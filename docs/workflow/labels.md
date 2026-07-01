@@ -1,6 +1,6 @@
 # GitHub Label Schema — grill-with-docs Workflow
 
-This is the canonical label set for the grill-with-docs workflow in this **single repo**. Provision it with `.ralph/ensure-labels.sh` (if/when the AFK loop is adopted) or `gh label create` directly.
+This is the canonical label set for the grill-with-docs workflow in this **single repo**. Provision it with `.agents/tools/ensure-labels.sh` (idempotent) or `gh label create` directly.
 
 The schema has five concerns: PR state machine, issue priority, issue domain (drives model selection if the AFK loop is used), human gates, and process.
 
@@ -28,7 +28,7 @@ Exactly one `ralph:*` label is set on every PR. The transitions are: `ralph:need
 
 ## Issue domain — drives model selection (only if the AFK loop is adopted)
 
-Issues carrying any **heavy** label route to the strongest model with 1M context. All others route to the default model. Configure in `.ralph/config.sh::RALPH_HEAVY_LABELS`.
+Issues carrying any **heavy** label route to the strongest model with 1M context. All others route to the default model. The heavy set is the domain labels listed below.
 
 Heavy:
 
@@ -70,8 +70,8 @@ Any one of these on an issue means it must not be picked autonomously.
 Single repo, so provisioning is one pass:
 
 ```bash
-.ralph/ensure-labels.sh            # if the AFK loop scripts are present
-# or, directly:
+.agents/tools/ensure-labels.sh     # idempotent; provisions the whole schema
+# or, one label directly:
 gh label create tracer --color 5319e7 --description "Vertical tracer-bullet slice" || \
   gh label edit tracer --color 5319e7 --description "Vertical tracer-bullet slice"
 ```
