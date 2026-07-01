@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Delegate to a local-only commit-message guard if one is present (kept outside
+# the repo so it is never published). No-op on clones that don't have it.
+set -euo pipefail
+guard="$(git rev-parse --git-dir)/hooks-local/commit-msg"
+[ -x "$guard" ] && exec "$guard" "$@"
+exit 0

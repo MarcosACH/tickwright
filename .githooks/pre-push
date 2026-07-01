@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Pre-push: type-check before a push leaves the machine, to catch the most common
+# CI red (type errors) that the pre-commit hook can't. Convenience only — CI is
+# the authoritative gate and re-runs everything; `git push --no-verify` skips
+# this. Enabled via core.hooksPath (see pre-commit).
+#
+# mypy runs only if Python changed across the commits being pushed. Uncommitted
+# work is stashed first so the check sees the committed state being pushed.
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+zero="0000000000000000000000000000000000000000"
+
+# git feeds one line per ref on stdin: <local ref> <local sha> <remote ref> <remote sha>
+run_mypy=0
+while read -r _ local_sha _ remote_sha; do
+  [ "$local_sha" = "$zero" ] && continue            # branch deletion — nothing to check
+  if [ "$remote_sha" != "$zero" ]; then
+    range="$remote_sha..$local_sha"                 # existing branch: only the new commits
+  else
+    base="$(git merge-base origin/main "$local_sha" 2>/dev/null || true)"
+    if [ -n "$base" ]; then
+      range="$base..$local_sha"                     # new branch: diff vs main
+    else
+      run_mypy=1; continue                          # no base to compare — check everything
+    fi
+  fi
+  git diff --name-only "$range" | grep -qE '\.py$' && run_mypy=1
+done
+
+[ "$run_mypy" = 0 ] && exit 0
+
+# Autostash: type-check the committed state being pushed, not whatever happens to
+# be dirty in the working tree. Tracked changes only; the check is read-only so
+# the pop never conflicts. Restore the real exit code so a type error blocks push.
+stashed=0
+cleanup() {
+  local rc=$?
+  if [ "$stashed" = 1 ]; then
+    git stash pop --quiet \
+      || echo "pre-push: 'git stash pop' failed — restore manually with 'git stash pop'" >&2
+  fi
+  exit "$rc"
+}
+trap cleanup EXIT
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  git stash push --quiet --message "pre-push autostash"
+  stashed=1
+fi
+
+echo "pre-push: mypy"
+uv run mypy .

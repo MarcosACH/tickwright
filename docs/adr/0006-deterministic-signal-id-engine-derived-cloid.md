@@ -25,3 +25,6 @@ real order.
   venue assigns it — tracking both `client_order_id` and
   `venue_order_id`. Either id can drive cancel/reconcile (Hyperliquid supports cancel by cloid
   or by oid).
+- The `{symbol}` component is unqualified by venue because Tickwright runs **one venue per process**
+  (ADR-0031); multiplexing venues in one process would require venue-qualified identity and must not
+  overload the bare-symbol key (see ADR-0003's venue-scope caveat).

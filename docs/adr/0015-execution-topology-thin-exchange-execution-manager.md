@@ -5,6 +5,13 @@ The four swappable seams are `Protocol`s: **`MarketFeed`** (`HyperliquidFeed`, `
 (`InMemoryBus`, `KafkaBus`). The **`ExecutionManager`** is deliberately **not** a Protocol — it
 is the one engine-internal orchestrator, not a swappable seam.
 
+Each seam **accepts N implementations**; the two shipped per seam only *prove* the seam (the
+ADR-0018/0001 framing), they do not cap it. For **`Exchange`** specifically, each real venue is a
+**self-contained adapter module** owning its venue translation, reconciliation queries, and
+instrument-spec sourcing, so adding a venue is an additive module plus a process — never a core
+change. The venue-extensibility model (process-per-venue, adapter self-containment, instrument-spec
+wiring) is specified in ADR-0031; package topology and the composition root in ADR-0032.
+
 Uniform bus coupling:
 
 ```
