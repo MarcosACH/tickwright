@@ -17,7 +17,10 @@ this).
 **Event**:
 An immutable fact published on the [[EventBus]] (`MarketTick`, `Signal`, `OrderPlaced`,
 `OrderFilled`, `OrderRejected`, `OrderCancelled`, …). The system's only currency; never
-mutated after dispatch (replay/audit depend on stability).
+mutated after dispatch (replay/audit depend on stability). Modelled as a `frozen` dataclass with a
+small envelope — a deterministic `event_id` (the dedup key), `ts_event`/`ts_init` (UTC epoch ns),
+and a `partition_key` property (the bus's ordering key; v1 returns `symbol`). Serialization is a
+boundary concern of the [[EventBus]] backend, not the domain type. See ADR-0025.
 _Avoid_: message, record (reserve "message" for the transport-level envelope).
 
 **EventBus**:
@@ -27,8 +30,12 @@ durability/replay), **not** a process-topology switch. Delivery is **at-least-on
 (duplicates legal, [[Idempotent consumer|consumers must be idempotent]]) and ordered
 **per symbol only** (every event keyed by symbol; cross-symbol order is not guaranteed). The
 interface is **pub/sub only** (`publish`/`subscribe`); query-shaped reads (e.g. reconciliation
-reading the exchange) are direct Protocol method calls, not bus messages. See
-ADR-0001, ADR-0002, ADR-0003, ADR-0004.
+reading the exchange) are direct Protocol method calls, not bus messages. Dispatch on the
+`InMemoryBus` is **synchronous and inline**, with a drain-to-quiescence FIFO for reentrant
+publishes (so a cascade mirrors `KafkaBus`'s poll-loop); [[Conflation]] of market data happens
+upstream at the feed, never in the bus. On the Kafka path all events ride **one topic keyed by
+`partition_key`** so a symbol's whole causal chain stays on one partition. See
+ADR-0001, ADR-0002, ADR-0003, ADR-0004, ADR-0023, ADR-0028.
 _Avoid_: message queue, broker, channel (those imply a specific backend).
 
 **Idempotent consumer**:
@@ -46,6 +53,13 @@ A timeout never transitions it — only [[Reconciliation]] moves a stuck `SUBMIT
 `PENDING` record is written **before** the network send (write-ahead intent), and recovery
 **reconciles by cloid before any resend**. See ADR-0007, ADR-0008.
 _Avoid_: order state machine (fine informally), workflow, process.
+
+**cancel_requested marker**:
+A checkpointed boolean+timestamp the [[ExecutionManager]] sets on a `LIVE` [[Order saga]] when it
+sends a cancel — **not** a `CANCELLING` state (the order stays `LIVE` and can still fill). It lets
+[[Reconciliation]] resolve a vanished order correctly: fills → `FILLED`; no fills + marker →
+`CANCELLED`; no fills + no marker → `REJECTED` ([[Ghost]]). See ADR-0026.
+_Avoid_: CANCELLING state, pending-cancel (there is no such saga state).
 
 **DENIED** vs **REJECTED** vs **FAILED**:
 The three negative terminals, split on "was it sent, and who decided?". `DENIED` = our
@@ -85,13 +99,19 @@ _Avoid_: execution engine (fine informally), order manager, router.
 **ExecutionReport** vs **OrderEvent**:
 The two event layers. An **ExecutionReport** is a *raw venue fact* the [[Exchange]] emits
 ("venue acked/filled/rejected cloid X"). An **OrderEvent** is the *canonical saga transition*
-the [[ExecutionManager]] publishes after applying that fact. See ADR-0015.
+the [[ExecutionManager]] publishes after applying that fact. Both are **typed variant classes**:
+`ExecutionReport` splits into `OrderStatusReport` + `FillReport`; `OrderEvent` is one class per
+saga transition (`OrderPlaced`/`OrderSubmitted`/`OrderLive`/`OrderPartiallyFilled`/`OrderFilled`/
+`OrderDenied`/`OrderRejected`/`OrderFailed`/`OrderCancelled`). See ADR-0015, ADR-0025.
 _Avoid_: using them interchangeably — one is venue truth, one is engine state.
 
 **Signal**:
-An [[Event]] a [[Strategy]] emits expressing an order intent (place/cancel). Carries a
-deterministic [[signal_id]] so replays converge. The `Exchange` consumes signals; the engine
-turns each into an order saga.
+An [[Event]] a [[Strategy]] emits expressing an order intent. A typed pair: **`PlaceSignal`**
+(side, qty, price, MARKET/LIMIT, GTC/IOC, `post_only`) and **`CancelSignal`** (its own seq'd
+[[signal_id]] plus a `target_signal_id` naming the order to cancel — the strategy references the
+`signal_id` it emitted, and the engine re-derives the [[Client order id|cloid]]). Carries a
+deterministic [[signal_id]] so replays converge; the [[ExecutionManager]] consumes signals and
+turns each into an order saga. See ADR-0026.
 _Avoid_: order request, command (the bus has no command pattern — a signal is just an event).
 
 **signal_id**:
@@ -174,9 +194,17 @@ _Avoid_: matching engine (fine informally), execution model.
 
 **PreTradeGuard** *(seam)*:
 The thin pre-trade check the [[ExecutionManager]] runs before placing: min-notional,
-quantity/price validity, kill-switch. Failure → `DENIED`. Impls: a real guard + `NoopGuard`.
-**Not** a RiskEngine (no exposure/position limits — deferred). See ADR-0017.
+quantity/price validity, [[Kill-switch]]. Failure → `DENIED`. Impls: a real guard + `NoopGuard`.
+**Not** a RiskEngine (no exposure/position limits — deferred). See ADR-0017, ADR-0026.
 _Avoid_: risk engine, risk manager (those imply the deferred portfolio-risk surface).
+
+**Kill-switch**:
+A **global, halt-only** flag on the [[PreTradeGuard]]: tripped, every new `PlaceSignal` is `DENIED`
+(never sent) while resting `LIVE` orders are left untouched (flatten is a separate, deferred operator
+action). Tripped **manually only** (`trip_kill_switch(reason)` wired to `SIGUSR1`; automatic
+circuit-breakers deferred), and **durable/sticky** — persisted to the [[Store]] and restored on
+restart, cleared only by an explicit reset, so a halt outlives a crash. See ADR-0026.
+_Avoid_: circuit breaker (implies the deferred automatic-trip policy), panic button (it does not flatten).
 
 **Quantization**:
 Rounding an order's price to the instrument tick and size to its lot/step at the boundary, so
@@ -190,9 +218,20 @@ instrument provider. See ADR-0017.
 _Avoid_: instrument, contract definition (we model only these few fields).
 
 **MarketTick**:
-The immutable [[Event]] a [[MarketFeed]] emits carrying a symbol's latest price; the only market
-input the [[Strategy]] and [[Paper exchange]] consume in v1.
-_Avoid_: quote, bar, candle (v1 has only ticks).
+The immutable [[Event]] a [[MarketFeed]] emits — a **last-trade tick** carrying `price`, `size`,
+`aggressor_side`, and the venue `trade_id`, sourced from Hyperliquid's `trades` channel; the only
+market input the [[Strategy]] and [[Paper exchange]] consume in v1. Single-price: the
+[[Paper exchange]] fills MARKET at the latest price and a LIMIT when a tick crosses it. Prices and
+sizes are `Decimal`, never `float`. See ADR-0027, ADR-0029.
+_Avoid_: quote, bar, candle (v1 has only ticks — a `MarketTick` is a trade tick, not a quote).
+
+**Conflation**:
+Shedding stale market data under backpressure by keeping only the **latest tick per symbol**. The
+live [[MarketFeed]] conflates at ingress (emitting a `feed.lagged` named event on each drop), never
+the [[EventBus]]; it is **market-data only** — [[Signal]]s and order-lifecycle [[Event]]s are never
+dropped — and happens **upstream of publish**, so both bus backends see the same stream. The
+file-backed replay feed never conflates (replay must stay faithful). See ADR-0023.
+_Avoid_: throttling, sampling, debounce (conflation is last-value-wins, not rate-limiting).
 
 **Component lifecycle**:
 The shared contract of every long-lived component (`MarketFeed`, `Strategy`, `Exchange`,
