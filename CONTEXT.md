@@ -85,9 +85,19 @@ _Avoid_: algo, bot, trader.
 **Exchange** *(Protocol)*:
 A **thin boundary adapter** translating venue ↔ our types: `place`/`cancel`/`fetch_*` and
 emitting raw [[ExecutionReport]]s. Owns no saga. `fetch_*` returns `None` on failure (the
-[[Connectivity guard]]). Impls: [[Paper exchange|PaperExchange]], `HyperliquidExchange`. See
-ADR-0011, ADR-0015.
+[[Connectivity guard]]). Impls: [[Paper exchange|PaperExchange]], `HyperliquidExchange`; the seam
+**accepts N** — each real venue is a self-contained [[Venue adapter]] (two ship only to prove the
+seam). See ADR-0011, ADR-0015, ADR-0031.
 _Avoid_: broker, venue client, gateway (fine informally).
+
+**Venue adapter**:
+The self-contained per-venue module that packages a venue's [[MarketFeed]] + [[Exchange]] +
+[[Instrument spec]] sourcing + its `*Config`. Tickwright runs **one venue per process** — scaling to
+N exchanges is **N processes**, one per venue, never one engine routing across venues — so venue is a
+deployment fact and instrument identity stays symbol-scoped (see [[signal_id]]). Adding an exchange
+is an additive adapter module plus a process, never a core change. See ADR-0031, ADR-0032.
+_Avoid_: plugin, connector, driver (fine informally); do not imply a runtime registry — wiring is an
+explicit [[Composition root]].
 
 **ExecutionManager**:
 The single engine-internal orchestrator (not a Protocol) that owns the [[Order saga]]: it
@@ -213,8 +223,10 @@ _Avoid_: rounding (too generic).
 
 **Instrument spec**:
 The minimal per-symbol metadata the guard and [[Quantization|quantizer]] need — tick, lot/step,
-min-notional — from config (paper) or the venue meta endpoint (Hyperliquid). Not a full
-instrument provider. See ADR-0017.
+min-notional — from config (paper) or the venue meta endpoint (Hyperliquid). **Sourced by the
+[[Venue adapter]]**, exposed via the [[Exchange]] Protocol, and wired into the guard by the
+[[Engine]] at startup, so the guard stays venue-agnostic. Not a full instrument provider. See
+ADR-0017, ADR-0031.
 _Avoid_: instrument, contract definition (we model only these few fields).
 
 **MarketTick**:
@@ -223,7 +235,8 @@ The immutable [[Event]] a [[MarketFeed]] emits — a **last-trade tick** carryin
 market input the [[Strategy]] and [[Paper exchange]] consume in v1. Single-price: the
 [[Paper exchange]] fills MARKET at the latest price and a LIMIT when a tick crosses it. Prices and
 sizes are `Decimal`, never `float`. See ADR-0027, ADR-0029.
-_Avoid_: quote, bar, candle (v1 has only ticks — a `MarketTick` is a trade tick, not a quote).
+_Avoid_: quote, bar, candle (v1 has only ticks — a `MarketTick` is a trade tick, not a quote; bars
+are a strategy-internal aggregation, not an engine type — ADR-0027).
 
 **Conflation**:
 Shedding stale market data under backpressure by keeping only the **latest tick per symbol**. The
@@ -259,10 +272,31 @@ A stable, documented telemetry name emitted as a structured record (`order.place
 Observability is a first-class priority of this system. See ADR-0020.
 _Avoid_: log message, log line (a named event is structured and asserted-on).
 
+**Composition root**:
+The single place that wires the engine: `build_engine(config)` reads the typed `*Config` objects and
+constructs the concrete impls, which the [[Engine]] then receives already-built (the engine never
+imports a concrete class). Impl selection is an explicit `match` over a small config discriminant —
+adding an impl adds **one arm** at the top of the app, touching no adapter and no engine internal.
+**No plugin registry / import-path DSL** (a deliberate non-goal). See ADR-0032, ADR-0021.
+_Avoid_: registry, plugin loader, DI container (implies the rejected runtime-pluggability surface).
+
+**Dependency direction** (adapter isolation):
+The inward ports-and-adapters rule: a central `domain` (events + seam Protocols + value types)
+depends on nothing; concrete impls depend on `domain` only; the [[Engine]] depends on Protocols,
+never on a concrete impl; **no adapter imports another adapter and core never imports an adapter.**
+Enforced mechanically by an `import-linter` contract in CI — a cross-adapter or core→adapter import
+**fails the build**, so decoupling is a gate, not an aspiration. See ADR-0032.
+_Avoid_: layering, tidy imports (undersell the enforced boundary).
+
 ## Relationships
 
 - The **Engine** hosts one **EventBus**; swapping the bus backend (InMemory ↔ Kafka) changes
   durability and inspectability, never the number of processes.
+- The **Engine** hosts exactly one live **Exchange** = **one venue per process**; scaling to N
+  exchanges is N processes ([[Venue adapter]]), not one engine routing across venues.
+- Concrete impls ([[Venue adapter]]s, bus/store backends, strategies) depend only on the `domain`
+  Protocols; the [[Composition root]] is the one place that knows every concrete
+  ([[Dependency direction]]).
 
 ## Flagged ambiguities
 

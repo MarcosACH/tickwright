@@ -36,6 +36,15 @@ existing zero-slippage model.
 against the single-price model; `allMids` — mid is not a tradeable price and has no per-symbol channel
 for symbol-keyed conflation (ADR-0023); `l2Book`/`candle` — outside the "only ticks" v1 scope.
 
+**Tick-only is a scope choice, not a foreclosure.** `MarketTick` is the sole v1 market input, but the
+door stays open: additional *live* data types a strategy cannot self-derive (top-of-book `QuoteTick`,
+funding rate, mark price, L2 book) are an **additive** path — a new typed event variant (ADR-0025)
+plus an additive, default-no-op `Strategy` callback — needing no rework of the existing type or the
+`on_tick` seam. v1 needs none of them (frictionless ⇒ no funding; single-price fill ⇒ no quotes).
+**Timeframes/bars are deliberately not an engine concern:** ticks are the atomic,
+timeframe-independent stream, and a strategy wanting bars aggregates them inside its own state
+(ADR-0016) — the engine stays honestly tick-driven, with no `BarAggregator` component.
+
 ## Deterministic replay: JSONL rows, feed drives the ManualClock
 
 `ReplayFeed` reads newline-delimited JSON rows (one `MarketTick` per line — readable, diffable,

@@ -11,6 +11,10 @@ v1 includes a **thin pre-trade boundary** in the `ExecutionManager`, run before 
    paper exchange, from the **venue meta endpoint** on Hyperliquid. Deliberately *not* a full
    instrument-provider component; only the fields the guard and quantizer need.
 
+The specs are **sourced by the `Exchange` adapter** (which owns venue knowledge), exposed via the
+`Exchange` Protocol, and wired into the guard/quantizer by the `Engine` at startup — keeping the
+guard venue-agnostic. This sourcing/wiring path is specified in ADR-0031.
+
 ## Deferred (explicit non-goals for v1)
 
 - **Full RiskEngine** — exposure/max-position/aggregate-notional, pre/post-trade portfolio risk.

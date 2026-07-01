@@ -21,6 +21,13 @@ balance snapshots) are account-scoped, not symbol-scoped, and would need their o
 (account). v1 is engine-only with portfolio/accounting deferred, so no such event exists yet;
 if one is introduced, it must not be forced onto the per-symbol key.
 
+**Caveat (venue scope).** The `symbol` key is unqualified by venue because Tickwright runs **one
+venue per process** (ADR-0031): venue is a deployment fact, so a symbol is unambiguous within a
+process. If that model is ever replaced by one engine multiplexing venues, instrument identity must
+gain a venue component (`{venue}:{symbol}`) and — like the account caveat above — must not be forced
+onto the bare-symbol key. `partition_key` is a *property* (ADR-0025) so this can change without
+touching the bus.
+
 ## Considered options
 
 - **Per-order-id ordering** (rejected): finer-grained and more Kafka parallelism per symbol,
