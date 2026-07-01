@@ -1,0 +1,11 @@
+# Feature work does NOT start from an issue template — it starts from a
+# grilling session (/grill-with-docs) that produces a PRD. Blank issues stay
+# enabled for that and for anything the templates below don't cover.
+blank_issues_enabled: true
+contact_links:
+  - name: New feature or capability
+    url: https://github.com/MarcosACH/tickwright/blob/main/CONTRIBUTING.md
+    about: Features begin with a grilling session (/grill-with-docs) → PRD, not a bare issue. Read CONTRIBUTING.md first.
+  - name: Question or clarification
+    url: https://github.com/MarcosACH/tickwright/blob/main/CONTEXT.md
+    about: Check CONTEXT.md (vocabulary) and docs/adr/ (past decisions) before opening a question.
