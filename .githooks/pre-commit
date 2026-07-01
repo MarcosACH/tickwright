@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# Fast local feedback before a commit lands: auto-format and lint the staged
+# Python files (ruff). This is a convenience, not the gate — full type-checking
+# and the test suite run in CI, which `git commit --no-verify` cannot skip.
+#
+# Enable once per clone:  git config core.hooksPath .githooks
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+# Staged files, added/copied/modified only (skip deletions).
+staged=$(git diff --cached --name-only --diff-filter=ACM)
+[ -z "$staged" ] && exit 0
+
+# Guard: format only the *staged* content. Snapshot any unstaged changes, peel
+# them off the working tree, and restore them on exit — so reformatting a
+# partially staged file can't sweep its unstaged hunks into the commit.
+unstaged_patch="$(git rev-parse --git-dir)/pre-commit-unstaged.patch"
+orig_tree=""
+has_unstaged=0
+if ! git diff --quiet; then
+  has_unstaged=1
+  orig_tree="$(git write-tree)"                             # snapshot original index
+  git diff --binary --color=never >"$unstaged_patch"        # unstaged = worktree vs index
+  git apply --reverse --whitespace=nowarn "$unstaged_patch" # peel unstaged off worktree
+fi
+
+restore_unstaged() {
+  [ "$has_unstaged" = 0 ] && return
+  # git apply is atomic: on a clean reapply the unstaged changes are simply back.
+  if git apply --whitespace=nowarn "$unstaged_patch" 2>/dev/null; then
+    rm -f "$unstaged_patch"
+    return
+  fi
+  # Formatting rewrote a line an unstaged hunk also touches, so the patch no
+  # longer applies. Roll the index and working tree all the way back to the
+  # pre-hook state and abort — never leave a half-merged file or lose work.
+  git read-tree "$orig_tree"
+  echo "$staged" | xargs git checkout-index -f --
+  git apply --whitespace=nowarn "$unstaged_patch"
+  rm -f "$unstaged_patch"
+  echo "pre-commit: staged and unstaged edits overlap the same lines — left your" >&2
+  echo "pre-commit: tree untouched and skipped formatting. Stage those hunks" >&2
+  echo "pre-commit: (e.g. 'git add -p') or commit them separately, then retry." >&2
+  exit 1
+}
+trap restore_unstaged EXIT
+
+# Python: ruff lint (--fix) then format on the staged .py files, via uv (matches CI).
+py=$(echo "$staged" | grep -E '\.py$' || true)
+if [ -n "$py" ]; then
+  echo "$py" | xargs uv run ruff check --fix
+  echo "$py" | xargs uv run ruff format
+  echo "$py" | xargs git add
+fi
+
+# Local-only guards (e.g. a private reference scrub) — kept outside the repo, so
+# they are not published and run only on machines that have them.
+guard="$(git rev-parse --git-dir)/hooks-local/pre-commit"
+[ -x "$guard" ] && "$guard"
