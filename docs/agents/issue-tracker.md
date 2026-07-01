@@ -1,6 +1,6 @@
 # Issue tracker: GitHub
 
-Issues and PRDs for Tickwright live as GitHub issues in a **single repository** — `MarcosACH/tickwright`. Use the `gh` CLI for all operations. All issues are tracked on a single user project board: **Tickwright — Workflow** (`https://github.com/users/MarcosACH/projects/<n>`).
+Issues and PRDs for Tickwright live as GitHub issues in a **single repository** — `MarcosACH/tickwright`. Use the `gh` CLI for all operations. All issues are tracked on a single user project board: **Tickwright — Workflow** (`https://github.com/users/MarcosACH/projects/2`).
 
 ## Issue routing
 
@@ -8,22 +8,53 @@ Issues and PRDs for Tickwright live as GitHub issues in a **single repository** 
 - A PRD breaks into one or more child vertical-slice issues, all linked as GitHub sub-issues of the parent.
 - Every slice is a vertical tracer through the relevant layers (event bus → strategy → exchange adapter → reconciliation), filed as its own child issue under the PRD.
 
+## Anatomy of a well-formed issue
+
+Comprehensiveness is not optional. An issue missing metadata is invisible to triage and the picker; an issue with a thin body cannot be picked up without a round-trip. Whoever files an issue — a skill or a human — is responsible for filling **all** of the following before the issue counts as created. The `gh` commands for each field are in Conventions below.
+
+**Required metadata on every new issue:**
+
+| Field | PRD (`to-prd`) | Slice (`to-issues`) | Bug |
+| --- | --- | --- | --- |
+| **Title** | imperative capability name (e.g. "Crash-safe order-lifecycle saga") | the single vertical behavior (e.g. "Reject limit order when price crosses band") | observed defect (e.g. "Paper exchange double-fills on restart") |
+| **Kind label** | `prd` | one priority label — `tracer` (default) / `critical` / `infra` / `polish` | `bug` |
+| **Domain label(s)** | every heavy label that applies (`engine`, `exchange`, `recovery`, `chain`, `concurrency`, `unsafe`) | same | same |
+| **Assignee** | `@me` | `@me` | `@me` |
+| **Project + Status** | added to project 2, Status `Todo` (or `Backlog` if deferred) | same | same |
+| **Parent link** | — | real GitHub sub-issue of its PRD | — |
+| **Body** | PRD structure below | slice structure below | `bug_report.md` template |
+
+Milestones are **not** used; sequencing comes from Status plus the `blocked` label (see picker order in [`triage-labels.md`](./triage-labels.md)).
+
+**PRD body** (parent `prd` issue):
+
+- **Problem / motivation** — what is missing or broken, and why it matters now.
+- **Goal & scope** — the target outcome, with an explicit **Out of scope** list.
+- **Vertical slices** — the child issues this decomposes into (linked as sub-issues by `to-issues`).
+- **Acceptance criteria** — observable, testable conditions for "done".
+- **Affected layers** — the feed → strategy → exchange → engine touch-points.
+- **References** — ADRs (`docs/adr/…`), CONTEXT.md terms, the module map.
+- **Non-goals / risks** — anything deliberately excluded, and any `unsafe` invariant it touches.
+
+**Slice body** (child implementation issue):
+
+- **Context** — one line of why, plus a `## Parent` link to the PRD.
+- **Behavior** — the one vertical behavior as Given/When/Then acceptance criteria.
+- **Layers touched** — which of feed → strategy → exchange → engine this slice crosses (it must cross every relevant one — vertical-slice policy).
+- **Test plan** — the failing test to write first (TDD red), plus property/edge cases.
+- **`## Blocked by`** — issues that must merge first (drives the `blocked` label).
+- **References** — the parent PRD, relevant ADRs, CONTEXT.md terms.
+
 ## Conventions
 
-- **Create an issue**: `gh issue create -R MarcosACH/tickwright --title "..." --body "..."`. Use a heredoc for multi-line bodies. **`gh issue create` does NOT add the issue to the project board** — you must add it explicitly with `gh project item-add <n> --owner MarcosACH --url <issue-url>` immediately after creation. New project items have no Status until an agent sets one; the `to-prd` and `to-issues` skills set newly-filed issues to `Todo`. Use `Backlog` only for items you want to defer (noted but not yet ready to be picked). An issue that is not on the project board is invisible to triage and Ralph; treat creation-without-linking as a bug.
+- **Create an issue**: `gh issue create -R MarcosACH/tickwright --title "..." --body "..."`. Use a heredoc for multi-line bodies. Populate the title, body, labels, and assignee to match **Anatomy of a well-formed issue** above — a bare title + body is not a complete issue. **`gh issue create` does NOT add the issue to the project board** — you must add it explicitly with `gh project item-add 2 --owner MarcosACH --url <issue-url>` immediately after creation. New project items have no Status until an agent sets one; the `to-prd` and `to-issues` skills set newly-filed issues to `Todo`. Use `Backlog` only for items you want to defer (noted but not yet ready to be picked). An issue that is not on the project board is invisible to triage and Ralph; treat creation-without-linking as a bug.
 - **Assignee**: every newly-filed issue (parent PRDs and child slices) must have an assignee set immediately after creation. The convention is `@me` — the GitHub user whose token the `gh` CLI is authenticated as (the project owner running the workflow). `gh issue create --assignee @me` works for the create step; for issues already created, use `gh issue edit <n> -R MarcosACH/tickwright --add-assignee @me`. Unassigned issues are treated as triage-pending and Ralph will not pick them up.
-- **Issue Type**: every newly-filed issue must have a GitHub Issue Type set. The repo has three enabled types — `Feature`, `Task`, `Bug`. Convention by source:
-  - **PRDs** (filed by `to-prd`) → `Feature`
-  - **Child slice issues** (filed by `to-issues`) → `Task`
-  - **Bug reports** → `Bug`
+- **Issue kind (by label, not GitHub Issue Type)**: this repo is user-owned, and GitHub custom Issue Types are an organization-only feature, so they are **not** used here. Distinguish kind by label instead — every newly-filed issue must carry exactly one kind:
+  - **PRDs** (filed by `to-prd`) → `prd`
+  - **Child slice issues** (filed by `to-issues`) → one priority label (`tracer` by default; `critical` / `infra` / `polish` as appropriate) and **never** `prd`
+  - **Bug reports** → `bug`
 
-  `gh issue create` does NOT support `--type` directly; set it via REST API right after creation:
-
-  ```sh
-  gh api -X PATCH repos/MarcosACH/tickwright/issues/<n> -f type=Feature
-  ```
-
-  **Important**: omit the leading slash on the endpoint argument. The no-leading-slash form works on every shell.
+  Apply at creation with `gh issue create --label prd ...`, or afterward with `gh issue edit <n> -R MarcosACH/tickwright --add-label prd`. The parent-vs-child distinction is thus `prd` (parent) versus a priority label (child slice).
 - **Link as a sub-issue of a parent**: when an issue has a parent (e.g. a slice ticket under its PRD), make it a real GitHub sub-issue, not just a `## Parent` text reference. The CLI has no `gh sub-issue` shorthand; use the REST API:
   ```sh
   CHILD_DB_ID=$(gh api repos/MarcosACH/tickwright/issues/<child-number> --jq '.id')
@@ -86,42 +117,51 @@ The project board has Status column `Backlog → Todo → In Progress → In Rev
 
 Ralph uses PR labels as the deterministic state machine.
 
-| Event                           | Command                                                                    |
-| ------------------------------- | -------------------------------------------------------------------------- |
-| PR opened after architecture    | `.ralph/set-pr-state.sh <PR> needs-review`                                 |
-| Code review blocks merge        | `.ralph/set-pr-state.sh <PR> changes-requested`                            |
-| Fixer addresses review findings | `.ralph/set-pr-state.sh <PR> review-addressed`                             |
-| Re-review passes merge gate     | `.ralph/set-pr-state.sh <PR> ready`                                        |
+| Event                           | New state label            |
+| ------------------------------- | -------------------------- |
+| PR opened after architecture    | `ralph:needs-review`       |
+| Code review blocks merge        | `ralph:changes-requested`  |
+| Fixer addresses review findings | `ralph:review-addressed`   |
+| Re-review passes merge gate     | `ralph:ready`              |
 
-Every open Ralph PR must have exactly one `ralph:*` state label. Run `.ralph/doctor.sh` to inspect drift (the "Invalid PR Label States" and "Slice Coherence" sections surface mismatches).
+Set exactly one `ralph:*` label per PR, clearing the others, e.g.:
+
+```sh
+gh pr edit <PR> -R MarcosACH/tickwright \
+  --add-label ralph:needs-review \
+  --remove-label ralph:changes-requested,ralph:review-addressed,ralph:ready
+```
+
+Every open Ralph PR must have exactly one `ralph:*` state label; a PR with zero or multiple state labels is a drift bug to fix by hand.
 
 Provision required labels (one-shot, idempotent):
 
 ```sh
-.ralph/ensure-labels.sh
+.agents/tools/ensure-labels.sh
 ```
 
 ### Moving Status with `gh`
 
-The Status field on the project needs three IDs (project, field, option). Constants for the project:
+The Status field on the project needs three IDs (project, field, option). Constants for the project (`https://github.com/users/MarcosACH/projects/2`):
 
 ```sh
-PROJECT_ID=<project-node-id>
-STATUS_FIELD=<status-field-id>
+PROJECT_NUMBER=2
+PROJECT_ID=PVT_kwHOCO3Woc4BcODC
+STATUS_FIELD=PVTSSF_lAHOCO3Woc4BcODCzhW4djE
 
 # Status option ids
-BACKLOG=<backlog-option-id>
-TODO=<todo-option-id>
-IN_PROGRESS=<in-progress-option-id>
-IN_REVIEW=<in-review-option-id>
-DONE=<done-option-id>
+BACKLOG=2ca48215
+TODO=5afbb6d2
+IN_PROGRESS=fb92732f
+IN_REVIEW=b35df904
+DONE=4b33f99e
 ```
 
 Find the project item id for an issue and update the field:
 
 ```sh
 ISSUE=92                                    # the issue number
-ITEM_ID=$(gh project item-list <n> --owner MarcosACH --format json --limit 200 \
+ITEM_ID=$(gh project item-list "$PROJECT_NUMBER" --owner MarcosACH --format json --limit 200 \
   | jq -r ".items[] | select(.content.number==$ISSUE) | .id")
 
 gh project item-edit \
@@ -134,5 +174,5 @@ gh project item-edit \
 If the option ids ever drift (e.g. someone renames a Status option in the GitHub UI), re-discover them with:
 
 ```sh
-gh api graphql -f query='query{node(id:"<status-field-id>"){... on ProjectV2SingleSelectField{options{id name}}}}'
+gh api graphql -f query='query{node(id:"'"$STATUS_FIELD"'"){... on ProjectV2SingleSelectField{options{id name}}}}'
 ```

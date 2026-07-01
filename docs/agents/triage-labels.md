@@ -24,7 +24,7 @@ Each open Ralph PR must have exactly one state label. The transitions and comman
 | `ralph:review-addressed`   | reviewer agent     | Findings were fixed; re-review needed        |
 | `ralph:ready`              | human maintainer   | Merge gate passed; waiting for human merge   |
 
-Use `.ralph/set-pr-state.sh <PR> <state>`; do not edit these labels by hand.
+Set these with `gh pr edit` — exactly one at a time, clearing the others (see [issue-tracker.md](./issue-tracker.md#ralph-pr-lifecycle)).
 
 ## Priority Labels
 
@@ -39,7 +39,7 @@ Every AFK implementation issue created by `to-issues` gets exactly one priority 
 
 ## Domain Labels (drive Ralph model selection)
 
-Issues carrying any of these "heavy" labels route to the strongest model (1M context); all others route to the default model. The set is defined in `.ralph/config.sh::RALPH_HEAVY_LABELS`. **Canonical source: `docs/workflow/labels.md`** — keep this list in sync with it.
+Issues carrying any of these "heavy" labels route to the strongest model (1M context); all others route to the default model. **Canonical source: `docs/workflow/labels.md`** — keep this list in sync with it.
 
 Heavy:
 
@@ -52,7 +52,7 @@ Heavy:
 
 ## Picker order and intra-PRD ordering
 
-Ralph's `state-check.sh` picks the next `tdd-implementation` candidate as follows:
+Ralph picks the next `tdd-implementation` candidate as follows:
 
 1. Walk open PRD issues (label `prd`) in the repo, sorted by issue number ascending.
 2. For each PRD, walk its open sub-issues in the order returned by GitHub (attachment order).
