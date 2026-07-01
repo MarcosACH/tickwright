@@ -4,11 +4,17 @@ Thanks for your interest in Tickwright — a readable, event-driven algorithmic 
 built as a reference implementation. **Clarity and correctness are the priorities**; please keep
 changes small, well-tested, and easy to read.
 
+## Before you start
+
+- Read [`CONTEXT.md`](CONTEXT.md) — the project's vocabulary, every term resolved.
+- Skim the relevant [`docs/adr/`](docs/adr/) — the locked-in architectural decisions and *why*.
+
 ## Development setup
 
 - **Python 3.13**, managed with [uv](https://github.com/astral-sh/uv).
 - `uv venv` → `uv sync` → `source .venv/bin/activate` (or prefix commands with `uv run`).
 - Dependencies are always project-local — **never installed globally**.
+- **Enable the git hooks** once per clone: `git config core.hooksPath .githooks`.
 
 ## Running checks
 
@@ -20,6 +26,17 @@ changes small, well-tested, and easy to read.
 | Types | `uv run mypy .` |
 
 The default paper-exchange + in-memory-bus path runs with **no external services and no API keys**.
+
+### Git hooks (local convenience, not the gate)
+
+With `core.hooksPath` enabled (see setup):
+
+- **pre-commit** auto-runs `ruff check --fix` + `ruff format` on your *staged* Python and re-stages
+  the result (unstaged hunks are preserved safely).
+- **pre-push** runs `mypy` on changed Python before the push leaves your machine.
+
+They exist to catch problems early; the **authoritative gate is CI**, which re-runs everything and
+can't be skipped with `--no-verify`.
 
 ## How we work
 
@@ -33,10 +50,16 @@ The default paper-exchange + in-memory-bus path runs with **no external services
   engine's own classes.
 - **Small commits.** One logical change per commit. Match the surrounding naming and style.
 
+## Conventions
+
+- **Branches:** `<type>/<short-slug>` — e.g. `feat/per-symbol-ordering`, `fix/ghost-reconcile-race`.
+- **Commits:** [Conventional Commits](https://www.conventionalcommits.org/) — `type: imperative subject`
+  (`feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `ci`). One logical change per commit.
+
 ## Pull requests
 
-- Open one PR per change and reference the issue it closes in the body (`Closes #N`). Don't close
-  issues by hand — merging the PR closes them.
+- **One PR per change — no mixed-concern PRs.** Reference the issue it closes in the body
+  (`Closes #N`); don't close issues by hand — merging the PR closes them.
 - Keep the diff focused and the description clear about *what* changed and *why*.
 - A PR is mergeable once it passes review and the lint / type / test / coverage gate.
 
