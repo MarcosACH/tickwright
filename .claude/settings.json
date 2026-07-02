@@ -7,6 +7,7 @@
       "Read(./.mypy_cache/**)",
       "Read(./.pytest_cache/**)",
       "Read(./.ruff_cache/**)",
+      "Read(./.import_linter_cache/**)",
       "Read(./**/*.pyc)",
       "Read(./**/*.egg-info/**)",
       "Read(./logs/**)",

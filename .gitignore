@@ -6,6 +6,10 @@ __pycache__/
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
+.import_linter_cache/
+.coverage
+.coverage.*
+htmlcov/
 
 # Env / secrets
 .env

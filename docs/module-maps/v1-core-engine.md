@@ -1,0 +1,239 @@
+# Module Map: Tickwright v1 Core Engine
+
+## Source
+
+PRD: [#9 — Tickwright v1 core engine: crash-safe event-driven pipeline (Hyperliquid + paper exchange)](https://github.com/MarcosACH/tickwright/issues/9).
+Constraints inherited from ADR-0032 (dependency direction, venue-as-extension-unit, composition root) and ADR-0015 (execution topology). Terms are used exactly as defined in `CONTEXT.md`.
+
+Top-level layout (fixed by this map; the folder tree is this map's artifact per ADR-0032):
+
+```
+src/tickwright/
+  domain/            # events, Protocols, value types, order FSM — depends on nothing
+  engine/
+    execution.py     # ExecutionManager
+    reconcile.py     # Reconciliation
+    cache.py         # Cache
+    guard.py         # RealGuard + NoopGuard (+ quantization, kill switch)
+    runner.py        # Engine: barrier, supervision, containment
+  adapters/
+    bus/             # InMemoryBus, KafkaBus (+ serde codec at the Kafka edge)
+    store/           # SQLiteStore, PostgresStore
+    feed/            # ReplayFeed
+    paper/           # PaperExchange + FillModel seam
+    clock/           # LiveClock, ManualClock
+  venues/
+    hyperliquid/     # HyperliquidFeed + HyperliquidExchange + spec sourcing + config
+  strategies/        # minimal reference Strategy impls
+  observability/     # named-event catalog, correlation ids, logging — shared leaf
+  app/               # build_engine(config), *Config aggregation, CLI entry
+```
+
+## Modules
+
+### domain
+
+**Interface:** The stable contract everything compiles against. Frozen, slotted dataclass events with the ADR-0025 envelope (`event_id`, `ts_event`, `ts_init`, `partition_key` property): `MarketTick`; `PlaceSignal`/`CancelSignal`; `OrderStatusReport`/`FillReport`; the nine class-per-transition `OrderEvent`s. The seam Protocols: `MarketFeed`, `Strategy`, `Exchange` (`fetch_*` returns `None` on failure — the connectivity guard is in the type), `EventBus` (pub/sub only), `Store`, `Clock`, `PreTradeGuard`. Value/identity types: Decimal money, `InstrumentSpec`, `signal_id`/`cloid` derivation, the order-state enum and `Order` saga record with idempotent `apply(event)` (no-op on already-reflected `event_id`; illegal transition raises `InvariantViolation`). Invariants: events are never mutated after dispatch; `event_id` derivations are deterministic and provenance-free; all timestamps UTC epoch ns.
+
+**Responsibilities:** Event taxonomy and idempotency-key derivation; the order-lifecycle FSM (legal transitions, terminal taxonomy `DENIED`/`REJECTED`/`FAILED`, `cancel_requested` marker, applied-`trade_id` tracking, `cum_qty` invariant); id derivation (`signal_id` → `cloid`); the Protocol definitions.
+
+**Seams:** None consumed — this module *defines* the seams others adapt to. Depends on nothing (stdlib only), log-free.
+
+**Depth note:** The deepest module in the repo. Delete it and dedup logic, transition legality, and id derivation scatter into every consumer of every event — the exact failure at-least-once delivery punishes. `Order.apply()` concentrates the crash-safety correctness argument into one unit-testable place with zero infrastructure.
+
+---
+
+### ExecutionManager (`engine/execution.py`)
+
+**Interface:** Engine-internal orchestrator, deliberately **not** a Protocol (ADR-0015). Constructed with the `EventBus`, `Store`, `Cache`, `PreTradeGuard`, `Exchange`, and `Clock` Protocols. Subscribes to `Signal` and `ExecutionReport`; publishes canonical `OrderEvent`s. Callers (the runner) must know: `PENDING` is checkpointed **before** any network send; a timeout never transitions a saga (only reconciliation moves a stuck `SUBMITTED`); guard failure yields `DENIED` without a send; a cancel sets the `cancel_requested` marker on a still-`LIVE` saga. Checkpoint failure raises `InvariantViolation` (fail-fast).
+
+**Responsibilities:** cloid assignment from `signal_id`; pre-trade guard invocation; write-ahead intent + checkpointing to `Store`; driving `Order.apply()` and publishing the resulting `OrderEvent`; translating `CancelSignal` (re-derive cloid from `target_signal_id`, send cancel, set marker); publishing reconciliation's synthetic events (`reconciliation`-flagged).
+
+**Seams:** Consumes the `Exchange`, `Store`, `EventBus`, `PreTradeGuard`, `Clock` seams — all with two shipped adapters.
+
+**Depth note:** The saga is written once and serves Paper and Hyperliquid identically. Deleting it forks the hardest logic (checkpoints, FSM driving, cloid authority) per venue — the rejected alternative of ADR-0015.
+
+---
+
+### Reconciliation (`engine/reconcile.py`)
+
+**Interface:** Constructed with the `Exchange`, `Cache`, `Store`, `Clock`, `EventBus`. Two entry points callers must know: the **startup mass-rebuild** (awaited by the runner's barrier; returns success/failure, bounded-retried by the caller) and the **continuous loops** (fast in-flight cadence, slower open-order/ghost cadence). Invariants: a `None` venue read **freezes** the cycle and removes nothing (`[]` never does); a ghost resolves only after the grace window **and** a fill-history cross-check; every heal is a deterministic, `reconciliation`-flagged synthetic event routed through the `ExecutionManager`; retry-budget < ghost-grace (ADR-0008/0011 timing rule).
+
+**Responsibilities:** Comparing local non-terminal sagas (by cloid) against venue truth; healing missed fills; resolving ghosts to `REJECTED`/`FILLED`; resolving vanished orders via the `cancel_requested` marker; emitting `reconcile.*`/`ghost.*` named events.
+
+**Seams:** Consumes `Exchange.fetch_*` (query-shaped direct calls, never bus messages — ADR-0004).
+
+**Depth note:** The correctness net under at-least-once delivery and crash recovery. Delete it and every consumer must individually distinguish outage from emptiness and duplicate from heal — the freeze/ghost/cross-check policy concentrates here.
+
+---
+
+### Cache (`engine/cache.py`)
+
+**Interface:** The in-memory read-model of current order state — a write-through projection of the `Store`, **never** the source of truth. Callers must know: rebuilt from the `Store` on startup (recovery step 2); reads are direct method calls (pull-then-subscribe — strategies pull open-order state at `on_start` because startup events predate their subscription); writes flow only through the `ExecutionManager`'s checkpoint path.
+
+**Responsibilities:** Projecting saga records into "what is true now" queries (open orders per strategy/symbol, saga lookup by cloid) for strategies, the reconciler, and the manager.
+
+**Seams:** None — one concrete class. Backed by the `Store` seam.
+
+**Depth note:** Passes the deletion test by concentrating the projection: without it, strategies, reconciler, and manager each query the `Store` with their own notion of "current", and recovery's rebuild step has no single owner.
+
+---
+
+### PreTradeGuard (`engine/guard.py`)
+
+**Interface:** The `PreTradeGuard` **Protocol lives in `domain`**; the two adapters live here: `RealGuard` and `NoopGuard`. Callers (the `ExecutionManager`) must know: check → quantize → verdict; failure means `DENIED` — the order is never sent and is safe to recreate. Quantization rules: size rounds **down** to `sz_decimals` (rounds-to-zero → `DENIED`); price rounds toward the passive side under the sig-figs ∧ decimals rule. The kill switch is global, halt-only, durable/sticky (persisted via `Store`, restored before the feed starts), tripped/reset manually (`SIGUSR1`/`SIGUSR2` wired by the runner); tripped ⇒ every new `PlaceSignal` is `DENIED`, resting `LIVE` orders untouched.
+
+**Responsibilities:** Min-notional and quantity/price validity; quantization against `InstrumentSpec` (wired venue-agnostically by the composition root at startup); kill-switch state and persistence.
+
+**Seams:** `PreTradeGuard` — two real adapters (`RealGuard`, `NoopGuard`).
+
+**Depth note:** Deliberately thin (not a RiskEngine — ADR-0017), but still deep relative to its interface: rounding/sig-fig subtleties and halt semantics concentrate here instead of leaking into the manager or each venue adapter.
+
+---
+
+### Engine runner (`engine/runner.py`)
+
+**Interface:** `Engine` with the ADR-0014 component contract (`async start()/stop()`, `READY → RUNNING → STOPPED` + `FAULTED`) and `run()` for supervised operation. Callers (the `app` entrypoint) must know: startup is the ADR-0024 ordered sequence gated on the **reconciliation barrier** (feed starts last; nothing places before the barrier clears; bounded retry then fail-fast `FAULTED`); shutdown is the reverse, bounded by `shutdown_timeout`, takes final strategy snapshots, **leaves resting `LIVE` orders alone**, exits 0; any invariant violation → `FAULTED` → non-zero exit. Exit-code contract: 0 = graceful, non-zero = restart-me.
+
+**Responsibilities:** Wiring subscriptions with **origin-based containment**: third-party handlers (`Strategy.*`, feed parse callbacks) wrapped — catch, log with correlation id, emit `strategy.error`/`handler.error`, continue; engine-internal handlers subscribed raw; `InvariantViolation` pierces everything. The per-symbol monotonic tick gate + staleness threshold (ADR-0025) applied in the strategy subscription wrapper. `asyncio.TaskGroup` supervision; OS signal handling (`SIGINT`/`SIGTERM` graceful, `SIGUSR1`/`SIGUSR2` kill switch); the run-id correlation binding.
+
+**Seams:** Consumes every domain Protocol; hosts N `Strategy` instances (per-strategy routing/seq/snapshot).
+
+**Depth note:** The ordering rules (barrier before feed, pull-then-subscribe, reverse shutdown) and the containment policy are exactly the knowledge that would otherwise smear across every component; the runner is where "crash and graceful stop converge on one recovery path" is enforced.
+
+---
+
+### bus (`adapters/bus/`)
+
+**Interface:** Two `EventBus` adapters. `InMemoryBus`: synchronous in-loop dispatch with a drain-to-quiescence FIFO for reentrant publishes; no serialization (events pass by reference). `KafkaBus`: same topology over one topic keyed by `partition_key`; `msgspec` serde codec at this edge only. Callers must know the shared contract, not the backend: at-least-once delivery, per-symbol ordering only, pub/sub only.
+
+**Responsibilities:** Dispatch mechanics, Kafka producer/consumer lifecycle, offset commits, wire-format encoding (Kafka side).
+
+**Seams:** `EventBus` — two real adapters. The serde codec is Kafka-internal, not a public seam.
+
+**Depth note:** "Swapping the backend changes durability, never behavior" lives or dies here; the drain-to-quiescence FIFO mirroring the Kafka poll loop is the concentrated trick that keeps both backends observationally equivalent.
+
+---
+
+### store (`adapters/store/`)
+
+**Interface:** Two `Store` adapters: `SQLiteStore` (default; file or `:memory:`), `PostgresStore`. Holds exactly three things (ADR-0019): saga records keyed by cloid (state, history, timestamps, venue oid, reasons, cancel intent), opaque strategy snapshot bytes per `strategy_id`, kill-switch state. Callers must know: seq high-water-mark is **derived** from saga records (no separate table); there is **no** processed-event-id table; the store is per-process, never shared.
+
+**Responsibilities:** Schema, transactional checkpoint writes, recovery reads.
+
+**Seams:** `Store` — two real adapters. Canonical pairings: InMemoryBus+SQLite, KafkaBus+Postgres.
+
+**Depth note:** Concentrates durability; the checkpoint write the whole crash-safety argument rests on is one tested code path per backend.
+
+---
+
+### feed (`adapters/feed/`)
+
+**Interface:** `ReplayFeed` — the non-venue `MarketFeed` adapter: file-backed, deterministic, **never conflates** (replay must stay faithful). Paired with `ManualClock` for test-time control.
+
+**Responsibilities:** Reading recorded ticks, emitting them as `MarketTick`s on the bus in order.
+
+**Seams:** Adapter of `MarketFeed` (the venue package provides the second adapter).
+
+**Depth note:** Small by design; earns its keep as the hermetic half of the feed seam — the tracer E2E and all strategy tests stand on it.
+
+---
+
+### paper (`adapters/paper/`)
+
+**Interface:** `PaperExchange` — the deterministic in-process `Exchange` adapter and default v1 target. Callers must know: fills MARKET at the latest `MarketTick`, holds a book of resting LIMITs re-checked each tick; frictionless (price+quantity, no fees/margin/PnL); zero setup, no keys. The **`FillModel` Protocol lives in this package** (paper-internal seam): `ImmediateFillModel` (deterministic, optimistic, zero-slippage, full-fill) and `StochasticFillModel` (seeded queue/slippage/partials/latency); both take injected RNG + `Clock`.
+
+**Responsibilities:** Resting-order book, fill decisions (delegated to the fill model), emitting `ExecutionReport`s, honest `fetch_*` for reconciliation.
+
+**Seams:** Adapter of `Exchange`; defines the `FillModel` seam with two real adapters.
+
+**Depth note:** The engine's whole hermetic test story hangs on this being a *real* exchange (never a mock); the fill-model seam isolates the only nondeterminism-shaped decision so determinism is a wiring choice.
+
+---
+
+### hyperliquid (`venues/hyperliquid/`)
+
+**Interface:** The one self-contained venue package (venue = extension unit, ADR-0031/0032): `HyperliquidFeed` (async WS `trades` channel, no auth, conflation at ingress with `feed.lagged`), `HyperliquidExchange` (async HTTP + SDK/`eth-account` signing utilities only; MARKET → aggressive-IOC-limit translation with slippage bound; `post_only` → ALO; perps only), instrument-spec sourcing from the meta endpoint, and `HyperliquidConfig`. Callers must know: signing key is env-only, never persisted, redacted from logs; `fetch_*` → `None` on failure; testnet/mainnet via `HYPERLIQUID_TESTNET`.
+
+**Responsibilities:** All venue knowledge — symbol/asset mapping, endpoints, auth, quirk translation. No saga, no engine imports, no other-adapter imports.
+
+**Seams:** Adapter of `MarketFeed` + `Exchange`; source of `InstrumentSpec`.
+
+**Depth note:** Adding venue N touches a new package like this one, a `*Config`, one composition-root arm, and deployment — nothing in the core. This package is the proof.
+
+---
+
+### strategies (`strategies/`)
+
+**Interface:** Minimal reference `Strategy` adapters (engine capability, not a library). Authors must know: `on_tick`/`on_order_event`; emit `PlaceSignal`/`CancelSignal` with strategy-owned monotonic `seq`; own state *content* via `snapshot()`/`restore()` (engine persists the bytes); cancel by your own `signal_id`; handler exceptions are contained, not fatal.
+
+**Responsibilities:** Signal logic only. No persistence, no venue knowledge, no saga awareness beyond `OrderEvent`s.
+
+**Seams:** Adapter(s) of `Strategy` — the seam accepts N; shipped impls prove it.
+
+**Depth note:** Shallow on purpose — the point of every other module is that this one stays trivial to write.
+
+---
+
+### clock (`adapters/clock/`)
+
+**Interface:** Two `Clock` adapters: `LiveClock` (wall clock, real async waits), `ManualClock` (explicit virtual-time advance). Invariant: engine code never touches `asyncio.sleep`/`time.time()` directly; canonical time is UTC epoch ns.
+
+**Responsibilities:** Reads, waits, timers.
+
+**Seams:** `Clock` — two real adapters.
+
+**Depth note:** The reason the whole suite never sleeps; deleting it re-scatters time into every timeout, cadence, and staleness check.
+
+---
+
+### observability (`observability/`)
+
+**Interface:** The shared leaf (ADR-0020/0032): the **named-event catalog** (stable, documented telemetry names — a test-assertable contract), correlation-id `ContextVar`s (run id + per-operation id), structured-logging setup with key redaction. Importable by engine, venues, and the `bus`/`store`/`feed`/`paper` adapters; **never** imported by `domain`, `clock`, or `strategies` (the last two stay domain-only — they emit no named events).
+
+**Responsibilities:** Emitting/asserting named events; ambient correlation binding; log configuration.
+
+**Seams:** None — one concrete implementation.
+
+**Depth note:** "A state-affecting path with no named event is a defect" is only enforceable if the catalog is one importable artifact tests can walk.
+
+---
+
+### app (`app/`)
+
+**Interface:** The composition root: `build_engine(config) -> Engine` plus the CLI entry (`asyncio.run(engine.run())`). Reads the typed `pydantic-settings` `*Config` objects (each adapter's config lives in its package; only `app` reads them all) and selects impls with an explicit `match` over config discriminants (`exchange: paper|hyperliquid`, `bus: in_memory|kafka`, `store: sqlite|postgres`). No registry, no import-path DSL.
+
+**Responsibilities:** Constructing every concrete, injecting already-built dependencies into the `Engine`, wiring instrument specs from the venue into the guard.
+
+**Seams:** None of its own — it is the one place that knows every adapter.
+
+**Depth note:** Exactly one module at the top of the graph may know all concretes; adding an impl is one `match` arm here and nowhere else.
+
+## Dependency graph
+
+```
+app ────────────▶ engine, adapters/*, venues/*, strategies, domain, observability
+engine ─────────▶ domain, observability          (Protocols only — never a concrete impl)
+adapters/bus ───▶ domain, observability
+adapters/store ─▶ domain, observability
+adapters/feed ──▶ domain, observability
+adapters/paper ─▶ domain, observability
+adapters/clock ─▶ domain
+venues/hyperliquid ▶ domain, observability
+strategies ─────▶ domain
+domain ─────────▶ (nothing)
+observability ──▶ (nothing inward; stdlib/logging only)
+```
+
+No cycles. Enforced by the `import-linter` contract in CI (ADR-0032): core → adapter and adapter → adapter imports fail the build. `domain` imports nothing and stays log-free; `clock` and `strategies` stay domain-only (they never import `observability`).
+
+## Out of scope
+
+- **`ExecutionManager` / `Reconciliation` / `Cache` as Protocols** — engine-internal, one implementation each; a seam needs two real adapters (ADR-0015).
+- **A DataEngine/ExecutionEngine layer** — the `Strategy`/`ExecutionManager` split *is* the data/execution split (ADR-0015).
+- **`FillModel` in `domain`** — only `PaperExchange` calls it; it is a paper-internal seam (map decision, 2026-07-02).
+- **Seam-first venue packaging** (`feeds/hyperliquid/` + `exchanges/hyperliquid/`) — fragments venue knowledge; rejected in ADR-0032.
+- **A plugin registry / entry-point discovery** — rejected in ADR-0032; wiring is the explicit `match` in `app`.
+- **A processed-event-id table module** — dedup lives in `Order.apply()` (ADR-0025/0019).
+- **A RiskEngine module** — the guard is deliberately thin; portfolio risk is deferred (ADR-0017).
+- **A separate `serde` module** — the codec is a `KafkaBus`-edge concern, not a shared seam (ADR-0025).
