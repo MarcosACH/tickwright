@@ -53,7 +53,8 @@ together because they share venue knowledge; packaging is fixed by ADR-0032.
 
 ## Instrument specs are adapter-sourced, `Exchange`-exposed, `Engine`-wired
 
-The `InstrumentSpec`s (tick, lot/step, min-notional — ADR-0017) are **authored by the adapter** (the
+The `InstrumentSpec`s (`sz_decimals` / `max_decimals` / `max_sig_figs` / `min_notional` —
+ADR-0017) are **authored by the adapter** (the
 component that talks to the venue meta endpoint / holds the paper config), **exposed via the
 `Exchange` Protocol** (an `instrument_specs()` accessor), and **wired into the
 `PreTradeGuard`/quantizer by the `Engine` at startup** — the startup sequence already connects the

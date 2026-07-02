@@ -15,7 +15,11 @@ those components.
 5. **Startup-reconciliation barrier** — the ADR-0011 mass-rebuild. A **hard gate**: nothing places
    until it succeeds.
 6. Start the `Strategy` instances (`on_start`: restore snapshot; seq high-water from the saga
-   store, ADR-0016).
+   store, ADR-0016; then **pull current open-order state from the `Cache` read-model** by direct
+   method call, ADR-0004 — the barrier's reconciliation `OrderEvent`s (step 5) were published
+   before strategies subscribed and are gone on `InMemoryBus`, so the contract is
+   **pull-then-subscribe: never rely on having seen startup events** — documented in
+   `extending.md`).
 7. Start the `MarketFeed` **last** — the first tick is only possible after the barrier clears, so
    no order can be placed before reconciliation completes (ADR-0011 inv 5).
 

@@ -24,3 +24,12 @@ the `StochasticFillModel` is what exercises it; the default never partials.
 
 Default is zero-slippage/optimistic for maximum readability and reproducibility — realism is
 the explicit purpose of the second model, not a default tax.
+
+## Crash recovery: the paper book re-adopts from the store
+
+The paper book is in-process and volatile, so restart semantics are pinned: at `start()` the
+`Engine` hands the `PaperExchange` the store's **non-terminal orders** (mirroring the spec-wiring
+path, ADR-0031) and it **rebuilds its resting book by cloid**. Startup reconciliation (ADR-0011)
+then finds them present — exactly like a live venue that kept them — so restart **re-adopts**
+resting orders instead of ghosting every healthy order, and the crash-recovery E2E (ADR-0022)
+exercises the same re-adopt path the live venue exercises, deterministically.

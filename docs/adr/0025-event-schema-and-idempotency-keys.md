@@ -75,3 +75,13 @@ Two load-bearing rules:
    table; in-memory has no redelivery, Kafka rides consumer offsets). A generic `processed_event_id`
    table was rejected — it adds a table the in-memory path never needs and dedups on id rather than on
    domain meaning, where the `cum_qty` invariant already lives.
+3. **Ticks get a monotonic gate, not a key.** `MarketTick`'s weak key is deliberate — but the one
+   consumer that is *not* naturally idempotent is `Strategy.on_tick`: a redelivered tick (Kafka
+   rebalance, uncommitted tail after crash-restart) double-counts indicator state and can mint a
+   *fresh* seq — a new intent no idempotency key catches → duplicate live order. The engine's
+   subscription wrapper (ADR-0024) therefore applies a **per-symbol monotonic gate**: a tick whose
+   (`ts_event`, `tid`) is ≤ the last dispatched for its symbol is dropped — sound because per-symbol
+   ordering (ADR-0003) means a duplicate can only arrive in order — plus a configurable **staleness
+   threshold** on live ticks so a restart's redelivered backlog cannot trade on pre-crash prices.
+   This makes ADR-0002's "consumers MUST be idempotent" structurally true for strategies on both
+   backends, with no strategy-author effort.

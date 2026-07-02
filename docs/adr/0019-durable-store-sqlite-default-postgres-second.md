@@ -16,9 +16,12 @@ So the canonical pairings are **InMemoryBus + SQLite** (zero-setup, deterministi
 ## What the store holds (minimal)
 
 - **Order saga records**, keyed by cloid: state, transition history, send timestamp, venue
-  `oid`, reason codes.
+  `oid`, reason codes, cancel intent (`cancel_requested` + the cancel's own `signal_id`,
+  ADR-0026).
 - **Strategy snapshots**: opaque bytes per `strategy_id`.
+- **Kill-switch state**: durable and sticky (ADR-0026), restored before the feed starts.
 
 The seq high-water-mark is **derived** from saga records (no separate table). There is **no
-"processed event id" table** — bus-redelivery dedup rides on Kafka consumer offsets on the Kafka
-path and does not arise on the in-memory path.
+"processed event id" table** — dedup is enforced by idempotent `Order.apply()` (ADR-0025); Kafka
+consumer offsets merely bound how much is redelivered, and the in-memory path has no redelivery.
+The store location is per-process configuration, never shared between engine instances (ADR-0028).

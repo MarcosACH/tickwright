@@ -41,8 +41,9 @@ ADR-0009).
   the common choice (resolving never-acked submits to `REJECTED`) because our ADR-0010
   taxonomy has a dedicated `FAILED` terminal that expresses this honestly; `REJECTED` is
   reserved for an actual venue refusal.
-- An order ghosted after the grace window + cross-check → **`REJECTED`** (ghost-reconciled) if
-  truly gone, or **`FILLED`/`PARTIALLY_FILLED`** if the cross-check found fills.
+- An order ghosted after the grace window + cross-check → **`FILLED`/`PARTIALLY_FILLED`** if the
+  cross-check found fills; if truly gone, **`REJECTED`** from `LIVE` and **`CANCELLED`** (fills
+  preserved) from `PARTIALLY_FILLED` (ADR-0010).
 
 ## External orders (boundary rule)
 
