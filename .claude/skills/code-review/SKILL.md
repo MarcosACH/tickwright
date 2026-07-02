@@ -64,8 +64,13 @@ Run these and treat any failure as BLOCKING. The list mirrors the authoritative 
 uv run ruff format --check .
 uv run ruff check .
 uv run mypy .
+uv run lint-imports   # ADR-0032 dependency-direction boundaries — a build-failing gate
 uv run pytest --cov --cov-report=term-missing --cov-fail-under=90
 ```
+
+ci.yml also runs `python -m compileall -q src` (byte-compile smoke) and a
+`pip-audit` supply-chain scan of the runtime deps; those are CI-only guards, not
+part of the reviewer's local mechanical pass.
 
 A review must not declare `Merge: READY` on a diff that would fail CI — the coverage gate (≥90% on the core) is part of the mechanical pass, not a style preference. Reviews must not flag findings ruff/mypy already catch — that is wasted attention.
 
