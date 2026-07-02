@@ -6,8 +6,12 @@
 #
 # Dependabot exemption: the ralph:* label and closes-issue gates are for
 # ralph/human PRs — a bot can apply neither, so those two steps are skipped for
-# dependabot[bot] (the job still runs and reports success). conventional-commits
-# is NOT exempt: Dependabot's ci:/chore: subjects already conform and stay gated.
+# dependabot[bot] (the job still runs and reports success). The exemption keys
+# off the PR author (github.event.pull_request.user.login), not github.actor —
+# a human editing/labeling a dependabot PR re-triggers this workflow as
+# themselves, and github.actor would then reflect the human, not the bot,
+# wrongly un-exempting the PR. conventional-commits is NOT exempt: Dependabot's
+# ci:/chore: subjects already conform and stay gated.
 #
 # Intended to become a required status check on main (both job names) once it
 # has reported at least once — same phasing as `ci`.
@@ -25,7 +29,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Exactly one ralph:* state label
-        if: ${{ github.actor != 'dependabot[bot]' }}
+        if: ${{ github.event.pull_request.user.login != 'dependabot[bot]' }}
         env:
           LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
         run: |
@@ -37,7 +41,7 @@ jobs:
           fi
 
       - name: Body closes an issue
-        if: ${{ github.actor != 'dependabot[bot]' }}
+        if: ${{ github.event.pull_request.user.login != 'dependabot[bot]' }}
         env:
           BODY: ${{ github.event.pull_request.body }}
         run: |
