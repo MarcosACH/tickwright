@@ -132,7 +132,7 @@ gh pr edit <PR> -R MarcosACH/tickwright \
   --remove-label ralph:changes-requested,ralph:review-addressed,ralph:ready
 ```
 
-Every open Ralph PR must have exactly one `ralph:*` state label; a PR with zero or multiple state labels is a drift bug to fix by hand.
+Every open Ralph PR must have exactly one `ralph:*` state label; a PR with zero or multiple state labels is a drift bug to fix by hand. **Dependabot PRs are the exception**: the `pr-policy` check skips its `ralph:*`-label and `Closes #N` gates for `dependabot[bot]` (see `docs/workflow/labels.md` and `.github/workflows/pr-policy.yml`), so a dependency PR needs neither.
 
 Provision required labels (one-shot, idempotent):
 

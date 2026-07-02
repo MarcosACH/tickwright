@@ -4,6 +4,11 @@
 # Conventional Commit subjects (CONTRIBUTING.md types). Label and body edits
 # re-trigger evaluation, so a red check turns green without a new push.
 #
+# Dependabot exemption: the ralph:* label and closes-issue gates are for
+# ralph/human PRs — a bot can apply neither, so those two steps are skipped for
+# dependabot[bot] (the job still runs and reports success). conventional-commits
+# is NOT exempt: Dependabot's ci:/chore: subjects already conform and stay gated.
+#
 # Intended to become a required status check on main (both job names) once it
 # has reported at least once — same phasing as `ci`.
 name: pr-policy
@@ -20,6 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Exactly one ralph:* state label
+        if: ${{ github.actor != 'dependabot[bot]' }}
         env:
           LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
         run: |
@@ -31,6 +37,7 @@ jobs:
           fi
 
       - name: Body closes an issue
+        if: ${{ github.actor != 'dependabot[bot]' }}
         env:
           BODY: ${{ github.event.pull_request.body }}
         run: |
