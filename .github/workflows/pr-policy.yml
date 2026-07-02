@@ -1,0 +1,67 @@
+# Enforces the PR invariants that docs/agents/issue-tracker.md and
+# docs/workflow/labels.md define as convention: exactly one ralph:* state
+# label on every open PR, an issue-closing reference in the body, and
+# Conventional Commit subjects (CONTRIBUTING.md types). Label and body edits
+# re-trigger evaluation, so a red check turns green without a new push.
+#
+# Intended to become a required status check on main (both job names) once it
+# has reported at least once — same phasing as `ci`.
+name: pr-policy
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+jobs:
+  pr-policy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Exactly one ralph:* state label
+        env:
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          n=$(tr ',' '\n' <<<"$LABELS" | grep -c '^ralph:' || true)
+          if [ "$n" -ne 1 ]; then
+            echo "::error::PR carries $n 'ralph:*' state labels; exactly one is required" \
+                 "(see docs/workflow/labels.md — PR state machine)."
+            exit 1
+          fi
+
+      - name: Body closes an issue
+        env:
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          if ! grep -qiE '(close[sd]?|fix(e[sd])?|resolve[sd]?) #[0-9]+' <<<"$BODY"; then
+            echo "::error::PR body must reference the issue it closes ('Closes #<N>')." \
+                 "Merging is what closes issues — see CONTRIBUTING.md."
+            exit 1
+          fi
+
+  conventional-commits:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          fetch-depth: 0
+
+      - name: Commit subjects follow Conventional Commits
+        # Types are the CONTRIBUTING.md set. Merge commits (branch updates from
+        # main) are exempt; everything else that would land on main is checked.
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          bad=0
+          while IFS= read -r line; do
+            sha=${line%% *}
+            subject=${line#* }
+            if ! grep -qE '^(feat|fix|docs|refactor|test|chore|ci)(\([a-z0-9._/-]+\))?!?: .+' <<<"$subject"; then
+              echo "::error::Commit ${sha:0:7} is not a Conventional Commit: \"$subject\"" \
+                   "(types: feat|fix|docs|refactor|test|chore|ci — see CONTRIBUTING.md)."
+              bad=1
+            fi
+          done < <(git log --no-merges --format='%H %s' "$BASE..$HEAD")
+          exit "$bad"
