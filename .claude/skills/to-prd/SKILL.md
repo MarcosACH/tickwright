@@ -33,14 +33,16 @@ user which modules they want tests written for.
 6. File the issue in `MarcosACH/tickwright` (the single repo for this project —
   the parent PRD and all child implementation issues live here). Then, in order:
 
-  - **Add to the project board**: `gh project item-add 6 --owner MarcosACH --url <issue-url>`.
+  - **Add to the project board**: `gh project item-add 2 --owner MarcosACH --url <issue-url>`.
+    (The board number is canonical in `docs/agents/issue-tracker.md` — if these disagree,
+    that file wins.)
   - **Set status to `Todo`**: via `gh project item-edit` (status field IDs in
     `docs/agents/issue-tracker.md`).
   - **Set assignee to `@me`**: `gh issue edit <n> -R MarcosACH/tickwright --add-assignee @me`.
     (Or pass `--assignee @me` on the original `gh issue create` call.)
   - **Set issue type to `Feature`**: `gh api -X PATCH repos/MarcosACH/tickwright/issues/<n> -f type=Feature`.
 
-  Confirm the project URL `https://github.com/users/MarcosACH/projects/6` in the
+  Confirm the project URL `https://github.com/users/MarcosACH/projects/2` in the
   response.
 
   See `docs/agents/issue-tracker.md` for the full gh CLI conventions (creation,
