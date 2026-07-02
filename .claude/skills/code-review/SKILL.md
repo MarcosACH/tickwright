@@ -256,6 +256,7 @@ Use this as the substantive-pass spine. Each item maps to a `Category` value.
 - [ ] `uv run mypy .` clean (or new `# type: ignore` lines explained).
 - [ ] No `# noqa` without a rule code and reason.
 - [ ] First sentence of each public function/class docstring is one line, ~15 words.
+- [ ] **Docs-sync**: if the diff changes behavior or conventions documented elsewhere (`CLAUDE.md`, `docs/agents/`, `docs/workflow/`, `docs/adr/`, `CONTEXT.md`, `.claude/skills/`, CI workflows), the same PR updates those files. A stale doc left behind is WARN; a contradicted canonical source (e.g. an ADR or `issue-tracker.md`) is BLOCKING.
 
 ### Tickwright invariants (BLOCKING if regressed)
 

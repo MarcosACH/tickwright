@@ -49,6 +49,10 @@ can't be skipped with `--no-verify`.
   time. Mock only at process boundaries (HTTP/WS, Kafka, the clock, randomness); never mock the
   engine's own classes.
 - **Small commits.** One logical change per commit. Match the surrounding naming and style.
+- **Docs stay in sync.** If a change alters something documented elsewhere — workflow conventions
+  (`docs/agents/`, `docs/workflow/`), agent skills (`.claude/skills/`), ADRs, `CONTEXT.md`, CI
+  workflows — update every affected file in the same PR. Prefer one canonical source that others
+  link over copies that can drift.
 
 ## Conventions
 
