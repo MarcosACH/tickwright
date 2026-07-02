@@ -1,0 +1,136 @@
+[project]
+name = "tickwright"
+version = "0.1.0"
+description = "An event-driven algorithmic trading engine built as a readable reference implementation."
+requires-python = ">=3.13,<3.14"
+license = "Apache-2.0"
+authors = [{ name = "Marcos Achaval" }]
+# Runtime dependencies are intentionally empty at scaffold time. Each vertical
+# slice adds exactly the deps it needs (ADR-0021), so the default paper-exchange
+# + in-memory-bus path stays hermetic: `uv sync` pulls nothing off the network
+# beyond the dev toolchain below.
+dependencies = []
+
+[dependency-groups]
+# Installed by `uv sync --dev` (and in CI). Not shipped to consumers.
+dev = [
+    "ruff>=0.14",
+    "mypy>=1.14",
+    "pytest>=8.3",
+    "pytest-cov>=6.0",
+    "hypothesis>=6.120",
+    "import-linter>=2.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tickwright"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+# E501 (line length) is handled by the formatter; F403 (star imports) is
+# permitted where a package re-exports its public surface.
+select = ["E", "W", "F", "I", "B", "C4", "UP"]
+ignore = ["E501", "F403"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.13"
+check_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+files = ["src", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.coverage.run]
+source = ["src/tickwright"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+
+# Import boundaries for the ports-and-adapters topology (ADR-0032, module map
+# docs/module-maps/v1-core-engine.md). CI runs `uv run lint-imports`; a
+# cross-adapter or core->adapter import fails the build, so "decoupled" is a
+# gate, not an aspiration. Dependency direction is inward:
+#   app -> engine, adapters/*, venues/*, strategies, domain, observability
+#   engine -> domain, observability            (Protocols only, never a concrete)
+#   adapters/*, venues/* -> domain, observability
+#   strategies -> domain
+#   domain -> (nothing) ; observability -> (nothing inward)
+[tool.importlinter]
+root_package = "tickwright"
+
+[[tool.importlinter.contracts]]
+name = "domain depends on nothing internal"
+type = "forbidden"
+source_modules = ["tickwright.domain"]
+forbidden_modules = [
+    "tickwright.engine",
+    "tickwright.adapters",
+    "tickwright.venues",
+    "tickwright.strategies",
+    "tickwright.observability",
+    "tickwright.app",
+]
+
+[[tool.importlinter.contracts]]
+name = "engine never imports a concrete impl"
+type = "forbidden"
+source_modules = ["tickwright.engine"]
+forbidden_modules = [
+    "tickwright.adapters",
+    "tickwright.venues",
+    "tickwright.strategies",
+    "tickwright.app",
+]
+
+[[tool.importlinter.contracts]]
+name = "adapters, venues, and strategies never import inward-forbidden layers"
+type = "forbidden"
+source_modules = [
+    "tickwright.adapters",
+    "tickwright.venues",
+    "tickwright.strategies",
+]
+forbidden_modules = [
+    "tickwright.engine",
+    "tickwright.app",
+]
+
+[[tool.importlinter.contracts]]
+name = "observability is a leaf and imports nothing inward"
+type = "forbidden"
+source_modules = ["tickwright.observability"]
+forbidden_modules = [
+    "tickwright.domain",
+    "tickwright.engine",
+    "tickwright.adapters",
+    "tickwright.venues",
+    "tickwright.strategies",
+    "tickwright.app",
+]
+
+[[tool.importlinter.contracts]]
+name = "no adapter imports another adapter, venue, or strategy package"
+type = "independence"
+modules = [
+    "tickwright.adapters.bus",
+    "tickwright.adapters.store",
+    "tickwright.adapters.feed",
+    "tickwright.adapters.paper",
+    "tickwright.adapters.clock",
+    "tickwright.venues.hyperliquid",
+    "tickwright.strategies",
+]
