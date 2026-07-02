@@ -104,11 +104,7 @@ After each `gh issue create`, immediately, in order:
    gh issue edit <n> -R MarcosACH/tickwright --add-assignee @me
    ```
    (Or pass `--assignee @me` on the original `gh issue create` call.) Unassigned issues are treated as triage-pending and Ralph will not pick them up.
-4. Set issue type to `Task` (child slice issues are all `Task`; only the parent PRD is `Feature`):
-   ```bash
-   gh api -X PATCH repos/MarcosACH/tickwright/issues/<n> -f type=Task
-   ```
-5. If the slice has a parent issue (the source PRD), link the new issue as a real GitHub sub-issue of the parent via REST:
+4. If the slice has a parent issue (the source PRD), link the new issue as a real GitHub sub-issue of the parent via REST:
    ```bash
    gh api -X POST repos/MarcosACH/tickwright/issues/<parent>/sub_issues \
      -F sub_issue_id=<child-issue-node-id>
