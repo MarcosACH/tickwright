@@ -43,7 +43,9 @@ plus an additive, default-no-op `Strategy` callback — needing no rework of the
 `on_tick` seam. v1 needs none of them (frictionless ⇒ no funding; single-price fill ⇒ no quotes).
 **Timeframes/bars are deliberately not an engine concern:** ticks are the atomic,
 timeframe-independent stream, and a strategy wanting bars aggregates them inside its own state
-(ADR-0016) — the engine stays honestly tick-driven, with no `BarAggregator` component.
+(ADR-0016) — best-effort on the live path, where conflation may drop trades under backpressure
+(ADR-0023; `ReplayFeed` is always complete) — the engine stays honestly tick-driven, with no
+`BarAggregator` component.
 
 ## Deterministic replay: JSONL rows, feed drives the ManualClock
 

@@ -7,7 +7,10 @@ actually care about — **was the order sent, and who decided?** — rather than
 - **`DENIED`** — refused by our **pre-trade guard** (min-notional/qty, kill-switch); **never
   sent** to the venue. Safe to recreate as a fresh intent immediately.
 - **`REJECTED`** — **sent**, and the **venue** adjudicated and refused it (includes the
-  ghost-reconciled case: an order that was live at the venue then vanished). Venue-final.
+  ghost-reconciled case: a `LIVE` order that vanished with **no fills recorded**). Venue-final.
+  A `PARTIALLY_FILLED` ghost instead resolves to **`CANCELLED`** with its fills preserved —
+  "the venue refused it" is false for an order the venue partially executed; this matches the
+  reference's resolution of missing partially-filled orders.
 - **`FAILED`** — **sent (or attempted)** and we have positive proof it **never landed**
   (hard transport/local error). May warrant a retry/replace decision.
 
@@ -19,7 +22,8 @@ Updated negative transitions:
 PENDING ─guard deny──▶ DENIED                    (pre-trade, never sent)
 SUBMITTED ─venue no──▶ REJECTED                  (sent, venue refused)
 SUBMITTED ─hard fail─▶ FAILED                    (sent, proven non-landing — NOT a timeout)
-LIVE | PARTIALLY_FILLED ─ghost reconcile─▶ REJECTED
+LIVE ─ghost reconcile───────▶ REJECTED           (vanished, no fills recorded)
+PARTIALLY_FILLED ─ghost─────▶ CANCELLED          (vanished; recorded fills preserved)
 ```
 
 This adopts the established `DENIED` (pre-trade) vs `REJECTED` (venue) distinction —

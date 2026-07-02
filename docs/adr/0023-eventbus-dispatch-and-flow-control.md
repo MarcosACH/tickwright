@@ -32,6 +32,12 @@ Two load-bearing scoping rules:
    deterministic (it is the tracer and test substrate). An unbounded ingress channel (a common live
    default in event-driven engines) was rejected: unbounded memory under sustained overload with no
    slow-consumer signal.
+3. **The live tick stream is lossy under backpressure — a stated strategy contract.** `MarketTick`
+   is a *trade* tick (ADR-0027) and strategies may aggregate bars/volume from it; under conflation
+   those aggregates are **best-effort on the live path** (a dropped trade is dropped volume).
+   Strategies must never assume a complete trade stream; `tick.conflated` is the signal. Documented
+   in `extending.md`. A volume-accumulating conflated tick (summing dropped `size`) is a possible
+   later refinement, deliberately not v1.
 
 ## Reentrant `publish` drains to quiescence (a FIFO trampoline, not recursion)
 

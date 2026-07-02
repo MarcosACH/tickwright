@@ -17,4 +17,8 @@
   `.env`. Keys: `HYPERLIQUID_TESTNET`, `KAFKA_BOOTSTRAP_SERVERS`, `KAFKA_*_TOPIC`, `STORE_*`,
   `LOG_*`. Uses typed, immutable `*Config` objects.
 
+- **Secrets:** the Hyperliquid signing key is **env-only** — never in committed files, never
+  persisted to the store, and **redacted from structured logs** (ADR-0020). The default
+  paper-exchange path needs no key at all.
+
 Dependencies are managed with `uv` in a project venv, never installed globally.

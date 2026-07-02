@@ -15,6 +15,9 @@ registries, or config-DSLs — extensibility is implementing a Protocol.**
 - **`engine`** (`ExecutionManager`/saga, reconciliation, recovery, the runner) depends on `domain`
   **Protocols**, **never** on a concrete impl.
 - **No adapter imports another adapter; core never imports an adapter.**
+- **`observability/` is a shared leaf** (engine and adapters may import it, ADR-0020); **`domain`
+  itself stays log-free** and imports nothing. Per-adapter `*Config` objects live inside their
+  adapter package (ADR-0031); only the composition root reads them all.
 
 This is the rule that keeps additions decoupled as the repo grows. It is **enforced mechanically**
 with an `import-linter` contract in CI — the same test-assertable-contract spirit as the named-event

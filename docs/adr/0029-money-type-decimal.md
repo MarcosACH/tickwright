@@ -1,8 +1,9 @@
 # Money type: Decimal everywhere, never float
 
 All prices, sizes, and notionals are `decimal.Decimal`, never `float`. Binary floating point cannot
-represent decimal tick/lot grids exactly, and ADR-0017 quantization (round price to tick, size to
-lot/step, check min-notional) is precisely the arithmetic that float rounding corrupts — a class of
+represent decimal price/size grids exactly, and ADR-0017 quantization (the sig-figs ∧ decimals
+price rule, size to `sz_decimals`, check min-notional) is precisely the arithmetic that float
+rounding corrupts — a class of
 silent venue-rejection and state-corruption bugs a reference engine must not model wrongly.
 
 Validated against the source: Hyperliquid returns `px`/`sz` as **strings**, so the boundary parses

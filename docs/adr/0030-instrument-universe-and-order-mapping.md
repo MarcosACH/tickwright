@@ -8,8 +8,9 @@ The instrument universe is **perpetuals** — Hyperliquid's flagship, indexed di
 `universe`. Spot (asset index `10000 + spot_index`, `MAX_DECIMALS = 8` vs perps' `6`) is deferred as
 an additive `InstrumentSpec` extension (ADR-0017), not a v1 concern. "Perps" here means only the perp
 trades feed (ADR-0027) and perp order placement; the frictionless engine (ADR-0013) models no margin,
-funding, or liquidation regardless. The `InstrumentSpec` carries the asset index plus tick/`szDecimals`
-from the meta endpoint; supporting spot later is the `10000+` offset and the 8-decimal rule.
+funding, or liquidation regardless. The `InstrumentSpec` carries the asset index plus `szDecimals`/`MAX_DECIMALS`
+from the meta endpoint, feeding the sig-fig price rule (ADR-0017); supporting spot later is the
+`10000+` offset and `MAX_DECIMALS = 8`.
 
 ## `reduce_only` is deferred
 
@@ -29,7 +30,7 @@ adapter (ADR-0015):
 
 - **MARKET** → an **IOC limit at an aggressive price**: `latest_price × (1 + slippage_bound)` for buy,
   `× (1 − slippage_bound)` for sell (a configurable bound with an SDK-style default), then quantized
-  to tick / significant figures (ADR-0017; perps allow ≤5 sig figs, integer prices always).
+  per the ADR-0017 price rule (perps allow ≤5 sig figs, integer prices always).
 - **`post_only`** → TIF **ALO** (rejects if it would cross — matches our `post_only` semantics).
 - **LIMIT** → limit with TIF **GTC** or **IOC**.
 

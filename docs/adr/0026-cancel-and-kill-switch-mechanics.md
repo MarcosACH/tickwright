@@ -20,22 +20,26 @@ ADR-0007 models cancel as `LIVE → CANCELLED` with **no `CANCELLING` state**. B
 vanishes from venue open-orders, which is indistinguishable from a **ghost** (→ `REJECTED`,
 ADR-0011) unless we record intent — and collapsing `CANCELLED` into `REJECTED` violates ADR-0010.
 
-So on a `CancelSignal` the `ExecutionManager` checkpoints a **`cancel_requested`** flag+timestamp on
-the `LIVE` saga record, *then* calls `exchange.cancel(cloid)`. This is a marker, **not** an FSM state:
+So on a `CancelSignal` the `ExecutionManager` durably checkpoints the cancel intent — the cancel's
+**own `signal_id`** plus a **`cancel_requested`** flag+timestamp on the `LIVE` saga record — *then*
+calls `exchange.cancel(cloid)`. Persisting the cancel's `signal_id` matters beyond dedup: cancel
+seqs participate in the ADR-0016 seq high-water-mark, so a restart can never re-issue a consumed id. This is a marker, **not** an FSM state:
 the order stays `LIVE` and can still fill (the cancel/fill race is real). Resolution:
 
 - **Happy path** — venue cancel-ack (`OrderStatusReport` cancelled) → `LIVE → CANCELLED`.
 - **Lost-ack / crash path** — reconciliation finds the order gone and cross-checks fill history
   (ADR-0011 inv 2/4): fills found → `FILLED`/`PARTIALLY_FILLED` (cancel lost the race); no new fills
   **and `cancel_requested`** → `CANCELLED` (our cancel landed, ack lost); no new fills **and not
-  `cancel_requested`** → `REJECTED` (ghost, unsolicited disappearance).
+  `cancel_requested`** → the ghost resolution of ADR-0010: `REJECTED` from `LIVE`, `CANCELLED`
+  (fills preserved) from `PARTIALLY_FILLED`.
 
 `FILLED` is terminal and wins the race; a late cancel-ack on a terminal saga is an idempotent no-op
 (ADR-0025); a cancel on an already-terminal/unknown order yields a benign venue "not found" report the
 saga ignores. The retry-budget-below-grace timing invariant (ADR-0011 inv 7) still applies. Not
 tracking intent (treat every vanished order as `REJECTED`-ghost) was rejected — it mislabels every
 ack-lost cancel as a venue rejection. The marker is what makes "no `CANCELLING` state" correct rather
-than lossy.
+than lossy. Order **modification** is likewise out of v1: the amend path is a `CancelSignal` + a
+fresh `PlaceSignal`; a native modify (`PENDING_UPDATE`) is an additive extension.
 
 ## The kill-switch is global and halt-only, tripped manually
 
@@ -49,8 +53,8 @@ under multi-strategy, ADR-0018) is a cheap additive extension — the guard alre
 knows `strategy_id` — but ships deferred.
 
 **Tripped manually only.** `trip_kill_switch(reason)` / `reset_kill_switch()` are callable
-programmatically (tests) and wired to `SIGUSR1` by the runner, alongside the `SIGINT`/`SIGTERM`
-handlers of ADR-0024 — a dependency-free operator interface, no HTTP admin surface in v1. Each
+programmatically (tests) and wired by the runner to `SIGUSR1` (trip) / `SIGUSR2` (reset), alongside
+the `SIGINT`/`SIGTERM` handlers of ADR-0024 — a dependency-free operator interface, no HTTP admin surface in v1. Each
 trip/reset emits a named event (`guard.kill_switch_tripped` / `guard.kill_switch_reset`, ADR-0020)
 with the reason. **Automatic circuit-breaker tripping** (on consecutive `FAILED`s, a reconcile freeze,
 a rejection storm) is deferred: those encode a *risk policy*, and a reference core exposes the

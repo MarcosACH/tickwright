@@ -6,7 +6,10 @@ anticipates this, so the cost is contained to the `ExecutionManager` gaining:
 
 - a **strategy registry** with **unique-`strategy_id` enforcement** (duplicate registration is a
   fail-fast error),
-- **per-strategy `OrderEvent` routing** (events return to the owning strategy),
+- **per-strategy `OrderEvent` routing** (events return to the owning strategy) and **per-strategy
+  tick filtering** (the engine's subscription wrapper, ADR-0024, delivers only the strategy's
+  declared symbol set — pub/sub stays type-keyed; routing/filtering is a wrapper concern, never a
+  bus feature),
 - **per-strategy seq + snapshot** (already implied by ADR-0006/0016).
 
 Multiple strategies may trade the **same symbol** independently; their orders stay isolated by

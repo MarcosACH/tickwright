@@ -211,19 +211,24 @@ _Avoid_: risk engine, risk manager (those imply the deferred portfolio-risk surf
 **Kill-switch**:
 A **global, halt-only** flag on the [[PreTradeGuard]]: tripped, every new `PlaceSignal` is `DENIED`
 (never sent) while resting `LIVE` orders are left untouched (flatten is a separate, deferred operator
-action). Tripped **manually only** (`trip_kill_switch(reason)` wired to `SIGUSR1`; automatic
+action). Tripped **manually only** (`trip_kill_switch(reason)` wired to `SIGUSR1`, reset to `SIGUSR2`;
+automatic
 circuit-breakers deferred), and **durable/sticky** — persisted to the [[Store]] and restored on
 restart, cleared only by an explicit reset, so a halt outlives a crash. See ADR-0026.
 _Avoid_: circuit breaker (implies the deferred automatic-trip policy), panic button (it does not flatten).
 
 **Quantization**:
-Rounding an order's price to the instrument tick and size to its lot/step at the boundary, so
-the venue never silently rejects it. Uses [[Instrument spec]]s. See ADR-0017.
-_Avoid_: rounding (too generic).
+Rule-based rounding of an order's price and size at the boundary, so the venue never silently
+rejects it: size rounds **down** to `sz_decimals` (rounds-to-zero → `DENIED`), price rounds
+toward the passive side under the sig-figs ∧ decimals rule (Hyperliquid has no fixed tick).
+Uses [[Instrument spec]]s. See ADR-0017.
+_Avoid_: rounding (too generic), tick size (Hyperliquid price granularity is
+significant-figures-based, not a fixed grid).
 
 **Instrument spec**:
-The minimal per-symbol metadata the guard and [[Quantization|quantizer]] need — tick, lot/step,
-min-notional — from config (paper) or the venue meta endpoint (Hyperliquid). **Sourced by the
+The minimal per-symbol metadata the guard and [[Quantization|quantizer]] need — `sz_decimals`,
+`max_decimals`, optional `max_sig_figs`, min-notional — from config (paper) or the venue meta
+endpoint (Hyperliquid). **Sourced by the
 [[Venue adapter]]**, exposed via the [[Exchange]] Protocol, and wired into the guard by the
 [[Engine]] at startup, so the guard stays venue-agnostic. Not a full instrument provider. See
 ADR-0017, ADR-0031.
