@@ -1,0 +1,103 @@
+"""The seam Protocols — the swappable boundaries of the engine (ADR-0015).
+
+These are structural contracts: an adapter satisfies a seam by shape, never by
+inheritance, so ``domain`` stays a pure leaf that every impl compiles against
+without importing anything back. Each Protocol is deliberately minimal for this
+tracer slice; later slices widen them (``Exchange.cancel``/``fetch_*``,
+``Clock`` timers, strategy snapshots) as their behaviors land.
+"""
+
+from collections.abc import Awaitable, Callable
+from datetime import datetime
+from typing import Protocol, runtime_checkable
+
+from .events import Event, MarketTick, OrderEvent, PlaceOrder
+
+type Handler[E: Event] = Callable[[E], Awaitable[None]]
+"""An async subscriber of a single event family."""
+
+
+@runtime_checkable
+class EventBus(Protocol):
+    """Publish/subscribe transport (ADR-0023). Pub/sub only — no query surface."""
+
+    def subscribe[E: Event](self, event_type: type[E], handler: Handler[E]) -> None:
+        """Register ``handler`` for every published event that is an ``event_type``."""
+        ...
+
+    async def publish(self, event: Event) -> None:
+        """Publish ``event``, draining the whole reentrant cascade to quiescence."""
+        ...
+
+
+@runtime_checkable
+class Clock(Protocol):
+    """The injected source of all time (ADR-0005). Canonical unit: UTC epoch ns."""
+
+    def timestamp_ns(self) -> int:
+        """The current time as UTC epoch nanoseconds."""
+        ...
+
+    def now(self) -> datetime:
+        """The current time as a timezone-aware UTC ``datetime`` (human edges only)."""
+        ...
+
+    async def sleep(self, seconds: float) -> None:
+        """Wait ``seconds``; virtual and immediate under ``ManualClock``."""
+        ...
+
+
+@runtime_checkable
+class ReplayClock(Clock, Protocol):
+    """A ``Clock`` whose virtual time a deterministic producer drives forward.
+
+    ``ReplayFeed`` advances the clock to each row's ``ts_event`` before publishing
+    (ADR-0027). Declaring the capability here — not on the concrete ``ManualClock``
+    — lets the feed depend on ``domain`` alone, keeping the no-adapter-imports-an-
+    adapter boundary intact (ADR-0032). ``LiveClock`` implements only ``Clock``.
+    """
+
+    def advance_to(self, ts_ns: int) -> None:
+        """Advance virtual time to ``ts_ns`` (never backward)."""
+        ...
+
+
+@runtime_checkable
+class MarketFeed(Protocol):
+    """Produces ``MarketTick`` events for configured symbols (ADR-0015)."""
+
+    async def start(self) -> None:
+        """Begin producing ticks. ``ReplayFeed`` runs to end-of-file."""
+        ...
+
+    async def stop(self) -> None:
+        """Stop producing ticks."""
+        ...
+
+
+@runtime_checkable
+class Strategy(Protocol):
+    """Consumes ticks, reacts to lifecycle, emits ``Signal``s (ADR-0015/0016)."""
+
+    strategy_id: str
+
+    async def on_tick(self, tick: MarketTick) -> None:
+        """Handle a market tick; may emit signals."""
+        ...
+
+    async def on_order_event(self, event: OrderEvent) -> None:
+        """Handle a canonical saga transition for one of this strategy's orders."""
+        ...
+
+
+@runtime_checkable
+class Exchange(Protocol):
+    """A thin venue boundary adapter (ADR-0015): translate and emit raw facts.
+
+    Owns no saga. ``place`` emits ``ExecutionReport``s on the bus rather than
+    returning them, so the ``ExecutionManager`` drives the FSM off venue facts.
+    """
+
+    async def place(self, order: PlaceOrder) -> None:
+        """Place ``order`` at the venue; emit the resulting raw ``ExecutionReport``(s)."""
+        ...
