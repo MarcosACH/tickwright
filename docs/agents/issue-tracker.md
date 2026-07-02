@@ -97,7 +97,7 @@ Every implementation PR must include `Closes #<issue-number>` in its body. GitHu
 - Auto-closes the issue when the PR merges to the default branch — no manual `gh issue close` needed
 - The "Item closed" project automation flips Status to `Done` when the PR merges
 
-Each child PR's `Closes` clause references the parent PRD issue.
+Each child PR's `Closes` clause references **its own child slice issue**, never the parent PRD — closing the parent on a child merge would kill the tracking issue while slices are still open. The parent PRD is closed by the **final** child PR carrying a second clause (`Closes #<child>` + `Closes #<prd>`); if that was forgotten, closing the PRD by hand once every sub-issue is Done is the documented exception to "never close manually".
 
 ## Issue lifecycle for agents
 

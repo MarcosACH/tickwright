@@ -40,13 +40,16 @@ user which modules they want tests written for.
     `docs/agents/issue-tracker.md`).
   - **Set assignee to `@me`**: `gh issue edit <n> -R MarcosACH/tickwright --add-assignee @me`.
     (Or pass `--assignee @me` on the original `gh issue create` call.)
-  - **Set issue type to `Feature`**: `gh api -X PATCH repos/MarcosACH/tickwright/issues/<n> -f type=Feature`.
+
+  Do NOT set a GitHub Issue Type — this user-owned repo does not use them (org-only
+  feature); the `prd` label is what marks the issue kind. See
+  `docs/agents/issue-tracker.md` §Issue kind.
 
   Confirm the project URL `https://github.com/users/MarcosACH/projects/2` in the
   response.
 
   See `docs/agents/issue-tracker.md` for the full gh CLI conventions (creation,
-  sub-issue linking via the REST API, status field IDs, assignee/type
+  sub-issue linking via the REST API, status field IDs, assignee and issue-kind
   conventions, and the `gh project item-edit` invocation).
 
 <prd-template>
