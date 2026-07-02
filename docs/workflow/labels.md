@@ -10,6 +10,8 @@ The schema has five concerns: PR state machine, issue priority, issue domain (dr
 
 Exactly one `ralph:*` label is set on every PR. The transitions are: `ralph:needs-review` → `ralph:changes-requested` ⇄ `ralph:review-addressed` → `ralph:ready`. (The `ralph:` prefix is kept as the conventional review-state namespace even if the AFK loop is not run.)
 
+**Dependabot PRs are exempt** from this label requirement (and from the `Closes #N` body rule): a bot can apply neither, so the `pr-policy` check skips both gates for `dependabot[bot]` (`.github/workflows/pr-policy.yml`). Conventional-commit subjects are still enforced for Dependabot.
+
 | Name | Color | Description |
 |---|---|---|
 | `ralph:needs-review` | `#1d76db` (blue) | PR opened, awaiting code-review |
