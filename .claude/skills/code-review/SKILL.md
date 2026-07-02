@@ -34,6 +34,7 @@ Before reading code:
   gh api graphql -f query='{ repository(owner:"MarcosACH",name:"tickwright") { issue(number:N) { parent { number title body } } } }'
   ```
   If `parent` is null, the linked issue is the spec. Otherwise read the parent before the diff and treat its "Out of scope" sections as hard constraints on what *not* to flag.
+- [ ] List the ADRs (`docs/adr/`) covering the touched modules and read them via `.agents/tools/doc-slice` — they are the densest source of review criteria in this repo. A diff that violates an ADR's decision is BLOCKING (cite the ADR in the finding).
 - [ ] If no context at all, **STOP and ask the user.**
 - [ ] Establish the optimization axis: correctness, performance, maintainability? Different axes change which findings are BLOCKING.
 - [ ] Identify the diff scope: `git diff main...HEAD` (or `gh pr diff <PR#>`).
@@ -57,16 +58,16 @@ Review is **read-only against the user's working tree**. Do not mutate refs.
 
 ### 2. Mechanical pass (push to tools, not humans)
 
-Run these and treat any failure as BLOCKING:
+Run these and treat any failure as BLOCKING. The list mirrors the authoritative CI gate (`.github/workflows/ci.yml`) — if the two ever disagree, ci.yml wins and this list needs updating:
 
 ```bash
 uv run ruff format --check .
 uv run ruff check .
 uv run mypy .
-uv run pytest -v
+uv run pytest --cov --cov-report=term-missing --cov-fail-under=90
 ```
 
-Reviews must not flag findings ruff/mypy already catch — that is wasted attention.
+A review must not declare `Merge: READY` on a diff that would fail CI — the coverage gate (≥90% on the core) is part of the mechanical pass, not a style preference. Reviews must not flag findings ruff/mypy already catch — that is wasted attention.
 
 ### 3. Substantive pass
 
@@ -149,9 +150,16 @@ Ralph-State: changes-requested | ready
 - Otherwise: `gh pr review <PR#> --comment --body "..."`
 - If `--request-changes` is rejected because the PR is the user's own, retry with `--comment`.
 - For line-anchored comments, post each finding via `gh api` against the PR's review-comments endpoint.
-- For Ralph PRs (`headRefName` starts with `ralph/issue-`), set the PR label from the footer when `.ralph/set-pr-state.sh` exists:
-  - `Ralph-State: changes-requested` → `.ralph/set-pr-state.sh <PR#> changes-requested`
-  - `Ralph-State: ready` → `.ralph/set-pr-state.sh <PR#> ready`
+- Set the PR's `ralph:*` state label from the footer. Every open PR carries **exactly one** `ralph:*` label (enforced by the `pr-policy` CI check); set the new one and clear the rest in a single edit:
+  ```bash
+  # Ralph-State: changes-requested
+  gh pr edit <PR#> -R MarcosACH/tickwright --add-label ralph:changes-requested \
+    --remove-label ralph:needs-review,ralph:review-addressed,ralph:ready
+  # Ralph-State: ready
+  gh pr edit <PR#> -R MarcosACH/tickwright --add-label ralph:ready \
+    --remove-label ralph:needs-review,ralph:changes-requested,ralph:review-addressed
+  ```
+  See [docs/agents/issue-tracker.md](../../../docs/agents/issue-tracker.md) §"Ralph PR lifecycle" for the state machine.
 
 **Local branch with no PR** → write `review-<short-sha>.md` at the repo root. The implementing agent reads and edits this file to drive fixes.
 
@@ -175,7 +183,7 @@ The implementing agent **cannot merge** while any `BLOCKING` finding has `**Stat
    - Adds new findings discovered in the new diff (continue ID sequence).
    - Posts the updated review as a new PR comment (or rewrites the local file).
 3. Merge is permitted only when the latest review shows `BLOCKING: 0 open` AND no `regressed` entries.
-4. For Ralph PRs, the latest review must also show `Ralph-State: ready` and the PR must be labeled `ralph:ready`.
+4. The latest review must also show `Ralph-State: ready` and the PR must be labeled `ralph:ready` (every PR uses the `ralph:*` state machine — see `docs/workflow/labels.md`).
 
 **WARN waivers** require the user (not the implementing agent) to write:
 ```
@@ -234,7 +242,7 @@ Use this as the substantive-pass spine. Each item maps to a `Category` value.
 - [ ] No mocks for internal collaborators. Mock only at process boundaries (network, FS, clock, the exchange SDK, the event-bus transport at the client level).
 - [ ] `pytest.raises` asserts on the exception type AND a substring of the message where the message is part of the contract.
 - [ ] Parametrized tests over copy-pasted near-duplicates.
-- [ ] No `time.sleep` in tests. Use `freezegun` or inject the clock.
+- [ ] No `time.sleep` in tests, and no freezing/patching time. Tests drive time through the injected `Clock` (`ManualClock`) — ADR-0005 makes direct `time.time()` / `asyncio.sleep` a banned pattern in engine code.
 
 ### Security
 - [ ] No secrets in logs or in commit (`SECRET_KEY`, `ENCRYPTION_KEY`, exchange API keys, signing keys).
@@ -250,12 +258,8 @@ Use this as the substantive-pass spine. Each item maps to a `Category` value.
 - [ ] First sentence of each public function/class docstring is one line, ~15 words.
 
 ### Tickwright invariants (BLOCKING if regressed)
-- [ ] Order-lifecycle saga remains idempotent: replaying an event must not double-place or double-cancel an order.
-- [ ] Recovery is crash-safe: a saga checkpoint replayed after restart must converge to the same terminal state.
-- [ ] Reconciliation freezes on connectivity failure: an exchange read that fails returns `None` and must not be misread as "all orders vanished."
-- [ ] Order rejections propagate as an explicit event; never silently `return None` for a placed-but-rejected order.
-- [ ] Event-bus handlers route on the same key end-to-end; a mismatched routing key must not silently drop or misdirect events.
-- [ ] The paper exchange stays deterministic: fills/rejections are reproducible from the same input sequence and clock.
+
+Walk the canonical list in [docs/agents/invariants.md](../../../docs/agents/invariants.md) — saga idempotency, crash-safe recovery, reconciliation freeze, explicit rejections, per-symbol ordering, deterministic paper exchange. Each entry cites its ADR; cite the ADR in the finding. Do not restate the list here — the shared file is the single source.
 
 ---
 

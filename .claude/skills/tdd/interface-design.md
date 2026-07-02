@@ -2,49 +2,59 @@
 
 Good interfaces make testing natural:
 
-1. **Accept dependencies via traits, don't construct them**
+1. **Accept dependencies via Protocols, don't construct them**
 
-   ```rust
-   // Testable — any PaymentGateway impl works (real, fake, mock)
-   async fn process_order<G: PaymentGateway>(order: Order, gateway: &G) -> Result<Receipt> {
-       gateway.charge(order.total_cents()).await
-   }
+   ```python
+   # Testable — any Clock impl works (LiveClock in prod, ManualClock in tests)
+   class Reconciler:
+       def __init__(self, *, transport: ExchangeTransport, clock: Clock) -> None: ...
 
-   // Hard to test — concrete type, env coupling, no seam to swap
-   async fn process_order(order: Order) -> Result<Receipt> {
-       let gateway = StripeGateway::from_env();
-       gateway.charge(order.total_cents()).await
-   }
+
+   # Hard to test — concrete type, env coupling, no seam to swap
+   class Reconciler:
+       def __init__(self) -> None:
+           self._transport = HyperliquidTransport.from_env()
    ```
 
-2. **Return values, don't mutate through `&mut` for results**
+   This is how ADR-0005 works: engine code never touches `time.time()` or `asyncio.sleep`
+   directly — the injected `Clock` owns all time, so tests advance a `ManualClock` instead of
+   sleeping.
 
-   ```rust
-   // Testable — pure function, easy to assert on the return
-   fn calculate_discount(cart: &Cart) -> Discount { /* ... */ }
+2. **Return values, don't mutate through parameters for results**
 
-   // Harder to test — must construct mutable state, then read it back
-   fn apply_discount(cart: &mut Cart) {
-       cart.total_cents -= /* ... */;
-   }
+   ```python
+   # Testable — pure function, easy to assert on the return
+   def size_order(signal: Signal, book: OrderBook) -> Quantity: ...
+
+
+   # Harder to test — must construct mutable state, then read it back
+   def apply_sizing(signal: Signal, book: OrderBook, order: MutableOrder) -> None:
+       order.qty = ...
    ```
 
-3. **Use newtypes instead of primitive parameters**
+3. **Use owned types instead of primitive parameters**
 
-   Rust's "value object". Prevents passing the wrong id type and gives you a place to hang validation.
+   `NewType` for identities, frozen dataclasses for values — invalid states become
+   unrepresentable and validation gets one home:
 
-   ```rust
-   // Primitive obsession — easy to mix up, no validation seam
-   fn get_user(id: String) -> Result<User> { /* ... */ }
+   ```python
+   # Primitive obsession — any str passes, cloids and symbols interchangeable
+   def get_order(cloid: str) -> Order: ...
 
-   // Newtype — type system enforces the right id, validation lives here
-   #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-   pub struct UserId(Uuid);
 
-   fn get_user(id: UserId) -> Result<User> { /* ... */ }
+   # Owned types — mixups are type errors, caught by mypy
+   Cloid = NewType("Cloid", str)
+   Symbol = NewType("Symbol", str)
+
+   def get_order(cloid: Cloid) -> Order: ...
    ```
+
+   Events are frozen dataclasses (ADR-0025); money is `Decimal`, never `float` (ADR-0029).
+   `Literal` / `Enum` for closed sets like order side — not bare `str`.
 
 4. **Small surface area**
-   - Fewer trait methods = fewer fakes/mocks to wire up
-   - Fewer parameters = simpler test setup
-   - Prefer one trait per role (`PaymentGateway`, `Mailer`) over a single god-trait
+
+   - Fewer Protocol methods = fewer fake methods to write
+   - Keyword-only parameters (`def __init__(self, *, ...)`) = self-documenting test setup
+   - Prefer one Protocol per role (`Clock`, `ExchangeTransport`, `OrderStore`) over a single
+     god-interface

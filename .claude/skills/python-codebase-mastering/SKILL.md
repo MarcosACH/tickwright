@@ -126,13 +126,7 @@ Use the narrowest meaningful checks while iterating:
 - `uv run pytest <module>/tests -v`
 - Broaden to the full suite only when the refactor crosses packages.
 
-For this repo, respect existing invariants:
-
-- Order-lifecycle saga stays idempotent: replaying an event must not double-place or double-cancel an order.
-- Recovery is crash-safe: a saga checkpoint replayed after restart converges to the same terminal state — do not break the checkpoint contract during cleanup.
-- Reconciliation freezes on connectivity failure: an exchange read that fails returns `None` and must not be reinterpreted as "all orders vanished."
-- Order rejections propagate as an explicit rejection event. Never `return None` for a placed-but-rejected order.
-- The paper exchange stays deterministic: fills/rejections must remain reproducible from the same input sequence and clock.
+For this repo, respect the canonical invariants in `docs/agents/invariants.md` (saga idempotency, crash-safe recovery, reconciliation freeze, explicit rejections, per-symbol ordering, deterministic paper exchange). Each entry cites its ADR; read the ADR before touching that area. A refactor that regresses one of them is not a mastering pass — it is a behavior change and goes back to design.
 
 Done means:
 

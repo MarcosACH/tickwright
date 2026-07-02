@@ -12,7 +12,7 @@ Pure computation, in-memory state, no I/O. Always deepenable — merge the modul
 
 ### 2. Local-substitutable
 
-Dependencies that have local test stand-ins (in-process SQLite via `rusqlite`/`sqlx::SqlitePool` standing in for Postgres, `tempfile` for the filesystem, `testcontainers` for a throwaway real Postgres). Deepenable if the stand-in exists. The deepened module is tested with the stand-in running in the test suite. The seam is internal; no port at the module's external interface.
+Dependencies that have local test stand-ins (in-process SQLite via `sqlite3`/`aiosqlite` standing in for Postgres — this repo's default durable store per ADR-0019, so the stand-in is also a production impl; pytest's `tmp_path` for the filesystem; `testcontainers` for a throwaway real Postgres). Deepenable if the stand-in exists. The deepened module is tested with the stand-in running in the test suite. The seam is internal; no port at the module's external interface.
 
 ### 3. Remote but owned (Ports & Adapters)
 

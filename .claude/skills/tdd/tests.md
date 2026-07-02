@@ -2,92 +2,94 @@
 
 ## Good Tests
 
-**Integration-style**: Test through real interfaces, not mocks of internal parts.
+**Integration-style**: exercise real code paths through public interfaces. In this repo that
+means wiring the real lightweight implementations — `InMemoryBus`, `SQLiteStore(":memory:")`,
+`PaperExchange`, `ManualClock`, a seeded RNG, `ReplayFeed` — not mocks (ADR-0022). The default
+suite runs with no external services and no API keys.
 
-```rust
-// GOOD: Tests observable behavior
-#[tokio::test]
-async fn user_can_checkout_with_valid_cart() {
-    let checkout = Checkout::new(FakePayments::ok(), FakeMailer::default());
-    let mut cart = Cart::new();
-    cart.add(product());
+```python
+# GOOD: observable behavior through the public interface
+async def test_market_signal_fills_against_latest_tick(harness):
+    # harness wires real bus + paper exchange + manual clock (module names illustrative —
+    # take real names from CONTEXT.md and the module map)
+    await harness.feed.emit(tick("BTC", price=Decimal("50000")))
+    await harness.strategy.emit(signal("BTC", side=Side.BUY, qty=Decimal("0.1")))
 
-    let receipt = checkout.checkout(&cart, payment_method()).await.unwrap();
+    fill = await harness.next_event(OrderFilled)
 
-    assert_eq!(receipt.status, Status::Confirmed);
-}
+    assert fill.price == Decimal("50000")
 ```
 
 Characteristics:
 
 - Tests behavior callers care about
-- Uses public API only (no `pub(crate)` shortcuts, no `#[cfg(test)] pub` escape hatches)
+- Uses public API only (no reaching into `_private` attributes or importing leaf internals)
 - Survives internal refactors
 - Describes WHAT, not HOW
 - One logical assertion per test
 
-Notes on Rust specifics:
+Project specifics:
 
-- Prefer `tests/` integration tests for end-to-end behavior — they can only see your crate's public API, which forces good interface boundaries
-- Keep `#[cfg(test)] mod tests { ... }` for unit tests only when behavior is genuinely internal (e.g., a parser combinator that isn't exposed)
-- Returning `anyhow::Result<()>` from a test lets you use `?` instead of unwrapping, but don't hide assertion failures behind `?`
+- **Tests never sleep.** Drive time with `ManualClock` (`clock.advance(...)`), never
+  `time.sleep` or wall-clock waits — all time flows through the injected `Clock` Protocol
+  (ADR-0005, ADR-0022).
+- **Money is `Decimal`** (ADR-0029). A float literal in a price/quantity assertion is a bug in
+  the test.
+- **Duplicate deliveries are actively injected.** The bus is at-least-once; a behavior isn't
+  green until it survives a replayed event (ADR-0002).
+- Use `hypothesis` for invariant properties — ADR-0022 lists the catalog (duplicate-delivery
+  convergence, legal-only saga transitions, reconcile freezes on `None`, …).
+- Parametrize with `pytest.mark.parametrize` instead of copy-pasted near-duplicates.
 
 ## Bad Tests
 
-**Implementation-detail tests**: Coupled to internal structure.
+**Implementation-detail tests**: coupled to internal structure.
 
-```rust
-// BAD: Tests implementation details
-#[tokio::test]
-async fn checkout_calls_payment_client_charge() {
-    let mut mock = MockPaymentClient::new();
-    mock.expect_charge()
-        .with(eq(cart.total_cents()))
-        .times(1)
-        .returning(|_| Ok(TxId::from("tx_1")));
+```python
+# BAD: asserts a method was called, not an outcome
+async def test_strategy_calls_place_order(mocker):
+    exchange = mocker.Mock(spec=PaperExchange)  # mocking our own class
+    strategy = MomentumStrategy(exchange=exchange)
 
-    checkout(&cart, &mock).await.unwrap();
-    // No assertion on observable outcome — only that a method was called.
-}
+    await strategy.on_tick(tick("BTC", price=Decimal("50000")))
+
+    exchange.place_order.assert_called_once()  # no observable outcome asserted
 ```
 
 Red flags:
 
-- Mocking internal collaborators
-- `expect_xxx().times(N)` on internal methods (asserting call counts/order)
-- `pub(crate)` or `#[cfg(test)] pub` exposed only so a test can poke internals
+- `unittest.mock.Mock` / `patch` on our own classes or internal collaborators
+- `assert_called_once_with(...)` / call-count/order assertions on internal methods
+- Importing `_private` helpers or monkeypatching module internals so a test can poke inside
 - Test breaks when refactoring without behavior change
 - Test name describes HOW not WHAT
-- Verifying through external means (DB row, log lines, file bytes) instead of the interface
+- Verifying through external means (raw SQL against the store, log lines, file bytes) instead
+  of the interface
 
-```rust
-// BAD: Bypasses interface to verify
-#[tokio::test]
-async fn create_user_saves_to_database() {
-    create_user(NewUser { name: "Alice".into() }).await.unwrap();
+```python
+# BAD: bypasses the interface to verify
+async def test_checkpoint_writes_row(store):
+    await saga.checkpoint(order)
 
-    let row: (String,) = sqlx::query_as("SELECT name FROM users WHERE name = $1")
-        .bind("Alice")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(row.0, "Alice");
-}
+    row = store._conn.execute(  # reaching into the store's connection
+        "SELECT state FROM orders WHERE cloid = ?", (order.cloid,)
+    ).fetchone()
+    assert row[0] == "PENDING"
 
-// GOOD: Verifies through interface
-#[tokio::test]
-async fn create_user_makes_user_retrievable() {
-    let user = create_user(NewUser { name: "Alice".into() }).await.unwrap();
 
-    let retrieved = get_user(user.id).await.unwrap();
+# GOOD: verifies through the interface
+async def test_checkpoint_is_recoverable(store):
+    await saga.checkpoint(order)
 
-    assert_eq!(retrieved.name, "Alice");
-}
+    recovered = await store.load_order(order.cloid)
+
+    assert recovered.state is OrderState.PENDING
 ```
 
-## Useful crates
+## Useful libraries
 
-- `tokio::test` — de-facto standard for async tests (`#[tokio::test(flavor = "multi_thread")]` when you need real parallelism)
-- `rstest` — parameterized tests and fixtures (`#[rstest]`, `#[case(...)]`)
-- `insta` — snapshot tests for stable serialized output
-- `wiremock` — HTTP-level fakes; usually a better behavioral boundary than mocking your own HTTP client trait
+- `pytest` + `pytest-asyncio` — async tests against the asyncio runtime (ADR-0001)
+- `hypothesis` — property-based tests; mandatory for the invariant catalog (ADR-0022)
+- `pytest.mark.parametrize` — table-driven cases and fixtures
+- `freezegun` is **not needed** here: time is injected via the `Clock` Protocol, so tests use
+  `ManualClock` instead of patching the interpreter's clock (ADR-0005)
