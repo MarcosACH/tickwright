@@ -1,0 +1,23 @@
+# Dependabot version updates. Security alerts / security-update PRs are a
+# separate repo setting (enabled) and need no config here.
+#
+# ci.yml pins actions by commit SHA; the github-actions ecosystem below is what
+# keeps those pins fresh (Dependabot updates the SHA and the version comment
+# together). Every Dependabot PR goes through the normal CI + review gate.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+
+  # Activate with the Python scaffold PR (needs pyproject.toml + uv.lock on
+  # main; Dependabot errors on a missing manifest until then):
+  # - package-ecosystem: uv
+  #   directory: /
+  #   schedule:
+  #     interval: weekly
+  #   commit-message:
+  #     prefix: chore
