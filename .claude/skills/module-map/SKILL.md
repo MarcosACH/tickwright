@@ -37,6 +37,8 @@ Read in this order:
 - `CONTEXT.md` (domain glossary) — module names MUST come from here
 - `docs/adr/` — respect existing architectural decisions
 
+For `CONTEXT.md` and ADRs, use `.agents/tools/doc-slice <file> [heading-substr]` (TOC first, then the sections relevant to the feature) rather than whole-file reads.
+
 ### 2. Draft module shapes
 
 Walk the PRD's user stories. For each unit of behaviour, ask: *what module owns this?*

@@ -34,6 +34,7 @@ See `docs/workflow/labels.md` for the label schema and `docs/agents/issue-tracke
 - **PR policy (mandatory):** all code changes ship as PRs with `Closes #N` in the body. Never close issues manually — the PR merge closes them.
 - **Commit grouping:** one logical change per commit (not one file per commit). Group tightly-related changes; split unrelated ones.
 - **Two implementations per seam, no more.** One looks hardcoded; three is scope creep.
+- **Docs-sync policy (mandatory):** a change that alters anything documented elsewhere — workflow conventions (`docs/agents/`, `docs/workflow/`), skills (`.claude/skills/`), invariants (`docs/agents/invariants.md`), ADRs, `CONTEXT.md`, CI workflows, or this file — updates every affected file **in the same PR**. Duplication that can drift is a bug: prefer linking one canonical source over copying, and when two files disagree, fix the copy, not the canon.
 - **Dependencies are managed with `uv` in a project virtual environment — never installed globally.**
 
 ## Project Context Files

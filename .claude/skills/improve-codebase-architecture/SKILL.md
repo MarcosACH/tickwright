@@ -76,10 +76,12 @@ This skill owns the PR opening step, the issue-link verification, and the `In Re
 
 1. **Confirm the PR base branch with the user before running `gh pr create`.** Never silently default to `main` or `master`, and never assume the branch's tracked upstream is the right merge target. Ask explicitly which branch the PR should merge into — examples: `main`, an in-flight epic branch like `feature/<epic-slug>`, or a parent slice's branch when the parent hasn't merged yet. Show the candidates you can see (the branch's actual fork point via `git merge-base`, the parent PRD's target branch if known, sibling slices' merge targets from recent `gh pr list --state merged` entries) and ask. Only after the user confirms, pass `--base <branch>` explicitly — do not omit the flag.
 
-2. **Open the PR** with `Closes #<n>` on the **first non-empty line** of the body and `--assignee @me`. Example:
+2. **Open the PR** with `Closes #<n>` on the **first non-empty line** of the body, `--assignee @me`, and the initial state label `ralph:needs-review`. Example:
    ```sh
-   gh pr create -R MarcosACH/tickwright --base <base-branch> --assignee @me --title "..." --body "..."
+   gh pr create -R MarcosACH/tickwright --base <base-branch> --assignee @me \
+     --label ralph:needs-review --title "..." --body "..."
    ```
+   The `pr-policy` CI check fails any PR that does not carry **exactly one** `ralph:*` state label and a `Closes #N` body — set both at creation, not after. If the label doesn't exist yet, provision it with `.agents/tools/ensure-labels.sh` (idempotent).
    See [docs/agents/issue-tracker.md](../../../docs/agents/issue-tracker.md) §"Creating PRs" for the full convention. Unassigned PRs are treated as drive-by; Ralph and the review pipeline expect a named owner.
 
 3. **Verify the link populated.** The `Closes` keyword in the body is necessary but not sufficient — GitHub's parser occasionally misses it, especially on PRs that don't target the default branch. After opening, poll `closingIssuesReferences` for up to ~30s:

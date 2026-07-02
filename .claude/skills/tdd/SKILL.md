@@ -91,6 +91,7 @@ Rules:
 - Only enough code to pass current test
 - Don't anticipate future tests
 - Keep tests focused on observable behavior
+- Commit subjects follow Conventional Commits — `feat|fix|docs|refactor|test|chore|ci(scope)?: ...` (see `CONTRIBUTING.md`). The `pr-policy` CI check rejects the eventual PR on a single non-conforming subject, so get it right per commit, not at PR time.
 
 ### 4. Refactor
 

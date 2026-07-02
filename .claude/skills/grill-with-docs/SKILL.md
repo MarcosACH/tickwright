@@ -12,7 +12,7 @@ If a question can be answered by exploring the codebase, explore the codebase in
 
 ## Domain awareness
 
-During codebase exploration, also look for existing documentation:
+During codebase exploration, also look for existing documentation. In this repo, read `CONTEXT.md` and ADRs through `.agents/tools/doc-slice <file> [heading-substr]` (TOC first, then just the section you need) — `CONTEXT.md` is 300+ lines and there are 30+ ADRs; whole-file reads waste the context budget.
 
 ### File structure
 

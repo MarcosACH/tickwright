@@ -1,113 +1,90 @@
 # When to Mock
 
-Mock at **system boundaries** only:
+This repo's architecture makes "never mock our own classes" structural, not aspirational
+(ADR-0022): every internal seam has a **real lightweight implementation**, so the default test
+wiring is real all the way down:
 
-- External APIs (payment, email, etc.)
-- Databases (often — prefer a real test DB via `sqlx::test` / `testcontainers` when feasible)
-- Time/randomness (inject a `Clock` / `Rng` trait)
-- File system (sometimes — `tempfile` is often better than mocking)
+| Seam          | Production impl        | Test stand-in (real, not a mock) |
+| ------------- | ---------------------- | -------------------------------- |
+| Event bus     | `KafkaBus`             | `InMemoryBus`                    |
+| Durable store | Postgres               | `SQLiteStore(":memory:")`        |
+| Exchange      | Hyperliquid            | `PaperExchange`                  |
+| Clock         | `LiveClock`            | `ManualClock`                    |
+| Market feed   | Hyperliquid WS         | `ReplayFeed`                     |
+| Randomness    | OS entropy             | seeded `random.Random`           |
+
+Mock **only** at the true process boundaries:
+
+- The Hyperliquid HTTP/WS transport
+- The Kafka client (when exercising the `KafkaBus` path)
 
 Don't mock:
 
-- Your own structs/modules
-- Internal collaborators
-- Anything you control end-to-end
+- Our own classes or internal collaborators
+- Anything in the table above — the stand-in is a real implementation
+- Time or randomness — those are injected, so tests pass `ManualClock` / a seeded RNG instead
+  of patching
 
-## Designing for Mockability
+## Designing for testability: Protocols at seams
 
-At system boundaries, design traits that are easy to fake or mock:
+Define the seam as a `typing.Protocol` and inject it — don't construct concrete dependencies
+internally:
 
-**1. Inject collaborators via traits**
+```python
+# Easy to swap in tests — dependencies injected, keyword-only
+class OrderSaga:
+    def __init__(self, *, exchange: Exchange, store: OrderStore, clock: Clock) -> None: ...
 
-Pass external dependencies in rather than constructing them internally:
 
-```rust
-// Easy to swap in tests
-async fn process_payment<P: PaymentClient>(order: &Order, client: &P) -> Result<Receipt> {
-    client.charge(order.total_cents()).await
-}
-
-// Hard to swap — concrete type baked in, env coupling
-async fn process_payment(order: &Order) -> Result<Receipt> {
-    let client = StripeClient::from_env();
-    client.charge(order.total_cents()).await
-}
+# Hard to swap — concrete type and env coupling baked in
+class OrderSaga:
+    def __init__(self) -> None:
+        self._exchange = HyperliquidExchange.from_env()
 ```
 
-**Choosing the injection shape:**
+## SDK-style boundary interfaces
 
-| Shape | When to use |
-|-------|-------------|
-| `<P: PaymentClient>` (generic) | Default. Zero-cost dispatch, monomorphized. |
-| `&dyn PaymentClient` | Heterogeneous collections, plugin-style code, smaller binary. |
-| `Box<dyn PaymentClient>` | Owned dyn storage in a long-lived struct. |
+At the process boundary, one method per operation with typed shapes — not a stringly-typed
+generic fetcher:
 
-**2. Prefer SDK-style traits over a generic fetcher**
+```python
+# GOOD: each method independently fakeable, types specific per operation
+class ExchangeTransport(Protocol):
+    async def place_order(self, req: PlaceOrderRequest) -> PlaceOrderResponse: ...
+    async def cancel_order(self, cloid: Cloid) -> CancelResponse: ...
+    async def open_orders(self) -> list[VenueOrder] | None: ...
+    # None = connectivity failure, never [] (ADR-0011)
 
-One method per external operation, not one stringly-typed `fetch`:
 
-```rust
-// GOOD: each method is independently mockable, types are specific
-#[cfg_attr(test, mockall::automock)]
-#[async_trait]
-pub trait UserApi {
-    async fn get_user(&self, id: UserId) -> Result<User, ApiErr>;
-    async fn get_orders(&self, user_id: UserId) -> Result<Vec<Order>, ApiErr>;
-    async fn create_order(&self, data: NewOrder) -> Result<Order, ApiErr>;
-}
-
-// BAD: tests must know URL paths and JSON shapes — couples tests to transport
-#[async_trait]
-pub trait HttpFetcher {
-    async fn fetch(&self, endpoint: &str, body: serde_json::Value) -> Result<serde_json::Value, ApiErr>;
-}
+# BAD: tests must know URL paths and JSON shapes — couples tests to the transport
+class HttpFetcher(Protocol):
+    async def fetch(self, endpoint: str, body: dict[str, Any]) -> dict[str, Any]: ...
 ```
 
-The SDK approach means:
+The SDK approach means each fake returns one specific typed shape, no conditional logic in
+test setup, and it's obvious which venue operations a test exercises.
 
-- Each fake/mock returns one specific typed shape
-- No conditional logic in test setup
-- Easy to see which endpoints a test exercises
-- Type safety per endpoint
+## Fakes over `unittest.mock`
 
-## Fakes vs `mockall`
+Reach for a hand-written stateful fake first — it records state you assert on through the
+public interface:
 
-Reach for a hand-written fake first when the dependency is stateful or reused across tests:
+```python
+class FakeTransport:
+    """In-memory ExchangeTransport recording placed orders."""
 
-```rust
-#[derive(Default, Clone)]
-struct FakePayments {
-    charges: Arc<Mutex<Vec<u64>>>,
-}
+    def __init__(self) -> None:
+        self.placed: list[PlaceOrderRequest] = []
 
-#[async_trait]
-impl PaymentClient for FakePayments {
-    async fn charge(&self, cents: u64) -> Result<TxId, PayErr> {
-        self.charges.lock().unwrap().push(cents);
-        Ok(TxId::from("fake"))
-    }
-}
+    async def place_order(self, req: PlaceOrderRequest) -> PlaceOrderResponse:
+        self.placed.append(req)
+        return PlaceOrderResponse(status=OrderStatus.RESTING, cloid=req.cloid)
 ```
 
-Use `mockall` for one-off, strict-expectation cases:
+Use `unittest.mock` (`Mock(spec=...)`, `AsyncMock`) only for one-off strict-expectation cases
+at the true boundary — e.g. asserting the transport is NOT called during a reconciliation
+freeze. Always pass `spec=`/`spec_set=` so typos fail loudly.
 
-```rust
-#[automock]
-#[async_trait]
-pub trait PaymentClient {
-    async fn charge(&self, cents: u64) -> Result<TxId, PayErr>;
-}
-
-// in a test
-let mut m = MockPaymentClient::new();
-m.expect_charge()
-    .with(eq(1_000))
-    .returning(|_| Ok(TxId::from("tx_1")));
-```
-
-Heuristic: if the test asserts on `times(N)` or `expect_X` for an internal method, it's probably testing implementation. Prefer fakes that record state, then assert on behavior observed through the public interface.
-
-## Async traits in 2025+
-
-- `async fn` in traits is stable for static dispatch — you often don't need `#[async_trait]` for generic-only traits.
-- For `dyn Trait` with async methods, you still need `#[async_trait]` or `trait-variant`. Keep it where required, drop it where not.
+Heuristic: if the test's main assertion is `assert_called_once_with(...)` on an internal
+method, it's testing implementation. Prefer fakes that record state, then assert on behavior
+observed through the public interface.

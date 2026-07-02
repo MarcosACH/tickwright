@@ -17,7 +17,7 @@ Tickwright is a single GitHub repo: `MarcosACH/tickwright`. The parent PRD issue
 - **Child implementation issues** are filed in the same repo and linked as GitHub sub-issues of the parent.
 - A single slice produces one child issue, linked as a sub-issue of the parent. Each child becomes one PR; merges happen in dependency order (blockers first).
 
-The project board is `https://github.com/users/MarcosACH/projects/6`. Every parent and child must be added to it with `gh project item-add 6 --owner MarcosACH --url <issue-url>`.
+The project board is `https://github.com/users/MarcosACH/projects/2` (**Tickwright — Workflow**). Every parent and child must be added to it with `gh project item-add 2 --owner MarcosACH --url <issue-url>`. The board number is canonical in `docs/agents/issue-tracker.md` — if these disagree, that file wins.
 
 ## Process
 
@@ -45,7 +45,7 @@ Break the plan into **tracer bullet** issues. Each issue is a thin vertical slic
 Slices may be 'HITL' or 'AFK'. HITL slices require human interaction, such as an architectural decision or a design review. AFK slices can be implemented and merged without human interaction. Prefer AFK over HITL where possible.
 
 <vertical-slice-rules>
-- Each slice delivers a narrow but COMPLETE path through every layer (market feed, strategy, exchange adapter, saga, tests)
+- Each slice delivers a narrow but COMPLETE path through every layer (feed → strategy → exchange → engine, plus tests)
 - A completed slice is demoable or verifiable on its own
 - Prefer many thin slices over few thick ones
 </vertical-slice-rules>
@@ -72,6 +72,8 @@ Iterate until the user approves the breakdown.
 
 For each approved slice, publish a new issue to the issue tracker. Use the issue body template below.
 
+Before applying any labels, provision them once with `.agents/tools/ensure-labels.sh` (idempotent) — `gh issue create` fails on labels that don't exist yet.
+
 Apply labels exactly (see `docs/workflow/labels.md` for the canonical list):
 
 - All issues: `needs-triage`, `ai`
@@ -94,7 +96,7 @@ gh issue create -R MarcosACH/tickwright --title "<title>" --body-file <file> --l
 After each `gh issue create`, immediately, in order:
 
 1. Add the new issue to the project board:
-   `gh project item-add 6 --owner MarcosACH --url <issue-url>`
+   `gh project item-add 2 --owner MarcosACH --url <issue-url>`
    `gh issue create` does NOT do this; an unlinked issue is invisible to triage and Ralph.
 2. Set status to `Todo` via `gh project item-edit` (status field IDs in `docs/agents/issue-tracker.md`).
 3. Set assignee to `@me`:
