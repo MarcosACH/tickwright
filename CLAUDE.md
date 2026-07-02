@@ -48,7 +48,7 @@ See `docs/workflow/labels.md` for the label schema and `docs/agents/issue-tracke
 
 ## Context Discipline
 
-- Never read `.venv/`, `__pycache__/`, `.mypy_cache/`, `.pytest_cache/`, `.ruff_cache/`, `*.egg-info/`, `*.pyc`, `logs/`, `*.log`. The `.claude/settings.json` deny list enforces this.
+- Never read `.venv/`, `__pycache__/`, `.mypy_cache/`, `.pytest_cache/`, `.ruff_cache/`, `.import_linter_cache/`, `*.egg-info/`, `*.pyc`, `logs/`, `*.log`. The `.claude/settings.json` deny list enforces this.
 - For `CONTEXT.md`, ADRs, and `docs/module-maps/*.md`, use `.agents/tools/doc-slice`:
   - `.agents/tools/doc-slice <file>` — list TOC (`line  level  heading`)
   - `.agents/tools/doc-slice <file> <heading-substr>` — print just that section
