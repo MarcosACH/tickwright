@@ -189,7 +189,7 @@ src/tickwright/
 
 ### observability (`observability/`)
 
-**Interface:** The shared leaf (ADR-0020/0032): the **named-event catalog** (stable, documented telemetry names — a test-assertable contract), correlation-id `ContextVar`s (run id + per-operation id), structured-logging setup with key redaction. Importable by engine and adapters; **never** imported by `domain`.
+**Interface:** The shared leaf (ADR-0020/0032): the **named-event catalog** (stable, documented telemetry names — a test-assertable contract), correlation-id `ContextVar`s (run id + per-operation id), structured-logging setup with key redaction. Importable by engine, venues, and the `bus`/`store`/`feed`/`paper` adapters; **never** imported by `domain`, `clock`, or `strategies` (the last two stay domain-only — they emit no named events).
 
 **Responsibilities:** Emitting/asserting named events; ambient correlation binding; log configuration.
 
@@ -225,7 +225,7 @@ domain ─────────▶ (nothing)
 observability ──▶ (nothing inward; stdlib/logging only)
 ```
 
-No cycles. Enforced by the `import-linter` contract in CI (ADR-0032): core → adapter and adapter → adapter imports fail the build. `domain` imports nothing and stays log-free.
+No cycles. Enforced by the `import-linter` contract in CI (ADR-0032): core → adapter and adapter → adapter imports fail the build. `domain` imports nothing and stays log-free; `clock` and `strategies` stay domain-only (they never import `observability`).
 
 ## Out of scope
 

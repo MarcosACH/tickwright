@@ -66,8 +66,8 @@ show_missing = true
 # gate, not an aspiration. Dependency direction is inward:
 #   app -> engine, adapters/*, venues/*, strategies, domain, observability
 #   engine -> domain, observability            (Protocols only, never a concrete)
-#   adapters/*, venues/* -> domain, observability
-#   strategies -> domain
+#   adapters/{bus,store,feed,paper}, venues/* -> domain, observability
+#   adapters/clock, strategies -> domain        (leaf-pure: emit no named events)
 #   domain -> (nothing) ; observability -> (nothing inward)
 [tool.importlinter]
 root_package = "tickwright"
@@ -108,6 +108,20 @@ forbidden_modules = [
     "tickwright.engine",
     "tickwright.app",
 ]
+
+# ADR-0032 makes observability a shared leaf that engine and adapters *may*
+# import — a ceiling, not a floor. The clock and strategies stay below it: they
+# emit no named events (ADR-0020's catalog has none; a strategy's telemetry is
+# emitted by the runner's containment wrapper, not the strategy itself), so the
+# module map draws them domain-only. This contract makes that drawn edge a gate.
+[[tool.importlinter.contracts]]
+name = "clock and strategies stay domain-only (never import observability)"
+type = "forbidden"
+source_modules = [
+    "tickwright.adapters.clock",
+    "tickwright.strategies",
+]
+forbidden_modules = ["tickwright.observability"]
 
 [[tool.importlinter.contracts]]
 name = "observability is a leaf and imports nothing inward"
