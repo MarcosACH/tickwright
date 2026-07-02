@@ -1,0 +1,61 @@
+# Authoritative gate on every PR and push to main: format-check, lint, type-check
+# and test. The .githooks/ pre-commit and pre-push hooks are local convenience
+# only — this workflow re-runs everything and `git commit/push --no-verify`
+# cannot skip it once "main" branch protection requires the `ci` check.
+#
+# The default paper-exchange + in-memory-bus path needs no external services and
+# no API keys, so this job starts none. (A Kafka-bus job can be added as a
+# separate matrix leg if/when those tests need a broker.)
+#
+# Actions are pinned by commit SHA (supply-chain hardening); the trailing
+# comment records the human-readable version. Bump both together.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Newer pushes supersede in-flight runs on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13"
+
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install dependencies from lockfile
+        run: uv sync --frozen --dev
+
+      - name: Check quality
+        run: |
+          uv run ruff format --check .
+          uv run ruff check .
+          uv run mypy .
+          uv run lint-imports
+          uv run python -m compileall -q src
+
+      - name: Test
+        # Coverage source is set in pyproject.toml ([tool.coverage.run] source);
+        # the ≥90%-on-core gate lives here so a drop fails the build.
+        run: uv run pytest --cov --cov-report=term-missing --cov-fail-under=90
+
+      - name: Audit runtime dependencies
+        run: |
+          uv export --frozen --no-dev --no-emit-project --format requirements-txt > /tmp/requirements.txt
+          uv tool run pip-audit --requirement /tmp/requirements.txt

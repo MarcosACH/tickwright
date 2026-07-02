@@ -24,6 +24,7 @@ changes small, well-tested, and easy to read.
 | Lint  | `uv run ruff check .` |
 | Format | `uv run ruff format .` |
 | Types | `uv run mypy .` |
+| Imports | `uv run lint-imports` (dependency-direction boundaries, ADR-0032) |
 
 The default paper-exchange + in-memory-bus path runs with **no external services and no API keys**.
 

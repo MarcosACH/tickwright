@@ -89,6 +89,7 @@ Run with the project venv via `uv run`:
 uv run ruff check .
 uv run ruff format .
 uv run mypy .
+uv run lint-imports   # dependency-direction boundaries (ADR-0032)
 ```
 
 ## Code Style
