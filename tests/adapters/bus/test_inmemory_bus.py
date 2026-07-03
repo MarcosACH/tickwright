@@ -10,6 +10,8 @@ in-memory cascade order-independent and parity-locked with the Kafka poll loop.
 import asyncio
 from decimal import Decimal
 
+import pytest
+
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.domain import (
     MarketTick,
@@ -138,6 +140,35 @@ def test_publish_returns_only_after_the_cascade_quiesces() -> None:
 def test_publish_with_no_subscribers_is_a_noop() -> None:
     bus = InMemoryBus()
     asyncio.run(bus.publish(_tick()))  # does not raise
+
+
+def test_handler_exception_mid_drain_drops_the_undelivered_tail() -> None:
+    """A handler failing mid-drain (fail-fast, ADR-0014) clears the FIFO, so a
+    caught-and-continued publish can't bleed the aborted cascade's stale events
+    into a later, unrelated one."""
+    bus = InMemoryBus()
+    delivered: list[str] = []
+    exploded = False
+
+    async def tick_handler(_: MarketTick) -> None:
+        nonlocal exploded
+        await bus.publish(_signal())  # enqueue a reentrant signal, then fail
+        if not exploded:
+            exploded = True
+            raise RuntimeError("boom")
+
+    bus.subscribe(MarketTick, tick_handler)
+    bus.subscribe(Signal, lambda ev: _append(delivered, "signal"))
+
+    with pytest.raises(RuntimeError, match="boom"):
+        asyncio.run(bus.publish(_tick()))
+    # The first cascade aborted before the drain reached its reentrant signal.
+    assert delivered == []
+
+    # A later clean publish delivers only its own cascade's signal — the dropped
+    # tail is gone, not resurrected (would be ["signal", "signal"] if retained).
+    asyncio.run(bus.publish(_tick(seq=2)))
+    assert delivered == ["signal"]
 
 
 # ---- helpers ---------------------------------------------------------------

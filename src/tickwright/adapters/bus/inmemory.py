@@ -43,5 +43,12 @@ class InMemoryBus:
                 for event_type, handler in list(self._subscriptions):
                     if isinstance(current, event_type):
                         await handler(current)
+        except BaseException:
+            # A handler failed mid-drain (e.g. a fail-fast InvariantViolation,
+            # ADR-0014). Drop the undelivered tail so a caught-and-continued
+            # publish can never bleed this cascade's stale events into a later,
+            # unrelated one. A clean drain leaves the queue empty already.
+            self._queue.clear()
+            raise
         finally:
             self._draining = False
