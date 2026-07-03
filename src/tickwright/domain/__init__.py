@@ -37,6 +37,7 @@ from .protocols import (
     Handler,
     MarketFeed,
     ReplayClock,
+    Store,
     Strategy,
 )
 
@@ -79,5 +80,6 @@ __all__ = [
     "Handler",
     "MarketFeed",
     "ReplayClock",
+    "Store",
     "Strategy",
 ]

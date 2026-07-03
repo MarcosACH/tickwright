@@ -12,6 +12,7 @@ and ``PARTIALLY_FILLED``, the terminal taxonomy ``DENIED``/``REJECTED``/``FAILED
 (ADR-0010), cancels, and the ghost-reconciliation resolutions.
 """
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from decimal import Decimal
 
@@ -56,6 +57,49 @@ class Order:
     venue_oid: str | None = None
     reason: str | None = None
     _applied_event_ids: set[str] = field(default_factory=set, init=False, repr=False)
+
+    @property
+    def applied_event_ids(self) -> frozenset[str]:
+        """The reflected ``event_id``s — the dedup set a ``Store`` round-trips."""
+        return frozenset(self._applied_event_ids)
+
+    @classmethod
+    def restore(
+        cls,
+        *,
+        cloid: str,
+        strategy_id: str,
+        signal_id: str,
+        symbol: str,
+        side: Side,
+        quantity: Decimal,
+        order_type: OrderType,
+        state: OrderState,
+        cum_qty: Decimal,
+        venue_oid: str | None,
+        reason: str | None,
+        applied_event_ids: Iterable[str],
+    ) -> "Order":
+        """Rebuild a checkpointed saga exactly as persisted (ADR-0008 recovery).
+
+        Restores the dedup set too, so a redelivered event that predates the
+        crash is still a no-op on the recovered saga.
+        """
+        order = cls(
+            cloid=cloid,
+            strategy_id=strategy_id,
+            signal_id=signal_id,
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            order_type=order_type,
+            state=state,
+            cum_qty=cum_qty,
+            venue_oid=venue_oid,
+            reason=reason,
+        )
+        order._applied_event_ids.update(applied_event_ids)
+        return order
 
     def apply(self, event: OrderEvent) -> bool:
         """Advance the saga by ``event``; idempotent and transition-checked.
