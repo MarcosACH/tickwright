@@ -60,7 +60,7 @@ family:
 | `Signal` | `signal_id` = `{strategy_id}:{symbol}:{seq}` | correctness key (ADR-0006) |
 | `FillReport` / `OrderFilled` / `OrderPartiallyFilled` | `{cloid}:fill:{trade_id}` | correctness key |
 | other `OrderEvent` / `OrderStatusReport` | `{cloid}:{state}` | single-entry-per-state |
-| `MarketTick` | `{symbol}:{ts_event}` | **weak** — audit/log only, not a correctness key |
+| `MarketTick` | `{symbol}:{ts_event}:{seq}` | **weak** — audit/log only, not a correctness key |
 
 Two load-bearing rules:
 
@@ -75,7 +75,11 @@ Two load-bearing rules:
    table; in-memory has no redelivery, Kafka rides consumer offsets). A generic `processed_event_id`
    table was rejected — it adds a table the in-memory path never needs and dedups on id rather than on
    domain meaning, where the `cum_qty` invariant already lives.
-3. **Ticks get a monotonic gate, not a key.** `MarketTick`'s weak key is deliberate — but the one
+3. **Ticks get a monotonic gate, not a key.** `MarketTick`'s weak key carries a trailing `seq` — the
+   feed's per-symbol source sequence — because the replay path (ADR-0027) is not assumed a real venue
+   trade id, so `{symbol}:{ts_event}` alone can collide when several recorded trades share a
+   nanosecond; `seq` disambiguates them in logs. It is still audit-only, distinct from the dedup gate
+   below (which keys on `(ts_event, tid)`). This weak key is deliberate — but the one
    consumer that is *not* naturally idempotent is `Strategy.on_tick`: a redelivered tick (Kafka
    rebalance, uncommitted tail after crash-restart) double-counts indicator state and can mint a
    *fresh* seq — a new intent no idempotency key catches → duplicate live order. The engine's
