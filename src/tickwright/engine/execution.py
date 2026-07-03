@@ -86,9 +86,9 @@ class ExecutionManager:
         # PENDING is the write-ahead intent: durable before anything else
         # happens (ADR-0008 rule 1), then announced.
         self._checkpoint(order)
-        await self._bus.publish(self._order_event(OrderPlaced, order))
+        await self._bus.publish(self._event(OrderPlaced, order))
 
-        submitted = self._order_event(OrderSubmitted, order)
+        submitted = self._event(OrderSubmitted, order)
         order.apply(submitted)
         await self._bus.publish(submitted)
 
@@ -140,8 +140,7 @@ class ExecutionManager:
             return  # A status that maps to no saga transition: nothing to do.
         if not order.apply(event):
             return  # Redelivered status the saga already reflects: suppress republish.
-        self._checkpoint(order)
-        await self._bus.publish(event)
+        await self._commit(order, event)
 
     async def _apply_fill(self, report: FillReport) -> None:
         order = self._orders.get(report.cloid)
@@ -162,6 +161,19 @@ class ExecutionManager:
             # Redelivered fill: the saga already reflects it. Suppress the
             # duplicate publish so downstream consumers never double-count.
             return
+        await self._commit(order, event)
+
+    async def _commit(self, order: Order, event: OrderEvent) -> None:
+        """Durably record the advanced saga, then announce it — never the reverse.
+
+        The crash-safe tail every venue-fact handler shares: checkpoint strictly
+        before publish (ADR-0008), so a crash between the two can never leave an
+        announced transition the durable store never recorded. Callers apply and
+        dedup first, so a deduped redelivery never reaches here — this only ever
+        commits a transition that advanced the saga. ``_place`` is deliberately
+        not routed through it: its ``SUBMITTED`` publish precedes the post-send
+        checkpoint (ADR-0008 rule 2), the one place that ordering is inverted.
+        """
         self._checkpoint(order)
         await self._bus.publish(event)
 
@@ -176,9 +188,18 @@ class ExecutionManager:
                 f"checkpoint write failed for cloid {order.cloid} in state {order.state.value}"
             ) from exc
 
-    def _order_event[E: (OrderPlaced, OrderSubmitted)](
-        self, event_type: type[E], order: Order
+    def _event[E: (OrderPlaced, OrderSubmitted, OrderLive, OrderCancelled)](
+        self, event_type: type[E], order: Order, *, venue_oid: str | None = None
     ) -> E:
+        """Build a reason-less canonical ``OrderEvent`` from ``order``'s identity.
+
+        The one home for the shared saga-event envelope (cloid, strategy id,
+        signal id, symbol, venue oid, timestamps). ``venue_oid`` defaults to the
+        order's own; a venue status carrying a fresher one passes it in. The
+        constraint set is exactly the reason-less families — ``OrderRejected``
+        and the other terminal-with-reason events are built explicitly, so mypy
+        rejects routing them through here without their required ``reason``.
+        """
         now = self._clock.timestamp_ns()
         return event_type(
             ts_event=now,
@@ -187,36 +208,20 @@ class ExecutionManager:
             strategy_id=order.strategy_id,
             signal_id=order.signal_id,
             symbol=order.symbol,
-            venue_oid=order.venue_oid,
+            venue_oid=venue_oid if venue_oid is not None else order.venue_oid,
         )
 
     def _status_event(self, order: Order, report: OrderStatusReport) -> OrderEvent | None:
         """Translate a raw ``OrderStatusReport`` into the canonical transition, or
-        ``None`` for a status that maps to no saga move."""
-        now = self._clock.timestamp_ns()
-        venue_oid = report.venue_oid if report.venue_oid is not None else order.venue_oid
+        ``None`` for a status that maps to no saga move. A fresher ``venue_oid`` on
+        the report wins; otherwise the order's own is kept."""
         match report.status:
             case OrderState.LIVE:
-                return OrderLive(
-                    ts_event=now,
-                    ts_init=now,
-                    cloid=order.cloid,
-                    strategy_id=order.strategy_id,
-                    signal_id=order.signal_id,
-                    symbol=order.symbol,
-                    venue_oid=venue_oid,
-                )
+                return self._event(OrderLive, order, venue_oid=report.venue_oid)
             case OrderState.CANCELLED:
-                return OrderCancelled(
-                    ts_event=now,
-                    ts_init=now,
-                    cloid=order.cloid,
-                    strategy_id=order.strategy_id,
-                    signal_id=order.signal_id,
-                    symbol=order.symbol,
-                    venue_oid=venue_oid,
-                )
+                return self._event(OrderCancelled, order, venue_oid=report.venue_oid)
             case OrderState.REJECTED:
+                now = self._clock.timestamp_ns()
                 return OrderRejected(
                     ts_event=now,
                     ts_init=now,
@@ -224,7 +229,7 @@ class ExecutionManager:
                     strategy_id=order.strategy_id,
                     signal_id=order.signal_id,
                     symbol=order.symbol,
-                    venue_oid=venue_oid,
+                    venue_oid=report.venue_oid if report.venue_oid is not None else order.venue_oid,
                     reason=report.reason or "venue rejected",
                 )
             case _:
