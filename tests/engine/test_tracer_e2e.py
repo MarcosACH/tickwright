@@ -19,6 +19,7 @@ from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.feed import ReplayFeed
 from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
+from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     Event,
     ExecutionReport,
@@ -65,7 +66,9 @@ def _run(path: Path) -> tuple[list[Event], SingleShotMarketStrategy]:
     bus = InMemoryBus()
     clock = ManualClock()
     exchange = PaperExchange(bus=bus, clock=clock, fill_model=ImmediateFillModel())
-    manager = ExecutionManager(bus=bus, clock=clock, exchange=exchange)
+    manager = ExecutionManager(
+        bus=bus, clock=clock, exchange=exchange, store=SQLiteStore(":memory:")
+    )
     strategy = SingleShotMarketStrategy(
         strategy_id="trivial", bus=bus, clock=clock, side=Side.BUY, quantity=Decimal("0.5")
     )
