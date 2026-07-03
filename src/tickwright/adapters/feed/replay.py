@@ -11,8 +11,20 @@ import json
 from collections.abc import Iterator
 from decimal import Decimal
 from pathlib import Path
+from typing import TypedDict
 
 from tickwright.domain import AggressorSide, EventBus, MarketTick, ReplayClock
+
+
+class _TickRow(TypedDict):
+    """The JSONL row schema a ``ReplayFeed`` reads (one last-trade tick per line)."""
+
+    symbol: str
+    price: str
+    size: str
+    aggressor_side: str
+    trade_id: str
+    ts_event: int
 
 
 class ReplayFeed:
@@ -33,14 +45,14 @@ class ReplayFeed:
     async def stop(self) -> None:  # noqa: B027 - replay has no live resources to release.
         """No-op: a replay drains at ``start`` and holds nothing open."""
 
-    def _read_rows(self) -> Iterator[dict]:
+    def _read_rows(self) -> Iterator[_TickRow]:
         with self._path.open("r", encoding="utf-8") as handle:
             for line in handle:
                 line = line.strip()
                 if line:
                     yield json.loads(line)
 
-    def _to_tick(self, row: dict) -> MarketTick:
+    def _to_tick(self, row: _TickRow) -> MarketTick:
         symbol = row["symbol"]
         ts_event = int(row["ts_event"])
         # Advance the clock first, so ts_init reflects the tick's own instant.
