@@ -11,8 +11,10 @@ transaction — the write the crash-safety argument rests on.
 
 import json
 import sqlite3
+import weakref
 from decimal import Decimal
 from pathlib import Path
+from types import TracebackType
 
 from tickwright.domain import Order, OrderState, OrderType, Side
 
@@ -40,6 +42,10 @@ class SQLiteStore:
 
     def __init__(self, path: str | Path = ":memory:") -> None:
         self._conn = sqlite3.connect(str(path))
+        # Tie the connection's lifetime to this store: close it on ``close()`` or,
+        # failing that, when the store is collected — so a store that outlives its
+        # explicit close (e.g. a hypothesis example) never leaks a connection.
+        self._finalizer = weakref.finalize(self, self._conn.close)
         with self._conn:
             self._conn.execute(_SCHEMA)
 
@@ -110,6 +116,17 @@ class SQLiteStore:
             return []
         return [(OrderState(state), ts_ns) for state, ts_ns in json.loads(row[0])]
 
+    def __enter__(self) -> "SQLiteStore":
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        self.close()
+
     def close(self) -> None:
-        """Close the connection. A file-backed store reopens on the same path."""
-        self._conn.close()
+        """Close the connection, once. A file-backed store reopens on the same path."""
+        self._finalizer()

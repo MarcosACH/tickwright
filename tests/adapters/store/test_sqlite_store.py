@@ -115,6 +115,26 @@ def test_file_backed_store_survives_close_and_reopen(tmp_path: Path) -> None:
     assert reopened.history("0xabc") == [(OrderState.SUBMITTED, 1_000)]
 
 
+def test_store_is_a_context_manager_that_closes_on_exit(tmp_path: Path) -> None:
+    path = tmp_path / "saga.db"
+    order = _order()
+    order.apply(_submitted())
+    with SQLiteStore(path) as store:
+        store.checkpoint(order, ts_ns=1_000)
+
+    # Closed on exit, but the file is durable — a fresh store reads the record.
+    with SQLiteStore(path) as reopened:
+        loaded = reopened.get_order("0xabc")
+    assert loaded is not None
+    assert loaded.state is OrderState.SUBMITTED
+
+
+def test_close_is_idempotent() -> None:
+    store = SQLiteStore(":memory:")
+    store.close()
+    store.close()  # a second close is a no-op, never an error
+
+
 def test_checkpointed_order_round_trips_from_memory_store() -> None:
     store = SQLiteStore(":memory:")
     order = _order()

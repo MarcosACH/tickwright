@@ -52,6 +52,9 @@ files = ["src", "tests"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+# A leaked resource (e.g. an unclosed store connection) is a bug, not noise:
+# fail the suite so it can never accumulate silently and mask a real warning.
+filterwarnings = ["error::ResourceWarning"]
 
 [tool.coverage.run]
 source = ["src/tickwright"]
