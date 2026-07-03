@@ -32,6 +32,7 @@ from tickwright.domain import (
     OrderPlaced,
     OrderRejected,
     OrderState,
+    OrderStatusReport,
     OrderSubmitted,
     PlaceSignal,
     Side,
@@ -367,6 +368,32 @@ def test_resting_limit_drives_the_saga_to_live() -> None:
         OrderState.SUBMITTED,
         OrderState.LIVE,
     ]
+
+
+def test_duplicate_status_report_yields_a_single_order_live() -> None:
+    bus, _, _, order_events = _harness()
+    cloid = derive_cloid("trivial:BTC:1")
+
+    async def scenario() -> None:
+        await bus.publish(_tick("42000"))
+        await bus.publish(_limit_signal("41000"))  # rests LIVE
+        # Redeliver the venue's LIVE status (same {cloid}:LIVE event_id): the saga
+        # already reflects it, so at-least-once delivery must not republish a
+        # second OrderLive (ADR-0002 idempotency).
+        await bus.publish(
+            OrderStatusReport(
+                ts_event=1_000,
+                ts_init=1_000,
+                cloid=cloid,
+                symbol="BTC",
+                status=OrderState.LIVE,
+            )
+        )
+
+    asyncio.run(scenario())
+
+    live = [ev for ev in order_events if isinstance(ev, OrderLive)]
+    assert len(live) == 1
 
 
 def test_resting_limit_fills_when_a_later_tick_crosses() -> None:

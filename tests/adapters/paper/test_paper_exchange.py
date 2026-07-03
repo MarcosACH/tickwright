@@ -199,6 +199,26 @@ def test_resting_limit_fills_when_a_later_tick_crosses_its_price() -> None:
     assert fills[0].price == Decimal("41000")  # filled at its limit price
 
 
+def test_resting_sell_limit_fills_when_a_later_tick_rises_to_its_price() -> None:
+    exchange, bus, clock, fills, statuses = _limit_harness()
+
+    async def scenario() -> None:
+        clock.advance_to(1_000)
+        await bus.publish(_tick("42000"))
+        # A SELL LIMIT at 43000 is above the market (42000): it cannot fill now, so
+        # it rests. When the market rises to the limit the resting SELL crosses.
+        await exchange.place(_limit_order("43000", side=Side.SELL))
+        clock.advance_to(2_000)
+        await bus.publish(_tick("43000", ts=2_000))
+
+    asyncio.run(scenario())
+
+    assert [s.status for s in statuses] == [OrderState.LIVE]
+    assert len(fills) == 1
+    assert fills[0].cloid == "0xabc"
+    assert fills[0].price == Decimal("43000")  # filled at its limit price
+
+
 def test_marketable_limit_fills_on_arrival_without_resting() -> None:
     exchange, bus, clock, fills, statuses = _limit_harness()
 
