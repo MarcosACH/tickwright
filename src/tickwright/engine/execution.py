@@ -5,11 +5,13 @@ once so Paper and Hyperliquid are served identically. It subscribes to ``Signal`
 and raw ``ExecutionReport``s, assigns the ``cloid`` from the ``signal_id``, drives
 ``Order.apply``, and publishes the canonical ``OrderEvent``s strategies consume.
 
-This is the happy-path manager for the tracer: derive cloid, record ``PENDING``,
-publish ``OrderPlaced`` → ``OrderSubmitted`` while sending to the exchange, then on
-the ``FillReport`` publish ``OrderFilled``. The write-ahead ``Store`` checkpoint,
-the ``PreTradeGuard``, cancels, and the partial/terminal transitions are later
-slices — this one keeps the saga in memory to prove the pipeline end to end.
+Every transition checkpoints durably (ADR-0008): the ``PENDING`` write-ahead
+intent is persisted **before** any ``Exchange.place`` call — so a crash mid-send
+leaves a durable record recovery can reconcile by cloid — and ``SUBMITTED`` is
+checkpointed after the send returns, arming the in-flight grace clock. A timeout
+never transitions a saga: nothing here subscribes to time; only venue facts and
+(later) reconciliation move an order. The ``PreTradeGuard`` and cancels are
+later slices.
 """
 
 from tickwright.domain import (
@@ -18,13 +20,14 @@ from tickwright.domain import (
     Exchange,
     ExecutionReport,
     FillReport,
+    InvariantViolation,
     Order,
-    OrderFilled,
     OrderPlaced,
     OrderSubmitted,
     PlaceOrder,
     PlaceSignal,
     Signal,
+    Store,
     derive_cloid,
 )
 
@@ -32,11 +35,12 @@ from tickwright.domain import (
 class ExecutionManager:
     """Owns cloid assignment, the saga FSM, and canonical ``OrderEvent`` publishing."""
 
-    def __init__(self, *, bus: EventBus, clock: Clock, exchange: Exchange) -> None:
+    def __init__(self, *, bus: EventBus, clock: Clock, exchange: Exchange, store: Store) -> None:
         self._bus = bus
         self._clock = clock
         self._exchange = exchange
-        self._orders: dict[str, Order] = {}  # in-memory saga; the Store lands later.
+        self._store = store
+        self._orders: dict[str, Order] = {}  # working set; the Store is the durable copy.
 
     async def on_signal(self, signal: Signal) -> None:
         if isinstance(signal, PlaceSignal):
@@ -64,7 +68,9 @@ class ExecutionManager:
         )
         self._orders[cloid] = order
 
-        # PENDING is the write-ahead intent; announce it before the send.
+        # PENDING is the write-ahead intent: durable before anything else
+        # happens (ADR-0008 rule 1), then announced.
+        self._checkpoint(order)
         await self._bus.publish(self._order_event(OrderPlaced, order))
 
         submitted = self._order_event(OrderSubmitted, order)
@@ -83,32 +89,44 @@ class ExecutionManager:
                 post_only=signal.post_only,
             )
         )
+        # SUBMITTED is checkpointed only after the send returns: until then the
+        # durable record stays PENDING, so a crash anywhere in the send window
+        # recovers through reconcile-by-cloid (ADR-0008 rule 2). Its timestamp
+        # arms the in-flight grace clock.
+        self._checkpoint(order)
 
     async def _apply_fill(self, report: FillReport) -> None:
         order = self._orders.get(report.cloid)
         if order is None:
             return  # A report for an order we do not own — reconciliation's concern.
 
-        cum_qty = order.cum_qty + report.quantity
         now = self._clock.timestamp_ns()
-        filled = OrderFilled(
-            ts_event=now,
-            ts_init=now,
-            cloid=order.cloid,
-            strategy_id=order.strategy_id,
-            signal_id=order.signal_id,
-            symbol=order.symbol,
-            venue_oid=order.venue_oid,
+        # Order owns the fill accounting: it accumulates cum_qty, picks
+        # OrderFilled vs OrderPartiallyFilled, and dedups the trade_id.
+        event = order.record_fill(
             trade_id=report.trade_id,
             quantity=report.quantity,
             price=report.price,
-            cum_qty=cum_qty,
+            ts_event=now,
+            ts_init=now,
         )
-        if not order.apply(filled):
+        if event is None:
             # Redelivered fill: the saga already reflects it. Suppress the
             # duplicate publish so downstream consumers never double-count.
             return
-        await self._bus.publish(filled)
+        self._checkpoint(order)
+        await self._bus.publish(event)
+
+    def _checkpoint(self, order: Order) -> None:
+        try:
+            self._store.checkpoint(order, ts_ns=self._clock.timestamp_ns())
+        except Exception as exc:
+            # A checkpoint the store cannot make durable is a broken engine
+            # assumption (ADR-0014): fail fast rather than run a saga whose
+            # memory and durable states silently diverge.
+            raise InvariantViolation(
+                f"checkpoint write failed for cloid {order.cloid} in state {order.state.value}"
+            ) from exc
 
     def _order_event[E: (OrderPlaced, OrderSubmitted)](
         self, event_type: type[E], order: Order

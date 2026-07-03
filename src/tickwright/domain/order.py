@@ -7,23 +7,44 @@ transition legality and for dedup. It is idempotent — a no-op on an event whos
 raises ``InvariantViolation`` on an illegal transition rather than corrupting
 state (fail-fast, ADR-0014).
 
-This slice models the happy-path transitions the tracer exercises; later slices
-extend ``_LEGAL_TRANSITIONS`` (LIVE, PARTIALLY_FILLED, the terminals) with the
-tests that drive them.
+The transition table is the full 9-state FSM: the happy path through ``LIVE``
+and ``PARTIALLY_FILLED``, the terminal taxonomy ``DENIED``/``REJECTED``/``FAILED``
+(ADR-0010), cancels, and the ghost-reconciliation resolutions.
 """
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from decimal import Decimal
 
 from .enums import OrderState, OrderType, Side
 from .errors import InvariantViolation
-from .events import OrderEvent, OrderFilled
+from .events import (
+    OrderDenied,
+    OrderEvent,
+    OrderFailed,
+    OrderFilled,
+    OrderFillEvent,
+    OrderPartiallyFilled,
+    OrderRejected,
+)
 
 # Legal saga transitions as (from_state, to_state) pairs (ADR-0007).
 _LEGAL_TRANSITIONS: frozenset[tuple[OrderState, OrderState]] = frozenset(
     {
         (OrderState.PENDING, OrderState.SUBMITTED),
+        (OrderState.PENDING, OrderState.DENIED),
+        (OrderState.SUBMITTED, OrderState.LIVE),
+        (OrderState.SUBMITTED, OrderState.PARTIALLY_FILLED),
         (OrderState.SUBMITTED, OrderState.FILLED),
+        (OrderState.SUBMITTED, OrderState.REJECTED),
+        (OrderState.SUBMITTED, OrderState.FAILED),
+        (OrderState.LIVE, OrderState.PARTIALLY_FILLED),
+        (OrderState.LIVE, OrderState.FILLED),
+        (OrderState.LIVE, OrderState.CANCELLED),
+        (OrderState.LIVE, OrderState.REJECTED),
+        (OrderState.PARTIALLY_FILLED, OrderState.PARTIALLY_FILLED),
+        (OrderState.PARTIALLY_FILLED, OrderState.FILLED),
+        (OrderState.PARTIALLY_FILLED, OrderState.CANCELLED),
     }
 )
 
@@ -42,7 +63,51 @@ class Order:
     state: OrderState = OrderState.PENDING
     cum_qty: Decimal = Decimal("0")
     venue_oid: str | None = None
+    reason: str | None = None
     _applied_event_ids: set[str] = field(default_factory=set, init=False, repr=False)
+
+    @property
+    def applied_event_ids(self) -> frozenset[str]:
+        """The reflected ``event_id``s — the dedup set a ``Store`` round-trips."""
+        return frozenset(self._applied_event_ids)
+
+    @classmethod
+    def restore(
+        cls,
+        *,
+        cloid: str,
+        strategy_id: str,
+        signal_id: str,
+        symbol: str,
+        side: Side,
+        quantity: Decimal,
+        order_type: OrderType,
+        state: OrderState,
+        cum_qty: Decimal,
+        venue_oid: str | None,
+        reason: str | None,
+        applied_event_ids: Iterable[str],
+    ) -> "Order":
+        """Rebuild a checkpointed saga exactly as persisted (ADR-0008 recovery).
+
+        Restores the dedup set too, so a redelivered event that predates the
+        crash is still a no-op on the recovered saga.
+        """
+        order = cls(
+            cloid=cloid,
+            strategy_id=strategy_id,
+            signal_id=signal_id,
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            order_type=order_type,
+            state=state,
+            cum_qty=cum_qty,
+            venue_oid=venue_oid,
+            reason=reason,
+        )
+        order._applied_event_ids.update(applied_event_ids)
+        return order
 
     def apply(self, event: OrderEvent) -> bool:
         """Advance the saga by ``event``; idempotent and transition-checked.
@@ -64,8 +129,46 @@ class Order:
         self.state = target
         if event.venue_oid is not None:
             self.venue_oid = event.venue_oid
-        if isinstance(event, OrderFilled):
+        if isinstance(event, OrderFillEvent):
             self.cum_qty = event.cum_qty
+        if isinstance(event, OrderDenied | OrderRejected | OrderFailed):
+            self.reason = event.reason
 
         self._applied_event_ids.add(event.event_id)
         return True
+
+    def record_fill(
+        self,
+        *,
+        trade_id: str,
+        quantity: Decimal,
+        price: Decimal,
+        ts_event: int,
+        ts_init: int,
+    ) -> OrderFillEvent | None:
+        """Account a raw fill and return the canonical event to publish, or ``None``.
+
+        The single home for fill accounting: it accumulates ``cum_qty``, selects
+        ``OrderFilled`` (fully filled) versus ``OrderPartiallyFilled`` (remainder
+        working), builds the canonical event from this order's own identity, and
+        delegates the transition to ``apply`` — the sole dedup and legality
+        authority. Returns ``None`` on a redelivered ``trade_id`` (a deduped
+        no-op) so the caller suppresses the duplicate publish; ``cum_qty`` can
+        never double-count.
+        """
+        cum_qty = self.cum_qty + quantity
+        event_type = OrderFilled if cum_qty >= self.quantity else OrderPartiallyFilled
+        event = event_type(
+            ts_event=ts_event,
+            ts_init=ts_init,
+            cloid=self.cloid,
+            strategy_id=self.strategy_id,
+            signal_id=self.signal_id,
+            symbol=self.symbol,
+            venue_oid=self.venue_oid,
+            trade_id=trade_id,
+            quantity=quantity,
+            price=price,
+            cum_qty=cum_qty,
+        )
+        return event if self.apply(event) else None

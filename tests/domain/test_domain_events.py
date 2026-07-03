@@ -17,6 +17,8 @@ from tickwright.domain import (
     MarketTick,
     OrderFilled,
     OrderPlaced,
+    OrderState,
+    OrderStatusReport,
     OrderSubmitted,
     OrderType,
     PlaceSignal,
@@ -108,6 +110,21 @@ def test_fill_family_event_ids_are_provenance_free() -> None:
     # of the same trade collapse to one id (ADR-0025 rule 1).
     assert fill_report.event_id == "0xabc:fill:v42"
     assert order_filled.event_id == "0xabc:fill:v42"
+
+
+def test_order_status_report_event_id_is_single_entry_per_state() -> None:
+    report = OrderStatusReport(
+        ts_event=4_000,
+        ts_init=4_000,
+        cloid="0xabc",
+        symbol="BTC",
+        status=OrderState.LIVE,
+        venue_oid="oid-9",
+    )
+    # ADR-0025: the status half of the report split keys {cloid}:{state}, the
+    # same single-entry-per-state key as the OrderEvent it will be turned into.
+    assert report.event_id == "0xabc:live"
+    assert report.partition_key == "BTC"
 
 
 def test_reconciliation_flag_is_excluded_from_the_event_id() -> None:

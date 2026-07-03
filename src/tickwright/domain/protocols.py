@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Protocol, runtime_checkable
 
 from .events import Event, MarketTick, OrderEvent, PlaceOrder
+from .order import Order
 
 type Handler[E: Event] = Callable[[E], Awaitable[None]]
 """An async subscriber of a single event family."""
@@ -87,6 +88,26 @@ class Strategy(Protocol):
 
     async def on_order_event(self, event: OrderEvent) -> None:
         """Handle a canonical saga transition for one of this strategy's orders."""
+        ...
+
+
+@runtime_checkable
+class Store(Protocol):
+    """Durable saga checkpoints (ADR-0019). The write the crash-safety
+    argument rests on (ADR-0008).
+
+    Deliberately synchronous: a checkpoint is one atomic step of a handler —
+    ``apply`` then persist with no yield point in between — so no other
+    handler can ever observe a saga whose memory and durable states disagree.
+    Throughput is explicitly not a goal; readable recovery is.
+    """
+
+    def checkpoint(self, order: Order, *, ts_ns: int) -> None:
+        """Durably record ``order``'s full saga state as of ``ts_ns``."""
+        ...
+
+    def get_order(self, cloid: str) -> Order | None:
+        """Rebuild the checkpointed saga for ``cloid``, or ``None`` if unknown."""
         ...
 
 

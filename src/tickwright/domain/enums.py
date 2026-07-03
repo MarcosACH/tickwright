@@ -2,8 +2,7 @@
 
 Values are lowercase strings so they read cleanly when embedded in idempotency
 keys (e.g. ``0xabc:submitted``) and structured logs. The ``OrderState`` set is
-the full ADR-0007 FSM; this v1 tracer only exercises the happy-path subset
-(``PENDING`` → ``SUBMITTED`` → ``FILLED``), but the vocabulary lands whole.
+the full ADR-0007/0010 FSM, and ``Order.apply`` enforces its transition table.
 """
 
 from enum import StrEnum

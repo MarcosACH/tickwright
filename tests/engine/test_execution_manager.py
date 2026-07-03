@@ -11,17 +11,23 @@ our own classes.
 import asyncio
 from decimal import Decimal
 
+import pytest
+
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
+from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     AggressorSide,
     ExecutionReport,
     FillReport,
+    InvariantViolation,
     MarketTick,
     OrderEvent,
     OrderFilled,
+    OrderPartiallyFilled,
     OrderPlaced,
+    OrderState,
     OrderSubmitted,
     PlaceSignal,
     Side,
@@ -60,11 +66,12 @@ def _tick(price: str = "42000") -> MarketTick:
     )
 
 
-def _harness() -> tuple[InMemoryBus, ManualClock, list[OrderEvent]]:
+def _harness() -> tuple[InMemoryBus, ManualClock, SQLiteStore, list[OrderEvent]]:
     bus = InMemoryBus()
     clock = ManualClock(start_ns=1_000)
+    store = SQLiteStore(":memory:")
     exchange = PaperExchange(bus=bus, clock=clock, fill_model=ImmediateFillModel())
-    manager = ExecutionManager(bus=bus, clock=clock, exchange=exchange)
+    manager = ExecutionManager(bus=bus, clock=clock, exchange=exchange, store=store)
 
     bus.subscribe(MarketTick, exchange.on_tick)
     bus.subscribe(Signal, manager.on_signal)
@@ -72,11 +79,127 @@ def _harness() -> tuple[InMemoryBus, ManualClock, list[OrderEvent]]:
 
     order_events: list[OrderEvent] = []
     bus.subscribe(OrderEvent, lambda ev: _record(order_events, ev))
-    return bus, clock, order_events
+    return bus, clock, store, order_events
+
+
+def test_pending_intent_is_durable_before_the_send_can_crash() -> None:
+    bus, _, store, _ = _harness()
+    cloid = derive_cloid("trivial:BTC:1")
+
+    async def scenario() -> None:
+        # No tick published: the real PaperExchange raises on place — standing
+        # in for a crash mid-send. The write-ahead intent (ADR-0008 rule 1)
+        # must already be durable, with the full params recovery needs to
+        # reconcile by cloid.
+        with pytest.raises(ValueError):
+            await bus.publish(_market_signal())
+
+    asyncio.run(scenario())
+
+    record = store.get_order(cloid)
+    assert record is not None
+    assert record.state is OrderState.PENDING
+    assert record.side is Side.BUY
+    assert record.quantity == Decimal("0.5")
+    # PENDING is the only checkpoint so far: nothing was written after the send.
+    assert store.history(cloid) == [(OrderState.PENDING, 1_000)]
+
+
+def test_every_transition_is_checkpointed_on_the_happy_path() -> None:
+    bus, _, store, _ = _harness()
+    cloid = derive_cloid("trivial:BTC:1")
+
+    async def scenario() -> None:
+        await bus.publish(_tick())
+        await bus.publish(_market_signal())
+
+    asyncio.run(scenario())
+
+    record = store.get_order(cloid)
+    assert record is not None
+    assert record.state is OrderState.FILLED
+    assert record.cum_qty == Decimal("0.5")
+    assert [state for state, _ in store.history(cloid)] == [
+        OrderState.PENDING,
+        OrderState.SUBMITTED,
+        OrderState.FILLED,
+    ]
+
+
+def _fill_report(cloid: str, trade_id: str, quantity: str) -> FillReport:
+    return FillReport(
+        ts_event=1_000,
+        ts_init=1_000,
+        cloid=cloid,
+        symbol="BTC",
+        trade_id=trade_id,
+        quantity=Decimal(quantity),
+        price=Decimal("42000"),
+    )
+
+
+def test_partial_fills_accumulate_to_filled_with_checkpoints() -> None:
+    bus, _, store, order_events = _harness()
+    cloid = derive_cloid("trivial:BTC:1")
+
+    async def scenario() -> None:
+        # No tick cached: the send crashes, leaving the saga in-flight — then
+        # the venue's fills arrive in two parts, as a live venue would push them.
+        with pytest.raises(ValueError):
+            await bus.publish(_market_signal())
+        await bus.publish(_fill_report(cloid, trade_id="f1", quantity="0.2"))
+        await bus.publish(_fill_report(cloid, trade_id="f2", quantity="0.3"))
+
+    asyncio.run(scenario())
+
+    fills = [ev for ev in order_events if isinstance(ev, OrderPartiallyFilled | OrderFilled)]
+    assert [type(ev) for ev in fills] == [OrderPartiallyFilled, OrderFilled]
+    assert [ev.cum_qty for ev in fills] == [Decimal("0.2"), Decimal("0.5")]
+
+    record = store.get_order(cloid)
+    assert record is not None
+    assert record.state is OrderState.FILLED
+    assert record.cum_qty == Decimal("0.5")
+    assert [state for state, _ in store.history(cloid)] == [
+        OrderState.PENDING,
+        OrderState.PARTIALLY_FILLED,
+        OrderState.FILLED,
+    ]
+
+
+def test_a_failed_checkpoint_write_is_an_invariant_violation() -> None:
+    bus, _, store, _ = _harness()
+
+    async def scenario() -> None:
+        await bus.publish(_tick())
+        # A dead store at checkpoint time must fail fast (ADR-0014): the saga
+        # may not advance past a write it cannot make durable.
+        store.close()
+        with pytest.raises(InvariantViolation):
+            await bus.publish(_market_signal())
+
+    asyncio.run(scenario())
+
+
+def test_time_passing_never_transitions_an_in_flight_saga() -> None:
+    bus, clock, store, order_events = _harness()
+    cloid = derive_cloid("trivial:BTC:1")
+
+    async def scenario() -> None:
+        with pytest.raises(ValueError):
+            await bus.publish(_market_signal())
+        # An hour of dead air. A timeout is never a transition (ADR-0007 inv 1):
+        # only a venue fact or reconciliation may move an in-flight saga.
+        clock.advance_to(1_000 + 3_600_000_000_000)
+
+    asyncio.run(scenario())
+
+    assert store.history(cloid) == [(OrderState.PENDING, 1_000)]
+    assert order_events == []
 
 
 def test_place_signal_drives_placed_submitted_filled_in_order() -> None:
-    bus, _, order_events = _harness()
+    bus, _, _, order_events = _harness()
 
     async def scenario() -> None:
         await bus.publish(_tick())
@@ -88,7 +211,7 @@ def test_place_signal_drives_placed_submitted_filled_in_order() -> None:
 
 
 def test_cloid_is_derived_from_the_signal_id() -> None:
-    bus, _, order_events = _harness()
+    bus, _, _, order_events = _harness()
     expected = derive_cloid("trivial:BTC:1")
 
     async def scenario() -> None:
@@ -102,7 +225,7 @@ def test_cloid_is_derived_from_the_signal_id() -> None:
 
 
 def test_order_filled_carries_the_fill_details() -> None:
-    bus, _, order_events = _harness()
+    bus, _, _, order_events = _harness()
 
     async def scenario() -> None:
         await bus.publish(_tick("42000"))
@@ -118,7 +241,7 @@ def test_order_filled_carries_the_fill_details() -> None:
 
 
 def test_duplicate_fill_report_yields_a_single_order_filled() -> None:
-    bus, _, order_events = _harness()
+    bus, _, _, order_events = _harness()
     cloid = derive_cloid("trivial:BTC:1")
 
     async def scenario() -> None:
@@ -146,7 +269,7 @@ def test_duplicate_fill_report_yields_a_single_order_filled() -> None:
 
 
 def test_fill_report_for_an_unknown_cloid_is_dropped() -> None:
-    bus, _, order_events = _harness()
+    bus, _, _, order_events = _harness()
 
     async def scenario() -> None:
         # A fill for an order this manager never placed (reconciliation's concern
@@ -169,7 +292,7 @@ def test_fill_report_for_an_unknown_cloid_is_dropped() -> None:
 
 
 def test_duplicate_signal_does_not_place_a_second_order() -> None:
-    bus, _, order_events = _harness()
+    bus, _, _, order_events = _harness()
 
     async def scenario() -> None:
         await bus.publish(_tick())

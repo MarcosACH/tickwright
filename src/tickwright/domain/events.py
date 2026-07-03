@@ -129,6 +129,25 @@ class ExecutionReport(Event):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class OrderStatusReport(ExecutionReport):
+    """A raw status fact: the venue reports the order's state (ADR-0025).
+
+    The status half of the report split — the reconciler reads open-orders
+    (status) and fill-history (fills) separately (ADR-0011 inv 4). ``status``
+    is the venue's adjudication mapped into the saga vocabulary; the key is
+    the same single-entry-per-state ``{cloid}:{state}`` as the ``OrderEvent``
+    the ``ExecutionManager`` turns it into.
+    """
+
+    status: OrderState
+    venue_oid: str | None = None
+
+    @property
+    def event_id(self) -> str:
+        return f"{self.cloid}:{self.status.value}"
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class FillReport(ExecutionReport):
     """A raw fill fact: the venue reports ``trade_id`` filled ``quantity`` @ ``price``."""
 
@@ -193,8 +212,22 @@ class OrderSubmitted(OrderEvent):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class OrderFilled(OrderEvent):
-    """Fully filled (``FILLED``). A fill-family event keyed on ``trade_id``."""
+class OrderLive(OrderEvent):
+    """Accepted by the venue and working (``LIVE``)."""
+
+    @property
+    def state(self) -> OrderState:
+        return OrderState.LIVE
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class OrderFillEvent(OrderEvent):
+    """The fill-family shape: a fill keyed on ``trade_id`` (ADR-0025).
+
+    ``event_id`` is ``{cloid}:fill:{trade_id}`` — a correctness key: a
+    redelivered or reconciler-synthesized copy of the same trade collapses to
+    one id, so ``cum_qty`` can never double-count.
+    """
 
     trade_id: str
     quantity: Decimal
@@ -202,12 +235,78 @@ class OrderFilled(OrderEvent):
     cum_qty: Decimal
 
     @property
+    def event_id(self) -> str:
+        return f"{self.cloid}:fill:{self.trade_id}"
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class OrderPartiallyFilled(OrderFillEvent):
+    """Partly filled, remainder working (``PARTIALLY_FILLED``)."""
+
+    @property
+    def state(self) -> OrderState:
+        return OrderState.PARTIALLY_FILLED
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class OrderFilled(OrderFillEvent):
+    """Fully filled (``FILLED``)."""
+
+    @property
     def state(self) -> OrderState:
         return OrderState.FILLED
 
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class OrderCancelled(OrderEvent):
+    """Cancelled with any recorded fills preserved (``CANCELLED``).
+
+    Also the resolution of a ghost-reconciled ``PARTIALLY_FILLED`` order —
+    "the venue refused it" is false for an order it partially executed
+    (ADR-0010).
+    """
+
     @property
-    def event_id(self) -> str:
-        return f"{self.cloid}:fill:{self.trade_id}"
+    def state(self) -> OrderState:
+        return OrderState.CANCELLED
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class OrderDenied(OrderEvent):
+    """Refused by the pre-trade guard, never sent (``DENIED``, ADR-0010)."""
+
+    reason: str
+
+    @property
+    def state(self) -> OrderState:
+        return OrderState.DENIED
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class OrderRejected(OrderEvent):
+    """Sent, and the venue adjudicated and refused it (``REJECTED``, ADR-0010).
+
+    Includes the ghost-reconciled case: a ``LIVE`` order that vanished with no
+    fills recorded.
+    """
+
+    reason: str
+
+    @property
+    def state(self) -> OrderState:
+        return OrderState.REJECTED
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class OrderFailed(OrderEvent):
+    """Sent (or attempted) with positive proof it never landed (``FAILED``,
+    ADR-0010). Never minted on a timeout — only on a proven hard failure."""
+
+    reason: str
+
+    @property
+    def state(self) -> OrderState:
+        return OrderState.FAILED
 
 
 # --- Venue-neutral order request (not an event) -----------------------------
