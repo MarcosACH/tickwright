@@ -34,6 +34,8 @@ This skill is _informed_ by the project's domain model. The domain language give
 
 Read the project's domain glossary and any ADRs in the area you're touching first.
 
+Also pull the **open issues** on the tracker (`gh issue list --state open`, then `gh issue view <N>` for anything on-topic). The backlog is design context, not noise: a "deepening" that a planned slice already owns is not a finding — it's duplicate work, and the deferred stubs it touches are deliberate, not friction. Keep the on-topic issues in hand so you can validate every candidate against them in step 2.
+
 Then use the Agent tool with `subagent_type=Explore` to walk the codebase. Don't follow rigid heuristics — explore organically and note where you experience friction:
 
 - Where does understanding one concept require bouncing between many small modules?
@@ -52,6 +54,13 @@ Present a numbered list of deepening opportunities. For each candidate:
 - **Problem** — why the current architecture is causing friction
 - **Solution** — plain English description of what would change
 - **Benefits** — explained in terms of locality and leverage, and also in how tests would improve
+- **Issue check** — the candidate's standing against the open issues (see below)
+
+**Validate every candidate against the open issues before presenting it.** For each, cite the relevant issue number(s) and give one verdict:
+
+- **No collision** — no open issue owns or overlaps it. Surface it as new work.
+- **Collides with #N** — a planned slice already builds this. Drop it; it is that issue's work, not a finding. Only keep it if the friction is bad enough that #N's stated approach should change — mark that clearly and say why, same discipline as the ADR-conflict rule below.
+- **Adjacent to #N** — no issue owns the extraction, but a planned slice will grow or exercise the same code. Surface it, but flag the **timing** question: pre-factor now, or fold it into #N when that slice brings the justifying complexity into view? Apply the deletion test against *present* complexity — if the two-plus instances that justify the deepening only arrive with #N, the honest recommendation is usually to defer.
 
 **Use CONTEXT.md vocabulary for the domain, and [LANGUAGE.md](LANGUAGE.md) vocabulary for the architecture.** If `CONTEXT.md` defines "Order," talk about "the Order intake module" — not "the FooBarHandler," and not "the Order service."
 
