@@ -28,10 +28,12 @@ from tickwright.domain import (
     OrderEvent,
     OrderFilled,
     OrderPlaced,
+    OrderState,
     OrderSubmitted,
     PlaceSignal,
     Side,
     Signal,
+    derive_cloid,
 )
 from tickwright.engine.execution import ExecutionManager
 from tickwright.strategies import SingleShotMarketStrategy
@@ -61,14 +63,13 @@ def _write_ticks(path: Path) -> Path:
     return path
 
 
-def _run(path: Path) -> tuple[list[Event], SingleShotMarketStrategy]:
+def _run(path: Path) -> tuple[list[Event], SingleShotMarketStrategy, SQLiteStore]:
     """Wire and drive the whole pipeline once; return every dispatched event."""
     bus = InMemoryBus()
     clock = ManualClock()
+    store = SQLiteStore(":memory:")
     exchange = PaperExchange(bus=bus, clock=clock, fill_model=ImmediateFillModel())
-    manager = ExecutionManager(
-        bus=bus, clock=clock, exchange=exchange, store=SQLiteStore(":memory:")
-    )
+    manager = ExecutionManager(bus=bus, clock=clock, exchange=exchange, store=store)
     strategy = SingleShotMarketStrategy(
         strategy_id="trivial", bus=bus, clock=clock, side=Side.BUY, quantity=Decimal("0.5")
     )
@@ -84,12 +85,12 @@ def _run(path: Path) -> tuple[list[Event], SingleShotMarketStrategy]:
     bus.subscribe(OrderEvent, strategy.on_order_event)
 
     asyncio.run(feed.start())
-    return recorded, strategy
+    return recorded, strategy, store
 
 
 def test_tracer_delivers_order_filled_to_the_strategy(tmp_path: Path) -> None:
     path = _write_ticks(tmp_path / "ticks.jsonl")
-    _, strategy = _run(path)
+    _, strategy, _ = _run(path)
 
     assert len(strategy.fills) == 1
     fill = strategy.fills[0]
@@ -103,7 +104,7 @@ def test_tracer_delivers_order_filled_to_the_strategy(tmp_path: Path) -> None:
 
 def test_tracer_event_cascade_is_the_canonical_sequence(tmp_path: Path) -> None:
     path = _write_ticks(tmp_path / "ticks.jsonl")
-    recorded, _ = _run(path)
+    recorded, _, _ = _run(path)
 
     assert [type(ev) for ev in recorded] == [
         MarketTick,  # tick 1 published by the feed
@@ -116,11 +117,28 @@ def test_tracer_event_cascade_is_the_canonical_sequence(tmp_path: Path) -> None:
     ]
 
 
+def test_tracer_checkpoints_the_saga_durably_through_the_store(tmp_path: Path) -> None:
+    path = _write_ticks(tmp_path / "ticks.jsonl")
+    _, _, store = _run(path)
+
+    cloid = derive_cloid("trivial:BTC:1")
+    record = store.get_order(cloid)
+    assert record is not None
+    assert record.state is OrderState.FILLED
+    assert record.cum_qty == Decimal("0.5")
+    # The whole lifecycle left its durable trail (ADR-0008 checkpoint points).
+    assert [state for state, _ in store.history(cloid)] == [
+        OrderState.PENDING,
+        OrderState.SUBMITTED,
+        OrderState.FILLED,
+    ]
+
+
 def test_tracer_is_deterministic_across_repeated_runs(tmp_path: Path) -> None:
     path = _write_ticks(tmp_path / "ticks.jsonl")
 
-    first, _ = _run(path)
-    second, _ = _run(path)
+    first, _, _ = _run(path)
+    second, _, _ = _run(path)
 
     # The entire event stream — ids, timestamps, prices — is identical each run.
     assert _fingerprint(first) == _fingerprint(second)

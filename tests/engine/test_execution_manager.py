@@ -21,6 +21,7 @@ from tickwright.domain import (
     AggressorSide,
     ExecutionReport,
     FillReport,
+    InvariantViolation,
     MarketTick,
     OrderEvent,
     OrderFilled,
@@ -164,6 +165,20 @@ def test_partial_fills_accumulate_to_filled_with_checkpoints() -> None:
         OrderState.PARTIALLY_FILLED,
         OrderState.FILLED,
     ]
+
+
+def test_a_failed_checkpoint_write_is_an_invariant_violation() -> None:
+    bus, _, store, _ = _harness()
+
+    async def scenario() -> None:
+        await bus.publish(_tick())
+        # A dead store at checkpoint time must fail fast (ADR-0014): the saga
+        # may not advance past a write it cannot make durable.
+        store.close()
+        with pytest.raises(InvariantViolation):
+            await bus.publish(_market_signal())
+
+    asyncio.run(scenario())
 
 
 def test_time_passing_never_transitions_an_in_flight_saga() -> None:

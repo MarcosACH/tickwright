@@ -20,6 +20,7 @@ from tickwright.domain import (
     Exchange,
     ExecutionReport,
     FillReport,
+    InvariantViolation,
     Order,
     OrderFilled,
     OrderPartiallyFilled,
@@ -126,7 +127,15 @@ class ExecutionManager:
         await self._bus.publish(filled)
 
     def _checkpoint(self, order: Order) -> None:
-        self._store.checkpoint(order, ts_ns=self._clock.timestamp_ns())
+        try:
+            self._store.checkpoint(order, ts_ns=self._clock.timestamp_ns())
+        except Exception as exc:
+            # A checkpoint the store cannot make durable is a broken engine
+            # assumption (ADR-0014): fail fast rather than run a saga whose
+            # memory and durable states silently diverge.
+            raise InvariantViolation(
+                f"checkpoint write failed for cloid {order.cloid} in state {order.state.value}"
+            ) from exc
 
     def _order_event[E: (OrderPlaced, OrderSubmitted)](
         self, event_type: type[E], order: Order
