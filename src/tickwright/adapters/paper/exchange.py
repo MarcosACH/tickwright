@@ -17,6 +17,7 @@ from tickwright.domain import (
     Clock,
     EventBus,
     FillReport,
+    InvariantViolation,
     MarketTick,
     OrderState,
     OrderStatusReport,
@@ -115,7 +116,9 @@ class PaperExchange:
         A BUY fills when the market trades at or below its limit; a SELL when the
         market trades at or above it. ``price`` is always set for a LIMIT.
         """
-        assert order.price is not None
+        if order.price is None:
+            # Only LIMITs reach the book; a priceless one is a broken assumption.
+            raise InvariantViolation(f"LIMIT order {order.cloid} on the book with no price")
         if order.side is Side.BUY:
             return tick.price <= order.price
         return tick.price >= order.price

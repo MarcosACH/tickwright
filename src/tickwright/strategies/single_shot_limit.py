@@ -16,6 +16,7 @@ from tickwright.domain import (
     CancelSignal,
     Clock,
     EventBus,
+    InvariantViolation,
     MarketTick,
     OrderCancelled,
     OrderEvent,
@@ -87,7 +88,9 @@ class SingleShotLimitStrategy:
     async def _maybe_cancel(self, tick: MarketTick) -> None:
         if self._cancel_after_ticks is None or self._cancelled:
             return
-        assert self._placed_signal_id is not None  # only reached after a place
+        if self._placed_signal_id is None:
+            # on_tick only routes here after a place; a missing id is a broken assumption.
+            raise InvariantViolation("cancel path reached before a signal was placed")
         self._ticks_since_place += 1
         if self._ticks_since_place < self._cancel_after_ticks:
             return
