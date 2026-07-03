@@ -18,7 +18,15 @@ from decimal import Decimal
 
 from .enums import OrderState, OrderType, Side
 from .errors import InvariantViolation
-from .events import OrderDenied, OrderEvent, OrderFailed, OrderFillEvent, OrderRejected
+from .events import (
+    OrderDenied,
+    OrderEvent,
+    OrderFailed,
+    OrderFilled,
+    OrderFillEvent,
+    OrderPartiallyFilled,
+    OrderRejected,
+)
 
 # Legal saga transitions as (from_state, to_state) pairs (ADR-0007).
 _LEGAL_TRANSITIONS: frozenset[tuple[OrderState, OrderState]] = frozenset(
@@ -128,3 +136,39 @@ class Order:
 
         self._applied_event_ids.add(event.event_id)
         return True
+
+    def record_fill(
+        self,
+        *,
+        trade_id: str,
+        quantity: Decimal,
+        price: Decimal,
+        ts_event: int,
+        ts_init: int,
+    ) -> OrderFillEvent | None:
+        """Account a raw fill and return the canonical event to publish, or ``None``.
+
+        The single home for fill accounting: it accumulates ``cum_qty``, selects
+        ``OrderFilled`` (fully filled) versus ``OrderPartiallyFilled`` (remainder
+        working), builds the canonical event from this order's own identity, and
+        delegates the transition to ``apply`` — the sole dedup and legality
+        authority. Returns ``None`` on a redelivered ``trade_id`` (a deduped
+        no-op) so the caller suppresses the duplicate publish; ``cum_qty`` can
+        never double-count.
+        """
+        cum_qty = self.cum_qty + quantity
+        event_type = OrderFilled if cum_qty >= self.quantity else OrderPartiallyFilled
+        event = event_type(
+            ts_event=ts_event,
+            ts_init=ts_init,
+            cloid=self.cloid,
+            strategy_id=self.strategy_id,
+            signal_id=self.signal_id,
+            symbol=self.symbol,
+            venue_oid=self.venue_oid,
+            trade_id=trade_id,
+            quantity=quantity,
+            price=price,
+            cum_qty=cum_qty,
+        )
+        return event if self.apply(event) else None

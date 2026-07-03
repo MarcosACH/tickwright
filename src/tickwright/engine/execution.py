@@ -22,8 +22,6 @@ from tickwright.domain import (
     FillReport,
     InvariantViolation,
     Order,
-    OrderFilled,
-    OrderPartiallyFilled,
     OrderPlaced,
     OrderSubmitted,
     PlaceOrder,
@@ -102,29 +100,22 @@ class ExecutionManager:
         if order is None:
             return  # A report for an order we do not own — reconciliation's concern.
 
-        cum_qty = order.cum_qty + report.quantity
-        # A fill that leaves quantity working is PARTIALLY_FILLED, not FILLED.
-        event_type = OrderFilled if cum_qty >= order.quantity else OrderPartiallyFilled
         now = self._clock.timestamp_ns()
-        filled = event_type(
-            ts_event=now,
-            ts_init=now,
-            cloid=order.cloid,
-            strategy_id=order.strategy_id,
-            signal_id=order.signal_id,
-            symbol=order.symbol,
-            venue_oid=order.venue_oid,
+        # Order owns the fill accounting: it accumulates cum_qty, picks
+        # OrderFilled vs OrderPartiallyFilled, and dedups the trade_id.
+        event = order.record_fill(
             trade_id=report.trade_id,
             quantity=report.quantity,
             price=report.price,
-            cum_qty=cum_qty,
+            ts_event=now,
+            ts_init=now,
         )
-        if not order.apply(filled):
+        if event is None:
             # Redelivered fill: the saga already reflects it. Suppress the
             # duplicate publish so downstream consumers never double-count.
             return
         self._checkpoint(order)
-        await self._bus.publish(filled)
+        await self._bus.publish(event)
 
     def _checkpoint(self, order: Order) -> None:
         try:
