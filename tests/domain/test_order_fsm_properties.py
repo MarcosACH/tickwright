@@ -39,6 +39,7 @@ _SPEC_TRANSITIONS: frozenset[tuple[OrderState, OrderState]] = frozenset(
         (OrderState.SUBMITTED, OrderState.LIVE),
         (OrderState.SUBMITTED, OrderState.PARTIALLY_FILLED),
         (OrderState.SUBMITTED, OrderState.FILLED),
+        (OrderState.SUBMITTED, OrderState.CANCELLED),
         (OrderState.SUBMITTED, OrderState.REJECTED),
         (OrderState.SUBMITTED, OrderState.FAILED),
         (OrderState.LIVE, OrderState.PARTIALLY_FILLED),

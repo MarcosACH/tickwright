@@ -113,6 +113,21 @@ class PlaceSignal(Signal):
     post_only: bool = False
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CancelSignal(Signal):
+    """Intent to cancel the order placed by ``target_signal_id`` (ADR-0026).
+
+    A cancel is itself a fresh, replayable intent: it carries its **own** seq'd
+    ``signal_id`` (so a re-emitted cancel dedups like any other signal) plus
+    ``target_signal_id`` — the ``signal_id`` the strategy emitted for the order
+    it wants gone. The strategy references orders by the id it minted; the
+    ``ExecutionManager`` re-derives the target ``cloid`` (ADR-0006), keeping the
+    ``cloid`` derivation out of strategy code.
+    """
+
+    target_signal_id: str
+
+
 # --- Raw venue facts (ExecutionReport) --------------------------------------
 
 
@@ -136,11 +151,14 @@ class OrderStatusReport(ExecutionReport):
     (status) and fill-history (fills) separately (ADR-0011 inv 4). ``status``
     is the venue's adjudication mapped into the saga vocabulary; the key is
     the same single-entry-per-state ``{cloid}:{state}`` as the ``OrderEvent``
-    the ``ExecutionManager`` turns it into.
+    the ``ExecutionManager`` turns it into. ``reason`` is optional venue-supplied
+    detail for a negative status (e.g. a ``post_only`` rejection); it is
+    metadata, excluded from ``event_id``.
     """
 
     status: OrderState
     venue_oid: str | None = None
+    reason: str | None = None
 
     @property
     def event_id(self) -> str:

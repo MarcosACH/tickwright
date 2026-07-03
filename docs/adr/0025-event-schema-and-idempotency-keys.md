@@ -44,8 +44,9 @@ the reference (ADR-0010's explicit goal).
   carries `cloid`, `strategy_id`, `signal_id`, `venue_oid: str | None`, `reconciliation: bool`; fills
   add `trade_id`/`qty`/`price`/`cum_qty`; the negative terminals add `reason`.
 - Raw **`ExecutionReport`** = **`OrderStatusReport` + `FillReport`** (the established
-  reconciliation-report split): status reports carry venue status + `venue_oid`; fill reports carry
-  `trade_id`/`qty`/`price`.
+  reconciliation-report split): status reports carry venue status + `venue_oid` + an optional
+  `reason` (venue-supplied detail for a negative status, e.g. a `post_only` rejection; metadata,
+  excluded from `event_id`); fill reports carry `trade_id`/`qty`/`price`.
   This also serves the reconciler, which reads open-orders (status) and fill-history (fills)
   separately (ADR-0011 inv 4).
 - **`Signal`** = `PlaceSignal` + `CancelSignal` (see ADR-0026).

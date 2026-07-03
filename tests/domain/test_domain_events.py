@@ -13,6 +13,7 @@ from hypothesis import strategies as st
 
 from tickwright.domain import (
     AggressorSide,
+    CancelSignal,
     FillReport,
     MarketTick,
     OrderFilled,
@@ -59,6 +60,23 @@ def test_place_signal_event_id_is_the_signal_id() -> None:
     assert signal.signal_id == "trivial:ETH:3"
     assert signal.event_id == "trivial:ETH:3"
     assert signal.partition_key == "ETH"
+
+
+def test_cancel_signal_has_its_own_seqd_id_and_a_target() -> None:
+    cancel = CancelSignal(
+        ts_event=2_000,
+        ts_init=2_000,
+        strategy_id="trivial",
+        symbol="ETH",
+        seq=4,
+        target_signal_id="trivial:ETH:3",
+    )
+    # A cancel is itself a fresh, replayable intent: its own signal_id keys it,
+    # while target_signal_id names the order it cancels (ADR-0026).
+    assert cancel.signal_id == "trivial:ETH:4"
+    assert cancel.event_id == "trivial:ETH:4"
+    assert cancel.target_signal_id == "trivial:ETH:3"
+    assert cancel.partition_key == "ETH"
 
 
 def test_order_lifecycle_event_ids_are_single_entry_per_state() -> None:
