@@ -19,14 +19,18 @@ from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     AggressorSide,
+    CancelSignal,
     ExecutionReport,
     FillReport,
     InvariantViolation,
     MarketTick,
+    OrderCancelled,
     OrderEvent,
     OrderFilled,
+    OrderLive,
     OrderPartiallyFilled,
     OrderPlaced,
+    OrderRejected,
     OrderState,
     OrderSubmitted,
     PlaceSignal,
@@ -50,6 +54,40 @@ def _market_signal(seq: int = 1) -> PlaceSignal:
         quantity=Decimal("0.5"),
         order_type=OrderType.MARKET,
         time_in_force=TimeInForce.IOC,
+    )
+
+
+def _limit_signal(
+    price: str,
+    *,
+    seq: int = 1,
+    side: Side = Side.BUY,
+    time_in_force: TimeInForce = TimeInForce.GTC,
+    post_only: bool = False,
+) -> PlaceSignal:
+    return PlaceSignal(
+        ts_event=1_000,
+        ts_init=1_000,
+        strategy_id="trivial",
+        symbol="BTC",
+        seq=seq,
+        side=side,
+        quantity=Decimal("0.5"),
+        order_type=OrderType.LIMIT,
+        time_in_force=time_in_force,
+        price=Decimal(price),
+        post_only=post_only,
+    )
+
+
+def _cancel_signal(target_signal_id: str, *, seq: int = 2) -> CancelSignal:
+    return CancelSignal(
+        ts_event=1_000,
+        ts_init=1_000,
+        strategy_id="trivial",
+        symbol="BTC",
+        seq=seq,
+        target_signal_id=target_signal_id,
     )
 
 
@@ -303,6 +341,141 @@ def test_duplicate_signal_does_not_place_a_second_order() -> None:
 
     # Only the first signal produces a saga; the resent one is a no-op.
     assert [type(ev) for ev in order_events] == [OrderPlaced, OrderSubmitted, OrderFilled]
+
+
+# --- LIMIT resting, cancel, and status handling (issue #13) -----------------
+
+
+def test_resting_limit_drives_the_saga_to_live() -> None:
+    bus, _, store, order_events = _harness()
+    cloid = derive_cloid("trivial:BTC:1")
+
+    async def scenario() -> None:
+        await bus.publish(_tick("42000"))
+        # A BUY LIMIT below the market rests: the venue reports it working, and
+        # the manager drives PENDING -> SUBMITTED -> LIVE.
+        await bus.publish(_limit_signal("41000"))
+
+    asyncio.run(scenario())
+
+    assert [type(ev) for ev in order_events] == [OrderPlaced, OrderSubmitted, OrderLive]
+    record = store.get_order(cloid)
+    assert record is not None
+    assert record.state is OrderState.LIVE
+    assert [state for state, _ in store.history(cloid)] == [
+        OrderState.PENDING,
+        OrderState.SUBMITTED,
+        OrderState.LIVE,
+    ]
+
+
+def test_resting_limit_fills_when_a_later_tick_crosses() -> None:
+    bus, _, _, order_events = _harness()
+
+    async def scenario() -> None:
+        await bus.publish(_tick("42000"))
+        await bus.publish(_limit_signal("41000"))  # rests LIVE
+        await bus.publish(_tick("41000"))  # crosses -> fills
+
+    asyncio.run(scenario())
+
+    assert [type(ev) for ev in order_events] == [
+        OrderPlaced,
+        OrderSubmitted,
+        OrderLive,
+        OrderFilled,
+    ]
+
+
+def test_post_only_that_would_cross_is_rejected_with_the_venue_reason() -> None:
+    bus, _, store, order_events = _harness()
+    cloid = derive_cloid("trivial:BTC:1")
+
+    async def scenario() -> None:
+        await bus.publish(_tick("42000"))
+        # post_only BUY LIMIT above the market would cross on arrival -> rejected.
+        await bus.publish(_limit_signal("43000", post_only=True))
+
+    asyncio.run(scenario())
+
+    rejected = [ev for ev in order_events if isinstance(ev, OrderRejected)]
+    assert len(rejected) == 1
+    assert rejected[0].reason == "post_only order would cross"
+    record = store.get_order(cloid)
+    assert record is not None
+    assert record.state is OrderState.REJECTED
+
+
+def test_unfilled_ioc_limit_cancels_straight_from_submitted() -> None:
+    bus, _, store, order_events = _harness()
+    cloid = derive_cloid("trivial:BTC:1")
+
+    async def scenario() -> None:
+        await bus.publish(_tick("42000"))
+        await bus.publish(_limit_signal("41000", time_in_force=TimeInForce.IOC))
+
+    asyncio.run(scenario())
+
+    # Never LIVE: an unfilled IOC goes SUBMITTED -> CANCELLED.
+    assert [type(ev) for ev in order_events] == [OrderPlaced, OrderSubmitted, OrderCancelled]
+    record = store.get_order(cloid)
+    assert record is not None
+    assert record.state is OrderState.CANCELLED
+
+
+def test_cancel_signal_checkpoints_the_marker_and_cancels_the_derived_cloid() -> None:
+    bus, _, store, order_events = _harness()
+    cloid = derive_cloid("trivial:BTC:1")
+
+    async def scenario() -> None:
+        await bus.publish(_tick("42000"))
+        await bus.publish(_limit_signal("41000"))  # rests LIVE
+        # The strategy cancels by the signal_id it emitted; the manager re-derives
+        # the cloid, marks intent durably, and the venue confirms the cancel.
+        await bus.publish(_cancel_signal("trivial:BTC:1"))
+
+    asyncio.run(scenario())
+
+    assert isinstance(order_events[-1], OrderCancelled)
+    record = store.get_order(cloid)
+    assert record is not None
+    assert record.state is OrderState.CANCELLED
+    # The cancel_requested marker was checkpointed (durable before the send).
+    assert record.cancel_requested is True
+    assert record.cancel_requested_ts is not None
+
+
+def test_a_venue_fill_wins_the_race_and_a_later_cancel_is_a_no_op() -> None:
+    bus, _, store, order_events = _harness()
+    cloid = derive_cloid("trivial:BTC:1")
+
+    async def scenario() -> None:
+        await bus.publish(_tick("42000"))
+        await bus.publish(_limit_signal("41000"))  # rests LIVE
+        # The venue fills the resting order (pushes the fill) before our cancel
+        # lands: FILLED is terminal and wins (ADR-0026).
+        await bus.publish(_fill_report(cloid, trade_id="v1", quantity="0.5"))
+        await bus.publish(_cancel_signal("trivial:BTC:1"))
+
+    asyncio.run(scenario())
+
+    assert isinstance(order_events[-1], OrderFilled)
+    record = store.get_order(cloid)
+    assert record is not None
+    assert record.state is OrderState.FILLED  # the late cancel did not move it
+
+
+def test_cancel_signal_for_an_unknown_order_is_a_benign_no_op() -> None:
+    bus, _, _, order_events = _harness()
+
+    async def scenario() -> None:
+        await bus.publish(_tick("42000"))
+        # No order was ever placed for this target: nothing to cancel, nothing raised.
+        await bus.publish(_cancel_signal("trivial:BTC:999"))
+
+    asyncio.run(scenario())
+
+    assert order_events == []
 
 
 async def _record(sink: list, event: object) -> None:
