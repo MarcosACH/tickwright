@@ -129,6 +129,25 @@ class ExecutionReport(Event):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class OrderStatusReport(ExecutionReport):
+    """A raw status fact: the venue reports the order's state (ADR-0025).
+
+    The status half of the report split — the reconciler reads open-orders
+    (status) and fill-history (fills) separately (ADR-0011 inv 4). ``status``
+    is the venue's adjudication mapped into the saga vocabulary; the key is
+    the same single-entry-per-state ``{cloid}:{state}`` as the ``OrderEvent``
+    the ``ExecutionManager`` turns it into.
+    """
+
+    status: OrderState
+    venue_oid: str | None = None
+
+    @property
+    def event_id(self) -> str:
+        return f"{self.cloid}:{self.status.value}"
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class FillReport(ExecutionReport):
     """A raw fill fact: the venue reports ``trade_id`` filled ``quantity`` @ ``price``."""
 
