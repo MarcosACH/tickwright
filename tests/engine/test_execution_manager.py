@@ -145,6 +145,29 @@ def test_duplicate_fill_report_yields_a_single_order_filled() -> None:
     assert filled[0].cum_qty == Decimal("0.5")
 
 
+def test_fill_report_for_an_unknown_cloid_is_dropped() -> None:
+    bus, _, order_events = _harness()
+
+    async def scenario() -> None:
+        # A fill for an order this manager never placed (reconciliation's concern
+        # once it lands). It must be dropped silently: no OrderFilled, no raise.
+        await bus.publish(
+            FillReport(
+                ts_event=1_000,
+                ts_init=1_000,
+                cloid="0xdeadbeef",
+                symbol="BTC",
+                trade_id="stray-1",
+                quantity=Decimal("0.5"),
+                price=Decimal("42000"),
+            )
+        )
+
+    asyncio.run(scenario())
+
+    assert order_events == []
+
+
 def test_duplicate_signal_does_not_place_a_second_order() -> None:
     bus, _, order_events = _harness()
 
