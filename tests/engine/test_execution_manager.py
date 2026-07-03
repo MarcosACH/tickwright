@@ -17,6 +17,7 @@ from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.domain import (
     AggressorSide,
     ExecutionReport,
+    FillReport,
     MarketTick,
     OrderEvent,
     OrderFilled,
@@ -114,6 +115,34 @@ def test_order_filled_carries_the_fill_details() -> None:
     assert filled.quantity == Decimal("0.5")
     assert filled.cum_qty == Decimal("0.5")
     assert filled.event_id == f"{filled.cloid}:fill:{filled.trade_id}"
+
+
+def test_duplicate_fill_report_yields_a_single_order_filled() -> None:
+    bus, _, order_events = _harness()
+    cloid = derive_cloid("trivial:BTC:1")
+
+    async def scenario() -> None:
+        await bus.publish(_tick())
+        await bus.publish(_market_signal())
+        # Redeliver the exact fill (same trade_id -> same event_id): the saga is
+        # already FILLED, so this must not publish a second OrderFilled.
+        await bus.publish(
+            FillReport(
+                ts_event=1_000,
+                ts_init=1_000,
+                cloid=cloid,
+                symbol="BTC",
+                trade_id=f"{cloid}-1",
+                quantity=Decimal("0.5"),
+                price=Decimal("42000"),
+            )
+        )
+
+    asyncio.run(scenario())
+
+    filled = [ev for ev in order_events if isinstance(ev, OrderFilled)]
+    assert len(filled) == 1
+    assert filled[0].cum_qty == Decimal("0.5")
 
 
 def test_duplicate_signal_does_not_place_a_second_order() -> None:

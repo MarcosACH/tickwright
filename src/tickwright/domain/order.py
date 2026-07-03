@@ -44,10 +44,15 @@ class Order:
     venue_oid: str | None = None
     _applied_event_ids: set[str] = field(default_factory=set, init=False, repr=False)
 
-    def apply(self, event: OrderEvent) -> None:
-        """Advance the saga by ``event``; idempotent and transition-checked."""
+    def apply(self, event: OrderEvent) -> bool:
+        """Advance the saga by ``event``; idempotent and transition-checked.
+
+        Returns ``True`` if the event advanced the saga, ``False`` if it was a
+        deduped no-op — so a caller can suppress the downstream publish of a
+        redelivered transition (at-least-once idempotency, ADR-0002).
+        """
         if event.event_id in self._applied_event_ids:
-            return  # Already reflected — duplicate delivery is a no-op.
+            return False  # Already reflected — duplicate delivery is a no-op.
 
         target = event.state
         if (self.state, target) not in _LEGAL_TRANSITIONS:
@@ -63,3 +68,4 @@ class Order:
             self.cum_qty = event.cum_qty
 
         self._applied_event_ids.add(event.event_id)
+        return True

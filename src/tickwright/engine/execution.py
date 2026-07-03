@@ -104,7 +104,10 @@ class ExecutionManager:
             price=report.price,
             cum_qty=cum_qty,
         )
-        order.apply(filled)
+        if not order.apply(filled):
+            # Redelivered fill: the saga already reflects it. Suppress the
+            # duplicate publish so downstream consumers never double-count.
+            return
         await self._bus.publish(filled)
 
     def _order_event[E: (OrderPlaced, OrderSubmitted)](
