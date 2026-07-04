@@ -145,11 +145,15 @@ class Reconciler:
 
     async def _resolve_ghost(self, order: Order) -> None:
         """Terminal resolution for an order continuously absent past the grace
-        window: truly gone → ``REJECTED`` from ``LIVE`` (ADR-0010/0011)."""
-        await self._bus.publish(
-            self._verdict(order, OrderState.REJECTED, "ghost: vanished from the venue")
-        )
-        named_event("ghost.reconciled", cloid=order.cloid, resolution="rejected")
+        window (ADR-0010/0011/0026): our own durable ``cancel_requested`` marker
+        reads the vanish as the cancel landing ack-lost → ``CANCELLED``;
+        otherwise truly gone → ``REJECTED`` from ``LIVE``."""
+        if order.cancel_requested:
+            status, reason = OrderState.CANCELLED, "ghost: vanished after a requested cancel"
+        else:
+            status, reason = OrderState.REJECTED, "ghost: vanished from the venue"
+        await self._bus.publish(self._verdict(order, status, reason))
+        named_event("ghost.reconciled", cloid=order.cloid, resolution=status.value)
 
     def _freeze(self, cycle: str, cloid: str) -> bool:
         """The connectivity guard tripping (ADR-0011 inv 1): a failed venue read

@@ -23,6 +23,7 @@ from tickwright.domain import (
     FillReport,
     MarketTick,
     Order,
+    OrderCancelled,
     OrderEvent,
     OrderFailed,
     OrderFilled,
@@ -323,6 +324,38 @@ def test_a_healed_fill_and_the_venues_late_duplicate_collapse_to_one_apply() -> 
     assert order.cum_qty == Decimal("0.5")  # never double-counted
     filled = [ev for ev in events if isinstance(ev, OrderFilled)]
     assert len(filled) == 1
+
+
+def test_a_vanished_order_with_the_cancel_requested_marker_resolves_cancelled() -> None:
+    clock = ManualClock(start_ns=0)
+    store = SQLiteStore(":memory:")
+    # A cancel was durably requested and sent, then the ack was lost and the
+    # venue's record expired: the marker is the durable memory of our own
+    # intent (ADR-0026), so the vanish reads as the cancel landing.
+    saga = _saga("0xabc", OrderState.LIVE)
+    assert saga.request_cancel(signal_id="trivial:BTC:2", ts_ns=400)
+    store.checkpoint(saga, ts_ns=500)
+    venue = _ForgetfulVenue()
+    config = ReconcileConfig(ghost_grace_seconds=90.0)
+    _, reconciler, events = _engine(store, venue, clock, config)  # type: ignore[arg-type]
+
+    async def scenario() -> None:
+        assert await reconciler.reconcile_open_orders() is True
+        await clock.sleep(91.0)
+        with structlog.testing.capture_logs() as logs:
+            assert await reconciler.reconcile_open_orders() is True
+        ghosts = [log for log in logs if log["event"] == "ghost.reconciled"]
+        assert len(ghosts) == 1
+        assert ghosts[0]["resolution"] == "cancelled"
+
+    asyncio.run(scenario())
+    order = store.get_order("0xabc")
+    assert order is not None
+    assert order.state is OrderState.CANCELLED
+    cancelled = [ev for ev in events if isinstance(ev, OrderCancelled)]
+    assert len(cancelled) == 1
+    assert cancelled[0].reconciliation is True
+    assert not [ev for ev in events if isinstance(ev, OrderRejected)]
 
 
 # --- Connectivity guard ---------------------------------------------------------
