@@ -6,7 +6,7 @@ It is the stable contract of the system; keep it log-free and dependency-free.
 """
 
 from .enums import AggressorSide, OrderState, OrderType, Side, TimeInForce
-from .errors import InvariantViolation
+from .errors import InvariantViolation, StartupReconciliationTimeout
 from .events import (
     CancelSignal,
     Event,
@@ -52,6 +52,7 @@ __all__ = [
     "TimeInForce",
     # errors
     "InvariantViolation",
+    "StartupReconciliationTimeout",
     # events + value types
     "CancelSignal",
     "Event",

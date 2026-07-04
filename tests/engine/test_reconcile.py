@@ -12,6 +12,8 @@ life is dead air, exactly like acks that died with the process.
 import asyncio
 from decimal import Decimal
 
+import pytest
+
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
@@ -30,7 +32,9 @@ from tickwright.domain import (
     PlaceOrder,
     Side,
     Signal,
+    StartupReconciliationTimeout,
     TimeInForce,
+    VenueOrderView,
 )
 from tickwright.engine.cache import Cache
 from tickwright.engine.execution import ExecutionManager
@@ -231,3 +235,102 @@ def test_a_crash_during_recovery_just_reruns_the_pass_and_converges() -> None:
     assert recovered is not None
     assert recovered.state is OrderState.FILLED
     assert recovered.cum_qty == Decimal("0.5")
+
+
+class _DarkVenue:
+    """An ``Exchange`` behind a dead link: every read fails (``None``), and
+    placing anything is a test failure — the barrier must gate all sends."""
+
+    def __init__(self) -> None:
+        self.reads = 0
+
+    async def place(self, order: PlaceOrder) -> None:
+        raise AssertionError("nothing may be placed before the barrier clears")
+
+    async def cancel(self, cloid: str) -> None:
+        raise AssertionError("nothing may be cancelled before the barrier clears")
+
+    async def fetch_order(self, cloid: str) -> VenueOrderView | None:
+        self.reads += 1
+        return None
+
+
+def test_sustained_venue_outage_trips_the_barrier_to_faulted_after_the_window() -> None:
+    clock = ManualClock(start_ns=0)
+    store = SQLiteStore(":memory:")
+    store.checkpoint(_saga("0xabc", OrderState.SUBMITTED), ts_ns=500)
+
+    bus = InMemoryBus()
+    cache = Cache(store=store)
+    cache.rebuild()
+    venue = _DarkVenue()
+    reconciler = Reconciler(bus=bus, clock=clock, exchange=venue, cache=cache)
+
+    with pytest.raises(StartupReconciliationTimeout):
+        asyncio.run(reconciler.run_startup_barrier(timeout_seconds=30.0))
+
+    # Bounded retry with backoff: several attempts, never a tight loop.
+    assert 3 <= venue.reads <= 10
+    # Freeze, don't guess (ADR-0011 inv 1/5): the outage resolved nothing.
+    recovered = store.get_order("0xabc")
+    assert recovered is not None
+    assert recovered.state is OrderState.SUBMITTED
+
+
+class _BlippingVenue(_DarkVenue):
+    """A venue whose link comes back after a couple of failed reads."""
+
+    def __init__(self, failures: int) -> None:
+        super().__init__()
+        self._failures = failures
+
+    async def fetch_order(self, cloid: str) -> VenueOrderView | None:
+        self.reads += 1
+        if self.reads <= self._failures:
+            return None
+        return VenueOrderView(status=None)  # link restored: positively no record
+
+
+def test_a_transient_boot_time_blip_resolves_and_the_barrier_clears() -> None:
+    clock = ManualClock(start_ns=0)
+    store = SQLiteStore(":memory:")
+    store.checkpoint(_saga("0xabc", OrderState.SUBMITTED), ts_ns=500)
+
+    bus = InMemoryBus()
+    cache = Cache(store=store)
+    cache.rebuild()
+    venue = _BlippingVenue(failures=2)
+    manager = ExecutionManager(bus=bus, clock=clock, exchange=venue, cache=cache)
+    bus.subscribe(ExecutionReport, manager.on_execution_report)
+    reconciler = Reconciler(bus=bus, clock=clock, exchange=venue, cache=cache)
+
+    asyncio.run(reconciler.run_startup_barrier(timeout_seconds=30.0))
+
+    # The retry absorbed the blip; the pass then resolved the saga normally.
+    assert venue.reads == 3
+    recovered = store.get_order("0xabc")
+    assert recovered is not None
+    assert recovered.state is OrderState.FAILED
+
+
+def test_on_the_paper_path_the_barrier_always_clears() -> None:
+    clock = ManualClock(start_ns=2_000)
+    store = SQLiteStore(":memory:")
+    exchange, dead_bus = _surviving_venue(clock)
+
+    async def first_life() -> None:
+        await dead_bus.publish(_tick("42000"))
+        await exchange.place(_resting_limit("0xabc"))
+
+    asyncio.run(first_life())
+    store.checkpoint(_saga("0xabc", OrderState.SUBMITTED), ts_ns=500)
+    _, _, reconciler, _ = _second_life(store, exchange, clock)
+
+    before_ns = clock.timestamp_ns()
+    asyncio.run(reconciler.run_startup_barrier(timeout_seconds=30.0))
+
+    # In-process reads cannot fail (ADR-0024): one pass, no backoff burned.
+    assert clock.timestamp_ns() == before_ns
+    recovered = store.get_order("0xabc")
+    assert recovered is not None
+    assert recovered.state is OrderState.LIVE

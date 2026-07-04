@@ -22,10 +22,13 @@ from tickwright.domain import (
     Order,
     OrderState,
     OrderStatusReport,
+    StartupReconciliationTimeout,
     VenueOrderView,
 )
 
 from .cache import Cache
+
+_NS_PER_SECOND = 1_000_000_000
 
 
 class Reconciler:
@@ -49,6 +52,29 @@ class Reconciler:
                 return False
             await self._adopt(order, view)
         return True
+
+    async def run_startup_barrier(
+        self, *, timeout_seconds: float, initial_backoff_seconds: float = 1.0
+    ) -> None:
+        """The hard startup gate (ADR-0024): nothing places until this clears.
+
+        Retries the mass-rebuild with exponential backoff so a transient
+        boot-time venue blip resolves and startup proceeds; a sustained outage
+        trips ``startup_reconciliation_timeout`` → ``StartupReconciliationTimeout``
+        (an ``InvariantViolation``), which the runner maps to ``FAULTED`` and a
+        non-zero exit for the external supervisor to backoff-restart. On the
+        paper path reads cannot fail, so the barrier always clears.
+        """
+        deadline_ns = self._clock.timestamp_ns() + int(timeout_seconds * _NS_PER_SECOND)
+        backoff_seconds = initial_backoff_seconds
+        while not await self.reconcile_startup():
+            if self._clock.timestamp_ns() >= deadline_ns:
+                raise StartupReconciliationTimeout(
+                    f"venue unreachable for {timeout_seconds}s during startup "
+                    "reconciliation; refusing to start on unverified state"
+                )
+            await self._clock.sleep(backoff_seconds)
+            backoff_seconds *= 2
 
     async def _adopt(self, order: Order, view: VenueOrderView) -> None:
         """Align one saga with the venue's view of its cloid."""
