@@ -25,6 +25,7 @@ from tickwright.domain import (
     StartupReconciliationTimeout,
     VenueOrderView,
 )
+from tickwright.observability import named_event
 
 from .cache import Cache
 
@@ -86,7 +87,7 @@ class Reconciler:
                 continue
             view = await self._exchange.fetch_order(order.cloid)
             if view is None:
-                return False
+                return self._freeze("inflight", order.cloid)
             if view.has_record:
                 self._inflight_misses.pop(order.cloid, None)
                 await self._adopt(order, view)
@@ -102,6 +103,14 @@ class Reconciler:
             self._inflight_misses.pop(order.cloid, None)
             await self._bus.publish(self._failed_verdict(order))
         return True
+
+    def _freeze(self, cycle: str, cloid: str) -> bool:
+        """The connectivity guard tripping (ADR-0011 inv 1): a failed venue read
+        aborts the whole cycle — nothing is ghosted, removed, or counted, since
+        an outage must never read as "all orders vanished". Returns ``False``
+        for the caller to propagate as the cycle verdict."""
+        named_event("reconcile.frozen", cycle=cycle, cloid=cloid)
+        return False
 
     async def run_startup_barrier(
         self,

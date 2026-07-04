@@ -10,6 +10,8 @@ through the ``ExecutionManager`` so dedup makes every cycle idempotent.
 import asyncio
 from decimal import Decimal
 
+import structlog.testing
+
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
@@ -28,6 +30,7 @@ from tickwright.domain import (
     Side,
     Signal,
     TimeInForce,
+    VenueOrderView,
 )
 from tickwright.engine.cache import Cache
 from tickwright.engine.execution import ExecutionManager
@@ -104,6 +107,26 @@ async def _record(sink: list[OrderEvent], event: OrderEvent) -> None:
     sink.append(event)
 
 
+class _FlakyLink:
+    """A real venue behind a link that can drop: while down, every read fails
+    (``None``) — never to be confused with a venue that answers "no record"."""
+
+    def __init__(self, venue: PaperExchange) -> None:
+        self._venue = venue
+        self.down = False
+
+    async def place(self, order: PlaceOrder) -> None:
+        await self._venue.place(order)
+
+    async def cancel(self, cloid: str) -> None:
+        await self._venue.cancel(cloid)
+
+    async def fetch_order(self, cloid: str) -> VenueOrderView | None:
+        if self.down:
+            return None
+        return await self._venue.fetch_order(cloid)
+
+
 # --- Fast in-flight cycle -----------------------------------------------------
 
 
@@ -163,3 +186,42 @@ def test_inflight_no_record_resolves_failed_only_after_the_attempt_budget() -> N
     assert order.state is OrderState.FAILED
     assert [type(ev) for ev in events] == [OrderFailed]
     assert events[0].reconciliation is True
+
+
+# --- Connectivity guard ---------------------------------------------------------
+
+
+def test_a_none_read_freezes_the_cycle_emits_frozen_and_the_next_cycle_heals() -> None:
+    clock = ManualClock(start_ns=2_000)
+    store = SQLiteStore(":memory:")
+    exchange, dead_bus = _surviving_venue(clock)
+
+    async def ack_lost() -> None:
+        await dead_bus.publish(_tick("42000"))
+        await exchange.place(_resting_limit("0xabc"))
+
+    asyncio.run(ack_lost())
+    store.checkpoint(_saga("0xabc", OrderState.SUBMITTED), ts_ns=500)
+    link = _FlakyLink(exchange)
+    _, reconciler, events = _engine(store, link, clock)  # type: ignore[arg-type]
+
+    # An outage must never read as "all orders vanished" (ADR-0011 inv 1):
+    # the cycle freezes, resolves nothing, and says so as telemetry.
+    link.down = True
+    with structlog.testing.capture_logs() as logs:
+        assert asyncio.run(reconciler.reconcile_inflight()) is False
+    order = store.get_order("0xabc")
+    assert order is not None
+    assert order.state is OrderState.SUBMITTED
+    assert events == []
+    frozen = [log for log in logs if log["event"] == "reconcile.frozen"]
+    assert len(frozen) == 1
+    assert frozen[0]["cycle"] == "inflight"
+
+    # The link returns: the very next cycle heals normally — the freeze also
+    # never advanced the no-record miss count toward a false FAILED.
+    link.down = False
+    assert asyncio.run(reconciler.reconcile_inflight()) is True
+    order = store.get_order("0xabc")
+    assert order is not None
+    assert order.state is OrderState.LIVE
