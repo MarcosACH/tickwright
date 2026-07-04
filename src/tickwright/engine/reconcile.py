@@ -53,6 +53,20 @@ class Reconciler:
             await self._adopt(order, view)
         return True
 
+    async def reconcile_inflight(self) -> bool:
+        """The fast continuous cycle: resolve ``SUBMITTED`` orders that never
+        acked — the riskiest "did it land?" path (ADR-0011). ``True`` on a
+        completed pass; ``False`` means a venue read failed and the cycle froze.
+        """
+        for order in self._cache.open_orders():
+            if order.state is not OrderState.SUBMITTED:
+                continue
+            view = await self._exchange.fetch_order(order.cloid)
+            if view is None:
+                return False
+            await self._adopt(order, view)
+        return True
+
     async def run_startup_barrier(
         self,
         *,
