@@ -10,11 +10,17 @@ intent is persisted **before** any ``Exchange.place`` call — so a crash mid-se
 leaves a durable record recovery can reconcile by cloid — and ``SUBMITTED`` is
 checkpointed after the send returns, arming the in-flight grace clock. A timeout
 never transitions a saga: nothing here subscribes to time; only venue facts and
-(later) reconciliation move an order. The ``PreTradeGuard`` and cancels are
-later slices.
+(later) reconciliation move an order.
+
+A ``CancelSignal`` re-derives the target ``cloid`` from ``target_signal_id``,
+durably checkpoints the ``cancel_requested`` marker **before** calling
+``Exchange.cancel``, and leaves the saga ``LIVE`` — the marker is metadata, not a
+state, so the order can still fill (ADR-0026). The ``PreTradeGuard`` is a later
+slice.
 """
 
 from tickwright.domain import (
+    CancelSignal,
     Clock,
     EventBus,
     Exchange,
@@ -22,7 +28,13 @@ from tickwright.domain import (
     FillReport,
     InvariantViolation,
     Order,
+    OrderCancelled,
+    OrderEvent,
+    OrderLive,
     OrderPlaced,
+    OrderRejected,
+    OrderState,
+    OrderStatusReport,
     OrderSubmitted,
     PlaceOrder,
     PlaceSignal,
@@ -45,11 +57,14 @@ class ExecutionManager:
     async def on_signal(self, signal: Signal) -> None:
         if isinstance(signal, PlaceSignal):
             await self._place(signal)
-        # CancelSignal handling arrives with the cancel slice.
+        elif isinstance(signal, CancelSignal):
+            await self._cancel(signal)
 
     async def on_execution_report(self, report: ExecutionReport) -> None:
         if isinstance(report, FillReport):
             await self._apply_fill(report)
+        elif isinstance(report, OrderStatusReport):
+            await self._apply_status(report)
 
     async def _place(self, signal: PlaceSignal) -> None:
         cloid = derive_cloid(signal.signal_id)
@@ -71,9 +86,9 @@ class ExecutionManager:
         # PENDING is the write-ahead intent: durable before anything else
         # happens (ADR-0008 rule 1), then announced.
         self._checkpoint(order)
-        await self._bus.publish(self._order_event(OrderPlaced, order))
+        await self._bus.publish(self._event(OrderPlaced, order))
 
-        submitted = self._order_event(OrderSubmitted, order)
+        submitted = self._event(OrderSubmitted, order)
         order.apply(submitted)
         await self._bus.publish(submitted)
 
@@ -95,6 +110,38 @@ class ExecutionManager:
         # arms the in-flight grace clock.
         self._checkpoint(order)
 
+    async def _cancel(self, signal: CancelSignal) -> None:
+        # Re-derive the target cloid from the signal_id the strategy emitted, so
+        # the cloid derivation never leaks into strategy code (ADR-0006/0026).
+        cloid = derive_cloid(signal.target_signal_id)
+        order = self._orders.get(cloid)
+        if order is None:
+            return  # A cancel for an order we do not own: benign no-op (ADR-0026).
+
+        if not order.request_cancel(signal_id=signal.signal_id, ts_ns=self._clock.timestamp_ns()):
+            # Already terminal, or already requested: an idempotent no-op. A
+            # re-emitted CancelSignal must not send a second cancel.
+            return
+
+        # The cancel_requested marker is durable *before* the send: a crash in the
+        # send window still lets reconciliation resolve an ack-lost cancel. The
+        # saga stays in its current state — the marker is metadata, not a state,
+        # so the order can still fill (ADR-0026).
+        self._checkpoint(order)
+        await self._exchange.cancel(cloid)
+
+    async def _apply_status(self, report: OrderStatusReport) -> None:
+        order = self._orders.get(report.cloid)
+        if order is None:
+            return  # A status for an order we do not own — reconciliation's concern.
+
+        event = self._status_event(order, report)
+        if event is None:
+            return  # A status that maps to no saga transition: nothing to do.
+        if not order.apply(event):
+            return  # Redelivered status the saga already reflects: suppress republish.
+        await self._commit(order, event)
+
     async def _apply_fill(self, report: FillReport) -> None:
         order = self._orders.get(report.cloid)
         if order is None:
@@ -114,6 +161,19 @@ class ExecutionManager:
             # Redelivered fill: the saga already reflects it. Suppress the
             # duplicate publish so downstream consumers never double-count.
             return
+        await self._commit(order, event)
+
+    async def _commit(self, order: Order, event: OrderEvent) -> None:
+        """Durably record the advanced saga, then announce it — never the reverse.
+
+        The crash-safe tail every venue-fact handler shares: checkpoint strictly
+        before publish (ADR-0008), so a crash between the two can never leave an
+        announced transition the durable store never recorded. Callers apply and
+        dedup first, so a deduped redelivery never reaches here — this only ever
+        commits a transition that advanced the saga. ``_place`` is deliberately
+        not routed through it: its ``SUBMITTED`` publish precedes the post-send
+        checkpoint (ADR-0008 rule 2), the one place that ordering is inverted.
+        """
         self._checkpoint(order)
         await self._bus.publish(event)
 
@@ -128,9 +188,18 @@ class ExecutionManager:
                 f"checkpoint write failed for cloid {order.cloid} in state {order.state.value}"
             ) from exc
 
-    def _order_event[E: (OrderPlaced, OrderSubmitted)](
-        self, event_type: type[E], order: Order
+    def _event[E: (OrderPlaced, OrderSubmitted, OrderLive, OrderCancelled)](
+        self, event_type: type[E], order: Order, *, venue_oid: str | None = None
     ) -> E:
+        """Build a reason-less canonical ``OrderEvent`` from ``order``'s identity.
+
+        The one home for the shared saga-event envelope (cloid, strategy id,
+        signal id, symbol, venue oid, timestamps). ``venue_oid`` defaults to the
+        order's own; a venue status carrying a fresher one passes it in. The
+        constraint set is exactly the reason-less families — ``OrderRejected``
+        and the other terminal-with-reason events are built explicitly, so mypy
+        rejects routing them through here without their required ``reason``.
+        """
         now = self._clock.timestamp_ns()
         return event_type(
             ts_event=now,
@@ -139,5 +208,29 @@ class ExecutionManager:
             strategy_id=order.strategy_id,
             signal_id=order.signal_id,
             symbol=order.symbol,
-            venue_oid=order.venue_oid,
+            venue_oid=venue_oid if venue_oid is not None else order.venue_oid,
         )
+
+    def _status_event(self, order: Order, report: OrderStatusReport) -> OrderEvent | None:
+        """Translate a raw ``OrderStatusReport`` into the canonical transition, or
+        ``None`` for a status that maps to no saga move. A fresher ``venue_oid`` on
+        the report wins; otherwise the order's own is kept."""
+        match report.status:
+            case OrderState.LIVE:
+                return self._event(OrderLive, order, venue_oid=report.venue_oid)
+            case OrderState.CANCELLED:
+                return self._event(OrderCancelled, order, venue_oid=report.venue_oid)
+            case OrderState.REJECTED:
+                now = self._clock.timestamp_ns()
+                return OrderRejected(
+                    ts_event=now,
+                    ts_init=now,
+                    cloid=order.cloid,
+                    strategy_id=order.strategy_id,
+                    signal_id=order.signal_id,
+                    symbol=order.symbol,
+                    venue_oid=report.venue_oid if report.venue_oid is not None else order.venue_oid,
+                    reason=report.reason or "venue rejected",
+                )
+            case _:
+                return None

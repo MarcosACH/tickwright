@@ -135,6 +135,37 @@ def test_close_is_idempotent() -> None:
     store.close()  # a second close is a no-op, never an error
 
 
+def test_cancel_requested_marker_round_trips(tmp_path: Path) -> None:
+    path = tmp_path / "saga.db"
+    order = _order()
+    order.apply(_submitted())  # a marker is state-independent; SUBMITTED is fine here
+    order.request_cancel(signal_id="trivial:BTC:2", ts_ns=1_500)
+    with SQLiteStore(path) as store:
+        store.checkpoint(order, ts_ns=2_000)
+
+    # Recovery must see the marker so an ack-lost cancel resolves, and the cancel's
+    # own signal_id so the seq high-water-mark survives the restart (ADR-0026).
+    with SQLiteStore(path) as reopened:
+        loaded = reopened.get_order("0xabc")
+    assert loaded is not None
+    assert loaded.cancel_requested is True
+    assert loaded.cancel_requested_ts == 1_500
+    assert loaded.cancel_signal_id == "trivial:BTC:2"
+
+
+def test_default_order_round_trips_without_a_cancel_marker() -> None:
+    store = SQLiteStore(":memory:")
+    order = _order()
+    order.apply(_submitted())
+    store.checkpoint(order, ts_ns=1_000)
+
+    loaded = store.get_order("0xabc")
+    assert loaded is not None
+    assert loaded.cancel_requested is False
+    assert loaded.cancel_requested_ts is None
+    assert loaded.cancel_signal_id is None
+
+
 def test_checkpointed_order_round_trips_from_memory_store() -> None:
     store = SQLiteStore(":memory:")
     order = _order()

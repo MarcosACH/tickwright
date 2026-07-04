@@ -16,6 +16,7 @@ PENDING ─submit──────▶ SUBMITTED
 PENDING ─guard reject▶ REJECTED                  (pre-trade min-notional/qty guard, kill-switch)
 SUBMITTED ─ack rest──▶ LIVE
 SUBMITTED ─immediate─▶ FILLED | PARTIALLY_FILLED (paper immediate / marketable)
+SUBMITTED ─ioc no-fill▶ CANCELLED                (an IOC that never rests, unfilled remainder)
 SUBMITTED ─venue no──▶ REJECTED
 SUBMITTED ─hard fail─▶ FAILED                    (proven non-landing, NOT a timeout)
 LIVE ────────────────▶ PARTIALLY_FILLED | FILLED | CANCELLED | REJECTED(ghost)
@@ -26,6 +27,8 @@ This is the smallest subset of a full order FSM where every state still maps to 
 *distinct recovery situation*; we drop their richer surface (`EMULATED`, `PENDING_UPDATE`,
 `EXPIRED`, a separate `PENDING_CANCEL`, …) as out of scope. Cancel is modelled `LIVE →
 CANCELLED` with any in-flight cancel resolved by reconciliation, not a `CANCELLING` state.
+An unfilled **IOC** never rests, so it cancels directly `SUBMITTED → CANCELLED` (folding the
+dropped `EXPIRED` into `CANCELLED`) rather than passing through a spurious `LIVE`.
 
 ## Load-bearing invariants
 

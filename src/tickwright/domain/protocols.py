@@ -122,3 +122,9 @@ class Exchange(Protocol):
     async def place(self, order: PlaceOrder) -> None:
         """Place ``order`` at the venue; emit the resulting raw ``ExecutionReport``(s)."""
         ...
+
+    async def cancel(self, cloid: str) -> None:
+        """Cancel the order identified by ``cloid``; emit the resulting raw
+        ``ExecutionReport``. A cancel of an unknown/already-gone order is a
+        benign no-op (ADR-0026)."""
+        ...

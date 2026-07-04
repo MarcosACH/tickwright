@@ -36,6 +36,7 @@ _LEGAL_TRANSITIONS: frozenset[tuple[OrderState, OrderState]] = frozenset(
         (OrderState.SUBMITTED, OrderState.LIVE),
         (OrderState.SUBMITTED, OrderState.PARTIALLY_FILLED),
         (OrderState.SUBMITTED, OrderState.FILLED),
+        (OrderState.SUBMITTED, OrderState.CANCELLED),
         (OrderState.SUBMITTED, OrderState.REJECTED),
         (OrderState.SUBMITTED, OrderState.FAILED),
         (OrderState.LIVE, OrderState.PARTIALLY_FILLED),
@@ -45,6 +46,18 @@ _LEGAL_TRANSITIONS: frozenset[tuple[OrderState, OrderState]] = frozenset(
         (OrderState.PARTIALLY_FILLED, OrderState.PARTIALLY_FILLED),
         (OrderState.PARTIALLY_FILLED, OrderState.FILLED),
         (OrderState.PARTIALLY_FILLED, OrderState.CANCELLED),
+    }
+)
+
+# The terminal states: no transition leaves them, so a cancel request against
+# one is a no-op (ADR-0010 taxonomy, ADR-0026).
+_TERMINAL_STATES: frozenset[OrderState] = frozenset(
+    {
+        OrderState.FILLED,
+        OrderState.CANCELLED,
+        OrderState.DENIED,
+        OrderState.REJECTED,
+        OrderState.FAILED,
     }
 )
 
@@ -64,12 +77,41 @@ class Order:
     cum_qty: Decimal = Decimal("0")
     venue_oid: str | None = None
     reason: str | None = None
+    cancel_requested: bool = False
+    cancel_requested_ts: int | None = None
+    cancel_signal_id: str | None = None
     _applied_event_ids: set[str] = field(default_factory=set, init=False, repr=False)
 
     @property
     def applied_event_ids(self) -> frozenset[str]:
         """The reflected ``event_id``s — the dedup set a ``Store`` round-trips."""
         return frozenset(self._applied_event_ids)
+
+    @property
+    def is_terminal(self) -> bool:
+        """Whether the saga has reached a terminal state (no transition leaves it)."""
+        return self.state in _TERMINAL_STATES
+
+    def request_cancel(self, *, signal_id: str, ts_ns: int) -> bool:
+        """Record cancel intent as a durable marker, **not** an FSM state (ADR-0026).
+
+        The order stays in its current state and can still fill — the cancel/fill
+        race is real, and a fill wins it. Returns ``True`` if this call set the
+        marker, ``False`` if it was a no-op (already requested, or terminal), so
+        the caller can skip a redundant cancel send. Idempotent: a re-emitted
+        ``CancelSignal`` keeps the first request's ``signal_id`` and timestamp.
+
+        The cancel's own ``signal_id`` is retained so a restart recovers the seq
+        high-water-mark from the store and never re-issues a consumed cancel id
+        (ADR-0026, ADR-0016) — the ``PlaceSignal`` id lives in ``signal_id``, but
+        cancels have no other durable home.
+        """
+        if self.is_terminal or self.cancel_requested:
+            return False
+        self.cancel_requested = True
+        self.cancel_requested_ts = ts_ns
+        self.cancel_signal_id = signal_id
+        return True
 
     @classmethod
     def restore(
@@ -86,12 +128,18 @@ class Order:
         cum_qty: Decimal,
         venue_oid: str | None,
         reason: str | None,
+        cancel_requested: bool,
+        cancel_requested_ts: int | None,
+        cancel_signal_id: str | None,
         applied_event_ids: Iterable[str],
     ) -> "Order":
         """Rebuild a checkpointed saga exactly as persisted (ADR-0008 recovery).
 
         Restores the dedup set too, so a redelivered event that predates the
-        crash is still a no-op on the recovered saga.
+        crash is still a no-op on the recovered saga. The ``cancel_requested``
+        marker and the cancel's ``signal_id`` round-trip so reconciliation can
+        resolve an ack-lost cancel and the seq high-water-mark stays intact after
+        a restart (ADR-0026).
         """
         order = cls(
             cloid=cloid,
@@ -105,6 +153,9 @@ class Order:
             cum_qty=cum_qty,
             venue_oid=venue_oid,
             reason=reason,
+            cancel_requested=cancel_requested,
+            cancel_requested_ts=cancel_requested_ts,
+            cancel_signal_id=cancel_signal_id,
         )
         order._applied_event_ids.update(applied_event_ids)
         return order

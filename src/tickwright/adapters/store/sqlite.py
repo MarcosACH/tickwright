@@ -31,6 +31,9 @@ CREATE TABLE IF NOT EXISTS orders (
     cum_qty           TEXT NOT NULL,
     venue_oid         TEXT,
     reason            TEXT,
+    cancel_requested    INTEGER NOT NULL DEFAULT 0,
+    cancel_requested_ts INTEGER,
+    cancel_signal_id    TEXT,
     applied_event_ids TEXT NOT NULL,
     history           TEXT NOT NULL
 )
@@ -62,7 +65,8 @@ class SQLiteStore:
             history: list[list[object]] = json.loads(row[0]) if row else []
             history.append([order.state.value, ts_ns])
             self._conn.execute(
-                "INSERT OR REPLACE INTO orders VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT OR REPLACE INTO orders VALUES "
+                "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     order.cloid,
                     order.strategy_id,
@@ -75,6 +79,9 @@ class SQLiteStore:
                     str(order.cum_qty),
                     order.venue_oid,
                     order.reason,
+                    int(order.cancel_requested),
+                    order.cancel_requested_ts,
+                    order.cancel_signal_id,
                     json.dumps(sorted(order.applied_event_ids)),
                     json.dumps(history),
                 ),
@@ -84,7 +91,8 @@ class SQLiteStore:
         """Rebuild the checkpointed saga for ``cloid``, or ``None`` if unknown."""
         row = self._conn.execute(
             "SELECT strategy_id, signal_id, symbol, side, quantity, order_type,"
-            "       state, cum_qty, venue_oid, reason, applied_event_ids"
+            "       state, cum_qty, venue_oid, reason, cancel_requested,"
+            "       cancel_requested_ts, cancel_signal_id, applied_event_ids"
             "  FROM orders WHERE cloid = ?",
             (cloid,),
         ).fetchone()
@@ -102,7 +110,10 @@ class SQLiteStore:
             cum_qty=Decimal(row[7]),
             venue_oid=row[8],
             reason=row[9],
-            applied_event_ids=json.loads(row[10]),
+            cancel_requested=bool(row[10]),
+            cancel_requested_ts=row[11],
+            cancel_signal_id=row[12],
+            applied_event_ids=json.loads(row[13]),
         )
 
     def history(self, cloid: str) -> list[tuple[OrderState, int]]:

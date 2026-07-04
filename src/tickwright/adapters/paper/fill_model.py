@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Protocol, runtime_checkable
 
-from tickwright.domain import MarketTick, PlaceOrder
+from tickwright.domain import InvariantViolation, MarketTick, PlaceOrder
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +30,11 @@ class FillModel(Protocol):
         """Return the fill for a MARKET ``order`` against the latest ``tick``."""
         ...
 
+    def limit_fill(self, order: PlaceOrder, tick: MarketTick) -> Fill:
+        """Return the fill for a marketable LIMIT ``order`` (the book decides it
+        crosses; the model decides how much and at what price)."""
+        ...
+
 
 class ImmediateFillModel:
     """Deterministic, optimistic, zero-slippage, full-fill (ADR-0012 default)."""
@@ -37,3 +42,10 @@ class ImmediateFillModel:
     def market_fill(self, order: PlaceOrder, tick: MarketTick) -> Fill:
         # Unlimited liquidity: fill the whole quantity now at the tick price.
         return Fill(quantity=order.quantity, price=tick.price)
+
+    def limit_fill(self, order: PlaceOrder, tick: MarketTick) -> Fill:
+        # Full fill at the limit price: no price improvement, no partials. The
+        # book has already decided the order crosses, so ``price`` is set.
+        if order.price is None:
+            raise InvariantViolation(f"marketable LIMIT {order.cloid} filled with no price")
+        return Fill(quantity=order.quantity, price=order.price)

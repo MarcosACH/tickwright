@@ -8,6 +8,7 @@ It is the stable contract of the system; keep it log-free and dependency-free.
 from .enums import AggressorSide, OrderState, OrderType, Side, TimeInForce
 from .errors import InvariantViolation
 from .events import (
+    CancelSignal,
     Event,
     ExecutionReport,
     FillReport,
@@ -51,6 +52,7 @@ __all__ = [
     # errors
     "InvariantViolation",
     # events + value types
+    "CancelSignal",
     "Event",
     "ExecutionReport",
     "FillReport",

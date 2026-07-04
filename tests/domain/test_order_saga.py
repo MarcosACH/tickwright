@@ -228,6 +228,15 @@ def test_live_order_can_be_cancelled() -> None:
     assert order.state is OrderState.CANCELLED
 
 
+def test_submitted_order_can_cancel_without_ever_resting() -> None:
+    # An unfilled IOC LIMIT never rests (LIVE); the venue cancels it straight
+    # from SUBMITTED (ADR-0007, extended for the IOC no-fill path).
+    order = _order()
+    order.apply(_submitted())
+    order.apply(_cancelled())
+    assert order.state is OrderState.CANCELLED
+
+
 def test_ghost_live_order_with_no_fills_resolves_to_rejected() -> None:
     order = _order()
     order.apply(_submitted())
@@ -281,6 +290,55 @@ def test_illegal_transition_raises_invariant_violation() -> None:
     # A fill on a still-PENDING order (never submitted) is not a legal entry.
     with pytest.raises(InvariantViolation):
         order.apply(_filled())
+
+
+# --- cancel_requested marker: metadata, not a state (ADR-0026) --------------
+
+
+def test_request_cancel_marks_intent_without_changing_state() -> None:
+    order = _order()
+    order.apply(_submitted())
+    order.apply(_live())
+    assert order.request_cancel(signal_id="trivial:BTC:2", ts_ns=5) is True
+    assert order.cancel_requested is True
+    assert order.cancel_requested_ts == 5
+    # The cancel's own signal_id is retained so a restart can recover the seq
+    # high-water-mark and never re-issue it (ADR-0026/0016).
+    assert order.cancel_signal_id == "trivial:BTC:2"
+    # The marker is metadata: the saga stays LIVE and can still fill.
+    assert order.state is OrderState.LIVE
+
+
+def test_request_cancel_is_idempotent_and_keeps_the_first_request() -> None:
+    order = _order()
+    order.apply(_submitted())
+    order.apply(_live())
+    order.request_cancel(signal_id="trivial:BTC:2", ts_ns=5)
+    assert order.request_cancel(signal_id="trivial:BTC:9", ts_ns=9) is False
+    # The first request wins: neither timestamp nor signal_id is overwritten.
+    assert order.cancel_requested_ts == 5
+    assert order.cancel_signal_id == "trivial:BTC:2"
+
+
+def test_request_cancel_on_a_terminal_order_is_a_no_op() -> None:
+    order = _order()
+    order.apply(_submitted())
+    order.apply(_filled())  # FILLED is terminal
+    assert order.request_cancel(signal_id="trivial:BTC:2", ts_ns=5) is False
+    assert order.cancel_requested is False
+    assert order.cancel_signal_id is None
+
+
+def test_a_fill_after_cancel_requested_still_transitions_to_filled() -> None:
+    order = _order()
+    order.apply(_submitted())
+    order.apply(_live())
+    order.request_cancel(signal_id="trivial:BTC:2", ts_ns=5)
+    # The cancel/fill race: the marker is set, but a venue fill still wins the
+    # race to a terminal state (ADR-0026). The marker does not block it.
+    order.apply(_filled())
+    assert order.state is OrderState.FILLED
+    assert order.cancel_requested is True  # marker preserved, just not a state
 
 
 # --- record_fill: Order owns fill accounting (ADR-0007) ---------------------
