@@ -118,7 +118,7 @@ class ExecutionManager:
         if order is None:
             return  # A cancel for an order we do not own: benign no-op (ADR-0026).
 
-        if not order.request_cancel(ts_ns=self._clock.timestamp_ns()):
+        if not order.request_cancel(signal_id=signal.signal_id, ts_ns=self._clock.timestamp_ns()):
             # Already terminal, or already requested: an idempotent no-op. A
             # re-emitted CancelSignal must not send a second cancel.
             return

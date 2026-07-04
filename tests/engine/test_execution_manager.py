@@ -467,9 +467,11 @@ def test_cancel_signal_checkpoints_the_marker_and_cancels_the_derived_cloid() ->
     record = store.get_order(cloid)
     assert record is not None
     assert record.state is OrderState.CANCELLED
-    # The cancel_requested marker was checkpointed (durable before the send).
+    # The cancel_requested marker was checkpointed (durable before the send),
+    # including the cancel's own signal_id for the seq high-water-mark (ADR-0026).
     assert record.cancel_requested is True
     assert record.cancel_requested_ts is not None
+    assert record.cancel_signal_id == "trivial:BTC:2"
 
 
 def test_a_venue_fill_wins_the_race_and_a_later_cancel_is_a_no_op() -> None:
