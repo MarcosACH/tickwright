@@ -110,6 +110,11 @@ class Store(Protocol):
         """Rebuild the checkpointed saga for ``cloid``, or ``None`` if unknown."""
         ...
 
+    def all_orders(self) -> list[Order]:
+        """Rebuild every checkpointed saga — the recovery mass-read the ``Cache``
+        projection is rebuilt from (ADR-0009)."""
+        ...
+
 
 @runtime_checkable
 class Exchange(Protocol):

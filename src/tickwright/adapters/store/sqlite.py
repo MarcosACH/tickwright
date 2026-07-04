@@ -15,6 +15,7 @@ import weakref
 from decimal import Decimal
 from pathlib import Path
 from types import TracebackType
+from typing import Any
 
 from tickwright.domain import Order, OrderState, OrderType, Side
 
@@ -87,33 +88,47 @@ class SQLiteStore:
                 ),
             )
 
+    _RECORD_COLUMNS = (
+        "cloid, strategy_id, signal_id, symbol, side, quantity, order_type,"
+        " state, cum_qty, venue_oid, reason, cancel_requested,"
+        " cancel_requested_ts, cancel_signal_id, applied_event_ids"
+    )
+
     def get_order(self, cloid: str) -> Order | None:
         """Rebuild the checkpointed saga for ``cloid``, or ``None`` if unknown."""
         row = self._conn.execute(
-            "SELECT strategy_id, signal_id, symbol, side, quantity, order_type,"
-            "       state, cum_qty, venue_oid, reason, cancel_requested,"
-            "       cancel_requested_ts, cancel_signal_id, applied_event_ids"
-            "  FROM orders WHERE cloid = ?",
-            (cloid,),
+            f"SELECT {self._RECORD_COLUMNS} FROM orders WHERE cloid = ?", (cloid,)
         ).fetchone()
         if row is None:
             return None
+        return self._restore(row)
+
+    def all_orders(self) -> list[Order]:
+        """Rebuild every checkpointed saga — the recovery mass-read (ADR-0009)."""
+        rows = self._conn.execute(
+            f"SELECT {self._RECORD_COLUMNS} FROM orders ORDER BY cloid"
+        ).fetchall()
+        return [self._restore(row) for row in rows]
+
+    @staticmethod
+    def _restore(row: tuple[Any, ...]) -> Order:
+        """One saga row, in ``_RECORD_COLUMNS`` order, back into an ``Order``."""
         return Order.restore(
-            cloid=cloid,
-            strategy_id=row[0],
-            signal_id=row[1],
-            symbol=row[2],
-            side=Side(row[3]),
-            quantity=Decimal(row[4]),
-            order_type=OrderType(row[5]),
-            state=OrderState(row[6]),
-            cum_qty=Decimal(row[7]),
-            venue_oid=row[8],
-            reason=row[9],
-            cancel_requested=bool(row[10]),
-            cancel_requested_ts=row[11],
-            cancel_signal_id=row[12],
-            applied_event_ids=json.loads(row[13]),
+            cloid=row[0],
+            strategy_id=row[1],
+            signal_id=row[2],
+            symbol=row[3],
+            side=Side(row[4]),
+            quantity=Decimal(row[5]),
+            order_type=OrderType(row[6]),
+            state=OrderState(row[7]),
+            cum_qty=Decimal(row[8]),
+            venue_oid=row[9],
+            reason=row[10],
+            cancel_requested=bool(row[11]),
+            cancel_requested_ts=row[12],
+            cancel_signal_id=row[13],
+            applied_event_ids=json.loads(row[14]),
         )
 
     def history(self, cloid: str) -> list[tuple[OrderState, int]]:
