@@ -138,6 +138,13 @@ class ExecutionManager:
         order = self._cache.get_order(report.cloid)
         if order is None:
             return  # A status for an order we do not own — reconciliation's concern.
+        if order.is_terminal:
+            # A late or synthetic status after the saga already resolved — e.g.
+            # the cancel-ack that lost the race to a fill, or a reconciler
+            # verdict crossing a venue push. Terminal is terminal: absorb it
+            # as an idempotent no-op, never route it into ``Order.apply`` to
+            # raise on an illegal transition (ADR-0026).
+            return
 
         event = self._status_event(order, report)
         if event is None:

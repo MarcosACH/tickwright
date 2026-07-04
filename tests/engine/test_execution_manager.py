@@ -496,6 +496,38 @@ def test_a_venue_fill_wins_the_race_and_a_later_cancel_is_a_no_op() -> None:
     assert record.state is OrderState.FILLED  # the late cancel did not move it
 
 
+def test_a_late_cancel_ack_on_a_terminal_saga_is_an_idempotent_no_op() -> None:
+    bus, _, store, order_events = _harness()
+    cloid = derive_cloid("trivial:BTC:1")
+
+    async def scenario() -> None:
+        await bus.publish(_tick("42000"))
+        await bus.publish(_limit_signal("41000"))  # rests LIVE
+        # The fill wins the cancel/fill race: FILLED, terminal (ADR-0026).
+        await bus.publish(_fill_report(cloid, trade_id="v1", quantity="0.5"))
+        # The venue's ack for the cancel that lost arrives late. A terminal
+        # saga absorbs it silently — routing it into Order.apply would raise
+        # InvariantViolation on FILLED -> CANCELLED (ADR-0026; #13 R001).
+        await bus.publish(
+            OrderStatusReport(
+                ts_event=2_000,
+                ts_init=2_000,
+                cloid=cloid,
+                symbol="BTC",
+                status=OrderState.CANCELLED,
+                reason="cancel acknowledged",
+            )
+        )
+
+    asyncio.run(scenario())
+
+    assert isinstance(order_events[-1], OrderFilled)
+    assert not [ev for ev in order_events if isinstance(ev, OrderCancelled)]
+    record = store.get_order(cloid)
+    assert record is not None
+    assert record.state is OrderState.FILLED
+
+
 def test_cancel_signal_for_an_unknown_order_is_a_benign_no_op() -> None:
     bus, _, _, order_events = _harness()
 
