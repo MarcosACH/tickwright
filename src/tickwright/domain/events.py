@@ -133,10 +133,18 @@ class CancelSignal(Signal):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ExecutionReport(Event):
-    """A raw venue fact emitted by an ``Exchange`` adapter (ADR-0015)."""
+    """A raw venue fact emitted by an ``Exchange`` adapter (ADR-0015).
+
+    ``reconciliation`` is audit/provenance metadata (ADR-0011 inv 6): ``True``
+    on the synthetic replicas the ``Reconciler`` builds from a fetched
+    ``VenueOrderView``, ``False`` on venue-pushed reports. Excluded from every
+    ``event_id`` so both copies of the same fact collapse under dedup; the
+    ``ExecutionManager`` propagates it onto the ``OrderEvent`` it publishes.
+    """
 
     cloid: str
     symbol: str
+    reconciliation: bool = False
 
     @property
     def partition_key(self) -> str:
@@ -325,6 +333,30 @@ class OrderFailed(OrderEvent):
     @property
     def state(self) -> OrderState:
         return OrderState.FAILED
+
+
+# --- Venue truth for one cloid (a query result, not an event) ---------------
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class VenueOrderView:
+    """One *successful* venue read for a cloid (``Exchange.fetch_order``).
+
+    Bundles the venue's order record (``status``; ``None`` when the venue
+    positively has no record) with that cloid's fill history, so the ADR-0011
+    open-orders-plus-fill-history cross-check is one read: a view with no
+    status and no fills is proof the order never landed. A read that *failed*
+    is never a view — ``fetch_order`` returns ``None`` for that (inv 1:
+    an outage must never read as "no record").
+    """
+
+    status: OrderStatusReport | None
+    fills: tuple[FillReport, ...] = ()
+
+    @property
+    def has_record(self) -> bool:
+        """Whether the venue knows this cloid at all — the resend gate (ADR-0008)."""
+        return self.status is not None or bool(self.fills)
 
 
 # --- Venue-neutral order request (not an event) -----------------------------

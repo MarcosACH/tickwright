@@ -30,6 +30,7 @@ from tickwright.domain import (
     Order,
     OrderCancelled,
     OrderEvent,
+    OrderFailed,
     OrderLive,
     OrderPlaced,
     OrderRejected,
@@ -39,20 +40,23 @@ from tickwright.domain import (
     PlaceOrder,
     PlaceSignal,
     Signal,
-    Store,
     derive_cloid,
 )
+
+from .cache import Cache
 
 
 class ExecutionManager:
     """Owns cloid assignment, the saga FSM, and canonical ``OrderEvent`` publishing."""
 
-    def __init__(self, *, bus: EventBus, clock: Clock, exchange: Exchange, store: Store) -> None:
+    def __init__(self, *, bus: EventBus, clock: Clock, exchange: Exchange, cache: Cache) -> None:
         self._bus = bus
         self._clock = clock
         self._exchange = exchange
-        self._store = store
-        self._orders: dict[str, Order] = {}  # working set; the Store is the durable copy.
+        # The working set and the durable copy in one seam: the Cache projects
+        # every checkpoint and is rebuilt from the Store on restart (ADR-0009),
+        # so a redelivered signal dedups across a crash too.
+        self._cache = cache
 
     async def on_signal(self, signal: Signal) -> None:
         if isinstance(signal, PlaceSignal):
@@ -68,8 +72,9 @@ class ExecutionManager:
 
     async def _place(self, signal: PlaceSignal) -> None:
         cloid = derive_cloid(signal.signal_id)
-        if cloid in self._orders:
-            # Re-seen signal_id: resume the existing saga, never place twice (ADR-0006).
+        if self._cache.get_order(cloid) is not None:
+            # Re-seen signal_id: the saga already exists — possibly from a life
+            # before a crash — never place twice (ADR-0006).
             return
 
         order = Order(
@@ -81,7 +86,6 @@ class ExecutionManager:
             quantity=signal.quantity,
             order_type=signal.order_type,
         )
-        self._orders[cloid] = order
 
         # PENDING is the write-ahead intent: durable before anything else
         # happens (ADR-0008 rule 1), then announced.
@@ -114,7 +118,7 @@ class ExecutionManager:
         # Re-derive the target cloid from the signal_id the strategy emitted, so
         # the cloid derivation never leaks into strategy code (ADR-0006/0026).
         cloid = derive_cloid(signal.target_signal_id)
-        order = self._orders.get(cloid)
+        order = self._cache.get_order(cloid)
         if order is None:
             return  # A cancel for an order we do not own: benign no-op (ADR-0026).
 
@@ -131,7 +135,7 @@ class ExecutionManager:
         await self._exchange.cancel(cloid)
 
     async def _apply_status(self, report: OrderStatusReport) -> None:
-        order = self._orders.get(report.cloid)
+        order = self._cache.get_order(report.cloid)
         if order is None:
             return  # A status for an order we do not own — reconciliation's concern.
 
@@ -143,7 +147,7 @@ class ExecutionManager:
         await self._commit(order, event)
 
     async def _apply_fill(self, report: FillReport) -> None:
-        order = self._orders.get(report.cloid)
+        order = self._cache.get_order(report.cloid)
         if order is None:
             return  # A report for an order we do not own — reconciliation's concern.
 
@@ -156,6 +160,7 @@ class ExecutionManager:
             price=report.price,
             ts_event=now,
             ts_init=now,
+            reconciliation=report.reconciliation,
         )
         if event is None:
             # Redelivered fill: the saga already reflects it. Suppress the
@@ -179,7 +184,7 @@ class ExecutionManager:
 
     def _checkpoint(self, order: Order) -> None:
         try:
-            self._store.checkpoint(order, ts_ns=self._clock.timestamp_ns())
+            self._cache.checkpoint(order, ts_ns=self._clock.timestamp_ns())
         except Exception as exc:
             # A checkpoint the store cannot make durable is a broken engine
             # assumption (ADR-0014): fail fast rather than run a saga whose
@@ -189,7 +194,12 @@ class ExecutionManager:
             ) from exc
 
     def _event[E: (OrderPlaced, OrderSubmitted, OrderLive, OrderCancelled)](
-        self, event_type: type[E], order: Order, *, venue_oid: str | None = None
+        self,
+        event_type: type[E],
+        order: Order,
+        *,
+        venue_oid: str | None = None,
+        reconciliation: bool = False,
     ) -> E:
         """Build a reason-less canonical ``OrderEvent`` from ``order``'s identity.
 
@@ -209,28 +219,52 @@ class ExecutionManager:
             signal_id=order.signal_id,
             symbol=order.symbol,
             venue_oid=venue_oid if venue_oid is not None else order.venue_oid,
+            reconciliation=reconciliation,
         )
 
     def _status_event(self, order: Order, report: OrderStatusReport) -> OrderEvent | None:
         """Translate a raw ``OrderStatusReport`` into the canonical transition, or
         ``None`` for a status that maps to no saga move. A fresher ``venue_oid`` on
-        the report wins; otherwise the order's own is kept."""
+        the report wins; otherwise the order's own is kept. The report's
+        ``reconciliation`` provenance carries through (ADR-0011 inv 6).
+
+        ``SUBMITTED`` and ``FAILED`` are minted only by the ``Reconciler``:
+        the bridge for a recovered ``PENDING`` whose send provably landed, and
+        the proven-never-landed verdict (ADR-0010) — verdicts, not venue pushes.
+        """
+        oid, flag = report.venue_oid, report.reconciliation
         match report.status:
+            case OrderState.SUBMITTED:
+                return self._event(OrderSubmitted, order, venue_oid=oid, reconciliation=flag)
             case OrderState.LIVE:
-                return self._event(OrderLive, order, venue_oid=report.venue_oid)
+                return self._event(OrderLive, order, venue_oid=oid, reconciliation=flag)
             case OrderState.CANCELLED:
-                return self._event(OrderCancelled, order, venue_oid=report.venue_oid)
+                return self._event(OrderCancelled, order, venue_oid=oid, reconciliation=flag)
             case OrderState.REJECTED:
-                now = self._clock.timestamp_ns()
-                return OrderRejected(
-                    ts_event=now,
-                    ts_init=now,
-                    cloid=order.cloid,
-                    strategy_id=order.strategy_id,
-                    signal_id=order.signal_id,
-                    symbol=order.symbol,
-                    venue_oid=report.venue_oid if report.venue_oid is not None else order.venue_oid,
-                    reason=report.reason or "venue rejected",
-                )
+                return self._reasoned_event(OrderRejected, order, report, "venue rejected")
+            case OrderState.FAILED:
+                return self._reasoned_event(OrderFailed, order, report, "proven never landed")
             case _:
                 return None
+
+    def _reasoned_event[E: (OrderRejected, OrderFailed)](
+        self,
+        event_type: type[E],
+        order: Order,
+        report: OrderStatusReport,
+        default_reason: str,
+    ) -> E:
+        """Build a terminal-with-reason event from ``order``'s identity and the
+        report's adjudication — the required-``reason`` twin of ``_event``."""
+        now = self._clock.timestamp_ns()
+        return event_type(
+            ts_event=now,
+            ts_init=now,
+            cloid=order.cloid,
+            strategy_id=order.strategy_id,
+            signal_id=order.signal_id,
+            symbol=order.symbol,
+            venue_oid=report.venue_oid if report.venue_oid is not None else order.venue_oid,
+            reason=report.reason or default_reason,
+            reconciliation=report.reconciliation,
+        )

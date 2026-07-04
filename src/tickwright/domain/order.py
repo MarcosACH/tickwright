@@ -33,6 +33,9 @@ _LEGAL_TRANSITIONS: frozenset[tuple[OrderState, OrderState]] = frozenset(
     {
         (OrderState.PENDING, OrderState.SUBMITTED),
         (OrderState.PENDING, OrderState.DENIED),
+        # Recovery-only: a durable write-ahead intent the venue positively has
+        # no record of — attempted, proven never landed (ADR-0010, ADR-0008).
+        (OrderState.PENDING, OrderState.FAILED),
         (OrderState.SUBMITTED, OrderState.LIVE),
         (OrderState.SUBMITTED, OrderState.PARTIALLY_FILLED),
         (OrderState.SUBMITTED, OrderState.FILLED),
@@ -196,6 +199,7 @@ class Order:
         price: Decimal,
         ts_event: int,
         ts_init: int,
+        reconciliation: bool = False,
     ) -> OrderFillEvent | None:
         """Account a raw fill and return the canonical event to publish, or ``None``.
 
@@ -221,5 +225,6 @@ class Order:
             quantity=quantity,
             price=price,
             cum_qty=cum_qty,
+            reconciliation=reconciliation,
         )
         return event if self.apply(event) else None

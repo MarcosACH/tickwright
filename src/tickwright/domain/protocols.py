@@ -11,7 +11,7 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
-from .events import Event, MarketTick, OrderEvent, PlaceOrder
+from .events import Event, MarketTick, OrderEvent, PlaceOrder, VenueOrderView
 from .order import Order
 
 type Handler[E: Event] = Callable[[E], Awaitable[None]]
@@ -110,6 +110,11 @@ class Store(Protocol):
         """Rebuild the checkpointed saga for ``cloid``, or ``None`` if unknown."""
         ...
 
+    def all_orders(self) -> list[Order]:
+        """Rebuild every checkpointed saga — the recovery mass-read the ``Cache``
+        projection is rebuilt from (ADR-0009)."""
+        ...
+
 
 @runtime_checkable
 class Exchange(Protocol):
@@ -127,4 +132,12 @@ class Exchange(Protocol):
         """Cancel the order identified by ``cloid``; emit the resulting raw
         ``ExecutionReport``. A cancel of an unknown/already-gone order is a
         benign no-op (ADR-0026)."""
+        ...
+
+    async def fetch_order(self, cloid: str) -> VenueOrderView | None:
+        """Venue truth for ``cloid`` — the reconciler's query-shaped direct read
+        (ADR-0004), never a bus message. Returns ``None`` only when the read
+        itself failed (outage): a failed read must never look like "no record"
+        (ADR-0011 inv 1). A successful read always returns a view, even an
+        empty one."""
         ...

@@ -6,7 +6,7 @@ It is the stable contract of the system; keep it log-free and dependency-free.
 """
 
 from .enums import AggressorSide, OrderState, OrderType, Side, TimeInForce
-from .errors import InvariantViolation
+from .errors import InvariantViolation, StartupReconciliationTimeout
 from .events import (
     CancelSignal,
     Event,
@@ -28,6 +28,7 @@ from .events import (
     PlaceOrder,
     PlaceSignal,
     Signal,
+    VenueOrderView,
 )
 from .ids import derive_cloid
 from .order import Order
@@ -51,6 +52,7 @@ __all__ = [
     "TimeInForce",
     # errors
     "InvariantViolation",
+    "StartupReconciliationTimeout",
     # events + value types
     "CancelSignal",
     "Event",
@@ -73,6 +75,7 @@ __all__ = [
     "PlaceOrder",
     "PlaceSignal",
     "Signal",
+    "VenueOrderView",
     # id derivation
     "derive_cloid",
     # seam Protocols

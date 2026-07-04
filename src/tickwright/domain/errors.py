@@ -8,3 +8,9 @@ pierces containment and faults the engine rather than being logged-and-skipped.
 
 class InvariantViolation(Exception):
     """A load-bearing engine invariant was broken (fail-fast, ADR-0014)."""
+
+
+class StartupReconciliationTimeout(InvariantViolation):
+    """The startup barrier could not reconcile against the venue within its
+    bounded window (ADR-0024): the engine must go ``FAULTED`` and exit non-zero
+    rather than trade on unverified state — freeze, don't guess (ADR-0011)."""

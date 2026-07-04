@@ -35,6 +35,7 @@ from tickwright.domain import (
     TimeInForce,
     derive_cloid,
 )
+from tickwright.engine.cache import Cache
 from tickwright.engine.execution import ExecutionManager
 
 _CLOID = derive_cloid("trivial:BTC:1")
@@ -45,7 +46,8 @@ def _wire() -> tuple[InMemoryBus, SQLiteStore, list[OrderEvent]]:
     clock = ManualClock(start_ns=1_000)
     store = SQLiteStore(":memory:")
     exchange = PaperExchange(bus=bus, clock=clock, fill_model=ImmediateFillModel())
-    manager = ExecutionManager(bus=bus, clock=clock, exchange=exchange, store=store)
+    cache = Cache(store=store)
+    manager = ExecutionManager(bus=bus, clock=clock, exchange=exchange, cache=cache)
 
     bus.subscribe(MarketTick, exchange.on_tick)
     bus.subscribe(Signal, manager.on_signal)

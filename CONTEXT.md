@@ -64,8 +64,8 @@ _Avoid_: CANCELLING state, pending-cancel (there is no such saga state).
 **DENIED** vs **REJECTED** vs **FAILED**:
 The three negative terminals, split on "was it sent, and who decided?". `DENIED` = our
 pre-trade guard refused it, **never sent** (safe to recreate). `REJECTED` = **sent**, the
-**venue** refused it (includes ghost-reconciled). `FAILED` = **sent**, we proved it **never
-landed**. Never collapse them — their recovery differs. See ADR-0010.
+**venue** refused it (includes ghost-reconciled). `FAILED` = **sent (or attempted)**, we proved it **never
+landed** (recovery resolves a never-landed `PENDING`/`SUBMITTED` here, never a blind resend). Never collapse them — their recovery differs. See ADR-0010.
 _Avoid_: error, cancelled (a cancel is none of these).
 
 **MarketFeed** *(Protocol)*:
