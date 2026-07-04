@@ -226,58 +226,45 @@ class ExecutionManager:
         """Translate a raw ``OrderStatusReport`` into the canonical transition, or
         ``None`` for a status that maps to no saga move. A fresher ``venue_oid`` on
         the report wins; otherwise the order's own is kept. The report's
-        ``reconciliation`` provenance carries through (ADR-0011 inv 6)."""
+        ``reconciliation`` provenance carries through (ADR-0011 inv 6).
+
+        ``SUBMITTED`` and ``FAILED`` are minted only by the ``Reconciler``:
+        the bridge for a recovered ``PENDING`` whose send provably landed, and
+        the proven-never-landed verdict (ADR-0010) — verdicts, not venue pushes.
+        """
+        oid, flag = report.venue_oid, report.reconciliation
         match report.status:
             case OrderState.SUBMITTED:
-                # Only the Reconciler mints this status, bridging a recovered
-                # PENDING intent whose send provably landed at the venue.
-                return self._event(
-                    OrderSubmitted,
-                    order,
-                    venue_oid=report.venue_oid,
-                    reconciliation=report.reconciliation,
-                )
+                return self._event(OrderSubmitted, order, venue_oid=oid, reconciliation=flag)
             case OrderState.LIVE:
-                return self._event(
-                    OrderLive,
-                    order,
-                    venue_oid=report.venue_oid,
-                    reconciliation=report.reconciliation,
-                )
+                return self._event(OrderLive, order, venue_oid=oid, reconciliation=flag)
             case OrderState.CANCELLED:
-                return self._event(
-                    OrderCancelled,
-                    order,
-                    venue_oid=report.venue_oid,
-                    reconciliation=report.reconciliation,
-                )
+                return self._event(OrderCancelled, order, venue_oid=oid, reconciliation=flag)
             case OrderState.REJECTED:
-                now = self._clock.timestamp_ns()
-                return OrderRejected(
-                    ts_event=now,
-                    ts_init=now,
-                    cloid=order.cloid,
-                    strategy_id=order.strategy_id,
-                    signal_id=order.signal_id,
-                    symbol=order.symbol,
-                    venue_oid=report.venue_oid if report.venue_oid is not None else order.venue_oid,
-                    reason=report.reason or "venue rejected",
-                    reconciliation=report.reconciliation,
-                )
+                return self._reasoned_event(OrderRejected, order, report, "venue rejected")
             case OrderState.FAILED:
-                # Only the Reconciler mints this status: positive proof the
-                # order never landed (ADR-0010) — a verdict, not a venue push.
-                now = self._clock.timestamp_ns()
-                return OrderFailed(
-                    ts_event=now,
-                    ts_init=now,
-                    cloid=order.cloid,
-                    strategy_id=order.strategy_id,
-                    signal_id=order.signal_id,
-                    symbol=order.symbol,
-                    venue_oid=order.venue_oid,
-                    reason=report.reason or "proven never landed",
-                    reconciliation=report.reconciliation,
-                )
+                return self._reasoned_event(OrderFailed, order, report, "proven never landed")
             case _:
                 return None
+
+    def _reasoned_event[E: (OrderRejected, OrderFailed)](
+        self,
+        event_type: type[E],
+        order: Order,
+        report: OrderStatusReport,
+        default_reason: str,
+    ) -> E:
+        """Build a terminal-with-reason event from ``order``'s identity and the
+        report's adjudication — the required-``reason`` twin of ``_event``."""
+        now = self._clock.timestamp_ns()
+        return event_type(
+            ts_event=now,
+            ts_init=now,
+            cloid=order.cloid,
+            strategy_id=order.strategy_id,
+            signal_id=order.signal_id,
+            symbol=order.symbol,
+            venue_oid=report.venue_oid if report.venue_oid is not None else order.venue_oid,
+            reason=report.reason or default_reason,
+            reconciliation=report.reconciliation,
+        )
