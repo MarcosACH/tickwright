@@ -128,6 +128,14 @@ class Reconciler:
                 self._absent_since_ns.pop(order.cloid, None)
                 await self._adopt(order, view)
                 continue
+            # No open-order record, but the read doubled as the fill-history
+            # cross-check (ADR-0011 inv 2/4): a vanished order may have filled,
+            # and executed truth heals immediately — no grace wait.
+            for fill in view.fills:
+                await self._bus.publish(replace(fill, reconciliation=True))
+            if order.is_terminal:
+                self._absent_since_ns.pop(order.cloid, None)
+                continue
             now = self._clock.timestamp_ns()
             first_absent_ns = self._absent_since_ns.setdefault(order.cloid, now)
             if now - first_absent_ns >= grace_ns:

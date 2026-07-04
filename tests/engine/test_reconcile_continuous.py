@@ -19,10 +19,12 @@ from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     AggressorSide,
     ExecutionReport,
+    FillReport,
     MarketTick,
     Order,
     OrderEvent,
     OrderFailed,
+    OrderFilled,
     OrderLive,
     OrderRejected,
     OrderState,
@@ -243,6 +245,42 @@ def test_a_live_order_absent_across_the_grace_window_resolves_rejected() -> None
     rejected = [ev for ev in events if isinstance(ev, OrderRejected)]
     assert len(rejected) == 1
     assert rejected[0].reconciliation is True
+
+
+def test_a_ghost_whose_fill_history_has_fills_heals_to_filled_not_rejected() -> None:
+    clock = ManualClock(start_ns=0)
+    store = SQLiteStore(":memory:")
+    store.checkpoint(_saga("0xabc", OrderState.LIVE), ts_ns=500)
+    venue = _ForgetfulVenue()
+    # The open-order record is gone, but fill history remembers: the order
+    # executed. The cross-check is mandatory before any "gone" verdict
+    # (ADR-0011 inv 2/4) — and executed truth needs no grace wait.
+    venue.views["0xabc"] = VenueOrderView(
+        status=None,
+        fills=(
+            FillReport(
+                ts_event=800,
+                ts_init=800,
+                cloid="0xabc",
+                symbol="BTC",
+                trade_id="0xabc-1",
+                quantity=Decimal("0.5"),
+                price=Decimal("41000"),
+            ),
+        ),
+    )
+    _, reconciler, events = _engine(store, venue, clock)  # type: ignore[arg-type]
+
+    assert asyncio.run(reconciler.reconcile_open_orders()) is True
+
+    order = store.get_order("0xabc")
+    assert order is not None
+    assert order.state is OrderState.FILLED
+    assert order.cum_qty == Decimal("0.5")
+    filled = [ev for ev in events if isinstance(ev, OrderFilled)]
+    assert len(filled) == 1
+    assert filled[0].reconciliation is True
+    assert not [ev for ev in events if isinstance(ev, OrderRejected)]
 
 
 # --- Connectivity guard ---------------------------------------------------------
