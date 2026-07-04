@@ -160,6 +160,7 @@ class ExecutionManager:
             price=report.price,
             ts_event=now,
             ts_init=now,
+            reconciliation=report.reconciliation,
         )
         if event is None:
             # Redelivered fill: the saga already reflects it. Suppress the

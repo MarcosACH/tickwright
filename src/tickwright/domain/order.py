@@ -199,6 +199,7 @@ class Order:
         price: Decimal,
         ts_event: int,
         ts_init: int,
+        reconciliation: bool = False,
     ) -> OrderFillEvent | None:
         """Account a raw fill and return the canonical event to publish, or ``None``.
 
@@ -224,5 +225,6 @@ class Order:
             quantity=quantity,
             price=price,
             cum_qty=cum_qty,
+            reconciliation=reconciliation,
         )
         return event if self.apply(event) else None

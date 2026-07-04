@@ -23,6 +23,7 @@ from tickwright.domain import (
     Order,
     OrderEvent,
     OrderFailed,
+    OrderFilled,
     OrderLive,
     OrderState,
     OrderType,
@@ -173,3 +174,60 @@ def test_recovered_pending_intent_the_venue_never_saw_resolves_failed() -> None:
     # Attempted and proven never-landed (ADR-0010): resolved, never resent.
     view = asyncio.run(exchange.fetch_order("0xabc"))
     assert view is not None and not view.has_record
+
+
+def test_recovered_saga_heals_the_fill_it_missed_while_dead() -> None:
+    clock = ManualClock(start_ns=2_000)
+    store = SQLiteStore(":memory:")
+    exchange, dead_bus = _surviving_venue(clock)
+
+    async def first_life() -> None:
+        await dead_bus.publish(_tick("42000"))
+        await exchange.place(_resting_limit("0xabc"))
+        # A later tick crosses the resting BUY while we are dead: the venue
+        # fills it; both the LIVE ack and the fill report go unheard.
+        await dead_bus.publish(_tick("40000", ts=1_500))
+
+    asyncio.run(first_life())
+    store.checkpoint(_saga("0xabc", OrderState.SUBMITTED), ts_ns=500)
+    _, _, reconciler, events = _second_life(store, exchange, clock)
+
+    assert asyncio.run(reconciler.reconcile_startup()) is True
+
+    # No lost fill: the saga converged on the venue's executed truth — the
+    # stale LIVE record must not shadow the fill history (ADR-0011 inv 4).
+    recovered = store.get_order("0xabc")
+    assert recovered is not None
+    assert recovered.state is OrderState.FILLED
+    assert recovered.cum_qty == Decimal("0.5")
+    filled = [ev for ev in events if isinstance(ev, OrderFilled)]
+    assert len(filled) == 1
+    assert filled[0].reconciliation is True
+
+
+def test_a_crash_during_recovery_just_reruns_the_pass_and_converges() -> None:
+    clock = ManualClock(start_ns=2_000)
+    store = SQLiteStore(":memory:")
+    exchange, dead_bus = _surviving_venue(clock)
+
+    async def first_life() -> None:
+        await dead_bus.publish(_tick("42000"))
+        await exchange.place(_resting_limit("0xabc"))
+        await dead_bus.publish(_tick("40000", ts=1_500))
+
+    asyncio.run(first_life())
+    store.checkpoint(_saga("0xabc", OrderState.SUBMITTED), ts_ns=500)
+
+    _, _, reconciler, _ = _second_life(store, exchange, clock)
+    assert asyncio.run(reconciler.reconcile_startup()) is True
+
+    # Death mid/after recovery: the third life rebuilds and reconciles again.
+    # Dedup by trade_id/event_id makes the redo a no-op — never a double count.
+    _, _, reconciler3, events3 = _second_life(store, exchange, clock)
+    assert asyncio.run(reconciler3.reconcile_startup()) is True
+
+    assert events3 == []
+    recovered = store.get_order("0xabc")
+    assert recovered is not None
+    assert recovered.state is OrderState.FILLED
+    assert recovered.cum_qty == Decimal("0.5")

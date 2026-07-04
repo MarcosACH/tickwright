@@ -58,9 +58,17 @@ class Reconciler:
             # blind resend (ADR-0008 rule 2). Recreating is the strategy's call.
             await self._bus.publish(self._failed_verdict(order))
             return
-        if view.status is not None:
-            # Replay the venue's record as a synthetic, provenance-flagged fact;
-            # the ExecutionManager turns it into the canonical transition.
+
+        # Replay the venue's facts as synthetic, provenance-flagged replicas;
+        # the ExecutionManager turns them into canonical transitions, deduping
+        # by trade_id/event_id anything the saga already reflects. Fills go
+        # first: a terminal status (CANCELLED after a partial fill) is only
+        # legal once the fills it followed are applied.
+        for fill in view.fills:
+            await self._bus.publish(replace(fill, reconciliation=True))
+        if view.status is not None and not (view.status.status is OrderState.LIVE and view.fills):
+            # A LIVE record alongside fills is stale by definition — the venue
+            # reported it working before it executed; the fills are the truth.
             await self._bus.publish(replace(view.status, reconciliation=True))
 
     def _failed_verdict(self, order: Order) -> OrderStatusReport:
