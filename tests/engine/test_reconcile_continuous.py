@@ -8,6 +8,7 @@ through the ``ExecutionManager`` so dedup makes every cycle idempotent.
 """
 
 import asyncio
+from dataclasses import replace
 from decimal import Decimal
 
 import structlog.testing
@@ -92,7 +93,7 @@ def _engine(
     exchange: PaperExchange,
     clock: ManualClock,
     config: ReconcileConfig | None = None,
-) -> tuple[Cache, Reconciler, list[OrderEvent]]:
+) -> tuple[InMemoryBus, Reconciler, list[OrderEvent]]:
     """Running-engine wiring: Cache projection, manager, the Reconciler."""
     bus = InMemoryBus()
     cache = Cache(store=store)
@@ -103,7 +104,7 @@ def _engine(
     events: list[OrderEvent] = []
     bus.subscribe(OrderEvent, lambda ev: _record(events, ev))
     reconciler = Reconciler(bus=bus, clock=clock, exchange=exchange, cache=cache, config=config)
-    return cache, reconciler, events
+    return bus, reconciler, events
 
 
 async def _record(sink: list[OrderEvent], event: OrderEvent) -> None:
@@ -281,6 +282,47 @@ def test_a_ghost_whose_fill_history_has_fills_heals_to_filled_not_rejected() -> 
     assert len(filled) == 1
     assert filled[0].reconciliation is True
     assert not [ev for ev in events if isinstance(ev, OrderRejected)]
+
+
+def test_a_healed_fill_and_the_venues_late_duplicate_collapse_to_one_apply() -> None:
+    clock = ManualClock(start_ns=2_000)
+    store = SQLiteStore(":memory:")
+    exchange, dead_bus = _surviving_venue(clock)
+
+    async def degraded_link() -> None:
+        # The venue accepted the order and later filled it, but both reports
+        # died on a degraded link: locally the order still looks LIVE.
+        await dead_bus.publish(_tick("42000"))
+        await exchange.place(_resting_limit("0xabc"))
+        await dead_bus.publish(_tick("40000", ts=1_500))
+
+    asyncio.run(degraded_link())
+    store.checkpoint(_saga("0xabc", OrderState.LIVE), ts_ns=500)
+    engine_bus, reconciler, events = _engine(store, exchange, clock)
+
+    # The slow cycle heals the missed fill through the ExecutionManager.
+    assert asyncio.run(reconciler.reconcile_open_orders()) is True
+    order = store.get_order("0xabc")
+    assert order is not None
+    assert order.state is OrderState.FILLED
+    assert order.cum_qty == Decimal("0.5")
+
+    # The venue's own late copy of the same fill finally arrives. The healed
+    # replica shares its event_id — provenance is excluded from the dedup key
+    # (ADR-0025) — so the duplicate collapses: applied once, republished never.
+    venue_view = asyncio.run(exchange.fetch_order("0xabc"))
+    assert venue_view is not None
+    (venue_fill,) = venue_view.fills
+    healed_twin = replace(venue_fill, reconciliation=True)
+    assert healed_twin.event_id == venue_fill.event_id
+
+    asyncio.run(engine_bus.publish(venue_fill))
+
+    order = store.get_order("0xabc")
+    assert order is not None
+    assert order.cum_qty == Decimal("0.5")  # never double-counted
+    filled = [ev for ev in events if isinstance(ev, OrderFilled)]
+    assert len(filled) == 1
 
 
 # --- Connectivity guard ---------------------------------------------------------
