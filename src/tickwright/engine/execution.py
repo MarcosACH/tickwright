@@ -39,20 +39,23 @@ from tickwright.domain import (
     PlaceOrder,
     PlaceSignal,
     Signal,
-    Store,
     derive_cloid,
 )
+
+from .cache import Cache
 
 
 class ExecutionManager:
     """Owns cloid assignment, the saga FSM, and canonical ``OrderEvent`` publishing."""
 
-    def __init__(self, *, bus: EventBus, clock: Clock, exchange: Exchange, store: Store) -> None:
+    def __init__(self, *, bus: EventBus, clock: Clock, exchange: Exchange, cache: Cache) -> None:
         self._bus = bus
         self._clock = clock
         self._exchange = exchange
-        self._store = store
-        self._orders: dict[str, Order] = {}  # working set; the Store is the durable copy.
+        # The working set and the durable copy in one seam: the Cache projects
+        # every checkpoint and is rebuilt from the Store on restart (ADR-0009),
+        # so a redelivered signal dedups across a crash too.
+        self._cache = cache
 
     async def on_signal(self, signal: Signal) -> None:
         if isinstance(signal, PlaceSignal):
@@ -68,8 +71,9 @@ class ExecutionManager:
 
     async def _place(self, signal: PlaceSignal) -> None:
         cloid = derive_cloid(signal.signal_id)
-        if cloid in self._orders:
-            # Re-seen signal_id: resume the existing saga, never place twice (ADR-0006).
+        if self._cache.get_order(cloid) is not None:
+            # Re-seen signal_id: the saga already exists — possibly from a life
+            # before a crash — never place twice (ADR-0006).
             return
 
         order = Order(
@@ -81,7 +85,6 @@ class ExecutionManager:
             quantity=signal.quantity,
             order_type=signal.order_type,
         )
-        self._orders[cloid] = order
 
         # PENDING is the write-ahead intent: durable before anything else
         # happens (ADR-0008 rule 1), then announced.
@@ -114,7 +117,7 @@ class ExecutionManager:
         # Re-derive the target cloid from the signal_id the strategy emitted, so
         # the cloid derivation never leaks into strategy code (ADR-0006/0026).
         cloid = derive_cloid(signal.target_signal_id)
-        order = self._orders.get(cloid)
+        order = self._cache.get_order(cloid)
         if order is None:
             return  # A cancel for an order we do not own: benign no-op (ADR-0026).
 
@@ -131,7 +134,7 @@ class ExecutionManager:
         await self._exchange.cancel(cloid)
 
     async def _apply_status(self, report: OrderStatusReport) -> None:
-        order = self._orders.get(report.cloid)
+        order = self._cache.get_order(report.cloid)
         if order is None:
             return  # A status for an order we do not own — reconciliation's concern.
 
@@ -143,7 +146,7 @@ class ExecutionManager:
         await self._commit(order, event)
 
     async def _apply_fill(self, report: FillReport) -> None:
-        order = self._orders.get(report.cloid)
+        order = self._cache.get_order(report.cloid)
         if order is None:
             return  # A report for an order we do not own — reconciliation's concern.
 
@@ -179,7 +182,7 @@ class ExecutionManager:
 
     def _checkpoint(self, order: Order) -> None:
         try:
-            self._store.checkpoint(order, ts_ns=self._clock.timestamp_ns())
+            self._cache.checkpoint(order, ts_ns=self._clock.timestamp_ns())
         except Exception as exc:
             # A checkpoint the store cannot make durable is a broken engine
             # assumption (ADR-0014): fail fast rather than run a saga whose

@@ -32,6 +32,7 @@ from tickwright.domain import (
     Signal,
     derive_cloid,
 )
+from tickwright.engine.cache import Cache
 from tickwright.engine.execution import ExecutionManager
 from tickwright.strategies import SingleShotLimitStrategy
 
@@ -59,7 +60,8 @@ def _run(
     clock = ManualClock()
     store = SQLiteStore(":memory:")
     exchange = PaperExchange(bus=bus, clock=clock, fill_model=ImmediateFillModel())
-    manager = ExecutionManager(bus=bus, clock=clock, exchange=exchange, store=store)
+    cache = Cache(store=store)
+    manager = ExecutionManager(bus=bus, clock=clock, exchange=exchange, cache=cache)
     strategy = SingleShotLimitStrategy(
         strategy_id="trivial",
         bus=bus,

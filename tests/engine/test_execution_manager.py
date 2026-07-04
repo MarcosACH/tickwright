@@ -41,6 +41,7 @@ from tickwright.domain import (
     derive_cloid,
 )
 from tickwright.domain.enums import OrderType
+from tickwright.engine.cache import Cache
 from tickwright.engine.execution import ExecutionManager
 
 
@@ -110,7 +111,8 @@ def _harness() -> tuple[InMemoryBus, ManualClock, SQLiteStore, list[OrderEvent]]
     clock = ManualClock(start_ns=1_000)
     store = SQLiteStore(":memory:")
     exchange = PaperExchange(bus=bus, clock=clock, fill_model=ImmediateFillModel())
-    manager = ExecutionManager(bus=bus, clock=clock, exchange=exchange, store=store)
+    cache = Cache(store=store)
+    manager = ExecutionManager(bus=bus, clock=clock, exchange=exchange, cache=cache)
 
     bus.subscribe(MarketTick, exchange.on_tick)
     bus.subscribe(Signal, manager.on_signal)
@@ -509,3 +511,38 @@ def test_cancel_signal_for_an_unknown_order_is_a_benign_no_op() -> None:
 
 async def _record(sink: list, event: object) -> None:
     sink.append(event)
+
+
+def test_a_restart_rebuilt_cache_dedups_a_redelivered_place_signal() -> None:
+    # First life: a GTC LIMIT rests on the book — a durable non-terminal saga.
+    bus, _, store, _ = _harness()
+    cloid = derive_cloid("trivial:BTC:1")
+
+    async def first_life() -> None:
+        await bus.publish(_tick("42000"))
+        await bus.publish(_limit_signal("41000"))
+
+    asyncio.run(first_life())
+    record = store.get_order(cloid)
+    assert record is not None and record.state is OrderState.LIVE
+
+    # Crash: every in-memory component dies; only the store survives. The
+    # second life rebuilds the projection from it (ADR-0009 recovery step 2).
+    bus2 = InMemoryBus()
+    clock2 = ManualClock(start_ns=2_000)
+    exchange2 = PaperExchange(bus=bus2, clock=clock2, fill_model=ImmediateFillModel())
+    cache2 = Cache(store=store)
+    cache2.rebuild()
+    manager2 = ExecutionManager(bus=bus2, clock=clock2, exchange=exchange2, cache=cache2)
+    bus2.subscribe(Signal, manager2.on_signal)
+    bus2.subscribe(ExecutionReport, manager2.on_execution_report)
+    second_life_events: list[OrderEvent] = []
+    bus2.subscribe(OrderEvent, lambda ev: _record(second_life_events, ev))
+    history_before = store.history(cloid)
+
+    # At-least-once redelivery of the same signal across the restart: the
+    # rebuilt projection recognizes the cloid — never a second placement.
+    asyncio.run(bus2.publish(_limit_signal("41000")))
+
+    assert second_life_events == []
+    assert store.history(cloid) == history_before
