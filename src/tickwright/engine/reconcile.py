@@ -1,16 +1,20 @@
-"""``Reconciler`` — startup mass-rebuild against the venue (ADR-0009/0011).
+"""``Reconciler`` — the correctness net against the venue (ADR-0009/0011).
 
-Recovery step 3: after the ``Cache`` is rebuilt from the ``Store``, every
-non-terminal saga is reconciled against venue truth by cloid **before anything
-can be placed**. Each heal is a ``reconciliation``-flagged synthetic replica of
-a raw venue fact, published on the bus and routed through the
-``ExecutionManager`` — the one saga writer — so dedup by ``event_id`` and
-``trade_id`` makes recovery idempotent: re-running a pass converges.
+Two phases, one healing discipline. *Startup* (recovery step 3): after the
+``Cache`` is rebuilt from the ``Store``, every non-terminal saga is reconciled
+against venue truth by cloid **before anything can be placed**. *Continuous*:
+two cycles thereafter — a fast in-flight check resolving ``SUBMITTED`` orders
+that never acked, and a slower open-order/ghost reconcile in which only
+continuous absence across the grace window (with a fill-history cross-check on
+every read) resolves a resting order terminally. Each heal is a
+``reconciliation``-flagged synthetic replica of a raw venue fact, published on
+the bus and routed through the ``ExecutionManager`` — the one saga writer — so
+dedup by ``event_id`` and ``trade_id`` makes every pass idempotent: re-running
+converges.
 
-A failed venue read (``fetch_order`` → ``None``) freezes the pass: it reports
-failure and heals nothing it could not prove — an outage must never read as
-"all orders vanished" (ADR-0011 inv 1). The continuous loops are a later slice
-(#15); this module owns the startup phase.
+A failed venue read (``fetch_order`` → ``None``) freezes the running pass: it
+reports failure, emits ``reconcile.frozen``, and heals nothing it could not
+prove — an outage must never read as "all orders vanished" (ADR-0011 inv 1).
 """
 
 from dataclasses import dataclass, replace
@@ -99,7 +103,7 @@ class Reconciler:
         for order in self._cache.open_orders():
             view = await self._exchange.fetch_order(order.cloid)
             if view is None:
-                return False
+                return self._freeze("startup", order.cloid)
             await self._adopt(order, view)
         return True
 
@@ -155,8 +159,7 @@ class Reconciler:
             # No open-order record, but the read doubled as the fill-history
             # cross-check (ADR-0011 inv 2/4): a vanished order may have filled,
             # and executed truth heals immediately — no grace wait.
-            for fill in view.fills:
-                await self._bus.publish(replace(fill, reconciliation=True))
+            await self._heal_fills(view)
             if order.is_terminal:
                 self._absent_since_ns.pop(order.cloid, None)
                 continue
@@ -243,12 +246,18 @@ class Reconciler:
         # by trade_id/event_id anything the saga already reflects. Fills go
         # first: a terminal status (CANCELLED after a partial fill) is only
         # legal once the fills it followed are applied.
-        for fill in view.fills:
-            await self._bus.publish(replace(fill, reconciliation=True))
+        await self._heal_fills(view)
         if view.status is not None and not (view.status.status is OrderState.LIVE and view.fills):
             # A LIVE record alongside fills is stale by definition — the venue
             # reported it working before it executed; the fills are the truth.
             await self._bus.publish(replace(view.status, reconciliation=True))
+
+    async def _heal_fills(self, view: VenueOrderView) -> None:
+        """Replay the view's fill history as reconciliation-flagged replicas —
+        the venue-pushed twin of each carries the same ``event_id``, so a late
+        duplicate collapses under the ``ExecutionManager``'s dedup."""
+        for fill in view.fills:
+            await self._bus.publish(replace(fill, reconciliation=True))
 
     def _failed_verdict(self, order: Order) -> OrderStatusReport:
         return self._verdict(order, OrderState.FAILED, "venue has no record of this cloid")

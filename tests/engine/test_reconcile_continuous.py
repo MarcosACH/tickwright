@@ -288,6 +288,46 @@ def test_a_ghost_whose_fill_history_has_fills_heals_to_filled_not_rejected() -> 
     assert not [ev for ev in events if isinstance(ev, OrderRejected)]
 
 
+def test_a_healthy_resting_order_makes_the_slow_cycle_a_quiet_no_op() -> None:
+    clock = ManualClock(start_ns=2_000)
+    store = SQLiteStore(":memory:")
+    exchange, dead_bus = _surviving_venue(clock)
+
+    async def resting() -> None:
+        await dead_bus.publish(_tick("42000"))
+        await exchange.place(_resting_limit("0xabc"))
+
+    asyncio.run(resting())
+    # This life heard the LIVE ack: local and venue truth already agree, and
+    # the saga's dedup set reflects the applied LIVE transition.
+    saga = _saga("0xabc", OrderState.SUBMITTED)
+    saga.apply(
+        OrderLive(
+            ts_event=600,
+            ts_init=600,
+            cloid="0xabc",
+            strategy_id="trivial",
+            signal_id="trivial:BTC:1",
+            symbol="BTC",
+        )
+    )
+    store.checkpoint(saga, ts_ns=700)
+    _, reconciler, events = _engine(store, exchange, clock)
+
+    async def cycles() -> None:
+        for _ in range(3):
+            assert await reconciler.reconcile_open_orders() is True
+
+    asyncio.run(cycles())
+
+    # Convergence means silence: the replayed LIVE dedups by its
+    # state-deterministic event_id, and nothing is ever republished.
+    order = store.get_order("0xabc")
+    assert order is not None
+    assert order.state is OrderState.LIVE
+    assert events == []
+
+
 def test_a_healed_fill_and_the_venues_late_duplicate_collapse_to_one_apply() -> None:
     clock = ManualClock(start_ns=2_000)
     store = SQLiteStore(":memory:")

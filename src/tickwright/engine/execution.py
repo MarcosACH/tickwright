@@ -10,7 +10,8 @@ intent is persisted **before** any ``Exchange.place`` call — so a crash mid-se
 leaves a durable record recovery can reconcile by cloid — and ``SUBMITTED`` is
 checkpointed after the send returns, arming the in-flight grace clock. A timeout
 never transitions a saga: nothing here subscribes to time; only venue facts and
-(later) reconciliation move an order.
+reconciliation verdicts move an order — and a status arriving after the saga
+already resolved terminally is absorbed as an idempotent no-op (ADR-0026).
 
 A ``CancelSignal`` re-derives the target ``cloid`` from ``target_signal_id``,
 durably checkpoints the ``cancel_requested`` marker **before** calling
