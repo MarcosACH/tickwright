@@ -24,6 +24,7 @@ from tickwright.domain import (
     PlaceOrder,
     Side,
     TimeInForce,
+    VenueOrderView,
 )
 
 
@@ -334,3 +335,49 @@ def test_immediate_fill_model_is_full_fill_zero_slippage() -> None:
 
 async def _record(sink: list, report: object) -> None:
     sink.append(report)
+
+
+def test_fetch_order_reports_a_resting_limit_as_live() -> None:
+    exchange, bus, _, _, _ = _limit_harness()
+
+    async def scenario() -> VenueOrderView | None:
+        await bus.publish(_tick("42000"))
+        await exchange.place(_limit_order("41000"))
+        # The reconciler's query-shaped read (ADR-0004): venue truth by cloid,
+        # never a bus message.
+        return await exchange.fetch_order("0xabc")
+
+    view = asyncio.run(scenario())
+    assert view is not None  # a paper read can never fail (ADR-0024)
+    assert view.status is not None
+    assert view.status.status is OrderState.LIVE
+    assert view.fills == ()
+
+
+def test_fetch_order_carries_the_fills_of_a_filled_order() -> None:
+    exchange, bus, _, _ = _harness()
+
+    async def scenario() -> VenueOrderView | None:
+        await bus.publish(_tick("42000"))
+        await exchange.place(_market_order())
+        return await exchange.fetch_order("0xabc")
+
+    view = asyncio.run(scenario())
+    assert view is not None
+    # The fill-history half of the ADR-0011 cross-check: a vanished order that
+    # actually filled is provable from the view alone.
+    assert view.has_record
+    assert [fill.trade_id for fill in view.fills] == ["0xabc-1"]
+    assert view.fills[0].quantity == Decimal("1")
+
+
+def test_fetch_order_for_an_unknown_cloid_is_positive_proof_of_no_record() -> None:
+    exchange, _, _, _ = _harness()
+
+    view = asyncio.run(exchange.fetch_order("0xghost"))
+
+    # An empty view, never None: on paper a read cannot fail, and "no record"
+    # must stay distinguishable from an outage (ADR-0011 inv 1).
+    assert view is not None
+    assert not view.has_record
+    assert view.status is None and view.fills == ()

@@ -25,6 +25,7 @@ from tickwright.domain import (
     PlaceOrder,
     Side,
     TimeInForce,
+    VenueOrderView,
 )
 
 from .fill_model import Fill, FillModel
@@ -40,6 +41,11 @@ class PaperExchange:
         self._latest_tick: dict[str, MarketTick] = {}
         self._fill_counts: dict[str, int] = {}
         self._book: dict[str, PlaceOrder] = {}  # resting LIMITs, keyed by cloid.
+        # The venue's own memory, per cloid: the last status and every fill it
+        # reported. This is what ``fetch_order`` answers reconciliation from —
+        # a real venue remembers the orders it saw; so does the paper one.
+        self._statuses: dict[str, OrderStatusReport] = {}
+        self._fills: dict[str, list[FillReport]] = {}
 
     async def on_tick(self, tick: MarketTick) -> None:
         # Cache the latest price per symbol; MARKET fills read it (ADR-0027).
@@ -123,11 +129,23 @@ class PaperExchange:
             return tick.price <= order.price
         return tick.price >= order.price
 
+    async def fetch_order(self, cloid: str) -> VenueOrderView | None:
+        """Venue truth for ``cloid``: last reported status plus every fill.
+
+        In-process reads cannot fail, so this never returns ``None`` — the
+        startup reconciliation barrier always clears on paper (ADR-0024). An
+        unknown cloid gets an empty view: positive proof of no record.
+        """
+        return VenueOrderView(
+            status=self._statuses.get(cloid),
+            fills=tuple(self._fills.get(cloid, [])),
+        )
+
     def _status_report(
         self, order: PlaceOrder, status: OrderState, *, reason: str | None = None
     ) -> OrderStatusReport:
         now = self._clock.timestamp_ns()
-        return OrderStatusReport(
+        report = OrderStatusReport(
             ts_event=now,
             ts_init=now,
             cloid=order.cloid,
@@ -135,12 +153,14 @@ class PaperExchange:
             status=status,
             reason=reason,
         )
+        self._statuses[order.cloid] = report
+        return report
 
     def _fill_report(self, order: PlaceOrder, fill: Fill) -> FillReport:
         index = self._fill_counts.get(order.cloid, 0) + 1
         self._fill_counts[order.cloid] = index
         now = self._clock.timestamp_ns()
-        return FillReport(
+        report = FillReport(
             ts_event=now,
             ts_init=now,
             cloid=order.cloid,
@@ -149,3 +169,5 @@ class PaperExchange:
             quantity=fill.quantity,
             price=fill.price,
         )
+        self._fills.setdefault(order.cloid, []).append(report)
+        return report

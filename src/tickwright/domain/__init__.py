@@ -28,6 +28,7 @@ from .events import (
     PlaceOrder,
     PlaceSignal,
     Signal,
+    VenueOrderView,
 )
 from .ids import derive_cloid
 from .order import Order
@@ -73,6 +74,7 @@ __all__ = [
     "PlaceOrder",
     "PlaceSignal",
     "Signal",
+    "VenueOrderView",
     # id derivation
     "derive_cloid",
     # seam Protocols
