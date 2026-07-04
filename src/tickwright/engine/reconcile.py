@@ -54,7 +54,11 @@ class Reconciler:
         return True
 
     async def run_startup_barrier(
-        self, *, timeout_seconds: float, initial_backoff_seconds: float = 1.0
+        self,
+        *,
+        timeout_seconds: float,
+        initial_backoff_seconds: float = 1.0,
+        max_backoff_seconds: float = 30.0,
     ) -> None:
         """The hard startup gate (ADR-0024): nothing places until this clears.
 
@@ -64,6 +68,11 @@ class Reconciler:
         (an ``InvariantViolation``), which the runner maps to ``FAULTED`` and a
         non-zero exit for the external supervisor to backoff-restart. On the
         paper path reads cannot fail, so the barrier always clears.
+
+        The backoff is capped at ``max_backoff_seconds`` so an uncapped doubling
+        cannot carry the clock far past the deadline: without the cap a large
+        ``timeout_seconds`` would fault nearly a whole backoff interval late,
+        making real time-to-``FAULTED`` up to ~2× the configured window.
         """
         deadline_ns = self._clock.timestamp_ns() + int(timeout_seconds * _NS_PER_SECOND)
         backoff_seconds = initial_backoff_seconds
@@ -74,7 +83,7 @@ class Reconciler:
                     "reconciliation; refusing to start on unverified state"
                 )
             await self._clock.sleep(backoff_seconds)
-            backoff_seconds *= 2
+            backoff_seconds = min(backoff_seconds * 2, max_backoff_seconds)
 
     async def _adopt(self, order: Order, view: VenueOrderView) -> None:
         """Align one saga with the venue's view of its cloid."""

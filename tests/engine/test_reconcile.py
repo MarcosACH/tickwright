@@ -277,6 +277,28 @@ def test_sustained_venue_outage_trips_the_barrier_to_faulted_after_the_window() 
     assert recovered.state is OrderState.SUBMITTED
 
 
+def test_backoff_is_capped_so_faulting_never_overshoots_the_window_by_much() -> None:
+    # With an uncapped doubling, a long window faults nearly a whole backoff
+    # interval late (~2x the configured timeout). The cap bounds the overshoot
+    # to one capped interval regardless of how long the window is.
+    clock = ManualClock(start_ns=0)
+    store = SQLiteStore(":memory:")
+    store.checkpoint(_saga("0xabc", OrderState.SUBMITTED), ts_ns=500)
+
+    bus = InMemoryBus()
+    cache = Cache(store=store)
+    cache.rebuild()
+    venue = _DarkVenue()
+    reconciler = Reconciler(bus=bus, clock=clock, exchange=venue, cache=cache)
+
+    with pytest.raises(StartupReconciliationTimeout):
+        asyncio.run(reconciler.run_startup_barrier(timeout_seconds=300.0, max_backoff_seconds=30.0))
+
+    # Fault lands within one capped backoff of the deadline — not ~2x the window.
+    faulted_at_seconds = clock.timestamp_ns() / 1_000_000_000
+    assert 300.0 <= faulted_at_seconds <= 330.0
+
+
 class _BlippingVenue(_DarkVenue):
     """A venue whose link comes back after a couple of failed reads."""
 
