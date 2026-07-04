@@ -60,9 +60,11 @@ class Reconciler:
         self._cache = cache
         self._config = config if config is not None else ReconcileConfig()
         # In-memory continuous-cycle bookkeeping: consecutive no-record reads
-        # per in-flight cloid. Deliberately not durable — a restart resets the
-        # count, and the startup pass re-proves everything anyway (ADR-0009).
+        # per in-flight cloid, and when each resting order was first observed
+        # missing its venue record. Deliberately not durable — a restart resets
+        # both, and the startup pass re-proves everything anyway (ADR-0009).
         self._inflight_misses: dict[str, int] = {}
+        self._absent_since_ns: dict[str, int] = {}
 
     async def reconcile_startup(self) -> bool:
         """One mass-rebuild pass over every non-terminal saga; ``True`` on success.
@@ -103,6 +105,43 @@ class Reconciler:
             self._inflight_misses.pop(order.cloid, None)
             await self._bus.publish(self._failed_verdict(order))
         return True
+
+    async def reconcile_open_orders(self) -> bool:
+        """The slow continuous cycle: resting orders and ghosts (ADR-0011).
+
+        An order whose venue record is gone becomes a ghost candidate; only
+        **continuous** absence across the grace window resolves it terminally,
+        and every read doubles as the fill-history cross-check — a vanished
+        order may have filled. ``True`` on a completed pass; ``False`` means a
+        venue read failed and the cycle froze.
+        """
+        grace_ns = int(self._config.ghost_grace_seconds * _NS_PER_SECOND)
+        for order in self._cache.open_orders():
+            if order.state not in (OrderState.LIVE, OrderState.PARTIALLY_FILLED):
+                continue
+            view = await self._exchange.fetch_order(order.cloid)
+            if view is None:
+                return self._freeze("open_order", order.cloid)
+            if view.status is not None:
+                # The record is back (or never left): not a ghost — the grace
+                # clock resets so only *continuous* absence can resolve.
+                self._absent_since_ns.pop(order.cloid, None)
+                await self._adopt(order, view)
+                continue
+            now = self._clock.timestamp_ns()
+            first_absent_ns = self._absent_since_ns.setdefault(order.cloid, now)
+            if now - first_absent_ns >= grace_ns:
+                self._absent_since_ns.pop(order.cloid)
+                await self._resolve_ghost(order)
+        return True
+
+    async def _resolve_ghost(self, order: Order) -> None:
+        """Terminal resolution for an order continuously absent past the grace
+        window: truly gone → ``REJECTED`` from ``LIVE`` (ADR-0010/0011)."""
+        await self._bus.publish(
+            self._verdict(order, OrderState.REJECTED, "ghost: vanished from the venue")
+        )
+        named_event("ghost.reconciled", cloid=order.cloid, resolution="rejected")
 
     def _freeze(self, cycle: str, cloid: str) -> bool:
         """The connectivity guard tripping (ADR-0011 inv 1): a failed venue read

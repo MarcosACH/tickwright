@@ -24,6 +24,7 @@ from tickwright.domain import (
     OrderEvent,
     OrderFailed,
     OrderLive,
+    OrderRejected,
     OrderState,
     OrderType,
     PlaceOrder,
@@ -186,6 +187,62 @@ def test_inflight_no_record_resolves_failed_only_after_the_attempt_budget() -> N
     assert order.state is OrderState.FAILED
     assert [type(ev) for ev in events] == [OrderFailed]
     assert events[0].reconciliation is True
+
+
+# --- Slow open-order / ghost cycle ----------------------------------------------
+
+
+class _ForgetfulVenue:
+    """A venue that answers every read positively but has lost this order —
+    e.g. it expired the record. Placing through it is a test failure."""
+
+    def __init__(self) -> None:
+        self.views: dict[str, VenueOrderView] = {}
+
+    async def place(self, order: PlaceOrder) -> None:
+        raise AssertionError("the ghost cycle must never place")
+
+    async def cancel(self, cloid: str) -> None:
+        raise AssertionError("the ghost cycle must never cancel")
+
+    async def fetch_order(self, cloid: str) -> VenueOrderView | None:
+        return self.views.get(cloid, VenueOrderView(status=None))
+
+
+def test_a_live_order_absent_across_the_grace_window_resolves_rejected() -> None:
+    clock = ManualClock(start_ns=0)
+    store = SQLiteStore(":memory:")
+    store.checkpoint(_saga("0xabc", OrderState.LIVE), ts_ns=500)
+    venue = _ForgetfulVenue()
+    config = ReconcileConfig(ghost_grace_seconds=90.0)
+    _, reconciler, events = _engine(store, venue, clock, config)  # type: ignore[arg-type]
+
+    async def scenario() -> None:
+        # First sighting of the absence arms the grace clock; well inside the
+        # window a missing record proves nothing (ADR-0011 inv 3).
+        assert await reconciler.reconcile_open_orders() is True
+        await clock.sleep(50.0)
+        assert await reconciler.reconcile_open_orders() is True
+        order = store.get_order("0xabc")
+        assert order is not None
+        assert order.state is OrderState.LIVE
+
+        # Continuously absent past the window: truly gone → REJECTED from LIVE
+        # (ADR-0010), announced as a ghost resolution.
+        await clock.sleep(41.0)
+        with structlog.testing.capture_logs() as logs:
+            assert await reconciler.reconcile_open_orders() is True
+        order = store.get_order("0xabc")
+        assert order is not None
+        assert order.state is OrderState.REJECTED
+        ghosts = [log for log in logs if log["event"] == "ghost.reconciled"]
+        assert len(ghosts) == 1
+        assert ghosts[0]["resolution"] == "rejected"
+
+    asyncio.run(scenario())
+    rejected = [ev for ev in events if isinstance(ev, OrderRejected)]
+    assert len(rejected) == 1
+    assert rejected[0].reconciliation is True
 
 
 # --- Connectivity guard ---------------------------------------------------------
