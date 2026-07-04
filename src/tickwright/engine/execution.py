@@ -192,7 +192,12 @@ class ExecutionManager:
             ) from exc
 
     def _event[E: (OrderPlaced, OrderSubmitted, OrderLive, OrderCancelled)](
-        self, event_type: type[E], order: Order, *, venue_oid: str | None = None
+        self,
+        event_type: type[E],
+        order: Order,
+        *,
+        venue_oid: str | None = None,
+        reconciliation: bool = False,
     ) -> E:
         """Build a reason-less canonical ``OrderEvent`` from ``order``'s identity.
 
@@ -212,17 +217,29 @@ class ExecutionManager:
             signal_id=order.signal_id,
             symbol=order.symbol,
             venue_oid=venue_oid if venue_oid is not None else order.venue_oid,
+            reconciliation=reconciliation,
         )
 
     def _status_event(self, order: Order, report: OrderStatusReport) -> OrderEvent | None:
         """Translate a raw ``OrderStatusReport`` into the canonical transition, or
         ``None`` for a status that maps to no saga move. A fresher ``venue_oid`` on
-        the report wins; otherwise the order's own is kept."""
+        the report wins; otherwise the order's own is kept. The report's
+        ``reconciliation`` provenance carries through (ADR-0011 inv 6)."""
         match report.status:
             case OrderState.LIVE:
-                return self._event(OrderLive, order, venue_oid=report.venue_oid)
+                return self._event(
+                    OrderLive,
+                    order,
+                    venue_oid=report.venue_oid,
+                    reconciliation=report.reconciliation,
+                )
             case OrderState.CANCELLED:
-                return self._event(OrderCancelled, order, venue_oid=report.venue_oid)
+                return self._event(
+                    OrderCancelled,
+                    order,
+                    venue_oid=report.venue_oid,
+                    reconciliation=report.reconciliation,
+                )
             case OrderState.REJECTED:
                 now = self._clock.timestamp_ns()
                 return OrderRejected(
@@ -234,6 +251,7 @@ class ExecutionManager:
                     symbol=order.symbol,
                     venue_oid=report.venue_oid if report.venue_oid is not None else order.venue_oid,
                     reason=report.reason or "venue rejected",
+                    reconciliation=report.reconciliation,
                 )
             case _:
                 return None

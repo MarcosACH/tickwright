@@ -133,10 +133,18 @@ class CancelSignal(Signal):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ExecutionReport(Event):
-    """A raw venue fact emitted by an ``Exchange`` adapter (ADR-0015)."""
+    """A raw venue fact emitted by an ``Exchange`` adapter (ADR-0015).
+
+    ``reconciliation`` is audit/provenance metadata (ADR-0011 inv 6): ``True``
+    on the synthetic replicas the ``Reconciler`` builds from a fetched
+    ``VenueOrderView``, ``False`` on venue-pushed reports. Excluded from every
+    ``event_id`` so both copies of the same fact collapse under dedup; the
+    ``ExecutionManager`` propagates it onto the ``OrderEvent`` it publishes.
+    """
 
     cloid: str
     symbol: str
+    reconciliation: bool = False
 
     @property
     def partition_key(self) -> str:
