@@ -11,7 +11,10 @@ import asyncio
 from dataclasses import replace
 from decimal import Decimal
 
+import pytest
 import structlog.testing
+from hypothesis import given
+from hypothesis import strategies as st
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
@@ -423,3 +426,38 @@ def test_a_none_read_freezes_the_cycle_emits_frozen_and_the_next_cycle_heals() -
     order = store.get_order("0xabc")
     assert order is not None
     assert order.state is OrderState.LIVE
+
+
+# --- Timing rule (ADR-0008/0011) --------------------------------------------------
+
+
+@given(
+    interval=st.floats(min_value=0.1, max_value=60.0),
+    attempts=st.integers(min_value=1, max_value=100),
+    slow_interval=st.floats(min_value=1.0, max_value=300.0),
+    grace=st.floats(min_value=0.1, max_value=600.0),
+)
+def test_every_constructible_config_keeps_the_retry_budget_under_the_ghost_grace(
+    interval: float, attempts: int, slow_interval: float, grace: float
+) -> None:
+    # The invariant is enforced at construction, so no runtime path ever holds
+    # a config under which an order still being retried could be ghosted.
+    try:
+        config = ReconcileConfig(
+            inflight_interval_seconds=interval,
+            inflight_max_attempts=attempts,
+            open_order_interval_seconds=slow_interval,
+            ghost_grace_seconds=grace,
+        )
+    except ValueError:
+        assert interval * attempts >= grace
+        return
+    budget = config.inflight_interval_seconds * config.inflight_max_attempts
+    assert budget < config.ghost_grace_seconds
+
+
+def test_a_config_whose_retry_budget_reaches_the_ghost_grace_is_rejected() -> None:
+    with pytest.raises(ValueError, match="ghost grace"):
+        ReconcileConfig(
+            inflight_interval_seconds=30.0, inflight_max_attempts=3, ghost_grace_seconds=90.0
+        )

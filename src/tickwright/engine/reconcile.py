@@ -34,12 +34,36 @@ _NS_PER_SECOND = 1_000_000_000
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReconcileConfig:
-    """Timing knobs for the continuous loops (ADR-0011 defaults)."""
+    """Timing knobs for the continuous loops (ADR-0011 defaults).
+
+    Construction enforces the timing invariant (ADR-0008/0011 rule 7): the
+    in-flight retry budget — ``inflight_interval_seconds`` ×
+    ``inflight_max_attempts`` — stays strictly under ``ghost_grace_seconds``,
+    so no runtime path ever holds a config under which an order still being
+    retried could be ghosted as missing.
+    """
 
     inflight_interval_seconds: float = 5.0
     inflight_max_attempts: int = 3
     open_order_interval_seconds: float = 30.0
     ghost_grace_seconds: float = 90.0
+
+    def __post_init__(self) -> None:
+        for name in (
+            "inflight_interval_seconds",
+            "inflight_max_attempts",
+            "open_order_interval_seconds",
+            "ghost_grace_seconds",
+        ):
+            if getattr(self, name) <= 0:
+                raise ValueError(f"{name} must be positive")
+        budget = self.inflight_interval_seconds * self.inflight_max_attempts
+        if budget >= self.ghost_grace_seconds:
+            raise ValueError(
+                f"in-flight retry budget ({budget}s) must stay under the "
+                f"ghost grace window ({self.ghost_grace_seconds}s): an order "
+                "still being retried must never be ghosted (ADR-0008/0011)"
+            )
 
 
 class Reconciler:
