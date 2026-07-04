@@ -85,6 +85,12 @@ class Reconciler:
             await self._bus.publish(self._failed_verdict(order))
             return
 
+        if order.state is OrderState.PENDING:
+            # The venue has a record, so the send provably left the box: walk
+            # the write-ahead intent through SUBMITTED first — the venue's
+            # facts (LIVE, fills, ...) are only legal transitions from there.
+            await self._bus.publish(self._submitted_bridge(order))
+
         # Replay the venue's facts as synthetic, provenance-flagged replicas;
         # the ExecutionManager turns them into canonical transitions, deduping
         # by trade_id/event_id anything the saga already reflects. Fills go
@@ -98,13 +104,21 @@ class Reconciler:
             await self._bus.publish(replace(view.status, reconciliation=True))
 
     def _failed_verdict(self, order: Order) -> OrderStatusReport:
+        return self._verdict(order, OrderState.FAILED, "venue has no record of this cloid")
+
+    def _submitted_bridge(self, order: Order) -> OrderStatusReport:
+        return self._verdict(order, OrderState.SUBMITTED, "venue record proves the send landed")
+
+    def _verdict(self, order: Order, status: OrderState, reason: str) -> OrderStatusReport:
+        """A reconciler verdict dressed as the synthetic status report that
+        carries it through the ``ExecutionManager`` — always provenance-flagged."""
         now = self._clock.timestamp_ns()
         return OrderStatusReport(
             ts_event=now,
             ts_init=now,
             cloid=order.cloid,
             symbol=order.symbol,
-            status=OrderState.FAILED,
-            reason="reconciliation: venue has no record of this cloid",
+            status=status,
+            reason=f"reconciliation: {reason}",
             reconciliation=True,
         )

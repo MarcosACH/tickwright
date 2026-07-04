@@ -228,6 +228,15 @@ class ExecutionManager:
         the report wins; otherwise the order's own is kept. The report's
         ``reconciliation`` provenance carries through (ADR-0011 inv 6)."""
         match report.status:
+            case OrderState.SUBMITTED:
+                # Only the Reconciler mints this status, bridging a recovered
+                # PENDING intent whose send provably landed at the venue.
+                return self._event(
+                    OrderSubmitted,
+                    order,
+                    venue_oid=report.venue_oid,
+                    reconciliation=report.reconciliation,
+                )
             case OrderState.LIVE:
                 return self._event(
                     OrderLive,
