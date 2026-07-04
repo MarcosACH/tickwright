@@ -358,6 +358,34 @@ def test_a_vanished_order_with_the_cancel_requested_marker_resolves_cancelled() 
     assert not [ev for ev in events if isinstance(ev, OrderRejected)]
 
 
+def test_a_partially_filled_ghost_truly_gone_resolves_cancelled_with_fills_kept() -> None:
+    clock = ManualClock(start_ns=0)
+    store = SQLiteStore(":memory:")
+    # Half the order executed, then the venue's record vanished for good.
+    saga = _saga("0xabc", OrderState.PARTIALLY_FILLED)
+    saga.cum_qty = Decimal("0.2")
+    store.checkpoint(saga, ts_ns=500)
+    venue = _ForgetfulVenue()
+    config = ReconcileConfig(ghost_grace_seconds=90.0)
+    _, reconciler, events = _engine(store, venue, clock, config)  # type: ignore[arg-type]
+
+    async def scenario() -> None:
+        assert await reconciler.reconcile_open_orders() is True
+        await clock.sleep(91.0)
+        assert await reconciler.reconcile_open_orders() is True
+
+    asyncio.run(scenario())
+    # CANCELLED, not REJECTED: a rejection would deny fills that provably
+    # happened — the executed quantity is preserved (ADR-0010/0011).
+    order = store.get_order("0xabc")
+    assert order is not None
+    assert order.state is OrderState.CANCELLED
+    assert order.cum_qty == Decimal("0.2")
+    cancelled = [ev for ev in events if isinstance(ev, OrderCancelled)]
+    assert len(cancelled) == 1
+    assert cancelled[0].reconciliation is True
+
+
 # --- Connectivity guard ---------------------------------------------------------
 
 

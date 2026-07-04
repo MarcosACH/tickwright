@@ -150,6 +150,10 @@ class Reconciler:
         otherwise truly gone → ``REJECTED`` from ``LIVE``."""
         if order.cancel_requested:
             status, reason = OrderState.CANCELLED, "ghost: vanished after a requested cancel"
+        elif order.state is OrderState.PARTIALLY_FILLED:
+            # A rejection would deny fills that provably happened: CANCELLED
+            # terminates the remainder while the executed quantity stands.
+            status, reason = OrderState.CANCELLED, "ghost: vanished with fills preserved"
         else:
             status, reason = OrderState.REJECTED, "ghost: vanished from the venue"
         await self._bus.publish(self._verdict(order, status, reason))
