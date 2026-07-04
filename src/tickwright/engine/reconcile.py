@@ -13,7 +13,7 @@ failure and heals nothing it could not prove — an outage must never read as
 (#15); this module owns the startup phase.
 """
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 from tickwright.domain import (
     Clock,
@@ -31,14 +31,37 @@ from .cache import Cache
 _NS_PER_SECOND = 1_000_000_000
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ReconcileConfig:
+    """Timing knobs for the continuous loops (ADR-0011 defaults)."""
+
+    inflight_interval_seconds: float = 5.0
+    inflight_max_attempts: int = 3
+    open_order_interval_seconds: float = 30.0
+    ghost_grace_seconds: float = 90.0
+
+
 class Reconciler:
     """Compares local non-terminal sagas against venue truth and heals the gap."""
 
-    def __init__(self, *, bus: EventBus, clock: Clock, exchange: Exchange, cache: Cache) -> None:
+    def __init__(
+        self,
+        *,
+        bus: EventBus,
+        clock: Clock,
+        exchange: Exchange,
+        cache: Cache,
+        config: ReconcileConfig | None = None,
+    ) -> None:
         self._bus = bus
         self._clock = clock
         self._exchange = exchange
         self._cache = cache
+        self._config = config if config is not None else ReconcileConfig()
+        # In-memory continuous-cycle bookkeeping: consecutive no-record reads
+        # per in-flight cloid. Deliberately not durable — a restart resets the
+        # count, and the startup pass re-proves everything anyway (ADR-0009).
+        self._inflight_misses: dict[str, int] = {}
 
     async def reconcile_startup(self) -> bool:
         """One mass-rebuild pass over every non-terminal saga; ``True`` on success.
@@ -64,7 +87,20 @@ class Reconciler:
             view = await self._exchange.fetch_order(order.cloid)
             if view is None:
                 return False
-            await self._adopt(order, view)
+            if view.has_record:
+                self._inflight_misses.pop(order.cloid, None)
+                await self._adopt(order, view)
+                continue
+            # No record is not yet proof: the send may still be on the wire in
+            # this very life. Only the budget-exhausting consecutive miss
+            # resolves FAILED — and that budget stays under the ghost grace
+            # window, so a retried order can never be ghosted (ADR-0008/0011).
+            misses = self._inflight_misses.get(order.cloid, 0) + 1
+            if misses < self._config.inflight_max_attempts:
+                self._inflight_misses[order.cloid] = misses
+                continue
+            self._inflight_misses.pop(order.cloid, None)
+            await self._bus.publish(self._failed_verdict(order))
         return True
 
     async def run_startup_barrier(

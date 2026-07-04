@@ -20,6 +20,7 @@ from tickwright.domain import (
     MarketTick,
     Order,
     OrderEvent,
+    OrderFailed,
     OrderLive,
     OrderState,
     OrderType,
@@ -30,7 +31,7 @@ from tickwright.domain import (
 )
 from tickwright.engine.cache import Cache
 from tickwright.engine.execution import ExecutionManager
-from tickwright.engine.reconcile import Reconciler
+from tickwright.engine.reconcile import ReconcileConfig, Reconciler
 
 
 def _tick(price: str, ts: int = 1_000) -> MarketTick:
@@ -81,7 +82,10 @@ def _surviving_venue(clock: ManualClock) -> tuple[PaperExchange, InMemoryBus]:
 
 
 def _engine(
-    store: SQLiteStore, exchange: PaperExchange, clock: ManualClock
+    store: SQLiteStore,
+    exchange: PaperExchange,
+    clock: ManualClock,
+    config: ReconcileConfig | None = None,
 ) -> tuple[Cache, Reconciler, list[OrderEvent]]:
     """Running-engine wiring: Cache projection, manager, the Reconciler."""
     bus = InMemoryBus()
@@ -92,7 +96,7 @@ def _engine(
     bus.subscribe(ExecutionReport, manager.on_execution_report)
     events: list[OrderEvent] = []
     bus.subscribe(OrderEvent, lambda ev: _record(events, ev))
-    reconciler = Reconciler(bus=bus, clock=clock, exchange=exchange, cache=cache)
+    reconciler = Reconciler(bus=bus, clock=clock, exchange=exchange, cache=cache, config=config)
     return cache, reconciler, events
 
 
@@ -127,3 +131,35 @@ def test_inflight_cycle_adopts_venue_truth_for_a_submitted_order_the_ack_missed(
     lives = [ev for ev in events if isinstance(ev, OrderLive)]
     assert len(lives) == 1
     assert lives[0].reconciliation is True
+
+
+def test_inflight_no_record_resolves_failed_only_after_the_attempt_budget() -> None:
+    clock = ManualClock(start_ns=2_000)
+    store = SQLiteStore(":memory:")
+    # The venue is reachable but has never seen this order: the send is lost
+    # somewhere in flight, or still on the wire.
+    exchange, _ = _surviving_venue(clock)
+
+    store.checkpoint(_saga("0xabc", OrderState.SUBMITTED), ts_ns=500)
+    config = ReconcileConfig(inflight_max_attempts=3)
+    _, reconciler, events = _engine(store, exchange, clock, config)
+
+    async def cycles(n: int) -> None:
+        for _ in range(n):
+            assert await reconciler.reconcile_inflight() is True
+
+    # Bounded retries (ADR-0011): a no-record read is not instant proof while
+    # the send may still land — the first misses resolve nothing.
+    asyncio.run(cycles(2))
+    order = store.get_order("0xabc")
+    assert order is not None
+    assert order.state is OrderState.SUBMITTED
+    assert events == []
+
+    # The budget-exhausting miss is the proof: FAILED, never a blind resend.
+    asyncio.run(cycles(1))
+    order = store.get_order("0xabc")
+    assert order is not None
+    assert order.state is OrderState.FAILED
+    assert [type(ev) for ev in events] == [OrderFailed]
+    assert events[0].reconciliation is True
