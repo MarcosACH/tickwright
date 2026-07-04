@@ -30,6 +30,7 @@ from tickwright.domain import (
     Order,
     OrderCancelled,
     OrderEvent,
+    OrderFailed,
     OrderLive,
     OrderPlaced,
     OrderRejected,
@@ -251,6 +252,21 @@ class ExecutionManager:
                     symbol=order.symbol,
                     venue_oid=report.venue_oid if report.venue_oid is not None else order.venue_oid,
                     reason=report.reason or "venue rejected",
+                    reconciliation=report.reconciliation,
+                )
+            case OrderState.FAILED:
+                # Only the Reconciler mints this status: positive proof the
+                # order never landed (ADR-0010) — a verdict, not a venue push.
+                now = self._clock.timestamp_ns()
+                return OrderFailed(
+                    ts_event=now,
+                    ts_init=now,
+                    cloid=order.cloid,
+                    strategy_id=order.strategy_id,
+                    signal_id=order.signal_id,
+                    symbol=order.symbol,
+                    venue_oid=order.venue_oid,
+                    reason=report.reason or "proven never landed",
                     reconciliation=report.reconciliation,
                 )
             case _:

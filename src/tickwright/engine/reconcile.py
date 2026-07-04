@@ -15,7 +15,15 @@ failure and heals nothing it could not prove — an outage must never read as
 
 from dataclasses import replace
 
-from tickwright.domain import Clock, EventBus, Exchange, Order, VenueOrderView
+from tickwright.domain import (
+    Clock,
+    EventBus,
+    Exchange,
+    Order,
+    OrderState,
+    OrderStatusReport,
+    VenueOrderView,
+)
 
 from .cache import Cache
 
@@ -44,7 +52,25 @@ class Reconciler:
 
     async def _adopt(self, order: Order, view: VenueOrderView) -> None:
         """Align one saga with the venue's view of its cloid."""
+        if not view.has_record:
+            # A successful read with no status and no fills is positive proof
+            # the order never landed: resolve FAILED (ADR-0010/0011) — never a
+            # blind resend (ADR-0008 rule 2). Recreating is the strategy's call.
+            await self._bus.publish(self._failed_verdict(order))
+            return
         if view.status is not None:
             # Replay the venue's record as a synthetic, provenance-flagged fact;
             # the ExecutionManager turns it into the canonical transition.
             await self._bus.publish(replace(view.status, reconciliation=True))
+
+    def _failed_verdict(self, order: Order) -> OrderStatusReport:
+        now = self._clock.timestamp_ns()
+        return OrderStatusReport(
+            ts_event=now,
+            ts_init=now,
+            cloid=order.cloid,
+            symbol=order.symbol,
+            status=OrderState.FAILED,
+            reason="reconciliation: venue has no record of this cloid",
+            reconciliation=True,
+        )

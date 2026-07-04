@@ -22,6 +22,7 @@ from tickwright.domain import (
     MarketTick,
     Order,
     OrderEvent,
+    OrderFailed,
     OrderLive,
     OrderState,
     OrderType,
@@ -128,3 +129,47 @@ def test_recovered_submitted_saga_adopts_the_venue_live_state() -> None:
     assert len(lives) == 1
     # The heal is auditable as reconciler-sourced (ADR-0011 inv 6).
     assert lives[0].reconciliation is True
+
+
+def test_recovered_submitted_saga_the_venue_never_saw_resolves_failed_not_resent() -> None:
+    clock = ManualClock(start_ns=2_000)
+    store = SQLiteStore(":memory:")
+    # The venue outlived our crash but never received this order: the crash
+    # happened inside the send window, before the request landed.
+    exchange, _ = _surviving_venue(clock)
+
+    store.checkpoint(_saga("0xabc", OrderState.SUBMITTED), ts_ns=500)
+    _, _, reconciler, events = _second_life(store, exchange, clock)
+
+    assert asyncio.run(reconciler.reconcile_startup()) is True
+
+    # Proven non-landing → FAILED (ADR-0010/0011), durably.
+    recovered = store.get_order("0xabc")
+    assert recovered is not None
+    assert recovered.state is OrderState.FAILED
+    assert [type(ev) for ev in events] == [OrderFailed]
+    assert events[0].reconciliation is True
+    # Never blind-resent (ADR-0008 rule 2): the venue still has no record.
+    view = asyncio.run(exchange.fetch_order("0xabc"))
+    assert view is not None and not view.has_record
+
+
+def test_recovered_pending_intent_the_venue_never_saw_resolves_failed() -> None:
+    clock = ManualClock(start_ns=2_000)
+    store = SQLiteStore(":memory:")
+    exchange, _ = _surviving_venue(clock)
+
+    # The crash hit after the write-ahead PENDING checkpoint but before (or
+    # inside) the send: the durable intent exists, the venue never saw it.
+    store.checkpoint(_saga("0xabc", OrderState.PENDING), ts_ns=500)
+    _, _, reconciler, events = _second_life(store, exchange, clock)
+
+    assert asyncio.run(reconciler.reconcile_startup()) is True
+
+    recovered = store.get_order("0xabc")
+    assert recovered is not None
+    assert recovered.state is OrderState.FAILED
+    assert [type(ev) for ev in events] == [OrderFailed]
+    # Attempted and proven never-landed (ADR-0010): resolved, never resent.
+    view = asyncio.run(exchange.fetch_order("0xabc"))
+    assert view is not None and not view.has_record

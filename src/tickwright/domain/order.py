@@ -33,6 +33,9 @@ _LEGAL_TRANSITIONS: frozenset[tuple[OrderState, OrderState]] = frozenset(
     {
         (OrderState.PENDING, OrderState.SUBMITTED),
         (OrderState.PENDING, OrderState.DENIED),
+        # Recovery-only: a durable write-ahead intent the venue positively has
+        # no record of — attempted, proven never landed (ADR-0010, ADR-0008).
+        (OrderState.PENDING, OrderState.FAILED),
         (OrderState.SUBMITTED, OrderState.LIVE),
         (OrderState.SUBMITTED, OrderState.PARTIALLY_FILLED),
         (OrderState.SUBMITTED, OrderState.FILLED),

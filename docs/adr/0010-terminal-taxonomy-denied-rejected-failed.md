@@ -20,6 +20,7 @@ Updated negative transitions:
 
 ```
 PENDING ─guard deny──▶ DENIED                    (pre-trade, never sent)
+PENDING ─recovery───▶ FAILED                     (write-ahead intent; venue proven to have no record)
 SUBMITTED ─venue no──▶ REJECTED                  (sent, venue refused)
 SUBMITTED ─hard fail─▶ FAILED                    (sent, proven non-landing — NOT a timeout)
 LIVE ─ghost reconcile───────▶ REJECTED           (vanished, no fills recorded)
