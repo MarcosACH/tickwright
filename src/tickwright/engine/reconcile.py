@@ -165,6 +165,9 @@ class Reconciler:
             return
         if self._inflight_run.record_absent(order.cloid):
             await self._bus.publish(self._failed_verdict(order))
+            named_event(
+                "inflight.reconciled", cloid=order.cloid, resolution=OrderState.FAILED.value
+            )
 
     async def _resolve_open_order(self, order: Order, view: VenueOrderView) -> None:
         """Resolve one resting order against its venue reading. A live record

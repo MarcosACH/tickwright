@@ -196,6 +196,30 @@ def test_inflight_no_record_resolves_failed_only_after_the_attempt_budget() -> N
     assert events[0].reconciliation is True
 
 
+def test_the_inflight_failed_verdict_is_announced_as_a_named_event() -> None:
+    clock = ManualClock(start_ns=2_000)
+    store = SQLiteStore(":memory:")
+    exchange, _ = _surviving_venue(clock)
+
+    store.checkpoint(_saga("0xabc", OrderState.SUBMITTED), ts_ns=500)
+    config = ReconcileConfig(inflight_max_attempts=2)
+    _, reconciler, _ = _engine(store, exchange, clock, config)
+
+    # The first miss proves nothing and stays silent; only the budget-exhausting
+    # verdict is a reconcile decision worth its own telemetry — parity with the
+    # ghost cadence's ``ghost.reconciled`` (ADR-0020).
+    with structlog.testing.capture_logs() as first:
+        assert asyncio.run(reconciler.reconcile_inflight()) is True
+    assert not [log for log in first if log["event"] == "inflight.reconciled"]
+
+    with structlog.testing.capture_logs() as verdict:
+        assert asyncio.run(reconciler.reconcile_inflight()) is True
+    reconciled = [log for log in verdict if log["event"] == "inflight.reconciled"]
+    assert len(reconciled) == 1
+    assert reconciled[0]["cloid"] == "0xabc"
+    assert reconciled[0]["resolution"] == "failed"
+
+
 # --- Slow open-order / ghost cycle ----------------------------------------------
 
 
