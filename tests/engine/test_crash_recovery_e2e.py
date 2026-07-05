@@ -14,6 +14,7 @@ the original signal thrown in.
 
 import asyncio
 import json
+from collections.abc import Mapping
 from decimal import Decimal
 from pathlib import Path
 
@@ -27,6 +28,7 @@ from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     AggressorSide,
     ExecutionReport,
+    InstrumentSpec,
     MarketTick,
     OrderEvent,
     OrderFailed,
@@ -73,6 +75,9 @@ class _CrashingTransport:
 
     async def fetch_order(self, cloid: str) -> VenueOrderView | None:
         raise AssertionError("first life never fetches")
+
+    def instrument_specs(self) -> Mapping[str, InstrumentSpec]:
+        return self._venue.instrument_specs()
 
 
 def _ticks_file(path: Path, prices: list[str]) -> Path:

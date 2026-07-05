@@ -13,10 +13,13 @@ owns no saga — the ``ExecutionManager`` turns these raw facts into canonical
 fees/margin/PnL (ADR-0013).
 """
 
+from collections.abc import Mapping
+
 from tickwright.domain import (
     Clock,
     EventBus,
     FillReport,
+    InstrumentSpec,
     InvariantViolation,
     MarketTick,
     OrderState,
@@ -34,10 +37,21 @@ from .fill_model import Fill, FillModel
 class PaperExchange:
     """An ``Exchange`` that fills against replayed/live ticks, deterministically."""
 
-    def __init__(self, *, bus: EventBus, clock: Clock, fill_model: FillModel) -> None:
+    def __init__(
+        self,
+        *,
+        bus: EventBus,
+        clock: Clock,
+        fill_model: FillModel,
+        instrument_specs: Mapping[str, InstrumentSpec] | None = None,
+    ) -> None:
         self._bus = bus
         self._clock = clock
         self._fill_model = fill_model
+        # Config-sourced venue metadata (ADR-0031). The exchange owns venue
+        # knowledge, so min-notional a MARKET can only be judged at its fill
+        # price is enforced here; the Engine also reads these to wire the guard.
+        self._specs = dict(instrument_specs or {})
         self._latest_tick: dict[str, MarketTick] = {}
         self._fill_counts: dict[str, int] = {}
         self._book: dict[str, PlaceOrder] = {}  # resting LIMITs, keyed by cloid.
@@ -74,6 +88,16 @@ class PaperExchange:
         tick = self._latest_tick.get(order.symbol)
         if tick is None:
             raise ValueError(f"no market tick cached for {order.symbol!r}; cannot fill MARKET")
+
+        spec = self._specs.get(order.symbol)
+        if spec is not None and tick.price * order.quantity < spec.min_notional:
+            # Only the venue knows a MARKET's fill price, so it is the one that
+            # can judge min-notional (ADR-0017): a too-small order is REJECTED
+            # (sent, venue-adjudicated), the twin of the guard's LIMIT DENIED.
+            await self._bus.publish(
+                self._status_report(order, OrderState.REJECTED, reason="below min notional")
+            )
+            return
 
         fill = self._fill_model.market_fill(order, tick)
         await self._bus.publish(self._fill_report(order, fill))
@@ -128,6 +152,11 @@ class PaperExchange:
         if order.side is Side.BUY:
             return tick.price <= order.price
         return tick.price >= order.price
+
+    def instrument_specs(self) -> Mapping[str, InstrumentSpec]:
+        """The config-sourced per-symbol specs (ADR-0031), for the Engine to wire
+        into the guard. A copy, so a caller can never mutate the venue's config."""
+        return dict(self._specs)
 
     async def fetch_order(self, cloid: str) -> VenueOrderView | None:
         """Venue truth for ``cloid``: last reported status plus every fill.

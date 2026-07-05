@@ -17,6 +17,7 @@ from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.domain import (
     AggressorSide,
     FillReport,
+    InstrumentSpec,
     MarketTick,
     OrderState,
     OrderStatusReport,
@@ -91,6 +92,70 @@ def _limit_harness() -> tuple[
     statuses: list[OrderStatusReport] = []
     bus.subscribe(OrderStatusReport, lambda r: _record(statuses, r))
     return exchange, bus, clock, fills, statuses
+
+
+_BTC_SPEC = InstrumentSpec(
+    symbol="BTC",
+    sz_decimals=3,
+    max_decimals=6,
+    max_sig_figs=5,
+    min_notional=Decimal("10"),
+)
+
+
+def _specced_harness() -> tuple[
+    PaperExchange, InMemoryBus, ManualClock, list[FillReport], list[OrderStatusReport]
+]:
+    bus = InMemoryBus()
+    clock = ManualClock()
+    exchange = PaperExchange(
+        bus=bus, clock=clock, fill_model=ImmediateFillModel(), instrument_specs={"BTC": _BTC_SPEC}
+    )
+    bus.subscribe(MarketTick, exchange.on_tick)
+    fills: list[FillReport] = []
+    statuses: list[OrderStatusReport] = []
+    bus.subscribe(FillReport, lambda r: _record(fills, r))
+    bus.subscribe(OrderStatusReport, lambda r: _record(statuses, r))
+    return exchange, bus, clock, fills, statuses
+
+
+def test_instrument_specs_exposes_the_configured_specs() -> None:
+    # Adapter-sourced specs (ADR-0031): the paper exchange authors them from
+    # config and exposes them for the Engine to wire into the guard.
+    exchange, *_ = _specced_harness()
+    assert exchange.instrument_specs() == {"BTC": _BTC_SPEC}
+
+
+def test_market_order_below_min_notional_is_rejected_by_the_venue() -> None:
+    exchange, bus, clock, fills, statuses = _specced_harness()
+
+    async def scenario() -> None:
+        clock.advance_to(1_000)
+        await bus.publish(_tick("100"))
+        # notional = 100 × 0.05 = 5, below min_notional 10. Only the venue knows
+        # a MARKET's fill price, so it adjudicates here → REJECTED, not filled.
+        await exchange.place(_market_order(qty="0.05"))
+
+    asyncio.run(scenario())
+
+    assert fills == []  # never filled
+    assert len(statuses) == 1
+    assert statuses[0].status is OrderState.REJECTED
+    assert statuses[0].reason
+
+
+def test_market_order_at_or_above_min_notional_fills_normally() -> None:
+    exchange, bus, clock, fills, statuses = _specced_harness()
+
+    async def scenario() -> None:
+        clock.advance_to(1_000)
+        await bus.publish(_tick("100"))
+        await exchange.place(_market_order(qty="0.2"))  # notional 20 ≥ 10
+
+    asyncio.run(scenario())
+
+    assert len(fills) == 1
+    assert not [s for s in statuses if s.status is OrderState.REJECTED]
 
 
 def test_market_order_fills_at_the_latest_tick_price() -> None:

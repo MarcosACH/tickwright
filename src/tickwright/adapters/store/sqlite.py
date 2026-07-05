@@ -17,7 +17,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any
 
-from tickwright.domain import Order, OrderState, OrderType, Side
+from tickwright.domain import KillSwitchState, Order, OrderState, OrderType, Side
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS orders (
@@ -37,7 +37,13 @@ CREATE TABLE IF NOT EXISTS orders (
     cancel_signal_id    TEXT,
     applied_event_ids TEXT NOT NULL,
     history           TEXT NOT NULL
-)
+);
+CREATE TABLE IF NOT EXISTS kill_switch (
+    id       INTEGER PRIMARY KEY CHECK (id = 1),
+    tripped  INTEGER NOT NULL,
+    reason   TEXT,
+    ts_ns    INTEGER NOT NULL
+);
 """
 
 
@@ -51,7 +57,7 @@ class SQLiteStore:
         # explicit close (e.g. a hypothesis example) never leaks a connection.
         self._finalizer = weakref.finalize(self, self._conn.close)
         with self._conn:
-            self._conn.execute(_SCHEMA)
+            self._conn.executescript(_SCHEMA)
 
     def checkpoint(self, order: Order, *, ts_ns: int) -> None:
         """Durably record ``order``'s full saga state as of ``ts_ns``.
@@ -130,6 +136,24 @@ class SQLiteStore:
             cancel_signal_id=row[13],
             applied_event_ids=json.loads(row[14]),
         )
+
+    def save_kill_switch(self, *, tripped: bool, reason: str | None, ts_ns: int) -> None:
+        """Durably record the single-row kill-switch state (ADR-0026)."""
+        with self._conn:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO kill_switch (id, tripped, reason, ts_ns) "
+                "VALUES (1, ?, ?, ?)",
+                (int(tripped), reason, ts_ns),
+            )
+
+    def load_kill_switch(self) -> KillSwitchState | None:
+        """The persisted kill-switch state, or ``None`` if never written."""
+        row = self._conn.execute(
+            "SELECT tripped, reason, ts_ns FROM kill_switch WHERE id = 1"
+        ).fetchone()
+        if row is None:
+            return None
+        return KillSwitchState(tripped=bool(row[0]), reason=row[1], ts_ns=row[2])
 
     def history(self, cloid: str) -> list[tuple[OrderState, int]]:
         """The durable transition trail: one ``(state, ts_ns)`` per checkpoint.
