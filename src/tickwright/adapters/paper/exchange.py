@@ -29,6 +29,7 @@ from tickwright.domain import (
     Side,
     TimeInForce,
     VenueOrderView,
+    below_min_notional,
 )
 
 from .fill_model import Fill, FillModel
@@ -90,7 +91,7 @@ class PaperExchange:
             raise ValueError(f"no market tick cached for {order.symbol!r}; cannot fill MARKET")
 
         spec = self._specs.get(order.symbol)
-        if spec is not None and tick.price * order.quantity < spec.min_notional:
+        if spec is not None and below_min_notional(tick.price, order.quantity, spec):
             # Only the venue knows a MARKET's fill price, so it is the one that
             # can judge min-notional (ADR-0017): a too-small order is REJECTED
             # (sent, venue-adjudicated), the twin of the guard's LIMIT DENIED.

@@ -23,6 +23,7 @@ from tickwright.domain import (
     InstrumentSpec,
     PlaceSignal,
     Store,
+    below_min_notional,
     quantize_price,
     quantize_size,
 )
@@ -80,7 +81,7 @@ class RealGuard:
             # so min-notional is adjudicated there (→ REJECTED), not here (ADR-0017).
             return Approved(quantity=quantity, price=None)
         price = quantize_price(signal.price, signal.side, spec)
-        if price * quantity < spec.min_notional:
+        if below_min_notional(price, quantity, spec):
             # A LIMIT carries its own price, so notional is exact: deny locally
             # rather than emit an order the venue will reject (ADR-0017).
             return Denied(reason="below min notional")

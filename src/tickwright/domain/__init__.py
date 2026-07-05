@@ -37,6 +37,7 @@ from .instrument import (
     GuardDecision,
     InstrumentSpec,
     KillSwitchState,
+    below_min_notional,
     quantize_price,
     quantize_size,
 )
@@ -94,6 +95,7 @@ __all__ = [
     # id derivation
     "derive_cloid",
     # quantization
+    "below_min_notional",
     "quantize_price",
     "quantize_size",
     # seam Protocols

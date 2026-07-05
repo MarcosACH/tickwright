@@ -9,7 +9,13 @@ live where both can import them.
 
 from decimal import Decimal
 
-from tickwright.domain import InstrumentSpec, Side, quantize_price, quantize_size
+from tickwright.domain import (
+    InstrumentSpec,
+    Side,
+    below_min_notional,
+    quantize_price,
+    quantize_size,
+)
 
 
 def _spec(
@@ -66,3 +72,20 @@ def test_integer_price_is_valid_beyond_the_significant_figure_cap() -> None:
     # integer is left untouched, never rounded to the 5-sig-fig grid (42130).
     spec = _spec(sz_decimals=2, max_decimals=6, max_sig_figs=5)
     assert quantize_price(Decimal("421234"), Side.BUY, spec) == Decimal("421234")
+
+
+def test_below_min_notional_when_the_notional_falls_short() -> None:
+    # notional = 100 × 0.05 = 5, below min_notional 10 → below. The one home the
+    # guard (LIMIT → DENIED) and every venue adapter (MARKET → REJECTED) share.
+    assert below_min_notional(Decimal("100"), Decimal("0.05"), _spec(min_notional="10"))
+
+
+def test_exactly_at_min_notional_is_not_below() -> None:
+    # The boundary is strict: 100 × 0.1 = 10 equals min_notional 10, so it *clears*
+    # — an order at exactly the minimum is allowed, never denied.
+    assert not below_min_notional(Decimal("100"), Decimal("0.1"), _spec(min_notional="10"))
+
+
+def test_above_min_notional_is_not_below() -> None:
+    # notional = 100 × 0.2 = 20, above min_notional 10 → not below.
+    assert not below_min_notional(Decimal("100"), Decimal("0.2"), _spec(min_notional="10"))

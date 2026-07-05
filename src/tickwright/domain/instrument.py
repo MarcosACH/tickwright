@@ -102,6 +102,19 @@ def quantize_price(price: Decimal, side: Side, spec: InstrumentSpec) -> Decimal:
     return price.quantize(quantum, rounding=rounding)
 
 
+def below_min_notional(price: Decimal, quantity: Decimal, spec: InstrumentSpec) -> bool:
+    """True if ``price × quantity`` falls **below** ``spec.min_notional`` (ADR-0017).
+
+    The one home for the min-notional boundary rule — a peer of the quantizers,
+    shared by the pre-trade guard (a LIMIT, before send → ``DENIED``) and every
+    ``Exchange`` adapter (a MARKET, at the venue-known fill price → ``REJECTED``),
+    so the two halves of the pre-trade/at-fill split can never disagree on what
+    "min notional" means. Strictly below: a notional exactly equal to
+    ``min_notional`` clears.
+    """
+    return price * quantity < spec.min_notional
+
+
 def _allowed_decimals(price: Decimal, spec: InstrumentSpec) -> int:
     """The maximum decimal places a valid price of ``price``'s magnitude may keep.
 
