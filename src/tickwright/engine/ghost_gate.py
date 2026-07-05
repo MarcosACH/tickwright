@@ -53,10 +53,14 @@ class GhostGate:
         from the store that the startup barrier already re-proved, so it is *not*
         protected and the grace window is its only guard. While the last event is
         fresher than the protection window the order is ``PROTECTED`` and the
-        grace clock is not touched; otherwise the grace clock advances and rules
-        ``GHOST`` once the order has been continuously absent across it.
+        grace clock is *reset* — protection defers the start of the grace
+        measurement, so a fresh event arriving after the clock had already armed
+        (e.g. a ``cancel_requested`` marker on a still-resting order) restarts it
+        rather than riding a stale run. Otherwise the grace clock advances and
+        rules ``GHOST`` once the order has been continuously absent across it.
         """
         if last_event_ns is not None and now_ns - last_event_ns < self._protection_span_ns:
+            self._grace.record_present(cloid)
             return GhostVerdict.PROTECTED
         if self._grace.record_absent(cloid, now_ns=now_ns):
             return GhostVerdict.GHOST

@@ -57,6 +57,23 @@ class TestGhostGate:
         assert gate.evaluate("0xabc", now_ns=100, last_event_ns=None) is GhostVerdict.WAITING
         assert gate.evaluate("0xabc", now_ns=191, last_event_ns=None) is GhostVerdict.GHOST
 
+    def test_protection_resets_a_grace_clock_that_had_already_armed(self) -> None:
+        gate = GhostGate(grace_span_ns=90, protection_span_ns=30)
+        # No recency yet: an unprotected absent read arms the grace clock at 35.
+        assert gate.evaluate("0xabc", now_ns=35, last_event_ns=None) is GhostVerdict.WAITING
+        # A fresh saga event lands mid-absence (e.g. a cancel_requested marker on a
+        # still-resting order). It re-enters protection, which must *restart* the
+        # grace measurement — protection defers the start, it does not ride a stale
+        # run. last_event=40: protected across 40..70.
+        assert gate.evaluate("0xabc", now_ns=45, last_event_ns=40) is GhostVerdict.PROTECTED
+        assert gate.evaluate("0xabc", now_ns=69, last_event_ns=40) is GhostVerdict.PROTECTED
+        # Protection lifts at 70; the grace clock arms *there*, not back at 35, so
+        # the ghost is due at 160 — not 125, which a stale run from 35 would give.
+        assert gate.evaluate("0xabc", now_ns=70, last_event_ns=40) is GhostVerdict.WAITING
+        assert gate.evaluate("0xabc", now_ns=125, last_event_ns=None) is GhostVerdict.WAITING
+        assert gate.evaluate("0xabc", now_ns=159, last_event_ns=None) is GhostVerdict.WAITING
+        assert gate.evaluate("0xabc", now_ns=160, last_event_ns=None) is GhostVerdict.GHOST
+
     def test_ghosting_re_arms_the_window(self) -> None:
         gate = GhostGate(grace_span_ns=90, protection_span_ns=30)
         gate.evaluate("0xabc", now_ns=0, last_event_ns=None)
