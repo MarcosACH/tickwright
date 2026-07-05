@@ -21,6 +21,7 @@ from tickwright.domain import (
     Denied,
     GuardDecision,
     InstrumentSpec,
+    InvariantViolation,
     PlaceSignal,
     Store,
     below_min_notional,
@@ -70,7 +71,17 @@ class RealGuard:
             # Halt-only: every new placement is DENIED while resting LIVE orders
             # are left untouched (ADR-0026). Checked first — a halt overrides all.
             return Denied(reason="kill switch tripped")
-        spec = self._specs[signal.symbol]
+        spec = self._specs.get(signal.symbol)
+        if spec is None:
+            # A traded symbol with no spec is a composition-root wiring bug
+            # (ADR-0031 sources a spec per symbol at startup): fail fast (ADR-0014)
+            # rather than send an unquantized order the venue would mishandle.
+            # Unlike the Exchange, whose specs are optional venue config, the
+            # guard's are mandatory — it cannot quantize without one.
+            raise InvariantViolation(
+                f"no InstrumentSpec wired for symbol {signal.symbol!r}; the composition "
+                "root must source a spec for every traded symbol (ADR-0031)"
+            )
         quantity = quantize_size(signal.quantity, spec)
         if quantity <= 0:
             # A size that rounds to nothing is a phantom order (ADR-0017): never

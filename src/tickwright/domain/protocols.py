@@ -186,7 +186,14 @@ class PreTradeGuard(Protocol):
         Failure — a size that rounds to zero, a below-min-notional order, or a
         tripped kill switch — is ``DENIED`` (ADR-0010): never sent, safe to
         recreate. Approval carries the quantized ``quantity``/``price`` the order
-        is actually placed at."""
+        is actually placed at.
+
+        The guard's specs are **mandatory**: a ``PlaceSignal`` for a symbol it has
+        no ``InstrumentSpec`` for is a composition-root wiring bug (ADR-0031) and
+        raises ``InvariantViolation`` (fail-fast, ADR-0014) — it cannot quantize
+        without a spec, and must not send an unquantized order. This is the
+        deliberate counterpart to ``Exchange``, whose specs are *optional* venue
+        config (a missing one skips the venue-side min-notional check)."""
         ...
 
     def trip_kill_switch(self, reason: str) -> None:

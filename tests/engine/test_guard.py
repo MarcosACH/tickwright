@@ -11,6 +11,7 @@ a crash.
 
 from decimal import Decimal
 
+import pytest
 import structlog.testing
 
 from tickwright.adapters.clock import ManualClock
@@ -19,6 +20,7 @@ from tickwright.domain import (
     Approved,
     Denied,
     InstrumentSpec,
+    InvariantViolation,
     OrderType,
     PlaceSignal,
     Side,
@@ -49,12 +51,13 @@ def _limit_signal(
     quantity: str = "1",
     side: Side = Side.BUY,
     seq: int = 1,
+    symbol: str = "BTC",
 ) -> PlaceSignal:
     return PlaceSignal(
         ts_event=1_000,
         ts_init=1_000,
         strategy_id="trivial",
-        symbol="BTC",
+        symbol=symbol,
         seq=seq,
         side=side,
         quantity=Decimal(quantity),
@@ -167,6 +170,25 @@ def test_trip_and_reset_emit_named_events() -> None:
     assert "guard.kill_switch_reset" in events
     tripped = next(log for log in logs if log["event"] == "guard.kill_switch_tripped")
     assert tripped["reason"] == "market data looks wrong"
+
+
+def test_check_for_an_unspecced_symbol_fails_fast() -> None:
+    # A RealGuard is wired with a spec per traded symbol at startup (ADR-0031). A
+    # PlaceSignal for a symbol it has no spec for is a composition-root wiring bug:
+    # fail fast (ADR-0014) rather than send an unquantized order the venue would
+    # silently mishandle. The symbol is named so the misconfiguration is diagnosable.
+    guard = _guard()  # specs = {"BTC": ...}
+    with pytest.raises(InvariantViolation, match="ETH"):
+        guard.check(_limit_signal(symbol="ETH"))
+
+
+def test_tripped_kill_switch_denies_an_unspecced_symbol_without_raising() -> None:
+    # The halt is checked before the spec lookup: a tripped kill switch denies
+    # every new placement (ADR-0026), even for a symbol with no spec, so a halt
+    # never surfaces as an InvariantViolation.
+    guard = _guard()
+    guard.trip_kill_switch("halt")
+    assert isinstance(guard.check(_limit_signal(symbol="ETH")), Denied)
 
 
 def test_noop_guard_passes_a_signal_through_unmodified() -> None:
