@@ -33,8 +33,10 @@ ADR-0009).
 6. **Synthetic events are first-class.** Events the reconciler generates (a healed fill, a
    ghost rejection) carry a **deterministic id** and a **`reconciliation` flag**, so they are
    idempotent on replay and auditable as reconciler-sourced vs venue-pushed.
-7. **Timing invariant.** The in-flight / fill-persist retry budget is capped **below** the
-   ghost grace window, so an order still being retried can never be ghosted as missing.
+7. **Timing invariant.** The in-flight / fill-persist retry budget **and** the recent-order
+   protection window are each capped **below** the ghost grace window, so an order still being
+   retried can never be ghosted as missing, and the protection pre-filter can never outlast the
+   grace measurement it precedes. Both bounds are enforced at `ReconcileConfig` construction.
 
 ## Resolutions
 

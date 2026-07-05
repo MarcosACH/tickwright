@@ -191,6 +191,14 @@ never raced onto the ghost path. The fill-history cross-check still runs inside 
 recent order that filled heals immediately. See ADR-0011.
 _Avoid_: cooldown, debounce (those undersell the race-the-venue guard).
 
+**Ghost gate**:
+The `engine/ghost_gate.py` module that owns ADR-0011 invariant 3 in full: the [[Recent-order
+protection window]] pre-filter in front of the grace window, ruling on one absent resting order
+with a single verdict — protected, waiting, or [[Ghost|ghost]]. A pure decision object (no bus,
+clock, or telemetry) composing the grace-window tracker, so the "is it a ghost yet?" timing rule
+reads in one place rather than smeared across the reconciler. See ADR-0011.
+_Avoid_: throttle, filter (too generic — this is the specific two-phase ghost-timing rule).
+
 **Synthetic event**:
 A lifecycle [[Event]] the reconciler generates (a healed fill, a ghost rejection) rather than
 the venue pushing it. Carries a deterministic id and a `reconciliation` flag so it is

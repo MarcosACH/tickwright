@@ -661,24 +661,29 @@ def test_every_cadence_freezes_on_a_none_read_and_removes_nothing(
     attempts=st.integers(min_value=1, max_value=100),
     slow_interval=st.floats(min_value=1.0, max_value=300.0),
     grace=st.floats(min_value=0.1, max_value=600.0),
+    protection=st.floats(min_value=0.1, max_value=600.0),
 )
-def test_every_constructible_config_keeps_the_retry_budget_under_the_ghost_grace(
-    interval: float, attempts: int, slow_interval: float, grace: float
+def test_every_constructible_config_respects_the_ghost_grace_timing_bounds(
+    interval: float, attempts: int, slow_interval: float, grace: float, protection: float
 ) -> None:
-    # The invariant is enforced at construction, so no runtime path ever holds
-    # a config under which an order still being retried could be ghosted.
+    # Both sub-windows must sit under the ghost grace window, enforced at
+    # construction so no runtime path ever holds a config where an order still
+    # being retried could be ghosted, nor one where the protection pre-filter
+    # outlasts the grace measurement it precedes (ADR-0008/0011).
     try:
         config = ReconcileConfig(
             inflight_interval_seconds=interval,
             inflight_max_attempts=attempts,
             open_order_interval_seconds=slow_interval,
             ghost_grace_seconds=grace,
+            recent_order_protection_seconds=protection,
         )
     except ValueError:
-        assert interval * attempts >= grace
+        assert interval * attempts >= grace or protection >= grace
         return
     budget = config.inflight_interval_seconds * config.inflight_max_attempts
     assert budget < config.ghost_grace_seconds
+    assert config.recent_order_protection_seconds < config.ghost_grace_seconds
 
 
 def test_a_config_whose_retry_budget_reaches_the_ghost_grace_is_rejected() -> None:
@@ -686,6 +691,16 @@ def test_a_config_whose_retry_budget_reaches_the_ghost_grace_is_rejected() -> No
         ReconcileConfig(
             inflight_interval_seconds=30.0, inflight_max_attempts=3, ghost_grace_seconds=90.0
         )
+
+
+def test_a_config_whose_protection_window_reaches_the_ghost_grace_is_rejected() -> None:
+    # The protection window is a brief pre-filter that defers the *start* of the
+    # grace measurement for a just-acked order; the grace window is the
+    # substantive continuous-absence measurement. A protection window that reaches
+    # the grace window inverts that layering — the shield outlasts the measurement
+    # it precedes — so it is rejected as a misconfiguration (ADR-0011 inv 3).
+    with pytest.raises(ValueError, match="protection window"):
+        ReconcileConfig(recent_order_protection_seconds=90.0, ghost_grace_seconds=90.0)
 
 
 @pytest.mark.parametrize(

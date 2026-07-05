@@ -32,8 +32,9 @@ from tickwright.domain import (
 )
 from tickwright.observability import named_event
 
-from .absence import ConsecutiveMisses, GraceWindow
+from .absence import ConsecutiveMisses
 from .cache import Cache
+from .ghost_gate import GhostGate, GhostVerdict
 
 _NS_PER_SECOND = 1_000_000_000
 
@@ -56,7 +57,10 @@ class ReconcileConfig:
     ``recent_order_protection_seconds`` is the second clause of ADR-0011 inv 3:
     the ghost cycle skips a resting order whose last saga event is fresher than
     this, so a just-acked order the venue's open-orders snapshot has not yet
-    propagated is never raced onto the ghost path.
+    propagated is never raced onto the ghost path. Construction also holds it
+    strictly under ``ghost_grace_seconds`` — the protection pre-filter is a brief
+    shield that defers the *start* of the grace measurement, so it must not
+    outlast the measurement it precedes.
     """
 
     inflight_interval_seconds: float = 5.0
@@ -82,6 +86,14 @@ class ReconcileConfig:
                 f"ghost grace window ({self.ghost_grace_seconds}s): an order "
                 "still being retried must never be ghosted (ADR-0008/0011)"
             )
+        if self.recent_order_protection_seconds >= self.ghost_grace_seconds:
+            raise ValueError(
+                f"the recent-order protection window "
+                f"({self.recent_order_protection_seconds}s) must stay under the "
+                f"ghost grace window ({self.ghost_grace_seconds}s): the protection "
+                "pre-filter must not outlast the grace measurement it precedes "
+                "(ADR-0011 inv 3)"
+            )
 
 
 class Reconciler:
@@ -101,20 +113,16 @@ class Reconciler:
         self._exchange = exchange
         self._cache = cache
         self._config = config if config is not None else ReconcileConfig()
-        # Continuous-cycle absence bookkeeping (ADR-0011 inv 3/7): the in-flight
-        # retry budget counts consecutive missed reads, the ghost grace window
-        # measures continuous absent wall-clock time. Both reset on presence and
-        # are deliberately in-memory — a restart resets them, and the startup
-        # pass re-proves everything against venue truth anyway (ADR-0009).
+        # Continuous-cycle absence bookkeeping (ADR-0011 inv 3/7), both deliberately
+        # in-memory — a restart resets them, and the startup pass re-proves
+        # everything against venue truth anyway (ADR-0009). The in-flight retry
+        # budget counts consecutive missed reads; the ghost gate owns inv 3 in full
+        # — the recent-order protection pre-filter in front of the grace window —
+        # so the "is it a ghost yet?" timing rule lives in one place.
         self._inflight_run = ConsecutiveMisses(limit=self._config.inflight_max_attempts)
-        self._ghost_grace = GraceWindow(
-            span_ns=int(self._config.ghost_grace_seconds * _NS_PER_SECOND)
-        )
-        # The recent-order protection window (ADR-0011 inv 3): while a resting
-        # order's last saga event is this fresh, the ghost cycle skips it entirely
-        # rather than race the venue's not-yet-propagated open-orders snapshot.
-        self._protection_span_ns = int(
-            self._config.recent_order_protection_seconds * _NS_PER_SECOND
+        self._ghost_gate = GhostGate(
+            grace_span_ns=int(self._config.ghost_grace_seconds * _NS_PER_SECOND),
+            protection_span_ns=int(self._config.recent_order_protection_seconds * _NS_PER_SECOND),
         )
 
     async def reconcile_startup(self) -> bool:
@@ -192,28 +200,22 @@ class Reconciler:
         non-terminal, past its protection window, *and* continuously absent
         across the grace window is ghost-resolved."""
         if view.status is not None:
-            self._ghost_grace.record_present(order.cloid)
+            self._ghost_gate.record_present(order.cloid)
             await self._adopt(order, view)
             return
         await self._heal_fills(view)
         if order.is_terminal:
-            self._ghost_grace.record_present(order.cloid)
+            self._ghost_gate.record_present(order.cloid)
             return
-        if self._within_protection_window(order.cloid):
+        verdict = self._ghost_gate.evaluate(
+            order.cloid,
+            now_ns=self._clock.timestamp_ns(),
+            last_event_ns=self._cache.last_event_ts(order.cloid),
+        )
+        if verdict is GhostVerdict.PROTECTED:
             named_event("reconcile.recency_skipped", cloid=order.cloid)
-            return
-        if self._ghost_grace.record_absent(order.cloid, now_ns=self._clock.timestamp_ns()):
+        elif verdict is GhostVerdict.GHOST:
             await self._resolve_ghost(order)
-
-    def _within_protection_window(self, cloid: str) -> bool:
-        """Whether ``cloid``'s last saga event is too recent to ghost-evaluate
-        (ADR-0011 inv 3). Unknown recency — a saga recovered from the store, never
-        checkpointed this session — is *not* protected: the startup barrier already
-        re-proved it, so the grace window is its only guard."""
-        last_event_ns = self._cache.last_event_ts(cloid)
-        if last_event_ns is None:
-            return False
-        return self._clock.timestamp_ns() - last_event_ns < self._protection_span_ns
 
     async def _resolve_ghost(self, order: Order) -> None:
         """Terminal resolution for an order continuously absent past the grace
