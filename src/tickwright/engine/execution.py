@@ -16,13 +16,21 @@ already resolved terminally is absorbed as an idempotent no-op (ADR-0026).
 A ``CancelSignal`` re-derives the target ``cloid`` from ``target_signal_id``,
 durably checkpoints the ``cancel_requested`` marker **before** calling
 ``Exchange.cancel``, and leaves the saga ``LIVE`` — the marker is metadata, not a
-state, so the order can still fill (ADR-0026). The ``PreTradeGuard`` is a later
-slice.
+state, so the order can still fill (ADR-0026).
+
+The ``PreTradeGuard`` runs **before** the write-ahead (ADR-0017): a ``Denied``
+verdict mints the ``DENIED`` terminal and never touches the exchange, while an
+``Approved`` verdict carries the quantized ``quantity``/``price`` the order is
+actually placed at. It defaults to a passthrough ``NoopGuard`` so the paper/test
+path needs no policy wired in.
 """
+
+from decimal import Decimal
 
 from tickwright.domain import (
     CancelSignal,
     Clock,
+    Denied,
     EventBus,
     Exchange,
     ExecutionReport,
@@ -30,6 +38,7 @@ from tickwright.domain import (
     InvariantViolation,
     Order,
     OrderCancelled,
+    OrderDenied,
     OrderEvent,
     OrderFailed,
     OrderLive,
@@ -40,17 +49,28 @@ from tickwright.domain import (
     OrderSubmitted,
     PlaceOrder,
     PlaceSignal,
+    PreTradeGuard,
     Signal,
     derive_cloid,
 )
+from tickwright.observability import named_event
 
 from .cache import Cache
+from .guard import NoopGuard
 
 
 class ExecutionManager:
     """Owns cloid assignment, the saga FSM, and canonical ``OrderEvent`` publishing."""
 
-    def __init__(self, *, bus: EventBus, clock: Clock, exchange: Exchange, cache: Cache) -> None:
+    def __init__(
+        self,
+        *,
+        bus: EventBus,
+        clock: Clock,
+        exchange: Exchange,
+        cache: Cache,
+        guard: PreTradeGuard | None = None,
+    ) -> None:
         self._bus = bus
         self._clock = clock
         self._exchange = exchange
@@ -58,6 +78,9 @@ class ExecutionManager:
         # every checkpoint and is rebuilt from the Store on restart (ADR-0009),
         # so a redelivered signal dedups across a crash too.
         self._cache = cache
+        # The pre-trade boundary run before any send (ADR-0017). Defaults to the
+        # passthrough guard so the paper/test path needs no policy wired in.
+        self._guard = guard if guard is not None else NoopGuard()
 
     async def on_signal(self, signal: Signal) -> None:
         if isinstance(signal, PlaceSignal):
@@ -78,15 +101,27 @@ class ExecutionManager:
             # before a crash — never place twice (ADR-0006).
             return
 
-        order = Order(
-            cloid=cloid,
-            strategy_id=signal.strategy_id,
-            signal_id=signal.signal_id,
-            symbol=signal.symbol,
-            side=signal.side,
-            quantity=signal.quantity,
-            order_type=signal.order_type,
-        )
+        # The pre-trade boundary runs before write-ahead (ADR-0017): a denial is
+        # never sent, so there is no in-flight intent to protect.
+        decision = self._guard.check(signal)
+
+        if isinstance(decision, Denied):
+            # DENIED (ADR-0010): a durable terminal that was never sent. No
+            # OrderPlaced/Submitted — the order goes straight from intent to
+            # refused, and a re-emitted signal_id dedups against this record.
+            order = self._order_for(signal, quantity=signal.quantity)
+            denied = self._denied_event(order, decision.reason)
+            order.apply(denied)
+            self._checkpoint(order)
+            named_event(
+                "guard.denied", cloid=order.cloid, signal_id=order.signal_id, reason=decision.reason
+            )
+            await self._bus.publish(denied)
+            return
+
+        # The quantized quantity is what actually gets placed and filled, so the
+        # saga records it, not the strategy's raw intent.
+        order = self._order_for(signal, quantity=decision.quantity)
 
         # PENDING is the write-ahead intent: durable before anything else
         # happens (ADR-0008 rule 1), then announced.
@@ -102,10 +137,10 @@ class ExecutionManager:
                 cloid=cloid,
                 symbol=signal.symbol,
                 side=signal.side,
-                quantity=signal.quantity,
+                quantity=order.quantity,
                 order_type=signal.order_type,
                 time_in_force=signal.time_in_force,
-                price=signal.price,
+                price=decision.price,
                 post_only=signal.post_only,
             )
         )
@@ -114,6 +149,20 @@ class ExecutionManager:
         # recovers through reconcile-by-cloid (ADR-0008 rule 2). Its timestamp
         # arms the in-flight grace clock.
         self._checkpoint(order)
+
+    @staticmethod
+    def _order_for(signal: PlaceSignal, *, quantity: Decimal) -> Order:
+        """Build the saga record from a ``PlaceSignal`` at a given ``quantity`` —
+        the quantized size for a placed order, the raw intent for a denial."""
+        return Order(
+            cloid=derive_cloid(signal.signal_id),
+            strategy_id=signal.strategy_id,
+            signal_id=signal.signal_id,
+            symbol=signal.symbol,
+            side=signal.side,
+            quantity=quantity,
+            order_type=signal.order_type,
+        )
 
     async def _cancel(self, signal: CancelSignal) -> None:
         # Re-derive the target cloid from the signal_id the strategy emitted, so
@@ -228,6 +277,23 @@ class ExecutionManager:
             symbol=order.symbol,
             venue_oid=venue_oid if venue_oid is not None else order.venue_oid,
             reconciliation=reconciliation,
+        )
+
+    def _denied_event(self, order: Order, reason: str) -> OrderDenied:
+        """Build the ``DENIED`` terminal from ``order``'s identity (ADR-0010).
+
+        The guard's pre-trade refusal, minted here rather than by a venue fact —
+        ``DENIED`` is the one terminal the venue never sees."""
+        now = self._clock.timestamp_ns()
+        return OrderDenied(
+            ts_event=now,
+            ts_init=now,
+            cloid=order.cloid,
+            strategy_id=order.strategy_id,
+            signal_id=order.signal_id,
+            symbol=order.symbol,
+            venue_oid=order.venue_oid,
+            reason=reason,
         )
 
     def _status_event(self, order: Order, report: OrderStatusReport) -> OrderEvent | None:
