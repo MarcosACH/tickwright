@@ -183,6 +183,14 @@ are found. A ghost is an *order* the reconciler removes — distinct from a dupl
 *fill*. See ADR-0011.
 _Avoid_: orphan, stale order, dead order.
 
+**Recent-order protection window**:
+The second clause of ADR-0011 invariant 3: the slow [[Ghost]] cycle skips ghost evaluation for a
+resting order whose last saga event is fresher than the window (default ~30s) — the grace clock
+never arms — so a just-acked order the venue's open-orders snapshot has not yet propagated is
+never raced onto the ghost path. The fill-history cross-check still runs inside the window, so a
+recent order that filled heals immediately. See ADR-0011.
+_Avoid_: cooldown, debounce (those undersell the race-the-venue guard).
+
 **Synthetic event**:
 A lifecycle [[Event]] the reconciler generates (a healed fill, a ghost rejection) rather than
 the venue pushing it. Carries a deterministic id and a `reconciliation` flag so it is

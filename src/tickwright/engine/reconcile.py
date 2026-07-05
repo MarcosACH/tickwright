@@ -52,12 +52,18 @@ class ReconcileConfig:
     ``inflight_max_attempts`` — stays strictly under ``ghost_grace_seconds``,
     so no runtime path ever holds a config under which an order still being
     retried could be ghosted as missing.
+
+    ``recent_order_protection_seconds`` is the second clause of ADR-0011 inv 3:
+    the ghost cycle skips a resting order whose last saga event is fresher than
+    this, so a just-acked order the venue's open-orders snapshot has not yet
+    propagated is never raced onto the ghost path.
     """
 
     inflight_interval_seconds: float = 5.0
     inflight_max_attempts: int = 3
     open_order_interval_seconds: float = 30.0
     ghost_grace_seconds: float = 90.0
+    recent_order_protection_seconds: float = 30.0
 
     def __post_init__(self) -> None:
         for name in (
@@ -65,6 +71,7 @@ class ReconcileConfig:
             "inflight_max_attempts",
             "open_order_interval_seconds",
             "ghost_grace_seconds",
+            "recent_order_protection_seconds",
         ):
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be positive")
@@ -102,6 +109,12 @@ class Reconciler:
         self._inflight_run = ConsecutiveMisses(limit=self._config.inflight_max_attempts)
         self._ghost_grace = GraceWindow(
             span_ns=int(self._config.ghost_grace_seconds * _NS_PER_SECOND)
+        )
+        # The recent-order protection window (ADR-0011 inv 3): while a resting
+        # order's last saga event is this fresh, the ghost cycle skips it entirely
+        # rather than race the venue's not-yet-propagated open-orders snapshot.
+        self._protection_span_ns = int(
+            self._config.recent_order_protection_seconds * _NS_PER_SECOND
         )
 
     async def reconcile_startup(self) -> bool:
@@ -173,9 +186,11 @@ class Reconciler:
         """Resolve one resting order against its venue reading. A live record
         resets the grace clock and adopts. Otherwise the read doubled as the
         fill-history cross-check (ADR-0011 inv 2/4): a vanished order may have
-        filled, and executed truth heals immediately — no grace wait. Only an
-        order still non-terminal *and* continuously absent across the grace
-        window is ghost-resolved."""
+        filled, and executed truth heals immediately — no grace wait. A
+        just-acked order still too recent to have propagated is left untouched
+        (no grace-arming, no ghost) rather than raced. Only an order still
+        non-terminal, past its protection window, *and* continuously absent
+        across the grace window is ghost-resolved."""
         if view.status is not None:
             self._ghost_grace.record_present(order.cloid)
             await self._adopt(order, view)
@@ -184,8 +199,21 @@ class Reconciler:
         if order.is_terminal:
             self._ghost_grace.record_present(order.cloid)
             return
+        if self._within_protection_window(order.cloid):
+            named_event("reconcile.recency_skipped", cloid=order.cloid)
+            return
         if self._ghost_grace.record_absent(order.cloid, now_ns=self._clock.timestamp_ns()):
             await self._resolve_ghost(order)
+
+    def _within_protection_window(self, cloid: str) -> bool:
+        """Whether ``cloid``'s last saga event is too recent to ghost-evaluate
+        (ADR-0011 inv 3). Unknown recency — a saga recovered from the store, never
+        checkpointed this session — is *not* protected: the startup barrier already
+        re-proved it, so the grace window is its only guard."""
+        last_event_ns = self._cache.last_event_ts(cloid)
+        if last_event_ns is None:
+            return False
+        return self._clock.timestamp_ns() - last_event_ns < self._protection_span_ns
 
     async def _resolve_ghost(self, order: Order) -> None:
         """Terminal resolution for an order continuously absent past the grace

@@ -22,7 +22,9 @@ ADR-0009).
    single-order/cloid query **and** consult fill history — a vanished order may have filled.
 3. **Grace window.** An order must be **continuously absent across the grace window** (default
    ~90s ≈ 3 missed slow cycles) before it is ghost-resolved. Plus a **recent-order protection
-   window**: skip orders whose last event is too recent to avoid racing the venue.
+   window** (default ~30s ≈ one slow cycle): skip ghost evaluation for orders whose last saga
+   event is too recent — the grace clock never arms — to avoid racing the venue's not-yet-
+   propagated open-orders snapshot. The fill-history cross-check still runs inside the window.
 4. **Fill history is mandatory.** Venue open-orders endpoints exclude closed orders, so
    open-orders alone cannot distinguish "missing" from "recently closed." Always consult fill
    history (Hyperliquid `userFills`/`userFillsByTime`).

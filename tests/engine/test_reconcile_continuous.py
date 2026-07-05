@@ -22,6 +22,7 @@ from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     AggressorSide,
+    Exchange,
     ExecutionReport,
     FillReport,
     MarketTick,
@@ -92,13 +93,14 @@ def _surviving_venue(clock: ManualClock) -> tuple[PaperExchange, InMemoryBus]:
     return exchange, dead_bus
 
 
-def _engine(
+def _wire(
     store: SQLiteStore,
-    exchange: PaperExchange,
+    exchange: Exchange,
     clock: ManualClock,
     config: ReconcileConfig | None = None,
-) -> tuple[InMemoryBus, Reconciler, list[OrderEvent]]:
-    """Running-engine wiring: Cache projection, manager, the Reconciler."""
+) -> tuple[InMemoryBus, Reconciler, list[OrderEvent], Cache]:
+    """The shared running-engine wiring: a Cache projection, the ExecutionManager,
+    and the Reconciler on one bus, with an OrderEvent sink."""
     bus = InMemoryBus()
     cache = Cache(store=store)
     cache.rebuild()
@@ -108,6 +110,17 @@ def _engine(
     events: list[OrderEvent] = []
     bus.subscribe(OrderEvent, lambda ev: _record(events, ev))
     reconciler = Reconciler(bus=bus, clock=clock, exchange=exchange, cache=cache, config=config)
+    return bus, reconciler, events, cache
+
+
+def _engine(
+    store: SQLiteStore,
+    exchange: PaperExchange,
+    clock: ManualClock,
+    config: ReconcileConfig | None = None,
+) -> tuple[InMemoryBus, Reconciler, list[OrderEvent]]:
+    """Running-engine wiring: Cache projection, manager, the Reconciler."""
+    bus, reconciler, events, _ = _wire(store, exchange, clock, config)
     return bus, reconciler, events
 
 
@@ -453,6 +466,120 @@ def test_a_partially_filled_ghost_truly_gone_resolves_cancelled_with_fills_kept(
     assert cancelled[0].reconciliation is True
 
 
+# --- Recent-order protection window (ADR-0011 inv 3) ----------------------------
+
+
+def _running_engine(
+    store: SQLiteStore,
+    venue: Exchange,
+    clock: ManualClock,
+    config: ReconcileConfig | None = None,
+) -> tuple[Reconciler, list[OrderEvent], Cache]:
+    """Engine wiring that also hands back the ``Cache``, so a test can checkpoint
+    a just-acked saga through the write-through path at a controlled ``now`` — the
+    venue's open-orders snapshot then lags that ack."""
+    _, reconciler, events, cache = _wire(store, venue, clock, config)
+    return reconciler, events, cache
+
+
+def test_a_recent_orders_absence_neither_arms_the_grace_clock_nor_ghosts_it() -> None:
+    clock = ManualClock(start_ns=1_000_000_000)
+    store = SQLiteStore(":memory:")
+    venue = _ForgetfulVenue()  # the venue's open-orders snapshot has not propagated the ack yet
+    config = ReconcileConfig(recent_order_protection_seconds=30.0, ghost_grace_seconds=90.0)
+    reconciler, events, cache = _running_engine(store, venue, clock, config)
+    # A LIVE ack we just heard and checkpointed: local truth is fresh as of now.
+    cache.checkpoint(_saga("0xabc", OrderState.LIVE), ts_ns=clock.timestamp_ns())
+
+    # Well inside the protection window a missing venue record proves nothing —
+    # the ghost cycle skips it entirely rather than racing the venue (ADR-0011
+    # inv 3): the grace clock never arms and the skip is named for auditability.
+    async def scenario() -> None:
+        for _ in range(3):
+            with structlog.testing.capture_logs() as logs:
+                assert await reconciler.reconcile_open_orders() is True
+            skipped = [log for log in logs if log["event"] == "reconcile.recency_skipped"]
+            assert len(skipped) == 1
+            assert skipped[0]["cloid"] == "0xabc"
+            await clock.sleep(5.0)
+
+    asyncio.run(scenario())
+    order = store.get_order("0xabc")
+    assert order is not None
+    assert order.state is OrderState.LIVE
+    assert events == []
+
+
+def test_a_recent_order_that_filled_heals_immediately_inside_the_protection_window() -> None:
+    clock = ManualClock(start_ns=1_000_000_000)
+    store = SQLiteStore(":memory:")
+    venue = _ForgetfulVenue()
+    # The open-orders snapshot has not propagated the ack, but fill history
+    # already remembers the order executed in full.
+    venue.views["0xabc"] = VenueOrderView(
+        status=None,
+        fills=(
+            FillReport(
+                ts_event=1_000_000_100,
+                ts_init=1_000_000_100,
+                cloid="0xabc",
+                symbol="BTC",
+                trade_id="0xabc-1",
+                quantity=Decimal("0.5"),
+                price=Decimal("41000"),
+            ),
+        ),
+    )
+    config = ReconcileConfig(recent_order_protection_seconds=30.0)
+    reconciler, events, cache = _running_engine(store, venue, clock, config)
+    cache.checkpoint(_saga("0xabc", OrderState.LIVE), ts_ns=clock.timestamp_ns())
+
+    # The order is well within its protection window, but the fill-history
+    # cross-check is mandatory and independent of the recency skip (ADR-0011
+    # inv 2/4): executed truth heals immediately, with no grace wait.
+    assert asyncio.run(reconciler.reconcile_open_orders()) is True
+
+    order = store.get_order("0xabc")
+    assert order is not None
+    assert order.state is OrderState.FILLED
+    assert order.cum_qty == Decimal("0.5")
+    filled = [ev for ev in events if isinstance(ev, OrderFilled)]
+    assert len(filled) == 1
+    assert filled[0].reconciliation is True
+
+
+def test_a_recent_order_resumes_normal_ghost_resolution_once_it_ages_out() -> None:
+    clock = ManualClock(start_ns=1_000_000_000)
+    store = SQLiteStore(":memory:")
+    venue = _ForgetfulVenue()
+    config = ReconcileConfig(recent_order_protection_seconds=30.0, ghost_grace_seconds=90.0)
+    reconciler, events, cache = _running_engine(store, venue, clock, config)
+    cache.checkpoint(_saga("0xabc", OrderState.LIVE), ts_ns=clock.timestamp_ns())
+
+    async def scenario() -> None:
+        # Inside the protection window: skipped, so the grace clock never armed.
+        assert await reconciler.reconcile_open_orders() is True
+        # Aged past protection: the first unprotected sighting arms the grace
+        # clock now (never earlier), so a lone read still ghosts nothing.
+        await clock.sleep(31.0)
+        assert await reconciler.reconcile_open_orders() is True
+        order = store.get_order("0xabc")
+        assert order is not None
+        assert order.state is OrderState.LIVE
+        # Continuously absent across the grace window past that arming: the #15
+        # ghost behavior resumes unchanged → REJECTED from LIVE (ADR-0010/0011).
+        await clock.sleep(91.0)
+        assert await reconciler.reconcile_open_orders() is True
+
+    asyncio.run(scenario())
+    order = store.get_order("0xabc")
+    assert order is not None
+    assert order.state is OrderState.REJECTED
+    rejected = [ev for ev in events if isinstance(ev, OrderRejected)]
+    assert len(rejected) == 1
+    assert rejected[0].reconciliation is True
+
+
 # --- Connectivity guard ---------------------------------------------------------
 
 
@@ -568,6 +695,7 @@ def test_a_config_whose_retry_budget_reaches_the_ghost_grace_is_rejected() -> No
         "inflight_max_attempts",
         "open_order_interval_seconds",
         "ghost_grace_seconds",
+        "recent_order_protection_seconds",
     ],
 )
 @pytest.mark.parametrize("value", [0, -1])

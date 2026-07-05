@@ -55,6 +55,30 @@ def test_checkpoint_writes_through_to_the_store_and_the_projection() -> None:
     assert cache.get_order("0xabc") is order
 
 
+def test_last_event_ts_tracks_this_sessions_writes_but_a_rebuild_forgets_them() -> None:
+    store = SQLiteStore(":memory:")
+    store.checkpoint(_order("0xold"), ts_ns=500)
+    cache = Cache(store=store)
+    cache.rebuild()
+
+    # A saga recovered from the store carries no session recency: it is not
+    # "just-acked this session", so the ghost cycle reads no protection for it
+    # (the startup barrier already re-proved it, ADR-0009/0011).
+    assert cache.last_event_ts("0xold") is None
+
+    # A write-through checkpoint stamps the recency the ghost cycle reads.
+    cache.checkpoint(_order("0xnew"), ts_ns=1_700)
+    assert cache.last_event_ts("0xnew") == 1_700
+    # The latest write wins.
+    cache.checkpoint(_order("0xnew"), ts_ns=2_400)
+    assert cache.last_event_ts("0xnew") == 2_400
+
+    # A rebuild discards session recency wholesale — a fresh process starts blank.
+    cache.rebuild()
+    assert cache.last_event_ts("0xnew") is None
+    assert cache.last_event_ts("0xmissing") is None
+
+
 def test_open_orders_are_the_non_terminal_sagas_filtered_by_strategy_and_symbol() -> None:
     store = SQLiteStore(":memory:")
     cache = Cache(store=store)
