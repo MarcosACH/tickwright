@@ -13,6 +13,7 @@ import asyncio
 from decimal import Decimal
 
 import pytest
+import structlog.testing
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
@@ -266,11 +267,17 @@ def test_sustained_venue_outage_trips_the_barrier_to_faulted_after_the_window() 
     venue = _DarkVenue()
     reconciler = Reconciler(bus=bus, clock=clock, exchange=venue, cache=cache)
 
-    with pytest.raises(StartupReconciliationTimeout):
-        asyncio.run(reconciler.run_startup_barrier(timeout_seconds=30.0))
+    with structlog.testing.capture_logs() as logs:
+        with pytest.raises(StartupReconciliationTimeout):
+            asyncio.run(reconciler.run_startup_barrier(timeout_seconds=30.0))
 
     # Bounded retry with backoff: several attempts, never a tight loop.
     assert 3 <= venue.reads <= 10
+    # Every frozen pass is telemetry, not silence (ADR-0020): one
+    # reconcile.frozen per failed read.
+    frozen = [log for log in logs if log["event"] == "reconcile.frozen"]
+    assert len(frozen) == venue.reads
+    assert frozen[0]["cycle"] == "startup"
     # Freeze, don't guess (ADR-0011 inv 1/5): the outage resolved nothing.
     recovered = store.get_order("0xabc")
     assert recovered is not None

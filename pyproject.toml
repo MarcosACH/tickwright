@@ -9,7 +9,9 @@ authors = [{ name = "Marcos Achaval" }]
 # slice adds exactly the deps it needs (ADR-0021), so the default paper-exchange
 # + in-memory-bus path stays hermetic: `uv sync` pulls nothing off the network
 # beyond the dev toolchain below.
-dependencies = []
+dependencies = [
+    "structlog>=26.1.0",
+]
 
 [dependency-groups]
 # Installed by `uv sync --dev` (and in CI). Not shipped to consumers.

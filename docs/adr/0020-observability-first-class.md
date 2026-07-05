@@ -21,7 +21,7 @@ coverage of state-affecting paths is a requirement, not optional.
   `signal.emitted`, `order.placed`, `order.submitted`, `order.live`, `order.partially_filled`,
   `order.filled`, `order.denied`, `order.rejected`, `order.failed`, `order.cancelled`,
   `saga.checkpoint`, `reconcile.started`, `reconcile.completed`, `reconcile.frozen` (connectivity
-  guard), `ghost.reconciled`, `fill.healed`, `feed.connected`, `feed.disconnected`,
+  guard), `inflight.reconciled`, `ghost.reconciled`, `fill.healed`, `feed.connected`, `feed.disconnected`,
   `guard.denied`, `strategy.snapshot`, `engine.faulted`.
 
 ## Coverage requirement
