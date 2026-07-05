@@ -535,3 +535,22 @@ def test_a_config_whose_retry_budget_reaches_the_ghost_grace_is_rejected() -> No
         ReconcileConfig(
             inflight_interval_seconds=30.0, inflight_max_attempts=3, ghost_grace_seconds=90.0
         )
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "inflight_interval_seconds",
+        "inflight_max_attempts",
+        "open_order_interval_seconds",
+        "ghost_grace_seconds",
+    ],
+)
+@pytest.mark.parametrize("value", [0, -1])
+def test_a_config_with_a_non_positive_timing_knob_is_rejected(field: str, value: int) -> None:
+    # Every timing knob must be strictly positive; the guard names the offending
+    # field so a misconfiguration is diagnosable. Checked before the budget rule,
+    # so a zero ghost_grace_seconds fails positivity, not the budget comparison.
+    kwargs: dict[str, int] = {field: value}
+    with pytest.raises(ValueError, match=f"{field} must be positive"):
+        ReconcileConfig(**kwargs)
