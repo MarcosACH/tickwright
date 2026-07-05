@@ -61,7 +61,7 @@ src/tickwright/
 
 **Responsibilities:** Comparing local non-terminal sagas (by cloid) against venue truth; healing missed fills; resolving ghosts to `REJECTED`/`FILLED`; resolving vanished orders via the `cancel_requested` marker; emitting `reconcile.*`/`ghost.*` named events.
 
-**Seams:** Consumes `Exchange.fetch_*` (query-shaped direct calls, never bus messages — ADR-0004).
+**Seams:** Consumes `Exchange.fetch_*` (query-shaped direct calls, never bus messages — ADR-0004). Internally, one `_drive` skeleton runs every cadence (a state filter, a read, a per-order handler), so the connectivity-guard freeze (ADR-0011 inv 1) lives in exactly one place; the continuous-absence bookkeeping lives in `engine/absence.py` as two trackers — `ConsecutiveMisses` (the in-flight retry budget, counted in missed reads) and `GraceWindow` (the ghost grace window, measured in wall-clock time) — each owning its reset-on-presence discipline.
 
 **Depth note:** The correctness net under at-least-once delivery and crash recovery. Delete it and every consumer must individually distinguish outage from emptiness and duplicate from heal — the freeze/ghost/cross-check policy concentrates here.
 

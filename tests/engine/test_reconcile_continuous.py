@@ -468,6 +468,40 @@ def test_a_none_read_freezes_the_cycle_emits_frozen_and_the_next_cycle_heals() -
     assert order.state is OrderState.LIVE
 
 
+@pytest.mark.parametrize(
+    ("cycle_method", "saga_state", "frozen_label"),
+    [
+        ("reconcile_startup", OrderState.SUBMITTED, "startup"),
+        ("reconcile_inflight", OrderState.SUBMITTED, "inflight"),
+        ("reconcile_open_orders", OrderState.LIVE, "open_order"),
+    ],
+)
+def test_every_cadence_freezes_on_a_none_read_and_removes_nothing(
+    cycle_method: str, saga_state: OrderState, frozen_label: str
+) -> None:
+    # The connectivity guard (ADR-0011 inv 1) is one skeleton behind every
+    # cadence: a failed read freezes the whole pass, resolves nothing, and names
+    # the frozen cycle — so no cadence can silently read an outage as "gone".
+    clock = ManualClock(start_ns=2_000)
+    store = SQLiteStore(":memory:")
+    exchange, _ = _surviving_venue(clock)
+    store.checkpoint(_saga("0xabc", saga_state), ts_ns=500)
+    link = _FlakyLink(exchange)
+    _, reconciler, events = _engine(store, link, clock)  # type: ignore[arg-type]
+
+    link.down = True
+    with structlog.testing.capture_logs() as logs:
+        assert asyncio.run(getattr(reconciler, cycle_method)()) is False
+
+    order = store.get_order("0xabc")
+    assert order is not None
+    assert order.state is saga_state
+    assert events == []
+    frozen = [log for log in logs if log["event"] == "reconcile.frozen"]
+    assert len(frozen) == 1
+    assert frozen[0]["cycle"] == frozen_label
+
+
 # --- Timing rule (ADR-0008/0011) --------------------------------------------------
 
 
