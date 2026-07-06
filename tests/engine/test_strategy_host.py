@@ -10,6 +10,7 @@ import asyncio
 from decimal import Decimal
 
 import pytest
+import structlog.testing
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
@@ -147,6 +148,68 @@ def test_staleness_gate_is_off_by_default() -> None:
     asyncio.run(bus.publish(_tick("BTC", ts=1_000, trade_id="a")))
 
     assert [tick.trade_id for tick in strategy.ticks] == ["a"]
+
+
+class RaisingStrategy(RecordingStrategy):
+    """A third-party strategy whose handlers raise — the containment target."""
+
+    def __init__(self, strategy_id: str, error: Exception) -> None:
+        super().__init__(strategy_id)
+        self._error = error
+
+    async def on_tick(self, tick: MarketTick) -> None:
+        raise self._error
+
+    async def on_order_event(self, event: OrderEvent) -> None:
+        raise self._error
+
+
+def test_raising_strategy_emits_strategy_error_and_others_keep_receiving() -> None:
+    bus = InMemoryBus()
+    host = StrategyHost(bus=bus, clock=ManualClock())
+    bad = RaisingStrategy("bad", KeyError("third-party bug"))
+    good = RecordingStrategy("good")
+    host.register(bad, symbols={"BTC"})
+    host.register(good, symbols={"BTC"})
+    host.start()
+
+    tick = _tick("BTC", ts=1_000, trade_id="a")
+    with structlog.testing.capture_logs() as logs:
+        asyncio.run(bus.publish(tick))
+
+    assert [t.trade_id for t in good.ticks] == ["a"]
+    errors = [log for log in logs if log["event"] == "strategy.error"]
+    assert len(errors) == 1
+    assert errors[0]["strategy_id"] == "bad"
+    assert errors[0]["event_id"] == tick.event_id
+
+
+def test_raising_on_order_event_is_contained_too() -> None:
+    bus = InMemoryBus()
+    host = StrategyHost(bus=bus, clock=ManualClock())
+    bad = RaisingStrategy("bad", ValueError("boom"))
+    host.register(bad, symbols={"BTC"})
+    host.start()
+
+    event = _order_placed("bad")
+    with structlog.testing.capture_logs() as logs:
+        asyncio.run(bus.publish(event))
+
+    errors = [log for log in logs if log["event"] == "strategy.error"]
+    assert len(errors) == 1
+    assert errors[0]["event_id"] == event.event_id
+
+
+def test_invariant_violation_pierces_containment() -> None:
+    bus = InMemoryBus()
+    host = StrategyHost(bus=bus, clock=ManualClock())
+    host.register(
+        RaisingStrategy("bad", InvariantViolation("broken engine assumption")), symbols={"BTC"}
+    )
+    host.start()
+
+    with pytest.raises(InvariantViolation):
+        asyncio.run(bus.publish(_tick("BTC")))
 
 
 def test_duplicate_strategy_id_registration_fails_fast() -> None:

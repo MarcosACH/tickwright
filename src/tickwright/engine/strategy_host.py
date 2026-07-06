@@ -6,16 +6,18 @@ strategy only the events it declared an interest in. Routing/filtering is a
 wrapper concern, never a bus feature — pub/sub stays type-keyed (ADR-0024).
 """
 
-from collections.abc import Iterable
+from collections.abc import Awaitable, Callable, Iterable
 
 from tickwright.domain import (
     Clock,
+    Event,
     EventBus,
     InvariantViolation,
     MarketTick,
     OrderEvent,
     Strategy,
 )
+from tickwright.observability import named_event
 
 
 class StrategyHost:
@@ -74,14 +76,38 @@ class StrategyHost:
             ):
                 return
             high_water[tick.symbol] = mark
-            await strategy.on_tick(tick)
+            await self._contained(strategy, strategy.on_tick, tick)
 
         async def on_order_event(event: OrderEvent) -> None:
             # Events return only to the owning strategy (ADR-0018): another
             # strategy's saga transitions are never its business.
             if event.strategy_id != strategy.strategy_id:
                 return
-            await strategy.on_order_event(event)
+            await self._contained(strategy, strategy.on_order_event, event)
 
         self._bus.subscribe(MarketTick, on_tick)
         self._bus.subscribe(OrderEvent, on_order_event)
+
+    @staticmethod
+    async def _contained[E: Event](
+        strategy: Strategy, handler: Callable[[E], Awaitable[None]], event: E
+    ) -> None:
+        """Run a third-party handler inside the containment net (ADR-0024).
+
+        A strategy bug is logged as ``strategy.error`` — correlated by the
+        triggering event's identity — and the engine continues; one bad handler
+        must never fault the engine or starve its sibling strategies. Only an
+        ``InvariantViolation`` (a broken *engine* assumption) pierces and
+        faults, and ``BaseException`` (cancellation, exit) is never swallowed.
+        """
+        try:
+            await handler(event)
+        except InvariantViolation:
+            raise
+        except Exception as exc:
+            named_event(
+                "strategy.error",
+                strategy_id=strategy.strategy_id,
+                event_id=event.event_id,
+                error=repr(exc),
+            )
