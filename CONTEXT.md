@@ -126,9 +126,9 @@ _Avoid_: order request, command (the bus has no command pattern — a signal is 
 
 **signal_id**:
 The deterministic identity of a [[Signal]], `{strategy_id}:{symbol}:{seq}` with `seq` a
-strategy-owned monotonic counter restored from snapshot on restart. The engine's saga and
-dedup are keyed on it. **Must be a pure function of strategy state — never random.** See
-ADR-0006.
+strategy-owned monotonic counter resumed on restart from the saga-store high-water mark —
+never the snapshot (ADR-0016). The engine's saga and dedup are keyed on it. **Must be a
+pure function of strategy state — never random.** See ADR-0006.
 _Avoid_: signal uuid, request id.
 
 **Client order id** / `cloid`:

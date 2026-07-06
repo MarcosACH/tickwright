@@ -1,9 +1,14 @@
 """``StrategyHost`` — the engine-side strategy runtime (issue #17).
 
-Hosts N third-party ``Strategy`` instances behind the engine's safety net
-(ADR-0018): a registry, and per-strategy subscription wrappers that route each
-strategy only the events it declared an interest in. Routing/filtering is a
-wrapper concern, never a bus feature — pub/sub stays type-keyed (ADR-0024).
+Hosts N third-party ``Strategy`` instances behind the engine's safety net:
+a unique-id registry (ADR-0018), per-strategy subscription wrappers that
+route each strategy only its declared symbols' ticks and its own
+``OrderEvent``s, the per-symbol monotonic tick gate plus staleness threshold
+(ADR-0025), the origin-based containment net (ADR-0024), and the
+snapshot-persist/restore and seq high-water recovery of ADR-0016. Routing,
+gating, and containment are wrapper concerns, never bus features — pub/sub
+stays type-keyed. The engine runner (issue #19) composes this host into the
+full ADR-0024 lifecycle.
 """
 
 from collections.abc import Awaitable, Callable, Iterable
