@@ -148,3 +148,83 @@ def test_stale_snapshot_never_reuses_a_consumed_signal_id(
 
     assert len(emitted) == ticks_after_restart
     assert not set(emitted) & consumed, f"reused signal ids: {set(emitted) & consumed}"
+
+
+class TickRecorder:
+    """A third-party strategy that only records what gets through the gate."""
+
+    def __init__(self, strategy_id: str) -> None:
+        self.strategy_id = strategy_id
+        self.ticks: list[MarketTick] = []
+
+    async def on_tick(self, tick: MarketTick) -> None:
+        self.ticks.append(tick)
+
+    async def on_order_event(self, event: OrderEvent) -> None:
+        pass
+
+    def set_next_seq(self, next_seq: int) -> None:
+        pass
+
+    def snapshot(self) -> bytes:
+        return b""
+
+    def restore(self, data: bytes) -> None:
+        pass
+
+
+_NOW_NS = 10_000  # The fixed "now" the staleness gate measures against.
+
+
+@given(
+    btc_times=st.sets(st.integers(min_value=8_000, max_value=10_000), min_size=1, max_size=6),
+    eth_times=st.sets(st.integers(min_value=8_000, max_value=10_000), min_size=1, max_size=6),
+    threshold=st.integers(min_value=100, max_value=1_000),
+    injections=st.lists(
+        st.tuples(st.integers(min_value=0, max_value=63), st.integers(min_value=0, max_value=63)),
+        max_size=8,
+    ),
+)
+def test_on_tick_sees_only_fresh_strictly_increasing_per_symbol_ticks(
+    btc_times: set[int],
+    eth_times: set[int],
+    threshold: int,
+    injections: list[tuple[int, int]],
+) -> None:
+    honest = sorted(
+        [_tick("BTC", ts, f"b{ts}") for ts in btc_times]
+        + [_tick("ETH", ts, f"e{ts}") for ts in eth_times],
+        key=lambda t: t.ts_event,
+    )
+    # Redeliveries: after honest position `pos`, replay an earlier-or-equal
+    # tick — the duplicate / reorder an at-least-once bus can produce under
+    # per-symbol ordering (ADR-0003).
+    replay_after: dict[int, list[MarketTick]] = {}
+    for after_raw, src_raw in injections:
+        pos = after_raw % len(honest)
+        src = src_raw % len(honest)
+        if src > pos:
+            pos, src = src, pos
+        replay_after.setdefault(pos, []).append(honest[src])
+
+    bus = InMemoryBus()
+    host = StrategyHost(
+        bus=bus,
+        clock=ManualClock(start_ns=_NOW_NS),
+        store=SQLiteStore(":memory:"),
+        tick_staleness_ns=threshold,
+    )
+    recorder = TickRecorder("recorder")
+    host.register(recorder, symbols={"BTC", "ETH"})
+    host.start()
+
+    for pos, tick in enumerate(honest):
+        asyncio.run(bus.publish(tick))
+        for replayed in replay_after.get(pos, []):
+            asyncio.run(bus.publish(replayed))
+
+    for symbol, times in (("BTC", btc_times), ("ETH", eth_times)):
+        delivered = [t.ts_event for t in recorder.ticks if t.symbol == symbol]
+        # Exactly the fresh honest ticks, in order: every duplicate, reorder,
+        # and stale-beyond-threshold tick was dropped, nothing else was.
+        assert delivered == [ts for ts in sorted(times) if _NOW_NS - ts <= threshold]
