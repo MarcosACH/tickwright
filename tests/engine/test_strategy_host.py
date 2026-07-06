@@ -239,6 +239,55 @@ def test_stop_persists_a_final_snapshot_per_strategy() -> None:
     assert store.load_strategy_snapshot("beta") == b"beta-final"
 
 
+def test_start_restores_the_persisted_snapshot() -> None:
+    store = SQLiteStore(":memory:")
+    store.save_strategy_snapshot("alpha", b"prior-life", ts_ns=1_000)
+    host = StrategyHost(bus=InMemoryBus(), clock=ManualClock(), store=store)
+    alpha = RecordingStrategy("alpha")
+    host.register(alpha, symbols={"BTC"})
+
+    host.start()
+
+    assert alpha.state == b"prior-life"
+
+
+def test_start_without_a_snapshot_leaves_the_strategy_fresh() -> None:
+    host = StrategyHost(bus=InMemoryBus(), clock=ManualClock(), store=SQLiteStore(":memory:"))
+    alpha = RecordingStrategy("alpha")
+    alpha.state = b"untouched"
+    host.register(alpha, symbols={"BTC"})
+
+    host.start()
+
+    assert alpha.state == b"untouched"
+
+
+class IncompatibleRestoreStrategy(RecordingStrategy):
+    """A strategy whose code changed shape between runs: restore() rejects."""
+
+    def restore(self, data: bytes) -> None:
+        raise ValueError("unknown snapshot version")
+
+
+def test_incompatible_snapshot_starts_fresh_with_a_named_event() -> None:
+    store = SQLiteStore(":memory:")
+    store.save_strategy_snapshot("alpha", b"old-shape", ts_ns=1_000)
+    bus = InMemoryBus()
+    host = StrategyHost(bus=bus, clock=ManualClock(), store=store)
+    alpha = IncompatibleRestoreStrategy("alpha")
+    host.register(alpha, symbols={"BTC"})
+
+    with structlog.testing.capture_logs() as logs:
+        host.start()
+
+    incompatible = [log for log in logs if log["event"] == "strategy.snapshot_incompatible"]
+    assert len(incompatible) == 1
+    assert incompatible[0]["strategy_id"] == "alpha"
+    # The engine is unaffected: the strategy runs fresh and still gets ticks.
+    asyncio.run(bus.publish(_tick("BTC")))
+    assert len(alpha.ticks) == 1
+
+
 def test_duplicate_strategy_id_registration_fails_fast() -> None:
     host = StrategyHost(bus=InMemoryBus(), clock=ManualClock(), store=SQLiteStore(":memory:"))
     host.register(RecordingStrategy("dup"), symbols={"BTC"})

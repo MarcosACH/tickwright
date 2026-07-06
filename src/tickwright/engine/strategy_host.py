@@ -57,9 +57,33 @@ class StrategyHost:
         self._symbols[strategy.strategy_id] = frozenset(symbols)
 
     def start(self) -> None:
-        """Subscribe every registered strategy's wrapped handlers."""
+        """Restore each strategy's persisted state, then subscribe its wrapped
+        handlers — restore strictly before the first delivered event."""
         for strategy in self._strategies.values():
+            self._restore(strategy)
             self._subscribe(strategy)
+
+    def _restore(self, strategy: Strategy) -> None:
+        """Feed the persisted snapshot to ``strategy.restore()``, if one exists.
+
+        A restore failure is *not* an invariant violation (ADR-0016): the
+        strategy's code changed shape between runs — log
+        ``strategy.snapshot_incompatible`` and start fresh. Seq-safety is
+        unaffected; it comes from the saga store, never the snapshot.
+        """
+        data = self._store.load_strategy_snapshot(strategy.strategy_id)
+        if data is None:
+            return
+        try:
+            strategy.restore(data)
+        except InvariantViolation:
+            raise
+        except Exception as exc:
+            named_event(
+                "strategy.snapshot_incompatible",
+                strategy_id=strategy.strategy_id,
+                error=repr(exc),
+            )
 
     def stop(self) -> None:
         """Take the final ``snapshot()`` of every strategy and persist it.
