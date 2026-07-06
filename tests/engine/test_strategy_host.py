@@ -121,6 +121,34 @@ def test_tick_gate_is_independent_per_symbol() -> None:
     assert [tick.symbol for tick in strategy.ticks] == ["BTC", "ETH"]
 
 
+def test_stale_beyond_threshold_tick_is_dropped() -> None:
+    bus = InMemoryBus()
+    clock = ManualClock(start_ns=10_000)
+    host = StrategyHost(bus=bus, clock=clock, tick_staleness_ns=1_000)
+    strategy = RecordingStrategy("live")
+    host.register(strategy, symbols={"BTC"})
+    host.start()
+
+    # 10_000 - 8_000 > 1_000: a pre-crash backlog tick — never trade on it.
+    asyncio.run(bus.publish(_tick("BTC", ts=8_000, trade_id="a")))
+    # 10_000 - 9_500 <= 1_000: fresh enough.
+    asyncio.run(bus.publish(_tick("BTC", ts=9_500, trade_id="b")))
+
+    assert [tick.trade_id for tick in strategy.ticks] == ["b"]
+
+
+def test_staleness_gate_is_off_by_default() -> None:
+    bus = InMemoryBus()
+    host = StrategyHost(bus=bus, clock=ManualClock(start_ns=10_000))
+    strategy = RecordingStrategy("replay")
+    host.register(strategy, symbols={"BTC"})
+    host.start()
+
+    asyncio.run(bus.publish(_tick("BTC", ts=1_000, trade_id="a")))
+
+    assert [tick.trade_id for tick in strategy.ticks] == ["a"]
+
+
 def test_duplicate_strategy_id_registration_fails_fast() -> None:
     host = StrategyHost(bus=InMemoryBus(), clock=ManualClock())
     host.register(RecordingStrategy("dup"), symbols={"BTC"})

@@ -21,9 +21,17 @@ from tickwright.domain import (
 class StrategyHost:
     """Registers strategies and wires their wrapped bus subscriptions."""
 
-    def __init__(self, *, bus: EventBus, clock: Clock) -> None:
+    def __init__(
+        self, *, bus: EventBus, clock: Clock, tick_staleness_ns: int | None = None
+    ) -> None:
         self._bus = bus
         self._clock = clock
+        # The staleness gate (ADR-0025): a tick older than this against the
+        # clock is a redelivered backlog — dropped, so a restart cannot trade
+        # on pre-crash prices. ``None`` disables it; the live composition root
+        # picks the policy, the paper/replay path needs none (the ReplayFeed
+        # advances the clock to each tick, so replay ticks are never stale).
+        self._tick_staleness_ns = tick_staleness_ns
         self._strategies: dict[str, Strategy] = {}
         self._symbols: dict[str, frozenset[str]] = {}
 
@@ -59,6 +67,11 @@ class StrategyHost:
             mark = (tick.ts_event, tick.trade_id)
             last = high_water.get(tick.symbol)
             if last is not None and mark <= last:
+                return
+            if (
+                self._tick_staleness_ns is not None
+                and self._clock.timestamp_ns() - tick.ts_event > self._tick_staleness_ns
+            ):
                 return
             high_water[tick.symbol] = mark
             await strategy.on_tick(tick)
