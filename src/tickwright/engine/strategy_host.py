@@ -15,6 +15,7 @@ from tickwright.domain import (
     InvariantViolation,
     MarketTick,
     OrderEvent,
+    Store,
     Strategy,
 )
 from tickwright.observability import named_event
@@ -24,10 +25,16 @@ class StrategyHost:
     """Registers strategies and wires their wrapped bus subscriptions."""
 
     def __init__(
-        self, *, bus: EventBus, clock: Clock, tick_staleness_ns: int | None = None
+        self,
+        *,
+        bus: EventBus,
+        clock: Clock,
+        store: Store,
+        tick_staleness_ns: int | None = None,
     ) -> None:
         self._bus = bus
         self._clock = clock
+        self._store = store
         # The staleness gate (ADR-0025): a tick older than this against the
         # clock is a redelivered backlog — dropped, so a restart cannot trade
         # on pre-crash prices. ``None`` disables it; the live composition root
@@ -53,6 +60,17 @@ class StrategyHost:
         """Subscribe every registered strategy's wrapped handlers."""
         for strategy in self._strategies.values():
             self._subscribe(strategy)
+
+    def stop(self) -> None:
+        """Take the final ``snapshot()`` of every strategy and persist it.
+
+        The graceful-stop half of ADR-0016's cadence: the engine owns
+        durability, so the strategy's last state content outlives the process.
+        """
+        for strategy in self._strategies.values():
+            self._store.save_strategy_snapshot(
+                strategy.strategy_id, strategy.snapshot(), ts_ns=self._clock.timestamp_ns()
+            )
 
     def _subscribe(self, strategy: Strategy) -> None:
         symbols = self._symbols[strategy.strategy_id]

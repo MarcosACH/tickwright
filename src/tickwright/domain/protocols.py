@@ -91,6 +91,23 @@ class Strategy(Protocol):
         """Handle a canonical saga transition for one of this strategy's orders."""
         ...
 
+    def snapshot(self) -> bytes:
+        """This strategy's state *content* as opaque bytes (ADR-0016).
+
+        The engine persists them per ``strategy_id`` — the strategy owns what
+        they mean, never where they live. Keep state minimal and
+        reconstructible; seq-safety never depends on it."""
+        ...
+
+    def restore(self, data: bytes) -> None:
+        """Rebuild state content from bytes a prior ``snapshot()`` returned.
+
+        Raising here is *not* fatal: the engine logs
+        ``strategy.snapshot_incompatible`` and the strategy starts fresh
+        (ADR-0016 — a strategy whose code changed shape between runs must not
+        fault the engine)."""
+        ...
+
 
 @runtime_checkable
 class Store(Protocol):
@@ -114,6 +131,19 @@ class Store(Protocol):
     def all_orders(self) -> list[Order]:
         """Rebuild every checkpointed saga — the recovery mass-read the ``Cache``
         projection is rebuilt from (ADR-0009)."""
+        ...
+
+    def save_strategy_snapshot(self, strategy_id: str, data: bytes, *, ts_ns: int) -> None:
+        """Durably record ``strategy_id``'s opaque state bytes (ADR-0016).
+
+        The engine persists what ``Strategy.snapshot()`` returned — content is
+        the strategy's business, durability is ours. Latest snapshot wins; the
+        same synchronous, no-yield discipline as ``checkpoint``."""
+        ...
+
+    def load_strategy_snapshot(self, strategy_id: str) -> bytes | None:
+        """The last persisted snapshot for ``strategy_id``, or ``None`` if never
+        saved — the read the engine restores from at startup (ADR-0016)."""
         ...
 
     def save_kill_switch(self, *, tripped: bool, reason: str | None, ts_ns: int) -> None:

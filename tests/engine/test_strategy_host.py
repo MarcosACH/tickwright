@@ -14,6 +14,7 @@ import structlog.testing
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
+from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     AggressorSide,
     InvariantViolation,
@@ -31,12 +32,19 @@ class RecordingStrategy:
         self.strategy_id = strategy_id
         self.ticks: list[MarketTick] = []
         self.order_events: list[OrderEvent] = []
+        self.state = b""
 
     async def on_tick(self, tick: MarketTick) -> None:
         self.ticks.append(tick)
 
     async def on_order_event(self, event: OrderEvent) -> None:
         self.order_events.append(event)
+
+    def snapshot(self) -> bytes:
+        return self.state
+
+    def restore(self, data: bytes) -> None:
+        self.state = data
 
 
 def _tick(symbol: str, *, ts: int = 1_000, trade_id: str = "a", seq: int = 1) -> MarketTick:
@@ -54,7 +62,7 @@ def _tick(symbol: str, *, ts: int = 1_000, trade_id: str = "a", seq: int = 1) ->
 
 def test_strategy_receives_only_ticks_for_its_declared_symbols() -> None:
     bus = InMemoryBus()
-    host = StrategyHost(bus=bus, clock=ManualClock())
+    host = StrategyHost(bus=bus, clock=ManualClock(), store=SQLiteStore(":memory:"))
     strategy = RecordingStrategy("btc-strat")
     host.register(strategy, symbols={"BTC"})
     host.start()
@@ -79,7 +87,7 @@ def _order_placed(strategy_id: str, *, symbol: str = "BTC") -> OrderPlaced:
 
 def test_strategy_receives_only_its_own_order_events() -> None:
     bus = InMemoryBus()
-    host = StrategyHost(bus=bus, clock=ManualClock())
+    host = StrategyHost(bus=bus, clock=ManualClock(), store=SQLiteStore(":memory:"))
     alpha = RecordingStrategy("alpha")
     beta = RecordingStrategy("beta")
     host.register(alpha, symbols={"BTC"})
@@ -95,7 +103,7 @@ def test_strategy_receives_only_its_own_order_events() -> None:
 
 def test_duplicate_and_out_of_order_ticks_never_reach_on_tick() -> None:
     bus = InMemoryBus()
-    host = StrategyHost(bus=bus, clock=ManualClock())
+    host = StrategyHost(bus=bus, clock=ManualClock(), store=SQLiteStore(":memory:"))
     strategy = RecordingStrategy("gated")
     host.register(strategy, symbols={"BTC"})
     host.start()
@@ -110,7 +118,7 @@ def test_duplicate_and_out_of_order_ticks_never_reach_on_tick() -> None:
 
 def test_tick_gate_is_independent_per_symbol() -> None:
     bus = InMemoryBus()
-    host = StrategyHost(bus=bus, clock=ManualClock())
+    host = StrategyHost(bus=bus, clock=ManualClock(), store=SQLiteStore(":memory:"))
     strategy = RecordingStrategy("multi")
     host.register(strategy, symbols={"BTC", "ETH"})
     host.start()
@@ -125,7 +133,9 @@ def test_tick_gate_is_independent_per_symbol() -> None:
 def test_stale_beyond_threshold_tick_is_dropped() -> None:
     bus = InMemoryBus()
     clock = ManualClock(start_ns=10_000)
-    host = StrategyHost(bus=bus, clock=clock, tick_staleness_ns=1_000)
+    host = StrategyHost(
+        bus=bus, clock=clock, store=SQLiteStore(":memory:"), tick_staleness_ns=1_000
+    )
     strategy = RecordingStrategy("live")
     host.register(strategy, symbols={"BTC"})
     host.start()
@@ -140,7 +150,7 @@ def test_stale_beyond_threshold_tick_is_dropped() -> None:
 
 def test_staleness_gate_is_off_by_default() -> None:
     bus = InMemoryBus()
-    host = StrategyHost(bus=bus, clock=ManualClock(start_ns=10_000))
+    host = StrategyHost(bus=bus, clock=ManualClock(start_ns=10_000), store=SQLiteStore(":memory:"))
     strategy = RecordingStrategy("replay")
     host.register(strategy, symbols={"BTC"})
     host.start()
@@ -166,7 +176,7 @@ class RaisingStrategy(RecordingStrategy):
 
 def test_raising_strategy_emits_strategy_error_and_others_keep_receiving() -> None:
     bus = InMemoryBus()
-    host = StrategyHost(bus=bus, clock=ManualClock())
+    host = StrategyHost(bus=bus, clock=ManualClock(), store=SQLiteStore(":memory:"))
     bad = RaisingStrategy("bad", KeyError("third-party bug"))
     good = RecordingStrategy("good")
     host.register(bad, symbols={"BTC"})
@@ -186,7 +196,7 @@ def test_raising_strategy_emits_strategy_error_and_others_keep_receiving() -> No
 
 def test_raising_on_order_event_is_contained_too() -> None:
     bus = InMemoryBus()
-    host = StrategyHost(bus=bus, clock=ManualClock())
+    host = StrategyHost(bus=bus, clock=ManualClock(), store=SQLiteStore(":memory:"))
     bad = RaisingStrategy("bad", ValueError("boom"))
     host.register(bad, symbols={"BTC"})
     host.start()
@@ -202,7 +212,7 @@ def test_raising_on_order_event_is_contained_too() -> None:
 
 def test_invariant_violation_pierces_containment() -> None:
     bus = InMemoryBus()
-    host = StrategyHost(bus=bus, clock=ManualClock())
+    host = StrategyHost(bus=bus, clock=ManualClock(), store=SQLiteStore(":memory:"))
     host.register(
         RaisingStrategy("bad", InvariantViolation("broken engine assumption")), symbols={"BTC"}
     )
@@ -212,8 +222,25 @@ def test_invariant_violation_pierces_containment() -> None:
         asyncio.run(bus.publish(_tick("BTC")))
 
 
+def test_stop_persists_a_final_snapshot_per_strategy() -> None:
+    store = SQLiteStore(":memory:")
+    host = StrategyHost(bus=InMemoryBus(), clock=ManualClock(), store=store)
+    alpha = RecordingStrategy("alpha")
+    beta = RecordingStrategy("beta")
+    alpha.state = b"alpha-final"
+    beta.state = b"beta-final"
+    host.register(alpha, symbols={"BTC"})
+    host.register(beta, symbols={"ETH"})
+    host.start()
+
+    host.stop()
+
+    assert store.load_strategy_snapshot("alpha") == b"alpha-final"
+    assert store.load_strategy_snapshot("beta") == b"beta-final"
+
+
 def test_duplicate_strategy_id_registration_fails_fast() -> None:
-    host = StrategyHost(bus=InMemoryBus(), clock=ManualClock())
+    host = StrategyHost(bus=InMemoryBus(), clock=ManualClock(), store=SQLiteStore(":memory:"))
     host.register(RecordingStrategy("dup"), symbols={"BTC"})
 
     with pytest.raises(InvariantViolation, match="dup"):

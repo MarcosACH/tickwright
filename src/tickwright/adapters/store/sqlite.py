@@ -38,6 +38,11 @@ CREATE TABLE IF NOT EXISTS orders (
     applied_event_ids TEXT NOT NULL,
     history           TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS strategy_snapshots (
+    strategy_id TEXT PRIMARY KEY,
+    data        BLOB NOT NULL,
+    ts_ns       INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS kill_switch (
     id       INTEGER PRIMARY KEY CHECK (id = 1),
     tripped  INTEGER NOT NULL,
@@ -136,6 +141,22 @@ class SQLiteStore:
             cancel_signal_id=row[13],
             applied_event_ids=json.loads(row[14]),
         )
+
+    def save_strategy_snapshot(self, strategy_id: str, data: bytes, *, ts_ns: int) -> None:
+        """Durably record ``strategy_id``'s opaque state bytes; latest wins (ADR-0016)."""
+        with self._conn:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO strategy_snapshots (strategy_id, data, ts_ns) "
+                "VALUES (?, ?, ?)",
+                (strategy_id, data, ts_ns),
+            )
+
+    def load_strategy_snapshot(self, strategy_id: str) -> bytes | None:
+        """The last persisted snapshot for ``strategy_id``, or ``None`` if never saved."""
+        row = self._conn.execute(
+            "SELECT data FROM strategy_snapshots WHERE strategy_id = ?", (strategy_id,)
+        ).fetchone()
+        return None if row is None else bytes(row[0])
 
     def save_kill_switch(self, *, tripped: bool, reason: str | None, ts_ns: int) -> None:
         """Durably record the single-row kill-switch state (ADR-0026)."""
