@@ -92,6 +92,35 @@ def test_strategy_receives_only_its_own_order_events() -> None:
     assert [event.strategy_id for event in beta.order_events] == ["beta"]
 
 
+def test_duplicate_and_out_of_order_ticks_never_reach_on_tick() -> None:
+    bus = InMemoryBus()
+    host = StrategyHost(bus=bus, clock=ManualClock())
+    strategy = RecordingStrategy("gated")
+    host.register(strategy, symbols={"BTC"})
+    host.start()
+
+    asyncio.run(bus.publish(_tick("BTC", ts=1_000, trade_id="a")))
+    asyncio.run(bus.publish(_tick("BTC", ts=1_000, trade_id="a")))  # duplicate
+    asyncio.run(bus.publish(_tick("BTC", ts=900, trade_id="z")))  # out of order
+    asyncio.run(bus.publish(_tick("BTC", ts=2_000, trade_id="b")))
+
+    assert [(t.ts_event, t.trade_id) for t in strategy.ticks] == [(1_000, "a"), (2_000, "b")]
+
+
+def test_tick_gate_is_independent_per_symbol() -> None:
+    bus = InMemoryBus()
+    host = StrategyHost(bus=bus, clock=ManualClock())
+    strategy = RecordingStrategy("multi")
+    host.register(strategy, symbols={"BTC", "ETH"})
+    host.start()
+
+    asyncio.run(bus.publish(_tick("BTC", ts=2_000, trade_id="a")))
+    # ETH is earlier than BTC's high-water; its own gate has seen nothing yet.
+    asyncio.run(bus.publish(_tick("ETH", ts=500, trade_id="b")))
+
+    assert [tick.symbol for tick in strategy.ticks] == ["BTC", "ETH"]
+
+
 def test_duplicate_strategy_id_registration_fails_fast() -> None:
     host = StrategyHost(bus=InMemoryBus(), clock=ManualClock())
     host.register(RecordingStrategy("dup"), symbols={"BTC"})
