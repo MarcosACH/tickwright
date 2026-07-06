@@ -10,6 +10,7 @@ life is dead air, exactly like acks that died with the process.
 """
 
 import asyncio
+from collections.abc import Mapping
 from decimal import Decimal
 
 import pytest
@@ -22,6 +23,7 @@ from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     AggressorSide,
     ExecutionReport,
+    InstrumentSpec,
     MarketTick,
     Order,
     OrderEvent,
@@ -254,6 +256,9 @@ class _DarkVenue:
     async def fetch_order(self, cloid: str) -> VenueOrderView | None:
         self.reads += 1
         return None
+
+    def instrument_specs(self) -> Mapping[str, InstrumentSpec]:
+        return {}
 
 
 def test_sustained_venue_outage_trips_the_barrier_to_faulted_after_the_window() -> None:

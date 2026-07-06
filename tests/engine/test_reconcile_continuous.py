@@ -8,6 +8,7 @@ through the ``ExecutionManager`` so dedup makes every cycle idempotent.
 """
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import replace
 from decimal import Decimal
 
@@ -25,6 +26,7 @@ from tickwright.domain import (
     Exchange,
     ExecutionReport,
     FillReport,
+    InstrumentSpec,
     MarketTick,
     Order,
     OrderCancelled,
@@ -251,6 +253,9 @@ class _ForgetfulVenue:
 
     async def fetch_order(self, cloid: str) -> VenueOrderView | None:
         return self.views.get(cloid, VenueOrderView(status=None))
+
+    def instrument_specs(self) -> Mapping[str, InstrumentSpec]:
+        return {}
 
 
 def test_a_live_order_absent_across_the_grace_window_resolves_rejected() -> None:

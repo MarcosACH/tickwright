@@ -31,6 +31,16 @@ from .events import (
     VenueOrderView,
 )
 from .ids import derive_cloid
+from .instrument import (
+    Approved,
+    Denied,
+    GuardDecision,
+    InstrumentSpec,
+    KillSwitchState,
+    below_min_notional,
+    quantize_price,
+    quantize_size,
+)
 from .order import Order
 from .protocols import (
     Clock,
@@ -38,6 +48,7 @@ from .protocols import (
     Exchange,
     Handler,
     MarketFeed,
+    PreTradeGuard,
     ReplayClock,
     Store,
     Strategy,
@@ -54,10 +65,15 @@ __all__ = [
     "InvariantViolation",
     "StartupReconciliationTimeout",
     # events + value types
+    "Approved",
     "CancelSignal",
+    "Denied",
     "Event",
     "ExecutionReport",
     "FillReport",
+    "GuardDecision",
+    "InstrumentSpec",
+    "KillSwitchState",
     "MarketTick",
     "Order",
     "OrderCancelled",
@@ -78,12 +94,17 @@ __all__ = [
     "VenueOrderView",
     # id derivation
     "derive_cloid",
+    # quantization
+    "below_min_notional",
+    "quantize_price",
+    "quantize_size",
     # seam Protocols
     "Clock",
     "EventBus",
     "Exchange",
     "Handler",
     "MarketFeed",
+    "PreTradeGuard",
     "ReplayClock",
     "Store",
     "Strategy",

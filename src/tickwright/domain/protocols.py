@@ -7,11 +7,12 @@ tracer slice; later slices widen them (``Exchange.cancel``/``fetch_*``,
 ``Clock`` timers, strategy snapshots) as their behaviors land.
 """
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
-from .events import Event, MarketTick, OrderEvent, PlaceOrder, VenueOrderView
+from .events import Event, MarketTick, OrderEvent, PlaceOrder, PlaceSignal, VenueOrderView
+from .instrument import GuardDecision, InstrumentSpec, KillSwitchState
 from .order import Order
 
 type Handler[E: Event] = Callable[[E], Awaitable[None]]
@@ -115,6 +116,21 @@ class Store(Protocol):
         projection is rebuilt from (ADR-0009)."""
         ...
 
+    def save_kill_switch(self, *, tripped: bool, reason: str | None, ts_ns: int) -> None:
+        """Durably record the global kill-switch state (ADR-0026).
+
+        Sticky by design: a tripped halt must outlive the process that set it,
+        so the flag is persisted here and restored before the feed starts. The
+        same synchronous, no-yield discipline as ``checkpoint``."""
+        ...
+
+    def load_kill_switch(self) -> "KillSwitchState | None":
+        """The persisted kill-switch state, or ``None`` if never written — the
+        read the guard restores from on startup (ADR-0026). ``None`` means never
+        tripped; a restored ``tripped`` halt is cleared only by an explicit
+        reset."""
+        ...
+
 
 @runtime_checkable
 class Exchange(Protocol):
@@ -140,4 +156,58 @@ class Exchange(Protocol):
         itself failed (outage): a failed read must never look like "no record"
         (ADR-0011 inv 1). A successful read always returns a view, even an
         empty one."""
+        ...
+
+    def instrument_specs(self) -> Mapping[str, InstrumentSpec]:
+        """The per-symbol ``InstrumentSpec``s this venue owns (ADR-0031).
+
+        The adapter is the one component that knows the venue (config on paper,
+        the meta endpoint on Hyperliquid); it authors the specs and exposes them
+        here so the ``Engine`` can wire them into the venue-agnostic guard at
+        startup. A synchronous accessor, not a bus message — it is read once
+        during composition, not a per-order hot path."""
+        ...
+
+
+@runtime_checkable
+class PreTradeGuard(Protocol):
+    """The thin pre-trade boundary the ``ExecutionManager`` runs before any send
+    (ADR-0017): check → quantize → verdict. Not a RiskEngine — no positions,
+    exposure, or portfolio risk (those are deferred).
+
+    Two impls satisfy it: a ``RealGuard`` (min-notional, quantization, kill
+    switch) and a ``NoopGuard`` passthrough. Users may plug their own — the
+    Protocol-extensibility story.
+    """
+
+    def check(self, signal: PlaceSignal) -> GuardDecision:
+        """Verdict on ``signal``: approve with quantized values, or ``DENIED``.
+
+        Failure — a size that rounds to zero, a below-min-notional order, or a
+        tripped kill switch — is ``DENIED`` (ADR-0010): never sent, safe to
+        recreate. Approval carries the quantized ``quantity``/``price`` the order
+        is actually placed at.
+
+        The guard's specs are **mandatory**: a ``PlaceSignal`` for a symbol it has
+        no ``InstrumentSpec`` for is a composition-root wiring bug (ADR-0031) and
+        raises ``InvariantViolation`` (fail-fast, ADR-0014) — it cannot quantize
+        without a spec, and must not send an unquantized order. This is the
+        deliberate counterpart to ``Exchange``, whose specs are *optional* venue
+        config (a missing one skips the venue-side min-notional check)."""
+        ...
+
+    def trip_kill_switch(self, reason: str) -> None:
+        """Halt new placements globally and durably (ADR-0026). Every subsequent
+        ``check`` returns ``DENIED``; resting ``LIVE`` orders are untouched. The
+        halt is persisted, so it outlives a crash."""
+        ...
+
+    def reset_kill_switch(self) -> None:
+        """Clear the halt and re-enable placement (ADR-0026). The only way a
+        tripped kill switch is lifted — a crash never un-halts it."""
+        ...
+
+    @property
+    def kill_switch_tripped(self) -> bool:
+        """Whether the kill switch is currently tripped."""
         ...
