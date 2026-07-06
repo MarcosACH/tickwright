@@ -8,7 +8,14 @@ wrapper concern, never a bus feature — pub/sub stays type-keyed (ADR-0024).
 
 from collections.abc import Iterable
 
-from tickwright.domain import Clock, EventBus, InvariantViolation, MarketTick, Strategy
+from tickwright.domain import (
+    Clock,
+    EventBus,
+    InvariantViolation,
+    MarketTick,
+    OrderEvent,
+    Strategy,
+)
 
 
 class StrategyHost:
@@ -45,4 +52,12 @@ class StrategyHost:
                 return
             await strategy.on_tick(tick)
 
+        async def on_order_event(event: OrderEvent) -> None:
+            # Events return only to the owning strategy (ADR-0018): another
+            # strategy's saga transitions are never its business.
+            if event.strategy_id != strategy.strategy_id:
+                return
+            await strategy.on_order_event(event)
+
         self._bus.subscribe(MarketTick, on_tick)
+        self._bus.subscribe(OrderEvent, on_order_event)
