@@ -8,7 +8,7 @@ wrapper concern, never a bus feature — pub/sub stays type-keyed (ADR-0024).
 
 from collections.abc import Iterable
 
-from tickwright.domain import Clock, EventBus, MarketTick, Strategy
+from tickwright.domain import Clock, EventBus, InvariantViolation, MarketTick, Strategy
 
 
 class StrategyHost:
@@ -21,7 +21,14 @@ class StrategyHost:
         self._symbols: dict[str, frozenset[str]] = {}
 
     def register(self, strategy: Strategy, *, symbols: Iterable[str]) -> None:
-        """Add ``strategy`` to the registry with its declared symbol set."""
+        """Add ``strategy`` to the registry with its declared symbol set.
+
+        A duplicate ``strategy_id`` is a composition-root wiring bug: ids key
+        seqs, snapshots, and ``OrderEvent`` routing, so two strategies sharing
+        one would silently corrupt each other's state (ADR-0018 — fail fast).
+        """
+        if strategy.strategy_id in self._strategies:
+            raise InvariantViolation(f"duplicate strategy_id registered: {strategy.strategy_id}")
         self._strategies[strategy.strategy_id] = strategy
         self._symbols[strategy.strategy_id] = frozenset(symbols)
 

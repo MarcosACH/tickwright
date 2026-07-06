@@ -9,9 +9,11 @@ seam this host exists to serve — not a mock of an engine class.
 import asyncio
 from decimal import Decimal
 
+import pytest
+
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
-from tickwright.domain import AggressorSide, MarketTick, OrderEvent
+from tickwright.domain import AggressorSide, InvariantViolation, MarketTick, OrderEvent
 from tickwright.engine.strategy_host import StrategyHost
 
 
@@ -54,3 +56,11 @@ def test_strategy_receives_only_ticks_for_its_declared_symbols() -> None:
     asyncio.run(bus.publish(_tick("ETH")))
 
     assert [tick.symbol for tick in strategy.ticks] == ["BTC"]
+
+
+def test_duplicate_strategy_id_registration_fails_fast() -> None:
+    host = StrategyHost(bus=InMemoryBus(), clock=ManualClock())
+    host.register(RecordingStrategy("dup"), symbols={"BTC"})
+
+    with pytest.raises(InvariantViolation, match="dup"):
+        host.register(RecordingStrategy("dup"), symbols={"ETH"})
