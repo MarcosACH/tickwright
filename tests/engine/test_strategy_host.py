@@ -19,8 +19,12 @@ from tickwright.domain import (
     AggressorSide,
     InvariantViolation,
     MarketTick,
+    Order,
     OrderEvent,
     OrderPlaced,
+    OrderType,
+    Side,
+    derive_cloid,
 )
 from tickwright.engine.strategy_host import StrategyHost
 
@@ -33,6 +37,10 @@ class RecordingStrategy:
         self.ticks: list[MarketTick] = []
         self.order_events: list[OrderEvent] = []
         self.state = b""
+        self.next_seq = 1
+
+    def set_next_seq(self, next_seq: int) -> None:
+        self.next_seq = next_seq
 
     async def on_tick(self, tick: MarketTick) -> None:
         self.ticks.append(tick)
@@ -286,6 +294,52 @@ def test_incompatible_snapshot_starts_fresh_with_a_named_event() -> None:
     # The engine is unaffected: the strategy runs fresh and still gets ticks.
     asyncio.run(bus.publish(_tick("BTC")))
     assert len(alpha.ticks) == 1
+
+
+def _checkpointed_order(
+    store: SQLiteStore, signal_id: str, *, cancel_signal_id: str | None = None
+) -> None:
+    strategy_id, symbol, _ = signal_id.split(":")
+    order = Order(
+        cloid=derive_cloid(signal_id),
+        strategy_id=strategy_id,
+        signal_id=signal_id,
+        symbol=symbol,
+        side=Side.BUY,
+        quantity=Decimal("1"),
+        order_type=OrderType.LIMIT,
+    )
+    if cancel_signal_id is not None:
+        assert order.request_cancel(signal_id=cancel_signal_id, ts_ns=1_000)
+    store.checkpoint(order, ts_ns=1_000)
+
+
+def test_start_recovers_next_seq_from_the_saga_high_water() -> None:
+    store = SQLiteStore(":memory:")
+    # alpha consumed seq 1 (BTC) and seq 3 (ETH); a cancel consumed seq 5.
+    _checkpointed_order(store, "alpha:BTC:1")
+    _checkpointed_order(store, "alpha:ETH:3", cancel_signal_id="alpha:ETH:5")
+    # Another strategy's records never leak into alpha's high-water.
+    _checkpointed_order(store, "other:BTC:9")
+
+    host = StrategyHost(bus=InMemoryBus(), clock=ManualClock(), store=store)
+    alpha = RecordingStrategy("alpha")
+    other = RecordingStrategy("other")
+    host.register(alpha, symbols={"BTC", "ETH"})
+    host.register(other, symbols={"BTC"})
+    host.start()
+
+    assert alpha.next_seq == 6
+    assert other.next_seq == 10
+
+
+def test_start_with_no_saga_records_starts_seq_at_one() -> None:
+    host = StrategyHost(bus=InMemoryBus(), clock=ManualClock(), store=SQLiteStore(":memory:"))
+    alpha = RecordingStrategy("alpha")
+    host.register(alpha, symbols={"BTC"})
+    host.start()
+
+    assert alpha.next_seq == 1
 
 
 def test_duplicate_strategy_id_registration_fails_fast() -> None:

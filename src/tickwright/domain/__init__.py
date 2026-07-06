@@ -30,7 +30,7 @@ from .events import (
     Signal,
     VenueOrderView,
 )
-from .ids import derive_cloid
+from .ids import derive_cloid, signal_seq
 from .instrument import (
     Approved,
     Denied,
@@ -94,6 +94,7 @@ __all__ = [
     "VenueOrderView",
     # id derivation
     "derive_cloid",
+    "signal_seq",
     # quantization
     "below_min_notional",
     "quantize_price",

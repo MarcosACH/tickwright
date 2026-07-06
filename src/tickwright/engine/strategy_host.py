@@ -17,6 +17,7 @@ from tickwright.domain import (
     OrderEvent,
     Store,
     Strategy,
+    signal_seq,
 )
 from tickwright.observability import named_event
 
@@ -57,11 +58,34 @@ class StrategyHost:
         self._symbols[strategy.strategy_id] = frozenset(symbols)
 
     def start(self) -> None:
-        """Restore each strategy's persisted state, then subscribe its wrapped
-        handlers — restore strictly before the first delivered event."""
+        """Recover each strategy — snapshot, then seq, then subscriptions.
+
+        The seq high-water mark comes from the saga store, never the snapshot
+        (ADR-0016): a stale snapshot restored a moment earlier can therefore
+        never re-emit a consumed ``signal_id``.
+        """
+        high_water = self._seq_high_water()
         for strategy in self._strategies.values():
             self._restore(strategy)
+            strategy.set_next_seq(high_water.get(strategy.strategy_id, 0) + 1)
             self._subscribe(strategy)
+
+    def _seq_high_water(self) -> dict[str, int]:
+        """Max consumed seq per strategy across every checkpointed saga.
+
+        Every place consumed its ``signal_id``'s seq, and every requested
+        cancel consumed its own (ADR-0026 — omitting cancels would let a
+        restart reuse a consumed id). One per-strategy counter across all
+        symbols, so this is a single max over the strategy's records.
+        """
+        high_water: dict[str, int] = {}
+        for order in self._store.all_orders():
+            seqs = [signal_seq(order.signal_id)]
+            if order.cancel_signal_id is not None:
+                seqs.append(signal_seq(order.cancel_signal_id))
+            current = high_water.get(order.strategy_id, 0)
+            high_water[order.strategy_id] = max(current, *seqs)
+        return high_water
 
     def _restore(self, strategy: Strategy) -> None:
         """Feed the persisted snapshot to ``strategy.restore()``, if one exists.

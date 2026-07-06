@@ -156,3 +156,35 @@ def test_records_fills_and_cancellations() -> None:
 
 async def _record(sink: list, signal: object) -> None:
     sink.append(signal)
+
+
+def test_set_next_seq_resumes_the_recovered_counter() -> None:
+    bus, _, strategy, signals = _harness(cancel_after_ticks=1)
+    strategy.set_next_seq(4)
+
+    asyncio.run(bus.publish(_tick()))
+    asyncio.run(bus.publish(_tick(ts=2_000)))
+
+    assert [s.signal_id for s in signals] == ["trivial:BTC:4", "trivial:BTC:5"]
+    cancel = signals[1]
+    assert isinstance(cancel, CancelSignal)
+    assert cancel.target_signal_id == "trivial:BTC:4"
+
+
+def test_snapshot_round_trip_preserves_place_and_cancel_state() -> None:
+    bus, _, fired, _ = _harness(cancel_after_ticks=2)
+    asyncio.run(bus.publish(_tick()))
+
+    second_bus, _, restored, signals = _harness(cancel_after_ticks=2)
+    restored.restore(fired.snapshot())
+    restored.set_next_seq(2)
+    asyncio.run(second_bus.publish(_tick(ts=2_000)))
+    asyncio.run(second_bus.publish(_tick(ts=3_000)))
+
+    # No second placement; the cancel counts restart-spanning ticks and still
+    # targets the signal_id placed in the first life.
+    assert [type(s) for s in signals] == [CancelSignal]
+    cancel = signals[0]
+    assert isinstance(cancel, CancelSignal)
+    assert cancel.target_signal_id == "trivial:BTC:1"
+    assert cancel.signal_id == "trivial:BTC:2"

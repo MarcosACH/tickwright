@@ -91,6 +91,14 @@ class Strategy(Protocol):
         """Handle a canonical saga transition for one of this strategy's orders."""
         ...
 
+    def set_next_seq(self, next_seq: int) -> None:
+        """Resume the strategy-owned monotonic ``seq`` at ``next_seq``.
+
+        Called by the engine at startup with the saga store's high-water mark
+        plus one (ADR-0016) — never derived from the snapshot, so a stale
+        snapshot can never reuse a consumed ``signal_id``."""
+        ...
+
     def snapshot(self) -> bytes:
         """This strategy's state *content* as opaque bytes (ADR-0016).
 
