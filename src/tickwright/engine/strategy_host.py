@@ -127,17 +127,20 @@ class StrategyHost:
 
     def _subscribe(self, strategy: Strategy) -> None:
         symbols = self._symbols[strategy.strategy_id]
-        # The per-symbol monotonic gate (ADR-0025): the last (ts_event, trade_id)
+        # The per-symbol monotonic gate (ADR-0025): the last (ts_event, seq)
         # dispatched to this strategy, per symbol. A tick at or below it is a
         # redelivery or a reorder — dropped, so on_tick is structurally
         # idempotent with no strategy-author effort. Sound because per-symbol
-        # ordering (ADR-0003) means a duplicate can only arrive in order.
-        high_water: dict[str, tuple[int, str]] = {}
+        # ordering (ADR-0003) means a duplicate can only arrive in order, and
+        # ``seq`` (the feed's per-symbol source sequence, ADR-0027) breaks a
+        # same-nanosecond tie monotonically — unlike ``trade_id``, whose string
+        # order need not follow source order across distinct same-ns trades.
+        high_water: dict[str, tuple[int, int]] = {}
 
         async def on_tick(tick: MarketTick) -> None:
             if tick.symbol not in symbols:
                 return
-            mark = (tick.ts_event, tick.trade_id)
+            mark = (tick.ts_event, tick.seq)
             last = high_water.get(tick.symbol)
             if last is not None and mark <= last:
                 return

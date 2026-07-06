@@ -139,6 +139,25 @@ def test_tick_gate_is_independent_per_symbol() -> None:
     assert [tick.symbol for tick in strategy.ticks] == ["BTC", "ETH"]
 
 
+def test_same_ts_event_ticks_are_gated_by_seq_not_trade_id() -> None:
+    bus = InMemoryBus()
+    host = StrategyHost(bus=bus, clock=ManualClock(), store=SQLiteStore(":memory:"))
+    strategy = RecordingStrategy("same-ns")
+    host.register(strategy, symbols={"BTC"})
+    host.start()
+
+    # Two *distinct* trades at the identical ts_event, in source (seq) order.
+    # Their trade_ids straddle a digit-width boundary, so a lexicographic
+    # (ts_event, trade_id) gate would see (1_000, "10") <= (1_000, "9") and drop
+    # the second, real tick. The gate keys on seq, so both get through.
+    asyncio.run(bus.publish(_tick("BTC", ts=1_000, trade_id="9", seq=1)))
+    asyncio.run(bus.publish(_tick("BTC", ts=1_000, trade_id="10", seq=2)))
+    # An exact redelivery (same ts_event and seq) is still dropped.
+    asyncio.run(bus.publish(_tick("BTC", ts=1_000, trade_id="10", seq=2)))
+
+    assert [(t.trade_id, t.seq) for t in strategy.ticks] == [("9", 1), ("10", 2)]
+
+
 def test_stale_beyond_threshold_tick_is_dropped() -> None:
     bus = InMemoryBus()
     clock = ManualClock(start_ns=10_000)

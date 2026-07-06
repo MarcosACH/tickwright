@@ -79,14 +79,16 @@ Two load-bearing rules:
 3. **Ticks get a monotonic gate, not a key.** `MarketTick`'s weak key carries a trailing `seq` — the
    feed's per-symbol source sequence — because the replay path (ADR-0027) is not assumed a real venue
    trade id, so `{symbol}:{ts_event}` alone can collide when several recorded trades share a
-   nanosecond; `seq` disambiguates them in logs. It is still audit-only, distinct from the dedup gate
-   below (which keys on `(ts_event, tid)`). This weak key is deliberate — but the one
-   consumer that is *not* naturally idempotent is `Strategy.on_tick`: a redelivered tick (Kafka
+   nanosecond; `seq` disambiguates them. It is audit-only as a *key*, but its `seq` component is the
+   same monotonic per-symbol discriminator the dedup gate keys on. This weak key is deliberate — but
+   the one consumer that is *not* naturally idempotent is `Strategy.on_tick`: a redelivered tick (Kafka
    rebalance, uncommitted tail after crash-restart) double-counts indicator state and can mint a
    *fresh* seq — a new intent no idempotency key catches → duplicate live order. The engine's
    subscription wrapper (ADR-0024) therefore applies a **per-symbol monotonic gate**: a tick whose
-   (`ts_event`, `tid`) is ≤ the last dispatched for its symbol is dropped — sound because per-symbol
-   ordering (ADR-0003) means a duplicate can only arrive in order — plus a configurable **staleness
-   threshold** on live ticks so a restart's redelivered backlog cannot trade on pre-crash prices.
+   (`ts_event`, `seq`) is ≤ the last dispatched for its symbol is dropped — sound because per-symbol
+   ordering (ADR-0003) means a duplicate can only arrive in order, and `seq` (not `trade_id`) is the
+   tiebreaker so distinct same-nanosecond trades stay strictly increasing in source order rather than
+   in a `trade_id` string order that need not track it — plus a configurable **staleness threshold**
+   on live ticks so a restart's redelivered backlog cannot trade on pre-crash prices.
    This makes ADR-0002's "consumers MUST be idempotent" structurally true for strategies on both
    backends, with no strategy-author effort.
