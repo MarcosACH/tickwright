@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from .enums import AggressorSide, OrderState, OrderType, Side, TimeInForce
+from .ids import SignalId
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -89,8 +90,12 @@ class Signal(Event):
 
     @property
     def signal_id(self) -> str:
-        """``{strategy_id}:{symbol}:{seq}`` — deterministic, replayable (ADR-0006)."""
-        return f"{self.strategy_id}:{self.symbol}:{self.seq}"
+        """``{strategy_id}:{symbol}:{seq}`` — deterministic, replayable (ADR-0006).
+
+        Delegates to ``SignalId``, the single owner of the format (compose here,
+        parse in recovery), so the wire form has exactly one author.
+        """
+        return SignalId(self.strategy_id, self.symbol, self.seq).render()
 
     @property
     def event_id(self) -> str:

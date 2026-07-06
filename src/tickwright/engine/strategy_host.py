@@ -20,9 +20,9 @@ from tickwright.domain import (
     InvariantViolation,
     MarketTick,
     OrderEvent,
+    SignalId,
     Store,
     Strategy,
-    signal_seq,
 )
 from tickwright.observability import named_event
 
@@ -85,9 +85,9 @@ class StrategyHost:
         """
         high_water: dict[str, int] = {}
         for order in self._store.all_orders():
-            seqs = [signal_seq(order.signal_id)]
+            seqs = [SignalId.parse(order.signal_id).seq]
             if order.cancel_signal_id is not None:
-                seqs.append(signal_seq(order.cancel_signal_id))
+                seqs.append(SignalId.parse(order.cancel_signal_id).seq)
             current = high_water.get(order.strategy_id, 0)
             high_water[order.strategy_id] = max(current, *seqs)
         return high_water

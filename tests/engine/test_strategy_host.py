@@ -24,6 +24,7 @@ from tickwright.domain import (
     OrderPlaced,
     OrderType,
     Side,
+    SignalId,
     derive_cloid,
 )
 from tickwright.engine.strategy_host import StrategyHost
@@ -299,12 +300,12 @@ def test_incompatible_snapshot_starts_fresh_with_a_named_event() -> None:
 def _checkpointed_order(
     store: SQLiteStore, signal_id: str, *, cancel_signal_id: str | None = None
 ) -> None:
-    strategy_id, symbol, _ = signal_id.split(":")
+    parsed = SignalId.parse(signal_id)
     order = Order(
         cloid=derive_cloid(signal_id),
-        strategy_id=strategy_id,
+        strategy_id=parsed.strategy_id,
         signal_id=signal_id,
-        symbol=symbol,
+        symbol=parsed.symbol,
         side=Side.BUY,
         quantity=Decimal("1"),
         order_type=OrderType.LIMIT,
