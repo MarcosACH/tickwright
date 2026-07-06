@@ -15,6 +15,7 @@ src/tickwright/
     reconcile.py     # Reconciliation
     cache.py         # Cache
     guard.py         # RealGuard + NoopGuard (+ quantization, kill switch)
+    strategy_host.py # StrategyHost: registry, routing, tick gate, snapshots, seq recovery
     runner.py        # Engine: barrier, supervision, containment
   adapters/
     bus/             # InMemoryBus, KafkaBus (+ serde codec at the Kafka edge)
@@ -91,13 +92,25 @@ src/tickwright/
 
 ---
 
+### StrategyHost (`engine/strategy_host.py`)
+
+**Interface:** `StrategyHost(bus, clock, store, tick_staleness_ns=None)` with `register(strategy, *, symbols)`, `start()`, `stop()`. Callers (the runner) must know: registration fails fast on a duplicate `strategy_id` (ADR-0018); `start()` recovers each strategy — restore persisted snapshot (an incompatible one emits `strategy.snapshot_incompatible` and starts fresh, ADR-0016), set `next_seq` from the saga high-water (places **and** cancel intents consume seqs, ADR-0026), then subscribe wrapped handlers; `stop()` takes the final `snapshot()` of every strategy.
+
+**Responsibilities:** The strategy side of ADR-0024's origin-based containment: `Strategy.on_tick`/`on_order_event` run inside the net — catch, emit `strategy.error` correlated by the triggering event's identity, continue; `InvariantViolation` pierces. Per-strategy routing (declared-symbol tick filtering, own-`strategy_id` `OrderEvent` filtering — a wrapper concern, never a bus feature, ADR-0018) and the per-symbol monotonic tick gate + configurable staleness threshold (ADR-0025).
+
+**Seams:** Hosts N `Strategy` instances (per-strategy routing/seq/snapshot); consumes `EventBus`, `Clock`, `Store` Protocols only.
+
+**Depth note:** Everything that makes an untrusted, trivially-written strategy safe to run — idempotent tick delivery, seq-safety across restart, blast-radius containment — concentrates here so it never smears into strategy code or the bus.
+
+---
+
 ### Engine runner (`engine/runner.py`)
 
-**Interface:** `Engine` with the ADR-0014 component contract (`async start()/stop()`, `READY → RUNNING → STOPPED` + `FAULTED`) and `run()` for supervised operation. Callers (the `app` entrypoint) must know: startup is the ADR-0024 ordered sequence gated on the **reconciliation barrier** (feed starts last; nothing places before the barrier clears; bounded retry then fail-fast `FAULTED`); shutdown is the reverse, bounded by `shutdown_timeout`, takes final strategy snapshots, **leaves resting `LIVE` orders alone**, exits 0; any invariant violation → `FAULTED` → non-zero exit. Exit-code contract: 0 = graceful, non-zero = restart-me.
+**Interface:** `Engine` with the ADR-0014 component contract (`async start()/stop()`, `READY → RUNNING → STOPPED` + `FAULTED`) and `run()` for supervised operation. Callers (the `app` entrypoint) must know: startup is the ADR-0024 ordered sequence gated on the **reconciliation barrier** (feed starts last; nothing places before the barrier clears; bounded retry then fail-fast `FAULTED`); shutdown is the reverse, bounded by `shutdown_timeout`, takes final strategy snapshots (`StrategyHost.stop()`), **leaves resting `LIVE` orders alone**, exits 0; any invariant violation → `FAULTED` → non-zero exit. Exit-code contract: 0 = graceful, non-zero = restart-me.
 
-**Responsibilities:** Wiring subscriptions with **origin-based containment**: third-party handlers (`Strategy.*`, feed parse callbacks) wrapped — catch, log with correlation id, emit `strategy.error`/`handler.error`, continue; engine-internal handlers subscribed raw; `InvariantViolation` pierces everything. The per-symbol monotonic tick gate + staleness threshold (ADR-0025) applied in the strategy subscription wrapper. `asyncio.TaskGroup` supervision; OS signal handling (`SIGINT`/`SIGTERM` graceful, `SIGUSR1`/`SIGUSR2` kill switch); the run-id correlation binding.
+**Responsibilities:** Composing the `StrategyHost` into the lifecycle (it owns the strategy-side containment, routing, and tick gate above); wrapping the remaining third-party surface (feed parse callbacks → `handler.error`) while engine-internal handlers subscribe raw; `asyncio.TaskGroup` supervision; OS signal handling (`SIGINT`/`SIGTERM` graceful, `SIGUSR1`/`SIGUSR2` kill switch); the run-id correlation binding.
 
-**Seams:** Consumes every domain Protocol; hosts N `Strategy` instances (per-strategy routing/seq/snapshot).
+**Seams:** Consumes every domain Protocol.
 
 **Depth note:** The ordering rules (barrier before feed, pull-then-subscribe, reverse shutdown) and the containment policy are exactly the knowledge that would otherwise smear across every component; the runner is where "crash and graceful stop converge on one recovery path" is enforced.
 
@@ -165,7 +178,7 @@ src/tickwright/
 
 ### strategies (`strategies/`)
 
-**Interface:** Minimal reference `Strategy` adapters (engine capability, not a library). Authors must know: `on_tick`/`on_order_event`; emit `PlaceSignal`/`CancelSignal` with strategy-owned monotonic `seq`; own state *content* via `snapshot()`/`restore()` (engine persists the bytes); cancel by your own `signal_id`; handler exceptions are contained, not fatal.
+**Interface:** Minimal reference `Strategy` adapters (engine capability, not a library). Authors must know: `on_tick`/`on_order_event`; emit `PlaceSignal`/`CancelSignal` via a composed `SignalEmitter` (`emitter.py`) that owns the strategy-owned monotonic `seq` (resumed at startup via the engine-set `set_next_seq()`, ADR-0016) and clock-stamps + publishes each signal; own state *content* via `snapshot()`/`restore()` (engine persists the bytes); cancel by your own `signal_id`; handler exceptions are contained, not fatal.
 
 **Responsibilities:** Signal logic only. No persistence, no venue knowledge, no saga awareness beyond `OrderEvent`s.
 

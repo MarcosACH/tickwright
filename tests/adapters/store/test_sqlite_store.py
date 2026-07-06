@@ -184,3 +184,18 @@ def test_checkpointed_order_round_trips_from_memory_store() -> None:
     assert loaded.order_type is OrderType.MARKET
     assert loaded.state is OrderState.SUBMITTED
     assert loaded.venue_oid == "oid-1"
+
+
+def test_strategy_snapshot_round_trips_and_upserts(tmp_path: Path) -> None:
+    path = tmp_path / "saga.db"
+    store = SQLiteStore(path)
+    assert store.load_strategy_snapshot("sma") is None
+
+    store.save_strategy_snapshot("sma", b'{"window": 5}', ts_ns=1_000)
+    store.save_strategy_snapshot("sma", b'{"window": 9}', ts_ns=2_000)
+    store.save_strategy_snapshot("grid", b"levels", ts_ns=2_000)
+    store.close()
+
+    reopened = SQLiteStore(path)
+    assert reopened.load_strategy_snapshot("sma") == b'{"window": 9}'
+    assert reopened.load_strategy_snapshot("grid") == b"levels"

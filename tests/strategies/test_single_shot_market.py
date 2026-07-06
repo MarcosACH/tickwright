@@ -9,6 +9,8 @@ The point of every other module is that this one stays trivial to write.
 import asyncio
 from decimal import Decimal
 
+import pytest
+
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.domain import (
@@ -135,3 +137,31 @@ async def _deliver(strategy: SingleShotMarketStrategy, events: list) -> None:
 
 async def _record(sink: list, signal: object) -> None:
     sink.append(signal)
+
+
+def test_set_next_seq_resumes_the_recovered_counter() -> None:
+    bus, _, strategy, signals = _harness()
+    strategy.set_next_seq(7)
+
+    asyncio.run(bus.publish(_tick()))
+
+    assert [s.signal_id for s in signals] == ["trivial:BTC:7"]
+
+
+def test_snapshot_round_trip_preserves_the_single_shot_state() -> None:
+    bus, _, fired, _ = _harness()
+    asyncio.run(bus.publish(_tick()))
+
+    _, _, restored, signals = _harness()
+    restored.restore(fired.snapshot())
+    asyncio.run(bus.publish(_tick(ts=2_000)))
+
+    # The restored strategy knows it already fired: single shot means one ever.
+    assert signals == []
+
+
+def test_restore_rejects_unreadable_bytes() -> None:
+    _, _, strategy, _ = _harness()
+
+    with pytest.raises(ValueError):
+        strategy.restore(b"\xff not a snapshot")
