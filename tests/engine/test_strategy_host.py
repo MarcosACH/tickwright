@@ -316,6 +316,25 @@ def test_incompatible_snapshot_starts_fresh_with_a_named_event() -> None:
     assert len(alpha.ticks) == 1
 
 
+class InvariantViolatingRestoreStrategy(RecordingStrategy):
+    """A strategy whose restore() signals a broken *engine* assumption."""
+
+    def restore(self, data: bytes) -> None:
+        raise InvariantViolation("broken engine assumption in restore")
+
+
+def test_invariant_violation_in_restore_pierces_and_faults_start() -> None:
+    store = SQLiteStore(":memory:")
+    store.save_strategy_snapshot("alpha", b"any", ts_ns=1_000)
+    host = StrategyHost(bus=InMemoryBus(), clock=ManualClock(), store=store)
+    host.register(InvariantViolatingRestoreStrategy("alpha"), symbols={"BTC"})
+
+    # Unlike an incompatible snapshot (start-fresh), an InvariantViolation is a
+    # broken engine assumption: it pierces the restore net and faults start().
+    with pytest.raises(InvariantViolation, match="broken engine assumption"):
+        host.start()
+
+
 def _checkpointed_order(
     store: SQLiteStore, signal_id: str, *, cancel_signal_id: str | None = None
 ) -> None:
