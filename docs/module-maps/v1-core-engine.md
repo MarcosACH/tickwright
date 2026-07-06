@@ -178,7 +178,7 @@ src/tickwright/
 
 ### strategies (`strategies/`)
 
-**Interface:** Minimal reference `Strategy` adapters (engine capability, not a library). Authors must know: `on_tick`/`on_order_event`; emit `PlaceSignal`/`CancelSignal` with strategy-owned monotonic `seq` (resumed at startup via the engine-set `set_next_seq()`, ADR-0016); own state *content* via `snapshot()`/`restore()` (engine persists the bytes); cancel by your own `signal_id`; handler exceptions are contained, not fatal.
+**Interface:** Minimal reference `Strategy` adapters (engine capability, not a library). Authors must know: `on_tick`/`on_order_event`; emit `PlaceSignal`/`CancelSignal` via a composed `SignalEmitter` (`emitter.py`) that owns the strategy-owned monotonic `seq` (resumed at startup via the engine-set `set_next_seq()`, ADR-0016) and clock-stamps + publishes each signal; own state *content* via `snapshot()`/`restore()` (engine persists the bytes); cancel by your own `signal_id`; handler exceptions are contained, not fatal.
 
 **Responsibilities:** Signal logic only. No persistence, no venue knowledge, no saga awareness beyond `OrderEvent`s.
 
