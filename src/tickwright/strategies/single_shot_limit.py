@@ -14,7 +14,6 @@ import json
 from decimal import Decimal
 
 from tickwright.domain import (
-    CancelSignal,
     Clock,
     EventBus,
     InvariantViolation,
@@ -23,10 +22,11 @@ from tickwright.domain import (
     OrderEvent,
     OrderFilled,
     OrderType,
-    PlaceSignal,
     Side,
     TimeInForce,
 )
+
+from .emitter import SignalEmitter
 
 
 class SingleShotLimitStrategy:
@@ -46,17 +46,15 @@ class SingleShotLimitStrategy:
         cancel_after_ticks: int | None = None,
     ) -> None:
         self.strategy_id = strategy_id
-        self._bus = bus
-        self._clock = clock
+        self._emitter = SignalEmitter(strategy_id=strategy_id, bus=bus, clock=clock)
         self._side = side
         self._quantity = quantity
         self._price = price
         self._time_in_force = time_in_force
         self._post_only = post_only
         self._cancel_after_ticks = cancel_after_ticks
-        # Engine-set via set_next_seq (ADR-0016); everything below it is the
-        # snapshot content this strategy owns.
-        self._next_seq = 1
+        # The emitter owns the seq counter (engine-set via set_next_seq, ADR-0016);
+        # everything below is the snapshot content this strategy owns.
         self._placed_signal_id: str | None = None
         self._ticks_since_place = 0
         self._cancelled = False
@@ -70,15 +68,8 @@ class SingleShotLimitStrategy:
         await self._maybe_cancel(tick)
 
     async def _place(self, tick: MarketTick) -> None:
-        seq = self._next_seq
-        self._next_seq += 1
-        now = self._clock.timestamp_ns()
-        signal = PlaceSignal(
-            ts_event=now,
-            ts_init=now,
-            strategy_id=self.strategy_id,
+        self._placed_signal_id = await self._emitter.place(
             symbol=tick.symbol,
-            seq=seq,
             side=self._side,
             quantity=self._quantity,
             order_type=OrderType.LIMIT,
@@ -86,8 +77,6 @@ class SingleShotLimitStrategy:
             price=self._price,
             post_only=self._post_only,
         )
-        self._placed_signal_id = signal.signal_id
-        await self._bus.publish(signal)
 
     async def _maybe_cancel(self, tick: MarketTick) -> None:
         if self._cancel_after_ticks is None or self._cancelled:
@@ -99,19 +88,7 @@ class SingleShotLimitStrategy:
         if self._ticks_since_place < self._cancel_after_ticks:
             return
         self._cancelled = True
-        seq = self._next_seq
-        self._next_seq += 1
-        now = self._clock.timestamp_ns()
-        await self._bus.publish(
-            CancelSignal(
-                ts_event=now,
-                ts_init=now,
-                strategy_id=self.strategy_id,
-                symbol=tick.symbol,
-                seq=seq,
-                target_signal_id=self._placed_signal_id,
-            )
-        )
+        await self._emitter.cancel(symbol=tick.symbol, target_signal_id=self._placed_signal_id)
 
     async def on_order_event(self, event: OrderEvent) -> None:
         if isinstance(event, OrderFilled):
@@ -121,7 +98,7 @@ class SingleShotLimitStrategy:
 
     def set_next_seq(self, next_seq: int) -> None:
         """Resume the seq counter from the engine-recovered high-water (ADR-0016)."""
-        self._next_seq = next_seq
+        self._emitter.set_next_seq(next_seq)
 
     def snapshot(self) -> bytes:
         """State content only — the seq never travels in the snapshot."""
