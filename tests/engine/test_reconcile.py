@@ -14,7 +14,6 @@ from collections.abc import Mapping
 from decimal import Decimal
 
 import pytest
-import structlog.testing
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
@@ -42,6 +41,7 @@ from tickwright.domain import (
 from tickwright.engine.cache import Cache
 from tickwright.engine.execution import ExecutionManager
 from tickwright.engine.reconcile import Reconciler
+from tickwright.observability.testing import capture_events
 
 
 def _tick(price: str, ts: int = 1_000) -> MarketTick:
@@ -272,7 +272,7 @@ def test_sustained_venue_outage_trips_the_barrier_to_faulted_after_the_window() 
     venue = _DarkVenue()
     reconciler = Reconciler(bus=bus, clock=clock, exchange=venue, cache=cache)
 
-    with structlog.testing.capture_logs() as logs:
+    with capture_events() as logs:
         with pytest.raises(StartupReconciliationTimeout):
             asyncio.run(reconciler.run_startup_barrier(timeout_seconds=30.0))
 

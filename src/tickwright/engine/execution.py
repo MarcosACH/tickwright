@@ -41,7 +41,9 @@ from tickwright.domain import (
     OrderDenied,
     OrderEvent,
     OrderFailed,
+    OrderFilled,
     OrderLive,
+    OrderPartiallyFilled,
     OrderPlaced,
     OrderRejected,
     OrderState,
@@ -53,10 +55,27 @@ from tickwright.domain import (
     Signal,
     derive_cloid,
 )
-from tickwright.observability import named_event
+from tickwright.observability import NamedEvent, named_event
+from tickwright.observability.correlation import operation
 
 from .cache import Cache
 from .guard import NoopGuard
+
+# The saga transition → named event map (ADR-0020): every canonical ``OrderEvent``
+# this manager publishes has exactly one cataloged name, so "a state-affecting
+# path with no named event is a defect" is enforced by construction — a new
+# ``OrderEvent`` family that is not mapped here fails ``_announce`` with a KeyError.
+_SAGA_EVENTS: dict[type[OrderEvent], NamedEvent] = {
+    OrderPlaced: NamedEvent.ORDER_PLACED,
+    OrderSubmitted: NamedEvent.ORDER_SUBMITTED,
+    OrderLive: NamedEvent.ORDER_LIVE,
+    OrderPartiallyFilled: NamedEvent.ORDER_PARTIALLY_FILLED,
+    OrderFilled: NamedEvent.ORDER_FILLED,
+    OrderDenied: NamedEvent.ORDER_DENIED,
+    OrderRejected: NamedEvent.ORDER_REJECTED,
+    OrderFailed: NamedEvent.ORDER_FAILED,
+    OrderCancelled: NamedEvent.ORDER_CANCELLED,
+}
 
 
 class ExecutionManager:
@@ -83,16 +102,24 @@ class ExecutionManager:
         self._guard = guard if guard is not None else NoopGuard()
 
     async def on_signal(self, signal: Signal) -> None:
-        if isinstance(signal, PlaceSignal):
-            await self._place(signal)
-        elif isinstance(signal, CancelSignal):
-            await self._cancel(signal)
+        # Signal handling binds the ``signal_id`` for the span of the work
+        # (ADR-0020): every record emitted while placing or cancelling rides it,
+        # with no call site repeating it as a field.
+        with operation(signal_id=signal.signal_id):
+            if isinstance(signal, PlaceSignal):
+                await self._place(signal)
+            elif isinstance(signal, CancelSignal):
+                await self._cancel(signal)
 
     async def on_execution_report(self, report: ExecutionReport) -> None:
-        if isinstance(report, FillReport):
-            await self._apply_fill(report)
-        elif isinstance(report, OrderStatusReport):
-            await self._apply_status(report)
+        # Venue-fact (and reconciler-synthetic) handling is saga handling: it
+        # binds the ``cloid`` so every canonical transition it drives is
+        # traceable to the exact order (ADR-0020).
+        with operation(cloid=report.cloid):
+            if isinstance(report, FillReport):
+                await self._apply_fill(report)
+            elif isinstance(report, OrderStatusReport):
+                await self._apply_status(report)
 
     async def _place(self, signal: PlaceSignal) -> None:
         cloid = derive_cloid(signal.signal_id)
@@ -113,10 +140,7 @@ class ExecutionManager:
             denied = self._denied_event(order, decision.reason)
             order.apply(denied)
             self._checkpoint(order)
-            named_event(
-                "guard.denied", cloid=order.cloid, signal_id=order.signal_id, reason=decision.reason
-            )
-            await self._bus.publish(denied)
+            await self._announce(denied)
             return
 
         # The quantized quantity is what actually gets placed and filled, so the
@@ -126,11 +150,11 @@ class ExecutionManager:
         # PENDING is the write-ahead intent: durable before anything else
         # happens (ADR-0008 rule 1), then announced.
         self._checkpoint(order)
-        await self._bus.publish(self._event(OrderPlaced, order))
+        await self._announce(self._event(OrderPlaced, order))
 
         submitted = self._event(OrderSubmitted, order)
         order.apply(submitted)
-        await self._bus.publish(submitted)
+        await self._announce(submitted)
 
         await self._exchange.place(
             PlaceOrder(
@@ -237,6 +261,20 @@ class ExecutionManager:
         checkpoint (ADR-0008 rule 2), the one place that ordering is inverted.
         """
         self._checkpoint(order)
+        await self._announce(event)
+
+    async def _announce(self, event: OrderEvent) -> None:
+        """Emit the saga transition's named event, then publish it (ADR-0020).
+
+        The single retrofit point for saga observability: every canonical
+        ``OrderEvent`` this manager publishes is first announced under its
+        cataloged name, so no state-affecting transition is silent. Correlation
+        ids ride the ambient context — the ``signal_id`` while a signal is
+        handled, the ``cloid`` while a venue fact is — never repeated here; only
+        a terminal's ``reason``, which no correlation scope carries, is attached.
+        """
+        reason = getattr(event, "reason", None)
+        named_event(_SAGA_EVENTS[type(event)], **({"reason": reason} if reason else {}))
         await self._bus.publish(event)
 
     def _checkpoint(self, order: Order) -> None:
