@@ -202,13 +202,13 @@ src/tickwright/
 
 ### observability (`observability/`)
 
-**Interface:** The shared leaf (ADR-0020/0032): the **named-event catalog** (stable, documented telemetry names — a test-assertable contract), correlation-id `ContextVar`s (run id + per-operation id), structured-logging setup with key redaction. Importable by engine, venues, and the `bus`/`store`/`feed`/`paper` adapters; **never** imported by `domain`, `clock`, or `strategies` (the last two stay domain-only — they emit no named events).
+**Interface:** The shared leaf (ADR-0020/0032): the **named-event catalog** — the closed `NamedEvent` enum, stable documented telemetry names, a test-assertable contract — and `named_event(NamedEvent, **fields)`, which refuses any uncataloged name; correlation-id `ContextVar`s via `bind_run_id` (per-process run id) and `operation(**ids)` (per-operation `cloid`/`signal_id`/`cycle`), merged into every record so no call site repeats them as fields; `configure_logging(stream, json_output, secrets)` wiring the structlog chain with redaction of registered secret **values** and sensitive field **names**. A `testing.capture_events()` seam runs the merge+redaction chain so tests assert on what a real line carries. Importable by engine, venues, and the `bus`/`store`/`feed`/`paper` adapters; **never** imported by `domain`, `clock`, or `strategies` (the last two stay domain-only — they emit no named events).
 
-**Responsibilities:** Emitting/asserting named events; ambient correlation binding; log configuration.
+**Responsibilities:** Emitting/asserting named events; ambient correlation binding; log configuration and secret redaction.
 
 **Seams:** None — one concrete implementation.
 
-**Depth note:** "A state-affecting path with no named event is a defect" is only enforceable if the catalog is one importable artifact tests can walk.
+**Depth note:** "A state-affecting path with no named event is a defect" is only enforceable if the catalog is one importable artifact tests can walk — the `test_catalog_walk` census drives every `NamedEvent`'s real path and fails if a name has no path-and-test.
 
 ---
 

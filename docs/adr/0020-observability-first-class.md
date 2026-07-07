@@ -25,6 +25,13 @@ coverage of state-affecting paths is a requirement, not optional.
   `ghost.reconciled`, `fill.healed`, `feed.connected`, `feed.disconnected`,
   `guard.denied`, `strategy.snapshot`, `engine.faulted`.
 
+  That list is the roadmap; the **shipped** catalog is the closed `observability.NamedEvent`
+  enum, which grows one slice at a time (a name lands only with its emitting path and a
+  catalog-walk test). Notable realized choices: the guard's pre-trade refusal ships as
+  `order.denied` — one name for the `DENIED` terminal, shared with the other saga terminals —
+  so the guard family currently ships only `guard.kill_switch_tripped`/`guard.kill_switch_reset`;
+  `strategy.snapshot_incompatible` names the incompatible-restore path.
+
 ## Coverage requirement
 
 Every saga transition, every reconcile decision (including a `None`-read freeze), every guard

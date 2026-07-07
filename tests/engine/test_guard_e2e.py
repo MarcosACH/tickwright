@@ -10,8 +10,6 @@ orders keep filling; the halt survives a restart. The same suite stays green wit
 import asyncio
 from decimal import Decimal
 
-import structlog.testing
-
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
@@ -37,6 +35,7 @@ from tickwright.domain.enums import OrderType
 from tickwright.engine.cache import Cache
 from tickwright.engine.execution import ExecutionManager
 from tickwright.engine.guard import NoopGuard, RealGuard
+from tickwright.observability.testing import capture_events
 
 _SPEC = InstrumentSpec(
     symbol="BTC",
@@ -171,21 +170,23 @@ def test_below_min_notional_signal_is_denied_and_never_sent() -> None:
     assert record.state is OrderState.DENIED
 
 
-def test_a_denial_emits_the_guard_denied_named_event() -> None:
+def test_a_denial_emits_the_order_denied_named_event() -> None:
     # A denial is a state-affecting path, so it is observable telemetry, not
-    # silent (ADR-0020): guard.denied carries the cloid and the refusal reason.
+    # silent (ADR-0020): order.denied carries the refusal reason, and the
+    # ambient signal_id (bound for the span of signal handling) rides the record
+    # rather than being repeated as a field.
     bus, _, _, _, _ = _harness()
 
     async def scenario() -> None:
         await bus.publish(_tick("42000"))
         await bus.publish(_limit_signal("100", quantity="0.05"))
 
-    with structlog.testing.capture_logs() as logs:
+    with capture_events() as logs:
         asyncio.run(scenario())
 
-    denied = [log for log in logs if log["event"] == "guard.denied"]
+    denied = [log for log in logs if log["event"] == "order.denied"]
     assert len(denied) == 1
-    assert denied[0]["cloid"] == derive_cloid("trivial:BTC:1")
+    assert denied[0]["signal_id"] == "trivial:BTC:1"
     assert denied[0]["reason"]
 
 

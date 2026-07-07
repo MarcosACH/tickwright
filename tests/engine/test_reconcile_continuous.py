@@ -46,6 +46,7 @@ from tickwright.domain import (
 from tickwright.engine.cache import Cache
 from tickwright.engine.execution import ExecutionManager
 from tickwright.engine.reconcile import ReconcileConfig, Reconciler
+from tickwright.observability.testing import capture_events
 
 
 def _tick(price: str, ts: int = 1_000) -> MarketTick:
@@ -227,10 +228,11 @@ def test_the_inflight_failed_verdict_is_announced_as_a_named_event() -> None:
         assert asyncio.run(reconciler.reconcile_inflight()) is True
     assert not [log for log in first if log["event"] == "inflight.reconciled"]
 
-    with structlog.testing.capture_logs() as verdict:
+    with capture_events() as verdict:
         assert asyncio.run(reconciler.reconcile_inflight()) is True
     reconciled = [log for log in verdict if log["event"] == "inflight.reconciled"]
     assert len(reconciled) == 1
+    # The cloid rides the ambient reconcile context, not the call site (ADR-0020).
     assert reconciled[0]["cloid"] == "0xabc"
     assert reconciled[0]["resolution"] == "failed"
 
@@ -501,7 +503,7 @@ def test_a_recent_orders_absence_neither_arms_the_grace_clock_nor_ghosts_it() ->
     # inv 3): the grace clock never arms and the skip is named for auditability.
     async def scenario() -> None:
         for _ in range(3):
-            with structlog.testing.capture_logs() as logs:
+            with capture_events() as logs:
                 assert await reconciler.reconcile_open_orders() is True
             skipped = [log for log in logs if log["event"] == "reconcile.recency_skipped"]
             assert len(skipped) == 1
@@ -605,7 +607,7 @@ def test_a_none_read_freezes_the_cycle_emits_frozen_and_the_next_cycle_heals() -
     # An outage must never read as "all orders vanished" (ADR-0011 inv 1):
     # the cycle freezes, resolves nothing, and says so as telemetry.
     link.down = True
-    with structlog.testing.capture_logs() as logs:
+    with capture_events() as logs:
         assert asyncio.run(reconciler.reconcile_inflight()) is False
     order = store.get_order("0xabc")
     assert order is not None
@@ -646,7 +648,7 @@ def test_every_cadence_freezes_on_a_none_read_and_removes_nothing(
     _, reconciler, events = _engine(store, link, clock)  # type: ignore[arg-type]
 
     link.down = True
-    with structlog.testing.capture_logs() as logs:
+    with capture_events() as logs:
         assert asyncio.run(getattr(reconciler, cycle_method)()) is False
 
     order = store.get_order("0xabc")

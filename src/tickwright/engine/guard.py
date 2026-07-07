@@ -28,7 +28,7 @@ from tickwright.domain import (
     quantize_price,
     quantize_size,
 )
-from tickwright.observability import named_event
+from tickwright.observability import NamedEvent, named_event
 
 
 class RealGuard:
@@ -50,12 +50,12 @@ class RealGuard:
     def trip_kill_switch(self, reason: str) -> None:
         """Halt new placements globally and durably (ADR-0026)."""
         self._set_kill_switch(tripped=True, reason=reason)
-        named_event("guard.kill_switch_tripped", reason=reason)
+        named_event(NamedEvent.GUARD_KILL_SWITCH_TRIPPED, reason=reason)
 
     def reset_kill_switch(self) -> None:
         """Clear the halt and re-enable placement (ADR-0026)."""
         self._set_kill_switch(tripped=False, reason=None)
-        named_event("guard.kill_switch_reset")
+        named_event(NamedEvent.GUARD_KILL_SWITCH_RESET)
 
     def _set_kill_switch(self, *, tripped: bool, reason: str | None) -> None:
         # Persist before flipping the in-memory flag: the durable record must

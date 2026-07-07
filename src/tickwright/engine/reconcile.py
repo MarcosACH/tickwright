@@ -30,7 +30,8 @@ from tickwright.domain import (
     StartupReconciliationTimeout,
     VenueOrderView,
 )
-from tickwright.observability import named_event
+from tickwright.observability import NamedEvent, named_event
+from tickwright.observability.correlation import operation
 
 from .absence import ConsecutiveMisses
 from .cache import Cache
@@ -164,14 +165,20 @@ class Reconciler:
         lives in exactly one place. ``True`` on a completed pass, ``False`` when a
         read froze it.
         """
-        for order in self._cache.open_orders():
-            if states is not None and order.state not in states:
-                continue
-            view = await self._exchange.fetch_order(order.cloid)
-            if view is None:
-                return self._freeze(cycle, order.cloid)
-            await handle(order, view)
-        return True
+        # The cycle id scopes the whole pass; the per-order cloid nests inside it
+        # (ADR-0020), so every reconcile record — a verdict or a freeze — is
+        # traceable to its cycle and its order without either being repeated as a
+        # field. Correlation binding lives here, at the one cadence chokepoint.
+        with operation(cycle=cycle):
+            for order in self._cache.open_orders():
+                if states is not None and order.state not in states:
+                    continue
+                with operation(cloid=order.cloid):
+                    view = await self._exchange.fetch_order(order.cloid)
+                    if view is None:
+                        return self._freeze()
+                    await handle(order, view)
+            return True
 
     async def _resolve_inflight(self, order: Order, view: VenueOrderView) -> None:
         """Resolve one ``SUBMITTED`` order against its venue reading. A record
@@ -186,9 +193,7 @@ class Reconciler:
             return
         if self._inflight_run.record_absent(order.cloid):
             await self._bus.publish(self._failed_verdict(order))
-            named_event(
-                "inflight.reconciled", cloid=order.cloid, resolution=OrderState.FAILED.value
-            )
+            named_event(NamedEvent.INFLIGHT_RECONCILED, resolution=OrderState.FAILED.value)
 
     async def _resolve_open_order(self, order: Order, view: VenueOrderView) -> None:
         """Resolve one resting order against its venue reading. A live record
@@ -213,7 +218,7 @@ class Reconciler:
             last_event_ns=self._cache.last_event_ts(order.cloid),
         )
         if verdict is GhostVerdict.PROTECTED:
-            named_event("reconcile.recency_skipped", cloid=order.cloid)
+            named_event(NamedEvent.RECONCILE_RECENCY_SKIPPED)
         elif verdict is GhostVerdict.GHOST:
             await self._resolve_ghost(order)
 
@@ -231,14 +236,15 @@ class Reconciler:
         else:
             status, reason = OrderState.REJECTED, "ghost: vanished from the venue"
         await self._bus.publish(self._verdict(order, status, reason))
-        named_event("ghost.reconciled", cloid=order.cloid, resolution=status.value)
+        named_event(NamedEvent.GHOST_RECONCILED, resolution=status.value)
 
-    def _freeze(self, cycle: str, cloid: str) -> bool:
+    def _freeze(self) -> bool:
         """The connectivity guard tripping (ADR-0011 inv 1): a failed venue read
         aborts the whole cycle — nothing is ghosted, removed, or counted, since
         an outage must never read as "all orders vanished". Returns ``False``
-        for the caller to propagate as the cycle verdict."""
-        named_event("reconcile.frozen", cycle=cycle, cloid=cloid)
+        for the caller to propagate as the cycle verdict. The frozen cycle and
+        the order whose read failed ride the ambient context (ADR-0020)."""
+        named_event(NamedEvent.RECONCILE_FROZEN)
         return False
 
     async def run_startup_barrier(

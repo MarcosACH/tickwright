@@ -24,7 +24,7 @@ from tickwright.domain import (
     Store,
     Strategy,
 )
-from tickwright.observability import named_event
+from tickwright.observability import NamedEvent, named_event
 
 
 class StrategyHost:
@@ -109,7 +109,7 @@ class StrategyHost:
             raise
         except Exception as exc:
             named_event(
-                "strategy.snapshot_incompatible",
+                NamedEvent.STRATEGY_SNAPSHOT_INCOMPATIBLE,
                 strategy_id=strategy.strategy_id,
                 error=repr(exc),
             )
@@ -180,7 +180,7 @@ class StrategyHost:
             raise
         except Exception as exc:
             named_event(
-                "strategy.error",
+                NamedEvent.STRATEGY_ERROR,
                 strategy_id=strategy.strategy_id,
                 event_id=event.event_id,
                 error=repr(exc),
