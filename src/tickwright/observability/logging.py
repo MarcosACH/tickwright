@@ -15,8 +15,43 @@ from collections.abc import Iterable
 from typing import TextIO
 
 import structlog
+from structlog.typing import Processor
 
 from .redaction import redact, register_secrets
+
+# The record-shaping processors — correlation-id merge, then redaction — that
+# decide what *content* a consumer sees, as opposed to the presentation
+# processors (level, timestamp, renderer) that only format it. Named once here
+# and shared verbatim with the test seam (``capture_events``), so a test
+# observes exactly the fields a real record carries and a new content rule (a
+# second redaction pass, a field sampler) lands in both paths by construction
+# rather than drifting. Redaction runs ahead of the level/timestamp adders,
+# which is output-identical: neither a fixed level string nor a generated ISO
+# timestamp can carry a secret, so scrubbing before they are added scrubs the
+# same content.
+RECORD_PROCESSORS: tuple[Processor, ...] = (
+    structlog.contextvars.merge_contextvars,
+    redact,
+)
+
+
+def build_processors(*, json_output: bool) -> list[Processor]:
+    """The full production chain: the shared record processors, then the level
+    and ISO-timestamp adders, then the renderer — JSON for aggregation, the
+    console renderer for a human at a terminal.
+
+    Pure: touches no global state (unlike ``configure_logging``), so a test can
+    assert on the chain's shape — notably that it opens with ``RECORD_PROCESSORS``.
+    """
+    renderer: Processor = (
+        structlog.processors.JSONRenderer() if json_output else structlog.dev.ConsoleRenderer()
+    )
+    return [
+        *RECORD_PROCESSORS,
+        structlog.processors.add_log_level,
+        structlog.processors.TimeStamper(fmt="iso", utc=True),
+        renderer,
+    ]
 
 
 def configure_logging(
@@ -32,17 +67,8 @@ def configure_logging(
     renderer (local development).
     """
     register_secrets(secrets)
-    renderer: structlog.typing.Processor = (
-        structlog.processors.JSONRenderer() if json_output else structlog.dev.ConsoleRenderer()
-    )
     structlog.configure(
-        processors=[
-            structlog.contextvars.merge_contextvars,
-            structlog.processors.add_log_level,
-            structlog.processors.TimeStamper(fmt="iso", utc=True),
-            redact,
-            renderer,
-        ],
+        processors=build_processors(json_output=json_output),
         logger_factory=structlog.PrintLoggerFactory(file=stream or sys.stderr),
         cache_logger_on_first_use=False,
     )
