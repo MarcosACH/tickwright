@@ -43,6 +43,7 @@ from tickwright.engine.cache import Cache
 from tickwright.engine.execution import ExecutionManager
 from tickwright.engine.guard import RealGuard
 from tickwright.engine.reconcile import ReconcileConfig, Reconciler
+from tickwright.engine.runner import Engine
 from tickwright.engine.strategy_host import StrategyHost
 from tickwright.observability import NamedEvent
 from tickwright.observability.testing import capture_events
@@ -364,6 +365,37 @@ def _drive_frozen() -> None:
     assert asyncio.run(reconciler.reconcile_inflight()) is False
 
 
+class _IdleFeed:
+    """A feed with nothing to say — the lifecycle walk needs the ordered
+    startup, not ticks. A ``MarketFeed`` double at the venue boundary."""
+
+    async def start(self) -> None:
+        return None
+
+    async def stop(self) -> None:
+        return None
+
+
+def _drive_engine_lifecycle() -> None:
+    """One supervised startup-and-stop: barrier cleared, feed started (ADR-0024)."""
+
+    async def go() -> None:
+        bus = InMemoryBus()
+        clock = ManualClock()
+        engine = Engine(
+            bus=bus,
+            clock=clock,
+            store=SQLiteStore(":memory:"),
+            exchange=PaperExchange(bus=bus, clock=clock, fill_model=ImmediateFillModel()),
+            feed=_IdleFeed(),
+        )
+        run = asyncio.create_task(engine.run())
+        await engine.stop()
+        assert await run == 0
+
+    asyncio.run(go())
+
+
 # --- The catalog walk --------------------------------------------------------
 
 # Every NamedEvent → a scenario that drives its real path. Several of the saga
@@ -379,6 +411,8 @@ SCENARIOS: dict[NamedEvent, Callable[[], None]] = {
     NamedEvent.ORDER_REJECTED: _drive_status(OrderState.REJECTED),
     NamedEvent.ORDER_FAILED: _drive_status(OrderState.FAILED),
     NamedEvent.ORDER_CANCELLED: _drive_status(OrderState.LIVE, OrderState.CANCELLED),
+    NamedEvent.ENGINE_BARRIER_CLEARED: _drive_engine_lifecycle,
+    NamedEvent.ENGINE_FEED_STARTED: _drive_engine_lifecycle,
     NamedEvent.GUARD_KILL_SWITCH_TRIPPED: _drive_kill_switch(reset=False),
     NamedEvent.GUARD_KILL_SWITCH_RESET: _drive_kill_switch(reset=True),
     NamedEvent.STRATEGY_ERROR: _drive_strategy_error,

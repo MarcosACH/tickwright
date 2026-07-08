@@ -15,6 +15,7 @@ composition root — the Engine never knows a concrete.
 """
 
 import asyncio
+import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
 
@@ -30,6 +31,8 @@ from tickwright.domain import (
     Store,
     Strategy,
 )
+from tickwright.observability import NamedEvent, named_event
+from tickwright.observability.correlation import bind_run_id
 
 from .cache import Cache
 from .execution import ExecutionManager
@@ -45,6 +48,8 @@ class EngineConfig:
     shutdown_timeout_seconds: float = 10.0
     tick_staleness_ns: int | None = None
     reconcile: ReconcileConfig | None = None
+    run_id: str | None = None
+    """The correlation id for this run (ADR-0020); ``None`` generates one."""
 
 
 class Engine:
@@ -106,6 +111,7 @@ class Engine:
             # possible after the barrier cleared, so nothing places before
             # reconciliation completes. Replay end-of-file ends the task but
             # not the run — like the CLI, the engine stops only when told to.
+            named_event(NamedEvent.ENGINE_FEED_STARTED)
             feed_task = tg.create_task(self._feed.start())
             tg.create_task(self._stop_when_requested(feed_task))
         self._state = ComponentState.STOPPED
@@ -119,6 +125,10 @@ class Engine:
 
     async def _start_sequence(self) -> None:
         """ADR-0024 steps 1–6: everything before the feed, in order."""
+        # Bind the per-process run correlation first: every record from here on
+        # — the engine's and every component's — is traceable to this run.
+        run_id = self._config.run_id or f"run-{uuid.uuid4().hex[:12]}"
+        bind_run_id(run_id)
         # Recover: rebuild the read-model projection from the durable record.
         self._cache.rebuild()
         # Engine-internal handlers subscribe raw (ADR-0024): any exception in
@@ -129,6 +139,7 @@ class Engine:
         await self._reconciler.run_startup_barrier(
             timeout_seconds=self._config.startup_reconciliation_timeout_seconds
         )
+        named_event(NamedEvent.ENGINE_BARRIER_CLEARED)
         # Strategies after the barrier: restore snapshot, resume seq, subscribe.
         self._host.start()
         self._state = ComponentState.RUNNING

@@ -29,6 +29,10 @@ class NamedEvent(StrEnum):
     ORDER_FAILED = "order.failed"
     ORDER_CANCELLED = "order.cancelled"
 
+    # Engine lifecycle (``Engine`` runner, ADR-0024).
+    ENGINE_BARRIER_CLEARED = "engine.barrier_cleared"
+    ENGINE_FEED_STARTED = "engine.feed_started"
+
     # Pre-trade kill switch (``PreTradeGuard``).
     GUARD_KILL_SWITCH_TRIPPED = "guard.kill_switch_tripped"
     GUARD_KILL_SWITCH_RESET = "guard.kill_switch_reset"
