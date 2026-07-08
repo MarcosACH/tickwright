@@ -15,6 +15,7 @@ composition root — the Engine never knows a concrete.
 """
 
 import asyncio
+import signal
 import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -36,6 +37,7 @@ from tickwright.observability.correlation import bind_run_id
 
 from .cache import Cache
 from .execution import ExecutionManager
+from .guard import NoopGuard
 from .reconcile import ReconcileConfig, Reconciler
 from .strategy_host import StrategyHost
 
@@ -72,11 +74,14 @@ class Engine:
         self._exchange = exchange
         self._feed = feed
         self._config = config if config is not None else EngineConfig()
+        # Resolved here (not left to the ExecutionManager default) because the
+        # runner also drives it from the operator signals below.
+        self._guard = guard if guard is not None else NoopGuard()
         # The engine-internal components, built here from the injected seams —
         # the composition root knows the concretes, the Engine knows the wiring.
         self._cache = Cache(store=store)
         self._execution = ExecutionManager(
-            bus=bus, clock=clock, exchange=exchange, cache=self._cache, guard=guard
+            bus=bus, clock=clock, exchange=exchange, cache=self._cache, guard=self._guard
         )
         self._reconciler = Reconciler(
             bus=bus,
@@ -106,6 +111,7 @@ class Engine:
         Returns the process exit-code contract (ADR-0024): 0 = graceful stop,
         non-zero = ``FAULTED`` — the external supervisor's restart signal.
         """
+        self._install_signal_handlers()
         try:
             await self._start_sequence()
             async with asyncio.TaskGroup() as tg:
@@ -125,6 +131,8 @@ class Engine:
             self._run_best_effort_stop_hooks()
             self._stopped.set()
             return 1
+        finally:
+            self._remove_signal_handlers()
         self._state = ComponentState.STOPPED
         self._stopped.set()
         return 0
@@ -133,6 +141,29 @@ class Engine:
         """Request the graceful stop and wait for the reverse shutdown to finish."""
         self._stop_requested.set()
         await self._stopped.wait()
+
+    # One handler per operator verb (ADR-0024): SIGINT/SIGTERM stop the run
+    # gracefully; SIGUSR1/SIGUSR2 trip and reset the durable kill switch
+    # (ADR-0026) without touching the run. SIGKILL is uncatchable by design —
+    # crash-only recovery on the next boot.
+    _SIGNAL_VERBS = (signal.SIGINT, signal.SIGTERM, signal.SIGUSR1, signal.SIGUSR2)
+
+    def _install_signal_handlers(self) -> None:
+        loop = asyncio.get_running_loop()
+        loop.add_signal_handler(signal.SIGINT, self._stop_requested.set)
+        loop.add_signal_handler(signal.SIGTERM, self._stop_requested.set)
+        loop.add_signal_handler(signal.SIGUSR1, self._trip_kill_switch)
+        loop.add_signal_handler(signal.SIGUSR2, self._guard.reset_kill_switch)
+
+    def _remove_signal_handlers(self) -> None:
+        """Restore default dispositions so a stopped engine never holds the
+        process's signal surface (and a test process gets its own back)."""
+        loop = asyncio.get_running_loop()
+        for sig in self._SIGNAL_VERBS:
+            loop.remove_signal_handler(sig)
+
+    def _trip_kill_switch(self) -> None:
+        self._guard.trip_kill_switch("SIGUSR1: operator kill switch")
 
     async def _start_sequence(self) -> None:
         """ADR-0024 steps 1–6: everything before the feed, in order."""

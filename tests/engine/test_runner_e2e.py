@@ -10,6 +10,9 @@ Zero external services; the whole run is on ``ManualClock``.
 
 import asyncio
 import json
+import os
+import signal
+from collections.abc import Callable
 from decimal import Decimal
 from pathlib import Path
 
@@ -22,11 +25,17 @@ from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     ComponentState,
+    InstrumentSpec,
     MarketTick,
+    OrderDenied,
     OrderEvent,
     OrderFilled,
+    OrderLive,
     OrderState,
+    OrderType,
+    PlaceSignal,
     Side,
+    TimeInForce,
     derive_cloid,
 )
 from tickwright.engine.guard import RealGuard
@@ -139,6 +148,102 @@ def test_named_events_prove_the_startup_order(tmp_path: Path) -> None:
 def _every_lifecycle_record_carries_a_run_id(logs: list[EventDict]) -> bool:
     engine_records = [log for log in logs if str(log["event"]).startswith("engine.")]
     return bool(engine_records) and all(log.get("run_id") for log in engine_records)
+
+
+async def _until(condition: Callable[[], bool]) -> None:
+    """Spin the loop (bounded by the caller's ``wait_for``) until ``condition``
+    holds — signal delivery is genuinely asynchronous, so the test waits for
+    the observable effect rather than assuming a delivery order."""
+    while not condition():
+        await asyncio.sleep(0)
+
+
+def test_sigterm_stops_the_engine_gracefully(tmp_path: Path) -> None:
+    """The operator contract (ADR-0024): SIGTERM → graceful stop → exit 0."""
+    ticks = _write_ticks(tmp_path / "ticks.jsonl")
+
+    async def main() -> tuple[int, Engine]:
+        bus = InMemoryBus()
+        clock = ManualClock()
+        store = SQLiteStore(tmp_path / "saga.db")
+        exchange = PaperExchange(bus=bus, clock=clock, fill_model=ImmediateFillModel())
+        bus.subscribe(MarketTick, exchange.on_tick)
+        feed = ReplayFeed(path=ticks, bus=bus, clock=clock)
+        engine = Engine(bus=bus, clock=clock, store=store, exchange=exchange, feed=feed)
+
+        run = asyncio.create_task(engine.run())
+        await asyncio.wait_for(_until(lambda: engine.state is ComponentState.RUNNING), timeout=5)
+        os.kill(os.getpid(), signal.SIGTERM)
+        return await asyncio.wait_for(run, timeout=5), engine
+
+    exit_code, engine = asyncio.run(main())
+
+    assert exit_code == 0
+    assert engine.state is ComponentState.STOPPED
+
+
+def test_sigusr1_trips_the_kill_switch_and_sigusr2_resets_it(tmp_path: Path) -> None:
+    """The operator kill switch (ADR-0026): SIGUSR1 halts placements durably —
+    subsequent ones are DENIED through the real guard — and SIGUSR2 re-enables."""
+    spec = InstrumentSpec(
+        symbol="BTC", sz_decimals=3, max_decimals=6, max_sig_figs=5, min_notional=Decimal("10")
+    )
+
+    def limit_signal(seq: int) -> PlaceSignal:
+        return PlaceSignal(
+            ts_event=1_000,
+            ts_init=1_000,
+            strategy_id="operator",
+            symbol="BTC",
+            seq=seq,
+            side=Side.BUY,
+            quantity=Decimal("0.5"),
+            order_type=OrderType.LIMIT,
+            time_in_force=TimeInForce.GTC,
+            price=Decimal("41000"),
+        )
+
+    async def main() -> None:
+        bus = InMemoryBus()
+        clock = ManualClock()
+        store = SQLiteStore(tmp_path / "saga.db")
+        venue = PaperExchange(bus=bus, clock=clock, fill_model=ImmediateFillModel())
+        bus.subscribe(MarketTick, venue.on_tick)
+        feed = ReplayFeed(path=_write_ticks(tmp_path / "ticks.jsonl"), bus=bus, clock=clock)
+        guard = RealGuard(specs={"BTC": spec}, store=store, clock=clock)
+        engine = Engine(bus=bus, clock=clock, store=store, exchange=venue, feed=feed, guard=guard)
+
+        outcomes: list[OrderEvent] = []
+        ticks_seen = asyncio.Event()
+
+        async def record(event: OrderEvent) -> None:
+            outcomes.append(event)
+
+        async def on_tick(_: MarketTick) -> None:
+            ticks_seen.set()
+
+        bus.subscribe(OrderEvent, record)
+        bus.subscribe(MarketTick, on_tick)
+
+        run = asyncio.create_task(engine.run())
+        await asyncio.wait_for(_until(lambda: engine.state is ComponentState.RUNNING), timeout=5)
+        # The venue prices limits off the latest tick: wait for the replay to land.
+        await asyncio.wait_for(ticks_seen.wait(), timeout=5)
+
+        os.kill(os.getpid(), signal.SIGUSR1)
+        await asyncio.wait_for(_until(lambda: guard.kill_switch_tripped), timeout=5)
+        await bus.publish(limit_signal(seq=1))
+        assert isinstance(outcomes[-1], OrderDenied)
+
+        os.kill(os.getpid(), signal.SIGUSR2)
+        await asyncio.wait_for(_until(lambda: not guard.kill_switch_tripped), timeout=5)
+        await bus.publish(limit_signal(seq=2))
+        assert isinstance(outcomes[-1], OrderLive)
+
+        await engine.stop()
+        assert await run == 0
+
+    asyncio.run(main())
 
 
 def test_invariant_violation_faults_the_engine_and_exits_nonzero(tmp_path: Path) -> None:
