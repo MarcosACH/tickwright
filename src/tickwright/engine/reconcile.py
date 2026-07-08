@@ -282,6 +282,13 @@ class Reconciler:
     async def _adopt(self, order: Order, view: VenueOrderView) -> None:
         """Align one saga with the venue's view of its cloid."""
         if not view.has_record:
+            if order.state in _OPEN_ORDER_STATES:
+                # The venue once ACKed this order as working, so an empty read
+                # means it is *gone*, not un-sent: the ghost taxonomy applies —
+                # REJECTED from LIVE, CANCELLED with fills preserved or after a
+                # requested cancel — never FAILED (ADR-0010/0011 resolutions).
+                await self._resolve_ghost(order)
+                return
             # A successful read with no status and no fills is positive proof
             # the order never landed: resolve FAILED (ADR-0010/0011) — never a
             # blind resend (ADR-0008 rule 2). Recreating is the strategy's call.
