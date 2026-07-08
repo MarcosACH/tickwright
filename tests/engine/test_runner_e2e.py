@@ -252,6 +252,22 @@ class _HangingFeed:
         await asyncio.Event().wait()
 
 
+class _BlockingFeed:
+    """A feed whose read loop runs until cancelled — a live feed that never
+    reaches end-of-file, unlike a replay. A ``MarketFeed`` double at the venue
+    boundary; ``started`` fires once the loop is actually running."""
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+
+    async def start(self) -> None:
+        self.started.set()
+        await asyncio.Event().wait()
+
+    async def stop(self) -> None:
+        return None
+
+
 def test_shutdown_is_bounded_a_hung_teardown_faults_instead_of_hanging(tmp_path: Path) -> None:
     """ADR-0024: the reverse shutdown is bounded by ``shutdown_timeout`` — a
     teardown that cannot finish must fault non-zero, never wedge the process."""
@@ -278,6 +294,33 @@ def test_shutdown_is_bounded_a_hung_teardown_faults_instead_of_hanging(tmp_path:
 
     assert exit_code != 0
     assert engine.state is ComponentState.FAULTED
+
+
+def test_graceful_stop_cancels_a_still_running_feed(tmp_path: Path) -> None:
+    """ADR-0024 reverse shutdown: a graceful stop of a feed still mid-read
+    cancels the feed task and exits 0 — the live-feed path that a replay hitting
+    end-of-file never exercises. The feed's ``start()`` never returns, so exit 0
+    is only reachable if the reverse shutdown cancelled the task; otherwise the
+    ``TaskGroup`` would wait on it forever and the run would time out."""
+
+    async def main() -> tuple[int, Engine]:
+        bus = InMemoryBus()
+        clock = ManualClock()
+        store = SQLiteStore(tmp_path / "saga.db")
+        exchange = PaperExchange(bus=bus, clock=clock, fill_model=ImmediateFillModel())
+        feed = _BlockingFeed()
+        engine = Engine(bus=bus, clock=clock, store=store, exchange=exchange, feed=feed)
+
+        run = asyncio.create_task(engine.run())
+        await asyncio.wait_for(_until(lambda: engine.state is ComponentState.RUNNING), timeout=5)
+        await asyncio.wait_for(feed.started.wait(), timeout=5)
+        await asyncio.wait_for(engine.stop(), timeout=5)
+        return await asyncio.wait_for(run, timeout=5), engine
+
+    exit_code, engine = asyncio.run(main())
+
+    assert exit_code == 0
+    assert engine.state is ComponentState.STOPPED
 
 
 def test_invariant_violation_faults_the_engine_and_exits_nonzero(tmp_path: Path) -> None:
