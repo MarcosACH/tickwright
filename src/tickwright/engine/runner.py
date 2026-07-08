@@ -10,8 +10,10 @@ orders left alone, store closed last.
 The Engine consumes seam Protocols only (ADR-0032): the composition root hands
 it already-built concretes and it constructs its own internals (``Cache``,
 ``ExecutionManager``, ``Reconciler``, ``StrategyHost``) from them. Venue-sim
-wiring that is not a seam (the paper exchange's tick subscription) stays in the
-composition root — the Engine never knows a concrete.
+wiring that is not a seam — the paper exchange filling off the tick stream — the
+paper adapter owns itself (it self-subscribes at construction, ADR-0012), so
+neither the Engine nor the composition root carries a paper-specific tick line;
+the Engine never knows a concrete.
 """
 
 import asyncio

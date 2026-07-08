@@ -21,7 +21,6 @@ from tickwright.domain import (
     Exchange,
     InstrumentSpec,
     MarketFeed,
-    MarketTick,
     PreTradeGuard,
     ReplayClock,
     Store,
@@ -53,16 +52,14 @@ def build_store(config: AppConfig) -> Store:
 def build_exchange(config: AppConfig, *, bus: EventBus, clock: Clock) -> Exchange:
     match config.exchange:
         case "paper":
-            exchange = PaperExchange(
+            # The paper venue subscribes itself to the tick stream (it fills off
+            # ticks, a real venue would not) — no tick-wiring line to keep here.
+            return PaperExchange(
                 bus=bus,
                 clock=clock,
                 fill_model=ImmediateFillModel(),
                 instrument_specs=config.paper.instrument_specs,
             )
-            # Venue-sim wiring, deliberately here and not in the Engine: the
-            # paper venue fills off the tick stream, a real venue would not.
-            bus.subscribe(MarketTick, exchange.on_tick)
-            return exchange
         case unreachable:
             assert_never(unreachable)
 

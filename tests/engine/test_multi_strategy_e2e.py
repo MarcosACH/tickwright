@@ -21,7 +21,6 @@ from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     ExecutionReport,
-    MarketTick,
     OrderState,
     Side,
     Signal,
@@ -75,7 +74,6 @@ def _life(
     host.register(btc_strat, symbols={"BTC"})
     host.register(eth_strat, symbols={"ETH"})
 
-    bus.subscribe(MarketTick, venue.on_tick)
     bus.subscribe(Signal, manager.on_signal)
     bus.subscribe(ExecutionReport, manager.on_execution_report)
     host.start()

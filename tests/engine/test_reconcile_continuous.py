@@ -92,7 +92,6 @@ def _surviving_venue(clock: ManualClock) -> tuple[PaperExchange, InMemoryBus]:
     """A venue whose acks we never heard: its bus has no engine listeners."""
     dead_bus = InMemoryBus()
     exchange = PaperExchange(bus=dead_bus, clock=clock, fill_model=ImmediateFillModel())
-    dead_bus.subscribe(MarketTick, exchange.on_tick)
     return exchange, dead_bus
 
 

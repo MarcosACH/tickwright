@@ -79,10 +79,33 @@ def _harness() -> tuple[PaperExchange, InMemoryBus, ManualClock, list[FillReport
     bus = InMemoryBus()
     clock = ManualClock()
     exchange = PaperExchange(bus=bus, clock=clock, fill_model=ImmediateFillModel())
-    bus.subscribe(MarketTick, exchange.on_tick)
     reports: list[FillReport] = []
     bus.subscribe(FillReport, lambda r: _record(reports, r))
     return exchange, bus, clock, reports
+
+
+def test_the_paper_venue_consumes_ticks_off_its_bus_with_no_external_wiring() -> None:
+    """A ``PaperExchange`` is *defined* by filling off the tick stream, so it
+    subscribes itself to ``MarketTick`` at construction (ADR-0012): the
+    composition root and every test get a tradable venue with no follow-up
+    wiring line to repeat or forget. Proof: a tick published with **no** manual
+    ``subscribe`` still reaches the venue — a MARKET then fills at the cached
+    price, which is only possible if the venue saw the tick."""
+    bus = InMemoryBus()
+    clock = ManualClock()
+    exchange = PaperExchange(bus=bus, clock=clock, fill_model=ImmediateFillModel())
+    fills: list[FillReport] = []
+    bus.subscribe(FillReport, lambda r: _record(fills, r))
+
+    async def scenario() -> None:
+        clock.advance_to(1_000)
+        await bus.publish(_tick("42000"))
+        await exchange.place(_market_order(qty="0.5"))
+
+    asyncio.run(scenario())
+
+    assert len(fills) == 1
+    assert fills[0].price == Decimal("42000")
 
 
 def _limit_harness() -> tuple[
@@ -111,7 +134,6 @@ def _specced_harness() -> tuple[
     exchange = PaperExchange(
         bus=bus, clock=clock, fill_model=ImmediateFillModel(), instrument_specs={"BTC": _BTC_SPEC}
     )
-    bus.subscribe(MarketTick, exchange.on_tick)
     fills: list[FillReport] = []
     statuses: list[OrderStatusReport] = []
     bus.subscribe(FillReport, lambda r: _record(fills, r))

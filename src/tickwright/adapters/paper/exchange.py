@@ -61,6 +61,14 @@ class PaperExchange:
         # a real venue remembers the orders it saw; so does the paper one.
         self._statuses: dict[str, OrderStatusReport] = {}
         self._fills: dict[str, list[FillReport]] = {}
+        # Filling off the tick stream *is* what a paper venue is (ADR-0012), so
+        # it wires its own tick subscription here rather than leaving a line for
+        # the composition root and every test to repeat (and be able to forget).
+        # A real venue would not — it fills off its own matching engine, not our
+        # replayed ticks — which is exactly why this lives in the paper adapter
+        # and not on the ``Exchange`` seam. Safe against ordering: the feed
+        # starts last (ADR-0024), so no tick is ever published before this.
+        bus.subscribe(MarketTick, self.on_tick)
 
     async def on_tick(self, tick: MarketTick) -> None:
         # Cache the latest price per symbol; MARKET fills read it (ADR-0027).

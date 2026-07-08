@@ -154,7 +154,7 @@ src/tickwright/
 
 ### paper (`adapters/paper/`)
 
-**Interface:** `PaperExchange` — the deterministic in-process `Exchange` adapter and default v1 target. Callers must know: fills MARKET at the latest `MarketTick`, holds a book of resting LIMITs re-checked each tick; frictionless (price+quantity, no fees/margin/PnL); zero setup, no keys. The **`FillModel` Protocol lives in this package** (paper-internal seam): `ImmediateFillModel` (deterministic, optimistic, zero-slippage, full-fill) and `StochasticFillModel` (seeded queue/slippage/partials/latency); both take injected RNG + `Clock`.
+**Interface:** `PaperExchange` — the deterministic in-process `Exchange` adapter and default v1 target. Callers must know: fills MARKET at the latest `MarketTick`, holds a book of resting LIMITs re-checked each tick; it **self-subscribes to the tick stream at construction** (filling off ticks is what a paper venue *is*, a real venue would not), so neither the composition root nor a test wires a tick line; frictionless (price+quantity, no fees/margin/PnL); zero setup, no keys. The **`FillModel` Protocol lives in this package** (paper-internal seam): `ImmediateFillModel` (deterministic, optimistic, zero-slippage, full-fill) and `StochasticFillModel` (seeded queue/slippage/partials/latency); both take injected RNG + `Clock`.
 
 **Responsibilities:** Resting-order book, fill decisions (delegated to the fill model), emitting `ExecutionReport`s, honest `fetch_*` for reconciliation.
 

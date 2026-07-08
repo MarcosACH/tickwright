@@ -197,8 +197,6 @@ def _manager(
         cache=cache,
         guard=guard,  # type: ignore[arg-type]
     )
-    if isinstance(exchange, PaperExchange):
-        bus.subscribe(MarketTick, exchange.on_tick)
     bus.subscribe(Signal, manager.on_signal)
     bus.subscribe(ExecutionReport, manager.on_execution_report)
 

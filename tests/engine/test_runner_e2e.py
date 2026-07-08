@@ -75,9 +75,6 @@ async def _run_to_fill_then_stop(ticks: Path, db: Path) -> tuple[int, Engine]:
     store = SQLiteStore(db)
     exchange = PaperExchange(bus=bus, clock=clock, fill_model=ImmediateFillModel())
     feed = ReplayFeed(path=ticks, bus=bus, clock=clock)
-    # Venue-sim wiring is composition-root business, not the Engine's: the
-    # paper venue fills off the tick stream, a real venue would not.
-    bus.subscribe(MarketTick, exchange.on_tick)
     engine = Engine(bus=bus, clock=clock, store=store, exchange=exchange, feed=feed)
     strategy = SingleShotMarketStrategy(
         strategy_id="trivial", bus=bus, clock=clock, side=Side.BUY, quantity=Decimal("0.5")
@@ -167,7 +164,6 @@ def test_sigterm_stops_the_engine_gracefully(tmp_path: Path) -> None:
         clock = ManualClock()
         store = SQLiteStore(tmp_path / "saga.db")
         exchange = PaperExchange(bus=bus, clock=clock, fill_model=ImmediateFillModel())
-        bus.subscribe(MarketTick, exchange.on_tick)
         feed = ReplayFeed(path=ticks, bus=bus, clock=clock)
         engine = Engine(bus=bus, clock=clock, store=store, exchange=exchange, feed=feed)
 
@@ -208,7 +204,6 @@ def test_sigusr1_trips_the_kill_switch_and_sigusr2_resets_it(tmp_path: Path) -> 
         clock = ManualClock()
         store = SQLiteStore(tmp_path / "saga.db")
         venue = PaperExchange(bus=bus, clock=clock, fill_model=ImmediateFillModel())
-        bus.subscribe(MarketTick, venue.on_tick)
         feed = ReplayFeed(path=_write_ticks(tmp_path / "ticks.jsonl"), bus=bus, clock=clock)
         guard = RealGuard(specs={"BTC": spec}, store=store, clock=clock)
         engine = Engine(bus=bus, clock=clock, store=store, exchange=venue, feed=feed, guard=guard)
@@ -295,7 +290,6 @@ def test_invariant_violation_faults_the_engine_and_exits_nonzero(tmp_path: Path)
         clock = ManualClock()
         store = SQLiteStore(tmp_path / "saga.db")
         exchange = PaperExchange(bus=bus, clock=clock, fill_model=ImmediateFillModel())
-        bus.subscribe(MarketTick, exchange.on_tick)
         feed = ReplayFeed(path=ticks, bus=bus, clock=clock)
         # A real guard with no specs: the first placement is a composition-root
         # wiring bug (ADR-0031) and raises InvariantViolation inside the raw
@@ -334,7 +328,6 @@ def test_graceful_stop_leaves_resting_live_orders_for_the_next_start_to_re_adopt
         bus = InMemoryBus()
         store = SQLiteStore(db)
         venue = PaperExchange(bus=bus, clock=clock, fill_model=ImmediateFillModel())
-        bus.subscribe(MarketTick, venue.on_tick)
         feed = ReplayFeed(path=_write_ticks(tmp_path / "first.jsonl"), bus=bus, clock=clock)
         engine = Engine(bus=bus, clock=clock, store=store, exchange=venue, feed=feed)
         engine.register(

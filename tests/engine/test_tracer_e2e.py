@@ -80,7 +80,6 @@ def _run(path: Path) -> tuple[list[Event], SingleShotMarketStrategy, SQLiteStore
     # Recorder first, so it captures each event in dispatch (cascade) order.
     recorded: list[Event] = []
     bus.subscribe(Event, lambda ev: _record(recorded, ev))
-    bus.subscribe(MarketTick, exchange.on_tick)
     bus.subscribe(MarketTick, strategy.on_tick)
     bus.subscribe(Signal, manager.on_signal)
     bus.subscribe(ExecutionReport, manager.on_execution_report)
