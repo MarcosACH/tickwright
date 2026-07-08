@@ -30,7 +30,9 @@ coverage of state-affecting paths is a requirement, not optional.
   catalog-walk test). Notable realized choices: the guard's pre-trade refusal ships as
   `order.denied` — one name for the `DENIED` terminal, shared with the other saga terminals —
   so the guard family currently ships only `guard.kill_switch_tripped`/`guard.kill_switch_reset`;
-  `strategy.snapshot_incompatible` names the incompatible-restore path.
+  `strategy.snapshot_incompatible` names the incompatible-restore path; the runner's
+  startup-order proof ships as `engine.barrier_cleared`/`engine.feed_started` (the ADR-0024
+  ordering, test-assertable) alongside the roadmap's `engine.faulted`.
 
 ## Coverage requirement
 

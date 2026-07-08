@@ -95,8 +95,8 @@ def test_an_unknown_discriminant_value_is_a_readable_config_error(
 def test_build_engine_wires_a_tradable_paper_engine(tmp_path: Path) -> None:
     """The whole point of the root: the built engine trades on replayed ticks.
 
-    Wired entirely from config — real guard included — it runs, places the
-    configured single-shot order, fills it on the paper venue, and stops
+    Wired entirely from config — real guard included — it runs both configured
+    strategy kinds (the market shot fills, the low limit rests LIVE) and stops
     gracefully; the durable trail is in the configured sqlite file.
     """
     ticks = tmp_path / "ticks.jsonl"
@@ -116,31 +116,53 @@ def test_build_engine_wires_a_tradable_paper_engine(tmp_path: Path) -> None:
                 symbol="BTC",
                 side=Side.BUY,
                 quantity=Decimal("0.5"),
-            )
+            ),
+            StrategyConfig(
+                kind="single_shot_limit",
+                strategy_id="rester",
+                symbol="BTC",
+                side=Side.BUY,
+                quantity=Decimal("0.5"),
+                price=Decimal("41000"),
+            ),
         ],
     )
     engine = build_engine(config)
     assert isinstance(engine, Engine)
 
-    cloid = derive_cloid("demo:BTC:1")
+    wanted = {
+        derive_cloid("demo:BTC:1"): OrderState.FILLED,
+        derive_cloid("rester:BTC:1"): OrderState.LIVE,
+    }
 
-    async def run_until_filled() -> int:
+    async def run_until_settled() -> int:
         run = asyncio.create_task(engine.run())
         reader = SQLiteStore(db)
         try:
 
-            def filled() -> bool:
-                order = reader.get_order(cloid)
-                return order is not None and order.state is OrderState.FILLED
+            def settled() -> bool:
+                orders = {c: reader.get_order(c) for c in wanted}
+                return all(o is not None and o.state is wanted[c] for c, o in orders.items())
 
-            async def until_filled() -> None:
-                while not filled():
+            async def until_settled() -> None:
+                while not settled():
                     await asyncio.sleep(0)
 
-            await asyncio.wait_for(until_filled(), timeout=5)
+            await asyncio.wait_for(until_settled(), timeout=5)
         finally:
             reader.close()
         await engine.stop()
         return await run
 
-    assert asyncio.run(run_until_filled()) == 0
+    assert asyncio.run(run_until_settled()) == 0
+
+
+def test_a_limit_strategy_config_requires_a_price() -> None:
+    with pytest.raises(ValidationError, match="price"):
+        StrategyConfig(
+            kind="single_shot_limit",
+            strategy_id="rester",
+            symbol="BTC",
+            side=Side.BUY,
+            quantity=Decimal("0.5"),
+        )

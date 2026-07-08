@@ -39,7 +39,7 @@ from tickwright.domain import (
     derive_cloid,
 )
 from tickwright.engine.guard import RealGuard
-from tickwright.engine.runner import Engine
+from tickwright.engine.runner import Engine, EngineConfig
 from tickwright.observability.testing import capture_events
 from tickwright.strategies import SingleShotLimitStrategy, SingleShotMarketStrategy
 
@@ -244,6 +244,45 @@ def test_sigusr1_trips_the_kill_switch_and_sigusr2_resets_it(tmp_path: Path) -> 
         assert await run == 0
 
     asyncio.run(main())
+
+
+class _HangingFeed:
+    """A feed whose ``stop()`` never returns — a wedged venue connection at
+    teardown. A ``MarketFeed`` double at the venue boundary."""
+
+    async def start(self) -> None:
+        return None
+
+    async def stop(self) -> None:
+        await asyncio.Event().wait()
+
+
+def test_shutdown_is_bounded_a_hung_teardown_faults_instead_of_hanging(tmp_path: Path) -> None:
+    """ADR-0024: the reverse shutdown is bounded by ``shutdown_timeout`` — a
+    teardown that cannot finish must fault non-zero, never wedge the process."""
+
+    async def main() -> tuple[int, Engine]:
+        bus = InMemoryBus()
+        clock = ManualClock()
+        store = SQLiteStore(tmp_path / "saga.db")
+        exchange = PaperExchange(bus=bus, clock=clock, fill_model=ImmediateFillModel())
+        engine = Engine(
+            bus=bus,
+            clock=clock,
+            store=store,
+            exchange=exchange,
+            feed=_HangingFeed(),
+            config=EngineConfig(shutdown_timeout_seconds=0.05),
+        )
+        run = asyncio.create_task(engine.run())
+        await asyncio.wait_for(_until(lambda: engine.state is ComponentState.RUNNING), timeout=5)
+        await asyncio.wait_for(engine.stop(), timeout=5)
+        return await asyncio.wait_for(run, timeout=5), engine
+
+    exit_code, engine = asyncio.run(main())
+
+    assert exit_code != 0
+    assert engine.state is ComponentState.FAULTED
 
 
 def test_invariant_violation_faults_the_engine_and_exits_nonzero(tmp_path: Path) -> None:

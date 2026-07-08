@@ -187,17 +187,24 @@ class Engine:
         self._state = ComponentState.RUNNING
 
     async def _stop_when_requested(self, feed_task: asyncio.Task[None]) -> None:
-        """Wait for the stop request, then reverse the startup (ADR-0024)."""
+        """Wait for the stop request, then reverse the startup (ADR-0024).
+
+        Bounded by ``shutdown_timeout``: a teardown that cannot finish (a
+        wedged venue connection, say) raises out to the TaskGroup and faults
+        non-zero rather than wedging the process. The bound is wall-clock
+        deliberately — it guards against real hangs, not simulated time.
+        """
         await self._stop_requested.wait()
-        await self._feed.stop()
-        if not feed_task.done():
-            feed_task.cancel()
-        # Final snapshots (ADR-0016), then the store closes last: every
-        # checkpoint is already durable, and resting LIVE orders stay in it —
-        # restart reconciliation re-adopts them (crash and graceful stop
-        # converge on one recovery path).
-        self._host.stop()
-        self._store.close()
+        async with asyncio.timeout(self._config.shutdown_timeout_seconds):
+            await self._feed.stop()
+            if not feed_task.done():
+                feed_task.cancel()
+            # Final snapshots (ADR-0016), then the store closes last: every
+            # checkpoint is already durable, and resting LIVE orders stay in it
+            # — restart reconciliation re-adopts them (crash and graceful stop
+            # converge on one recovery path).
+            self._host.stop()
+            self._store.close()
 
     def _run_best_effort_stop_hooks(self) -> None:
         """The faulted teardown: try each stop hook, keep going if one breaks.
@@ -209,5 +216,5 @@ class Engine:
         for hook in (self._host.stop, self._store.close):
             try:
                 hook()
-            except Exception:  # noqa: BLE001 - a broken hook must not mask the fault.
+            except Exception:
                 continue
