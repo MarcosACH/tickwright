@@ -36,6 +36,16 @@ class TimeInForce(StrEnum):
     IOC = "ioc"
 
 
+class ComponentState(StrEnum):
+    """The shared component lifecycle (ADR-0014): ``READY → RUNNING → STOPPED``,
+    plus ``FAULTED`` for an unrecoverable invariant violation (fail-fast)."""
+
+    READY = "ready"
+    RUNNING = "running"
+    STOPPED = "stopped"
+    FAULTED = "faulted"
+
+
 class OrderState(StrEnum):
     """The order-lifecycle saga states (ADR-0007 / ADR-0010)."""
 
