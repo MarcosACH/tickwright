@@ -235,11 +235,18 @@ class ExecutionManager:
         now = self._clock.timestamp_ns()
         # Order owns the fill accounting: it accumulates cum_qty, picks
         # OrderFilled vs OrderPartiallyFilled, and dedups the trade_id.
+        #
+        # A fill is the one saga family whose fact originates at the venue, not
+        # here: ts_event carries the report's venue fill instant (when the fill
+        # occurred), while ts_init is the engine's construction time (when we
+        # minted the canonical event). Contrast the order-event families, which
+        # correctly stamp both with `now` because the engine *is* where those
+        # facts occur (ADR-0005; Event contract in domain/events.py).
         event = order.record_fill(
             trade_id=report.trade_id,
             quantity=report.quantity,
             price=report.price,
-            ts_event=now,
+            ts_event=report.ts_event,
             ts_init=now,
             reconciliation=report.reconciliation,
         )

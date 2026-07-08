@@ -167,10 +167,10 @@ def test_every_transition_is_checkpointed_on_the_happy_path() -> None:
     ]
 
 
-def _fill_report(cloid: str, trade_id: str, quantity: str) -> FillReport:
+def _fill_report(cloid: str, trade_id: str, quantity: str, *, ts_event: int = 1_000) -> FillReport:
     return FillReport(
-        ts_event=1_000,
-        ts_init=1_000,
+        ts_event=ts_event,
+        ts_init=ts_event,
         cloid=cloid,
         symbol="BTC",
         trade_id=trade_id,
@@ -279,6 +279,62 @@ def test_order_filled_carries_the_fill_details() -> None:
     assert filled.quantity == Decimal("0.5")
     assert filled.cum_qty == Decimal("0.5")
     assert filled.event_id == f"{filled.cloid}:fill:{filled.trade_id}"
+
+
+def test_fill_preserves_the_venue_ts_event_while_ts_init_is_engine_time() -> None:
+    bus, clock, _, order_events = _harness()
+    cloid = derive_cloid("trivial:BTC:1")
+
+    async def scenario() -> None:
+        # Leave the saga in-flight (no tick cached -> the send crashes), so the
+        # order exists in cache to accept a hand-built venue fill.
+        with pytest.raises(ValueError):
+            await bus.publish(_market_signal())
+        # The engine receives the fill strictly later than the venue stamped it.
+        # On the paper path both clocks coincide, so the gap is only observable
+        # by injecting a report whose ts_event predates the clock's current time.
+        clock.advance_to(5_000)
+        await bus.publish(
+            FillReport(
+                ts_event=2_000,  # venue fill instant, strictly earlier than now
+                ts_init=2_000,
+                cloid=cloid,
+                symbol="BTC",
+                trade_id="f1",
+                quantity=Decimal("0.5"),
+                price=Decimal("42000"),
+            )
+        )
+
+    asyncio.run(scenario())
+
+    filled = next(ev for ev in order_events if isinstance(ev, OrderFilled))
+    assert filled.ts_event == 2_000  # venue fill instant preserved (when the fact occurred)
+    assert filled.ts_init == 5_000  # engine construction time (clock at processing)
+
+
+def test_partial_fill_ts_event_tracks_each_report_while_ts_init_is_engine_time() -> None:
+    bus, clock, _, order_events = _harness()
+    cloid = derive_cloid("trivial:BTC:1")
+
+    async def scenario() -> None:
+        # In-flight saga, then two venue fills arriving after their own instants,
+        # each received at a distinct (later) engine time.
+        with pytest.raises(ValueError):
+            await bus.publish(_market_signal())
+        clock.advance_to(5_000)
+        await bus.publish(_fill_report(cloid, trade_id="f1", quantity="0.2", ts_event=2_000))
+        clock.advance_to(9_000)
+        await bus.publish(_fill_report(cloid, trade_id="f2", quantity="0.3", ts_event=4_000))
+
+    asyncio.run(scenario())
+
+    fills = [ev for ev in order_events if isinstance(ev, OrderPartiallyFilled | OrderFilled)]
+    assert [type(ev) for ev in fills] == [OrderPartiallyFilled, OrderFilled]
+    # Each fill carries its own report's venue instant in ts_event...
+    assert [ev.ts_event for ev in fills] == [2_000, 4_000]
+    # ...while ts_init is engine construction time, monotonic in receipt order.
+    assert [ev.ts_init for ev in fills] == [5_000, 9_000]
 
 
 def test_duplicate_fill_report_yields_a_single_order_filled() -> None:
