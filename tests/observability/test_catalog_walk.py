@@ -27,6 +27,7 @@ from tickwright.domain import (
     ExecutionReport,
     FillReport,
     InstrumentSpec,
+    InvariantViolation,
     MarketTick,
     Order,
     OrderEvent,
@@ -376,6 +377,34 @@ class _IdleFeed:
         return None
 
 
+class _PoisonedFeed:
+    """A feed whose read loop breaks an engine assumption — the fail-fast class."""
+
+    async def start(self) -> None:
+        raise InvariantViolation("the read loop broke an engine assumption")
+
+    async def stop(self) -> None:
+        return None
+
+
+def _drive_engine_faulted() -> None:
+    """An ``InvariantViolation`` in a supervised task: cancel, fault, exit 1."""
+
+    async def go() -> None:
+        bus = InMemoryBus()
+        clock = ManualClock()
+        engine = Engine(
+            bus=bus,
+            clock=clock,
+            store=SQLiteStore(":memory:"),
+            exchange=PaperExchange(bus=bus, clock=clock, fill_model=ImmediateFillModel()),
+            feed=_PoisonedFeed(),
+        )
+        assert await engine.run() == 1
+
+    asyncio.run(go())
+
+
 def _drive_engine_lifecycle() -> None:
     """One supervised startup-and-stop: barrier cleared, feed started (ADR-0024)."""
 
@@ -413,6 +442,7 @@ SCENARIOS: dict[NamedEvent, Callable[[], None]] = {
     NamedEvent.ORDER_CANCELLED: _drive_status(OrderState.LIVE, OrderState.CANCELLED),
     NamedEvent.ENGINE_BARRIER_CLEARED: _drive_engine_lifecycle,
     NamedEvent.ENGINE_FEED_STARTED: _drive_engine_lifecycle,
+    NamedEvent.ENGINE_FAULTED: _drive_engine_faulted,
     NamedEvent.GUARD_KILL_SWITCH_TRIPPED: _drive_kill_switch(reset=False),
     NamedEvent.GUARD_KILL_SWITCH_RESET: _drive_kill_switch(reset=True),
     NamedEvent.STRATEGY_ERROR: _drive_strategy_error,

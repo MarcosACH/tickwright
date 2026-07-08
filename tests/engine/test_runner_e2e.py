@@ -29,11 +29,12 @@ from tickwright.domain import (
     Side,
     derive_cloid,
 )
+from tickwright.engine.guard import RealGuard
 from tickwright.engine.runner import Engine
 from tickwright.observability.testing import capture_events
 from tickwright.strategies import SingleShotLimitStrategy, SingleShotMarketStrategy
 
-_ROWS = [
+_ROWS: list[dict[str, str | int]] = [
     {
         "symbol": "BTC",
         "price": "42000",
@@ -140,6 +141,41 @@ def _every_lifecycle_record_carries_a_run_id(logs: list[EventDict]) -> bool:
     return bool(engine_records) and all(log.get("run_id") for log in engine_records)
 
 
+def test_invariant_violation_faults_the_engine_and_exits_nonzero(tmp_path: Path) -> None:
+    """ADR-0014/0024 fail-fast: an ``InvariantViolation`` in an engine-internal
+    handler pierces everything — siblings cancelled, ``FAULTED``, non-zero exit."""
+    ticks = _write_ticks(tmp_path / "ticks.jsonl")
+
+    async def faulted_life() -> tuple[int, Engine]:
+        bus = InMemoryBus()
+        clock = ManualClock()
+        store = SQLiteStore(tmp_path / "saga.db")
+        exchange = PaperExchange(bus=bus, clock=clock, fill_model=ImmediateFillModel())
+        bus.subscribe(MarketTick, exchange.on_tick)
+        feed = ReplayFeed(path=ticks, bus=bus, clock=clock)
+        # A real guard with no specs: the first placement is a composition-root
+        # wiring bug (ADR-0031) and raises InvariantViolation inside the raw
+        # ExecutionManager.on_signal handler — the engine must not contain it.
+        guard = RealGuard(specs={}, store=store, clock=clock)
+        engine = Engine(
+            bus=bus, clock=clock, store=store, exchange=exchange, feed=feed, guard=guard
+        )
+        engine.register(
+            SingleShotMarketStrategy(
+                strategy_id="doomed", bus=bus, clock=clock, side=Side.BUY, quantity=Decimal("0.5")
+            ),
+            symbols={"BTC"},
+        )
+        return await engine.run(), engine
+
+    with capture_events() as logs:
+        exit_code, engine = asyncio.run(faulted_life())
+
+    assert exit_code != 0
+    assert engine.state is ComponentState.FAULTED
+    assert "engine.faulted" in [log["event"] for log in logs]
+
+
 def test_graceful_stop_leaves_resting_live_orders_for_the_next_start_to_re_adopt(
     tmp_path: Path,
 ) -> None:
@@ -206,7 +242,8 @@ def test_graceful_stop_leaves_resting_live_orders_for_the_next_start_to_re_adopt
         # Fresh non-crossing ticks, timestamped after the first life — virtual
         # time never moves backward across lives on the shared clock.
         later = [
-            dict(r, ts_event=r["ts_event"] + 10_000, trade_id=f"2-{r['trade_id']}") for r in _ROWS
+            dict(r, ts_event=int(r["ts_event"]) + 10_000, trade_id=f"2-{r['trade_id']}")
+            for r in _ROWS
         ]
         (tmp_path / "second.jsonl").write_text("\n".join(json.dumps(r) for r in later) + "\n")
         feed = ReplayFeed(path=tmp_path / "second.jsonl", bus=bus, clock=clock)

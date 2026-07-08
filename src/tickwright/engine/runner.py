@@ -103,17 +103,28 @@ class Engine:
     async def run(self) -> int:
         """The supervised lifecycle: ordered startup, operation, graceful stop.
 
-        Returns the process exit-code contract (ADR-0024): 0 = graceful stop.
+        Returns the process exit-code contract (ADR-0024): 0 = graceful stop,
+        non-zero = ``FAULTED`` — the external supervisor's restart signal.
         """
-        await self._start_sequence()
-        async with asyncio.TaskGroup() as tg:
-            # The feed starts last (ADR-0024 step 7): the first tick is only
-            # possible after the barrier cleared, so nothing places before
-            # reconciliation completes. Replay end-of-file ends the task but
-            # not the run — like the CLI, the engine stops only when told to.
-            named_event(NamedEvent.ENGINE_FEED_STARTED)
-            feed_task = tg.create_task(self._feed.start())
-            tg.create_task(self._stop_when_requested(feed_task))
+        try:
+            await self._start_sequence()
+            async with asyncio.TaskGroup() as tg:
+                # The feed starts last (ADR-0024 step 7): the first tick is only
+                # possible after the barrier cleared, so nothing places before
+                # reconciliation completes. Replay end-of-file ends the task but
+                # not the run — like the CLI, the engine stops only when told to.
+                named_event(NamedEvent.ENGINE_FEED_STARTED)
+                feed_task = tg.create_task(self._feed.start())
+                tg.create_task(self._stop_when_requested(feed_task))
+        except Exception as exc:
+            # The first raw-handler exception aborted the TaskGroup and
+            # cancelled its siblings (ADR-0024): fail fast, but leave a
+            # readable trail and let waiters through before exiting non-zero.
+            self._state = ComponentState.FAULTED
+            named_event(NamedEvent.ENGINE_FAULTED, error=repr(exc))
+            self._run_best_effort_stop_hooks()
+            self._stopped.set()
+            return 1
         self._state = ComponentState.STOPPED
         self._stopped.set()
         return 0
@@ -156,3 +167,16 @@ class Engine:
         # converge on one recovery path).
         self._host.stop()
         self._store.close()
+
+    def _run_best_effort_stop_hooks(self) -> None:
+        """The faulted teardown: try each stop hook, keep going if one breaks.
+
+        A fault must still leave the last strategy snapshots and a closed store
+        where it can — but a failing hook cannot be allowed to mask the fault
+        or block the non-zero exit.
+        """
+        for hook in (self._host.stop, self._store.close):
+            try:
+                hook()
+            except Exception:  # noqa: BLE001 - a broken hook must not mask the fault.
+                continue

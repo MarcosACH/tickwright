@@ -32,6 +32,7 @@ class NamedEvent(StrEnum):
     # Engine lifecycle (``Engine`` runner, ADR-0024).
     ENGINE_BARRIER_CLEARED = "engine.barrier_cleared"
     ENGINE_FEED_STARTED = "engine.feed_started"
+    ENGINE_FAULTED = "engine.faulted"
 
     # Pre-trade kill switch (``PreTradeGuard``).
     GUARD_KILL_SWITCH_TRIPPED = "guard.kill_switch_tripped"
