@@ -27,6 +27,7 @@ from tickwright.domain import (
     ExecutionReport,
     FillReport,
     InstrumentSpec,
+    InvariantViolation,
     MarketTick,
     Order,
     OrderEvent,
@@ -43,6 +44,7 @@ from tickwright.engine.cache import Cache
 from tickwright.engine.execution import ExecutionManager
 from tickwright.engine.guard import RealGuard
 from tickwright.engine.reconcile import ReconcileConfig, Reconciler
+from tickwright.engine.runner import Engine
 from tickwright.engine.strategy_host import StrategyHost
 from tickwright.observability import NamedEvent
 from tickwright.observability.testing import capture_events
@@ -195,8 +197,6 @@ def _manager(
         cache=cache,
         guard=guard,  # type: ignore[arg-type]
     )
-    if isinstance(exchange, PaperExchange):
-        bus.subscribe(MarketTick, exchange.on_tick)
     bus.subscribe(Signal, manager.on_signal)
     bus.subscribe(ExecutionReport, manager.on_execution_report)
 
@@ -364,6 +364,92 @@ def _drive_frozen() -> None:
     assert asyncio.run(reconciler.reconcile_inflight()) is False
 
 
+class _IdleFeed:
+    """A feed with nothing to say — the lifecycle walk needs the ordered
+    startup, not ticks. A ``MarketFeed`` double at the venue boundary."""
+
+    async def start(self) -> None:
+        return None
+
+    async def stop(self) -> None:
+        return None
+
+
+class _PoisonedFeed:
+    """A feed whose read loop breaks an engine assumption — the fail-fast class."""
+
+    async def start(self) -> None:
+        raise InvariantViolation("the read loop broke an engine assumption")
+
+    async def stop(self) -> None:
+        return None
+
+
+def _drive_engine_faulted() -> None:
+    """An ``InvariantViolation`` in a supervised task: cancel, fault, exit 1."""
+
+    async def go() -> None:
+        bus = InMemoryBus()
+        clock = ManualClock()
+        engine = Engine(
+            bus=bus,
+            clock=clock,
+            store=SQLiteStore(":memory:"),
+            exchange=PaperExchange(bus=bus, clock=clock, fill_model=ImmediateFillModel()),
+            feed=_PoisonedFeed(),
+        )
+        assert await engine.run() == 1
+
+    asyncio.run(go())
+
+
+class _StoreThatBreaksOnClose(SQLiteStore):
+    """An in-memory store whose ``close`` fails — the fault-teardown hook that
+    breaks. A ``Store`` at the boundary; every other method is the real one."""
+
+    def close(self) -> None:
+        raise RuntimeError("store close broke during fault teardown")
+
+
+def _drive_engine_stop_hook_failed() -> None:
+    """A fault whose best-effort teardown hits a hook that raises: the break is
+    recorded (never swallowed silently), and the fault still exits non-zero."""
+
+    async def go() -> None:
+        bus = InMemoryBus()
+        clock = ManualClock()
+        engine = Engine(
+            bus=bus,
+            clock=clock,
+            store=_StoreThatBreaksOnClose(":memory:"),
+            exchange=PaperExchange(bus=bus, clock=clock, fill_model=ImmediateFillModel()),
+            feed=_PoisonedFeed(),
+        )
+        assert await engine.run() == 1
+
+    asyncio.run(go())
+
+
+def _drive_engine_lifecycle() -> None:
+    """One supervised startup-and-stop: barrier cleared, feed started (ADR-0024)."""
+
+    async def go() -> None:
+        bus = InMemoryBus()
+        clock = ManualClock()
+        engine = Engine(
+            bus=bus,
+            clock=clock,
+            store=SQLiteStore(":memory:"),
+            exchange=PaperExchange(bus=bus, clock=clock, fill_model=ImmediateFillModel()),
+            feed=_IdleFeed(),
+        )
+        run = asyncio.create_task(engine.run())
+        await engine.stop()
+        assert await run == 0
+
+    asyncio.run(go())
+
+
 # --- The catalog walk --------------------------------------------------------
 
 # Every NamedEvent → a scenario that drives its real path. Several of the saga
@@ -379,6 +465,10 @@ SCENARIOS: dict[NamedEvent, Callable[[], None]] = {
     NamedEvent.ORDER_REJECTED: _drive_status(OrderState.REJECTED),
     NamedEvent.ORDER_FAILED: _drive_status(OrderState.FAILED),
     NamedEvent.ORDER_CANCELLED: _drive_status(OrderState.LIVE, OrderState.CANCELLED),
+    NamedEvent.ENGINE_BARRIER_CLEARED: _drive_engine_lifecycle,
+    NamedEvent.ENGINE_FEED_STARTED: _drive_engine_lifecycle,
+    NamedEvent.ENGINE_FAULTED: _drive_engine_faulted,
+    NamedEvent.ENGINE_STOP_HOOK_FAILED: _drive_engine_stop_hook_failed,
     NamedEvent.GUARD_KILL_SWITCH_TRIPPED: _drive_kill_switch(reset=False),
     NamedEvent.GUARD_KILL_SWITCH_RESET: _drive_kill_switch(reset=True),
     NamedEvent.STRATEGY_ERROR: _drive_strategy_error,

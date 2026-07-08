@@ -49,7 +49,6 @@ def _wire() -> tuple[InMemoryBus, SQLiteStore, list[OrderEvent]]:
     cache = Cache(store=store)
     manager = ExecutionManager(bus=bus, clock=clock, exchange=exchange, cache=cache)
 
-    bus.subscribe(MarketTick, exchange.on_tick)
     bus.subscribe(Signal, manager.on_signal)
     bus.subscribe(ExecutionReport, manager.on_execution_report)
 

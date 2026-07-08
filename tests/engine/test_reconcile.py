@@ -87,7 +87,6 @@ def _surviving_venue(clock: ManualClock) -> tuple[PaperExchange, InMemoryBus]:
     """A venue that outlived our crash: its first-life bus has no listeners."""
     dead_bus = InMemoryBus()
     exchange = PaperExchange(bus=dead_bus, clock=clock, fill_model=ImmediateFillModel())
-    dead_bus.subscribe(MarketTick, exchange.on_tick)
     return exchange, dead_bus
 
 
@@ -181,6 +180,29 @@ def test_recovered_pending_intent_the_venue_never_saw_resolves_failed() -> None:
     # Attempted and proven never-landed (ADR-0010): resolved, never resent.
     view = asyncio.run(exchange.fetch_order("0xabc"))
     assert view is not None and not view.has_record
+
+
+def test_recovered_live_saga_the_venue_lost_ghost_resolves_rejected_not_failed() -> None:
+    clock = ManualClock(start_ns=2_000)
+    store = SQLiteStore(":memory:")
+    # The venue outlived our crash but lost this once-ACKed order (a paper
+    # restart, an expiry, a venue-side purge): gone is not the same as un-sent.
+    exchange, _ = _surviving_venue(clock)
+
+    store.checkpoint(_saga("0xabc", OrderState.LIVE), ts_ns=500)
+    _, _, reconciler, events = _second_life(store, exchange, clock)
+
+    with capture_events() as logs:
+        assert asyncio.run(reconciler.reconcile_startup()) is True
+
+    # The ghost taxonomy applies (ADR-0010/0011 resolutions): REJECTED from
+    # LIVE — FAILED would claim the send never landed, which the earlier ACK
+    # disproves, and the FSM rightly forbids LIVE → FAILED.
+    recovered = store.get_order("0xabc")
+    assert recovered is not None
+    assert recovered.state is OrderState.REJECTED
+    assert not any(isinstance(ev, OrderFailed) for ev in events)
+    assert "ghost.reconciled" in [log["event"] for log in logs]
 
 
 def test_recovered_saga_heals_the_fill_it_missed_while_dead() -> None:

@@ -148,8 +148,14 @@ def _first_life(
     )
     feed = ReplayFeed(path=_ticks_file(tmp_path / "ticks.jsonl", ["42000"]), bus=bus, clock=clock)
 
-    bus.subscribe(MarketTick, venue.on_tick)
     bus.subscribe(MarketTick, strategy.on_tick)
+    # This crash sim deliberately splits the venue's buses: it *publishes*
+    # reports on the dead ``venue_bus`` (so they never reach the engine — the
+    # severed post-send link) while *reading* ticks from the live engine bus.
+    # That read/write split is the one case the venue's own tick subscription
+    # (bound to its construction bus, ``venue_bus``) cannot cover, so the tick
+    # wire to the engine bus stays explicit here.
+    bus.subscribe(MarketTick, venue.on_tick)
     bus.subscribe(Signal, manager.on_signal)
     bus.subscribe(ExecutionReport, manager.on_execution_report)
 

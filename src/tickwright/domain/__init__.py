@@ -5,7 +5,7 @@ This package *defines* the seams every adapter and the engine compile against.
 It is the stable contract of the system; keep it log-free and dependency-free.
 """
 
-from .enums import AggressorSide, OrderState, OrderType, Side, TimeInForce
+from .enums import AggressorSide, ComponentState, OrderState, OrderType, Side, TimeInForce
 from .errors import InvariantViolation, StartupReconciliationTimeout
 from .events import (
     CancelSignal,
@@ -57,6 +57,7 @@ from .protocols import (
 __all__ = [
     # enums
     "AggressorSide",
+    "ComponentState",
     "OrderState",
     "OrderType",
     "Side",

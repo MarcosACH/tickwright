@@ -169,6 +169,12 @@ class Store(Protocol):
         reset."""
         ...
 
+    def close(self) -> None:
+        """Release the store's underlying resources — the final step of the
+        engine's reverse shutdown (ADR-0024). Idempotent; every checkpoint
+        already committed durably, so closing loses nothing."""
+        ...
+
 
 @runtime_checkable
 class Exchange(Protocol):

@@ -89,7 +89,6 @@ def _harness(
     guard = guard or RealGuard(specs={"BTC": _SPEC}, store=store, clock=clock)
     manager = ExecutionManager(bus=bus, clock=clock, exchange=exchange, cache=cache, guard=guard)
 
-    bus.subscribe(MarketTick, exchange.on_tick)
     bus.subscribe(Signal, manager.on_signal)
     bus.subscribe(ExecutionReport, manager.on_execution_report)
 
@@ -126,7 +125,6 @@ def test_market_below_min_notional_is_rejected_by_the_venue_via_sourced_specs() 
     cache = Cache(store=store)
     guard = RealGuard(specs=exchange.instrument_specs(), store=store, clock=clock)
     manager = ExecutionManager(bus=bus, clock=clock, exchange=exchange, cache=cache, guard=guard)
-    bus.subscribe(MarketTick, exchange.on_tick)
     bus.subscribe(Signal, manager.on_signal)
     bus.subscribe(ExecutionReport, manager.on_execution_report)
     order_events: list[OrderEvent] = []
@@ -222,7 +220,6 @@ def _revived_manager(
     cache.rebuild()
     guard = RealGuard(specs={"BTC": _SPEC}, store=store, clock=clock)
     manager = ExecutionManager(bus=bus, clock=clock, exchange=exchange, cache=cache, guard=guard)
-    bus.subscribe(MarketTick, exchange.on_tick)
     bus.subscribe(Signal, manager.on_signal)
     bus.subscribe(ExecutionReport, manager.on_execution_report)
     events: list[OrderEvent] = []
