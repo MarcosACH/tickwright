@@ -213,10 +213,14 @@ class Engine:
 
         A fault must still leave the last strategy snapshots and a closed store
         where it can — but a failing hook cannot be allowed to mask the fault
-        or block the non-zero exit.
+        or block the non-zero exit. A hook that breaks is *recorded* (never
+        swallowed silently): a lost snapshot or an unclosed store on the fault
+        path is exactly the kind of thing an operator must be able to see in the
+        trail (ADR-0020), and it rides the same run correlation as the fault.
         """
         for hook in (self._host.stop, self._store.close):
             try:
                 hook()
-            except Exception:
+            except Exception as exc:
+                named_event(NamedEvent.ENGINE_STOP_HOOK_FAILED, hook=hook.__name__, error=repr(exc))
                 continue

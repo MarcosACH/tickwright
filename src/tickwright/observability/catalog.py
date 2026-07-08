@@ -33,6 +33,7 @@ class NamedEvent(StrEnum):
     ENGINE_BARRIER_CLEARED = "engine.barrier_cleared"
     ENGINE_FEED_STARTED = "engine.feed_started"
     ENGINE_FAULTED = "engine.faulted"
+    ENGINE_STOP_HOOK_FAILED = "engine.stop_hook_failed"
 
     # Pre-trade kill switch (``PreTradeGuard``).
     GUARD_KILL_SWITCH_TRIPPED = "guard.kill_switch_tripped"

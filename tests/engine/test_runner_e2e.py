@@ -26,6 +26,7 @@ from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     ComponentState,
     InstrumentSpec,
+    InvariantViolation,
     MarketTick,
     OrderDenied,
     OrderEvent,
@@ -355,6 +356,48 @@ def test_invariant_violation_faults_the_engine_and_exits_nonzero(tmp_path: Path)
     assert exit_code != 0
     assert engine.state is ComponentState.FAULTED
     assert "engine.faulted" in [log["event"] for log in logs]
+
+
+def test_a_broken_stop_hook_on_the_fault_path_is_recorded_not_swallowed(tmp_path: Path) -> None:
+    """ADR-0020/0024: the faulted teardown is best-effort but not silent. A stop
+    hook that raises mid-fault (here the store failing to close) is recorded as
+    ``engine.stop_hook_failed`` and cannot mask the fault or block the non-zero
+    exit — the operator sees the lost resource in the same run's trail."""
+
+    class _StoreThatBreaksOnClose(SQLiteStore):
+        def close(self) -> None:
+            raise RuntimeError("store close broke during fault teardown")
+
+    async def faulted_life() -> tuple[int, Engine]:
+        bus = InMemoryBus()
+        clock = ManualClock()
+        store = _StoreThatBreaksOnClose(tmp_path / "saga.db")
+        exchange = PaperExchange(bus=bus, clock=clock, fill_model=ImmediateFillModel())
+        engine = Engine(bus=bus, clock=clock, store=store, exchange=exchange, feed=_PoisonedFeed())
+        return await engine.run(), engine
+
+    with capture_events() as logs:
+        exit_code, engine = asyncio.run(faulted_life())
+
+    names = [log["event"] for log in logs]
+    assert exit_code != 0
+    assert engine.state is ComponentState.FAULTED
+    # The fault is not masked by the broken hook, and the break is on the record.
+    assert "engine.faulted" in names
+    hook_failures = [log for log in logs if log["event"] == "engine.stop_hook_failed"]
+    assert len(hook_failures) == 1
+    assert hook_failures[0]["hook"] == "close"
+
+
+class _PoisonedFeed:
+    """A feed whose read loop breaks an engine assumption — the fail-fast class.
+    A ``MarketFeed`` double at the venue boundary."""
+
+    async def start(self) -> None:
+        raise InvariantViolation("the read loop broke an engine assumption")
+
+    async def stop(self) -> None:
+        return None
 
 
 def test_graceful_stop_leaves_resting_live_orders_for_the_next_start_to_re_adopt(

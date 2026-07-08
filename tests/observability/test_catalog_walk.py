@@ -403,6 +403,33 @@ def _drive_engine_faulted() -> None:
     asyncio.run(go())
 
 
+class _StoreThatBreaksOnClose(SQLiteStore):
+    """An in-memory store whose ``close`` fails — the fault-teardown hook that
+    breaks. A ``Store`` at the boundary; every other method is the real one."""
+
+    def close(self) -> None:
+        raise RuntimeError("store close broke during fault teardown")
+
+
+def _drive_engine_stop_hook_failed() -> None:
+    """A fault whose best-effort teardown hits a hook that raises: the break is
+    recorded (never swallowed silently), and the fault still exits non-zero."""
+
+    async def go() -> None:
+        bus = InMemoryBus()
+        clock = ManualClock()
+        engine = Engine(
+            bus=bus,
+            clock=clock,
+            store=_StoreThatBreaksOnClose(":memory:"),
+            exchange=PaperExchange(bus=bus, clock=clock, fill_model=ImmediateFillModel()),
+            feed=_PoisonedFeed(),
+        )
+        assert await engine.run() == 1
+
+    asyncio.run(go())
+
+
 def _drive_engine_lifecycle() -> None:
     """One supervised startup-and-stop: barrier cleared, feed started (ADR-0024)."""
 
@@ -441,6 +468,7 @@ SCENARIOS: dict[NamedEvent, Callable[[], None]] = {
     NamedEvent.ENGINE_BARRIER_CLEARED: _drive_engine_lifecycle,
     NamedEvent.ENGINE_FEED_STARTED: _drive_engine_lifecycle,
     NamedEvent.ENGINE_FAULTED: _drive_engine_faulted,
+    NamedEvent.ENGINE_STOP_HOOK_FAILED: _drive_engine_stop_hook_failed,
     NamedEvent.GUARD_KILL_SWITCH_TRIPPED: _drive_kill_switch(reset=False),
     NamedEvent.GUARD_KILL_SWITCH_RESET: _drive_kill_switch(reset=True),
     NamedEvent.STRATEGY_ERROR: _drive_strategy_error,
