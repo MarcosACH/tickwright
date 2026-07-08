@@ -14,6 +14,9 @@ dependencies = [
     "structlog>=26.1.0",
 ]
 
+[project.scripts]
+tickwright = "tickwright.app.__main__:main"
+
 [dependency-groups]
 # Installed by `uv sync --dev` (and in CI). Not shipped to consumers.
 dev = [
