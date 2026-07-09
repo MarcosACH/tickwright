@@ -112,7 +112,6 @@ class KafkaBus:
         self._poll_task = asyncio.create_task(self._poll(self._consumer))
 
     async def publish(self, event: Event) -> None:
-        self._reraise_dispatch_fault()
         if self._producer is None:
             raise RuntimeError("KafkaBus.publish before start()")
         placed = await self._producer.send_and_wait(
@@ -120,6 +119,15 @@ class KafkaBus:
         )
         current = self._produced_high_water.get(placed.partition, -1)
         self._produced_high_water[placed.partition] = max(current, placed.offset)
+        # The parity trick (ADR-0023): a top-level publish returns only after
+        # the whole cascade it began was delivered — exactly the in-memory
+        # drain-to-quiescence contract, so callers observe one behavior on
+        # both backends (and a handler exception surfaces *here*, in the
+        # publish that caused it). A publish from inside a handler runs in
+        # the poll task: it must enqueue-and-unwind (draining would deadlock
+        # the dispatcher on itself), mirroring the in-memory reentrant FIFO.
+        if asyncio.current_task() is not self._poll_task:
+            await self.drain()
 
     async def drain(self) -> None:
         """Wait until every record this process produced was dispatched and committed.
@@ -143,12 +151,14 @@ class KafkaBus:
 
     def _reraise_dispatch_fault(self) -> None:
         """Containment parity (ADR-0024): on the in-memory bus a raw handler
-        exception propagates into the publish that caused it; here dispatch
-        runs in the poll loop, so its death re-raises at the next hot-path
-        touch — the feed's next publish faults the engine, and a shutdown
-        drain fails loudly instead of waiting on a dead dispatcher."""
+        exception propagates into the publish that caused it — raised once,
+        and the bus survives. Here dispatch runs in the poll loop, so the
+        fault is handed to the earliest drain (normally the publish whose
+        cascade broke, since a top-level publish drains) and *popped*: the
+        next publish works again, matching the in-memory contract."""
         if self._dispatch_fault is not None:
-            raise self._dispatch_fault
+            fault, self._dispatch_fault = self._dispatch_fault, None
+            raise fault
 
     async def close(self) -> None:
         """Stop consuming, then flush and disconnect — buffered writes survive."""
@@ -168,21 +178,27 @@ class KafkaBus:
 
     async def _poll(self, consumer: _ConsumerLike) -> None:
         """Deliver one record at a time; commit only after its handlers ran."""
-        try:
-            while True:
-                record = await consumer.getone()
-                event = decode_event(record.value)
+        while True:
+            record = await consumer.getone()
+            event = decode_event(record.value)
+            try:
                 for event_type, handler in list(self._subscriptions):
                     if isinstance(event, event_type):
                         await handler(event)
-                await consumer.commit()
+            except asyncio.CancelledError:
+                raise
+            except BaseException as exc:
+                # Stored for the draining publisher to re-raise (containment
+                # parity), then keep serving — the in-memory bus survives a
+                # handler fault too. The record is *not* committed: within
+                # this session the fetch position already moved past it, but
+                # a restart redelivers it (at-least-once, offsets bound it).
+                # Local accounting still advances so a later drain terminates
+                # instead of waiting forever on the record we just dropped.
+                self._dispatch_fault = exc
                 self._committed_position[record.partition] = record.offset + 1
                 self._progress.set()
-        except asyncio.CancelledError:
-            raise
-        except BaseException as exc:
-            # Never committed, so the record redelivers on restart. Stored —
-            # not re-raised — so no unretrieved-task noise; waiters are woken
-            # to find the fault instead of a progress mark.
-            self._dispatch_fault = exc
+                continue
+            await consumer.commit()
+            self._committed_position[record.partition] = record.offset + 1
             self._progress.set()

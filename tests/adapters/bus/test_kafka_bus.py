@@ -88,31 +88,35 @@ def test_subscribed_handler_receives_events_consumed_from_the_topic() -> None:
     assert seen == [_tick(1), _tick(2)]
 
 
-def test_a_handler_fault_resurfaces_on_the_next_publish_and_on_drain() -> None:
+def test_a_handler_fault_propagates_into_the_causing_publish_and_the_bus_survives() -> None:
     # Containment parity (ADR-0024): on InMemoryBus a raw handler exception
-    # propagates into the publish that caused it. Over Kafka dispatch happens
-    # in the poll loop, so the fault is stored and re-raised at the next
-    # hot-path touch — the feed's next publish faults the engine, and a
-    # shutdown drain cannot wait forever on a dispatcher that died.
+    # propagates into the publish that caused it, once, and the bus keeps
+    # working. Over Kafka dispatch happens in the poll loop, so the fault is
+    # handed to the publish draining that cascade; the record is dropped
+    # uncommitted (a restart would redeliver it) and later publishes deliver.
     broker = FakeKafkaBroker()
     bus = _wire(broker)
+    seen: list[MarketTick] = []
 
-    async def broken(event: MarketTick) -> None:
-        raise RuntimeError("handler broke an engine assumption")
+    async def brittle(event: MarketTick) -> None:
+        if event.seq == 1:
+            raise RuntimeError("handler broke an engine assumption")
+        seen.append(event)
 
-    bus.subscribe(MarketTick, broken)
+    bus.subscribe(MarketTick, brittle)
 
     async def scenario() -> None:
         await bus.start()
-        await bus.publish(_tick(1))
         with pytest.raises(RuntimeError, match="handler broke"):
-            await bus.drain()
-        with pytest.raises(RuntimeError, match="handler broke"):
-            await bus.publish(_tick(2))
-        await bus.close()  # teardown still works on a faulted bus
+            await bus.publish(_tick(1))
+        await bus.publish(_tick(2))
+        await bus.drain()
+        await bus.close()  # teardown still works after a fault
 
     # Bounded: a wrong implementation must fail loudly, not hang in drain.
     asyncio.run(asyncio.wait_for(scenario(), timeout=5))
+
+    assert seen == [_tick(2)]
 
 
 def test_drain_returns_only_after_every_published_event_was_dispatched() -> None:

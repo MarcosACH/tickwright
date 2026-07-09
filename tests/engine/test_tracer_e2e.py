@@ -3,8 +3,13 @@
 ``ReplayFeed`` tick → ``SingleShotMarketStrategy`` MARKET ``PlaceSignal`` →
 ``ExecutionManager`` → ``PaperExchange`` fill at the latest tick → strategy sees
 ``OrderFilled``. Zero external services, zero sleeps: the whole run is on
-``ManualClock`` + ``InMemoryBus``, driven by a JSONL file. The canonical event
-cascade is asserted, and the full sequence is identical across repeated runs.
+``ManualClock``, driven by a JSONL file. The canonical event cascade is
+asserted, and the full sequence is identical across repeated runs.
+
+Every test runs parametrized over both bus backends (issue #20): the identical
+scenario, cascade order, fill price, and durable trail over ``InMemoryBus``
+and over ``KafkaBus`` on the fake broker — swapping the backend changes
+durability, never behavior (ADR-0023/0028).
 
 This wiring lives in the test because the composition root (``app``) and the
 supervised runner are later slices; here it doubles as the pipeline's spec.
@@ -15,7 +20,9 @@ import json
 from decimal import Decimal
 from pathlib import Path
 
-from tickwright.adapters.bus import InMemoryBus
+import pytest
+from bus_backends import BUS_BACKENDS, make_bus
+
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.feed import ReplayFeed
 from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
@@ -64,9 +71,9 @@ def _write_ticks(path: Path) -> Path:
     return path
 
 
-def _run(path: Path) -> tuple[list[Event], SingleShotMarketStrategy, SQLiteStore]:
+def _run(path: Path, backend: str) -> tuple[list[Event], SingleShotMarketStrategy, SQLiteStore]:
     """Wire and drive the whole pipeline once; return every dispatched event."""
-    bus = InMemoryBus()
+    bus = make_bus(backend)
     clock = ManualClock()
     store = SQLiteStore(":memory:")
     exchange = PaperExchange(bus=bus, clock=clock, fill_model=ImmediateFillModel())
@@ -85,13 +92,20 @@ def _run(path: Path) -> tuple[list[Event], SingleShotMarketStrategy, SQLiteStore
     bus.subscribe(ExecutionReport, manager.on_execution_report)
     bus.subscribe(OrderEvent, strategy.on_order_event)
 
-    asyncio.run(feed.start())
+    async def drive() -> None:
+        await bus.start()
+        await feed.start()
+        await bus.drain()
+        await bus.close()
+
+    asyncio.run(drive())
     return recorded, strategy, store
 
 
-def test_tracer_delivers_order_filled_to_the_strategy(tmp_path: Path) -> None:
+@pytest.mark.parametrize("backend", BUS_BACKENDS)
+def test_tracer_delivers_order_filled_to_the_strategy(tmp_path: Path, backend: str) -> None:
     path = _write_ticks(tmp_path / "ticks.jsonl")
-    _, strategy, _ = _run(path)
+    _, strategy, _ = _run(path, backend)
 
     assert len(strategy.fills) == 1
     fill = strategy.fills[0]
@@ -103,9 +117,10 @@ def test_tracer_delivers_order_filled_to_the_strategy(tmp_path: Path) -> None:
     assert fill.signal_id == "trivial:BTC:1"
 
 
-def test_tracer_event_cascade_is_the_canonical_sequence(tmp_path: Path) -> None:
+@pytest.mark.parametrize("backend", BUS_BACKENDS)
+def test_tracer_event_cascade_is_the_canonical_sequence(tmp_path: Path, backend: str) -> None:
     path = _write_ticks(tmp_path / "ticks.jsonl")
-    recorded, _, _ = _run(path)
+    recorded, _, _ = _run(path, backend)
 
     assert [type(ev) for ev in recorded] == [
         MarketTick,  # tick 1 published by the feed
@@ -118,9 +133,12 @@ def test_tracer_event_cascade_is_the_canonical_sequence(tmp_path: Path) -> None:
     ]
 
 
-def test_tracer_checkpoints_the_saga_durably_through_the_store(tmp_path: Path) -> None:
+@pytest.mark.parametrize("backend", BUS_BACKENDS)
+def test_tracer_checkpoints_the_saga_durably_through_the_store(
+    tmp_path: Path, backend: str
+) -> None:
     path = _write_ticks(tmp_path / "ticks.jsonl")
-    _, _, store = _run(path)
+    _, _, store = _run(path, backend)
 
     cloid = derive_cloid("trivial:BTC:1")
     record = store.get_order(cloid)
@@ -135,14 +153,26 @@ def test_tracer_checkpoints_the_saga_durably_through_the_store(tmp_path: Path) -
     ]
 
 
-def test_tracer_is_deterministic_across_repeated_runs(tmp_path: Path) -> None:
+@pytest.mark.parametrize("backend", BUS_BACKENDS)
+def test_tracer_is_deterministic_across_repeated_runs(tmp_path: Path, backend: str) -> None:
     path = _write_ticks(tmp_path / "ticks.jsonl")
 
-    first, _, _ = _run(path)
-    second, _, _ = _run(path)
+    first, _, _ = _run(path, backend)
+    second, _, _ = _run(path, backend)
 
     # The entire event stream — ids, timestamps, prices — is identical each run.
     assert _fingerprint(first) == _fingerprint(second)
+
+
+def test_tracer_behaves_identically_over_both_backends(tmp_path: Path) -> None:
+    """The parity promise itself (ADR-0028): one scenario, two transports,
+    one observable event stream."""
+    path = _write_ticks(tmp_path / "ticks.jsonl")
+
+    in_memory, _, _ = _run(path, "in_memory")
+    kafka, _, _ = _run(path, "kafka")
+
+    assert _fingerprint(in_memory) == _fingerprint(kafka)
 
 
 def _fingerprint(events: list[Event]) -> list[tuple[str, str, int]]:
