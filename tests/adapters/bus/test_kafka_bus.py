@@ -10,12 +10,32 @@ import asyncio
 from decimal import Decimal
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 from kafka_fakes import FakeKafkaBroker
 
 from tickwright.adapters.bus.kafka import KafkaBus
 from tickwright.adapters.bus.serde import decode_event
-from tickwright.domain import Event, EventBus, MarketTick
+from tickwright.adapters.clock import ManualClock
+from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
+from tickwright.adapters.store import SQLiteStore
+from tickwright.domain import (
+    Event,
+    EventBus,
+    ExecutionReport,
+    MarketTick,
+    OrderEvent,
+    OrderState,
+    OrderType,
+    PlaceSignal,
+    Side,
+    Signal,
+    TimeInForce,
+    derive_cloid,
+)
 from tickwright.domain.enums import AggressorSide
+from tickwright.engine.cache import Cache
+from tickwright.engine.execution import ExecutionManager
 
 
 def _tick(seq: int = 1, symbol: str = "BTC", price: str = "100") -> MarketTick:
@@ -144,3 +164,137 @@ def test_drain_returns_only_after_every_published_event_was_dispatched() -> None
         await bus.close()
 
     asyncio.run(scenario())
+
+
+# ---- Property: per-symbol ordering across the keyed topic (ADR-0028) --------
+#
+# The bus promises per-symbol ordering *only*: a symbol's whole chain lands on
+# one partition, so its events arrive in publish order; cross-symbol order is
+# free to scramble as the poll loop round-robins partitions. The sequence is
+# published from inside a handler (the reentrant path) so the records genuinely
+# interleave across partitions instead of each publish draining before the next.
+
+_SYMBOLS = ["BTC", "ETH", "SOL", "DOGE", "ADA"]
+
+
+@given(plan=st.lists(st.sampled_from(_SYMBOLS), max_size=24))
+def test_events_for_one_symbol_arrive_in_publish_order(plan: list[str]) -> None:
+    broker = FakeKafkaBroker()
+    bus = _wire(broker)
+    ticks = [_tick(seq=index + 1, symbol=symbol) for index, symbol in enumerate(plan)]
+    seen: list[MarketTick] = []
+
+    async def seed_then_record(event: MarketTick) -> None:
+        if event.symbol == "seed":
+            for tick in ticks:
+                await bus.publish(tick)  # reentrant: produced, not yet dispatched
+        else:
+            seen.append(event)
+
+    bus.subscribe(MarketTick, seed_then_record)
+
+    async def scenario() -> None:
+        await bus.start()
+        await bus.publish(_tick(seq=0, symbol="seed"))
+        await bus.drain()
+        await bus.close()
+
+    asyncio.run(scenario())
+
+    assert sorted(seen, key=lambda t: t.seq) == ticks  # delivered exactly once each
+    for symbol in _SYMBOLS:
+        published = [tick.seq for tick in ticks if tick.symbol == symbol]
+        delivered = [tick.seq for tick in seen if tick.symbol == symbol]
+        assert delivered == published
+
+
+# ---- Property: rewound offsets redeliver, final state converges (ADR-0002) --
+#
+# At-least-once delivery is the shared bus contract: a consumer whose offsets
+# rewind re-dispatches everything after the rewind point, and the saga's
+# idempotency keys must swallow every replayed record — the durable end state
+# and the canonical OrderEvent stream are exactly the no-rewind baseline's.
+
+_CLOID = derive_cloid("trivial:BTC:1")
+
+
+def _saga_pipeline(broker: FakeKafkaBroker) -> tuple[KafkaBus, SQLiteStore, list[OrderEvent]]:
+    bus = _wire(broker)
+    clock = ManualClock(start_ns=1_000)
+    store = SQLiteStore(":memory:")
+    exchange = PaperExchange(bus=bus, clock=clock, fill_model=ImmediateFillModel())
+    manager = ExecutionManager(bus=bus, clock=clock, exchange=exchange, cache=Cache(store=store))
+    bus.subscribe(Signal, manager.on_signal)
+    bus.subscribe(ExecutionReport, manager.on_execution_report)
+
+    order_events: list[OrderEvent] = []
+
+    async def record(event: OrderEvent) -> None:
+        order_events.append(event)
+
+    bus.subscribe(OrderEvent, record)
+    return bus, store, order_events
+
+
+def _place_signal() -> PlaceSignal:
+    return PlaceSignal(
+        ts_event=1_000,
+        ts_init=1_000,
+        strategy_id="trivial",
+        symbol="BTC",
+        seq=1,
+        side=Side.BUY,
+        quantity=Decimal("0.5"),
+        order_type=OrderType.MARKET,
+        time_in_force=TimeInForce.IOC,
+    )
+
+
+def _run_saga_with_rewind(rewind_fraction: float | None) -> tuple[SQLiteStore, list[OrderEvent]]:
+    broker = FakeKafkaBroker()
+    bus, store, order_events = _saga_pipeline(broker)
+
+    async def scenario() -> None:
+        await bus.start()
+        await bus.publish(_tick(seq=0, symbol="BTC", price="42000"))
+        await bus.publish(_place_signal())  # cascades to FILLED, all committed
+        if rewind_fraction is not None:
+            positions = [int(len(p) * rewind_fraction) for p in broker.partitions]
+            broker.consumers[0].rewind(positions)
+            # Everything from the rewind point redelivers; the broker fence
+            # holds until the replay is fully reprocessed and recommitted.
+            await broker.all_committed()
+        await bus.close()
+
+    asyncio.run(asyncio.wait_for(scenario(), timeout=5))
+    return store, order_events
+
+
+@given(rewind_fraction=st.floats(min_value=0.0, max_value=1.0))
+def test_rewound_offsets_redeliver_without_changing_final_state(rewind_fraction: float) -> None:
+    baseline_store, baseline_events = _run_saga_with_rewind(None)
+    store, order_events = _run_saga_with_rewind(rewind_fraction)
+
+    # At-least-once is the shared contract: raw subscribers may see replayed
+    # copies, so the *stream* is allowed to repeat — what must not change is
+    # anything an idempotency key guards.
+    record = store.get_order(_CLOID)
+    baseline = baseline_store.get_order(_CLOID)
+    assert record is not None and baseline is not None
+    assert record.state is baseline.state is OrderState.FILLED
+    assert record.cum_qty == baseline.cum_qty == Decimal("0.5")
+    # The durable trail is exactly the baseline's: no duplicated checkpoint,
+    # no re-placement (a second send would mint a second distinct trade id).
+    assert [state for state, _ in store.history(_CLOID)] == [
+        state for state, _ in baseline_store.history(_CLOID)
+    ]
+
+    # Deduplicating the delivered stream on event_id recovers the canonical
+    # sequence — every replayed copy collapsed onto an already-seen key.
+    def _dedup(events: list[OrderEvent]) -> list[tuple[str, str]]:
+        seen: dict[str, str] = {}
+        for ev in events:
+            seen.setdefault(ev.event_id, type(ev).__name__)
+        return [(name, event_id) for event_id, name in seen.items()]
+
+    assert _dedup(order_events) == _dedup(baseline_events)

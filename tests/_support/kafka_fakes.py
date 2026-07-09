@@ -123,3 +123,15 @@ class FakeConsumer:
     async def commit(self) -> None:
         self._broker.committed = list(self._positions)
         self._broker._notify()
+
+    def rewind(self, positions: list[int]) -> None:
+        """Rewind fetch positions *and* group offsets — the redelivery injection.
+
+        Everything from ``positions`` on re-dispatches, exactly what a consumer
+        restart from stale committed offsets does; the group offsets rewind too,
+        so ``broker.all_committed()`` is a deterministic fence for the replay
+        being fully reprocessed.
+        """
+        self._positions = list(positions)
+        self._broker.committed = list(positions)
+        self._broker._notify()
