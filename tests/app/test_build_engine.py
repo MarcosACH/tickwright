@@ -11,6 +11,7 @@ running it end-to-end.
 import asyncio
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 from pydantic import ValidationError
@@ -64,6 +65,22 @@ def test_bus_discriminant_selects_the_kafka_bus(tmp_path: Path) -> None:
 def test_store_discriminant_selects_the_sqlite_store(tmp_path: Path) -> None:
     store = build_store(_config(tmp_path, store="sqlite"))
     assert isinstance(store, SQLiteStore)
+    store.close()
+
+
+def test_store_discriminant_selects_the_postgres_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Selection only — the driver is stubbed at its boundary so no server is
+    # contacted, exactly as the kafka arm builds without a cluster. That the DDL
+    # runs against a real Postgres is the store contract suite's job.
+    import psycopg
+
+    from tickwright.adapters.store.postgres import PostgresStore
+
+    monkeypatch.setattr(psycopg, "connect", lambda *args, **kwargs: MagicMock())
+    store = build_store(_config(tmp_path, store="postgres"))
+    assert isinstance(store, PostgresStore)
     store.close()
 
 

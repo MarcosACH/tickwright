@@ -55,6 +55,12 @@ def build_store(config: AppConfig) -> Store:
     match config.store:
         case "sqlite":
             return SQLiteStore(config.sqlite.path)
+        case "postgres":
+            # Imported here, not at module top: selecting the hermetic default
+            # must not load the psycopg driver at all.
+            from tickwright.adapters.store.postgres import PostgresStore
+
+            return PostgresStore(config.postgres.dsn)
         case unreachable:
             assert_never(unreachable)
 

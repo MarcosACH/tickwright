@@ -17,7 +17,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from tickwright.adapters.bus import KafkaBusConfig
 from tickwright.adapters.feed import ReplayFeedConfig
 from tickwright.adapters.paper import PaperExchangeConfig
-from tickwright.adapters.store import SQLiteStoreConfig
+from tickwright.adapters.store import PostgresStoreConfig, SQLiteStoreConfig
 from tickwright.domain import Side
 from tickwright.engine.runner import EngineConfig
 
@@ -56,13 +56,14 @@ class AppConfig(BaseSettings):
 
     # The seam discriminants (ADR-0032): each names the impl for one Protocol.
     bus: Literal["in_memory", "kafka"] = "in_memory"
-    store: Literal["sqlite"] = "sqlite"
+    store: Literal["sqlite", "postgres"] = "sqlite"
     exchange: Literal["paper"] = "paper"
     feed: Literal["replay"] = "replay"
     guard: Literal["real", "noop"] = "real"
 
     # The per-adapter configs (each defined in its adapter's package).
     sqlite: SQLiteStoreConfig = SQLiteStoreConfig()
+    postgres: PostgresStoreConfig = PostgresStoreConfig()
     replay: ReplayFeedConfig
     paper: PaperExchangeConfig = PaperExchangeConfig()
     kafka: KafkaBusConfig = KafkaBusConfig()
