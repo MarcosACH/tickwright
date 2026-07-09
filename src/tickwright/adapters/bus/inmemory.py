@@ -17,19 +17,19 @@ from collections import deque
 from tickwright.domain import Event
 from tickwright.domain.protocols import Handler
 
+from .subscriptions import Subscriptions
+
 
 class InMemoryBus:
     """An ``EventBus`` that dispatches synchronously in the current event loop."""
 
     def __init__(self) -> None:
-        self._subscriptions: list[tuple[type[Event], Handler[Event]]] = []
+        self._subscriptions = Subscriptions()
         self._queue: deque[Event] = deque()
         self._draining = False
 
     def subscribe[E: Event](self, event_type: type[E], handler: Handler[E]) -> None:
-        # Handler[E] is stored as Handler[Event]; dispatch guards with isinstance,
-        # so the handler only ever sees events it is registered for.
-        self._subscriptions.append((event_type, handler))  # type: ignore[arg-type]
+        self._subscriptions.subscribe(event_type, handler)
 
     async def start(self) -> None:
         """Nothing to connect: dispatch is in-process by reference."""
@@ -49,9 +49,7 @@ class InMemoryBus:
         try:
             while self._queue:
                 current = self._queue.popleft()
-                for event_type, handler in list(self._subscriptions):
-                    if isinstance(current, event_type):
-                        await handler(current)
+                await self._subscriptions.dispatch(current)
         except BaseException:
             # A handler failed mid-drain (e.g. a fail-fast InvariantViolation,
             # ADR-0014). Drop the undelivered tail so a caught-and-continued

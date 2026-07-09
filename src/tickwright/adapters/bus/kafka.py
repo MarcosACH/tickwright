@@ -26,7 +26,9 @@ from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 from tickwright.domain import Event
 from tickwright.domain.protocols import Handler
 
+from .drain_ledger import DrainLedger
 from .serde import decode_event, encode_event
+from .subscriptions import Subscriptions
 
 
 class _RecordCoordinates(Protocol):
@@ -82,20 +84,15 @@ class KafkaBus:
         self._producer: _ProducerLike | None = None
         self._consumer: _ConsumerLike | None = None
         self._poll_task: asyncio.Task[None] | None = None
-        self._subscriptions: list[tuple[type[Event], Handler[Event]]] = []
-        # The drain ledger: highest offset this process produced per partition,
-        # against the next-to-consume position the poll loop has committed.
-        # Single process, single group (ADR-0001): we are the only producer, so
-        # "our records are committed" is exactly "the topic went idle".
-        self._produced_high_water: dict[int, int] = {}
-        self._committed_position: dict[int, int] = {}
-        self._progress = asyncio.Event()
+        self._subscriptions = Subscriptions()
+        # The drain fence: produced-vs-committed offsets per partition. Single
+        # process, single group (ADR-0001) — we are the only producer, so "our
+        # records are committed" is exactly "the topic went idle".
+        self._ledger = DrainLedger()
         self._dispatch_fault: BaseException | None = None
 
     def subscribe[E: Event](self, event_type: type[E], handler: Handler[E]) -> None:
-        # Same storage-and-guard shape as InMemoryBus: stored as Handler[Event],
-        # dispatch guards with isinstance so a handler only sees its own type.
-        self._subscriptions.append((event_type, handler))  # type: ignore[arg-type]
+        self._subscriptions.subscribe(event_type, handler)
 
     async def start(self) -> None:
         """Connect the producer and consumer, then start the poll loop."""
@@ -117,8 +114,7 @@ class KafkaBus:
         placed = await self._producer.send_and_wait(
             self._topic, value=encode_event(event), key=event.partition_key.encode()
         )
-        current = self._produced_high_water.get(placed.partition, -1)
-        self._produced_high_water[placed.partition] = max(current, placed.offset)
+        self._ledger.record_produced(placed.partition, placed.offset)
         # The parity trick (ADR-0023): a top-level publish returns only after
         # the whole cascade it began was delivered — exactly the in-memory
         # drain-to-quiescence contract, so callers observe one behavior on
@@ -138,16 +134,9 @@ class KafkaBus:
         """
         while True:
             self._reraise_dispatch_fault()
-            self._progress.clear()
-            if not self._in_flight():
+            if not self._ledger.in_flight():
                 return
-            await self._progress.wait()
-
-    def _in_flight(self) -> bool:
-        return any(
-            self._committed_position.get(partition, 0) <= high_water
-            for partition, high_water in self._produced_high_water.items()
-        )
+            await self._ledger.wait_for_progress()
 
     def _reraise_dispatch_fault(self) -> None:
         """Containment parity (ADR-0024): on the in-memory bus a raw handler
@@ -182,9 +171,7 @@ class KafkaBus:
             record = await consumer.getone()
             event = decode_event(record.value)
             try:
-                for event_type, handler in list(self._subscriptions):
-                    if isinstance(event, event_type):
-                        await handler(event)
+                await self._subscriptions.dispatch(event)
             except asyncio.CancelledError:
                 raise
             except BaseException as exc:
@@ -196,9 +183,7 @@ class KafkaBus:
                 # Local accounting still advances so a later drain terminates
                 # instead of waiting forever on the record we just dropped.
                 self._dispatch_fault = exc
-                self._committed_position[record.partition] = record.offset + 1
-                self._progress.set()
+                self._ledger.record_committed(record.partition, record.offset)
                 continue
             await consumer.commit()
-            self._committed_position[record.partition] = record.offset + 1
-            self._progress.set()
+            self._ledger.record_committed(record.partition, record.offset)

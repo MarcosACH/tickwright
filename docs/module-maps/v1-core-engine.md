@@ -122,9 +122,9 @@ src/tickwright/
 
 **Responsibilities:** Dispatch mechanics, Kafka producer/consumer lifecycle, offset commits, wire-format encoding (Kafka side).
 
-**Seams:** `EventBus` — two real adapters. The serde codec is Kafka-internal, not a public seam.
+**Seams:** `EventBus` — two real adapters. Kafka-internal, none a public seam: the serde codec (wire format), `Subscriptions` (the type-guarded, registration-ordered fan-out both backends share, so parity of delivery is one module not two copies), and `DrainLedger` (the `KafkaBus` produced-vs-committed offset fence, tested at its own interface for the off-by-one conventions the drain rests on).
 
-**Depth note:** "Swapping the backend changes durability, never behavior" lives or dies here; the drain-to-quiescence FIFO mirroring the Kafka poll loop is the concentrated trick that keeps both backends observationally equivalent.
+**Depth note:** "Swapping the backend changes durability, never behavior" lives or dies here; the drain-to-quiescence FIFO mirroring the Kafka poll loop is the concentrated trick that keeps both backends observationally equivalent. The shared `Subscriptions` makes delivery-parity structural (not two copies agreeing), and the `DrainLedger` isolates the offset accounting the Kafka drain fence rests on.
 
 ---
 
