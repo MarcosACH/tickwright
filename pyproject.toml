@@ -57,6 +57,12 @@ warn_unused_ignores = true
 warn_redundant_casts = true
 files = ["src", "tests"]
 
+# aiokafka ships no py.typed marker; the bus wraps it behind its own typed
+# Protocols (_ProducerLike/_ConsumerLike), so the untyped surface never leaks.
+[[tool.mypy.overrides]]
+module = "aiokafka.*"
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
