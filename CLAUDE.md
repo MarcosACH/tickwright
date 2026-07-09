@@ -103,4 +103,4 @@ uv run lint-imports   # dependency-direction boundaries (ADR-0032)
 
 The CLI (`tickwright` / `python -m tickwright.app`) reads `AppConfig` from the environment and `.env`. **`.env.example` is the canonical variable reference** — every variable maps onto `AppConfig` (`src/tickwright/app/config.py`) with the `TICKWRIGHT_` prefix, `__` for nesting, and JSON for complex values (e.g. `TICKWRIGHT_REPLAY__PATH`, `TICKWRIGHT_STRATEGIES`).
 
-Later slices add their variables with their impls (e.g. `HYPERLIQUID_TESTNET` for the live exchange path; `KAFKA_BOOTSTRAP_SERVERS`, `KAFKA_*_TOPIC` for the `KafkaBus` backend).
+The `KafkaBus` backend reads `TICKWRIGHT_BUS=kafka` plus `TICKWRIGHT_KAFKA__{BOOTSTRAP_SERVERS,EVENTS_TOPIC,GROUP_ID}`. Later slices add their variables with their impls (e.g. `HYPERLIQUID_TESTNET` for the live exchange path).
