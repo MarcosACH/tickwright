@@ -9,6 +9,7 @@ that line — serde, keying, dispatch, commits — is real ``KafkaBus`` code.
 import asyncio
 from decimal import Decimal
 
+import msgspec
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
@@ -168,6 +169,58 @@ def test_when_two_same_symbol_records_fault_the_first_is_the_one_that_surfaces()
             await bus.publish(_tick(seq=0, symbol="seed"))
         await bus.close()  # teardown still works after the fault
 
+    asyncio.run(asyncio.wait_for(scenario(), timeout=5))
+
+
+def test_a_handler_fault_drops_the_undelivered_cascade_tail() -> None:
+    # Containment parity, completed (ADR-0024): InMemoryBus clears its FIFO on a
+    # fault, so an event a handler published reentrantly *before* the fault is
+    # never delivered. Over Kafka that event is a durable record already on the
+    # topic — the poll loop must drop the faulted cascade's tail to match, or
+    # the two backends deliver different streams for the same input.
+    broker = FakeKafkaBroker()
+    bus = _wire(broker)
+    delivered: list[MarketTick] = []
+
+    async def handler(event: MarketTick) -> None:
+        if event.symbol == "trigger":
+            await bus.publish(_tick(1, symbol="BTC"))  # reentrant tail, then fault
+            raise RuntimeError("boom")
+        delivered.append(event)
+
+    bus.subscribe(MarketTick, handler)
+
+    async def scenario() -> None:
+        await bus.start()
+        with pytest.raises(RuntimeError, match="boom"):
+            await bus.publish(_tick(seq=0, symbol="trigger"))
+        await bus.drain()  # the tail was dropped; drain is idle, it does not hang
+        await bus.close()
+
+    asyncio.run(asyncio.wait_for(scenario(), timeout=5))
+
+    assert delivered == []  # the reentrantly-published BTC tick was never delivered
+
+
+def test_a_malformed_record_surfaces_as_a_fault_instead_of_hanging_the_drain() -> None:
+    # A payload that will not decode must not silently kill the poll loop and
+    # hang drain forever (the fetch position advances, so a naive loop would
+    # wait on a commit that never comes). It is handled like any dispatch fault:
+    # dropped, its offset advanced, the error handed to the draining publisher.
+    broker = FakeKafkaBroker()
+    bus = _wire(broker)
+
+    async def scenario() -> None:
+        await bus.start()
+        # A poison record straight onto the topic, behind the bus's own codec;
+        # same key as the valid publish below, so it sits at the lower offset on
+        # the shared partition and the poll loop reaches it first.
+        broker.produce(key=b"BTC", value=b"not a valid envelope")
+        with pytest.raises(msgspec.DecodeError):
+            await bus.publish(_tick(symbol="BTC"))  # drains, and re-raises the decode fault
+        await bus.close()
+
+    # Bounded: the old behaviour (decode outside the try) would hang here.
     asyncio.run(asyncio.wait_for(scenario(), timeout=5))
 
 

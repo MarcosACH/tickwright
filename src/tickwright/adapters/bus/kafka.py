@@ -130,21 +130,25 @@ class KafkaBus:
 
         A handler publishing mid-drain raises the high-water mark, so the wait
         naturally extends to the whole reentrant cascade — the Kafka face of
-        the in-memory drain-to-quiescence contract (ADR-0023/0024).
+        the in-memory drain-to-quiescence contract (ADR-0023/0024). A fault is
+        re-raised only once the cascade has drained to quiescence (its tail
+        dropped, below), so the bus is idle and the next publish starts clean —
+        the boundary InMemoryBus gets by clearing its FIFO before it re-raises.
         """
         while True:
-            self._reraise_dispatch_fault()
             if not self._ledger.in_flight():
+                self._reraise_dispatch_fault()
                 return
             await self._ledger.wait_for_progress()
 
     def _reraise_dispatch_fault(self) -> None:
         """Containment parity (ADR-0024): on the in-memory bus a raw handler
         exception propagates into the publish that caused it — raised once,
-        and the bus survives. Here dispatch runs in the poll loop, so the
-        fault is handed to the earliest drain (normally the publish whose
-        cascade broke, since a top-level publish drains) and *popped*: the
-        next publish works again, matching the in-memory contract."""
+        and the bus survives. Here dispatch runs in the poll loop, so the fault
+        is stored, its cascade tail dropped, and the fault handed to the drain
+        that fenced the cascade (normally the top-level publish, which drains)
+        and *popped*: the next publish works again, matching the in-memory
+        contract."""
         if self._dispatch_fault is not None:
             fault, self._dispatch_fault = self._dispatch_fault, None
             raise fault
@@ -166,29 +170,40 @@ class KafkaBus:
             self._producer = None
 
     async def _poll(self, consumer: _ConsumerLike) -> None:
-        """Deliver one record at a time; commit only after its handlers ran."""
+        """Deliver one record at a time; commit only after its handlers ran.
+
+        Once a record in a cascade faults — a handler raising, or a payload
+        that will not decode — the rest of that cascade is *dropped* rather
+        than delivered: the Kafka face of InMemoryBus clearing its FIFO on a
+        fault (containment parity, ADR-0024). Dropped records advance local
+        accounting so the drain fencing the cascade terminates, but are left
+        broker-uncommitted, so a restart redelivers them (at-least-once,
+        ADR-0002). The first fault is the one the draining publisher re-raises;
+        because every later record in the cascade is skipped *before* dispatch,
+        a second fault can never overwrite it — first-fault-wins is structural.
+        """
         while True:
             record = await consumer.getone()
-            event = decode_event(record.value)
+            if self._dispatch_fault is not None:
+                # A cascade faulted; drop its tail. Advance accounting so the
+                # drain terminates; leave the offset uncommitted (restart
+                # redelivers). The fault is popped when the drain re-raises it,
+                # after which the next cascade dispatches normally again.
+                self._ledger.record_committed(record.partition, record.offset)
+                continue
             try:
+                event = decode_event(record.value)
                 await self._subscriptions.dispatch(event)
             except asyncio.CancelledError:
                 raise
             except BaseException as exc:
                 # Stored for the draining publisher to re-raise (containment
                 # parity), then keep serving — the in-memory bus survives a
-                # handler fault too. First-write-wins: the in-memory drain
-                # aborts on the *first* fault, so the earliest exception is the
-                # one a caller sees; a second fault in the same pass (two
-                # same-partition records dispatched before the drain re-raises)
-                # must not overwrite it, or the two backends report different
-                # exceptions for the same input. The record is *not* committed:
-                # within this session the fetch position already moved past it,
-                # but a restart redelivers it (at-least-once, offsets bound it).
-                # Local accounting still advances so a later drain terminates
-                # instead of waiting forever on the record we just dropped.
-                if self._dispatch_fault is None:
-                    self._dispatch_fault = exc
+                # handler fault too. A malformed record surfaces here the same
+                # way instead of silently killing the poll loop. The record is
+                # *not* broker-committed (a restart redelivers it); local
+                # accounting still advances so the drain terminates.
+                self._dispatch_fault = exc
                 self._ledger.record_committed(record.partition, record.offset)
                 continue
             await consumer.commit()
