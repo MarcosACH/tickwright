@@ -14,17 +14,22 @@ the original signal thrown in.
 
 import asyncio
 import json
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from store_backends import (
+    STORE_BACKEND_PARAMS,
+    PostgresBackend,
+    SQLiteBackend,
+    resolve_backend,
+)
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.feed import ReplayFeed
 from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
-from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     AggressorSide,
     ExecutionReport,
@@ -41,6 +46,7 @@ from tickwright.domain import (
     PlaceSignal,
     Side,
     Signal,
+    Store,
     TimeInForce,
     VenueOrderView,
     derive_cloid,
@@ -51,6 +57,16 @@ from tickwright.engine.reconcile import Reconciler
 from tickwright.strategies import SingleShotLimitStrategy
 
 _CLOID = derive_cloid("trivial:BTC:1")
+
+# The store the crash leaves behind, and the store the second life reopens over
+# the same durable backing — one per backend. Postgres auto-skips without a
+# reachable server (see ``store_backends``), so the default run stays hermetic.
+Backend = SQLiteBackend | PostgresBackend
+
+
+@pytest.fixture(params=STORE_BACKEND_PARAMS)
+def store_backend(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[Backend]:
+    yield resolve_backend(request.param, tmp_path / "saga.db")
 
 
 class _CrashingTransport:
@@ -126,12 +142,17 @@ def _redelivered_signal() -> PlaceSignal:
 
 
 def _first_life(
-    tmp_path: Path, *, pre_send: bool
-) -> tuple[SQLiteStore, PaperExchange, ManualClock]:
-    """Run the real pipeline into the crash; return what survives it."""
+    tmp_path: Path, backend: Backend, *, pre_send: bool
+) -> tuple[PaperExchange, ManualClock]:
+    """Run the real pipeline into the crash; return what survives it.
+
+    The saga store is checkpointed and then closed — the crash. Its durable
+    backing (a SQLite file, or the Postgres server) outlives the process, so the
+    second life reopens it. The venue is the remote that survives our death.
+    """
     bus = InMemoryBus()
     clock = ManualClock()
-    store = SQLiteStore(":memory:")
+    store = backend.open()
     venue_bus = InMemoryBus()  # the venue's report link — dies with the process
     venue = PaperExchange(bus=venue_bus, clock=clock, fill_model=ImmediateFillModel())
     cache = Cache(store=store)
@@ -165,14 +186,17 @@ def _first_life(
     # The write-ahead intent is the durable truth the crash left behind.
     record = store.get_order(_CLOID)
     assert record is not None and record.state is OrderState.PENDING
-    return store, venue, clock
+    store.close()  # the crash: the process, and its store connection, die
+    return venue, clock
 
 
 def _second_life(
-    store: SQLiteStore, venue: PaperExchange, clock: ManualClock
-) -> tuple[InMemoryBus, Reconciler, list[OrderEvent]]:
-    """Recovery wiring over the survivors: rebuilt Cache, fresh bus and manager."""
+    backend: Backend, venue: PaperExchange, clock: ManualClock
+) -> tuple[InMemoryBus, Reconciler, list[OrderEvent], Store]:
+    """Recovery wiring over the survivors: a store reopened on the same durable
+    backing, a Cache rebuilt from it, a fresh bus and manager."""
     bus = InMemoryBus()
+    store = backend.open()
     cache = Cache(store=store)
     cache.rebuild()
     manager = ExecutionManager(bus=bus, clock=clock, exchange=venue, cache=cache)
@@ -185,17 +209,19 @@ def _second_life(
 
     bus.subscribe(OrderEvent, record)
     reconciler = Reconciler(bus=bus, clock=clock, exchange=venue, cache=cache)
-    return bus, reconciler, events
+    return bus, reconciler, events, store
 
 
-def test_post_send_kill_recovers_the_landed_order_and_its_fill(tmp_path: Path) -> None:
-    store, venue, clock = _first_life(tmp_path, pre_send=False)
+def test_post_send_kill_recovers_the_landed_order_and_its_fill(
+    tmp_path: Path, store_backend: Backend
+) -> None:
+    venue, clock = _first_life(tmp_path, store_backend, pre_send=False)
 
     # While we are dead the market crosses the resting BUY at the venue: it
     # fills, reporting into the dead link.
     asyncio.run(venue.on_tick(_crossing_tick()))
 
-    bus, reconciler, events = _second_life(store, venue, clock)
+    bus, reconciler, events, store = _second_life(store_backend, venue, clock)
     asyncio.run(reconciler.run_startup_barrier(timeout_seconds=30.0))
 
     # No lost fill: the saga converged on the venue's executed truth.
@@ -212,14 +238,15 @@ def test_post_send_kill_recovers_the_landed_order_and_its_fill(tmp_path: Path) -
     assert view is not None
     assert [fill.trade_id for fill in view.fills] == [f"{_CLOID}-1"]
     assert [type(ev) for ev in events] == [OrderSubmitted, OrderFilled]
+    store.close()
 
 
 def test_pre_send_kill_resolves_the_unlanded_intent_failed_never_resent(
-    tmp_path: Path,
+    tmp_path: Path, store_backend: Backend
 ) -> None:
-    store, venue, clock = _first_life(tmp_path, pre_send=True)
+    venue, clock = _first_life(tmp_path, store_backend, pre_send=True)
 
-    bus, reconciler, events = _second_life(store, venue, clock)
+    bus, reconciler, events, store = _second_life(store_backend, venue, clock)
     asyncio.run(reconciler.run_startup_barrier(timeout_seconds=30.0))
 
     # The venue never saw the cloid: proven never-landed → FAILED (ADR-0010).
@@ -234,3 +261,4 @@ def test_pre_send_kill_resolves_the_unlanded_intent_failed_never_resent(
     assert not [ev for ev in events if isinstance(ev, OrderPlaced)]
     view = asyncio.run(venue.fetch_order(_CLOID))
     assert view is not None and not view.has_record
+    store.close()
