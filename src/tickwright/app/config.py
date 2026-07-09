@@ -14,6 +14,7 @@ from typing import Literal, Self
 from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from tickwright.adapters.bus import KafkaBusConfig
 from tickwright.adapters.feed import ReplayFeedConfig
 from tickwright.adapters.paper import PaperExchangeConfig
 from tickwright.adapters.store import SQLiteStoreConfig
@@ -54,7 +55,7 @@ class AppConfig(BaseSettings):
     )
 
     # The seam discriminants (ADR-0032): each names the impl for one Protocol.
-    bus: Literal["in_memory"] = "in_memory"
+    bus: Literal["in_memory", "kafka"] = "in_memory"
     store: Literal["sqlite"] = "sqlite"
     exchange: Literal["paper"] = "paper"
     feed: Literal["replay"] = "replay"
@@ -64,6 +65,7 @@ class AppConfig(BaseSettings):
     sqlite: SQLiteStoreConfig = SQLiteStoreConfig()
     replay: ReplayFeedConfig
     paper: PaperExchangeConfig = PaperExchangeConfig()
+    kafka: KafkaBusConfig = KafkaBusConfig()
 
     strategies: list[StrategyConfig] = Field(default_factory=list)
     engine: EngineConfig = EngineConfig()

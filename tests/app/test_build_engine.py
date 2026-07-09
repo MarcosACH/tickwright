@@ -16,6 +16,7 @@ import pytest
 from pydantic import ValidationError
 
 from tickwright.adapters.bus import InMemoryBus
+from tickwright.adapters.bus.kafka import KafkaBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.feed import ReplayFeed, ReplayFeedConfig
 from tickwright.adapters.paper import PaperExchange, PaperExchangeConfig
@@ -51,6 +52,13 @@ def _config(tmp_path: Path, **overrides: object) -> AppConfig:
 
 def test_bus_discriminant_selects_the_in_memory_bus(tmp_path: Path) -> None:
     assert isinstance(build_bus(_config(tmp_path, bus="in_memory")), InMemoryBus)
+
+
+def test_bus_discriminant_selects_the_kafka_bus(tmp_path: Path) -> None:
+    # Selection only — no cluster is contacted until the runner starts the bus,
+    # so building the Kafka backend needs no running Kafka.
+    config = _config(tmp_path, bus="kafka", kafka={"bootstrap_servers": "kafka:9092"})
+    assert isinstance(build_bus(config), KafkaBus)
 
 
 def test_store_discriminant_selects_the_sqlite_store(tmp_path: Path) -> None:
