@@ -14,6 +14,7 @@ import pytest
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.domain import (
+    EventBus,
     MarketTick,
     OrderType,
     PlaceSignal,
@@ -49,6 +50,25 @@ def _signal(seq: int = 1) -> PlaceSignal:
         order_type=OrderType.MARKET,
         time_in_force=TimeInForce.IOC,
     )
+
+
+def test_lifecycle_is_a_no_op_and_satisfies_the_eventbus_seam() -> None:
+    # The seam carries lifecycle (ADR-0024 starts and stops the bus); for the
+    # in-memory backend both verbs are awaitable no-ops — nothing to connect,
+    # nothing to flush — and publish works regardless of lifecycle state.
+    bus = InMemoryBus()
+    assert isinstance(bus, EventBus)
+    seen: list[MarketTick] = []
+    bus.subscribe(MarketTick, lambda ev: _record(seen, ev))
+
+    async def scenario() -> None:
+        await bus.start()
+        await bus.publish(_tick())
+        await bus.close()
+
+    asyncio.run(scenario())
+
+    assert seen == [_tick()]
 
 
 def test_publish_delivers_to_subscribers_of_matching_type() -> None:

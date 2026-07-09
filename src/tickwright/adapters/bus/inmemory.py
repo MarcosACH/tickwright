@@ -31,6 +31,12 @@ class InMemoryBus:
         # so the handler only ever sees events it is registered for.
         self._subscriptions.append((event_type, handler))  # type: ignore[arg-type]
 
+    async def start(self) -> None:
+        """Nothing to connect: dispatch is in-process by reference."""
+
+    async def close(self) -> None:
+        """Nothing to flush: publish already drained every cascade it began."""
+
     async def publish(self, event: Event) -> None:
         self._queue.append(event)
         if self._draining:

@@ -13,7 +13,7 @@ from decimal import Decimal
 
 from tickwright.adapters.bus.kafka import KafkaBus
 from tickwright.adapters.bus.serde import decode_event
-from tickwright.domain import Event, MarketTick
+from tickwright.domain import Event, EventBus, MarketTick
 from tickwright.domain.enums import AggressorSide
 
 
@@ -144,6 +144,10 @@ def _wire(broker: FakeKafkaBroker) -> KafkaBus:
         producer_factory=broker.producer,
         consumer_factory=broker.consumer,
     )
+
+
+def test_kafka_bus_satisfies_the_eventbus_seam() -> None:
+    assert isinstance(_wire(FakeKafkaBroker()), EventBus)
 
 
 def test_publish_sends_one_encoded_record_keyed_by_partition_key() -> None:
