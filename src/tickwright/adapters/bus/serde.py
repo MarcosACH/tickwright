@@ -11,11 +11,32 @@ by value, frozen slots dataclasses natively.
 
 import msgspec
 
-from tickwright.domain import Event, MarketTick
+from tickwright.domain import Event, events
 
-_EVENT_TYPES: dict[str, type[Event]] = {
-    MarketTick.__name__: MarketTick,
-}
+
+def _publishable_event_types() -> dict[str, type[Event]]:
+    """The leaves of the ``Event`` subclass tree, keyed by class name.
+
+    The leaves are exactly the publishable concrete families; interior nodes
+    (``Signal``, ``ExecutionReport``, ``OrderEvent``, …) are bases with
+    abstract key derivations. Deriving the registry keeps the codec incapable
+    of lagging the schema: a new family is encodable the day it exists.
+
+    Derived from the events module namespace, not ``__subclasses__()``:
+    ``@dataclass(slots=True)`` *recreates* each class, and the abandoned
+    pre-slots originals linger in ``__subclasses__()`` until GC — the module
+    namespace and ``__bases__`` only ever hold the final class objects.
+    """
+    classes = [
+        obj
+        for obj in vars(events).values()
+        if isinstance(obj, type) and issubclass(obj, Event) and obj is not Event
+    ]
+    bases = {base for cls in classes for base in cls.__bases__}
+    return {cls.__name__: cls for cls in classes if cls not in bases}
+
+
+_EVENT_TYPES: dict[str, type[Event]] = _publishable_event_types()
 
 
 class _Envelope(msgspec.Struct):
