@@ -38,6 +38,10 @@ class FakeKafkaBroker:
         self.partitions = [[] for _ in range(self.partition_count)]
         self.committed = [0] * self.partition_count
         self._changed: asyncio.Event = asyncio.Event()
+        # Every client handed out, so suites can observe lifecycle at the
+        # boundary: connected during a run, disconnected after teardown.
+        self.producers: list[FakeProducer] = []
+        self.consumers: list[FakeConsumer] = []
 
     def partition_for(self, key: bytes) -> int:
         return zlib.crc32(key) % self.partition_count
@@ -62,10 +66,12 @@ class FakeKafkaBroker:
             await self._wait_for_change()
 
     def producer(self, **_: object) -> "FakeProducer":
-        return FakeProducer(self)
+        self.producers.append(FakeProducer(self))
+        return self.producers[-1]
 
     def consumer(self, *_: object, **__: object) -> "FakeConsumer":
-        return FakeConsumer(self)
+        self.consumers.append(FakeConsumer(self))
+        return self.consumers[-1]
 
 
 class FakeProducer:
