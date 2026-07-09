@@ -139,6 +139,38 @@ def test_a_handler_fault_propagates_into_the_causing_publish_and_the_bus_survive
     assert seen == [_tick(2)]
 
 
+def test_when_two_same_symbol_records_fault_the_first_is_the_one_that_surfaces() -> None:
+    # Containment parity, tightened (ADR-0024): InMemoryBus dispatches in FIFO
+    # order and aborts on the *first* fault, so the first-published exception is
+    # the one a caller sees. Two same-symbol records share a partition, so the
+    # poll loop dispatches them in publish order — and both are already produced
+    # (seeded reentrantly) before the draining publisher gets to re-raise, so
+    # the loop hits both faults in one pass. The fault slot must keep the first,
+    # not let the second overwrite it, or the two backends report different
+    # exceptions for the same input (a per-symbol-ordered parity break).
+    broker = FakeKafkaBroker()
+    bus = _wire(broker)
+
+    async def handler(event: MarketTick) -> None:
+        if event.symbol == "seed":
+            await bus.publish(_tick(1, symbol="BTC"))  # reentrant: produced, not dispatched
+            await bus.publish(_tick(2, symbol="BTC"))
+        elif event.seq == 1:
+            raise RuntimeError("first fault")
+        elif event.seq == 2:
+            raise RuntimeError("second fault")
+
+    bus.subscribe(MarketTick, handler)
+
+    async def scenario() -> None:
+        await bus.start()
+        with pytest.raises(RuntimeError, match="first fault"):
+            await bus.publish(_tick(seq=0, symbol="seed"))
+        await bus.close()  # teardown still works after the fault
+
+    asyncio.run(asyncio.wait_for(scenario(), timeout=5))
+
+
 def test_drain_returns_only_after_every_published_event_was_dispatched() -> None:
     # The ADR-0024 shutdown drain: over Kafka "the FIFO went idle" means every
     # record this process produced has been delivered and committed — including

@@ -177,12 +177,18 @@ class KafkaBus:
             except BaseException as exc:
                 # Stored for the draining publisher to re-raise (containment
                 # parity), then keep serving — the in-memory bus survives a
-                # handler fault too. The record is *not* committed: within
-                # this session the fetch position already moved past it, but
-                # a restart redelivers it (at-least-once, offsets bound it).
+                # handler fault too. First-write-wins: the in-memory drain
+                # aborts on the *first* fault, so the earliest exception is the
+                # one a caller sees; a second fault in the same pass (two
+                # same-partition records dispatched before the drain re-raises)
+                # must not overwrite it, or the two backends report different
+                # exceptions for the same input. The record is *not* committed:
+                # within this session the fetch position already moved past it,
+                # but a restart redelivers it (at-least-once, offsets bound it).
                 # Local accounting still advances so a later drain terminates
                 # instead of waiting forever on the record we just dropped.
-                self._dispatch_fault = exc
+                if self._dispatch_fault is None:
+                    self._dispatch_fault = exc
                 self._ledger.record_committed(record.partition, record.offset)
                 continue
             await consumer.commit()
