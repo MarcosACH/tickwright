@@ -11,6 +11,8 @@ import zlib
 from dataclasses import dataclass, field
 from decimal import Decimal
 
+import pytest
+
 from tickwright.adapters.bus.kafka import KafkaBus
 from tickwright.adapters.bus.serde import decode_event
 from tickwright.domain import Event, EventBus, MarketTick
@@ -194,6 +196,33 @@ def test_subscribed_handler_receives_events_consumed_from_the_topic() -> None:
     # Same symbol -> same partition -> delivered in publish order, and
     # `all_committed` returning proves offsets advanced only after dispatch.
     assert seen == [_tick(1), _tick(2)]
+
+
+def test_a_handler_fault_resurfaces_on_the_next_publish_and_on_drain() -> None:
+    # Containment parity (ADR-0024): on InMemoryBus a raw handler exception
+    # propagates into the publish that caused it. Over Kafka dispatch happens
+    # in the poll loop, so the fault is stored and re-raised at the next
+    # hot-path touch — the feed's next publish faults the engine, and a
+    # shutdown drain cannot wait forever on a dispatcher that died.
+    broker = FakeKafkaBroker()
+    bus = _wire(broker)
+
+    async def broken(event: MarketTick) -> None:
+        raise RuntimeError("handler broke an engine assumption")
+
+    bus.subscribe(MarketTick, broken)
+
+    async def scenario() -> None:
+        await bus.start()
+        await bus.publish(_tick(1))
+        with pytest.raises(RuntimeError, match="handler broke"):
+            await bus.drain()
+        with pytest.raises(RuntimeError, match="handler broke"):
+            await bus.publish(_tick(2))
+        await bus.close()  # teardown still works on a faulted bus
+
+    # Bounded: a wrong implementation must fail loudly, not hang in drain.
+    asyncio.run(asyncio.wait_for(scenario(), timeout=5))
 
 
 def test_drain_returns_only_after_every_published_event_was_dispatched() -> None:

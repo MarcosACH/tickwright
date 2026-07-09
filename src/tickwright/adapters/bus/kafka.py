@@ -90,6 +90,7 @@ class KafkaBus:
         self._produced_high_water: dict[int, int] = {}
         self._committed_position: dict[int, int] = {}
         self._progress = asyncio.Event()
+        self._dispatch_fault: BaseException | None = None
 
     def subscribe[E: Event](self, event_type: type[E], handler: Handler[E]) -> None:
         # Same storage-and-guard shape as InMemoryBus: stored as Handler[Event],
@@ -111,6 +112,7 @@ class KafkaBus:
         self._poll_task = asyncio.create_task(self._poll(self._consumer))
 
     async def publish(self, event: Event) -> None:
+        self._reraise_dispatch_fault()
         if self._producer is None:
             raise RuntimeError("KafkaBus.publish before start()")
         placed = await self._producer.send_and_wait(
@@ -127,6 +129,7 @@ class KafkaBus:
         the in-memory drain-to-quiescence contract (ADR-0023/0024).
         """
         while True:
+            self._reraise_dispatch_fault()
             self._progress.clear()
             if not self._in_flight():
                 return
@@ -137,6 +140,15 @@ class KafkaBus:
             self._committed_position.get(partition, 0) <= high_water
             for partition, high_water in self._produced_high_water.items()
         )
+
+    def _reraise_dispatch_fault(self) -> None:
+        """Containment parity (ADR-0024): on the in-memory bus a raw handler
+        exception propagates into the publish that caused it; here dispatch
+        runs in the poll loop, so its death re-raises at the next hot-path
+        touch — the feed's next publish faults the engine, and a shutdown
+        drain fails loudly instead of waiting on a dead dispatcher."""
+        if self._dispatch_fault is not None:
+            raise self._dispatch_fault
 
     async def close(self) -> None:
         """Stop consuming, then flush and disconnect — buffered writes survive."""
@@ -156,12 +168,21 @@ class KafkaBus:
 
     async def _poll(self, consumer: _ConsumerLike) -> None:
         """Deliver one record at a time; commit only after its handlers ran."""
-        while True:
-            record = await consumer.getone()
-            event = decode_event(record.value)
-            for event_type, handler in list(self._subscriptions):
-                if isinstance(event, event_type):
-                    await handler(event)
-            await consumer.commit()
-            self._committed_position[record.partition] = record.offset + 1
+        try:
+            while True:
+                record = await consumer.getone()
+                event = decode_event(record.value)
+                for event_type, handler in list(self._subscriptions):
+                    if isinstance(event, event_type):
+                        await handler(event)
+                await consumer.commit()
+                self._committed_position[record.partition] = record.offset + 1
+                self._progress.set()
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:
+            # Never committed, so the record redelivers on restart. Stored —
+            # not re-raised — so no unretrieved-task noise; waiters are woken
+            # to find the fault instead of a progress mark.
+            self._dispatch_fault = exc
             self._progress.set()
