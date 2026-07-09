@@ -12,6 +12,7 @@ authors = [{ name = "Marcos Achaval" }]
 dependencies = [
     "aiokafka>=0.14.0",
     "msgspec>=0.21.1",
+    "psycopg[binary]>=3.2",
     "pydantic-settings>=2.14.2",
     "structlog>=26.1.0",
 ]
@@ -56,7 +57,15 @@ check_untyped_defs = true
 warn_unused_ignores = true
 warn_redundant_casts = true
 files = ["src", "tests"]
-mypy_path = "tests/_support"
+# `src` maps to the `tickwright` package; `tests/_support` holds top-level test
+# helpers (kafka_fakes, store_backends). With explicit_package_bases on, both
+# must be declared bases so files under them keep their intended module names.
+mypy_path = ["src", "tests/_support"]
+# The test tree is a flat namespace (no __init__.py; pythonpath discovery), so
+# per-area `conftest.py` files share a module name. These let mypy path-qualify
+# them instead of erroring on the collision.
+namespace_packages = true
+explicit_package_bases = true
 
 # aiokafka ships no py.typed marker; the bus wraps it behind its own typed
 # Protocols (_ProducerLike/_ConsumerLike), so the untyped surface never leaks.
@@ -73,6 +82,12 @@ pythonpath = ["tests/_support"]
 # A leaked resource (e.g. an unclosed store connection) is a bug, not noise:
 # fail the suite so it can never accumulate silently and mask a real warning.
 filterwarnings = ["error::ResourceWarning"]
+# `postgres` marks tests that need a real Postgres (the PostgresStore contract
+# arm, ADR-0019). They auto-skip when no STORE_POSTGRES_DSN is reachable, so the
+# default `uv run pytest` stays hermetic; `-m "not postgres"` deselects them.
+markers = [
+    "postgres: needs a reachable Postgres server (auto-skips without STORE_POSTGRES_DSN)",
+]
 
 [tool.coverage.run]
 source = ["src/tickwright"]
