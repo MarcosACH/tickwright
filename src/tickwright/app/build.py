@@ -37,6 +37,16 @@ def build_bus(config: AppConfig) -> EventBus:
     match config.bus:
         case "in_memory":
             return InMemoryBus()
+        case "kafka":
+            # Imported here, not at module top: selecting the hermetic default
+            # must not load the wire stack (serde/aiokafka) at all.
+            from tickwright.adapters.bus.kafka import KafkaBus
+
+            return KafkaBus(
+                bootstrap_servers=config.kafka.bootstrap_servers,
+                topic=config.kafka.events_topic,
+                group_id=config.kafka.group_id,
+            )
         case unreachable:
             assert_never(unreachable)
 

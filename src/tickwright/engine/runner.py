@@ -19,7 +19,7 @@ the Engine never knows a concrete.
 import asyncio
 import signal
 import uuid
-from collections.abc import Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 
 from tickwright.domain import (
@@ -98,6 +98,7 @@ class Engine:
         self._state = ComponentState.READY
         self._stop_requested = asyncio.Event()
         self._stopped = asyncio.Event()
+        self._feed_task: asyncio.Task[None] | None = None
 
     @property
     def state(self) -> ComponentState:
@@ -122,15 +123,15 @@ class Engine:
                 # reconciliation completes. Replay end-of-file ends the task but
                 # not the run — like the CLI, the engine stops only when told to.
                 named_event(NamedEvent.ENGINE_FEED_STARTED)
-                feed_task = tg.create_task(self._feed.start())
-                tg.create_task(self._stop_when_requested(feed_task))
+                self._feed_task = tg.create_task(self._feed.start())
+                tg.create_task(self._stop_when_requested())
         except Exception as exc:
             # The first raw-handler exception aborted the TaskGroup and
             # cancelled its siblings (ADR-0024): fail fast, but leave a
             # readable trail and let waiters through before exiting non-zero.
             self._state = ComponentState.FAULTED
             named_event(NamedEvent.ENGINE_FAULTED, error=repr(exc))
-            self._run_best_effort_stop_hooks()
+            await self._run_best_effort_stop_hooks()
             self._stopped.set()
             return 1
         finally:
@@ -175,6 +176,9 @@ class Engine:
         bind_run_id(run_id)
         # Recover: rebuild the read-model projection from the durable record.
         self._cache.rebuild()
+        # Start the bus (ADR-0024 step 3): in-memory a no-op; Kafka connects
+        # the producer/consumer — before anything can publish or subscribe.
+        await self._bus.start()
         # Engine-internal handlers subscribe raw (ADR-0024): any exception in
         # the saga path propagates to the TaskGroup and faults the engine.
         self._bus.subscribe(Signal, self._execution.on_signal)
@@ -188,7 +192,42 @@ class Engine:
         self._host.start()
         self._state = ComponentState.RUNNING
 
-    async def _stop_when_requested(self, feed_task: asyncio.Task[None]) -> None:
+    def _teardown_steps(self) -> tuple[tuple[str, Callable[[], Awaitable[None] | None]], ...]:
+        """The reverse shutdown, described once (ADR-0024).
+
+        Both teardown paths walk this same ordered membership and differ only
+        in failure *policy* (graceful: bounded as a whole, propagate; faulted:
+        bounded per step, record, keep going) — so a new teardown seam adds
+        one entry here, never a second copy that the fault path silently
+        misses. Order: cut the source, let in-flight events land in the final
+        snapshots (ADR-0016), then flush the bus and close the store last —
+        resting LIVE orders stay in it for restart reconciliation to re-adopt
+        (crash and graceful stop converge on one recovery path).
+        """
+        return (
+            ("feed.stop", self._stop_feed),
+            ("bus.drain", self._bus.drain),
+            ("host.stop", self._host.stop),
+            ("bus.close", self._bus.close),
+            ("store.close", self._store.close),
+        )
+
+    async def _stop_feed(self) -> None:
+        """Ask the feed to stop, then cancel a read loop that outlives the ask
+        (a live feed mid-read never returns on its own). On the fault path the
+        TaskGroup already cancelled the task; the venue connection still needs
+        the explicit ``stop`` so a live WS cannot leak."""
+        await self._feed.stop()
+        if self._feed_task is not None and not self._feed_task.done():
+            self._feed_task.cancel()
+
+    @staticmethod
+    async def _run_step(step: Callable[[], Awaitable[None] | None]) -> None:
+        result = step()
+        if result is not None:
+            await result
+
+    async def _stop_when_requested(self) -> None:
         """Wait for the stop request, then reverse the startup (ADR-0024).
 
         Bounded by ``shutdown_timeout``: a teardown that cannot finish (a
@@ -198,29 +237,23 @@ class Engine:
         """
         await self._stop_requested.wait()
         async with asyncio.timeout(self._config.shutdown_timeout_seconds):
-            await self._feed.stop()
-            if not feed_task.done():
-                feed_task.cancel()
-            # Final snapshots (ADR-0016), then the store closes last: every
-            # checkpoint is already durable, and resting LIVE orders stay in it
-            # — restart reconciliation re-adopts them (crash and graceful stop
-            # converge on one recovery path).
-            self._host.stop()
-            self._store.close()
+            for _name, step in self._teardown_steps():
+                await self._run_step(step)
 
-    def _run_best_effort_stop_hooks(self) -> None:
-        """The faulted teardown: try each stop hook, keep going if one breaks.
+    async def _run_best_effort_stop_hooks(self) -> None:
+        """The faulted teardown: the same steps, best-effort per step.
 
-        A fault must still leave the last strategy snapshots and a closed store
-        where it can — but a failing hook cannot be allowed to mask the fault
-        or block the non-zero exit. A hook that breaks is *recorded* (never
-        swallowed silently): a lost snapshot or an unclosed store on the fault
-        path is exactly the kind of thing an operator must be able to see in the
-        trail (ADR-0020), and it rides the same run correlation as the fault.
+        A fault must still stop the feed, take the last strategy snapshots,
+        flush the bus, and close the store where it can — but a failing or
+        hanging step cannot be allowed to mask the fault or block the non-zero
+        exit, so each step is bounded on its own and a break is *recorded*
+        (never swallowed silently): a lost snapshot or an unclosed store on
+        the fault path is exactly the kind of thing an operator must be able
+        to see in the trail (ADR-0020), riding the same run correlation.
         """
-        for hook in (self._host.stop, self._store.close):
+        for name, step in self._teardown_steps():
             try:
-                hook()
+                async with asyncio.timeout(self._config.shutdown_timeout_seconds):
+                    await self._run_step(step)
             except Exception as exc:
-                named_event(NamedEvent.ENGINE_STOP_HOOK_FAILED, hook=hook.__name__, error=repr(exc))
-                continue
+                named_event(NamedEvent.ENGINE_STOP_HOOK_FAILED, hook=name, error=repr(exc))

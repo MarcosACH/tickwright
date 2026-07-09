@@ -10,6 +10,8 @@ authors = [{ name = "Marcos Achaval" }]
 # + in-memory-bus path stays hermetic: `uv sync` pulls nothing off the network
 # beyond the dev toolchain below.
 dependencies = [
+    "aiokafka>=0.14.0",
+    "msgspec>=0.21.1",
     "pydantic-settings>=2.14.2",
     "structlog>=26.1.0",
 ]
@@ -54,10 +56,20 @@ check_untyped_defs = true
 warn_unused_ignores = true
 warn_redundant_casts = true
 files = ["src", "tests"]
+mypy_path = "tests/_support"
+
+# aiokafka ships no py.typed marker; the bus wraps it behind its own typed
+# Protocols (_ProducerLike/_ConsumerLike), so the untyped surface never leaks.
+[[tool.mypy.overrides]]
+module = "aiokafka.*"
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+# Process-boundary fakes shared across suites (e.g. the Kafka broker) live in
+# tests/_support and import as plain top-level modules: `import kafka_fakes`.
+pythonpath = ["tests/_support"]
 # A leaked resource (e.g. an unclosed store connection) is a bug, not noise:
 # fail the suite so it can never accumulate silently and mask a real warning.
 filterwarnings = ["error::ResourceWarning"]
@@ -80,6 +92,8 @@ show_missing = true
 #   domain -> (nothing) ; observability -> (nothing inward)
 [tool.importlinter]
 root_package = "tickwright"
+# Lets contracts name external packages (msgspec/aiokafka in the serde gate).
+include_external_packages = true
 
 [[tool.importlinter.contracts]]
 name = "domain depends on nothing internal"
@@ -143,6 +157,25 @@ forbidden_modules = [
     "tickwright.venues",
     "tickwright.strategies",
     "tickwright.app",
+]
+
+# ADR-0025: serialization is a KafkaBus boundary concern. Domain events stay
+# stdlib dataclasses and the in-memory hot path passes them by reference —
+# neither may touch the wire stack. (The package __init__ is not addressable
+# here; the runtime probe in test_inmemory_bus.py gates what it loads.)
+[[tool.importlinter.contracts]]
+name = "domain and the in-memory bus hot path stay serde/Kafka-free"
+type = "forbidden"
+source_modules = [
+    "tickwright.domain",
+    "tickwright.adapters.bus.inmemory",
+    "tickwright.adapters.bus.config",
+]
+forbidden_modules = [
+    "tickwright.adapters.bus.kafka",
+    "tickwright.adapters.bus.serde",
+    "msgspec",
+    "aiokafka",
 ]
 
 [[tool.importlinter.contracts]]

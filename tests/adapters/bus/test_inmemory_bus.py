@@ -8,12 +8,15 @@ in-memory cascade order-independent and parity-locked with the Kafka poll loop.
 """
 
 import asyncio
+import subprocess
+import sys
 from decimal import Decimal
 
 import pytest
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.domain import (
+    EventBus,
     MarketTick,
     OrderType,
     PlaceSignal,
@@ -49,6 +52,42 @@ def _signal(seq: int = 1) -> PlaceSignal:
         order_type=OrderType.MARKET,
         time_in_force=TimeInForce.IOC,
     )
+
+
+def test_the_in_memory_hot_path_imports_no_serde_or_kafka_module() -> None:
+    """ADR-0025: events pass by reference with zero serialization, so the
+    hermetic default must never load the wire stack. Proven on a fresh
+    interpreter: importing the bus package and InMemoryBus pulls in neither
+    msgspec/aiokafka nor the serde/kafka modules. (The import-linter contract
+    gates the static graph; this gates what actually loads at runtime.)"""
+    probe = (
+        "import sys\n"
+        "from tickwright.adapters.bus import InMemoryBus\n"
+        "loaded = [m for m in sys.modules if m.startswith(('msgspec', 'aiokafka'))\n"
+        "          or m.endswith(('.serde', '.kafka'))]\n"
+        "assert not loaded, f'wire stack leaked onto the hot path: {loaded}'\n"
+    )
+    subprocess.run([sys.executable, "-c", probe], check=True)
+
+
+def test_lifecycle_is_a_no_op_and_satisfies_the_eventbus_seam() -> None:
+    # The seam carries lifecycle (ADR-0024 starts and stops the bus); for the
+    # in-memory backend both verbs are awaitable no-ops — nothing to connect,
+    # nothing to flush — and publish works regardless of lifecycle state.
+    bus = InMemoryBus()
+    assert isinstance(bus, EventBus)
+    seen: list[MarketTick] = []
+    bus.subscribe(MarketTick, lambda ev: _record(seen, ev))
+
+    async def scenario() -> None:
+        await bus.start()
+        await bus.publish(_tick())
+        await bus.drain()  # nothing can be in flight: publish already drained
+        await bus.close()
+
+    asyncio.run(scenario())
+
+    assert seen == [_tick()]
 
 
 def test_publish_delivers_to_subscribers_of_matching_type() -> None:

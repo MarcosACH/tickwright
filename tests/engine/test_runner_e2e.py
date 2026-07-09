@@ -16,9 +16,11 @@ from collections.abc import Callable
 from decimal import Decimal
 from pathlib import Path
 
+from kafka_fakes import FakeKafkaBroker
 from structlog.typing import EventDict
 
 from tickwright.adapters.bus import InMemoryBus
+from tickwright.adapters.bus.kafka import KafkaBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.feed import ReplayFeed
 from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
@@ -386,7 +388,7 @@ def test_a_broken_stop_hook_on_the_fault_path_is_recorded_not_swallowed(tmp_path
     assert "engine.faulted" in names
     hook_failures = [log for log in logs if log["event"] == "engine.stop_hook_failed"]
     assert len(hook_failures) == 1
-    assert hook_failures[0]["hook"] == "close"
+    assert hook_failures[0]["hook"] == "store.close"
 
 
 class _PoisonedFeed:
@@ -398,6 +400,90 @@ class _PoisonedFeed:
 
     async def stop(self) -> None:
         return None
+
+
+def _kafka_bus(broker: FakeKafkaBroker) -> KafkaBus:
+    return KafkaBus(
+        bootstrap_servers="kafka:9092",
+        topic="tickwright.events",
+        group_id="tickwright",
+        producer_factory=broker.producer,
+        consumer_factory=broker.consumer,
+    )
+
+
+def test_the_runner_owns_the_bus_lifecycle_connect_on_start_disconnect_on_stop(
+    tmp_path: Path,
+) -> None:
+    """ADR-0024 steps 3 and the reverse shutdown: the runner starts the bus
+    (Kafka: connect producer/consumer) and closes it on a graceful stop —
+    observed at the process boundary, where the broker sees its clients."""
+    broker = FakeKafkaBroker()
+
+    async def main() -> tuple[int, Engine]:
+        bus = _kafka_bus(broker)
+        clock = ManualClock()
+        store = SQLiteStore(tmp_path / "saga.db")
+        exchange = PaperExchange(bus=bus, clock=clock, fill_model=ImmediateFillModel())
+        engine = Engine(bus=bus, clock=clock, store=store, exchange=exchange, feed=_BlockingFeed())
+
+        run = asyncio.create_task(engine.run())
+        await asyncio.wait_for(_until(lambda: engine.state is ComponentState.RUNNING), timeout=5)
+        # Mid-run the bus is connected: the broker handed out started clients.
+        assert [p.started for p in broker.producers] == [True]
+        assert [c.started for c in broker.consumers] == [True]
+        await asyncio.wait_for(engine.stop(), timeout=5)
+        return await asyncio.wait_for(run, timeout=5), engine
+
+    exit_code, engine = asyncio.run(main())
+
+    assert exit_code == 0
+    assert engine.state is ComponentState.STOPPED
+    # The reverse shutdown closed the bus: every client disconnected.
+    assert [p.started for p in broker.producers] == [False]
+    assert [c.started for c in broker.consumers] == [False]
+
+
+class _FaultingFeedThatRecordsStop:
+    """A feed whose read loop faults the engine, recording whether teardown
+    still stopped it — the fault path must cut the venue connection too.
+    A ``MarketFeed`` double at the venue boundary."""
+
+    def __init__(self) -> None:
+        self.stopped = False
+
+    async def start(self) -> None:
+        raise InvariantViolation("the read loop broke an engine assumption")
+
+    async def stop(self) -> None:
+        self.stopped = True
+
+
+def test_the_fault_path_walks_the_same_teardown_feed_stopped_and_bus_closed(
+    tmp_path: Path,
+) -> None:
+    """The faulted teardown shares membership and order with the graceful one,
+    differing only in failure policy (ADR-0024): a fault must still stop the
+    feed (a live WS must not leak) and close the bus (a Kafka producer must
+    flush — buffered writes survive the fault)."""
+    broker = FakeKafkaBroker()
+    feed = _FaultingFeedThatRecordsStop()
+
+    async def faulted_life() -> tuple[int, Engine]:
+        bus = _kafka_bus(broker)
+        clock = ManualClock()
+        store = SQLiteStore(tmp_path / "saga.db")
+        exchange = PaperExchange(bus=bus, clock=clock, fill_model=ImmediateFillModel())
+        engine = Engine(bus=bus, clock=clock, store=store, exchange=exchange, feed=feed)
+        return await engine.run(), engine
+
+    exit_code, engine = asyncio.run(faulted_life())
+
+    assert exit_code != 0
+    assert engine.state is ComponentState.FAULTED
+    assert feed.stopped, "the fault path must stop the feed, not just cancel its task"
+    assert [p.started for p in broker.producers] == [False]
+    assert [c.started for c in broker.consumers] == [False]
 
 
 def test_graceful_stop_leaves_resting_live_orders_for_the_next_start_to_re_adopt(

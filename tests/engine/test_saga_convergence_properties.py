@@ -1,27 +1,31 @@
 """Property suites: the saga converges under at-least-once delivery (ADR-0002).
 
-Everything here runs through real components — ``InMemoryBus``,
-``ExecutionManager``, ``PaperExchange``, ``SQLiteStore(":memory:")`` — with
-Hypothesis actively injecting the duplicates a redelivering bus would produce:
-resent ``Signal``s, redelivered ``FillReport``s, and multi-part fills with
-copies interleaved. Convergence means the duplicated run ends in exactly the
-baseline's saga state, with no extra order placement and no double-counted
-``cum_qty``.
+Everything here runs through real components — the bus, ``ExecutionManager``,
+``PaperExchange``, ``SQLiteStore(":memory:")`` — with Hypothesis actively
+injecting the duplicates a redelivering bus would produce: resent ``Signal``s,
+redelivered ``FillReport``s, and multi-part fills with copies interleaved.
+Convergence means the duplicated run ends in exactly the baseline's saga
+state, with no extra order placement and no double-counted ``cum_qty``.
+
+Every property runs parametrized over both bus backends (issue #20):
+``InMemoryBus`` and ``KafkaBus`` over the fake broker, one observable saga
+either way (ADR-0023/0028).
 """
 
 import asyncio
 from decimal import Decimal
 
 import pytest
+from bus_backends import BUS_BACKENDS, make_bus
 from hypothesis import given
 from hypothesis import strategies as st
 
-from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     AggressorSide,
+    EventBus,
     ExecutionReport,
     FillReport,
     MarketTick,
@@ -41,8 +45,8 @@ from tickwright.engine.execution import ExecutionManager
 _CLOID = derive_cloid("trivial:BTC:1")
 
 
-def _wire() -> tuple[InMemoryBus, SQLiteStore, list[OrderEvent]]:
-    bus = InMemoryBus()
+def _wire(backend: str) -> tuple[EventBus, SQLiteStore, list[OrderEvent]]:
+    bus = make_bus(backend)
     clock = ManualClock(start_ns=1_000)
     store = SQLiteStore(":memory:")
     exchange = PaperExchange(bus=bus, clock=clock, fill_model=ImmediateFillModel())
@@ -104,11 +108,12 @@ def _fingerprint(events: list[OrderEvent]) -> list[tuple[str, str]]:
     return [(type(ev).__name__, ev.event_id) for ev in events]
 
 
-def _run_with_redeliveries(plan: list[str]) -> tuple[SQLiteStore, list[OrderEvent]]:
+def _run_with_redeliveries(plan: list[str], backend: str) -> tuple[SQLiteStore, list[OrderEvent]]:
     """One happy-path placement, then redeliver duplicates per ``plan``."""
-    bus, store, order_events = _wire()
+    bus, store, order_events = _wire(backend)
 
     async def scenario() -> None:
+        await bus.start()
         await bus.publish(_tick())
         await bus.publish(_signal())
         for kind in plan:
@@ -117,15 +122,20 @@ def _run_with_redeliveries(plan: list[str]) -> tuple[SQLiteStore, list[OrderEven
             else:
                 # The exact fill the paper exchange emitted, redelivered.
                 await bus.publish(_fill_report(f"{_CLOID}-1", Decimal("0.5")))
+        await bus.drain()
+        await bus.close()
 
     asyncio.run(scenario())
     return store, order_events
 
 
+@pytest.mark.parametrize("backend", BUS_BACKENDS)
 @given(plan=st.lists(st.sampled_from(["signal", "fill"]), max_size=6))
-def test_duplicate_signals_and_reports_converge_to_the_baseline_saga(plan: list[str]) -> None:
-    baseline_store, baseline_events = _run_with_redeliveries([])
-    store, order_events = _run_with_redeliveries(plan)
+def test_duplicate_signals_and_reports_converge_to_the_baseline_saga(
+    backend: str, plan: list[str]
+) -> None:
+    baseline_store, baseline_events = _run_with_redeliveries([], backend)
+    store, order_events = _run_with_redeliveries(plan, backend)
 
     record = store.get_order(_CLOID)
     baseline = baseline_store.get_order(_CLOID)
@@ -142,6 +152,7 @@ def test_duplicate_signals_and_reports_converge_to_the_baseline_saga(plan: list[
     assert trades == {f"{_CLOID}-1"}
 
 
+@pytest.mark.parametrize("backend", BUS_BACKENDS)
 @given(
     parts=st.lists(
         st.tuples(st.integers(min_value=1, max_value=5), st.integers(min_value=1, max_value=3)),
@@ -151,7 +162,7 @@ def test_duplicate_signals_and_reports_converge_to_the_baseline_saga(plan: list[
     data=st.data(),
 )
 def test_duplicated_fill_reports_never_double_count_cum_qty(
-    parts: list[tuple[int, int]], data: st.DataObject
+    backend: str, parts: list[tuple[int, int]], data: st.DataObject
 ) -> None:
     quantities = [Decimal(tenths) / 10 for tenths, _ in parts]
     total = sum(quantities, Decimal("0"))
@@ -164,15 +175,20 @@ def test_duplicated_fill_reports_never_double_count_cum_qty(
     ]
     deliveries = data.draw(st.permutations(deliveries))
 
-    bus, store, order_events = _wire()
+    bus, store, order_events = _wire(backend)
 
     async def scenario() -> None:
+        await bus.start()
         # No tick cached: the send crashes, leaving an in-flight saga the
-        # venue's (duplicated) fill stream then resolves.
+        # venue's (duplicated) fill stream then resolves. Containment parity:
+        # the handler's exception surfaces in the causing publish on both
+        # backends.
         with pytest.raises(ValueError):
             await bus.publish(_signal(quantity=total))
         for report in deliveries:
             await bus.publish(report)
+        await bus.drain()
+        await bus.close()
 
     asyncio.run(scenario())
 

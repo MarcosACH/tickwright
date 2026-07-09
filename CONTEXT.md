@@ -29,8 +29,10 @@ The transport every component couples through — publish/subscribe by event typ
 durability/replay), **not** a process-topology switch. Delivery is **at-least-once**
 (duplicates legal, [[Idempotent consumer|consumers must be idempotent]]) and ordered
 **per symbol only** (every event keyed by symbol; cross-symbol order is not guaranteed). The
-interface is **pub/sub only** (`publish`/`subscribe`); query-shaped reads (e.g. reconciliation
-reading the exchange) are direct Protocol method calls, not bus messages. Dispatch on the
+interface is **pub/sub plus lifecycle** (`publish`/`subscribe`, and `start`/`drain`/`close`
+for the runner's ordered startup and reverse shutdown, ADR-0024 — all no-ops in-memory);
+never query-shaped: reads (e.g. reconciliation reading the exchange) are direct Protocol
+method calls, not bus messages. Dispatch on the
 `InMemoryBus` is **synchronous and inline**, with a drain-to-quiescence FIFO for reentrant
 publishes (so a cascade mirrors `KafkaBus`'s poll-loop); [[Conflation]] of market data happens
 upstream at the feed, never in the bus. On the Kafka path all events ride **one topic keyed by

@@ -21,14 +21,34 @@ type Handler[E: Event] = Callable[[E], Awaitable[None]]
 
 @runtime_checkable
 class EventBus(Protocol):
-    """Publish/subscribe transport (ADR-0023). Pub/sub only — no query surface."""
+    """Publish/subscribe transport (ADR-0023). Pub/sub only — no query surface.
+
+    Lifecycle rides the seam because the runner starts and stops the bus in
+    its ordered sequence (ADR-0024): in-memory both verbs are no-ops; Kafka
+    connects on ``start`` and flushes/commits on ``close``.
+    """
 
     def subscribe[E: Event](self, event_type: type[E], handler: Handler[E]) -> None:
         """Register ``handler`` for every published event that is an ``event_type``."""
         ...
 
+    async def start(self) -> None:
+        """Connect the transport (ADR-0024 startup step 3). In-memory: no-op."""
+        ...
+
     async def publish(self, event: Event) -> None:
         """Publish ``event``, draining the whole reentrant cascade to quiescence."""
+        ...
+
+    async def drain(self) -> None:
+        """Return once every event published so far — including events handlers
+        published while draining — has been delivered (ADR-0024's shutdown
+        drain). In-memory: no-op, ``publish`` already drained; Kafka: wait for
+        this process's produced records to be dispatched and committed."""
+        ...
+
+    async def close(self) -> None:
+        """Stop delivering and flush anything buffered; safe on a never-started bus."""
         ...
 
 
