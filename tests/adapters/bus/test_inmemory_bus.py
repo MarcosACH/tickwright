@@ -64,6 +64,7 @@ def test_lifecycle_is_a_no_op_and_satisfies_the_eventbus_seam() -> None:
     async def scenario() -> None:
         await bus.start()
         await bus.publish(_tick())
+        await bus.drain()  # nothing can be in flight: publish already drained
         await bus.close()
 
     asyncio.run(scenario())

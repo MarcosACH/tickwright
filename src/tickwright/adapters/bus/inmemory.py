@@ -34,6 +34,9 @@ class InMemoryBus:
     async def start(self) -> None:
         """Nothing to connect: dispatch is in-process by reference."""
 
+    async def drain(self) -> None:
+        """Nothing can be in flight: publish drained every cascade it began."""
+
     async def close(self) -> None:
         """Nothing to flush: publish already drained every cascade it began."""
 

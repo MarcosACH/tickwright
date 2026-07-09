@@ -29,15 +29,24 @@ from tickwright.domain.protocols import Handler
 from .serde import decode_event, encode_event
 
 
+class _RecordCoordinates(Protocol):
+    """Where a record landed: aiokafka's ``RecordMetadata`` / consumed-message slice."""
+
+    @property
+    def partition(self) -> int: ...
+    @property
+    def offset(self) -> int: ...
+
+
 class _ProducerLike(Protocol):
     """The slice of the aiokafka producer surface the bus stands on."""
 
     async def start(self) -> None: ...
     async def stop(self) -> None: ...
-    async def send_and_wait(self, topic: str, value: bytes, key: bytes) -> object: ...
+    async def send_and_wait(self, topic: str, value: bytes, key: bytes) -> _RecordCoordinates: ...
 
 
-class _ConsumedRecord(Protocol):
+class _ConsumedRecord(_RecordCoordinates, Protocol):
     """The slice of one consumed message the bus reads."""
 
     @property
@@ -74,6 +83,13 @@ class KafkaBus:
         self._consumer: _ConsumerLike | None = None
         self._poll_task: asyncio.Task[None] | None = None
         self._subscriptions: list[tuple[type[Event], Handler[Event]]] = []
+        # The drain ledger: highest offset this process produced per partition,
+        # against the next-to-consume position the poll loop has committed.
+        # Single process, single group (ADR-0001): we are the only producer, so
+        # "our records are committed" is exactly "the topic went idle".
+        self._produced_high_water: dict[int, int] = {}
+        self._committed_position: dict[int, int] = {}
+        self._progress = asyncio.Event()
 
     def subscribe[E: Event](self, event_type: type[E], handler: Handler[E]) -> None:
         # Same storage-and-guard shape as InMemoryBus: stored as Handler[Event],
@@ -97,8 +113,29 @@ class KafkaBus:
     async def publish(self, event: Event) -> None:
         if self._producer is None:
             raise RuntimeError("KafkaBus.publish before start()")
-        await self._producer.send_and_wait(
+        placed = await self._producer.send_and_wait(
             self._topic, value=encode_event(event), key=event.partition_key.encode()
+        )
+        current = self._produced_high_water.get(placed.partition, -1)
+        self._produced_high_water[placed.partition] = max(current, placed.offset)
+
+    async def drain(self) -> None:
+        """Wait until every record this process produced was dispatched and committed.
+
+        A handler publishing mid-drain raises the high-water mark, so the wait
+        naturally extends to the whole reentrant cascade — the Kafka face of
+        the in-memory drain-to-quiescence contract (ADR-0023/0024).
+        """
+        while True:
+            self._progress.clear()
+            if not self._in_flight():
+                return
+            await self._progress.wait()
+
+    def _in_flight(self) -> bool:
+        return any(
+            self._committed_position.get(partition, 0) <= high_water
+            for partition, high_water in self._produced_high_water.items()
         )
 
     async def close(self) -> None:
@@ -126,3 +163,5 @@ class KafkaBus:
                 if isinstance(event, event_type):
                     await handler(event)
             await consumer.commit()
+            self._committed_position[record.partition] = record.offset + 1
+            self._progress.set()

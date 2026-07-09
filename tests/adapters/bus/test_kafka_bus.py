@@ -62,9 +62,12 @@ class FakeKafkaBroker:
     def partition_for(self, key: bytes) -> int:
         return zlib.crc32(key) % self.partition_count
 
-    def produce(self, key: bytes, value: bytes) -> None:
-        self.partitions[self.partition_for(key)].append((key, value))
+    def produce(self, key: bytes, value: bytes) -> _Record:
+        partition = self.partition_for(key)
+        self.partitions[partition].append((key, value))
         self._notify()
+        offset = len(self.partitions[partition]) - 1
+        return _Record(value=value, key=key, partition=partition, offset=offset)
 
     def _notify(self) -> None:
         self._changed.set()
@@ -98,9 +101,9 @@ class FakeProducer:
     async def stop(self) -> None:
         self.started = False
 
-    async def send_and_wait(self, topic: str, value: bytes, key: bytes) -> None:
+    async def send_and_wait(self, topic: str, value: bytes, key: bytes) -> _Record:
         assert self.started, "send before producer.start()"
-        self._broker.produce(key, value)
+        return self._broker.produce(key, value)
 
 
 class FakeConsumer:
@@ -191,3 +194,30 @@ def test_subscribed_handler_receives_events_consumed_from_the_topic() -> None:
     # Same symbol -> same partition -> delivered in publish order, and
     # `all_committed` returning proves offsets advanced only after dispatch.
     assert seen == [_tick(1), _tick(2)]
+
+
+def test_drain_returns_only_after_every_published_event_was_dispatched() -> None:
+    # The ADR-0024 shutdown drain: over Kafka "the FIFO went idle" means every
+    # record this process produced has been delivered and committed — including
+    # records a handler published mid-drain (the reentrant cascade tail).
+    broker = FakeKafkaBroker()
+    bus = _wire(broker)
+    seen: list[MarketTick] = []
+
+    async def cascade(event: MarketTick) -> None:
+        seen.append(event)
+        if event.seq == 1:
+            await bus.publish(_tick(2, symbol="ETH"))
+
+    bus.subscribe(MarketTick, cascade)
+
+    async def scenario() -> None:
+        await bus.start()
+        await bus.publish(_tick(1, symbol="BTC"))
+        await bus.drain()
+        # No sleeps, no fake-broker helpers: drain alone must be the fence.
+        assert seen == [_tick(1, symbol="BTC"), _tick(2, symbol="ETH")]
+        assert broker.committed == [len(p) for p in broker.partitions]
+        await bus.close()
+
+    asyncio.run(scenario())

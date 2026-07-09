@@ -40,6 +40,13 @@ class EventBus(Protocol):
         """Publish ``event``, draining the whole reentrant cascade to quiescence."""
         ...
 
+    async def drain(self) -> None:
+        """Return once every event published so far — including events handlers
+        published while draining — has been delivered (ADR-0024's shutdown
+        drain). In-memory: no-op, ``publish`` already drained; Kafka: wait for
+        this process's produced records to be dispatched and committed."""
+        ...
+
     async def close(self) -> None:
         """Stop delivering and flush anything buffered; safe on a never-started bus."""
         ...
