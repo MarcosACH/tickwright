@@ -96,6 +96,7 @@ filterwarnings = ["error::ResourceWarning"]
 # default `uv run pytest` stays hermetic; `-m "not postgres"` deselects them.
 markers = [
     "postgres: needs a reachable Postgres server (auto-skips without STORE_POSTGRES_DSN)",
+    "live: places real orders on Hyperliquid testnet (auto-skips without TICKWRIGHT_HYPERLIQUID__SIGNING_KEY; run manually/nightly, never in the CI gate, ADR-0022)",
 ]
 
 [tool.coverage.run]

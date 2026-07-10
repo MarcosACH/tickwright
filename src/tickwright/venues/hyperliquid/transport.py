@@ -21,7 +21,10 @@ async def post_json(url: str, payload: dict[str, Any]) -> object:
     import aiohttp
 
     try:
-        async with aiohttp.ClientSession() as session:
+        # A bounded total per request: a hung venue read must surface as the
+        # OSError the connectivity guard keys on, not stall its caller.
+        timeout = aiohttp.ClientTimeout(total=30)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(url, json=payload) as response:
                 response.raise_for_status()
                 return await response.json()
