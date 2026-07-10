@@ -65,8 +65,9 @@ uv venv                 # create .venv
 uv sync                 # install locked deps
 source .venv/bin/activate   # optional; or prefix commands with `uv run`
 
-# infrastructure for the Kafka bus path (optional; the in-memory bus needs nothing)
-# docker compose up -d        # (compose file added during implementation)
+# infrastructure for the non-default backends (optional; the hermetic
+# in-memory-bus + SQLite path needs nothing)
+docker compose up -d postgres   # Postgres for the PostgresStore path (ADR-0019)
 ```
 
 ## Tests
@@ -82,6 +83,7 @@ Run with the project venv via `uv run`:
 - `hypothesis` for property-based tests. Target **≥90% coverage** on the core.
 - Mock at process boundaries only (HTTP/WS, Kafka client, system clock, randomness). Never mock our own classes.
 - The default paper-exchange + in-memory-bus path runs with **no external services and no API keys**.
+- Tests marked `postgres` need a real Postgres (`PostgresStore` contract, ADR-0019); they auto-skip unless `STORE_POSTGRES_DSN` points at a reachable server. Bring one up with `docker compose up -d postgres`, then `STORE_POSTGRES_DSN=postgresql://tickwright:tickwright@localhost:5432/tickwright uv run pytest -m postgres`. `-m "not postgres"` deselects them.
 
 ## Linting & formatting
 
@@ -103,4 +105,4 @@ uv run lint-imports   # dependency-direction boundaries (ADR-0032)
 
 The CLI (`tickwright` / `python -m tickwright.app`) reads `AppConfig` from the environment and `.env`. **`.env.example` is the canonical variable reference** — every variable maps onto `AppConfig` (`src/tickwright/app/config.py`) with the `TICKWRIGHT_` prefix, `__` for nesting, and JSON for complex values (e.g. `TICKWRIGHT_REPLAY__PATH`, `TICKWRIGHT_STRATEGIES`).
 
-The `KafkaBus` backend reads `TICKWRIGHT_BUS=kafka` plus `TICKWRIGHT_KAFKA__{BOOTSTRAP_SERVERS,EVENTS_TOPIC,GROUP_ID}`. Later slices add their variables with their impls (e.g. `HYPERLIQUID_TESTNET` for the live exchange path).
+The `KafkaBus` backend reads `TICKWRIGHT_BUS=kafka` plus `TICKWRIGHT_KAFKA__{BOOTSTRAP_SERVERS,EVENTS_TOPIC,GROUP_ID}`. The `PostgresStore` backend reads `TICKWRIGHT_STORE=postgres` plus `TICKWRIGHT_POSTGRES__DSN` (ADR-0019; the `docker compose up postgres` service is its default). Later slices add their variables with their impls (e.g. `HYPERLIQUID_TESTNET` for the live exchange path).
