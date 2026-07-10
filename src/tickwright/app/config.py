@@ -20,6 +20,7 @@ from tickwright.adapters.paper import PaperExchangeConfig
 from tickwright.adapters.store import PostgresStoreConfig, SQLiteStoreConfig
 from tickwright.domain import Side
 from tickwright.engine.runner import EngineConfig
+from tickwright.venues.hyperliquid import HyperliquidConfig
 
 
 class StrategyConfig(BaseModel):
@@ -58,15 +59,26 @@ class AppConfig(BaseSettings):
     bus: Literal["in_memory", "kafka"] = "in_memory"
     store: Literal["sqlite", "postgres"] = "sqlite"
     exchange: Literal["paper"] = "paper"
-    feed: Literal["replay"] = "replay"
+    feed: Literal["replay", "hyperliquid"] = "replay"
     guard: Literal["real", "noop"] = "real"
 
     # The per-adapter configs (each defined in its adapter's package).
     sqlite: SQLiteStoreConfig = SQLiteStoreConfig()
     postgres: PostgresStoreConfig = PostgresStoreConfig()
-    replay: ReplayFeedConfig
+    replay: ReplayFeedConfig | None = None
+    hyperliquid: HyperliquidConfig = HyperliquidConfig()
     paper: PaperExchangeConfig = PaperExchangeConfig()
     kafka: KafkaBusConfig = KafkaBusConfig()
 
     strategies: list[StrategyConfig] = Field(default_factory=list)
     engine: EngineConfig = EngineConfig()
+
+    @model_validator(mode="after")
+    def _the_selected_feed_needs_its_config(self) -> Self:
+        if self.feed == "replay" and self.replay is None:
+            raise ValueError("feed='replay' needs a tick file: set TICKWRIGHT_REPLAY__PATH")
+        if self.feed == "hyperliquid" and not self.hyperliquid.symbols:
+            raise ValueError(
+                "feed='hyperliquid' needs at least one symbol: set TICKWRIGHT_HYPERLIQUID__SYMBOLS"
+            )
+        return self

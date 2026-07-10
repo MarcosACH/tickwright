@@ -18,12 +18,13 @@ from pydantic import ValidationError
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.bus.kafka import KafkaBus
-from tickwright.adapters.clock import ManualClock
+from tickwright.adapters.clock import LiveClock, ManualClock
 from tickwright.adapters.feed import ReplayFeed, ReplayFeedConfig
 from tickwright.adapters.paper import PaperExchange, PaperExchangeConfig
 from tickwright.adapters.store import SQLiteStore, SQLiteStoreConfig
 from tickwright.app.build import (
     build_bus,
+    build_clock,
     build_engine,
     build_exchange,
     build_feed,
@@ -34,6 +35,7 @@ from tickwright.app.config import AppConfig, StrategyConfig
 from tickwright.domain import InstrumentSpec, OrderState, Side, derive_cloid
 from tickwright.engine.guard import NoopGuard, RealGuard
 from tickwright.engine.runner import Engine
+from tickwright.venues.hyperliquid import HyperliquidFeed
 
 _SPEC = InstrumentSpec(
     symbol="BTC", sz_decimals=3, max_decimals=6, max_sig_figs=5, min_notional=Decimal("10")
@@ -96,6 +98,25 @@ def test_exchange_discriminant_selects_the_paper_exchange(tmp_path: Path) -> Non
 def test_feed_discriminant_selects_the_replay_feed(tmp_path: Path) -> None:
     feed = build_feed(_config(tmp_path, feed="replay"), bus=InMemoryBus(), clock=ManualClock())
     assert isinstance(feed, ReplayFeed)
+
+
+def test_feed_discriminant_selects_the_hyperliquid_feed(tmp_path: Path) -> None:
+    config = _config(tmp_path, feed="hyperliquid", hyperliquid={"symbols": ["BTC"]})
+    feed = build_feed(config, bus=InMemoryBus(), clock=LiveClock())
+    assert isinstance(feed, HyperliquidFeed)
+
+
+def test_the_clock_follows_the_feed_discriminant(tmp_path: Path) -> None:
+    # Replay drives virtual time (ADR-0027); the live feed runs on the wall
+    # clock — the pairing is the root's job, not the operator's.
+    assert isinstance(build_clock(_config(tmp_path)), ManualClock)
+    live = _config(tmp_path, feed="hyperliquid", hyperliquid={"symbols": ["BTC"]})
+    assert isinstance(build_clock(live), LiveClock)
+
+
+def test_a_hyperliquid_feed_with_no_symbols_is_a_readable_config_error(tmp_path: Path) -> None:
+    with pytest.raises(ValidationError, match="symbol"):
+        _config(tmp_path, feed="hyperliquid")
 
 
 @pytest.mark.parametrize(("kind", "expected"), [("real", RealGuard), ("noop", NoopGuard)])

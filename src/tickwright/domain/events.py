@@ -65,11 +65,16 @@ class MarketTick(Event):
     aggressor_side: AggressorSide
     trade_id: str
     seq: int
+    venue_trade_id: bool = False
+    """Whether ``trade_id`` is a venue-assigned id (the live path, ADR-0027).
+    Replay never sets it: a file-sourced trade id is not assumed unique."""
 
     @property
     def event_id(self) -> str:
-        # Weak key (audit/log only, not a correctness key). Replay form,
-        # ADR-0027: a real venue trade id is not assumed on this path.
+        # Weak key (audit/log only, not a correctness key), ADR-0027: the live
+        # form leans on the venue's own trade id; the replay form cannot.
+        if self.venue_trade_id:
+            return f"{self.symbol}:{self.trade_id}"
         return f"{self.symbol}:{self.ts_event}:{self.seq}"
 
     @property

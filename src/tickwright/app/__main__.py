@@ -16,10 +16,10 @@ from .config import AppConfig
 
 
 def main() -> int:
-    # The required fields (the replay path) come from the environment/.env at
-    # runtime — a missing one is a readable pydantic validation error, which is
-    # exactly the CLI contract; mypy just can't see the env.
-    config = AppConfig()  # type: ignore[call-arg]
+    # Everything comes from the environment/.env at runtime — a missing or
+    # inconsistent field (feed=replay without a tick file, say) is a readable
+    # pydantic validation error, which is exactly the CLI contract.
+    config = AppConfig()
     configure_logging()
     engine = build_engine(config)
     return asyncio.run(engine.run())

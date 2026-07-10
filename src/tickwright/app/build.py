@@ -11,7 +11,7 @@ from collections.abc import Mapping
 from typing import assert_never
 
 from tickwright.adapters.bus import InMemoryBus
-from tickwright.adapters.clock import ManualClock
+from tickwright.adapters.clock import LiveClock, ManualClock
 from tickwright.adapters.feed import ReplayFeed
 from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.adapters.store import SQLiteStore
@@ -29,6 +29,10 @@ from tickwright.domain import (
 from tickwright.engine.guard import NoopGuard, RealGuard
 from tickwright.engine.runner import Engine
 from tickwright.strategies import SingleShotLimitStrategy, SingleShotMarketStrategy
+
+# Imported at module top, unlike the kafka/psycopg arms: the venue package is
+# light — the websockets client loads only when a live connection is opened.
+from tickwright.venues.hyperliquid import HyperliquidFeed
 
 from .config import AppConfig, StrategyConfig
 
@@ -80,10 +84,28 @@ def build_exchange(config: AppConfig, *, bus: EventBus, clock: Clock) -> Exchang
             assert_never(unreachable)
 
 
-def build_feed(config: AppConfig, *, bus: EventBus, clock: ReplayClock) -> MarketFeed:
+def build_clock(config: AppConfig) -> Clock:
+    """The clock is the feed's consequence, not a free choice: replay drives
+    virtual time (ADR-0027), a live feed runs on the wall clock (ADR-0005)."""
     match config.feed:
         case "replay":
+            return ManualClock()
+        case "hyperliquid":
+            return LiveClock()
+        case unreachable:
+            assert_never(unreachable)
+
+
+def build_feed(config: AppConfig, *, bus: EventBus, clock: Clock) -> MarketFeed:
+    match config.feed:
+        case "replay":
+            # Both narrowings hold by construction: config validation requires
+            # the replay section, and build_clock pairs replay with ManualClock.
+            assert config.replay is not None
+            assert isinstance(clock, ReplayClock)
             return ReplayFeed(path=config.replay.path, bus=bus, clock=clock)
+        case "hyperliquid":
+            return HyperliquidFeed(config=config.hyperliquid, bus=bus, clock=clock)
         case unreachable:
             assert_never(unreachable)
 
@@ -111,9 +133,7 @@ def build_engine(config: AppConfig) -> Engine:
     (ADR-0031) — the one placement where both sides are concrete.
     """
     bus = build_bus(config)
-    # The replay feed drives virtual time (ADR-0027); the live slice will
-    # derive a LiveClock from a live feed discriminant when one ships.
-    clock = ManualClock()
+    clock = build_clock(config)
     store = build_store(config)
     exchange = build_exchange(config, bus=bus, clock=clock)
     feed = build_feed(config, bus=bus, clock=clock)

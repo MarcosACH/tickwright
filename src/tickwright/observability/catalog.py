@@ -29,6 +29,12 @@ class NamedEvent(StrEnum):
     ORDER_FAILED = "order.failed"
     ORDER_CANCELLED = "order.cancelled"
 
+    # Live-feed ingress: a conflation drop under backpressure, and a
+    # malformed-frame drop that is skipped instead of faulting the engine
+    # (``HyperliquidFeed``, ADR-0023).
+    FEED_LAGGED = "feed.lagged"
+    FEED_FRAME_DROPPED = "feed.frame_dropped"
+
     # Engine lifecycle (``Engine`` runner, ADR-0024).
     ENGINE_BARRIER_CLEARED = "engine.barrier_cleared"
     ENGINE_FEED_STARTED = "engine.feed_started"
