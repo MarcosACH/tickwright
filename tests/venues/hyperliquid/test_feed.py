@@ -11,37 +11,15 @@ import json
 from decimal import Decimal
 from pathlib import Path
 
+from hyperliquid_fakes import FakeWsConnection, trade, trades_frame
+
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.domain import AggressorSide, MarketTick
+from tickwright.observability.testing import capture_events
 from tickwright.venues.hyperliquid import HyperliquidConfig, HyperliquidFeed
 
 _FIXTURES = Path(__file__).parent / "fixtures"
-
-
-class FakeWsConnection:
-    """A recorded-frame WS connection: replays frames, records sends, then idles
-    (a live socket delivers nothing between trades) until closed."""
-
-    def __init__(self, frames: list[str]) -> None:
-        self.sent: list[str] = []
-        self._frames = list(frames)
-        self._closed = asyncio.Event()
-
-    async def send(self, message: str) -> None:
-        self.sent.append(message)
-
-    async def close(self) -> None:
-        self._closed.set()
-
-    def __aiter__(self) -> "FakeWsConnection":
-        return self
-
-    async def __anext__(self) -> str:
-        if self._frames:
-            return self._frames.pop(0)
-        await self._closed.wait()
-        raise StopAsyncIteration
 
 
 def _fixture_frames() -> list[str]:
@@ -86,16 +64,6 @@ def _drive(
     return asyncio.run(main())
 
 
-def _trades_frame(*trades: dict) -> str:
-    return json.dumps({"channel": "trades", "data": list(trades)})
-
-
-def _trade(
-    coin: str, px: str, tid: int, *, side: str = "B", sz: str = "1", time: int = 1_700_000_000_000
-) -> dict:
-    return {"coin": coin, "side": side, "px": px, "sz": sz, "time": time, "tid": tid}
-
-
 def test_recorded_trades_frames_parse_into_market_ticks() -> None:
     seen, _ = _drive(_fixture_frames(), symbols=["BTC"], until_ticks=2)
 
@@ -112,7 +80,7 @@ def test_recorded_trades_frames_parse_into_market_ticks() -> None:
 
 
 def test_subscribes_the_trades_channel_per_configured_symbol() -> None:
-    frames = [_trades_frame(_trade("BTC", "100", 1))]
+    frames = [trades_frame(trade("BTC", "100", 1))]
     _, connection = _drive(frames, symbols=["BTC", "ETH"], until_ticks=1)
 
     assert [json.loads(m) for m in connection.sent] == [
@@ -122,7 +90,7 @@ def test_subscribes_the_trades_channel_per_configured_symbol() -> None:
 
 
 def test_prices_and_sizes_parse_to_decimal_never_float() -> None:
-    frames = [_trades_frame(_trade("BTC", "0.1", 1, sz="0.2"))]
+    frames = [trades_frame(trade("BTC", "0.1", 1, sz="0.2"))]
     seen, _ = _drive(frames, symbols=["BTC"], until_ticks=1)
 
     assert isinstance(seen[0].price, Decimal)
@@ -131,7 +99,7 @@ def test_prices_and_sizes_parse_to_decimal_never_float() -> None:
 
 
 def test_batched_trades_frame_yields_one_tick_per_trade_in_order() -> None:
-    frames = [_trades_frame(_trade("BTC", "100", 1), _trade("BTC", "101", 2))]
+    frames = [trades_frame(trade("BTC", "100", 1), trade("BTC", "101", 2))]
     seen, _ = _drive(frames, symbols=["BTC"], until_ticks=2)
 
     assert [t.trade_id for t in seen] == ["1", "2"]
@@ -139,9 +107,9 @@ def test_batched_trades_frame_yields_one_tick_per_trade_in_order() -> None:
 
 def test_assigns_per_symbol_source_sequence() -> None:
     frames = [
-        _trades_frame(_trade("BTC", "100", 1)),
-        _trades_frame(_trade("ETH", "50", 2)),
-        _trades_frame(_trade("BTC", "101", 3)),
+        trades_frame(trade("BTC", "100", 1)),
+        trades_frame(trade("ETH", "50", 2)),
+        trades_frame(trade("BTC", "101", 3)),
     ]
     seen, _ = _drive(frames, symbols=["BTC", "ETH"], until_ticks=3)
 
@@ -150,18 +118,87 @@ def test_assigns_per_symbol_source_sequence() -> None:
 
 
 def test_live_ticks_dedup_on_the_venue_trade_id() -> None:
-    frames = [_trades_frame(_trade("BTC", "100", 900000000000001))]
+    frames = [trades_frame(trade("BTC", "100", 900000000000001))]
     seen, _ = _drive(frames, symbols=["BTC"], until_ticks=1)
 
     # Live-form weak key (ADR-0027): {symbol}:{tid}, not the replay form.
     assert seen[0].event_id == "BTC:900000000000001"
 
 
+def test_slow_consumer_gets_only_the_latest_tick_per_symbol_with_one_lagged_per_drop() -> None:
+    """ADR-0023: under backpressure the feed conflates — newest tick per symbol
+    wins, every dropped tick emits one ``feed.lagged`` — while the WS keeps
+    draining. Here the first publish blocks; three more ticks arrive meanwhile
+    (BTC 101 → superseded by BTC 102 → one drop; ETH 50 kept)."""
+
+    async def main() -> tuple[list[MarketTick], list[dict]]:
+        bus = InMemoryBus()
+        clock = ManualClock()
+        seen: list[MarketTick] = []
+        release = asyncio.Event()
+        first_delivered = asyncio.Event()
+
+        async def slow_consumer(tick: MarketTick) -> None:
+            seen.append(tick)
+            if len(seen) == 1:
+                first_delivered.set()
+                await release.wait()
+
+        bus.subscribe(MarketTick, slow_consumer)
+        connection = FakeWsConnection(
+            [
+                trades_frame(trade("BTC", "100", 1)),
+                trades_frame(trade("BTC", "101", 2)),
+                trades_frame(trade("BTC", "102", 3)),
+                trades_frame(trade("ETH", "50", 4)),
+            ]
+        )
+
+        async def connect(url: str) -> FakeWsConnection:
+            return connection
+
+        feed = HyperliquidFeed(
+            config=HyperliquidConfig(symbols=["BTC", "ETH"]),
+            bus=bus,
+            clock=clock,
+            connect=connect,
+        )
+        with capture_events() as logs:
+            run = asyncio.create_task(feed.start())
+            await asyncio.wait_for(first_delivered.wait(), timeout=2)
+            # The publish is stuck in the slow consumer; the reader must still
+            # drain the socket to the end before we let the consumer go.
+            await asyncio.wait_for(connection.drained.wait(), timeout=2)
+            release.set()
+
+            async def rest_published() -> None:
+                while len(seen) < 3:
+                    await asyncio.sleep(0)
+
+            await asyncio.wait_for(rest_published(), timeout=2)
+            await feed.stop()
+            await asyncio.wait_for(run, timeout=2)
+        return seen, [log for log in logs if log["event"] == "feed.lagged"]
+
+    seen, lagged = asyncio.run(main())
+
+    # Latest per symbol only: BTC 101 was superseded while the consumer stalled.
+    assert [(t.symbol, t.price) for t in seen] == [
+        ("BTC", Decimal("100")),
+        ("BTC", Decimal("102")),
+        ("ETH", Decimal("50")),
+    ]
+    # Exactly one drop, named per ADR-0020/0023, identifying the dropped tick.
+    assert len(lagged) == 1
+    assert lagged[0]["symbol"] == "BTC"
+    assert lagged[0]["dropped_trade_id"] == "2"
+
+
 def test_non_trades_frames_are_ignored() -> None:
     frames = [
         json.dumps({"channel": "subscriptionResponse", "data": {"method": "subscribe"}}),
         json.dumps({"channel": "pong"}),
-        _trades_frame(_trade("BTC", "100", 1)),
+        trades_frame(trade("BTC", "100", 1)),
     ]
     seen, _ = _drive(frames, symbols=["BTC"], until_ticks=1)
 

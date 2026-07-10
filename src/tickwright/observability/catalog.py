@@ -29,6 +29,9 @@ class NamedEvent(StrEnum):
     ORDER_FAILED = "order.failed"
     ORDER_CANCELLED = "order.cancelled"
 
+    # Live-feed ingress conflation (``HyperliquidFeed``, ADR-0023).
+    FEED_LAGGED = "feed.lagged"
+
     # Engine lifecycle (``Engine`` runner, ADR-0024).
     ENGINE_BARRIER_CLEARED = "engine.barrier_cleared"
     ENGINE_FEED_STARTED = "engine.feed_started"
