@@ -16,10 +16,10 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Protocol
 
 from tickwright.domain import AggressorSide, Clock, EventBus, MarketTick
-from tickwright.observability import NamedEvent, named_event
 
 from .backoff import Backoff
 from .config import HyperliquidConfig
+from .ingress import ConflatingIngress
 
 if TYPE_CHECKING:
     from websockets.asyncio.client import ClientConnection
@@ -103,11 +103,6 @@ class HyperliquidFeed:
         self._connect = connect
         self._connection: WsConnection | None = None
         self._seq_by_symbol: dict[str, int] = {}
-        # The ingress conflation buffer (ADR-0023): latest unpublished tick per
-        # symbol, drained by the publisher while the reader keeps the WS moving.
-        self._pending: dict[str, MarketTick] = {}
-        self._wake = asyncio.Event()
-        self._reading_done = False
         self._stopping = False
 
     async def start(self) -> None:
@@ -125,13 +120,16 @@ class HyperliquidFeed:
                 continue
             backoff.reset()
             self._connection = connection
-            self._reading_done = False
             await self._subscribe(connection)
-            # Reader and publisher are separate coroutines so a slow subscriber
-            # never stalls the socket (ADR-0023); either one failing cancels both.
+            # A fresh ingress per connection: the reader offers ticks, the drain
+            # publishes them, conflating under backpressure so a slow subscriber
+            # never stalls the socket (ADR-0023). Separate coroutines; either one
+            # failing cancels both. A new buffer means no stale tick survives a
+            # reconnect.
+            ingress = ConflatingIngress(bus=self._bus)
             async with asyncio.TaskGroup() as tg:
-                tg.create_task(self._read_frames(connection))
-                tg.create_task(self._publish_conflated())
+                tg.create_task(self._read_frames(connection, ingress))
+                tg.create_task(ingress.drain())
             # Iteration ended: a stop() is final; anything else was the venue
             # hanging up, so back off once and go resubscribe.
             if self._stopping:
@@ -143,43 +141,17 @@ class HyperliquidFeed:
         if self._connection is not None:
             await self._connection.close()
 
-    async def _read_frames(self, connection: WsConnection) -> None:
+    async def _read_frames(self, connection: WsConnection, ingress: ConflatingIngress) -> None:
         try:
             async for frame in connection:
                 for tick in self._parse(frame):
-                    self._conflate_in(tick)
-                    # One turn of the loop per trade: a keeping-up publisher
-                    # drains each tick before the next lands, so conflation
-                    # only ever bites under real backpressure (ADR-0023).
+                    ingress.offer(tick)
+                    # One turn of the loop per trade: a keeping-up drain publishes
+                    # each tick before the next lands, so conflation only ever
+                    # bites under real backpressure (ADR-0023).
                     await asyncio.sleep(0)
         finally:
-            self._reading_done = True
-            self._wake.set()
-
-    def _conflate_in(self, tick: MarketTick) -> None:
-        """Fold one tick into the buffer. Keep-latest-per-symbol: superseding
-        an unpublished tick emits one ``feed.lagged`` per drop, never silently."""
-        dropped = self._pending.pop(tick.symbol, None)
-        if dropped is not None:
-            named_event(
-                NamedEvent.FEED_LAGGED,
-                symbol=dropped.symbol,
-                dropped_trade_id=dropped.trade_id,
-            )
-        self._pending[tick.symbol] = tick
-        self._wake.set()
-
-    async def _publish_conflated(self) -> None:
-        while True:
-            while self._pending:
-                symbol = next(iter(self._pending))
-                await self._bus.publish(self._pending.pop(symbol))
-            if self._reading_done:
-                return
-            # No yield between the emptiness check and clear/wait, so a tick
-            # conflated in during the last publish cannot slip past unseen.
-            self._wake.clear()
-            await self._wake.wait()
+            ingress.close()
 
     async def _subscribe(self, connection: WsConnection) -> None:
         for symbol in self._config.symbols:
