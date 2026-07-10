@@ -342,3 +342,105 @@ def test_a_filled_placement_fetches_and_emits_the_real_venue_fills() -> None:
     )
     assert first.cloid == CLOID
     assert first.ts_event == 1_700_000_000_500 * _NS_PER_MS  # the venue's fill time
+
+
+def cancel_success_response() -> dict:
+    return {
+        "status": "ok",
+        "response": {"type": "cancel", "data": {"statuses": ["success"]}},
+    }
+
+
+def test_cancel_sends_a_signed_cancel_by_cloid_and_reports_cancelled() -> None:
+    async def main() -> tuple[FakeExchangeApi, list[ExecutionReport]]:
+        bus = InMemoryBus()
+        clock = ManualClock(start_ns=1_700_000_001_000 * _NS_PER_MS)
+        post = FakeExchangeApi([resting_response(oid=77), cancel_success_response()])
+        exchange = make_exchange(post, bus=bus, clock=clock)
+        reports: list[ExecutionReport] = []
+
+        async def collect(report: ExecutionReport) -> None:
+            reports.append(report)
+
+        bus.subscribe(ExecutionReport, collect)
+        await exchange.place(limit_order(Side.BUY, "0.5", "42000"))
+        await exchange.cancel(CLOID)
+        return post, reports
+
+    post, reports = asyncio.run(main())
+
+    (url, payload) = post.requests[1]
+    assert url == "https://api.hyperliquid-testnet.xyz/exchange"
+    action = payload["action"]
+    assert action == {"type": "cancelByCloid", "cancels": [{"asset": 3, "cloid": CLOID}]}
+    recovered = recover_agent_or_user_from_l1_action(
+        action, payload["signature"], None, payload["nonce"], None, False
+    )
+    assert recovered == Account.from_key(TEST_SIGNING_KEY).address
+    # The venue accepted the cancel: the raw CANCELLED fact goes on the bus.
+    live, cancelled = reports
+    assert isinstance(cancelled, OrderStatusReport)
+    assert cancelled.status is OrderState.CANCELLED
+    assert cancelled.cloid == CLOID
+
+
+def order_status_response(
+    *, coin: str = "BTC", status: str = "open", oid: int = 77, cloid: str | None = None
+) -> dict:
+    """The venue's orderStatus answer for a known order."""
+    return {
+        "status": "order",
+        "order": {
+            "order": {
+                "coin": coin,
+                "side": "B",
+                "limitPx": "42000.0",
+                "sz": "0.5",
+                "oid": oid,
+                "timestamp": 1_700_000_000_000,
+                "origSz": "0.5",
+                "cloid": cloid or CLOID,
+            },
+            "status": status,
+            "statusTimestamp": 1_700_000_000_100,
+        },
+    }
+
+
+def test_cancel_of_an_order_placed_before_a_crash_resolves_the_coin_from_venue_truth() -> None:
+    # A restart empties the adapter's placed-order memory, but the engine still
+    # cancels by cloid (ADR-0026) — so the adapter asks the venue whose order
+    # this is (orderStatus) and cancels with the resolved asset index.
+    async def main() -> FakeExchangeApi:
+        post = FakeExchangeApi([order_status_response(), cancel_success_response()])
+        exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
+        await exchange.cancel(CLOID)
+        return post
+
+    post = asyncio.run(main())
+
+    (status_url, status_query) = post.requests[0]
+    assert status_url == "https://api.hyperliquid-testnet.xyz/info"
+    assert status_query == {
+        "type": "orderStatus",
+        "user": Account.from_key(TEST_SIGNING_KEY).address,
+        "oid": CLOID,
+    }
+    (_, cancel_payload) = post.requests[1]
+    assert cancel_payload["action"] == {
+        "type": "cancelByCloid",
+        "cancels": [{"asset": 3, "cloid": CLOID}],
+    }
+
+
+def test_cancel_of_a_cloid_the_venue_never_saw_is_a_benign_no_op() -> None:
+    async def main() -> FakeExchangeApi:
+        post = FakeExchangeApi([{"status": "unknownOid"}])
+        exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
+        await exchange.cancel(CLOID)
+        return post
+
+    post = asyncio.run(main())
+    # One venue read, no cancel action: nothing to cancel, nothing to report
+    # (ADR-0026) — the venue positively has no record of this cloid.
+    assert len(post.requests) == 1

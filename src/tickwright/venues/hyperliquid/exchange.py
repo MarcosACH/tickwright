@@ -84,6 +84,9 @@ class HyperliquidExchange:
         # unless the key is an API/agent wallet acting for a master account.
         self._user_address = config.account_address or self._wallet.address
         self._latest_price: dict[str, Decimal] = {}
+        # Orders this process placed, by cloid: a cancel needs the symbol (the
+        # venue cancels by asset index) and the report needs it back.
+        self._placed: dict[str, PlaceOrder] = {}
         # The MARKET slippage bound needs the latest traded price, and the tick
         # stream is where prices live (ADR-0027) — subscribe like any consumer.
         bus.subscribe(MarketTick, self.on_tick)
@@ -97,22 +100,68 @@ class HyperliquidExchange:
             "orders": [self._order_wire(order)],
             "grouping": "na",
         }
+        self._placed[order.cloid] = order
         response = await self._send_action(action)
         await self._report_placement(order, response)
+
+    async def cancel(self, cloid: str) -> None:
+        # The venue cancels by asset index, so the cloid needs a symbol: from
+        # this process's own placements, or — after a restart emptied that
+        # memory — from the venue's order record itself.
+        order = self._placed.get(cloid)
+        symbol = order.symbol if order is not None else await self._resolve_symbol(cloid)
+        if symbol is None:
+            # The venue positively has no record of this cloid: nothing to
+            # cancel, nothing to report — a benign no-op (ADR-0026).
+            return
+        action = {
+            "type": "cancelByCloid",
+            "cancels": [{"asset": self._universe.asset_indices[symbol], "cloid": cloid}],
+        }
+        response = await self._send_action(action)
+        (status,) = _action_statuses(response)
+        if status == "success":
+            await self._bus.publish(
+                self._status_report(cloid=cloid, symbol=symbol, status=OrderState.CANCELLED)
+            )
+        # A per-cancel error means the order is already gone (filled/cancelled/
+        # never landed): a benign no-op — the venue's real state arrives as its
+        # own report or through reconciliation (ADR-0026).
+
+    async def _resolve_symbol(self, cloid: str) -> str | None:
+        """The coin the venue holds ``cloid`` under, or ``None`` if it has no
+        record (``unknownOid``)."""
+        response = await self._info(
+            {"type": "orderStatus", "user": self._user_address, "oid": cloid}
+        )
+        match response:
+            case {"status": "order", "order": {"order": {"coin": str(coin)}}}:
+                return coin
+        return None
 
     async def _report_placement(self, order: PlaceOrder, response: object) -> None:
         """Translate the venue's placement adjudication into raw facts on the
         bus (ADR-0015): one order in, one status out of ``statuses``."""
-        (status,) = _placement_statuses(response)
+        (status,) = _action_statuses(response)
         if "resting" in status:
             await self._bus.publish(
-                self._status_report(order, OrderState.LIVE, venue_oid=str(status["resting"]["oid"]))
+                self._status_report(
+                    cloid=order.cloid,
+                    symbol=order.symbol,
+                    status=OrderState.LIVE,
+                    venue_oid=str(status["resting"]["oid"]),
+                )
             )
         elif "error" in status:
             # Venue-adjudicated refusal: REJECTED, never DENIED (ADR-0010) —
             # the order was sent and judged, and the venue's reason rides along.
             await self._bus.publish(
-                self._status_report(order, OrderState.REJECTED, reason=str(status["error"]))
+                self._status_report(
+                    cloid=order.cloid,
+                    symbol=order.symbol,
+                    status=OrderState.REJECTED,
+                    reason=str(status["error"]),
+                )
             )
         elif "filled" in status:
             # The placement response carries no trade ids, and a synthetic one
@@ -147,9 +196,10 @@ class HyperliquidExchange:
 
     def _status_report(
         self,
-        order: PlaceOrder,
-        status: OrderState,
         *,
+        cloid: str,
+        symbol: str,
+        status: OrderState,
         venue_oid: str | None = None,
         reason: str | None = None,
     ) -> OrderStatusReport:
@@ -157,8 +207,8 @@ class HyperliquidExchange:
         return OrderStatusReport(
             ts_event=now,
             ts_init=now,
-            cloid=order.cloid,
-            symbol=order.symbol,
+            cloid=cloid,
+            symbol=symbol,
             status=status,
             venue_oid=venue_oid,
             reason=reason,
@@ -215,13 +265,14 @@ class HyperliquidExchange:
         return await self._post(f"{self._config.api_url}/exchange", payload)
 
 
-def _placement_statuses(response: object) -> list[dict[str, Any]]:
-    """The ``statuses`` array out of a placement response, or a readable error
-    for a shape the venue never documented (fail fast on our own parsing)."""
+def _action_statuses(response: object) -> list[Any]:
+    """The ``statuses`` array out of an /exchange action response (dicts for
+    orders, bare strings for cancels), or a readable error for a shape the
+    venue never documented (fail fast on our own parsing)."""
     match response:
         case {"status": "ok", "response": {"data": {"statuses": list(statuses)}}}:
             return statuses
-    raise ValueError(f"unrecognized Hyperliquid placement response: {response!r}")
+    raise ValueError(f"unrecognized Hyperliquid action response: {response!r}")
 
 
 def _wire_decimal(value: Decimal) -> str:
