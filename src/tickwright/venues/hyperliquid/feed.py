@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Protocol
 from tickwright.domain import AggressorSide, Clock, EventBus, MarketTick
 from tickwright.observability import NamedEvent, named_event
 
+from .backoff import Backoff
 from .config import HyperliquidConfig
 
 if TYPE_CHECKING:
@@ -110,17 +111,19 @@ class HyperliquidFeed:
         self._stopping = False
 
     async def start(self) -> None:
-        backoff = self._config.reconnect_initial_backoff_seconds
+        backoff = Backoff(
+            initial=self._config.reconnect_initial_backoff_seconds,
+            maximum=self._config.reconnect_max_backoff_seconds,
+        )
         while not self._stopping:
             try:
                 connection = await self._connect(self._config.ws_url)
             except OSError:
                 # Connect refused/unreachable: pace the retry on the injected
                 # clock, doubling up to the cap (virtual under ManualClock).
-                await self._clock.sleep(backoff)
-                backoff = min(backoff * 2, self._config.reconnect_max_backoff_seconds)
+                await backoff.sleep_on(self._clock)
                 continue
-            backoff = self._config.reconnect_initial_backoff_seconds
+            backoff.reset()
             self._connection = connection
             self._reading_done = False
             await self._subscribe(connection)
@@ -133,8 +136,7 @@ class HyperliquidFeed:
             # hanging up, so back off once and go resubscribe.
             if self._stopping:
                 return
-            await self._clock.sleep(backoff)
-            backoff = min(backoff * 2, self._config.reconnect_max_backoff_seconds)
+            await backoff.sleep_on(self._clock)
 
     async def stop(self) -> None:
         self._stopping = True
