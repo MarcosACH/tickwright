@@ -1,9 +1,33 @@
-"""Fakes for the Hyperliquid WS process boundary (the one seam the venue
-suite mocks): a recorded-frame connection and frame builders shaped like the
-venue's ``trades``-channel payloads."""
+"""Fakes for the Hyperliquid process boundaries (the only seams the venue
+suite mocks): a recorded-frame WS connection with frame builders shaped like
+the venue's ``trades``-channel payloads, and a canned-response HTTP POST for
+the exchange/info endpoints."""
 
 import asyncio
 import json
+
+
+class FakeExchangeApi:
+    """A canned-response ``post`` seam: records every request, answers in order.
+
+    Shaped like the adapter's transport callable — ``await post(url, payload)``
+    — so the whole sign-and-send path runs for real up to the socket."""
+
+    def __init__(self, responses: list[object]) -> None:
+        self.requests: list[tuple[str, dict]] = []
+        self._responses = list(responses)
+
+    async def __call__(self, url: str, payload: dict) -> object:
+        self.requests.append((url, payload))
+        return self._responses.pop(0)
+
+
+def resting_response(oid: int) -> dict:
+    """The venue's successful placement response for an order that rests."""
+    return {
+        "status": "ok",
+        "response": {"type": "order", "data": {"statuses": [{"resting": {"oid": oid}}]}},
+    }
 
 
 class FakeWsConnection:
