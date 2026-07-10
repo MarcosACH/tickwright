@@ -65,18 +65,37 @@ class HyperliquidFeed:
         self._pending: dict[str, MarketTick] = {}
         self._wake = asyncio.Event()
         self._reading_done = False
+        self._stopping = False
 
     async def start(self) -> None:
-        connection = await self._connect(self._config.ws_url)
-        self._connection = connection
-        await self._subscribe(connection)
-        # Reader and publisher are separate coroutines so a slow subscriber
-        # never stalls the socket (ADR-0023); either one failing cancels both.
-        async with asyncio.TaskGroup() as tg:
-            tg.create_task(self._read_frames(connection))
-            tg.create_task(self._publish_conflated())
+        backoff = self._config.reconnect_initial_backoff_seconds
+        while not self._stopping:
+            try:
+                connection = await self._connect(self._config.ws_url)
+            except OSError:
+                # Connect refused/unreachable: pace the retry on the injected
+                # clock, doubling up to the cap (virtual under ManualClock).
+                await self._clock.sleep(backoff)
+                backoff = min(backoff * 2, self._config.reconnect_max_backoff_seconds)
+                continue
+            backoff = self._config.reconnect_initial_backoff_seconds
+            self._connection = connection
+            self._reading_done = False
+            await self._subscribe(connection)
+            # Reader and publisher are separate coroutines so a slow subscriber
+            # never stalls the socket (ADR-0023); either one failing cancels both.
+            async with asyncio.TaskGroup() as tg:
+                tg.create_task(self._read_frames(connection))
+                tg.create_task(self._publish_conflated())
+            # Iteration ended: a stop() is final; anything else was the venue
+            # hanging up, so back off once and go resubscribe.
+            if self._stopping:
+                return
+            await self._clock.sleep(backoff)
+            backoff = min(backoff * 2, self._config.reconnect_max_backoff_seconds)
 
     async def stop(self) -> None:
+        self._stopping = True
         if self._connection is not None:
             await self._connection.close()
 

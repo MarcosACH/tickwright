@@ -194,6 +194,104 @@ def test_slow_consumer_gets_only_the_latest_tick_per_symbol_with_one_lagged_per_
     assert lagged[0]["dropped_trade_id"] == "2"
 
 
+class RecordingClock(ManualClock):
+    """A ``ManualClock`` that also records what it was asked to sleep — the
+    backoff assertions read this, so no real time ever passes."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.sleeps: list[float] = []
+
+    async def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        await super().sleep(seconds)
+
+
+def test_ws_drop_reconnects_with_backoff_resubscribes_and_resumes() -> None:
+    """The venue hangs up after one tick, the next connect attempt is refused,
+    the one after succeeds: the feed sleeps the doubling backoff on the injected
+    clock (1s, then 2s — never a real sleep), resubscribes, and resumes."""
+
+    async def main() -> tuple[list[MarketTick], FakeWsConnection, RecordingClock, int]:
+        bus = InMemoryBus()
+        clock = RecordingClock()
+        seen: list[MarketTick] = []
+        resumed = asyncio.Event()
+
+        async def record(tick: MarketTick) -> None:
+            seen.append(tick)
+            if len(seen) >= 2:
+                resumed.set()
+
+        bus.subscribe(MarketTick, record)
+        first = FakeWsConnection([trades_frame(trade("BTC", "100", 1))], drop_when_drained=True)
+        second = FakeWsConnection([trades_frame(trade("BTC", "101", 2))])
+        outcomes: list[FakeWsConnection | Exception] = [
+            first,
+            ConnectionRefusedError("venue hiccup"),
+            second,
+        ]
+        connects = 0
+
+        async def connect(url: str) -> FakeWsConnection:
+            nonlocal connects
+            connects += 1
+            outcome = outcomes.pop(0)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+        feed = HyperliquidFeed(
+            config=HyperliquidConfig(symbols=["BTC"]), bus=bus, clock=clock, connect=connect
+        )
+        run = asyncio.create_task(feed.start())
+        await asyncio.wait_for(resumed.wait(), timeout=2)
+        await feed.stop()
+        await asyncio.wait_for(run, timeout=2)
+        return seen, second, clock, connects
+
+    seen, second, clock, connects = asyncio.run(main())
+
+    assert [t.price for t in seen] == [Decimal("100"), Decimal("101")]  # resumed
+    assert connects == 3
+    assert clock.sleeps == [1.0, 2.0]  # doubling backoff, virtual time only
+    assert json.loads(second.sent[0]) == {  # resubscribed on the new socket
+        "method": "subscribe",
+        "subscription": {"type": "trades", "coin": "BTC"},
+    }
+
+
+def test_stop_does_not_trigger_a_reconnect() -> None:
+    connection = FakeWsConnection([trades_frame(trade("BTC", "100", 1))])
+    connect_count = 0
+
+    async def main() -> None:
+        nonlocal connect_count
+        bus = InMemoryBus()
+        got_one = asyncio.Event()
+
+        async def record(tick: MarketTick) -> None:
+            got_one.set()
+
+        bus.subscribe(MarketTick, record)
+
+        async def connect(url: str) -> FakeWsConnection:
+            nonlocal connect_count
+            connect_count += 1
+            return connection
+
+        feed = HyperliquidFeed(
+            config=HyperliquidConfig(symbols=["BTC"]), bus=bus, clock=ManualClock(), connect=connect
+        )
+        run = asyncio.create_task(feed.start())
+        await asyncio.wait_for(got_one.wait(), timeout=2)
+        await feed.stop()
+        await asyncio.wait_for(run, timeout=2)
+
+    asyncio.run(main())
+    assert connect_count == 1
+
+
 def test_non_trades_frames_are_ignored() -> None:
     frames = [
         json.dumps({"channel": "subscriptionResponse", "data": {"method": "subscribe"}}),

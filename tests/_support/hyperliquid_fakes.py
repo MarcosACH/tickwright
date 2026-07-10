@@ -12,11 +12,12 @@ class FakeWsConnection:
     fires once every frame has been read *and processed* — it is set when the
     reader comes back for the frame after the last one."""
 
-    def __init__(self, frames: list[str]) -> None:
+    def __init__(self, frames: list[str], *, drop_when_drained: bool = False) -> None:
         self.sent: list[str] = []
         self.drained = asyncio.Event()
         self._frames = list(frames)
         self._closed = asyncio.Event()
+        self._drop_when_drained = drop_when_drained
 
     async def send(self, message: str) -> None:
         self.sent.append(message)
@@ -34,6 +35,9 @@ class FakeWsConnection:
             await asyncio.sleep(0)
             return self._frames.pop(0)
         self.drained.set()
+        if self._drop_when_drained:
+            # The venue hung up: iteration ends without a stop() being asked.
+            raise StopAsyncIteration
         await self._closed.wait()
         raise StopAsyncIteration
 

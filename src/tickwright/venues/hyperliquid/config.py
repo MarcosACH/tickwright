@@ -12,6 +12,10 @@ class HyperliquidConfig(BaseModel):
 
     testnet: bool = False
     symbols: list[str] = Field(default_factory=list)
+    # Reconnect pacing (ADR-0021): doubling from initial, capped at max, always
+    # slept on the injected Clock — a reconnect storm can never hammer the venue.
+    reconnect_initial_backoff_seconds: float = Field(default=1.0, gt=0)
+    reconnect_max_backoff_seconds: float = Field(default=60.0, gt=0)
 
     @property
     def ws_url(self) -> str:
