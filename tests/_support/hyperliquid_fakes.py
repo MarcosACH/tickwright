@@ -11,7 +11,9 @@ class FakeExchangeApi:
     """A canned-response ``post`` seam: records every request, answers in order.
 
     Shaped like the adapter's transport callable — ``await post(url, payload)``
-    — so the whole sign-and-send path runs for real up to the socket."""
+    — so the whole sign-and-send path runs for real up to the socket. An
+    exception instance in ``responses`` is raised instead of returned (the
+    transport-failure case)."""
 
     def __init__(self, responses: list[object]) -> None:
         self.requests: list[tuple[str, dict]] = []
@@ -19,7 +21,10 @@ class FakeExchangeApi:
 
     async def __call__(self, url: str, payload: dict) -> object:
         self.requests.append((url, payload))
-        return self._responses.pop(0)
+        response = self._responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return response
 
 
 def resting_response(oid: int) -> dict:

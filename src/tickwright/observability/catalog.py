@@ -54,3 +54,8 @@ class NamedEvent(StrEnum):
     RECONCILE_RECENCY_SKIPPED = "reconcile.recency_skipped"
     GHOST_RECONCILED = "ghost.reconciled"
     RECONCILE_FROZEN = "reconcile.frozen"
+
+    # Live-exchange write path: a place/cancel send that failed in transport —
+    # outcome unknown, no report emitted; reconcile-by-cloid resolves the
+    # in-flight order (``HyperliquidExchange``, ADR-0008 rule 2).
+    EXCHANGE_REQUEST_FAILED = "exchange.request_failed"

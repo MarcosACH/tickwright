@@ -27,8 +27,10 @@ from tickwright.domain import (
     PlaceOrder,
     Side,
     TimeInForce,
+    VenueOrderView,
     quantize_price,
 )
+from tickwright.observability import NamedEvent, named_event
 
 from .config import HyperliquidConfig
 from .universe import HyperliquidUniverse
@@ -101,24 +103,41 @@ class HyperliquidExchange:
             "grouping": "na",
         }
         self._placed[order.cloid] = order
-        response = await self._send_action(action)
-        await self._report_placement(order, response)
+        try:
+            response = await self._send_action(action)
+            await self._report_placement(order, response)
+        except OSError as exc:
+            # The send window's truth is unknown — the order may or may not
+            # have landed — so there is no fact to report. Name the failure;
+            # reconcile-by-cloid resolves the in-flight order (ADR-0008 rule 2).
+            self._request_failed("place", order.cloid, exc)
+
+    def _request_failed(self, request: str, cloid: str, exc: OSError) -> None:
+        named_event(
+            NamedEvent.EXCHANGE_REQUEST_FAILED, request=request, cloid=cloid, error=str(exc)
+        )
 
     async def cancel(self, cloid: str) -> None:
         # The venue cancels by asset index, so the cloid needs a symbol: from
         # this process's own placements, or — after a restart emptied that
         # memory — from the venue's order record itself.
-        order = self._placed.get(cloid)
-        symbol = order.symbol if order is not None else await self._resolve_symbol(cloid)
-        if symbol is None:
-            # The venue positively has no record of this cloid: nothing to
-            # cancel, nothing to report — a benign no-op (ADR-0026).
+        try:
+            order = self._placed.get(cloid)
+            symbol = order.symbol if order is not None else await self._resolve_symbol(cloid)
+            if symbol is None:
+                # The venue positively has no record of this cloid: nothing to
+                # cancel, nothing to report — a benign no-op (ADR-0026).
+                return
+            action = {
+                "type": "cancelByCloid",
+                "cancels": [{"asset": self._universe.asset_indices[symbol], "cloid": cloid}],
+            }
+            response = await self._send_action(action)
+        except OSError as exc:
+            # The cancel_requested marker is already durable (ADR-0026), so an
+            # ack-lost cancel is reconciliation's to resolve — just name it.
+            self._request_failed("cancel", cloid, exc)
             return
-        action = {
-            "type": "cancelByCloid",
-            "cancels": [{"asset": self._universe.asset_indices[symbol], "cloid": cloid}],
-        }
-        response = await self._send_action(action)
         (status,) = _action_statuses(response)
         if status == "success":
             await self._bus.publish(
@@ -127,6 +146,43 @@ class HyperliquidExchange:
         # A per-cancel error means the order is already gone (filled/cancelled/
         # never landed): a benign no-op — the venue's real state arrives as its
         # own report or through reconciliation (ADR-0026).
+
+    async def fetch_order(self, cloid: str) -> VenueOrderView | None:
+        """Venue truth for ``cloid``: the order record plus its fill history,
+        the ADR-0011 cross-check in one read. ``unknownOid`` is positive proof
+        of no record (an empty view); a read that *failed* is ``None`` — an
+        outage must never look like "no record" (inv 1)."""
+        try:
+            return await self._fetch_view(cloid)
+        except OSError:
+            # Timeout or transport failure (TimeoutError is an OSError): the
+            # read failed, and a failed read is None — the reconciler freezes
+            # rather than mistaking an outage for an empty book.
+            return None
+
+    async def _fetch_view(self, cloid: str) -> VenueOrderView | None:
+        response = await self._info(
+            {"type": "orderStatus", "user": self._user_address, "oid": cloid}
+        )
+        match response:
+            case {"status": "unknownOid"}:
+                return VenueOrderView(status=None)
+            case {
+                "status": "order",
+                "order": {"order": {"coin": str(coin), "oid": int(oid)}, "status": str(status)},
+            }:
+                state = _order_state(status)
+                if state is None:
+                    return None
+                return VenueOrderView(
+                    status=self._status_report(
+                        cloid=cloid, symbol=coin, status=state, venue_oid=str(oid)
+                    ),
+                    fills=tuple(await self._fetch_fills(cloid=cloid, symbol=coin, oid=oid)),
+                )
+        # A response we cannot map — an unknown shape — is a failed read, not
+        # a record: freezing (ADR-0011) beats misclassifying venue truth.
+        return None
 
     async def _resolve_symbol(self, cloid: str) -> str | None:
         """The coin the venue holds ``cloid`` under, or ``None`` if it has no
@@ -168,10 +224,13 @@ class HyperliquidExchange:
             # would double-count against reconciliation's venue-tid fills under
             # {cloid}:fill:{tid} dedup — so fetch the venue's own fill records
             # and emit those.
-            for report in await self._fetch_fills(order, oid=int(status["filled"]["oid"])):
+            fills = await self._fetch_fills(
+                cloid=order.cloid, symbol=order.symbol, oid=int(status["filled"]["oid"])
+            )
+            for report in fills:
                 await self._bus.publish(report)
 
-    async def _fetch_fills(self, order: PlaceOrder, *, oid: int) -> list[FillReport]:
+    async def _fetch_fills(self, *, cloid: str, symbol: str, oid: int) -> list[FillReport]:
         """This order's fills from the venue's fill history, by its oid — the
         one id fills carry (they have no cloid on the wire)."""
         entries = await self._info({"type": "userFills", "user": self._user_address})
@@ -181,8 +240,8 @@ class HyperliquidExchange:
             FillReport(
                 ts_event=int(entry["time"]) * _NS_PER_MS,
                 ts_init=self._clock.timestamp_ns(),
-                cloid=order.cloid,
-                symbol=order.symbol,
+                cloid=cloid,
+                symbol=symbol,
                 trade_id=str(entry["tid"]),
                 quantity=Decimal(str(entry["sz"])),
                 price=Decimal(str(entry["px"])),
@@ -263,6 +322,26 @@ class HyperliquidExchange:
         )
         payload = {"action": action, "nonce": nonce, "signature": signature}
         return await self._post(f"{self._config.api_url}/exchange", payload)
+
+
+def _order_state(status: str) -> OrderState | None:
+    """The saga vocabulary for a venue order-status string, or ``None`` for a
+    status we cannot map (freeze, never misclassify).
+
+    The venue's taxonomy is a long list of specific causes, but every entry
+    resolves by suffix: ``…Rejected`` refusals, ``…Canceled`` / ``…Cancel``
+    removals (``canceled``, ``marginCanceled``, ``scheduledCancel``, …).
+    """
+    match status:
+        case "open":
+            return OrderState.LIVE
+        case "filled":
+            return OrderState.FILLED
+        case _ if status.endswith(("anceled", "ancel")):
+            return OrderState.CANCELLED
+        case _ if status.endswith("ejected"):
+            return OrderState.REJECTED
+    return None
 
 
 def _action_statuses(response: object) -> list[Any]:

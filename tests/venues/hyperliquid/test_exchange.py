@@ -11,6 +11,7 @@ sent. Venue quirk translation lives in the adapter, never the engine
 import asyncio
 from decimal import Decimal
 
+import pytest
 from eth_account import Account
 from hyperliquid.utils.signing import recover_agent_or_user_from_l1_action
 from hyperliquid_fakes import FakeExchangeApi, resting_response
@@ -29,7 +30,10 @@ from tickwright.domain import (
     PlaceOrder,
     Side,
     TimeInForce,
+    VenueOrderView,
 )
+from tickwright.observability import NamedEvent
+from tickwright.observability.testing import capture_events
 from tickwright.venues.hyperliquid import (
     HyperliquidConfig,
     HyperliquidExchange,
@@ -444,3 +448,117 @@ def test_cancel_of_a_cloid_the_venue_never_saw_is_a_benign_no_op() -> None:
     # One venue read, no cancel action: nothing to cancel, nothing to report
     # (ADR-0026) — the venue positively has no record of this cloid.
     assert len(post.requests) == 1
+
+
+async def fetch_view(post: FakeExchangeApi) -> VenueOrderView | None:
+    exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
+    return await exchange.fetch_order(CLOID)
+
+
+def test_fetch_order_bundles_the_venue_status_and_fills_into_one_view() -> None:
+    post = FakeExchangeApi(
+        [
+            order_status_response(status="filled", oid=91),
+            [
+                fill_entry(oid=90, tid=555, px="43249.0", sz="1.0"),
+                fill_entry(oid=91, tid=556, px="43250.0", sz="0.5"),
+            ],
+        ]
+    )
+    view = asyncio.run(fetch_view(post))
+
+    assert view is not None
+    assert view.has_record
+    assert view.status is not None
+    assert view.status.status is OrderState.FILLED
+    assert view.status.cloid == CLOID
+    assert view.status.symbol == "BTC"
+    assert view.status.venue_oid == "91"
+    # The ADR-0011 cross-check in one read: this order's fills, by its oid.
+    (fill,) = view.fills
+    assert (fill.trade_id, fill.price, fill.quantity) == ("556", Decimal("43250.0"), Decimal("0.5"))
+
+
+def test_fetch_order_returns_an_empty_view_when_the_venue_has_no_record() -> None:
+    # unknownOid is a *successful* read: positive proof the order never landed
+    # (the ADR-0008 resend gate), categorically different from a failed read.
+    view = asyncio.run(fetch_view(FakeExchangeApi([{"status": "unknownOid"}])))
+
+    assert view is not None
+    assert not view.has_record
+    assert view.status is None
+    assert view.fills == ()
+
+
+def test_fetch_order_returns_none_when_the_read_itself_fails() -> None:
+    # The connectivity guard (ADR-0011 inv 1): a timeout or transport error is
+    # None — never an empty view, which would read as "no record" and let
+    # recovery resend into an outage.
+    for failure in (TimeoutError("venue timed out"), ConnectionError("connection refused")):
+        view = asyncio.run(fetch_view(FakeExchangeApi([failure])))
+        assert view is None
+
+    # A failure on the *fills* half of the read poisons the whole view too.
+    view = asyncio.run(
+        fetch_view(FakeExchangeApi([order_status_response(), ConnectionError("reset")]))
+    )
+    assert view is None
+
+
+@pytest.mark.parametrize(
+    ("venue_status", "state"),
+    [
+        ("open", OrderState.LIVE),
+        ("canceled", OrderState.CANCELLED),
+        ("marginCanceled", OrderState.CANCELLED),
+        ("scheduledCancel", OrderState.CANCELLED),
+        ("minTradeNtlRejected", OrderState.REJECTED),
+        ("badAloPxRejected", OrderState.REJECTED),
+    ],
+)
+def test_fetch_order_maps_the_venue_status_taxonomy_by_suffix(
+    venue_status: str, state: OrderState
+) -> None:
+    post = FakeExchangeApi([order_status_response(status=venue_status), []])
+    view = asyncio.run(fetch_view(post))
+
+    assert view is not None and view.status is not None
+    assert view.status.status is state
+
+
+def test_fetch_order_treats_a_status_it_cannot_map_as_a_failed_read() -> None:
+    # A venue status outside the known taxonomy (say, a trigger state v1 never
+    # places) must freeze the reconciler, not get misclassified as venue truth.
+    view = asyncio.run(fetch_view(FakeExchangeApi([order_status_response(status="triggered")])))
+    assert view is None
+
+
+def test_a_transport_failure_on_place_emits_no_report_and_does_not_raise() -> None:
+    # The send window's truth is unknown — the order may or may not have
+    # landed — so the adapter reports nothing (no fact to report) and lets
+    # reconcile-by-cloid resolve the in-flight order (ADR-0008 rule 2). It
+    # names the failure for triage instead of faulting the engine.
+    post = FakeExchangeApi([ConnectionError("connection refused")])
+
+    with capture_events() as events:
+        reports = asyncio.run(
+            place_and_collect_reports(post, limit_order(Side.BUY, "0.5", "42000"))
+        )
+
+    assert reports == []
+    assert any(e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED for e in events)
+
+
+def test_a_transport_failure_on_cancel_emits_no_report_and_does_not_raise() -> None:
+    async def main() -> None:
+        post = FakeExchangeApi([resting_response(oid=77), TimeoutError("venue timed out")])
+        exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
+        await exchange.place(limit_order(Side.BUY, "0.5", "42000"))
+        await exchange.cancel(CLOID)
+
+    with capture_events() as events:
+        asyncio.run(main())
+
+    # The cancel_requested marker is already durable (ADR-0026); reconciliation
+    # resolves an ack-lost cancel, so the adapter only names the failure.
+    assert any(e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED for e in events)
