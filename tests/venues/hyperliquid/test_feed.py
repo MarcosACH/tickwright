@@ -7,6 +7,7 @@ path hermetically.
 """
 
 import asyncio
+import json
 from decimal import Decimal
 from pathlib import Path
 
@@ -85,6 +86,16 @@ def _drive(
     return asyncio.run(main())
 
 
+def _trades_frame(*trades: dict) -> str:
+    return json.dumps({"channel": "trades", "data": list(trades)})
+
+
+def _trade(
+    coin: str, px: str, tid: int, *, side: str = "B", sz: str = "1", time: int = 1_700_000_000_000
+) -> dict:
+    return {"coin": coin, "side": side, "px": px, "sz": sz, "time": time, "tid": tid}
+
+
 def test_recorded_trades_frames_parse_into_market_ticks() -> None:
     seen, _ = _drive(_fixture_frames(), symbols=["BTC"], until_ticks=2)
 
@@ -98,3 +109,52 @@ def test_recorded_trades_frames_parse_into_market_ticks() -> None:
 
     assert sell.aggressor_side is AggressorSide.SELL
     assert sell.price == Decimal("43249.0")
+
+
+def test_subscribes_the_trades_channel_per_configured_symbol() -> None:
+    frames = [_trades_frame(_trade("BTC", "100", 1))]
+    _, connection = _drive(frames, symbols=["BTC", "ETH"], until_ticks=1)
+
+    assert [json.loads(m) for m in connection.sent] == [
+        {"method": "subscribe", "subscription": {"type": "trades", "coin": "BTC"}},
+        {"method": "subscribe", "subscription": {"type": "trades", "coin": "ETH"}},
+    ]
+
+
+def test_prices_and_sizes_parse_to_decimal_never_float() -> None:
+    frames = [_trades_frame(_trade("BTC", "0.1", 1, sz="0.2"))]
+    seen, _ = _drive(frames, symbols=["BTC"], until_ticks=1)
+
+    assert isinstance(seen[0].price, Decimal)
+    assert isinstance(seen[0].size, Decimal)
+    assert seen[0].price == Decimal("0.1")  # exact — a float round-trip would not be
+
+
+def test_batched_trades_frame_yields_one_tick_per_trade_in_order() -> None:
+    frames = [_trades_frame(_trade("BTC", "100", 1), _trade("BTC", "101", 2))]
+    seen, _ = _drive(frames, symbols=["BTC"], until_ticks=2)
+
+    assert [t.trade_id for t in seen] == ["1", "2"]
+
+
+def test_assigns_per_symbol_source_sequence() -> None:
+    frames = [
+        _trades_frame(_trade("BTC", "100", 1)),
+        _trades_frame(_trade("ETH", "50", 2)),
+        _trades_frame(_trade("BTC", "101", 3)),
+    ]
+    seen, _ = _drive(frames, symbols=["BTC", "ETH"], until_ticks=3)
+
+    seqs = {(t.symbol, t.seq) for t in seen}
+    assert seqs == {("BTC", 0), ("BTC", 1), ("ETH", 0)}
+
+
+def test_non_trades_frames_are_ignored() -> None:
+    frames = [
+        json.dumps({"channel": "subscriptionResponse", "data": {"method": "subscribe"}}),
+        json.dumps({"channel": "pong"}),
+        _trades_frame(_trade("BTC", "100", 1)),
+    ]
+    seen, _ = _drive(frames, symbols=["BTC"], until_ticks=1)
+
+    assert [t.trade_id for t in seen] == ["1"]
