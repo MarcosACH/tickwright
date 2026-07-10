@@ -76,6 +76,12 @@ explicit_package_bases = true
 module = "aiokafka.*"
 ignore_missing_imports = true
 
+# hyperliquid-python-sdk ships no py.typed marker; only its signing utilities
+# are used (ADR-0021), behind the adapter's own typed surface.
+[[tool.mypy.overrides]]
+module = "hyperliquid.*"
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"

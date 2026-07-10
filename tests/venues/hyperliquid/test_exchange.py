@@ -15,6 +15,7 @@ import pytest
 from eth_account import Account
 from hyperliquid.utils.signing import recover_agent_or_user_from_l1_action
 from hyperliquid_fakes import FakeExchangeApi, resting_response
+from pydantic import SecretStr
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
@@ -62,7 +63,7 @@ def make_exchange(
     config = HyperliquidConfig(
         testnet=True,
         symbols=["BTC"],
-        signing_key=TEST_SIGNING_KEY,
+        signing_key=SecretStr(TEST_SIGNING_KEY),
         slippage_bound=Decimal("0.05"),
     )
     return HyperliquidExchange(config=config, bus=bus, clock=clock, universe=UNIVERSE, post=post)

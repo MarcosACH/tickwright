@@ -11,6 +11,7 @@ import asyncio
 from decimal import Decimal
 
 from hyperliquid_fakes import FakeExchangeApi
+from pydantic import SecretStr
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
@@ -66,7 +67,9 @@ def test_a_venue_outage_freezes_reconciliation_instead_of_resolving_inflight() -
         # Every fetch the reconciler makes dies in transport: the outage case.
         post = FakeExchangeApi([ConnectionError("venue unreachable")] * 10)
         exchange = HyperliquidExchange(
-            config=HyperliquidConfig(testnet=True, symbols=["BTC"], signing_key=TEST_SIGNING_KEY),
+            config=HyperliquidConfig(
+                testnet=True, symbols=["BTC"], signing_key=SecretStr(TEST_SIGNING_KEY)
+            ),
             bus=bus,
             clock=clock,
             universe=HyperliquidUniverse(specs={"BTC": BTC_SPEC}, asset_indices={"BTC": 3}),

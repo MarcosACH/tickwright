@@ -58,7 +58,7 @@ class AppConfig(BaseSettings):
     # The seam discriminants (ADR-0032): each names the impl for one Protocol.
     bus: Literal["in_memory", "kafka"] = "in_memory"
     store: Literal["sqlite", "postgres"] = "sqlite"
-    exchange: Literal["paper"] = "paper"
+    exchange: Literal["paper", "hyperliquid"] = "paper"
     feed: Literal["replay", "hyperliquid"] = "replay"
     guard: Literal["real", "noop"] = "real"
 
@@ -80,6 +80,13 @@ class AppConfig(BaseSettings):
         if self.feed == "hyperliquid" and not self.hyperliquid.symbols:
             raise ValueError(
                 "feed='hyperliquid' needs at least one symbol: set TICKWRIGHT_HYPERLIQUID__SYMBOLS"
+            )
+        if self.exchange == "hyperliquid" and self.hyperliquid.signing_key is None:
+            # The paper default needs no key at all (ADR-0021); only the live
+            # write path signs.
+            raise ValueError(
+                "exchange='hyperliquid' needs a signing key: "
+                "set TICKWRIGHT_HYPERLIQUID__SIGNING_KEY"
             )
         return self
 

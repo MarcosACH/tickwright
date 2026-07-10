@@ -18,6 +18,7 @@ from decimal import Decimal
 
 import pytest
 from hyperliquid_fakes import FakeExchangeApi, FakeWsConnection, trade, trades_frame
+from pydantic import SecretStr
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
@@ -383,7 +384,9 @@ def _drive_exchange_request_failed() -> None:
                 testnet=True,
                 symbols=["BTC"],
                 # Anvil's account #0 — a publicly-known throwaway key.
-                signing_key="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+                signing_key=SecretStr(
+                    "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+                ),
             ),
             bus=InMemoryBus(),
             clock=ManualClock(),

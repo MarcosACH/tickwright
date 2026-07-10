@@ -12,7 +12,7 @@ bounded against is the tick stream's — the adapter subscribes itself, like
 every consumer of market data.
 """
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Mapping
 from decimal import Decimal
 from typing import Any
 
@@ -20,6 +20,7 @@ from tickwright.domain import (
     Clock,
     EventBus,
     FillReport,
+    InstrumentSpec,
     MarketTick,
     OrderState,
     OrderStatusReport,
@@ -33,27 +34,12 @@ from tickwright.domain import (
 from tickwright.observability import NamedEvent, named_event
 
 from .config import HyperliquidConfig
+from .transport import PostJson, post_json
 from .universe import HyperliquidUniverse
-
-type PostJson = Callable[[str, dict[str, Any]], Awaitable[object]]
-"""POSTs ``payload`` as JSON to ``url`` and returns the decoded response,
-raising ``OSError``/``TimeoutError`` on transport failure. Defaults to the
-real client; tests inject fakes."""
 
 _NS_PER_MS = 1_000_000
 
 _TIF_WIRE = {TimeInForce.GTC: "Gtc", TimeInForce.IOC: "Ioc"}
-
-
-async def _post_json(url: str, payload: dict[str, Any]) -> object:
-    """The real transport. Imported lazily so the package stays light until a
-    live exchange is actually built (mirrors the feed's websockets import)."""
-    import aiohttp
-
-    async with aiohttp.ClientSession() as session:
-        async with session.post(url, json=payload) as response:
-            response.raise_for_status()
-            return await response.json()
 
 
 class HyperliquidExchange:
@@ -66,7 +52,7 @@ class HyperliquidExchange:
         bus: EventBus,
         clock: Clock,
         universe: HyperliquidUniverse,
-        post: PostJson = _post_json,
+        post: PostJson = post_json,
     ) -> None:
         if config.signing_key is None:
             raise ValueError(
@@ -249,6 +235,11 @@ class HyperliquidExchange:
             for entry in entries
             if entry["oid"] == oid
         ]
+
+    def instrument_specs(self) -> Mapping[str, InstrumentSpec]:
+        """The meta-sourced per-symbol specs (ADR-0031), for the Engine to wire
+        into the guard. A copy, so a caller can never mutate the universe."""
+        return dict(self._universe.specs)
 
     async def _info(self, query: dict[str, Any]) -> object:
         return await self._post(f"{self._config.api_url}/info", query)
