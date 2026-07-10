@@ -13,18 +13,26 @@ import asyncio
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 from decimal import Decimal
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from tickwright.domain import AggressorSide, Clock, EventBus, MarketTick
 from tickwright.observability import NamedEvent, named_event
 
 from .config import HyperliquidConfig
 
+if TYPE_CHECKING:
+    from websockets.asyncio.client import ClientConnection
+
 _NS_PER_MS = 1_000_000
 
 
 class WsConnection(Protocol):
-    """The slice of a websocket connection the feed uses (the mockable boundary)."""
+    """The slice of a websocket connection the feed uses (the mockable boundary).
+
+    The contract the reconnect loop stands on: iteration **ends** when the
+    connection dies — however it dies — and never raises for it; ``close()``
+    also ends iteration (that is how ``stop`` unblocks the reader).
+    """
 
     async def send(self, message: str) -> None: ...
 
@@ -34,13 +42,47 @@ class WsConnection(Protocol):
 
 
 type Connect = Callable[[str], Awaitable[WsConnection]]
-"""Opens a websocket to a URL. Defaults to the real client; tests inject fakes."""
+"""Opens a websocket to a URL, raising ``OSError`` on failure. Defaults to the
+real client; tests inject fakes."""
 
 
 async def _open_websocket(url: str) -> WsConnection:
+    """The real client, adapted to the seam: a failed connect is an ``OSError``
+    (handshake refusals included), so the backoff loop owns every failure."""
     import websockets
 
-    return await websockets.connect(url)  # type: ignore[return-value]
+    try:
+        return _RealWsConnection(await websockets.connect(url))
+    except websockets.exceptions.WebSocketException as exc:
+        raise ConnectionError(f"hyperliquid websocket connect failed: {exc}") from exc
+
+
+class _RealWsConnection:
+    """Adapts ``websockets``' connection to the ``WsConnection`` contract:
+    ``ConnectionClosed`` becomes the end of iteration, frames are always
+    ``str``. Constructed only after ``websockets`` is imported."""
+
+    def __init__(self, connection: "ClientConnection") -> None:
+        from websockets.exceptions import ConnectionClosed
+
+        self._connection = connection
+        self._closed_exc = ConnectionClosed
+
+    async def send(self, message: str) -> None:
+        await self._connection.send(message)
+
+    async def close(self) -> None:
+        await self._connection.close()
+
+    def __aiter__(self) -> "_RealWsConnection":
+        return self
+
+    async def __anext__(self) -> str:
+        try:
+            message = await self._connection.recv()
+        except self._closed_exc:
+            raise StopAsyncIteration from None
+        return message if isinstance(message, str) else message.decode()
 
 
 class HyperliquidFeed:
