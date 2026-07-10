@@ -93,6 +93,7 @@ class HyperliquidFeed:
             aggressor_side=AggressorSide.BUY if trade["side"] == "B" else AggressorSide.SELL,
             trade_id=str(trade["tid"]),
             seq=seq,
+            venue_trade_id=True,  # tid is venue-assigned: dedup on {symbol}:{tid} (ADR-0027)
             ts_event=int(str(trade["time"])) * _NS_PER_MS,
             ts_init=self._clock.timestamp_ns(),
         )

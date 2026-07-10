@@ -149,6 +149,14 @@ def test_assigns_per_symbol_source_sequence() -> None:
     assert seqs == {("BTC", 0), ("BTC", 1), ("ETH", 0)}
 
 
+def test_live_ticks_dedup_on_the_venue_trade_id() -> None:
+    frames = [_trades_frame(_trade("BTC", "100", 900000000000001))]
+    seen, _ = _drive(frames, symbols=["BTC"], until_ticks=1)
+
+    # Live-form weak key (ADR-0027): {symbol}:{tid}, not the replay form.
+    assert seen[0].event_id == "BTC:900000000000001"
+
+
 def test_non_trades_frames_are_ignored() -> None:
     frames = [
         json.dumps({"channel": "subscriptionResponse", "data": {"method": "subscribe"}}),
