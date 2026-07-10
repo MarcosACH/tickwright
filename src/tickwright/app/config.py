@@ -82,3 +82,13 @@ class AppConfig(BaseSettings):
                 "feed='hyperliquid' needs at least one symbol: set TICKWRIGHT_HYPERLIQUID__SYMBOLS"
             )
         return self
+
+    def secrets(self) -> tuple[str, ...]:
+        """Every secret value this config carries, for log redaction (ADR-0020).
+
+        The config is the one place that knows which of its fields are key
+        material, so it owns the inventory the CLI hands ``configure_logging``.
+        The default paper path carries none.
+        """
+        key = self.hyperliquid.signing_key
+        return (key.get_secret_value(),) if key is not None else ()

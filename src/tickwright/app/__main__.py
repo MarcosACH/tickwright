@@ -20,7 +20,7 @@ def main() -> int:
     # inconsistent field (feed=replay without a tick file, say) is a readable
     # pydantic validation error, which is exactly the CLI contract.
     config = AppConfig()
-    configure_logging()
+    configure_logging(secrets=config.secrets())
     engine = build_engine(config)
     return asyncio.run(engine.run())
 
