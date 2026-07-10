@@ -166,7 +166,7 @@ src/tickwright/
 
 ### hyperliquid (`venues/hyperliquid/`)
 
-**Interface:** The one self-contained venue package (venue = extension unit, ADR-0031/0032): `HyperliquidFeed` (async WS `trades` channel, no auth, conflation at ingress with `feed.lagged`), `HyperliquidExchange` (async HTTP + SDK/`eth-account` signing utilities only; MARKET → aggressive-IOC-limit translation with slippage bound; `post_only` → ALO; perps only), instrument-spec sourcing from the meta endpoint, and `HyperliquidConfig`. Callers must know: signing key is env-only, never persisted, redacted from logs; `fetch_*` → `None` on failure; testnet/mainnet via `HYPERLIQUID_TESTNET`.
+**Interface:** The one self-contained venue package (venue = extension unit, ADR-0031/0032): `HyperliquidFeed` (async WS `trades` channel, no auth, conflation at ingress with `feed.lagged`), `HyperliquidExchange` (async HTTP + SDK/`eth-account` signing utilities only; MARKET → aggressive-IOC-limit translation with slippage bound; `post_only` → ALO; perps only), instrument-spec sourcing from the meta endpoint, and `HyperliquidConfig`. Callers must know: signing key is env-only, never persisted, redacted from logs; `fetch_*` → `None` on failure; testnet/mainnet via `TICKWRIGHT_HYPERLIQUID__TESTNET`.
 
 **Responsibilities:** All venue knowledge — symbol/asset mapping, endpoints, auth, quirk translation. No saga, no engine imports, no other-adapter imports.
 

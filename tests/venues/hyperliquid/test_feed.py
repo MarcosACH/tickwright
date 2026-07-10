@@ -12,6 +12,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from hyperliquid_fakes import FakeWsConnection, trade, trades_frame
+from structlog.typing import EventDict
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
@@ -131,7 +132,7 @@ def test_slow_consumer_gets_only_the_latest_tick_per_symbol_with_one_lagged_per_
     draining. Here the first publish blocks; three more ticks arrive meanwhile
     (BTC 101 → superseded by BTC 102 → one drop; ETH 50 kept)."""
 
-    async def main() -> tuple[list[MarketTick], list[dict]]:
+    async def main() -> tuple[list[MarketTick], list[EventDict]]:
         bus = InMemoryBus()
         clock = ManualClock()
         seen: list[MarketTick] = []
