@@ -19,7 +19,10 @@ from typing import Any
 from tickwright.domain import (
     Clock,
     EventBus,
+    FillReport,
     MarketTick,
+    OrderState,
+    OrderStatusReport,
     OrderType,
     PlaceOrder,
     Side,
@@ -77,6 +80,9 @@ class HyperliquidExchange:
         self._universe = universe
         self._post = post
         self._wallet = Account.from_key(config.signing_key.get_secret_value())
+        # /info queries ask about the account, which is the key's own address
+        # unless the key is an API/agent wallet acting for a master account.
+        self._user_address = config.account_address or self._wallet.address
         self._latest_price: dict[str, Decimal] = {}
         # The MARKET slippage bound needs the latest traded price, and the tick
         # stream is where prices live (ADR-0027) — subscribe like any consumer.
@@ -91,7 +97,72 @@ class HyperliquidExchange:
             "orders": [self._order_wire(order)],
             "grouping": "na",
         }
-        await self._send_action(action)
+        response = await self._send_action(action)
+        await self._report_placement(order, response)
+
+    async def _report_placement(self, order: PlaceOrder, response: object) -> None:
+        """Translate the venue's placement adjudication into raw facts on the
+        bus (ADR-0015): one order in, one status out of ``statuses``."""
+        (status,) = _placement_statuses(response)
+        if "resting" in status:
+            await self._bus.publish(
+                self._status_report(order, OrderState.LIVE, venue_oid=str(status["resting"]["oid"]))
+            )
+        elif "error" in status:
+            # Venue-adjudicated refusal: REJECTED, never DENIED (ADR-0010) —
+            # the order was sent and judged, and the venue's reason rides along.
+            await self._bus.publish(
+                self._status_report(order, OrderState.REJECTED, reason=str(status["error"]))
+            )
+        elif "filled" in status:
+            # The placement response carries no trade ids, and a synthetic one
+            # would double-count against reconciliation's venue-tid fills under
+            # {cloid}:fill:{tid} dedup — so fetch the venue's own fill records
+            # and emit those.
+            for report in await self._fetch_fills(order, oid=int(status["filled"]["oid"])):
+                await self._bus.publish(report)
+
+    async def _fetch_fills(self, order: PlaceOrder, *, oid: int) -> list[FillReport]:
+        """This order's fills from the venue's fill history, by its oid — the
+        one id fills carry (they have no cloid on the wire)."""
+        entries = await self._info({"type": "userFills", "user": self._user_address})
+        if not isinstance(entries, list):
+            raise ValueError(f"unrecognized Hyperliquid userFills response: {entries!r}")
+        return [
+            FillReport(
+                ts_event=int(entry["time"]) * _NS_PER_MS,
+                ts_init=self._clock.timestamp_ns(),
+                cloid=order.cloid,
+                symbol=order.symbol,
+                trade_id=str(entry["tid"]),
+                quantity=Decimal(str(entry["sz"])),
+                price=Decimal(str(entry["px"])),
+            )
+            for entry in entries
+            if entry["oid"] == oid
+        ]
+
+    async def _info(self, query: dict[str, Any]) -> object:
+        return await self._post(f"{self._config.api_url}/info", query)
+
+    def _status_report(
+        self,
+        order: PlaceOrder,
+        status: OrderState,
+        *,
+        venue_oid: str | None = None,
+        reason: str | None = None,
+    ) -> OrderStatusReport:
+        now = self._clock.timestamp_ns()
+        return OrderStatusReport(
+            ts_event=now,
+            ts_init=now,
+            cloid=order.cloid,
+            symbol=order.symbol,
+            status=status,
+            venue_oid=venue_oid,
+            reason=reason,
+        )
 
     def _order_wire(self, order: PlaceOrder) -> dict[str, Any]:
         # Field order matters: the venue re-encodes the JSON action with
@@ -142,6 +213,15 @@ class HyperliquidExchange:
         )
         payload = {"action": action, "nonce": nonce, "signature": signature}
         return await self._post(f"{self._config.api_url}/exchange", payload)
+
+
+def _placement_statuses(response: object) -> list[dict[str, Any]]:
+    """The ``statuses`` array out of a placement response, or a readable error
+    for a shape the venue never documented (fail fast on our own parsing)."""
+    match response:
+        case {"status": "ok", "response": {"data": {"statuses": list(statuses)}}}:
+            return statuses
+    raise ValueError(f"unrecognized Hyperliquid placement response: {response!r}")
 
 
 def _wire_decimal(value: Decimal) -> str:

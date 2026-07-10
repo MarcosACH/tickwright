@@ -19,8 +19,12 @@ from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.domain import (
     AggressorSide,
+    ExecutionReport,
+    FillReport,
     InstrumentSpec,
     MarketTick,
+    OrderState,
+    OrderStatusReport,
     OrderType,
     PlaceOrder,
     Side,
@@ -215,3 +219,126 @@ def test_limit_passes_through_with_its_own_time_in_force() -> None:
     assert ioc["t"] == {"limit": {"tif": "Ioc"}}
     assert ioc["p"] == "42000.5"
     assert ioc["b"] is False
+
+
+async def place_and_collect_reports(
+    post: FakeExchangeApi, order: PlaceOrder, *, prime_tick: bool = True
+) -> list[ExecutionReport]:
+    """Drive one placement against canned responses; return the raw venue
+    facts the adapter emitted on the bus (its ``Exchange`` contract)."""
+    bus = InMemoryBus()
+    clock = ManualClock(start_ns=1_700_000_001_000 * _NS_PER_MS)
+    exchange = make_exchange(post, bus=bus, clock=clock)
+    reports: list[ExecutionReport] = []
+
+    async def collect(report: ExecutionReport) -> None:
+        reports.append(report)
+
+    bus.subscribe(ExecutionReport, collect)
+    if prime_tick:
+        await bus.publish(tick("BTC", "43250.5"))
+    await exchange.place(order)
+    return reports
+
+
+def test_a_resting_placement_reports_the_order_live() -> None:
+    post = FakeExchangeApi([resting_response(oid=77)])
+    reports = asyncio.run(place_and_collect_reports(post, limit_order(Side.BUY, "0.5", "42000")))
+
+    (report,) = reports
+    assert isinstance(report, OrderStatusReport)
+    assert report.status is OrderState.LIVE
+    assert report.cloid == CLOID
+    assert report.symbol == "BTC"
+    assert report.venue_oid == "77"
+
+
+def error_response(message: str) -> dict:
+    """The venue's per-order placement refusal (still HTTP 200 / status ok)."""
+    return {
+        "status": "ok",
+        "response": {"type": "order", "data": {"statuses": [{"error": message}]}},
+    }
+
+
+def test_a_placement_error_reports_the_order_rejected_with_the_venue_reason() -> None:
+    post = FakeExchangeApi([error_response("Order must have minimum value of $10")])
+    reports = asyncio.run(place_and_collect_reports(post, limit_order(Side.BUY, "0.0001", "42000")))
+
+    (report,) = reports
+    assert isinstance(report, OrderStatusReport)
+    # Venue-adjudicated refusal: REJECTED (sent, judged), never DENIED
+    # (ADR-0010) — the reason rides along for the OrderRejected.
+    assert report.status is OrderState.REJECTED
+    assert report.reason == "Order must have minimum value of $10"
+    assert report.cloid == CLOID
+
+
+def filled_response(*, oid: int, total_sz: str, avg_px: str) -> dict:
+    """The venue's placement response for an order that filled on arrival."""
+    return {
+        "status": "ok",
+        "response": {
+            "type": "order",
+            "data": {"statuses": [{"filled": {"totalSz": total_sz, "avgPx": avg_px, "oid": oid}}]},
+        },
+    }
+
+
+def fill_entry(*, oid: int, tid: int, px: str, sz: str, time: int = 1_700_000_000_500) -> dict:
+    """One venue ``userFills`` entry (the fields the docs pin, ADR-0011)."""
+    return {
+        "coin": "BTC",
+        "px": px,
+        "sz": sz,
+        "side": "B",
+        "time": time,
+        "startPosition": "0.0",
+        "dir": "Open Long",
+        "closedPnl": "0.0",
+        "hash": "0x" + "00" * 32,
+        "oid": oid,
+        "crossed": True,
+        "fee": "0.0",
+        "feeToken": "USDC",
+        "tid": tid,
+    }
+
+
+def test_a_filled_placement_fetches_and_emits_the_real_venue_fills() -> None:
+    # The placement response carries no trade ids, and inventing one would
+    # double-count against reconciliation's {cloid}:fill:{tid} dedup — so the
+    # adapter follows up with a fills read and emits the venue's own records,
+    # filtered to this order's oid.
+    post = FakeExchangeApi(
+        [
+            filled_response(oid=91, total_sz="0.5", avg_px="43250.0"),
+            [
+                fill_entry(oid=90, tid=555, px="43249.0", sz="1.0"),
+                fill_entry(oid=91, tid=556, px="43250.0", sz="0.3"),
+                fill_entry(oid=91, tid=557, px="43250.5", sz="0.2"),
+            ],
+        ]
+    )
+    reports = asyncio.run(place_and_collect_reports(post, market_order(Side.BUY, "0.5")))
+
+    (fills_url, fills_query) = post.requests[1]
+    assert fills_url == "https://api.hyperliquid-testnet.xyz/info"
+    assert fills_query == {
+        "type": "userFills",
+        "user": Account.from_key(TEST_SIGNING_KEY).address,
+    }
+    first, second = reports
+    assert isinstance(first, FillReport) and isinstance(second, FillReport)
+    assert (first.trade_id, first.price, first.quantity) == (
+        "556",
+        Decimal("43250.0"),
+        Decimal("0.3"),
+    )
+    assert (second.trade_id, second.price, second.quantity) == (
+        "557",
+        Decimal("43250.5"),
+        Decimal("0.2"),
+    )
+    assert first.cloid == CLOID
+    assert first.ts_event == 1_700_000_000_500 * _NS_PER_MS  # the venue's fill time
