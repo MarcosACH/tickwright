@@ -12,10 +12,11 @@ no network.
 import asyncio
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Protocol
 
 from tickwright.domain import AggressorSide, Clock, EventBus, MarketTick
+from tickwright.observability import NamedEvent, named_event
 
 from .backoff import Backoff
 from .config import HyperliquidConfig
@@ -25,6 +26,9 @@ if TYPE_CHECKING:
     from websockets.asyncio.client import ClientConnection
 
 _NS_PER_MS = 1_000_000
+# A dropped frame/row is echoed into its named event for triage; truncated so a
+# pathological payload can never bloat the logs.
+_MAX_LOGGED_FRAME = 200
 
 
 class WsConnection(Protocol):
@@ -159,10 +163,44 @@ class HyperliquidFeed:
             await connection.send(json.dumps(message))
 
     def _parse(self, frame: str) -> list[MarketTick]:
-        message = json.loads(frame)
-        if message.get("channel") != "trades":
+        """Parse a WS frame into ticks, skipping (and naming) anything malformed.
+
+        A corrupt frame or trade row must never fault the feed: the live tick
+        stream is lossy by contract (ADR-0023), so trades data we cannot read
+        emits one ``feed.frame_dropped`` (ADR-0020) and is skipped — good rows in
+        the same batch still flow. Frames from other channels are *ignored*, not
+        dropped: only the ``trades`` channel is a tick source (like the venue's
+        ``subscriptionResponse``/``pong``).
+        """
+        try:
+            message = json.loads(frame)
+        except json.JSONDecodeError:
+            self._drop_frame(frame)
             return []
-        return [self._to_tick(trade) for trade in message["data"]]
+        if not isinstance(message, dict) or message.get("channel") != "trades":
+            return []
+        rows = message.get("data")
+        if not isinstance(rows, list):
+            self._drop_frame(frame)
+            return []
+        ticks: list[MarketTick] = []
+        for row in rows:
+            try:
+                ticks.append(self._to_tick(row))
+            except (KeyError, ValueError, TypeError, InvalidOperation):
+                self._drop_frame(frame, row)
+        return ticks
+
+    def _drop_frame(self, frame: str, row: object = None) -> None:
+        """Name one unparseable ``trades`` frame or row and skip it (ADR-0020/0023).
+
+        The trades channel is public and unauthenticated (no key material), so
+        echoing the offending payload — truncated — is safe and aids triage."""
+        named_event(
+            NamedEvent.FEED_FRAME_DROPPED,
+            frame=frame[:_MAX_LOGGED_FRAME],
+            row=None if row is None else repr(row)[:_MAX_LOGGED_FRAME],
+        )
 
     def _to_tick(self, trade: dict[str, object]) -> MarketTick:
         symbol = str(trade["coin"])

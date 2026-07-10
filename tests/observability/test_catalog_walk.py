@@ -493,6 +493,41 @@ def _drive_feed_lagged() -> None:
     asyncio.run(go())
 
 
+def _drive_feed_frame_dropped() -> None:
+    """A malformed trades frame reaches the live feed: it is skipped and named
+    (``feed.frame_dropped``, ADR-0023), and the good frame after it still ticks
+    through — the engine is never faulted by one bad row."""
+
+    async def go() -> None:
+        bus = InMemoryBus()
+        clock = ManualClock()
+        ticked = asyncio.Event()
+
+        async def record(tick: MarketTick) -> None:
+            ticked.set()
+
+        bus.subscribe(MarketTick, record)
+        connection = FakeWsConnection(
+            [
+                trades_frame({"coin": "BTC", "side": "B", "px": "not-a-number"}),
+                trades_frame(trade("BTC", "100", 1)),
+            ]
+        )
+
+        async def connect(url: str) -> FakeWsConnection:
+            return connection
+
+        feed = HyperliquidFeed(
+            config=HyperliquidConfig(symbols=["BTC"]), bus=bus, clock=clock, connect=connect
+        )
+        run = asyncio.create_task(feed.start())
+        await ticked.wait()  # the good frame landed → the feed survived the bad one
+        await feed.stop()
+        await run
+
+    asyncio.run(go())
+
+
 # --- The catalog walk --------------------------------------------------------
 
 # Every NamedEvent → a scenario that drives its real path. Several of the saga
@@ -509,6 +544,7 @@ SCENARIOS: dict[NamedEvent, Callable[[], None]] = {
     NamedEvent.ORDER_FAILED: _drive_status(OrderState.FAILED),
     NamedEvent.ORDER_CANCELLED: _drive_status(OrderState.LIVE, OrderState.CANCELLED),
     NamedEvent.FEED_LAGGED: _drive_feed_lagged,
+    NamedEvent.FEED_FRAME_DROPPED: _drive_feed_frame_dropped,
     NamedEvent.ENGINE_BARRIER_CLEARED: _drive_engine_lifecycle,
     NamedEvent.ENGINE_FEED_STARTED: _drive_engine_lifecycle,
     NamedEvent.ENGINE_FAULTED: _drive_engine_faulted,

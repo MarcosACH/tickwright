@@ -302,3 +302,52 @@ def test_non_trades_frames_are_ignored() -> None:
     seen, _ = _drive(frames, symbols=["BTC"], until_ticks=1)
 
     assert [t.trade_id for t in seen] == ["1"]
+
+
+def test_malformed_frames_are_skipped_and_named_while_good_frames_keep_flowing() -> None:
+    """A corrupt frame or trade row must never fault the feed (ADR-0023): each
+    emits one ``feed.frame_dropped`` and is skipped, and good rows — even in the
+    same batch as a bad one — still tick through."""
+
+    async def main() -> tuple[list[MarketTick], list[EventDict]]:
+        bus = InMemoryBus()
+        clock = ManualClock()
+        seen: list[MarketTick] = []
+        enough = asyncio.Event()
+
+        async def record(tick: MarketTick) -> None:
+            seen.append(tick)
+            if len(seen) >= 2:
+                enough.set()
+
+        bus.subscribe(MarketTick, record)
+        connection = FakeWsConnection(
+            [
+                "}not json{",  # frame-level garbage → one drop
+                json.dumps({"channel": "trades", "data": "oops"}),  # trades frame, data not a list
+                trades_frame({"coin": "BTC", "side": "B", "px": "nope"}),  # unparseable row
+                trades_frame(trade("BTC", "100", 1), {"coin": "BTC"}),  # one good, one bad row
+                trades_frame(trade("BTC", "101", 2)),
+            ]
+        )
+
+        async def connect(url: str) -> FakeWsConnection:
+            return connection
+
+        feed = HyperliquidFeed(
+            config=HyperliquidConfig(symbols=["BTC"]), bus=bus, clock=clock, connect=connect
+        )
+        with capture_events() as logs:
+            run = asyncio.create_task(feed.start())
+            await asyncio.wait_for(enough.wait(), timeout=2)
+            await feed.stop()
+            await asyncio.wait_for(run, timeout=2)
+        return seen, [log for log in logs if log["event"] == "feed.frame_dropped"]
+
+    seen, dropped = asyncio.run(main())
+
+    # Both good trades ticked through despite the garbage around and beside them.
+    assert [t.trade_id for t in seen] == ["1", "2"]
+    # One drop each: the non-JSON frame, the non-list `data`, the bad-only row,
+    # and the bad row in the mixed batch.
+    assert len(dropped) == 4
