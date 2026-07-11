@@ -14,7 +14,6 @@ fees/margin/PnL (ADR-0013).
 """
 
 from collections.abc import Mapping
-from decimal import Decimal
 
 from tickwright.domain import (
     Clock,
@@ -33,6 +32,7 @@ from tickwright.domain import (
     below_min_notional,
 )
 
+from .book import RestingBook
 from .fill_model import Fill, FillModel
 
 
@@ -56,11 +56,10 @@ class PaperExchange:
         self._specs = dict(instrument_specs or {})
         self._latest_tick: dict[str, MarketTick] = {}
         self._fill_counts: dict[str, int] = {}
-        self._book: dict[str, PlaceOrder] = {}  # resting LIMITs, keyed by cloid.
-        # Unfilled size still working per resting cloid — the fill model may
-        # partial-fill a crossing LIMIT, so the venue tracks the remainder and
-        # re-rests it until a later tick fills the rest (ADR-0012).
-        self._remaining: dict[str, Decimal] = {}
+        # Resting LIMITs and their working remainders. The fill model may
+        # partial-fill a crossing LIMIT, so the book caps each fill to what is
+        # still working and lifts the order off once it converges (ADR-0012).
+        self._book = RestingBook()
         # The venue's own memory, per cloid: the last status and every fill it
         # reported. This is what ``fetch_order`` answers reconciliation from —
         # a real venue remembers the orders it saw; so does the paper one.
@@ -82,36 +81,25 @@ class PaperExchange:
 
     async def _match_book(self, tick: MarketTick) -> None:
         # Re-check resting LIMITs for this symbol: any the tick now crosses fills.
-        crossed = [
-            order
-            for order in self._book.values()
-            if order.symbol == tick.symbol and self._crosses(order, tick)
-        ]
-        for order in crossed:
-            if await self._fill_crossing_limit(order, tick):
-                del self._book[order.cloid]  # fully filled: lift it off the book.
+        # The book lifts a fully-filled order off itself, so a partial just stays.
+        for order in self._book.resting():
+            if order.symbol == tick.symbol and self._crosses(order, tick):
+                await self._fill_crossing_limit(order, tick)
 
     async def _fill_crossing_limit(self, order: PlaceOrder, tick: MarketTick) -> bool:
-        """Fill a crossing LIMIT per the model, capping to its working remainder.
+        """Fill a crossing LIMIT per the model against its working remainder.
 
-        Returns ``True`` once the order is fully filled (and forgets its
-        remainder); a ``None`` decision (queue miss) or a partial returns
-        ``False``, leaving the reduced remainder recorded for a later tick. Book
-        membership is the caller's to manage — a resting order and a marketable
-        arrival share the fill math but differ on where the remainder lives.
+        Returns ``True`` once the order is fully filled. A ``None`` decision (a
+        queue miss) or a partial returns ``False``; the book keeps the reduced
+        remainder resting for a later tick. The order must already be on the
+        book — the book caps the fill and lifts it off on completion.
         """
         fill = await self._fill_model.limit_fill(order, tick)
         if fill is None:
             return False  # queue miss (ADR-0012): nothing fills this tick.
-        remaining = self._remaining.get(order.cloid, order.quantity)
-        quantity = min(fill.quantity, remaining)
+        quantity, complete = self._book.apply_fill(order.cloid, fill.quantity)
         await self._bus.publish(self._fill_report(order, Fill(quantity=quantity, price=fill.price)))
-        remaining -= quantity
-        if remaining <= 0:
-            self._remaining.pop(order.cloid, None)
-            return True
-        self._remaining[order.cloid] = remaining
-        return False
+        return complete
 
     async def place(self, order: PlaceOrder) -> None:
         if order.order_type is OrderType.MARKET:
@@ -152,21 +140,22 @@ class PaperExchange:
                     )
                 )
                 return
-            # Marketable on arrival. The model may only partial-fill it, so the
-            # remainder is handled exactly like a resting order's: GTC rests it,
-            # IOC cancels it. A full fill on arrival never rests.
+            # Marketable on arrival. Rest it first so the book owns its
+            # remainder, then fill: a full fill lifts it right back off; the
+            # model may only partial-fill, and the remainder is then handled
+            # exactly like a resting order's — GTC keeps it, IOC cancels it.
+            self._book.rest(order)
             if await self._fill_crossing_limit(order, tick):
-                return
+                return  # fully filled on arrival: the book already lifted it off.
             if order.time_in_force is TimeInForce.IOC:
-                # IOC never rests: cancel whatever remainder didn't fill now.
-                self._remaining.pop(order.cloid, None)
+                # IOC never rests: drop whatever remainder didn't fill now.
+                self._book.remove(order.cloid)
                 await self._bus.publish(self._status_report(order, OrderState.CANCELLED))
                 return
-            # GTC: rest the remainder for a later crossing tick. Announce it
-            # working only if *nothing* filled (a queue miss); a partial already
-            # drove the saga to PARTIALLY_FILLED, itself a working state.
-            self._book[order.cloid] = order
-            if self._remaining.get(order.cloid, order.quantity) == order.quantity:
+            # GTC keeps the remainder resting for a later crossing tick. Announce
+            # it working only if *nothing* filled (a queue miss); a partial
+            # already drove the saga to PARTIALLY_FILLED, itself a working state.
+            if not self._book.has_partial(order.cloid):
                 await self._bus.publish(self._status_report(order, OrderState.LIVE))
             return
 
@@ -177,11 +166,11 @@ class PaperExchange:
 
         # Not marketable on arrival: rest on the book and report it working (LIVE).
         # A later tick that crosses it fills it (see ``on_tick``).
-        self._book[order.cloid] = order
+        self._book.rest(order)
         await self._bus.publish(self._status_report(order, OrderState.LIVE))
 
     async def cancel(self, cloid: str) -> None:
-        order = self._book.pop(cloid, None)
+        order = self._book.remove(cloid)
         if order is None:
             # Nothing resting under this cloid: already filled/cancelled or never
             # placed. A benign no-op — the venue has nothing to report (ADR-0026).
