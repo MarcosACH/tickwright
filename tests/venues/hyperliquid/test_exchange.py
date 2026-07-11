@@ -98,7 +98,7 @@ def test_market_buy_places_an_aggressive_ioc_limit_at_the_bounded_price() -> Non
     async def main() -> tuple[FakeExchangeApi, ManualClock]:
         bus = InMemoryBus()
         clock = ManualClock(start_ns=1_700_000_001_000 * _NS_PER_MS)
-        post = FakeExchangeApi([resting_response(oid=77)])
+        post = FakeExchangeApi({"order": resting_response(oid=77)})
         exchange = make_exchange(post, bus=bus, clock=clock)
         await bus.publish(tick("BTC", "43250.5"))
         await exchange.place(market_order(Side.BUY, "0.5"))
@@ -141,7 +141,7 @@ def test_market_sell_places_an_aggressive_ioc_limit_at_the_bounded_price() -> No
     async def main() -> FakeExchangeApi:
         bus = InMemoryBus()
         clock = ManualClock(start_ns=1_700_000_001_000 * _NS_PER_MS)
-        post = FakeExchangeApi([resting_response(oid=78)])
+        post = FakeExchangeApi({"order": resting_response(oid=78)})
         exchange = make_exchange(post, bus=bus, clock=clock)
         await bus.publish(tick("BTC", "43250.5"))
         await exchange.place(market_order(Side.SELL, "0.25"))
@@ -189,7 +189,7 @@ def test_post_only_limit_maps_to_alo() -> None:
     async def main() -> FakeExchangeApi:
         bus = InMemoryBus()
         clock = ManualClock()
-        post = FakeExchangeApi([resting_response(oid=79)])
+        post = FakeExchangeApi({"order": resting_response(oid=79)})
         exchange = make_exchange(post, bus=bus, clock=clock)
         await exchange.place(limit_order(Side.BUY, "0.5", "42000", post_only=True))
         return post
@@ -205,8 +205,8 @@ def test_limit_passes_through_with_its_own_time_in_force() -> None:
     async def main() -> tuple[FakeExchangeApi, FakeExchangeApi]:
         bus = InMemoryBus()
         clock = ManualClock()
-        gtc_post = FakeExchangeApi([resting_response(oid=80)])
-        ioc_post = FakeExchangeApi([resting_response(oid=81)])
+        gtc_post = FakeExchangeApi({"order": resting_response(oid=80)})
+        ioc_post = FakeExchangeApi({"order": resting_response(oid=81)})
         await make_exchange(gtc_post, bus=bus, clock=clock).place(
             limit_order(Side.BUY, "0.5", "42000")
         )
@@ -247,7 +247,7 @@ async def place_and_collect_reports(
 
 
 def test_a_resting_placement_reports_the_order_live() -> None:
-    post = FakeExchangeApi([resting_response(oid=77)])
+    post = FakeExchangeApi({"order": resting_response(oid=77)})
     reports = asyncio.run(place_and_collect_reports(post, limit_order(Side.BUY, "0.5", "42000")))
 
     (report,) = reports
@@ -267,7 +267,7 @@ def error_response(message: str) -> dict:
 
 
 def test_a_placement_error_reports_the_order_rejected_with_the_venue_reason() -> None:
-    post = FakeExchangeApi([error_response("Order must have minimum value of $10")])
+    post = FakeExchangeApi({"order": error_response("Order must have minimum value of $10")})
     reports = asyncio.run(place_and_collect_reports(post, limit_order(Side.BUY, "0.0001", "42000")))
 
     (report,) = reports
@@ -316,14 +316,14 @@ def test_a_filled_placement_fetches_and_emits_the_real_venue_fills() -> None:
     # adapter follows up with a fills read and emits the venue's own records,
     # filtered to this order's oid.
     post = FakeExchangeApi(
-        [
-            filled_response(oid=91, total_sz="0.5", avg_px="43250.0"),
-            [
+        {
+            "order": filled_response(oid=91, total_sz="0.5", avg_px="43250.0"),
+            "userFills": [
                 fill_entry(oid=90, tid=555, px="43249.0", sz="1.0"),
                 fill_entry(oid=91, tid=556, px="43250.0", sz="0.3"),
                 fill_entry(oid=91, tid=557, px="43250.5", sz="0.2"),
             ],
-        ]
+        }
     )
     reports = asyncio.run(place_and_collect_reports(post, market_order(Side.BUY, "0.5")))
 
@@ -360,7 +360,9 @@ def test_cancel_sends_a_signed_cancel_by_cloid_and_reports_cancelled() -> None:
     async def main() -> tuple[FakeExchangeApi, list[ExecutionReport]]:
         bus = InMemoryBus()
         clock = ManualClock(start_ns=1_700_000_001_000 * _NS_PER_MS)
-        post = FakeExchangeApi([resting_response(oid=77), cancel_success_response()])
+        post = FakeExchangeApi(
+            {"order": resting_response(oid=77), "cancelByCloid": cancel_success_response()}
+        )
         exchange = make_exchange(post, bus=bus, clock=clock)
         reports: list[ExecutionReport] = []
 
@@ -417,7 +419,9 @@ def test_cancel_of_an_order_placed_before_a_crash_resolves_the_coin_from_venue_t
     # cancels by cloid (ADR-0026) — so the adapter asks the venue whose order
     # this is (orderStatus) and cancels with the resolved asset index.
     async def main() -> FakeExchangeApi:
-        post = FakeExchangeApi([order_status_response(), cancel_success_response()])
+        post = FakeExchangeApi(
+            {"orderStatus": order_status_response(), "cancelByCloid": cancel_success_response()}
+        )
         exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
         await exchange.cancel(CLOID)
         return post
@@ -440,7 +444,7 @@ def test_cancel_of_an_order_placed_before_a_crash_resolves_the_coin_from_venue_t
 
 def test_cancel_of_a_cloid_the_venue_never_saw_is_a_benign_no_op() -> None:
     async def main() -> FakeExchangeApi:
-        post = FakeExchangeApi([{"status": "unknownOid"}])
+        post = FakeExchangeApi({"orderStatus": {"status": "unknownOid"}})
         exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
         await exchange.cancel(CLOID)
         return post
@@ -458,13 +462,13 @@ async def fetch_view(post: FakeExchangeApi) -> VenueOrderView | None:
 
 def test_fetch_order_bundles_the_venue_status_and_fills_into_one_view() -> None:
     post = FakeExchangeApi(
-        [
-            order_status_response(status="filled", oid=91),
-            [
+        {
+            "orderStatus": order_status_response(status="filled", oid=91),
+            "userFills": [
                 fill_entry(oid=90, tid=555, px="43249.0", sz="1.0"),
                 fill_entry(oid=91, tid=556, px="43250.0", sz="0.5"),
             ],
-        ]
+        }
     )
     view = asyncio.run(fetch_view(post))
 
@@ -483,7 +487,7 @@ def test_fetch_order_bundles_the_venue_status_and_fills_into_one_view() -> None:
 def test_fetch_order_returns_an_empty_view_when_the_venue_has_no_record() -> None:
     # unknownOid is a *successful* read: positive proof the order never landed
     # (the ADR-0008 resend gate), categorically different from a failed read.
-    view = asyncio.run(fetch_view(FakeExchangeApi([{"status": "unknownOid"}])))
+    view = asyncio.run(fetch_view(FakeExchangeApi({"orderStatus": {"status": "unknownOid"}})))
 
     assert view is not None
     assert not view.has_record
@@ -496,12 +500,16 @@ def test_fetch_order_returns_none_when_the_read_itself_fails() -> None:
     # None — never an empty view, which would read as "no record" and let
     # recovery resend into an outage.
     for failure in (TimeoutError("venue timed out"), ConnectionError("connection refused")):
-        view = asyncio.run(fetch_view(FakeExchangeApi([failure])))
+        view = asyncio.run(fetch_view(FakeExchangeApi({"orderStatus": failure})))
         assert view is None
 
     # A failure on the *fills* half of the read poisons the whole view too.
     view = asyncio.run(
-        fetch_view(FakeExchangeApi([order_status_response(), ConnectionError("reset")]))
+        fetch_view(
+            FakeExchangeApi(
+                {"orderStatus": order_status_response(), "userFills": ConnectionError("reset")}
+            )
+        )
     )
     assert view is None
 
@@ -520,7 +528,9 @@ def test_fetch_order_returns_none_when_the_read_itself_fails() -> None:
 def test_fetch_order_maps_the_venue_status_taxonomy_by_suffix(
     venue_status: str, state: OrderState
 ) -> None:
-    post = FakeExchangeApi([order_status_response(status=venue_status), []])
+    post = FakeExchangeApi(
+        {"orderStatus": order_status_response(status=venue_status), "userFills": []}
+    )
     view = asyncio.run(fetch_view(post))
 
     assert view is not None and view.status is not None
@@ -530,7 +540,9 @@ def test_fetch_order_maps_the_venue_status_taxonomy_by_suffix(
 def test_fetch_order_treats_a_status_it_cannot_map_as_a_failed_read() -> None:
     # A venue status outside the known taxonomy (say, a trigger state v1 never
     # places) must freeze the reconciler, not get misclassified as venue truth.
-    view = asyncio.run(fetch_view(FakeExchangeApi([order_status_response(status="triggered")])))
+    view = asyncio.run(
+        fetch_view(FakeExchangeApi({"orderStatus": order_status_response(status="triggered")}))
+    )
     assert view is None
 
 
@@ -539,7 +551,7 @@ def test_a_transport_failure_on_place_emits_no_report_and_does_not_raise() -> No
     # landed — so the adapter reports nothing (no fact to report) and lets
     # reconcile-by-cloid resolve the in-flight order (ADR-0008 rule 2). It
     # names the failure for triage instead of faulting the engine.
-    post = FakeExchangeApi([ConnectionError("connection refused")])
+    post = FakeExchangeApi({"order": ConnectionError("connection refused")})
 
     with capture_events() as events:
         reports = asyncio.run(
@@ -552,7 +564,9 @@ def test_a_transport_failure_on_place_emits_no_report_and_does_not_raise() -> No
 
 def test_a_transport_failure_on_cancel_emits_no_report_and_does_not_raise() -> None:
     async def main() -> None:
-        post = FakeExchangeApi([resting_response(oid=77), TimeoutError("venue timed out")])
+        post = FakeExchangeApi(
+            {"order": resting_response(oid=77), "cancelByCloid": TimeoutError("venue timed out")}
+        )
         exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
         await exchange.place(limit_order(Side.BUY, "0.5", "42000"))
         await exchange.cancel(CLOID)

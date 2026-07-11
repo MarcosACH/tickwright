@@ -25,7 +25,7 @@ def meta_response() -> dict:
 
 
 def test_fetch_instrument_specs_maps_the_meta_universe() -> None:
-    post = FakeExchangeApi([meta_response()])
+    post = FakeExchangeApi({"meta": meta_response()})
     universe = asyncio.run(fetch_instrument_specs(HyperliquidConfig(testnet=True), post=post))
 
     assert post.requests == [("https://api.hyperliquid-testnet.xyz/info", {"type": "meta"})]

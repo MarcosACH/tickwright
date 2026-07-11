@@ -8,23 +8,45 @@ import json
 
 
 class FakeExchangeApi:
-    """A canned-response ``post`` seam: records every request, answers in order.
+    """A venue-state ``post`` seam: answers each request by *what it asks*, not
+    by call order.
 
     Shaped like the adapter's transport callable — ``await post(url, payload)``
-    — so the whole sign-and-send path runs for real up to the socket. An
-    exception instance in ``responses`` is raised instead of returned (the
-    transport-failure case)."""
+    — so the whole sign-and-send path runs for real up to the socket. Responses
+    are keyed by the venue's own request discriminator: the action ``type`` for
+    ``/exchange`` posts (``order``, ``cancelByCloid``) and the query ``type``
+    for ``/info`` posts (``meta``, ``orderStatus``, ``userFills``). One response
+    serves every request of that type — the venue's state does not change
+    between reads — so a test describes venue state, not a call script. An
+    exception value is raised instead of returned (the transport-failure case);
+    a request of an unrouted type is a loud failure (the adapter asked
+    something the test never set up). Every request is recorded in order in
+    ``requests`` for wire assertions."""
 
-    def __init__(self, responses: list[object]) -> None:
+    def __init__(self, responses: dict[str, object]) -> None:
         self.requests: list[tuple[str, dict]] = []
-        self._responses = list(responses)
+        self._responses = dict(responses)
 
     async def __call__(self, url: str, payload: dict) -> object:
         self.requests.append((url, payload))
-        response = self._responses.pop(0)
+        request_type = _request_type(url, payload)
+        if request_type not in self._responses:
+            raise AssertionError(
+                f"FakeExchangeApi got an unrouted {request_type!r} request to {url}; "
+                f"routed types: {sorted(self._responses)}"
+            )
+        response = self._responses[request_type]
         if isinstance(response, BaseException):
             raise response
         return response
+
+
+def _request_type(url: str, payload: dict) -> str:
+    """The venue's discriminator for a request: the action ``type`` for an
+    ``/exchange`` post, the query ``type`` for an ``/info`` post."""
+    if url.endswith("/exchange"):
+        return str(payload["action"]["type"])
+    return str(payload["type"])
 
 
 def resting_response(oid: int) -> dict:

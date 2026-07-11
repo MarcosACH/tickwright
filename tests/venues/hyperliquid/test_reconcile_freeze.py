@@ -64,8 +64,9 @@ def test_a_venue_outage_freezes_reconciliation_instead_of_resolving_inflight() -
     async def main() -> tuple[bool, list[ExecutionReport]]:
         bus = InMemoryBus()
         clock = ManualClock(start_ns=0)
-        # Every fetch the reconciler makes dies in transport: the outage case.
-        post = FakeExchangeApi([ConnectionError("venue unreachable")] * 10)
+        # Every orderStatus read the reconciler makes dies in transport: the
+        # outage case (one route answers them all — the venue's state holds).
+        post = FakeExchangeApi({"orderStatus": ConnectionError("venue unreachable")})
         exchange = HyperliquidExchange(
             config=HyperliquidConfig(
                 testnet=True, symbols=["BTC"], signing_key=SecretStr(TEST_SIGNING_KEY)

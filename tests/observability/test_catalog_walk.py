@@ -391,7 +391,7 @@ def _drive_exchange_request_failed() -> None:
             bus=InMemoryBus(),
             clock=ManualClock(),
             universe=HyperliquidUniverse(specs={"BTC": _SPEC}, asset_indices={"BTC": 0}),
-            post=FakeExchangeApi([ConnectionError("connection refused")]),
+            post=FakeExchangeApi({"order": ConnectionError("connection refused")}),
         )
         await exchange.place(
             PlaceOrder(
