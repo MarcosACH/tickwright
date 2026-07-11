@@ -20,9 +20,9 @@ On top of it sits one loop, `engine/cadence.py::run_cadence`:
 `while True: await clock.sleep_until(now + interval); await cycle()`. Deadlines reschedule **from
 now, with no catch-up**: a large replay time-jump (sparse ticks) fires the cycle once, not once
 per missed interval — the cycles are convergent state checks (re-running heals nothing new), so
-replaying missed firings would be pure noise. A cycle reporting failure (`False`, a frozen
-reconcile pass — ADR-0011 inv 1) is retried at the next deadline, not tighter: freeze semantics
-already guarantee nothing was guessed. The loop runs until cancelled; the runner supervises both
+replaying missed firings would be pure noise. The loop ignores the cycle's result: a failed pass
+(a frozen reconcile cycle — ADR-0011 inv 1) is retried at the next deadline, not tighter — freeze
+semantics already guarantee nothing was guessed. The loop runs until cancelled; the runner supervises both
 cadence tasks in its `TaskGroup` and cancels them in the reverse shutdown, right after the feed
 stops and before the bus drains (ADR-0024) — no cycle is still publishing heals into a closing
 store.

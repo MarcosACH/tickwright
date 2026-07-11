@@ -6,8 +6,9 @@ loop never busy-spins and never moves time backward; under ``LiveClock`` it is
 an ordinary wall-clock timer. Deadlines reschedule from *now* after each run —
 a large replay time-jump fires the cycle once, not once per missed interval.
 The loop runs until cancelled; the runner supervises it in the ``TaskGroup``
-and cancels it in the reverse shutdown (ADR-0024). A cycle reporting failure
-(``False`` — a frozen reconcile pass) is simply retried at the next deadline.
+and cancels it in the reverse shutdown (ADR-0024). The cycle's result is
+ignored: a failed pass (e.g. a frozen reconcile cycle) is simply retried at
+the next deadline.
 """
 
 from collections.abc import Awaitable, Callable
@@ -18,7 +19,7 @@ _NS_PER_SECOND = 1_000_000_000
 
 
 async def run_cadence(
-    *, clock: Clock, interval_seconds: float, cycle: Callable[[], Awaitable[bool]]
+    *, clock: Clock, interval_seconds: float, cycle: Callable[[], Awaitable[object]]
 ) -> None:
     """Run ``cycle`` every ``interval_seconds`` of clock time, forever."""
     interval_ns = int(interval_seconds * _NS_PER_SECOND)
