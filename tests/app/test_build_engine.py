@@ -315,8 +315,7 @@ def test_paper_fill_model_selects_the_seeded_stochastic_model_from_config(tmp_pa
             "instrument_specs": {"BTC": _SPEC},
             "fill_model": "stochastic",
             "seed": 7,
-            "prob_slippage": 1.0,
-            "max_slippage": "0.001",
+            "stochastic": {"prob_slippage": 1.0, "max_slippage": "0.001"},
         },
     )
     price = _fill_price_from_built_paper(config)

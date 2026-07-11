@@ -24,6 +24,25 @@ class Fill:
     price: Decimal
 
 
+@dataclass(frozen=True, slots=True)
+class StochasticParams:
+    """The seeded fill model's behavioral knobs (ADR-0012), as one bundle so the
+    model, the config, and the composition root each name them once.
+
+    Every default is inert — an unseeded stochastic model fills optimistically,
+    like ``ImmediateFillModel`` — so realism is opt-in knob by knob: one-tick
+    slippage (``prob_slippage`` / ``max_slippage``), queue position
+    (``prob_fill_on_limit``), partial fills (``partial_fill_fraction``), and
+    latency (``latency_seconds``, awaited on the injected ``Clock``).
+    """
+
+    prob_slippage: float = 0.0
+    max_slippage: Decimal = Decimal("0")
+    prob_fill_on_limit: float = 1.0
+    partial_fill_fraction: Decimal = Decimal("1")
+    latency_seconds: float = 0.0
+
+
 @runtime_checkable
 class FillModel(Protocol):
     """Decides whether and at what price/quantity an order fills.
@@ -68,29 +87,15 @@ class StochasticFillModel:
     seed replays a byte-identical fill sequence and a different seed diverges.
     """
 
-    def __init__(
-        self,
-        *,
-        rng: random.Random,
-        clock: Clock,
-        prob_slippage: float = 0.0,
-        max_slippage: Decimal = Decimal("0"),
-        prob_fill_on_limit: float = 1.0,
-        partial_fill_fraction: Decimal = Decimal("1"),
-        latency_seconds: float = 0.0,
-    ) -> None:
+    def __init__(self, *, rng: random.Random, clock: Clock, params: StochasticParams) -> None:
         self._rng = rng
         self._clock = clock
-        self._prob_slippage = prob_slippage
-        self._max_slippage = max_slippage
-        self._prob_fill_on_limit = prob_fill_on_limit
-        self._partial_fill_fraction = partial_fill_fraction
-        self._latency_seconds = latency_seconds
+        self._params = params
 
     async def market_fill(self, order: PlaceOrder, tick: MarketTick) -> Fill:
         # Market takes liquidity now — always the full quantity (ADR-0012 scopes
         # partials to the resting book), but the price may slip adversely.
-        await self._clock.sleep(self._latency_seconds)
+        await self._clock.sleep(self._params.latency_seconds)
         return Fill(quantity=order.quantity, price=self._slipped(order.side, tick.price))
 
     async def limit_fill(self, order: PlaceOrder, tick: MarketTick) -> Fill | None:
@@ -101,10 +106,10 @@ class StochasticFillModel:
         # remaining and re-rests any remainder, so partials converge to FILLED.
         if order.price is None:
             raise InvariantViolation(f"crossing LIMIT {order.cloid} priced with no price")
-        if self._rng.random() >= self._prob_fill_on_limit:
+        if self._rng.random() >= self._params.prob_fill_on_limit:
             return None  # queue miss: stays resting for a later crossing tick
-        await self._clock.sleep(self._latency_seconds)
-        return Fill(quantity=order.quantity * self._partial_fill_fraction, price=order.price)
+        await self._clock.sleep(self._params.latency_seconds)
+        return Fill(quantity=order.quantity * self._params.partial_fill_fraction, price=order.price)
 
     def _slipped(self, side: Side, price: Decimal) -> Decimal:
         """Perturb ``price`` against ``side`` with probability ``prob_slippage``.
@@ -113,8 +118,8 @@ class StochasticFillModel:
         less — with a magnitude drawn uniformly in ``[0, max_slippage]`` so the
         seed alone determines the exact fill price.
         """
-        if self._rng.random() >= self._prob_slippage:
+        if self._rng.random() >= self._params.prob_slippage:
             return price
-        magnitude = Decimal(str(self._rng.random())) * self._max_slippage
+        magnitude = Decimal(str(self._rng.random())) * self._params.max_slippage
         adverse = Decimal(1) + magnitude if side is Side.BUY else Decimal(1) - magnitude
         return price * adverse

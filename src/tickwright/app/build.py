@@ -116,13 +116,7 @@ def build_fill_model(config: PaperExchangeConfig, *, clock: Clock) -> FillModel:
             return ImmediateFillModel()
         case "stochastic":
             return StochasticFillModel(
-                rng=random.Random(config.seed),
-                clock=clock,
-                prob_slippage=config.prob_slippage,
-                max_slippage=config.max_slippage,
-                prob_fill_on_limit=config.prob_fill_on_limit,
-                partial_fill_fraction=config.partial_fill_fraction,
-                latency_seconds=config.latency_seconds,
+                rng=random.Random(config.seed), clock=clock, params=config.stochastic
             )
         case unreachable:
             assert_never(unreachable)

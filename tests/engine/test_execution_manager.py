@@ -661,13 +661,12 @@ def test_stochastic_partials_drive_the_saga_from_live_to_filled() -> None:
     and the seeded model produce every fill."""
     import random
 
-    from tickwright.adapters.paper import StochasticFillModel
+    from tickwright.adapters.paper import StochasticFillModel, StochasticParams
 
     model = StochasticFillModel(
         rng=random.Random(0),
         clock=ManualClock(),
-        prob_fill_on_limit=1.0,
-        partial_fill_fraction=Decimal("0.4"),
+        params=StochasticParams(prob_fill_on_limit=1.0, partial_fill_fraction=Decimal("0.4")),
     )
     bus, _, store, order_events = _stochastic_harness(model)
     cloid = derive_cloid("trivial:BTC:1")

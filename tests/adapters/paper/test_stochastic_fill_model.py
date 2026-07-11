@@ -13,7 +13,7 @@ from decimal import Decimal
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
-from tickwright.adapters.paper import PaperExchange, StochasticFillModel
+from tickwright.adapters.paper import PaperExchange, StochasticFillModel, StochasticParams
 from tickwright.domain import (
     FillReport,
     MarketTick,
@@ -71,8 +71,7 @@ def _model(seed: int) -> StochasticFillModel:
     return StochasticFillModel(
         rng=random.Random(seed),
         clock=ManualClock(),
-        prob_slippage=1.0,
-        max_slippage=Decimal("0.001"),
+        params=StochasticParams(prob_slippage=1.0, max_slippage=Decimal("0.001")),
     )
 
 
@@ -111,8 +110,7 @@ def test_slippage_is_adverse_and_within_the_configured_bound() -> None:
         sell = StochasticFillModel(
             rng=random.Random(seed),
             clock=ManualClock(),
-            prob_slippage=1.0,
-            max_slippage=Decimal("0.001"),
+            params=StochasticParams(prob_slippage=1.0, max_slippage=Decimal("0.001")),
         )
         sell_fill = asyncio.run(
             sell.market_fill(
@@ -140,8 +138,7 @@ def _partial_model(*, fraction: str) -> StochasticFillModel:
     return StochasticFillModel(
         rng=random.Random(0),
         clock=ManualClock(),
-        prob_fill_on_limit=1.0,
-        partial_fill_fraction=Decimal(fraction),
+        params=StochasticParams(prob_fill_on_limit=1.0, partial_fill_fraction=Decimal(fraction)),
     )
 
 
@@ -240,7 +237,9 @@ def test_a_queue_miss_emits_no_fill_and_leaves_the_order_resting() -> None:
     cancel still finds it on the book and reports it cancelled."""
     bus = InMemoryBus()
     clock = ManualClock()
-    model = StochasticFillModel(rng=random.Random(0), clock=clock, prob_fill_on_limit=0.0)
+    model = StochasticFillModel(
+        rng=random.Random(0), clock=clock, params=StochasticParams(prob_fill_on_limit=0.0)
+    )
     exchange = PaperExchange(bus=bus, clock=clock, fill_model=model)
     fills: list[FillReport] = []
     statuses: list[OrderStatusReport] = []
@@ -268,7 +267,9 @@ def test_fill_latency_advances_virtual_time_via_the_injected_clock() -> None:
     the suite runs with zero real sleeps."""
     bus = InMemoryBus()
     clock = ManualClock()
-    model = StochasticFillModel(rng=random.Random(0), clock=clock, latency_seconds=2.0)
+    model = StochasticFillModel(
+        rng=random.Random(0), clock=clock, params=StochasticParams(latency_seconds=2.0)
+    )
     exchange = PaperExchange(bus=bus, clock=clock, fill_model=model)
     fills: list[FillReport] = []
     bus.subscribe(FillReport, lambda r: _record(fills, r))
@@ -293,10 +294,12 @@ def _run_stream(seed: int) -> list[tuple[Decimal, Decimal]]:
     model = StochasticFillModel(
         rng=random.Random(seed),
         clock=clock,
-        prob_slippage=1.0,
-        max_slippage=Decimal("0.001"),
-        prob_fill_on_limit=1.0,
-        partial_fill_fraction=Decimal("0.4"),
+        params=StochasticParams(
+            prob_slippage=1.0,
+            max_slippage=Decimal("0.001"),
+            prob_fill_on_limit=1.0,
+            partial_fill_fraction=Decimal("0.4"),
+        ),
     )
     exchange = PaperExchange(bus=bus, clock=clock, fill_model=model)
     fills: list[FillReport] = []
