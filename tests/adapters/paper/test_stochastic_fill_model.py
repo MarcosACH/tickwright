@@ -231,3 +231,31 @@ def test_a_marketable_ioc_limit_partial_fill_cancels_its_remainder() -> None:
 
     assert [f.quantity for f in fills] == [Decimal("0.4")]  # only the arrival fill
     assert [s.status for s in statuses] == [OrderState.CANCELLED]
+
+
+def test_a_queue_miss_emits_no_fill_and_leaves_the_order_resting() -> None:
+    """Queue position (ADR-0012): with ``prob_fill_on_limit`` at zero the model
+    always returns ``None`` on a crossing tick — someone is always ahead of us.
+    No ``FillReport`` is emitted and the order stays resting, provably: a later
+    cancel still finds it on the book and reports it cancelled."""
+    bus = InMemoryBus()
+    clock = ManualClock()
+    model = StochasticFillModel(rng=random.Random(0), clock=clock, prob_fill_on_limit=0.0)
+    exchange = PaperExchange(bus=bus, clock=clock, fill_model=model)
+    fills: list[FillReport] = []
+    statuses: list[OrderStatusReport] = []
+    bus.subscribe(FillReport, lambda r: _record(fills, r))
+    bus.subscribe(OrderStatusReport, lambda r: _record(statuses, r))
+
+    async def scenario() -> None:
+        clock.advance_to(1_000)
+        await bus.publish(_tick("42000"))  # rests
+        await exchange.place(_limit_order("41000", qty="1"))
+        for _ in range(3):
+            await bus.publish(_tick("41000"))  # crosses, but always a queue miss
+        await exchange.cancel("0xabc")
+
+    asyncio.run(scenario())
+
+    assert fills == []  # never fills while it loses the queue
+    assert [s.status for s in statuses] == [OrderState.LIVE, OrderState.CANCELLED]
