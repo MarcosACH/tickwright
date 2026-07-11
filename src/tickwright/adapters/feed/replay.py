@@ -7,6 +7,7 @@ before publishing. Replay is therefore deterministic in time and never conflates
 every strategy test stand on this feed.
 """
 
+import asyncio
 import json
 from collections.abc import Iterator
 from decimal import Decimal
@@ -39,7 +40,14 @@ class ReplayFeed:
 
     async def start(self) -> None:
         for row in self._read_rows():
+            # ``_to_tick`` advances virtual time, which may release parked
+            # ``sleep_until`` waiters (ADR-0033). Yield once so a matured
+            # cadence runs *at* its crossed deadline — before this row, whose
+            # ``ts_event`` is at or past it, is published. Without the yield
+            # nothing on the hermetic path ever suspends, and a woken waiter
+            # would starve until end-of-file.
             tick = self._to_tick(row)
+            await asyncio.sleep(0)
             await self._bus.publish(tick)
 
     async def stop(self) -> None:  # noqa: B027 - replay has no live resources to release.
