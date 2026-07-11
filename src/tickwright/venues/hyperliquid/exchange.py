@@ -43,6 +43,10 @@ _NS_PER_MS = 1_000_000
 
 _TIF_WIRE = {TimeInForce.GTC: "Gtc", TimeInForce.IOC: "Ioc"}
 
+# The saga-terminal states a venue read can resolve to (ADR-0010): once an order
+# reaches one, the adapter's placed-order memory for it is dead weight to drop.
+_TERMINAL_STATES = frozenset({OrderState.FILLED, OrderState.CANCELLED, OrderState.REJECTED})
+
 
 class HyperliquidExchange:
     """The live ``Exchange`` adapter for Hyperliquid perps."""
@@ -125,6 +129,7 @@ class HyperliquidExchange:
             return
         (status,) = _action_statuses(response)
         if status == "success":
+            self._placed.pop(cloid, None)  # terminal: drop the placed memory
             await self._bus.publish(
                 self._status_report(cloid=cloid, symbol=symbol, status=OrderState.CANCELLED)
             )
@@ -171,11 +176,28 @@ class HyperliquidExchange:
         if state is None:
             # A status outside the taxonomy is likewise a failed read.
             return None
+        # Bound the fills read to this order's own lifetime (ADR-0011): starting
+        # at the venue's recorded placement time keeps its fills at the front of
+        # the returned window, so a busy account's later fills can never push
+        # them past the venue's page cap and silently under-report through the
+        # {cloid}:fill:{tid} dedup. The timestamp is the venue's own, so the
+        # bound is exact regardless of local clock skew.
+        fills = await self._fetch_fills(
+            cloid=cloid, symbol=read.coin, oid=read.oid, since_ms=read.timestamp
+        )
+        if fills is None:
+            # An unparseable fills half is a failed read too — freeze, never a
+            # partial view that would read as "no fills" (ADR-0011 inv 1).
+            return None
+        if state in _TERMINAL_STATES:
+            # This order is done: drop the placed-order memory a cancel would
+            # have used, so the adapter's cache tracks only still-open orders.
+            self._placed.pop(cloid, None)
         return VenueOrderView(
             status=self._status_report(
                 cloid=cloid, symbol=read.coin, status=state, venue_oid=str(read.oid)
             ),
-            fills=tuple(await self._fetch_fills(cloid=cloid, symbol=read.coin, oid=read.oid)),
+            fills=tuple(fills),
         )
 
     async def _order_status(self, cloid: str) -> object:
@@ -199,6 +221,7 @@ class HyperliquidExchange:
         elif "error" in status:
             # Venue-adjudicated refusal: REJECTED, never DENIED (ADR-0010) —
             # the order was sent and judged, and the venue's reason rides along.
+            self._placed.pop(order.cloid, None)  # terminal: drop the placed memory
             await self._bus.publish(
                 self._status_report(
                     cloid=order.cloid,
@@ -211,19 +234,47 @@ class HyperliquidExchange:
             # The placement response carries no trade ids, and a synthetic one
             # would double-count against reconciliation's venue-tid fills under
             # {cloid}:fill:{tid} dedup — so fetch the venue's own fill records
-            # and emit those.
+            # and emit those. This is the read right after placement: the fills
+            # are the newest, so the whole-history read cannot miss them. A read
+            # that fails emits nothing now — reconciliation is the backstop, and
+            # an IOC that filled is terminal.
             fills = await self._fetch_fills(
                 cloid=order.cloid, symbol=order.symbol, oid=int(status["filled"]["oid"])
             )
-            for report in fills:
+            self._placed.pop(order.cloid, None)  # terminal: drop the placed memory
+            for report in fills or ():
                 await self._bus.publish(report)
 
-    async def _fetch_fills(self, *, cloid: str, symbol: str, oid: int) -> list[FillReport]:
+    async def _fetch_fills(
+        self, *, cloid: str, symbol: str, oid: int, since_ms: int | None = None
+    ) -> list[FillReport] | None:
         """This order's fills from the venue's fill history, by its oid — the
-        one id fills carry (they have no cloid on the wire)."""
-        entries = await self._info({"type": "userFills", "user": self._user_address})
+        one id fills carry (they have no cloid on the wire).
+
+        ``since_ms`` bounds the read to fills at or after a known placement time
+        (``userFillsByTime``), so an aged order's fills sit at the front of the
+        window rather than risking the venue's page cap; without it the whole
+        recent history is read (``userFills``), safe only right after placement
+        when this order's fills are the newest. ``None`` on a body we cannot
+        parse — a failed read the caller freezes on, never silent truth.
+        """
+        query: dict[str, Any] = (
+            {"type": "userFills", "user": self._user_address}
+            if since_ms is None
+            else {"type": "userFillsByTime", "user": self._user_address, "startTime": since_ms}
+        )
+        entries = await self._info(query)
         if not isinstance(entries, list):
-            raise ValueError(f"unrecognized Hyperliquid userFills response: {entries!r}")
+            # A shape we cannot parse is a failed read, not "no fills": name it
+            # (a venue contract change stays visible) and let the caller freeze
+            # or heal, never misread it as truth.
+            named_event(
+                NamedEvent.EXCHANGE_REQUEST_FAILED,
+                request="userFills",
+                cloid=cloid,
+                error=f"unrecognized fills response: {entries!r}",
+            )
+            return None
         return [
             FillReport(
                 ts_event=int(entry["time"]) * _NS_PER_MS,
@@ -320,13 +371,15 @@ class HyperliquidExchange:
 @dataclass(frozen=True, slots=True)
 class _OrderRecord:
     """The venue's decoded ``orderStatus`` order record: the coin it lives
-    under, the venue oid, and the raw venue status string. Each caller applies
-    its own status policy — ``fetch_order`` maps the status to saga vocabulary
-    (freezing on one it cannot map), a post-restart ``cancel`` needs only the
-    coin (it cancels by asset index, whatever the status)."""
+    under, the venue oid, its placement timestamp (ms), and the raw venue status
+    string. Each caller applies its own status policy — ``fetch_order`` maps the
+    status to saga vocabulary (freezing on one it cannot map) and bounds the
+    fills read at ``timestamp``, a post-restart ``cancel`` needs only the coin
+    (it cancels by asset index, whatever the status)."""
 
     coin: str
     oid: int
+    timestamp: int
     status: str
 
 
@@ -348,9 +401,12 @@ def _decode_order_status(response: object) -> _OrderRecord | _OrderStatusRead:
             return _OrderStatusRead.NO_RECORD
         case {
             "status": "order",
-            "order": {"order": {"coin": str(coin), "oid": int(oid)}, "status": str(status)},
+            "order": {
+                "order": {"coin": str(coin), "oid": int(oid), "timestamp": int(timestamp)},
+                "status": str(status),
+            },
         }:
-            return _OrderRecord(coin=coin, oid=oid, status=status)
+            return _OrderRecord(coin=coin, oid=oid, timestamp=timestamp, status=status)
     return _OrderStatusRead.UNRECOGNIZED
 
 

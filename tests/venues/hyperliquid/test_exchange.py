@@ -464,7 +464,7 @@ def test_fetch_order_bundles_the_venue_status_and_fills_into_one_view() -> None:
     post = FakeExchangeApi(
         {
             "orderStatus": order_status_response(status="filled", oid=91),
-            "userFills": [
+            "userFillsByTime": [
                 fill_entry(oid=90, tid=555, px="43249.0", sz="1.0"),
                 fill_entry(oid=91, tid=556, px="43250.0", sz="0.5"),
             ],
@@ -482,6 +482,15 @@ def test_fetch_order_bundles_the_venue_status_and_fills_into_one_view() -> None:
     # The ADR-0011 cross-check in one read: this order's fills, by its oid.
     (fill,) = view.fills
     assert (fill.trade_id, fill.price, fill.quantity) == ("556", Decimal("43250.0"), Decimal("0.5"))
+    # The fills read is bounded at the order's own venue placement time, so its
+    # fills sit at the front of the window and the venue's page cap can never
+    # push them out (the whole-history read this replaces could — R001).
+    (_, fills_query) = post.requests[1]
+    assert fills_query == {
+        "type": "userFillsByTime",
+        "user": Account.from_key(TEST_SIGNING_KEY).address,
+        "startTime": 1_700_000_000_000,
+    }
 
 
 def test_fetch_order_returns_an_empty_view_when_the_venue_has_no_record() -> None:
@@ -507,11 +516,30 @@ def test_fetch_order_returns_none_when_the_read_itself_fails() -> None:
     view = asyncio.run(
         fetch_view(
             FakeExchangeApi(
-                {"orderStatus": order_status_response(), "userFills": ConnectionError("reset")}
+                {
+                    "orderStatus": order_status_response(),
+                    "userFillsByTime": ConnectionError("reset"),
+                }
             )
         )
     )
     assert view is None
+
+
+def test_fetch_order_freezes_on_a_fills_body_it_cannot_parse() -> None:
+    # A 200-OK fills body of the wrong shape is a failed read, not "no fills":
+    # it must freeze the reconciler (None), the same as an unparseable
+    # orderStatus — never a partial view that reads as an empty book (ADR-0011
+    # inv 1) — and name the shape change for triage.
+    post = FakeExchangeApi(
+        {"orderStatus": order_status_response(status="open"), "userFillsByTime": {"unexpected": 1}}
+    )
+
+    with capture_events() as events:
+        view = asyncio.run(fetch_view(post))
+
+    assert view is None
+    assert any(e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED for e in events)
 
 
 @pytest.mark.parametrize(
@@ -529,7 +557,7 @@ def test_fetch_order_maps_the_venue_status_taxonomy_by_suffix(
     venue_status: str, state: OrderState
 ) -> None:
     post = FakeExchangeApi(
-        {"orderStatus": order_status_response(status=venue_status), "userFills": []}
+        {"orderStatus": order_status_response(status=venue_status), "userFillsByTime": []}
     )
     view = asyncio.run(fetch_view(post))
 
@@ -577,3 +605,32 @@ def test_a_transport_failure_on_cancel_emits_no_report_and_does_not_raise() -> N
     # The cancel_requested marker is already durable (ADR-0026); reconciliation
     # resolves an ack-lost cancel, so the adapter only names the failure.
     assert any(e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED for e in events)
+
+
+def test_a_terminal_fetch_prunes_the_placed_order_so_the_cache_stays_bounded() -> None:
+    # _placed lets a cancel resolve a still-open order's coin without a venue
+    # read. Once fetch_order sees the order terminate, that memory is dead
+    # weight — pruning it keeps the cache bounded by open orders, not by every
+    # order the process ever placed (R003). Observable: a later cancel of the
+    # pruned cloid falls back to an orderStatus read instead of the cache.
+    async def main() -> FakeExchangeApi:
+        post = FakeExchangeApi(
+            {
+                "order": resting_response(oid=77),
+                "orderStatus": order_status_response(status="filled"),
+                "userFillsByTime": [],
+                "cancelByCloid": cancel_success_response(),
+            }
+        )
+        exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
+        await exchange.place(limit_order(Side.BUY, "0.5", "42000"))
+        await exchange.fetch_order(CLOID)  # sees FILLED → prunes _placed[CLOID]
+        await exchange.cancel(CLOID)
+        return post
+
+    post = asyncio.run(main())
+
+    # Two orderStatus reads: the fetch, then the cancel's fallback — which only
+    # happens because the terminal fetch pruned the placed-order memory.
+    reads = [query for (_, query) in post.requests if query.get("type") == "orderStatus"]
+    assert len(reads) == 2
