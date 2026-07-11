@@ -84,7 +84,7 @@ class PaperExchange:
         ]
         for order in crossed:
             del self._book[order.cloid]
-            fill = self._fill_model.limit_fill(order, tick)
+            fill = await self._fill_model.limit_fill(order, tick)
             await self._bus.publish(self._fill_report(order, fill))
 
     async def place(self, order: PlaceOrder) -> None:
@@ -108,7 +108,7 @@ class PaperExchange:
             )
             return
 
-        fill = self._fill_model.market_fill(order, tick)
+        fill = await self._fill_model.market_fill(order, tick)
         await self._bus.publish(self._fill_report(order, fill))
 
     async def _place_limit(self, order: PlaceOrder) -> None:
@@ -127,7 +127,7 @@ class PaperExchange:
                 )
                 return
             # Marketable on arrival: fill now at the limit price, never rest.
-            fill = self._fill_model.limit_fill(order, tick)
+            fill = await self._fill_model.limit_fill(order, tick)
             await self._bus.publish(self._fill_report(order, fill))
             return
 
