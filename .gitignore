@@ -20,6 +20,9 @@ htmlcov/
 logs/
 *.log
 
+# Runtime artifacts (the SQLite saga store the quickstart writes)
+*.db
+
 # Private working notes / reference provenance — NEVER committed
 docs/private/
 *.private.md
