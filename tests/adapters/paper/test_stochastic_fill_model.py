@@ -259,3 +259,27 @@ def test_a_queue_miss_emits_no_fill_and_leaves_the_order_resting() -> None:
 
     assert fills == []  # never fills while it loses the queue
     assert [s.status for s in statuses] == [OrderState.LIVE, OrderState.CANCELLED]
+
+
+def test_fill_latency_advances_virtual_time_via_the_injected_clock() -> None:
+    """Latency is modeled by awaiting the injected Clock (ADR-0005): the model
+    and exchange share one clock, so a configured latency advances virtual time
+    and lands in the fill's timestamp. Under ManualClock the wait is virtual —
+    the suite runs with zero real sleeps."""
+    bus = InMemoryBus()
+    clock = ManualClock()
+    model = StochasticFillModel(rng=random.Random(0), clock=clock, latency_seconds=2.0)
+    exchange = PaperExchange(bus=bus, clock=clock, fill_model=model)
+    fills: list[FillReport] = []
+    bus.subscribe(FillReport, lambda r: _record(fills, r))
+
+    async def scenario() -> None:
+        clock.advance_to(1_000)
+        await bus.publish(_tick("42000"))
+        await exchange.place(_market_order())
+
+    asyncio.run(scenario())
+
+    assert len(fills) == 1
+    # 1_000 ns base + 2.0 s of virtual latency = 2_000_001_000 ns.
+    assert fills[0].ts_event == 1_000 + 2_000_000_000

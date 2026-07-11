@@ -76,6 +76,7 @@ class StochasticFillModel:
         max_slippage: Decimal = Decimal("0"),
         prob_fill_on_limit: float = 1.0,
         partial_fill_fraction: Decimal = Decimal("1"),
+        latency_seconds: float = 0.0,
     ) -> None:
         self._rng = rng
         self._clock = clock
@@ -83,10 +84,12 @@ class StochasticFillModel:
         self._max_slippage = max_slippage
         self._prob_fill_on_limit = prob_fill_on_limit
         self._partial_fill_fraction = partial_fill_fraction
+        self._latency_seconds = latency_seconds
 
     async def market_fill(self, order: PlaceOrder, tick: MarketTick) -> Fill:
         # Market takes liquidity now — always the full quantity (ADR-0012 scopes
         # partials to the resting book), but the price may slip adversely.
+        await self._clock.sleep(self._latency_seconds)
         return Fill(quantity=order.quantity, price=self._slipped(order.side, tick.price))
 
     async def limit_fill(self, order: PlaceOrder, tick: MarketTick) -> Fill | None:
@@ -99,6 +102,7 @@ class StochasticFillModel:
             raise InvariantViolation(f"crossing LIMIT {order.cloid} priced with no price")
         if self._rng.random() >= self._prob_fill_on_limit:
             return None  # queue miss: stays resting for a later crossing tick
+        await self._clock.sleep(self._latency_seconds)
         return Fill(quantity=order.quantity * self._partial_fill_fraction, price=order.price)
 
     def _slipped(self, side: Side, price: Decimal) -> Decimal:
