@@ -55,12 +55,12 @@ cancel its siblings; best-effort stop hooks run (each failure recorded as
 **non-zero**. A hand-rolled `gather` + supervisor was rejected — it re-implements exactly this with
 room for a missed-propagation bug.
 
-> **Shipped state (as of the #19 runner).** The TaskGroup supervises the feed read loop and the
-> barrier-gated startup; the **continuous reconciliation loops are not yet scheduled** — the runner
-> wires only the startup barrier (`run_startup_barrier`). Scheduling the in-flight/open-order
-> cadences here is deferred to **#49**, which must first resolve how a periodic loop paces off
-> feed-driven virtual time without racing the feed (a naive `clock.sleep` cadence breaks the
-> deterministic `ManualClock`/`ReplayFeed` model). Kafka drains land with the Kafka bus (#20).
+> **Shipped state (as of the #49 runner).** The TaskGroup supervises the feed read loop, the
+> barrier-gated startup, and the **continuous reconciliation loops**: `reconcile_inflight` and
+> `reconcile_open_orders` run as `run_cadence` tasks paced by their `ReconcileConfig` intervals
+> off `Clock.sleep_until` — the virtual-time waiter that keeps replay deterministic (ADR-0033).
+> The reverse shutdown cancels them right after the feed stops, before the bus drains. Kafka
+> drains land with the Kafka bus (#20).
 
 - **OS signals.** `SIGINT`/`SIGTERM` (via `loop.add_signal_handler`) set a stop event → the graceful
   shutdown above → exit **0**. `SIGKILL` is uncatchable → crash-only recovery on next boot,
