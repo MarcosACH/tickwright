@@ -283,3 +283,41 @@ def test_fill_latency_advances_virtual_time_via_the_injected_clock() -> None:
     assert len(fills) == 1
     # 1_000 ns base + 2.0 s of virtual latency = 2_000_001_000 ns.
     assert fills[0].ts_event == 1_000 + 2_000_000_000
+
+
+def _run_stream(seed: int) -> list[tuple[Decimal, Decimal]]:
+    """Drive a mixed slippage+partial scenario end-to-end and return the raw
+    (quantity, price) of every FillReport in order — the venue's fill sequence."""
+    bus = InMemoryBus()
+    clock = ManualClock()
+    model = StochasticFillModel(
+        rng=random.Random(seed),
+        clock=clock,
+        prob_slippage=1.0,
+        max_slippage=Decimal("0.001"),
+        prob_fill_on_limit=1.0,
+        partial_fill_fraction=Decimal("0.4"),
+    )
+    exchange = PaperExchange(bus=bus, clock=clock, fill_model=model)
+    fills: list[FillReport] = []
+    bus.subscribe(FillReport, lambda r: _record(fills, r))
+
+    async def scenario() -> None:
+        clock.advance_to(1_000)
+        await bus.publish(_tick("42000"))
+        await exchange.place(_market_order(cloid="0xm1"))  # slipped market fill
+        await exchange.place(_limit_order("41000", cloid="0xl1"))  # rests
+        for _ in range(3):
+            await bus.publish(_tick("41000"))  # partials converge
+        await exchange.place(_market_order(cloid="0xm2"))  # another slipped fill
+
+    asyncio.run(scenario())
+    return [(f.quantity, f.price) for f in fills]
+
+
+def test_same_seed_and_tick_stream_replays_a_byte_identical_fill_sequence() -> None:
+    """The headline determinism guarantee (ADR-0012): a fixed seed over the same
+    tick stream reproduces the whole fill sequence exactly — slippage prices and
+    partial quantities alike — while a different seed diverges."""
+    assert _run_stream(11) == _run_stream(11)  # replayable to the byte
+    assert _run_stream(11) != _run_stream(22)  # the seed is what makes it differ
