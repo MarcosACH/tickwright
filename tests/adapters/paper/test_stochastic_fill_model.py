@@ -17,6 +17,8 @@ from tickwright.adapters.paper import PaperExchange, StochasticFillModel
 from tickwright.domain import (
     FillReport,
     MarketTick,
+    OrderState,
+    OrderStatusReport,
     OrderType,
     PlaceOrder,
     Side,
@@ -170,3 +172,62 @@ def test_a_resting_limit_partial_fills_across_ticks_and_converges() -> None:
     cumulative = [sum(quantities[: i + 1], Decimal(0)) for i in range(len(quantities))]
     assert cumulative == sorted(cumulative)  # monotonic
     assert cumulative[-1] == Decimal("1")  # converges to the full order size
+
+
+def test_a_marketable_limit_partial_fill_rests_its_remainder_and_converges() -> None:
+    """A GTC LIMIT that crosses on arrival is not special-cased into a single
+    full fill: the model may only partial-fill it, so the venue rests the
+    remainder on the book — exactly like a resting order — and later crossing
+    ticks converge it to FILLED. The arrival fill must not be lost."""
+    bus = InMemoryBus()
+    clock = ManualClock()
+    exchange = PaperExchange(bus=bus, clock=clock, fill_model=_partial_model(fraction="0.4"))
+    fills: list[FillReport] = []
+    bus.subscribe(FillReport, lambda r: _record(fills, r))
+
+    async def scenario() -> None:
+        clock.advance_to(1_000)
+        await bus.publish(_tick("41000"))  # below the limit: crosses on arrival
+        await exchange.place(_limit_order("42000", qty="1"))  # BUY limit above market
+        for _ in range(2):
+            await bus.publish(_tick("41000"))
+
+    asyncio.run(scenario())
+
+    quantities = [f.quantity for f in fills]
+    assert quantities == [Decimal("0.4"), Decimal("0.4"), Decimal("0.2")]
+    assert sum(quantities, Decimal(0)) == Decimal("1")
+
+
+def test_a_marketable_ioc_limit_partial_fill_cancels_its_remainder() -> None:
+    """IOC never rests: a marketable IOC LIMIT that the model only partial-fills
+    on arrival fills what it can now and cancels the unfilled remainder — no
+    resting, and no later tick fills more."""
+    bus = InMemoryBus()
+    clock = ManualClock()
+    exchange = PaperExchange(bus=bus, clock=clock, fill_model=_partial_model(fraction="0.4"))
+    fills: list[FillReport] = []
+    statuses: list[OrderStatusReport] = []
+    bus.subscribe(FillReport, lambda r: _record(fills, r))
+    bus.subscribe(OrderStatusReport, lambda r: _record(statuses, r))
+
+    ioc = PlaceOrder(
+        cloid="0xioc",
+        symbol="BTC",
+        side=Side.BUY,
+        quantity=Decimal("1"),
+        order_type=OrderType.LIMIT,
+        time_in_force=TimeInForce.IOC,
+        price=Decimal("42000"),
+    )
+
+    async def scenario() -> None:
+        clock.advance_to(1_000)
+        await bus.publish(_tick("41000"))  # crosses on arrival
+        await exchange.place(ioc)
+        await bus.publish(_tick("41000"))  # would fill more if it had rested
+
+    asyncio.run(scenario())
+
+    assert [f.quantity for f in fills] == [Decimal("0.4")]  # only the arrival fill
+    assert [s.status for s in statuses] == [OrderState.CANCELLED]
