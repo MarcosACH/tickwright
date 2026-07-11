@@ -349,6 +349,26 @@ def test_a_filled_placement_fetches_and_emits_the_real_venue_fills() -> None:
     assert first.ts_event == 1_700_000_000_500 * _NS_PER_MS  # the venue's fill time
 
 
+def test_a_filled_placement_whose_fills_read_fails_names_a_fills_failure_not_a_place() -> None:
+    # The order filled, but the follow-up fills read dies in transport. The
+    # placement itself succeeded, so naming it a *place* failure would mislead
+    # triage — name it a fills-read failure, emit nothing, and let
+    # reconciliation's fetch_order re-read FILLED and heal the fills (R004).
+    post = FakeExchangeApi(
+        {
+            "order": filled_response(oid=91, total_sz="0.5", avg_px="43250.0"),
+            "userFills": ConnectionError("connection refused"),
+        }
+    )
+
+    with capture_events() as events:
+        reports = asyncio.run(place_and_collect_reports(post, market_order(Side.BUY, "0.5")))
+
+    assert reports == []
+    failed = [e for e in events if e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED]
+    assert failed and failed[0]["request"] == "fills"
+
+
 def cancel_success_response() -> dict:
     return {
         "status": "ok",

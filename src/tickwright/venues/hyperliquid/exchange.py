@@ -263,13 +263,23 @@ class HyperliquidExchange:
             # would double-count against reconciliation's venue-tid fills under
             # {cloid}:fill:{tid} dedup — so fetch the venue's own fill records
             # and emit those. This is the read right after placement: the fills
-            # are the newest, so the whole-history read cannot miss them. A read
-            # that fails emits nothing now — reconciliation is the backstop, and
-            # an IOC that filled is terminal.
-            fills = await self._fetch_fills(
-                cloid=order.cloid, symbol=order.symbol, oid=int(status["filled"]["oid"])
-            )
+            # are the newest, so the whole-history read cannot miss them. An IOC
+            # that filled is terminal, so drop the placed memory regardless of
+            # how the fills read resolves.
             self._placed.pop(order.cloid, None)  # terminal: drop the placed memory
+            try:
+                fills = await self._fetch_fills(
+                    cloid=order.cloid, symbol=order.symbol, oid=int(status["filled"]["oid"])
+                )
+            except OSError as exc:
+                # The order filled but reading its fills failed in transport.
+                # The placement succeeded, so this is a fills-read failure, not a
+                # place failure — name it as such and emit nothing; reconcile's
+                # fetch_order re-reads FILLED and heals the fills (ADR-0011).
+                self._request_failed("fills", order.cloid, exc)
+                return
+            # An unparseable (non-transport) fills read is None: emit nothing —
+            # reconciliation is the backstop.
             for report in fills or ():
                 await self._bus.publish(report)
 
