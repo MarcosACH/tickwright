@@ -53,7 +53,7 @@ from tickwright.domain import (
 )
 from tickwright.engine.cache import Cache
 from tickwright.engine.execution import ExecutionManager
-from tickwright.engine.reconcile import Reconciler
+from tickwright.engine.reconcile import ReconcileConfig, Reconciler
 from tickwright.strategies import SingleShotLimitStrategy
 
 _CLOID = derive_cloid("trivial:BTC:1")
@@ -208,7 +208,9 @@ def _second_life(
         events.append(event)
 
     bus.subscribe(OrderEvent, record)
-    reconciler = Reconciler(bus=bus, clock=clock, exchange=venue, cache=cache)
+    reconciler = Reconciler(
+        bus=bus, clock=clock, exchange=venue, cache=cache, config=ReconcileConfig()
+    )
     return bus, reconciler, events, store
 
 

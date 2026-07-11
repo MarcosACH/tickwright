@@ -38,6 +38,7 @@ from tickwright.observability import NamedEvent, named_event
 from tickwright.observability.correlation import bind_run_id
 
 from .cache import Cache
+from .cadence import run_cadence
 from .execution import ExecutionManager
 from .guard import NoopGuard
 from .reconcile import ReconcileConfig, Reconciler
@@ -85,12 +86,17 @@ class Engine:
         self._execution = ExecutionManager(
             bus=bus, clock=clock, exchange=exchange, cache=self._cache, guard=self._guard
         )
+        # Resolved here (not left to the Reconciler default) because the runner
+        # also paces the continuous cadences off the same intervals below.
+        self._reconcile_config = (
+            self._config.reconcile if self._config.reconcile is not None else ReconcileConfig()
+        )
         self._reconciler = Reconciler(
             bus=bus,
             clock=clock,
             exchange=exchange,
             cache=self._cache,
-            config=self._config.reconcile,
+            config=self._reconcile_config,
         )
         self._host = StrategyHost(
             bus=bus, clock=clock, store=store, tick_staleness_ns=self._config.tick_staleness_ns
@@ -99,6 +105,7 @@ class Engine:
         self._stop_requested = asyncio.Event()
         self._stopped = asyncio.Event()
         self._feed_task: asyncio.Task[None] | None = None
+        self._cadence_tasks: list[asyncio.Task[None]] = []
 
     @property
     def state(self) -> ComponentState:
@@ -118,6 +125,25 @@ class Engine:
         try:
             await self._start_sequence()
             async with asyncio.TaskGroup() as tg:
+                # The continuous reconciliation cadences (ADR-0011/0024), paced
+                # by virtual time (ADR-0033): they run for the life of the
+                # TaskGroup and stop with the reverse shutdown below.
+                self._cadence_tasks = [
+                    tg.create_task(
+                        run_cadence(
+                            clock=self._clock,
+                            interval_seconds=self._reconcile_config.inflight_interval_seconds,
+                            cycle=self._reconciler.reconcile_inflight,
+                        )
+                    ),
+                    tg.create_task(
+                        run_cadence(
+                            clock=self._clock,
+                            interval_seconds=self._reconcile_config.open_order_interval_seconds,
+                            cycle=self._reconciler.reconcile_open_orders,
+                        )
+                    ),
+                ]
                 # The feed starts last (ADR-0024 step 7): the first tick is only
                 # possible after the barrier cleared, so nothing places before
                 # reconciliation completes. Replay end-of-file ends the task but
@@ -206,11 +232,21 @@ class Engine:
         """
         return (
             ("feed.stop", self._stop_feed),
+            ("reconcile.stop", self._stop_cadences),
             ("bus.drain", self._bus.drain),
             ("host.stop", self._host.stop),
             ("bus.close", self._bus.close),
             ("store.close", self._store.close),
         )
+
+    async def _stop_cadences(self) -> None:
+        """Cancel the continuous reconciliation loops and wait them out, so no
+        cycle is still publishing heals while the bus drains and the store
+        closes behind it. On the fault path the TaskGroup already cancelled
+        them; cancelling a done task is a no-op."""
+        for task in self._cadence_tasks:
+            task.cancel()
+        await asyncio.gather(*self._cadence_tasks, return_exceptions=True)
 
     async def _stop_feed(self) -> None:
         """Ask the feed to stop, then cancel a read loop that outlives the ask

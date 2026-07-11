@@ -107,13 +107,16 @@ class Reconciler:
         clock: Clock,
         exchange: Exchange,
         cache: Cache,
-        config: ReconcileConfig | None = None,
+        config: ReconcileConfig,
     ) -> None:
         self._bus = bus
         self._clock = clock
         self._exchange = exchange
         self._cache = cache
-        self._config = config if config is not None else ReconcileConfig()
+        # Required, not defaulted: the Engine resolves the one ReconcileConfig
+        # and paces the cadence loops off the same intervals — a second default
+        # here could drift the pacing apart from the judging.
+        self._config = config
         # Continuous-cycle absence bookkeeping (ADR-0011 inv 3/7), both deliberately
         # in-memory — a restart resets them, and the startup pass re-proves
         # everything against venue truth anyway (ADR-0009). The in-flight retry
