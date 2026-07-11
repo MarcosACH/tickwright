@@ -408,6 +408,42 @@ def _drive_exchange_request_failed() -> None:
     asyncio.run(go())
 
 
+def _drive_exchange_action_rejected() -> None:
+    """A live placement the venue refuses at the action envelope (bad
+    nonce/signature/rate-limit): the adapter names the refusal and emits no
+    terminal — reconcile-by-cloid owns the in-flight order (``HyperliquidExchange``,
+    ADR-0008 rule 2)."""
+
+    async def go() -> None:
+        exchange = HyperliquidExchange(
+            config=HyperliquidConfig(
+                testnet=True,
+                symbols=["BTC"],
+                # Anvil's account #0 — a publicly-known throwaway key.
+                signing_key=SecretStr(
+                    "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+                ),
+            ),
+            bus=InMemoryBus(),
+            clock=ManualClock(),
+            universe=HyperliquidUniverse(specs={"BTC": _SPEC}, asset_indices={"BTC": 0}),
+            post=FakeExchangeApi({"order": {"status": "err", "response": "Invalid nonce"}}),
+        )
+        await exchange.place(
+            PlaceOrder(
+                cloid=derive_cloid("walk:BTC:1"),
+                symbol="BTC",
+                side=Side.BUY,
+                quantity=Decimal("0.5"),
+                order_type=OrderType.LIMIT,
+                time_in_force=TimeInForce.GTC,
+                price=Decimal("100"),
+            )
+        )
+
+    asyncio.run(go())
+
+
 class _IdleFeed:
     """A feed with nothing to say — the lifecycle walk needs the ordered
     startup, not ticks. A ``MarketFeed`` double at the venue boundary."""
@@ -600,6 +636,7 @@ SCENARIOS: dict[NamedEvent, Callable[[], None]] = {
     NamedEvent.GHOST_RECONCILED: _drive_ghost_reconciled,
     NamedEvent.RECONCILE_FROZEN: _drive_frozen,
     NamedEvent.EXCHANGE_REQUEST_FAILED: _drive_exchange_request_failed,
+    NamedEvent.EXCHANGE_ACTION_REJECTED: _drive_exchange_action_rejected,
 }
 
 

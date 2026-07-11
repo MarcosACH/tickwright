@@ -59,3 +59,8 @@ class NamedEvent(StrEnum):
     # outcome unknown, no report emitted; reconcile-by-cloid resolves the
     # in-flight order (``HyperliquidExchange``, ADR-0008 rule 2).
     EXCHANGE_REQUEST_FAILED = "exchange.request_failed"
+    # Live-exchange write path: the venue refused the whole action envelope (bad
+    # nonce/signature, an action rate-limit) at HTTP 200 — distinct from a failed
+    # transport and from a per-order REJECTED. No report; reconcile-by-cloid owns
+    # the in-flight order (``HyperliquidExchange``, ADR-0008 rule 2).
+    EXCHANGE_ACTION_REJECTED = "exchange.action_rejected"

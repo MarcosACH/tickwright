@@ -78,6 +78,10 @@ class HyperliquidExchange:
         # unless the key is an API/agent wallet acting for a master account.
         self._user_address = config.account_address or self._wallet.address
         self._latest_price: dict[str, Decimal] = {}
+        # The last nonce sent: the venue requires per-address nonces to be
+        # strictly increasing, and the ms-truncated clock would collide on two
+        # sends inside one millisecond — this floor keeps them monotonic.
+        self._last_nonce = 0
         # Orders this process placed, by cloid: a cancel needs the symbol (the
         # venue cancels by asset index) and the report needs it back.
         self._placed: dict[str, PlaceOrder] = {}
@@ -109,6 +113,15 @@ class HyperliquidExchange:
             NamedEvent.EXCHANGE_REQUEST_FAILED, request=request, cloid=cloid, error=str(exc)
         )
 
+    def _action_rejected(self, request: str, cloid: str, reason: str) -> None:
+        # The venue refused the whole action (bad nonce/signature, an action
+        # rate-limit): a 200-OK `err` envelope, not a transport failure and not
+        # a per-order REJECTED. Name it and stop — reconcile-by-cloid owns the
+        # in-flight order (a place never landed, so a later resend is safe).
+        named_event(
+            NamedEvent.EXCHANGE_ACTION_REJECTED, request=request, cloid=cloid, reason=reason
+        )
+
     async def cancel(self, cloid: str) -> None:
         try:
             symbol = await self._cancel_symbol(cloid)
@@ -127,7 +140,13 @@ class HyperliquidExchange:
             # ack-lost cancel is reconciliation's to resolve — just name it.
             self._request_failed("cancel", cloid, exc)
             return
-        (status,) = _action_statuses(response)
+        outcome = _action_outcome(response)
+        if isinstance(outcome, _ActionError):
+            # The cancel action was refused, not adjudicated: a benign no-op —
+            # the durable cancel_requested marker leaves it to reconciliation.
+            self._action_rejected("cancel", cloid, outcome.message)
+            return
+        (status,) = outcome
         if status == "success":
             self._placed.pop(cloid, None)  # terminal: drop the placed memory
             await self._bus.publish(
@@ -208,7 +227,16 @@ class HyperliquidExchange:
     async def _report_placement(self, order: PlaceOrder, response: object) -> None:
         """Translate the venue's placement adjudication into raw facts on the
         bus (ADR-0015): one order in, one status out of ``statuses``."""
-        (status,) = _action_statuses(response)
+        outcome = _action_outcome(response)
+        if isinstance(outcome, _ActionError):
+            # The venue refused the whole action (bad nonce/signature/rate-limit)
+            # — the order never entered the book. Drop the placed memory and name
+            # it, emitting no terminal: a transient refusal must leave the order
+            # resendable, and reconcile-by-cloid resolves it (ADR-0008 rule 2).
+            self._placed.pop(order.cloid, None)
+            self._action_rejected("place", order.cloid, outcome.message)
+            return
+        (status,) = outcome
         if "resting" in status:
             await self._bus.publish(
                 self._status_report(
@@ -360,7 +388,11 @@ class HyperliquidExchange:
     async def _send_action(self, action: dict[str, Any]) -> object:
         from hyperliquid.utils.signing import sign_l1_action
 
-        nonce = self._clock.timestamp_ns() // _NS_PER_MS
+        # The clock's ms, floored to stay strictly above the last nonce: two
+        # sends inside one millisecond still get increasing nonces, which the
+        # venue requires per address.
+        nonce = max(self._clock.timestamp_ns() // _NS_PER_MS, self._last_nonce + 1)
+        self._last_nonce = nonce
         signature = sign_l1_action(
             self._wallet, action, None, nonce, None, not self._config.testnet
         )
@@ -430,13 +462,27 @@ def _order_state(status: str) -> OrderState | None:
     return None
 
 
-def _action_statuses(response: object) -> list[Any]:
-    """The ``statuses`` array out of an /exchange action response (dicts for
-    orders, bare strings for cancels), or a readable error for a shape the
-    venue never documented (fail fast on our own parsing)."""
+@dataclass(frozen=True, slots=True)
+class _ActionError:
+    """A Hyperliquid action-level refusal (the ``{"status": "err", ...}``
+    envelope): the whole order/cancel action was rejected before adjudication —
+    a bad nonce or signature, an action rate-limit — distinct from a per-order
+    ``error`` status and never a transport failure. ``message`` is the venue's
+    reason string, for the operator's triage."""
+
+    message: str
+
+
+def _action_outcome(response: object) -> list[Any] | _ActionError:
+    """The ``statuses`` array out of an ok /exchange action response (dicts for
+    orders, bare strings for cancels), or an ``_ActionError`` for the venue's
+    documented action-level ``err`` envelope. A shape that is neither is a
+    genuine parse failure we fail fast on (``ValueError``)."""
     match response:
         case {"status": "ok", "response": {"data": {"statuses": list(statuses)}}}:
             return statuses
+        case {"status": "err", "response": message}:
+            return _ActionError(str(message))
     raise ValueError(f"unrecognized Hyperliquid action response: {response!r}")
 
 

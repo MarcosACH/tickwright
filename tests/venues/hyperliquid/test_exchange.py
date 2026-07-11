@@ -607,6 +607,87 @@ def test_a_transport_failure_on_cancel_emits_no_report_and_does_not_raise() -> N
     assert any(e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED for e in events)
 
 
+def action_error_response(message: str) -> dict:
+    """The venue's action-level refusal envelope: the whole order/cancel action
+    was rejected before adjudication (bad nonce/signature, an action rate-limit),
+    at HTTP 200 — distinct from a per-order ``error`` status inside ``statuses``."""
+    return {"status": "err", "response": message}
+
+
+def test_a_top_level_action_error_on_place_emits_no_report_and_names_it() -> None:
+    # A top-level `err` envelope means the order never entered the book (the send
+    # was refused, not adjudicated) — so the adapter emits no terminal REJECTED
+    # (which would wrongly kill a resendable order on a transient nonce/rate
+    # error), names the refusal, and lets reconcile-by-cloid resolve. It must not
+    # fault the engine by raising an "unrecognized response" ValueError (R001).
+    post = FakeExchangeApi({"order": action_error_response("Invalid nonce")})
+
+    with capture_events() as events:
+        reports = asyncio.run(
+            place_and_collect_reports(post, limit_order(Side.BUY, "0.5", "42000"))
+        )
+
+    assert reports == []
+    rejected = [e for e in events if e["event"] == NamedEvent.EXCHANGE_ACTION_REJECTED]
+    assert rejected and rejected[0]["reason"] == "Invalid nonce"
+
+
+def test_a_top_level_action_error_on_cancel_emits_no_report_and_names_it() -> None:
+    # A refused cancel action (bad nonce/signature/rate-limit) is a benign named
+    # no-op: the cancel_requested marker is already durable (ADR-0026), so
+    # reconciliation resolves it. It must not raise — no engine fault (R001).
+    async def main() -> tuple[list[ExecutionReport], list[str]]:
+        bus = InMemoryBus()
+        post = FakeExchangeApi(
+            {
+                "order": resting_response(oid=77),
+                "cancelByCloid": action_error_response("Invalid nonce"),
+            }
+        )
+        exchange = make_exchange(post, bus=bus, clock=ManualClock())
+        reports: list[ExecutionReport] = []
+
+        async def collect(report: ExecutionReport) -> None:
+            reports.append(report)
+
+        bus.subscribe(ExecutionReport, collect)
+        await exchange.place(limit_order(Side.BUY, "0.5", "42000"))
+        with capture_events() as events:
+            await exchange.cancel(CLOID)
+        reasons = [
+            str(e["reason"]) for e in events if e["event"] == NamedEvent.EXCHANGE_ACTION_REJECTED
+        ]
+        return reports, reasons
+
+    reports, reasons = asyncio.run(main())
+    # Only the LIVE from placement — the refused cancel adds no CANCELLED.
+    (live,) = reports
+    assert isinstance(live, OrderStatusReport) and live.status is OrderState.LIVE
+    assert reasons == ["Invalid nonce"]
+
+
+def test_placements_within_one_millisecond_get_strictly_increasing_nonces() -> None:
+    # Hyperliquid requires per-address nonces to be strictly increasing; the ms
+    # truncation of the wall clock would collide on two sends inside one
+    # millisecond, so the adapter advances a monotonic floor (R002). ManualClock
+    # never ticks, so both sends read the same ms — the second must still exceed
+    # the first.
+    async def main() -> FakeExchangeApi:
+        post = FakeExchangeApi({"order": resting_response(oid=77)})
+        exchange = make_exchange(
+            post, bus=InMemoryBus(), clock=ManualClock(start_ns=42 * _NS_PER_MS)
+        )
+        await exchange.place(limit_order(Side.BUY, "0.5", "42000"))
+        await exchange.place(limit_order(Side.SELL, "0.5", "42000"))
+        return post
+
+    post = asyncio.run(main())
+    first_nonce = post.requests[0][1]["nonce"]
+    second_nonce = post.requests[1][1]["nonce"]
+    assert first_nonce == 42  # the clock's ms, unchanged
+    assert second_nonce > first_nonce
+
+
 def test_a_terminal_fetch_prunes_the_placed_order_so_the_cache_stays_bounded() -> None:
     # _placed lets a cancel resolve a still-open order's coin without a venue
     # read. Once fetch_order sees the order terminate, that memory is dead
