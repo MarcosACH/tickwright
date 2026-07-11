@@ -14,6 +14,7 @@ fees/margin/PnL (ADR-0013).
 """
 
 from collections.abc import Mapping
+from decimal import Decimal
 
 from tickwright.domain import (
     Clock,
@@ -56,6 +57,10 @@ class PaperExchange:
         self._latest_tick: dict[str, MarketTick] = {}
         self._fill_counts: dict[str, int] = {}
         self._book: dict[str, PlaceOrder] = {}  # resting LIMITs, keyed by cloid.
+        # Unfilled size still working per resting cloid — the fill model may
+        # partial-fill a crossing LIMIT, so the venue tracks the remainder and
+        # re-rests it until a later tick fills the rest (ADR-0012).
+        self._remaining: dict[str, Decimal] = {}
         # The venue's own memory, per cloid: the last status and every fill it
         # reported. This is what ``fetch_order`` answers reconciliation from —
         # a real venue remembers the orders it saw; so does the paper one.
@@ -83,9 +88,22 @@ class PaperExchange:
             if order.symbol == tick.symbol and self._crosses(order, tick)
         ]
         for order in crossed:
-            del self._book[order.cloid]
             fill = await self._fill_model.limit_fill(order, tick)
-            await self._bus.publish(self._fill_report(order, fill))
+            if fill is None:
+                continue  # queue miss (ADR-0012): the order stays resting.
+            remaining = self._remaining.get(order.cloid, order.quantity)
+            quantity = min(fill.quantity, remaining)
+            await self._bus.publish(
+                self._fill_report(order, Fill(quantity=quantity, price=fill.price))
+            )
+            remaining -= quantity
+            if remaining <= 0:
+                # Fully filled: lift it off the book and forget its remainder.
+                del self._book[order.cloid]
+                self._remaining.pop(order.cloid, None)
+            else:
+                # Partial: keep resting with the reduced remainder for later.
+                self._remaining[order.cloid] = remaining
 
     async def place(self, order: PlaceOrder) -> None:
         if order.order_type is OrderType.MARKET:

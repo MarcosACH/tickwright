@@ -74,16 +74,32 @@ class StochasticFillModel:
         clock: Clock,
         prob_slippage: float = 0.0,
         max_slippage: Decimal = Decimal("0"),
+        prob_fill_on_limit: float = 1.0,
+        partial_fill_fraction: Decimal = Decimal("1"),
     ) -> None:
         self._rng = rng
         self._clock = clock
         self._prob_slippage = prob_slippage
         self._max_slippage = max_slippage
+        self._prob_fill_on_limit = prob_fill_on_limit
+        self._partial_fill_fraction = partial_fill_fraction
 
     async def market_fill(self, order: PlaceOrder, tick: MarketTick) -> Fill:
         # Market takes liquidity now — always the full quantity (ADR-0012 scopes
         # partials to the resting book), but the price may slip adversely.
         return Fill(quantity=order.quantity, price=self._slipped(order.side, tick.price))
+
+    async def limit_fill(self, order: PlaceOrder, tick: MarketTick) -> Fill | None:
+        # A resting LIMIT is a maker: it fills at its own price, never slipped.
+        # Two seeded decisions: whether it fills *this* crossing tick at all
+        # (queue position — someone may be ahead of us) and, if so, what
+        # fraction of the original size. The exchange caps the fraction to the
+        # remaining and re-rests any remainder, so partials converge to FILLED.
+        if order.price is None:
+            raise InvariantViolation(f"crossing LIMIT {order.cloid} priced with no price")
+        if self._rng.random() >= self._prob_fill_on_limit:
+            return None  # queue miss: stays resting for a later crossing tick
+        return Fill(quantity=order.quantity * self._partial_fill_fraction, price=order.price)
 
     def _slipped(self, side: Side, price: Decimal) -> Decimal:
         """Perturb ``price`` against ``side`` with probability ``prob_slippage``.
