@@ -17,7 +17,8 @@ from collections.abc import Callable
 from decimal import Decimal
 
 import pytest
-from hyperliquid_fakes import FakeWsConnection, trade, trades_frame
+from hyperliquid_fakes import FakeExchangeApi, FakeWsConnection, trade, trades_frame
+from pydantic import SecretStr
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
@@ -34,6 +35,7 @@ from tickwright.domain import (
     OrderEvent,
     OrderState,
     OrderStatusReport,
+    PlaceOrder,
     PlaceSignal,
     Side,
     Signal,
@@ -49,7 +51,12 @@ from tickwright.engine.runner import Engine
 from tickwright.engine.strategy_host import StrategyHost
 from tickwright.observability import NamedEvent
 from tickwright.observability.testing import capture_events
-from tickwright.venues.hyperliquid import HyperliquidConfig, HyperliquidFeed
+from tickwright.venues.hyperliquid import (
+    HyperliquidConfig,
+    HyperliquidExchange,
+    HyperliquidFeed,
+    HyperliquidUniverse,
+)
 
 _SPEC = InstrumentSpec(
     symbol="BTC", sz_decimals=3, max_decimals=6, max_sig_figs=5, min_notional=Decimal("10")
@@ -366,6 +373,77 @@ def _drive_frozen() -> None:
     assert asyncio.run(reconciler.reconcile_inflight()) is False
 
 
+def _drive_exchange_request_failed() -> None:
+    """A live placement whose transport fails: the adapter names the failure
+    and emits no report — the send window's truth is unknown, and
+    reconcile-by-cloid owns it (``HyperliquidExchange``, ADR-0008 rule 2)."""
+
+    async def go() -> None:
+        exchange = HyperliquidExchange(
+            config=HyperliquidConfig(
+                testnet=True,
+                symbols=["BTC"],
+                # Anvil's account #0 — a publicly-known throwaway key.
+                signing_key=SecretStr(
+                    "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+                ),
+            ),
+            bus=InMemoryBus(),
+            clock=ManualClock(),
+            universe=HyperliquidUniverse(specs={"BTC": _SPEC}, asset_indices={"BTC": 0}),
+            post=FakeExchangeApi({"order": ConnectionError("connection refused")}),
+        )
+        await exchange.place(
+            PlaceOrder(
+                cloid=derive_cloid("walk:BTC:1"),
+                symbol="BTC",
+                side=Side.BUY,
+                quantity=Decimal("0.5"),
+                order_type=OrderType.LIMIT,
+                time_in_force=TimeInForce.GTC,
+                price=Decimal("100"),
+            )
+        )
+
+    asyncio.run(go())
+
+
+def _drive_exchange_action_rejected() -> None:
+    """A live placement the venue refuses at the action envelope (bad
+    nonce/signature/rate-limit): the adapter names the refusal and emits no
+    terminal — reconcile-by-cloid owns the in-flight order (``HyperliquidExchange``,
+    ADR-0008 rule 2)."""
+
+    async def go() -> None:
+        exchange = HyperliquidExchange(
+            config=HyperliquidConfig(
+                testnet=True,
+                symbols=["BTC"],
+                # Anvil's account #0 — a publicly-known throwaway key.
+                signing_key=SecretStr(
+                    "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+                ),
+            ),
+            bus=InMemoryBus(),
+            clock=ManualClock(),
+            universe=HyperliquidUniverse(specs={"BTC": _SPEC}, asset_indices={"BTC": 0}),
+            post=FakeExchangeApi({"order": {"status": "err", "response": "Invalid nonce"}}),
+        )
+        await exchange.place(
+            PlaceOrder(
+                cloid=derive_cloid("walk:BTC:1"),
+                symbol="BTC",
+                side=Side.BUY,
+                quantity=Decimal("0.5"),
+                order_type=OrderType.LIMIT,
+                time_in_force=TimeInForce.GTC,
+                price=Decimal("100"),
+            )
+        )
+
+    asyncio.run(go())
+
+
 class _IdleFeed:
     """A feed with nothing to say — the lifecycle walk needs the ordered
     startup, not ticks. A ``MarketFeed`` double at the venue boundary."""
@@ -557,6 +635,8 @@ SCENARIOS: dict[NamedEvent, Callable[[], None]] = {
     NamedEvent.RECONCILE_RECENCY_SKIPPED: _drive_recency_skipped,
     NamedEvent.GHOST_RECONCILED: _drive_ghost_reconciled,
     NamedEvent.RECONCILE_FROZEN: _drive_frozen,
+    NamedEvent.EXCHANGE_REQUEST_FAILED: _drive_exchange_request_failed,
+    NamedEvent.EXCHANGE_ACTION_REJECTED: _drive_exchange_action_rejected,
 }
 
 

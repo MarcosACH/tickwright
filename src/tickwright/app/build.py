@@ -7,6 +7,7 @@ already-built dependencies. Adding an impl is one ``Literal`` value in
 ``config.py`` and one ``match`` arm here — no registry, no import-path DSL.
 """
 
+import asyncio
 from collections.abc import Mapping
 from typing import assert_never
 
@@ -31,8 +32,13 @@ from tickwright.engine.runner import Engine
 from tickwright.strategies import SingleShotLimitStrategy, SingleShotMarketStrategy
 
 # Imported at module top, unlike the kafka/psycopg arms: the venue package is
-# light — the websockets client loads only when a live connection is opened.
-from tickwright.venues.hyperliquid import HyperliquidFeed
+# light — the websockets/aiohttp/signing stacks load only when a live
+# connection or exchange is actually opened.
+from tickwright.venues.hyperliquid import (
+    HyperliquidExchange,
+    HyperliquidFeed,
+    fetch_instrument_specs,
+)
 
 from .config import AppConfig, StrategyConfig
 
@@ -79,6 +85,15 @@ def build_exchange(config: AppConfig, *, bus: EventBus, clock: Clock) -> Exchang
                 clock=clock,
                 fill_model=ImmediateFillModel(),
                 instrument_specs=config.paper.instrument_specs,
+            )
+        case "hyperliquid":
+            # The venue authors its own specs from the meta endpoint
+            # (ADR-0031). Composition is the one read-once moment (no event
+            # loop is running yet), so the fetch runs to completion here and
+            # the guard gets the specs through exchange.instrument_specs().
+            universe = asyncio.run(fetch_instrument_specs(config.hyperliquid))
+            return HyperliquidExchange(
+                config=config.hyperliquid, bus=bus, clock=clock, universe=universe
             )
         case unreachable:
             assert_never(unreachable)

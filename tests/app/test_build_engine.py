@@ -35,7 +35,7 @@ from tickwright.app.config import AppConfig, StrategyConfig
 from tickwright.domain import InstrumentSpec, OrderState, Side, derive_cloid
 from tickwright.engine.guard import NoopGuard, RealGuard
 from tickwright.engine.runner import Engine
-from tickwright.venues.hyperliquid import HyperliquidFeed
+from tickwright.venues.hyperliquid import HyperliquidExchange, HyperliquidFeed
 
 _SPEC = InstrumentSpec(
     symbol="BTC", sz_decimals=3, max_decimals=6, max_sig_figs=5, min_notional=Decimal("10")
@@ -93,6 +93,39 @@ def test_exchange_discriminant_selects_the_paper_exchange(tmp_path: Path) -> Non
     assert isinstance(exchange, PaperExchange)
     # The venue owns the specs (ADR-0031): config flowed through to the seam.
     assert exchange.instrument_specs() == {"BTC": _SPEC}
+
+
+# Anvil's account #0 — a publicly-known throwaway key, safe in a test file.
+TEST_SIGNING_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+
+
+def test_exchange_discriminant_selects_hyperliquid_with_meta_sourced_specs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The one live read composition makes: the meta endpoint. Faked at the
+    # HTTP boundary so the arm is proven with zero network.
+    async def fake_post(url: str, payload: dict) -> object:
+        assert url == "https://api.hyperliquid-testnet.xyz/info"
+        assert payload == {"type": "meta"}
+        return {"universe": [{"name": "BTC", "szDecimals": 5, "maxLeverage": 40}]}
+
+    monkeypatch.setattr("tickwright.venues.hyperliquid.transport.post_json", fake_post)
+    config = _config(
+        tmp_path,
+        exchange="hyperliquid",
+        hyperliquid={"signing_key": TEST_SIGNING_KEY, "symbols": ["BTC"], "testnet": True},
+    )
+    exchange = build_exchange(config, bus=InMemoryBus(), clock=LiveClock())
+
+    assert isinstance(exchange, HyperliquidExchange)
+    # The venue authored its specs from meta (ADR-0031), ready for the guard.
+    spec = exchange.instrument_specs()["BTC"]
+    assert (spec.sz_decimals, spec.max_decimals, spec.max_sig_figs) == (5, 6, 5)
+
+
+def test_the_hyperliquid_exchange_requires_a_signing_key(tmp_path: Path) -> None:
+    with pytest.raises(ValidationError, match="TICKWRIGHT_HYPERLIQUID__SIGNING_KEY"):
+        _config(tmp_path, exchange="hyperliquid", hyperliquid={"symbols": ["BTC"]})
 
 
 def test_feed_discriminant_selects_the_replay_feed(tmp_path: Path) -> None:

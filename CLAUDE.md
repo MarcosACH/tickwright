@@ -84,6 +84,7 @@ Run with the project venv via `uv run`:
 - Mock at process boundaries only (HTTP/WS, Kafka client, system clock, randomness). Never mock our own classes.
 - The default paper-exchange + in-memory-bus path runs with **no external services and no API keys**.
 - Tests marked `postgres` need a real Postgres (`PostgresStore` contract, ADR-0019); they auto-skip unless `STORE_POSTGRES_DSN` points at a reachable server. Bring one up with `docker compose up -d postgres`, then `STORE_POSTGRES_DSN=postgresql://tickwright:tickwright@localhost:5432/tickwright uv run pytest -m postgres`. `-m "not postgres"` deselects them.
+- Tests marked `live` place real orders on Hyperliquid **testnet** (ADR-0022); they auto-skip unless `TICKWRIGHT_HYPERLIQUID__SIGNING_KEY` holds a funded testnet key. Run manually/nightly with `uv run pytest -m live` — never part of the CI gate.
 
 ## Linting & formatting
 
@@ -105,4 +106,4 @@ uv run lint-imports   # dependency-direction boundaries (ADR-0032)
 
 The CLI (`tickwright` / `python -m tickwright.app`) reads `AppConfig` from the environment and `.env`. **`.env.example` is the canonical variable reference** — every variable maps onto `AppConfig` (`src/tickwright/app/config.py`) with the `TICKWRIGHT_` prefix, `__` for nesting, and JSON for complex values (e.g. `TICKWRIGHT_REPLAY__PATH`, `TICKWRIGHT_STRATEGIES`).
 
-The `KafkaBus` backend reads `TICKWRIGHT_BUS=kafka` plus `TICKWRIGHT_KAFKA__{BOOTSTRAP_SERVERS,EVENTS_TOPIC,GROUP_ID}`. The `PostgresStore` backend reads `TICKWRIGHT_STORE=postgres` plus `TICKWRIGHT_POSTGRES__DSN` (ADR-0019; the `docker compose up postgres` service is its default). The live `HyperliquidFeed` reads `TICKWRIGHT_FEED=hyperliquid` plus `TICKWRIGHT_HYPERLIQUID__{SYMBOLS,TESTNET,...}` (ADR-0021; no API key — the trades channel is unauthenticated). Later slices add their variables with their impls (e.g. the signing key for the live exchange path).
+The `KafkaBus` backend reads `TICKWRIGHT_BUS=kafka` plus `TICKWRIGHT_KAFKA__{BOOTSTRAP_SERVERS,EVENTS_TOPIC,GROUP_ID}`. The `PostgresStore` backend reads `TICKWRIGHT_STORE=postgres` plus `TICKWRIGHT_POSTGRES__DSN` (ADR-0019; the `docker compose up postgres` service is its default). The live `HyperliquidFeed` reads `TICKWRIGHT_FEED=hyperliquid` plus `TICKWRIGHT_HYPERLIQUID__{SYMBOLS,TESTNET,...}` (ADR-0021; no API key — the trades channel is unauthenticated). The live `HyperliquidExchange` reads `TICKWRIGHT_EXCHANGE=hyperliquid` plus `TICKWRIGHT_HYPERLIQUID__{SIGNING_KEY,ACCOUNT_ADDRESS,SLIPPAGE_BOUND}` (ADR-0030; the signing key is env-only, never persisted, redacted from logs — the paper default needs none).
