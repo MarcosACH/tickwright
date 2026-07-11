@@ -11,11 +11,14 @@ import asyncio
 import random
 from decimal import Decimal
 
+import pytest
+
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.paper import PaperExchange, StochasticFillModel, StochasticParams
 from tickwright.domain import (
     FillReport,
+    InvariantViolation,
     MarketTick,
     OrderState,
     OrderStatusReport,
@@ -324,3 +327,32 @@ def test_same_seed_and_tick_stream_replays_a_byte_identical_fill_sequence() -> N
     partial quantities alike — while a different seed diverges."""
     assert _run_stream(11) == _run_stream(11)  # replayable to the byte
     assert _run_stream(11) != _run_stream(22)  # the seed is what makes it differ
+
+
+def test_default_params_are_valid_and_inert() -> None:
+    # The all-default bundle must construct: it is the config default, and an
+    # unseeded stochastic model has to behave optimistically like ImmediateFillModel.
+    params = StochasticParams()
+    assert params.partial_fill_fraction == Decimal("1")
+    assert params.prob_fill_on_limit == 1.0
+
+
+@pytest.mark.parametrize(
+    "kwargs, offending",
+    [
+        ({"partial_fill_fraction": Decimal("0")}, "partial_fill_fraction"),
+        ({"partial_fill_fraction": Decimal("-0.1")}, "partial_fill_fraction"),
+        ({"partial_fill_fraction": Decimal("1.5")}, "partial_fill_fraction"),
+        ({"prob_slippage": 1.5}, "prob_slippage"),
+        ({"prob_slippage": -0.1}, "prob_slippage"),
+        ({"prob_fill_on_limit": 1.5}, "prob_fill_on_limit"),
+        ({"prob_fill_on_limit": -0.1}, "prob_fill_on_limit"),
+        ({"max_slippage": Decimal("-1")}, "max_slippage"),
+        ({"latency_seconds": -1.0}, "latency_seconds"),
+    ],
+)
+def test_out_of_range_knobs_are_rejected_at_construction(kwargs: dict, offending: str) -> None:
+    # A knob outside its range is a silent misconfiguration, not a fill outcome:
+    # a non-positive partial_fill_fraction in particular would never converge.
+    with pytest.raises(InvariantViolation, match=offending):
+        StochasticParams(**kwargs)

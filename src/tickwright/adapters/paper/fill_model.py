@@ -42,6 +42,29 @@ class StochasticParams:
     partial_fill_fraction: Decimal = Decimal("1")
     latency_seconds: float = 0.0
 
+    def __post_init__(self) -> None:
+        # Guard the knob ranges at construction: an out-of-range value is a silent
+        # misconfiguration, not a fill outcome. The sharpest is a non-positive
+        # ``partial_fill_fraction`` — it would offer a zero (or negative) quantity
+        # every crossing tick, so the order never converges and the venue emits an
+        # unending stream of empty fills (ADR-0012 partials must converge).
+        if not 0.0 <= self.prob_slippage <= 1.0:
+            raise InvariantViolation(f"prob_slippage must be in [0, 1], got {self.prob_slippage}")
+        if not 0.0 <= self.prob_fill_on_limit <= 1.0:
+            raise InvariantViolation(
+                f"prob_fill_on_limit must be in [0, 1], got {self.prob_fill_on_limit}"
+            )
+        if not Decimal(0) < self.partial_fill_fraction <= Decimal(1):
+            raise InvariantViolation(
+                f"partial_fill_fraction must be in (0, 1], got {self.partial_fill_fraction}"
+            )
+        if self.max_slippage < 0:
+            raise InvariantViolation(f"max_slippage must be non-negative, got {self.max_slippage}")
+        if self.latency_seconds < 0.0:
+            raise InvariantViolation(
+                f"latency_seconds must be non-negative, got {self.latency_seconds}"
+            )
+
 
 @runtime_checkable
 class FillModel(Protocol):

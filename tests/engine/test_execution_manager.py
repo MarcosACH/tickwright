@@ -9,13 +9,19 @@ our own classes.
 """
 
 import asyncio
+import random
 from decimal import Decimal
 
 import pytest
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
-from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
+from tickwright.adapters.paper import (
+    ImmediateFillModel,
+    PaperExchange,
+    StochasticFillModel,
+    StochasticParams,
+)
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     AggressorSide,
@@ -659,10 +665,6 @@ def test_stochastic_partials_drive_the_saga_from_live_to_filled() -> None:
     saga LIVE → PARTIALLY_FILLED* → FILLED, with a monotonic cum_qty that
     converges to exactly the order size — no report hand-fed, the paper venue
     and the seeded model produce every fill."""
-    import random
-
-    from tickwright.adapters.paper import StochasticFillModel, StochasticParams
-
     model = StochasticFillModel(
         rng=random.Random(0),
         clock=ManualClock(),
