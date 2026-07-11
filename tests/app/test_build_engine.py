@@ -32,7 +32,18 @@ from tickwright.app.build import (
     build_store,
 )
 from tickwright.app.config import AppConfig, StrategyConfig
-from tickwright.domain import InstrumentSpec, OrderState, Side, derive_cloid
+from tickwright.domain import (
+    AggressorSide,
+    FillReport,
+    InstrumentSpec,
+    MarketTick,
+    OrderState,
+    OrderType,
+    PlaceOrder,
+    Side,
+    TimeInForce,
+    derive_cloid,
+)
 from tickwright.engine.guard import NoopGuard, RealGuard
 from tickwright.engine.runner import Engine
 from tickwright.venues.hyperliquid import HyperliquidExchange, HyperliquidFeed
@@ -245,3 +256,68 @@ def test_a_limit_strategy_config_requires_a_price() -> None:
             side=Side.BUY,
             quantity=Decimal("0.5"),
         )
+
+
+async def _record_fill(sink: list, report: object) -> None:
+    sink.append(report)
+
+
+def _market_tick(price: str) -> MarketTick:
+    return MarketTick(
+        ts_event=1_000,
+        ts_init=1_000,
+        symbol="BTC",
+        price=Decimal(price),
+        size=Decimal("10"),
+        aggressor_side=AggressorSide.BUY,
+        trade_id="t1",
+        seq=0,
+    )
+
+
+def _btc_market_order() -> PlaceOrder:
+    return PlaceOrder(
+        cloid="0xabc",
+        symbol="BTC",
+        side=Side.BUY,
+        quantity=Decimal("0.5"),
+        order_type=OrderType.MARKET,
+        time_in_force=TimeInForce.IOC,
+    )
+
+
+def _fill_price_from_built_paper(config: AppConfig) -> Decimal:
+    bus = InMemoryBus()
+    exchange = build_exchange(config, bus=bus, clock=ManualClock(start_ns=1_000))
+    fills: list[FillReport] = []
+    bus.subscribe(FillReport, lambda r: _record_fill(fills, r))
+
+    async def scenario() -> None:
+        await bus.publish(_market_tick("42000"))
+        await exchange.place(_btc_market_order())
+
+    asyncio.run(scenario())
+    return fills[0].price
+
+
+def test_paper_fill_model_defaults_to_immediate_full_fill_zero_slippage(tmp_path: Path) -> None:
+    # Default unchanged (ADR-0012): the reproducible ImmediateFillModel fills at
+    # the exact tick price, so the built paper stack needs no seed or knobs.
+    assert _fill_price_from_built_paper(_config(tmp_path)) == Decimal("42000")
+
+
+def test_paper_fill_model_selects_the_seeded_stochastic_model_from_config(tmp_path: Path) -> None:
+    # The second impl is a wiring choice: config selects it and the seed + knobs
+    # flow to the seam, observable as an adverse slip off the tick price.
+    config = _config(
+        tmp_path,
+        paper={
+            "instrument_specs": {"BTC": _SPEC},
+            "fill_model": "stochastic",
+            "seed": 7,
+            "prob_slippage": 1.0,
+            "max_slippage": "0.001",
+        },
+    )
+    price = _fill_price_from_built_paper(config)
+    assert Decimal("42000") < price <= Decimal("42000") * (Decimal(1) + Decimal("0.001"))

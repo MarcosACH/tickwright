@@ -2,8 +2,9 @@
 
 Only ``PaperExchange`` calls it, so it lives here, not in ``domain`` (module-map
 decision). It isolates the one nondeterminism-shaped decision so determinism is a
-wiring choice: ``ImmediateFillModel`` (this slice) uses no RNG at all; the seeded
-``StochasticFillModel`` lands in a later slice behind the same interface.
+wiring choice: ``ImmediateFillModel`` uses no RNG at all; the seeded
+``StochasticFillModel`` models slippage, queue position, partial fills, and
+latency behind the same interface, deterministic per seed.
 """
 
 import random
