@@ -21,3 +21,9 @@ class LiveClock:
 
     async def sleep(self, seconds: float) -> None:
         await asyncio.sleep(seconds)
+
+    async def sleep_until(self, ts_ns: int) -> None:
+        """Wait until the wall clock crosses ``ts_ns`` (ADR-0033). Loops because
+        ``asyncio.sleep`` may wake a hair early relative to ``time.time_ns``."""
+        while (remaining_ns := ts_ns - self.timestamp_ns()) > 0:
+            await asyncio.sleep(remaining_ns / 1_000_000_000)

@@ -68,6 +68,16 @@ class Clock(Protocol):
         """Wait ``seconds``; virtual and immediate under ``ManualClock``."""
         ...
 
+    async def sleep_until(self, ts_ns: int) -> None:
+        """Park until the clock crosses ``ts_ns`` — a pure waiter (ADR-0033).
+
+        Never advances time itself: under ``ManualClock`` it wakes only when a
+        producer (``advance_to``) drives virtual time across the target, so a
+        periodic cadence paces off feed-driven virtual time without racing the
+        feed backward or busy-spinning.
+        """
+        ...
+
 
 @runtime_checkable
 class ReplayClock(Clock, Protocol):
