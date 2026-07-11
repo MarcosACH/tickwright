@@ -13,7 +13,9 @@ every consumer of market data.
 """
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from decimal import Decimal
+from enum import Enum
 from typing import Any
 
 from tickwright.domain import (
@@ -104,15 +106,12 @@ class HyperliquidExchange:
         )
 
     async def cancel(self, cloid: str) -> None:
-        # The venue cancels by asset index, so the cloid needs a symbol: from
-        # this process's own placements, or — after a restart emptied that
-        # memory — from the venue's order record itself.
         try:
-            order = self._placed.get(cloid)
-            symbol = order.symbol if order is not None else await self._resolve_symbol(cloid)
+            symbol = await self._cancel_symbol(cloid)
             if symbol is None:
-                # The venue positively has no record of this cloid: nothing to
-                # cancel, nothing to report — a benign no-op (ADR-0026).
+                # No usable venue record for this cloid: nothing to cancel,
+                # nothing to report — a benign no-op (ADR-0026). An ambiguous
+                # read is reconciliation's to resolve, not the adapter's.
                 return
             action = {
                 "type": "cancelByCloid",
@@ -133,6 +132,18 @@ class HyperliquidExchange:
         # never landed): a benign no-op — the venue's real state arrives as its
         # own report or through reconciliation (ADR-0026).
 
+    async def _cancel_symbol(self, cloid: str) -> str | None:
+        """The coin to cancel ``cloid`` under (the venue cancels by asset
+        index): this process's own placement, or — after a restart emptied that
+        memory — the venue's order record. ``None`` when the venue has no
+        usable record (``unknownOid``, or a response we cannot parse):
+        reconciliation is the backstop for an ambiguous read (ADR-0026)."""
+        order = self._placed.get(cloid)
+        if order is not None:
+            return order.symbol
+        read = _decode_order_status(await self._order_status(cloid))
+        return read.coin if isinstance(read, _OrderRecord) else None
+
     async def fetch_order(self, cloid: str) -> VenueOrderView | None:
         """Venue truth for ``cloid``: the order record plus its fill history,
         the ADR-0011 cross-check in one read. ``unknownOid`` is positive proof
@@ -147,39 +158,30 @@ class HyperliquidExchange:
             return None
 
     async def _fetch_view(self, cloid: str) -> VenueOrderView | None:
-        response = await self._info(
-            {"type": "orderStatus", "user": self._user_address, "oid": cloid}
+        read = _decode_order_status(await self._order_status(cloid))
+        if read is _OrderStatusRead.NO_RECORD:
+            # unknownOid: a *successful* read that positively has no record —
+            # the order never landed (an empty view, not a failed read).
+            return VenueOrderView(status=None)
+        if read is _OrderStatusRead.UNRECOGNIZED:
+            # A shape we cannot parse is a failed read, not a record: freezing
+            # (ADR-0011) beats misclassifying venue truth.
+            return None
+        state = _order_state(read.status)
+        if state is None:
+            # A status outside the taxonomy is likewise a failed read.
+            return None
+        return VenueOrderView(
+            status=self._status_report(
+                cloid=cloid, symbol=read.coin, status=state, venue_oid=str(read.oid)
+            ),
+            fills=tuple(await self._fetch_fills(cloid=cloid, symbol=read.coin, oid=read.oid)),
         )
-        match response:
-            case {"status": "unknownOid"}:
-                return VenueOrderView(status=None)
-            case {
-                "status": "order",
-                "order": {"order": {"coin": str(coin), "oid": int(oid)}, "status": str(status)},
-            }:
-                state = _order_state(status)
-                if state is None:
-                    return None
-                return VenueOrderView(
-                    status=self._status_report(
-                        cloid=cloid, symbol=coin, status=state, venue_oid=str(oid)
-                    ),
-                    fills=tuple(await self._fetch_fills(cloid=cloid, symbol=coin, oid=oid)),
-                )
-        # A response we cannot map — an unknown shape — is a failed read, not
-        # a record: freezing (ADR-0011) beats misclassifying venue truth.
-        return None
 
-    async def _resolve_symbol(self, cloid: str) -> str | None:
-        """The coin the venue holds ``cloid`` under, or ``None`` if it has no
-        record (``unknownOid``)."""
-        response = await self._info(
-            {"type": "orderStatus", "user": self._user_address, "oid": cloid}
-        )
-        match response:
-            case {"status": "order", "order": {"order": {"coin": str(coin)}}}:
-                return coin
-        return None
+    async def _order_status(self, cloid: str) -> object:
+        """The venue's ``orderStatus`` answer for ``cloid`` — the one read both
+        the reconciler's ``fetch_order`` and a post-restart ``cancel`` share."""
+        return await self._info({"type": "orderStatus", "user": self._user_address, "oid": cloid})
 
     async def _report_placement(self, order: PlaceOrder, response: object) -> None:
         """Translate the venue's placement adjudication into raw facts on the
@@ -313,6 +315,43 @@ class HyperliquidExchange:
         )
         payload = {"action": action, "nonce": nonce, "signature": signature}
         return await self._post(f"{self._config.api_url}/exchange", payload)
+
+
+@dataclass(frozen=True, slots=True)
+class _OrderRecord:
+    """The venue's decoded ``orderStatus`` order record: the coin it lives
+    under, the venue oid, and the raw venue status string. Each caller applies
+    its own status policy — ``fetch_order`` maps the status to saga vocabulary
+    (freezing on one it cannot map), a post-restart ``cancel`` needs only the
+    coin (it cancels by asset index, whatever the status)."""
+
+    coin: str
+    oid: int
+    status: str
+
+
+class _OrderStatusRead(Enum):
+    """An ``orderStatus`` read that yielded no usable order record."""
+
+    NO_RECORD = "no_record"  # unknownOid — the venue positively has no record
+    UNRECOGNIZED = "unrecognized"  # a shape we cannot parse — a failed read
+
+
+def _decode_order_status(response: object) -> _OrderRecord | _OrderStatusRead:
+    """Decode a venue ``orderStatus`` response into its order record, or which
+    kind of no-record it is: ``NO_RECORD`` for the venue's positive
+    ``unknownOid``, ``UNRECOGNIZED`` for any shape outside that and the order
+    record (a failed read — never venue truth). The one decode both
+    ``fetch_order`` and a post-restart ``cancel`` read the venue through."""
+    match response:
+        case {"status": "unknownOid"}:
+            return _OrderStatusRead.NO_RECORD
+        case {
+            "status": "order",
+            "order": {"order": {"coin": str(coin), "oid": int(oid)}, "status": str(status)},
+        }:
+            return _OrderRecord(coin=coin, oid=oid, status=status)
+    return _OrderStatusRead.UNRECOGNIZED
 
 
 def _order_state(status: str) -> OrderState | None:
