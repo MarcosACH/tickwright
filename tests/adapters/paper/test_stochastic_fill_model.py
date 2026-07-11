@@ -76,3 +76,37 @@ def test_a_different_seed_gives_a_different_market_fill() -> None:
     ninety_nine = asyncio.run(_model(99).market_fill(order, tick))
 
     assert seven != ninety_nine  # the seed is what makes the sequence differ
+
+
+def test_slippage_is_adverse_and_within_the_configured_bound() -> None:
+    tick = _tick("40000")
+    price = Decimal("40000")
+    ceiling = price * (Decimal(1) + Decimal("0.001"))
+    floor = price * (Decimal(1) - Decimal("0.001"))
+
+    # Sweep many seeds: a BUY never fills below the market and never worse than
+    # the bound; a SELL is the mirror. Slippage is a cost, never a windfall.
+    for seed in range(50):
+        buy = asyncio.run(_model(seed).market_fill(_market_order(), tick))
+        assert price <= buy.price <= ceiling
+
+        sell = StochasticFillModel(
+            rng=random.Random(seed),
+            clock=ManualClock(),
+            prob_slippage=1.0,
+            max_slippage=Decimal("0.001"),
+        )
+        sell_fill = asyncio.run(
+            sell.market_fill(
+                PlaceOrder(
+                    cloid="0xsell",
+                    symbol="BTC",
+                    side=Side.SELL,
+                    quantity=Decimal("1"),
+                    order_type=OrderType.MARKET,
+                    time_in_force=TimeInForce.IOC,
+                ),
+                tick,
+            )
+        )
+        assert floor <= sell_fill.price <= price
