@@ -7,13 +7,21 @@ already-built dependencies. Adding an impl is one ``Literal`` value in
 ``config.py`` and one ``match`` arm here — no registry, no import-path DSL.
 """
 
+import asyncio
+import random
 from collections.abc import Mapping
 from typing import assert_never
 
 from tickwright.adapters.bus import InMemoryBus
-from tickwright.adapters.clock import ManualClock
+from tickwright.adapters.clock import LiveClock, ManualClock
 from tickwright.adapters.feed import ReplayFeed
-from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
+from tickwright.adapters.paper import (
+    FillModel,
+    ImmediateFillModel,
+    PaperExchange,
+    PaperExchangeConfig,
+    StochasticFillModel,
+)
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     Clock,
@@ -29,6 +37,15 @@ from tickwright.domain import (
 from tickwright.engine.guard import NoopGuard, RealGuard
 from tickwright.engine.runner import Engine
 from tickwright.strategies import SingleShotLimitStrategy, SingleShotMarketStrategy
+
+# Imported at module top, unlike the kafka/psycopg arms: the venue package is
+# light — the websockets/aiohttp/signing stacks load only when a live
+# connection or exchange is actually opened.
+from tickwright.venues.hyperliquid import (
+    HyperliquidExchange,
+    HyperliquidFeed,
+    fetch_instrument_specs,
+)
 
 from .config import AppConfig, StrategyConfig
 
@@ -55,6 +72,12 @@ def build_store(config: AppConfig) -> Store:
     match config.store:
         case "sqlite":
             return SQLiteStore(config.sqlite.path)
+        case "postgres":
+            # Imported here, not at module top: selecting the hermetic default
+            # must not load the psycopg driver at all.
+            from tickwright.adapters.store.postgres import PostgresStore
+
+            return PostgresStore(config.postgres.dsn)
         case unreachable:
             assert_never(unreachable)
 
@@ -67,17 +90,60 @@ def build_exchange(config: AppConfig, *, bus: EventBus, clock: Clock) -> Exchang
             return PaperExchange(
                 bus=bus,
                 clock=clock,
-                fill_model=ImmediateFillModel(),
+                fill_model=build_fill_model(config.paper, clock=clock),
                 instrument_specs=config.paper.instrument_specs,
+            )
+        case "hyperliquid":
+            # The venue authors its own specs from the meta endpoint
+            # (ADR-0031). Composition is the one read-once moment (no event
+            # loop is running yet), so the fetch runs to completion here and
+            # the guard gets the specs through exchange.instrument_specs().
+            universe = asyncio.run(fetch_instrument_specs(config.hyperliquid))
+            return HyperliquidExchange(
+                config=config.hyperliquid, bus=bus, clock=clock, universe=universe
             )
         case unreachable:
             assert_never(unreachable)
 
 
-def build_feed(config: AppConfig, *, bus: EventBus, clock: ReplayClock) -> MarketFeed:
+def build_fill_model(config: PaperExchangeConfig, *, clock: Clock) -> FillModel:
+    """Select the paper venue's fill behavior (ADR-0012). Determinism is a
+    wiring choice: ``immediate`` uses no RNG; ``stochastic`` gets a seeded one
+    plus the same ``Clock`` the venue runs on, so its latency shares virtual
+    time under replay."""
+    match config.fill_model:
+        case "immediate":
+            return ImmediateFillModel()
+        case "stochastic":
+            return StochasticFillModel(
+                rng=random.Random(config.seed), clock=clock, params=config.stochastic
+            )
+        case unreachable:
+            assert_never(unreachable)
+
+
+def build_clock(config: AppConfig) -> Clock:
+    """The clock is the feed's consequence, not a free choice: replay drives
+    virtual time (ADR-0027), a live feed runs on the wall clock (ADR-0005)."""
     match config.feed:
         case "replay":
+            return ManualClock()
+        case "hyperliquid":
+            return LiveClock()
+        case unreachable:
+            assert_never(unreachable)
+
+
+def build_feed(config: AppConfig, *, bus: EventBus, clock: Clock) -> MarketFeed:
+    match config.feed:
+        case "replay":
+            # Both narrowings hold by construction: config validation requires
+            # the replay section, and build_clock pairs replay with ManualClock.
+            assert config.replay is not None
+            assert isinstance(clock, ReplayClock)
             return ReplayFeed(path=config.replay.path, bus=bus, clock=clock)
+        case "hyperliquid":
+            return HyperliquidFeed(config=config.hyperliquid, bus=bus, clock=clock)
         case unreachable:
             assert_never(unreachable)
 
@@ -105,9 +171,7 @@ def build_engine(config: AppConfig) -> Engine:
     (ADR-0031) — the one placement where both sides are concrete.
     """
     bus = build_bus(config)
-    # The replay feed drives virtual time (ADR-0027); the live slice will
-    # derive a LiveClock from a live feed discriminant when one ships.
-    clock = ManualClock()
+    clock = build_clock(config)
     store = build_store(config)
     exchange = build_exchange(config, bus=bus, clock=clock)
     feed = build_feed(config, bus=bus, clock=clock)

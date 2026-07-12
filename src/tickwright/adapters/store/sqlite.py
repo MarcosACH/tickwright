@@ -9,15 +9,21 @@ transition history (ADR-0008's checkpoint trail). Each checkpoint is one
 transaction — the write the crash-safety argument rests on.
 """
 
-import json
 import sqlite3
 import weakref
-from decimal import Decimal
 from pathlib import Path
 from types import TracebackType
-from typing import Any
 
-from tickwright.domain import KillSwitchState, Order, OrderState, OrderType, Side
+from tickwright.domain import KillSwitchState, Order, OrderState
+
+from ._records import (
+    READ_COLUMN_LIST,
+    RECORD_COLUMNS,
+    next_history,
+    record_values,
+    restore_history,
+    restore_order,
+)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS orders (
@@ -74,73 +80,28 @@ class SQLiteStore:
             row = self._conn.execute(
                 "SELECT history FROM orders WHERE cloid = ?", (order.cloid,)
             ).fetchone()
-            history: list[list[object]] = json.loads(row[0]) if row else []
-            history.append([order.state.value, ts_ns])
+            history = next_history(row[0] if row else None, order.state, ts_ns)
+            placeholders = ", ".join("?" * len(RECORD_COLUMNS))
             self._conn.execute(
-                "INSERT OR REPLACE INTO orders VALUES "
-                "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    order.cloid,
-                    order.strategy_id,
-                    order.signal_id,
-                    order.symbol,
-                    order.side.value,
-                    str(order.quantity),
-                    order.order_type.value,
-                    order.state.value,
-                    str(order.cum_qty),
-                    order.venue_oid,
-                    order.reason,
-                    int(order.cancel_requested),
-                    order.cancel_requested_ts,
-                    order.cancel_signal_id,
-                    json.dumps(sorted(order.applied_event_ids)),
-                    json.dumps(history),
-                ),
+                f"INSERT OR REPLACE INTO orders VALUES ({placeholders})",
+                record_values(order, history=history),
             )
-
-    _RECORD_COLUMNS = (
-        "cloid, strategy_id, signal_id, symbol, side, quantity, order_type,"
-        " state, cum_qty, venue_oid, reason, cancel_requested,"
-        " cancel_requested_ts, cancel_signal_id, applied_event_ids"
-    )
 
     def get_order(self, cloid: str) -> Order | None:
         """Rebuild the checkpointed saga for ``cloid``, or ``None`` if unknown."""
         row = self._conn.execute(
-            f"SELECT {self._RECORD_COLUMNS} FROM orders WHERE cloid = ?", (cloid,)
+            f"SELECT {READ_COLUMN_LIST} FROM orders WHERE cloid = ?", (cloid,)
         ).fetchone()
         if row is None:
             return None
-        return self._restore(row)
+        return restore_order(row)
 
     def all_orders(self) -> list[Order]:
         """Rebuild every checkpointed saga — the recovery mass-read (ADR-0009)."""
         rows = self._conn.execute(
-            f"SELECT {self._RECORD_COLUMNS} FROM orders ORDER BY cloid"
+            f"SELECT {READ_COLUMN_LIST} FROM orders ORDER BY cloid"
         ).fetchall()
-        return [self._restore(row) for row in rows]
-
-    @staticmethod
-    def _restore(row: tuple[Any, ...]) -> Order:
-        """One saga row, in ``_RECORD_COLUMNS`` order, back into an ``Order``."""
-        return Order.restore(
-            cloid=row[0],
-            strategy_id=row[1],
-            signal_id=row[2],
-            symbol=row[3],
-            side=Side(row[4]),
-            quantity=Decimal(row[5]),
-            order_type=OrderType(row[6]),
-            state=OrderState(row[7]),
-            cum_qty=Decimal(row[8]),
-            venue_oid=row[9],
-            reason=row[10],
-            cancel_requested=bool(row[11]),
-            cancel_requested_ts=row[12],
-            cancel_signal_id=row[13],
-            applied_event_ids=json.loads(row[14]),
-        )
+        return [restore_order(row) for row in rows]
 
     def save_strategy_snapshot(self, strategy_id: str, data: bytes, *, ts_ns: int) -> None:
         """Durably record ``strategy_id``'s opaque state bytes; latest wins (ADR-0016)."""
@@ -183,9 +144,7 @@ class SQLiteStore:
         Protocol — recovery rebuilds from the current record alone.
         """
         row = self._conn.execute("SELECT history FROM orders WHERE cloid = ?", (cloid,)).fetchone()
-        if row is None:
-            return []
-        return [(OrderState(state), ts_ns) for state, ts_ns in json.loads(row[0])]
+        return restore_history(row[0] if row else None)
 
     def __enter__(self) -> "SQLiteStore":
         return self

@@ -1,0 +1,3 @@
+{"symbol": "BTC", "price": "43250.5", "size": "0.25", "aggressor_side": "buy", "trade_id": "1", "ts_event": 1700000000000000000}
+{"symbol": "BTC", "price": "43251.0", "size": "0.10", "aggressor_side": "sell", "trade_id": "2", "ts_event": 1700000000500000000}
+{"symbol": "BTC", "price": "43252.5", "size": "0.40", "aggressor_side": "buy", "trade_id": "3", "ts_event": 1700000001000000000}

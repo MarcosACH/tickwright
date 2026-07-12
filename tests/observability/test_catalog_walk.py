@@ -17,6 +17,8 @@ from collections.abc import Callable
 from decimal import Decimal
 
 import pytest
+from hyperliquid_fakes import FakeExchangeApi, FakeWsConnection, trade, trades_frame
+from pydantic import SecretStr
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
@@ -33,6 +35,7 @@ from tickwright.domain import (
     OrderEvent,
     OrderState,
     OrderStatusReport,
+    PlaceOrder,
     PlaceSignal,
     Side,
     Signal,
@@ -48,6 +51,12 @@ from tickwright.engine.runner import Engine
 from tickwright.engine.strategy_host import StrategyHost
 from tickwright.observability import NamedEvent
 from tickwright.observability.testing import capture_events
+from tickwright.venues.hyperliquid import (
+    HyperliquidConfig,
+    HyperliquidExchange,
+    HyperliquidFeed,
+    HyperliquidUniverse,
+)
 
 _SPEC = InstrumentSpec(
     symbol="BTC", sz_decimals=3, max_decimals=6, max_sig_figs=5, min_notional=Decimal("10")
@@ -364,6 +373,77 @@ def _drive_frozen() -> None:
     assert asyncio.run(reconciler.reconcile_inflight()) is False
 
 
+def _drive_exchange_request_failed() -> None:
+    """A live placement whose transport fails: the adapter names the failure
+    and emits no report — the send window's truth is unknown, and
+    reconcile-by-cloid owns it (``HyperliquidExchange``, ADR-0008 rule 2)."""
+
+    async def go() -> None:
+        exchange = HyperliquidExchange(
+            config=HyperliquidConfig(
+                testnet=True,
+                symbols=["BTC"],
+                # Anvil's account #0 — a publicly-known throwaway key.
+                signing_key=SecretStr(
+                    "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+                ),
+            ),
+            bus=InMemoryBus(),
+            clock=ManualClock(),
+            universe=HyperliquidUniverse(specs={"BTC": _SPEC}, asset_indices={"BTC": 0}),
+            post=FakeExchangeApi({"order": ConnectionError("connection refused")}),
+        )
+        await exchange.place(
+            PlaceOrder(
+                cloid=derive_cloid("walk:BTC:1"),
+                symbol="BTC",
+                side=Side.BUY,
+                quantity=Decimal("0.5"),
+                order_type=OrderType.LIMIT,
+                time_in_force=TimeInForce.GTC,
+                price=Decimal("100"),
+            )
+        )
+
+    asyncio.run(go())
+
+
+def _drive_exchange_action_rejected() -> None:
+    """A live placement the venue refuses at the action envelope (bad
+    nonce/signature/rate-limit): the adapter names the refusal and emits no
+    terminal — reconcile-by-cloid owns the in-flight order (``HyperliquidExchange``,
+    ADR-0008 rule 2)."""
+
+    async def go() -> None:
+        exchange = HyperliquidExchange(
+            config=HyperliquidConfig(
+                testnet=True,
+                symbols=["BTC"],
+                # Anvil's account #0 — a publicly-known throwaway key.
+                signing_key=SecretStr(
+                    "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+                ),
+            ),
+            bus=InMemoryBus(),
+            clock=ManualClock(),
+            universe=HyperliquidUniverse(specs={"BTC": _SPEC}, asset_indices={"BTC": 0}),
+            post=FakeExchangeApi({"order": {"status": "err", "response": "Invalid nonce"}}),
+        )
+        await exchange.place(
+            PlaceOrder(
+                cloid=derive_cloid("walk:BTC:1"),
+                symbol="BTC",
+                side=Side.BUY,
+                quantity=Decimal("0.5"),
+                order_type=OrderType.LIMIT,
+                time_in_force=TimeInForce.GTC,
+                price=Decimal("100"),
+            )
+        )
+
+    asyncio.run(go())
+
+
 class _IdleFeed:
     """A feed with nothing to say — the lifecycle walk needs the ordered
     startup, not ticks. A ``MarketFeed`` double at the venue boundary."""
@@ -450,6 +530,82 @@ def _drive_engine_lifecycle() -> None:
     asyncio.run(go())
 
 
+def _drive_feed_lagged() -> None:
+    """A stalled consumer while more BTC trades arrive: the live feed conflates
+    at ingress — keep-latest-per-symbol — and names the drop (ADR-0023)."""
+
+    async def go() -> None:
+        bus = InMemoryBus()
+        clock = ManualClock()
+        release = asyncio.Event()
+        stalled = asyncio.Event()
+
+        async def slow_consumer(tick: MarketTick) -> None:
+            stalled.set()
+            await release.wait()
+
+        bus.subscribe(MarketTick, slow_consumer)
+        connection = FakeWsConnection(
+            [
+                trades_frame(trade("BTC", "42000", 1)),
+                trades_frame(trade("BTC", "42001", 2)),
+                trades_frame(trade("BTC", "42002", 3)),
+            ]
+        )
+
+        async def connect(url: str) -> FakeWsConnection:
+            return connection
+
+        feed = HyperliquidFeed(
+            config=HyperliquidConfig(symbols=["BTC"]), bus=bus, clock=clock, connect=connect
+        )
+        run = asyncio.create_task(feed.start())
+        await stalled.wait()
+        # While the first publish is stuck, 42001 lands unpublished and 42002
+        # supersedes it — the drop that emits feed.lagged.
+        await connection.drained.wait()
+        release.set()
+        await feed.stop()
+        await run
+
+    asyncio.run(go())
+
+
+def _drive_feed_frame_dropped() -> None:
+    """A malformed trades frame reaches the live feed: it is skipped and named
+    (``feed.frame_dropped``, ADR-0023), and the good frame after it still ticks
+    through — the engine is never faulted by one bad row."""
+
+    async def go() -> None:
+        bus = InMemoryBus()
+        clock = ManualClock()
+        ticked = asyncio.Event()
+
+        async def record(tick: MarketTick) -> None:
+            ticked.set()
+
+        bus.subscribe(MarketTick, record)
+        connection = FakeWsConnection(
+            [
+                trades_frame({"coin": "BTC", "side": "B", "px": "not-a-number"}),
+                trades_frame(trade("BTC", "100", 1)),
+            ]
+        )
+
+        async def connect(url: str) -> FakeWsConnection:
+            return connection
+
+        feed = HyperliquidFeed(
+            config=HyperliquidConfig(symbols=["BTC"]), bus=bus, clock=clock, connect=connect
+        )
+        run = asyncio.create_task(feed.start())
+        await ticked.wait()  # the good frame landed → the feed survived the bad one
+        await feed.stop()
+        await run
+
+    asyncio.run(go())
+
+
 # --- The catalog walk --------------------------------------------------------
 
 # Every NamedEvent → a scenario that drives its real path. Several of the saga
@@ -465,6 +621,8 @@ SCENARIOS: dict[NamedEvent, Callable[[], None]] = {
     NamedEvent.ORDER_REJECTED: _drive_status(OrderState.REJECTED),
     NamedEvent.ORDER_FAILED: _drive_status(OrderState.FAILED),
     NamedEvent.ORDER_CANCELLED: _drive_status(OrderState.LIVE, OrderState.CANCELLED),
+    NamedEvent.FEED_LAGGED: _drive_feed_lagged,
+    NamedEvent.FEED_FRAME_DROPPED: _drive_feed_frame_dropped,
     NamedEvent.ENGINE_BARRIER_CLEARED: _drive_engine_lifecycle,
     NamedEvent.ENGINE_FEED_STARTED: _drive_engine_lifecycle,
     NamedEvent.ENGINE_FAULTED: _drive_engine_faulted,
@@ -477,6 +635,8 @@ SCENARIOS: dict[NamedEvent, Callable[[], None]] = {
     NamedEvent.RECONCILE_RECENCY_SKIPPED: _drive_recency_skipped,
     NamedEvent.GHOST_RECONCILED: _drive_ghost_reconciled,
     NamedEvent.RECONCILE_FROZEN: _drive_frozen,
+    NamedEvent.EXCHANGE_REQUEST_FAILED: _drive_exchange_request_failed,
+    NamedEvent.EXCHANGE_ACTION_REJECTED: _drive_exchange_action_rejected,
 }
 
 

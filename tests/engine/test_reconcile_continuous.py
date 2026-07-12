@@ -111,7 +111,13 @@ def _wire(
     bus.subscribe(ExecutionReport, manager.on_execution_report)
     events: list[OrderEvent] = []
     bus.subscribe(OrderEvent, lambda ev: _record(events, ev))
-    reconciler = Reconciler(bus=bus, clock=clock, exchange=exchange, cache=cache, config=config)
+    reconciler = Reconciler(
+        bus=bus,
+        clock=clock,
+        exchange=exchange,
+        cache=cache,
+        config=config if config is not None else ReconcileConfig(),
+    )
     return bus, reconciler, events, cache
 
 

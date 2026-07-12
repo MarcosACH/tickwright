@@ -1,0 +1,23 @@
+# Local infrastructure for the non-default backends. The hermetic path
+# (paper exchange + in-memory bus + SQLite store) needs none of this.
+#
+#   docker compose up -d postgres
+#   STORE_POSTGRES_DSN=postgresql://tickwright:tickwright@localhost:5432/tickwright \
+#     uv run pytest -m postgres
+#
+# The DSN above is also PostgresStoreConfig's default, so `TICKWRIGHT_STORE=postgres`
+# talks to this service out of the box (ADR-0019).
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: tickwright
+      POSTGRES_PASSWORD: tickwright
+      POSTGRES_DB: tickwright
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tickwright -d tickwright"]
+      interval: 2s
+      timeout: 3s
+      retries: 20

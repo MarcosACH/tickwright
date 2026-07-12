@@ -44,6 +44,22 @@ def test_market_tick_event_id_and_partition_key() -> None:
     assert tick.partition_key == "BTC"
 
 
+def test_market_tick_with_a_venue_trade_id_dedups_on_symbol_and_tid() -> None:
+    tick = MarketTick(
+        ts_event=1_000,
+        ts_init=1_000,
+        symbol="BTC",
+        price=Decimal("42000.5"),
+        size=Decimal("0.1"),
+        aggressor_side=AggressorSide.BUY,
+        trade_id="900000000000001",
+        seq=0,
+        venue_trade_id=True,
+    )
+    # Live-form weak key (ADR-0027): {symbol}:{tid} — tid is a real venue id.
+    assert tick.event_id == "BTC:900000000000001"
+
+
 def test_place_signal_event_id_is_the_signal_id() -> None:
     signal = PlaceSignal(
         ts_event=2_000,

@@ -4,6 +4,20 @@ reproducible default fill behavior."""
 
 from .config import PaperExchangeConfig
 from .exchange import PaperExchange
-from .fill_model import Fill, FillModel, ImmediateFillModel
+from .fill_model import (
+    Fill,
+    FillModel,
+    ImmediateFillModel,
+    StochasticFillModel,
+    StochasticParams,
+)
 
-__all__ = ["Fill", "FillModel", "ImmediateFillModel", "PaperExchange", "PaperExchangeConfig"]
+__all__ = [
+    "Fill",
+    "FillModel",
+    "ImmediateFillModel",
+    "PaperExchange",
+    "PaperExchangeConfig",
+    "StochasticFillModel",
+    "StochasticParams",
+]

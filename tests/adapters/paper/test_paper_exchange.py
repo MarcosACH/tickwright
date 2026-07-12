@@ -415,7 +415,7 @@ def test_cancel_of_an_unknown_order_is_a_benign_no_op() -> None:
 
 def test_immediate_fill_model_is_full_fill_zero_slippage() -> None:
     model = ImmediateFillModel()
-    fill = model.market_fill(_market_order(qty="3"), _tick("250"))
+    fill = asyncio.run(model.market_fill(_market_order(qty="3"), _tick("250")))
     assert fill.quantity == Decimal("3")
     assert fill.price == Decimal("250")
 
