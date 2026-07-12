@@ -14,6 +14,26 @@
 # The broker advertises localhost:9092 — KafkaBusConfig's default bootstrap
 # server — so `TICKWRIGHT_BUS=kafka` talks to this service out of the box, over
 # the one keyed topic `tickwright.events` (ADR-0028).
+#
+# State is deliberately ephemeral: every service's declared volume paths are
+# RAM-backed `tmpfs`, so no data survives the container and no anonymous
+# volumes accumulate across up/down cycles. This is test/dev infra with
+# disposable data — the store re-creates its schema on connect and the broker
+# auto-creates its topic. Production durability is a deployment concern: point
+# `TICKWRIGHT_POSTGRES__DSN` at a managed Postgres (ADR-0019), not this service.
+#
+# `tmpfs` vs a named volume — when to persist:
+#   - `tmpfs` (here): data lives in RAM and is thrown away with the container.
+#     Chosen because a clean, reproducible slate every run IS the feature, and
+#     because unmounted image VOLUMEs otherwise spawn junk anonymous volumes.
+#   - A named volume: data lives on disk and survives `down`/restart. Add one
+#     only when re-creating state is genuinely costly (a seeded local dev DB you
+#     iterate on for days) — not for throwaway test data. It looks like:
+#       services: { postgres: { volumes: ["pgdata:/var/lib/postgresql/data"] } }
+#       volumes:  { pgdata: {} }      # Compose names it "<project>_pgdata"
+# A path is one or the other, never both. To keep this ephemeral default but
+# opt into persistence per run, layer a second override file:
+#   docker compose -f docker-compose.yml -f docker-compose.persist.yml up
 services:
   postgres:
     image: postgres:17
@@ -23,6 +43,11 @@ services:
       POSTGRES_DB: tickwright
     ports:
       - "5432:5432"
+    # RAM-backed data dir (the image's one declared VOLUME): disposable, fast,
+    # and never spawns an anonymous volume. Size-capped so throwaway test data
+    # can never pressure the host (tmpfs otherwise defaults to ~half of RAM).
+    tmpfs:
+      - /var/lib/postgresql/data:size=512m
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U tickwright -d tickwright"]
       interval: 2s
@@ -36,6 +61,14 @@ services:
     image: apache/kafka:3.9.0
     ports:
       - "9092:9092"
+    # RAM-back all three of the image's declared VOLUMEs so none spawns an
+    # anonymous volume (the broker's KRaft logs already live in the ephemeral
+    # container layer, not a volume). Size-capped so throwaway test data can
+    # never pressure the host (tmpfs otherwise defaults to ~half of RAM).
+    tmpfs:
+      - /var/lib/kafka/data:size=512m
+      - /etc/kafka/secrets:size=16m
+      - /mnt/shared/config:size=16m
     healthcheck:
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list"]
       interval: 5s
