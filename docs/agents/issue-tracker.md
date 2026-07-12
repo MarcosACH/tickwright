@@ -83,11 +83,12 @@ Run `gh issue view <number> -R MarcosACH/tickwright --comments`.
 
 ## Creating PRs
 
-- **Assignee**: every PR opened by a workflow skill (currently `/improve-codebase-architecture` — see [skill section 4](../../.claude/skills/improve-codebase-architecture/SKILL.md)) must set `--assignee @me`. Same convention as issue creation: the assignee resolves to the GitHub user whose token the `gh` CLI is authenticated as (the project owner running the workflow). Unassigned PRs are treated as drive-by; Ralph and the review pipeline expect a named owner.
+- **Assignee**: **every** PR — opened by any workflow skill (e.g. `/improve-codebase-architecture` — see [skill section 4](../../.claude/skills/improve-codebase-architecture/SKILL.md)), by `/tdd`, or by hand for a one-off chore/fix — must set `--assignee @me`. There is no "manual PR" exemption. Same convention as issue creation: the assignee resolves to the GitHub user whose token the `gh` CLI is authenticated as (the project owner running the workflow). Unassigned PRs are treated as drive-by; Ralph and the review pipeline expect a named owner.
   ```sh
   gh pr create -R MarcosACH/tickwright --assignee @me --title "..." --body "..."
   ```
   For PRs already opened without an assignee, use `gh pr edit <n> -R MarcosACH/tickwright --add-assignee @me`.
+- **Linked issue on the project board**: a PR's `Closes #<N>` issue must be on project 2 (see **Conventions** → *Create an issue*). `gh issue create` does **not** add it, so any issue you file to back a PR — including a one-off `infra`/`bug` issue created just to satisfy the `Closes` gate — must be added explicitly with `gh project item-add 2 --owner MarcosACH --url <issue-url>` and given a Status (**In Review** once its PR is open). An issue that closes a PR but never reached the board is invisible to triage.
 
 ## Linking PRs to issues
 
