@@ -30,7 +30,7 @@ dev = [
     "mypy>=1.14",
     "pytest>=8.3",
     "pytest-cov>=6.0",
-    "hypothesis>=6.120",
+    "hypothesis>=6.156.6",
     "import-linter>=2.1",
 ]
 
