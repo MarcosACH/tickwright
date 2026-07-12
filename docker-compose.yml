@@ -21,6 +21,19 @@
 # disposable data — the store re-creates its schema on connect and the broker
 # auto-creates its topic. Production durability is a deployment concern: point
 # `TICKWRIGHT_POSTGRES__DSN` at a managed Postgres (ADR-0019), not this service.
+#
+# `tmpfs` vs a named volume — when to persist:
+#   - `tmpfs` (here): data lives in RAM and is thrown away with the container.
+#     Chosen because a clean, reproducible slate every run IS the feature, and
+#     because unmounted image VOLUMEs otherwise spawn junk anonymous volumes.
+#   - A named volume: data lives on disk and survives `down`/restart. Add one
+#     only when re-creating state is genuinely costly (a seeded local dev DB you
+#     iterate on for days) — not for throwaway test data. It looks like:
+#       services: { postgres: { volumes: ["pgdata:/var/lib/postgresql/data"] } }
+#       volumes:  { pgdata: {} }      # Compose names it "<project>_pgdata"
+# A path is one or the other, never both. To keep this ephemeral default but
+# opt into persistence per run, layer a second override file:
+#   docker compose -f docker-compose.yml -f docker-compose.persist.yml up
 services:
   postgres:
     image: postgres:17
