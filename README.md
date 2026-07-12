@@ -169,8 +169,8 @@ uv run lint-imports       # dependency-direction boundaries (ADR-0032)
 ```
 
 The non-default backends are opt-in and need infrastructure: `docker compose up -d postgres` for the
-`PostgresStore` path, a Kafka broker for the `KafkaBus` path, and a funded Hyperliquid **testnet**
-key for the `live`-marked tests. All three auto-skip when their service isn't configured — see
+`PostgresStore` path, `docker compose up -d kafka` for the `KafkaBus` path, and a funded Hyperliquid
+**testnet** key for the `live`-marked tests. All three auto-skip when their service isn't configured — see
 [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`.env.example`](.env.example).
 
 ## License

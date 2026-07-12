@@ -7,6 +7,13 @@
 #
 # The DSN above is also PostgresStoreConfig's default, so `TICKWRIGHT_STORE=postgres`
 # talks to this service out of the box (ADR-0019).
+#
+#   docker compose up -d kafka
+#   TICKWRIGHT_BUS=kafka uv run tickwright
+#
+# The broker advertises localhost:9092 — KafkaBusConfig's default bootstrap
+# server — so `TICKWRIGHT_BUS=kafka` talks to this service out of the box, over
+# the one keyed topic `tickwright.events` (ADR-0028).
 services:
   postgres:
     image: postgres:17
@@ -20,4 +27,17 @@ services:
       test: ["CMD-SHELL", "pg_isready -U tickwright -d tickwright"]
       interval: 2s
       timeout: 3s
+      retries: 20
+
+  # Single-node KRaft broker (no ZooKeeper). Zero-config: the image self-boots
+  # as a combined broker+controller advertising PLAINTEXT://localhost:9092 and
+  # auto-creates topics, so the host-run engine reaches it at localhost:9092.
+  kafka:
+    image: apache/kafka:3.9.0
+    ports:
+      - "9092:9092"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list"]
+      interval: 5s
+      timeout: 10s
       retries: 20
