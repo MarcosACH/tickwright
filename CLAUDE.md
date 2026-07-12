@@ -68,6 +68,7 @@ source .venv/bin/activate   # optional; or prefix commands with `uv run`
 # infrastructure for the non-default backends (optional; the hermetic
 # in-memory-bus + SQLite path needs nothing)
 docker compose up -d postgres   # Postgres for the PostgresStore path (ADR-0019)
+docker compose up -d kafka      # Kafka broker for the KafkaBus path (ADR-0028)
 ```
 
 ## Tests
@@ -106,4 +107,4 @@ uv run lint-imports   # dependency-direction boundaries (ADR-0032)
 
 The CLI (`tickwright` / `python -m tickwright.app`) reads `AppConfig` from the environment and `.env`. **`.env.example` is the canonical variable reference** — every variable maps onto `AppConfig` (`src/tickwright/app/config.py`) with the `TICKWRIGHT_` prefix, `__` for nesting, and JSON for complex values (e.g. `TICKWRIGHT_REPLAY__PATH`, `TICKWRIGHT_STRATEGIES`).
 
-The `KafkaBus` backend reads `TICKWRIGHT_BUS=kafka` plus `TICKWRIGHT_KAFKA__{BOOTSTRAP_SERVERS,EVENTS_TOPIC,GROUP_ID}`. The `PostgresStore` backend reads `TICKWRIGHT_STORE=postgres` plus `TICKWRIGHT_POSTGRES__DSN` (ADR-0019; the `docker compose up postgres` service is its default). The live `HyperliquidFeed` reads `TICKWRIGHT_FEED=hyperliquid` plus `TICKWRIGHT_HYPERLIQUID__{SYMBOLS,TESTNET,...}` (ADR-0021; no API key — the trades channel is unauthenticated). The live `HyperliquidExchange` reads `TICKWRIGHT_EXCHANGE=hyperliquid` plus `TICKWRIGHT_HYPERLIQUID__{SIGNING_KEY,ACCOUNT_ADDRESS,SLIPPAGE_BOUND}` (ADR-0030; the signing key is env-only, never persisted, redacted from logs — the paper default needs none).
+The `KafkaBus` backend reads `TICKWRIGHT_BUS=kafka` plus `TICKWRIGHT_KAFKA__{BOOTSTRAP_SERVERS,EVENTS_TOPIC,GROUP_ID}` (ADR-0028; the `docker compose up kafka` service advertises the default `localhost:9092`). The `PostgresStore` backend reads `TICKWRIGHT_STORE=postgres` plus `TICKWRIGHT_POSTGRES__DSN` (ADR-0019; the `docker compose up postgres` service is its default). The live `HyperliquidFeed` reads `TICKWRIGHT_FEED=hyperliquid` plus `TICKWRIGHT_HYPERLIQUID__{SYMBOLS,TESTNET,...}` (ADR-0021; no API key — the trades channel is unauthenticated). The live `HyperliquidExchange` reads `TICKWRIGHT_EXCHANGE=hyperliquid` plus `TICKWRIGHT_HYPERLIQUID__{SIGNING_KEY,ACCOUNT_ADDRESS,SLIPPAGE_BOUND}` (ADR-0030; the signing key is env-only, never persisted, redacted from logs — the paper default needs none).
