@@ -27,7 +27,7 @@ tickwright = "tickwright.app.__main__:main"
 # Installed by `uv sync --dev` (and in CI). Not shipped to consumers.
 dev = [
     "ruff>=0.14",
-    "mypy>=1.14",
+    "mypy>=2.2.0",
     "pytest>=8.3",
     "pytest-cov>=6.0",
     "hypothesis>=6.156.6",
