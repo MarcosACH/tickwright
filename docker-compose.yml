@@ -14,6 +14,13 @@
 # The broker advertises localhost:9092 — KafkaBusConfig's default bootstrap
 # server — so `TICKWRIGHT_BUS=kafka` talks to this service out of the box, over
 # the one keyed topic `tickwright.events` (ADR-0028).
+#
+# State is deliberately ephemeral: every service's declared volume paths are
+# RAM-backed `tmpfs`, so no data survives the container and no anonymous
+# volumes accumulate across up/down cycles. This is test/dev infra with
+# disposable data — the store re-creates its schema on connect and the broker
+# auto-creates its topic. Production durability is a deployment concern: point
+# `TICKWRIGHT_POSTGRES__DSN` at a managed Postgres (ADR-0019), not this service.
 services:
   postgres:
     image: postgres:17
@@ -23,6 +30,10 @@ services:
       POSTGRES_DB: tickwright
     ports:
       - "5432:5432"
+    # RAM-backed data dir (the image's one declared VOLUME): disposable, fast,
+    # and never spawns an anonymous volume.
+    tmpfs:
+      - /var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U tickwright -d tickwright"]
       interval: 2s
@@ -36,6 +47,13 @@ services:
     image: apache/kafka:3.9.0
     ports:
       - "9092:9092"
+    # RAM-back all three of the image's declared VOLUMEs so none spawns an
+    # anonymous volume (the broker's KRaft logs already live in the ephemeral
+    # container layer, not a volume).
+    tmpfs:
+      - /var/lib/kafka/data
+      - /etc/kafka/secrets
+      - /mnt/shared/config
     healthcheck:
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list"]
       interval: 5s
