@@ -44,9 +44,10 @@ services:
     ports:
       - "5432:5432"
     # RAM-backed data dir (the image's one declared VOLUME): disposable, fast,
-    # and never spawns an anonymous volume.
+    # and never spawns an anonymous volume. Size-capped so throwaway test data
+    # can never pressure the host (tmpfs otherwise defaults to ~half of RAM).
     tmpfs:
-      - /var/lib/postgresql/data
+      - /var/lib/postgresql/data:size=512m
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U tickwright -d tickwright"]
       interval: 2s
@@ -62,11 +63,12 @@ services:
       - "9092:9092"
     # RAM-back all three of the image's declared VOLUMEs so none spawns an
     # anonymous volume (the broker's KRaft logs already live in the ephemeral
-    # container layer, not a volume).
+    # container layer, not a volume). Size-capped so throwaway test data can
+    # never pressure the host (tmpfs otherwise defaults to ~half of RAM).
     tmpfs:
-      - /var/lib/kafka/data
-      - /etc/kafka/secrets
-      - /mnt/shared/config
+      - /var/lib/kafka/data:size=512m
+      - /etc/kafka/secrets:size=16m
+      - /mnt/shared/config:size=16m
     healthcheck:
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list"]
       interval: 5s
