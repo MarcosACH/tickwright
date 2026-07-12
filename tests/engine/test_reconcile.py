@@ -40,7 +40,7 @@ from tickwright.domain import (
 )
 from tickwright.engine.cache import Cache
 from tickwright.engine.execution import ExecutionManager
-from tickwright.engine.reconcile import Reconciler
+from tickwright.engine.reconcile import ReconcileConfig, Reconciler
 from tickwright.observability.testing import capture_events
 
 
@@ -102,7 +102,9 @@ def _second_life(
     bus.subscribe(ExecutionReport, manager.on_execution_report)
     events: list[OrderEvent] = []
     bus.subscribe(OrderEvent, lambda ev: _record(events, ev))
-    reconciler = Reconciler(bus=bus, clock=clock, exchange=exchange, cache=cache)
+    reconciler = Reconciler(
+        bus=bus, clock=clock, exchange=exchange, cache=cache, config=ReconcileConfig()
+    )
     return bus, cache, reconciler, events
 
 
@@ -292,7 +294,9 @@ def test_sustained_venue_outage_trips_the_barrier_to_faulted_after_the_window() 
     cache = Cache(store=store)
     cache.rebuild()
     venue = _DarkVenue()
-    reconciler = Reconciler(bus=bus, clock=clock, exchange=venue, cache=cache)
+    reconciler = Reconciler(
+        bus=bus, clock=clock, exchange=venue, cache=cache, config=ReconcileConfig()
+    )
 
     with capture_events() as logs:
         with pytest.raises(StartupReconciliationTimeout):
@@ -323,7 +327,9 @@ def test_backoff_is_capped_so_faulting_never_overshoots_the_window_by_much() -> 
     cache = Cache(store=store)
     cache.rebuild()
     venue = _DarkVenue()
-    reconciler = Reconciler(bus=bus, clock=clock, exchange=venue, cache=cache)
+    reconciler = Reconciler(
+        bus=bus, clock=clock, exchange=venue, cache=cache, config=ReconcileConfig()
+    )
 
     with pytest.raises(StartupReconciliationTimeout):
         asyncio.run(reconciler.run_startup_barrier(timeout_seconds=300.0, max_backoff_seconds=30.0))
@@ -358,7 +364,9 @@ def test_a_transient_boot_time_blip_resolves_and_the_barrier_clears() -> None:
     venue = _BlippingVenue(failures=2)
     manager = ExecutionManager(bus=bus, clock=clock, exchange=venue, cache=cache)
     bus.subscribe(ExecutionReport, manager.on_execution_report)
-    reconciler = Reconciler(bus=bus, clock=clock, exchange=venue, cache=cache)
+    reconciler = Reconciler(
+        bus=bus, clock=clock, exchange=venue, cache=cache, config=ReconcileConfig()
+    )
 
     asyncio.run(reconciler.run_startup_barrier(timeout_seconds=30.0))
 

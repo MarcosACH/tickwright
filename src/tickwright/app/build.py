@@ -8,13 +8,20 @@ already-built dependencies. Adding an impl is one ``Literal`` value in
 """
 
 import asyncio
+import random
 from collections.abc import Mapping
 from typing import assert_never
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import LiveClock, ManualClock
 from tickwright.adapters.feed import ReplayFeed
-from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
+from tickwright.adapters.paper import (
+    FillModel,
+    ImmediateFillModel,
+    PaperExchange,
+    PaperExchangeConfig,
+    StochasticFillModel,
+)
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     Clock,
@@ -83,7 +90,7 @@ def build_exchange(config: AppConfig, *, bus: EventBus, clock: Clock) -> Exchang
             return PaperExchange(
                 bus=bus,
                 clock=clock,
-                fill_model=ImmediateFillModel(),
+                fill_model=build_fill_model(config.paper, clock=clock),
                 instrument_specs=config.paper.instrument_specs,
             )
         case "hyperliquid":
@@ -94,6 +101,22 @@ def build_exchange(config: AppConfig, *, bus: EventBus, clock: Clock) -> Exchang
             universe = asyncio.run(fetch_instrument_specs(config.hyperliquid))
             return HyperliquidExchange(
                 config=config.hyperliquid, bus=bus, clock=clock, universe=universe
+            )
+        case unreachable:
+            assert_never(unreachable)
+
+
+def build_fill_model(config: PaperExchangeConfig, *, clock: Clock) -> FillModel:
+    """Select the paper venue's fill behavior (ADR-0012). Determinism is a
+    wiring choice: ``immediate`` uses no RNG; ``stochastic`` gets a seeded one
+    plus the same ``Clock`` the venue runs on, so its latency shares virtual
+    time under replay."""
+    match config.fill_model:
+        case "immediate":
+            return ImmediateFillModel()
+        case "stochastic":
+            return StochasticFillModel(
+                rng=random.Random(config.seed), clock=clock, params=config.stochastic
             )
         case unreachable:
             assert_never(unreachable)

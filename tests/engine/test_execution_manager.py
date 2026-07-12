@@ -9,13 +9,19 @@ our own classes.
 """
 
 import asyncio
+import random
 from decimal import Decimal
 
 import pytest
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
-from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
+from tickwright.adapters.paper import (
+    ImmediateFillModel,
+    PaperExchange,
+    StochasticFillModel,
+    StochasticParams,
+)
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     AggressorSide,
@@ -633,3 +639,67 @@ def test_a_restart_rebuilt_cache_dedups_a_redelivered_place_signal() -> None:
 
     assert second_life_events == []
     assert store.history(cloid) == history_before
+
+
+def _stochastic_harness(
+    fill_model: object,
+) -> tuple[InMemoryBus, ManualClock, SQLiteStore, list[OrderEvent]]:
+    bus = InMemoryBus()
+    clock = ManualClock(start_ns=1_000)
+    store = SQLiteStore(":memory:")
+    exchange = PaperExchange(bus=bus, clock=clock, fill_model=fill_model)  # type: ignore[arg-type]
+    cache = Cache(store=store)
+    manager = ExecutionManager(bus=bus, clock=clock, exchange=exchange, cache=cache)
+
+    bus.subscribe(Signal, manager.on_signal)
+    bus.subscribe(ExecutionReport, manager.on_execution_report)
+
+    order_events: list[OrderEvent] = []
+    bus.subscribe(OrderEvent, lambda ev: _record(order_events, ev))
+    return bus, clock, store, order_events
+
+
+def test_stochastic_partials_drive_the_saga_from_live_to_filled() -> None:
+    """The acceptance criterion end-to-end: a resting GTC LIMIT that the
+    StochasticFillModel partial-fills across crossing ticks drives the real
+    saga LIVE → PARTIALLY_FILLED* → FILLED, with a monotonic cum_qty that
+    converges to exactly the order size — no report hand-fed, the paper venue
+    and the seeded model produce every fill."""
+    model = StochasticFillModel(
+        rng=random.Random(0),
+        clock=ManualClock(),
+        params=StochasticParams(prob_fill_on_limit=1.0, partial_fill_fraction=Decimal("0.4")),
+    )
+    bus, _, store, order_events = _stochastic_harness(model)
+    cloid = derive_cloid("trivial:BTC:1")
+
+    async def scenario() -> None:
+        await bus.publish(_tick("42000"))  # above the limit: the order rests
+        await bus.publish(_limit_signal("41000"))  # GTC BUY, qty 0.5, rests LIVE
+        for _ in range(3):
+            await bus.publish(_tick("41000"))  # crossing ticks: 0.2, 0.2, 0.1
+
+    asyncio.run(scenario())
+
+    fills = [ev for ev in order_events if isinstance(ev, OrderPartiallyFilled | OrderFilled)]
+    assert [type(ev) for ev in fills] == [
+        OrderPartiallyFilled,
+        OrderPartiallyFilled,
+        OrderFilled,
+    ]
+    cum = [ev.cum_qty for ev in fills]
+    assert cum == sorted(cum)  # monotonic
+    assert cum == [Decimal("0.2"), Decimal("0.4"), Decimal("0.5")]
+
+    record = store.get_order(cloid)
+    assert record is not None
+    assert record.state is OrderState.FILLED
+    assert record.cum_qty == Decimal("0.5")
+    assert [state for state, _ in store.history(cloid)] == [
+        OrderState.PENDING,
+        OrderState.SUBMITTED,
+        OrderState.LIVE,
+        OrderState.PARTIALLY_FILLED,
+        OrderState.PARTIALLY_FILLED,
+        OrderState.FILLED,
+    ]
