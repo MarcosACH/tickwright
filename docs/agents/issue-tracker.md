@@ -98,7 +98,7 @@ Every implementation PR must include `Closes #<issue-number>` in its body. GitHu
 - Auto-closes the issue when the PR merges to the default branch — no manual `gh issue close` needed
 - The "Item closed" project automation flips Status to `Done` when the PR merges
 
-Each child PR's `Closes` clause references **its own child slice issue**, never the parent PRD — closing the parent on a child merge would kill the tracking issue while slices are still open. The parent PRD is closed by the **final** child PR carrying a second clause (`Closes #<child>` + `Closes #<prd>`); if that was forgotten, closing the PRD by hand once every sub-issue is Done is the documented exception to "never close manually".
+Each child PR's `Closes` clause references **its own child slice issue**, never the parent PRD — closing the parent on a child merge would kill the tracking issue while slices are still open. A **parent PRD** is an epic with no merge event of its own: its completion is an *aggregate* condition — every sub-issue Done **and** the release cut — that no `Closes #N` keyword can express. So a PRD is **not** auto-closed; it is closed **deliberately at release**, once every sub-issue is Done, by the maintainer (or a future close-parent automation), commenting the release URL. This is the one sanctioned exception to "never close manually", and it applies **only** to parent PRDs — never to child slice issues. The release-time step and command live in [versioning.md → Parent PRD issues at release](../workflow/versioning.md#parent-prd-issues-at-release).
 
 ## Issue lifecycle for agents
 

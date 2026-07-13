@@ -73,11 +73,13 @@ A tag and a GitHub Release are metadata pointing at an existing commit, **not** 
 
 ## Parent PRD issues at release
 
-Child vertical-slice issues auto-close on PR merge (`Closes #N`) — never close them by hand. A **parent PRD** issue has no merging PR of its own, so once all its sub-issues are closed and the release is cut, **close the PRD manually**, commenting with the release URL. This is the one sanctioned exception to "never close issues manually"; it does not apply to child issues.
+Child vertical-slice issues auto-close on PR merge (`Closes #N`) — never close them by hand. A **parent PRD** is an epic with no merge event of its own: its completion is an *aggregate* condition — every sub-issue Done **and** the release cut — that no `Closes #N` keyword can express (the rule and its rationale live in [issue-tracker.md → Linking PRs to issues](../agents/issue-tracker.md#linking-prs-to-issues)). So at release, once all sub-issues are closed, **close the PRD deliberately**, commenting with the release URL. This is the one sanctioned exception to "never close issues manually"; it applies only to parent PRDs, never to child issues.
 
 ```bash
 gh issue close <PRD#> --comment "Delivered in vX.Y.Z: <release-url>. All sub-issues complete."
 ```
+
+> **Deferred: close-parent automation.** A tiny GitHub Actions job on the `issues: closed` event — "if the closed issue is a sub-issue and all its siblings are now closed, close the parent, commenting the release URL" — would remove the one manual step. It is **not** adopted yet: it needs the release URL threaded in (the parent closes at *release*, not on the last child's close), so the trigger is really "release cut", not "last child closed". Revisit if forgotten PRD-closes become real friction; until then the deliberate `gh issue close` above is the sanctioned path.
 
 ## History
 
