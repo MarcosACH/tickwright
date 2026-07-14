@@ -44,8 +44,6 @@ Then use the Agent tool with `subagent_type=Explore` to walk the codebase and br
 - Where do tightly-coupled modules leak across their seams?
 - Which parts of the codebase are untested, or hard to test through their current interface?
 
-Apply the **deletion test** to anything you suspect is shallow: would deleting it concentrate complexity, or just move it? A "yes, concentrates" is the signal you want.
-
 ### 1b. Verify every lead against the code
 
 **A subagent's report is a lead, not a finding.** It returns *characterizations* — "N duplicated call sites", "a shallow wrapper", "public only for tests" — and a characterization is a claim about code, not evidence of it. Open the files it cites and read them before a lead becomes a candidate. **A count is not a reading**: N call sites that each vary the thing under test are N specifications, not N duplications, and only opening them tells you which.
@@ -54,16 +52,17 @@ Present only what you read yourself, and cite the lines you opened — not the l
 
 Do not look for a confidence signal to trigger this check. A false lead arrives specific, plausible, and correctly `file:line`-cited — indistinguishable from a true one until you open the file. That is why this is a step and not a disposition.
 
-Two questions retire most bad leads:
+Three questions retire most bad leads:
 
 - **Does the friction survive reading?** Read every site the lead rests on, not a sample.
+- **Does the deletion test hold?** For any lead that calls a module shallow, imagine deleting it: would complexity concentrate, or just move? A "yes, concentrates" is the signal you want; "just moves it" retires the lead.
 - **Would the implied fix break something the repo enforces?** Check it against the ADRs and the mechanical gates (`lint-imports` contracts, CI checks) before it reaches the list. A "deepening" that inverts an enforced dependency direction is not a candidate.
 
 ### 2. Present candidates
 
 Present a numbered list of deepening opportunities. For each candidate:
 
-- **Files** — which files/modules are involved
+- **Files** — the files and line ranges you opened in 1b, not the ones the walk reported
 - **Problem** — why the current architecture is causing friction
 - **Solution** — plain English description of what would change
 - **Benefits** — explained in terms of locality and leverage, and also in how tests would improve
