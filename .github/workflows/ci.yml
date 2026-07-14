@@ -70,6 +70,12 @@ jobs:
         # hostile config that is *accepted*. The dummy key need not be well-formed:
         # nothing in tests/app reads the environment now, and the one subprocess is
         # handed a scrubbed one.
+        #
+        # Scoped to tests/app on purpose — do not widen to the whole suite. The
+        # live testnet suite (ADR-0022) skips on SIGNING_KEY being *absent*, not on
+        # it being well-formed, so the dummy key above reads to it as a funded
+        # wallet: it would be collected and fail. tests/app is where the env-reading
+        # config class lives and is the whole blast radius of issue #71.
         env:
           TICKWRIGHT_FEED: hyperliquid
           TICKWRIGHT_EXCHANGE: hyperliquid
