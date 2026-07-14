@@ -31,8 +31,16 @@ _ENV = {
 }
 
 
-def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["git", *args], cwd=cwd, env=_ENV, capture_output=True, text=True)
+def _git(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+    """Run git in ``cwd``, raising unless the caller is the one asserting on the status.
+
+    Every call here but the commit under test is harness setup, and setup that fails
+    quietly is precisely how this file's first draft passed vacuously — so the default
+    is to raise rather than let a broken scratch repo read as a result.
+    """
+    return subprocess.run(
+        ["git", *args], cwd=cwd, env=_ENV, capture_output=True, text=True, check=check
+    )
 
 
 def _repo(root: Path) -> Path:
@@ -54,10 +62,10 @@ def _repo(root: Path) -> Path:
     return root
 
 
-def _install_guard(git_common_dir: Path, hook: str, body: str = _GUARD_REJECTS) -> None:
+def _install_guard(git_common_dir: Path, hook: str) -> None:
     guard = git_common_dir / "hooks-local" / hook
     guard.parent.mkdir(parents=True, exist_ok=True)
-    guard.write_text(body)
+    guard.write_text(_GUARD_REJECTS)
     guard.chmod(0o755)
 
 
@@ -65,7 +73,8 @@ def _commit(cwd: Path, name: str) -> subprocess.CompletedProcess[str]:
     """Stage and commit a non-Python file, so the ruff block is not in play."""
     (cwd / name).write_text("scratch\n")
     _git(cwd, "add", name)
-    return _git(cwd, "commit", "-m", f"add {name}")
+    # Unchecked: this status is the hook's verdict, which every test here asserts on.
+    return _git(cwd, "commit", "-m", f"add {name}", check=False)
 
 
 def _subject(cwd: Path) -> str:
