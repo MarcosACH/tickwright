@@ -15,7 +15,7 @@ adding an impl widens exactly one ``Literal`` plus one ``match`` arm in
 from decimal import Decimal
 from typing import Literal, Self
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from tickwright.adapters.bus import KafkaBusConfig
@@ -54,6 +54,11 @@ class AppConfig(BaseModel):
     venue would silently wire one into a paper test (issue #71). Env-reading
     lives in ``AppSettings`` alone, and this class has no machinery to do it.
     """
+
+    # Dropping BaseSettings drops the strictness it carried, and only the
+    # env-reading was meant to go: a plain BaseModel ignores unknown fields,
+    # which would silently swallow a mistyped keyword.
+    model_config = ConfigDict(extra="forbid")
 
     # The seam discriminants (ADR-0032): each names the impl for one Protocol.
     bus: Literal["in_memory", "kafka"] = "in_memory"

@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from tickwright.app.config import AppConfig, AppSettings
 
@@ -42,6 +43,25 @@ def test_app_config_ignores_a_hostile_dotenv_and_exported_env(
     assert config.feed == "replay"
     assert config.exchange == "paper"
     assert config.secrets() == ()
+
+
+def test_app_config_rejects_an_unknown_field(tmp_path: Path) -> None:
+    """A mistyped field is a loud error, not a silently dropped keyword.
+
+    ``AppConfig`` inherited ``extra="forbid"`` from ``BaseSettings`` and must
+    not lose it on the way to being a pure ``BaseModel``: the helpers here
+    build a config by keyword to poke one field at a time
+    (``test_build_engine._config``), so a typo would otherwise be dropped and
+    leave the test asserting against a default it never chose — the same
+    silently-accepted config issue #71 is about, one layer down.
+    """
+    (tmp_path / "ticks.jsonl").touch()
+
+    with pytest.raises(ValidationError, match="exchagne"):
+        AppConfig(  # type: ignore[call-arg]
+            replay={"path": tmp_path / "ticks.jsonl"},  # type: ignore[arg-type]
+            exchagne="hyperliquid",
+        )
 
 
 def test_app_settings_resolves_the_documented_precedence_chain(
