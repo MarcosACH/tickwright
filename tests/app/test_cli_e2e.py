@@ -11,11 +11,14 @@ re-adoption, where the venue survives, is proven in-process in
 """
 
 import json
+import os
 import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+import pytest
 
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import OrderState, derive_cloid
@@ -71,10 +74,34 @@ def _write_workspace(cwd: Path) -> None:
     )
 
 
+def _export_hostile_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Export a live-venue config into the shell this test's CLI inherits.
+
+    The rest of ``tests/app/`` is hermetic because it builds the pure
+    ``AppConfig``, but this test's whole subject is a real process whose job is
+    to read the environment — no config class can insulate it. A developer (or
+    a CI ``env:`` block) with these exported must not change what the CLI under
+    test does, so the test exports them itself and expects the spawn to scrub
+    them (issue #71).
+    """
+    monkeypatch.setenv("TICKWRIGHT_FEED", "hyperliquid")
+    monkeypatch.setenv("TICKWRIGHT_EXCHANGE", "hyperliquid")
+    monkeypatch.setenv("TICKWRIGHT_HYPERLIQUID__SYMBOLS", '["BTC"]')
+    monkeypatch.setenv("TICKWRIGHT_HYPERLIQUID__SIGNING_KEY", "0xdeadbeef")
+
+
 def _spawn(cwd: Path) -> subprocess.Popen[bytes]:
+    """The CLI under test, configured only by the ``.env`` in ``cwd``.
+
+    The child inherits the shell otherwise, and exported ``TICKWRIGHT_*`` vars
+    outrank the ``.env`` this test wrote — so they go. The file half needs no
+    scrubbing and must keep working: the CLI resolves the relative ``.env``
+    against the child's cwd, which is ``tmp_path``.
+    """
     return subprocess.Popen(
         [sys.executable, "-m", "tickwright.app"],
         cwd=cwd,
+        env={k: v for k, v in os.environ.items() if not k.startswith("TICKWRIGHT_")},
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
@@ -105,8 +132,11 @@ def _terminate(process: subprocess.Popen[bytes], *, timeout: float = 15.0) -> in
         raise
 
 
-def test_cli_replays_trades_and_exits_zero_on_sigterm(tmp_path: Path) -> None:
+def test_cli_replays_trades_and_exits_zero_on_sigterm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _write_workspace(tmp_path)
+    _export_hostile_config(monkeypatch)
     db = tmp_path / "saga.db"
 
     with _spawn(tmp_path) as process:
