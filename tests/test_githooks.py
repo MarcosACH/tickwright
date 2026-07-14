@@ -22,7 +22,11 @@ from pathlib import Path
 _GITHOOKS = Path(__file__).resolve().parent.parent / ".githooks"
 
 # A guard is only consulted when executable; keep the bit explicit at both ends.
+# Both announce themselves on stderr, which git forwards whether the hook passes or
+# fails — so "did the guard actually run?" stays answerable even in the cases where
+# it lets the commit through and the exit code alone would not say.
 _GUARD_REJECTS = "#!/usr/bin/env bash\necho 'guard says no' >&2\nexit 1\n"
+_GUARD_ACCEPTS = "#!/usr/bin/env bash\necho 'guard says yes' >&2\nexit 0\n"
 
 _ENV = {
     **os.environ,
@@ -62,10 +66,10 @@ def _repo(root: Path) -> Path:
     return root
 
 
-def _install_guard(git_common_dir: Path, hook: str) -> None:
+def _install_guard(git_common_dir: Path, hook: str, body: str = _GUARD_REJECTS) -> None:
     guard = git_common_dir / "hooks-local" / hook
     guard.parent.mkdir(parents=True, exist_ok=True)
-    guard.write_text(_GUARD_REJECTS)
+    guard.write_text(body)
     guard.chmod(0o755)
 
 
@@ -97,6 +101,30 @@ def test_pre_commit_allows_the_commit_when_no_local_guard_is_installed(
     assert result.returncode == 0, (
         f"commit rejected with no guard installed:\n{result.stdout}\n{result.stderr}"
     )
+    assert _subject(repo) == "add README.md"
+
+
+def test_pre_commit_allows_the_commit_when_the_local_guard_accepts(
+    tmp_path: Path,
+) -> None:
+    """A present guard that passes lets the commit land — and is proven to have run.
+
+    The fourth quadrant of guard absent/present × accepts/rejects, and the only case
+    that exercises the delegation propagating a guard's *success*. The stderr
+    assertion is load-bearing: a guard that is never found also lets the commit land,
+    so without it this would be indistinguishable from the no-guard test above —
+    passing for the wrong reason, which is the failure this file has already been
+    bitten by once.
+    """
+    repo = _repo(tmp_path / "repo")
+    _install_guard(repo / ".git", "pre-commit", _GUARD_ACCEPTS)
+
+    result = _commit(repo, "README.md")
+
+    assert result.returncode == 0, (
+        f"a passing guard blocked the commit:\n{result.stdout}\n{result.stderr}"
+    )
+    assert "guard says yes" in result.stderr, "the guard was never found or run"
     assert _subject(repo) == "add README.md"
 
 
