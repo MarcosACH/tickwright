@@ -55,6 +55,28 @@ jobs:
         # the ≥90%-on-core gate lives here so a drop fails the build.
         run: uv run pytest --cov --cov-report=term-missing --cov-fail-under=90
 
+      - name: Suite is hermetic against ambient config
+        # The tests above pass on a fresh runner by luck, not by design: .env is
+        # gitignored and nothing here exports TICKWRIGHT_*, so the class defaults
+        # win because both higher-priority sources happen to be empty. A job-level
+        # env: block, a `cp .env.example .env` step, a repo variable, or a
+        # self-hosted runner with a populated profile would each silently wire a
+        # live venue into the paper tests (issue #71). This step removes the luck.
+        #
+        # The hostile env must be a *valid* config — hence SYMBOLS and SIGNING_KEY.
+        # FEED+EXCHANGE alone is a config that fails validation loudly, and a guard
+        # that only ever sees the invalid path would keep passing if the classes
+        # stopped validating but kept reading ambient state. The danger is a
+        # hostile config that is *accepted*. The dummy key need not be well-formed:
+        # nothing in tests/app reads the environment now, and the one subprocess is
+        # handed a scrubbed one.
+        env:
+          TICKWRIGHT_FEED: hyperliquid
+          TICKWRIGHT_EXCHANGE: hyperliquid
+          TICKWRIGHT_HYPERLIQUID__SYMBOLS: '["BTC"]'
+          TICKWRIGHT_HYPERLIQUID__SIGNING_KEY: "0xdeadbeef"
+        run: uv run pytest tests/app -q
+
       - name: Audit runtime dependencies
         run: |
           uv export --frozen --no-dev --no-emit-project --format requirements-txt > /tmp/requirements.txt
