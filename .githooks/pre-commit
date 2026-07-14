@@ -68,6 +68,12 @@ fi
 # rejected every commit with no output. `if` reads as the intent — run it when it's
 # there — and yields 0 when it isn't; set -e still carries a present guard's veto
 # out of the body.
+#
+# Not `exec "$guard"` either, though commit-msg delegates that way and unifying the
+# two would read as tidier: exec replaces this process and discards the
+# restore_unstaged EXIT trap above, so a guard that rejects would strand the
+# developer's unstaged hunks outside the working tree. commit-msg can exec safely
+# only because it has no trap to lose.
 guard="$(git rev-parse --git-common-dir)/hooks-local/pre-commit"
 if [ -x "$guard" ]; then
   "$guard"
