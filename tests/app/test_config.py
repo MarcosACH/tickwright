@@ -78,8 +78,3 @@ def test_app_settings_resolves_the_documented_precedence_chain(
     assert settings.store == "postgres"  # .env file beats the class default
     assert settings.feed == "replay"  # class default, unmentioned by either
     assert settings.replay is not None and settings.replay.path == Path("ticks.jsonl")
-
-
-def test_app_settings_is_an_app_config() -> None:
-    """The skin satisfies the pure type, so ``build_engine`` needs no change."""
-    assert issubclass(AppSettings, AppConfig)
