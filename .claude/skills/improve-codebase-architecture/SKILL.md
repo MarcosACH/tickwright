@@ -36,7 +36,7 @@ Read the project's domain glossary and any ADRs in the area you're touching firs
 
 Also pull the **open issues** on the tracker (`gh issue list --state open`, then `gh issue view <N>` for anything on-topic). The backlog is design context, not noise: a "deepening" that a planned slice already owns is not a finding — it's duplicate work, and the deferred stubs it touches are deliberate, not friction. Keep the on-topic issues in hand so you can validate every candidate against them in step 2.
 
-Then use the Agent tool with `subagent_type=Explore` to walk the codebase. Don't follow rigid heuristics — explore organically and note where you experience friction:
+Then use the Agent tool with `subagent_type=Explore` to walk the codebase and bring back leads. Don't follow rigid heuristics — have it explore organically and report where the friction seems to be:
 
 - Where does understanding one concept require bouncing between many small modules?
 - Where are modules **shallow** — interface nearly as complex as the implementation?
@@ -45,6 +45,19 @@ Then use the Agent tool with `subagent_type=Explore` to walk the codebase. Don't
 - Which parts of the codebase are untested, or hard to test through their current interface?
 
 Apply the **deletion test** to anything you suspect is shallow: would deleting it concentrate complexity, or just move it? A "yes, concentrates" is the signal you want.
+
+### 1b. Verify every lead against the code
+
+**A subagent's report is a lead, not a finding.** It returns *characterizations* — "N duplicated call sites", "a shallow wrapper", "public only for tests" — and a characterization is a claim about code, not evidence of it. Open the files it cites and read them before a lead becomes a candidate. **A count is not a reading**: N call sites that each vary the thing under test are N specifications, not N duplications, and only opening them tells you which.
+
+Present only what you read yourself, and cite the lines you opened — not the lines you were told about. A lead that dissolves on inspection is this step working; presenting it would have been the skill failing.
+
+Do not look for a confidence signal to trigger this check. A false lead arrives specific, plausible, and correctly `file:line`-cited — indistinguishable from a true one until you open the file. That is why this is a step and not a disposition.
+
+Two questions retire most bad leads:
+
+- **Does the friction survive reading?** Read every site the lead rests on, not a sample.
+- **Would the implied fix break something the repo enforces?** Check it against the ADRs and the mechanical gates (`lint-imports` contracts, CI checks) before it reaches the list. A "deepening" that inverts an enforced dependency direction is not a candidate.
 
 ### 2. Present candidates
 
@@ -56,7 +69,7 @@ Present a numbered list of deepening opportunities. For each candidate:
 - **Benefits** — explained in terms of locality and leverage, and also in how tests would improve
 - **Issue check** — the candidate's standing against the open issues (see below)
 
-**Validate every candidate against the open issues before presenting it.** For each, cite the relevant issue number(s) and give one verdict:
+**Validate every candidate against the open issues before presenting it.** This gates a candidate's **novelty**; step 1b gates its **truth**. Both are required and neither substitutes for the other — a false finding is exactly as novel as a true one, so a clean "No collision" says nothing about whether the friction is real. For each, cite the relevant issue number(s) and give one verdict:
 
 - **No collision** — no open issue owns or overlaps it. Surface it as new work.
 - **Collides with #N** — a planned slice already builds this. Drop it; it is that issue's work, not a finding. Only keep it if the friction is bad enough that #N's stated approach should change — mark that clearly and say why, same discipline as the ADR-conflict rule below.
