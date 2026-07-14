@@ -31,7 +31,8 @@ See `docs/workflow/labels.md` for the label schema and `docs/agents/issue-tracke
 - **No code is copied from any prior/private codebase.** Generalizable patterns are reimplemented from first principles and validated against current best practice before coding.
 - **TDD policy (mandatory):** red test first, green implementation, refactor only after green. One behavior at a time.
 - **Vertical slice policy (mandatory):** features/bugfixes cross every relevant layer (feed → strategy → exchange → engine) in one PR. Never deliver a horizontal layer in isolation.
-- **PR policy (mandatory):** all code changes ship as PRs with `Closes #N` in the body. Never close issues manually — the PR merge closes them.
+- **PR policy (mandatory):** all code changes ship as PRs with `Closes #N` in the body. Never close issues manually — the PR merge closes them. The one exception is a parent PRD, closed deliberately at release (`docs/workflow/versioning.md`).
+- **Release policy (mandatory):** when work reaches a shippable milestone (a PRD delivered, a meaningful feature set, an important fix), proactively propose a release — a version number *with its SemVer rationale* — and wait for maintainer sign-off before tagging. Never self-authorize a tag or GitHub Release. Full policy and procedure: `docs/workflow/versioning.md`.
 - **Commit grouping:** one logical change per commit (not one file per commit). Group tightly-related changes; split unrelated ones.
 - **Two implementations per seam, no more.** One looks hardcoded; three is scope creep.
 - **Docs-sync policy (mandatory):** a change that alters anything documented elsewhere — workflow conventions (`docs/agents/`, `docs/workflow/`), skills (`.claude/skills/`), invariants (`docs/agents/invariants.md`), ADRs, `CONTEXT.md`, CI workflows, or this file — updates every affected file **in the same PR**. Duplication that can drift is a bug: prefer linking one canonical source over copying, and when two files disagree, fix the copy, not the canon.
@@ -43,6 +44,7 @@ See `docs/workflow/labels.md` for the label schema and `docs/agents/issue-tracke
 - Architecture decisions: `docs/adr/`
 - Module maps for in-flight features: `docs/module-maps/`
 - Workflow & label schema: `docs/workflow/labels.md`
+- Versioning, tags & releases: `docs/workflow/versioning.md`
 - Issue-tracker conventions: `docs/agents/issue-tracker.md`
 - Triage label roles: `docs/agents/triage-labels.md`
 
