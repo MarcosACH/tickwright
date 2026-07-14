@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 # Delegate to a local-only commit-message guard if one is present (kept outside
 # the repo so it is never published). No-op on clones that don't have it.
+#
+# --git-common-dir, not --git-dir: the latter is .git/worktrees/<name> in a linked
+# worktree, where the guard would be invisible and silently stop scrubbing. `exec`
+# hands the guard's own status to git, so the trailing `exit 0` — which is what
+# makes "no guard" a no-op rather than a rejection — is reached only when there is
+# no guard to run.
 set -euo pipefail
-guard="$(git rev-parse --git-dir)/hooks-local/commit-msg"
+guard="$(git rev-parse --git-common-dir)/hooks-local/commit-msg"
 [ -x "$guard" ] && exec "$guard" "$@"
 exit 0
