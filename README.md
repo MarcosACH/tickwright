@@ -89,7 +89,7 @@ reconciliation cadence — it does not self-exit on end-of-file). Press **Ctrl-C
 shuts down gracefully, takes final strategy snapshots, leaves resting orders alone, and exits `0`.
 
 Everything is configured through the environment / `.env` — [`.env.example`](.env.example) is the
-canonical variable reference, and every variable maps onto `AppConfig`
+canonical variable reference, and every variable maps onto a field of `AppConfig`
 ([`src/tickwright/app/config.py`](src/tickwright/app/config.py)) with the `TICKWRIGHT_` prefix. To
 switch the fill model to `stochastic`, swap in the Kafka bus or Postgres store, or point the live
 Hyperliquid feed at real market data, edit `.env` — no code changes.
