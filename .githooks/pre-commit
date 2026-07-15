@@ -57,4 +57,6 @@ fi
 # Local-only guards (e.g. a private reference scrub) — kept outside the repo, so
 # they are not published and run only on machines that have them.
 guard="$(git rev-parse --git-dir)/hooks-local/pre-commit"
-[ -x "$guard" ] && "$guard"
+if [ -x "$guard" ]; then
+  "$guard"
+fi
