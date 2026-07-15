@@ -25,6 +25,7 @@ _GITHOOKS = Path(__file__).resolve().parent.parent / ".githooks"
 # fails — so "did the guard actually run?" stays answerable in the cases where the
 # exit code alone would not say.
 _GUARD_REJECTS = "#!/usr/bin/env bash\necho 'guard says no' >&2\nexit 1\n"
+_GUARD_ACCEPTS = "#!/usr/bin/env bash\necho 'guard says yes' >&2\nexit 0\n"
 
 _ENV = {
     **os.environ,
@@ -93,6 +94,27 @@ def test_pre_commit_allows_the_commit_when_no_local_guard_is_installed(
     assert result.returncode == 0, (
         f"commit rejected with no guard installed:\n{result.stdout}\n{result.stderr}"
     )
+    assert _subject(repo) == "add README.md"
+
+
+def test_pre_commit_allows_the_commit_when_the_local_guard_accepts(
+    tmp_path: Path,
+) -> None:
+    """A present guard that passes lets the commit land — and is proven to have run.
+
+    The stderr assertion is load-bearing: a guard that is never found *also* lets the
+    commit land, so without it this would be indistinguishable from the no-guard test
+    above, and the whole file could pass with the hook never wired up at all.
+    """
+    repo = _repo(tmp_path / "repo")
+    _install_guard(repo / ".git", "pre-commit", _GUARD_ACCEPTS)
+
+    result = _commit(repo, "README.md")
+
+    assert result.returncode == 0, (
+        f"a passing guard blocked the commit:\n{result.stdout}\n{result.stderr}"
+    )
+    assert "guard says yes" in result.stderr, "the guard was never found or run"
     assert _subject(repo) == "add README.md"
 
 
