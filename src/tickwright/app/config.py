@@ -1,17 +1,21 @@
 """The typed application config (ADR-0021/0032).
 
-``AppConfig`` is the one settings object the CLI reads — from the environment
-and ``.env`` — composed of the per-adapter ``*Config``s that live in their own
-packages. The ``Literal`` discriminants below are the whole selection surface:
-an unknown value fails validation with a readable error before any wiring
-happens, and adding an impl widens exactly one ``Literal`` plus one ``match``
-arm in ``build.py``.
+Two classes, one shape. ``AppConfig`` is the pure model ``build_engine`` takes,
+composed of the per-adapter ``*Config``s that live in their own packages; it
+reads nothing ambient. ``AppSettings`` subclasses it with the env/``.env``
+reading the CLI needs, and ``__main__`` is its only builder — everything else,
+tests included, builds the pure type (issue #71).
+
+The ``Literal`` discriminants below are the whole selection surface: an unknown
+value fails validation with a readable error before any wiring happens, and
+adding an impl widens exactly one ``Literal`` plus one ``match`` arm in
+``build.py``.
 """
 
 from decimal import Decimal
 from typing import Literal, Self
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from tickwright.adapters.bus import KafkaBusConfig
@@ -40,20 +44,21 @@ class StrategyConfig(BaseModel):
         return self
 
 
-class AppConfig(BaseSettings):
-    """Everything the composition root needs, from env vars or ``.env``.
+class AppConfig(BaseModel):
+    """Everything the composition root needs. Pure: reads nothing ambient.
 
-    Nested fields use ``__`` in the environment, e.g.
-    ``TICKWRIGHT_REPLAY__PATH=ticks.jsonl`` or
-    ``TICKWRIGHT_ENGINE__SHUTDOWN_TIMEOUT_SECONDS=5``.
+    Deliberately *not* a ``BaseSettings``. Both ambient sources — an exported
+    ``TICKWRIGHT_*`` var and a ``.env`` on the cwd — outrank a class default in
+    the pydantic-settings chain, so a config class that reads them cannot also
+    be the class tests build by hand: a developer ``.env`` selecting a live
+    venue would silently wire one into a paper test (issue #71). Env-reading
+    lives in ``AppSettings`` alone, and this class has no machinery to do it.
     """
 
-    model_config = SettingsConfigDict(
-        env_prefix="TICKWRIGHT_",
-        env_nested_delimiter="__",
-        env_file=".env",
-        env_file_encoding="utf-8",
-    )
+    # Dropping BaseSettings drops the strictness it carried, and only the
+    # env-reading was meant to go: a plain BaseModel ignores unknown fields,
+    # which would silently swallow a mistyped keyword.
+    model_config = ConfigDict(extra="forbid")
 
     # The seam discriminants (ADR-0032): each names the impl for one Protocol.
     bus: Literal["in_memory", "kafka"] = "in_memory"
@@ -99,3 +104,26 @@ class AppConfig(BaseSettings):
         """
         key = self.hyperliquid.signing_key
         return (key.get_secret_value(),) if key is not None else ()
+
+
+class AppSettings(AppConfig, BaseSettings):
+    """The one env-reading skin, built only by ``__main__`` (the CLI entry).
+
+    An ``AppConfig`` in every way that matters — ``build_engine`` takes the
+    pure type and this satisfies it — plus the ability to resolve fields from
+    the environment and ``.env``. Nested fields use ``__``, e.g.
+    ``TICKWRIGHT_REPLAY__PATH=ticks.jsonl`` or
+    ``TICKWRIGHT_ENGINE__SHUTDOWN_TIMEOUT_SECONDS=5``.
+
+    This is the *only* legitimate place a config reads ambient state. It stays
+    internal to ``tickwright.app`` and out of ``__all__`` on purpose: exporting
+    it would advertise a second env-reading entry point, which is the bug class
+    issue #71 closed.
+    """
+
+    model_config = SettingsConfigDict(
+        env_prefix="TICKWRIGHT_",
+        env_nested_delimiter="__",
+        env_file=".env",
+        env_file_encoding="utf-8",
+    )
