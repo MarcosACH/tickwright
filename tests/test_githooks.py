@@ -20,6 +20,12 @@ from pathlib import Path
 
 _GITHOOKS = Path(__file__).resolve().parent.parent / ".githooks"
 
+# A guard is only consulted when executable; keep the bit explicit at both ends.
+# It announces itself on stderr, which git forwards whether the hook passes or
+# fails — so "did the guard actually run?" stays answerable in the cases where the
+# exit code alone would not say.
+_GUARD_REJECTS = "#!/usr/bin/env bash\necho 'guard says no' >&2\nexit 1\n"
+
 _ENV = {
     **os.environ,
     "GIT_CONFIG_GLOBAL": "/dev/null",
@@ -35,14 +41,33 @@ def _git(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedProce
 
 
 def _repo(root: Path) -> Path:
-    """A scratch repo with the real ``.githooks`` wired up the documented way."""
+    """A scratch repo with the real ``.githooks`` wired up the documented way.
+
+    The hooks are *committed* before ``core.hooksPath`` is set, so no hook runs
+    during setup and HEAD gives the tests a baseline subject to compare against.
+    """
     root.mkdir(parents=True, exist_ok=True)
     _git(root, "init", "-q", "-b", "main")
     _git(root, "config", "user.name", "Test")
     _git(root, "config", "user.email", "test@example.com")
     shutil.copytree(_GITHOOKS, root / ".githooks")
+    _git(root, "add", ".githooks")
+    _git(root, "commit", "-q", "-m", "hooks")  # no hooksPath yet, so none run
     _git(root, "config", "core.hooksPath", ".githooks")
     return root
+
+
+def _install_guard(git_common_dir: Path, hook: str, body: str = _GUARD_REJECTS) -> None:
+    """Plant a stand-in for the private guard where the real one lives."""
+    guard = git_common_dir / "hooks-local" / hook
+    guard.parent.mkdir(parents=True, exist_ok=True)
+    guard.write_text(body)
+    guard.chmod(0o755)
+
+
+def _subject(cwd: Path) -> str:
+    """The subject of HEAD — what did (or did not) land."""
+    return _git(cwd, "log", "-1", "--format=%s").stdout.strip()
 
 
 def _commit(cwd: Path, name: str) -> subprocess.CompletedProcess[str]:
@@ -68,3 +93,22 @@ def test_pre_commit_allows_the_commit_when_no_local_guard_is_installed(
     assert result.returncode == 0, (
         f"commit rejected with no guard installed:\n{result.stdout}\n{result.stderr}"
     )
+    assert _subject(repo) == "add README.md"
+
+
+def test_pre_commit_still_blocks_when_the_local_guard_rejects(tmp_path: Path) -> None:
+    """A present guard keeps its veto — the absent-guard fix must not disarm it.
+
+    Only the *absent* case is being changed, so this pins the other half. It is the
+    fence that rejects ``[ -x "$guard" ] && "$guard" || true``, which buys "an absent
+    guard allows" by making a present guard's rejection unreachable too — silently
+    disabling the private reference scrub.
+    """
+    repo = _repo(tmp_path / "repo")
+    _install_guard(repo / ".git", "pre-commit")
+
+    result = _commit(repo, "README.md")
+
+    assert result.returncode != 0, "a rejecting guard did not block the commit"
+    assert "guard says no" in result.stderr
+    assert _subject(repo) == "hooks", "the rejected commit landed anyway"
