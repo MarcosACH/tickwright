@@ -56,26 +56,17 @@ jobs:
         run: uv run pytest --cov --cov-report=term-missing --cov-fail-under=90
 
       - name: Suite is hermetic against ambient config
-        # The tests above pass on a fresh runner by luck, not by design: .env is
-        # gitignored and nothing here exports TICKWRIGHT_*, so the class defaults
-        # win because both higher-priority sources happen to be empty. A job-level
-        # env: block, a `cp .env.example .env` step, a repo variable, or a
-        # self-hosted runner with a populated profile would each silently wire a
-        # live venue into the paper tests (issue #71). This step removes the luck.
+        # A fresh runner exports no TICKWRIGHT_*, so the run above proves nothing
+        # about tests/app ignoring them (issue #71). Export a live venue and re-run:
+        # the paper defaults must still win.
         #
-        # The hostile env must be a *valid* config — hence SYMBOLS and SIGNING_KEY.
-        # FEED+EXCHANGE alone is a config that fails validation loudly, and a guard
-        # that only ever sees the invalid path would keep passing if the classes
-        # stopped validating but kept reading ambient state. The danger is a
-        # hostile config that is *accepted*. The dummy key need not be well-formed:
-        # nothing in tests/app reads the environment now, and the one subprocess is
-        # handed a scrubbed one.
+        # The env is deliberately *valid* — hence SYMBOLS/SIGNING_KEY. FEED+EXCHANGE
+        # alone fails validation, and a guard that only sees the rejected path would
+        # keep passing if the config stopped validating but kept reading ambient
+        # state. The bug is a hostile config silently accepted.
         #
-        # Scoped to tests/app on purpose — do not widen to the whole suite. The
-        # live testnet suite (ADR-0022) skips on SIGNING_KEY being *absent*, not on
-        # it being well-formed, so the dummy key above reads to it as a funded
-        # wallet: it would be collected and fail. tests/app is where the env-reading
-        # config class lives and is the whole blast radius of issue #71.
+        # Do not widen past tests/app: the live suite (ADR-0022) skips on
+        # SIGNING_KEY being absent, so the dummy key below enrols it for real.
         env:
           TICKWRIGHT_FEED: hyperliquid
           TICKWRIGHT_EXCHANGE: hyperliquid
