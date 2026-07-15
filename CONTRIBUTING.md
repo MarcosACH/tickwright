@@ -14,7 +14,8 @@ changes small, well-tested, and easy to read.
 - **Python 3.13**, managed with [uv](https://github.com/astral-sh/uv).
 - `uv venv` → `uv sync` → `source .venv/bin/activate` (or prefix commands with `uv run`).
 - Dependencies are always project-local — **never installed globally**.
-- **Enable the git hooks** once per clone: `git config core.hooksPath .githooks`.
+- **Enable the git hooks** once per clone: `git config core.hooksPath .githooks`. This is shared
+  config, so linked worktrees inherit it — no need to re-run it in each one.
 
 ## Running checks
 
