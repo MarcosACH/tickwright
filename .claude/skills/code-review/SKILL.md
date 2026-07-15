@@ -54,7 +54,15 @@ Review is **read-only against the user's working tree**. Do not mutate refs.
   ```
   `git fetch` without a destination ref does not create a local branch.
 - If the PR's `headRefName` already exists locally and points at the same SHA as the PR head, just read files via `git show <SHA>:<path>` — no fetch needed.
-- After the review, verify no stray refs remain: `git branch --list 'pr-*-review'` should be empty.
+- **To *run* anything at the PR head — the mechanical pass in step 2 — use a detached worktree.** `git show` reads files but cannot execute them, and `ruff`/`mypy`/`pytest` run against the working tree: on a PR whose head you don't have checked out, running them where you stand reviews the wrong code and a green result means nothing.
+  ```bash
+  git worktree add --detach ../tickwright-pr-<N> <SHA>   # no branch created, no ref moved
+  cd ../tickwright-pr-<N> && uv venv && uv sync          # worktrees don't inherit .venv
+  # ... run the step 2 commands here ...
+  cd - && git worktree remove ../tickwright-pr-<N>       # always, even after a failed pass
+  ```
+  `worktree add --detach` creates no branch, so this respects the no-refs rule above. Place it **outside** the repo (`../tickwright-pr-<N>`, not `./pr-<N>`) — a worktree nested in the repo gets swept up by `ruff check .` and pytest collection.
+- After the review, verify no stray refs or checkouts remain: `git branch --list 'pr-*-review'` should be empty, and `git worktree list` should show only the user's own worktrees.
 
 ### 2. Mechanical pass (push to tools, not humans)
 
@@ -67,6 +75,8 @@ uv run mypy .
 uv run lint-imports   # ADR-0032 dependency-direction boundaries — a build-failing gate
 uv run pytest --cov --cov-report=term-missing --cov-fail-under=90
 ```
+
+These run against the working tree. If the target is a PR whose head is not what you have checked out, run them in the detached worktree from [Workspace discipline](#workspace-discipline-pr-target) — otherwise they report on your branch, not the one under review.
 
 ci.yml also runs `python -m compileall -q src` (byte-compile smoke) and a
 `pip-audit` supply-chain scan of the runtime deps; those are CI-only guards, not
