@@ -1,10 +1,13 @@
-"""The ``.githooks`` delegation contract: a local-only guard that may not be there.
+"""The ``.githooks`` delegation contract: a local hook guard that may not be there.
 
 ``.githooks/pre-commit`` and ``.githooks/commit-msg`` both end by handing off to a
-private guard kept outside the repo, so it is never published. ``CONTRIBUTING.md``
-tells every contributor to enable ``core.hooksPath .githooks`` and almost none of
-them have that guard — "no guard on this clone" is the common case, not the exotic
-one, and it must be a silent no-op.
+private guard kept outside the repo, so it is never published. The contract these
+tests fence — location, arming, authority — is stated in ``CONTRIBUTING.md``
+("Local hook guards"); this file pins it, it does not redefine it.
+
+``CONTRIBUTING.md`` tells every contributor to enable ``core.hooksPath .githooks``
+and almost none of them have that guard — "no guard on this clone" is the common
+case, not the exotic one, and it must be a silent no-op.
 
 Driven through a real ``git`` in a scratch repo: the hooks' whole subject is git's
 exit-code contract, so nothing here is mocked (a process boundary). Global and

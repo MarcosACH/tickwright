@@ -54,8 +54,9 @@ if [ -n "$py" ]; then
   echo "$py" | xargs git add
 fi
 
-# Local-only guards (e.g. a private reference scrub) — kept outside the repo, so
-# they are not published and run only on machines that have them.
+# Local hook guard (e.g. a private reference scrub) — kept outside the repo, so it
+# is not published and runs only on machines that have it. Its contract — location,
+# arming, authority — is documented once in CONTRIBUTING.md, not restated here.
 #
 # --git-common-dir, not --git-dir: the latter is .git/worktrees/<name> in a linked
 # worktree, where the guard would be invisible and the scrub would quietly stop

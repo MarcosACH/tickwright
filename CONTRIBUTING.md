@@ -35,10 +35,29 @@ With `core.hooksPath` enabled (see setup):
 
 - **pre-commit** auto-runs `ruff check --fix` + `ruff format` on your *staged* Python and re-stages
   the result (unstaged hunks are preserved safely).
+- **commit-msg** runs your local hook guard if you have one (see below), and does nothing otherwise.
 - **pre-push** runs `mypy` on changed Python before the push leaves your machine.
 
 They exist to catch problems early; the **authoritative gate is CI**, which re-runs everything and
 can't be skipped with `--no-verify`.
+
+#### Local hook guards
+
+`pre-commit` and `commit-msg` each finish by handing off to an optional **local hook guard**: an
+executable you keep outside the repo, so it is never published and runs only on the machines that
+have it. Nothing here installs one, and you do not need one to contribute — but if you add one,
+this is the contract it is held to:
+
+- **Location** — `hooks-local/<hook-name>` under the *common* git directory, so
+  `.git/hooks-local/pre-commit` and `.git/hooks-local/commit-msg`. The hooks resolve it with
+  `git rev-parse --git-common-dir` rather than `--git-dir`, which is what lets linked worktrees
+  share the one install instead of quietly skipping it.
+- **Arming** — the executable bit. A guard that is absent or non-executable is skipped and the
+  commit proceeds. That is the normal case for nearly every clone, so it is silent by design.
+- **Authority** — a guard that exits non-zero aborts the commit, and that veto is final. Any change
+  to the delegation must keep a failing guard failing: this is the seam the maintainer's private
+  reference scrub hangs off, backing the "no code is copied from any prior/private codebase" rule
+  in [`CLAUDE.md`](CLAUDE.md). `tests/test_githooks.py` fences both halves against a real `git`.
 
 ## How we work
 
