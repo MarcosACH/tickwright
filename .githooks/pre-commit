@@ -56,6 +56,16 @@ fi
 
 # Local-only guards (e.g. a private reference scrub) — kept outside the repo, so
 # they are not published and run only on machines that have them.
+#
+# --git-common-dir, not --git-dir: the latter is .git/worktrees/<name> in a linked
+# worktree, where the guard would be invisible and the scrub would quietly stop
+# running on commits that are just as real.
+#
+# Deliberately not `exec "$guard"`, though commit-msg delegates that way and
+# unifying the two would read as tidier: exec replaces this process and discards the
+# restore_unstaged EXIT trap above, so a guard that rejects would strand the
+# developer's unstaged hunks in the patch file. commit-msg can exec safely only
+# because it has no trap to lose.
 guard="$(git rev-parse --git-common-dir)/hooks-local/pre-commit"
 if [ -x "$guard" ]; then
   "$guard"

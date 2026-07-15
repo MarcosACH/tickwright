@@ -155,6 +155,40 @@ def test_pre_commit_finds_the_local_guard_from_a_linked_worktree(tmp_path: Path)
     assert "guard says no" in result.stderr
 
 
+def test_pre_commit_keeps_unstaged_work_when_the_local_guard_rejects(
+    tmp_path: Path,
+) -> None:
+    """A rejected commit leaves the developer's unstaged hunks where they left them.
+
+    ``pre-commit`` peels unstaged changes off the working tree so it formats only
+    staged content, and restores them from an EXIT trap. The guard runs *inside* that
+    window, so how it is invoked decides whether the trap survives a rejection.
+
+    This is the fence against unifying the delegation on ``exec`` the way ``commit-msg``
+    does it — which reads as tidier and silently eats uncommitted work: ``exec``
+    replaces the process, the trap is discarded, and the peeled hunks survive only in
+    a ``.git`` patch file the developer never knew about. ``commit-msg`` can ``exec``
+    safely only because it has no trap to lose.
+    """
+    repo = _repo(tmp_path / "repo")
+    _install_guard(repo / ".git", "pre-commit")
+    tracked = repo / "notes.md"
+    tracked.write_text("line1\nline2\n")
+    _git(repo, "add", "notes.md")
+    _git(repo, "commit", "-q", "-m", "notes", "--no-verify")
+
+    tracked.write_text("line1\nstaged edit\n")
+    _git(repo, "add", "notes.md")
+    tracked.write_text("line1\nstaged edit\nprecious unstaged work\n")
+
+    result = _git(repo, "commit", "-m", "try", check=False)
+
+    assert result.returncode != 0, "a rejecting guard did not block the commit"
+    assert "precious unstaged work" in tracked.read_text(), (
+        "the guard's rejection swallowed the developer's unstaged hunks"
+    )
+
+
 def test_commit_msg_finds_the_local_guard_from_a_linked_worktree(tmp_path: Path) -> None:
     """The message scrub resolves the same guard from a worktree as from ``.git``.
 
