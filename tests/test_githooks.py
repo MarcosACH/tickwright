@@ -134,3 +134,22 @@ def test_pre_commit_still_blocks_when_the_local_guard_rejects(tmp_path: Path) ->
     assert result.returncode != 0, "a rejecting guard did not block the commit"
     assert "guard says no" in result.stderr
     assert _subject(repo) == "hooks", "the rejected commit landed anyway"
+
+
+def test_pre_commit_finds_the_local_guard_from_a_linked_worktree(tmp_path: Path) -> None:
+    """A worktree resolves the same guard as the main checkout.
+
+    ``--git-dir`` is ``.git/worktrees/<name>`` here, not ``.git``, so a guard looked
+    up that way is invisible exactly in a worktree — and the scrub stops running on
+    commits that are every bit as real. Proven via the guard's own veto: only a guard
+    that was actually found can reject.
+    """
+    repo = _repo(tmp_path / "repo")
+    _install_guard(repo / ".git", "pre-commit")
+    linked = tmp_path / "linked"
+    _git(repo, "worktree", "add", "-q", str(linked), "-b", "side")
+
+    result = _commit(linked, "NOTES.md")
+
+    assert result.returncode != 0, "the guard was not found from the worktree"
+    assert "guard says no" in result.stderr
