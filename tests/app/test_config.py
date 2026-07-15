@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from tickwright.adapters.feed import ReplayFeedConfig
 from tickwright.app.config import AppConfig, AppSettings
 
 _HOSTILE_ENV_FILE = (
@@ -38,14 +39,14 @@ def test_app_config_ignores_a_hostile_dotenv_and_exported_env(
     monkeypatch.setenv("TICKWRIGHT_FEED", "hyperliquid")
     monkeypatch.setenv("TICKWRIGHT_EXCHANGE", "hyperliquid")
 
-    config = AppConfig(replay={"path": tmp_path / "ticks.jsonl"})  # type: ignore[arg-type]
+    config = AppConfig(replay=ReplayFeedConfig(path=tmp_path / "ticks.jsonl"))
 
     assert config.feed == "replay"
     assert config.exchange == "paper"
     assert config.secrets() == ()
 
 
-def test_app_config_rejects_an_unknown_field(tmp_path: Path) -> None:
+def test_app_config_rejects_an_unknown_field() -> None:
     """A mistyped field is a loud error, not a silently dropped keyword.
 
     ``AppConfig`` inherited ``extra="forbid"`` from ``BaseSettings`` and must
@@ -55,13 +56,8 @@ def test_app_config_rejects_an_unknown_field(tmp_path: Path) -> None:
     leave the test asserting against a default it never chose — the same
     silently-accepted config issue #71 is about, one layer down.
     """
-    (tmp_path / "ticks.jsonl").touch()
-
     with pytest.raises(ValidationError, match="exchagne"):
-        AppConfig(  # type: ignore[call-arg]
-            replay={"path": tmp_path / "ticks.jsonl"},  # type: ignore[arg-type]
-            exchagne="hyperliquid",
-        )
+        AppConfig(exchagne="hyperliquid")  # type: ignore[call-arg]  # the subject
 
 
 def test_app_settings_resolves_the_documented_precedence_chain(
