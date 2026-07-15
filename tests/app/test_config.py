@@ -55,9 +55,17 @@ def test_app_config_rejects_an_unknown_field() -> None:
     (``test_build_engine._config``), so a typo would otherwise be dropped and
     leave the test asserting against a default it never chose — the same
     silently-accepted config issue #71 is about, one layer down.
+
+    ``replay`` is set so the typo is the only thing wrong with this config.
+    Without it the model validator rejects the missing tick file anyway, and
+    the assertion below passes on that error instead — ``ValidationError``
+    renders the input dict, so even a match on the field name finds it there.
     """
-    with pytest.raises(ValidationError, match="exchagne"):
-        AppConfig(exchagne="hyperliquid")  # type: ignore[call-arg]  # the subject
+    with pytest.raises(ValidationError, match=r"exchagne[\s\S]*Extra inputs are not permitted"):
+        AppConfig(
+            replay=ReplayFeedConfig(path=Path("ticks.jsonl")),
+            exchagne="hyperliquid",  # type: ignore[call-arg]  # the subject
+        )
 
 
 def test_app_settings_resolves_the_documented_precedence_chain(
