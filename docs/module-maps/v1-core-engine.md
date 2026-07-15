@@ -214,7 +214,9 @@ src/tickwright/
 
 ### app (`app/`)
 
-**Interface:** The composition root: `build_engine(config) -> Engine` plus the CLI entry (`asyncio.run(engine.run())`). Reads the typed `pydantic-settings` `*Config` objects (each adapter's config lives in its package; only `app` reads them all) and selects impls with an explicit `match` over config discriminants (`exchange: paper|hyperliquid`, `bus: in_memory|kafka`, `store: sqlite|postgres`). No registry, no import-path DSL.
+**Interface:** The composition root: `build_engine(config) -> Engine` plus the CLI entry (`asyncio.run(engine.run())`). Takes the pure `AppConfig`, which composes the typed `*Config` objects (each adapter's config lives in its package; only `app` knows them all), and selects impls with an explicit `match` over config discriminants (`exchange: paper|hyperliquid`, `bus: in_memory|kafka`, `store: sqlite|postgres`). No registry, no import-path DSL.
+
+Ambient config is read in exactly one place: `AppSettings`, the `pydantic-settings` skin over `AppConfig` that `__main__` alone builds. `AppConfig` itself is a pure `BaseModel` and reads neither the environment nor `.env` — a config class that reads them cannot also be the class tests build by hand, since both sources outrank a class default and would wire a live venue into a paper test (issue #71).
 
 **Responsibilities:** Constructing every concrete, injecting already-built dependencies into the `Engine`, wiring instrument specs from the venue into the guard.
 
