@@ -153,3 +153,23 @@ def test_pre_commit_finds_the_local_guard_from_a_linked_worktree(tmp_path: Path)
 
     assert result.returncode != 0, "the guard was not found from the worktree"
     assert "guard says no" in result.stderr
+
+
+def test_commit_msg_finds_the_local_guard_from_a_linked_worktree(tmp_path: Path) -> None:
+    """The message scrub resolves the same guard from a worktree as from ``.git``.
+
+    ``commit-msg`` shares ``pre-commit``'s ``--git-dir`` lookup and the same blind
+    spot, but never had the exit-status bug — ``exec`` plus a trailing ``exit 0``
+    already made an absent guard a clean no-op. So a worktree failed *quietly* here:
+    the scrub simply stopped running rather than announcing itself, which is why this
+    half went unnoticed while its sibling was loudly aborting.
+    """
+    repo = _repo(tmp_path / "repo")
+    _install_guard(repo / ".git", "commit-msg")
+    linked = tmp_path / "linked"
+    _git(repo, "worktree", "add", "-q", str(linked), "-b", "side")
+
+    result = _commit(linked, "NOTES.md")
+
+    assert result.returncode != 0, "the guard was not found from the worktree"
+    assert "guard says no" in result.stderr
