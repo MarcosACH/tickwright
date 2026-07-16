@@ -3,11 +3,10 @@
 # never published). No-op on clones that don't have it. Its contract — location,
 # arming, authority — is documented once in CONTRIBUTING.md, not restated here.
 #
-# --git-common-dir, not --git-dir: the latter is .git/worktrees/<name> in a linked
-# worktree, where the guard would be invisible and the scrub would silently stop
-# running. `exec` hands the guard's own status to git, so the trailing `exit 0` —
-# which is what makes "no guard" a no-op rather than a rejection — is reached only
-# when there is no guard to run.
+# --git-common-dir, not --git-dir: the guard is shared state, resolved the same from
+# every worktree (see CONTRIBUTING.md "Per-worktree vs shared git state"). `exec` hands
+# the guard's own status to git, so the trailing `exit 0` — which makes "no guard" a
+# no-op rather than a rejection — is reached only when there is no guard to run.
 set -euo pipefail
 guard="$(git rev-parse --git-common-dir)/hooks-local/commit-msg"
 [ -x "$guard" ] && exec "$guard" "$@"

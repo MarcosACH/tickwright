@@ -17,6 +17,7 @@ suite holds to.
 """
 
 import os
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -210,3 +211,168 @@ def test_commit_msg_finds_the_local_guard_from_a_linked_worktree(tmp_path: Path)
 
     assert result.returncode != 0, "the guard was not found from the worktree"
     assert "guard says no" in result.stderr
+
+
+# --- pre-push autostash across the shared stash stack (issue #83) ----------------
+#
+# ``pre-push`` autostashes uncommitted work, runs ``uv run mypy .``, and pops in an
+# EXIT trap. ``refs/stash`` lives in the common git dir and is shared by every linked
+# worktree, so a pop of the unqualified ``stash@{0}`` can restore an entry another
+# worktree pushed while ``mypy`` ran — applying that worktree's work into this one and
+# dropping its stash entry, silently when the patches don't conflict.
+#
+# The race needs no concurrency to pin: the defect is that the pop is unqualified, so
+# a *sequential* interleaving reproduces it. The stub ``uv`` below is that interleaving
+# — it stands in for ``mypy`` (the tests can't run the real thing) and, in the same
+# breath, pushes a foreign stash onto the shared stack *between* the hook's push and
+# its pop. A stub on ``PATH`` is a process boundary, so it keeps the no-mocking-our-code
+# rule the rest of this file holds to.
+
+
+def _stub_uv_stashing(worktree: Path) -> str:
+    """A stand-in ``uv`` that, mid-window, stashes ``worktree`` onto the shared stack.
+
+    This is the foreign push the hook must not restore: it runs while the hook holds
+    its own autostash open, so the entry it creates becomes ``stash@{0}`` — exactly
+    the slot an unqualified ``git stash pop`` would take.
+    """
+    return (
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f"cd {shlex.quote(str(worktree))}\n"
+        'git stash push --quiet --message "foreign worktree autostash"\n'
+        "exit 0\n"
+    )
+
+
+def _stub_uv_noop() -> str:
+    """A stand-in ``uv`` that only stands in for ``mypy`` — no foreign stash."""
+    return "#!/usr/bin/env bash\nexit 0\n"
+
+
+def _install_stub_uv(bin_dir: Path, body: str) -> dict[str, str]:
+    """Plant an executable ``uv`` in ``bin_dir`` and return an env that finds it first.
+
+    The hook invokes ``uv run mypy .``; prepending ``bin_dir`` to ``PATH`` is what puts
+    this stub in that seat instead of the real toolchain.
+    """
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    uv = bin_dir / "uv"
+    uv.write_text(body)
+    uv.chmod(0o755)
+    return {**_ENV, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
+
+
+def _pre_push_repo(root: Path) -> Path:
+    """A scratch repo wired for ``pre-push``: a bare ``origin`` and a Python baseline.
+
+    No ``origin/main`` is fetched, so the hook's ``merge-base origin/main`` finds no
+    base and takes its "check everything" branch — the autostash path runs on every
+    push here, without the test having to arrange a Python diff in the pushed range.
+    """
+    origin = root.parent / "origin.git"
+    _git(root.parent, "init", "--bare", "-q", str(origin))
+    repo = _repo(root)
+    _git(repo, "remote", "add", "origin", str(origin))
+    (repo / "own.py").write_text("x = 1\n")
+    (repo / "foreign.py").write_text("y = 2\n")
+    _git(repo, "add", "own.py", "foreign.py")
+    _git(repo, "commit", "-q", "--no-verify", "-m", "baseline")
+    return repo
+
+
+def _push(repo: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    """Push a fresh branch, running ``pre-push`` under ``env`` (which finds the stub)."""
+    return subprocess.run(
+        ["git", "push", "-q", "origin", "HEAD:refs/heads/probe"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def _arrange_foreign_stash_race(tmp_path: Path) -> tuple[Path, Path, dict[str, str]]:
+    """Wire the deterministic interleaving both worktree tests below share.
+
+    The main worktree carries its own uncommitted hunk into a push; the linked
+    worktree carries a distinct one, left dirty for the stub ``uv`` to stash onto the
+    shared stack while ``mypy`` "runs". Returns ``(repo, linked, env)`` — ``env`` puts
+    the stub in front of the real ``uv`` on ``PATH``.
+    """
+    repo = _pre_push_repo(tmp_path / "repo")
+    linked = tmp_path / "linked"
+    _git(repo, "worktree", "add", "-q", str(linked), "-b", "side")
+
+    (repo / "own.py").write_text("x = 1\n# main own hunk\n")
+    (linked / "foreign.py").write_text("y = 2\n# foreign hunk\n")
+
+    env = _install_stub_uv(tmp_path / "bin", _stub_uv_stashing(linked))
+    return repo, linked, env
+
+
+def test_pre_push_restores_its_own_autostash_not_a_foreign_one(tmp_path: Path) -> None:
+    """The hook restores the work *it* stashed, not whatever reached ``stash@{0}`` since.
+
+    The main worktree pushes with its own uncommitted hunk; while ``mypy`` runs, a
+    linked worktree stashes onto the shared stack. An unqualified pop restores the
+    linked worktree's entry into the main tree and leaves the main hunk buried one
+    slot down — so the developer who pushed loses exactly the work the autostash was
+    meant to protect. The fix must restore the entry the hook created and no other.
+    """
+    repo, _linked, env = _arrange_foreign_stash_race(tmp_path)
+
+    result = _push(repo, env)
+
+    assert result.returncode == 0, f"push failed:\n{result.stdout}\n{result.stderr}"
+    assert (repo / "own.py").read_text() == "x = 1\n# main own hunk\n", (
+        "pre-push restored a foreign worktree's stash instead of its own autostash"
+    )
+
+
+def test_pre_push_leaves_a_foreign_stash_entry_on_the_stack(tmp_path: Path) -> None:
+    """The hook drops only what it created — a foreign entry survives the push intact.
+
+    The mirror of the sibling test: even when the hook correctly ignores the foreign
+    ``stash@{0}`` for its own restore, it must not *drop* it either. An unqualified
+    ``git stash pop`` removes the entry it applied, so the buggy hook silently deletes
+    the linked worktree's stashed work; the fix, staying off the shared stack, leaves
+    that entry exactly where the linked worktree left it.
+    """
+    repo, _linked, env = _arrange_foreign_stash_race(tmp_path)
+
+    result = _push(repo, env)
+
+    assert result.returncode == 0, f"push failed:\n{result.stdout}\n{result.stderr}"
+    stash_list = _git(repo, "stash", "list").stdout
+    assert "foreign worktree autostash" in stash_list, (
+        f"pre-push dropped a stash entry it did not create:\n{stash_list!r}"
+    )
+
+
+def test_pre_push_autostashes_and_restores_cleanly_in_the_single_worktree_case(
+    tmp_path: Path,
+) -> None:
+    """The ordinary case still works: dirty push, own work back, nothing left behind.
+
+    The fence for the fix itself — going off the shared stash stack must not break the
+    plain single-worktree push it was always for. With no foreign entry in play, the
+    hook stashes the uncommitted hunk for ``mypy``, restores it verbatim, and leaves no
+    stray stash entry or parked ref behind.
+    """
+    repo = _pre_push_repo(tmp_path / "repo")
+    (repo / "own.py").write_text("x = 1\n# uncommitted hunk\n")
+
+    env = _install_stub_uv(tmp_path / "bin", _stub_uv_noop())
+    result = _push(repo, env)
+
+    assert result.returncode == 0, f"push failed:\n{result.stdout}\n{result.stderr}"
+    assert (repo / "own.py").read_text() == "x = 1\n# uncommitted hunk\n", (
+        "pre-push did not restore the single worktree's own uncommitted work"
+    )
+    assert _git(repo, "stash", "list").stdout == "", "pre-push left a stray stash entry"
+    parked = _git(
+        repo, "rev-parse", "--verify", "-q", "refs/worktree/pre-push-autostash", check=False
+    )
+    assert parked.returncode != 0, "pre-push left its parked autostash ref behind"
