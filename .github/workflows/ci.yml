@@ -57,22 +57,23 @@ jobs:
 
       - name: Suite is hermetic against ambient config
         # A fresh runner exports no TICKWRIGHT_*, so the run above proves nothing
-        # about tests/app ignoring them (issue #71). Export a live venue and re-run:
-        # the paper defaults must still win.
+        # about the suite ignoring them (issue #71). Export a live venue and
+        # re-run the whole suite: the paper defaults must still win.
         #
         # The env is deliberately *valid* — hence SYMBOLS/SIGNING_KEY. FEED+EXCHANGE
         # alone fails validation, and a guard that only sees the rejected path would
         # keep passing if the config stopped validating but kept reading ambient
         # state. The bug is a hostile config silently accepted.
         #
-        # Do not widen past tests/app: the live suite (ADR-0022) skips on
-        # SIGNING_KEY being absent, so the dummy key below enrols it for real.
+        # The live suite (ADR-0022) stays skipped because its run-gate is the
+        # separate TICKWRIGHT_LIVE_TESTNET opt-in (issue #73), left unset here —
+        # the dummy SIGNING_KEY no longer enrols it.
         env:
           TICKWRIGHT_FEED: hyperliquid
           TICKWRIGHT_EXCHANGE: hyperliquid
           TICKWRIGHT_HYPERLIQUID__SYMBOLS: '["BTC"]'
           TICKWRIGHT_HYPERLIQUID__SIGNING_KEY: "0xdeadbeef"
-        run: uv run pytest tests/app -q
+        run: uv run pytest -q
 
       - name: Audit runtime dependencies
         run: |
