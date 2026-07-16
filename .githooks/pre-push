@@ -32,20 +32,37 @@ done
 [ "$run_mypy" = 0 ] && exit 0
 
 # Autostash: type-check the committed state being pushed, not whatever happens to
-# be dirty in the working tree. Tracked changes only; the check is read-only so
-# the pop never conflicts. Restore the real exit code so a type error blocks push.
+# be dirty in the working tree. Tracked changes only; the restore lands on a then-
+# clean tree so it never conflicts. Restore the real exit code so a type error blocks
+# push.
+#
+# Deliberately off the shared stash stack. refs/stash lives in the common git dir and
+# every linked worktree shares it, so an unqualified `git stash pop` (== stash@{0})
+# can restore an entry another worktree pushed while mypy ran — applying that tree's
+# work into this one and dropping its entry, silently when the hunks don't conflict.
+# Instead: `git stash create` snapshots the dirty tree into a commit without touching
+# any stack; we park that commit under refs/worktree/ — a per-worktree ref, so two
+# concurrent pre-push runs never collide and a crash leaves the work recoverable by
+# name — clean the tree for mypy, then restore exactly that commit. Never another
+# worktree's work, and nothing of anyone else's to drop.
+autostash_ref="refs/worktree/pre-push-autostash"
 stashed=0
 cleanup() {
   local rc=$?
   if [ "$stashed" = 1 ]; then
-    git stash pop --quiet \
-      || echo "pre-push: 'git stash pop' failed — restore manually with 'git stash pop'" >&2
+    if git stash apply --quiet "$autostash_ref"; then
+      git update-ref -d "$autostash_ref"
+    else
+      echo "pre-push: could not restore your autostash — your uncommitted work is safe" >&2
+      echo "pre-push: at $autostash_ref; recover it with 'git stash apply $autostash_ref'" >&2
+    fi
   fi
   exit "$rc"
 }
 trap cleanup EXIT
 if ! git diff --quiet || ! git diff --cached --quiet; then
-  git stash push --quiet --message "pre-push autostash"
+  git update-ref "$autostash_ref" "$(git stash create "pre-push autostash")"
+  git reset --hard --quiet
   stashed=1
 fi
 
