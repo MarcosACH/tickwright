@@ -63,8 +63,21 @@ There is no priority-label sort within the picker. Priority labels still drive m
 
 ### Enforcing intra-PRD ordering
 
-To enforce "slice B must wait for slice A," apply the `blocked` label to slice B. The picker filters `blocked` issues out of the queue. When slice A merges, remove `blocked` from slice B so the next iteration can pick it.
+To enforce "slice B must wait for slice A," apply the `blocked` label to slice B **and** create GitHub's real dependency relationship (`…/issues/B/dependencies/blocked_by` with A's database id — see *Link a blocker* in [`issue-tracker.md`](./issue-tracker.md)). The `blocked` label is what the picker filters on; the dependency is what makes the slice order machine-readable everywhere else. When slice A merges, remove `blocked` from slice B so the next iteration can pick it.
 
-Rule of thumb: when `to-issues` opens slices for a new PRD, label every slice except the first as `blocked`. As each slice merges, unblock the next.
+Rule of thumb: when `to-issues` opens slices for a new PRD, label every slice except the first as `blocked` and chain each slice's dependency to its predecessor. As each slice merges, unblock the next.
 
-When closing an issue (or merging a PR that closes one), scan open issues labeled `blocked` whose `## Blocked by` section references the just-closed issue. If all their listed blockers are now closed, remove `blocked` from those issues so the picker can pull them.
+When closing an issue (or merging a PR that closes one), find the issues it was blocking with a query — the real dependency graph, not a prose scan:
+
+```sh
+gh api repos/MarcosACH/tickwright/issues/<closed>/dependencies/blocking --jq '.[] | "#\(.number)"'
+```
+
+For each returned issue, check whether any blocker is still open:
+
+```sh
+gh api repos/MarcosACH/tickwright/issues/<blocked>/dependencies/blocked_by \
+  --jq '.[] | select(.state=="open") | "#\(.number)"'
+```
+
+If that returns nothing (no open blockers remain), remove `blocked` from the issue so the picker can pull it.
