@@ -28,7 +28,12 @@ classes" structural rather than aspirational.
 
 ## Live tests
 
-An **opt-in, separately-marked `live` suite** against Hyperliquid testnet
-(`HYPERLIQUID_TESTNET`), **excluded from the PR/CI gate** (run manually/nightly). Keeps CI
+An **opt-in, separately-marked `live` suite** against Hyperliquid testnet,
+**excluded from the PR/CI gate** (run manually/nightly). Its run-gate is a
+dedicated `TICKWRIGHT_LIVE_TESTNET` opt-in flag that maps onto **no** config
+field (issue #73) — distinct from the `TICKWRIGHT_HYPERLIQUID__SIGNING_KEY` the
+suite reads for the key itself (ADR-0030). Gating on that config field instead
+let a valid dummy key enrol the suite, which is why the hermeticity guard could
+not run the whole suite; the separate flag removes that coupling. Keeps CI
 hermetic and zero-setup while still giving real-venue coverage on demand. Live-in-gate was
 rejected (flaky, needs secrets/network, breaks zero-setup CI).

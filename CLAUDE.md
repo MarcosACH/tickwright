@@ -88,7 +88,7 @@ Run with the project venv via `uv run`:
 - The default paper-exchange + in-memory-bus path runs with **no external services and no API keys**.
 - The suite is **hermetic against ambient config**: an outcome must never depend on a developer `.env` or an exported `TICKWRIGHT_*` var. Build the pure `AppConfig`, never `AppSettings` (see *Environment Variables*), and hand any subprocess a `TICKWRIGHT_`-scrubbed environment. CI asserts this by running `tests/app` under a hostile live-venue env.
 - Tests marked `postgres` need a real Postgres (`PostgresStore` contract, ADR-0019); they auto-skip unless `STORE_POSTGRES_DSN` points at a reachable server. Bring one up with `docker compose up -d postgres`, then `STORE_POSTGRES_DSN=postgresql://tickwright:tickwright@localhost:5432/tickwright uv run pytest -m postgres`. `-m "not postgres"` deselects them.
-- Tests marked `live` place real orders on Hyperliquid **testnet** (ADR-0022); they auto-skip unless `TICKWRIGHT_HYPERLIQUID__SIGNING_KEY` holds a funded testnet key. Run manually/nightly with `uv run pytest -m live` — never part of the CI gate.
+- Tests marked `live` place real orders on Hyperliquid **testnet** (ADR-0022); they auto-skip unless you opt in with `TICKWRIGHT_LIVE_TESTNET=1` **and** `TICKWRIGHT_HYPERLIQUID__SIGNING_KEY` holds a funded testnet key. The opt-in flag is a dedicated run-gate mapping onto no config field (issue #73), so the key alone never enrols the suite and CI can run the whole thing under a hostile config. Run manually/nightly with `TICKWRIGHT_LIVE_TESTNET=1 uv run pytest -m live` — never part of the CI gate.
 
 ## Linting & formatting
 
