@@ -42,7 +42,7 @@ Milestones are **not** used; sequencing comes from Status plus the `blocked` lab
 - **Behavior** — the one vertical behavior as Given/When/Then acceptance criteria.
 - **Layers touched** — which of feed → strategy → exchange → engine this slice crosses (it must cross every relevant one — vertical-slice policy).
 - **Test plan** — the failing test to write first (TDD red), plus property/edge cases.
-- **`## Blocked by`** — issues that must merge first (drives the `blocked` label).
+- **`## Blocked by`** — issues that must merge first. Human-readable redundancy for the real GitHub dependency relationship (see *Link a blocker* in Conventions), not the mechanism: the `blocked` label is what drives the picker, and the dependency is what feeds everything outside it.
 - **References** — the parent PRD, relevant ADRs, CONTEXT.md terms.
 
 ## Conventions
@@ -67,6 +67,18 @@ Milestones are **not** used; sequencing comes from Status plus the `blocked` lab
     --jq '[.[] | {number, title, repo: .repository.full_name}]'
   ```
   The `## Parent` body section in the issue template is human-readable redundancy, not a substitute for the API link.
+- **Link a blocker**: when an issue is blocked by another (e.g. slice B must merge after slice A), create GitHub's real issue-dependency relationship, not just a `## Blocked by` text reference. Keep both: the `blocked` label is what the picker filters on (GitHub's dependency does **not** drive the picker), and the relationship is what feeds the UI's blocked-by panel, GitHub's merge gating, and the unblock sweep in [`triage-labels.md`](./triage-labels.md). The CLI has no shorthand; use the REST API:
+  ```sh
+  BLOCKER_DB_ID=$(gh api repos/MarcosACH/tickwright/issues/<blocker-number> --jq '.id')
+  gh api -X POST repos/MarcosACH/tickwright/issues/<blocked-number>/dependencies/blocked_by \
+    -F issue_id=$BLOCKER_DB_ID
+  ```
+  `issue_id` is the numeric **database id** (`.id`), not the issue number — the same trap as `sub_issue_id` above. Passing the number would not error; it would silently link whatever issue holds that database id, in some unrelated repo. Always resolve it via `--jq '.id'`. Verify from either direction:
+  ```sh
+  gh api repos/MarcosACH/tickwright/issues/<blocked>/dependencies/blocked_by --jq '.[] | "#\(.number)"'
+  gh api repos/MarcosACH/tickwright/issues/<blocker>/dependencies/blocking  --jq '.[] | "#\(.number)"'
+  ```
+  The `## Blocked by` body section in the issue template is human-readable redundancy, not a substitute for the API link.
 - **Read an issue**: `gh issue view <n> -R MarcosACH/tickwright --comments`.
 - **List issues**: `gh issue list -R MarcosACH/tickwright --state open --json number,title,body,labels --jq '[.[] | {number, title, labels: [.labels[].name]}]'`.
 - **Comment**: `gh issue comment <n> -R MarcosACH/tickwright --body "..."`.

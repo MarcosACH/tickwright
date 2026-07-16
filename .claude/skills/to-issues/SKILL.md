@@ -106,12 +106,20 @@ After each `gh issue create`, immediately, in order:
    (Or pass `--assignee @me` on the original `gh issue create` call.) Unassigned issues are treated as triage-pending and Ralph will not pick them up.
 4. If the slice has a parent issue (the source PRD), link the new issue as a real GitHub sub-issue of the parent via REST:
    ```bash
+   CHILD_DB_ID=$(gh api repos/MarcosACH/tickwright/issues/<child> --jq '.id')
    gh api -X POST repos/MarcosACH/tickwright/issues/<parent>/sub_issues \
-     -F sub_issue_id=<child-issue-node-id>
+     -F sub_issue_id=$CHILD_DB_ID
    ```
-   Note `-F` (numeric) not `-f` (string) — the API rejects a string-typed `sub_issue_id`. The `## Parent` body section is human-readable redundancy and does NOT create the GitHub sub-issue link on its own.
+   Note `-F` (numeric) not `-f` (string) — the API rejects a string-typed `sub_issue_id`. `sub_issue_id` is the **database id** (`.id`, an integer), not the GraphQL node id (`I_kwDO…`) and not the issue number — always resolve it via `--jq '.id'`. The `## Parent` body section is human-readable redundancy and does NOT create the GitHub sub-issue link on its own.
+5. If the slice is blocked by another (its `## Blocked by` names one), create GitHub's real dependency relationship alongside the `blocked` label. Slices are published in dependency order (blockers first, per the preamble above), so the blocker already has a real issue number here:
+   ```bash
+   BLOCKER_DB_ID=$(gh api repos/MarcosACH/tickwright/issues/<blocker> --jq '.id')
+   gh api -X POST repos/MarcosACH/tickwright/issues/<blocked>/dependencies/blocked_by \
+     -F issue_id=$BLOCKER_DB_ID
+   ```
+   `issue_id` is the **database id** (`.id`), not the issue number — same id-type trap as `sub_issue_id`; passing the number silently links an unrelated repo's issue. Keep both the `blocked` label (what the picker filters on) and this relationship (what feeds the UI, merge gating, and the unblock sweep). The `## Blocked by` body section does NOT create the link on its own. See *Link a blocker* in `docs/agents/issue-tracker.md`.
 
-After publishing all slices, verify with `gh issue view <n> --json projectItems` (project linkage) and `gh api repos/MarcosACH/tickwright/issues/<parent>/sub_issues --jq '[.[] | {number, title}]'` (sub-issue linkage) for at least one issue.
+After publishing all slices, verify with `gh issue view <n> --json projectItems` (project linkage), `gh api repos/MarcosACH/tickwright/issues/<parent>/sub_issues --jq '[.[] | {number, title}]'` (sub-issue linkage), and `gh api repos/MarcosACH/tickwright/issues/<blocked>/dependencies/blocked_by --jq '.[] | "#\(.number)"'` (blocker linkage) for at least one issue of each kind.
 
 ### Body authoring rules (agent-optimized, not human-optimized)
 
@@ -158,7 +166,7 @@ One paragraph of intent + 5–10 behavior-level bullets. No struct/field/path/si
 
 ## Blocked by
 
-- A reference to the blocking ticket (if any)
+- A reference to the blocking ticket (if any). Human-readable redundancy — the real dependency is created via the API in the post-create step list, not by this section.
 
 Or "None - can start immediately" if no blockers.
 
