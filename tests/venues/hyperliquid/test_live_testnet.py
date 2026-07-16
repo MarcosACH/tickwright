@@ -1,8 +1,11 @@
 """The opt-in live testnet suite (issue #23, ADR-0022): real venue, real key.
 
-Runs only with ``TICKWRIGHT_HYPERLIQUID__SIGNING_KEY`` in the environment
-(a funded testnet API wallet) and never in the CI gate — ``uv run pytest -m
-live`` is the manual/nightly invocation. One round trip proves the whole
+Runs only when opted in with ``TICKWRIGHT_LIVE_TESTNET`` (issue #73) and given
+``TICKWRIGHT_HYPERLIQUID__SIGNING_KEY`` (a funded testnet API wallet), never in
+the CI gate — ``uv run pytest -m live`` is the manual/nightly invocation. The
+opt-in flag is a dedicated run-gate that maps onto no config field, so CI can
+run the whole suite under a hostile config without enrolling this one. One
+round trip proves the whole
 write path against the real venue: place a deep out-of-the-money resting
 LIMIT → reconcile-visible via ``fetch_order`` → cancel by cloid →
 ``CANCELLED``, both as a pushed report and as venue truth.
@@ -13,6 +16,7 @@ import os
 from decimal import Decimal
 
 import pytest
+from live_gate import LIVE_TESTNET_ENV, live_testnet_enabled
 from pydantic import SecretStr
 
 from tickwright.adapters.bus import InMemoryBus
@@ -43,8 +47,8 @@ SYMBOL = "BTC"
 pytestmark = [
     pytest.mark.live,
     pytest.mark.skipif(
-        SIGNING_KEY_ENV not in os.environ,
-        reason=f"no {SIGNING_KEY_ENV}: live testnet suite skipped (ADR-0022)",
+        not live_testnet_enabled(),
+        reason=f"no {LIVE_TESTNET_ENV}: live testnet suite not opted in (ADR-0022)",
     ),
 ]
 
