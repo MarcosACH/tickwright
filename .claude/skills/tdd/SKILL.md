@@ -48,7 +48,18 @@ RIGHT (vertical):
 
 - Fetch the issue: `gh issue view <n> --comments`
 - Apply the "picking up an issue" transition from [docs/agents/issue-tracker.md](../../../docs/agents/issue-tracker.md): remove the `needs-triage` label if present, move project Status to `In Progress`. Do this *now*, not at PR time — it signals the issue is being worked.
-- **Confirm the base branch with the user before creating `ralph/issue-<N>`.** Never silently branch off whatever happens to be checked out. Ask explicitly which branch this work should be based on — examples: `main`, an in-flight epic branch like `feature/<epic-slug>`, or a parent slice's branch. Show the candidates you can see (`git branch --show-current`, the issue's parent PRD, sibling slices' branches via recent merges) and ask. Only after the user confirms, run `git checkout -b ralph/issue-<N> <base>`.
+- **Confirm the base branch with the user before creating `ralph/issue-<N>`.** Never silently branch off whatever happens to be checked out. Ask explicitly which branch this work should be based on — examples: `main`, an in-flight epic branch like `feature/<epic-slug>`, or a parent slice's branch. Show the candidates you can see (`git branch --show-current`, the issue's parent PRD, sibling slices' branches via recent merges) and ask. Only after the user confirms, create the branch:
+  - **Default — `git checkout -b ralph/issue-<N> <base>`.** Right for the common case: a clean tree with one issue in flight. It mutates the single working tree, which is fine when nothing is in the way.
+  - **Worktree — when the tree is dirty at pickup, or a second issue is genuinely in flight** (e.g. a slice and its follow-up, each wanting its own checkout and its own `.venv`). A worktree gives the slice its own checkout so nothing gets stashed and the two don't take turns on one directory:
+    ```bash
+    git worktree add ../tickwright-issue-<N> -b ralph/issue-<N> <base>
+    cd ../tickwright-issue-<N>
+    uv venv && uv sync        # a worktree inherits no untracked files, so it has no .venv; skip this and the
+                              # first `uv run pytest` dies on a missing interpreter — exactly when the red test
+                              # is supposed to be failing for its own reason, the worst moment to be wrong about why
+    cp ../tickwright/.env .   # untracked too, so it doesn't come across either (skip if the source has none)
+    ```
+    Place it **outside** the repo (`../tickwright-issue-<N>`); nested, it gets swept into `ruff check .` and pytest collection. This is guidance, not a mandate — `git checkout -b` stays the default, and a worktree costs a full `uv sync` that is not worth it to fix a typo.
 
 When exploring the codebase, use the project's domain glossary so that test names and interface vocabulary match the project's language, and respect ADRs in the area you're touching.
 
