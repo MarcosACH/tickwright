@@ -12,9 +12,15 @@ cd "$(git rev-parse --show-toplevel)"
 staged=$(git diff --cached --name-only --diff-filter=ACM)
 [ -z "$staged" ] && exit 0
 
-# Guard: format only the *staged* content. Snapshot any unstaged changes, peel
+# Safety: format only the *staged* content. Snapshot any unstaged changes, peel
 # them off the working tree, and restore them on exit — so reformatting a
 # partially staged file can't sweep its unstaged hunks into the commit.
+#
+# --git-dir, not --git-common-dir: this patch is scratch state owned by *this*
+# commit, and linked worktrees share a common dir. Resolving it there would aim two
+# concurrent commits at one path — the second would overwrite the first's snapshot,
+# and restore_unstaged would put back the wrong hunks, losing work. The local hook
+# guard below takes the opposite lookup for the mirror-image reason: it is shared.
 unstaged_patch="$(git rev-parse --git-dir)/pre-commit-unstaged.patch"
 orig_tree=""
 has_unstaged=0
@@ -54,7 +60,22 @@ if [ -n "$py" ]; then
   echo "$py" | xargs git add
 fi
 
-# Local-only guards (e.g. a private reference scrub) — kept outside the repo, so
-# they are not published and run only on machines that have them.
-guard="$(git rev-parse --git-dir)/hooks-local/pre-commit"
-[ -x "$guard" ] && "$guard"
+# Local hook guard (e.g. a private reference scrub) — kept outside the repo, so it
+# is not published and runs only on machines that have it. Its contract — location,
+# arming, authority — is documented once in CONTRIBUTING.md, not restated here.
+#
+# --git-common-dir, not --git-dir: the latter is .git/worktrees/<name> in a linked
+# worktree, where the guard would be invisible and the scrub would quietly stop
+# running on commits that are just as real. This applies to the guard alone — the
+# unstaged patch above is per-worktree on purpose; see its comment before unifying
+# the two lookups.
+#
+# Deliberately not `exec "$guard"`, though commit-msg delegates that way and
+# unifying the two would read as tidier: exec replaces this process and discards the
+# restore_unstaged EXIT trap above, so a guard that rejects would strand the
+# developer's unstaged hunks in the patch file. commit-msg can exec safely only
+# because it has no trap to lose.
+guard="$(git rev-parse --git-common-dir)/hooks-local/pre-commit"
+if [ -x "$guard" ]; then
+  "$guard"
+fi
