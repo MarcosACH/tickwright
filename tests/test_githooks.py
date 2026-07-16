@@ -376,3 +376,166 @@ def test_pre_push_autostashes_and_restores_cleanly_in_the_single_worktree_case(
         repo, "rev-parse", "--verify", "-q", "refs/worktree/pre-push-autostash", check=False
     )
     assert parked.returncode != 0, "pre-push left its parked autostash ref behind"
+
+
+# --- pre-commit rollback when a reformat collides with an unstaged hunk (issue #84) --
+#
+# ``pre-commit`` formats only *staged* content: it peels unstaged hunks off the working
+# tree, runs ``ruff format`` on what's left, and reapplies the hunks from an EXIT trap.
+# The one case that peel-and-reapply cannot survive is when ``ruff format`` rewrites a
+# line an unstaged hunk also touches — the reversed patch no longer applies. The trap's
+# recovery branch (`.githooks/pre-commit` ``restore_unstaged``) then rolls the index and
+# working tree all the way back to the pre-hook state and aborts, so neither the staged
+# edit nor the unstaged hunk is lost and no half-merged file is left behind.
+#
+# That branch is unreachable through the guard-delegation tests above: those stage a
+# non-Python file on purpose, so the ruff block never runs and nothing is ever
+# reformatted. Reaching it means running the ruff block, which shells out to ``uv run
+# ruff`` in a scratch repo that has no ``pyproject.toml`` or venv. The stub ``uv`` below
+# stands in for that toolchain and makes the reformat deterministic — a process boundary,
+# so it keeps the no-mocking-our-code rule the rest of this file holds to.
+
+
+def _stub_uv_reformatting() -> str:
+    """A stand-in ``uv`` whose ``ruff format`` rewrites ``a=2`` to ``a = 2``.
+
+    That single whitespace change is exactly what real ``ruff format`` would make, and it
+    lands on the one line the unstaged hunk this scenario arranges also edits — so the
+    reversed unstaged patch can no longer reapply, forcing the rollback branch. ``ruff
+    check --fix`` is a no-op here, as it is on this input; only ``format`` mutates.
+    """
+    return (
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "fmt=0\n"
+        "files=()\n"
+        'for arg in "$@"; do\n'
+        '  case "$arg" in\n'
+        "    format) fmt=1 ;;\n"
+        '    *.py) files+=("$arg") ;;\n'
+        "  esac\n"
+        "done\n"
+        '[ "$fmt" = 1 ] || exit 0\n'
+        'for f in "${files[@]}"; do\n'
+        '  out="$(sed -E \'s/([[:alnum:]_]+)=([[:alnum:]_]+)/\\1 = \\2/g\' "$f")"\n'
+        '  printf \'%s\\n\' "$out" >"$f"\n'
+        "done\n"
+    )
+
+
+def _arrange_reformat_collision(tmp_path: Path) -> tuple[Path, dict[str, str]]:
+    """A partially-staged ``.py`` whose staged line ``ruff format`` will rewrite, with an
+    unstaged hunk on that very line.
+
+    The baseline commits ``a=1``. The staged edit (``a=2``) is what ``ruff format`` turns
+    into ``a = 2``; the unstaged hunk (``a=3``) sits on the same line, so once the staged
+    content is reformatted the unstaged patch no longer applies. Returns ``(repo, env)`` —
+    ``env`` puts the stub ``uv`` in front of the real toolchain on ``PATH``.
+    """
+    repo = _repo(tmp_path / "repo")
+    mod = repo / "mod.py"
+    mod.write_text("a=1\n")
+    _git(repo, "add", "mod.py")
+    _git(repo, "commit", "-q", "-m", "baseline", "--no-verify")
+
+    mod.write_text("a=2\n")  # staged edit; ruff format will rewrite it to `a = 2`
+    _git(repo, "add", "mod.py")
+    mod.write_text("a=3\n")  # unstaged hunk on the same line the reformat touches
+
+    env = _install_stub_uv(tmp_path / "bin", _stub_uv_reformatting())
+    return repo, env
+
+
+def _commit_under(repo: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    """Run ``git commit`` with ``env`` so the hook finds the stub ``uv`` on ``PATH``."""
+    return subprocess.run(
+        ["git", "commit", "-m", "try"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_pre_commit_aborts_when_a_reformat_collides_with_an_unstaged_hunk(
+    tmp_path: Path,
+) -> None:
+    """The rollback branch is reached and refuses the commit with its overlap message.
+
+    This is the tracer: it proves the scenario actually drives execution into
+    ``restore_unstaged``'s recovery path — reformatting staged content across a line an
+    unstaged hunk also touches — rather than the clean-reapply return just above it. A
+    passing commit here would mean the collision never happened and the sibling
+    assertions below are vacuous.
+    """
+    repo, env = _arrange_reformat_collision(tmp_path)
+
+    result = _commit_under(repo, env)
+
+    assert result.returncode != 0, (
+        f"the colliding commit was not aborted:\n{result.stdout}\n{result.stderr}"
+    )
+    assert "staged and unstaged edits overlap" in result.stderr, (
+        f"the rollback branch's message did not appear:\n{result.stderr}"
+    )
+    assert _subject(repo) == "baseline", "the aborted commit landed anyway"
+
+
+def test_pre_commit_rollback_restores_the_staged_edit_to_the_index(
+    tmp_path: Path,
+) -> None:
+    """The index is rolled back to its pre-hook state — the staged edit, unreformatted.
+
+    ``restore_unstaged`` ``git add``ed the reformatted ``a = 2`` before it discovered the
+    collision, so a half-done rollback would strand that reformatted blob in the index.
+    The recovery ``git read-tree "$orig_tree"`` must put the *original* staged content
+    back, so a retry sees exactly what the developer staged. The staged blob is therefore
+    ``a=2`` (the staged edit), not ``a = 2`` (the abandoned reformat) nor ``a=1`` (base).
+    """
+    repo, env = _arrange_reformat_collision(tmp_path)
+
+    _commit_under(repo, env)
+
+    staged_blob = _git(repo, "show", ":mod.py").stdout
+    assert staged_blob == "a=2\n", (
+        f"the index was not rolled back to the staged edit: {staged_blob!r}"
+    )
+
+
+def test_pre_commit_rollback_restores_the_working_tree_byte_for_byte(
+    tmp_path: Path,
+) -> None:
+    """The working file is exactly what it was before the hook ran — the unstaged hunk.
+
+    Before the hook, ``mod.py`` on disk was ``a=3`` (the staged ``a=2`` with the unstaged
+    hunk on top). The rollback ``checkout-index``es the original staged content back and
+    reapplies the unstaged patch, so the file returns to ``a=3`` — not the reformatted
+    ``a = 2`` the hook left mid-run, and not a conflict-marked half-merge. This is the
+    "never lose work" promise the recovery comment makes, observed on disk.
+    """
+    repo, env = _arrange_reformat_collision(tmp_path)
+
+    _commit_under(repo, env)
+
+    assert (repo / "mod.py").read_text() == "a=3\n", (
+        f"the working tree was not restored to its pre-hook bytes: "
+        f"{(repo / 'mod.py').read_text()!r}"
+    )
+
+
+def test_pre_commit_rollback_leaves_no_stranded_patch_file(tmp_path: Path) -> None:
+    """The peeled-off unstaged patch is cleaned up even when the reapply fails.
+
+    ``pre-commit`` writes the unstaged hunks to ``$GIT_DIR/pre-commit-unstaged.patch``
+    while it reformats. On the clean path it removes that file after reapplying; the
+    rollback branch must do the same after restoring by hand. A stranded patch is the
+    "half-merged file or lost work" the recovery comment promises never happens — a stale
+    hunk the next commit could silently pick up.
+    """
+    repo, env = _arrange_reformat_collision(tmp_path)
+
+    _commit_under(repo, env)
+
+    patch = repo / ".git" / "pre-commit-unstaged.patch"
+    assert not patch.exists(), f"the rollback left a stranded patch file: {patch}"
