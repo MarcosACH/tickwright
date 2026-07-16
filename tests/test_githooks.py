@@ -253,8 +253,9 @@ def _stub_uv_noop() -> str:
 def _install_stub_uv(bin_dir: Path, body: str) -> dict[str, str]:
     """Plant an executable ``uv`` in ``bin_dir`` and return an env that finds it first.
 
-    The hook invokes ``uv run mypy .``; prepending ``bin_dir`` to ``PATH`` is what puts
-    this stub in that seat instead of the real toolchain.
+    The hooks invoke ``uv run <tool>`` (``mypy`` in pre-push, ``ruff`` in pre-commit);
+    prepending ``bin_dir`` to ``PATH`` is what puts this stub in that seat instead of the
+    real toolchain.
     """
     bin_dir.mkdir(parents=True, exist_ok=True)
     uv = bin_dir / "uv"
