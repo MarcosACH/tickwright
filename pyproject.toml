@@ -14,10 +14,10 @@ dependencies = [
     "aiokafka>=0.14.0",
     "hyperliquid-python-sdk~=0.24",
     "msgspec>=0.21.1",
-    "psycopg[binary]>=3.2",
+    "psycopg[binary]>=3.3.4",
     "pydantic-settings>=2.14.2",
     "structlog>=26.1.0",
-    "websockets>=15.0",
+    "websockets>=16.1",
 ]
 
 [project.scripts]
