@@ -1132,7 +1132,7 @@ requires-dist = [
     { name = "aiokafka", specifier = ">=0.14.0" },
     { name = "hyperliquid-python-sdk", specifier = "~=0.24" },
     { name = "msgspec", specifier = ">=0.21.1" },
-    { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
+    { name = "psycopg", extras = ["binary"], specifier = ">=3.3.4" },
     { name = "pydantic-settings", specifier = ">=2.14.2" },
     { name = "structlog", specifier = ">=26.1.0" },
     { name = "websockets", specifier = ">=15.0" },
