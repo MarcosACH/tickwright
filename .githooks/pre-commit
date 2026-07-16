@@ -16,11 +16,10 @@ staged=$(git diff --cached --name-only --diff-filter=ACM)
 # them off the working tree, and restore them on exit — so reformatting a
 # partially staged file can't sweep its unstaged hunks into the commit.
 #
-# --git-dir, not --git-common-dir: this patch is scratch state owned by *this*
-# commit, and linked worktrees share a common dir. Resolving it there would aim two
-# concurrent commits at one path — the second would overwrite the first's snapshot,
-# and restore_unstaged would put back the wrong hunks, losing work. The local hook
-# guard below takes the opposite lookup for the mirror-image reason: it is shared.
+# --git-dir, not --git-common-dir: this patch is per-worktree scratch, so it must not
+# land on the shared common dir where a concurrent commit would overwrite it (see
+# CONTRIBUTING.md "Per-worktree vs shared git state"). The guard below takes the
+# opposite, shared lookup.
 unstaged_patch="$(git rev-parse --git-dir)/pre-commit-unstaged.patch"
 orig_tree=""
 has_unstaged=0
@@ -64,11 +63,9 @@ fi
 # is not published and runs only on machines that have it. Its contract — location,
 # arming, authority — is documented once in CONTRIBUTING.md, not restated here.
 #
-# --git-common-dir, not --git-dir: the latter is .git/worktrees/<name> in a linked
-# worktree, where the guard would be invisible and the scrub would quietly stop
-# running on commits that are just as real. This applies to the guard alone — the
-# unstaged patch above is per-worktree on purpose; see its comment before unifying
-# the two lookups.
+# --git-common-dir, not --git-dir: the guard is shared, so every worktree must resolve
+# the same install (see CONTRIBUTING.md "Per-worktree vs shared git state"). The
+# unstaged patch above takes the opposite, per-worktree lookup on purpose.
 #
 # Deliberately not `exec "$guard"`, though commit-msg delegates that way and
 # unifying the two would read as tidier: exec replaces this process and discards the

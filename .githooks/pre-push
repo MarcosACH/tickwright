@@ -36,15 +36,14 @@ done
 # clean tree so it never conflicts. Restore the real exit code so a type error blocks
 # push.
 #
-# Deliberately off the shared stash stack. refs/stash lives in the common git dir and
-# every linked worktree shares it, so an unqualified `git stash pop` (== stash@{0})
-# can restore an entry another worktree pushed while mypy ran — applying that tree's
-# work into this one and dropping its entry, silently when the hunks don't conflict.
-# Instead: `git stash create` snapshots the dirty tree into a commit without touching
-# any stack; we park that commit under refs/worktree/ — a per-worktree ref, so two
-# concurrent pre-push runs never collide and a crash leaves the work recoverable by
-# name — clean the tree for mypy, then restore exactly that commit. Never another
-# worktree's work, and nothing of anyone else's to drop.
+# Deliberately off the shared refs/stash stack (see CONTRIBUTING.md "Per-worktree vs
+# shared git state"): an unqualified `git stash pop` (== stash@{0}) could restore an
+# entry another worktree pushed while mypy ran, silently swapping uncommitted work.
+# Instead `git stash create` snapshots the dirty tree into a commit without touching
+# any stack; we park that commit under refs/worktree/ — git's per-worktree ref
+# namespace — so concurrent pre-push runs never collide and a crash leaves the work
+# recoverable by name. Restore exactly that commit: never another worktree's work, and
+# nothing of anyone else's to drop.
 autostash_ref="refs/worktree/pre-push-autostash"
 stashed=0
 cleanup() {

@@ -59,6 +59,27 @@ this is the contract it is held to:
   reference scrub hangs off, backing the "no code is copied from any prior/private codebase" rule
   in [`CLAUDE.md`](CLAUDE.md). `tests/test_githooks.py` fences both halves against a real `git`.
 
+#### Per-worktree vs shared git state
+
+Linked worktrees share one **common** git directory — `refs/stash`, `hooks-local/`, and config all
+live there and are seen identically from every worktree — but each worktree also has its **own**
+private git dir (`.git/worktrees/<name>`). A hook that reads or writes git state must pick between
+the two deliberately, and every hook comment that names a `--git-dir` / `--git-common-dir` /
+`refs/worktree/` choice is applying this one rule:
+
+- **Shared** state must be resolved so all worktrees agree on it. The local hook guard is looked up
+  with `git rev-parse --git-common-dir` (not `--git-dir`, which is `.git/worktrees/<name>` in a
+  linked worktree, where the guard would be invisible), so one install serves every worktree.
+- **Per-worktree scratch** must never land on shared state, or two concurrent hooks collide and
+  silently swap each other's uncommitted work. `pre-commit`'s unstaged-patch snapshot goes under
+  `--git-dir` (the private dir); `pre-push`'s autostash is parked under `refs/worktree/` (git's
+  per-worktree ref namespace) and stays off the shared `refs/stash` stack entirely, so a stash the
+  hook created is the only thing it can restore. `tests/test_githooks.py` fences the `pre-push` case
+  against a real linked worktree.
+
+This matters most under parallel worktrees, where concurrent hooks are the norm rather than the
+exception.
+
 ## How we work
 
 - **Spec first.** Requirements are stress-tested ("grilled") into a written specification before
