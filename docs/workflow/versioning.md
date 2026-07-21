@@ -84,3 +84,4 @@ gh issue close <PRD#> --comment "Delivered in vX.Y.Z: <release-url>. All sub-iss
 ## History
 
 - **v0.1.0** (2026-07-13) — first release; full v1 core-engine scope of PRD #9. Tag-only (scaffold already declared `0.1.0`).
+- **v0.2.0** (2026-07-21) — hardening release; the `AppConfig` config-contract split (#71) sets the MINOR floor, alongside git-hook fixes, test-hermeticity gating, workflow docs, and dependency bumps. First bump-PR release (#96 moved `pyproject.toml` `0.1.0` → `0.2.0`), in contrast to `v0.1.0`'s tag-only cut.
