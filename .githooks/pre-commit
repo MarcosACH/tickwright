@@ -12,6 +12,14 @@ cd "$(git rev-parse --show-toplevel)"
 staged=$(git diff --cached --name-only --diff-filter=ACM)
 [ -z "$staged" ] && exit 0
 
+# The peel/restore below reverts unstaged files — uv.lock included — to their committed
+# state while it reformats, and `uv run` re-locks uv.lock the instant pyproject.toml
+# disagrees with it, which that revert can momentarily arrange. Pin uv frozen so this
+# hook, a formatting convenience, never rewrites the lockfile out from under the patch it
+# is about to restore — aborting an unrelated commit on the bare git-apply failure that
+# leaves behind (issue #98). Exported, so the delegated guard below inherits it too.
+export UV_FROZEN=1
+
 # Safety: format only the *staged* content. Snapshot any unstaged changes, peel
 # them off the working tree, and restore them on exit — so reformatting a
 # partially staged file can't sweep its unstaged hunks into the commit.

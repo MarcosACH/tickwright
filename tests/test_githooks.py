@@ -540,3 +540,117 @@ def test_pre_commit_rollback_leaves_no_stranded_patch_file(tmp_path: Path) -> No
 
     patch = repo / ".git" / "pre-commit-unstaged.patch"
     assert not patch.exists(), f"the rollback left a stranded patch file: {patch}"
+
+
+# --- pre-commit vs a `uv run` that re-locks a dirty uv.lock mid-hook (issue #98) -----
+#
+# ``pre-commit`` peels unstaged changes off the worktree so it reformats only staged
+# content, reverting each unstaged file (``uv.lock`` included) to its committed state,
+# then restores them from an EXIT trap. Its ruff block shells out to ``uv run`` in the
+# middle of that window — and ``uv run`` re-locks ``uv.lock`` the instant ``pyproject.toml``
+# disagrees with it, which the revert momentarily arranges. That mutation moves ``uv.lock``
+# out from under the saved patch, so the restore can no longer reapply it and the hook
+# aborts an otherwise-valid commit. Same peel/restore machinery as #84, but the mutation
+# comes from ``uv run`` *inside* the hook, not a reformat colliding with an unstaged hunk.
+#
+# The stub ``uv`` below stands in for that toolchain (the scratch repo has no venv) and
+# models the one behaviour that matters here: ``uv run`` re-locks ``uv.lock`` unless it is
+# told to stay frozen. A stub on ``PATH`` is a process boundary, so it keeps the
+# no-mocking-our-code rule the rest of this file holds to.
+
+
+def _stub_uv_relocking() -> str:
+    """A stand-in ``uv`` that re-locks ``uv.lock`` on every ``run`` — unless told not to.
+
+    Real ``uv run``'s mid-hook mutation distilled to its cause: seeing the lockfile as
+    stale, it rewrites it. It stands down only when pinned frozen — via ``UV_FROZEN=1`` in
+    the environment or ``--frozen`` on the command line, both of which real ``uv`` honours —
+    so the tests key on the *behaviour* the fix must produce, not the flag it happens to
+    pick. The ``ruff check``/``format`` arguments are irrelevant to the lockfile, so ignored.
+    """
+    return (
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "frozen=0\n"
+        '[ "${UV_FROZEN:-0}" = "1" ] && frozen=1\n'
+        'for arg in "$@"; do\n'
+        '  [ "$arg" = "--frozen" ] && frozen=1\n'
+        "done\n"
+        "[ \"$frozen\" = 1 ] || printf 'lock = new\\n' >uv.lock\n"
+    )
+
+
+def _arrange_relock_scenario(tmp_path: Path) -> tuple[Path, dict[str, str]]:
+    """A staged ``.py`` commit with ``uv.lock`` left unstaged-dirty, and a stub ``uv``
+    poised to re-lock it the moment the ruff block runs.
+
+    The baseline commits ``uv.lock`` (``old``) and an already-formatted ``mod.py``. The
+    pending commit stages a ``mod.py`` edit — giving the ruff block a ``.py`` file to run
+    ``uv run`` against — and leaves ``uv.lock`` at ``new`` in the worktree, unstaged: the
+    exact shape a version bump leaves behind once an earlier ``uv run`` re-locked it and
+    only the source change got staged. Returns ``(repo, env)`` with the stub ``uv`` ahead of
+    the real toolchain on ``PATH``.
+    """
+    repo = _repo(tmp_path / "repo")
+    lock = repo / "uv.lock"
+    lock.write_text("lock = old\n")
+    mod = repo / "mod.py"
+    mod.write_text("x = 1\n")
+    _git(repo, "add", "uv.lock", "mod.py")
+    _git(repo, "commit", "-q", "-m", "baseline", "--no-verify")
+
+    mod.write_text("y = 2\n")  # staged .py edit: gives the ruff block a `uv run` to make
+    _git(repo, "add", "mod.py")
+    lock.write_text("lock = new\n")  # uv.lock dirty in the worktree, pointedly not staged
+
+    env = _install_stub_uv(tmp_path / "bin", _stub_uv_relocking())
+    return repo, env
+
+
+def test_pre_commit_lands_the_commit_when_uv_relocks_a_dirty_lockfile(
+    tmp_path: Path,
+) -> None:
+    """A staged commit lands even though a dirty ``uv.lock`` is re-locked mid-hook.
+
+    The tracer for #98: with ``uv.lock`` unstaged-dirty, the peel reverts it, ``uv run``
+    re-locks it behind the peel's back, and the unfixed hook's restore can no longer
+    reapply its patch — so it falls into the rollback branch and aborts a commit that has
+    nothing to do with the lockfile. A dirty ``uv.lock`` must not be able to veto an
+    unrelated staged commit; the commit lands.
+    """
+    repo, env = _arrange_relock_scenario(tmp_path)
+
+    result = _commit_under(repo, env)
+
+    assert result.returncode == 0, (
+        f"a dirty uv.lock aborted an unrelated staged commit:\n{result.stdout}\n{result.stderr}"
+    )
+    assert _subject(repo) == "try", "the commit did not land"
+
+
+def test_pre_commit_leaves_the_dirty_lockfile_unstaged_and_uncommitted(
+    tmp_path: Path,
+) -> None:
+    """The dirty ``uv.lock`` stays exactly where the developer left it: unstaged on disk,
+    and out of the commit it was never staged into.
+
+    The hook reformats only *staged* content, so the lockfile the developer pointedly did
+    not ``git add`` must not ride along — the committed copy stays ``old`` — and the
+    unstaged edit it carried must survive untouched — the worktree keeps ``new``. This is
+    the "leaves the tree as it found it" half of #98: pinning ``uv`` frozen fixes the abort
+    without the peel/restore quietly swallowing or committing the lockfile in the process.
+    """
+    repo, env = _arrange_relock_scenario(tmp_path)
+
+    _commit_under(repo, env)
+
+    committed_lock = _git(repo, "show", "HEAD:uv.lock").stdout
+    assert committed_lock == "lock = old\n", (
+        f"the unstaged uv.lock was swept into the commit: {committed_lock!r}"
+    )
+    assert (repo / "uv.lock").read_text() == "lock = new\n", (
+        f"the developer's unstaged uv.lock edit was lost: {(repo / 'uv.lock').read_text()!r}"
+    )
+    assert _git(repo, "diff", "--cached", "--name-only").stdout == "", (
+        "the hook left changes staged after the commit"
+    )
