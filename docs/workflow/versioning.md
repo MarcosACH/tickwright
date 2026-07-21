@@ -53,7 +53,7 @@ Consequence for the procedure below: **bump the file first, then tag the commit 
 
 ## Release procedure
 
-A tag and a GitHub Release are metadata pointing at an existing commit, **not** a commit to `main` — so a tag-only release (no version bump) needs no PR and does not touch the PR-only / `Closes #N` branch protection. A release that *does* bump `pyproject.toml` ships that bump as a normal PR first, then tags the merge commit.
+A tag and a GitHub Release are metadata pointing at an existing commit, **not** a commit to `main` — so the **tag itself** needs no PR and does not touch the PR-only / `Closes #N` branch protection (the `## History` entry it must capture still rides a PR — see step 1). A release that *does* bump `pyproject.toml` ships that bump as a normal PR first, then tags the merge commit.
 
 1. **(If the number changes)** Bump `version` in `pyproject.toml` in a PR against its own chore issue, **and add this release's [`## History`](#history) entry in the same PR** — so the tag lands on a commit that documents its own release. Merge it. Write the *intended* cut date (this repo tags right after the merge, so it is reliable) and keep the entry to facts known now — scope, SemVer rationale — referencing the driving issue, not the bump PR's own not-yet-assigned number. Skip the bump if the target version already matches; a **tag-only release** (no bump PR, as `0.1.0` shipped) instead adds its History entry in a small *pre-tag* docs PR, since the entry must live in the tagged commit.
 2. **Confirm `main` is in sync** with the remote and tag its HEAD — never an earlier "last feature" commit, which would omit merged work:
