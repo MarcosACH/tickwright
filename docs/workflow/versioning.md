@@ -45,7 +45,7 @@ Versions only ever move **forward** — you can never return to `0.x`. Instabili
 
 ## Static versioning, not VCS-derived
 
-`pyproject.toml`'s `version` is the **source of truth** — it is what `uv build` / `hatchling` stamp into wheel and sdist filenames and metadata, what a consumer's `tickwright>=…` resolves against, and what `importlib.metadata.version("tickwright")` returns once installed. **The git tag and `pyproject.toml` are two independent records kept in sync by hand.** Tagging does not read or change `pyproject.toml`; `pyproject.toml` does not know a tag exists. If they drift, built artifacts are mislabeled — a real bug, not cosmetic.
+`pyproject.toml`'s `version` is the **source of truth** — it is what `uv build` / `hatchling` stamp into wheel and sdist filenames and metadata, what a consumer's `tickwright>=…` resolves against, and what `importlib.metadata.version("tickwright")` returns once installed. The package's runtime `tickwright.__version__` is *derived* from that installed metadata (`src/tickwright/__init__.py` calls `importlib.metadata.version("tickwright")`, falling back to `"0.0.0+unknown"` in an uninstalled raw checkout), so there is no second hardcoded string to bump — `pyproject.toml` is the only in-repo copy (issue #97). **The git tag and `pyproject.toml` are two independent records kept in sync by hand.** Tagging does not read or change `pyproject.toml`; `pyproject.toml` does not know a tag exists. If they drift, built artifacts are mislabeled — a real bug, not cosmetic.
 
 Consequence for the procedure below: **bump the file first, then tag the commit that carries the bump.** (`0.1.0` needed no bump — the scaffold already declared it — so its release was tag-only.)
 
