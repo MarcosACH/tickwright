@@ -29,6 +29,31 @@ changes small, well-tested, and easy to read.
 
 The default paper-exchange + in-memory-bus path runs with **no external services and no API keys**.
 
+### Test tiers
+
+`uv run pytest` on a bare clone is **hermetic** — paper exchange + in-memory bus + SQLite, plus
+`hypothesis` property tests — and needs no services or keys. The `KafkaBus` adapter is covered here
+too: its unit tests run against an in-process fake broker
+([`tests/_support/kafka_fakes.py`](tests/_support/kafka_fakes.py)), not a real cluster.
+
+Two markers reach for real infrastructure and **auto-skip** when it isn't configured, so the default
+run stays green without them:
+
+- **`postgres`** — the `PostgresStore` contract
+  ([ADR-0019](docs/adr/0019-durable-store-sqlite-default-postgres-second.md)). Auto-skips unless
+  `STORE_POSTGRES_DSN` points at a reachable server. Bring one up with `docker compose up -d postgres`,
+  then run `STORE_POSTGRES_DSN=postgresql://tickwright:tickwright@localhost:5432/tickwright uv run
+  pytest -m postgres`. `-m "not postgres"` deselects them.
+- **`live`** — places **real orders on Hyperliquid testnet**
+  ([ADR-0022](docs/adr/0022-testing-strategy.md)). Auto-skips unless you opt in with
+  `TICKWRIGHT_LIVE_TESTNET=1` **and** `TICKWRIGHT_HYPERLIQUID__SIGNING_KEY` holds a funded testnet key
+  — the key alone never enrolls the suite, so CI can run everything under a hostile config. Run it
+  manually/nightly with `TICKWRIGHT_LIVE_TESTNET=1 uv run pytest -m live`; **never** part of the CI gate.
+
+To exercise the real `KafkaBus` end-to-end (rather than its fake-broker unit tests), run the *app* on
+Kafka, not the suite: `docker compose up -d kafka`, then `TICKWRIGHT_BUS=kafka uv run tickwright`.
+[`.env.example`](.env.example) is the canonical reference for every backend's variables.
+
 ### Git hooks (local convenience, not the gate)
 
 With `core.hooksPath` enabled (see setup):
