@@ -25,7 +25,7 @@ logs/
 # Runtime artifacts (the SQLite saga store the quickstart writes)
 *.db
 
-# Private working notes / reference provenance — NEVER committed
+# Private working notes — NEVER committed
 docs/private/
 *.private.md
 NOTES.private.md

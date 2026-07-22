@@ -6,9 +6,11 @@ disable-model-invocation: true
 
 Interview me relentlessly about every aspect of this plan until we reach a shared understanding. Walk down each branch of the design tree, resolving dependencies between decisions one-by-one. For each question, provide your recommended answer.
 
-Ask the questions one at a time, waiting for feedback on each question before continuing.
+Ask the questions **one at a time**, waiting for feedback on each before continuing. Asking several at once is bewildering and gets shallow answers.
 
-If a question can be answered by exploring the codebase, explore the codebase instead.
+**Facts vs. decisions.** If a *fact* can be found by exploring the environment — the codebase, the docs, the tools — look it up rather than asking me; asking me to recite what you can read wastes the session. The *decisions*, though, are mine: put each one to me and wait for my answer. Don't infer a decision from a fact and move on.
+
+**Confirmation gate.** Do not act on the plan — no PRD (`/to-spec`), no tickets (`/to-tickets`), no code — until I confirm out loud that we have reached a shared understanding. Reaching the end of your questions is not the gate; my confirmation is.
 
 ## Domain awareness
 
