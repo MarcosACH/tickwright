@@ -15,6 +15,14 @@ description: Test-driven development with red-green-refactor loop. Use when user
 
 See [tests.md](tests.md) for examples and [mocking.md](mocking.md) for mocking guidelines.
 
+## Seams — where tests go
+
+A **seam** is the public boundary you test at: the interface where you observe behavior without reaching inside. In this repo the seams are the ADR-0032 Protocols — `Strategy`, `MarketFeed`, `Exchange`, `EventBus`, `Store`, `Clock`, fill models — wired with their real lightweight implementations (`InMemoryBus`, `SQLiteStore(":memory:")`, `PaperExchange`, `ManualClock`, `ReplayFeed`). Tests live at seams, never against internals.
+
+**Test only at pre-agreed seams.** Before writing any test, write the seams under test down and confirm them with the user — no test is written at an unconfirmed seam. If the driving PRD already sketched its test seams (`/to-spec` does this), start from those and confirm they still hold. Agreeing the seams up front is how testing effort lands on the critical paths and complex logic instead of every edge case — prefer existing seams, and put any new one at the highest point you can.
+
+Ask: "What's the public interface, and which seams should we test?"
+
 ## Anti-Pattern: Horizontal Slices
 
 **DO NOT write all tests first, then all implementation.** This is "horizontal slicing" - treating RED as "write all tests" and GREEN as "write all code."
@@ -39,6 +47,12 @@ RIGHT (vertical):
   RED→GREEN: test3→impl3
   ...
 ```
+
+## Anti-Pattern: Tautological Tests
+
+A **tautological test** recomputes its expected value the way the code does, so it passes by construction and can never disagree with the code. `assert fill_price(tick) == tick.price` when the implementation *is* `return tick.price`; a property test whose oracle is a copy of the function under test; a hand-derived snapshot computed with the same formula. These are green the moment they're written and stay green when the behavior breaks — worse than no test, because they read as coverage.
+
+Expected values must come from an **independent source of truth**: a known-good literal (`Decimal("50000")`), a worked example from the SPEC or an ADR, or a genuinely different computation. For a `hypothesis` property, assert an *invariant* the code doesn't compute the same way (duplicate-delivery convergence, a saga never leaving a legal state) — not the function's own output re-derived. See [tests.md](tests.md).
 
 ## Workflow
 
@@ -66,6 +80,7 @@ When exploring the codebase, use the project's domain glossary so that test name
 Before writing any code:
 
 - [ ] Confirm with user what interface changes are needed
+- [ ] **Confirm the seams under test up front** (see [Seams](#seams--where-tests-go)) — no test at an unconfirmed seam
 - [ ] Confirm with user which behaviors to test (prioritize)
 - [ ] Identify opportunities for [deep modules](deep-modules.md) (small interface, deep implementation)
 - [ ] Design interfaces for [testability](interface-design.md)
@@ -103,6 +118,14 @@ Rules:
 - Don't anticipate future tests
 - Keep tests focused on observable behavior
 - Commit subjects follow Conventional Commits — `feat|fix|docs|refactor|test|chore|ci(scope)?: ...` (see `CONTRIBUTING.md`). The `pr-policy` CI check rejects the eventual PR on a single non-conforming subject, so get it right per commit, not at PR time.
+
+### Feedback cadence
+
+Match the feedback loop to its cost — cheap checks often, the expensive one once:
+
+- **Typecheck regularly** — `uv run mypy .` after each green (and `uv run ruff check .` for lint). Fast, and catches the class of error a single test won't.
+- **Run the single test file regularly** — `uv run pytest tests/<area>/test_x.py -v` (or `::TestClass::test`) is your inner loop; run it every red→green, not the whole suite.
+- **Run the full suite once at the end** — `uv run pytest -v` before you consider the branch done, to catch cross-module regressions the focused runs miss. Don't pay for the full suite on every cycle.
 
 ### 4. Refactor
 

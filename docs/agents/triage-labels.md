@@ -28,7 +28,7 @@ Set these with `gh pr edit` — exactly one at a time, clearing the others (see 
 
 ## Priority Labels
 
-Every AFK implementation issue created by `to-issues` gets exactly one priority label:
+Every AFK implementation issue created by `to-tickets` gets exactly one priority label:
 
 | Label      | Meaning                                                  |
 | ---------- | -------------------------------------------------------- |
@@ -65,7 +65,7 @@ There is no priority-label sort within the picker. Priority labels still drive m
 
 To enforce "slice B must wait for slice A," apply the `blocked` label to slice B **and** create GitHub's real dependency relationship (`…/issues/B/dependencies/blocked_by` with A's database id — see *Link a blocker* in [`issue-tracker.md`](./issue-tracker.md)). The `blocked` label is what the picker filters on; the dependency is what makes the slice order machine-readable everywhere else. When slice A merges, remove `blocked` from slice B so the next iteration can pick it.
 
-Rule of thumb: when `to-issues` opens slices for a new PRD, label every slice except the first as `blocked` and chain each slice's dependency to its predecessor. As each slice merges, unblock the next.
+Rule of thumb: when `to-tickets` opens slices for a new PRD, label every slice except the first as `blocked` and chain each slice's dependency to its predecessor. As each slice merges, unblock the next.
 
 When closing an issue (or merging a PR that closes one), find the issues it was blocking with a query — the real dependency graph, not a prose scan:
 

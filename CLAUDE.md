@@ -10,17 +10,19 @@ v1 scope: Hyperliquid (real, read-only-auth market data) + an in-process determi
 
 ## Workflow (grill-with-docs)
 
-This repo uses the grill-with-docs / tracer-bullet workflow (Matt Pocock). Single repo; vertical-slice issues.
+This repo uses the grill-with-docs / tracer-bullet workflow. Single repo; vertical-slice issues.
 
 Pipeline:
 
-1. `/grill-with-docs` — exhaustive Phase 0 interview to define **all** requirements and scope before any code. Resolve terms in `CONTEXT.md`; write ADRs for load-bearing decisions. **Gate:** no PRD, no code until requirements/scope are signed off.
-2. `/to-prd` — parent PRD issue on the GitHub project.
+1. `/grill-with-docs` — exhaustive Phase 0 interview to define **all** requirements and scope before any code. Resolve terms in `CONTEXT.md`; write ADRs for load-bearing decisions. **Gate:** no PRD, no code until the maintainer confirms requirements/scope are signed off.
+2. `/to-spec` — synthesize the parent PRD issue (**synthesis-only, no interview** — alignment already happened in step 1). The artifact is still a PRD.
 3. `/module-map` — architecture anchor at `docs/module-maps/<slug>.md`.
-4. `/to-issues` — break the PRD into vertical-slice child issues, linked as GitHub sub-issues (all in this repo).
+4. `/to-tickets` — break the PRD into vertical-slice child tickets, linked as GitHub sub-issues (all in this repo), each declaring its blocking edges.
 5. `/tdd` per child — red-green-refactor on `ralph/issue-<N>` branch; vertical tracer through `feed → strategy → exchange → engine`.
 6. Open one PR per issue with `Closes #<N>` in the body.
 7. `/code-review` — structured BLOCKING/WARN/NIT review; label `ralph:ready` when clean. Merge closes the issue automatically.
+
+Auxiliary skills (used as needed, not part of the linear pipeline): `/wayfinder` — chart a huge, foggy effort as a map of decision tickets on the tracker before it's spec-able; `/research` — delegate primary-source investigation to a background agent, cited Markdown under `docs/research/`; `/prototype` — throwaway logic prototype to pressure-test a state model before committing.
 
 See `docs/workflow/labels.md` for the label schema and `docs/agents/issue-tracker.md` for gh CLI / project-board conventions.
 

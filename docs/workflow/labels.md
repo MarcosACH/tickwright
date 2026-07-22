@@ -2,7 +2,7 @@
 
 This is the canonical label set for the grill-with-docs workflow in this **single repo**. Provision it with `.agents/tools/ensure-labels.sh` (idempotent) or `gh label create` directly.
 
-The schema has five concerns: PR state machine, issue priority, issue domain (drives model selection if the AFK loop is used), human gates, and process.
+The schema has six concerns: PR state machine, issue priority, issue domain (drives model selection if the AFK loop is used), human gates, process, and wayfinding (decision-ticket maps, only if the `wayfinder` skill is used).
 
 > Single-repo project — there is **no** `repo:*` routing dimension. The parent PRD issue and all child vertical-slice issues live in this one repo.
 
@@ -64,6 +64,18 @@ Any one of these on an issue means it must not be picked autonomously.
 | `prd` | `#5319e7` (purple) | Parent PRD issue — sub-issues describe vertical slices |
 | `ai` | `#bfd4f2` (sky) | Created or executed by an AI agent |
 | `bug` | `#d73a4a` (red) | (Existing GitHub default; preserved) |
+
+## Wayfinder — decision-ticket maps
+
+Used only by the [`wayfinder`](../../.claude/skills/wayfinder/SKILL.md) skill, which charts a huge, foggy effort as a **map** issue whose child issues are **decision tickets**. `wayfinder:map` marks the map; each ticket carries exactly one `wayfinder:<type>` naming the skill that resolves it. See [`issue-tracker.md` → Wayfinding operations](../agents/issue-tracker.md#wayfinding-operations).
+
+| Name | Color | Description |
+|---|---|---|
+| `wayfinder:map` | `#006b75` (dark teal) | The map issue — index of decision tickets for one effort |
+| `wayfinder:grill-with-docs` | `#0e8a8f` (teal) | Decision ticket resolved by `/grill-with-docs` (the default type) |
+| `wayfinder:research` | `#2bb0bd` (light teal) | AFK ticket resolved by a `/research` subagent |
+| `wayfinder:prototype` | `#5ec8d3` (pale teal) | HITL ticket resolved by a `/prototype` logic prototype |
+| `wayfinder:task` | `#bfe9ee` (palest teal) | Manual prerequisite that unblocks a decision (HITL or AFK) |
 
 ---
 

@@ -14,7 +14,7 @@ Comprehensiveness is not optional. An issue missing metadata is invisible to tri
 
 **Required metadata on every new issue:**
 
-| Field | PRD (`to-prd`) | Slice (`to-issues`) | Bug |
+| Field | PRD (`to-spec`) | Slice (`to-tickets`) | Bug |
 | --- | --- | --- | --- |
 | **Title** | imperative capability name (e.g. "Crash-safe order-lifecycle saga") | the single vertical behavior (e.g. "Reject limit order when price crosses band") | observed defect (e.g. "Paper exchange double-fills on restart") |
 | **Kind label** | `prd` | one priority label — `tracer` (default) / `critical` / `infra` / `polish` | `bug` |
@@ -30,7 +30,7 @@ Milestones are **not** used; sequencing comes from Status plus the `blocked` lab
 
 - **Problem / motivation** — what is missing or broken, and why it matters now.
 - **Goal & scope** — the target outcome, with an explicit **Out of scope** list.
-- **Vertical slices** — the child issues this decomposes into (linked as sub-issues by `to-issues`).
+- **Vertical slices** — the child issues this decomposes into (linked as sub-issues by `to-tickets`).
 - **Acceptance criteria** — observable, testable conditions for "done".
 - **Affected layers** — the feed → strategy → exchange → engine touch-points.
 - **References** — ADRs (`docs/adr/…`), CONTEXT.md terms, the module map.
@@ -47,11 +47,11 @@ Milestones are **not** used; sequencing comes from Status plus the `blocked` lab
 
 ## Conventions
 
-- **Create an issue**: `gh issue create -R MarcosACH/tickwright --title "..." --body "..."`. Use a heredoc for multi-line bodies. Populate the title, body, labels, and assignee to match **Anatomy of a well-formed issue** above — a bare title + body is not a complete issue. **`gh issue create` does NOT add the issue to the project board** — you must add it explicitly with `gh project item-add 2 --owner MarcosACH --url <issue-url>` immediately after creation. New project items have no Status until an agent sets one; the `to-prd` and `to-issues` skills set newly-filed issues to `Todo`. Use `Backlog` only for items you want to defer (noted but not yet ready to be picked). An issue that is not on the project board is invisible to triage and Ralph; treat creation-without-linking as a bug.
+- **Create an issue**: `gh issue create -R MarcosACH/tickwright --title "..." --body "..."`. Use a heredoc for multi-line bodies. Populate the title, body, labels, and assignee to match **Anatomy of a well-formed issue** above — a bare title + body is not a complete issue. **`gh issue create` does NOT add the issue to the project board** — you must add it explicitly with `gh project item-add 2 --owner MarcosACH --url <issue-url>` immediately after creation. New project items have no Status until an agent sets one; the `to-spec` and `to-tickets` skills set newly-filed issues to `Todo`. Use `Backlog` only for items you want to defer (noted but not yet ready to be picked). An issue that is not on the project board is invisible to triage and Ralph; treat creation-without-linking as a bug.
 - **Assignee**: every newly-filed issue (parent PRDs and child slices) must have an assignee set immediately after creation. The convention is `@me` — the GitHub user whose token the `gh` CLI is authenticated as (the project owner running the workflow). `gh issue create --assignee @me` works for the create step; for issues already created, use `gh issue edit <n> -R MarcosACH/tickwright --add-assignee @me`. Unassigned issues are treated as triage-pending and Ralph will not pick them up.
 - **Issue kind (by label, not GitHub Issue Type)**: this repo is user-owned, and GitHub custom Issue Types are an organization-only feature, so they are **not** used here. Distinguish kind by label instead — every newly-filed issue must carry exactly one kind:
-  - **PRDs** (filed by `to-prd`) → `prd`
-  - **Child slice issues** (filed by `to-issues`) → one priority label (`tracer` by default; `critical` / `infra` / `polish` as appropriate) and **never** `prd`
+  - **PRDs** (filed by `to-spec`) → `prd`
+  - **Child slice issues** (filed by `to-tickets`) → one priority label (`tracer` by default; `critical` / `infra` / `polish` as appropriate) and **never** `prd`
   - **Bug reports** → `bug`
 
   Apply at creation with `gh issue create --label prd ...`, or afterward with `gh issue edit <n> -R MarcosACH/tickwright --add-label prd`. The parent-vs-child distinction is thus `prd` (parent) versus a priority label (child slice).
@@ -87,7 +87,7 @@ Milestones are **not** used; sequencing comes from Status plus the `blocked` lab
 
 ## When a skill says "publish to the issue tracker"
 
-Create a GitHub issue in `MarcosACH/tickwright`, then add it to the project board. See [`to-issues`](../../.claude/skills/to-issues/SKILL.md) for the full creation flow.
+Create a GitHub issue in `MarcosACH/tickwright`, then add it to the project board. See [`to-tickets`](../../.claude/skills/to-tickets/SKILL.md) for the full creation flow.
 
 ## When a skill says "fetch the relevant ticket"
 
@@ -118,7 +118,7 @@ The project board has Status column `Backlog → Todo → In Progress → In Rev
 
 | Trigger                                | Agent action                                                              |
 | -------------------------------------- | ------------------------------------------------------------------------- |
-| Issue filed by `to-prd` / `to-issues`  | Status set to `Todo` immediately (skips `Backlog`)                        |
+| Issue filed by `to-spec` / `to-tickets` | Status set to `Todo` immediately (skips `Backlog`)                       |
 | Item intentionally deferred            | Human drags Status to `Backlog`                                           |
 | Picking up an issue                    | Remove `needs-triage` if present; move Status to `In Progress`            |
 | Opening the PR (with `Closes #<n>`)    | Move Status to `In Review` — signals the ticket is awaiting review        |
@@ -189,3 +189,20 @@ If the option ids ever drift (e.g. someone renames a Status option in the GitHub
 ```sh
 gh api graphql -f query='query{node(id:"'"$STATUS_FIELD"'"){... on ProjectV2SingleSelectField{options{id name}}}}'
 ```
+
+## Wayfinding operations
+
+Used by [`/wayfinder`](../../.claude/skills/wayfinder/SKILL.md) to plan a huge, foggy effort as a **map** issue with **decision-ticket** child issues. These reuse the mechanics above (project board, sub-issue linking, native dependencies, Status transitions) — this section only says how `/wayfinder` composes them. Labels are provisioned by `.agents/tools/ensure-labels.sh` (`wayfinder:map`, `wayfinder:research`, `wayfinder:prototype`, `wayfinder:grill-with-docs`, `wayfinder:task`; canonical in [`labels.md`](../workflow/labels.md)).
+
+- **Map**: a single issue labelled `wayfinder:map`, holding the Destination / Notes / Decisions-so-far / fog body. Create it like any issue (title, body, `--assignee @me`), add it to project 2, and set Status `Todo` — same flow as *Create an issue* above, just with the `wayfinder:map` label. It is the canonical artifact; its child tickets hold the detail.
+- **Child ticket**: an issue linked to the map as a real **GitHub sub-issue** (the `sub_issue_id` REST call in *Link as a sub-issue of a parent* above), added to project 2 at Status `Todo`, carrying one `wayfinder:<type>` label. Its body is a single `## Question`.
+- **Blocking**: GitHub's **native issue dependency** (`dependencies/blocked_by`, the `issue_id` = blocker **database id** — see *Link a blocker* above). This is what renders the frontier visually in GitHub's UI. `/wayfinder` does **not** use the `blocked` label here (that label is the Ralph picker's filter; the wayfinder frontier is computed from dependencies + Status, not picked by Ralph).
+- **Claim — solo-repo caveat**: assigning a ticket would be the natural claim signal (unassigned = unclaimed), but that can't work here — this repo assigns **every** issue to `@me` at creation (the Assignee convention above), so the assignee never distinguishes claimed from unclaimed. Instead, **claim a wayfinder ticket by moving its Status `Todo → In Progress`** (the *Moving Status with `gh`* recipe above) before any work. Concurrent sessions are rare in a solo repo, so this is a light convention, not a lock.
+- **Frontier query**: the map's open child issues whose blockers are all closed and whose Status is still `Todo` (unclaimed); first in map order wins. List the map's sub-issues, drop any with an open `blocked_by`, drop any already `In Progress`:
+  ```sh
+  gh api repos/MarcosACH/tickwright/issues/<map>/sub_issues --jq '.[] | select(.state=="open") | .number'
+  # for each, an open blocker disqualifies it:
+  gh api repos/MarcosACH/tickwright/issues/<child>/dependencies/blocked_by --jq '[.[] | select(.state=="open")] | length'
+  ```
+  (Read each candidate's project Status via the `item-list` query in *Moving Status* to skip the `In Progress` ones.)
+- **Resolve**: `gh issue comment <n> --body "<answer>"`, then `gh issue close <n>` (its Status auto-moves to `Done` on close — the same automation as a merged PR), then append a one-line context pointer (gist + link) to the map's Decisions-so-far. A wayfinder ticket closes on **resolution**, not via a PR `Closes #N`; it has no code merge of its own, so this deliberate close is legitimate (it is not a child slice issue — the "never close manually" rule targets those).

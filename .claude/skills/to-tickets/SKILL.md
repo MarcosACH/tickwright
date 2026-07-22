@@ -1,11 +1,11 @@
 ---
-name: to-issues
-description: Break a plan, spec, or PRD into independently-grabbable issues on the project issue tracker using tracer-bullet vertical slices. Use when user wants to convert a plan into issues, create implementation tickets, or break down work into issues.
+name: to-tickets
+description: Break a plan, spec, or PRD into independently-grabbable tickets on the project issue tracker using tracer-bullet vertical slices, each declaring its blocking edges. Use when user wants to convert a plan into issues, create implementation tickets, or break down work into issues.
 ---
 
-# To Issues
+# To Tickets
 
-Break a plan into independently-grabbable issues using vertical slices (tracer bullets).
+Break a plan into independently-grabbable **tickets** — tracer-bullet vertical slices, each declaring the tickets that **block** it — filed as GitHub issues (the produced artifact is still a GitHub issue).
 
 See `docs/workflow/labels.md` for the full label vocabulary (PR state, priority, domain, human gates), `docs/agents/issue-tracker.md` for the gh CLI patterns (creation, sub-issue linking, status transitions), and `docs/agents/triage-labels.md` for the canonical role → label mapping the skills speak in.
 
@@ -38,6 +38,8 @@ Remember the matched map's path; you will reference it from each issue body in s
 
 If you have not already explored the codebase, do so to understand the current state of the code. Issue titles and descriptions should use the project's domain glossary vocabulary (CONTEXT.md), the module names from the matched module map, and respect ADRs in the area you're touching.
 
+While exploring, look for opportunities to **prefactor** — reshape the existing code so the feature drops in cleanly. "Make the change easy, then make the easy change." A prefactor is its own slice (or slices), sequenced **first**, blocking the slices that build on it.
+
 ### 3. Draft vertical slices
 
 Break the plan into **tracer bullet** issues. Each issue is a thin vertical slice that cuts through ALL integration layers end-to-end, NOT a horizontal slice of one layer.
@@ -47,8 +49,18 @@ Slices may be 'HITL' or 'AFK'. HITL slices require human interaction, such as an
 <vertical-slice-rules>
 - Each slice delivers a narrow but COMPLETE path through every layer (feed → strategy → exchange → engine, plus tests)
 - A completed slice is demoable or verifiable on its own
+- Each slice is sized to fit in **a single fresh context window** — one Ralph agent, started cold, can carry it start to green without compacting. If a slice won't fit, split it.
+- Any prefactoring (step 2) is its own slice, sequenced first
 - Prefer many thin slices over few thick ones
 </vertical-slice-rules>
+
+**Wide refactors are the exception to vertical slicing.** A **wide refactor** is one mechanical change — rename a field on a shared struct, retype a symbol every layer imports — whose **blast radius** fans across the whole codebase, so a single edit breaks hundreds of call sites at once and no vertical slice can land green. Don't force it into a tracer bullet; sequence it as **expand–contract**:
+
+- **Expand** — add the new form beside the old so nothing breaks (one slice).
+- **Migrate** — move the call sites over in batches sized by blast radius (per package, per module directory), each batch its own slice blocked by the expand, keeping the suite green batch to batch because the old form still exists.
+- **Contract** — delete the old form once no caller remains (one slice, blocked by every migrate batch).
+
+When even a migrate batch can't stay green alone (an invariant spans the old and new forms mid-migration), keep the sequence but let the batches share an integration branch that all block a final integrate-and-verify slice — green is promised only there. This is the sanctioned way to break the vertical-slice policy; use it only when the blast radius genuinely forces it, and say so in the slice bodies.
 
 ### 4. Quiz the user
 

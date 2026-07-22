@@ -45,6 +45,13 @@ LABELS=(
   "chain|d93f0b|Live Hyperliquid integration, signing, key material"
   "concurrency|d93f0b|Async ordering, races, delivery guarantees"
   "unsafe|d93f0b|Modifies an invariant flagged \"unsafe\" in CONTEXT.md"
+
+  # Wayfinder — decision-ticket maps (used only by the wayfinder skill)
+  "wayfinder:map|006b75|The map issue — index of decision tickets for one effort"
+  "wayfinder:grill-with-docs|0e8a8f|Decision ticket resolved by /grill-with-docs (default type)"
+  "wayfinder:research|2bb0bd|AFK ticket resolved by a /research subagent"
+  "wayfinder:prototype|5ec8d3|HITL ticket resolved by a /prototype logic prototype"
+  "wayfinder:task|bfe9ee|Manual prerequisite that unblocks a decision (HITL or AFK)"
 )
 
 for entry in "${LABELS[@]}"; do
