@@ -15,6 +15,13 @@ anticipates this, so the cost is contained to the `ExecutionManager` gaining:
 Multiple strategies may trade the **same symbol** independently; their orders stay isolated by
 distinct `cloid`s, and per-symbol ordering (ADR-0003) is unaffected.
 
+> **Caveat — position economics (ADR-0034).** This same-symbol independence is an **order-level**
+> property (distinct `cloid`s, routing). It does **not** extend to position economics on a
+> one-way (`NET`) venue, where all same-symbol fills net into a single venue position. There,
+> `(strategy, symbol)` ownership must be **disjoint per account** — the registry fail-fast rejects
+> a second strategy declaring a symbol another already owns on the same account — and same-symbol
+> isolation requires a **separate account**. `HEDGE`-mode venues may relax this. See ADR-0034.
+
 ## Scope guard: engine capability, not a strategy library
 
 The deliverable is the **multi-strategy engine**, not a catalog of algorithms. The shipped

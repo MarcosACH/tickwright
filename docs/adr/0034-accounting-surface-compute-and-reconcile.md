@@ -4,7 +4,7 @@ status: accepted
 
 # The accounting surface computes everywhere and reconciles against venue truth on live
 
-_Decision ticket [#111](https://github.com/MarcosACH/tickwright/issues/111) (D1) on the trade-economics map [#107](https://github.com/MarcosACH/tickwright/issues/107). This ADR is a planning artifact; it folds into `main` when the effort lands._
+_Accepted via the D1 grilling session on decision ticket [#111](https://github.com/MarcosACH/tickwright/issues/111), part of the trade-economics map [#107](https://github.com/MarcosACH/tickwright/issues/107). Downstream map tickets, the PRD, and implementation build on it._
 
 The account/position/PnL surface is a **fill-fed write-through projection** with **identical compute logic on paper and live** — it subscribes to fills like the order `Cache` (ADR-0009). On live, a reconciliation loop **heals it against the venue's account/position snapshot**, mirroring order-saga reconciliation (ADR-0011). We reject "mirror venue truth on live" (a second code path that the paper exchange — which has no venue to mirror — cannot share) and "hybrid snapshot-replace" (a coarse special case of reconciliation). One truth model, one recovery story for the whole engine.
 
