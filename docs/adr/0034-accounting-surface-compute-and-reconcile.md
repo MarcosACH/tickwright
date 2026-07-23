@@ -35,7 +35,7 @@ Recovery lifts ADR-0009 from orders to accounting, on the same crash-only code p
 
 ## Funding-accrual idempotency
 
-Each funding accrual is a **keyed idempotent ledger event** — deterministic id `(account, symbol, funding-timestamp)` (ADR-0025) — so replay-on-restart *and* a reconcile that re-ingests the same funding both converge without double-counting. Live **ingests** funding from the venue keyed by `(time, symbol)`; paper **generates** it on the `Clock` keyed the same way — one idempotent shape, both modes. Funding *mechanics* are deferred to the funding-model ticket ([#117](https://github.com/MarcosACH/tickwright/issues/117)).
+Each funding accrual is a **keyed idempotent ledger event** — deterministic id `(account, symbol, funding-timestamp)` (ADR-0025) — so replay-on-restart *and* a reconcile that re-ingests the same funding both converge without double-counting. Live **ingests** funding from the venue keyed by `(time, symbol)`; paper **generates** it on the `Clock` keyed the same way — one idempotent shape, both modes. Funding *mechanics* — the precise key, sign convention, boundary schedule, paper `Clock`-driven catch-up cadence, and live `userFundings` ingest — are **fixed by ADR-0037** (resolving [#117](https://github.com/MarcosACH/tickwright/issues/117)), now the canonical source; the `funding-timestamp` above is the epoch-aligned `boundary_ts` on paper and the venue's `userFunding.time` on live.
 
 ## Consequences
 
