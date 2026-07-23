@@ -324,6 +324,33 @@ Enforced mechanically by an `import-linter` contract in CI — a cross-adapter o
 **fails the build**, so decoupling is a gate, not an aspiration. See ADR-0032.
 _Avoid_: layering, tidy imports (undersell the enforced boundary).
 
+**Position**:
+The per-`(account, strategy, symbol)` economic aggregate of one instrument's net exposure —
+signed size, average entry, realized PnL, accrued fees and funding, cash impact (the exact
+Tier-1 "ledger" it accumulates through an idempotent `apply`) — with unrealized PnL and notional
+**recomputed from a mark**, never stored. A pure `domain` aggregate, the economic sibling of the
+[[Order saga]]. See ADR-0035, ADR-0034.
+_Avoid_: holding, lot, order (the FSM saga is the [[Order saga]]).
+
+**Account**:
+One collateral pool's balances — `total = locked + free` — plus its **reported** margin, effective
+leverage, and liquidation price recomputed from marks; the boundary reconciled against the venue's
+account snapshot (the sole reconciliation anchor, ADR-0034). See ADR-0035.
+_Avoid_: wallet, balance (a facet); not `eth_account.Account` (the signing library's unrelated type).
+
+**Portfolio** *(seam)*:
+The pull-style read seam a [[Strategy]] queries for [[Position]]/[[Account]] snapshots — reads are
+**method calls, never a PnL subscription** (ADR-0004). Delivers ADR-0017's deferred positions-tracker;
+**not** the portfolio-*risk* surface. See ADR-0035.
+_Avoid_: portfolio risk, RiskEngine (enforcement, deferred), position manager.
+
+**PortfolioProjection**:
+The fill-fed write-through projection of [[Position]]/[[Account]] state implementing [[Portfolio]] —
+the accounting sibling of the [[Cache]], updated **synchronously on the fill-apply path** (never a bus
+subscriber), reconciled against venue truth on live, rebuilt from the [[Store]] on restart. See
+ADR-0035, ADR-0034.
+_Avoid_: cache (that's the order read-model), ledger (reserved), portfolio tracker.
+
 ## Relationships
 
 - The **Engine** hosts one **EventBus**; swapping the bus backend (InMemory ↔ Kafka) changes
@@ -333,9 +360,18 @@ _Avoid_: layering, tidy imports (undersell the enforced boundary).
 - Concrete impls ([[Venue adapter]]s, bus/store backends, strategies) depend only on the `domain`
   Protocols; the [[Composition root]] is the one place that knows every concrete
   ([[Dependency direction]]).
+- A **Position** belongs to one **Account** and one **Strategy**; on a `NET` venue
+  `Σ(Position size per symbol) = Account net size = venue szi` (per-strategy attribution bridged to
+  the reconciliation anchor, ADR-0034).
+- The **PortfolioProjection** projects **Position**/**Account** state and implements the **Portfolio**
+  seam, fed by the **ExecutionManager** on the fill-apply path — the accounting sibling of the
+  **Cache** (order read-model).
 
 ## Flagged ambiguities
 
 - "worker" in the author's prior system meant a separate OS process per pipeline stage. Here
   the whole pipeline is one process; avoid "worker" for Tickwright components — use the
   component name (feed/strategy/exchange) or **Engine** for the host.
+- "Portfolio" was used for both the accounting read-facade and the deferred portfolio-*risk*/exposure
+  surface — resolved: [[Portfolio]] is the accounting read seam (this map); portfolio-risk enforcement
+  stays the deferred RiskEngine concern (ADR-0017).
