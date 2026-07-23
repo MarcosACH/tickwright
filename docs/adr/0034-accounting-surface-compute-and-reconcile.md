@@ -1,7 +1,3 @@
----
-status: accepted
----
-
 # The accounting surface computes everywhere and reconciles against venue truth on live
 
 _Accepted via the D1 grilling session on decision ticket [#111](https://github.com/MarcosACH/tickwright/issues/111), part of the trade-economics map [#107](https://github.com/MarcosACH/tickwright/issues/107). Downstream map tickets, the PRD, and implementation build on it._
