@@ -28,6 +28,7 @@ See `docs/workflow/labels.md` for the label schema and `docs/agents/issue-tracke
 
 ## Required Behavior
 
+- **Be concise.** Keep responses short and to the point; skip preamble, hedging, and restating the question.
 - Always aim for best software-engineering and architectural practices.
 - Prefer minimal, targeted edits over broad rewrites; match existing naming and style.
 - **No code is copied from any prior/private codebase.** Generalizable patterns are reimplemented from first principles and validated against current best practice before coding.
