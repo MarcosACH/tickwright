@@ -328,15 +328,27 @@ _Avoid_: layering, tidy imports (undersell the enforced boundary).
 The per-`(account, strategy, symbol)` economic aggregate of one instrument's net exposure —
 signed size, average entry, realized PnL, accrued fees and funding, cash impact (the exact
 Tier-1 "ledger" it accumulates through an idempotent `apply`) — with unrealized PnL and notional
-**recomputed from a mark**, never stored. A pure `domain` aggregate, the economic sibling of the
-[[Order saga]]. See ADR-0035, ADR-0034.
+**recomputed from a mark**, never stored. The `account` is ambient (one per process, ADR-0038) and
+`strategy` is nullable: **`None` is the reserved unattributed partition** holding flow the engine
+never placed. A pure `domain` aggregate, the economic sibling of the [[Order saga]]. See ADR-0035,
+ADR-0034, ADR-0038.
 _Avoid_: holding, lot, order (the FSM saga is the [[Order saga]]).
 
 **Account**:
 One collateral pool's balances — `total = locked + free` — plus its **reported** margin, effective
 leverage, and liquidation price recomputed from marks; the boundary reconciled against the venue's
-account snapshot (the sole reconciliation anchor, ADR-0034). See ADR-0035.
+account snapshot (the sole reconciliation anchor, ADR-0034). A **deployment fact**: one [[Engine]]
+process trades exactly one, owned exclusively (ADR-0038). See ADR-0035.
 _Avoid_: wallet, balance (a facet); not `eth_account.Account` (the signing library's unrelated type).
+
+**AccountSpec**:
+The venue adapter's **static declarations** about the [[Account]] it trades — the qualified
+`account_id` (venue + network + venue-native identifier) and the `NET`/`HEDGE` netting semantics —
+exposed on the [[Venue adapter]]'s `Exchange` seam beside the instrument specs and read once at
+composition. `AccountSpec` is to [[Account]] as the instrument spec is to the instrument: static
+declaration, never live balances. See ADR-0038, ADR-0031.
+_Avoid_: account config (it is adapter-authored, not operator-authored), account state/snapshot
+(that is the venue's live truth the [[PortfolioProjection]] reconciles against).
 
 **Portfolio** *(seam)*:
 The pull-style read seam a [[Strategy]] queries for [[Position]]/[[Account]] snapshots — reads are
@@ -375,14 +387,19 @@ funding **rate** (the input rate, not the cash accrual).
 
 - The **Engine** hosts one **EventBus**; swapping the bus backend (InMemory ↔ Kafka) changes
   durability and inspectability, never the number of processes.
-- The **Engine** hosts exactly one live **Exchange** = **one venue per process**; scaling to N
-  exchanges is N processes ([[Venue adapter]]), not one engine routing across venues.
+- The **Engine** hosts exactly one live **Exchange** = **one venue per process** and **one Account
+  per process**; scaling to N exchanges or N accounts is N processes ([[Venue adapter]]), not one
+  engine routing across venues or accounts. An **Account** is owned by exactly one process
+  (ADR-0038) — two engines on one account would each heal their ledger toward the other's flow.
 - Concrete impls ([[Venue adapter]]s, bus/store backends, strategies) depend only on the `domain`
   Protocols; the [[Composition root]] is the one place that knows every concrete
   ([[Dependency direction]]).
-- A **Position** belongs to one **Account** and one **Strategy**; on a `NET` venue
-  `Σ(Position size per symbol) = Account net size = venue szi` (per-strategy attribution bridged to
-  the reconciliation anchor, ADR-0034).
+- A **Position** belongs to one **Account** and one **Strategy** — or to the unattributed partition
+  when the engine did not place the flow; on a `NET` venue
+  `Σ(Position size per symbol) = Account net size = venue szi` holds by construction
+  (per-strategy attribution bridged to the reconciliation anchor, ADR-0034/0038).
+- Each **Venue adapter** declares its **AccountSpec**; the **Engine** wires it in at startup, the
+  same way it wires the instrument specs into the **PreTradeGuard** (ADR-0031, ADR-0038).
 - The **PortfolioProjection** projects **Position**/**Account** state and implements the **Portfolio**
   seam, fed by the **ExecutionManager** on the fill-apply path — the accounting sibling of the
   **Cache** (order read-model).
