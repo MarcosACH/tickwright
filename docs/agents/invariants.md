@@ -27,5 +27,7 @@ Consumed by `/code-review` (any regression is BLOCKING) and `/python-codebase-ma
 7. **Account exclusivity.** One process trades exactly one account, and an account is owned by
    exactly one process — the cloid ownership boundary protects the order saga but has no analogue
    on a position, so two engines on one account each heal their ledger toward the other's flow.
-   A `Store` whose ledger names a different `account_id` than the adapter reports fail-fasts.
+   *Enforcement lands with the accounting surface — the `Store` binds its ledger to one
+   `account_id` and fail-fasts when the adapter reports another; concurrent ownership is
+   undetectable in-process either way and stays a deployment rule.*
    (ADR-0038, ADR-0031, ADR-0034)

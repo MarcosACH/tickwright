@@ -23,8 +23,9 @@ distinct `cloid`s, and per-symbol ordering (ADR-0003) is unaffected.
 > isolation requires a **separate account**. `HEDGE`-mode venues may relax this. See ADR-0034.
 >
 > **And a separate account means a separate process (ADR-0038).** With one account per process,
-> the rule above reads as **`(strategy, symbol)` disjoint process-wide**, enforced by this
-> registry. Isolating same-symbol strategies is therefore a *deployment* act — a second process
+> the rule above reads as **`(strategy, symbol)` disjoint process-wide**, to be enforced by this
+> registry — a second fail-fast beside the `strategy_id` one, landing with the accounting
+> surface. Isolating same-symbol strategies is therefore a *deployment* act — a second process
 > against a second account (a Hyperliquid sub-account), never two processes sharing one account,
 > which ADR-0038's exclusivity invariant forbids.
 

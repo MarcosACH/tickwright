@@ -46,8 +46,8 @@ makes the topic name, the consumer-group id, and the store location (ADR-0019) *
 configuration** — two engine processes must never share any of the three. A shared topic would have
 two venues consuming each other's events with **unqualified symbols colliding** (BTC exists on both
 venues), silently re-importing the venue-identity problem ADR-0031 deferred; a shared store would
-have two accounts' fills accreting onto one ledger, which ADR-0038's `account_id` check fail-fasts
-on. The env keys already exist (`KAFKA_*_TOPIC`, `STORE_*`); this rule makes isolation a stated
+have two accounts' fills accreting onto one ledger, which ADR-0038's `account_id` binding check
+will fail-fast on once the accounting surface lands. The env keys already exist (`KAFKA_*_TOPIC`, `STORE_*`); this rule makes isolation a stated
 invariant, not a deployment accident.
 
 **Topic-per-family was rejected on parity grounds, not preference:** separate market/signals/orders
