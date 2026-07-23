@@ -360,6 +360,17 @@ into entry price or realized PnL. See ADR-0036, ADR-0013.
 _Avoid_: commission (a taken-liquidity synonym; "fee" spans rebates too), cost basis (that's entry
 price), slippage (a fill-*price* effect, not a fee).
 
+**Funding**:
+The periodic **cash adjustment** a perpetual [[Position]] accrues to its [[Account]] collateral —
+a signed `Decimal` (negative = **paid**, positive = **received**, mirroring the venue's
+`userFunding.usdc`), settled hourly at epoch-aligned boundaries as **`FundingAccrual`** events
+`(account, symbol, boundary_ts, amount)`, keyed idempotent so catch-up, reconcile, and restart
+converge. Paper **generates** it on the [[Clock]] cadence (`amount = − signed_size × price ×
+funding_rate`, `funding_rate` a per-boundary rate on the instrument); live **ingests** the venue's
+reported payment. Its **own ledger line**, never entry price or realized PnL. See ADR-0037, ADR-0034.
+_Avoid_: interest, carry, funding **fee** (it is not a [[Fee]] — no trade, no maker/taker),
+funding **rate** (the input rate, not the cash accrual).
+
 ## Relationships
 
 - The **Engine** hosts one **EventBus**; swapping the bus backend (InMemory ↔ Kafka) changes
