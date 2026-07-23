@@ -1,0 +1,69 @@
+# Perp funding: a keyed `FundingAccrual` event, generated on paper's `Clock` cadence with catch-up, ingested from the venue on live
+
+_Accepted via the D4 grilling session on decision ticket [#117](https://github.com/MarcosACH/tickwright/issues/117), part of the trade-economics map [#107](https://github.com/MarcosACH/tickwright/issues/107). Grounded in R2 ([#109](https://github.com/MarcosACH/tickwright/issues/109)); builds on ADR-0034 (D1), ADR-0035 (D2), and ADR-0036 (D3, the fee sibling). Funding is the periodic-cash-adjustment counterpart to the per-fill fee._
+
+Perpetual **funding** is a periodic **cash adjustment** to an account's collateral, modeled as a first-class **`FundingAccrual`** event carrying a single signed `Decimal` `amount` (USDC). Each `Exchange` adapter produces it — `PaperExchange` **generates** accruals on a `Clock`-driven cadence with per-boundary catch-up; `HyperliquidExchange` **ingests** the venue's reported funding — and the `PortfolioProjection` merely **accrues** it onto funding's own Tier-1 ledger line (ADR-0034/0035), never into average entry price and never into realized PnL. This is the direct parallel to the fee decision (ADR-0036): same seam, same "own ledger line" treatment, differing only in that funding has no carrier fill and so becomes its own event.
+
+## The funding seam is the `Exchange` adapter, not a swappable `FundingModel`
+
+The two implementations "per seam" (ADR-0032) already exist as the two `Exchange` adapters. Funding is another economic fact each adapter is authority for, exactly as ADR-0036 framed fees:
+
+- **Paper generates.** `PaperExchange` computes each accrual `amount = − signed_size × price × funding_rate` at a funding boundary, from a configured rate (below). The arithmetic is a pure `domain` helper — a peer of `quantize_size` / the fee helper — unit-testable in isolation and shared, not an injected strategy object.
+- **Live ingests.** `HyperliquidExchange` reads the venue-reported funding payment straight off `userFundings` (WS) / `userFunding` (REST) — the venue already computed it hourly on the true oracle notional (R2).
+
+A dedicated `FundingModel` seam (paralleling the paper `FillModel`, ADR-0012) is **rejected** for the same reason `FeeModel` was (ADR-0036): a configured rate is deterministic config, not a nondeterminism model; the seam would be **single-implementation** on the paper side and a field-read on live. It earns its place only in a multi-schedule backtester, which is a Tickwright non-goal.
+
+## Paper drives off the `Clock` cadence primitive, but with per-boundary catch-up
+
+Paper has no venue to push funding, so it **generates** accruals on a loop built on ADR-0033's `Clock.sleep_until` pure waiter — correct under both the live wall-clock and replay virtual-time. But it deliberately **does not** reuse `run_cadence`'s "reschedule from now, with no catch-up" semantics, and the ADR records why:
+
+- The reconciliation cadences (ADR-0033) collapse a time-jump to **one** firing because reconcile cycles are **convergent** — re-running heals nothing new, so replaying missed firings is noise.
+- Funding is the opposite: **additive**. Each boundary is a distinct real economic payment. A virtual-time jump across N boundaries while a position is open must accrue **N** payments, not one — collapsing would silently under-charge funding.
+
+So the paper funding loop **settles every boundary strictly crossed** since the last, posting one keyed accrual per boundary. This catch-up is inherently safe because each accrual is idempotent-keyed (below): re-firing a boundary is a no-op. Funding is a **Tier-1 accumulated, write-path, durable** ledger line (ADR-0034) — never a Tier-2 recompute-on-read valuation — so a lazy "compute Σ over boundaries at read time" model is rejected: it would demote funding to a derived metric and lose the durable keyed event that recovery and reconcile depend on.
+
+Live never runs this loop: the venue emits funding at its own boundaries and we ingest it. The cadence is a **paper-only generator**; the *shape* it emits (a keyed `FundingAccrual`) is identical to what live ingests.
+
+## Boundaries are epoch-aligned at a configurable interval (default 1h)
+
+A funding boundary is any instant whose `ts_ns` is an integer multiple of the funding interval measured from the Unix epoch. At the default interval of **1 hour** that is exactly the top of each UTC hour — **the venue's real schedule** (R2). This is venue-faithful and replay-deterministic: the feed's `ts_event` timeline carries real timestamps, so a replayed run crosses the *same* absolute boundaries a live run would. The interval stays configuration for a future venue or test; relative-to-start boundaries were rejected (arbitrary phase, non-reproducible across launches).
+
+Paper position and the price proxy **only change on feed rows (ticks)**. A virtual-time jump that crosses several boundaries happens *between two consecutive ticks*, where no fill occurred — so position and last-known price are **constant across all caught-up boundaries**. Catch-up is therefore just "post N identical keyed accruals," distinguished only by their boundary timestamps.
+
+## Paper rate: one configured `funding_rate` on `InstrumentSpec`
+
+`InstrumentSpec` gains an additive signed `Decimal` **`funding_rate`** — the **per-boundary** (hourly) rate, positive ⇒ longs pay, **defaulting to `0`** so a frictionless spec stays valid and existing paper configs are unaffected. It is the venue-formula-independent effective rate: the ⅛-of-the-8h-rate detail (R2) is how the *venue* derives its real number; paper takes the effective per-boundary rate as config so the boundary math stays the clean `amount = − signed_size × price × funding_rate`.
+
+The parallel to the fee rates (ADR-0036) is exact and load-bearing: live **ignores** `funding_rate` (as it ignores `maker_fee`/`taker_fee`) and reads/ingests the venue's actual funding — so the two modes never disagree on a number the venue is the authority for. A **replayed / venue-sourced rate series** is a genuinely second paper behavior but needs a funding-rate **data channel in the feed**, which the trades-only, no-backtest paper feed does not have; it is named here as a deferred extension point, not v1 scope. Deriving the rate from the premium formula (impact bid/ask vs oracle, R2) is rejected outright — it needs an order book paper does not model at this rung.
+
+## Notional basis: paper collapses oracle to its single price proxy
+
+R2 is firm that the venue's funding notional is on the **oracle** price, not mark — deliberately, since mark is a manipulable median. But that distinction only bites where funding is **computed against a real venue**, and Tickwright never computes funding notional on live: it **ingests** the venue's already-computed payment. `size × oracle × rate` is therefore a **paper-only** computation, and paper has exactly one price signal — its **last-trade** price (the same proxy paper marks to, ADR-0034). So paper uses `price = last_trade_px`, **collapsing oracle → its single price proxy**; the oracle/mark split is a live reality that live sidesteps by ingesting. Funding and unrealized-PnL/mark thus share paper's one price source and stay consistent by construction, and funding rides whatever proxy the (pending) mark-price data model settles paper on. A separate paper oracle input was rejected — a second price channel to honor a distinction that is moot on paper and already handled on live. There is no missing-price edge: a non-flat position implies a prior fill on a tick that set last-trade, and a flat position accrues zero (skipped, below).
+
+## Sign: the accrual mirrors the venue's `userFunding.usdc`
+
+With signed position size (long > 0, short < 0):
+
+```
+amount = − signed_position_size × price × funding_rate
+```
+
+This equals the venue's `userFunding.usdc` (R2's worked example: long `szi=+49.1477`, rate `+0.0000417` ⇒ `usdc ≈ −3.63`): **negative = funding paid (cash out), positive = received (cash in)**; longs pay at a positive rate, shorts receive, and it flips at a negative rate. The account applies `cash += amount`.
+
+The `FundingAccrual` `amount` **mirrors its venue source field's sign** — the same meta-principle ADR-0036 set for the fee line (which mirrors `fee`, positive = cost). Live therefore **ingests `userFunding.usdc` verbatim** — zero sign transformation, so no flip bug and reconcile is a direct field compare — and paper computes the formula above, which reproduces that exact sign. The two lines' cash rules legitimately differ (`cash += funding` vs `cash −= fee`) because their venue fields carry opposite raw signs; each line stays faithful to its own venue source rather than to a forced house convention.
+
+## `FundingAccrual`: a first-class event, keyed and idempotent
+
+Funding is a first-class **`FundingAccrual`** event in the ADR-0025 taxonomy — `(account, symbol, boundary_ts, amount)` — **not** a carrier-less internal adjustment. Fees got to be a read-model (ADR-0036) because they ride an existing carrier event (the fill); funding has **no carrier**, so it becomes its own event rather than reinventing durable-keyed-idempotent state outside the taxonomy built for it. Live funding literally *arrives* as venue events (`userFundings`), mirroring the `FillReport → OrderFilled` ingress shape: paper **generates** the event, live **ingests** it, one shape both modes. It is applied store-first on the same synchronous Tier-1 write pattern ADR-0035 fixed (exact wiring is a spec-time detail).
+
+- **Idempotency key** `(account, symbol, boundary_ts)`, provenance-free (ADR-0025) — paper's `boundary_ts` is the epoch-aligned boundary instant; live's is the venue's `userFunding.time` (a given account is *either* paper or live, so the keys need never agree across modes — only dedupe within one account's stream). The key makes all three convergence paths no-ops on redelivery: **catch-up**, live **reconcile re-ingest**, and **restart-replay**. A reconciler-synthesized heal and a venue push of the same funding collapse to the same key — the ADR-0011 synthetic-event guarantee, same as fills and fees.
+- **Recovery** is snapshot-plus-reconcile (ADR-0034): restore the funding line from the `Store`, then live reconciles against `userFunding` history to heal anything that landed while down. Boundaries are a deterministic function of time + epoch alignment, so catch-up needs **no stored watermark for correctness** — it re-derives the boundary set and the key dedupes; a watermark is a pure efficiency optimization.
+
+## Consequences
+
+- **Edge cases.** A flat position **or** `funding_rate = 0` ⇒ `amount = 0` ⇒ **skip, emit no event** (no ledger churn on the default-0 path; safe because catch-up re-derives boundaries and re-skips — no durable record needed for a zero). A fill timestamped exactly at a boundary uses the position **as of just-before** the same-instant fill, via ADR-0033's replay ordering (a matured cadence fires before the same-`ts_event` row is published) — deterministic; the venue's exact tie-break is a detail paper approximates. Funding accrued while a position was open **survives a later close** — it is realized cash, never reversed.
+- **Instrument metadata.** `InstrumentSpec` gains additive `funding_rate` (signed hourly `Decimal`, default `0`), sourced from paper config or venue meta; paper input only, ignored by live for accrual.
+- **Event schema.** The ADR-0025 taxonomy gains the `FundingAccrual` variant. This resolves the map's open "do position/funding updates become bus events" question for funding: **funding is a keyed bus event** (unlike the fee, which rides `OrderFillEvent` as a read-model, ADR-0036).
+- **Cadence semantics.** Funding is the first cadence that **must catch up** — recorded against ADR-0033's no-catch-up reconcile default, with the additive-vs-convergent rationale, so a future reader does not "fix" it to collapse.
+- **Downstream.** The implementation is a later `/to-spec → /to-tickets → /tdd` slice, not this planning ticket. The `InstrumentSpec.funding_rate` field, the `FundingAccrual` event, the pure `domain` funding helper, the paper `Clock`-driven catch-up loop, and the live `userFundings` ingest + reconcile land together as one vertical slice on ADR-0035's surface.
+- **Terminology.** `CONTEXT.md` gains the economic term **Funding** (and names `FundingAccrual`). The rest of the economic-quantity vocabulary (Equity, PnL, Margin, Mark price, Collateral) stays with its own model tickets.
