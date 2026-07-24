@@ -24,7 +24,7 @@ The `Exchange` Protocol gains one synchronous accessor, `account_spec() -> Accou
 - `account_id` — the qualified identity (below);
 - `netting` — the `NET` / `HEDGE` semantics ADR-0034 requires every adapter to declare.
 
-Collateral currency and cross-vs-isolated margin mode join it additively as the margin/mark tickets land.
+Collateral currency joins it additively as the margin/mark tickets land. **(Refined by ADR-0040:** cross-vs-isolated margin mode is **not** an `AccountSpec` field — on the venue it is per-asset (`updateLeverage`/`leverage.{type,value}`), so it lives with the position, paper-configured per symbol and live-ingested per position. `AccountSpec` keeps only the account-wide facts.**)**
 
 **One value, not accessor-per-fact.** Adding a field with a default to a frozen dataclass breaks no implementation; adding a Protocol method breaks every one — including the user-supplied `Exchange` implementations the extensibility story invites (ADR-0031). The naming mirrors the existing pair: `InstrumentSpec` is to `Instrument` as `AccountSpec` is to `Account`, so `Account` stays the live aggregate.
 

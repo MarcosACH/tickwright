@@ -398,6 +398,40 @@ reported payment. Its **own ledger line**, never entry price or realized PnL. Se
 _Avoid_: interest, carry, funding **fee** (it is not a [[Fee]] — no trade, no maker/taker),
 funding **rate** (the input rate, not the cash accrual).
 
+**Margin** *(reported)*:
+The **reported** collateral a [[Position]] ties up — **initial** (`margin_used = notional / leverage`,
+the sibling `maintenance = notional × margin_maint` at a flat tier-0 rate) — recomputed each read
+(Tier-2), **never enforced**: the [[Paper exchange]] never rejects an order for margin and never
+liquidates (a future map). Cross margin shares one account pool; **isolated** locks collateral
+per-position (static at open on paper). `max_leverage` and `margin_maint` are additive
+`InstrumentSpec` fields. See ADR-0040, ADR-0034.
+_Avoid_: margin **call**, buying power (enforcement/broker terms — this surface only reports),
+margin **tier** (the piecewise table is a deferred extension point).
+
+**Leverage** & **Margin mode**:
+A **per-symbol / per-position** input (not an [[AccountSpec]] fact): the integer leverage and
+`cross`/`isolated` mode that set a [[Position]]'s [[Margin|initial margin]]. **Config-authoritative
+on both paths** — paper-configured (`PaperExchangeConfig`, default **1x / isolated**), live-ingested
+as a cross-check; the engine does **not** set them on the venue as part of this surface. **Effective
+leverage** (`notional / equity`) is a convention-only readout with no venue counterpart. See ADR-0040,
+ADR-0038.
+_Avoid_: account leverage (it is per-symbol), setting leverage (a separate [[Exchange]] write action).
+
+**Liquidation price**:
+The per-[[Position]] price at which the venue would liquidate it — **nullable**, and the **one**
+Tier-2 number not computed everywhere: **read-through on live** (the venue's `liquidationPx`,
+stale-frozen, `None` when absent) because re-deriving it needs the maintenance-margin tier fixed
+point, **computed on paper** from the canonical formula. Never enforced here. See ADR-0040, ADR-0034.
+_Avoid_: stop-out, margin-call price; account liquidation price (there is none — it is per-position).
+
+**Equity** & **Free margin**:
+The [[Account]]'s reported collateral numbers: `equity = genesis + Σ(realized + fees + funding) +
+Σ unrealized_pnl` (the Tier-1 cash line plus Tier-2 uPnL), and `free_margin = equity − total_margin_used`
+(isolated buckets locked, excluded). A **negative** free margin is **reported without consequence**
+(no reject, no liquidation, no alert) — the honest "underwater on live" signal. See ADR-0040.
+_Avoid_: balance (`cash`/`total` is one facet of equity), buying power, withdrawable (the venue's
+name for free margin).
+
 ## Relationships
 
 - The **Engine** hosts one **EventBus**; swapping the bus backend (InMemory ↔ Kafka) changes
