@@ -380,11 +380,14 @@ _Avoid_: portfolio risk, RiskEngine (enforcement, deferred), position manager.
 The **frozen `domain` value snapshots** the [[Portfolio]] seam returns — read-only copies computed at
 read time, **distinct from** the mutable [[Position]]/[[Account]] aggregates (which carry `apply()`
 and move under the reader). Each is **internally coherent by construction** (all fields from one
-`(position, mark)` read). `PositionView` carries the per-`(strategy, symbol)` set (size, entry,
-realized/unrealized PnL, fees, funding, notional, leverage, margin mode, margin used, maintenance,
-liquidation price, effective leverage) plus its `mark`/`mark_ts`; `AccountView` carries the shared
-pool (equity, cash, total margin/maintenance, free margin, effective leverage). **Tier-1 fields are
-never `None`; mark-dependent Tier-2 fields are `Decimal | None`** — `None` when the mark is absent
+`(position, mark)` read). `PositionView` carries **two grains** — the strategy's **own-attribution slice** (size, entry,
+realized/unrealized PnL, fees, funding) and the symbol's **whole-position economics** off the
+account-net `szi` (notional, leverage, margin mode, margin used, maintenance, liquidation price,
+effective leverage, plus `mark_ts`), which coincide in v1 except under foreign flow; `AccountView`
+carries the shared pool (equity, cash, total margin/maintenance, free margin, effective leverage).
+The raw mark **value** is not exposed — only its freshness `mark_ts` (ADR-0039: the mark is an
+accounting input, not a strategy signal). **Tier-1 fields are never `None`; mark-dependent Tier-2
+fields (incl. every account Σ over them) are `Decimal | None`** — `None` when the mark is absent
 (a stale mark freezes; the strategy judges staleness from `mark_ts`, ADR-0039). `position()` returns
 `None` only for a never-traded symbol; a **flat-with-history** record reads `size=0` with realized
 retained. See ADR-0041.
@@ -436,7 +439,8 @@ on both paths** — paper-configured (`PaperExchangeConfig`, default **1x / isol
 as a cross-check; the engine does **not** set them on the venue as part of this surface. **Effective
 leverage** is a convention-only readout with no venue counterpart — the *realized* ratio (vs the set
 nominal `leverage`), `notional / (isolated_collateral + uPnL)` for an isolated position (so adding
-isolated margin lowers it) and `notional / equity` for cross/account (ADR-0041 §4.1). See ADR-0040,
+isolated margin lowers it) and `notional / equity` for cross/account; the isolated denominator is a
+modelling choice R3 flagged for confirmation, pending #142 (ADR-0041 §4.1). See ADR-0040,
 ADR-0041, ADR-0038.
 _Avoid_: account leverage (it is per-symbol), setting leverage (a separate [[Exchange]] write action).
 

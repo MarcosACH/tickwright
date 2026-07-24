@@ -43,20 +43,22 @@ This lets a strategy read its lifetime realized on a since-closed symbol (`posit
 
 ## 4. The view field sets
 
-All `Decimal` (ADR-0029). Grain rule from ADR-0034/0040 + P1 #119: only `size`/`unrealized_pnl`/`realized_pnl` are linearly attributable to a strategy; everything the venue keys per position rides `PositionView`; the shared pool rides `AccountView`.
+All `Decimal` (ADR-0029). `PositionView` carries **two grains**, which in v1 usually coincide but diverge under foreign flow (§5), so the split is explicit:
 
-| `PositionView` (own `(strategy, symbol)`) | `AccountView` (account-wide pool) |
+- **Own-attribution slice (the strategy's `strategy_id` partition)** — `size`, `entry_price`, `realized_pnl`, `unrealized_pnl`, `fees`, `funding`. The numbers a fill partitions linearly or attributes (ADR-0034/0040 grain rule + P1 #119).
+- **Position-grain economics (computed off the symbol's account-net `szi`, not the strategy's own size)** — `notional`, `leverage`, `margin_mode`, `margin_used`, `maintenance_margin`, `liquidation_price`, `effective_leverage`, and `mark_ts` (§6). These are properties of the *whole* venue position — one collateral bucket, one `liquidationPx` — which the venue keys per position, never per strategy.
+
+| `PositionView` | `AccountView` (account-wide pool) |
 |---|---|
-| `size`, `entry_price` | `equity` (`= cash + Σ uPnL`) |
-| `realized_pnl`, `unrealized_pnl` | `cash` (Tier-1 collateral balance) |
-| `fees`, `funding` | `total_margin_used` (Σ) |
-| `notional` | `total_maintenance_margin` (Σ) |
-| `leverage`, `margin_mode` | `free_margin` (`equity − total_margin_used`) |
-| `margin_used`, `maintenance_margin` | `effective_leverage` (`total_notional / equity`) |
-| `liquidation_price`, `effective_leverage` | `mark_ts` semantics per §6; **no** account `liquidation_price` |
-| `mark`, `mark_ts` (§6) | |
+| *own slice:* `size`, `entry_price` | `equity` (`= cash + Σ uPnL`) |
+| *own slice:* `realized_pnl`, `unrealized_pnl` | `cash` (Tier-1 collateral balance) |
+| *own slice:* `fees`, `funding` | `total_margin_used` (Σ) |
+| *position-grain:* `notional`, `leverage`, `margin_mode` | `total_maintenance_margin` (Σ) |
+| *position-grain:* `margin_used`, `maintenance_margin` | `free_margin` (`equity − total_margin_used`) |
+| *position-grain:* `liquidation_price`, `effective_leverage` | `effective_leverage` (`total_notional / equity`) |
+| *position-grain:* `mark_ts` (§6) | *(no account `liquidation_price` and no account `mark_ts` — staleness is judged per-position)* |
 
-Venue-faithful placement (R3 #110): the venue reports `leverage`, `liquidationPx`, `marginUsed`, `positionValue`, `unrealizedPnl` **per position** (`clearinghouseState.assetPositions[].position`), and `accountValue`/`totalMarginUsed`/`withdrawable` **account-wide** (`marginSummary`). There is **no** account-level liquidation price. `PositionView.maintenance_margin` is computed (`notional × margin_maint`) — the venue has no per-position maintenance field, so only the account Σ has a venue value to cross-check (ADR-0040 §6).
+Venue-faithful placement (R3 #110): the venue reports `leverage`, `liquidationPx`, `marginUsed`, `positionValue`, `unrealizedPnl` **per position** (`clearinghouseState.assetPositions[].position`), and `accountValue`/`totalMarginUsed`/`withdrawable` **account-wide** (`marginSummary`). There is **no** account-level liquidation price. `PositionView.maintenance_margin` is computed (`notional × margin_maint`) — the venue has no per-position maintenance field, so only the account Σ has a venue value to cross-check (ADR-0040 §6). The raw mark **value** is not a `PositionView` field (only its freshness `mark_ts`, §6); ADR-0039 keeps the mark an accounting input, not a strategy signal.
 
 ### 4.1 `effective_leverage` denominator — refines ADR-0040 §2
 
@@ -66,20 +68,20 @@ Venue-faithful placement (R3 #110): the venue reports `leverage`, `liquidationPx
 - **cross position:** `effective_leverage = notional / account_equity`
 - **account:** `effective_leverage = total_notional / account_equity`
 
-The isolated denominator is the position's own equity, which R3 §2.3 captures verbatim from the venue (`isolated position equity = leverage.rawUsd + unrealizedPnl`, and the venue's own per-position `returnOnEquity` is computed off it). Only this makes the defining behavior hold: adding isolated margin (`updateIsolatedMargin`, live-only — paper freezes collateral at open, ADR-0040 §1) raises `rawUsd` → drops `effective_leverage` and pushes `liquidation_price` away. Under ADR-0040's account-equity denominator that top-up would leave `effective_leverage` unmoved. `effective_leverage` remains convention-only and **outside** the §6 alert band (no venue field to compare).
+The isolated denominator is the position's own equity (`isolated_collateral + uPnL`, both position-grain per §4). R3 §2.3 lists `isolated position equity = leverage.rawUsd + unrealizedPnl` under **"Inferred / needs confirmation — field algebra the venue docs do not spell out"**, and R3 §1.3 hands the exact denominator (whole-account equity vs per-position isolated equity) to this ADR as a **modelling choice to confirm** — so it is adopted here **on argument, not as a venue-confirmed fact**, and its validation against a funded testnet position is added to #142's scope. The argument: only a position-equity denominator makes the defining behavior hold — adding isolated margin (`updateIsolatedMargin`, live-only; paper freezes collateral at open, ADR-0040 §1) raises `rawUsd` → drops `effective_leverage` and pushes `liquidation_price` away, whereas an account-equity denominator would leave `effective_leverage` unmoved by the top-up. `effective_leverage` remains convention-only and **outside** the §6 alert band (no venue field to compare).
 
 ## 5. The unattributed partition stays off the seam
 
-The `strategy_id=None` partition (foreign flow — a manual venue-UI trade or a pre-existing position, ADR-0038) is **not reachable** on the strategy-facing seam: a strategy's facade is bound to its real `strategy_id`, and `None` is not a strategy. So `position()`/`open_positions()` return only the strategy's own flow — if strategy `S` holds BTC `+2` and foreign flow adds `+1` (`szi = +3`), `S.position("BTC")` reads `+2`. The foreign flow's effect is still **honestly present** in account-level numbers (`equity`/`cash`/`margin_used` fold in the full `szi`) but is not decomposable by the strategy. The unattributed partition is an engine/telemetry concern (reconciliation, ADR-0038 account-exclusivity alerting), surfaced via the `engine` concrete (§8), never the `domain` seam — keeping ADR-0038's "no strategy's PnL is polluted by exposure it did not open" structural.
+The `strategy_id=None` partition (foreign flow — a manual venue-UI trade or a pre-existing position, ADR-0038) is **not reachable** on the strategy-facing seam: a strategy's facade is bound to its real `strategy_id`, and `None` is not a strategy. So the **own-attribution fields** (§4) return only the strategy's own flow — if strategy `S` holds BTC `+2` and foreign flow adds `+1` (`szi = +3`), `S.position("BTC").size` reads `+2` and `realized_pnl`/`unrealized_pnl`/`fees`/`funding` are its `+2` slice. The **position-grain fields** (§4), however, read the whole venue position: `notional = 3 × mark`, and `margin_used`/`liquidation_price`/`effective_leverage` are the `+3` position's (one collateral bucket, one `liquidationPx`) — because those are properties of the venue position, not a strategy's slice, and splitting them would understate a safety-relevant number. The foreign flow's effect is thus **honestly present** in both the position-grain fields and the account-level numbers (`equity`/`cash` fold in the full `szi`); only the *attribution* of the `+1` to a strategy is withheld. The unattributed partition is an engine/telemetry concern (reconciliation, ADR-0038 account-exclusivity alerting), surfaced via the `engine` concrete (§8), never the `domain` seam — keeping ADR-0038's "no strategy's PnL is polluted by exposure it did not open" structural.
 
 ## 6. Nullability: absent marks read `None`, staleness is exposed
 
 ADR-0039 deferred its `None`-surfacing to this ticket, with the policy: a **stale** mark freezes at its last value; a **wholly-absent** mark reads `None` (never a fabricated flat); **no per-read max-age** (the read path is clock-free — the strategy/reconcile judges staleness). Applied to the field types:
 
-- **Tier-1 fields are never `None`** — `size`, `entry_price`, `realized_pnl`, `fees`, `funding`, `cash`, and isolated `margin_used` (= locked collateral, mark-independent). Readable even in the recovery window before any mark.
+- **Tier-1 fields are never `None`** — `size`, `entry_price`, `realized_pnl`, `fees`, `funding`, `cash`, and isolated `margin_used` (= locked collateral, mark-independent — ADR-0040 §3: isolated collateral is an ingested position *input*, not a recomputed valuation, so it is Tier-1 here even though ADR-0040 §2 tables `margin_used` among the Tier-2 set). Readable even in the recovery window before any mark.
 - **Tier-2 mark-dependent fields are `Decimal | None`**, `None` iff the mark is absent: `unrealized_pnl`, `notional`, cross `margin_used`, `maintenance_margin`, `effective_leverage`, paper `liquidation_price` (live `liquidation_price` is separately `None` when the venue omits it). The seam **surfaces** the `None`; the strategy handles it — primarily a cold-start/recovery transient, since once a mark lands it freezes-on-stale and never returns to `None`.
-- **Account pool numbers (`equity`, `free_margin`, `effective_leverage`) are `Decimal | None`** — `None` if *any* account position needed for the Σ lacks a mark (a cross-strategy coupling: one un-marked symbol makes the account-equity read `None` for every strategy, because account equity is genuinely uncomputable then). `cash` is always a real `Decimal`, so cold-start is not a blackout.
-- **Staleness is exposed, not decided by the seam.** `PositionView` carries `mark: Decimal | None` and `mark_ts: int | None` (UTC epoch ns) — the exact `(mark, ts)` the projection holds (ADR-0039). `mark_ts is None` ⟺ absent ⟺ Tier-2 `None`; a *stale* mark has an old `mark_ts` with Tier-2 fields computed off the frozen value. The strategy — which holds a `Clock` — compares `mark_ts` to `now` to judge "too stale". Without `mark_ts`, a strategy would have no way to detect a stale-but-present mark, so the pair is load-bearing.
+- **Every account Σ over a mark-dependent per-position quantity is `Decimal | None`** — `equity`, `total_margin_used`, `total_maintenance_margin`, `free_margin`, `effective_leverage` — `None` if *any* contributing account position lacks a mark (a cross-strategy coupling: one un-marked symbol makes the account-equity read `None` for every strategy, because account equity is genuinely uncomputable then). **Only `cash` is exempt** (Tier-1), so cold-start is not a blackout.
+- **Staleness is exposed, not decided by the seam.** `PositionView` carries `mark_ts: int | None` (UTC epoch ns) — the observation time of the mark the projection holds (ADR-0039); the raw mark **value** is not exposed (ADR-0039: the mark stays an accounting input, not a strategy signal). `mark_ts is None` ⟺ absent ⟺ Tier-2 `None`; a *stale* mark has an old `mark_ts` with Tier-2 fields computed off the frozen value. The strategy — which holds a `Clock` — compares `mark_ts` to `now` to judge "too stale". Without `mark_ts`, a strategy would have no way to detect a stale-but-present mark, so it is load-bearing.
 
 ## 7. Synchronous, and injected by the composition root
 
@@ -97,7 +99,8 @@ The `domain` `Portfolio` Protocol exists for **dependency direction** — so a `
 
 - **Additive and dependency-safe** — a new `domain` Protocol (`Portfolio`) plus two frozen `domain` value types (`PositionView`, `AccountView`); the `Strategy` Protocol is unchanged; strategies keep depending on `domain` alone.
 - **Delivers the strategy read-API ADR-0035 unblocked** — the exact method set and scoping the `Portfolio` seam left open.
-- **Refines ADR-0040 §2** (§4.1) — the per-position `effective_leverage` denominator is position-equity for isolated; ADR-0040 §2 and the CONTEXT.md **Leverage & Margin mode** term are corrected in-place (docs-sync).
+- **Refines ADR-0040 §2** (§4.1) — the per-position `effective_leverage` denominator is position-equity for isolated (a modelling choice R3 flagged for confirmation, added to #142's scope); ADR-0040 §2 and the CONTEXT.md **Leverage & Margin mode** term are corrected in-place (docs-sync).
+- **Refines ADR-0039** (§6) — the mark stays unexposed as a value; only its freshness `mark_ts` rides `PositionView` pull-style. ADR-0039's "Strategies do not see the mark" section and its deferred `None`-surfacing / startup-gap sites are amended to point forward; ADR-0035 §37 ("method set is specifiable") and ADR-0040 §2's "how a strategy reaches account-level numbers" are back-linked to this ADR (docs-sync).
 - **Adds CONTEXT.md terms** — `PositionView`, `AccountView`; the `Portfolio` term is sharpened with the method set and scoping.
 - **Deferred, named extension points** — the account-net-per-symbol accessor (`HEDGE`/multi-strategy), the telemetry/observability read surface on the `engine` concrete, and an `on_mark` strategy callback (ADR-0039, kept a zero-rework extension).
 - **The recovery trading-gate** — whether a strategy may act before reconcile completes — is left to the durability ticket [#137](https://github.com/MarcosACH/tickwright/issues/137).
