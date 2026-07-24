@@ -391,8 +391,8 @@ mark-dependent Tier-2 fields (and every account Σ with a mark-dependent term) a
 — `None` when the mark is absent (a stale mark freezes; the strategy judges staleness from
 `mark_ts`, ADR-0039); effective leverage is additionally `None` on a non-positive denominator.
 `position()` returns `None` only for a never-traded symbol; a **flat-with-history** record reads
-`size=0` with realized retained, its position-grain fields degenerating to zeros with no liquidation
-price. See ADR-0041.
+`size=0` with realized retained, its position-grain valuations degenerating (no liquidation price).
+See ADR-0041.
 _Avoid_: PositionSnapshot/AccountSnapshot (overloads `Strategy.snapshot()`), live view (they are
 frozen), DTO.
 
