@@ -367,7 +367,8 @@ _Avoid_: account config (it is adapter-authored, not operator-authored), account
 **Portfolio** *(seam)*:
 The pull-style read seam a [[Strategy]] queries for [[Position]]/[[Account]] state — reads are
 **synchronous method calls, never a PnL subscription** (ADR-0004). Three methods: `position(symbol)`
-and `open_positions()` (this strategy's **own** overlay, frozen [[PositionView]]s), and `account()`
+and `open_positions()` (frozen [[PositionView]]s — this strategy's **own** attribution beside the
+whole-position economics), and `account()`
 (the account-wide shared pool, a frozen [[AccountView]]). **Scoped to the strategy at injection**
 (a per-`strategy_id` facade, like the `SignalEmitter`) and **constructor-injected by the
 [[Composition root]]** — no `strategy_id`/`venue`/`account_id` argument, no change to the [[Strategy]]
@@ -387,8 +388,9 @@ effective leverage, plus `mark_ts`), which coincide in v1 except under foreign f
 carries the shared pool (equity, cash, total margin/maintenance, free margin, effective leverage).
 The raw mark **value** is not exposed — only its freshness `mark_ts` (ADR-0039: the mark is an
 accounting input, not a strategy signal). **Tier-1 fields are never `None`; mark-dependent Tier-2
-fields (incl. every account Σ over them) are `Decimal | None`** — `None` when the mark is absent
-(a stale mark freezes; the strategy judges staleness from `mark_ts`, ADR-0039). `position()` returns
+fields (and every account Σ with a mark-dependent term) are `Decimal | None`** — `None` when the mark
+is absent (a stale mark freezes; the strategy judges staleness from `mark_ts`, ADR-0039); effective
+leverage is additionally `None` on a non-positive denominator. `position()` returns
 `None` only for a never-traded symbol; a **flat-with-history** record reads `size=0` with realized
 retained. See ADR-0041.
 _Avoid_: PositionSnapshot/AccountSnapshot (overloads `Strategy.snapshot()`), live view (they are
@@ -439,7 +441,8 @@ on both paths** — paper-configured (`PaperExchangeConfig`, default **1x / isol
 as a cross-check; the engine does **not** set them on the venue as part of this surface. **Effective
 leverage** is a convention-only readout with no venue counterpart — the *realized* ratio (vs the set
 nominal `leverage`), `notional / (isolated_collateral + uPnL)` for an isolated position (so adding
-isolated margin lowers it) and `notional / equity` for cross/account; the isolated denominator is a
+isolated margin lowers it) and `notional / equity` for cross/account, **`None` when that denominator
+is `≤ 0`**; the isolated denominator is a
 modelling choice R3 flagged for confirmation, pending #142 (ADR-0041 §4.1). See ADR-0040,
 ADR-0041, ADR-0038.
 _Avoid_: account leverage (it is per-symbol), setting leverage (a separate [[Exchange]] write action).
