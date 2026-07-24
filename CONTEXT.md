@@ -274,8 +274,22 @@ sizes are `Decimal`, never `float`. See ADR-0027, ADR-0029.
 _Avoid_: quote, bar, candle (v1 has only ticks — a `MarketTick` is a trade tick, not a quote; bars
 are a strategy-internal aggregation, not an engine type — ADR-0027).
 
+**MarkTick**:
+The immutable [[Event]] a [[MarketFeed]] emits carrying only a symbol's **mark price** — the venue's
+robust-median valuation price, distinct from the last-trade [[MarketTick]]. It is the input the
+[[PortfolioProjection]] recomputes Tier-2 valuations from (unrealized PnL, equity, margin, effective
+leverage, liquidation price); **never a fill input** and **never seen by a [[Strategy]]** in v1
+(reached only through the [[Portfolio]] seam). Provenance differs by deployment, compute does not:
+live carries the venue mark (`activeAssetCtx`), paper and replay carry the **last-trade proxy** (the
+latest [[MarketTick]] `price`), so there is one mark per deployment and no runtime fallback.
+[[Conflation|Conflates]] last-value-wins per symbol like a [[MarketTick]]; a stale mark **freezes**
+at its last value, a wholly-absent mark makes the mark-dependent Tier-2 reads **`None`** (never a
+fabricated flat). Prices are `Decimal`. See ADR-0039, ADR-0034, ADR-0027.
+_Avoid_: oracle price (a different venue price — used for funding, not margining), mid, index price.
+
 **Conflation**:
-Shedding stale market data under backpressure by keeping only the **latest tick per symbol**. The
+Shedding stale market data under backpressure by keeping only the **latest tick per symbol** (both
+[[MarketTick]] and [[MarkTick]] — each last-value-wins). The
 live [[MarketFeed]] conflates at ingress (emitting a `feed.lagged` named event on each drop), never
 the [[EventBus]]; it is **market-data only** — [[Signal]]s and order-lifecycle [[Event]]s are never
 dropped — and happens **upstream of publish**, so both bus backends see the same stream. The
@@ -357,10 +371,11 @@ The pull-style read seam a [[Strategy]] queries for [[Position]]/[[Account]] sna
 _Avoid_: portfolio risk, RiskEngine (enforcement, deferred), position manager.
 
 **PortfolioProjection**:
-The fill-fed write-through projection of [[Position]]/[[Account]] state implementing [[Portfolio]] —
-the accounting sibling of the [[Cache]], updated **synchronously on the fill-apply path** (never a bus
-subscriber), reconciled against venue truth on live, rebuilt from the [[Store]] on restart. See
-ADR-0035, ADR-0034.
+The write-through projection of [[Position]]/[[Account]] state implementing [[Portfolio]] —
+the accounting sibling of the [[Cache]]. Its **Tier-1** ledger is applied **synchronously on the
+fill-apply path** (not a fill-bus subscriber); its **Tier-2** mark is fed by **subscribing to
+[[MarkTick]]** into a private latest-value map (a non-accumulated cache, ADR-0039). Reconciled
+against venue truth on live, rebuilt from the [[Store]] on restart. See ADR-0035, ADR-0034, ADR-0039.
 _Avoid_: cache (that's the order read-model), ledger (reserved), portfolio tracker.
 
 **Fee**:
