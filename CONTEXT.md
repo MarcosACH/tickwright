@@ -365,10 +365,31 @@ _Avoid_: account config (it is adapter-authored, not operator-authored), account
 (that is the venue's live truth the [[PortfolioProjection]] reconciles against).
 
 **Portfolio** *(seam)*:
-The pull-style read seam a [[Strategy]] queries for [[Position]]/[[Account]] snapshots — reads are
-**method calls, never a PnL subscription** (ADR-0004). Delivers ADR-0017's deferred positions-tracker;
-**not** the portfolio-*risk* surface. See ADR-0035.
+The pull-style read seam a [[Strategy]] queries for [[Position]]/[[Account]] state — reads are
+**synchronous method calls, never a PnL subscription** (ADR-0004). Three methods: `position(symbol)`
+and `open_positions()` (this strategy's **own** overlay, frozen [[PositionView]]s), and `account()`
+(the account-wide shared pool, a frozen [[AccountView]]). **Scoped to the strategy at injection**
+(a per-`strategy_id` facade, like the `SignalEmitter`) and **constructor-injected by the
+[[Composition root]]** — no `strategy_id`/`venue`/`account_id` argument, no change to the [[Strategy]]
+Protocol. The unattributed partition (`strategy_id=None`) is **off the seam** (engine/telemetry-only).
+Delivers ADR-0017's deferred positions-tracker; **not** the portfolio-*risk* surface. See ADR-0041,
+ADR-0035.
 _Avoid_: portfolio risk, RiskEngine (enforcement, deferred), position manager.
+
+**PositionView** & **AccountView**:
+The **frozen `domain` value snapshots** the [[Portfolio]] seam returns — read-only copies computed at
+read time, **distinct from** the mutable [[Position]]/[[Account]] aggregates (which carry `apply()`
+and move under the reader). Each is **internally coherent by construction** (all fields from one
+`(position, mark)` read). `PositionView` carries the per-`(strategy, symbol)` set (size, entry,
+realized/unrealized PnL, fees, funding, notional, leverage, margin mode, margin used, maintenance,
+liquidation price, effective leverage) plus its `mark`/`mark_ts`; `AccountView` carries the shared
+pool (equity, cash, total margin/maintenance, free margin, effective leverage). **Tier-1 fields are
+never `None`; mark-dependent Tier-2 fields are `Decimal | None`** — `None` when the mark is absent
+(a stale mark freezes; the strategy judges staleness from `mark_ts`, ADR-0039). `position()` returns
+`None` only for a never-traded symbol; a **flat-with-history** record reads `size=0` with realized
+retained. See ADR-0041.
+_Avoid_: PositionSnapshot/AccountSnapshot (overloads `Strategy.snapshot()`), live view (they are
+frozen), DTO.
 
 **PortfolioProjection**:
 The write-through projection of [[Position]]/[[Account]] state implementing [[Portfolio]] —
@@ -413,8 +434,10 @@ A **per-symbol / per-position** input (not an [[AccountSpec]] fact): the integer
 `cross`/`isolated` mode that set a [[Position]]'s [[Margin|initial margin]]. **Config-authoritative
 on both paths** — paper-configured (`PaperExchangeConfig`, default **1x / isolated**), live-ingested
 as a cross-check; the engine does **not** set them on the venue as part of this surface. **Effective
-leverage** (`notional / equity`) is a convention-only readout with no venue counterpart. See ADR-0040,
-ADR-0038.
+leverage** is a convention-only readout with no venue counterpart — the *realized* ratio (vs the set
+nominal `leverage`), `notional / (isolated_collateral + uPnL)` for an isolated position (so adding
+isolated margin lowers it) and `notional / equity` for cross/account (ADR-0041 §4.1). See ADR-0040,
+ADR-0041, ADR-0038.
 _Avoid_: account leverage (it is per-symbol), setting leverage (a separate [[Exchange]] write action).
 
 **Liquidation price**:
