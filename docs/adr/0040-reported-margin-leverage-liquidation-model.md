@@ -21,7 +21,7 @@ The Tier-1 accumulated ledger (net size, average entry, realized PnL, fees, fund
 | `notional` | `\|szi\| × mark` | ✓ | Σ = total notional |
 | `unrealized_pnl` | `szi × (mark − entry)` | ✓ | Σ |
 | `equity` | `cash + Σ unrealized_pnl` | — | ✓ (the anchor) |
-| `margin_used` (initial) | cross: `notional / leverage`; isolated: `rawUsd` | ✓ | Σ = total margin used |
+| `margin_used` (initial) | cross: `notional / leverage`; isolated: the position's locked collateral (an ingested input, §3) | ✓ | Σ = total margin used |
 | `maintenance_margin` | `notional × margin_maint` (flat, §4) | ✓ | Σ |
 | `free_margin` | `equity − total_margin_used` | — | ✓ |
 | `liquidation_price` | §3 (read-through live / computed paper) | ✓ (nullable) | — |
@@ -38,12 +38,14 @@ The Tier-1 accumulated ledger (net size, average entry, realized PnL, fees, fund
 
 Every Tier-2 number is **computed on both paper and live** from `(position, fresh feed mark (ADR-0039), leverage, margin_maint)`. On live the venue-reported values (`unrealizedPnl`, `marginUsed`, `positionValue`, `accountValue`, `withdrawable`, `crossMaintenanceMarginUsed`) are the **divergence cross-check (§6), not the input** — computing keeps the numbers fresh at feed-mark cadence, per-strategy-attributable, and identical across paper and live (ADR-0034's core grain).
 
-**Liquidation price is the one exception — read-through on live, computed on paper.** ADR-0034 flagged it as a candidate; this ADR confirms it. Three reasons it is special: (i) re-deriving it needs the maintenance-margin **tier fixed point** — self-referential, since the tier depends on position value *at the liquidation price*; (ii) it is safety-relevant; (iii) the venue already computes it exactly and reports it as one field.
+**Liquidation price is the one recomputed *valuation* read through the venue on live, computed on paper.** ADR-0034 flagged it as a candidate; this ADR confirms it. Three reasons it is special: (i) re-deriving it needs the maintenance-margin **tier fixed point** — self-referential, since the tier depends on position value *at the liquidation price*; (ii) it is safety-relevant; (iii) the venue already computes it exactly and reports it as one field.
 
 - **Live:** ingest `clearinghouseState.liquidationPx` per position via the **reconcile pull** — exactly the channel ADR-0039 kept alive for this. Cached on the projection, **stale-frozen between reconciles**, **`None`** when the venue omits it (no position, or one it cannot price — ADR-0034's `None` → freeze, never a fabricated value). Authoritative, and **outside the alert band** — we read the venue's own number, so there is nothing to diverge against.
 - **Paper:** compute the canonical `liq_price = price − side · margin_available / size / (1 − l · side)` (R3), where `l = margin_maint` (§4), `margin_available` is `equity − maintenance` (cross) or `isolated_collateral − maintenance` (isolated), and `side = +1` long / `−1` short. Isolated is the clean case (depends only on the position's static collateral, §1); cross recomputes off account equity each read.
 
-The accepted cost: liquidation price is the **only** number with a compute/read split, and on live it is only as fresh as the reconcile cadence. Both are acceptable because liquidation is alert-only and never enforced here, and for a fixed position it barely moves between reconciles. Computing it on live to stay pure to ADR-0034's identical-compute grain would mean owning the fixed point *and* the cross-account coupling for a number we would then merely alert on.
+**Isolated collateral is the one other live read — but as a position *input*, not a valuation.** An isolated position's locked collateral is `rawUsd` on live (which reflects the `updateIsolatedMargin` top-ups the surface does not model, §1) and the static open-margin (`notional / leverage`) on paper. It is ingested exactly as the per-symbol leverage/mode are (§5) — a per-position input the valuations are computed *from*, not a recomputed valuation read back. So isolated `margin_used` equals that collateral by definition on both paths; only the **cross** `margin_used` (`notional / leverage`) is a computed valuation the §6 band meaningfully compares against the venue's `marginUsed`.
+
+The accepted cost: liquidation price is the **only recomputed *valuation*** with a compute/read split (isolated collateral is read on live too, but as a position input — above), and on live it is only as fresh as the reconcile cadence. Both are acceptable because liquidation is alert-only and never enforced here, and for a fixed position it barely moves between reconciles. Computing it on live to stay pure to ADR-0034's identical-compute grain would mean owning the fixed point *and* the cross-account coupling for a number we would then merely alert on.
 
 ## 4. Flat maintenance margin; the additive `InstrumentSpec` fields
 
@@ -67,13 +69,13 @@ The accepted cost: liquidation price is the **only** number with a compute/read 
 The **per-symbol leverage + margin mode is the single source of truth for the margin model on both paper and live.** It is a per-symbol block in `PaperExchangeConfig` (mode + integer leverage) — **not** on `InstrumentSpec`, which stays the identical venue-metadata shape across paths (ADR-0031). Defaults are the safest pair: **leverage `1x`, mode `isolated`** (`1x` isolated = full-notional collateral per position, minimal liquidation exposure); leverage is thus off-by-default and opted into per symbol.
 
 - **Paper:** the configured values drive the model directly.
-- **Live:** the model still computes from config; the ingested venue `leverage.{type, value}` is a **cross-check** — a disagreement (a failed push, or a hand-edit in the venue UI) surfaces through the resulting `margin_used` divergence (§6). The venue's `rawUsd` (isolated collateral) is ingested for read-through on the isolated path.
+- **Live:** the model still computes from config; the ingested venue `leverage.{type, value}` is a **cross-check** — a disagreement (a failed push, or a hand-edit in the venue UI) surfaces through the resulting `margin_used` divergence (§6). The venue's `rawUsd` (isolated collateral) is ingested as the isolated position's collateral input (§3), not derived from config.
 
 **The engine does not set leverage or mode on the venue as part of this surface.** Pushing config to the venue via `updateLeverage` is a signed on-chain write with its own design questions (when to apply, existing-position handling, failure/retry, and whether to also expose `updateIsolatedMargin`) and belongs to the **`Exchange` adapter**, not the reporting surface. It is captured as a separate decision ticket blocked by this one.
 
 ## 6. The Tier-2 divergence alert band
 
-ADR-0034 deferred the numeric tolerance to this ticket. It applies to the mark-dependent, venue-comparable numbers — **`unrealized_pnl`, `notional`, `equity`, `margin_used`, `maintenance_margin` (account-level), `free_margin`** — and **not** to `liquidation_price` (read-through, no computed cross-check) or `effective_leverage` (no venue field).
+ADR-0034 deferred the numeric tolerance to this ticket. It applies to the mark-dependent, venue-comparable numbers — **`unrealized_pnl`, `notional`, `equity`, `margin_used` (its cross computation; isolated `margin_used` ≡ the ingested collateral, §3), `maintenance_margin` (account-level), `free_margin`** — and **not** to `liquidation_price` (read-through, no computed cross-check) or `effective_leverage` (no venue field).
 
 - **Shape — combined absolute + relative:** alert iff `|computed − venue| > max(atol, rtol × |venue|)`, one uniform policy applied per number. A pure absolute band is useless at scale; a pure relative band screams on near-zero positions.
 - **Defaults — `rtol = 0.1%` (`0.001`), `atol = $0.01`, both config.** These are *starting* values; the real tuning wants a **funded testnet position** to measure actual divergence, captured as a `wayfinder:task` graduated from this ticket. This ADR fixes the band's shape and defaults; the task hardens the constants.
@@ -92,6 +94,7 @@ Paper runs the same compute as live (ADR-0034); it merely has no venue to cross-
 
 - **Additive only** — `InstrumentSpec` gains `max_leverage` and `margin_maint`; no field is removed, no seam is broken. `PaperExchangeConfig` gains a per-symbol leverage/mode block.
 - **Refines ADR-0038** — margin mode is per-symbol, not an `AccountSpec` field. ADR-0038's `AccountSpec` note is corrected accordingly.
+- **Corrects ADR-0035** — its additive-metadata list dropped `margin_init` (§4); the list is updated in-place (docs-sync). The parent map [#107](https://github.com/MarcosACH/tickwright/issues/107)'s Notes name it too and should read `maker_fee`/`taker_fee`/`margin_maint`/`max_leverage`.
 - **Confirms ADR-0034's liquidation exception** and fixes its deferred Tier-2 alert band.
 - **Graduates two tickets:** an `Exchange`-side decision on applying per-symbol leverage/mode to the venue (`updateLeverage`), blocked by this ticket; and a `wayfinder:task` to validate the reported margin/liquidation math against a funded testnet position and tune the §6 constants (clearing the map's standing fog patch).
 - **Deferred, named extension points:** the margin-tier table (`margin_table_id`), isolated-margin top-up/withdraw modeling, and multi-currency collateral.
