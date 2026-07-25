@@ -57,7 +57,7 @@ The escape hatch needs no new machinery: the store path is already config (`SQLi
 
 **Genesis, realized PnL, fees, funding.** Nothing else may *add to* the cash line. Deposits, withdrawals and transfers are **not modelled** — not on paper, where the account is funded once at creation, and not on live.
 
-The value of stating this is not the feature avoided; it is that a **closed** write-set makes the Σ-invariant checkable and gives #137 a finite list of writers to enforce.
+The value of stating this is not the feature avoided; it is that a **closed** write-set makes the Σ-invariant checkable and gives #137 a finite list of accruing writers to enforce.
 
 ```
 cash = genesis_collateral
