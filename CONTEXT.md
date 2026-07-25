@@ -457,25 +457,29 @@ point, **computed on paper** from the canonical formula. Never enforced here. Se
 _Avoid_: stop-out, margin-call price; account liquidation price (there is none — it is per-position).
 
 **Equity** & **Free margin**:
-The [[Account]]'s reported collateral numbers: `equity = genesis + Σ(realized + fees + funding) +
-Σ unrealized_pnl` (the Tier-1 cash line plus Tier-2 uPnL), and `free_margin = equity − total_margin_used`
+The [[Account]]'s reported collateral numbers: `equity = genesis + Σ realized − Σ fees + Σ funding +
+Σ unrealized_pnl` (the Tier-1 cash line plus Tier-2 uPnL) — the fee term **subtracts**, a [[Fee]] being
+a cost magnitude (`> 0` debited, `< 0` a maker rebate credited, ADR-0036) while realized PnL and
+[[Funding]] are already signed deltas — and `free_margin = equity − total_margin_used`
 (isolated buckets locked, excluded). A **negative** free margin is **reported without consequence**
-(no reject, no liquidation, no alert) — the honest "underwater on live" signal. See ADR-0040.
+(no reject, no liquidation, no alert) — the honest "underwater on live" signal. See ADR-0040, ADR-0042.
 _Avoid_: balance (`cash`/`total` is one facet of equity), buying power, withdrawable (the venue's
 name for free margin).
 
 **Genesis collateral**:
 The value the [[Account]]'s cash line opens at — the one number equity, free margin and effective
-leverage are measured against. On **paper** it is operator-declared: a **required**, strictly
-positive `PaperExchangeConfig` field with no default, because a non-zero default would report
-against capital nobody chose. On **live** it is **ingested** at the first reconcile as
+leverage are measured against. On **paper** it is operator-declared: a strictly positive
+`PaperExchangeConfig` field with no default, **demanded by `AppConfig` whenever the paper exchange is
+selected** (never required at field level, which would drag a paper number into a live run), because a
+non-zero default would report against capital nobody chose. On **live** it is **ingested** at the first reconcile as
 `accountValue − Σ unrealized_pnl` (`accountValue` is equity and already contains uPnL, so the
 subtraction is what stops it being double-counted). Persisted as its own column on both paths,
 distinct from the cash line that accumulates away from it; on paper a config value disagreeing with
 the stored one **fail-fasts** alongside the [[AccountSpec]] `account_id` check — a different genesis
 is a different account history. Together with realized PnL, [[Fee|fees]] and [[Funding]] it closes
-the cash line's write-set at four **accretive** inputs — the reconciler's synthetic cash adjustment
-(ADR-0034) corrects that line on live but adds nothing to it: deposits, withdrawals and transfers
+the cash line's write-set at four **accruing** inputs — three added and fees subtracted — while the
+reconciler's synthetic cash adjustment (ADR-0034) corrects that line on live but accrues nothing to
+it: deposits, withdrawals and transfers
 are not modelled, and a real one on live surfaces as a benign Tier-1 divergence that heals and
 alerts. See ADR-0042, ADR-0040.
 _Avoid_: starting balance, initial deposit (nothing is deposited — the account is declared, not
