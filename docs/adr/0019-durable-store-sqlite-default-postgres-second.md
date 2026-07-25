@@ -21,7 +21,7 @@ So the canonical pairings are **InMemoryBus + SQLite** (zero-setup, deterministi
 - **Strategy snapshots**: opaque bytes per `strategy_id`.
 - **Kill-switch state**: durable and sticky (ADR-0026), restored before the feed starts.
 - **The position ledger**, keyed by `(strategy_id, symbol)`: signed size, entry price, realized
-  PnL, accrued fees, accrued funding, isolated collateral (ADR-0043 §3).
+  PnL, accrued fees, accrued funding, the funding watermark, isolated collateral (ADR-0043 §3).
 - **The account row**: a single row by constraint (one process trades one account, ADR-0038)
   holding `account_id`, genesis collateral (ADR-0042) and the cash line.
 
@@ -31,7 +31,10 @@ means the current row state (ADR-0043 §1, extending ADR-0009 from orders to acc
 The seq high-water-mark is **derived** from saga records (no separate table). There is **no
 "processed event id" table** — dedup is enforced by idempotent `Order.apply()` (ADR-0025); Kafka
 consumer offsets merely bound how much is redelivered, and the in-memory path has no redelivery.
-**The ledger reinforces this rather than excepting it**: funding needs no durable dedup record at
-all (ADR-0043 §5), and the saga's applied-event set is authoritative for the ledger too, because
-the ledger write shares the saga's transaction (ADR-0043 §4).
+**The ledger reinforces this rather than excepting it**: the saga's applied-event set is
+authoritative for the ledger too, because the ledger write shares the saga's transaction
+(ADR-0043 §4), and funding — the one ingress with no saga to ride — is deduped across a restart by
+a **bounded watermark column on the position row it already writes** (`last_funding_ts_ns`,
+ADR-0043 §5.2), never by a table of processed ids. Paper reads it never, having nothing to
+re-derive (ADR-0043 §5.1).
 The store location is per-process configuration, never shared between engine instances (ADR-0028).

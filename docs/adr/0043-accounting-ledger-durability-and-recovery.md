@@ -1,6 +1,6 @@
 # Accounting-ledger durability: current-state rows, one atomic write, and a restart that refuses rather than guesses
 
-_Accepted via the D10 grilling session on decision ticket [#137](https://github.com/MarcosACH/tickwright/issues/137), part of the trade-economics map [#107](https://github.com/MarcosACH/tickwright/issues/107). Delivers the schema, write cadence and restart sequence ADR-0034 deferred to "the durability ticket". **Extends ADR-0019** (the store's minimal holdings gain the ledger tables), **ADR-0035** (the Tier-1 write is one atomic call, not two), **ADR-0038** (`AccountSpec` gains `genesis_collateral`) and **ADR-0042** (the startup check gains a second condition and a named carrier for the configured genesis). **Resolves ADR-0041 §7's deferred recovery trading-gate**: there is none. **Confirms ADR-0037's no-watermark claim** and records the policy that makes it survive a restart._
+_Accepted via the D10 grilling session on decision ticket [#137](https://github.com/MarcosACH/tickwright/issues/137), part of the trade-economics map [#107](https://github.com/MarcosACH/tickwright/issues/107). Delivers the schema, write cadence and restart sequence ADR-0034 deferred to "the durability ticket". **Extends ADR-0019** (the store's minimal holdings gain the ledger tables), **ADR-0035** (the Tier-1 write is one atomic call, not two), **ADR-0038** (`AccountSpec` gains `genesis_collateral`) and **ADR-0042** (the startup check gains a second condition and a named carrier for the configured genesis). **Resolves ADR-0041 §7's deferred recovery trading-gate**: there is none. **Splits ADR-0037's no-watermark claim by path** — confirmed for paper's catch-up, and made durable on live, where the ingress re-delivers across a restart._
 
 ADR-0034 made the `Store` system-of-record for the Tier-1 ledger and for the per-strategy attribution a venue snapshot cannot reconstruct, then deferred the schema. ADR-0035 said Tier-1 is written store-first on the fill-apply path, before publish. ADR-0042 fixed what a paper account opens at. What was left is the part that decides whether any of it survives a crash: what the rows are, whether the writes are atomic, what happens between process start and the first reconcile, and what the engine does when it opens a store that is not the ledger it expects.
 
@@ -38,10 +38,11 @@ CREATE TABLE IF NOT EXISTS positions (
     strategy_id         TEXT NOT NULL,   -- '__unattributed__' for the reserved partition (§2)
     symbol              TEXT NOT NULL,
     signed_size         TEXT NOT NULL,
-    entry_price         TEXT,            -- NULL when flat (§3)
+    entry_price         TEXT,            -- NULL when flat (ADR-0041 §3)
     realized_pnl        TEXT NOT NULL,
     fees                TEXT NOT NULL,
     funding             TEXT NOT NULL,
+    last_funding_ts_ns  INTEGER,         -- NULL until the first accrual (§5.2)
     isolated_collateral TEXT,            -- NULL when the position is cross-margined
     ts_ns               INTEGER NOT NULL,
     PRIMARY KEY (strategy_id, symbol)
@@ -58,6 +59,8 @@ CREATE TABLE IF NOT EXISTS account (
 
 **`account` is a single row, by constraint.** ADR-0038 makes one-account-per-process a *deployment fact*; `CHECK (id = 1)` encodes it in the schema instead of merely documenting it, exactly as the existing `kill_switch` table does. The §10 mismatch check then reduces to "read the one row and compare", with no ambiguity about *which* row binds the ledger. A table keyed by `account_id` would let one store silently accumulate two account histories — the precise failure ADR-0038's exclusivity invariant exists to prevent.
 
+**`account_id` is therefore stamped once, on the account row — not on every position row.** ADR-0038 reads `account_id` as stamped on "durable ledger rows", and taken literally that means a repeated column on `positions`. The single-row `account` table makes the repetition redundant *and* unsafe: a per-row copy is a second place the binding can be written, so it can disagree with the one row §10 actually checks, and no query needs it — the store holds exactly one account's ledger by construction, so a position row has nothing to be disambiguated from. ADR-0038 is annotated in place accordingly. `account_id` keeps its stamp everywhere it is genuinely a discriminator: on the `FundingAccrual` event (ADR-0037) and on telemetry (ADR-0020), both of which travel outside the store.
+
 **`genesis_collateral` is `NOT NULL` and carries no `CHECK`.** ADR-0042 §6 is explicit that positivity is a validator on paper *config input*, never a column constraint: an unfunded live wallet opens at `accountValue − Σ unrealized_pnl = 0`, and a `CHECK (genesis_collateral > 0)` would reject the exact row that ADR is instructing this schema to write.
 
 **`isolated_collateral` is on the row, and this extends the field list #137 inherited.** ADR-0040 §1 fixes paper isolated collateral as the initial margin moved in **at open** (`notional / leverage`), never topped up; ADR-0041 §6 then classifies it **Tier-1** — "mark-independent … it is Tier-1 here even though ADR-0040 §2 tables `margin_used` among the Tier-2 set" — and Tier-1 must be "readable even in the recovery window before any mark". It is not recomputable at boot: it is a function of the notional at the instant the position opened, which no other column remembers, and config cannot supply it because ADR-0040 §5's config-authoritative values are leverage and *mode*, not the collateral those produced at a past price. Live re-ingests it from `rawUsd` each reconcile, but §6's window means the value must read correctly *before* the first reconcile, so it is persisted on both paths. `NULL` distinguishes *cross-margined* from a genuine isolated collateral of `0` on a wiped position.
@@ -65,6 +68,8 @@ CREATE TABLE IF NOT EXISTS account (
 **Leverage and margin mode are deliberately absent.** ADR-0040 §5 makes them config-authoritative on both paths, so they are re-read at boot. Persisting them would create a second authority and a second thing for §10 to fail-fast on.
 
 **`entry_price` is nullable** because ADR-0041 §3 keeps a flat-with-history position readable with realized PnL retained, and P1 ([#119](https://github.com/MarcosACH/tickwright/issues/119)) established that a full close resets entry. `NULL` says "no position to have an entry for"; `0` would be indistinguishable from a real price.
+
+**`last_funding_ts_ns` is the one durable idempotency field on either table**, and it is a watermark rather than a key set precisely so it stays bounded (§5.2). `NULL` means no accrual has ever been applied to this row, which is distinct from a boundary applied at epoch `0`. It is an `INTEGER` for the same reason `ts_ns` is: a boundary instant is a timestamp, not money, so ADR-0029's `Decimal`-as-`TEXT` rule does not reach it.
 
 **No Tier-2 value is ever persisted.** ADR-0035 recomputes Tier-2 on every read from `(position, mark)`. A stored `unrealized_pnl` would survive a restart and disagree with the recomputed value the moment a mark lands — a stale valuation with durability, which is worse than no valuation at all.
 
@@ -85,11 +90,15 @@ So every ledger mutation is **one `Store` call, one transaction**, covering the 
 
 The accepted cost is stated plainly: the `Store` Protocol grows a method that knows about three aggregates at once, which the current one-method-per-aggregate shape does not. That coupling is the price of the guarantee, and it is also what keeps §1's deferred audit log addable *inside the same transaction* later.
 
-## 5. Funding needs nothing durable, because paper skips the restart gap
+## 5. Paper skips the restart gap and needs nothing durable; live carries one bounded watermark
 
-**Paper accrues funding only while the engine is running.** Boundaries that elapse while the process is down are **not** settled on the next start; the loop resumes from the startup instant. Consequently **no funding idempotency record is persisted** — no watermark, no applied-key set.
+The two ingress paths ADR-0037 defines — paper **generates**, live **ingests** — need different answers here, because only one of them can hand the engine an accrual it has already applied.
 
-ADR-0037's claim that catch-up "needs no stored watermark for correctness — it re-derives the boundary set and the key dedupes" is **confirmed, and this ADR records the policy that makes it true across a restart**. Within a run the in-memory applied-key set dedupes re-fired boundaries. Across a restart that set is empty, so the claim survives only because nothing re-derives a past boundary in the first place. The crash-immediately-after-a-boundary case is safe for the same reason: that accrual is already durable in the ledger under §4, and the loop simply never revisits it. Had the gap been accrued, a durable watermark would have been **required**, not an optimization.
+### 5.1 Paper: skip the gap, persist nothing
+
+**Paper accrues funding only while the engine is running.** Boundaries that elapse while the process is down are **not** settled on the next start; the loop resumes from the startup instant. Consequently **no funding idempotency record is persisted on the paper path** — no watermark read, no applied-key set.
+
+ADR-0037's claim that catch-up "needs no stored watermark for correctness — it re-derives the boundary set and the key dedupes" is **confirmed for paper's catch-up, and this ADR records the policy that makes it true across a restart**. Within a run the in-memory applied-key set dedupes re-fired boundaries. Across a restart that set is empty, so the claim survives only because nothing re-derives a past boundary in the first place. The crash-immediately-after-a-boundary case is safe for the same reason: that accrual is already durable in the ledger under §4, and the loop simply never revisits it. Had the gap been accrued, a durable watermark would have been **required** on paper too, not an optimization.
 
 **The deciding argument is that there is no defensible price for the gap.** ADR-0037's catch-up is priced by a claim that does not survive a restart:
 
@@ -100,6 +109,20 @@ A restart gap is not between two consecutive ticks. It spans the last tick befor
 **Rejected: accrue the gap.** It is the more faithful reading of ADR-0037's own additive-not-convergent rule, and the rejection is a real trade. The accepted cost: **paper PnL is not restart-invariant** — two runs over the same wall-clock window, one with a restart in the middle, report different funding, and the paper funding line understates by whatever elapsed while down. A stated, bounded fidelity gap is preferable to a restart-invariant number produced by a pricing rule nobody can defend.
 
 This is a **live-wall-clock paper** concern only. Under replay (ADR-0027) the timeline is the file, there is no wall-clock gap, and the two policies coincide.
+
+### 5.2 Live: one durable watermark per position row
+
+**Live's ingress genuinely re-delivers, so the same policy does not transfer.** ADR-0037 has live ingesting `userFundings` and reconciling against `userFunding` history "to heal anything that landed while down" — and it lists **live reconcile re-ingest** and **restart-replay** among the three convergence paths the `(account, symbol, boundary_ts)` key is supposed to make no-ops. That key dedupes against an **in-memory** set, which §5.1's restart empties. Nothing else stands between a re-delivered accrual and the ledger: the engine accrues at boundaries `t₁…t₅`, each durable under §4; it crashes; on restart the reconnect's history read and the first reconcile hand back `t₁…t₅` against an empty set, and the funding line and `cash` **double-count**.
+
+That failure is not self-correcting in any way this ADR is willing to accept. Tier-1 heals it against venue truth eventually (ADR-0034), but at the price §4 already refused one section earlier: a divergence alert indistinguishable from a real one, on the money line.
+
+**So the position row carries `last_funding_ts_ns` (§3), and it is the durable half of ADR-0037's key.** An ingested accrual whose `boundary_ts` is at or below the row's watermark has already been applied and is **dropped**; one above it is applied and advances the mark, inside the same §4 transaction that writes the funding line — so the mark can never disagree with the sum it guards. The in-memory applied-key set keeps its within-run job unchanged; the watermark is what survives the process.
+
+This is **ADR-0025's per-symbol monotonic gate at accounting grain** — the same instrument `StrategyHost` already applies to ticks — and it is sound for the same reason: funding boundaries are ordered per symbol, and both live channels deliver them in time order (the subscription's history snapshot and the REST `userFunding` read are both time-ordered). The accepted cost is the gate's usual one: an accrual arriving *below* the mark out of order is dropped rather than applied, with ADR-0034's exact Tier-1 reconcile as the backstop if a venue ever violates that ordering.
+
+**A watermark, not an applied-key set** — this is the same distinction §4 drew when it rejected ledger-side durable dedup. A per-position key set accumulates one entry per boundary for the life of the ledger, unbounded; a watermark is one integer per row, bounded by the row count and dying with the row. ADR-0019's no-processed-event-id-table rule is honored rather than excepted: this adds no table and no growing set, only a column on a row that already exists — and ADR-0037 named a watermark as the instrument available here, having judged it optional for the re-derivation case it was reasoning about.
+
+**Paper writes the column too, and one schema serves both.** Paper's generator advances the mark as it accrues; because §5.1 means paper never re-derives a past boundary, no paper read of it can ever drop anything. Forking the schema by path to save one nullable column would cost more than it saves, and it would make §7's shared store-contract suite prove less.
 
 ## 6. The restart sequence, and the window that stays open
 
@@ -121,7 +144,9 @@ bind run_id
 
 **Rejected: a full ledger reconcile inside the barrier.** It adds a second failure mode to `StartupReconciliationTimeout`, lengthens the gate, and — since paper has nothing to reconcile against — gives the two venues different barrier semantics. Positions, Tier-1 heals and the ADR-0040 §6 divergence alerts stay on the cadence.
 
-**There is no recovery trading-gate. This resolves ADR-0041 §7's deferral.** Strategies already cannot act inside the window: `host.start()` runs after the barrier and the feed starts last, so no `on_tick` can fire. The residue is confined to `account()` accuracy, and gating *trading* on a *reporting* surface would breach this map's ceiling, which rules margin enforcement out of scope. The window opens at `host.start()` and closes at the first successful ledger reconcile cycle; what is readable inside it is already fixed by ADR-0041 §6 — restored Tier-1, `None` Tier-2 until the first `MarkTick`, freeze-never-flat throughout.
+**There is no recovery trading-gate. This resolves ADR-0041 §7's deferral.** The decision rests on the residue, not on strategies being inert: the residue is confined to `account()` accuracy, and gating *trading* on a *reporting* surface would breach this map's ceiling, which rules margin enforcement out of scope.
+
+The window is quiet but not empty, and it is worth being exact about which. **No `on_tick` can fire inside it** — `host.start()` runs after the barrier and the feed starts last — so the ordinary trading path is structurally closed. **`on_order_event` can**: strategies subscribe to `OrderEvent` in `StrategyHost.start()`, and the reconcile cadences launch as soon as the start sequence returns, publishing reports that reach the owning strategy as `OrderEvent`s before the first ledger cycle closes the window. A strategy that emits from its order-event handler can therefore place inside the window, reading Tier-1 that ADR-0041 §6 already defines for exactly this state (restored, honest, possibly stale, never a fabricated flat). That is the reading the seam is specified to give, so it needs no gate — but it is a live path, not an impossible one. The window opens at `host.start()` and closes at the first successful ledger reconcile cycle; what is readable inside it is already fixed by ADR-0041 §6 — restored Tier-1, `None` Tier-2 until the first `MarkTick`, freeze-never-flat throughout.
 
 ## 7. `Decimal` stays `TEXT` on both backends
 
@@ -141,7 +166,7 @@ A version table was **rejected as speculative machinery** for a change that does
 
 **The data hazard is paper-only, and it is refused.** An existing paper store carries an `orders` table full of filled orders. After the upgrade it would gain an empty ledger, seed genesis from config, and report a flat account with full cash — silently ignoring every fill it ever recorded. That ledger **cannot** be backfilled: replaying `orders` to rebuild positions is event-sourced recovery through the back door (§1, ADR-0009), and it would not even work, because the per-fill fee only exists on the event as of ADR-0036 and funding did not exist at all — the fee and funding lines would be permanently zero and wrong.
 
-So an `orders` table with rows and **no `account` row** is a startup **refusal** on the paper path, reported by §10's check with the same remedy. It converts a silently wrong ledger into a loud failure. On live the same state is legitimate and self-correcting — ADR-0042 §6 creates the row at first reconcile and positions heal from venue truth — so the refusal is paper-only, for the same reason atomicity was in §4: no venue to heal from.
+So an `orders` table with rows and **no `account` row** is a startup **refusal** on the paper path, reported by §10's check — `has_orders() and load_account() is None` (§9) — with the same remedy. It converts a silently wrong ledger into a loud failure. On live the same state is legitimate and self-correcting — ADR-0042 §6 creates the row at first reconcile and positions heal from venue truth — so the refusal is paper-only, for the same reason atomicity was in §4: no venue to heal from.
 
 ## 9. The `Store` Protocol extension
 
@@ -158,6 +183,8 @@ def checkpoint_ledger(
 def all_positions(self) -> list[Position]: ...
 
 def load_account(self) -> Account | None: ...
+
+def has_orders(self) -> bool: ...
 ```
 
 The write's shape follows from what actually mutates the ledger: a **fill** touches one order, one position and the account; a **funding accrual** touches one or two positions (the owning strategy's and the unattributed partition's) and the account, with no order — ADR-0037's "funding has no carrier"; a **reconcile heal** touches many positions and the account; **genesis / live materialisation** touches the account alone. Hence `positions` is a sequence, `order` is optional, and `account` is required because every mutation moves cash — ADR-0042 §4's four accruing inputs plus the live-only reconcile correction.
@@ -165,6 +192,8 @@ The write's shape follows from what actually mutates the ledger: a **fill** touc
 **Rejected: overloading the existing `checkpoint()`** with optional ledger arguments. It would make every existing order-only call site ambiguous about whether it also writes the ledger.
 
 `load_account()` returning `None` is load-bearing rather than defensive: it is a live first run (materialised in §6's barrier step), it is the paper seed-genesis case, and combined with a non-empty `orders` table it is §8's refusal.
+
+**`has_orders()` is the other half of that refusal, and it is a fourth member rather than a reuse of `all_orders()`.** §10 runs the check before `cache.rebuild()`, and `all_orders()` is precisely the mass-read that rebuild performs — answering an existence question with it would deserialize every saga in the store twice on every start, on the recovery path where the engine is least able to afford it. The condition asks whether *any* order history exists, which is `SELECT 1 … LIMIT 1` on both backends. A `bool` also keeps the check honest about what it is entitled to know: nothing about the orders themselves, which belong to the `Cache`'s recovery, not the ledger's.
 
 `all_positions()` returns the unattributed partition **unfiltered**. ADR-0034's Σ-invariant — Σ per-strategy signed size = account net = venue `szi` — holds by construction only if the partition is restored with everything else, so filtering belongs at the `Portfolio` seam (ADR-0041 §5 keeps it off the strategy API) and never in the store. That also keeps the partition visible on `PortfolioProjection`'s concrete surface, which ADR-0041 §8 reserves for telemetry and CLI.
 
@@ -185,10 +214,11 @@ A second exception class was rejected: the operator's remedy is the same sentenc
 
 ## Consequences
 
-- **ADR-0019's "what the store holds (minimal)" list gains a fourth and fifth entry**: the position ledger and the single account row. Its no-processed-event-id-table rule is *reinforced*, not excepted — §5 adds no funding dedup table, and §4 makes the order saga's applied set authoritative for the ledger too, by atomicity.
+- **ADR-0019's "what the store holds (minimal)" list gains a fourth and fifth entry**: the position ledger and the single account row. Its no-processed-event-id-table rule is *reinforced*, not excepted — §5 adds no funding dedup table (only a bounded watermark column on a row that already exists), and §4 makes the order saga's applied set authoritative for the ledger too, by atomicity.
 - **ADR-0035's Tier-1 write is now atomic, not merely ordered.** "Store-first, then project, before publish" stands; §4 adds that the store step is one transaction spanning the order row and the ledger rows.
-- **ADR-0037 is confirmed and annotated.** The no-watermark claim holds; §5 records that the skip-the-gap policy is what makes it hold across a restart, and that accruing the gap would have made a durable watermark mandatory. A new documented paper limitation: funding is not restart-invariant.
-- **ADR-0038's `AccountSpec` gains `genesis_collateral`** (§10), and invariant #7's store binding gains its second condition (§8).
+- **ADR-0037 is split by path, not simply confirmed.** Its no-watermark claim holds for **paper's catch-up** — §5.1 records that the skip-the-gap policy is what makes it hold across a restart, and that accruing the gap would have made a durable watermark mandatory there too. On **live** it does not survive: the ingress re-delivers, so `last_funding_ts_ns` on the position row becomes the durable half of ADR-0037's idempotency key (§5.2), and its "all three convergence paths are no-ops" claim is true of restart-replay only because of that column. A new documented paper limitation: funding is not restart-invariant.
+- **ADR-0038's `AccountSpec` gains `genesis_collateral`** (§10), and invariant #7's store binding gains its second condition (§8). Its "`account_id` is stamped on durable ledger rows" is **narrowed to the single account row** (§3) — position rows carry no copy, because a second place to write the binding is a second place for it to disagree with the one §10 checks.
+- **The `Store` Protocol gains four members**, not three: `checkpoint_ledger`, `all_positions`, `load_account` and `has_orders` (§9). The last exists so §8's refusal can ask an existence question without running the recovery mass-read a second time before `cache.rebuild()`.
 - **ADR-0041 §7's deferred recovery trading-gate is resolved: there is none** (§6). §6's nullability rules are unchanged and now have a concrete window to describe.
 - **ADR-0042's check is extended in place** — same error type, same remedy, one further condition — and its `NOT NULL`-only genesis column is honored exactly (§3).
 - **`strategy_id` becomes constrained for the first time**: a validator on `StrategyConfig` and `StrategyHost.register` rejecting `__unattributed__` (§2). Existing configured strategies are unaffected unless one holds that literal.

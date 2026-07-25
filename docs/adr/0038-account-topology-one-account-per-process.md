@@ -10,7 +10,7 @@ An `Engine` trades **exactly one account, on exactly one venue**. The account is
 
 The account has an identity, and that identity is **not** a key component.
 
-- `account_id` lives on the `Account` aggregate, is stamped on durable ledger rows, on the `FundingAccrual` event (ADR-0037) and on telemetry (ADR-0020).
+- `account_id` lives on the `Account` aggregate, is stamped on durable ledger rows, on the `FundingAccrual` event (ADR-0037) and on telemetry (ADR-0020). **(Narrowed by ADR-0043 §3:** on disk that stamp is the **single `account` row**, not a column repeated on every position row. The ledger's `account` table is one row by `CHECK (id = 1)`, so a store holds exactly one account's ledger by construction and a per-row copy would only add a second place the binding could be written — and disagree with the row the startup check reads. The event and telemetry stamps are unchanged: those records travel outside the store, where the id is a real discriminator.**)**
 - In-memory `Position` is keyed `(strategy, symbol)` — the account component is constant within a process, so paying for it at every lookup would be a dead dimension.
 
 ADR-0034/0035/0037 describe `Position` as per-`(account, strategy, symbol)` and the funding key as `(account, symbol, boundary_ts)`. Those tuples stand as the **logical** keys and remain correct; this ADR records that in a one-account process the leading component is ambient rather than materialized. This is ADR-0003's own discipline — a scope fact "must not be forced onto the bare-symbol key", while `partition_key` stays a *property* so the identity can exist without being the key — applied one level up.
