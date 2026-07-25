@@ -55,6 +55,8 @@ A different genesis is a different account history. Point the store at a fresh
 path to open a new ledger, or restore the declared values to resume this one.
 ```
 
+**`StoreAccountMismatch` is an `InvariantViolation`** (`domain/errors.py`), joining `StartupReconciliationTimeout` under the fail-fast class ADR-0014 defines — a ledger that names a different account is a broken engine assumption, not a recoverable handler error, so it must fault the process rather than be logged and skipped. It is raised before any recovery work begins (Consequences), so it faults the startup barrier rather than a subscribed handler — but the class is load-bearing rather than decorative: ADR-0024 draws the containment line by *handler origin*, and `InvariantViolation` is the one type that **pierces even the containment net**. Naming it is what keeps the taxonomy `errors.py` documents from growing a second, unclassified fail-fast path.
+
 The escape hatch needs no new machinery: the store path is already config (`SQLiteStoreConfig`), so "I want a different genesis" and "I want a different account" are the same operator action, expressed the same way.
 
 ## 4. The cash line has exactly four accruing inputs
