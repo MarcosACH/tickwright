@@ -360,7 +360,10 @@ The venue adapter's **static declarations** about the [[Account]] it trades — 
 `account_id` (venue + network + venue-native identifier) and the `NET`/`HEDGE` netting semantics —
 exposed on the [[Venue adapter]]'s `Exchange` seam beside the instrument specs and read once at
 composition. `AccountSpec` is to [[Account]] as the instrument spec is to the instrument: static
-declaration, never live balances. See ADR-0038, ADR-0031.
+declaration, never live balances. Carries **no collateral currency** in v1 (USDC is implicit,
+ADR-0042 §2); on the paper venue the `account_id`'s label half comes from `PaperExchangeConfig`
+(lowercase slug, no hyphen, so `paper-<label>` stays unambiguously two segments against live's
+three). See ADR-0038, ADR-0042, ADR-0031.
 _Avoid_: account config (it is adapter-authored, not operator-authored), account state/snapshot
 (that is the venue's live truth the [[PortfolioProjection]] reconciles against).
 
@@ -460,6 +463,22 @@ The [[Account]]'s reported collateral numbers: `equity = genesis + Σ(realized +
 (no reject, no liquidation, no alert) — the honest "underwater on live" signal. See ADR-0040.
 _Avoid_: balance (`cash`/`total` is one facet of equity), buying power, withdrawable (the venue's
 name for free margin).
+
+**Genesis collateral**:
+The value the [[Account]]'s cash line opens at — the one number equity, free margin and effective
+leverage are measured against. On **paper** it is operator-declared: a **required**, strictly
+positive `PaperExchangeConfig` field with no default, because a non-zero default would report
+against capital nobody chose. On **live** it is **ingested** at the first reconcile as
+`accountValue − Σ unrealized_pnl` (`accountValue` is equity and already contains uPnL, so the
+subtraction is what stops it being double-counted). Persisted as its own column on both paths,
+distinct from the cash line that accumulates away from it; on paper a config value disagreeing with
+the stored one **fail-fasts** alongside the [[AccountSpec]] `account_id` check — a different genesis
+is a different account history. Together with realized PnL, [[Fee|fees]] and [[Funding]] it closes
+the cash line's write-set at four inputs: deposits, withdrawals and transfers are not modelled, and
+a real one on live surfaces as a benign Tier-1 divergence that heals and alerts. See ADR-0042,
+ADR-0040.
+_Avoid_: starting balance, initial deposit (nothing is deposited — the account is declared, not
+funded), seed capital.
 
 ## Relationships
 
