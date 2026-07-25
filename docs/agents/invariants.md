@@ -30,6 +30,7 @@ Consumed by `/code-review` (any regression is BLOCKING) and `/python-codebase-ma
    *Enforcement lands with the accounting surface — the `Store` binds its ledger to the account's
    whole opening declaration (`account_id`, plus the genesis collateral a paper ledger was opened
    at) and fail-fasts when the adapter or config reports another, one error naming every field that
-   disagrees; concurrent ownership is undetectable in-process either way and stays a deployment
-   rule.*
-   (ADR-0038, ADR-0042, ADR-0031, ADR-0034)
+   disagrees; the same error also refuses a paper store holding order history but no ledger, which
+   cannot be backfilled. The check runs before any other recovery work. Concurrent ownership is
+   undetectable in-process either way and stays a deployment rule.*
+   (ADR-0038, ADR-0042, ADR-0043, ADR-0031, ADR-0034)
