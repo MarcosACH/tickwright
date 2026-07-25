@@ -162,10 +162,11 @@ _Avoid_: timer, scheduler (those are facets of the Clock, not separate concepts)
 **Store** (durable store) *(Protocol)*:
 The system-of-record behind the [[Cache]] and the [[PortfolioProjection]]: holds order saga
 records (keyed by [[Client order id|cloid]]), [[Strategy]] snapshots, the kill-switch state, and
-the accounting ledger — [[Position]] rows keyed by `(strategy_id, symbol)` plus a single
-[[Account]] row. Ledger rows are **current-state, upserted in place** (recovery is a read, never a
-replay), and a ledger mutation is written in **one transaction with the order checkpoint** it
-belongs to. Impls: `SQLiteStore` (default, zero-setup) + `PostgresStore` (production parity).
+the accounting ledger — [[Position]] rows keyed by `(strategy_id, symbol)`, a single [[Account]]
+row, and one funding watermark per symbol. Ledger rows are **current-state, upserted in place**
+(recovery is a read, never a replay), and a ledger mutation is written in **one transaction with
+the order checkpoint** it belongs to. Impls: `SQLiteStore` (default, zero-setup) +
+`PostgresStore` (production parity).
 Paired with the [[EventBus]] backend — InMemory+SQLite or Kafka+Postgres. See ADR-0019, ADR-0043.
 _Avoid_: database, persistence layer (fine informally), repository.
 
