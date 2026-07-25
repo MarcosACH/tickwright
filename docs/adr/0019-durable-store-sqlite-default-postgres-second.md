@@ -38,6 +38,7 @@ authoritative for the ledger too, because the ledger write shares the saga's tra
 (ADR-0043 §4), and funding — the one ingress with no saga to ride — is deduped across a restart by
 a **watermark, never by a set of processed ids**. `funding_marks` is a table, but not the banned
 kind: the rule forbids a record that grows with the event stream, and this one holds a single
-overwritten row per traded symbol, bounded by the instrument set (ADR-0043 §5.2). Paper reads it
+overwritten row per traded symbol, bounded by the symbols the account has ever held — configured or
+arrived as foreign flow — rather than by history (ADR-0043 §5.2). Paper writes it and reads it
 never, having nothing to re-derive (ADR-0043 §5.1).
 The store location is per-process configuration, never shared between engine instances (ADR-0028).
