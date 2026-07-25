@@ -34,6 +34,6 @@ The accounting surface decomposes into a small **`domain` value model** — `Pos
 ## Consequences
 
 - **Delivers ADR-0017's Open Q#17** ("Portfolio / positions tracker", deferred): `Portfolio` **is** that tracker — the *reported-accounting* part of it. Portfolio-**risk** enforcement (exposure/max-position limits, the `RiskEngine`) stays deferred and out of this map's scope. Docs-sync to ADR-0017 when the implementation lands — the same deferred-docs-sync discipline ADR-0034 applies to its ADR-0018 caveat.
-- **Unblocks the strategy read-API ticket** (ADR-0034 named it as waiting on this): the pull surface is now `Portfolio`, so its exact method set is specifiable.
+- **Unblocks the strategy read-API ticket** (ADR-0034 named it as waiting on this): the pull surface is now `Portfolio`, so its exact method set is specifiable — **now fixed by ADR-0041 §3**.
 - **The durability schema/cadence** — what the `Store` persists for the ledger + per-strategy attribution, and snapshot frequency — remains its own ticket (ADR-0034).
 - **`PortfolioProjection` is a second projection to recover** — restored from the `Store`, then reconciled against the venue on restart, on the same crash-only path as the order `Cache` (ADR-0009/0034).
