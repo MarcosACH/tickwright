@@ -474,9 +474,10 @@ subtraction is what stops it being double-counted). Persisted as its own column 
 distinct from the cash line that accumulates away from it; on paper a config value disagreeing with
 the stored one **fail-fasts** alongside the [[AccountSpec]] `account_id` check — a different genesis
 is a different account history. Together with realized PnL, [[Fee|fees]] and [[Funding]] it closes
-the cash line's write-set at four inputs: deposits, withdrawals and transfers are not modelled, and
-a real one on live surfaces as a benign Tier-1 divergence that heals and alerts. See ADR-0042,
-ADR-0040.
+the cash line's write-set at four **accretive** inputs — the reconciler's synthetic cash adjustment
+(ADR-0034) corrects that line on live but adds nothing to it: deposits, withdrawals and transfers
+are not modelled, and a real one on live surfaces as a benign Tier-1 divergence that heals and
+alerts. See ADR-0042, ADR-0040.
 _Avoid_: starting balance, initial deposit (nothing is deposited — the account is declared, not
 funded), seed capital.
 
