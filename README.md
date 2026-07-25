@@ -90,9 +90,11 @@ shuts down gracefully, takes final strategy snapshots, leaves resting orders alo
 
 Everything is configured through the environment / `.env` — [`.env.example`](.env.example) is the
 canonical variable reference, and every variable maps onto a field of `AppConfig`
-([`src/tickwright/app/config.py`](src/tickwright/app/config.py)) with the `TICKWRIGHT_` prefix. To
-switch the fill model to `stochastic`, swap in the Kafka bus or Postgres store, or point the live
-Hyperliquid feed at real market data, edit `.env` — no code changes.
+([`src/tickwright/app/config.py`](src/tickwright/app/config.py)) with the `TICKWRIGHT_` prefix — the
+one exception being a block explicitly marked NOT YET WIRED, decided in an ADR and ignored by the
+build until its slice lands. To switch the fill model to `stochastic`, swap in the Kafka bus or
+Postgres store, or point the live Hyperliquid feed at real market data, edit `.env` — no code
+changes.
 
 ## Architecture at a glance
 
