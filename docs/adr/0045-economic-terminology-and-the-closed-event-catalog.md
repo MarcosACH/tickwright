@@ -1,6 +1,6 @@
 # Economic terminology and the closed event catalog: gross realized PnL, unsigned notional, and no position event
 
-_Accepted via the D12 grilling session on decision ticket [#138](https://github.com/MarcosACH/tickwright/issues/138), the terminal ticket of the trade-economics map [#107](https://github.com/MarcosACH/tickwright/issues/107). Delivers the economic vocabulary **ADR-0034's Consequences terminology bullet** and **ADR-0035's Naming section** deferred to "its owning model tickets plus a terminology sweep", and **closes ADR-0025's event catalog** for the accounting surface — the half **ADR-0037's Consequences "Event schema" bullet** left open when it settled funding. **Amends ADR-0025** (the catalog gains a closure clause, not a variant), **ADR-0040 §7** (its equity invariant is stated on the formula that does not survive a live heal) and **ADR-0020** (four roadmap names). Corrects four documentation defects the sweep surfaced._
+_Accepted via the D12 grilling session on decision ticket [#138](https://github.com/MarcosACH/tickwright/issues/138), the terminal ticket of the trade-economics map [#107](https://github.com/MarcosACH/tickwright/issues/107). Delivers the economic vocabulary **ADR-0034's Consequences terminology bullet** and **ADR-0035's Naming section** deferred to "its owning model tickets plus a terminology sweep", and **closes ADR-0025's event catalog** for the accounting surface — the half **ADR-0037's Consequences "Event schema" bullet** left open when it settled funding. **Amends ADR-0025** (the catalog gains a closure clause, not a variant), **ADR-0040 §7** (its equity invariant is stated on the formula that does not survive a live heal), **ADR-0020** (four roadmap names) and **ADR-0044 §2** (its `Margin` gloss). Corrects five documentation defects the sweep surfaced._
 
 Every mechanism in this surface is now decided: the truth model (ADR-0034), the topology
 (ADR-0035), fees (ADR-0036), funding (ADR-0037), the account (ADR-0038), the mark (ADR-0039),
@@ -10,7 +10,7 @@ documents use to describe the same quantities — deliberately deferred, because
 before the mechanics landed would have drifted from them — and the one schema question none of them
 answered: whether a position or account change is a bus event.
 
-This ADR settles both, and records the four places where the existing documents already disagree
+This ADR settles both, and records the five places where the existing documents already disagree
 with each other.
 
 ## 1. The catalog closes: a position or account change is not a bus event
