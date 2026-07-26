@@ -70,11 +70,14 @@ hole.
 
 **Naming.** `leverage` / `LeverageSpec`, not `margin` / `MarginSpec`, because `CONTEXT.md` already
 binds **Margin** to the *reported collateral a position ties up* — an output of this surface,
-**computed** on a cross position and **ingested** on an isolated one (ADR-0045 §9.5; this once read
-"a computed Tier-2 output", which is the cross-only half). Naming an operator input with the word
-the glossary gives to a reported output would be exactly the collision the glossary exists to
-prevent. The glossary's term for what this block holds is **Leverage & Margin mode**, and the field
-takes its head noun.
+**computed in both modes**: off the nominal leverage on a cross position (`notional / leverage`),
+off the ingested collateral on an isolated one (`isolated_collateral + unrealized_pnl`). (This read
+"a computed Tier-2 output" originally; ADR-0045 §9.5 replaced it with a computed/**ingested** split,
+and [#142](https://github.com/MarcosACH/tickwright/issues/142) collapsed that split again — isolated
+`margin_used` is recomputed each read exactly like cross — so the original gloss was right, and
+§9.5's defect 5 is withdrawn there.) Naming an operator input with the word the glossary gives to a
+reported output would be exactly the collision the glossary exists to prevent. The glossary's term
+for what this block holds is **Leverage & Margin mode**, and the field takes its head noun.
 
 **The composition root resolves the map before injecting it.** `AppConfig.leverage` is *sparse* —
 it carries only the symbols the operator wrote — while §3's scope is every symbol the configured
@@ -235,11 +238,16 @@ undocumented — and irrelevant here, because we never attempt one.
 
 **([#142](https://github.com/MarcosACH/tickwright/issues/142) resolved which reading holds: the
 first, and the refusal is vindicated on the stronger of the two grounds.** Measured on a held
-isolated position, `updateLeverage` at 5x → 10x → 3x left `marginUsed` at `45.858067`, `rawUsd` at
-`−83.731933` and `liquidationPx` at `42395.915443038` — **all three unchanged**. A leverage change
-after open does **not** re-margin the live position; it governs future opens only, exactly as
-*"leverage is only checked upon opening a position"* reads on its face. So a boot push would not
-have made the model true, which is this paragraph's first reading.
+isolated position, `updateLeverage` at 5x → 10x → 3x left `rawUsd` at `−83.731933` and
+`liquidationPx` at `42395.915443038` — **both unchanged**, and both **mark-invariant**, which is
+what makes them the evidence here rather than merely consistent with it. `marginUsed` read
+`45.858067` across the sequence and is *not* mark-invariant (§10's correction: it is
+`isolated_collateral + unrealized_pnl`); against that sequence's locked collateral of `45.898067`
+the reading implies a mark of 64795, one $1 BTC quantum above the `45.856067` recorded at mark
+64794 in §8 and ADR-0041 §4.1 — the same position at a different instant, not a different margin.
+A leverage change after open does **not** re-margin the live position; it governs future opens
+only, exactly as *"leverage is only checked upon opening a position"* reads on its face. So a boot
+push would not have made the model true, which is this paragraph's first reading.
 
 The two behaviours called "undocumented and irrelevant here" were measured too, and they narrow
 §4's accepted read→write race further than this ADR assumed:

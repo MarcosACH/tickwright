@@ -238,7 +238,10 @@ genuine multi-sense conflicts go in **Flagged ambiguities** with a resolution, w
 ## 9. Sweep corrections
 
 Five places where the documents already disagreed. None changes a decision; all are drift the sweep
-exists to catch.
+exists to catch. (**Two of the five — defects 2 and 5 — were later withdrawn** by
+[#142](https://github.com/MarcosACH/tickwright/issues/142): the disagreement was real in both
+cases, but the sweep resolved it toward the landed ADRs when `CONTEXT.md` held the accurate
+reading. Each is annotated in place below.)
 
 1. **`CONTEXT.md` `Margin` states `margin_used = notional / leverage` unconditionally.** True for
    **cross** only. An isolated position's `margin_used` is computed from its locked collateral —
@@ -274,19 +277,34 @@ between *landed* documents — and here the glossary was the accurate one.**)**
    but the four inputs moves `cash` — `Genesis collateral` already described the live heal that
    `Equity`'s formula implicitly denied. Resolved by §5.
 5. **The `margin_used`-is-computed gloss, in the three places that carry it.** `ADR-0044 §2`'s
-   naming argument called `Margin` "a computed Tier-2 output" — defects 1 and 2 from the other
-   side, in the ADR that reasons *about* the glossary: an isolated position's `margin_used` is
-   neither computed nor Tier-2. That sentence is **duplicated**, so correcting it at its origin
-   alone would have left the copies to drift: `ADR-0040`'s ADR-0044 amendment block restates the
-   naming argument verbatim ("binds **Margin** to the computed collateral a position ties up"), and
-   `CONTEXT.md`'s `Leverage` entry re-glosses the cross-reference in its own `_Avoid_` list ("the
-   *computed* collateral a position ties up") — **below**, in the same file, the `Margin` entry that
-   calls an isolated position's `margin_used` "an ingested input rather than a computed valuation",
-   so the two disagreed in the document a reader consults for the word itself. All
-   three now carry the computed/ingested split, or drop the tier word where the point is the
-   *name*. The naming argument itself is unaffected everywhere — it turns on `Margin` naming a
-   **reported output** rather than an operator input, true in both modes — so only the gloss
-   changes.
+   naming argument called `Margin` "a computed Tier-2 output"; the sweep read that as defects 1 and
+   2 from the other side, in the ADR that reasons *about* the glossary. That sentence is
+   **duplicated**, so correcting it at its origin alone would have left the copies to drift:
+   `ADR-0040`'s ADR-0044 amendment block restates the naming argument verbatim ("binds **Margin**
+   to the computed collateral a position ties up"), and `CONTEXT.md`'s `Leverage` entry re-glosses
+   the cross-reference in its own `_Avoid_` list ("the *computed* collateral a position ties up") —
+   **below**, in the same file, the `Margin` entry that calls an isolated position's `margin_used`
+   "an ingested input rather than a computed valuation", so the two disagreed in the document a
+   reader consults for the word itself. The **three-way sync is the durable part** of this entry;
+   the gloss it synced them onto is not — [#142](https://github.com/MarcosACH/tickwright/issues/142)
+   withdrew it, below. The naming argument itself is unaffected throughout — it turns on `Margin`
+   naming a **reported output** rather than an operator input, true in both modes — so only the
+   gloss ever changed.
+
+**(Defect 5 withdrawn by [#142](https://github.com/MarcosACH/tickwright/issues/142), for the same
+reason as defect 2.** This entry judged "a computed Tier-2 output" wrong on the premise that an
+isolated position's `margin_used` is neither computed nor Tier-2 — the landed-ADR error defects 1
+and 2 inherited. Measured, it is **both**: `isolated_collateral + unrealized_pnl`, recomputed each
+read, mark-dependent. So `ADR-0044 §2`'s original gloss was accurate and the computed/ingested split
+this sweep installed in its place is the drift.
+
+All three copies are corrected again, and this time toward the mode-neutral reading: `margin_used`
+is **computed in both modes** — off the nominal leverage on a cross position, off the ingested
+collateral on an isolated one. `ADR-0040`'s amendment block keeps "reported collateral" as the
+mode-neutral word rather than as a correction of "computed".
+
+The three-way sync stands as this entry's real finding: a gloss duplicated across three documents
+was moved in step twice, and would have drifted both times had the copies not been named here.**)**
 
 ## Consequences
 
@@ -297,10 +315,15 @@ between *landed* documents — and here the glossary was the accurate one.**)**
   §2's `margin_used` row loses its `(initial)` heading (§6) — which also costs §1, §4, the
   sentence ADR-0043 §3 quotes from §1, and ADR-0035's `margin_init` aside the words "the initial
   margin", wherever they named the *amount*; and its ADR-0044 amendment block loses the word
-  "computed" from the `Margin` gloss it restates (§9.5). Its numbers are unchanged.
+  "computed" from the `Margin` gloss it restates (§9.5 — the word is *not* restored by §9.5's #142
+  withdrawal; "reported" simply stops being a correction and becomes the mode-neutral choice). Its
+  numbers are unchanged.
 - **The `Margin` gloss is corrected in all three documents carrying it** (§9.5) — `ADR-0044 §2`'s
   "a computed Tier-2 output" becomes the computed/ingested split, and the copies in `ADR-0040`'s
   amendment block and `CONTEXT.md`'s `Leverage` entry follow it. No naming decision moves.
+  (**Amended by [#142](https://github.com/MarcosACH/tickwright/issues/142)**: the split is withdrawn
+  — `margin_used` is computed in both modes — and all three copies move again, in step. What this
+  bullet records that survives is the *sync*, not the gloss it synced them onto.)
 - **ADR-0020 gains four roadmap names** (§2), none of them shipped until its emitting path is.
 - **The ADR-0034 / ADR-0035 / ADR-0037 deferrals are delivered**, each annotated in place so a
   reader landing on any of the three finds the pointer rather than an open question. The economic

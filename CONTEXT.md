@@ -449,7 +449,8 @@ funding **rate** (the input rate, not the cash accrual).
 **Notional**:
 A [[Position]]'s gross market value — **unsigned**: `|size| × mark`, the magnitude **that**
 `maintenance_margin`, **cross** `margin_used` and [[Leverage|effective leverage]] are computed from
-(an **isolated** position's `margin_used` is ingested, not derived from it — [[Margin]]). The
+(an **isolated** position's `margin_used` is computed too, but from its own collateral and uPnL
+rather than from notional — [[Margin]]). The
 [[Account]] total is the **sum of those magnitudes** — *gross*, never net: two opposite positions
 of equal size total twice one of them rather than zero, because each independently ties up
 collateral and each is independently liquidatable. Tier-2. See ADR-0045, ADR-0040.
