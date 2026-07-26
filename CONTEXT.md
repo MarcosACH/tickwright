@@ -484,8 +484,9 @@ live-ingested as a cross-check. The engine **pushes** it to the venue **once, at
 symbols already aligned are skipped, symbols holding no position are written blind, and a
 disagreement on a symbol that *does* hold a position **refuses to start** rather than re-margining a
 live position — after which the venue is left alone for the run, with drift **alerted, never
-re-pushed**, on a direct exact-match check (`LEVERAGE_DIVERGENCE`; the `margin_used` route is blind
-for isolated positions, because a leverage change never re-margins an open position — #142). A
+re-pushed**, on a direct exact-match check (`LEVERAGE_DIVERGENCE`; the indirect `margin_used` route is
+blind for **any** position held across the drift, because a leverage change never re-margins an open
+one — measured isolated, inferred for cross, #142 and ADR-0044 §10). A
 boot-time push is safe under every venue branch: a change on a held position cannot silently
 re-margin it, a **mode switch** on one is always rejected, and a **decrease** only succeeds when the
 locked collateral allows. **Effective leverage** is a convention-only readout with no venue

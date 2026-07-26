@@ -1,6 +1,6 @@
 # Applying leverage & margin mode to the venue: one boot-time push, a refusal on held disagreement, and a config that never fights the operator
 
-_Accepted via the D11 grilling session on decision ticket [#141](https://github.com/MarcosACH/tickwright/issues/141), part of the trade-economics map [#107](https://github.com/MarcosACH/tickwright/issues/107). Discharges the venue-write question **ADR-0040 §5** deferred ("the engine does not set leverage or mode on the venue as part of this surface … captured as a separate decision ticket") — and **amends ADR-0040 §5 twice**: the config block moves out of `PaperExchangeConfig`, and its claim that a leverage disagreement surfaces through `margin_used` is corrected (it is blind for isolated positions). **Extends ADR-0024** (startup step 4 gains the connect half its prose already promises) and **declares on the `Exchange` Protocol the `start()` ADR-0014 already assigns it**. Grounded in the `updateLeverage` surface captured verbatim by R3 ([#110](https://github.com/MarcosACH/tickwright/issues/110))._
+_Accepted via the D11 grilling session on decision ticket [#141](https://github.com/MarcosACH/tickwright/issues/141), part of the trade-economics map [#107](https://github.com/MarcosACH/tickwright/issues/107). Discharges the venue-write question **ADR-0040 §5** deferred ("the engine does not set leverage or mode on the venue as part of this surface … captured as a separate decision ticket") — and **amends ADR-0040 §5 twice**: the config block moves out of `PaperExchangeConfig`, and its claim that a leverage disagreement surfaces through `margin_used` is corrected (it is blind for isolated positions — and, per §10's #142 amendment, for any position held across the drift). **Extends ADR-0024** (startup step 4 gains the connect half its prose already promises) and **declares on the `Exchange` Protocol the `start()` ADR-0014 already assigns it**. Grounded in the `updateLeverage` surface captured verbatim by R3 ([#110](https://github.com/MarcosACH/tickwright/issues/110))._
 
 ADR-0040 made the per-symbol leverage and margin mode the single source of truth for the margin
 model on both paths, then stopped at the boundary: nothing pushed that truth to the venue, so a
@@ -460,7 +460,23 @@ an open position** (§5's correction — measured across 5x → 10x → 3x with 
 the mark, so it corroborates rather than carries this).
 Neither term of `isolated_collateral + unrealized_pnl` depends on the leverage *setting* once the
 position is open, so a drift in that setting is invisible in `margin_used` no matter which tier the
-number belongs to. `LEVERAGE_DIVERGENCE` remains necessary.**)**
+number belongs to.
+
+**That replacement premise is wider than the conclusion this section's title and body draw from it.**
+No-re-margining is stated without a mode, and applied to **cross** it says the same thing for the
+window this check governs: the model computes `notional / config_leverage`, the venue's held cross
+`marginUsed` keeps whatever leverage the position opened at, and after §4's boot push those are the
+same number — so a venue-side drift landing *after* a position is open is invisible in cross
+`margin_used` too. The indirect route keeps exactly one sighted case, in either mode: a drift landing
+*before* the position opens, where the venue prices the open off the drifted setting while the model
+uses config. Marked as what it is — #142 measured a held **isolated** position, so the cross half is
+inference from the venue's own *"leverage is only checked upon opening a position"* (§5), not a
+measured fact. It is the safe direction to infer in: it makes the indirect route weaker than this
+section assumed, never stronger. Whoever measures a held cross position should widen the wording
+above; `LEVERAGE_DIVERGENCE` itself is unaffected either way, since it compares the **setting** and
+already covers both modes on an exact match.
+
+`LEVERAGE_DIVERGENCE` remains necessary.**)**
 
 It is also nearly free: the reconcile pull already reads `clearinghouseState` for ADR-0040 §3's
 liquidation-price read-through, so the comparison costs no additional venue call.
