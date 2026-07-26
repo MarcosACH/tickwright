@@ -447,13 +447,12 @@ _Avoid_: interest, carry, funding **fee** (it is not a [[Fee]] — no trade, no 
 funding **rate** (the input rate, not the cash accrual).
 
 **Notional**:
-A [[Position]]'s gross market value — **unsigned**: `|size| × mark`, the magnitude
+A [[Position]]'s gross market value — **unsigned**: `|size| × mark`, the magnitude **that**
 `maintenance_margin`, **cross** `margin_used` and [[Leverage|effective leverage]] are computed from
 (an **isolated** position's `margin_used` is ingested, not derived from it — [[Margin]]). The
-[[Account]] total is the **sum of those magnitudes** — *gross*, never net: two opposite positions of
-equal size total twice
-one of them rather than zero, because each independently ties up collateral and each is
-independently liquidatable. Tier-2. See ADR-0045, ADR-0040.
+[[Account]] total is the **sum of those magnitudes** — *gross*, never net: two opposite positions
+of equal size total twice one of them rather than zero, because each independently ties up
+collateral and each is independently liquidatable. Tier-2. See ADR-0045, ADR-0040.
 _Avoid_: **net exposure** / net notional (a signed portfolio-risk quantity, and the deferred
 RiskEngine's concern — ADR-0017; this word is a magnitude), position value, exposure unqualified.
 
