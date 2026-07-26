@@ -487,8 +487,9 @@ isolated margin lowers it) and `notional / equity` for cross/account, **`None` w
 is `≤ 0`**; the isolated denominator is a modelling choice R3 flagged for confirmation, pending #142
 (ADR-0041 §4.1). See ADR-0040, ADR-0041, ADR-0038, ADR-0044.
 _Avoid_: account leverage (it is per-symbol); **margin** as the name for this input (that word is
-this glossary's [[Margin]] — the *computed* collateral a position ties up; this is its *setting*);
-topping up isolated collateral (`updateIsolatedMargin` — a deferred extension point, ADR-0044 §8).
+this glossary's [[Margin]] — the collateral a position ties up, *computed* on a cross position and
+*ingested* on an isolated one; this is its *setting*); topping up isolated collateral
+(`updateIsolatedMargin` — a deferred extension point, ADR-0044 §8).
 
 **Liquidation price**:
 The per-[[Position]] price at which the venue would liquidate it — **nullable**, and the **one**
