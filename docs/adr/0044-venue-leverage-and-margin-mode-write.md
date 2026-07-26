@@ -83,10 +83,14 @@ Resolving here rather than in either consumer is load-bearing twice over. It kee
 venue reading the same numbers by construction — the two consumers cannot disagree about what an
 unconfigured symbol means, which is the disagreement §3 exists to rule out. And it is the only
 place both inputs are in scope: `strategies` and `leverage` are peer `AppConfig` fields, while an
-`Exchange` knows nothing of strategies — the one symbol list an adapter holds is
-`HyperliquidConfig.symbols`, the feed subscription list §3 rejects as the scope. The adapter
-therefore iterates a map it needs no strategy knowledge to interpret, which is also why this sync
-does not thicken it (ADR-0015).
+`Exchange` knows nothing of strategies. The two symbol sets an adapter *does* hold are both the
+wrong ones, and §3 rejects each for its own reason: `HyperliquidConfig.symbols` is the feed
+subscription list, which can legitimately carry context symbols no strategy places against, and
+`PaperExchangeConfig.instrument_specs` is paper's instrument *universe* — the `meta.universe`
+analogue, config-sourced because the paper venue has no meta endpoint (ADR-0031) — which §9 reads
+for `max_leverage` and which says nothing about what is traded. The adapter therefore iterates a
+map it needs no strategy knowledge to interpret, which is also why this sync does not thicken it
+(ADR-0015).
 
 ## 3. Scope: every strategy-traded symbol, including the ones nobody configured
 
