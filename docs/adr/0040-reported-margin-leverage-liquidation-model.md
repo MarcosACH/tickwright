@@ -95,7 +95,7 @@ Paper runs the same compute as live (ADR-0034); it merely has no venue to cross-
 
 ## Consequences
 
-- **Additive only** — `InstrumentSpec` gains `max_leverage` and `margin_maint`; no field is removed, no seam is broken. `PaperExchangeConfig` gains a per-symbol leverage/mode block.
+- **Additive only** — `InstrumentSpec` gains `max_leverage` and `margin_maint`; no field is removed, no seam is broken. `PaperExchangeConfig` gains a per-symbol leverage/mode block. **(Amended by ADR-0044 §2:** that block is **not** a `PaperExchangeConfig` field — it is venue-agnostic **`AppConfig.leverage: dict[str, LeverageSpec]`**, because its consumer `PortfolioProjection` needs it on both paths and no live run may read `config.paper` (ADR-0042 §1). Still additive; only the home changed, as §5 above records.**)**
 - **Refines ADR-0038** — margin mode is per-symbol, not an `AccountSpec` field. ADR-0038's `AccountSpec` note is corrected accordingly.
 - **Corrects ADR-0035** — its additive-metadata list dropped `margin_init` (§4); the list is updated in-place (docs-sync). The parent map [#107](https://github.com/MarcosACH/tickwright/issues/107)'s Notes name it too and should read `maker_fee`/`taker_fee`/`margin_maint`/`max_leverage`.
 - **Confirms ADR-0034's liquidation exception** and fixes its deferred Tier-2 alert band.

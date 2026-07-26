@@ -120,6 +120,22 @@ for a symbol with no open position is not documented** — the design would rest
 premise to save writes that are already free of the address budget's meaningful cost. It stays a
 named option, reachable if the blind write ever proves noisy.
 
+**The blind write is therefore only as fresh as that one read, and the gap is accepted rather than
+closed.** §5's "never write for a held symbol" holds against the venue state the read returned, not
+the state at the instant of the write. Own flow cannot open a position inside that window — the
+barrier has not cleared and the feed starts last (ADR-0024) — so the only actor that can is
+**foreign flow**: a manual venue-UI trade or a second process on the same account (ADR-0038). That
+is the same operator persona §1 is built around, so the case is named rather than assumed away. It
+is accepted on three grounds: the window is one startup step wide; foreign flow at boot is already
+an anomaly ADR-0038 alerts on rather than a supported mode; and **no amount of re-reading closes
+it** — `updateLeverage` offers no compare-and-set, so any read-then-write stays racy, and a
+per-symbol re-check would buy a merely smaller window at exactly the per-symbol cost the paragraph
+above just declined to pay. The residual risk is narrow and stated: a position opened by someone
+else in the seconds before our write is re-margined at boot instead of refused. If
+[#142](https://github.com/MarcosACH/tickwright/issues/142) finds the venue *rejects* a change on a
+held position, the race closes on its own — the write fails and §6's taxonomy faults the boot,
+which is the right outcome anyway.
+
 **Whether a no-op `updateLeverage` succeeds or errors is undocumented** across the venue's own docs
 and every SDK surface examined. The skip above removes the question for held symbols, but a
 position-less symbol may well already carry the configured setting, so the failure taxonomy (§6)
@@ -130,7 +146,10 @@ an exact match.
 ## 5. A held disagreement refuses to start — the venue twin of `StoreAccountMismatch`
 
 **The engine never writes leverage or mode for a symbol that currently holds an open position.** If
-config and venue disagree there, startup raises a single error naming **every** disagreeing symbol
+config and venue disagree there, startup raises **`VenueLeverageMismatch`** — an
+`InvariantViolation`, ADR-0014's second error class (fail-fast → `FAULTED` → the process exits),
+named beside `StoreAccountMismatch` rather than folded into it because the two answer different
+questions and the operator resolves them in different places — naming **every** disagreeing symbol
 with both pairs, and the process faults before any order can be placed.
 
 This is the same shape ADR-0042 §3 / ADR-0043 §8 already established for the durable store: when
@@ -169,7 +188,9 @@ budget to a new boot-time venue read rather than minting a second timeout. A boo
 resolves and we proceed; a sustained failure exits into the supervisor's backoff instead of
 crash-looping.
 
-Within that: a **no-change `err`** counts as success and emits a named event, not a failure (§4); a
+Within that: a **no-change `err`** counts as success and emits
+**`EXCHANGE_LEVERAGE_UNCHANGED`** (`exchange.leverage_unchanged`, joining ADR-0020's named-event
+catalog beside the adapter's two existing write-path events), not a failure (§4); a
 **rate-limit** rejection is transient and retried; anything else consumes the budget and faults.
 Clearing startup with a venue we failed to align is not an available outcome — that is the state
 the step exists to prevent.
@@ -198,6 +219,16 @@ check and push land at step 4 — after the store is known to be ours, and **bef
 barrier, so the barrier's own `clearinghouseState` read (ADR-0043 §6) observes an already-aligned
 venue and the first reconcile cycle cannot manufacture a spurious divergence. Both refusals precede
 the barrier, so neither can let an order out.
+
+**That leaves two `clearinghouseState` reads one step apart, and they stay separate deliberately.**
+Step 4's read decides the push (§4); step 5's materialises the account row (ADR-0043 §6). Sharing
+one payload is *sound* — the row is `accountValue − Σ unrealized_pnl` (ADR-0042 §6), which the push
+does not move — but it is not worth buying: the two reads live in different components either side
+of a lifecycle boundary, so threading one payload from `Exchange.start()` into the barrier couples
+them for the sake of a single unsigned info call — and an unsigned read is not an action, so it
+does not draw on the address-based allowance §1 is careful with. This is not in tension with §4's
+rejection of `activeAssetData` either: that was a read scaling **per symbol**, where these are one
+per boot each, and the second one the boot already made before this ADR existed.
 
 **The push targets the account the ledger is bound to.** `updateLeverage` is signed through the same
 active pool as orders, so when `HyperliquidConfig.vault_address` is set (ADR-0038's sub-account
@@ -246,9 +277,12 @@ the check running where the venue-specific half cannot.
 ## 10. Post-boot drift: a direct check, because `margin_used` is blind for isolated
 
 Each reconcile compares the ingested `leverage.{type, value}` against config for every held symbol
-and emits a **distinct alert-only event on an exact mismatch**, naming the symbol, the configured
-pair and the venue pair. Exact match, no tolerance band — the pair is discrete, so ADR-0040 §6's
-`max(atol, rtol·|venue|)` shape has nothing to measure.
+and emits **`LEVERAGE_DIVERGENCE`** (`leverage.divergence`) **on an exact mismatch**, naming the
+symbol, the configured pair and the venue pair. It rides the same alert sink as ADR-0040 §6's
+`VALUATION_DIVERGENCE` and is **distinct from it**: that one reports a *computed* number drifting
+from the venue's within a tolerance band, this one reports a discrete *operator setting* the engine
+declines to re-impose. Exact match, no tolerance band — the pair is discrete, so ADR-0040 §6's
+`max(atol, rtol·|venue|)` shape has nothing to measure. Alert-only, never heals, never re-pushes.
 
 **This corrects ADR-0040 §5.** That section claims a live leverage disagreement "surfaces through
 the resulting `margin_used` divergence (§6)". It does not, in the mode ADR-0040 §1 calls primary
@@ -269,8 +303,9 @@ disagreement and keeps trading, exactly as it reports a negative free margin wit
 ## Consequences
 
 - **Additive across the board.** `Exchange` gains `start()` (paper's is a validation-only no-op);
-  `AppConfig` gains `leverage`; `domain` gains `LeverageSpec`. No seam is broken and no existing
-  field is removed.
+  `AppConfig` gains `leverage`; `domain` gains `LeverageSpec` and the `VenueLeverageMismatch`
+  `InvariantViolation`; ADR-0020's catalog gains `LEVERAGE_DIVERGENCE` and
+  `EXCHANGE_LEVERAGE_UNCHANGED`. No seam is broken and no existing field is removed.
 - **Amends ADR-0040 §5 twice** — the config block leaves `PaperExchangeConfig` for
   `AppConfig.leverage` (§2), and the `margin_used`-divergence claim is corrected for isolated
   positions (§10). Its "the engine does not set leverage or mode on the venue" sentence is
@@ -278,8 +313,12 @@ disagreement and keeps trading, exactly as it reports a negative free margin wit
 - **Extends ADR-0024** — step 4 gains the connect half its prose already promised, and the
   barrier-failure policy covers the push (§6) rather than the push getting a policy of its own.
 - **Two refusals now guard boot**, in a fixed order: `StoreAccountMismatch` (step 2, "is this my
-  ledger?") then the venue leverage mismatch (step 4, "is this the account I am modelling?"). Both
+  ledger?") then `VenueLeverageMismatch` (step 4, "is this the account I am modelling?"). Both
   precede the barrier, so neither can let an order out.
+- **The blind write is fresh-as-of-one-read, by choice** (§4). Foreign flow opening a position
+  inside the step-4 read→write window would be re-margined rather than refused; the window is one
+  startup step, no re-read closes it (`updateLeverage` has no compare-and-set), and #142 may close
+  it outright if the venue rejects changes on held positions.
 - **The operator keeps the last word in-flight.** A venue-side change during a run stands and is
   alerted; only a deliberate restart re-imposes config. The cost is stated: a divergence can persist
   for the life of a run, and the reported margin and liquidation numbers for a held symbol are then

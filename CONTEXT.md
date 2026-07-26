@@ -450,8 +450,8 @@ live-ingested as a cross-check. The engine **pushes** it to the venue **once, at
 symbols already aligned are skipped, symbols holding no position are written blind, and a
 disagreement on a symbol that *does* hold a position **refuses to start** rather than re-margining a
 live position — after which the venue is left alone for the run, with drift **alerted, never
-re-pushed**, on a direct exact-match check (the `margin_used` route is blind for isolated positions,
-where computed and venue margin are the same ingested number). **Effective
+re-pushed**, on a direct exact-match check (`LEVERAGE_DIVERGENCE`; the `margin_used` route is blind
+for isolated positions, where computed and venue margin are the same ingested number). **Effective
 leverage** is a convention-only readout with no venue counterpart — the *realized* ratio (vs the set
 nominal `leverage`), `notional / (isolated_collateral + uPnL)` for an isolated position (so adding
 isolated margin lowers it) and `notional / equity` for cross/account, **`None` when that denominator

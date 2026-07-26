@@ -28,7 +28,7 @@ those components.
    component). On **paper** it validates the configured leverage against `InstrumentSpec.max_leverage`
    and writes nothing; on **live** it validates, reads `clearinghouseState` once, and pushes
    `AppConfig.leverage` to the venue via `updateLeverage` — skipping symbols already aligned, writing
-   blind where no position is held, and raising a **venue leverage mismatch** where config disagrees
+   blind where no position is held, and raising **`VenueLeverageMismatch`** where config disagrees
    with a symbol that *does* hold one. That refusal is the venue twin of step 2's
    `StoreAccountMismatch`, and the order of the two is load-bearing: the local, cheap store check
    refuses first, the networked venue check second, **both before** the step 5 barrier — so neither
