@@ -1,6 +1,6 @@
 # Economic terminology and the closed event catalog: gross realized PnL, unsigned notional, and no position event
 
-_Accepted via the D12 grilling session on decision ticket [#138](https://github.com/MarcosACH/tickwright/issues/138), the terminal ticket of the trade-economics map [#107](https://github.com/MarcosACH/tickwright/issues/107). Delivers the economic vocabulary **ADR-0034's Consequences terminology bullet** and **ADR-0035's Naming section** deferred to "its owning model tickets plus a terminology sweep", and **closes ADR-0025's event catalog** for the accounting surface — the half **ADR-0037's Consequences "Event schema" bullet** left open when it settled funding. **Amends ADR-0025** (the catalog gains a closure clause, not a variant), **ADR-0040** (amended three times — §7's equity invariant is stated on the formula that does not survive a live heal, §2's `margin_used` row loses its `(initial)` heading, and its ADR-0044 amendment block loses the word "computed"), **ADR-0020** (four roadmap names) and **ADR-0044 §2** (its `Margin` gloss). Corrects five documentation defects the sweep surfaced._
+_Accepted via the D12 grilling session on decision ticket [#138](https://github.com/MarcosACH/tickwright/issues/138), the terminal ticket of the trade-economics map [#107](https://github.com/MarcosACH/tickwright/issues/107). Delivers the economic vocabulary **ADR-0034's Consequences terminology bullet** and **ADR-0035's Naming section** deferred to "its owning model tickets plus a terminology sweep", and **closes ADR-0025's event catalog** for the accounting surface — the half **ADR-0037's Consequences "Event schema" bullet** left open when it settled funding. **Amends ADR-0025** (the catalog gains a closure clause, not a variant), **ADR-0040** (amended three times — §7's equity invariant is stated on the formula that does not survive a live heal, §2's `margin_used` row loses its `(initial)` heading, and its ADR-0044 amendment block loses the word "computed"), **ADR-0020** (four roadmap names) and **ADR-0044 §2** (its `Margin` gloss — later superseded, below). Corrects five documentation defects the sweep surfaced. **Amended by [#142](https://github.com/MarcosACH/tickwright/issues/142)**: two of those five — defects **2 and 5** — are **withdrawn** (§9), the glossary having held the accurate reading and the landed ADRs the error; with defect 5 goes the `ADR-0044 §2` amendment named above. Three defects stand._
 
 Every mechanism in this surface is now decided: the truth model (ADR-0034), the topology
 (ADR-0035), fees (ADR-0036), funding (ADR-0037), the account (ADR-0038), the mark (ADR-0039),
@@ -109,6 +109,23 @@ check would diverge on every fill. Pinning the Hyperliquid arithmetic empiricall
 to [#142](https://github.com/MarcosACH/tickwright/issues/142)'s scope, alongside the effective-leverage
 denominator ADR-0041 §4.1 already sent there. It fixes one adapter's arithmetic; it cannot change
 this definition.
+
+**(Answered by [#142](https://github.com/MarcosACH/tickwright/issues/142) — the definition is
+confirmed, and Hyperliquid's normalization turns out to be the identity.** `closedPnl` is **gross**
+of fees: **65/65 opening fills carry `closedPnl = 0.0`** against a non-zero `fee`, and closing fills
+reconstruct exactly as `side × (px − entryPx) × sz` with no fee term (the residuals across 113
+historical fills are a constant `entryPx` quantization offset, ≈0.9 ppm, independent of `fee`). So
+the un-bundling this paragraph requires is a **no-op for this venue** — the adapter accumulates
+`closedPnl` raw — and ADR-0034's zero-tolerance check holds against the raw field.
+
+The rule itself is unchanged, and the reason for stating it venue-agnostically got stronger. "At
+least one is ambiguous in its own documentation" above understates the case: the venue's
+[entry-price-and-PnL page](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/entry-price-and-pnl)
+gives closed PnL as `fee + side · (mark − entry) · size` for a closing trade "*and only the fee for
+an opening trade*" — **wrong on both clauses**. The venue *documentation* is the untrustworthy source
+here; the venue's *data* matches this section exactly. One gap stands, and it is moot: every observed
+fill was taker (`crossed: true`), so the maker-rebate case (a negative `fee`) is unmeasured — but
+`fee` is not a term in `closedPnl` at all, so its sign cannot matter.**)**
 
 **Rejected: a `Total PnL` term** (`realized + unrealized`). No field carries it — ADR-0041 exposes
 the two separately — and a term with no field behind it drifts. Recorded as a non-term.
@@ -238,16 +255,38 @@ genuine multi-sense conflicts go in **Flagged ambiguities** with a resolution, w
 ## 9. Sweep corrections
 
 Five places where the documents already disagreed. None changes a decision; all are drift the sweep
-exists to catch.
+exists to catch. (**Two of the five — defects 2 and 5 — were later withdrawn** by
+[#142](https://github.com/MarcosACH/tickwright/issues/142): the disagreement was real in both
+cases, but the sweep resolved it toward the landed ADRs when `CONTEXT.md` held the accurate
+reading. Each is annotated in place below.)
 
 1. **`CONTEXT.md` `Margin` states `margin_used = notional / leverage` unconditionally.** True for
-   **cross** only. An isolated position's `margin_used` **is** its locked collateral — ingested from
-   `rawUsd` on live, static-at-open on paper (ADR-0040 §1/§3).
-2. **`CONTEXT.md` `Margin` calls the whole term "recomputed each read (Tier-2)".** Again cross-only.
-   Isolated `margin_used` is **Tier-1 and persisted** — ADR-0041 §6 classifies it Tier-1
-   ("mark-independent … even though ADR-0040 §2 tables `margin_used` among the Tier-2 set") and
-   ADR-0043 §3 puts `isolated_collateral` on the position row because nothing can recompute it at
-   boot.
+   **cross** only. An isolated position's `margin_used` is computed from its locked collateral —
+   ingested on live, static-at-open on paper (ADR-0040 §1/§3).
+2. **`CONTEXT.md` `Margin` calls the whole term "recomputed each read (Tier-2)".** This one the
+   sweep got **wrong**, and [#142](https://github.com/MarcosACH/tickwright/issues/142) reversed it —
+   `CONTEXT.md` was right and the ADRs it was corrected against were not. See the correction below.
+
+**(Defects 1 and 2 amended by [#142](https://github.com/MarcosACH/tickwright/issues/142).** The
+sweep faithfully propagated an error that was already in the landed ADRs, so it inherited rather
+than introduced it — but the entry as written is wrong and would mislead.
+
+Measured against a funded testnet position, the venue's isolated `marginUsed` is
+`isolated_collateral + unrealized_pnl` and **moves with the mark** (`25.860067` at mark 64796 →
+`25.856067` at mark 64794). So:
+
+- **Defect 2 is withdrawn.** Isolated `margin_used` is **Tier-2, recomputed each read** — exactly
+  what `CONTEXT.md` said. What is Tier-1 and persisted is the underlying **`isolated_collateral`**,
+  which is what ADR-0043 §3 actually puts on the row; the sweep conflated the two because ADR-0040
+  §3 and ADR-0041 §6 did. Both are now corrected at source, and `CONTEXT.md`'s `Margin` term is
+  restored to "recomputed each read" for both modes rather than being "fixed" toward the error.
+- **Defect 1 survives, minus its field name.** `margin_used` is still not `notional / leverage` for
+  an isolated position, so the unconditional formula is still wrong. But the collateral is **not**
+  `rawUsd` — that measured `−103.731933` against a collateral of `25.898067`, being the cash leg net
+  of cost basis. It is recovered as `marginUsed − unrealizedPnl`.
+
+This is the sweep's own thesis holding at one remove: the drift it exists to catch was, again,
+between *landed* documents — and here the glossary was the accurate one.**)**
 3. **`CONTEXT.md` `PositionView` flattens ADR-0041 §6's nullability rule** to "`None` when the mark
    is absent", dropping the per-**term** refinement: a field is `None` only when the mark is absent
    *and its own terms need it*. A flat position's valuations need no mark and read `0`.
@@ -255,19 +294,34 @@ exists to catch.
    but the four inputs moves `cash` — `Genesis collateral` already described the live heal that
    `Equity`'s formula implicitly denied. Resolved by §5.
 5. **The `margin_used`-is-computed gloss, in the three places that carry it.** `ADR-0044 §2`'s
-   naming argument called `Margin` "a computed Tier-2 output" — defects 1 and 2 from the other
-   side, in the ADR that reasons *about* the glossary: an isolated position's `margin_used` is
-   neither computed nor Tier-2. That sentence is **duplicated**, so correcting it at its origin
-   alone would have left the copies to drift: `ADR-0040`'s ADR-0044 amendment block restates the
-   naming argument verbatim ("binds **Margin** to the computed collateral a position ties up"), and
-   `CONTEXT.md`'s `Leverage` entry re-glosses the cross-reference in its own `_Avoid_` list ("the
-   *computed* collateral a position ties up") — **below**, in the same file, the `Margin` entry that
-   calls an isolated position's `margin_used` "an ingested input rather than a computed valuation",
-   so the two disagreed in the document a reader consults for the word itself. All
-   three now carry the computed/ingested split, or drop the tier word where the point is the
-   *name*. The naming argument itself is unaffected everywhere — it turns on `Margin` naming a
-   **reported output** rather than an operator input, true in both modes — so only the gloss
-   changes.
+   naming argument called `Margin` "a computed Tier-2 output"; the sweep read that as defects 1 and
+   2 from the other side, in the ADR that reasons *about* the glossary. That sentence is
+   **duplicated**, so correcting it at its origin alone would have left the copies to drift:
+   `ADR-0040`'s ADR-0044 amendment block restates the naming argument verbatim ("binds **Margin**
+   to the computed collateral a position ties up"), and `CONTEXT.md`'s `Leverage` entry re-glosses
+   the cross-reference in its own `_Avoid_` list ("the *computed* collateral a position ties up") —
+   **below**, in the same file, the `Margin` entry that calls an isolated position's `margin_used`
+   "an ingested input rather than a computed valuation", so the two disagreed in the document a
+   reader consults for the word itself. The **three-way sync is the durable part** of this entry;
+   the gloss it synced them onto is not — [#142](https://github.com/MarcosACH/tickwright/issues/142)
+   withdrew it, below. The naming argument itself is unaffected throughout — it turns on `Margin`
+   naming a **reported output** rather than an operator input, true in both modes — so only the
+   gloss ever changed.
+
+**(Defect 5 withdrawn by [#142](https://github.com/MarcosACH/tickwright/issues/142), for the same
+reason as defect 2.** This entry judged "a computed Tier-2 output" wrong on the premise that an
+isolated position's `margin_used` is neither computed nor Tier-2 — the landed-ADR error defects 1
+and 2 inherited. Measured, it is **both**: `isolated_collateral + unrealized_pnl`, recomputed each
+read, mark-dependent. So `ADR-0044 §2`'s original gloss was accurate and the computed/ingested split
+this sweep installed in its place is the drift.
+
+All three copies are corrected again, and this time toward the mode-neutral reading: `margin_used`
+is **computed in both modes** — off the nominal leverage on a cross position, off the ingested
+collateral on an isolated one. `ADR-0040`'s amendment block keeps "reported collateral" as the
+mode-neutral word rather than as a correction of "computed".
+
+The three-way sync stands as this entry's real finding: a gloss duplicated across three documents
+was moved in step twice, and would have drifted both times had the copies not been named here.**)**
 
 ## Consequences
 
@@ -278,10 +332,15 @@ exists to catch.
   §2's `margin_used` row loses its `(initial)` heading (§6) — which also costs §1, §4, the
   sentence ADR-0043 §3 quotes from §1, and ADR-0035's `margin_init` aside the words "the initial
   margin", wherever they named the *amount*; and its ADR-0044 amendment block loses the word
-  "computed" from the `Margin` gloss it restates (§9.5). Its numbers are unchanged.
+  "computed" from the `Margin` gloss it restates (§9.5 — the word is *not* restored by §9.5's #142
+  withdrawal; "reported" simply stops being a correction and becomes the mode-neutral choice). Its
+  numbers are unchanged.
 - **The `Margin` gloss is corrected in all three documents carrying it** (§9.5) — `ADR-0044 §2`'s
   "a computed Tier-2 output" becomes the computed/ingested split, and the copies in `ADR-0040`'s
   amendment block and `CONTEXT.md`'s `Leverage` entry follow it. No naming decision moves.
+  (**Amended by [#142](https://github.com/MarcosACH/tickwright/issues/142)**: the split is withdrawn
+  — `margin_used` is computed in both modes — and all three copies move again, in step. What this
+  bullet records that survives is the *sync*, not the gloss it synced them onto.)
 - **ADR-0020 gains four roadmap names** (§2), none of them shipped until its emitting path is.
 - **The ADR-0034 / ADR-0035 / ADR-0037 deferrals are delivered**, each annotated in place so a
   reader landing on any of the three finds the pointer rather than an open question. The economic
@@ -294,6 +353,17 @@ exists to catch.
   moving it.
 - **[#142](https://github.com/MarcosACH/tickwright/issues/142) gains one item** (§3): pin whether
   Hyperliquid's `closedPnl` includes the fee, and whether an opening fill carries a non-zero
-  `closedPnl`. It tunes an adapter, and cannot reopen §3.
+  `closedPnl`. It tunes an adapter, and cannot reopen §3. (**Answered, and it did not**: `closedPnl`
+  is **gross** and `0.0` on opens, so §3's definition matches the venue verbatim and the
+  gross-normalization §3 assigns the adapter is the **identity** for Hyperliquid. The venue's own
+  documentation is wrong on both clauses — recorded at §3, since it is the reason §3 keeps the rule
+  venue-agnostic rather than Hyperliquid-shaped.)
 - **The map's frontier is empty of decisions.** With this ticket closed, [#107](https://github.com/MarcosACH/tickwright/issues/107)
   holds only the `wayfinder:task` #142, and the destination — the PRD — is reachable via `/to-spec`.
+  (**No longer true — and #142 is why.** That task closed, but it surfaced an account-grain design
+  question that is now the open decision
+  [#148](https://github.com/MarcosACH/tickwright/issues/148) — "supported account abstraction modes &
+  where the reconcile anchor reads account state" — #107's only remaining open child, and the carrier
+  of ADR-0040 §6's band-shape defect. So the frontier holds one decision again and `/to-spec` waits
+  on it. What this bullet recorded stands for the *terminology* half: #138 closed without leaving a
+  decision behind; the one on the frontier now is not this ticket's.)
