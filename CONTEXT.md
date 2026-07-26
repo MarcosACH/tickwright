@@ -463,12 +463,12 @@ The **reported** collateral a [[Position]] ties up — `margin_used`, with its s
 [[Paper exchange]] never rejects an order for margin and never liquidates (a future map). What
 `margin_used` *is* depends on the mode, but **both are Tier-2, recomputed each read**: a **cross**
 position shares one account pool and computes `notional / leverage`; an **isolated** position
-computes `isolated_collateral + uPnL` — its own equity, which moves with the mark. The
-`isolated_collateral` underneath it *is* Tier-1 and **persisted** (static at open on paper, ingested
-on live as `marginUsed − unrealizedPnl` — never the venue's `rawUsd`, which is the cash leg net of
-cost basis and is negative for a long). `max_leverage` and `margin_maint` are additive
-`InstrumentSpec` fields. Both `margin_used` computations sit inside ADR-0040 §6's alert band.
-See ADR-0040, ADR-0041, ADR-0043, ADR-0045, and the [#142](https://github.com/MarcosACH/tickwright/issues/142)
+computes `isolated_collateral + uPnL` — its backing collateral plus its unrealized PnL, which moves
+with the mark. The `isolated_collateral` underneath it *is* Tier-1 and **persisted** (static at open
+on paper, ingested on live as `marginUsed − unrealizedPnl` — never the venue's `rawUsd`, which is
+the cash leg net of cost basis and is negative for a long). `max_leverage` and `margin_maint` are
+additive `InstrumentSpec` fields. Both `margin_used` computations sit inside ADR-0040 §6's alert
+band. See ADR-0040, ADR-0041, ADR-0043, ADR-0045, and the [#142](https://github.com/MarcosACH/tickwright/issues/142)
 testnet measurement that settled the tiering.
 _Avoid_: **initial margin** (conventionally the collateral reserved when an *order* is submitted —
 an admission gate this surface does not implement), margin **call**, buying power
