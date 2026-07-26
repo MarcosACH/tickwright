@@ -53,7 +53,8 @@ the reference (ADR-0010's explicit goal).
 
 ## Catalog closure: the accounting surface contributes exactly one variant
 
-_Added by ADR-0045 (D12), closing the question ADR-0037 §66 left half-open._
+_Added by ADR-0045 (D12), closing the question ADR-0037's Consequences "Event schema" bullet left
+half-open._
 
 The trade-economics map (ADR-0034–0045) added two variants to this taxonomy and **deliberately no
 third**:

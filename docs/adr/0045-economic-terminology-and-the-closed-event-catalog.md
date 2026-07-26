@@ -1,6 +1,6 @@
 # Economic terminology and the closed event catalog: gross realized PnL, unsigned notional, and no position event
 
-_Accepted via the D12 grilling session on decision ticket [#138](https://github.com/MarcosACH/tickwright/issues/138), the terminal ticket of the trade-economics map [#107](https://github.com/MarcosACH/tickwright/issues/107). Delivers the economic vocabulary **ADR-0034 §46** and **ADR-0035** deferred to "its owning model tickets plus a terminology sweep", and **closes ADR-0025's event catalog** for the accounting surface — the half **ADR-0037 §66** left open when it settled funding. **Amends ADR-0025** (the catalog gains a closure clause, not a variant), **ADR-0040 §7** (its equity invariant is stated on the formula that does not survive a live heal) and **ADR-0020** (four roadmap names). Corrects four documentation defects the sweep surfaced._
+_Accepted via the D12 grilling session on decision ticket [#138](https://github.com/MarcosACH/tickwright/issues/138), the terminal ticket of the trade-economics map [#107](https://github.com/MarcosACH/tickwright/issues/107). Delivers the economic vocabulary **ADR-0034's Consequences terminology bullet** and **ADR-0035's Naming section** deferred to "its owning model tickets plus a terminology sweep", and **closes ADR-0025's event catalog** for the accounting surface — the half **ADR-0037's Consequences "Event schema" bullet** left open when it settled funding. **Amends ADR-0025** (the catalog gains a closure clause, not a variant), **ADR-0040 §7** (its equity invariant is stated on the formula that does not survive a live heal) and **ADR-0020** (four roadmap names). Corrects four documentation defects the sweep surfaced._
 
 Every mechanism in this surface is now decided: the truth model (ADR-0034), the topology
 (ADR-0035), fees (ADR-0036), funding (ADR-0037), the account (ADR-0038), the mark (ADR-0039),
@@ -148,7 +148,7 @@ expanded form:
 equity = genesis_collateral + Σ realized_pnl − Σ fees + Σ funding + Σ unrealized_pnl
 ```
 
-That expression holds **only while `cash` equals the sum of its four inputs**, and ADR-0042 §5 says
+That expression holds **only while `cash` equals the sum of its four inputs**, and ADR-0042 §4 says
 plainly that on live it need not: the synthetic cash adjustment "exists precisely because the four
 inputs above failed to reproduce the venue's number." So on the live path — the path §7 names — the
 formula is false the instant a heal fires, while `equity = cash + Σ uPnL` remains true. The
@@ -181,12 +181,16 @@ which is exactly the kind of coincidence that makes a wrong name survive review.
 invites a reader fluent in the convention to conclude that orders are margin-checked — the single
 most consequential thing this surface does **not** do.
 
-`ADR-0040 §2`'s table heading is corrected to match. The venue's own "IM fraction" language is
-unaffected: an adapter may use its venue's words internally, `domain` uses this one.
+Three places are corrected to match: `ADR-0040 §2`'s table heading, and the two that used the phrase
+to name the *amount* rather than a venue's fraction — `ADR-0040 §1` and the sentence `ADR-0043 §3`
+quotes from it, both of which now read "the amount moved in at open". The venue's own "IM fraction"
+language is unaffected — an adapter may use its venue's words internally, `domain` uses this one —
+so `ADR-0040 §4`'s `margin_init` discussion and `ADR-0041 §4.1`'s "initial-margin fraction" stand.
 
 ## 7. `Collateral` is a flagged ambiguity, not a term
 
-**Decision: no `Collateral` glossary term.** This overrides ADR-0034 §46, which listed one.
+**Decision: no `Collateral` glossary term.** This overrides ADR-0034's _Consequences_ terminology
+bullet, which listed one.
 
 The word already carries **three distinct, separately-owned meanings** in this repo:
 
@@ -242,12 +246,15 @@ exists to catch.
   surface, and the accounting surface contributes exactly one variant — `FundingAccrual`. A future
   position event is an additive taxonomy change with a stated trigger (§1), not a gap.
 - **ADR-0040 is amended twice**: §7's equity invariant is restated on the compact form (§5), and
-  §2's `margin_used` row loses its `(initial)` heading (§6). Its numbers are unchanged.
+  §2's `margin_used` row loses its `(initial)` heading (§6) — which also costs §1, and the sentence
+  ADR-0043 §3 quotes from it, the words "the initial margin". Its numbers are unchanged.
 - **ADR-0020 gains four roadmap names** (§2), none of them shipped until its emitting path is.
-- **ADR-0034 §46 and ADR-0035's deferral are delivered.** The economic vocabulary those documents
-  postponed now exists, with one deliberate deviation: `Collateral` is a flagged ambiguity rather
-  than a term (§7).
-- **ADR-0036/0037 are confirmed, not amended.** Their "own ledger line, never folded into realized
+- **The ADR-0034 / ADR-0035 / ADR-0037 deferrals are delivered**, each annotated in place so a
+  reader landing on any of the three finds the pointer rather than an open question. The economic
+  vocabulary those documents postponed now exists, with one deliberate deviation: `Collateral` is a
+  flagged ambiguity rather than a term (§7).
+- **ADR-0036/0037's decisions are confirmed, not amended** — ADR-0037's two annotations mark its
+  deferrals closed and change nothing it decided. Their "own ledger line, never folded into realized
   PnL" treatment is what §3 names and generalizes; the new content is that **normalizing a venue's
   realized figure to gross is the adapter's job**, which extends their existing seam rather than
   moving it.
