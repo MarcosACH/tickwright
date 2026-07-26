@@ -23,7 +23,8 @@ So the canonical pairings are **InMemoryBus + SQLite** (zero-setup, deterministi
 - **The position ledger**, keyed by `(strategy_id, symbol)`: signed size, entry price, realized
   PnL, accrued fees, accrued funding, isolated collateral (ADR-0043 §3).
 - **The account row**: a single row by constraint (one process trades one account, ADR-0038)
-  holding `account_id`, genesis collateral (ADR-0042) and the cash line.
+  holding `account_id`, the opening declaration — genesis collateral (ADR-0042) and the instant it
+  was written — and the cash line.
 - **The funding watermarks**, one row per symbol: the last funding boundary applied to it
   (ADR-0043 §5.2) — at `symbol` grain because that is the grain of ADR-0037's key.
 

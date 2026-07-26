@@ -36,7 +36,7 @@ This is consistent with every money decision already made: ADR-0029 makes all mo
 
 ## 3. Genesis is a creation seed; the store is authority; a changed genesis fail-fasts
 
-The configured value is used **once**, to seed the account row when it does not exist. It is persisted as its own column — distinct from the cash line, which accumulates away from it — and on every subsequent start it serves exactly one purpose: a **cross-check**.
+The configured value is used **once**, to seed the account row when it does not exist. **(Placed by ADR-0043 §6:** that write happens inside `PortfolioProjection.recover()`, in the same startup step as the check below and before anything else recovers — the check is already holding the declared value, and the branch that seeds is the one where its refusal did not fire. Seeding later would start strategies with no account row, against ADR-0041 §6.**)** It is persisted as its own column — distinct from the cash line, which accumulates away from it — and on every subsequent start it serves exactly one purpose: a **cross-check**.
 
 - **The cash line is restored from the `Store`,** never recomputed from config. ADR-0034 makes the store system-of-record for Tier-1, and cash is Tier-1.
 - **Config genesis ≠ persisted genesis → refuse to start,** naming both values and the remedy.

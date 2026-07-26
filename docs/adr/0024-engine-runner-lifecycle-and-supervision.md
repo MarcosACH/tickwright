@@ -12,12 +12,15 @@ those components.
 2. **Recover**: rebuild the `Cache` from the `Store` (write-through projection, ADR-0009).
    **(Extended by ADR-0043 §6/§10:** the accounting ledger recovers here too, and it goes **first**
    — `Engine._start_sequence` calls `PortfolioProjection.recover()`, which checks the store's
-   account binding and then restores the ledger rows, *before* this `Cache` rebuild and before any
-   other recovery work. The order is load-bearing twice over: the check can **refuse** the store
-   outright (`StoreAccountMismatch`, ADR-0042 §3/ADR-0043 §8), which must happen before the engine
-   has done work it would have to unwind; and its existence question — does `orders` hold rows with
-   no account row? — is answered by a narrow `has_orders()` precisely so it need not run the mass
-   read this step performs.**)**
+   account binding, seeds the **paper** account row when the store has none, and then restores the
+   ledger rows, *before* this `Cache` rebuild and before any other recovery work. The order is
+   load-bearing twice over: the check can **refuse** the store outright (`StoreAccountMismatch`,
+   ADR-0042 §3/ADR-0043 §8), which must happen before the engine has done work it would have to
+   unwind; and its existence question — does `orders` hold rows with no account row? — is answered
+   by a narrow `has_orders()` precisely so it need not run the mass read this step performs. The
+   seed sits here rather than at step 5 because paper's opening value is *declared* config the
+   check already holds, so it needs no venue read and cannot fail on connectivity; live's is
+   ingested, which is why its twin waits for the barrier.**)**
 3. Start the `EventBus` (InMemory: no-op; Kafka: connect consumers/producers).
 4. Connect the `Exchange` + `ExecutionManager` (WS/HTTP; subscribe to `Signal`/`ExecutionReport`).
 5. **Startup-reconciliation barrier** — the ADR-0011 mass-rebuild. A **hard gate**: nothing places
