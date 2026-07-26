@@ -261,11 +261,12 @@ exists to catch.
    alone would have left the copies to drift: `ADR-0040`'s ADR-0044 amendment block restates the
    naming argument verbatim ("binds **Margin** to the computed collateral a position ties up"), and
    `CONTEXT.md`'s `Leverage` entry re-glosses the cross-reference in its own `_Avoid_` list ("the
-   *computed* collateral a position ties up") 27 lines above the `Margin` entry that calls an
-   isolated position's "an ingested input rather than a computed valuation". All three now carry
-   the computed/ingested split, or drop the tier word where the point is the *name*. The naming
-   argument itself is unaffected everywhere — it turns on `Margin` naming a **reported output**
-   rather than an operator input, true in both modes — so only the gloss changes.
+   *computed* collateral a position ties up"), 27 lines **below** the `Margin` entry that calls an
+   isolated position's `margin_used` "an ingested input rather than a computed valuation". All
+   three now carry the computed/ingested split, or drop the tier word where the point is the
+   *name*. The naming argument itself is unaffected everywhere — it turns on `Margin` naming a
+   **reported output** rather than an operator input, true in both modes — so only the gloss
+   changes.
 
 ## Consequences
 
