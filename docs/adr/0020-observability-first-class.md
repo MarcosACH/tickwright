@@ -23,7 +23,13 @@ coverage of state-affecting paths is a requirement, not optional.
   `saga.checkpoint`, `reconcile.started`, `reconcile.completed`, `reconcile.frozen` (connectivity
   guard), `reconcile.recency_skipped` (recent-order protection window), `inflight.reconciled`,
   `ghost.reconciled`, `fill.healed`, `feed.connected`, `feed.disconnected`,
-  `guard.denied`, `strategy.snapshot`, `engine.faulted`.
+  `guard.denied`, `strategy.snapshot`, `engine.faulted`, and — added by ADR-0045 §2 for the
+  accounting surface — `position.opened`, `position.changed`, `position.closed`,
+  `account.reconciled`. Those four are load-bearing rather than incidental: ADR-0045 §1 declines a
+  position/account **bus** event on the grounds that this catalog already carries the telemetry, so
+  they are what that decision rests on. (A flip through zero is one fill that emits
+  `position.closed` then `position.opened` — the residual opens a fresh average-cost record, and
+  telemetry hiding that would misreport the entry basis.)
 
   That list is the roadmap; the **shipped** catalog is the closed `observability.NamedEvent`
   enum, which grows one slice at a time (a name lands only with its emitting path and a

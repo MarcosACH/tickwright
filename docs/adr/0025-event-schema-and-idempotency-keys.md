@@ -51,6 +51,37 @@ the reference (ADR-0010's explicit goal).
   separately (ADR-0011 inv 4).
 - **`Signal`** = `PlaceSignal` + `CancelSignal` (see ADR-0026).
 
+## Catalog closure: the accounting surface contributes exactly one variant
+
+_Added by ADR-0045 (D12), closing the question ADR-0037 §66 left half-open._
+
+The trade-economics map (ADR-0034–0045) added two variants to this taxonomy and **deliberately no
+third**:
+
+- **`FundingAccrual`** `(account, symbol, boundary_ts, amount)` — funding's own event, keyed
+  idempotent on `(account, symbol, boundary_ts)` (ADR-0037). It exists because funding is an
+  **input with no carrier**: paper *generates* it on a `Clock` cadence and live *ingests* it, so
+  something must transport it into the projection.
+- **`MarkTick`** `(symbol, mark)` — market data on ADR-0027's reserved additive path (ADR-0039),
+  weak-keyed and conflatable like `MarketTick`.
+
+**There is no position or account event, and this is a decision rather than a gap.** A position or
+account change is an **output** — a derived consequence of a fill already on this bus, already
+keyed `{cloid}:fill:{trade_id}` and already idempotent — where `FundingAccrual` is an input. The
+rule the two cases share: **an event carries something the bus does not already carry.** The fee
+went the same way for the same reason and needed no variant at all: it rides `OrderFillEvent` as a
+read-model (ADR-0036).
+
+Nothing consumes such an event either. ADR-0035 writes Tier-1 **synchronously on the fill-apply
+path** rather than by subscription, and ADR-0004/ADR-0041 make every strategy read a pull method
+call — so the projection is the writer and the strategy is a puller. Telemetry is served by
+ADR-0020's named lifecycle events (`position.opened` / `position.changed` / `position.closed` /
+`account.reconciled`), which this surface owes regardless.
+
+Adding one later is an **additive** taxonomy change with a stated trigger — a consumer that cannot
+be served by a pull call or a log record, most plausibly an external dashboard reading the Kafka
+topic (ADR-0028). See ADR-0045 §1.
+
 ## Idempotency keys: deterministic, provenance-free, enforced by the saga
 
 Engine correctness rests on deterministic idempotency keys (ADR-0002). `event_id` is derived per
