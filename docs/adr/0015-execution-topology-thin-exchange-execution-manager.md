@@ -7,9 +7,12 @@ is the one engine-internal orchestrator, not a swappable seam.
 
 Each seam **accepts N implementations**; the two shipped per seam only *prove* the seam (the
 ADR-0018/0001 framing), they do not cap it. For **`Exchange`** specifically, each real venue is a
-**self-contained adapter module** owning its venue translation, reconciliation queries, and
-instrument-spec sourcing, so adding a venue is an additive module plus a process — never a core
-change. The venue-extensibility model (process-per-venue, adapter self-containment, instrument-spec
+**self-contained adapter module** owning its venue translation, reconciliation queries,
+instrument-spec sourcing, and — since ADR-0044 — the boot-time **account-configuration sync**
+(pushing the configured per-symbol leverage and margin mode to the venue in `start()`), so adding a
+venue is an additive module plus a process — never a core change. That sync does not thicken the
+adapter in the sense this ADR means: it is startup config alignment, not saga. The adapter still
+owns no order state, and the write happens once, before the barrier, on a path no order crosses. The venue-extensibility model (process-per-venue, adapter self-containment, instrument-spec
 wiring) is specified in ADR-0031; package topology and the composition root in ADR-0032.
 
 Uniform bus coupling:

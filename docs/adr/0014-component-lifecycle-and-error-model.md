@@ -11,6 +11,12 @@ lifecycle, a readable component-state FSM:
 
 `start`/`stop` are `async` (real network I/O on the live path).
 
+**(Noted by ADR-0044 §7:** the `Exchange` Protocol declared none of this until ADR-0044, which adds
+**`start()` only** — the venue-alignment step ADR-0024's step 4 always named. `stop()`, `state` and
+`health()` stay undeclared on that Protocol until there is teardown to do: the live adapter holds no
+persistent connection of its own, posting per request. The contract above is unchanged; only the
+`Exchange` Protocol's coverage of it has moved.**)**
+
 ## Error model (crash-only, two classes)
 
 - **Recoverable handler error** — a `Strategy`/`Feed` handler raises on a single event. Caught,

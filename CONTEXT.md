@@ -443,15 +443,23 @@ margin **tier** (the piecewise table is a deferred extension point).
 
 **Leverage** & **Margin mode**:
 A **per-symbol / per-position** input (not an [[AccountSpec]] fact): the integer leverage and
-`cross`/`isolated` mode that set a [[Position]]'s [[Margin|initial margin]]. **Config-authoritative
-on both paths** — paper-configured (`PaperExchangeConfig`, default **1x / isolated**), live-ingested
-as a cross-check; the engine does **not** set them on the venue as part of this surface. **Effective
+`cross`/`isolated` mode that set a [[Position]]'s [[Margin|initial margin]], carried together as one
+`LeverageSpec` because the venue sets them in one action. **Config-authoritative on both paths** —
+declared venue-agnostically in `AppConfig.leverage` (default **1x / isolated**, the safest pair) and
+live-ingested as a cross-check. The engine **pushes** it to the venue **once, at boot** (ADR-0044):
+symbols already aligned are skipped, symbols holding no position are written blind, and a
+disagreement on a symbol that *does* hold a position **refuses to start** rather than re-margining a
+live position — after which the venue is left alone for the run, with drift **alerted, never
+re-pushed**, on a direct exact-match check (the `margin_used` route is blind for isolated positions,
+where computed and venue margin are the same ingested number). **Effective
 leverage** is a convention-only readout with no venue counterpart — the *realized* ratio (vs the set
 nominal `leverage`), `notional / (isolated_collateral + uPnL)` for an isolated position (so adding
 isolated margin lowers it) and `notional / equity` for cross/account, **`None` when that denominator
 is `≤ 0`**; the isolated denominator is a modelling choice R3 flagged for confirmation, pending #142
-(ADR-0041 §4.1). See ADR-0040, ADR-0041, ADR-0038.
-_Avoid_: account leverage (it is per-symbol), setting leverage (a separate [[Exchange]] write action).
+(ADR-0041 §4.1). See ADR-0040, ADR-0041, ADR-0038, ADR-0044.
+_Avoid_: account leverage (it is per-symbol); **margin** as the name for this input (that word is
+this glossary's [[Margin]] — the *computed* collateral a position ties up; this is its *setting*);
+topping up isolated collateral (`updateIsolatedMargin` — a deferred extension point, ADR-0044 §8).
 
 **Liquidation price**:
 The per-[[Position]] price at which the venue would liquidate it — **nullable**, and the **one**
