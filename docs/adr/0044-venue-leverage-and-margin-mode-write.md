@@ -467,14 +467,21 @@ No-re-margining is stated without a mode, and applied to **cross** it says the s
 window this check governs: the model computes `notional / config_leverage`, the venue's held cross
 `marginUsed` keeps whatever leverage the position opened at, and after §4's boot push those are the
 same number — so a venue-side drift landing *after* a position is open is invisible in cross
-`margin_used` too. The indirect route keeps exactly one sighted case, in either mode: a drift landing
-*before* the position opens, where the venue prices the open off the drifted setting while the model
-uses config. Marked as what it is — #142 measured a held **isolated** position, so the cross half is
-inference from the venue's own *"leverage is only checked upon opening a position"* (§5), not a
-measured fact. It is the safe direction to infer in: it makes the indirect route weaker than this
-section assumed, never stronger. Whoever measures a held cross position should widen the wording
-above; `LEVERAGE_DIVERGENCE` itself is unaffected either way, since it compares the **setting** and
-already covers both modes on an exact match.
+`margin_used` too. The indirect route keeps exactly one sighted case, and it is **cross-only**: a
+drift landing *before* the position opens, where the venue prices the open off the drifted setting
+while the model computes `notional / config_leverage`. That case does **not** exist for isolated,
+because the model does not compute an isolated position's collateral on live at all — it **ingests**
+it (ADR-0040 §3), so a pre-open drift is priced into the venue's collateral *and into ours*, and the
+two sides still differ by mark skew alone. This section's original claim therefore stands unweakened
+where it was made: for isolated the route is blind **unconditionally**, and the widening adds the
+post-open half of the cross case rather than subtracting from the isolated one. (Paper does not
+supply a counter-example: it computes the collateral from config at open, but has no venue to compare
+against, so §6's band never fires there.) Marked as what it is — #142 measured a held **isolated**
+position, so the cross half is inference from the venue's own *"leverage is only checked upon opening
+a position"* (§5), not a measured fact. It is the safe direction to infer in: it makes the indirect
+route weaker than this section assumed, never stronger. Whoever measures a held cross position should
+widen the wording above; `LEVERAGE_DIVERGENCE` itself is unaffected either way, since it compares the
+**setting** and already covers both modes on an exact match.
 
 `LEVERAGE_DIVERGENCE` remains necessary.**)**
 
@@ -500,9 +507,11 @@ disagreement and keeps trading, exactly as it reports a negative free margin wit
   `PortfolioProjection` and the `Exchange`. Neither consumer resolves defaults itself, so they
   cannot disagree about an unconfigured symbol, and the adapter needs no knowledge of strategies.
 - **Amends ADR-0040 §5 twice** — the config block leaves `PaperExchangeConfig` for
-  `AppConfig.leverage` (§2), and the `margin_used`-divergence claim is corrected for isolated
-  positions (§10). Its "the engine does not set leverage or mode on the venue" sentence is
-  superseded by this ADR, as that sentence anticipated.
+  `AppConfig.leverage` (§2), and the `margin_used`-divergence claim is corrected: blind for isolated
+  positions **unconditionally**, and — per §10's [#142](https://github.com/MarcosACH/tickwright/issues/142)
+  amendment — blind for a **cross** position too once it is open, leaving the indirect route one
+  cross-only sighted case (a drift landing before the open). Its "the engine does not set leverage or
+  mode on the venue" sentence is superseded by this ADR, as that sentence anticipated.
 - **Extends ADR-0024** — step 4 gains the connect half its prose already promised, and the
   barrier-failure policy covers the push (§6) rather than the push getting a policy of its own.
 - **Two refusals now guard boot**, in a fixed order: `StoreAccountMismatch` (step 2, "is this my
