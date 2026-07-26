@@ -72,9 +72,9 @@ hole.
 binds **Margin** to the *reported collateral a position ties up* — an output of this surface,
 **computed** on a cross position and **ingested** on an isolated one (ADR-0045 §9.5; this once read
 "a computed Tier-2 output", which is the cross-only half). Naming an operator input with the word
-the glossary gives to a reported output would be exactly the
-collision the glossary exists to prevent. The glossary's term for what this block holds is
-**Leverage & Margin mode**, and the field takes its head noun.
+the glossary gives to a reported output would be exactly the collision the glossary exists to
+prevent. The glossary's term for what this block holds is **Leverage & Margin mode**, and the field
+takes its head noun.
 
 **The composition root resolves the map before injecting it.** `AppConfig.leverage` is *sparse* —
 it carries only the symbols the operator wrote — while §3's scope is every symbol the configured
