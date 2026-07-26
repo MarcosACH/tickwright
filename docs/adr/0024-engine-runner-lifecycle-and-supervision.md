@@ -23,6 +23,20 @@ those components.
    ingested, which is why its twin waits for the barrier.**)**
 3. Start the `EventBus` (InMemory: no-op; Kafka: connect consumers/producers).
 4. Connect the `Exchange` + `ExecutionManager` (WS/HTTP; subscribe to `Signal`/`ExecutionReport`).
+   **(Extended by ADR-0044 §7:** the *connect* half this step has always named now exists —
+   `Exchange.start()`, declared on the Protocol (the `start()` ADR-0014 already assigns the
+   component). On **paper** it validates the configured leverage against `InstrumentSpec.max_leverage`
+   and writes nothing; on **live** it validates, reads `clearinghouseState` once, and pushes the
+   per-symbol leverage map to the venue via `updateLeverage` — the complete map the composition
+   root resolved from the sparse `AppConfig.leverage` and the strategy-declared symbols
+   (ADR-0044 §2), so the adapter needs no knowledge of strategies — skipping symbols already
+   aligned, writing blind where no position is held, and raising **`VenueLeverageMismatch`** where
+   config disagrees with a symbol that *does* hold one. That refusal is the venue twin of step 2's
+   `StoreAccountMismatch`, and the order of the two is load-bearing: the local, cheap store check
+   refuses first, the networked venue check second, **both before** the step 5 barrier — so neither
+   can let an order out. Placing the push here rather than after the barrier also means the barrier's
+   own `clearinghouseState` read observes an already-aligned venue, so the first reconcile cycle
+   cannot manufacture a spurious divergence.**)**
 5. **Startup-reconciliation barrier** — the ADR-0011 mass-rebuild. A **hard gate**: nothing places
    until it succeeds. **(Extended by ADR-0043 §6:** on **live** the barrier also performs a single
    unsigned `clearinghouseState` read to **materialise the account row** when the ledger has none —
@@ -53,6 +67,13 @@ it expires — rather than the read getting a policy of its own. Clearing the ba
 row is **not** an available outcome: that is the state the step exists to prevent, so a
 `clearinghouseState` that will not answer must fault the process, never be read as an empty
 ledger — the freeze-don't-guess rule above, applied to the account line.**)**
+**(Extended again by ADR-0044 §6:** step 4's leverage push runs under this same policy and the same
+`startup_reconciliation_timeout` budget — bounded retry with backoff, then `FAULTED` — rather than
+minting a second timeout, for the same reason ADR-0043 gave: it is boot-window venue I/O facing the
+same transient-blip reality. A venue **no-change** error counts as success, a rate-limit rejection is
+retried, anything else consumes the budget and faults. Clearing startup with a venue we failed to
+align is not an available outcome. Note this is *retry* policy only — a **mismatch** on a held
+position is not retryable and refuses immediately (§5 there).**)**
 
 ## Shutdown reverses the sequence and leaves resting orders alone
 
@@ -68,6 +89,11 @@ store → exit **0**.
   by `cloid` on restart, so crash and graceful stop **converge on one recovery path**. Cancelling on
   stop would fork the two paths and push failure-prone network calls into teardown. Flatten-on-exit
   is a risk/operator policy, not engine mechanics (deferred to the strategy/kill-switch surface).
+  **(Consumed by ADR-0044 §4:** this is what makes an own resting order the *ordinary* actor in the
+  step-4 leverage read→write race — the order is live on the venue for the whole of the next boot's
+  step 4 and can fill mid-window, so "the feed starts last" bounds new **sends**, never **fills**.
+  A future flatten-on-exit or cancel-on-stop policy would shrink that race; nothing else depends on
+  it, and ADR-0044 accepts the race regardless.**)**
 
 ## Supervision is `asyncio.TaskGroup`; two error classes map to two mechanisms
 
