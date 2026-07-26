@@ -415,7 +415,8 @@ _Avoid_: cache (that's the order read-model), ledger (reserved), portfolio track
 
 **Realized PnL** & **Unrealized PnL**:
 The two halves of a [[Position]]'s trade profit — **realized** is booked when a fill reduces or
-closes exposure (`(exit − entry) × closed_size`, accumulated as Tier-1); **unrealized** is the open
+closes exposure (`signed_closed_size × (exit − entry)` — signed with the closed exposure, so a short
+closed below its entry books a profit; accumulated as Tier-1); **unrealized** is the open
 exposure marked to a price (`signed_size × (mark − entry)`, Tier-2, recomputed each read from the
 [[MarkTick]] mark). Both are **gross**: [[Fee|fees]] and [[Funding]] accrue on their own ledger
 lines and are **never** folded in — a venue reporting them bundled is un-bundled at its
@@ -446,9 +447,11 @@ _Avoid_: interest, carry, funding **fee** (it is not a [[Fee]] — no trade, no 
 funding **rate** (the input rate, not the cash accrual).
 
 **Notional**:
-A [[Position]]'s gross market value — **unsigned**: `|size| × mark`, the magnitude every margin
-number is computed from ([[Margin]], [[Leverage|effective leverage]]). The [[Account]] total is the
-**sum of those magnitudes** — *gross*, never net: two opposite positions of equal size total twice
+A [[Position]]'s gross market value — **unsigned**: `|size| × mark`, the magnitude
+`maintenance_margin`, **cross** `margin_used` and [[Leverage|effective leverage]] are computed from
+(an **isolated** position's `margin_used` is ingested, not derived from it — [[Margin]]). The
+[[Account]] total is the **sum of those magnitudes** — *gross*, never net: two opposite positions of
+equal size total twice
 one of them rather than zero, because each independently ties up collateral and each is
 independently liquidatable. Tier-2. See ADR-0045, ADR-0040.
 _Avoid_: **net exposure** / net notional (a signed portfolio-risk quantity, and the deferred
