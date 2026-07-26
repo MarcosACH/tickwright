@@ -155,7 +155,9 @@ idempotent push, but it costs one info read per symbol instead of one per boot, 
 for a symbol with no open position is not documented** — the design would rest on an unverified
 premise to save writes that are already free of the address budget's meaningful cost — one boot's
 worth of writes against §1's cited 10 000-request buffer. It stays a named option, reachable if the
-blind write ever proves noisy.
+blind write ever proves noisy. (Note the trade is not reads-for-writes at par: by §1's citation the
+reads it would add cost nothing against that budget, so what the option actually buys is
+idempotency, and what it costs is resting the design on an undocumented premise.)
 
 **([#142](https://github.com/MarcosACH/tickwright/issues/142) verified the premise; the extension
 point is now unblocked, and the decision to defer it is a cost trade rather than an unknown.**
@@ -164,17 +166,18 @@ Queried against a **flat** BTC on testnet, `activeAssetData` returned
 alongside `maxTradeSzs`, `availableToTrade` and `markPx`. It **does** report the setting with no
 open position.
 
-Two facts sharpen the trade this section declined. In its favour: `activeAssetData` is an **unsigned
-info request**, so by §1's own *actions-not-info* citation it costs nothing against the address
-budget — the "one read per symbol" price is smaller than assumed. Against it: the pinned SDK's
-`Info` exposes **no `active_asset_data` method**, so it needs a raw `Info.post("/info", …)`, where
-`Exchange.update_leverage(leverage, name, is_cross)` exists as a typed call.
+Two facts sharpen the trade this section declined. In its favour, confirming the note above against
+the body's own "one info read per symbol" framing: `activeAssetData` is an **unsigned info
+request**, so by §1's *actions-not-info* citation its price against the address budget is **zero**.
+Against it: the pinned SDK's `Info` exposes **no `active_asset_data` method**, so it needs a raw
+`Info.post("/info", …)`, where `Exchange.update_leverage(leverage, name, is_cross)` exists as a
+typed call.
 
 Nothing here reverses the decision — the blind write remains correct and simpler. But the idempotent
 push is now a real option, and it is the natural home for the `EXCHANGE_LEVERAGE_UNCHANGED` event
-§6's correction leaves without a source.**)** (Note the trade is not reads-for-writes at par: by §1's citation the
-reads it would add cost nothing against that budget, so what the option actually buys is
-idempotency, and what it costs is resting the design on an undocumented premise.)
+§6's correction leaves without a source. The note above no longer prices it correctly: the
+"undocumented premise" it charges the option for is **retired**, leaving the raw `Info.post` as the
+whole of what the option costs.**)**
 
 **The blind write is therefore only as fresh as that one read, and the gap is accepted rather than
 closed.** §5's "never write for a held symbol" holds against the venue state the read returned, not
@@ -332,8 +335,12 @@ exceptions. Three concrete strings observed, for this section's classification:
 | `"Isolated position does not have sufficient margin available to decrease leverage. To decrease leverage, add margin to the position."` | decrease on a held position with too little collateral | fault (§5's held-disagreement outcome) |
 | `"Cannot switch leverage type with open position."` | mode switch on a held position | fault (§5's held-disagreement outcome) |
 
-Note the venue enforces the leverage bound itself, so §9's both-paths validation is
-belt-and-braces — correctly, since it fires at config load rather than at boot.**)**
+Note the venue enforces the leverage bound itself — but only on **live**, and only at the instant of
+the write. That does not make §9's check redundant, and its reason is not earliness: **paper never
+talks to the venue at all**, so without §9 it would accept an impossible leverage silently and
+compute margin, liquidation price and effective leverage off it. §9's check runs in `start()` on
+**both** paths, not at config load — `max_leverage` lives on the adapter-authored `InstrumentSpec`,
+which is why it cannot be an `AppConfig` validator like §3's.**)**
 
 ## 7. The seam: `Exchange.start()`, at ADR-0024 step 4
 
