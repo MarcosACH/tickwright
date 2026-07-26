@@ -185,7 +185,10 @@ most consequential thing this surface does **not** do.
 to name the *amount* rather than a venue's fraction: `ADR-0040 §1` and the sentence `ADR-0043 §3`
 quotes from it, both of which now read "the amount moved in at open"; `ADR-0040 §4`'s
 `initial_margin = notional / leverage`, which now reads "the amount is `notional / leverage`"; and
-`ADR-0035`'s `margin_init` aside, which now names it "the collateral a position ties up".
+`ADR-0035`'s `margin_init` aside, which now names it "the collateral moved in at open" — `ADR-0040
+§1`'s wording exactly, because the *at open* scoping is load-bearing: "the collateral a position ties
+up" is this glossary's definition of `margin_used`, and asserting that equals `notional / leverage`
+would restate §9.1's cross-only defect.
 
 What stands is **fraction** language only — an adapter may use its venue's words internally,
 `domain` uses this one. That leaves four phrases, three of them in `ADR-0040 §4`: its
