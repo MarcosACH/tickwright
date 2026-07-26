@@ -27,9 +27,11 @@ those components.
    until it succeeds. **(Extended by ADR-0043 §6:** on **live** the barrier also performs a single
    unsigned `clearinghouseState` read to **materialise the account row** when the ledger has none —
    otherwise a live first run would start strategies with no account row at all, against ADR-0041
-   §6's promise that `cash` is Tier-1 and never `None`. It is a no-op on paper, where genesis
-   seeded the row at first start. A *full* ledger reconcile inside the barrier was rejected;
-   positions, Tier-1 heals and the ADR-0040 §6 divergence alerts stay on the cadence.**)**
+   §6's promise that `cash` is Tier-1 and never `None`. It is a no-op on **paper**: the row already
+   exists by the time the barrier runs, seeded three steps earlier by step 2's check — paper's
+   opening value is declared config, so that write needs no venue read and no gate. A *full* ledger
+   reconcile inside the barrier was rejected; positions, Tier-1 heals and the ADR-0040 §6
+   divergence alerts stay on the cadence.**)**
 6. Start the `Strategy` instances (`on_start`: restore snapshot; seq high-water from the saga
    store, ADR-0016; then **pull current open-order state from the `Cache` read-model** by direct
    method call, ADR-0004 — the barrier's reconciliation `OrderEvent`s (step 5) were published

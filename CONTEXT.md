@@ -475,9 +475,12 @@ The value the [[Account]]'s cash line opens at — the one number equity, free m
 leverage are measured against. On **paper** it is operator-declared: a strictly positive
 `PaperExchangeConfig` field with no default, **demanded by `AppConfig` whenever the paper exchange is
 selected** (never required at field level, which would drag a paper number into a live run), because a
-non-zero default would report against capital nobody chose. On **live** it is **ingested** at the first reconcile as
-`accountValue − Σ unrealized_pnl` (`accountValue` is equity and already contains uPnL, so the
-subtraction is what stops it being double-counted). Persisted as its own column on both paths,
+non-zero default would report against capital nobody chose. On **live** it is **ingested** inside the
+**startup reconciliation barrier** — not at a later cadence reconcile, which would start strategies
+with no account row at all — as `accountValue − Σ unrealized_pnl` (`accountValue` is equity and
+already contains uPnL, so the subtraction is what stops it being double-counted). Paper's is written
+a step earlier still, seeded by the startup check that would otherwise refuse the store (ADR-0043
+§6). Persisted as its own column on both paths — beside the instant it was written — and
 distinct from the cash line that accumulates away from it; on paper a config value disagreeing with
 the stored one **fail-fasts** alongside the [[AccountSpec]] `account_id` check — a different genesis
 is a different account history. Together with realized PnL, [[Fee|fees]] and [[Funding]] it closes
@@ -485,7 +488,7 @@ the cash line's write-set at four **accruing** inputs — three added and fees s
 reconciler's synthetic cash adjustment (ADR-0034) corrects that line on live but accrues nothing to
 it: deposits, withdrawals and transfers
 are not modelled, and a real one on live surfaces as a benign Tier-1 divergence that heals and
-alerts. See ADR-0042, ADR-0040.
+alerts. See ADR-0042, ADR-0043, ADR-0040.
 _Avoid_: starting balance, initial deposit (nothing is deposited — the account is declared, not
 funded), seed capital.
 
