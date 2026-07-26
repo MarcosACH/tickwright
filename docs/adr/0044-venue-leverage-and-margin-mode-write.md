@@ -26,13 +26,16 @@ Config wins at boot; the venue wins in-flight. The alternatives both fail on a s
   must not out-argue a human at the venue. It also spends the wrong budget: the venue's
   address-based rate limit starts at **10 000 requests and accrues at 1 per USDC traded**, so an
   unconditional per-cadence write would consume a low-volume account's lifetime allowance on
-  bookkeeping. Those figures carry no in-repo citation — R3's note
-  ([#110](https://github.com/MarcosACH/tickwright/issues/110)) documents the margin/liquidation
-  surface, not rate limits — so their sourcing is handed to
-  [#142](https://github.com/MarcosACH/tickwright/issues/142), together with whether unsigned info
-  reads draw on this same allowance or a separate one. The argument above does not turn on either
-  answer: the operator-authority reason stands alone, and a *cheaper* write budget would not make
-  silently reverting a human's de-risking edit acceptable.
+  bookkeeping. Verbatim from the venue's rate-limits page, §"Address-based limits" —
+  https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/rate-limits-and-user-limits —
+  *"Each address starts with an initial buffer of 10000 requests"*, *"The rate limiting logic allows
+  1 request per 1 USDC traded cumulatively since address inception"*, and — the half that decides
+  what counts against it — *"Note that this rate limit only applies to actions, not info requests."*
+  Cited directly rather than through R3's note
+  ([#110](https://github.com/MarcosACH/tickwright/issues/110)), which captured the
+  margin/liquidation/mark surface and no rate-limit facts at all. The argument does not turn on the
+  numbers anyway: the operator-authority reason stands alone, and a *cheaper* write budget would not
+  make silently reverting a human's de-risking edit acceptable.
 - **Pushing lazily before the first order** on a symbol would move a signed on-chain write onto the
   order path and leave reported margin wrong for any configured-but-not-yet-traded symbol.
 
@@ -145,23 +148,31 @@ This deliberately avoids `activeAssetData` (`{type, user, coin}` → `leverage.{
 the one endpoint that reports the setting for a position-less symbol. It would permit a fully
 idempotent push, but it costs one info read per symbol instead of one per boot, and **its behaviour
 for a symbol with no open position is not documented** — the design would rest on an unverified
-premise to save writes that are already free of the address budget's meaningful cost (a budget whose
-figures are themselves uncited, §1 — but one boot's worth of writes is negligible against any
-plausible reading of them, so this clause does not wait on #142 either). It stays a named option,
-reachable if the blind write ever proves noisy.
+premise to save writes that are already free of the address budget's meaningful cost — one boot's
+worth of writes against §1's cited 10 000-request buffer. It stays a named option, reachable if the
+blind write ever proves noisy. (Note the trade is not reads-for-writes at par: by §1's citation the
+reads it would add cost nothing against that budget, so what the option actually buys is
+idempotency, and what it costs is resting the design on an undocumented premise.)
 
 **The blind write is therefore only as fresh as that one read, and the gap is accepted rather than
 closed.** §5's "never write for a held symbol" holds against the venue state the read returned, not
-the state at the instant of the write. Own flow cannot open a position inside that window — the
-barrier has not cleared and the feed starts last (ADR-0024) — so the only actor that can is
-**foreign flow**: a manual venue-UI trade or a second process on the same account (ADR-0038). That
-is the same operator persona §1 is built around, so the case is named rather than assumed away. It
-is accepted on three grounds: the window is one startup step wide; foreign flow at boot is already
-an anomaly ADR-0038 alerts on rather than a supported mode; and **no amount of re-reading closes
-it** — `updateLeverage` offers no compare-and-set, so any read-then-write stays racy, and a
-per-symbol re-check would buy a merely smaller window at exactly the per-symbol cost the paragraph
-above just declined to pay. The residual risk is narrow and stated: a position opened by someone
-else in the seconds before our write is re-margined at boot instead of refused. If
+the state at the instant of the write. Two actors can open a position inside it, and the ordinary
+one is **ours**. The barrier has not cleared and the feed starts last (ADR-0024), so this process
+cannot *place* an order in the window — but that is not the same as no order *filling*: ADR-0024's
+graceful stop **deliberately leaves resting `LIVE` orders on the venue**, to be re-adopted by
+`cloid` on restart, so a limit order from the previous run sits on the book throughout step 4 and
+can fill at any moment. That is not an anomaly; it is the supported, expected state after a clean
+restart, and it is the likeliest way a symbol the read saw flat is held by the time we write to it.
+The second actor is **foreign flow** — a manual venue-UI trade or a second process on the same
+account (ADR-0038) — rarer, and already an ADR-0038 alerting condition rather than a supported mode.
+
+The gap is accepted on two grounds that hold for **either** actor: the window is one startup step
+wide, and **no amount of re-reading closes it** — `updateLeverage` offers no compare-and-set, so any
+read-then-write stays racy, and a per-symbol re-check would buy a merely smaller window at exactly
+the per-symbol cost the paragraph above just declined to pay. The residual risk is narrow and
+stated: a position opened during those seconds — most likely by our own resting order filling — is
+re-margined at boot instead of refused, in the one case §5 exists for (config and venue disagreeing
+on that symbol; where they agree the write is a no-op either way). If
 [#142](https://github.com/MarcosACH/tickwright/issues/142) finds the venue *rejects* a change on a
 held position, the race closes on its own — the write fails and §6's taxonomy faults the boot,
 which is the right outcome anyway.
@@ -260,9 +271,11 @@ Step 4's read decides the push (§4); step 5's materialises the account row (ADR
 one payload is *sound* — the row is `accountValue − Σ unrealized_pnl` (ADR-0042 §6), which the push
 does not move — but it is not worth buying: the two reads live in different components either side
 of a lifecycle boundary, so threading one payload from `Exchange.start()` into the barrier couples
-them for the sake of a single info call. This is not in tension with §4's rejection of
-`activeAssetData` either: that was a read scaling **per symbol**, where these are one per boot each,
-and the second one the boot already made before this ADR existed.
+them for the sake of a single info call. Neither read is scarce in the sense §1 is careful about:
+both are **unsigned info reads**, and the address-based allowance §1 quotes *"only applies to
+actions, not info requests"*. This is also not in tension with §4's rejection of `activeAssetData`:
+that was a read scaling **per symbol**, where these are one per boot each, and the second one the
+boot already made before this ADR existed.
 
 **The push targets the account the ledger is bound to.** `updateLeverage` is signed through the same
 active pool as orders, so when `HyperliquidConfig.vault_address` is set (ADR-0038's sub-account
@@ -357,10 +370,12 @@ disagreement and keeps trading, exactly as it reports a negative free margin wit
 - **Two refusals now guard boot**, in a fixed order: `StoreAccountMismatch` (step 2, "is this my
   ledger?") then `VenueLeverageMismatch` (step 4, "is this the account I am modelling?"). Both
   precede the barrier, so neither can let an order out.
-- **The blind write is fresh-as-of-one-read, by choice** (§4). Foreign flow opening a position
-  inside the step-4 read→write window would be re-margined rather than refused; the window is one
-  startup step, no re-read closes it (`updateLeverage` has no compare-and-set), and #142 may close
-  it outright if the venue rejects changes on held positions.
+- **The blind write is fresh-as-of-one-read, by choice** (§4). A position opened inside the step-4
+  read→write window is re-margined rather than refused — most often by **our own resting order from
+  the previous run filling** (ADR-0024 leaves resting `LIVE` orders on the venue across a graceful
+  stop, so this is the ordinary case, not an anomaly), and more rarely by foreign flow. The window
+  is one startup step, no re-read closes it (`updateLeverage` has no compare-and-set), and #142 may
+  close it outright if the venue rejects changes on held positions.
 - **The operator keeps the last word in-flight.** A venue-side change during a run stands and is
   alerted; only a deliberate restart re-imposes config. The cost is stated: a divergence can persist
   for the life of a run, and the reported margin and liquidation numbers for a held symbol are then
@@ -372,6 +387,5 @@ disagreement and keeps trading, exactly as it reports a negative free margin wit
   no-op `updateLeverage` (narrows §6's tolerance); whether changing leverage recomputes an open
   position's `marginUsed`; whether a leverage decrease or mode switch on a held position is
   rejected; and whether `activeAssetData` reports leverage for a symbol with no open position.
-  Handed there separately, and not a venue behaviour: the **citation** for §1's rate-limit figures,
-  which are the canon's only rate-limit facts and carry none — along with whether an unsigned info
-  read draws on that same address-based allowance.
+  The rate-limit taxonomy is **not** among them: §1 cites the buffer, the accrual and the
+  actions-not-info scope directly at the venue's rate-limits page, so nothing there is outstanding.

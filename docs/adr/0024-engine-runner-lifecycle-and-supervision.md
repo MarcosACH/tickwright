@@ -89,6 +89,11 @@ store → exit **0**.
   by `cloid` on restart, so crash and graceful stop **converge on one recovery path**. Cancelling on
   stop would fork the two paths and push failure-prone network calls into teardown. Flatten-on-exit
   is a risk/operator policy, not engine mechanics (deferred to the strategy/kill-switch surface).
+  **(Consumed by ADR-0044 §4:** this is what makes an own resting order the *ordinary* actor in the
+  step-4 leverage read→write race — the order is live on the venue for the whole of the next boot's
+  step 4 and can fill mid-window, so "the feed starts last" bounds new **sends**, never **fills**.
+  A future flatten-on-exit or cancel-on-stop policy would shrink that race; nothing else depends on
+  it, and ADR-0044 accepts the race regardless.**)**
 
 ## Supervision is `asyncio.TaskGroup`; two error classes map to two mechanisms
 
