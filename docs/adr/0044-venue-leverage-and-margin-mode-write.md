@@ -199,12 +199,31 @@ on that symbol; where they agree the write is a no-op either way). If
 held position, the race closes on its own — the write fails and §6's taxonomy faults the boot,
 which is the right outcome anyway.
 
+**(Answered by [#142](https://github.com/MarcosACH/tickwright/issues/142) in three branches — and
+the residual risk closes on a different one than this sentence expected.** A **leverage change** on
+a held position is *accepted*, not rejected, so the route hoped for here does not open. What closes
+the risk is the stronger fact §5's correction records: the accepted change **never re-margins** the
+position. The re-margining this paragraph accepts as residual risk is not something the venue will
+do — it governs future opens only. The two branches that *are* refusals narrow the window further,
+and both fault the boot through §6 exactly as this sentence anticipated: a **mode switch** on a held
+position is always rejected, and a **decrease** succeeds only when the locked collateral allows. So
+the accepted read→write race is real but unreachable in its stated failure mode.**)**
+
 **Whether a no-op `updateLeverage` succeeds or errors is undocumented** across the venue's own docs
 and every SDK surface examined. The skip above removes the question for held symbols, but a
 position-less symbol may well already carry the configured setting, so the failure taxonomy (§6)
 must treat a no-change error as success. [#142](https://github.com/MarcosACH/tickwright/issues/142)
 confirms the real response shape so that tolerance can be narrowed from "looks like no change" to
 an exact match.
+
+**(Answered by [#142](https://github.com/MarcosACH/tickwright/issues/142) — and the tolerance is
+*removed*, not narrowed. Both sentences above are superseded; the rule to implement is §6's.** A
+no-op returns the **identical** `{"status": "ok", "response": {"type": "default"}}` envelope as a
+real change, so there is no "no-change error" for the taxonomy to treat as success and nothing to
+tolerate: §6's split is the exact `ok` ⇒ success / `err` ⇒ fault, with no fuzzy match at any point.
+The corollary is that the **write cannot distinguish a no-op from a change at all** — which is what
+leaves `EXCHANGE_LEVERAGE_UNCHANGED` without a source unless the `activeAssetData` pre-read above is
+taken (§6's correction).**)**
 
 ## 5. A held disagreement refuses to start — the venue twin of `StoreAccountMismatch`
 
@@ -429,7 +448,9 @@ ingested constant — it is `isolated_collateral + unrealized_pnl` and moves wit
 sits *inside* §6's band alongside cross (see the ADR-0040 §3 and §6 corrections).
 
 The blindness is nonetheless real, and for a sturdier reason: **a leverage change never re-margins
-an open position** (§5's correction — measured across 5x → 10x → 3x with `marginUsed` unmoved).
+an open position** (§5's correction — measured across 5x → 10x → 3x with the **mark-invariant**
+`rawUsd` and `liquidationPx` unmoved; `marginUsed` held across the sequence too, but it moves with
+the mark, so it corroborates rather than carries this).
 Neither term of `isolated_collateral + unrealized_pnl` depends on the leverage *setting* once the
 position is open, so a drift in that setting is invisible in `margin_used` no matter which tier the
 number belongs to. `LEVERAGE_DIVERGENCE` remains necessary.**)**
@@ -447,8 +468,10 @@ disagreement and keeps trading, exactly as it reports a negative free margin wit
 - **Additive across the board.** `Exchange` gains `start()` (paper's is a validation-only no-op);
   `AppConfig` gains `leverage` plus a cross-field validator rejecting dead entries (§3); `domain`
   gains `LeverageSpec` and the `VenueLeverageMismatch` `InvariantViolation`; ADR-0020's catalog
-  gains `LEVERAGE_DIVERGENCE` and `EXCHANGE_LEVERAGE_UNCHANGED`. No seam is broken and no existing
-  field is removed.
+  gains `LEVERAGE_DIVERGENCE`, and `EXCHANGE_LEVERAGE_UNCHANGED` **only if** §4's deferred
+  `activeAssetData` pre-read is taken — [#142](https://github.com/MarcosACH/tickwright/issues/142)
+  found the write cannot distinguish a no-op from a change, leaving the event unreachable from it
+  and dropped otherwise (§6's correction). No seam is broken and no existing field is removed.
 - **The composition root gains one resolution step** (§2): sparse `AppConfig.leverage` × the
   strategy-declared symbols → a complete `dict[str, LeverageSpec]`, injected into both the
   `PortfolioProjection` and the `Exchange`. Neither consumer resolves defaults itself, so they

@@ -497,9 +497,9 @@ choice R3 flagged for confirmation and [#142](https://github.com/MarcosACH/tickw
 **confirmed** (ADR-0041 §4.1). See ADR-0040, ADR-0041, ADR-0038, ADR-0044.
 _Avoid_: account leverage (it is per-symbol); **margin** as the name for this input (that word is
 this glossary's [[Margin]] — the collateral a position ties up, *computed* in both modes, off the
-nominal leverage on a cross position and off the ingested collateral on an isolated one; this is its
-*setting*); topping up isolated collateral
-(`updateIsolatedMargin` — a deferred extension point, ADR-0044 §8).
+nominal leverage on a cross position and off the ingested collateral **plus uPnL** on an isolated
+one; this is its *setting*); topping up isolated collateral (`updateIsolatedMargin` — a deferred
+extension point, ADR-0044 §8).
 
 **Liquidation price**:
 The per-[[Position]] price at which the venue would liquidate it — **nullable**, and the **one**
