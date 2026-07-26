@@ -10,10 +10,23 @@ those components.
 
 1. Bind the `run_id` correlation, init observability, open the `Store`, build the `Cache`.
 2. **Recover**: rebuild the `Cache` from the `Store` (write-through projection, ADR-0009).
+   **(Extended by ADR-0043 §6/§10:** the accounting ledger recovers here too, and it goes **first**
+   — `Engine._start_sequence` calls `PortfolioProjection.recover()`, which checks the store's
+   account binding and then restores the ledger rows, *before* this `Cache` rebuild and before any
+   other recovery work. The order is load-bearing twice over: the check can **refuse** the store
+   outright (`StoreAccountMismatch`, ADR-0042 §3/ADR-0043 §8), which must happen before the engine
+   has done work it would have to unwind; and its existence question — does `orders` hold rows with
+   no account row? — is answered by a narrow `has_orders()` precisely so it need not run the mass
+   read this step performs.**)**
 3. Start the `EventBus` (InMemory: no-op; Kafka: connect consumers/producers).
 4. Connect the `Exchange` + `ExecutionManager` (WS/HTTP; subscribe to `Signal`/`ExecutionReport`).
 5. **Startup-reconciliation barrier** — the ADR-0011 mass-rebuild. A **hard gate**: nothing places
-   until it succeeds.
+   until it succeeds. **(Extended by ADR-0043 §6:** on **live** the barrier also performs a single
+   unsigned `clearinghouseState` read to **materialise the account row** when the ledger has none —
+   otherwise a live first run would start strategies with no account row at all, against ADR-0041
+   §6's promise that `cash` is Tier-1 and never `None`. It is a no-op on paper, where genesis
+   seeded the row at first start. A *full* ledger reconcile inside the barrier was rejected;
+   positions, Tier-1 heals and the ADR-0040 §6 divergence alerts stay on the cadence.**)**
 6. Start the `Strategy` instances (`on_start`: restore snapshot; seq high-water from the saga
    store, ADR-0016; then **pull current open-order state from the `Cache` read-model** by direct
    method call, ADR-0004 — the barrier's reconciliation `OrderEvent`s (step 5) were published
@@ -29,6 +42,12 @@ we proceed; a sustained outage trips the timeout → `FAULTED` → the process e
 external supervisor backoff-restarts (re-entering recovery). This composes ADR-0011's
 freeze-don't-guess with ADR-0014's crash-only, avoiding both a hung half-alive engine and a tight
 crash-loop. (Live-path only; the barrier cannot fail on the paper exchange.)
+**(Extended by ADR-0043 §6:** this policy covers the account-materialisation read as well as the
+mass-rebuild — same backoff, same `startup_reconciliation_timeout` budget, same `FAULTED` exit when
+it expires — rather than the read getting a policy of its own. Clearing the barrier with no account
+row is **not** an available outcome: that is the state the step exists to prevent, so a
+`clearinghouseState` that will not answer must fault the process, never be read as an empty
+ledger — the freeze-don't-guess rule above, applied to the account line.**)**
 
 ## Shutdown reverses the sequence and leaves resting orders alone
 

@@ -98,7 +98,7 @@ Collision is not a correctness concern: two paper ledgers may both be `paper-def
 
 `HyperliquidConfig` gains no collateral field, and that absence is deliberate rather than an omission. The live account's opening state is read from `clearinghouseState` — equity is `marginSummary.accountValue`, free margin is root `withdrawable` (R1 #108). Configuring it would invent a number the venue already knows, contradict ADR-0034's venue-is-authoritative rule for Tier-1, and fail-fast on every legitimate deposit — the case §4 just classified as benign.
 
-The genesis **column** is nonetheless populated on live, so it stays `NOT NULL` on both paths and "when did this ledger open, and at what value" stays answerable. The account row is created at the first reconcile with:
+The genesis **column** is nonetheless populated on live, so it stays `NOT NULL` on both paths and "when did this ledger open, and at what value" stays answerable. The account row is created at the first reconcile with: **(Narrowed by ADR-0043 §6:** not at the first *cadence* reconcile but inside the **startup reconciliation barrier**, via a single unsigned `clearinghouseState` read taken solely to create the row when absent. At a cadence, a live first run would start strategies with no account row at all, breaking ADR-0041 §6's "`cash` is never `None`". The formula below is unchanged; only when it is evaluated is.**)**
 
 ```
 genesis_collateral = accountValue − Σ unrealized_pnl
