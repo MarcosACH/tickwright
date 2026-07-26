@@ -26,10 +26,12 @@ those components.
    **(Extended by ADR-0044 §7:** the *connect* half this step has always named now exists —
    `Exchange.start()`, declared on the Protocol (the `start()` ADR-0014 already assigns the
    component). On **paper** it validates the configured leverage against `InstrumentSpec.max_leverage`
-   and writes nothing; on **live** it validates, reads `clearinghouseState` once, and pushes
-   `AppConfig.leverage` to the venue via `updateLeverage` — skipping symbols already aligned, writing
-   blind where no position is held, and raising **`VenueLeverageMismatch`** where config disagrees
-   with a symbol that *does* hold one. That refusal is the venue twin of step 2's
+   and writes nothing; on **live** it validates, reads `clearinghouseState` once, and pushes the
+   per-symbol leverage map to the venue via `updateLeverage` — the complete map the composition
+   root resolved from the sparse `AppConfig.leverage` and the strategy-declared symbols
+   (ADR-0044 §2), so the adapter needs no knowledge of strategies — skipping symbols already
+   aligned, writing blind where no position is held, and raising **`VenueLeverageMismatch`** where
+   config disagrees with a symbol that *does* hold one. That refusal is the venue twin of step 2's
    `StoreAccountMismatch`, and the order of the two is load-bearing: the local, cheap store check
    refuses first, the networked venue check second, **both before** the step 5 barrier — so neither
    can let an order out. Placing the push here rather than after the barrier also means the barrier's

@@ -71,8 +71,22 @@ an operator input with the word the glossary gives to a computed output would be
 collision the glossary exists to prevent. The glossary's term for what this block holds is
 **Leverage & Margin mode**, and the field takes its head noun.
 
-The composition root reads it once and injects it into both consumers: the `PortfolioProjection`
-(the model, both paths) and the `Exchange` (the push and the bounds check, §7/§9).
+**The composition root resolves the map before injecting it.** `AppConfig.leverage` is *sparse* —
+it carries only the symbols the operator wrote — while §3's scope is every symbol the configured
+strategies declare. So the root reads it once and resolves the two into a **complete**
+`dict[str, LeverageSpec]` covering exactly the strategy-traded set, filling the `1x`/`isolated`
+default for each symbol without an entry, then injects **that resolved map** into both consumers:
+the `PortfolioProjection` (the model, both paths) and the `Exchange` (the push and the bounds check,
+§7/§9).
+
+Resolving here rather than in either consumer is load-bearing twice over. It keeps the model and the
+venue reading the same numbers by construction — the two consumers cannot disagree about what an
+unconfigured symbol means, which is the disagreement §3 exists to rule out. And it is the only
+place both inputs are in scope: `strategies` and `leverage` are peer `AppConfig` fields, while an
+`Exchange` knows nothing of strategies — the one symbol list an adapter holds is
+`HyperliquidConfig.symbols`, the feed subscription list §3 rejects as the scope. The adapter
+therefore iterates a map it needs no strategy knowledge to interpret, which is also why this sync
+does not thicken it (ADR-0015).
 
 ## 3. Scope: every strategy-traded symbol, including the ones nobody configured
 
@@ -99,9 +113,13 @@ Pushing the default also gives the divergence signal a clean meaning: after boot
 is real drift, never a config gap.
 
 **An entry for a symbol no configured strategy trades is rejected at startup**, with the offending
-keys named. It is config that cannot take effect — nearly always a typo'd symbol — and `AppConfig`'s
-existing `extra="forbid"` already establishes that silently-ignored configuration is treated here as
-a bug, not a convenience.
+keys named — as an `AppConfig` cross-field validator over `strategies` × `leverage`, the shape
+`config.py` already uses to validate `hyperliquid.symbols` against the selected feed, and
+ADR-0042 §1 to demand genesis collateral when the exchange is paper. It fires at config load,
+before any component is built, so §2's resolution never meets a dead entry and neither path reaches
+`start()` carrying one. It is config that cannot take effect — nearly always a typo'd symbol — and
+`AppConfig`'s existing `extra="forbid"` already establishes that silently-ignored configuration is
+treated here as a bug, not a convenience.
 
 ## 4. One read splits the push three ways
 
@@ -274,10 +292,13 @@ Every strategy-traded symbol must have an `InstrumentSpec`, and its configured l
 **`1 ≤ leverage ≤ spec.max_leverage`**. A violation raises once, naming every offending symbol with
 its bound, and faults — identically on paper and on live.
 
-This spends `InstrumentSpec.max_leverage` on the purpose ADR-0040 §4 introduced it for. It cannot
-be a pydantic validator on `AppConfig.leverage`: `max_leverage` lives on the spec, which the
-**adapter** authors — from the meta endpoint on live, from `PaperExchangeConfig.instrument_specs` on
-paper — so the earliest point at which both paths hold it is `start()` itself.
+This spends `InstrumentSpec.max_leverage` on the purpose ADR-0040 §4 introduced it for. Unlike
+§3's dead-config rejection — which *is* an `AppConfig` validator, because both its inputs are
+`AppConfig` fields — this one cannot be: `max_leverage` lives on the spec, which the **adapter**
+authors — from the meta endpoint on live, from `PaperExchangeConfig.instrument_specs` on paper — so
+the earliest point at which both paths hold it is `start()` itself. That splits the three checks by
+what each one needs: config-only in the validator (§3), config × spec in `start()` (here), and
+config × venue in `start()` on live alone (§4/§5).
 
 Leaving it to the venue to reject was rejected: live would fail with a venue error message while
 **paper would accept an impossible leverage silently** and compute margin, liquidation price and
@@ -315,9 +336,14 @@ disagreement and keeps trading, exactly as it reports a negative free margin wit
 ## Consequences
 
 - **Additive across the board.** `Exchange` gains `start()` (paper's is a validation-only no-op);
-  `AppConfig` gains `leverage`; `domain` gains `LeverageSpec` and the `VenueLeverageMismatch`
-  `InvariantViolation`; ADR-0020's catalog gains `LEVERAGE_DIVERGENCE` and
-  `EXCHANGE_LEVERAGE_UNCHANGED`. No seam is broken and no existing field is removed.
+  `AppConfig` gains `leverage` plus a cross-field validator rejecting dead entries (§3); `domain`
+  gains `LeverageSpec` and the `VenueLeverageMismatch` `InvariantViolation`; ADR-0020's catalog
+  gains `LEVERAGE_DIVERGENCE` and `EXCHANGE_LEVERAGE_UNCHANGED`. No seam is broken and no existing
+  field is removed.
+- **The composition root gains one resolution step** (§2): sparse `AppConfig.leverage` × the
+  strategy-declared symbols → a complete `dict[str, LeverageSpec]`, injected into both the
+  `PortfolioProjection` and the `Exchange`. Neither consumer resolves defaults itself, so they
+  cannot disagree about an unconfigured symbol, and the adapter needs no knowledge of strategies.
 - **Amends ADR-0040 §5 twice** — the config block leaves `PaperExchangeConfig` for
   `AppConfig.leverage` (§2), and the `margin_used`-divergence claim is corrected for isolated
   positions (§10). Its "the engine does not set leverage or mode on the venue" sentence is
