@@ -26,7 +26,13 @@ Config wins at boot; the venue wins in-flight. The alternatives both fail on a s
   must not out-argue a human at the venue. It also spends the wrong budget: the venue's
   address-based rate limit starts at **10 000 requests and accrues at 1 per USDC traded**, so an
   unconditional per-cadence write would consume a low-volume account's lifetime allowance on
-  bookkeeping.
+  bookkeeping. Those figures carry no in-repo citation — R3's note
+  ([#110](https://github.com/MarcosACH/tickwright/issues/110)) documents the margin/liquidation
+  surface, not rate limits — so their sourcing is handed to
+  [#142](https://github.com/MarcosACH/tickwright/issues/142), together with whether unsigned info
+  reads draw on this same allowance or a separate one. The argument above does not turn on either
+  answer: the operator-authority reason stands alone, and a *cheaper* write budget would not make
+  silently reverting a human's de-risking edit acceptable.
 - **Pushing lazily before the first order** on a symbol would move a signed on-chain write onto the
   order path and leave reported margin wrong for any configured-but-not-yet-traded symbol.
 
@@ -225,10 +231,9 @@ Step 4's read decides the push (§4); step 5's materialises the account row (ADR
 one payload is *sound* — the row is `accountValue − Σ unrealized_pnl` (ADR-0042 §6), which the push
 does not move — but it is not worth buying: the two reads live in different components either side
 of a lifecycle boundary, so threading one payload from `Exchange.start()` into the barrier couples
-them for the sake of a single unsigned info call — and an unsigned read is not an action, so it
-does not draw on the address-based allowance §1 is careful with. This is not in tension with §4's
-rejection of `activeAssetData` either: that was a read scaling **per symbol**, where these are one
-per boot each, and the second one the boot already made before this ADR existed.
+them for the sake of a single info call. This is not in tension with §4's rejection of
+`activeAssetData` either: that was a read scaling **per symbol**, where these are one per boot each,
+and the second one the boot already made before this ADR existed.
 
 **The push targets the account the ledger is bound to.** `updateLeverage` is signed through the same
 active pool as orders, so when `HyperliquidConfig.vault_address` is set (ADR-0038's sub-account
@@ -330,3 +335,6 @@ disagreement and keeps trading, exactly as it reports a negative free margin wit
   no-op `updateLeverage` (narrows §6's tolerance); whether changing leverage recomputes an open
   position's `marginUsed`; whether a leverage decrease or mode switch on a held position is
   rejected; and whether `activeAssetData` reports leverage for a symbol with no open position.
+  Handed there separately, and not a venue behaviour: the **citation** for §1's rate-limit figures,
+  which are the canon's only rate-limit facts and carry none — along with whether an unsigned info
+  read draws on that same address-based allowance.
