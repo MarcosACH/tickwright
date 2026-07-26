@@ -110,6 +110,23 @@ to [#142](https://github.com/MarcosACH/tickwright/issues/142)'s scope, alongside
 denominator ADR-0041 §4.1 already sent there. It fixes one adapter's arithmetic; it cannot change
 this definition.
 
+**(Answered by [#142](https://github.com/MarcosACH/tickwright/issues/142) — the definition is
+confirmed, and Hyperliquid's normalization turns out to be the identity.** `closedPnl` is **gross**
+of fees: **65/65 opening fills carry `closedPnl = 0.0`** against a non-zero `fee`, and closing fills
+reconstruct exactly as `side × (px − entryPx) × sz` with no fee term (the residuals across 113
+historical fills are a constant `entryPx` quantization offset, ≈0.9 ppm, independent of `fee`). So
+the un-bundling this paragraph requires is a **no-op for this venue** — the adapter accumulates
+`closedPnl` raw — and ADR-0034's zero-tolerance check holds against the raw field.
+
+The rule itself is unchanged, and the reason for stating it venue-agnostically got stronger. "At
+least one is ambiguous in its own documentation" above understates the case: the venue's
+[entry-price-and-PnL page](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/entry-price-and-pnl)
+gives closed PnL as `fee + side · (mark − entry) · size` for a closing trade "*and only the fee for
+an opening trade*" — **wrong on both clauses**. The venue *documentation* is the untrustworthy source
+here; the venue's *data* matches this section exactly. One gap stands, and it is moot: every observed
+fill was taker (`crossed: true`), so the maker-rebate case (a negative `fee`) is unmeasured — but
+`fee` is not a term in `closedPnl` at all, so its sign cannot matter.**)**
+
 **Rejected: a `Total PnL` term** (`realized + unrealized`). No field carries it — ADR-0041 exposes
 the two separately — and a term with no field behind it drifts. Recorded as a non-term.
 
@@ -336,6 +353,17 @@ was moved in step twice, and would have drifted both times had the copies not be
   moving it.
 - **[#142](https://github.com/MarcosACH/tickwright/issues/142) gains one item** (§3): pin whether
   Hyperliquid's `closedPnl` includes the fee, and whether an opening fill carries a non-zero
-  `closedPnl`. It tunes an adapter, and cannot reopen §3.
+  `closedPnl`. It tunes an adapter, and cannot reopen §3. (**Answered, and it did not**: `closedPnl`
+  is **gross** and `0.0` on opens, so §3's definition matches the venue verbatim and the
+  gross-normalization §3 assigns the adapter is the **identity** for Hyperliquid. The venue's own
+  documentation is wrong on both clauses — recorded at §3, since it is the reason §3 keeps the rule
+  venue-agnostic rather than Hyperliquid-shaped.)
 - **The map's frontier is empty of decisions.** With this ticket closed, [#107](https://github.com/MarcosACH/tickwright/issues/107)
   holds only the `wayfinder:task` #142, and the destination — the PRD — is reachable via `/to-spec`.
+  (**No longer true — and #142 is why.** That task closed, but it surfaced an account-grain design
+  question that is now the open decision
+  [#148](https://github.com/MarcosACH/tickwright/issues/148) — "supported account abstraction modes &
+  where the reconcile anchor reads account state" — #107's only remaining open child, and the carrier
+  of ADR-0040 §6's band-shape defect. So the frontier holds one decision again and `/to-spec` waits
+  on it. What this bullet recorded stands for the *terminology* half: #138 closed without leaving a
+  decision behind; the one on the frontier now is not this ticket's.)
