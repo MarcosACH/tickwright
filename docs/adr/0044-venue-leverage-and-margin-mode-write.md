@@ -123,8 +123,10 @@ This deliberately avoids `activeAssetData` (`{type, user, coin}` → `leverage.{
 the one endpoint that reports the setting for a position-less symbol. It would permit a fully
 idempotent push, but it costs one info read per symbol instead of one per boot, and **its behaviour
 for a symbol with no open position is not documented** — the design would rest on an unverified
-premise to save writes that are already free of the address budget's meaningful cost. It stays a
-named option, reachable if the blind write ever proves noisy.
+premise to save writes that are already free of the address budget's meaningful cost (a budget whose
+figures are themselves uncited, §1 — but one boot's worth of writes is negligible against any
+plausible reading of them, so this clause does not wait on #142 either). It stays a named option,
+reachable if the blind write ever proves noisy.
 
 **The blind write is therefore only as fresh as that one read, and the gap is accepted rather than
 closed.** §5's "never write for a held symbol" holds against the venue state the read returned, not
@@ -165,11 +167,16 @@ wins**, and report every disagreement at once rather than one per restart. The s
 
 Pushing instead was rejected on the venue's own words. Its documentation states that *"the leverage
 of an existing position can be increased without closing the position. Leverage is only checked upon
-opening a position."* If leverage is checked only at open, then changing it afterwards plausibly
-governs only future opens, leaving the live position's actual locked margin as it was — so the push
-would not make the model true anyway. And if the venue *does* recompute an open position's margin,
-the push has silently re-margined a live position at boot. Both readings argue against writing; the
-refusal is correct under either, which is why this ADR does not wait on
+opening a position."* (Verbatim from the [margining
+page](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/margining), §"Initial Margin and
+Leverage", cited directly rather than through R3's note
+([#110](https://github.com/MarcosACH/tickwright/issues/110)) — that note captured the
+`updateLeverage` *action shape*, not the leverage-change semantics this section turns on.) If
+leverage is checked only at open, then changing it afterwards plausibly governs only future opens,
+leaving the live position's actual locked margin as it was — so the push would not make the model
+true anyway. And if the venue *does* recompute an open position's margin, the push has silently
+re-margined a live position at boot. Both readings argue against writing; the refusal is correct
+under either, which is why this ADR does not wait on
 [#142](https://github.com/MarcosACH/tickwright/issues/142) to resolve which holds. The venue's
 behaviour for a **leverage decrease** or a **mode switch** on a held position is likewise
 undocumented — and irrelevant here, because we never attempt one.
