@@ -241,13 +241,32 @@ Five places where the documents already disagreed. None changes a decision; all 
 exists to catch.
 
 1. **`CONTEXT.md` `Margin` states `margin_used = notional / leverage` unconditionally.** True for
-   **cross** only. An isolated position's `margin_used` **is** its locked collateral — ingested from
-   `rawUsd` on live, static-at-open on paper (ADR-0040 §1/§3).
-2. **`CONTEXT.md` `Margin` calls the whole term "recomputed each read (Tier-2)".** Again cross-only.
-   Isolated `margin_used` is **Tier-1 and persisted** — ADR-0041 §6 classifies it Tier-1
-   ("mark-independent … even though ADR-0040 §2 tables `margin_used` among the Tier-2 set") and
-   ADR-0043 §3 puts `isolated_collateral` on the position row because nothing can recompute it at
-   boot.
+   **cross** only. An isolated position's `margin_used` is computed from its locked collateral —
+   ingested on live, static-at-open on paper (ADR-0040 §1/§3).
+2. **`CONTEXT.md` `Margin` calls the whole term "recomputed each read (Tier-2)".** This one the
+   sweep got **wrong**, and [#142](https://github.com/MarcosACH/tickwright/issues/142) reversed it —
+   `CONTEXT.md` was right and the ADRs it was corrected against were not. See the correction below.
+
+**(Defects 1 and 2 amended by [#142](https://github.com/MarcosACH/tickwright/issues/142).** The
+sweep faithfully propagated an error that was already in the landed ADRs, so it inherited rather
+than introduced it — but the entry as written is wrong and would mislead.
+
+Measured against a funded testnet position, the venue's isolated `marginUsed` is
+`isolated_collateral + unrealized_pnl` and **moves with the mark** (`25.860067` at mark 64796 →
+`25.856067` at mark 64794). So:
+
+- **Defect 2 is withdrawn.** Isolated `margin_used` is **Tier-2, recomputed each read** — exactly
+  what `CONTEXT.md` said. What is Tier-1 and persisted is the underlying **`isolated_collateral`**,
+  which is what ADR-0043 §3 actually puts on the row; the sweep conflated the two because ADR-0040
+  §3 and ADR-0041 §6 did. Both are now corrected at source, and `CONTEXT.md`'s `Margin` term is
+  restored to "recomputed each read" for both modes rather than being "fixed" toward the error.
+- **Defect 1 survives, minus its field name.** `margin_used` is still not `notional / leverage` for
+  an isolated position, so the unconditional formula is still wrong. But the collateral is **not**
+  `rawUsd` — that measured `−103.731933` against a collateral of `25.898067`, being the cash leg net
+  of cost basis. It is recovered as `marginUsed − unrealizedPnl`.
+
+This is the sweep's own thesis holding at one remove: the drift it exists to catch was, again,
+between *landed* documents — and here the glossary was the accurate one.**)**
 3. **`CONTEXT.md` `PositionView` flattens ADR-0041 §6's nullability rule** to "`None` when the mark
    is absent", dropping the per-**term** refinement: a field is `None` only when the mark is absent
    *and its own terms need it*. A flat position's valuations need no mark and read `0`.

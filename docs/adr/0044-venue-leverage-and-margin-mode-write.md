@@ -152,7 +152,24 @@ idempotent push, but it costs one info read per symbol instead of one per boot, 
 for a symbol with no open position is not documented** — the design would rest on an unverified
 premise to save writes that are already free of the address budget's meaningful cost — one boot's
 worth of writes against §1's cited 10 000-request buffer. It stays a named option, reachable if the
-blind write ever proves noisy. (Note the trade is not reads-for-writes at par: by §1's citation the
+blind write ever proves noisy.
+
+**([#142](https://github.com/MarcosACH/tickwright/issues/142) verified the premise; the extension
+point is now unblocked, and the decision to defer it is a cost trade rather than an unknown.**
+Queried against a **flat** BTC on testnet, `activeAssetData` returned
+`leverage: {type: "cross", value: 20}` — plus `rawUsd` when the symbol is isolated —
+alongside `maxTradeSzs`, `availableToTrade` and `markPx`. It **does** report the setting with no
+open position.
+
+Two facts sharpen the trade this section declined. In its favour: `activeAssetData` is an **unsigned
+info request**, so by §1's own *actions-not-info* citation it costs nothing against the address
+budget — the "one read per symbol" price is smaller than assumed. Against it: the pinned SDK's
+`Info` exposes **no `active_asset_data` method**, so it needs a raw `Info.post("/info", …)`, where
+`Exchange.update_leverage(leverage, name, is_cross)` exists as a typed call.
+
+Nothing here reverses the decision — the blind write remains correct and simpler. But the idempotent
+push is now a real option, and it is the natural home for the `EXCHANGE_LEVERAGE_UNCHANGED` event
+§6's correction leaves without a source.**)** (Note the trade is not reads-for-writes at par: by §1's citation the
 reads it would add cost nothing against that budget, so what the option actually buys is
 idempotency, and what it costs is resting the design on an undocumented premise.)
 
@@ -216,6 +233,27 @@ under either, which is why this ADR does not wait on
 behaviour for a **leverage decrease** or a **mode switch** on a held position is likewise
 undocumented — and irrelevant here, because we never attempt one.
 
+**([#142](https://github.com/MarcosACH/tickwright/issues/142) resolved which reading holds: the
+first, and the refusal is vindicated on the stronger of the two grounds.** Measured on a held
+isolated position, `updateLeverage` at 5x → 10x → 3x left `marginUsed` at `45.858067`, `rawUsd` at
+`−83.731933` and `liquidationPx` at `42395.915443038` — **all three unchanged**. A leverage change
+after open does **not** re-margin the live position; it governs future opens only, exactly as
+*"leverage is only checked upon opening a position"* reads on its face. So a boot push would not
+have made the model true, which is this paragraph's first reading.
+
+The two behaviours called "undocumented and irrelevant here" were measured too, and they narrow
+§4's accepted read→write race further than this ADR assumed:
+
+- **mode switch on a held position: always rejected** — `"Cannot switch leverage type with open position."`
+- **leverage decrease on a held position: conditionally allowed** — 10x → 3x succeeded; 3x → 1x was rejected for insufficient isolated margin
+- **leverage increase on a held position: allowed**, as the venue documents
+
+Combined with the no-re-margin result, **every branch of the race is safe**: a write that lands on a
+position opened inside the window either succeeds without touching the position's margin, or fails
+with a classifiable `err` that §6 faults on. The blind write **cannot silently re-margin a live
+position** — the outcome §4 accepts as a residual risk is, on this venue, unreachable. The
+uncertainty is removed rather than tolerated.**)**
+
 The gate is quiet in normal operation: after a clean restart config and venue agree by construction
 (this engine pushed them into agreement at the previous boot), so it fires only when config changed
 while a position was open, or someone hand-edited the venue. Both are moments where stopping is the
@@ -242,6 +280,33 @@ catalog beside the adapter's two existing write-path events), not a failure (§4
 **rate-limit** rejection is transient and retried; anything else consumes the budget and faults.
 Clearing startup with a venue we failed to align is not an available outcome — that is the state
 the step exists to prevent.
+
+**(Corrected by [#142](https://github.com/MarcosACH/tickwright/issues/142) — the tolerance is not
+narrowed, it is removed.** This paragraph was written against an undocumented response shape and
+hedged accordingly. Measured against the venue: a **no-op `updateLeverage` returns the identical
+success envelope as a real change** — `{"status": "ok", "response": {"type": "default"}}`, verified
+by pushing `cross/20x` onto a symbol already at `cross/20x`, and again for `isolated/1x`. **There is
+no "no change" `err` at all.**
+
+So the taxonomy is **exact**, with no fuzzy match to tolerate: `status == "ok"` ⇒ success;
+`status == "err"` ⇒ classify and fault. And **`EXCHANGE_LEVERAGE_UNCHANGED` is unreachable from the
+write** — the write cannot distinguish a no-op from a change. It must either be dropped, or
+re-sourced from the pre-read now that §4's `activeAssetData` route is confirmed viable (see the §4
+correction), where "already aligned" is knowable *before* writing. That choice belongs to whoever
+implements §4's push.
+
+The error envelope is `{"status": "err", "response": "<plain string>"}` — a **bare string**, and
+returned as a **value, not raised**, so the adapter must inspect the envelope rather than rely on
+exceptions. Three concrete strings observed, for this section's classification:
+
+| observed `response` | cause | classify as |
+|---|---|---|
+| `"Invalid leverage value"` | leverage above `maxLeverage` | fault — a config bug §9 should already have caught |
+| `"Isolated position does not have sufficient margin available to decrease leverage. To decrease leverage, add margin to the position."` | decrease on a held position with too little collateral | fault (§5's held-disagreement outcome) |
+| `"Cannot switch leverage type with open position."` | mode switch on a held position | fault (§5's held-disagreement outcome) |
+
+Note the venue enforces the leverage bound itself, so §9's both-paths validation is
+belt-and-braces — correctly, since it fires at config load rather than at boot.**)**
 
 ## 7. The seam: `Exchange.start()`, at ADR-0024 step 4
 
@@ -297,9 +362,14 @@ point**, for three reasons:
 - **There is nothing to push *from*.** Leverage and mode are declarative state that config can
   mirror and a boot-time sync can converge. Isolated collateral is an imperative action with an
   amount and a direction — it has no steady-state value for config to declare.
-- **Live already sees its effect.** ADR-0040 §3 ingests `rawUsd` as the isolated collateral input,
+- **Live already sees its effect.** ADR-0040 §3 ingests the isolated collateral as a position input,
   so a manual top-up is already reflected in reported margin, liquidation price and (per ADR-0041
-  §4.1) effective leverage. The surface observes the action without owning it.
+  §4.1) effective leverage. The surface observes the action without owning it. (**Confirmed by
+  [#142](https://github.com/MarcosACH/tickwright/issues/142)**, which drove a real
+  `updateIsolatedMargin` of +20 USDC and watched all three move: `margin_used` `25.856067` →
+  `45.856067`, `liquidation_price` `52522.4977` → `42395.9154`, `effective_leverage` `5.0119` →
+  `2.8260`. The named field was wrong — the collateral is recovered as `marginUsed − unrealizedPnl`,
+  not read off `rawUsd`, which measured **negative** — but the argument is unaffected.)
 
 The extension point is reached if and only if the paper model gains dynamic isolated collateral;
 exposing it as a `Strategy`-callable position-management action is further still, past this map's
@@ -338,11 +408,23 @@ declines to re-impose. Exact match, no tolerance band — the pair is discrete, 
 
 **This corrects ADR-0040 §5.** That section claims a live leverage disagreement "surfaces through
 the resulting `margin_used` divergence (§6)". It does not, in the mode ADR-0040 §1 calls primary
-and §5 makes the default: §6 scopes the band to `margin_used`'s **cross** computation precisely
-because §3 makes isolated `margin_used` ≡ the ingested `rawUsd` collateral — the same number on
-both sides of the comparison. For an isolated position, a leverage or mode drift produces **no**
+and §5 makes the default: for an isolated position, a leverage or mode drift produces **no**
 `margin_used` divergence at all. The indirect route is blind in the common case, so the direct check
 is necessary, not merely sharper.
+
+**(The conclusion is confirmed by [#142](https://github.com/MarcosACH/tickwright/issues/142); its
+original premise was wrong and is replaced above.** This section argued the blindness from
+ADR-0040 §3 making isolated `margin_used` "≡ the ingested `rawUsd` collateral — the same number on
+both sides of the comparison". That premise fails twice: `rawUsd` is not the collateral (it measured
+`−103.731933` against a collateral of `25.898067`), and isolated `margin_used` is **not** a static
+ingested constant — it is `isolated_collateral + unrealized_pnl` and moves with the mark, so it now
+sits *inside* §6's band alongside cross (see the ADR-0040 §3 and §6 corrections).
+
+The blindness is nonetheless real, and for a sturdier reason: **a leverage change never re-margins
+an open position** (§5's correction — measured across 5x → 10x → 3x with `marginUsed` unmoved).
+Neither term of `isolated_collateral + unrealized_pnl` depends on the leverage *setting* once the
+position is open, so a drift in that setting is invisible in `margin_used` no matter which tier the
+number belongs to. `LEVERAGE_DIVERGENCE` remains necessary.**)**
 
 It is also nearly free: the reconcile pull already reads `clearinghouseState` for ADR-0040 §3's
 liquidation-price read-through, so the comparison costs no additional venue call.

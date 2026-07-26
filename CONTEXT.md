@@ -460,11 +460,15 @@ RiskEngine's concern — ADR-0017; this word is a magnitude), position value, ex
 The **reported** collateral a [[Position]] ties up — `margin_used`, with its sibling
 `maintenance = notional × margin_maint` at a flat tier-0 rate — **never enforced**: the
 [[Paper exchange]] never rejects an order for margin and never liquidates (a future map). What
-`margin_used` *is* depends on the mode: a **cross** position shares one account pool and computes it
-(`notional / leverage`, Tier-2, recomputed each read); an **isolated** position's is the collateral
-**locked** to it — an ingested input rather than a computed valuation, so it is **Tier-1 and
-persisted** (static at open on paper, the venue's `rawUsd` on live). `max_leverage` and
-`margin_maint` are additive `InstrumentSpec` fields. See ADR-0040, ADR-0043, ADR-0045.
+`margin_used` *is* depends on the mode, but **both are Tier-2, recomputed each read**: a **cross**
+position shares one account pool and computes `notional / leverage`; an **isolated** position
+computes `isolated_collateral + uPnL` — its own equity, which moves with the mark. The
+`isolated_collateral` underneath it *is* Tier-1 and **persisted** (static at open on paper, ingested
+on live as `marginUsed − unrealizedPnl` — never the venue's `rawUsd`, which is the cash leg net of
+cost basis and is negative for a long). `max_leverage` and `margin_maint` are additive
+`InstrumentSpec` fields. Both `margin_used` computations sit inside ADR-0040 §6's alert band.
+See ADR-0040, ADR-0041, ADR-0043, ADR-0045, and the [#142](https://github.com/MarcosACH/tickwright/issues/142)
+testnet measurement that settled the tiering.
 _Avoid_: **initial margin** (conventionally the collateral reserved when an *order* is submitted —
 an admission gate this surface does not implement), margin **call**, buying power
 (enforcement/broker terms — this surface only reports), margin **tier** (the piecewise table is a
@@ -480,15 +484,20 @@ symbols already aligned are skipped, symbols holding no position are written bli
 disagreement on a symbol that *does* hold a position **refuses to start** rather than re-margining a
 live position — after which the venue is left alone for the run, with drift **alerted, never
 re-pushed**, on a direct exact-match check (`LEVERAGE_DIVERGENCE`; the `margin_used` route is blind
-for isolated positions, where computed and venue margin are the same ingested number). **Effective
-leverage** is a convention-only readout with no venue counterpart — the *realized* ratio (vs the set
-nominal `leverage`), `notional / (isolated_collateral + uPnL)` for an isolated position (so adding
-isolated margin lowers it) and `notional / equity` for cross/account, **`None` when that denominator
-is `≤ 0`**; the isolated denominator is a modelling choice R3 flagged for confirmation, pending #142
-(ADR-0041 §4.1). See ADR-0040, ADR-0041, ADR-0038, ADR-0044.
+for isolated positions, because a leverage change never re-margins an open position — #142). A
+boot-time push is safe under every venue branch: a change on a held position cannot silently
+re-margin it, a **mode switch** on one is always rejected, and a **decrease** only succeeds when the
+locked collateral allows. **Effective leverage** is a convention-only readout with no venue
+counterpart — the *realized* ratio (vs the set nominal `leverage`),
+`notional / (isolated_collateral + uPnL)` for an isolated position (so adding isolated margin lowers
+it — measured: a +20 USDC top-up drove it 5.0119 → 2.8260) and `notional / equity` for
+cross/account, **`None` when that denominator is `≤ 0`**; the isolated denominator was a modelling
+choice R3 flagged for confirmation and [#142](https://github.com/MarcosACH/tickwright/issues/142)
+**confirmed** (ADR-0041 §4.1). See ADR-0040, ADR-0041, ADR-0038, ADR-0044.
 _Avoid_: account leverage (it is per-symbol); **margin** as the name for this input (that word is
-this glossary's [[Margin]] — the collateral a position ties up, *computed* on a cross position and
-*ingested* on an isolated one; this is its *setting*); topping up isolated collateral
+this glossary's [[Margin]] — the collateral a position ties up, *computed* in both modes, off the
+nominal leverage on a cross position and off the ingested collateral on an isolated one; this is its
+*setting*); topping up isolated collateral
 (`updateIsolatedMargin` — a deferred extension point, ADR-0044 §8).
 
 **Liquidation price**:
