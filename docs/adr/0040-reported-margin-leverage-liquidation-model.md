@@ -62,7 +62,7 @@ The accepted cost: liquidation price is the **only recomputed *valuation*** with
 - **`max_leverage: int`** — the venue leverage cap (from `meta.universe[].maxLeverage`). Bounds/validates the per-symbol configured leverage on paper; a real venue fact.
 - **`margin_maint: Decimal`** — the maintenance-margin **fraction**, flat tier-0. Carried as **explicit data, not derived**: the Hyperliquid adapter sets it to `1/(2·max_leverage)` when building the spec; paper config sets it directly. This keeps the `domain` maintenance helper venue-agnostic (`maintenance = notional × margin_maint`) instead of leaking the venue's "half the initial margin at max leverage" rule into `domain` — the same choice ADR-0036 made carrying `maker_fee`/`taker_fee` explicitly rather than re-deriving a fee tier.
 
-**No `margin_init` field.** The initial-margin fraction is `1/leverage` off the **per-symbol configured leverage** (§5), not static instrument metadata; there is no additional per-venue initial-margin haircut, so `initial_margin = notional / leverage` directly. A constant `margin_init = 1.0` field would be exactly the speculative seam the ≤2-implementations bar warns against.
+**No `margin_init` field.** The initial-margin fraction is `1/leverage` off the **per-symbol configured leverage** (§5), not static instrument metadata; there is no additional per-venue initial-margin haircut, so the amount is `notional / leverage` directly. A constant `margin_init = 1.0` field would be exactly the speculative seam the ≤2-implementations bar warns against.
 
 ## 5. Leverage and margin mode: config-authoritative on both paths
 

@@ -181,11 +181,18 @@ which is exactly the kind of coincidence that makes a wrong name survive review.
 invites a reader fluent in the convention to conclude that orders are margin-checked — the single
 most consequential thing this surface does **not** do.
 
-Three places are corrected to match: `ADR-0040 §2`'s table heading, and the two that used the phrase
-to name the *amount* rather than a venue's fraction — `ADR-0040 §1` and the sentence `ADR-0043 §3`
-quotes from it, both of which now read "the amount moved in at open". The venue's own "IM fraction"
-language is unaffected — an adapter may use its venue's words internally, `domain` uses this one —
-so `ADR-0040 §4`'s `margin_init` discussion and `ADR-0041 §4.1`'s "initial-margin fraction" stand.
+**Five places are corrected to match** — `ADR-0040 §2`'s table heading, plus every use of the phrase
+to name the *amount* rather than a venue's fraction: `ADR-0040 §1` and the sentence `ADR-0043 §3`
+quotes from it, both of which now read "the amount moved in at open"; `ADR-0040 §4`'s
+`initial_margin = notional / leverage`, which now reads "the amount is `notional / leverage`"; and
+`ADR-0035`'s `margin_init` aside, which now names it "the collateral a position ties up".
+
+What stands is **fraction** language only — an adapter may use its venue's words internally,
+`domain` uses this one. That leaves four phrases, three of them in `ADR-0040 §4`: its
+"initial-margin fraction is `1/leverage`" and "per-venue initial-margin haircut" (the same sentence
+whose *amount* clause is corrected above), its quoted venue rule "half the initial margin at max
+leverage", and `ADR-0041 §4.1`'s "initial-margin fraction". The distinction is the test to apply to
+any future occurrence: **a fraction may keep the name, an amount may not.**
 
 ## 7. `Collateral` is a flagged ambiguity, not a term
 
@@ -246,8 +253,9 @@ exists to catch.
   surface, and the accounting surface contributes exactly one variant — `FundingAccrual`. A future
   position event is an additive taxonomy change with a stated trigger (§1), not a gap.
 - **ADR-0040 is amended twice**: §7's equity invariant is restated on the compact form (§5), and
-  §2's `margin_used` row loses its `(initial)` heading (§6) — which also costs §1, and the sentence
-  ADR-0043 §3 quotes from it, the words "the initial margin". Its numbers are unchanged.
+  §2's `margin_used` row loses its `(initial)` heading (§6) — which also costs §1, §4, the sentence
+  ADR-0043 §3 quotes from §1, and ADR-0035's `margin_init` aside the words "the initial margin",
+  wherever they named the *amount*. Its numbers are unchanged.
 - **ADR-0020 gains four roadmap names** (§2), none of them shipped until its emitting path is.
 - **The ADR-0034 / ADR-0035 / ADR-0037 deferrals are delivered**, each annotated in place so a
   reader landing on any of the three finds the pointer rather than an open question. The economic
