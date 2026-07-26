@@ -237,7 +237,7 @@ genuine multi-sense conflicts go in **Flagged ambiguities** with a resolution, w
 
 ## 9. Sweep corrections
 
-Four places where the documents already disagreed. None changes a decision; all are drift the sweep
+Five places where the documents already disagreed. None changes a decision; all are drift the sweep
 exists to catch.
 
 1. **`CONTEXT.md` `Margin` states `margin_used = notional / leverage` unconditionally.** True for
@@ -254,6 +254,11 @@ exists to catch.
 4. **`CONTEXT.md` `Equity` and `Genesis collateral` contradicted each other** on whether anything
    but the four inputs moves `cash` — `Genesis collateral` already described the live heal that
    `Equity`'s formula implicitly denied. Resolved by §5.
+5. **`ADR-0044 §2`'s naming argument glossed `Margin` as "a computed Tier-2 output".** Defect 1 and
+   2 from the other side, in the ADR that reasons *about* the glossary: an isolated position's
+   `margin_used` is neither computed nor Tier-2. Its argument is unaffected — it turns on `Margin`
+   naming a **reported output** rather than an operator input, true in both modes — so only the
+   gloss changes.
 
 ## Consequences
 
@@ -264,6 +269,8 @@ exists to catch.
   §2's `margin_used` row loses its `(initial)` heading (§6) — which also costs §1, §4, the
   sentence ADR-0043 §3 quotes from §1, and ADR-0035's `margin_init` aside the words "the initial
   margin", wherever they named the *amount*. Its numbers are unchanged.
+- **ADR-0044 §2's `Margin` gloss is corrected** (§9.5) — "a computed Tier-2 output" becomes the
+  computed/ingested split. Its naming decision stands unchanged.
 - **ADR-0020 gains four roadmap names** (§2), none of them shipped until its emitting path is.
 - **The ADR-0034 / ADR-0035 / ADR-0037 deferrals are delivered**, each annotated in place so a
   reader landing on any of the three finds the pointer rather than an open question. The economic

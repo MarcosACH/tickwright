@@ -69,8 +69,10 @@ pair — `1x` isolated — so an absent entry is a complete, conservative specif
 hole.
 
 **Naming.** `leverage` / `LeverageSpec`, not `margin` / `MarginSpec`, because `CONTEXT.md` already
-binds **Margin** to the *reported collateral a position ties up* — a computed Tier-2 output. Naming
-an operator input with the word the glossary gives to a computed output would be exactly the
+binds **Margin** to the *reported collateral a position ties up* — an output of this surface,
+**computed** on a cross position and **ingested** on an isolated one (ADR-0045 §9.5; this once read
+"a computed Tier-2 output", which is the cross-only half). Naming an operator input with the word
+the glossary gives to a reported output would be exactly the
 collision the glossary exists to prevent. The glossary's term for what this block holds is
 **Leverage & Margin mode**, and the field takes its head noun.
 
