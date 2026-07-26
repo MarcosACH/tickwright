@@ -492,22 +492,33 @@ disagreement and keeps trading, exactly as it reports a negative free margin wit
 - **Two refusals now guard boot**, in a fixed order: `StoreAccountMismatch` (step 2, "is this my
   ledger?") then `VenueLeverageMismatch` (step 4, "is this the account I am modelling?"). Both
   precede the barrier, so neither can let an order out.
-- **The blind write is fresh-as-of-one-read, by choice** (§4). A position opened inside the step-4
-  read→write window is re-margined rather than refused — most often by **our own resting order from
-  the previous run filling** (ADR-0024 leaves resting `LIVE` orders on the venue across a graceful
-  stop, so this is the ordinary case, not an anomaly), and more rarely by foreign flow. The window
-  is one startup step, no re-read closes it (`updateLeverage` has no compare-and-set), and #142 may
-  close it outright if the venue rejects changes on held positions.
+- **The blind write is fresh-as-of-one-read, by choice** (§4). A position can open inside the step-4
+  read→write window — most often by **our own resting order from the previous run filling**
+  (ADR-0024 leaves resting `LIVE` orders on the venue across a graceful stop, so this is the
+  ordinary case, not an anomaly), and more rarely by foreign flow. The window is one startup step
+  and no re-read closes it (`updateLeverage` has no compare-and-set), so it stays **accepted** —
+  but [#142](https://github.com/MarcosACH/tickwright/issues/142) established that its stated
+  failure mode is **unreachable** rather than merely narrow: a leverage change never re-margins an
+  open position, so a write landing on one either succeeds without touching its margin, or fails
+  with a classifiable `err` that §6 faults on (§5's correction). This bullet read that such a
+  position "is re-margined rather than refused", and anticipated #142 closing the window outright
+  "if the venue rejects changes on held positions" — the venue *accepts* them, and the risk closes
+  on the no-re-margin fact instead.
 - **The operator keeps the last word in-flight.** A venue-side change during a run stands and is
   alerted; only a deliberate restart re-imposes config. The cost is stated: a divergence can persist
   for the life of a run, and the reported margin and liquidation numbers for a held symbol are then
   the configured view, not the venue's.
 - **Deferred, named extension points:** `updateIsolatedMargin` / `topUpIsolatedOnlyMargin` (§8), and
   an `activeAssetData`-based fully-idempotent push (§4).
-- **Handed to [#142](https://github.com/MarcosACH/tickwright/issues/142)** — four venue behaviours
-  that no documentation or SDK settles, none of which changes a decision above: the response to a
-  no-op `updateLeverage` (narrows §6's tolerance); whether changing leverage recomputes an open
-  position's `marginUsed`; whether a leverage decrease or mode switch on a held position is
-  rejected; and whether `activeAssetData` reports leverage for a symbol with no open position.
-  The rate-limit taxonomy is **not** among them: §1 cites the buffer, the accrual and the
-  actions-not-info scope directly at the venue's rate-limits page, so nothing there is outstanding.
+- **Handed to [#142](https://github.com/MarcosACH/tickwright/issues/142) — and all four now
+  answered**, none of them changing a decision above. What no documentation or SDK settled: the
+  response to a no-op `updateLeverage` — it returns the **identical `ok` envelope** as a real
+  change, so §6's tolerance is **removed**, not narrowed as this bullet originally read (§6);
+  whether changing leverage recomputes an open position's `marginUsed` — it does **not**, the
+  change governs future opens only (§5); whether a leverage decrease or mode switch on a held
+  position is rejected — a **mode switch always**, a **decrease** only when the locked collateral
+  is insufficient (§5); and whether `activeAssetData` reports leverage for a symbol with no open
+  position — it **does**, and as an unsigned read (§4). Each answer is recorded in place at the
+  section it bears on. The rate-limit taxonomy is **not** among them: §1 cites the buffer, the
+  accrual and the actions-not-info scope directly at the venue's rate-limits page, so nothing
+  there is outstanding.
