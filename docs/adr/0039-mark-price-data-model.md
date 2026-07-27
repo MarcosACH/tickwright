@@ -1,0 +1,59 @@
+# Mark price is ingested market data: a `MarkTick` on the feed, frozen last-value, `None` when absent
+
+_Accepted via the grilling session on decision ticket [#133](https://github.com/MarcosACH/tickwright/issues/133), part of the trade-economics map [#107](https://github.com/MarcosACH/tickwright/issues/107). Realizes the additive market-data path ADR-0027 reserved for "mark price"; makes concrete the Tier-2 mark input ADR-0034 (D1) left abstract and ADR-0035 (D2) placed on the `PortfolioProjection`. Builds on ADR-0023 (feed conflation), ADR-0025 (event schema), ADR-0004 (pull reads), and R3's mark-source findings (#110)._
+
+Every Tier-2 valuation — unrealized PnL, equity, margin used, effective leverage, liquidation price, notional — is **recomputed on every read from `(current position, current mark)`** (ADR-0034/0035). ADR-0034 fixed *that* the mark is **ingested venue market data (an input)**, never stored state and never healed; it did not fix **how the mark arrives**. This ADR does: the mark enters on the **feed** as a new `MarkTick` event, the `PortfolioProjection` caches the latest one per symbol, and the read path reads that cache with no venue call and no clock branch.
+
+## The ingress seam: the feed, not the reconcile pull
+
+The mark is **market data**, so it enters the same way every other market input does — through the `MarketFeed` (ADR-0027). On live, `HyperliquidFeed` subscribes the venue's per-coin `activeAssetCtx` channel (which carries `markPx`, is keyed per symbol, updates ~every 3 s, and is **public** — no signing key, so the feed stays unauthenticated per ADR-0021) and emits a `MarkTick` per update. `allMids` is **mids, not mark**, and was already rejected as a market-data source (ADR-0027).
+
+**Rejected: sourcing the mark from the `Exchange` adapter's reconcile cycle.** The reconciler already reads venue account/position truth on its cadence and *could* read `markPx` for every asset in one `metaAndAssetCtxs` call, adding no new event and no new subscription. It is rejected as the mark **ingress** because it welds Tier-2 valuation freshness to the reconcile cadence — collapsing ADR-0034's deliberate two-tier split (Tier-1 truth-heal vs Tier-2 always-fresh valuation) back onto a single clock — and cannot produce the per-symbol, conflatable stream a market input is (ADR-0023). The reconcile cycle is *not* discarded, though: `clearinghouseState` reports the venue's **own** Tier-2 (`unrealizedPnl`, `marginUsed`, nullable `liquidationPx`), and that stays the **divergence cross-check / alert source** (ADR-0034's alert-only Tier-2 band, whose numeric width is #134's) and the liquidation-price read-through candidate. What the reconcile read stops being is *the mark that drives the recompute*.
+
+## Where the mark lives: a latest-value map on the projection
+
+The `PortfolioProjection` — the sole owner of the Tier-2 recompute (ADR-0035, D2) — owns a **private `symbol → (mark, ts)` latest-value map**. Query methods consult it internally. The mark is **not** an argument to `Account`/`Position` query methods: passing it in would push mark-sourcing onto every caller and break ADR-0034/ADR-0004's "single fresh, always-available read path." No standalone mark component or shared cache is introduced — the projection is the single reader and writer of Tier-2, so a private map is the whole mechanism.
+
+The projection is fed the mark by **subscribing to `MarkTick` on the `EventBus`** — a plain subscription, deliberately **distinct** from the synchronous fill-apply path that writes Tier-1 (ADR-0035: Tier-1 is applied store-first, before publish, "not a subscriber"). That discipline exists because *accumulated ledger state is ordering-critical*; the mark is a **non-accumulated latest-value cache**, where a slightly-late update means a slightly-stale valuation — which Tier-2 tolerates by construction (alert-only, never healed). So the projection is **fill-fed (synchronous, Tier-1) and mark-fed (bus subscription, Tier-2)**, and that asymmetry is principled.
+
+## Staleness and absence: freeze at last, `None` on absence, no max-age
+
+- **Stale mark (present but old):** freeze at the last mark. This is automatic — the map holds the last value until the next `MarkTick`. There is **no per-read max-age** in v1, and therefore **no clock on the read path** (ADR-0004 keeps venue calls off this path; this keeps the `Clock` off it too, ADR-0033).
+- **Absence (no mark ever seen for a symbol):** the mark-dependent Tier-2 numbers return **`None`** — never a fabricated flat or zero. This is ADR-0034's "`None` → freeze, never flat" applied to valuations: we freeze at the last mark when one exists, and report *unknown* (`None`) rather than *worthless* when none does. Tier-1 (net size, entry, realized PnL, fees, funding, cash) is unaffected — it never depends on the mark and is always available.
+- **The staleness safety net is the reconcile cross-check, not a read-time age gate.** A dead or frozen mark stream surfaces as growing divergence between our recomputed Tier-2 and the venue's reported `unrealizedPnl`/`marginUsed` on the reconcile cycle → the Tier-2 alert fires (#134 owns the band). The map records each mark's `ts` so that alert (and any future staleness telemetry) can use it; the read itself never gates on age. A max-age cutoff was rejected: it adds a read-path clock dependency, a threshold nobody can calibrate well in v1, and partial duplication of the cross-check that already exists.
+
+How `None` **surfaces through the `Portfolio` Protocol** (per-field nullability, whether the seam hides it) is the read-API ticket's call (#135 — **now fixed by ADR-0041 §6**); this ADR fixes only the underlying policy. Full-disconnect staleness — the reconcile stream *also* down — is the recovery / "freeze-never-flat" window owned by the read-seam (#135 — read-seam reporting **fixed by ADR-0041 §7**) and durability (#137) tickets.
+
+## Paper and replay: the last-trade proxy, one provenance per deployment
+
+**Paper's mark, for the entire Tier-2 surface, is the last-trade proxy** — the latest `MarketTick.price`. This extends ADR-0037's existing last-trade proxy (paper funding notional) to the whole valuation surface and states it once as *the* paper mark rule, so **paper and live differ only in the mark's provenance, never in the compute** (ADR-0034's identical-compute grain).
+
+The provenance is normalized at the ingress boundary: **the feed always emits a uniform `MarkTick`.** On live it carries the venue mark (`activeAssetCtx`); on paper and replay it carries the latest `MarketTick.price`. The `PortfolioProjection` therefore consumes **one identical `MarkTick` stream on every deployment** and is provenance-agnostic (normalize-at-adapter, uniform downstream). The alternative — the projection subscribing to `MarkTick` on live and `MarketTick` on paper and resolving "current mark" itself — was rejected: it pushes two-implementation provenance logic into the projection and makes its subscriptions differ per deployment.
+
+**Replay needs no row-schema change.** `ReplayFeed` is a paper deployment; it reads the same trades-only JSONL rows (ADR-0027) and derives a `MarkTick` per row from the trade price. No new column: replay carries a trades-only feed with no separate data channel (ADR-0037's "trades-only, no-backtest paper feed"), and this ADR is exactly what ADR-0037 deferred to when it left paper's mark to "whatever proxy the (pending) mark-price data model settles paper on" — the last-trade proxy, derived per row.
+
+**One mark provenance per deployment, no runtime blending.** Live's mark is the venue mark and does **not** fall back to last-trade at runtime; its absence yields `None` (above), not a borrowed trade price. This is a deliberately stricter line than a mark→last-trade fallback chain: the brief live startup gap before the first `MarkTick` reads `None`, which the read-seam already must handle at startup/recovery (#135 — **fixed by ADR-0041 §7**), and the bright line "provenance differs, compute does not" is worth more than squeezing a valuation out of that gap.
+
+## The `MarkTick` event
+
+A new market-data variant in the `MarketTick` lineage (ADR-0027), a frozen dataclass event (ADR-0025):
+
+| `MarkTick` | Source (live) | Type |
+| --- | --- | --- |
+| `symbol` | `activeAssetCtx` `coin` | `str` |
+| `price` | `activeAssetCtx` `ctx.markPx` | `Decimal` |
+| `ts_event` | receipt time (ns, ADR-0005) | `int` |
+
+It carries no `size`, `aggressor_side`, or `trade_id` — it is not a trade. Like `MarketTick` its dedup key is **weak** (a mark is a latest-value, not a correctness key, ADR-0025): `event_id = {symbol}:{ts_event}` on live, `{symbol}:{ts_event}:{seq}` on `ReplayFeed`. It **conflates identically to `MarketTick`** — last-value-wins per symbol at feed ingress, `tick.conflated` on each drop, never on `ReplayFeed` (ADR-0023).
+
+## Strategies do not see the mark (in v1)
+
+`MarkTick` rides the bus for the `PortfolioProjection` to consume, but **no `on_mark` `Strategy` callback is added.** Strategies receive events only through typed callbacks (ADR-0027), so with no callback a strategy simply does not see the raw mark — it reaches valuations through the `Portfolio` read seam (#135). The mark's role in v1 is an **accounting input, not a strategy signal**. **Now fixed by ADR-0041 §6**: still no push callback, and the raw mark **value** stays unexposed — only its freshness (`mark_ts`) rides `PositionView` pull-style, so a strategy judges staleness without the mark becoming a signal. The additive default-no-op callback ADR-0027 reserved stays a reserved, **zero-rework** extension point: the event already exists on the bus, so adding the callback later touches nothing else. This ticket owns *ingress*; #135 owns *what strategies see*, and pre-empting that scoping here would serve a seam no v1 strategy needs.
+
+## Consequences
+
+- **ADR-0027** is amended: `MarkTick` is the first realization of its reserved additive market-data path; the v1 market-data model now has **two** feed events (`MarketTick`, `MarkTick`), both single-price ticks, `MarkTick` bearing only a price.
+- **ADR-0034** is extended: its Tier-2 mark input is now concretely the feed-sourced `MarkTick`; absence → `None` (freeze-never-flat); the reconcile-read venue Tier-2 is the cross-check source, not the recompute input.
+- **CONTEXT.md** gains the `MarkTick` term; the `Conflation` term notes `MarkTick` joins `MarketTick` as conflated market data.
+- **Deferred here (owned elsewhere):** the numeric Tier-2 divergence/alert band (#134); how `None` surfaces through the `Portfolio` Protocol (#135 — fixed by ADR-0041 §6); the recovery/first-reconcile window (#135/#137 — read-seam reporting fixed by ADR-0041 §7).
+- **Planning deliverable only.** This ADR fixes the model; the `MarkTick` type, the live `activeAssetCtx` subscription, the paper/replay `MarkTick` synthesis, and the projection's mark map + subscription land later as one vertical `/to-spec → /to-tickets → /tdd` slice.
