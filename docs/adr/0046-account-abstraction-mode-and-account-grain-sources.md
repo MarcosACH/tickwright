@@ -210,9 +210,22 @@ edge of its maintenance margin. It is not free collateral under any reading, so 
 answers a third question this surface never asks, on top of the resting-order margin above. What
 this correction removes is the suggestion that the field holds something mysterious; what remains
 unidentified is much **narrower** — no longer a term every account may carry, but 2 of the 10
-sampled accounts (17 and 61 positions), whose further 64 035 / 68 281 are *larger* magnitudes than
-the 271.07 and confined to those two heavily-positioned books. Both are ruled out by direct
-computation as orders, margin tiers, isolated positions, or spot.**)**
+sampled accounts, both heavily-positioned books, at magnitudes *larger* than the 271.07:
+
+| account | positions | model predicts | venue `withdrawable` | unexplained |
+|---|---|---|---|---|
+| `0xd4c1f7e8d8…` | 17 | `379767.931283` | `311553.645131` | **`68214.286152`** |
+| `0x27c9fa86c9…` | 61 | `73502.120231` | **`0.0`** | **`73502.120231`** |
+
+Both are ruled out by direct computation as orders, margin tiers, isolated positions, or spot. But
+they are **two different shapes, not one class**, and only the first is a further *deduction*: the
+second has `withdrawable` **pinned at exactly zero** while the model predicts a positive figure, so
+what fails there is not an unaccounted term of the same kind but the field bottoming out under some
+condition this rule does not express. Whoever revisits this should treat them separately.
+
+(Figures are as at the sampling snapshot. Both accounts trade actively, and a tight re-read minutes
+later gave `68281.421247` and `64035.283183` respectively — the magnitude class is stable, the exact
+number is not, which is why the snapshot is named.)**)**
 
 ### 2.1 The same scope error, one field over: account `maintenance_margin`
 
