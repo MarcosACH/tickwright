@@ -208,7 +208,11 @@ saga's, on a different anchor with a different freeze grain).
 **Connectivity guard** (`None`-not-`[]`):
 The invariant that a failed venue read returns `None`, never `[]`; on `None`, [[Reconciliation]]
 **freezes** the cycle and removes nothing. An outage must never be misread as "all orders
-vanished." See ADR-0011.
+vanished." The sentinel reads as *no truth to compare against*, which an outage is one route to:
+on the account pull [[Ledger reconciliation]] anchors on, the paper exchange answers `None`
+**permanently and without failing**, holding no account state to report — same freeze, different
+route, and the only value that stays fail-closed if a paper ledger cadence is ever wired by
+mistake. See ADR-0011.
 _Avoid_: empty result, no orders (the whole point is that these differ from a failure).
 
 **Ghost** / ghost-reconciled:
