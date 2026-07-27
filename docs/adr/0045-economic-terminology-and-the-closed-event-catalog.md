@@ -370,5 +370,6 @@ was moved in step twice, and would have drifted both times had the copies not be
   (**True again as of [ADR-0046](./0046-account-abstraction-mode-and-account-grain-sources.md).**
   #148 is settled — Manual/Standard is the supported mode, the account-grain sources are named, and
   the band-shape defect it carried is applied at ADR-0046 §5. #107's decision frontier is empty and
-  `/to-spec` is unblocked. What remains on the map is a `wayfinder:task` re-validating #142's
-  account-grain measurements under a supported mode, which does **not** gate the PRD.)
+  `/to-spec` is unblocked. What remains on the map is a `wayfinder:task` —
+  [#152](https://github.com/MarcosACH/tickwright/issues/152) — re-validating #142's account-grain
+  measurements under a supported mode, which does **not** gate the PRD.)

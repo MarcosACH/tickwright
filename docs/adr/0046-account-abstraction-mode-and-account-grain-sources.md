@@ -1,6 +1,6 @@
 # Supported account abstraction mode: Manual/Standard only, and where account-grain equity and free margin are read
 
-_Accepted via the D13 grilling session on decision ticket [#148](https://github.com/MarcosACH/tickwright/issues/148), graduated from the [#142](https://github.com/MarcosACH/tickwright/issues/142) testnet validation task on the trade-economics map [#107](https://github.com/MarcosACH/tickwright/issues/107). Fixes the premise every account-grain decision in this surface rests on: **that `clearinghouseState` reports the account's equity**. It does — under exactly one family of venue account modes, which this ADR makes a deployment precondition and verifies at boot. **Amends ADR-0034** (the anchor's field sources), **ADR-0040** (§2's `free_margin` source, §3's liquidation `null` rule and its paper mirror, §6's alert-band reference — resolving the defect §6 carries a `#148` pointer for), **ADR-0044** (the boot step ordering), and **ADR-0024** (startup step 4 opens with the mode gate, and the barrier-failure policy gains a third consumer). **ADR-0042 and ADR-0043 stand decisionally unchanged**, with the precondition their formulas depend on now named — ADR-0042 §6 additionally takes an incidental in-place correction, its aside naming free margin as root `withdrawable` being superseded by §2 here._
+_Accepted via the D13 grilling session on decision ticket [#148](https://github.com/MarcosACH/tickwright/issues/148), graduated from the [#142](https://github.com/MarcosACH/tickwright/issues/142) testnet validation task on the trade-economics map [#107](https://github.com/MarcosACH/tickwright/issues/107). Fixes the premise every account-grain decision in this surface rests on: **that `clearinghouseState` reports the account's equity**. It does — under exactly one family of venue account modes, which this ADR makes a deployment precondition and verifies at boot. **Amends ADR-0034** (the anchor's field sources), **ADR-0040** (§2's `free_margin` source, §3's liquidation `null` rule and its paper mirror, §6's alert-band reference — resolving the defect §6 carries a `#148` pointer for), **ADR-0044** (the boot step ordering), and **ADR-0024** (startup step 4 opens with the mode gate, and the barrier-failure policy gains a third consumer). **ADR-0042 and ADR-0043 stand decisionally unchanged**, with the precondition their formulas depend on now named — ADR-0042 §6 additionally takes an incidental in-place correction, its aside naming free margin as root `withdrawable` being superseded by §2 here, and **ADR-0041 §4** a narrower one still, correcting where in the response that field lives._
 
 Hyperliquid lets an account choose how its spot and perps balances interact. The choice is
 invisible in every field this surface reads, and it silently changes what those fields **mean**.
@@ -76,6 +76,15 @@ not a complaint (§3).
   cannot be done safely from the obvious fields: #142 measured `totalRawUsd = −103.66` on a **long**,
   establishing that it is the cash leg *net of cost basis*, not cash — so any merge keyed on it is
   reading a quantity that does not mean what its name suggests.
+- **Source the account-grain numbers from `activeAssetData.availableToTrade`** instead of the
+  account summary. Rejected on **grain** and on **meaning**, not on cost — ADR-0044 §4 establishes
+  it as an unsigned info read whose price against the address budget is zero. *Grain:* it is
+  **per-symbol**, and under cross margin the same free collateral backs every symbol, so no
+  summation over symbols yields the account's free margin — the venue already does that summation,
+  and publishes it as `crossMarginSummary`. It also leaves `equity` unsourced entirely: no
+  per-symbol tradability field carries it. *Meaning:* it returns **two** values rather than one, and
+  what it answers is *"how much can I trade on this symbol"* — an admission-gate question, which is
+  the same category error §2 rejects `withdrawable` for, one grain down.
 - **Support Portfolio Margin.** Out of scope by construction: it collateralizes perps with HYPE, BTC
   and USDT as well as USDC, which is the multi-currency model plus haircuts plus an FX layer.
 
@@ -128,7 +137,8 @@ unattributed residual of **271.072769** — not explained by open orders, and no
 `max(initial_margin, 0.1 × total_position_value)` transfer rule, which does not bind there. So
 `withdrawable` carries at least one term beyond order margin that remains unidentified. That
 **strengthens** this decision rather than qualifying it: it is one more reason the field is not a
-cross-check source. Chasing the residual is carried by the re-validation task graduated below.
+cross-check source. Chasing the residual is carried by the re-validation task graduated from this
+ticket ([#152](https://github.com/MarcosACH/tickwright/issues/152)).
 
 ## 3. The boot check: an allowlist of two literals, gating the venue writes
 
@@ -145,6 +155,11 @@ literal set is four values, read live from the venue:
 | `"disabled"` | Manual/Standard | **`userSetAbstraction("disabled")`** |
 | `"unifiedAccount"` | Unified | `userSetAbstraction("unifiedAccount")` |
 | `"portfolioMargin"` | Portfolio margin | `userSetAbstraction("portfolioMargin")` |
+
+**These four literals are not §1's four modes**, and the coincidence of counts is worth naming:
+Manual/Standard supplies **two** of them, and DEX Abstraction — legacy and being discontinued —
+supplied none in anything sampled. The allowlist is written against the literals, so whatever that
+mode reports, it refuses.
 
 The pinned SDK's type carries only three — `Abstraction = Literal["unifiedAccount",
 "portfolioMargin", "disabled"]` — because `"default"` is the *unset* state and appears only on the
@@ -325,8 +340,10 @@ a position that has none. No `Portfolio` API change: the field is `Decimal | Non
   it is a *different quantity*, not another name for ours. Two further asides that named it as our
   free-margin source are corrected in place for the same reason: **ADR-0040 §3**'s enumeration of
   the live cross-check fields (which also gains the `crossMarginSummary` pair that replaced it) and
-  **ADR-0042 §6**'s description of the live account's opening state. `withdrawable` now appears in
-  this repo only as a venue field we describe, never as one we read.
+  **ADR-0042 §6**'s description of the live account's opening state. **ADR-0041 §4**'s
+  venue-faithful placement note takes a third, narrower correction: it listed the field as a
+  `marginSummary` member, where it is a field of the response **root**. `withdrawable` now appears
+  in this repo only as a venue field we describe, never as one we read.
 - **One venue field became two.** `free_margin`'s cross-check now reads two fields off
   `crossMarginSummary` instead of one root field. No extra request: both arrive in the same
   `clearinghouseState` response the reconcile pull already makes.
@@ -334,7 +351,8 @@ a position that has none. No `Portfolio` API change: the field is `Decimal | Non
   took at account grain was measured under a mode this ADR rules out. Its *position*-grain results
   stand — the liquidation formula, the cross formulas, `closedPnl` being gross, the mark-skew
   series — because none of them depend on the mode. The account-grain half is carried by the
-  re-validation task graduated from this ticket.
+  re-validation task graduated from this ticket,
+  [#152](https://github.com/MarcosACH/tickwright/issues/152).
 - **The `None` liquidation branch is now understood rather than tolerated.** It was documented as
   though exceptional; it is the majority case for a long, on both paths, for a reason that has
   nothing to do with account modes.
