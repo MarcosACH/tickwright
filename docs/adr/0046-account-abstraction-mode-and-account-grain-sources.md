@@ -52,8 +52,9 @@ The reasoning is three-layered, and the first layer is decisive on its own:
   action-budget reasoning would otherwise have to absorb.
 
 **Consequence, stated plainly: this is real friction for anyone else adopting Tickwright.** Three
-independent random samples of addresses that traded on mainnet the day this was decided, drawn from
-the venue's public leaderboard and classified with one unsigned `userAbstraction` read each:
+independent samples of addresses that traded on mainnet the day this was decided, drawn from the
+venue's public leaderboard and classified with one unsigned `userAbstraction` read each — **B and C
+drawn cleanly; A is not a clean random sample**, for the reason below the table:
 
 | sample | classified | `unifiedAccount` | `portfolioMargin` | `disabled` | `default` | **refused** |
 |---|---|---|---|---|---|---|
@@ -64,10 +65,11 @@ the venue's public leaderboard and classified with one unsigned `userAbstraction
 
 So **roughly 88 % of leaderboard-ranked active traders are on a mode Tickwright refuses.** Sample A
 stopped at 114 of its 170 candidates because the run that produced it exited once it had found its
-fourth `default`-mode account holding open positions — a stopping rule that **over**-samples
-`default` and therefore *under*-states the refused share, which makes A's 87.7 % a floor rather than
-a figure biased high. Samples B and C were drawn afterwards specifically to check it, classify every
-address they draw, and bracket A from both sides.
+fourth `default`-mode account **holding open positions** — a narrower count than the table's
+`default` column, which classifies every address the run drew and therefore reads 5. It is still a
+stopping rule that **over**-samples `default` and therefore *under*-states the refused share, which
+makes A's 87.7 % a floor rather than a figure biased high. Samples B and C were drawn afterwards
+specifically to check it, classify every address they draw, and bracket A from both sides.
 
 **What the ratio is robust to, and what it is not.** Three draws settle the **draw**: sampling noise
 and A's stopping rule are both retired. They do not settle the **frame** — all three are drawn from
@@ -211,8 +213,9 @@ carried inside `cash` against the isolated `margin_used = collateral + unrealize
 *our* side as well would subtract isolated collateral a second time. The two sections differ because
 the venue's own arithmetic differs: `crossAV` and `crossTMU` each drop the same isolated term and it
 cancels in their difference, whereas `crossMaintenanceMarginUsed` drops an isolated term with nothing
-to cancel against. So `equity` and `free_margin` compare Σ-over-all to Σ-over-all, and
-`maintenance_margin` alone compares on the cross subset.
+to cancel against. So: `equity` compares Σ-over-all against an all-scope field; `free_margin`
+compares Σ-over-all against a **cross-scoped pair**, exact only by that cancellation and therefore
+**not** narrowed; `maintenance_margin` alone narrows to the cross subset.
 
 **A confirmation falls out of the same measurement.** `0x6de6…ef7b` reproduces
 `crossMaintenanceMarginUsed` across **50 distinct symbols** to ~3e-9 relative, which confirms
