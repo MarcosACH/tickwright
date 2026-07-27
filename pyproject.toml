@@ -10,14 +10,14 @@ authors = [{ name = "Marcos Achaval" }]
 # + in-memory-bus path stays hermetic: `uv sync` pulls nothing off the network
 # beyond the dev toolchain below.
 dependencies = [
-    "aiohttp>=3.14.1",
+    "aiohttp>=3.14.3",
     "aiokafka>=0.14.0",
     "hyperliquid-python-sdk~=0.24",
     "msgspec>=0.21.1",
     "psycopg[binary]>=3.3.4",
     "pydantic-settings>=2.14.2",
     "structlog>=26.1.0",
-    "websockets>=16.1",
+    "websockets>=16.1.1",
 ]
 
 [project.scripts]
@@ -30,7 +30,7 @@ dev = [
     "mypy>=2.3.0",
     "pytest>=8.3",
     "pytest-cov>=6.0",
-    "hypothesis>=6.156.6",
+    "hypothesis>=6.161.0",
     "import-linter>=2.13",
 ]
 
