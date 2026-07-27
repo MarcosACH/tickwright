@@ -41,8 +41,8 @@ src/tickwright/
     funding.py         # userFundings ingest, batch sort                      NEW
     exchange.py        # + start() orchestration, feeToken guard
     feed.py            # + activeAssetCtx -> MarkTick
-  strategies/          # + a Portfolio constructor param on both strategies —
-                       #   the seam's only consumer (ADR-0041 §7)
+  strategies/          # + a Portfolio constructor param on single_shot.py —
+                       #   the seam's only consumer (ADR-0041 §8)
   app/                 # + AppConfig.leverage, paper genesis/label, the
                        #   resolved leverage map, Portfolio facade injection
   observability/       # + the accounting named events
@@ -269,21 +269,25 @@ The ADRs deferred these to `/module-map` by name. They are decided here and are 
 
 ---
 
-### strategies (`strategies/single_shot.py`, `strategies/single_shot_limit.py`)
+### strategies (`strategies/single_shot.py`)
 
-**Interface:** Both shipped strategies gain a keyword-only `portfolio: Portfolio` constructor parameter, beside the `bus`/`clock` pair they already take. Callers must know: the strategy holds the **`domain` Protocol**, never the `PortfolioProjection` concrete and never the `ScopedPortfolio` class — that is the whole point of the seam existing for dependency direction (ADR-0035). It arrives already scoped to this `strategy_id`, so there is no account or strategy argument to pass and the unattributed partition is unreachable through it (ADR-0041 §5). Reads are synchronous, so two reads inside one handler cannot straddle a fill (ADR-0041 §7).
+**Interface:** `SingleShotMarketStrategy` gains a keyword-only `portfolio: Portfolio` constructor parameter, beside the `bus`/`clock` pair it already takes. **The read it makes is the tracer's assertion**, and it goes in the handler that already keeps the strategy's observable record: `on_order_event` appends the `OrderFilled` to its public `fills` list, and now also calls `portfolio.position(event.symbol)` and records the returned `PositionView` on a public `positions` list. Same shape as `fills`, deliberately — the slice's end-to-end test then asserts the traced position through the strategy's own surface rather than reaching into the projection. The read is coherent by construction: the projection is the fill's **writer**, applying Tier-1 synchronously on the `ExecutionManager` fill-apply path rather than by subscription, so both read-models have already moved by the time the `OrderFilled` reaches a strategy (ADR-0035, ADR-0045 §1) — the position read is the one that fill just produced.
+
+`SingleShotLimitStrategy` **does not take the parameter.** It reads no portfolio state, and ADR-0041 §7 is explicit that such a strategy "simply omits the arg"; adding it for symmetry would ship a constructor parameter with no reader, and `_build_strategy`'s per-arm `match` imposes no uniformity constraint that would force the pair. The seam's second consumer arrives when a strategy has a reason to read, not to fill out the tree.
+
+Callers must know: the strategy holds the **`domain` Protocol**, never the `PortfolioProjection` concrete and never the `ScopedPortfolio` class — that is the whole point of the seam existing for dependency direction (ADR-0035, ADR-0041 §8). It arrives already scoped to this `strategy_id`, so there is no account or strategy argument to pass and the unattributed partition is unreachable through it (ADR-0041 §5). Reads are synchronous, so two reads inside one handler cannot straddle a fill (ADR-0041 §7).
 
 **Responsibilities:** consuming the read seam. No accounting logic of its own — a strategy that recomputes a quantity `valuation.py` already assembles is the divergence ADR-0034's identical-compute grain exists to prevent.
 
-**Seams:** Consumer of `Portfolio`. Still an implementer of `Strategy`, unchanged.
+**Seams:** Consumer of `Portfolio` (`single_shot.py` alone). Still an implementer of `Strategy`, unchanged — the seam is a constructor parameter, not a Protocol member (ADR-0041 §7).
 
-**Depth note:** Thin by design, but it is the layer that makes the tracer slice vertical: PRD #168's Slice 1 is "a replayed fill produces a `Position` a strategy **reads** through `Portfolio`", so the seam has a consumer in the same PR that introduces it rather than shipping with none. Constructor injection rather than a `StrategyHost` lookup is what keeps `strategies` free of an `engine` import.
+**Depth note:** Thin by design, but it is the layer that makes the tracer slice vertical: PRD #168's Slice 1 is "a replayed fill produces a `Position` **a strategy reads** through `Portfolio`" — singular, and one reader discharges it, so the seam ships with a consumer in the same PR that introduces it rather than with none. Constructor injection rather than a `StrategyHost` lookup is what keeps `strategies` free of an `engine` import.
 
 ---
 
 ### app (`app/config.py`, `app/build.py`)
 
-**Interface:** `AppConfig` gains **`leverage: dict[str, LeverageSpec]`** — a top-level, venue-agnostic peer of `strategies` and `engine`, never nested under `paper` or `hyperliquid`, because its consumer is venue-agnostic and no live run may read a paper block. `PaperExchangeConfig` gains `genesis_collateral: Decimal | None = None` (`gt=0` on any value present) and `account_label: str = "default"` (lowercase slug, no hyphen, so `paper-<label>` stays unambiguously two segments against live's three). The genesis demand is a **`model_validator(mode="after")` on `AppConfig`** keyed on `exchange == "paper"` — never a required field, which would fire during field validation of `paper` and force a paper number onto a live run. A `leverage` entry naming a symbol no strategy trades is rejected at load. `build.py` **resolves** the sparse leverage map against the strategy-declared symbol set into a complete map and injects *that* into both consumers, so the model and the venue cannot disagree about what an unconfigured symbol means; it constructs the projection and hands each strategy its scoped `Portfolio` the same way it already hands them a `Clock` and a `SignalEmitter` — `_build_strategy` gains a `portfolio=` argument beside `bus`/`clock`, and is the map's single injection site for the seam. The `case "paper":` arm stays the single reader of `config.paper`.
+**Interface:** `AppConfig` gains **`leverage: dict[str, LeverageSpec]`** — a top-level, venue-agnostic peer of `strategies` and `engine`, never nested under `paper` or `hyperliquid`, because its consumer is venue-agnostic and no live run may read a paper block. `PaperExchangeConfig` gains `genesis_collateral: Decimal | None = None` (`gt=0` on any value present) and `account_label: str = "default"` (lowercase slug, no hyphen, so `paper-<label>` stays unambiguously two segments against live's three). The genesis demand is a **`model_validator(mode="after")` on `AppConfig`** keyed on `exchange == "paper"` — never a required field, which would fire during field validation of `paper` and force a paper number onto a live run. A `leverage` entry naming a symbol no strategy trades is rejected at load. `build.py` **resolves** the sparse leverage map against the strategy-declared symbol set into a complete map and injects *that* into both consumers, so the model and the venue cannot disagree about what an unconfigured symbol means; it constructs the projection and hands a strategy its scoped `Portfolio` the same way it already hands it a `Clock` and a `SignalEmitter` — `_build_strategy` gains a `portfolio=` argument beside `bus`/`clock` and is the map's single injection site for the seam, resolving `projection.for_strategy(config.strategy_id)` and passing it to the arms whose constructor declares it (today `single_shot_market` alone; ADR-0041 §7 lets the rest omit it). The `case "paper":` arm stays the single reader of `config.paper`.
 
 **Responsibilities:** the new config surface, the leverage resolution, facade injection.
 
