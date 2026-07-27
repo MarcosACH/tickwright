@@ -508,10 +508,11 @@ a position that has none. No `Portfolio` API change: the field is `Decimal | Non
   `clearinghouseState` response the reconcile pull already makes.
 - **A venue field's *scope* is now part of what sourcing it means.** Both defects this ADR fixes
   are the same mistake — reading a field whose name suggests our quantity and whose scope is
-  narrower (`withdrawable` nets off order margin **and applies a 10 %-of-notional floor, the larger of
-  the two terms**, §2; `crossMaintenanceMarginUsed` excludes isolated positions, §2.1) — and one
-  response carries fields on **both** scopes (`marginSummary.totalMarginUsed`
-  includes isolated, `crossMaintenanceMarginUsed` does not). Every account-grain member of ADR-0040
+  narrower (`withdrawable` nets off **whichever is larger** of total initial margin — positions
+  *and* exposure-increasing resting orders — or a 10 %-of-notional floor, usually the floor, §2;
+  `crossMaintenanceMarginUsed` excludes isolated positions, §2.1) — and one response carries fields
+  on **both** scopes (`marginSummary.totalMarginUsed` includes isolated,
+  `crossMaintenanceMarginUsed` does not). Every account-grain member of ADR-0040
   §6's band now carries its comparison scope: `equity` and `margin_used` compare Σ-over-all against
   all-scope venue fields; `free_margin` compares Σ-over-all against a **cross-scoped pair**, which is
   exact only by the cancellation §2 derives and is therefore **not** narrowed; `maintenance_margin`
