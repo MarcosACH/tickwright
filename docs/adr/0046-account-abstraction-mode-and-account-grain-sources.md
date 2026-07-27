@@ -1,6 +1,6 @@
 # Supported account abstraction mode: Manual/Standard only, and where account-grain equity and free margin are read
 
-_Accepted via the D13 grilling session on decision ticket [#148](https://github.com/MarcosACH/tickwright/issues/148), graduated from the [#142](https://github.com/MarcosACH/tickwright/issues/142) testnet validation task on the trade-economics map [#107](https://github.com/MarcosACH/tickwright/issues/107). Fixes the premise every account-grain decision in this surface rests on: **that `clearinghouseState` reports the account's equity**. It does — under exactly one family of venue account modes, which this ADR makes a deployment precondition and verifies at boot. **Amends ADR-0034** (the anchor's field sources), **ADR-0040** (§2's `free_margin` source, §3's liquidation `null` rule and its paper mirror, §6's alert-band reference — resolving the defect §6 carries a `#148` pointer for), and **ADR-0044** (the boot step ordering). **ADR-0042 and ADR-0043 stand unchanged**, with the precondition their formulas depend on now named._
+_Accepted via the D13 grilling session on decision ticket [#148](https://github.com/MarcosACH/tickwright/issues/148), graduated from the [#142](https://github.com/MarcosACH/tickwright/issues/142) testnet validation task on the trade-economics map [#107](https://github.com/MarcosACH/tickwright/issues/107). Fixes the premise every account-grain decision in this surface rests on: **that `clearinghouseState` reports the account's equity**. It does — under exactly one family of venue account modes, which this ADR makes a deployment precondition and verifies at boot. **Amends ADR-0034** (the anchor's field sources), **ADR-0040** (§2's `free_margin` source, §3's liquidation `null` rule and its paper mirror, §6's alert-band reference — resolving the defect §6 carries a `#148` pointer for), **ADR-0044** (the boot step ordering), and **ADR-0024** (startup step 4 opens with the mode gate, and the barrier-failure policy gains a third consumer). **ADR-0042 and ADR-0043 stand unchanged**, with the precondition their formulas depend on now named._
 
 Hyperliquid lets an account choose how its spot and perps balances interact. The choice is
 invisible in every field this surface reads, and it silently changes what those fields **mean**.
@@ -52,9 +52,13 @@ The reasoning is three-layered, and the first layer is decisive on its own:
   action-budget reasoning would otherwise have to absorb.
 
 **Consequence, stated plainly: this is real friction for anyone else adopting Tickwright.** Sampling
-170 randomly-chosen addresses that traded on mainnet the day this was decided: **93 `unifiedAccount`,
-7 `portfolioMargin`, 9 `disabled`, 5 `default`** — roughly **88 % of active traders are on a mode
-Tickwright refuses**. The refusal is therefore designed as a remediation, not a complaint (§3).
+170 randomly-chosen addresses that traded on mainnet the day this was decided returned a mode for
+**114** of them: **93 `unifiedAccount`, 7 `portfolioMargin`, 9 `disabled`, 5 `default`** — so
+roughly **88 % of the classified sample** (100 of 114) is on a mode Tickwright refuses. The
+remaining 56 addresses are **unclassified, and the reason was not recorded** — the ratio is
+therefore reported over the 114 that answered, and it is stated here rather than left implicit so
+the denominator is not later mistaken for the sample size. The refusal is designed as a remediation,
+not a complaint (§3).
 
 ### Alternatives rejected
 
@@ -156,15 +160,20 @@ perps clearinghouse fully populated and spot empty.
   check reasons from, so reporting leverage mismatches computed against a margin model that does not
   apply would be noise on top of an error. Gate first, then check. Nothing else touches the venue
   until the gate passes.
-- **Its own error type, not merged into `StoreAccountMismatch`.** ADR-0042 merged the two *store*
-  checks because they are the same kind of disagreement discovered at the same moment. This one is
-  categorically different: it does not disagree with a recorded value, it invalidates the meaning of
-  every value read afterwards.
+- **Its own error type — `VenueAccountModeUnsupported`, not merged into `StoreAccountMismatch`.** An
+  `InvariantViolation` (ADR-0014's second error class → `FAULTED`), named beside
+  `StoreAccountMismatch` (ADR-0042) and `VenueLeverageMismatch` (ADR-0044 §5) exactly as those two
+  are named beside each other. ADR-0042 merged the two *store* checks because they are the same kind
+  of disagreement discovered at the same moment; this one is categorically different, and its name
+  says so — it is **not** a `*Mismatch`, because it does not disagree with a recorded value. It
+  invalidates the meaning of every value read afterwards.
 - **A failed read refuses to start** — bounded retry under `startup_reconciliation_timeout`, then
-  `FAULTED`, reusing ADR-0024's barrier budget exactly as ADR-0044 §7 does. Never "assume standard on
-  error": that is ADR-0011 invariant 1's freeze-never-fabricate rule applied to a precondition.
-- **The error is a remediation.** Given that ~88 % of active accounts are on a refused mode (§1), it
-  names the observed mode, the two accepted literals, and the fix: `userSetAbstraction("disabled")`
+  `FAULTED`, reusing ADR-0024's barrier budget exactly as ADR-0044 §6 does. Never "assume standard on
+  error": that is ADR-0011 invariant 1's freeze-never-fabricate rule applied to a precondition. An
+  **unrecognised** literal is not a failed read — it takes the allowlist's refusal above.
+- **The error is a remediation.** Given that ~88 % of the sampled accounts that answered are on a
+  refused mode (§1), it names the observed mode, the two accepted literals, and the fix:
+  `userSetAbstraction("disabled")`
   with the master wallet, then a spot→perps `usdClassTransfer`. Both are **user-signed** actions an
   agent wallet cannot perform, which is why this is an operator step and not something the engine
   can do for itself.
@@ -176,7 +185,8 @@ perps clearinghouse fully populated and spot empty.
 ## 4. Re-verification in flight: divergence-triggered, freeze on change
 
 **Decision: read the mode at boot, and re-read it before applying any Tier-1 **account cash** heal.
-On a changed mode, refuse the heal, freeze the account-grain reconcile, and alert. Never `FAULTED`.**
+On a changed mode — or on a re-read that fails or returns an unrecognised literal — refuse the heal,
+freeze the account-grain reconcile, and emit `ACCOUNT_MODE_UNVERIFIED`. Never `FAULTED`.**
 
 The hole a boot-only check leaves is not that the cross-check goes stale — it is that **ADR-0034
 heals Tier-1 toward the venue**. A mode switch mid-run would write the perps sub-ledger's smaller
@@ -206,6 +216,23 @@ only the cross-check and the heal become invalid. Freezing the account-grain rec
 invariant 1's existing mechanism applied to a **semantic** outage rather than a network one. The
 engine keeps trading on numbers that are still right, and stops trusting a snapshot that no longer
 means what it did.
+
+**An unreadable mode takes the same branch as a changed one — the guard fails closed.** A re-read
+that errors, times out, or returns a literal outside the allowlist leaves the mode **unverified**,
+and an unverified mode is not evidence that it is unchanged. Proceeding would heal on exactly the
+assumption this section exists to stop the engine making, so the heal is refused and the
+account-grain reconcile freezes identically. This is the in-flight twin of §3's "never assume
+standard on error", and the reason the boot and in-flight halves differ only in their terminal
+state: at boot there is nothing correct to fall back to, so an unreadable mode is `FAULTED`; in
+flight the local ledger is still correct, so it is a freeze. The alert carries **why** it froze
+(changed vs unreadable) so an operator is not left guessing which.
+
+**The alert is `ACCOUNT_MODE_UNVERIFIED`** (named event `account.mode_unverified`), on the same sink
+as the Tier-1 heal-alert and distinct from ADR-0040 §6's `VALUATION_DIVERGENCE` and ADR-0044 §10's
+`LEVERAGE_DIVERGENCE`. Those two report a *number* disagreeing with the venue; this one reports that
+the numbers can no longer be compared at all — the cross-check has stopped, not diverged. It is
+therefore **not** a `*_DIVERGENCE`, and its name says so. ADR-0045 §2's catalog note is updated to
+list it beside the other two.
 
 ## 5. ADR-0040 §6's alert band: the relative term scales by notional
 
@@ -281,9 +308,14 @@ a position that has none. No `Portfolio` API change: the field is `Decimal | Non
 ## Consequences
 
 - **A documented, non-negotiable deployment precondition.** Running Tickwright live against
-  Hyperliquid requires the account in Manual/Standard. ~88 % of active accounts are not, so most
-  first-run attempts by a new operator will hit the refusal — by design, since the alternative is
-  reporting an equity that is off by an order of magnitude.
+  Hyperliquid requires the account in Manual/Standard. ~88 % of the sampled accounts that answered
+  are not (§1), so most first-run attempts by a new operator will hit the refusal — by design, since
+  the alternative is reporting an equity that is off by an order of magnitude.
+- **The error and alert catalogs each gain one name.** `VenueAccountModeUnsupported` joins
+  `StoreAccountMismatch` and `VenueLeverageMismatch` as an `InvariantViolation` that refuses startup
+  (§3); `ACCOUNT_MODE_UNVERIFIED` / `account.mode_unverified` joins `VALUATION_DIVERGENCE` and
+  `LEVERAGE_DIVERGENCE` on the reconcile alert sink (§4), and ADR-0045 §2's catalog note lists it.
+  Both land with their emitting path under ADR-0020's one-slice-at-a-time rule, not before.
 - **The precondition costs no configuration.** Nothing is declared, so nothing can be declared
   wrongly; the venue is asked, and the answer is not overridable. This is deliberately unlike
   ADR-0044's leverage, which *is* config-authoritative — the difference being that leverage is a

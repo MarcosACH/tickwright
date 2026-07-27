@@ -70,7 +70,7 @@ time: a name lands only with its emitting path and a catalog-walk test"):
 | `position.opened` | a fill takes a `(strategy, symbol)` record from flat to non-flat |
 | `position.changed` | a fill or accrual moves a non-flat record |
 | `position.closed` | a fill returns a record to `size = 0` |
-| `account.reconciled` | a ledger reconcile cycle completes (its divergences already have their own alert types — ADR-0040 §6's `VALUATION_DIVERGENCE`, ADR-0044 §10's `LEVERAGE_DIVERGENCE`) |
+| `account.reconciled` | a ledger reconcile cycle completes (its divergences already have their own alert types — ADR-0040 §6's `VALUATION_DIVERGENCE`, ADR-0044 §10's `LEVERAGE_DIVERGENCE`, and ADR-0046 §4's `ACCOUNT_MODE_UNVERIFIED` / `account.mode_unverified`, which reports the account-grain cross-check *stopping* rather than diverging) |
 
 A flip through zero (P1, [#119](https://github.com/MarcosACH/tickwright/issues/119)) is one fill
 that closes and reopens; it emits `position.closed` then `position.opened`, because the residual
@@ -367,3 +367,8 @@ was moved in step twice, and would have drifted both times had the copies not be
   of ADR-0040 §6's band-shape defect. So the frontier holds one decision again and `/to-spec` waits
   on it. What this bullet recorded stands for the *terminology* half: #138 closed without leaving a
   decision behind; the one on the frontier now is not this ticket's.)
+  (**True again as of [ADR-0046](./0046-account-abstraction-mode-and-account-grain-sources.md).**
+  #148 is settled — Manual/Standard is the supported mode, the account-grain sources are named, and
+  the band-shape defect it carried is applied at ADR-0046 §5. #107's decision frontier is empty and
+  `/to-spec` is unblocked. What remains on the map is a `wayfinder:task` re-validating #142's
+  account-grain measurements under a supported mode, which does **not** gate the PRD.)

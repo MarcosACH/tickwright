@@ -367,8 +367,11 @@ or pooled — and therefore **what the venue's perps account snapshot means**. T
 clearinghouse *is* the account boundary; under `unifiedAccount` or `portfolioMargin` the same
 snapshot reports only the collateral posted into perps, so equity and free margin read an order of
 magnitude low. Not configuration — it is **read from the venue** and verified at boot, and again
-before any Tier-1 cash heal; an unsupported mode **refuses to start**. A [[Venue adapter]] concern
-that never reaches `domain`. See ADR-0046, ADR-0038, ADR-0034.
+before any Tier-1 cash heal. The guard **fails closed at both points**: at boot an unsupported *or
+unreadable* mode refuses to start (`VenueAccountModeUnsupported`); in flight a mode that changed or
+could not be verified refuses the heal, freezes the account-grain reconcile and alerts
+(`ACCOUNT_MODE_UNVERIFIED`) — an unverified mode is never read as an unchanged one. A
+[[Venue adapter]] concern that never reaches `domain`. See ADR-0046, ADR-0038, ADR-0034.
 _Avoid_: margin mode (that is per-symbol cross/isolated — see [[Leverage]] & Margin mode), account
 type, unified margin.
 
