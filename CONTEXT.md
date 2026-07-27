@@ -474,7 +474,9 @@ RiskEngine's concern — ADR-0017; this word is a magnitude), position value, ex
 
 **Margin** *(reported)*:
 The **reported** collateral a [[Position]] ties up — `margin_used`, with its sibling
-`maintenance = notional × margin_maint` at a flat tier-0 rate — **never enforced**: the
+`maintenance = notional × margin_maint` at a flat tier-0 rate **exact only below the asset's first
+margin-tier band** (above it the venue charges `notional × mmr(tier) − deduction(tier)`, and the
+flat rate under-reports — ADR-0040 §4) — **never enforced**: the
 [[Paper exchange]] never rejects an order for margin and never liquidates (a future map). What
 `margin_used` *is* depends on the mode, but **both are Tier-2, recomputed each read**: a **cross**
 position shares one account pool and computes `notional / leverage`; an **isolated** position
