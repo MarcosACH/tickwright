@@ -557,8 +557,9 @@ to match (ADR-0046 §2.1).
 See ADR-0045, ADR-0040, ADR-0042, ADR-0046.
 _Avoid_: balance (`cash` is one term of equity), buying power, **withdrawable** (not a synonym —
 the venue's `withdrawable` additionally deducts the margin reserved by *exposure-increasing* resting
-orders **and a 10 %-of-notional withdrawal floor** — `max(0, AV − max(IM, 0.1 × totalNtlPos))`, the
-dominant term of the two — neither of which this surface models; ADR-0046 §2),
+orders **and a 10 %-of-notional withdrawal floor** —
+`max(0, accountValue − max(initial_margin, 0.1 × totalNtlPos))`, the dominant term of the two —
+neither of which this surface models; ADR-0046 §2),
 **position equity** (equity is account-grain; an isolated position's backing collateral is named
 descriptively — ADR-0041 §4.1).
 
