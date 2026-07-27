@@ -275,7 +275,7 @@ Use this as the substantive-pass spine. Each item maps to a `Category` value.
 
 ### Tickwright invariants (BLOCKING if regressed)
 
-Walk the canonical list in [docs/agents/invariants.md](../../../docs/agents/invariants.md) — saga idempotency, crash-safe recovery, reconciliation freeze, explicit rejections, per-symbol ordering, deterministic paper exchange. Each entry cites its ADR; cite the ADR in the finding. Do not restate the list here — the shared file is the single source.
+Open and walk the canonical list in [docs/agents/invariants.md](../../../docs/agents/invariants.md). Each entry cites its ADR; cite the ADR in the finding. Do not restate the list here — the shared file is the single source, and a copy that falls behind it silently narrows the review.
 
 ---
 

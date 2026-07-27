@@ -21,6 +21,12 @@ balance snapshots) are account-scoped, not symbol-scoped, and would need their o
 (account). v1 is engine-only with portfolio/accounting deferred, so no such event exists yet;
 if one is introduced, it must not be forced onto the per-symbol key.
 
+> **Resolved (ADR-0038).** The accounting map introduced that event: `FundingAccrual` (ADR-0037).
+> It stays **symbol-partitioned** and carries account identity as a *property*, never as the
+> ordering key — the outcome this caveat called for. The account itself is a deployment fact
+> (one account per process, ADR-0038), so a symbol is unambiguous within a process on the account
+> axis as well as the venue axis below.
+
 **Caveat (venue scope).** The `symbol` key is unqualified by venue because Tickwright runs **one
 venue per process** (ADR-0031): venue is a deployment fact, so a symbol is unambiguous within a
 process. If that model is ever replaced by one engine multiplexing venues, instrument identity must

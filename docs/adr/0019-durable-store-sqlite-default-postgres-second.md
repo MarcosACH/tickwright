@@ -20,8 +20,27 @@ So the canonical pairings are **InMemoryBus + SQLite** (zero-setup, deterministi
   ADR-0026).
 - **Strategy snapshots**: opaque bytes per `strategy_id`.
 - **Kill-switch state**: durable and sticky (ADR-0026), restored before the feed starts.
+- **The position ledger**, keyed by `(strategy_id, symbol)`: signed size, entry price, realized
+  PnL, accrued fees, accrued funding, isolated collateral (ADR-0043 §3).
+- **The account row**: a single row by constraint (one process trades one account, ADR-0038)
+  holding `account_id`, the opening declaration — genesis collateral (ADR-0042) and the instant it
+  was written — and the cash line.
+- **The funding watermarks**, one row per symbol: the last funding boundary applied to it
+  (ADR-0043 §5.2) — at `symbol` grain because that is the grain of ADR-0037's key.
+
+The last three are current-state rows, not an event log: recovery is a `SELECT`, and "snapshot"
+means the current row state (ADR-0043 §1, extending ADR-0009 from orders to accounting).
 
 The seq high-water-mark is **derived** from saga records (no separate table). There is **no
 "processed event id" table** — dedup is enforced by idempotent `Order.apply()` (ADR-0025); Kafka
 consumer offsets merely bound how much is redelivered, and the in-memory path has no redelivery.
+**The ledger honors this rather than excepting it**: the saga's applied-event set is
+authoritative for the ledger too, because the ledger write shares the saga's transaction
+(ADR-0043 §4), and funding — the one ingress with no saga to ride — is deduped across a restart by
+a **watermark, never by a set of processed ids**. `funding_marks` is a table, but not the banned
+kind: the rule forbids a record that grows with the event stream, and this one holds a single
+overwritten row per traded symbol, bounded by the symbols the account has ever held — configured or
+arrived as foreign flow — rather than by history (ADR-0043 §5.2). **Both paths write it and both
+read it**: it gates live's re-delivered history and a replay rerun's re-derived boundaries alike,
+and is simply inert under live-wall-clock paper, whose generator only moves forward (ADR-0043 §5.1).
 The store location is per-process configuration, never shared between engine instances (ADR-0028).
