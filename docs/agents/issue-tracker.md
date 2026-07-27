@@ -83,7 +83,7 @@ Milestones are **not** used; sequencing comes from Status plus the `blocked` lab
 - **List issues**: `gh issue list -R MarcosACH/tickwright --state open --json number,title,body,labels --jq '[.[] | {number, title, labels: [.labels[].name]}]'`.
 - **Comment**: `gh issue comment <n> -R MarcosACH/tickwright --body "..."`.
 - **Apply / remove labels**: `gh issue edit <n> -R MarcosACH/tickwright --add-label "..."` / `--remove-label "..."`.
-- **Close**: never manually — the PR's `Closes #N` does it on merge. The one exception is a **parent PRD**, closed deliberately at release (see [Linking PRs to issues](#linking-prs-to-issues)).
+- **Close**: never manually — the PR's `Closes #N` does it on merge. The exceptions are the issues that have **no merge event of their own**, so no `Closes #N` can ever reach them: a **parent PRD**, closed deliberately at release (see [Linking PRs to issues](#linking-prs-to-issues)), and a **wayfinder map or ticket**, closed on resolution (see [Wayfinding operations](#wayfinding-operations)). Never a child slice issue.
 
 ## When a skill says "publish to the issue tracker"
 
@@ -110,7 +110,7 @@ Every implementation PR must include `Closes #<issue-number>` in its body. GitHu
 - Auto-closes the issue when the PR merges to the default branch — no manual `gh issue close` needed
 - The "Item closed" project automation flips Status to `Done` when the PR merges
 
-Each child PR's `Closes` clause references **its own child slice issue**, never the parent PRD — closing the parent on a child merge would kill the tracking issue while slices are still open. A **parent PRD** is an epic with no merge event of its own: its completion is an *aggregate* condition — every sub-issue Done **and** the release cut — that no `Closes #N` keyword can express. So a PRD is **not** auto-closed; it is closed **deliberately at release**, once every sub-issue is Done, by the maintainer (or a future close-parent automation), commenting the release URL. This is the one sanctioned exception to "never close manually", and it applies **only** to parent PRDs — never to child slice issues. The release-time step and command live in [versioning.md → Parent PRD issues at release](../workflow/versioning.md#parent-prd-issues-at-release).
+Each child PR's `Closes` clause references **its own child slice issue**, never the parent PRD — closing the parent on a child merge would kill the tracking issue while slices are still open. A **parent PRD** is an epic with no merge event of its own: its completion is an *aggregate* condition — every sub-issue Done **and** the release cut — that no `Closes #N` keyword can express. So a PRD is **not** auto-closed; it is closed **deliberately at release**, once every sub-issue is Done, by the maintainer (or a future close-parent automation), commenting the release URL. This is a sanctioned exception to "never close manually" — one of two, the other being a wayfinder map or ticket, which likewise has no merge event of its own (see [Wayfinding operations](#wayfinding-operations)). What the rule targets is **child slice issues**: those always close on their own PR's merge, never by hand. The release-time step and command live in [versioning.md → Parent PRD issues at release](../workflow/versioning.md#parent-prd-issues-at-release).
 
 ## Issue lifecycle for agents
 
