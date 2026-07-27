@@ -41,6 +41,8 @@ src/tickwright/
     funding.py         # userFundings ingest, batch sort                      NEW
     exchange.py        # + start() orchestration, feeToken guard
     feed.py            # + activeAssetCtx -> MarkTick
+  strategies/          # + a Portfolio constructor param on both strategies —
+                       #   the seam's only consumer (ADR-0041 §7)
   app/                 # + AppConfig.leverage, paper genesis/label, the
                        #   resolved leverage map, Portfolio facade injection
   observability/       # + the accounting named events
@@ -128,7 +130,12 @@ The ADRs deferred these to `/module-map` by name. They are decided here and are 
 - **`Exchange` gains four members** — `async start()` (validate bounds; on live: mode gate, then the leverage push), `async stop()` (cancel anything the adapter runs; paper's funding loop, live a no-op), `account_spec() -> AccountSpec` (synchronous, read once at composition, peer of `instrument_specs()`), and `async fetch_account_state() -> VenueAccountState | None` (the reconcile pull; `None` = the read failed, never "flat" — ADR-0011 inv 1 in the type, exactly as `fetch_order` carries it).
 - **`Store` gains five members** — `checkpoint_ledger(*, account, positions=(), order=None, funding_mark=None, ts_ns)` (one transaction across all three aggregates), `all_positions()` (the unattributed partition **unfiltered**), `load_account()`, `funding_mark(symbol)`, `has_orders()` (ADR-0043 §9).
 - **Events** — `MarkTick` (`symbol`, `price`, `ts_event`; weak dedup key, conflates like `MarketTick`, carries no size or trade id); `FundingAccrual` (keyed `(account, symbol, boundary_ts)`, symbol-partitioned); a signed `fee: Decimal` on `FillReport` and `OrderFillEvent`; `VenueAccountState` + `VenuePositionState`, the frozen normalized venue read, peers of `VenueOrderView`.
-- **`InstrumentSpec` gains five additive fields**, all defaulting to `0`/venue-sourced so a frictionless spec stays valid: `maker_fee`, `taker_fee`, `funding_rate`, `margin_maint`, `max_leverage`. **No `margin_init`** (ADR-0040 §4).
+- **`InstrumentSpec` gains five additive fields** — `maker_fee`, `taker_fee`, `funding_rate`, `margin_maint`, `max_leverage` — every one of them **defaulted**, so a frictionless spec stays valid and the existing construction sites keep compiling. But **not all defaulted to `0`**, and the map fixes the two that ADR-0040 §4 left unstated, because §4's field list and ADR-0044 §9's `1 ≤ leverage ≤ spec.max_leverage` bound first meet in a slice rather than in either ADR:
+  - `maker_fee` / `taker_fee` (ADR-0036) and `funding_rate` (ADR-0037) default to **`0`**, exactly as those ADRs state — the frictionless-spec guarantee, not a claim about the venue.
+  - `margin_maint` defaults to **`0`**: frictionless maintenance on the same pattern (ADR-0013), with the real rate authored by whoever authors the spec — the adapter from `1/(2·max_leverage)`, paper config directly (ADR-0040 §4).
+  - `max_leverage` defaults to **`1`**, *not* `0`. Zero is not merely unstated but unsafe: it makes §9's bound unsatisfiable, so a default-valued spec would fault every paper start rather than validate one. `1` is the honest frictionless reading — a spec declaring no cap models no leverage — it keeps §9 satisfiable against ADR-0040 §5's own `1x`/`isolated` default, and it turns a configured `5x` against an undeclared cap into the loud refusal §9 wants instead of a silent accept.
+
+  Making either field **required** was rejected: it would break all eleven existing `InstrumentSpec(...)` sites for a value neither the guard nor the quantizer needs, which is what "additive" is supposed to prevent. **No `margin_init`** (ADR-0040 §4).
 - **Errors** — `StoreAccountMismatch`, `VenueLeverageMismatch`, `VenueAccountModeUnsupported`, all `InvariantViolation` subclasses (ADR-0014's fail-fast class, which pierces the containment net).
 
 **Responsibilities:** the stable contract every new module compiles against; no behavior.
@@ -158,7 +165,7 @@ The ADRs deferred these to `/module-map` by name. They are decided here and are 
 
 ### LedgerReconciliation (`engine/ledger_reconcile.py`)
 
-**Interface:** The account-grain healing cycle, constructed with the `Exchange`, the `PortfolioProjection`, the `Clock`, the `EventBus` and a config carrying the ADR-0040 §6 band. Engine-internal, not a Protocol. Callers (the runner) must know:
+**Interface:** The account-grain healing cycle, constructed with the `Exchange`, the `PortfolioProjection`, the `Clock`, the `EventBus` and a config carrying the ADR-0040 §6 band. Engine-internal, not a Protocol. **Live-only** — ADR-0034 places the heal "on live" because paper has no venue to heal *from*: paper's `fetch_account_state()` answers out of the same book the projection writes, so a paper cadence could only ever confirm itself, and the one real divergence paper can suffer (a crash between the fill and its checkpoint) is closed by the atomic ledger write instead (ADR-0043 §4). The runner wires the cadence on the live path alone. Callers (the runner) must know:
 
 - The anchor is **one `fetch_account_state()` read per cycle**; `None` **freezes** the cycle and heals nothing — an outage is never a flat book (ADR-0011 inv 1, ADR-0034).
 - **Tier-1 divergence heals through synthetic events** on the same idempotent `apply()` path as everything else — a reconciliation fill and/or a cash adjustment, deterministically keyed and `reconciliation`-flagged — never a blind field overwrite, so every heal leaves a "why did it move" record.
@@ -182,7 +189,7 @@ The ADRs deferred these to `/module-map` by name. They are decided here and are 
 
 - **`ExecutionManager`** — on a **fill** transition it makes **one** `Store.checkpoint_ledger(order=…, positions=…, account=…, ts_ns=…)` call spanning the order row and the ledger rows, then projects both read-models in memory; store-first stays the rule, and the atomicity is what makes the paper path survive a crash at all (paper has no venue to heal from — ADR-0043 §4). Every **non-fill** transition keeps `Cache.checkpoint` unchanged, none of them touching the ledger. `Cache` therefore gains an in-memory-only `project(order, ts_ns)` for the atomic path; a checkpoint the store cannot make durable stays `InvariantViolation`.
 - **`StrategyHost`** — two new fail-fasts at registration: a second strategy declaring a symbol another already owns (ADR-0034's disjointness rule, unenforced today), and the reserved literal `__unattributed__` as a `strategy_id` (ADR-0043 §2, mirrored by a `StrategyConfig` validator).
-- **`Engine`** — the startup sequence gains `PortfolioProjection.recover()` immediately after `bind_run_id` and before `cache.rebuild()`; `Exchange.start()` at step 4, **before** the barrier, so both venue refusals precede any order and the barrier observes an aligned venue; the barrier gains the **live-only** account materialisation under its existing failure policy (bounded retry → `FAULTED`, never a cleared barrier with no account row); the ledger cadence joins the reconcile cadences; `exchange.stop()` joins `_teardown_steps` after `feed.stop`, so the funding generator stops before the bus drains.
+- **`Engine`** — the startup sequence gains `PortfolioProjection.recover()` immediately after `bind_run_id` and before `cache.rebuild()`; `Exchange.start()` at step 4, **before** the barrier, so both venue refusals precede any order and the barrier observes an aligned venue; the barrier gains the **live-only** account materialisation under its existing failure policy (bounded retry → `FAULTED`, never a cleared barrier with no account row); the **live-only** ledger cadence joins the reconcile cadences; `exchange.stop()` joins `_teardown_steps` after `feed.stop`, so the funding generator stops before the bus drains.
 
 **Responsibilities:** unchanged in kind — the manager still owns the checkpoint step, the host still owns registration and containment, the runner still owns ordering.
 
@@ -192,7 +199,7 @@ The ADRs deferred these to `/module-map` by name. They are decided here and are 
 
 ### paper (`adapters/paper/`)
 
-**Interface:** `PaperExchange` gains: a signed `fee` stamped on every emitted fill, computed from `InstrumentSpec` maker/taker rates via the `economics.py` helper, with maker/taker decided at the fill boundary where the exchange already knows it (taker iff the fill happens on arrival; maker iff it comes off the resting book) and **not** stored on the event; `account_spec()` returning the `paper-<label>` qualified id, `NET` netting and the operator's `genesis_collateral`; `fetch_account_state()` answering honestly from its own book; `start()` performing the ADR-0044 §9 bounds validation (identically to live) and spawning the funding loop; `stop()` cancelling it. `adapters/paper/funding.py` holds the generator: it settles **every boundary strictly crossed** since the last — funding is additive, not convergent, so a virtual-time jump across N boundaries accrues N payments — built on `Clock.sleep_until`, deliberately *not* on `run_cadence`'s collapse-to-one semantics (ADR-0037). It **skips the restart gap**: the loop resumes from the startup instant, never from the watermark (ADR-0043 §5.1). Paper's price for the funding notional is its one price signal, the last trade.
+**Interface:** `PaperExchange` gains: a signed `fee` stamped on every emitted fill, computed from `InstrumentSpec` maker/taker rates via the `economics.py` helper, with maker/taker decided at the fill boundary where the exchange already knows it (taker iff the fill happens on arrival; maker iff it comes off the resting book) and **not** stored on the event; `account_spec()` returning the `paper-<label>` qualified id, `NET` netting and the operator's `genesis_collateral`; `fetch_account_state()` answering honestly from its own book — present for `Exchange` conformance and as the reconciler's test double, **never** to drive a paper ledger cadence, which is live-only; `start()` performing the ADR-0044 §9 bounds validation (identically to live) and spawning the funding loop; `stop()` cancelling it. `adapters/paper/funding.py` holds the generator: it settles **every boundary strictly crossed** since the last — funding is additive, not convergent, so a virtual-time jump across N boundaries accrues N payments — built on `Clock.sleep_until`, deliberately *not* on `run_cadence`'s collapse-to-one semantics (ADR-0037). It **skips the restart gap**: the loop resumes from the startup instant, never from the watermark (ADR-0043 §5.1). Paper's price for the funding notional is its one price signal, the last trade.
 
 **Responsibilities:** the venue's half of the economics on the deterministic path — fee arithmetic, funding generation, an honest account snapshot, boot-time bounds validation.
 
@@ -262,9 +269,21 @@ The ADRs deferred these to `/module-map` by name. They are decided here and are 
 
 ---
 
+### strategies (`strategies/single_shot.py`, `strategies/single_shot_limit.py`)
+
+**Interface:** Both shipped strategies gain a keyword-only `portfolio: Portfolio` constructor parameter, beside the `bus`/`clock` pair they already take. Callers must know: the strategy holds the **`domain` Protocol**, never the `PortfolioProjection` concrete and never the `ScopedPortfolio` class — that is the whole point of the seam existing for dependency direction (ADR-0035). It arrives already scoped to this `strategy_id`, so there is no account or strategy argument to pass and the unattributed partition is unreachable through it (ADR-0041 §5). Reads are synchronous, so two reads inside one handler cannot straddle a fill (ADR-0041 §7).
+
+**Responsibilities:** consuming the read seam. No accounting logic of its own — a strategy that recomputes a quantity `valuation.py` already assembles is the divergence ADR-0034's identical-compute grain exists to prevent.
+
+**Seams:** Consumer of `Portfolio`. Still an implementer of `Strategy`, unchanged.
+
+**Depth note:** Thin by design, but it is the layer that makes the tracer slice vertical: PRD #168's Slice 1 is "a replayed fill produces a `Position` a strategy **reads** through `Portfolio`", so the seam has a consumer in the same PR that introduces it rather than shipping with none. Constructor injection rather than a `StrategyHost` lookup is what keeps `strategies` free of an `engine` import.
+
+---
+
 ### app (`app/config.py`, `app/build.py`)
 
-**Interface:** `AppConfig` gains **`leverage: dict[str, LeverageSpec]`** — a top-level, venue-agnostic peer of `strategies` and `engine`, never nested under `paper` or `hyperliquid`, because its consumer is venue-agnostic and no live run may read a paper block. `PaperExchangeConfig` gains `genesis_collateral: Decimal | None = None` (`gt=0` on any value present) and `account_label: str = "default"` (lowercase slug, no hyphen, so `paper-<label>` stays unambiguously two segments against live's three). The genesis demand is a **`model_validator(mode="after")` on `AppConfig`** keyed on `exchange == "paper"` — never a required field, which would fire during field validation of `paper` and force a paper number onto a live run. A `leverage` entry naming a symbol no strategy trades is rejected at load. `build.py` **resolves** the sparse leverage map against the strategy-declared symbol set into a complete map and injects *that* into both consumers, so the model and the venue cannot disagree about what an unconfigured symbol means; it constructs the projection and hands each strategy its scoped `Portfolio` the same way it already hands them a `Clock` and a `SignalEmitter`. The `case "paper":` arm stays the single reader of `config.paper`.
+**Interface:** `AppConfig` gains **`leverage: dict[str, LeverageSpec]`** — a top-level, venue-agnostic peer of `strategies` and `engine`, never nested under `paper` or `hyperliquid`, because its consumer is venue-agnostic and no live run may read a paper block. `PaperExchangeConfig` gains `genesis_collateral: Decimal | None = None` (`gt=0` on any value present) and `account_label: str = "default"` (lowercase slug, no hyphen, so `paper-<label>` stays unambiguously two segments against live's three). The genesis demand is a **`model_validator(mode="after")` on `AppConfig`** keyed on `exchange == "paper"` — never a required field, which would fire during field validation of `paper` and force a paper number onto a live run. A `leverage` entry naming a symbol no strategy trades is rejected at load. `build.py` **resolves** the sparse leverage map against the strategy-declared symbol set into a complete map and injects *that* into both consumers, so the model and the venue cannot disagree about what an unconfigured symbol means; it constructs the projection and hands each strategy its scoped `Portfolio` the same way it already hands them a `Clock` and a `SignalEmitter` — `_build_strategy` gains a `portfolio=` argument beside `bus`/`clock`, and is the map's single injection site for the seam. The `case "paper":` arm stays the single reader of `config.paper`.
 
 **Responsibilities:** the new config surface, the leverage resolution, facade injection.
 
@@ -288,7 +307,7 @@ The ADRs deferred these to `/module-map` by name. They are decided here and are 
 
 ```
 app ────────────────▶ engine, adapters/*, venues/*, strategies, domain, observability
-engine/portfolio ───▶ domain, observability          (Protocols only)
+engine/portfolio ───▶ domain (Protocols only), observability
 engine/ledger_reconcile ▶ domain, observability, engine/portfolio
 engine/execution ───▶ domain, observability, engine/{cache,portfolio}
 adapters/paper ─────▶ domain, observability
