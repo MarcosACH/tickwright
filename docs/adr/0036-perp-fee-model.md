@@ -2,7 +2,7 @@
 
 _Accepted via the D3 grilling session on decision ticket [#116](https://github.com/MarcosACH/tickwright/issues/116), part of the trade-economics map [#107](https://github.com/MarcosACH/tickwright/issues/107). Grounded in R2 ([#109](https://github.com/MarcosACH/tickwright/issues/109)); builds on ADR-0034 (D1) and ADR-0035 (D2). Funding ([#117](https://github.com/MarcosACH/tickwright/issues/117)) is a sibling decision, not this one._
 
-A perpetual fill carries a **single signed `Decimal` `fee`** (negative = a maker rebate, ADR-0029), settled in **USDC**. Each `Exchange` adapter produces it at the **fill boundary** — the paper exchange **computes** it from flat maker/taker rates on `InstrumentSpec`; the live exchange **reads** the venue-reported fee — and the `PortfolioProjection` merely **accrues** it (ADR-0035). This lifts ADR-0013's fee deferral: the portfolio surface that ADR named as the precondition now exists, so the additive fee seam it anticipated is introduced here.
+A perpetual fill carries a **single signed `Decimal` `fee`** (negative = a maker rebate, ADR-0029 — a shorthand about the *sign convention*, qualified below: making liquidity is not what makes a fee negative), settled in **USDC**. Each `Exchange` adapter produces it at the **fill boundary** — the paper exchange **computes** it from flat maker/taker rates on `InstrumentSpec`; the live exchange **reads** the venue-reported fee — and the `PortfolioProjection` merely **accrues** it (ADR-0035). This lifts ADR-0013's fee deferral: the portfolio surface that ADR named as the precondition now exists, so the additive fee seam it anticipated is introduced here.
 
 ## The fee seam is the `Exchange` adapter, not a swappable fee-model object
 
