@@ -38,7 +38,7 @@ The Tier-1 accumulated ledger (net size, average entry, realized PnL, fees, fund
 
 ## 3. Computed everywhere, except liquidation price
 
-Every Tier-2 number is **computed on both paper and live** from `(position, fresh feed mark (ADR-0039), leverage, margin_maint)`. On live the venue-reported values (`unrealizedPnl`, `marginUsed`, `positionValue`, `accountValue`, `withdrawable`, `crossMaintenanceMarginUsed`) are the **divergence cross-check (§6), not the input** — computing keeps the numbers fresh at feed-mark cadence, per-strategy-attributable, and identical across paper and live (ADR-0034's core grain).
+Every Tier-2 number is **computed on both paper and live** from `(position, fresh feed mark (ADR-0039), leverage, margin_maint)`. On live the venue-reported values (`unrealizedPnl`, `marginUsed`, `positionValue`, `accountValue`, `crossMarginSummary.accountValue` and `crossMarginSummary.totalMarginUsed`, `crossMaintenanceMarginUsed` — the account-grain pair as fixed by [ADR-0046](./0046-account-abstraction-mode-and-account-grain-sources.md) §2, which drops root `withdrawable` from the model entirely) are the **divergence cross-check (§6), not the input** — computing keeps the numbers fresh at feed-mark cadence, per-strategy-attributable, and identical across paper and live (ADR-0034's core grain).
 
 **Liquidation price is the one recomputed *valuation* read through the venue on live, computed on paper.** ADR-0034 flagged it as a candidate; this ADR confirms it. Three reasons it is special: (i) re-deriving it needs the maintenance-margin **tier fixed point** — self-referential, since the tier depends on position value *at the liquidation price*; (ii) it is safety-relevant; (iii) the venue already computes it exactly and reports it as one field.
 

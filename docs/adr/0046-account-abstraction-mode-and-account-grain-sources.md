@@ -1,6 +1,6 @@
 # Supported account abstraction mode: Manual/Standard only, and where account-grain equity and free margin are read
 
-_Accepted via the D13 grilling session on decision ticket [#148](https://github.com/MarcosACH/tickwright/issues/148), graduated from the [#142](https://github.com/MarcosACH/tickwright/issues/142) testnet validation task on the trade-economics map [#107](https://github.com/MarcosACH/tickwright/issues/107). Fixes the premise every account-grain decision in this surface rests on: **that `clearinghouseState` reports the account's equity**. It does — under exactly one family of venue account modes, which this ADR makes a deployment precondition and verifies at boot. **Amends ADR-0034** (the anchor's field sources), **ADR-0040** (§2's `free_margin` source, §3's liquidation `null` rule and its paper mirror, §6's alert-band reference — resolving the defect §6 carries a `#148` pointer for), **ADR-0044** (the boot step ordering), and **ADR-0024** (startup step 4 opens with the mode gate, and the barrier-failure policy gains a third consumer). **ADR-0042 and ADR-0043 stand unchanged**, with the precondition their formulas depend on now named._
+_Accepted via the D13 grilling session on decision ticket [#148](https://github.com/MarcosACH/tickwright/issues/148), graduated from the [#142](https://github.com/MarcosACH/tickwright/issues/142) testnet validation task on the trade-economics map [#107](https://github.com/MarcosACH/tickwright/issues/107). Fixes the premise every account-grain decision in this surface rests on: **that `clearinghouseState` reports the account's equity**. It does — under exactly one family of venue account modes, which this ADR makes a deployment precondition and verifies at boot. **Amends ADR-0034** (the anchor's field sources), **ADR-0040** (§2's `free_margin` source, §3's liquidation `null` rule and its paper mirror, §6's alert-band reference — resolving the defect §6 carries a `#148` pointer for), **ADR-0044** (the boot step ordering), and **ADR-0024** (startup step 4 opens with the mode gate, and the barrier-failure policy gains a third consumer). **ADR-0042 and ADR-0043 stand decisionally unchanged**, with the precondition their formulas depend on now named — ADR-0042 §6 additionally takes an incidental in-place correction, its aside naming free margin as root `withdrawable` being superseded by §2 here._
 
 Hyperliquid lets an account choose how its spot and perps balances interact. The choice is
 invisible in every field this surface reads, and it silently changes what those fields **mean**.
@@ -322,7 +322,11 @@ a position that has none. No `Portfolio` API change: the field is `Decimal | Non
   choice and the abstraction mode is a fact about the account's shape.
 - **`withdrawable` leaves the model entirely.** CONTEXT.md's `Equity & Free margin` entry lists it
   under `_Avoid_` as "the venue's name for free margin" — that gloss is now wrong and is corrected:
-  it is a *different quantity*, not another name for ours.
+  it is a *different quantity*, not another name for ours. Two further asides that named it as our
+  free-margin source are corrected in place for the same reason: **ADR-0040 §3**'s enumeration of
+  the live cross-check fields (which also gains the `crossMarginSummary` pair that replaced it) and
+  **ADR-0042 §6**'s description of the live account's opening state. `withdrawable` now appears in
+  this repo only as a venue field we describe, never as one we read.
 - **One venue field became two.** `free_margin`'s cross-check now reads two fields off
   `crossMarginSummary` instead of one root field. No extra request: both arrive in the same
   `clearinghouseState` response the reconcile pull already makes.
