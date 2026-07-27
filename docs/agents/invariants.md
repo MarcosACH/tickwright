@@ -34,3 +34,14 @@ Consumed by `/code-review` (any regression is BLOCKING) and `/python-codebase-ma
    cannot be backfilled. The check runs before any other recovery work. Concurrent ownership is
    undetectable in-process either way and stays a deployment rule.*
    (ADR-0038, ADR-0042, ADR-0043, ADR-0031, ADR-0034)
+8. **The live account's abstraction mode is Manual/Standard.** Every account-grain number this
+   engine reconciles against assumes the venue's perps account snapshot *is* the account; under a
+   pooled mode it is only the collateral posted into perps, so equity and free margin read an order
+   of magnitude low with no field indicating it. Verified at **boot** (an allowlist of `default` /
+   `disabled`; anything else, or an unreadable mode, refuses to start) and re-verified **before any
+   Tier-1 account-cash heal** — where a mode that is changed **or unverifiable** (a failed read, an
+   unrecognised literal) refuses the heal and freezes the account-grain reconcile, because healing
+   would write a sub-ledger's value into the durable cash line. *The guard fails closed at both
+   points: an unverified mode is never read as an unchanged one. Live-only; paper has no venue and
+   no mode.*
+   (ADR-0046, ADR-0034, ADR-0040, ADR-0042, ADR-0043)

@@ -360,6 +360,21 @@ account snapshot (the sole reconciliation anchor, ADR-0034). A **deployment fact
 process trades exactly one, owned exclusively (ADR-0038). See ADR-0035.
 _Avoid_: wallet, balance (a facet); not `eth_account.Account` (the signing library's unrelated type).
 
+**Account abstraction mode**:
+The venue-side setting that decides whether an [[Account]]'s spot and perps balances are separate
+or pooled — and therefore **what the venue's perps account snapshot means**. Tickwright supports
+**Manual/Standard only** (`userAbstraction` reading `default` or `disabled`), where the perps
+clearinghouse *is* the account boundary; under `unifiedAccount` or `portfolioMargin` the same
+snapshot reports only the collateral posted into perps, so equity and free margin read an order of
+magnitude low. Not configuration — it is **read from the venue** and verified at boot, and again
+before any Tier-1 cash heal. The guard **fails closed at both points**: at boot an unsupported *or
+unreadable* mode refuses to start (`VenueAccountModeUnsupported`); in flight a mode that changed or
+could not be verified refuses the heal, freezes the account-grain reconcile and alerts
+(`ACCOUNT_MODE_UNVERIFIED`) — an unverified mode is never read as an unchanged one. A
+[[Venue adapter]] concern that never reaches `domain`. See ADR-0046, ADR-0038, ADR-0034.
+_Avoid_: margin mode (that is per-symbol cross/isolated — see [[Leverage]] & Margin mode), account
+type, unified margin.
+
 **AccountSpec**:
 The venue adapter's **static declarations** about the [[Account]] it trades — the qualified
 `account_id` (venue + network + venue-native identifier) and the `NET`/`HEDGE` netting semantics —
@@ -468,7 +483,11 @@ with the mark. The `isolated_collateral` underneath it *is* Tier-1 and **persist
 on paper, ingested on live as `marginUsed − unrealizedPnl` — never the venue's `rawUsd`, which is
 the cash leg net of cost basis and is negative for a long). `max_leverage` and `margin_maint` are
 additive `InstrumentSpec` fields. Both `margin_used` computations sit inside ADR-0040 §6's alert
-band. See ADR-0040, ADR-0041, ADR-0043, ADR-0045, and the [#142](https://github.com/MarcosACH/tickwright/issues/142)
+band. The account-level **maintenance** total is reported over every position but **cross-checked
+only over the cross subset** — the venue's `crossMaintenanceMarginUsed` excludes isolated positions,
+which have no venue maintenance counterpart at all (ADR-0046 §2.1); `margin_used`'s account total
+needs no such narrowing, since `marginSummary.totalMarginUsed` includes them.
+See ADR-0040, ADR-0041, ADR-0043, ADR-0045, ADR-0046, and the [#142](https://github.com/MarcosACH/tickwright/issues/142)
 testnet measurement that settled the tiering.
 _Avoid_: **initial margin** (conventionally the collateral reserved when an *order* is submitted —
 an admission gate this surface does not implement), margin **call**, buying power
@@ -506,7 +525,11 @@ extension point, ADR-0044 §8).
 The per-[[Position]] price at which the venue would liquidate it — **nullable**, and the **one**
 Tier-2 number not computed everywhere: **read-through on live** (the venue's `liquidationPx`,
 stale-frozen, `None` when absent) because re-deriving it needs the maintenance-margin tier fixed
-point, **computed on paper** from the canonical formula. Never enforced here. See ADR-0040, ADR-0034.
+point, **computed on paper** from the canonical formula. Never enforced here. `None` is **routine,
+not exceptional**: the venue reports no liquidation price when it would be **non-positive**, which is
+reachable for a long once collateral is large relative to notional and *impossible* for a short —
+measured at 12 of 17 cross longs. Paper mirrors that rule, reporting `None` on a computed
+`liq_price ≤ 0` (ADR-0046 §6). See ADR-0040, ADR-0034, ADR-0046.
 _Avoid_: stop-out, margin-call price; account liquidation price (there is none — it is per-position).
 
 **Equity** & **Free margin**:
@@ -520,10 +543,17 @@ credited, ADR-0036, while realized PnL and [[Funding]] are already signed deltas
 line toward venue truth without accruing from anything the engine did (ADR-0034). So the four-input
 sum is how cash **moves**, not a formula equity is defined by. A **negative** free margin is
 **reported without consequence** (no reject, no liquidation, no alert) — the honest "underwater on
-live" signal. See ADR-0045, ADR-0040, ADR-0042.
-_Avoid_: balance (`cash` is one term of equity), buying power, withdrawable (the venue's
-name for free margin), **position equity** (equity is account-grain; an isolated position's backing
-collateral is named descriptively — ADR-0041 §4.1).
+live" signal. On live the two are **cross-checked** against `marginSummary.accountValue` and
+`crossMarginSummary.accountValue − crossMarginSummary.totalMarginUsed` respectively — never against
+the venue's `withdrawable`, which is a *different quantity* (ADR-0046 §2). Both comparisons run over
+**all** positions: the free-margin pair is cross-scoped on the venue's side, but the isolated term it
+drops cancels in the difference, so — unlike the maintenance total above — our side is not narrowed
+to match (ADR-0046 §2.1).
+See ADR-0045, ADR-0040, ADR-0042, ADR-0046.
+_Avoid_: balance (`cash` is one term of equity), buying power, **withdrawable** (not a synonym —
+the venue's `withdrawable` additionally deducts the margin reserved by resting orders, which this
+surface does not model; ADR-0046 §2), **position equity** (equity is account-grain; an isolated
+position's backing collateral is named descriptively — ADR-0041 §4.1).
 
 **Genesis collateral**:
 The value the [[Account]]'s cash line opens at — the one number equity, free margin and effective

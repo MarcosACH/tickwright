@@ -37,6 +37,15 @@ those components.
    can let an order out. Placing the push here rather than after the barrier also means the barrier's
    own `clearinghouseState` read observes an already-aligned venue, so the first reconcile cycle
    cannot manufacture a spurious divergence.**)**
+   **(Extended again by ADR-0046 §3:** on **live** this step now *opens* with an unsigned
+   `userAbstraction` read gating everything above — the account's abstraction mode must be
+   Manual/Standard (an allowlist of `default` / `disabled`), and anything else raises
+   **`VenueAccountModeUnsupported`**, a third `InvariantViolation` beside `StoreAccountMismatch` and
+   `VenueLeverageMismatch`. It is ordered **before** the leverage push and nothing else touches the
+   venue until it passes: a pooled mode makes `clearinghouseState` a perps *sub-ledger* rather than
+   the account, so every margin number the push and the barrier reason from would be off by an order
+   of magnitude, and reporting a leverage mismatch computed against it would be noise on top of an
+   error. It is a no-op on **paper** — the mode is a live-only venue concept.**)**
 5. **Startup-reconciliation barrier** — the ADR-0011 mass-rebuild. A **hard gate**: nothing places
    until it succeeds. **(Extended by ADR-0043 §6:** on **live** the barrier also performs a single
    unsigned `clearinghouseState` read to **materialise the account row** when the ledger has none —
@@ -74,6 +83,13 @@ same transient-blip reality. A venue **no-change** error counts as success, a ra
 retried, anything else consumes the budget and faults. Clearing startup with a venue we failed to
 align is not an available outcome. Note this is *retry* policy only — a **mismatch** on a held
 position is not retryable and refuses immediately (§5 there).**)**
+**(Extended a third time by ADR-0046 §3:** step 4's abstraction-mode gate joins the same policy —
+bounded retry with backoff inside the same `startup_reconciliation_timeout` budget, then `FAULTED`,
+for the same reason the two above give. **"Assume standard on error" is not an available outcome**:
+an unreadable mode is the freeze-don't-guess rule applied to a precondition, and clearing startup
+without knowing what `clearinghouseState` *means* is exactly the state the gate exists to prevent.
+As with ADR-0044, this is *retry* policy only — an **unsupported** mode is not retryable and refuses
+immediately.**)**
 
 ## Shutdown reverses the sequence and leaves resting orders alone
 
