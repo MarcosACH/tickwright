@@ -14,6 +14,11 @@ single-`ExecutionManager` topology already implies). Scaling to N exchanges is *
 per venue — adding Kraken means deploying a second Tickwright process configured for Kraken, not
 teaching one engine to route across venues.
 
+> **Extended to accounts (ADR-0038).** The same reasoning was applied one level down: the
+> **account** is a deployment fact too, so one process = one venue = **one account**, and N accounts
+> is N processes. ADR-0038 also gives the account a venue-declared identity (`AccountSpec`, the
+> `instrument_specs()` pattern below) and makes **account exclusivity** an invariant.
+
 **Rejected: one engine multiplexing N venues** (an execution router dispatching by venue, the
 established execution-engine-routes-by-venue model). It would require venue-qualified identity
 everywhere, per-venue reconciliation loops inside one process, and venue-aware `cloid` derivation — a

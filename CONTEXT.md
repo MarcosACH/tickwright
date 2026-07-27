@@ -160,10 +160,14 @@ deterministic and never sleep. Canonical timestamp is UTC epoch nanoseconds. See
 _Avoid_: timer, scheduler (those are facets of the Clock, not separate concepts).
 
 **Store** (durable store) *(Protocol)*:
-The system-of-record behind the [[Cache]]: holds order saga records (keyed by
-[[Client order id|cloid]]) and [[Strategy]] snapshots. Impls: `SQLiteStore` (default,
-zero-setup) + `PostgresStore` (production parity). Paired with the [[EventBus]] backend —
-InMemory+SQLite or Kafka+Postgres. See ADR-0019.
+The system-of-record behind the [[Cache]] and the [[PortfolioProjection]]: holds order saga
+records (keyed by [[Client order id|cloid]]), [[Strategy]] snapshots, the kill-switch state, and
+the accounting ledger — [[Position]] rows keyed by `(strategy_id, symbol)`, a single [[Account]]
+row, and one funding watermark per symbol. Ledger rows are **current-state, upserted in place**
+(recovery is a read, never a replay), and a ledger mutation is written in **one transaction with
+the order checkpoint** it belongs to. Impls: `SQLiteStore` (default, zero-setup) +
+`PostgresStore` (production parity).
+Paired with the [[EventBus]] backend — InMemory+SQLite or Kafka+Postgres. See ADR-0019, ADR-0043.
 _Avoid_: database, persistence layer (fine informally), repository.
 
 **Cache**:
@@ -274,8 +278,23 @@ sizes are `Decimal`, never `float`. See ADR-0027, ADR-0029.
 _Avoid_: quote, bar, candle (v1 has only ticks — a `MarketTick` is a trade tick, not a quote; bars
 are a strategy-internal aggregation, not an engine type — ADR-0027).
 
+**MarkTick**:
+The immutable [[Event]] a [[MarketFeed]] emits carrying only a symbol's **mark price** — defined
+here, having no entry of its own: the venue's robust-median valuation price, distinct from the
+last-trade [[MarketTick]] price. It is the input the
+[[PortfolioProjection]] recomputes Tier-2 valuations from (unrealized PnL, equity, margin, effective
+leverage, liquidation price); **never a fill input** and **never seen by a [[Strategy]]** in v1
+(reached only through the [[Portfolio]] seam). Provenance differs by deployment, compute does not:
+live carries the venue mark (`activeAssetCtx`), paper and replay carry the **last-trade proxy** (the
+latest [[MarketTick]] `price`), so there is one mark per deployment and no runtime fallback.
+[[Conflation|Conflates]] last-value-wins per symbol like a [[MarketTick]]; a stale mark **freezes**
+at its last value, a wholly-absent mark makes the mark-dependent Tier-2 reads **`None`** (never a
+fabricated flat). Prices are `Decimal`. See ADR-0039, ADR-0034, ADR-0027.
+_Avoid_: oracle price (a different venue price — used for funding, not margining), mid, index price.
+
 **Conflation**:
-Shedding stale market data under backpressure by keeping only the **latest tick per symbol**. The
+Shedding stale market data under backpressure by keeping only the **latest tick per symbol** (both
+[[MarketTick]] and [[MarkTick]] — each last-value-wins). The
 live [[MarketFeed]] conflates at ingress (emitting a `feed.lagged` named event on each drop), never
 the [[EventBus]]; it is **market-data only** — [[Signal]]s and order-lifecycle [[Event]]s are never
 dropped — and happens **upstream of publish**, so both bus backends see the same stream. The
@@ -324,18 +343,280 @@ Enforced mechanically by an `import-linter` contract in CI — a cross-adapter o
 **fails the build**, so decoupling is a gate, not an aspiration. See ADR-0032.
 _Avoid_: layering, tidy imports (undersell the enforced boundary).
 
+**Position**:
+The per-`(account, strategy, symbol)` economic aggregate of one instrument's net exposure —
+signed size, average entry, realized PnL, accrued fees and funding, cash impact (the exact
+Tier-1 "ledger" it accumulates through an idempotent `apply`) — with unrealized PnL and notional
+**recomputed from a mark**, never stored. The `account` is ambient (one per process, ADR-0038) and
+`strategy` is nullable: **`None` is the reserved unattributed partition** holding flow the engine
+never placed. A pure `domain` aggregate, the economic sibling of the [[Order saga]]. See ADR-0035,
+ADR-0034, ADR-0038.
+_Avoid_: holding, lot, order (the FSM saga is the [[Order saga]]).
+
+**Account**:
+One collateral pool's balances — `total = locked + free` — plus its **reported** margin, effective
+leverage, and liquidation price recomputed from marks; the boundary reconciled against the venue's
+account snapshot (the sole reconciliation anchor, ADR-0034). A **deployment fact**: one [[Engine]]
+process trades exactly one, owned exclusively (ADR-0038). See ADR-0035.
+_Avoid_: wallet, balance (a facet); not `eth_account.Account` (the signing library's unrelated type).
+
+**Account abstraction mode**:
+The venue-side setting that decides whether an [[Account]]'s spot and perps balances are separate
+or pooled — and therefore **what the venue's perps account snapshot means**. Tickwright supports
+**Manual/Standard only** (`userAbstraction` reading `default` or `disabled`), where the perps
+clearinghouse *is* the account boundary; under `unifiedAccount` or `portfolioMargin` the same
+snapshot reports only the collateral posted into perps, so equity and free margin read an order of
+magnitude low. Not configuration — it is **read from the venue** and verified at boot, and again
+before any Tier-1 cash heal. The guard **fails closed at both points**: at boot an unsupported *or
+unreadable* mode refuses to start (`VenueAccountModeUnsupported`); in flight a mode that changed or
+could not be verified refuses the heal, freezes the account-grain reconcile and alerts
+(`ACCOUNT_MODE_UNVERIFIED`) — an unverified mode is never read as an unchanged one. A
+[[Venue adapter]] concern that never reaches `domain`. See ADR-0046, ADR-0038, ADR-0034.
+_Avoid_: margin mode (that is per-symbol cross/isolated — see [[Leverage]] & Margin mode), account
+type, unified margin.
+
+**AccountSpec**:
+The venue adapter's **static declarations** about the [[Account]] it trades — the qualified
+`account_id` (venue + network + venue-native identifier) and the `NET`/`HEDGE` netting semantics —
+exposed on the [[Venue adapter]]'s `Exchange` seam beside the instrument specs and read once at
+composition. `AccountSpec` is to [[Account]] as the instrument spec is to the instrument: static
+declaration, never live balances. Carries **no collateral currency** in v1 (USDC is implicit,
+ADR-0042 §2); on the paper venue the `account_id`'s label half comes from `PaperExchangeConfig`
+(lowercase slug, no hyphen, so `paper-<label>` stays unambiguously two segments against live's
+three). See ADR-0038, ADR-0042, ADR-0031.
+_Avoid_: account config (it is adapter-authored, not operator-authored), account state/snapshot
+(that is the venue's live truth the [[PortfolioProjection]] reconciles against).
+
+**Portfolio** *(seam)*:
+The pull-style read seam a [[Strategy]] queries for [[Position]]/[[Account]] state — reads are
+**synchronous method calls, never a PnL subscription** (ADR-0004). Three methods: `position(symbol)`
+and `open_positions()` (frozen [[PositionView]]s — this strategy's **own** attribution beside the
+whole-position economics), and `account()` (the account-wide shared pool, a frozen [[AccountView]]).
+**Scoped to the strategy at injection** (a per-`strategy_id` facade, like the `SignalEmitter`) and
+**constructor-injected by the [[Composition root]]** — no `strategy_id`/`venue`/`account_id`
+argument, no change to the [[Strategy]] Protocol. The unattributed partition (`strategy_id=None`) is
+**off the seam** (engine/telemetry-only). Delivers ADR-0017's deferred positions-tracker; **not**
+the portfolio-*risk* surface. See ADR-0041, ADR-0035.
+_Avoid_: portfolio risk, RiskEngine (enforcement, deferred), position manager.
+
+**PositionView** & **AccountView**:
+The **frozen `domain` value snapshots** the [[Portfolio]] seam returns — read-only copies computed at
+read time, **distinct from** the mutable [[Position]]/[[Account]] aggregates (which carry `apply()`
+and move under the reader). Each is **internally coherent by construction** (all fields from one
+`(position, mark)` read). `PositionView` carries **two grains** — the strategy's **own-attribution
+slice** (size, entry, realized/unrealized PnL, fees, funding) and the symbol's **whole-position
+economics** off the account-net `szi` (notional, leverage, margin mode, margin used, maintenance,
+liquidation price, effective leverage, plus `mark_ts`), which coincide in v1 except under foreign
+flow; `AccountView` carries the shared pool (equity, cash, total margin/maintenance, free margin,
+effective leverage). The raw mark **value** is not exposed — only its freshness `mark_ts` (ADR-0039:
+the mark is an accounting input, not a strategy signal). **Tier-1 fields are never `None`;
+mark-dependent Tier-2 fields (and every account Σ with a mark-dependent term) are `Decimal | None`**
+— `None` only when the mark is absent **and that field's own terms need it**, so a flat position's
+valuations read `0` rather than `None` (a stale mark freezes; the strategy judges staleness from
+`mark_ts`, ADR-0039); effective leverage is additionally `None` on a non-positive denominator.
+`position()` returns `None` only for a never-traded symbol; a **flat-with-history** record reads
+`size=0` with realized retained, its position-grain valuations degenerating (no liquidation price).
+See ADR-0041.
+_Avoid_: PositionSnapshot/AccountSnapshot (overloads `Strategy.snapshot()`), live view (they are
+frozen), DTO.
+
+**PortfolioProjection**:
+The write-through projection of [[Position]]/[[Account]] state implementing [[Portfolio]] —
+the accounting sibling of the [[Cache]]. Its **Tier-1** ledger is applied **synchronously on the
+fill-apply path** (not a fill-bus subscriber); its **Tier-2** mark is fed by **subscribing to
+[[MarkTick]]** into a private latest-value map (a non-accumulated cache, ADR-0039). Reconciled
+against venue truth on live, rebuilt from the [[Store]] on restart. See ADR-0035, ADR-0034, ADR-0039.
+_Avoid_: cache (that's the order read-model), ledger (reserved), portfolio tracker.
+
+**Realized PnL** & **Unrealized PnL**:
+The two halves of a [[Position]]'s trade profit — **realized** is booked when a fill reduces or
+closes exposure (`signed_closed_size × (exit − entry)` — signed with the closed exposure, so a short
+closed below its entry books a profit; accumulated as Tier-1); **unrealized** is the open
+exposure marked to a price (`signed_size × (mark − entry)`, Tier-2, recomputed each read from the
+[[MarkTick]] mark). Both are **gross**: [[Fee|fees]] and [[Funding]] accrue on their own ledger
+lines and are **never** folded in — a venue reporting them bundled is un-bundled at its
+[[Venue adapter]]'s `Exchange` seam, so `domain` never carries a venue's convention. Realized is
+retained on a flat record; unrealized reads `0` there, needing no mark. See ADR-0045, ADR-0036,
+ADR-0037, ADR-0040.
+_Avoid_: PnL unqualified (always say which), **Total PnL** (realized + unrealized — deliberately
+not a term: no field carries it), net PnL (implies fees deducted; they are not).
+
+**Fee**:
+The per-fill trading cost a [[Position]] accrues — a signed `Decimal` (negative = a **maker
+rebate**), settled in USDC, decided at the **fill boundary** by whether the fill **took** liquidity
+(crossed on arrival) or **made** it (rested), computed there (paper: `notional × maker/taker rate`
+on the instrument; live: read from the venue) and accrued as its **own ledger line**, never folded
+into entry price or realized PnL. **Making liquidity is not what makes the fee negative**: the base
+maker rate is a positive cost, and a rebate is a property of the account's volume tier — a measured
+maker fill (`crossed: false`) carried `fee` **`+0.019571`**, the base `0.015 %` (ADR-0036, #152).
+See ADR-0036, ADR-0013.
+_Avoid_: commission (a taken-liquidity synonym; "fee" spans rebates too), cost basis (that's entry
+price), slippage (a fill-*price* effect, not a fee).
+
+**Funding**:
+The periodic **cash adjustment** a perpetual [[Position]] accrues to its [[Account]] collateral —
+a signed `Decimal` (negative = **paid**, positive = **received**, mirroring the venue's
+`userFunding.usdc`), settled hourly at epoch-aligned boundaries as **`FundingAccrual`** events
+`(account, symbol, boundary_ts, amount)`, keyed idempotent so catch-up, reconcile, and restart
+converge. Paper **generates** it on the [[Clock]] cadence (`amount = − signed_size × price ×
+funding_rate`, `funding_rate` a per-boundary rate on the instrument); live **ingests** the venue's
+reported payment. Its **own ledger line**, never entry price or realized PnL. See ADR-0037, ADR-0034.
+_Avoid_: interest, carry, funding **fee** (it is not a [[Fee]] — no trade, no maker/taker),
+funding **rate** (the input rate, not the cash accrual).
+
+**Notional**:
+A [[Position]]'s gross market value — **unsigned**: `|size| × mark`, the magnitude **that**
+`maintenance_margin`, **cross** `margin_used` and [[Leverage|effective leverage]] are computed from
+(an **isolated** position's `margin_used` is computed too, but from its own collateral and uPnL
+rather than from notional — [[Margin]]). The
+[[Account]] total is the **sum of those magnitudes** — *gross*, never net: two opposite positions
+of equal size total twice one of them rather than zero, because each independently ties up
+collateral and each is independently liquidatable. Tier-2. See ADR-0045, ADR-0040.
+_Avoid_: **net exposure** / net notional (a signed portfolio-risk quantity, and the deferred
+RiskEngine's concern — ADR-0017; this word is a magnitude), position value, exposure unqualified.
+
+**Margin** *(reported)*:
+The **reported** collateral a [[Position]] ties up — `margin_used`, with its sibling
+`maintenance = notional × margin_maint` at a flat tier-0 rate **exact only below the asset's first
+margin-tier band** (above it the venue charges `notional × mmr(tier) − deduction(tier)`, and the
+flat rate under-reports — ADR-0040 §4) — **never enforced**: the
+[[Paper exchange]] never rejects an order for margin and never liquidates (a future map). What
+`margin_used` *is* depends on the mode, but **both are Tier-2, recomputed each read**: a **cross**
+position shares one account pool and computes `notional / leverage`; an **isolated** position
+computes `isolated_collateral + uPnL` — its backing collateral plus its unrealized PnL, which moves
+with the mark. The `isolated_collateral` underneath it *is* Tier-1 and **persisted** (static at open
+on paper, ingested on live as `marginUsed − unrealizedPnl` — never the venue's `rawUsd`, which is
+the cash leg net of cost basis and is negative for a long). `max_leverage` and `margin_maint` are
+additive `InstrumentSpec` fields. Both `margin_used` computations sit inside ADR-0040 §6's alert
+band. The account-level **maintenance** total is reported over every position but **cross-checked
+only over the cross subset** — the venue's `crossMaintenanceMarginUsed` excludes isolated positions,
+which have no venue maintenance counterpart at all (ADR-0046 §2.1); `margin_used`'s account total
+needs no such narrowing, since `marginSummary.totalMarginUsed` includes them.
+See ADR-0040, ADR-0041, ADR-0043, ADR-0045, ADR-0046, and the [#142](https://github.com/MarcosACH/tickwright/issues/142)
+testnet measurement that settled the tiering.
+_Avoid_: **initial margin** (conventionally the collateral reserved when an *order* is submitted —
+an admission gate this surface does not implement), margin **call**, buying power
+(enforcement/broker terms — this surface only reports), margin **tier** (the piecewise table is a
+deferred extension point).
+
+**Leverage** & **Margin mode**:
+A **per-symbol / per-position** input (not an [[AccountSpec]] fact): the integer leverage and
+`cross`/`isolated` mode that set a [[Position]]'s [[Margin|margin_used]], carried together as one
+`LeverageSpec` because the venue sets them in one action. **Config-authoritative on both paths** —
+declared venue-agnostically in `AppConfig.leverage` (default **1x / isolated**, the safest pair) and
+live-ingested as a cross-check. The engine **pushes** it to the venue **once, at boot** (ADR-0044):
+symbols already aligned are skipped, symbols holding no position are written blind, and a
+disagreement on a symbol that *does* hold a position **refuses to start** rather than re-margining a
+live position — after which the venue is left alone for the run, with drift **alerted, never
+re-pushed**, on a direct exact-match check (`LEVERAGE_DIVERGENCE`; the indirect `margin_used` route is
+blind for **any** position held across the drift, because a leverage change never re-margins an open
+one — measured isolated, inferred for cross, #142 and ADR-0044 §10). A
+boot-time push is safe under every venue branch: a change on a held position cannot silently
+re-margin it, a **mode switch** on one is always rejected, and a **decrease** only succeeds when the
+locked collateral allows. **Effective leverage** is a convention-only readout with no venue
+counterpart — the *realized* ratio (vs the set nominal `leverage`),
+`notional / (isolated_collateral + uPnL)` for an isolated position (so adding isolated margin lowers
+it — measured: a +20 USDC top-up drove it 5.0119 → 2.8260) and `notional / equity` for
+cross/account, **`None` when that denominator is `≤ 0`**; the isolated denominator was a modelling
+choice R3 flagged for confirmation and [#142](https://github.com/MarcosACH/tickwright/issues/142)
+**confirmed** (ADR-0041 §4.1). See ADR-0040, ADR-0041, ADR-0038, ADR-0044.
+_Avoid_: account leverage (it is per-symbol); **margin** as the name for this input (that word is
+this glossary's [[Margin]] — the collateral a position ties up, *computed* in both modes, off the
+nominal leverage on a cross position and off the ingested collateral **plus uPnL** on an isolated
+one; this is its *setting*); topping up isolated collateral (`updateIsolatedMargin` — a deferred
+extension point, ADR-0044 §8).
+
+**Liquidation price**:
+The per-[[Position]] price at which the venue would liquidate it — **nullable**, and the **one**
+Tier-2 number not computed everywhere: **read-through on live** (the venue's `liquidationPx`,
+stale-frozen, `None` when absent) because re-deriving it needs the maintenance-margin tier fixed
+point, **computed on paper** from the canonical formula. Never enforced here. `None` is **routine,
+not exceptional**: the venue reports no liquidation price when it would be **non-positive**, which is
+reachable for a long once collateral is large relative to notional and *impossible* for a short —
+measured at 12 of 17 cross longs. Paper mirrors that rule, reporting `None` on a computed
+`liq_price ≤ 0` (ADR-0046 §6). See ADR-0040, ADR-0034, ADR-0046.
+_Avoid_: stop-out, margin-call price; account liquidation price (there is none — it is per-position).
+
+**Equity** & **Free margin**:
+The [[Account]]'s reported collateral numbers: **`equity = cash + Σ unrealized_pnl`** — the Tier-1
+cash line plus the Tier-2 valuation, true on both paths — and
+`free_margin = equity − total_margin_used` (isolated buckets locked, excluded). The **cash line**
+accrues from four signed inputs — [[Genesis collateral|genesis]], `+` realized PnL, `−` [[Fee|fees]]
+(the fee term **subtracts**, a [[Fee]] being a cost magnitude: `> 0` debited, `< 0` a maker rebate
+credited, ADR-0036, while realized PnL and [[Funding]] are already signed deltas and add),
+`+` funding — with one standing exception on live: the reconciler's cash adjustment corrects that
+line toward venue truth without accruing from anything the engine did (ADR-0034). So the four-input
+sum is how cash **moves**, not a formula equity is defined by. A **negative** free margin is
+**reported without consequence** (no reject, no liquidation, no alert) — the honest "underwater on
+live" signal. On live the two are **cross-checked** against `marginSummary.accountValue` and
+`crossMarginSummary.accountValue − crossMarginSummary.totalMarginUsed` respectively — never against
+the venue's `withdrawable`, which is a *different quantity* (ADR-0046 §2). Both comparisons run over
+**all** positions: the free-margin pair is cross-scoped on the venue's side, but the isolated term it
+drops cancels in the difference, so — unlike the maintenance total above — our side is not narrowed
+to match (ADR-0046 §2.1).
+See ADR-0045, ADR-0040, ADR-0042, ADR-0046.
+_Avoid_: balance (`cash` is one term of equity), buying power, **withdrawable** (not a synonym —
+the venue's `withdrawable` deducts from `accountValue` **whichever is larger** of the account's
+total initial margin — positions *and* exposure-increasing resting orders — or a 10 %-of-notional
+withdrawal floor: `max(0, accountValue − max(initial_margin, 0.1 × totalNtlPos))`, a `max` and not a
+sum, with the floor the term that usually binds. This surface models neither the order-margin
+component nor the floor; ADR-0046 §2),
+**position equity** (equity is account-grain; an isolated position's backing collateral is named
+descriptively — ADR-0041 §4.1).
+
+**Genesis collateral**:
+The value the [[Account]]'s cash line opens at — the one number equity, free margin and effective
+leverage are measured against. On **paper** it is operator-declared: a strictly positive
+`PaperExchangeConfig` field with no default, **demanded by `AppConfig` whenever the paper exchange is
+selected** (never required at field level, which would drag a paper number into a live run), because a
+non-zero default would report against capital nobody chose. On **live** it is **ingested** inside the
+**startup reconciliation barrier** — not at a later cadence reconcile, which would start strategies
+with no account row at all — as `accountValue − Σ unrealized_pnl` (`accountValue` is equity and
+already contains uPnL, so the subtraction is what stops it being double-counted). Paper's is written
+a step earlier still, seeded by the startup check that would otherwise refuse the store (ADR-0043
+§6). Persisted as its own column on both paths — beside the instant it was written — and
+distinct from the cash line that accumulates away from it; on paper a config value disagreeing with
+the stored one **fail-fasts** alongside the [[AccountSpec]] `account_id` check — a different genesis
+is a different account history. Together with realized PnL, [[Fee|fees]] and [[Funding]] it closes
+the cash line's write-set at four **accruing** inputs — three added and fees subtracted — while the
+reconciler's synthetic cash adjustment (ADR-0034) corrects that line on live but accrues nothing to
+it: deposits, withdrawals and transfers
+are not modelled, and a real one on live surfaces as a benign Tier-1 divergence that heals and
+alerts. See ADR-0042, ADR-0043, ADR-0040.
+_Avoid_: starting balance, initial deposit (nothing is deposited — the account is declared, not
+funded), seed capital.
+
 ## Relationships
 
 - The **Engine** hosts one **EventBus**; swapping the bus backend (InMemory ↔ Kafka) changes
   durability and inspectability, never the number of processes.
-- The **Engine** hosts exactly one live **Exchange** = **one venue per process**; scaling to N
-  exchanges is N processes ([[Venue adapter]]), not one engine routing across venues.
+- The **Engine** hosts exactly one live **Exchange** = **one venue per process** and **one Account
+  per process**; scaling to N exchanges or N accounts is N processes ([[Venue adapter]]), not one
+  engine routing across venues or accounts. An **Account** is owned by exactly one process
+  (ADR-0038) — two engines on one account would each heal their ledger toward the other's flow.
 - Concrete impls ([[Venue adapter]]s, bus/store backends, strategies) depend only on the `domain`
   Protocols; the [[Composition root]] is the one place that knows every concrete
   ([[Dependency direction]]).
+- A **Position** belongs to one **Account** and one **Strategy** — or to the unattributed partition
+  when the engine did not place the flow; on a `NET` venue
+  `Σ(Position size per symbol) = Account net size = venue szi` holds by construction
+  (per-strategy attribution bridged to the reconciliation anchor, ADR-0034/0038).
+- Each **Venue adapter** declares its **AccountSpec**; the **Engine** wires it in at startup, the
+  same way it wires the instrument specs into the **PreTradeGuard** (ADR-0031, ADR-0038).
+- The **PortfolioProjection** projects **Position**/**Account** state and implements the **Portfolio**
+  seam, fed by the **ExecutionManager** on the fill-apply path — the accounting sibling of the
+  **Cache** (order read-model).
 
 ## Flagged ambiguities
 
 - "worker" in the author's prior system meant a separate OS process per pipeline stage. Here
   the whole pipeline is one process; avoid "worker" for Tickwright components — use the
   component name (feed/strategy/exchange) or **Engine** for the host.
+- "Portfolio" was used for both the accounting read-facade and the deferred portfolio-*risk*/exposure
+  surface — resolved: [[Portfolio]] is the accounting read seam (this map); portfolio-risk enforcement
+  stays the deferred RiskEngine concern (ADR-0017).
+- "collateral" carries three distinct senses and deliberately has **no term of its own**: the
+  account's collateral *pool* (→ [[Account]], [[Equity]]), an isolated position's *locked* collateral
+  (→ [[Margin]], [[Leverage]]), and the account's *opening cash line* (→ [[Genesis collateral]]).
+  Each sense is owned by the term it belongs to — a fourth, generic definition would overlap all
+  three and have to be kept in sync with each (ADR-0045). Always say which.

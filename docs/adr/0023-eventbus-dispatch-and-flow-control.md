@@ -20,7 +20,9 @@ keeps the newest tick per symbol, drops stale — and every drop emits a named e
 (`feed.lagged` / `tick.conflated`, ADR-0020) so a slow-consumer condition is observable, never
 silent. This is sound because `MarketTick` is **last-value-wins**: strategies act on `on_tick`
 and the paper exchange re-checks resting limits each tick (ADR-0012), so only the latest price
-per symbol ever matters.
+per symbol ever matters. The **`MarkTick`** valuation event (ADR-0039) joins it under the same rule
+— also last-value-wins per symbol, so it conflates identically and only its latest value drives the
+recomputed Tier-2 read.
 
 Two load-bearing scoping rules:
 

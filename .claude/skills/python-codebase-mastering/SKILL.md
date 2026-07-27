@@ -126,7 +126,7 @@ Use the narrowest meaningful checks while iterating:
 - `uv run pytest <module>/tests -v`
 - Broaden to the full suite only when the refactor crosses packages.
 
-For this repo, respect the canonical invariants in `docs/agents/invariants.md` (saga idempotency, crash-safe recovery, reconciliation freeze, explicit rejections, per-symbol ordering, deterministic paper exchange). Each entry cites its ADR; read the ADR before touching that area. A refactor that regresses one of them is not a mastering pass — it is a behavior change and goes back to design.
+For this repo, open and respect the canonical invariants in `docs/agents/invariants.md` — the single source, never copied here, since a copy that falls behind it silently narrows the behavior lock. Each entry cites its ADR; read the ADR before touching that area. A refactor that regresses one of them is not a mastering pass — it is a behavior change and goes back to design.
 
 Done means:
 
