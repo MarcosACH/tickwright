@@ -62,12 +62,22 @@ the venue's public leaderboard and classified with one unsigned `userAbstraction
 | C | 70 | 61 | 3 | 3 | 3 | 91.4 % |
 | **combined** | **304** | 248 | 20 | 26 | 10 | **88.2 %** |
 
-So **roughly 88 % of active traders are on a mode Tickwright refuses.** Sample A stopped at 114 of
-170 candidates because the run that produced it exited early on an unrelated condition — a stopping
-rule weakly correlated with how common `default` is, and therefore *not* a clean random sample.
-Samples B and C were drawn afterwards specifically to check it, classify every address they draw,
-and bracket A's figure from both sides. The ratio is robust; the refusal is designed as a
-remediation, not a complaint (§3).
+So **roughly 88 % of leaderboard-ranked active traders are on a mode Tickwright refuses.** Sample A
+stopped at 114 of its 170 candidates because the run that produced it exited once it had found its
+fourth `default`-mode account holding open positions — a stopping rule that **over**-samples
+`default` and therefore *under*-states the refused share, which makes A's 87.7 % a floor rather than
+a figure biased high. Samples B and C were drawn afterwards specifically to check it, classify every
+address they draw, and bracket A from both sides.
+
+**What the ratio is robust to, and what it is not.** Three draws settle the **draw**: sampling noise
+and A's stopping rule are both retired. They do not settle the **frame** — all three are drawn from
+the public leaderboard, a top-N ranking by PnL and volume, and unified account and portfolio margin
+are capital-efficiency features that larger accounts adopt preferentially. So 88 % is a statement
+about leaderboard-ranked traders and is plausibly an over-estimate for the whole active population.
+That cuts the right way for this decision rather than against it — the friction is real at the top
+of the distribution, which is where high-volume automated users sit — but the figure is not a
+population proportion and is not used as one. The refusal is designed as a remediation, not a
+complaint (§3).
 
 ### Alternatives rejected
 
@@ -192,6 +202,18 @@ has no venue cross-check at all** — the venue publishes neither a per-position
 (R3 #110) nor a total — so it is computed-only, and ADR-0040 §4's tier-crossing alert reaches only
 cross positions. Stated rather than hidden.
 
+**`free_margin` is the deliberate exception, and it must not be narrowed the same way.** Its venue
+side is *also* a cross-scoped pair (§2: `crossMarginSummary.accountValue −
+crossMarginSummary.totalMarginUsed`), so the rule this section establishes — venue field is
+cross-scoped ⇒ narrow the comparison — reads as if it applied. It does not. Our computed
+`free_margin` is already the cross pool: §2 derives the cancellation exactly, the isolated collateral
+carried inside `cash` against the isolated `margin_used = collateral + unrealized_pnl`. Narrowing
+*our* side as well would subtract isolated collateral a second time. The two sections differ because
+the venue's own arithmetic differs: `crossAV` and `crossTMU` each drop the same isolated term and it
+cancels in their difference, whereas `crossMaintenanceMarginUsed` drops an isolated term with nothing
+to cancel against. So `equity` and `free_margin` compare Σ-over-all to Σ-over-all, and
+`maintenance_margin` alone compares on the cross subset.
+
 **A confirmation falls out of the same measurement.** `0x6de6…ef7b` reproduces
 `crossMaintenanceMarginUsed` across **50 distinct symbols** to ~3e-9 relative, which confirms
 ADR-0040 §4's flat `margin_maint = 1/(2·max_leverage)` far more broadly than
@@ -244,7 +266,7 @@ perps clearinghouse fully populated and spot empty.
   `FAULTED`, reusing ADR-0024's barrier budget exactly as ADR-0044 §6 does. Never "assume standard on
   error": that is ADR-0011 invariant 1's freeze-never-fabricate rule applied to a precondition. An
   **unrecognised** literal is not a failed read — it takes the allowlist's refusal above.
-- **The error is a remediation.** Given that ~88 % of the sampled accounts that answered are on a
+- **The error is a remediation.** Given that ~88 % of the sampled leaderboard accounts are on a
   refused mode (§1), it names the observed mode, the two accepted literals, and the fix:
   `userSetAbstraction("disabled")`
   with the master wallet, then a spot→perps `usdClassTransfer`. Both are **user-signed** actions an
@@ -325,8 +347,20 @@ this surface reproduces the venue **exactly** when fed the venue's own mark, so 
 | `equity` | `≤ Σ notional · ε` | **total notional** |
 | `margin_used` (cross) | `notional · ε / leverage` | itself |
 | `margin_used` (isolated) | `notional · ε` | position `notional` |
-| `maintenance_margin` | `notional · margin_maint · ε` | itself |
+| `maintenance_margin` (account, **cross subset**) | `≤ Σ_cross notional · margin_maint · ε` | itself — **the cross-subset Σ**, never the reported Σ-over-all (§2.1) |
 | `free_margin` | `≤ Σ notional · ε · (1 + 1/leverage)` | **total notional** |
+
+Two readings the table has to rule out. **"Itself" means our computed quantity**, not the venue's:
+the defect §6 of ADR-0040 records is scaling by `|venue|`, and where the reference is "itself" the
+quantity is proportional to the notional its error flows through (`notional`; cross `margin_used =
+notional/L`; `maintenance_margin = notional · margin_maint`), so self-scaling *is* notional-scaling.
+And **`maintenance_margin` is the one row where the reported and compared quantities differ** — §2.1
+narrows the comparison to the cross subset while the reported number stays Σ-over-all, so the
+reference is the cross subset's Σ. Using the reported Σ-over-all would widen the band by
+`Σ_all / Σ_cross`, which is unbounded: on an account holding `Σ_cross = 100` against `Σ_iso =
+10 000`, `rtol = 0.001` gives a band of `10.10` where the cross-subset reference gives `0.10` — a
+10 % divergence on the cross subset would never fire, suppressing exactly the tier-crossing signal
+ADR-0040 §4 says the alert exists to raise.
 
 **#142's recommendation was half right.** It proposed `notional` for `unrealized_pnl` — correct —
 and **`equity` for `free_margin`** — incorrect under leverage. At leverage `L`, equity is roughly
@@ -381,7 +415,7 @@ a position that has none. No `Portfolio` API change: the field is `Decimal | Non
 ## Consequences
 
 - **A documented, non-negotiable deployment precondition.** Running Tickwright live against
-  Hyperliquid requires the account in Manual/Standard. ~88 % of the sampled accounts that answered
+  Hyperliquid requires the account in Manual/Standard. ~88 % of the sampled leaderboard accounts
   are not (§1), so most first-run attempts by a new operator will hit the refusal — by design, since
   the alternative is reporting an equity that is off by an order of magnitude.
 - **The error and alert catalogs each gain one name.** `VenueAccountModeUnsupported` joins
@@ -409,9 +443,12 @@ a position that has none. No `Portfolio` API change: the field is `Decimal | Non
   are the same mistake — reading a field whose name suggests our quantity and whose scope is
   narrower (`withdrawable` nets off order margin, §2; `crossMaintenanceMarginUsed` excludes isolated
   positions, §2.1) — and one response carries fields on **both** scopes (`marginSummary.totalMarginUsed`
-  includes isolated, `crossMaintenanceMarginUsed` does not). Every account-grain cross-check in
-  ADR-0040 §6 now states which scope it compares on. **Isolated maintenance margin has no venue
-  counterpart at all** and is therefore computed-only.
+  includes isolated, `crossMaintenanceMarginUsed` does not). Every account-grain member of ADR-0040
+  §6's band now carries its comparison scope: `equity` and `margin_used` compare Σ-over-all against
+  all-scope venue fields; `free_margin` compares Σ-over-all against a **cross-scoped pair**, which is
+  exact only by the cancellation §2 derives and is therefore **not** narrowed; `maintenance_margin`
+  alone narrows to the cross subset. **Isolated maintenance margin has no venue counterpart at all**
+  and is therefore computed-only.
 - **#142's account-grain measurements are superseded, not merely re-labelled.** Every number it
   took at account grain was measured under a mode this ADR rules out. Its *position*-grain results
   stand — the liquidation formula, the cross formulas, `closedPnl` being gross, the mark-skew

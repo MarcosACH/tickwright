@@ -545,7 +545,10 @@ sum is how cash **moves**, not a formula equity is defined by. A **negative** fr
 **reported without consequence** (no reject, no liquidation, no alert) — the honest "underwater on
 live" signal. On live the two are **cross-checked** against `marginSummary.accountValue` and
 `crossMarginSummary.accountValue − crossMarginSummary.totalMarginUsed` respectively — never against
-the venue's `withdrawable`, which is a *different quantity* (ADR-0046 §2).
+the venue's `withdrawable`, which is a *different quantity* (ADR-0046 §2). Both comparisons run over
+**all** positions: the free-margin pair is cross-scoped on the venue's side, but the isolated term it
+drops cancels in the difference, so — unlike the maintenance total above — our side is not narrowed
+to match (ADR-0046 §2.1).
 See ADR-0045, ADR-0040, ADR-0042, ADR-0046.
 _Avoid_: balance (`cash` is one term of equity), buying power, **withdrawable** (not a synonym —
 the venue's `withdrawable` additionally deducts the margin reserved by resting orders, which this
