@@ -209,9 +209,10 @@ the identification is of the **class**, not of that one snapshot.
 edge of its maintenance margin. It is not free collateral under any reading, so `withdrawable`
 answers a third question this surface never asks, on top of the resting-order margin above. What
 this correction removes is the suggestion that the field holds something mysterious; what remains
-unidentified is much smaller — 2 of the 10 sampled accounts (17 and 61 positions) carry a further
-64 035 / 68 281, ruled out by direct computation as orders, margin tiers, isolated positions, or
-spot.**)**
+unidentified is much **narrower** — no longer a term every account may carry, but 2 of the 10
+sampled accounts (17 and 61 positions), whose further 64 035 / 68 281 are *larger* magnitudes than
+the 271.07 and confined to those two heavily-positioned books. Both are ruled out by direct
+computation as orders, margin tiers, isolated positions, or spot.**)**
 
 ### 2.1 The same scope error, one field over: account `maintenance_margin`
 

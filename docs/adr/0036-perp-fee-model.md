@@ -25,7 +25,7 @@ A dedicated `FeeModel` seam (paralleling the paper `FillModel`, ADR-0012) was **
 
 `0.002 × 65239 × 0.015 % = 0.0195717` — the venue's **base maker rate, and a cost, not a rebate**. So the shorthand *"negative = maker rebate"* used throughout this ADR is right about the **sign convention** and misleading about **when it fires**: `crossed: false` does **not** imply a negative fee. A negative `fee` requires a maker-**rebate volume tier**, which is a property of the account's 14-day volume, not of the fill's liquidity side. On a fresh account every maker fill is a positive `+0.015 %` cost.
 
-Nothing in the design changes — the field is signed, the live path reads whatever the venue reports, and `maker_fee` stays a signed rate that *may* be negative. Two consequences worth stating: paper's `maker_fee` should default to the **positive** base rate rather than a rebate unless the operator is modelling a rebate tier; and the negative branch remains **unobserved**, so anyone hunting it on a low-volume account will not find it.**)**
+Nothing in the design changes — the field is signed, the live path reads whatever the venue reports, and `maker_fee` stays a signed rate that *may* be negative. Two consequences worth stating: an operator modelling Hyperliquid should **configure** paper's `maker_fee` to the **positive** base `0.015 %` rather than to a rebate, unless they are deliberately modelling a rebate volume tier — the *field* default stays `0` per the paragraph above, which is a frictionless-spec guarantee, not a claim about the venue; and the negative branch remains **unobserved**, so anyone hunting it on a low-volume account will not find it.**)**
 
 ## Maker vs taker is decided at the fill boundary and consumed there
 

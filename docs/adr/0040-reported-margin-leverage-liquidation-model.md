@@ -95,7 +95,7 @@ The accepted cost: liquidation price is the **only recomputed *valuation*** with
 
 The deferral itself is **not** reversed: read-through liquidation still removes the fixed point on live (bullet one, untouched), and flat tier-0 stays exact below the first band. But its stated safety margin was fictitious, and the consequence below — that a tier-crossing position trips the §6 alert — is now a *reachable* operating condition rather than a theoretical one. `InstrumentSpec.margin_table_id` remains the named extension point, with `meta.marginTables` confirmed as its source.**)**
 
-**(The band figures immediately above are *testnet's*, and the mainnet estimate they "corrected" was right — [#152](https://github.com/MarcosACH/tickwright/issues/152).** The table read as "BTC is `marginTableId: 54`" is the **testnet** universe's; mainnet BTC is a *different table id* with bands three orders of magnitude higher. Read from `meta` on both networks the same day:
+**(The band figures immediately above are *testnet's*, and the mainnet estimate they "corrected" was right — [#152](https://github.com/MarcosACH/tickwright/issues/152).** The table read as "BTC is `marginTableId: 54`" is the **testnet** universe's; mainnet BTC is a *different table id* whose first band opens at `$150,000,000` against testnet's `$10,000` — **four** orders of magnitude higher, the same factor the bullet above misattributes to the original estimate. Read from `meta` on both networks the same day:
 
 | network | BTC `marginTableId` | bands |
 |---|---|---|
