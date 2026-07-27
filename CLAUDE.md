@@ -46,6 +46,7 @@ See `docs/workflow/labels.md` for the label schema and `docs/agents/issue-tracke
 - Domain glossary: `CONTEXT.md`
 - Architecture decisions: `docs/adr/`
 - Module maps for in-flight features: `docs/module-maps/`
+- Primary-source research notes: `docs/research/` — dated captures backing the ADRs, **not maintained**; where a note and an ADR disagree, the ADR wins
 - Workflow & label schema: `docs/workflow/labels.md`
 - Versioning, tags & releases: `docs/workflow/versioning.md`
 - Issue-tracker conventions: `docs/agents/issue-tracker.md`
@@ -54,7 +55,7 @@ See `docs/workflow/labels.md` for the label schema and `docs/agents/issue-tracke
 ## Context Discipline
 
 - Never read `.venv/`, `__pycache__/`, `.mypy_cache/`, `.pytest_cache/`, `.ruff_cache/`, `.import_linter_cache/`, `*.egg-info/`, `*.pyc`, `logs/`, `*.log`. The `.claude/settings.json` deny list enforces this.
-- For `CONTEXT.md`, ADRs, and `docs/module-maps/*.md`, use `.agents/tools/doc-slice`:
+- For `CONTEXT.md`, ADRs, `docs/module-maps/*.md`, and `docs/research/*.md`, use `.agents/tools/doc-slice`:
   - `.agents/tools/doc-slice <file>` — list TOC (`line  level  heading`)
   - `.agents/tools/doc-slice <file> <heading-substr>` — print just that section
 - For large source/test files, use `Read` with `offset`/`limit` targeting the symbol you need.
