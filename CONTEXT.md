@@ -186,13 +186,33 @@ _Avoid_: event replay, event sourcing (those are a deferred audit capability, no
 The healer that periodically compares local order state against the venue's truth and applies
 the difference, in two phases (startup mass-rebuild, continuous loops) and two cadences (fast
 in-flight check, slower open-order/ghost reconcile). The correctness net under at-least-once
-delivery and crash recovery. See ADR-0011.
+delivery and crash recovery. Anchored on the **cloid**; its economic sibling is
+[[Ledger reconciliation]], a separate cycle on a separate anchor. See ADR-0011.
 _Avoid_: sync, refresh, polling (those undersell the heal-against-truth role).
+
+**Ledger reconciliation**:
+[[Reconciliation]]'s economic sibling — the [[PortfolioProjection]]'s own healing loop, anchored on
+the venue's **account/position snapshot** rather than on a cloid, and **live-only** (paper has no
+venue to heal from). Splits by tier: **Tier-1** divergence (the accumulated ledger) heals through a
+[[Synthetic event]] on the same idempotent apply path *and* alerts; **Tier-2** divergence (recomputed
+valuations) only ever alerts, inside a band scaled by the notional the quantity's mark-sensitivity
+flows through (`VALUATION_DIVERGENCE`). Per-strategy attribution is **never** reconciled — the venue
+has no per-strategy truth — so the residual lands in the unattributed partition and Σ holds by
+construction. The [[Connectivity guard]] applies unchanged, plus one of its own: the
+[[Account abstraction mode]] is re-verified before any cash heal, and a changed *or unverifiable*
+mode **freezes** the account-grain cycle (`ACCOUNT_MODE_UNVERIFIED`) rather than faulting. See
+ADR-0034, ADR-0040, ADR-0046, ADR-0044.
+_Avoid_: portfolio sync, PnL refresh; **[[Reconciliation]]** unqualified (that one is the order
+saga's, on a different anchor with a different freeze grain).
 
 **Connectivity guard** (`None`-not-`[]`):
 The invariant that a failed venue read returns `None`, never `[]`; on `None`, [[Reconciliation]]
 **freezes** the cycle and removes nothing. An outage must never be misread as "all orders
-vanished." See ADR-0011.
+vanished." The sentinel reads as *no truth to compare against*, which an outage is one route to:
+on the account pull [[Ledger reconciliation]] anchors on, the paper exchange answers `None`
+**permanently and without failing**, holding no account state to report — same freeze, different
+route, and the only value that stays fail-closed if a paper ledger cadence is ever wired by
+mistake. See ADR-0011.
 _Avoid_: empty result, no orders (the whole point is that these differ from a failure).
 
 **Ghost** / ghost-reconciled:
