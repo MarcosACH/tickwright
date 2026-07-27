@@ -446,7 +446,10 @@ The per-fill trading cost a [[Position]] accrues — a signed `Decimal` (negativ
 rebate**), settled in USDC, decided at the **fill boundary** by whether the fill **took** liquidity
 (crossed on arrival) or **made** it (rested), computed there (paper: `notional × maker/taker rate`
 on the instrument; live: read from the venue) and accrued as its **own ledger line**, never folded
-into entry price or realized PnL. See ADR-0036, ADR-0013.
+into entry price or realized PnL. **Making liquidity is not what makes the fee negative**: the base
+maker rate is a positive cost, and a rebate is a property of the account's volume tier — a measured
+maker fill (`crossed: false`) carried `fee` **`+0.019571`**, the base `0.015 %` (ADR-0036, #152).
+See ADR-0036, ADR-0013.
 _Avoid_: commission (a taken-liquidity synonym; "fee" spans rebates too), cost basis (that's entry
 price), slippage (a fill-*price* effect, not a fee).
 
@@ -474,7 +477,9 @@ RiskEngine's concern — ADR-0017; this word is a magnitude), position value, ex
 
 **Margin** *(reported)*:
 The **reported** collateral a [[Position]] ties up — `margin_used`, with its sibling
-`maintenance = notional × margin_maint` at a flat tier-0 rate — **never enforced**: the
+`maintenance = notional × margin_maint` at a flat tier-0 rate **exact only below the asset's first
+margin-tier band** (above it the venue charges `notional × mmr(tier) − deduction(tier)`, and the
+flat rate under-reports — ADR-0040 §4) — **never enforced**: the
 [[Paper exchange]] never rejects an order for margin and never liquidates (a future map). What
 `margin_used` *is* depends on the mode, but **both are Tier-2, recomputed each read**: a **cross**
 position shares one account pool and computes `notional / leverage`; an **isolated** position
@@ -551,9 +556,13 @@ drops cancels in the difference, so — unlike the maintenance total above — o
 to match (ADR-0046 §2.1).
 See ADR-0045, ADR-0040, ADR-0042, ADR-0046.
 _Avoid_: balance (`cash` is one term of equity), buying power, **withdrawable** (not a synonym —
-the venue's `withdrawable` additionally deducts the margin reserved by resting orders, which this
-surface does not model; ADR-0046 §2), **position equity** (equity is account-grain; an isolated
-position's backing collateral is named descriptively — ADR-0041 §4.1).
+the venue's `withdrawable` deducts from `accountValue` **whichever is larger** of the account's
+total initial margin — positions *and* exposure-increasing resting orders — or a 10 %-of-notional
+withdrawal floor: `max(0, accountValue − max(initial_margin, 0.1 × totalNtlPos))`, a `max` and not a
+sum, with the floor the term that usually binds. This surface models neither the order-margin
+component nor the floor; ADR-0046 §2),
+**position equity** (equity is account-grain; an isolated position's backing collateral is named
+descriptively — ADR-0041 §4.1).
 
 **Genesis collateral**:
 The value the [[Account]]'s cash line opens at — the one number equity, free margin and effective

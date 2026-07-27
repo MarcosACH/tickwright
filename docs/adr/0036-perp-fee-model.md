@@ -2,7 +2,7 @@
 
 _Accepted via the D3 grilling session on decision ticket [#116](https://github.com/MarcosACH/tickwright/issues/116), part of the trade-economics map [#107](https://github.com/MarcosACH/tickwright/issues/107). Grounded in R2 ([#109](https://github.com/MarcosACH/tickwright/issues/109)); builds on ADR-0034 (D1) and ADR-0035 (D2). Funding ([#117](https://github.com/MarcosACH/tickwright/issues/117)) is a sibling decision, not this one._
 
-A perpetual fill carries a **single signed `Decimal` `fee`** (negative = a maker rebate, ADR-0029), settled in **USDC**. Each `Exchange` adapter produces it at the **fill boundary** — the paper exchange **computes** it from flat maker/taker rates on `InstrumentSpec`; the live exchange **reads** the venue-reported fee — and the `PortfolioProjection` merely **accrues** it (ADR-0035). This lifts ADR-0013's fee deferral: the portfolio surface that ADR named as the precondition now exists, so the additive fee seam it anticipated is introduced here.
+A perpetual fill carries a **single signed `Decimal` `fee`** (negative = a maker rebate, ADR-0029 — a shorthand about the *sign convention*, qualified below: making liquidity is not what makes a fee negative), settled in **USDC**. Each `Exchange` adapter produces it at the **fill boundary** — the paper exchange **computes** it from flat maker/taker rates on `InstrumentSpec`; the live exchange **reads** the venue-reported fee — and the `PortfolioProjection` merely **accrues** it (ADR-0035). This lifts ADR-0013's fee deferral: the portfolio surface that ADR named as the precondition now exists, so the additive fee seam it anticipated is introduced here.
 
 ## The fee seam is the `Exchange` adapter, not a swappable fee-model object
 
@@ -16,6 +16,16 @@ A dedicated `FeeModel` seam (paralleling the paper `FillModel`, ADR-0012) was **
 ## Instrument metadata: additive `maker_fee` / `taker_fee` rates
 
 `InstrumentSpec` gains **`maker_fee`** and **`taker_fee`**: signed `Decimal` rates on notional (positive = cost, negative = rebate), **defaulting to `0`** so a frictionless spec stays valid and existing paper configs are unaffected. Additive metadata per ADR-0017/0030, sourced from paper config or the venue meta. They are the **paper** computation input; the live path ignores them for accrual (it reads the venue's actual fee), so the two never disagree on a number the venue is the authority for.
+
+**(A maker fill was finally observed, and it is *positive* — [#152](https://github.com/MarcosACH/tickwright/issues/152).** Every fill [#142](https://github.com/MarcosACH/tickwright/issues/142) captured was taker, leaving the maker side of this ADR unexercised. A post-only bid filled on testnet:
+
+```json
+{"coin":"BTC","px":"65239.0","sz":"0.002","crossed":false,"fee":"0.019571","feeToken":"USDC"}
+```
+
+`0.002 × 65239 × 0.015 % = 0.0195717`, against a reported `0.019571` — the venue's **base maker rate, and a cost, not a rebate**. (The last digit is not a discrepancy: the venue reports `fee` to **6 dp and truncates**, since rounding would give `0.019572`. Back out the rate from the reported figure and it reads `0.0149995 %`, the truncation artifact rather than a different rate. Same reporting precision `withdrawable` carries in [ADR-0046](./0046-account-abstraction-mode-and-account-grain-sources.md) §2.) So the shorthand *"negative = maker rebate"* used throughout this ADR is right about the **sign convention** and misleading about **when it fires**: `crossed: false` does **not** imply a negative fee. A negative `fee` requires a maker-**rebate volume tier**, which is a property of the account's 14-day volume, not of the fill's liquidity side. On a fresh account every maker fill is a positive `+0.015 %` cost.
+
+Nothing in the design changes — the field is signed, the live path reads whatever the venue reports, and `maker_fee` stays a signed rate that *may* be negative. Two consequences worth stating: an operator modelling Hyperliquid should **configure** paper's `maker_fee` to the **positive** base `0.015 %` rather than to a rebate, unless they are deliberately modelling a rebate volume tier — the *field* default stays `0` per the paragraph above, which is a frictionless-spec guarantee, not a claim about the venue; and the negative branch remains **unobserved**, so anyone hunting it on a low-volume account will not find it.**)**
 
 ## Maker vs taker is decided at the fill boundary and consumed there
 

@@ -95,9 +95,39 @@ The accepted cost: liquidation price is the **only recomputed *valuation*** with
 
 The deferral itself is **not** reversed: read-through liquidation still removes the fixed point on live (bullet one, untouched), and flat tier-0 stays exact below the first band. But its stated safety margin was fictitious, and the consequence below — that a tier-crossing position trips the §6 alert — is now a *reachable* operating condition rather than a theoretical one. `InstrumentSpec.margin_table_id` remains the named extension point, with `meta.marginTables` confirmed as its source.**)**
 
+**(The band figures immediately above are *testnet's*, and the mainnet estimate they "corrected" was right — [#152](https://github.com/MarcosACH/tickwright/issues/152).** The table read as "BTC is `marginTableId: 54`" is the **testnet** universe's; mainnet BTC is a *different table id* whose first band opens at `$150,000,000` against testnet's `$10,000` — **four** orders of magnitude higher, the same factor the bullet above misattributes to the original estimate. Read from `meta` on both networks the same day:
+
+| network | BTC `marginTableId` | bands |
+|---|---|---|
+| mainnet | **56** ("tiered 40x") | 40x from `$0`, 20x above **`$150,000,000`** |
+| testnet | **54** ("tiered 40x") | 40x from `$0`, 25x above **`$10,000`**, 10x above **`$50,000`** |
+
+So the "off by four orders of magnitude" bullet holds **only on testnet**. On mainnet this section's original `>$150M on BTC` estimate is *exactly* right, and it was not derived from the max-leverage figure after all. Testnet's bands appear deliberately scaled down so tier crossing is reachable with faucet-sized funds — which is precisely what makes it a trap: **a venue constant measured on testnet is a testnet constant.** The operational reading of the two bullets therefore splits — the extension point is near on testnet and remote on mainnet — and neither number belongs in code: the bands are read from `meta` at runtime, per asset, per network.**)**
+
 **Consequence, stated:** flat maintenance margin slightly *under*-reports maintenance (and thus liquidation distance) for a tier-crossing position. On live that makes the *computed* maintenance diverge from the venue's `crossMaintenanceMarginUsed` and **trips the §6 alert** — the correct signal that an unmodeled regime was reached. The extension point is `InstrumentSpec.margin_table_id` plus a tier structure, reached only if a paper strategy trades tier-crossing size.
 
 **(Two refinements from [ADR-0046](./0046-account-abstraction-mode-and-account-grain-sources.md) §2.1.** First, that alert reaches **cross positions only** — `crossMaintenanceMarginUsed` excludes isolated positions, so a tier-crossing *isolated* position under-reports silently. Second, the flat rate is confirmed far more broadly than [#142](https://github.com/MarcosACH/tickwright/issues/142)'s single BTC position could confirm it: an account holding **50 distinct cross symbols** reproduces `crossMaintenanceMarginUsed` from `Σ notional × 1/(2·max_leverage)` to ~3e-9 relative — 50 independent `max_leverage` values, each below its own first tier band, which is exactly the regime this section claims the flat rate is exact in.**)**
+
+**(The tier-crossing case is no longer hypothetical: it was measured, and the flat rate is falsified above the first band — [#152](https://github.com/MarcosACH/tickwright/issues/152).** Everything above reasoned about a tier-crossing position without ever holding one. A 0.185 BTC cross long on testnet, notional `12073.655`, sits in the `$10k`–`$50k` band:
+
+```
+venue crossMaintenanceMarginUsed = 166.4731
+flat 1/(2·40) = 0.0125 -> 150.9207   ✗   (this section's rate: under-reports by 15.55)
+flat 1/(2·25) = 0.02   -> 241.4731   ✗   (the band's rate alone: over-reports by 75.00)
+notional × 0.02 − 75   = 166.4731    ✓   exact
+```
+
+That is R3 ([#110](https://github.com/MarcosACH/tickwright/issues/110))'s `notional·mmr − deduction` form, confirmed against the venue for the first time. Two consequences for the deferred extension point:
+
+- **The deduction is not a published field — it is a continuity consequence**, so the tier structure needs no data beyond the bands already in `meta.marginTables`. Each band's deduction is whatever keeps maintenance continuous at the boundary:
+
+  `deduction(k) = deduction(k−1) + lowerBound(k) × (mmr(k) − mmr(k−1))`
+
+  which for testnet BTC yields `0 → 75 → 1575`, and `12073.655 × 0.02 − 75 = 166.4731` reproduces the measurement exactly. **The third deferral bullet is now fully retired**: bands *and* deductions are both derivable from the raw `meta` response, with nothing hardcoded and no unverified endpoint.
+
+- **`marginTableId` frequently references a table that `meta.marginTables` does not publish** — 196/232 mainnet assets, 182/210 testnet. In all 378 observed cases the missing id **equals the asset's own `maxLeverage`**, i.e. untiered assets encode their flat cap as the id and only genuinely-tiered assets get a published table (ids ≥ 50). A bare `tables[spec.margin_table_id]` lookup therefore fails on ~84 % of the universe. Whoever takes the extension point must fall back to "no table ⇒ flat `1/(2·max_leverage)`" rather than assume the table exists. Recorded as an **observed regularity, not a documented contract** — implement it as a guard, not a guarantee.
+
+The decision still stands, but how many of the three bullets carry it now depends on the network. Bullet three is retired outright. Bullet one holds everywhere. **Bullet two holds only on mainnet**, where the first band opens at `$150,000,000` and a paper position really does essentially never cross tier-0; against testnet's `$10,000` band it is gone, and bullet one carries the deferral alone. The decision's *scope* is unchanged either way — flat tier-0 is exact **below** the first band, re-verified in the same session at notional `5873.49`, maintenance `73.418625`, rate exactly `1/80`. What changed is that the "Consequence, stated" above is now a *measured* magnitude rather than an estimate: at `12073.655` of notional the flat rate under-reports maintenance by **15.55** (9.3 %), and that gap grows with notional.**)**
 
 **Additive `InstrumentSpec` fields (this ADR's concrete deliverable):**
 
@@ -135,7 +165,7 @@ ADR-0034 deferred the numeric tolerance to this ticket. It applies to the mark-d
 
   **(Measured by [#142](https://github.com/MarcosACH/tickwright/issues/142). `rtol` confirmed; the band's *shape* has a defect, carried by [#148](https://github.com/MarcosACH/tickwright/issues/148).**
 
-  Every formula in this ADR reproduces the venue **exactly** when fed the venue's own mark — **below the first margin-tier band**, which is where the measurement sat (a ~$130 notional against §4's newly-read $10k bound) and where flat tier-0 *is* the venue's own maintenance rate. Inside that regime the band absorbs **mark skew** only — the gap between our latest `MarkTick` (ADR-0039, `activeAssetCtx`, ~3 s) and the venue's instantaneous mark at reconcile. Over 162 samples of BTC testnet: 3 s p99 `1.4e-04`, 60 s max `3.9e-04`, with a hard floor at the BTC mark quantum of $1 ≈ `1.5e-05`. Above the first band the flat-tier approximation diverges by whatever the tier table dictates, not by mark skew — that divergence is the alert §4's "Consequence, stated" says it should be, and is deliberately **not** an input to sizing `rtol` (sizing the band to absorb it would suppress the signal).
+  Every formula in this ADR reproduces the venue **exactly** when fed the venue's own mark — **below the first margin-tier band**, which is where the measurement sat (a ~$130 notional against §4's newly-read $10k bound — *testnet's* bound; mainnet BTC's first band is $150M, see §4) and where flat tier-0 *is* the venue's own maintenance rate. Inside that regime the band absorbs **mark skew** only — the gap between our latest `MarkTick` (ADR-0039, `activeAssetCtx`, ~3 s) and the venue's instantaneous mark at reconcile. Over 162 samples of BTC testnet: 3 s p99 `1.4e-04`, 60 s max `3.9e-04`, with a hard floor at the BTC mark quantum of $1 ≈ `1.5e-05`. Above the first band the flat-tier approximation diverges by whatever the tier table dictates, not by mark skew — that divergence is the alert §4's "Consequence, stated" says it should be, and is deliberately **not** an input to sizing `rtol` (sizing the band to absorb it would suppress the signal).
 
   **`rtol = 0.001` therefore stands on evidence** — ≈7× the 3-second p99, ≈2.6× the 60-second max, leaving about an order of magnitude of headroom for a fast tape (the sampled window was quiet: `6e-04` total range over 5 minutes).
 

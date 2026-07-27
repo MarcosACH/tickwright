@@ -170,6 +170,63 @@ unattributed residual of **271.072769** — not explained by open orders, and no
 cross-check source. Chasing the residual is carried by the re-validation task graduated from this
 ticket ([#152](https://github.com/MarcosACH/tickwright/issues/152)).
 
+**(That last dismissal was wrong, and the rule it dismissed is the answer —
+[#152](https://github.com/MarcosACH/tickwright/issues/152).** The `max(initial_margin, 0.1 ×
+total_position_value)` transfer rule **does** bind: it binds whenever blended leverage exceeds 10x,
+which for a 50-position book is unremarkable. The venue's full withdrawal rule is
+
+```
+withdrawable = max(0, accountValue − max(IM, 0.1 × totalNtlPos))
+```
+
+so on an account with no resting orders the residual this section calls unattributed is exactly
+`max(0, 0.1 × crossNtlPos − crossTMU)`. Re-sampled across **220** mainnet addresses (70
+standard-mode, 39 holding no orders of any kind): exact to **one ulp** — the venue reports
+`withdrawable` to 6 dp — on **8 of the 10** that hold positions, with the floor actually binding on
+6. The clean control, three cross positions all at 20x and zero orders:
+
+| | |
+|---|---|
+| `crossAV` | `1008998.241837` |
+| `crossTMU` | `503510.150066` |
+| `crossNtlPos` | `10070203.0013389997` |
+| `crossAV − max(crossTMU, 0.1 × crossNtlPos)` | `1977.94170310003` |
+| `withdrawable` (actual) | `1977.941704` |
+
+Its whole residual — `503510.150067`, three orders of magnitude larger than the 271.07 — is the
+floor. Reproduced on our own testnet account too, at **error `0.000000`**: a zero-order cross short
+of notional `5873.49` gave `929.919372 − 587.349 = 342.570372`, the venue's `withdrawable` exactly.
+
+**Two refinements follow.** First, the order-margin term in the table above is specifically
+*exposure-increasing* order margin: an order on the opposite side of an existing position reserves
+nothing, whether or not it carries `reduceOnly` — control `0xca230e816b…`, 84 HYPE sells against a
+HYPE long, none flagged, `withdrawable == crossAV − crossTMU` to 1e-10. Second, `0x6de6…ef7b` itself
+can no longer be re-checked (only its abbreviated address survives, and its state has long moved), so
+the identification is of the **class**, not of that one snapshot.
+
+**The decision does not change — it gets a second, independent reason.** The identified term is a
+*withdrawal haircut*: a 10 % floor on notional that exists to stop an account being drained to the
+edge of its maintenance margin. It is not free collateral under any reading, so `withdrawable`
+answers a third question this surface never asks, on top of the resting-order margin above. What
+this correction removes is the suggestion that the field holds something mysterious; what remains
+unidentified is much **narrower** — no longer a term every account may carry, but 2 of the 10
+sampled accounts, both heavily-positioned books, at magnitudes *larger* than the 271.07:
+
+| account | positions | model predicts | venue `withdrawable` | unexplained |
+|---|---|---|---|---|
+| `0xd4c1f7e8d8…` | 17 | `379767.931283` | `311553.645131` | **`68214.286152`** |
+| `0x27c9fa86c9…` | 61 | `73502.120231` | **`0.0`** | **`73502.120231`** |
+
+Both are ruled out by direct computation as orders, margin tiers, isolated positions, or spot. But
+they are **two different shapes, not one class**, and only the first is a further *deduction*: the
+second has `withdrawable` **pinned at exactly zero** while the model predicts a positive figure, so
+what fails there is not an unaccounted term of the same kind but the field bottoming out under some
+condition this rule does not express. Whoever revisits this should treat them separately.
+
+(Figures are as at the sampling snapshot. Both accounts trade actively, and a tight re-read minutes
+later gave `68281.421247` and `64035.283183` respectively — the magnitude class is stable, the exact
+number is not, which is why the snapshot is named.)**)**
+
 ### 2.1 The same scope error, one field over: account `maintenance_margin`
 
 **Decision: account-level `maintenance_margin` is reported as Σ over *all* positions, but
@@ -275,6 +332,26 @@ perps clearinghouse fully populated and spot empty.
   with the master wallet, then a spot→perps `usdClassTransfer`. Both are **user-signed** actions an
   agent wallet cannot perform, which is why this is an operator step and not something the engine
   can do for itself.
+
+  **(Both halves of that claim were executed and confirmed —
+  [#152](https://github.com/MarcosACH/tickwright/issues/152).** The remediation was run end-to-end on
+  the testnet account and produced the literal **`"disabled"`**, which is the whole reason this
+  allowlist has two entries: a `== "default"` check would have refused the account the operator was
+  just told to build.
+
+  The agent-wallet half deserves an explicit note, because the pinned SDK **appears to offer a way
+  around it**. Alongside the EIP-712 `user_set_abstraction`, `hyperliquid-python-sdk` 0.24.0 exposes
+  **`agent_set_abstraction(abstraction)`**, signed via `sign_l1_action` — the *agent-signable* path,
+  the same one orders use. It is not a loophole. Tested against the venue:
+
+  | call | signing path | venue response |
+  |---|---|---|
+  | `agent_set_abstraction("i")` | `sign_l1_action` (agent-signable) | `err: Abstraction transition not allowed` |
+  | `user_set_abstraction(master, "disabled")` | EIP-712 user-signed | `err: Must deposit before performing actions. User: 0x7bc6…d273` |
+
+  The second is the general rule and worth stating once: **a user-signed action is attributed to the
+  signer, not to the `user` field in its payload**. An agent key is therefore treated as its own
+  (empty) account and can never act for the master, whatever address the payload names.**)**
 - **Paper is a no-op.** The mode is a live-only concept, and no live run may read a paper block or
   vice versa (ADR-0042 §1).
 - **No configuration surface.** The mode is read from the venue, never declared. `.env.example` gains
@@ -444,9 +521,11 @@ a position that has none. No `Portfolio` API change: the field is `Decimal | Non
   `clearinghouseState` response the reconcile pull already makes.
 - **A venue field's *scope* is now part of what sourcing it means.** Both defects this ADR fixes
   are the same mistake — reading a field whose name suggests our quantity and whose scope is
-  narrower (`withdrawable` nets off order margin, §2; `crossMaintenanceMarginUsed` excludes isolated
-  positions, §2.1) — and one response carries fields on **both** scopes (`marginSummary.totalMarginUsed`
-  includes isolated, `crossMaintenanceMarginUsed` does not). Every account-grain member of ADR-0040
+  narrower (`withdrawable` nets off **whichever is larger** of total initial margin — positions
+  *and* exposure-increasing resting orders — or a 10 %-of-notional floor, usually the floor, §2;
+  `crossMaintenanceMarginUsed` excludes isolated positions, §2.1) — and one response carries fields
+  on **both** scopes (`marginSummary.totalMarginUsed` includes isolated,
+  `crossMaintenanceMarginUsed` does not). Every account-grain member of ADR-0040
   §6's band now carries its comparison scope: `equity` and `margin_used` compare Σ-over-all against
   all-scope venue fields; `free_margin` compares Σ-over-all against a **cross-scoped pair**, which is
   exact only by the cancellation §2 derives and is therefore **not** narrowed; `maintenance_margin`
