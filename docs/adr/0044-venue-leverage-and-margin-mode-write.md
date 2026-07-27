@@ -355,6 +355,14 @@ simply never declared them. ADR-0024 step 4 already reads *"Connect the `Exchang
 stay undeclared until there is teardown to do — the adapter holds no persistent connection of its
 own, posting per request.
 
+**(`stop()` is now declared, on this section's own condition — the
+[trade-economics module map](../module-maps/trade-economics-accounting-surface.md).** ADR-0037's
+paper funding generator is a running `Clock`-driven task inside `PaperExchange`, which is teardown
+to do; the map gives it `Exchange.stop()` as its cancellation point and one `exchange.stop` entry in
+the runner's `_teardown_steps`, ordered after `feed.stop` so the generator stops before the bus
+drains. `state` and `health()` stay undeclared. `HyperliquidExchange.stop()` is a no-op, the
+per-request posting rationale above being unchanged for it.**)**
+
 Doing it in `build_exchange` instead — which already runs `asyncio.run(fetch_instrument_specs(...))`
 at composition, "the one read-once moment" — was rejected: it would put a **signed venue write** in
 the composition root, and fire §5's refusal before `run_id` binding and observability init, unlike
