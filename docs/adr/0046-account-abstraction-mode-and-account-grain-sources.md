@@ -1,6 +1,6 @@
 # Supported account abstraction mode: Manual/Standard only, and where account-grain equity and free margin are read
 
-_Accepted via the D13 grilling session on decision ticket [#148](https://github.com/MarcosACH/tickwright/issues/148), graduated from the [#142](https://github.com/MarcosACH/tickwright/issues/142) testnet validation task on the trade-economics map [#107](https://github.com/MarcosACH/tickwright/issues/107). Fixes the premise every account-grain decision in this surface rests on: **that `clearinghouseState` reports the account's equity**. It does — under exactly one family of venue account modes, which this ADR makes a deployment precondition and verifies at boot. **Amends ADR-0034** (the anchor's field sources), **ADR-0040** (§2's `free_margin` source, §3's liquidation `null` rule and its paper mirror, §6's alert-band reference — resolving the defect §6 carries a `#148` pointer for), **ADR-0044** (the boot step ordering), and **ADR-0024** (startup step 4 opens with the mode gate, and the barrier-failure policy gains a third consumer). **ADR-0042 and ADR-0043 stand decisionally unchanged**, with the precondition their formulas depend on now named — ADR-0042 §6 additionally takes an incidental in-place correction, its aside naming free margin as root `withdrawable` being superseded by §2 here, and **ADR-0041 §4** a narrower one still, correcting where in the response that field lives._
+_Accepted via the D13 grilling session on decision ticket [#148](https://github.com/MarcosACH/tickwright/issues/148), graduated from the [#142](https://github.com/MarcosACH/tickwright/issues/142) testnet validation task on the trade-economics map [#107](https://github.com/MarcosACH/tickwright/issues/107). Fixes the premise every account-grain decision in this surface rests on: **that `clearinghouseState` reports the account's equity**. It does — under exactly one family of venue account modes, which this ADR makes a deployment precondition and verifies at boot. **Amends ADR-0034** (the anchor's field sources), **ADR-0040** (§2's `free_margin` source **and its account `maintenance_margin` cross-check scope**, §3's liquidation `null` rule and its paper mirror, §6's alert-band reference — resolving the defect §6 carries a `#148` pointer for), **ADR-0044** (the boot step ordering), **ADR-0024** (startup step 4 opens with the mode gate, and the barrier-failure policy gains a third consumer), and **ADR-0045** (§2's alert catalog gains `ACCOUNT_MODE_UNVERIFIED`, and its frontier bullet records the map's decision frontier closing). **ADR-0042 and ADR-0043 stand decisionally unchanged**, with the precondition their formulas depend on now named — ADR-0042 §6 additionally takes an incidental in-place correction, its aside naming free margin as root `withdrawable` being superseded by §2 here, and **ADR-0041 §4** two narrower ones, correcting where in the response `withdrawable` lives and narrowing its account-Σ maintenance cross-check to the cross subset (§2.1)._
 
 Hyperliquid lets an account choose how its spot and perps balances interact. The choice is
 invisible in every field this surface reads, and it silently changes what those fields **mean**.
@@ -51,14 +51,23 @@ The reasoning is three-layered, and the first layer is decisive on its own:
   and portfolio margin are limited to 50 000 user actions per day, a constraint ADR-0044 §1's
   action-budget reasoning would otherwise have to absorb.
 
-**Consequence, stated plainly: this is real friction for anyone else adopting Tickwright.** Sampling
-170 randomly-chosen addresses that traded on mainnet the day this was decided returned a mode for
-**114** of them: **93 `unifiedAccount`, 7 `portfolioMargin`, 9 `disabled`, 5 `default`** — so
-roughly **88 % of the classified sample** (100 of 114) is on a mode Tickwright refuses. The
-remaining 56 addresses are **unclassified, and the reason was not recorded** — the ratio is
-therefore reported over the 114 that answered, and it is stated here rather than left implicit so
-the denominator is not later mistaken for the sample size. The refusal is designed as a remediation,
-not a complaint (§3).
+**Consequence, stated plainly: this is real friction for anyone else adopting Tickwright.** Three
+independent random samples of addresses that traded on mainnet the day this was decided, drawn from
+the venue's public leaderboard and classified with one unsigned `userAbstraction` read each:
+
+| sample | classified | `unifiedAccount` | `portfolioMargin` | `disabled` | `default` | **refused** |
+|---|---|---|---|---|---|---|
+| A | 114 | 93 | 7 | 9 | 5 | 87.7 % |
+| B | 120 | 94 | 10 | 14 | 2 | 86.7 % |
+| C | 70 | 61 | 3 | 3 | 3 | 91.4 % |
+| **combined** | **304** | 248 | 20 | 26 | 10 | **88.2 %** |
+
+So **roughly 88 % of active traders are on a mode Tickwright refuses.** Sample A stopped at 114 of
+170 candidates because the run that produced it exited early on an unrelated condition — a stopping
+rule weakly correlated with how common `default` is, and therefore *not* a clean random sample.
+Samples B and C were drawn afterwards specifically to check it, classify every address they draw,
+and bracket A's figure from both sides. The ratio is robust; the refusal is designed as a
+remediation, not a complaint (§3).
 
 ### Alternatives rejected
 
@@ -78,13 +87,22 @@ not a complaint (§3).
   reading a quantity that does not mean what its name suggests.
 - **Source the account-grain numbers from `activeAssetData.availableToTrade`** instead of the
   account summary. Rejected on **grain** and on **meaning**, not on cost — ADR-0044 §4 establishes
-  it as an unsigned info read whose price against the address budget is zero. *Grain:* it is
-  **per-symbol**, and under cross margin the same free collateral backs every symbol, so no
-  summation over symbols yields the account's free margin — the venue already does that summation,
-  and publishes it as `crossMarginSummary`. It also leaves `equity` unsourced entirely: no
-  per-symbol tradability field carries it. *Meaning:* it returns **two** values rather than one, and
-  what it answers is *"how much can I trade on this symbol"* — an admission-gate question, which is
-  the same category error §2 rejects `withdrawable` for, one grain down.
+  it as an unsigned info read whose price against the address budget is zero. *Meaning — the
+  decisive objection:* it returns **two** values rather than one, and what it answers is *"how much
+  can I trade on this symbol"* — an admission-gate question, which is the same category error §2
+  rejects `withdrawable` for, one grain down, and its exact relationship to our free margin under
+  Manual/Standard is **unmeasured** (whether it nets off resting-order margin the way `withdrawable`
+  does is precisely the open question). *Grain:* it is **per-symbol** and leaves `equity` unsourced
+  entirely — no per-symbol tradability field carries it — so at best it could source one of the two
+  account-grain numbers, from one request per symbol, where `crossMarginSummary` sources both from
+  the response the reconcile pull already makes.
+
+  Stated carefully, because the obvious grain argument does not hold: under **cross** margin the same
+  free collateral backs every symbol, so a single symbol's value already *is* the account figure —
+  [#142](https://github.com/MarcosACH/tickwright/issues/142) measured `availableToTrade = 951.66`
+  against an equity of `977.58` and `totalMarginUsed` of `25.9168`, which is exactly
+  `equity − total_margin_used`. The route is rejected for what the number **means** and for what it
+  cannot reach, not because no arithmetic recovers free margin from it.
 - **Support Portfolio Margin.** Out of scope by construction: it collateralizes perps with HYPE, BTC
   and USDT as well as USDC, which is the multi-currency model plus haircuts plus an FX layer.
 
@@ -139,6 +157,46 @@ unattributed residual of **271.072769** — not explained by open orders, and no
 **strengthens** this decision rather than qualifying it: it is one more reason the field is not a
 cross-check source. Chasing the residual is carried by the re-validation task graduated from this
 ticket ([#152](https://github.com/MarcosACH/tickwright/issues/152)).
+
+### 2.1 The same scope error, one field over: account `maintenance_margin`
+
+**Decision: account-level `maintenance_margin` is reported as Σ over *all* positions, but
+cross-checked against `crossMaintenanceMarginUsed` over the **cross subset only**.**
+
+ADR-0040 §6 puts account-level `maintenance_margin` in the alert band, and R1
+([#108](https://github.com/MarcosACH/tickwright/issues/108)) recorded its venue counterpart as root
+`crossMaintenanceMarginUsed` without recording that field's **scope**. It is cross-only — the name
+says so — while ADR-0040 §2's account row is a Σ over every position. Measured:
+
+| account | venue `crossMaintenanceMarginUsed` | our Σ over **cross** | our Σ over **all** |
+|---|---|---|---|
+| `0x48cd…4955` — 2 cross, 0 isolated | 2141.6235 | 2141.6235 ✓ | 2141.6235 ✓ |
+| `0x6de6…ef7b` — 50 cross, 0 isolated | 4351.774296 | 4351.774308 ✓ | 4351.774308 ✓ |
+| `0x863a…fd6f` — 0 cross, 1 isolated | **0.0** | 0.0 ✓ | **11028.12** ✗ |
+
+The trap is a **venue asymmetry between two fields of the same response**: `marginSummary.totalMarginUsed`
+**includes** isolated positions (measured `111169.464955` on that third account, exactly its isolated
+position's `marginUsed`), while `crossMaintenanceMarginUsed` **excludes** them. So `margin_used`'s
+account Σ cross-checks correctly and `maintenance_margin`'s does not, and nothing in the field names
+warns you which is which except the `cross` prefix on the second.
+
+This is §2's defect one field over, with the same signature: an unbounded, mode-independent gap that
+no `rtol`/`atol` absorbs, firing whenever an isolated position is open — which ADR-0040 §1 calls
+**the primary mode in practice**. It is *not* the mark-skew the band was sized for.
+
+**Re-scope rather than drop**, mirroring §2: the reported number stays Σ-over-all, because that is
+the honest account-wide maintenance a strategy should read, and only the **comparison** narrows to
+the cross subset. Dropping account `maintenance_margin` from the band would also discard the signal
+on the cross subset, where the venue does publish a number. The cost is that **isolated maintenance
+has no venue cross-check at all** — the venue publishes neither a per-position maintenance field
+(R3 #110) nor a total — so it is computed-only, and ADR-0040 §4's tier-crossing alert reaches only
+cross positions. Stated rather than hidden.
+
+**A confirmation falls out of the same measurement.** `0x6de6…ef7b` reproduces
+`crossMaintenanceMarginUsed` across **50 distinct symbols** to ~3e-9 relative, which confirms
+ADR-0040 §4's flat `margin_maint = 1/(2·max_leverage)` far more broadly than
+[#142](https://github.com/MarcosACH/tickwright/issues/142)'s single BTC position could — and confirms
+it below each symbol's first tier band, which is where §4 says the flat rate is exact.
 
 ## 3. The boot check: an allowlist of two literals, gating the venue writes
 
@@ -347,6 +405,13 @@ a position that has none. No `Portfolio` API change: the field is `Decimal | Non
 - **One venue field became two.** `free_margin`'s cross-check now reads two fields off
   `crossMarginSummary` instead of one root field. No extra request: both arrive in the same
   `clearinghouseState` response the reconcile pull already makes.
+- **A venue field's *scope* is now part of what sourcing it means.** Both defects this ADR fixes
+  are the same mistake — reading a field whose name suggests our quantity and whose scope is
+  narrower (`withdrawable` nets off order margin, §2; `crossMaintenanceMarginUsed` excludes isolated
+  positions, §2.1) — and one response carries fields on **both** scopes (`marginSummary.totalMarginUsed`
+  includes isolated, `crossMaintenanceMarginUsed` does not). Every account-grain cross-check in
+  ADR-0040 §6 now states which scope it compares on. **Isolated maintenance margin has no venue
+  counterpart at all** and is therefore computed-only.
 - **#142's account-grain measurements are superseded, not merely re-labelled.** Every number it
   took at account grain was measured under a mode this ADR rules out. Its *position*-grain results
   stand — the liquidation formula, the cross formulas, `closedPnl` being gross, the mark-skew

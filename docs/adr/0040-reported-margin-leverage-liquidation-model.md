@@ -22,7 +22,7 @@ The Tier-1 accumulated ledger (net size, average entry, realized PnL, fees, fund
 | `unrealized_pnl` | `szi × (mark − entry)` | ✓ | Σ |
 | `equity` | `cash + Σ unrealized_pnl` | — | ✓ (the anchor) |
 | `margin_used` | cross: `notional / leverage`; isolated: `isolated_collateral + unrealized_pnl` — the position's backing collateral plus its unrealized PnL (§3; the row originally read "the position's locked collateral (an ingested input)", corrected by [#142](https://github.com/MarcosACH/tickwright/issues/142)) | ✓ | Σ = total margin used |
-| `maintenance_margin` | `notional × margin_maint` (flat, §4) | ✓ | Σ |
+| `maintenance_margin` | `notional × margin_maint` (flat, §4) | ✓ | Σ — reported over **all** positions, but cross-checked over the **cross subset only** ([ADR-0046](./0046-account-abstraction-mode-and-account-grain-sources.md) §2.1) |
 | `free_margin` | `equity − total_margin_used` (formula confirmed exactly by [ADR-0046](./0046-account-abstraction-mode-and-account-grain-sources.md) §2; its **venue cross-check source changes** — see below) | — | ✓ |
 | `liquidation_price` | §3 (read-through live / computed paper) | ✓ (nullable) | — |
 | `effective_leverage` | isolated position: `notional / (isolated_collateral + uPnL)`; cross position: `notional / equity`; account: `total_notional / equity` (denominator refined by ADR-0041 §4.1) | ✓ (nullable) | ✓ (nullable) |
@@ -97,6 +97,8 @@ The deferral itself is **not** reversed: read-through liquidation still removes 
 
 **Consequence, stated:** flat maintenance margin slightly *under*-reports maintenance (and thus liquidation distance) for a tier-crossing position. On live that makes the *computed* maintenance diverge from the venue's `crossMaintenanceMarginUsed` and **trips the §6 alert** — the correct signal that an unmodeled regime was reached. The extension point is `InstrumentSpec.margin_table_id` plus a tier structure, reached only if a paper strategy trades tier-crossing size.
 
+**(Two refinements from [ADR-0046](./0046-account-abstraction-mode-and-account-grain-sources.md) §2.1.** First, that alert reaches **cross positions only** — `crossMaintenanceMarginUsed` excludes isolated positions, so a tier-crossing *isolated* position under-reports silently. Second, the flat rate is confirmed far more broadly than [#142](https://github.com/MarcosACH/tickwright/issues/142)'s single BTC position could confirm it: an account holding **50 distinct cross symbols** reproduces `crossMaintenanceMarginUsed` from `Σ notional × 1/(2·max_leverage)` to ~3e-9 relative — 50 independent `max_leverage` values, each below its own first tier band, which is exactly the regime this section claims the flat rate is exact in.**)**
+
 **Additive `InstrumentSpec` fields (this ADR's concrete deliverable):**
 
 - **`max_leverage: int`** — the venue leverage cap (from `meta.universe[].maxLeverage`). Bounds/validates the per-symbol configured leverage on paper; a real venue fact.
@@ -122,7 +124,9 @@ The **per-symbol leverage + margin mode is the single source of truth for the ma
 
 ## 6. The Tier-2 divergence alert band
 
-ADR-0034 deferred the numeric tolerance to this ticket. It applies to the mark-dependent, venue-comparable numbers — **`unrealized_pnl`, `notional`, `equity`, `margin_used` (**both** computations — see the §3 correction: isolated `margin_used` is `isolated_collateral + unrealized_pnl`, mark-dependent, not an ingested constant), `maintenance_margin` (account-level), `free_margin`** — and **not** to `liquidation_price` (read-through, no computed cross-check) or `effective_leverage` (no venue field).
+ADR-0034 deferred the numeric tolerance to this ticket. It applies to the mark-dependent, venue-comparable numbers — **`unrealized_pnl`, `notional`, `equity`, `margin_used` (**both** computations — see the §3 correction: isolated `margin_used` is `isolated_collateral + unrealized_pnl`, mark-dependent, not an ingested constant), `maintenance_margin` (account-level, **cross subset only** — see below), `free_margin`** — and **not** to `liquidation_price` (read-through, no computed cross-check) or `effective_leverage` (no venue field).
+
+  **(Scope fixed by [ADR-0046](./0046-account-abstraction-mode-and-account-grain-sources.md) §2.1.** The account-level `maintenance_margin` entry compares against `crossMaintenanceMarginUsed`, which is **cross-only** — while §2's account row is a Σ over *every* position. Measured: an account holding one isolated position and no cross position reports `crossMaintenanceMarginUsed = 0.0` against a Σ-over-all of **11028.12**. The comparison therefore narrows to the **cross subset**; the *reported* number stays Σ-over-all. **Isolated maintenance has no venue counterpart** (the venue publishes no per-position maintenance field — R3 [#110](https://github.com/MarcosACH/tickwright/issues/110) — and no total), so it is computed-only and §4's tier-crossing alert below reaches cross positions only. Note the asymmetry inside one response: `marginSummary.totalMarginUsed` **includes** isolated, so `margin_used`'s account Σ needs no such narrowing.**)**
 
 - **Shape — combined absolute + relative:** alert iff `|computed − venue| > max(atol, rtol × reference)`, one uniform policy applied per number. A pure absolute band is useless at scale; a pure relative band screams on near-zero positions.
 

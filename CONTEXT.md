@@ -483,7 +483,11 @@ with the mark. The `isolated_collateral` underneath it *is* Tier-1 and **persist
 on paper, ingested on live as `marginUsed − unrealizedPnl` — never the venue's `rawUsd`, which is
 the cash leg net of cost basis and is negative for a long). `max_leverage` and `margin_maint` are
 additive `InstrumentSpec` fields. Both `margin_used` computations sit inside ADR-0040 §6's alert
-band. See ADR-0040, ADR-0041, ADR-0043, ADR-0045, and the [#142](https://github.com/MarcosACH/tickwright/issues/142)
+band. The account-level **maintenance** total is reported over every position but **cross-checked
+only over the cross subset** — the venue's `crossMaintenanceMarginUsed` excludes isolated positions,
+which have no venue maintenance counterpart at all (ADR-0046 §2.1); `margin_used`'s account total
+needs no such narrowing, since `marginSummary.totalMarginUsed` includes them.
+See ADR-0040, ADR-0041, ADR-0043, ADR-0045, ADR-0046, and the [#142](https://github.com/MarcosACH/tickwright/issues/142)
 testnet measurement that settled the tiering.
 _Avoid_: **initial margin** (conventionally the collateral reserved when an *order* is submitted —
 an admission gate this surface does not implement), margin **call**, buying power
