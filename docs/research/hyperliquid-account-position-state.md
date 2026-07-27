@@ -14,7 +14,7 @@
 >
 > | in this note | current answer |
 > | --- | --- |
-> | §2 — *"Free / available collateral = `withdrawable` (root)"* | **Superseded.** `withdrawable` also deducts resting-order initial margin **and** a 10 %-of-notional transfer floor, so it is not free margin. Free margin is sourced from `crossMarginSummary.accountValue − crossMarginSummary.totalMarginUsed` — [ADR-0046](../adr/0046-account-abstraction-mode-and-account-grain-sources.md) §2. |
+> | §2 — *"Free / available collateral = `withdrawable` (root)"* | **Superseded.** The venue's rule is `withdrawable = max(0, accountValue − max(total_initial_margin, 0.1 × totalNtlPos))` — the two deductions are **alternatives, not a sum**, the first covers *all* initial margin (positions and resting orders alike), and the second is a withdrawal haircut. It answers *"what could I take off the venue"*, not *"what free collateral do I have"*. Free margin is sourced from `crossMarginSummary.accountValue − crossMarginSummary.totalMarginUsed` — [ADR-0046](../adr/0046-account-abstraction-mode-and-account-grain-sources.md) §2. |
 > | Open Q3 — fill `fee` sign, *"negative = maker rebate"* (secondary sources only) | **Answered, and the shorthand misleads.** The sign convention is right, but `crossed: false` does **not** imply a negative fee: a measured maker fill charged the base `+0.015 %` as a *cost*. The rebate branch is gated on a maker-rebate **volume tier** and remains unobserved — [ADR-0036](../adr/0036-perp-fee-model.md). |
 > | Open Q2 — `crossMaintenanceMarginUsed` presence | **Observed live** on both networks, repeatedly, in #142/#152. |
 >
