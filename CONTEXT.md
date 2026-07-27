@@ -446,7 +446,10 @@ The per-fill trading cost a [[Position]] accrues — a signed `Decimal` (negativ
 rebate**), settled in USDC, decided at the **fill boundary** by whether the fill **took** liquidity
 (crossed on arrival) or **made** it (rested), computed there (paper: `notional × maker/taker rate`
 on the instrument; live: read from the venue) and accrued as its **own ledger line**, never folded
-into entry price or realized PnL. See ADR-0036, ADR-0013.
+into entry price or realized PnL. **Making liquidity is not what makes the fee negative**: the base
+maker rate is a positive cost, and a rebate is a property of the account's volume tier — a measured
+maker fill (`crossed: false`) carried `fee` **`+0.019571`**, the base `0.015 %` (ADR-0036, #152).
+See ADR-0036, ADR-0013.
 _Avoid_: commission (a taken-liquidity synonym; "fee" spans rebates too), cost basis (that's entry
 price), slippage (a fill-*price* effect, not a fee).
 

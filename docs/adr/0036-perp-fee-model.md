@@ -17,6 +17,16 @@ A dedicated `FeeModel` seam (paralleling the paper `FillModel`, ADR-0012) was **
 
 `InstrumentSpec` gains **`maker_fee`** and **`taker_fee`**: signed `Decimal` rates on notional (positive = cost, negative = rebate), **defaulting to `0`** so a frictionless spec stays valid and existing paper configs are unaffected. Additive metadata per ADR-0017/0030, sourced from paper config or the venue meta. They are the **paper** computation input; the live path ignores them for accrual (it reads the venue's actual fee), so the two never disagree on a number the venue is the authority for.
 
+**(A maker fill was finally observed, and it is *positive* — [#152](https://github.com/MarcosACH/tickwright/issues/152).** Every fill [#142](https://github.com/MarcosACH/tickwright/issues/142) captured was taker, leaving the maker side of this ADR unexercised. A post-only bid filled on testnet:
+
+```json
+{"coin":"BTC","px":"65239.0","sz":"0.002","crossed":false,"fee":"0.019571","feeToken":"USDC"}
+```
+
+`0.002 × 65239 × 0.015 % = 0.0195717` — the venue's **base maker rate, and a cost, not a rebate**. So the shorthand *"negative = maker rebate"* used throughout this ADR is right about the **sign convention** and misleading about **when it fires**: `crossed: false` does **not** imply a negative fee. A negative `fee` requires a maker-**rebate volume tier**, which is a property of the account's 14-day volume, not of the fill's liquidity side. On a fresh account every maker fill is a positive `+0.015 %` cost.
+
+Nothing in the design changes — the field is signed, the live path reads whatever the venue reports, and `maker_fee` stays a signed rate that *may* be negative. Two consequences worth stating: paper's `maker_fee` should default to the **positive** base rate rather than a rebate unless the operator is modelling a rebate tier; and the negative branch remains **unobserved**, so anyone hunting it on a low-volume account will not find it.**)**
+
 ## Maker vs taker is decided at the fill boundary and consumed there
 
 The paper exchange already knows liquidity provision structurally, so the rule reads off the existing matching semantics:
