@@ -123,9 +123,18 @@ least one is ambiguous in its own documentation" above understates the case: the
 [entry-price-and-PnL page](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/entry-price-and-pnl)
 gives closed PnL as `fee + side · (mark − entry) · size` for a closing trade "*and only the fee for
 an opening trade*" — **wrong on both clauses**. The venue *documentation* is the untrustworthy source
-here; the venue's *data* matches this section exactly. One gap stands, and it is moot: every observed
-fill was taker (`crossed: true`), so the maker-rebate case (a negative `fee`) is unmeasured — but
-`fee` is not a term in `closedPnl` at all, so its sign cannot matter.**)**
+here; the venue's *data* matches this section exactly. One gap stood, and it was moot: every fill
+observed at the time was taker (`crossed: true`), so the maker case was unmeasured — but `fee` is not
+a term in `closedPnl` at all, so its sign cannot matter.**)**
+
+**(The maker fill was captured, and it closes that gap on evidence rather than on mootness —
+[#152](https://github.com/MarcosACH/tickwright/issues/152).** The project's first `crossed: false`
+fill — a closing one — reconstructs gross exactly as above: `closedPnl −0.0702 =
+(65203.9 − 65239) × 0.002`, with its `fee` of `0.019571` excluded. So "every observed fill was taker"
+no longer holds, and the finding now rests on both liquidity sides. What remains unobserved is
+narrower than the sentence above says: not the maker *case* but a **negative** `fee`, which ADR-0036
+identifies as gated on a maker-rebate **volume tier** rather than on maker-ness — this fill charged
+the base `+0.015 %`, a cost.**)**
 
 **Rejected: a `Total PnL` term** (`realized + unrealized`). No field carries it — ADR-0041 exposes
 the two separately — and a term with no field behind it drifts. Recorded as a non-term.
