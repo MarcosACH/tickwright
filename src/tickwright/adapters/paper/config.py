@@ -1,6 +1,7 @@
 """``PaperExchange`` config — each adapter's config lives in its package
 (ADR-0032); only the composition root reads them all."""
 
+from decimal import Decimal
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -27,3 +28,27 @@ class PaperExchangeConfig(BaseModel):
     fill_model: Literal["immediate", "stochastic"] = "immediate"
     seed: int = 0
     stochastic: StochasticParams = StochasticParams()
+
+    genesis_collateral: Decimal | None = Field(default=None, gt=0)
+    """The paper account's opening cash — the one number the whole Tier-1 ledger
+    is measured against (ADR-0042 §1).
+
+    Nullable **here** and demanded by ``AppConfig`` when the paper venue is
+    selected, which is not a softening: a required field would fire during this
+    block's own validation, before any validator can see the ``exchange``
+    discriminant, and a partial paper block is the ordinary case — so it would
+    force a paper number onto a live run. The ``None`` is the unset marker that
+    check reads, never an operator-selectable state.
+
+    ``gt=0``, because an account cannot be *created* owing money. That is input
+    validation, not margin enforcement: derived free margin still goes negative
+    freely and without consequence at runtime (ADR-0040 §7)."""
+
+    account_label: str = Field(default="default", pattern=r"^[a-z0-9_]{1,32}$")
+    """The label half of the ``paper-<label>`` account id (ADR-0042 §5).
+
+    May default where the collateral may not: a wrong label cannot make a number
+    wrong, only point at the wrong ledger, which the store's identity check
+    catches loudly. **No hyphen**, so a paper id stays unambiguously two segments
+    against a live id's three, and never derived from anything ambient — two runs
+    of one config must produce the same account identity."""

@@ -19,6 +19,7 @@ from tickwright.domain import (
     FillReport,
     InstrumentSpec,
     MarketTick,
+    Netting,
     OrderState,
     OrderStatusReport,
     OrderType,
@@ -27,6 +28,11 @@ from tickwright.domain import (
     TimeInForce,
     VenueOrderView,
 )
+
+# The paper account's opening cash. The venue requires it (ADR-0042 §1: the
+# engine supplies no collateral of its own); these tests do not exercise the
+# ledger, so one shared declaration keeps every wiring site honest and quiet.
+_GENESIS = Decimal("100000")
 
 
 def _tick(price: str, ts: int = 1_000, symbol: str = "BTC") -> MarketTick:
@@ -78,7 +84,9 @@ def _limit_order(
 def _harness() -> tuple[PaperExchange, InMemoryBus, ManualClock, list[FillReport]]:
     bus = InMemoryBus()
     clock = ManualClock()
-    exchange = PaperExchange(bus=bus, clock=clock, fill_model=ImmediateFillModel())
+    exchange = PaperExchange(
+        bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+    )
     reports: list[FillReport] = []
     bus.subscribe(FillReport, lambda r: _record(reports, r))
     return exchange, bus, clock, reports
@@ -93,7 +101,9 @@ def test_the_paper_venue_consumes_ticks_off_its_bus_with_no_external_wiring() ->
     price, which is only possible if the venue saw the tick."""
     bus = InMemoryBus()
     clock = ManualClock()
-    exchange = PaperExchange(bus=bus, clock=clock, fill_model=ImmediateFillModel())
+    exchange = PaperExchange(
+        bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+    )
     fills: list[FillReport] = []
     bus.subscribe(FillReport, lambda r: _record(fills, r))
 
@@ -132,7 +142,11 @@ def _specced_harness() -> tuple[
     bus = InMemoryBus()
     clock = ManualClock()
     exchange = PaperExchange(
-        bus=bus, clock=clock, fill_model=ImmediateFillModel(), instrument_specs={"BTC": _BTC_SPEC}
+        bus=bus,
+        clock=clock,
+        fill_model=ImmediateFillModel(),
+        genesis_collateral=_GENESIS,
+        instrument_specs={"BTC": _BTC_SPEC},
     )
     fills: list[FillReport] = []
     statuses: list[OrderStatusReport] = []
@@ -468,3 +482,32 @@ def test_fetch_order_for_an_unknown_cloid_is_positive_proof_of_no_record() -> No
     assert view is not None
     assert not view.has_record
     assert view.status is None and view.fills == ()
+
+
+def test_the_paper_venue_declares_a_two_segment_account_id_and_its_genesis() -> None:
+    """``paper-<label>`` stays unambiguously two segments against a live venue's
+    three (ADR-0042 §5), and the operator's declared collateral rides the spec."""
+    exchange = PaperExchange(
+        bus=InMemoryBus(),
+        clock=ManualClock(),
+        fill_model=ImmediateFillModel(),
+        genesis_collateral=Decimal("250000"),
+        account_label="momentum_v2",
+    )
+
+    spec = exchange.account_spec()
+
+    assert spec.account_id == "paper-momentum_v2"
+    assert spec.genesis_collateral == Decimal("250000")
+    assert spec.netting is Netting.NET
+
+
+def test_the_paper_account_label_defaults() -> None:
+    exchange = PaperExchange(
+        bus=InMemoryBus(),
+        clock=ManualClock(),
+        fill_model=ImmediateFillModel(),
+        genesis_collateral=_GENESIS,
+    )
+
+    assert exchange.account_spec().account_id == "paper-default"
