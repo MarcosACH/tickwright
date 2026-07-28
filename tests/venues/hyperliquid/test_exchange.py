@@ -10,12 +10,14 @@ sent. Venue quirk translation lives in the adapter, never the engine
 
 import asyncio
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from eth_account import Account
 from hyperliquid.utils.signing import recover_agent_or_user_from_l1_action
 from hyperliquid_fakes import FakeExchangeApi, resting_response
 from pydantic import SecretStr
+from seam_claims import assert_every_member_is_claimed
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
@@ -774,7 +776,49 @@ def test_the_hyperliquid_venue_satisfies_the_exchange_seam() -> None:
     """Conformance asserted at the adapter, as both bus adapters assert theirs
     (``tests/adapters/bus/``). ``Exchange`` is ``runtime_checkable``, so this is
     a member-presence check: the seam cannot grow a member that leaves this
-    adapter behind without failing here."""
+    adapter behind without failing here. What it cannot see — a member this
+    adapter implements but no test asserts — is ``_SEAM_CLAIMS`` below."""
     exchange = make_exchange(FakeExchangeApi({}), bus=InMemoryBus(), clock=ManualClock())
 
     assert isinstance(exchange, Exchange)
+
+
+def test_the_venue_hands_out_the_meta_sourced_specs_by_copy() -> None:
+    """The specs the composition root wires into the venue-agnostic guard come
+    from the venue itself (ADR-0031): the adapter is the one component that
+    knows what the meta endpoint said. Handed out as a copy — the universe is
+    read once at startup and must not be mutable through a caller that only
+    asked to read it, which is what would let a guard and an adapter disagree
+    about the same symbol's tick grid."""
+    exchange = make_exchange(FakeExchangeApi({}), bus=InMemoryBus(), clock=ManualClock())
+
+    specs = exchange.instrument_specs()
+
+    assert specs == {"BTC": BTC_SPEC}
+    assert specs is not UNIVERSE.specs
+
+
+# Which test claims each ``Exchange`` member for *this* adapter. The gate below
+# asserts it against the Protocol itself, so it cannot quietly fall behind. Two
+# claims live in the sibling module that owns their subject rather than here —
+# the gate reads the whole suite directory, not this file.
+_SEAM_CLAIMS = {
+    "start": "test_connecting_asks_the_venue_for_nothing_because_posting_is_request_scoped",
+    "stop": "test_the_venue_link_is_released_without_a_start_having_run",
+    "place": "test_market_buy_places_an_aggressive_ioc_limit_at_the_bounded_price",
+    "cancel": "test_cancel_sends_a_signed_cancel_by_cloid_and_reports_cancelled",
+    "fetch_order": "test_fetch_order_bundles_the_venue_status_and_fills_into_one_view",
+    # test_account.py — the module that owns what qualifies an account id.
+    "account_spec": "test_the_account_id_is_qualified_by_venue_network_and_address",
+    "instrument_specs": "test_the_venue_hands_out_the_meta_sourced_specs_by_copy",
+}
+
+
+def test_every_exchange_member_carries_a_claim_in_the_hyperliquid_suite() -> None:
+    """The completeness gate the ``isinstance`` check above cannot be — the live
+    arm of the same gate the paper suite runs.
+
+    It earned its place immediately: ``instrument_specs()`` was on this adapter
+    with no test of its own, reached only sideways through ``build_engine``'s
+    wiring, and the gate is what named the omission."""
+    assert_every_member_is_claimed(Exchange, _SEAM_CLAIMS, suite=Path(__file__).parent)

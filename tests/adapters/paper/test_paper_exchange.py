@@ -8,9 +8,11 @@ optimistic, zero-slippage, full-fill: no RNG at all.
 
 import asyncio
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from ledgers import GENESIS
+from seam_claims import assert_every_member_is_claimed
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
@@ -579,10 +581,36 @@ def test_the_paper_venue_satisfies_the_exchange_seam() -> None:
     """Conformance asserted at the adapter, as both bus adapters assert theirs.
 
     ``Exchange`` is ``runtime_checkable``, so this is precisely a member-presence
-    check — the completeness gate the seam gets for free: a member added to the
-    Protocol fails here for whichever adapter was left behind, without anyone
-    maintaining a transcribed list of what the seam contains.
+    check: a member added to the Protocol fails here for whichever adapter was
+    left behind, without anyone maintaining a transcribed list of what the seam
+    contains. The half it cannot see — a member every adapter implements but no
+    test asserts — is what ``_SEAM_CLAIMS`` below covers.
     """
     exchange, _bus, _clock, _reports = _harness()
 
     assert isinstance(exchange, Exchange)
+
+
+# Which test claims each ``Exchange`` member for *this* adapter. Not a second
+# copy of the seam: the gate below asserts it against the Protocol itself, so a
+# new member cannot arrive without someone naming what asserts it here.
+_SEAM_CLAIMS = {
+    "start": "test_the_lifecycle_pair_reaches_nothing_because_the_one_link_is_constructed",
+    "stop": "test_the_paper_venue_releases_without_a_start_and_keeps_its_book",
+    "place": "test_market_order_fills_at_the_latest_tick_price",
+    "cancel": "test_cancel_removes_a_resting_order_and_reports_cancelled",
+    "fetch_order": "test_fetch_order_reports_a_resting_limit_as_live",
+    "account_spec": "test_the_paper_venue_declares_a_two_segment_account_id_and_its_genesis",
+    "instrument_specs": "test_instrument_specs_exposes_the_configured_specs",
+}
+
+
+def test_every_exchange_member_carries_a_claim_in_the_paper_suite() -> None:
+    """The completeness gate the ``isinstance`` check above cannot be.
+
+    Both adapters must implement a new seam member for the engine to run at all,
+    so conformance passes the moment the member exists — while nothing asserts
+    what it *does* on this venue. Four more members are queued (#177, #173,
+    #174); each arrives cheaper against a gate that names the omission than
+    against a reviewer who has to notice it."""
+    assert_every_member_is_claimed(Exchange, _SEAM_CLAIMS, suite=Path(__file__).parent)
