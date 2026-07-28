@@ -1,11 +1,11 @@
-"""Shared record (de)serialization for the ``Store`` adapters (ADR-0019).
+"""Shared row shape for the ``Store`` adapters (ADR-0019).
 
 Both ``SQLiteStore`` and ``PostgresStore`` persist the same rows: the same
 columns, the same JSON encoding of the applied-event dedup set and the
-transition history, the same ``Decimal``-as-``TEXT`` money mapping. Only the SQL
-*dialect* differs — placeholder syntax and the upsert clause. This module owns
-the field mapping so the two backends cannot drift on what a row *is*; each
-backend keeps only its own SQL.
+transition history, the same ``Decimal``-as-``TEXT`` money mapping, and the same
+upsert semantics. This module owns all of it, so the two backends cannot drift
+on what a row *is* or on how it is written; each backend keeps only what is
+genuinely per-dialect — the parameter marker, and the DDL's column types.
 
 Money is written ``str(value)`` and read ``Decimal(text)``, exact in
 *representation* rather than merely in numeric value: trailing zeros, ``-0`` and
@@ -14,8 +14,10 @@ exponent (ADR-0043 §7).
 """
 
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from decimal import Decimal
+from types import MappingProxyType
 from typing import Any
 
 from tickwright.domain import Account, Order, OrderState, OrderType, Position, Side
@@ -39,6 +41,15 @@ RECORD_COLUMNS: tuple[str, ...] = (
     "cancel_signal_id",
     "applied_event_ids",
     "history",
+)
+
+RECORD_KEY_COLUMNS: tuple[str, ...] = ("cloid",)
+
+# What an upsert may move: every column but the key it collided on. A saga row
+# has no write-once trio — recovery rebuilds from the current record, so every
+# non-key column follows the incoming order.
+RECORD_UPDATE_COLUMNS: tuple[str, ...] = tuple(
+    column for column in RECORD_COLUMNS if column not in RECORD_KEY_COLUMNS
 )
 
 # What ``get_order`` / ``all_orders`` select to rebuild an ``Order`` — every
@@ -130,6 +141,11 @@ ACCOUNT_COLUMNS: tuple[str, ...] = (
 
 ACCOUNT_COLUMN_LIST = ", ".join(ACCOUNT_COLUMNS)
 
+# The key is the constraint itself: ``CHECK (id = 1)`` is what makes the account
+# one row (ADR-0043 §3), so ``id`` is a literal in the statement rather than a
+# column any caller writes.
+ACCOUNT_KEY_COLUMNS: tuple[str, ...] = ("id",)
+
 # What an upsert may move: everything but the write-once trio and the key.
 ACCOUNT_UPDATE_COLUMNS: tuple[str, ...] = ("cash", "ts_ns")
 
@@ -213,6 +229,8 @@ def restore_position(row: Sequence[Any]) -> Position:
 # ADR-0029's ``Decimal``-as-``TEXT`` rule does not reach it.
 FUNDING_MARK_COLUMNS: tuple[str, ...] = ("symbol", "last_funding_ts_ns", "ts_ns")
 
+FUNDING_MARK_KEY_COLUMNS: tuple[str, ...] = ("symbol",)
+
 FUNDING_MARK_UPDATE_COLUMNS: tuple[str, ...] = ("last_funding_ts_ns", "ts_ns")
 
 
@@ -229,4 +247,98 @@ def restore_account(row: Sequence[Any]) -> Account:
         genesis_collateral=Decimal(row[1]),
         genesis_ts_ns=row[2],
         cash=Decimal(row[3]),
+    )
+
+
+_NO_LITERALS: Mapping[str, str] = MappingProxyType({})
+
+
+def _upsert(
+    *,
+    table: str,
+    columns: Sequence[str],
+    key_columns: Sequence[str],
+    update_columns: Sequence[str],
+    placeholder: str,
+    literals: Mapping[str, str] = _NO_LITERALS,
+) -> str:
+    """One ``INSERT … ON CONFLICT … DO UPDATE``, in the caller's dialect.
+
+    ``columns`` are the parameterized columns in write-tuple order, so the
+    statement and the tuple are rendered from one list and cannot fall out of
+    step. ``literals`` are columns written as SQL literals instead — the
+    ``account`` row's ``id = 1``, which is a constraint (ADR-0043 §3) rather than
+    a value any caller supplies.
+
+    ``update_columns`` is the load-bearing argument: it is what a collision may
+    move. Every non-key column for a saga or position row; every column but the
+    key *and* the write-once trio for the account row, which is what "written
+    once, with the row; never updated" means in DDL.
+
+    ``EXCLUDED`` is spelled once, uppercase — SQL keywords are case-insensitive,
+    so both backends read the same text and the statement stays one string.
+    """
+    return (
+        f"INSERT INTO {table} ({', '.join((*literals, *columns))}) "
+        f"VALUES ({', '.join((*literals.values(), *([placeholder] * len(columns))))}) "
+        f"ON CONFLICT ({', '.join(key_columns)}) DO UPDATE SET "
+        + ", ".join(f"{column} = EXCLUDED.{column}" for column in update_columns)
+    )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Upserts:
+    """Every durable write the store makes, rendered for one backend's dialect.
+
+    One object rather than four constants per adapter, because the four
+    statements express one decision — what a row is, and which of its columns a
+    re-write may move — and that decision has no per-backend half. The adapter
+    holds the dialect; this holds the semantics.
+    """
+
+    order: str
+    account: str
+    position: str
+    funding_mark: str
+
+
+def upserts_for(placeholder: str) -> Upserts:
+    """The store's four upserts, parameterized by ``placeholder`` (``?`` / ``%s``).
+
+    That marker is the whole of what used to differ between the two adapters'
+    write SQL, which was otherwise transcribed twice from these same tuples. A
+    new ledger table now adds a field here and is written identically by both
+    backends, rather than by two hand-kept statements that agree right up until
+    one of them is edited.
+    """
+    return Upserts(
+        order=_upsert(
+            table="orders",
+            columns=RECORD_COLUMNS,
+            key_columns=RECORD_KEY_COLUMNS,
+            update_columns=RECORD_UPDATE_COLUMNS,
+            placeholder=placeholder,
+        ),
+        account=_upsert(
+            table="account",
+            columns=ACCOUNT_COLUMNS,
+            key_columns=ACCOUNT_KEY_COLUMNS,
+            update_columns=ACCOUNT_UPDATE_COLUMNS,
+            placeholder=placeholder,
+            literals={"id": "1"},
+        ),
+        position=_upsert(
+            table="positions",
+            columns=POSITION_COLUMNS,
+            key_columns=POSITION_KEY_COLUMNS,
+            update_columns=POSITION_UPDATE_COLUMNS,
+            placeholder=placeholder,
+        ),
+        funding_mark=_upsert(
+            table="funding_marks",
+            columns=FUNDING_MARK_COLUMNS,
+            key_columns=FUNDING_MARK_KEY_COLUMNS,
+            update_columns=FUNDING_MARK_UPDATE_COLUMNS,
+            placeholder=placeholder,
+        ),
     )

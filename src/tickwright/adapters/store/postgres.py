@@ -5,8 +5,10 @@ The KafkaBus pairing's durability half: identical saga *and* ledger semantics to
 suite. The same six tables — three for the saga and its neighbours, three for
 the ADR-0043 accounting ledger — the same derived seq high-water (no separate
 table), and no processed-event table: dedup is ``Order.apply``'s job (ADR-0025).
-The field mapping is shared with ``SQLiteStore`` (``_records``); only the SQL
-dialect — ``%s`` placeholders and ``ON CONFLICT`` upserts — lives here.
+The row shape — the field mapping *and* the upsert semantics — is shared with
+``SQLiteStore`` (``_records``); what lives here is the dialect it is rendered in
+(``%s`` placeholders), the column types the DDL needs (``BIGINT``, ``BYTEA``,
+``BOOLEAN``) and this driver's transaction and cursor handling.
 
 Money stays ``TEXT`` here rather than ``NUMERIC`` (ADR-0043 §7). ``NUMERIC``
 normalises representation — ``1000`` for ``1E+3``, ``0.00000000`` for ``0E-8`` —
@@ -38,16 +40,8 @@ from tickwright.domain import (
 
 from ._records import (
     ACCOUNT_COLUMN_LIST,
-    ACCOUNT_COLUMNS,
-    ACCOUNT_UPDATE_COLUMNS,
-    FUNDING_MARK_COLUMNS,
-    FUNDING_MARK_UPDATE_COLUMNS,
     POSITION_COLUMN_LIST,
-    POSITION_COLUMNS,
-    POSITION_KEY_COLUMNS,
-    POSITION_UPDATE_COLUMNS,
     READ_COLUMN_LIST,
-    RECORD_COLUMNS,
     account_values,
     funding_mark_values,
     next_history,
@@ -57,6 +51,7 @@ from ._records import (
     restore_history,
     restore_order,
     restore_position,
+    upserts_for,
 )
 
 # Individual DDL statements: psycopg's extended protocol runs one command per
@@ -130,38 +125,10 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     """,
 )
 
-# Upsert built from the shared column list so it can never drift from the write
-# tuple: insert every column, and on a cloid collision overwrite each non-key
-# column with the incoming value.
-_UPSERT_ORDER = (
-    f"INSERT INTO orders ({', '.join(RECORD_COLUMNS)}) "
-    f"VALUES ({', '.join(['%s'] * len(RECORD_COLUMNS))}) "
-    "ON CONFLICT (cloid) DO UPDATE SET "
-    + ", ".join(f"{column} = EXCLUDED.{column}" for column in RECORD_COLUMNS if column != "cloid")
-)
-
-# The account upsert. Only ``ACCOUNT_UPDATE_COLUMNS`` are overwritten: the
-# write-once trio (ADR-0043 §3) is inserted with the row and never moved.
-_UPSERT_ACCOUNT = (
-    f"INSERT INTO account (id, {ACCOUNT_COLUMN_LIST}) "
-    f"VALUES (1, {', '.join(['%s'] * len(ACCOUNT_COLUMNS))}) "
-    "ON CONFLICT (id) DO UPDATE SET "
-    + ", ".join(f"{column} = EXCLUDED.{column}" for column in ACCOUNT_UPDATE_COLUMNS)
-)
-
-_UPSERT_POSITION = (
-    f"INSERT INTO positions ({POSITION_COLUMN_LIST}) "
-    f"VALUES ({', '.join(['%s'] * len(POSITION_COLUMNS))}) "
-    f"ON CONFLICT ({', '.join(POSITION_KEY_COLUMNS)}) DO UPDATE SET "
-    + ", ".join(f"{column} = EXCLUDED.{column}" for column in POSITION_UPDATE_COLUMNS)
-)
-
-_UPSERT_FUNDING_MARK = (
-    f"INSERT INTO funding_marks ({', '.join(FUNDING_MARK_COLUMNS)}) "
-    f"VALUES ({', '.join(['%s'] * len(FUNDING_MARK_COLUMNS))}) "
-    "ON CONFLICT (symbol) DO UPDATE SET "
-    + ", ".join(f"{column} = EXCLUDED.{column}" for column in FUNDING_MARK_UPDATE_COLUMNS)
-)
+# Every write this adapter makes, rendered from the shared row shape so it can
+# never drift from the write tuple or from ``SQLiteStore``. ``%s`` is the whole
+# of this backend's contribution.
+_UPSERTS = upserts_for("%s")
 
 
 class PostgresStore:
@@ -198,7 +165,7 @@ class PostgresStore:
             "SELECT history FROM orders WHERE cloid = %s", (order.cloid,)
         ).fetchone()
         history = next_history(row[0] if row else None, order.state, ts_ns)
-        self._conn.execute(_UPSERT_ORDER, record_values(order, history=history))
+        self._conn.execute(_UPSERTS.order, record_values(order, history=history))
 
     def get_order(self, cloid: str) -> Order | None:
         """Rebuild the checkpointed saga for ``cloid``, or ``None`` if unknown."""
@@ -278,14 +245,14 @@ class PostgresStore:
             with self._conn.transaction(), self._conn.cursor() as cursor:
                 if order is not None:
                     self._write_order(order, ts_ns=ts_ns)
-                cursor.execute(_UPSERT_ACCOUNT, account_values(account, ts_ns=ts_ns))
+                cursor.execute(_UPSERTS.account, account_values(account, ts_ns=ts_ns))
                 cursor.executemany(
-                    _UPSERT_POSITION,
+                    _UPSERTS.position,
                     [position_values(position, ts_ns=ts_ns) for position in positions],
                 )
                 if funding_mark is not None:
                     cursor.execute(
-                        _UPSERT_FUNDING_MARK, funding_mark_values(funding_mark, ts_ns=ts_ns)
+                        _UPSERTS.funding_mark, funding_mark_values(funding_mark, ts_ns=ts_ns)
                     )
         except psycopg.Error as exc:
             raise InvariantViolation(f"ledger checkpoint at ts_ns={ts_ns} refused: {exc}") from exc

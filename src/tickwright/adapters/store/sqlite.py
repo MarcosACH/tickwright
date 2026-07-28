@@ -15,6 +15,11 @@ not an event log.
 Each checkpoint is one transaction — the write the crash-safety argument rests
 on — and ``checkpoint_ledger`` widens that to one transaction across the order
 row and the ledger together, because a fill moves both.
+
+The row shape — the field mapping *and* the upsert semantics — is shared with
+``PostgresStore`` (``_records``); what lives here is the dialect it is rendered
+in (``?`` placeholders), the column types the DDL needs, and this driver's
+transaction handling.
 """
 
 import sqlite3
@@ -34,14 +39,7 @@ from tickwright.domain import (
 
 from ._records import (
     ACCOUNT_COLUMN_LIST,
-    ACCOUNT_COLUMNS,
-    ACCOUNT_UPDATE_COLUMNS,
-    FUNDING_MARK_COLUMNS,
-    FUNDING_MARK_UPDATE_COLUMNS,
     POSITION_COLUMN_LIST,
-    POSITION_COLUMNS,
-    POSITION_KEY_COLUMNS,
-    POSITION_UPDATE_COLUMNS,
     READ_COLUMN_LIST,
     RECORD_COLUMNS,
     account_values,
@@ -53,6 +51,7 @@ from ._records import (
     restore_history,
     restore_order,
     restore_position,
+    upserts_for,
 )
 
 _SCHEMA = """
@@ -112,30 +111,10 @@ CREATE TABLE IF NOT EXISTS account (
 );
 """
 
-# The account upsert, built from the shared column list so it cannot drift from
-# the write tuple. Deliberately not ``INSERT OR REPLACE`` like the saga row: a
-# replace rewrites every column, and the write-once trio (ADR-0043 §3) must
-# survive an upsert, so only ``ACCOUNT_UPDATE_COLUMNS`` are overwritten.
-_UPSERT_ACCOUNT = (
-    f"INSERT INTO account (id, {ACCOUNT_COLUMN_LIST}) "
-    f"VALUES (1, {', '.join('?' * len(ACCOUNT_COLUMNS))}) "
-    "ON CONFLICT (id) DO UPDATE SET "
-    + ", ".join(f"{column} = excluded.{column}" for column in ACCOUNT_UPDATE_COLUMNS)
-)
-
-_UPSERT_POSITION = (
-    f"INSERT INTO positions ({POSITION_COLUMN_LIST}) "
-    f"VALUES ({', '.join('?' * len(POSITION_COLUMNS))}) "
-    f"ON CONFLICT ({', '.join(POSITION_KEY_COLUMNS)}) DO UPDATE SET "
-    + ", ".join(f"{column} = excluded.{column}" for column in POSITION_UPDATE_COLUMNS)
-)
-
-_UPSERT_FUNDING_MARK = (
-    f"INSERT INTO funding_marks ({', '.join(FUNDING_MARK_COLUMNS)}) "
-    f"VALUES ({', '.join('?' * len(FUNDING_MARK_COLUMNS))}) "
-    "ON CONFLICT (symbol) DO UPDATE SET "
-    + ", ".join(f"{column} = excluded.{column}" for column in FUNDING_MARK_UPDATE_COLUMNS)
-)
+# Every write this adapter makes, rendered from the shared row shape so it can
+# never drift from the write tuple or from ``PostgresStore``. ``?`` is the whole
+# of this backend's contribution.
+_UPSERTS = upserts_for("?")
 
 
 class SQLiteStore:
@@ -250,14 +229,14 @@ class SQLiteStore:
             with self._conn:
                 if order is not None:
                     self._write_order(order, ts_ns=ts_ns)
-                self._conn.execute(_UPSERT_ACCOUNT, account_values(account, ts_ns=ts_ns))
+                self._conn.execute(_UPSERTS.account, account_values(account, ts_ns=ts_ns))
                 self._conn.executemany(
-                    _UPSERT_POSITION,
+                    _UPSERTS.position,
                     [position_values(position, ts_ns=ts_ns) for position in positions],
                 )
                 if funding_mark is not None:
                     self._conn.execute(
-                        _UPSERT_FUNDING_MARK, funding_mark_values(funding_mark, ts_ns=ts_ns)
+                        _UPSERTS.funding_mark, funding_mark_values(funding_mark, ts_ns=ts_ns)
                     )
         except sqlite3.Error as exc:
             raise InvariantViolation(f"ledger checkpoint at ts_ns={ts_ns} refused: {exc}") from exc
