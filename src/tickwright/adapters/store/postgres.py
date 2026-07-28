@@ -289,6 +289,13 @@ class PostgresStore:
         ).fetchall()
         return [restore_position(row) for row in rows]
 
+    def has_orders(self) -> bool:
+        """Whether any saga history exists at all — the existence question the
+        startup refusal asks before ``cache.rebuild()`` (ADR-0043 §9). Answering
+        it with ``all_orders()`` would deserialize every saga in the store twice
+        on every start, on the recovery path."""
+        return self._conn.execute("SELECT 1 FROM orders LIMIT 1").fetchone() is not None
+
     def funding_mark(self, symbol: str) -> int | None:
         """The last funding boundary applied to ``symbol``, or ``None`` if none
         ever was — the "never accrued" state ADR-0043 §3 encodes as row absence,

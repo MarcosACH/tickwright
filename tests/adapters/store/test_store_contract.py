@@ -488,3 +488,43 @@ def test_the_funding_mark_is_absent_until_written_and_then_advances(
 
     with store_backend.open() as reopened:
         assert reopened.funding_mark("BTC") == 1_800
+
+
+def test_has_orders_reports_whether_any_saga_history_exists(store_backend: Backend) -> None:
+    """A ``bool``, and a member of its own rather than a reuse of ``all_orders()``
+    (ADR-0043 §9): the startup check runs *before* ``cache.rebuild()``, and
+    answering an existence question with the mass-read would deserialize every
+    saga in the store twice on every start — on the recovery path, where the
+    engine is least able to afford it. The ``bool`` also keeps the check honest
+    about what it is entitled to know: nothing about the orders themselves."""
+    with store_backend.open() as store:
+        assert store.has_orders() is False
+
+        store.checkpoint(_order(), ts_ns=1_000)
+
+        assert store.has_orders() is True
+
+    with store_backend.open() as reopened:
+        assert reopened.has_orders() is True
+
+
+def test_a_store_with_order_history_and_no_ledger_opens_and_reads_it_empty(
+    store_backend: Backend,
+) -> None:
+    """The DDL is purely additive — three new tables, no change to the existing
+    three — so a store written before the ledger gains empty tables on next open
+    and that is the entire migration (ADR-0043 §8). No schema-version table, no
+    migration framework; the cost named rather than hidden is that the first
+    *non*-additive change needs per-backend handling.
+
+    The state this reads is the one a previous release leaves behind, and it is
+    exactly the pair the paper-path startup refusal keys on: order history with
+    no account row. Refusing it is a later slice's; opening it is this one's."""
+    with store_backend.open() as store:
+        store.checkpoint(_order(), ts_ns=1_000)
+
+    with store_backend.open() as reopened:
+        assert reopened.has_orders() is True
+        assert reopened.load_account() is None
+        assert reopened.all_positions() == []
+        assert reopened.funding_mark("BTC") is None

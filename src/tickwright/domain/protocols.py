@@ -273,6 +273,17 @@ class Store(Protocol):
         ``Portfolio`` seam and never in the store."""
         ...
 
+    def has_orders(self) -> bool:
+        """Whether any saga history exists at all (ADR-0043 §9).
+
+        A member of its own rather than a reuse of ``all_orders()``: the startup
+        refusal asks this **before** ``cache.rebuild()``, and answering an
+        existence question with the mass-read would deserialize every saga in
+        the store twice on every start, on the recovery path. The ``bool`` also
+        keeps the check honest about what it is entitled to know — nothing about
+        the orders themselves, which belong to the ``Cache``'s recovery."""
+        ...
+
     def funding_mark(self, symbol: str) -> int | None:
         """The last funding boundary applied to ``symbol``, or ``None`` if none
         ever was (ADR-0043 §5.2).
