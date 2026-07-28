@@ -2,7 +2,8 @@
 
 ``ReplayFeed`` tick → ``SingleShotMarketStrategy`` MARKET ``PlaceSignal`` →
 ``ExecutionManager`` → ``PaperExchange`` fill at the latest tick → strategy sees
-``OrderFilled``. Zero external services, zero sleeps: the whole run is on
+``OrderFilled`` **and reads the position that fill produced** through the
+``Portfolio`` seam. Zero external services, zero sleeps: the whole run is on
 ``ManualClock``, driven by a JSONL file. The canonical event cascade is
 asserted, and the full sequence is identical across repeated runs.
 
@@ -28,6 +29,7 @@ from tickwright.adapters.feed import ReplayFeed
 from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
+    Account,
     Event,
     ExecutionReport,
     FillReport,
@@ -44,7 +46,13 @@ from tickwright.domain import (
 )
 from tickwright.engine.cache import Cache
 from tickwright.engine.execution import ExecutionManager
+from tickwright.engine.portfolio import PortfolioProjection
 from tickwright.strategies import SingleShotMarketStrategy
+
+# The paper account's opening cash. The venue requires it (ADR-0042 §1: the
+# engine supplies no collateral of its own); these tests do not exercise the
+# ledger, so one shared declaration keeps every wiring site honest and quiet.
+_GENESIS = Decimal("100000")
 
 _ROWS = [
     {
@@ -76,11 +84,25 @@ def _run(path: Path, backend: str) -> tuple[list[Event], SingleShotMarketStrateg
     bus = make_bus(backend)
     clock = ManualClock()
     store = SQLiteStore(":memory:")
-    exchange = PaperExchange(bus=bus, clock=clock, fill_model=ImmediateFillModel())
+    exchange = PaperExchange(
+        bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+    )
     cache = Cache(store=store)
-    manager = ExecutionManager(bus=bus, clock=clock, exchange=exchange, cache=cache)
+    spec = exchange.account_spec()
+    assert spec.genesis_collateral is not None  # the paper venue always declares one
+    projection = PortfolioProjection(
+        account=Account.open(spec, genesis_collateral=spec.genesis_collateral, ts_ns=0)
+    )
+    manager = ExecutionManager(
+        bus=bus, clock=clock, exchange=exchange, cache=cache, portfolio=projection
+    )
     strategy = SingleShotMarketStrategy(
-        strategy_id="trivial", bus=bus, clock=clock, side=Side.BUY, quantity=Decimal("0.5")
+        strategy_id="trivial",
+        bus=bus,
+        clock=clock,
+        side=Side.BUY,
+        quantity=Decimal("0.5"),
+        portfolio=projection.for_strategy("trivial"),
     )
     feed = ReplayFeed(path=path, bus=bus, clock=clock)
 
@@ -115,6 +137,34 @@ def test_tracer_delivers_order_filled_to_the_strategy(tmp_path: Path, backend: s
     assert fill.price == Decimal("42000")
     assert fill.quantity == Decimal("0.5")
     assert fill.signal_id == "trivial:BTC:1"
+
+
+@pytest.mark.parametrize("backend", BUS_BACKENDS)
+def test_tracer_delivers_the_position_that_fill_produced_to_the_strategy(
+    tmp_path: Path, backend: str
+) -> None:
+    """The economic half of the tracer: the strategy reads its own position back
+    through the ``Portfolio`` seam **in the same handler** that saw the fill.
+
+    That read is coherent by construction rather than by timing — the projection
+    is the fill's *writer*, applied synchronously on the fill-apply path, so both
+    read-models have already moved when the ``OrderFilled`` is published
+    (ADR-0035, ADR-0045 §1).
+    """
+    path = _write_ticks(tmp_path / "ticks.jsonl")
+    _, strategy, _ = _run(path, backend)
+
+    assert len(strategy.positions) == 1
+    view = strategy.positions[0]
+    assert view is not None
+    assert view.symbol == "BTC"
+    assert view.size == Decimal("0.5")
+    assert view.entry_price == Decimal("42000")
+    # Opening a leg realizes nothing, and the Tier-1 lines no slice moves yet
+    # still read numbers rather than ``None`` (ADR-0041 §6).
+    assert view.realized_pnl == Decimal("0")
+    assert view.fees == Decimal("0")
+    assert view.funding == Decimal("0")
 
 
 @pytest.mark.parametrize("backend", BUS_BACKENDS)

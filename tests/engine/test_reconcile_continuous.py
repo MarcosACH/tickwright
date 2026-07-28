@@ -16,12 +16,14 @@ import pytest
 import structlog.testing
 from hypothesis import given
 from hypothesis import strategies as st
+from ledgers import ledger
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
+    AccountSpec,
     AggressorSide,
     Exchange,
     ExecutionReport,
@@ -47,6 +49,11 @@ from tickwright.engine.cache import Cache
 from tickwright.engine.execution import ExecutionManager
 from tickwright.engine.reconcile import ReconcileConfig, Reconciler
 from tickwright.observability.testing import capture_events
+
+# The paper account's opening cash. The venue requires it (ADR-0042 §1: the
+# engine supplies no collateral of its own); these tests do not exercise the
+# ledger, so one shared declaration keeps every wiring site honest and quiet.
+_GENESIS = Decimal("100000")
 
 
 def _tick(price: str, ts: int = 1_000) -> MarketTick:
@@ -91,7 +98,9 @@ def _saga(cloid: str, state: OrderState) -> Order:
 def _surviving_venue(clock: ManualClock) -> tuple[PaperExchange, InMemoryBus]:
     """A venue whose acks we never heard: its bus has no engine listeners."""
     dead_bus = InMemoryBus()
-    exchange = PaperExchange(bus=dead_bus, clock=clock, fill_model=ImmediateFillModel())
+    exchange = PaperExchange(
+        bus=dead_bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+    )
     return exchange, dead_bus
 
 
@@ -106,7 +115,9 @@ def _wire(
     bus = InMemoryBus()
     cache = Cache(store=store)
     cache.rebuild()
-    manager = ExecutionManager(bus=bus, clock=clock, exchange=exchange, cache=cache)
+    manager = ExecutionManager(
+        bus=bus, clock=clock, exchange=exchange, cache=cache, portfolio=ledger()
+    )
     bus.subscribe(Signal, manager.on_signal)
     bus.subscribe(ExecutionReport, manager.on_execution_report)
     events: list[OrderEvent] = []
@@ -260,6 +271,9 @@ class _ForgetfulVenue:
 
     async def fetch_order(self, cloid: str) -> VenueOrderView | None:
         return self.views.get(cloid, VenueOrderView(status=None))
+
+    def account_spec(self) -> AccountSpec:
+        return AccountSpec(account_id="fake-venue")
 
     def instrument_specs(self) -> Mapping[str, InstrumentSpec]:
         return {}

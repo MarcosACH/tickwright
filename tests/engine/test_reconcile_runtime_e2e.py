@@ -16,12 +16,15 @@ from collections.abc import Mapping
 from decimal import Decimal
 from pathlib import Path
 
+from ledgers import ledger
+
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.feed import ReplayFeed
 from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
+    AccountSpec,
     ComponentState,
     InstrumentSpec,
     MarketTick,
@@ -38,6 +41,11 @@ from tickwright.engine.reconcile import ReconcileConfig
 from tickwright.engine.runner import Engine, EngineConfig
 from tickwright.observability.testing import capture_events
 from tickwright.strategies import SingleShotLimitStrategy
+
+# The paper account's opening cash. The venue requires it (ADR-0042 §1: the
+# engine supplies no collateral of its own); these tests do not exercise the
+# ledger, so one shared declaration keeps every wiring site honest and quiet.
+_GENESIS = Decimal("100000")
 
 _NS = 1_000_000_000
 _CLOID = derive_cloid("trivial:BTC:1")
@@ -86,7 +94,9 @@ def test_a_missed_fill_landing_mid_run_is_healed_by_the_inflight_cadence(
         # The severed report link: the venue acks and fills into its own
         # private bus, so the engine sees nothing it doesn't reconcile for.
         venue_bus = InMemoryBus()
-        venue = PaperExchange(bus=venue_bus, clock=clock, fill_model=ImmediateFillModel())
+        venue = PaperExchange(
+            bus=venue_bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+        )
         feed = ReplayFeed(path=ticks, bus=bus, clock=clock)
         engine = Engine(
             bus=bus,
@@ -94,6 +104,7 @@ def test_a_missed_fill_landing_mid_run_is_healed_by_the_inflight_cadence(
             store=store,
             exchange=venue,
             feed=feed,
+            portfolio=ledger(),
             config=EngineConfig(reconcile=ReconcileConfig()),
         )
         strategy = SingleShotLimitStrategy(
@@ -163,6 +174,9 @@ class _VanishingLinkExchange:
     async def cancel(self, cloid: str) -> None:
         await self._venue.cancel(cloid)
 
+    def account_spec(self) -> AccountSpec:
+        return self._venue.account_spec()
+
     def instrument_specs(self) -> Mapping[str, InstrumentSpec]:
         return self._venue.instrument_specs()
 
@@ -203,7 +217,9 @@ def test_a_vanished_order_is_ghosted_only_after_grace_and_a_none_read_freezes(
         bus = InMemoryBus()
         clock = ManualClock()
         store = SQLiteStore(db)
-        venue = PaperExchange(bus=bus, clock=clock, fill_model=ImmediateFillModel())
+        venue = PaperExchange(
+            bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+        )
         feed = ReplayFeed(path=ticks, bus=bus, clock=clock)
         engine = Engine(
             bus=bus,
@@ -212,6 +228,7 @@ def test_a_vanished_order_is_ghosted_only_after_grace_and_a_none_read_freezes(
             exchange=_VanishingLinkExchange(venue, clock),
             feed=feed,
             config=EngineConfig(reconcile=config),
+            portfolio=ledger(),
         )
         strategy = SingleShotLimitStrategy(
             strategy_id="trivial",

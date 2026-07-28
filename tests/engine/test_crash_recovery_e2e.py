@@ -19,6 +19,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from ledgers import ledger
 from store_backends import (
     STORE_BACKEND_PARAMS,
     PostgresBackend,
@@ -31,6 +32,7 @@ from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.feed import ReplayFeed
 from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.domain import (
+    AccountSpec,
     AggressorSide,
     ExecutionReport,
     InstrumentSpec,
@@ -55,6 +57,11 @@ from tickwright.engine.cache import Cache
 from tickwright.engine.execution import ExecutionManager
 from tickwright.engine.reconcile import ReconcileConfig, Reconciler
 from tickwright.strategies import SingleShotLimitStrategy
+
+# The paper account's opening cash. The venue requires it (ADR-0042 §1: the
+# engine supplies no collateral of its own); these tests do not exercise the
+# ledger, so one shared declaration keeps every wiring site honest and quiet.
+_GENESIS = Decimal("100000")
 
 _CLOID = derive_cloid("trivial:BTC:1")
 
@@ -91,6 +98,9 @@ class _CrashingTransport:
 
     async def fetch_order(self, cloid: str) -> VenueOrderView | None:
         raise AssertionError("first life never fetches")
+
+    def account_spec(self) -> AccountSpec:
+        return self._venue.account_spec()
 
     def instrument_specs(self) -> Mapping[str, InstrumentSpec]:
         return self._venue.instrument_specs()
@@ -154,10 +164,16 @@ def _first_life(
     clock = ManualClock()
     store = backend.open()
     venue_bus = InMemoryBus()  # the venue's report link — dies with the process
-    venue = PaperExchange(bus=venue_bus, clock=clock, fill_model=ImmediateFillModel())
+    venue = PaperExchange(
+        bus=venue_bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+    )
     cache = Cache(store=store)
     manager = ExecutionManager(
-        bus=bus, clock=clock, exchange=_CrashingTransport(venue, pre_send=pre_send), cache=cache
+        bus=bus,
+        clock=clock,
+        exchange=_CrashingTransport(venue, pre_send=pre_send),
+        cache=cache,
+        portfolio=ledger(),
     )
     strategy = SingleShotLimitStrategy(
         strategy_id="trivial",
@@ -199,7 +215,9 @@ def _second_life(
     store = backend.open()
     cache = Cache(store=store)
     cache.rebuild()
-    manager = ExecutionManager(bus=bus, clock=clock, exchange=venue, cache=cache)
+    manager = ExecutionManager(
+        bus=bus, clock=clock, exchange=venue, cache=cache, portfolio=ledger()
+    )
     bus.subscribe(Signal, manager.on_signal)
     bus.subscribe(ExecutionReport, manager.on_execution_report)
     events: list[OrderEvent] = []

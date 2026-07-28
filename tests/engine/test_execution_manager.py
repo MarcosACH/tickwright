@@ -13,6 +13,7 @@ import random
 from decimal import Decimal
 
 import pytest
+from ledgers import ledger
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
@@ -49,6 +50,11 @@ from tickwright.domain import (
 from tickwright.domain.enums import OrderType
 from tickwright.engine.cache import Cache
 from tickwright.engine.execution import ExecutionManager
+
+# The paper account's opening cash. The venue requires it (ADR-0042 §1: the
+# engine supplies no collateral of its own); these tests do not exercise the
+# ledger, so one shared declaration keeps every wiring site honest and quiet.
+_GENESIS = Decimal("100000")
 
 
 def _market_signal(seq: int = 1) -> PlaceSignal:
@@ -116,9 +122,13 @@ def _harness() -> tuple[InMemoryBus, ManualClock, SQLiteStore, list[OrderEvent]]
     bus = InMemoryBus()
     clock = ManualClock(start_ns=1_000)
     store = SQLiteStore(":memory:")
-    exchange = PaperExchange(bus=bus, clock=clock, fill_model=ImmediateFillModel())
+    exchange = PaperExchange(
+        bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+    )
     cache = Cache(store=store)
-    manager = ExecutionManager(bus=bus, clock=clock, exchange=exchange, cache=cache)
+    manager = ExecutionManager(
+        bus=bus, clock=clock, exchange=exchange, cache=cache, portfolio=ledger()
+    )
 
     bus.subscribe(Signal, manager.on_signal)
     bus.subscribe(ExecutionReport, manager.on_execution_report)
@@ -623,10 +633,14 @@ def test_a_restart_rebuilt_cache_dedups_a_redelivered_place_signal() -> None:
     # second life rebuilds the projection from it (ADR-0009 recovery step 2).
     bus2 = InMemoryBus()
     clock2 = ManualClock(start_ns=2_000)
-    exchange2 = PaperExchange(bus=bus2, clock=clock2, fill_model=ImmediateFillModel())
+    exchange2 = PaperExchange(
+        bus=bus2, clock=clock2, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+    )
     cache2 = Cache(store=store)
     cache2.rebuild()
-    manager2 = ExecutionManager(bus=bus2, clock=clock2, exchange=exchange2, cache=cache2)
+    manager2 = ExecutionManager(
+        bus=bus2, clock=clock2, exchange=exchange2, cache=cache2, portfolio=ledger()
+    )
     bus2.subscribe(Signal, manager2.on_signal)
     bus2.subscribe(ExecutionReport, manager2.on_execution_report)
     second_life_events: list[OrderEvent] = []
@@ -647,9 +661,16 @@ def _stochastic_harness(
     bus = InMemoryBus()
     clock = ManualClock(start_ns=1_000)
     store = SQLiteStore(":memory:")
-    exchange = PaperExchange(bus=bus, clock=clock, fill_model=fill_model)  # type: ignore[arg-type]
+    exchange = PaperExchange(
+        bus=bus,
+        clock=clock,
+        fill_model=fill_model,  # type: ignore[arg-type]
+        genesis_collateral=_GENESIS,
+    )
     cache = Cache(store=store)
-    manager = ExecutionManager(bus=bus, clock=clock, exchange=exchange, cache=cache)
+    manager = ExecutionManager(
+        bus=bus, clock=clock, exchange=exchange, cache=cache, portfolio=ledger()
+    )
 
     bus.subscribe(Signal, manager.on_signal)
     bus.subscribe(ExecutionReport, manager.on_execution_report)
