@@ -105,9 +105,15 @@ auth, quirk translation — and importing no other adapter. It provides both a `
 - [ ] Put venue alignment in `start()` and release in `stop()`, never in `__init__` or a placement.
   The runner drives `start()` at ADR-0024 step 4 — after the bus, **before** the startup barrier — so
   a refusal there (an `InvariantViolation`) faults the process before any order can go out, and the
-  barrier reads an already-aligned venue. `stop()` is driven immediately after the feed is cut, so an
-  adapter-owned loop stops before the bus drains behind it; it must tolerate a `start()` that never
-  ran or refused, because the teardown releases either way.
+  barrier reads an already-aligned venue. Retry a transient venue blip inside the
+  `startup_reconciliation_timeout` budget yourself; the runner does not retry the call, so raising
+  spends the last of it. `stop()` is driven once the feed is cut **and** the reconcile cadences are
+  cancelled — nothing is left to call `fetch_order` on you — and still ahead of the bus drain, so an
+  adapter-owned loop stops before the bus closes under it.
+- [ ] Write `stop()` to tolerate both edges the runner's one teardown membership creates: a `start()`
+  that never ran or refused (the fault path releases either way), and a **second** call (a graceful
+  step that raises behind it faults the run, and the best-effort pass re-walks from the top). Release
+  what exists; make the second call a no-op.
 - [ ] Keep secrets env-only: never persist a signing key, and register it for log redaction.
 - [ ] Add the venue to the `feed` and `exchange` `Literal`s in
   [`app/config.py`](../src/tickwright/app/config.py).

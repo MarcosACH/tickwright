@@ -356,8 +356,8 @@ class Exchange(Protocol):
     returning them, so the ``ExecutionManager`` drives the FSM off venue facts.
 
     Lifecycle rides the seam because the runner drives it in its ordered
-    sequence (ADR-0024): ``start`` at step 4, ``stop`` immediately behind the
-    feed. The two are declared as a pair and read as one.
+    sequence (ADR-0024): ``start`` at step 4, ``stop`` behind the feed and the
+    reconcile cadences. The two are declared as a pair and read as one.
     """
 
     async def start(self) -> None:
@@ -368,20 +368,36 @@ class Exchange(Protocol):
         here precedes every order, and the barrier observes an already-aligned
         venue. A refusal is an ``InvariantViolation``: the engine faults and
         exits non-zero rather than trading against a venue it could not align.
+
+        Refusal and failure are not the same answer, and the split is the
+        adapter's to make (ADR-0024 barrier-failure policy, extended by
+        ADR-0044 §6 / ADR-0046 §3): a venue that *disagrees* with this config
+        refuses immediately and is never retried, while transient boot-window
+        venue I/O — a blip, a rate-limit — is retried with backoff inside the
+        ``startup_reconciliation_timeout`` budget before it becomes a refusal.
+        The runner does not retry this call; raising is how you spend the last
+        of that budget.
         """
         ...
 
     async def stop(self) -> None:
         """Release whatever ``start()`` connected (ADR-0024 reverse shutdown).
 
-        Driven immediately after the feed is cut, so an adapter-owned loop stops
-        before the bus drains behind it and cannot publish into a closing bus.
+        Driven once the feed is cut and the reconcile cadences are cancelled —
+        so nothing is left to call ``fetch_order`` on a released adapter — and
+        still ahead of the bus drain, so an adapter-owned loop stops before the
+        bus closes under it and cannot publish into a closing bus.
 
         **Safe on an adapter that never started**, the peer of ``EventBus.close``
         above: the faulted teardown walks the same ordered membership as the
         graceful one, so a ``start()`` that *refused* — or that never ran at all,
         because an earlier step faulted first — is still followed by this call.
         Release what exists; never assume a successful ``start()`` preceded you.
+
+        **Idempotent**, for the same reason read the other way: a graceful step
+        that raises *behind* this one faults the run, and the best-effort pass
+        re-walks the membership from the top — so the runner may drive this
+        twice in one shutdown. The second call must be a no-op, not a failure.
         """
         ...
 

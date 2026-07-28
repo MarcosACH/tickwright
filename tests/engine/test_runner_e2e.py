@@ -838,6 +838,56 @@ def test_a_venue_that_breaks_on_stop_is_recorded_and_the_teardown_carries_on(
     assert timeline == ["exchange.start", "feed.stop", "store.close"]
 
 
+class _StoreThatBreaksOnClose(_TimelineStore):
+    """The last teardown step, breaking — so the graceful pass fails *behind*
+    the venue release, which is the only way to reach the second one."""
+
+    def close(self) -> None:
+        self._timeline.append("store.close")
+        raise RuntimeError("the store would not close")
+
+
+def test_a_graceful_teardown_that_breaks_releases_the_venue_a_second_time(
+    tmp_path: Path,
+) -> None:
+    """Why ``Exchange.stop()`` must be idempotent: the two teardown paths are
+    one membership, and the faulted path walks it **from the top**. A graceful
+    step that raises behind the venue release (here the store's close) faults
+    the run, and the best-effort pass releases the venue again — so an adapter
+    is called twice in the one shutdown and may hold nothing the second time."""
+    timeline: list[str] = []
+
+    async def main() -> tuple[int, Engine]:
+        feed = _TimelineFeed(timeline)
+        engine = Engine(
+            bus=InMemoryBus(),
+            clock=ManualClock(),
+            store=_StoreThatBreaksOnClose(tmp_path / "saga.db", timeline),
+            exchange=_LifecycleRecordingVenue(timeline),
+            feed=feed,
+            portfolio=ledger(),
+        )
+        run = asyncio.create_task(engine.run())
+        await asyncio.wait_for(feed.started.wait(), timeout=5)
+        engine._stop_requested.set()
+        return await asyncio.wait_for(run, timeout=5), engine
+
+    exit_code, engine = asyncio.run(main())
+
+    assert exit_code != 0, "a teardown that breaks faults the run, graceful request or not"
+    assert engine.state is ComponentState.FAULTED
+    assert timeline.count("exchange.stop") == 2, "the release is driven once per teardown pass"
+    assert timeline == [
+        "exchange.start",
+        "feed.stop",
+        "exchange.stop",
+        "store.close",
+        "feed.stop",
+        "exchange.stop",
+        "store.close",
+    ]
+
+
 def test_graceful_stop_leaves_resting_live_orders_for_the_next_start_to_re_adopt(
     tmp_path: Path,
 ) -> None:
