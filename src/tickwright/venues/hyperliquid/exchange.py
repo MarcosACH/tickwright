@@ -96,8 +96,10 @@ class HyperliquidExchange:
 
     async def start(self) -> None:
         """Nothing to connect yet: placement is request-scoped HTTP and the
-        tick subscription is wired at construction. The venue-alignment reads
-        this step exists to host arrive with the leverage push (ADR-0044)."""
+        tick subscription is wired at construction. The venue alignment this
+        step exists to host arrives in order: the ``userAbstraction`` mode gate
+        first (ADR-0046 §3, which opens step 4 and gates everything after it),
+        then the leverage push (ADR-0044 §7)."""
         return None
 
     async def stop(self) -> None:
