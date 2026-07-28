@@ -17,7 +17,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from kafka_fakes import FakeKafkaBroker
-from ledgers import ledger
+from ledgers import GENESIS, ledger
 from structlog.typing import EventDict
 
 from tickwright.adapters.bus import InMemoryBus
@@ -46,11 +46,6 @@ from tickwright.engine.guard import RealGuard
 from tickwright.engine.runner import Engine, EngineConfig
 from tickwright.observability.testing import capture_events
 from tickwright.strategies import SingleShotLimitStrategy, SingleShotMarketStrategy
-
-# The paper account's opening cash. The venue requires it (ADR-0042 §1: the
-# engine supplies no collateral of its own); these tests do not exercise the
-# ledger, so one shared declaration keeps every wiring site honest and quiet.
-_GENESIS = Decimal("100000")
 
 _ROWS: list[dict[str, str | int]] = [
     {
@@ -83,7 +78,7 @@ async def _run_to_fill_then_stop(ticks: Path, db: Path) -> tuple[int, Engine]:
     clock = ManualClock()
     store = SQLiteStore(db)
     exchange = PaperExchange(
-        bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+        bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
     )
     feed = ReplayFeed(path=ticks, bus=bus, clock=clock)
     projection = ledger()
@@ -183,7 +178,7 @@ def test_sigterm_stops_the_engine_gracefully(tmp_path: Path) -> None:
         clock = ManualClock()
         store = SQLiteStore(tmp_path / "saga.db")
         exchange = PaperExchange(
-            bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+            bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
         )
         feed = ReplayFeed(path=ticks, bus=bus, clock=clock)
         engine = Engine(
@@ -227,7 +222,7 @@ def test_sigusr1_trips_the_kill_switch_and_sigusr2_resets_it(tmp_path: Path) -> 
         clock = ManualClock()
         store = SQLiteStore(tmp_path / "saga.db")
         venue = PaperExchange(
-            bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+            bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
         )
         feed = ReplayFeed(path=_write_ticks(tmp_path / "ticks.jsonl"), bus=bus, clock=clock)
         guard = RealGuard(specs={"BTC": spec}, store=store, clock=clock)
@@ -310,7 +305,7 @@ def test_shutdown_is_bounded_a_hung_teardown_faults_instead_of_hanging(tmp_path:
         clock = ManualClock()
         store = SQLiteStore(tmp_path / "saga.db")
         exchange = PaperExchange(
-            bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+            bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
         )
         engine = Engine(
             bus=bus,
@@ -344,7 +339,7 @@ def test_graceful_stop_cancels_a_still_running_feed(tmp_path: Path) -> None:
         clock = ManualClock()
         store = SQLiteStore(tmp_path / "saga.db")
         exchange = PaperExchange(
-            bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+            bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
         )
         feed = _BlockingFeed()
         engine = Engine(
@@ -373,7 +368,7 @@ def test_invariant_violation_faults_the_engine_and_exits_nonzero(tmp_path: Path)
         clock = ManualClock()
         store = SQLiteStore(tmp_path / "saga.db")
         exchange = PaperExchange(
-            bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+            bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
         )
         feed = ReplayFeed(path=ticks, bus=bus, clock=clock)
         # A real guard with no specs: the first placement is a composition-root
@@ -425,7 +420,7 @@ def test_a_broken_stop_hook_on_the_fault_path_is_recorded_not_swallowed(tmp_path
         clock = ManualClock()
         store = _StoreThatBreaksOnClose(tmp_path / "saga.db")
         exchange = PaperExchange(
-            bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+            bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
         )
         engine = Engine(
             bus=bus,
@@ -484,7 +479,7 @@ def test_the_runner_owns_the_bus_lifecycle_connect_on_start_disconnect_on_stop(
         clock = ManualClock()
         store = SQLiteStore(tmp_path / "saga.db")
         exchange = PaperExchange(
-            bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+            bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
         )
         engine = Engine(
             bus=bus,
@@ -542,7 +537,7 @@ def test_the_fault_path_walks_the_same_teardown_feed_stopped_and_bus_closed(
         clock = ManualClock()
         store = SQLiteStore(tmp_path / "saga.db")
         exchange = PaperExchange(
-            bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+            bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
         )
         engine = Engine(
             bus=bus, clock=clock, store=store, exchange=exchange, feed=feed, portfolio=ledger()
@@ -572,7 +567,7 @@ def test_graceful_stop_leaves_resting_live_orders_for_the_next_start_to_re_adopt
         bus = InMemoryBus()
         store = SQLiteStore(db)
         venue = PaperExchange(
-            bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+            bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
         )
         feed = ReplayFeed(path=_write_ticks(tmp_path / "first.jsonl"), bus=bus, clock=clock)
         engine = Engine(

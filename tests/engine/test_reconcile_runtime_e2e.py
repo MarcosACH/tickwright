@@ -16,7 +16,7 @@ from collections.abc import Mapping
 from decimal import Decimal
 from pathlib import Path
 
-from ledgers import ledger
+from ledgers import GENESIS, ledger
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
@@ -41,11 +41,6 @@ from tickwright.engine.reconcile import ReconcileConfig
 from tickwright.engine.runner import Engine, EngineConfig
 from tickwright.observability.testing import capture_events
 from tickwright.strategies import SingleShotLimitStrategy
-
-# The paper account's opening cash. The venue requires it (ADR-0042 §1: the
-# engine supplies no collateral of its own); these tests do not exercise the
-# ledger, so one shared declaration keeps every wiring site honest and quiet.
-_GENESIS = Decimal("100000")
 
 _NS = 1_000_000_000
 _CLOID = derive_cloid("trivial:BTC:1")
@@ -95,7 +90,7 @@ def test_a_missed_fill_landing_mid_run_is_healed_by_the_inflight_cadence(
         # private bus, so the engine sees nothing it doesn't reconcile for.
         venue_bus = InMemoryBus()
         venue = PaperExchange(
-            bus=venue_bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+            bus=venue_bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
         )
         feed = ReplayFeed(path=ticks, bus=bus, clock=clock)
         engine = Engine(
@@ -218,7 +213,7 @@ def test_a_vanished_order_is_ghosted_only_after_grace_and_a_none_read_freezes(
         clock = ManualClock()
         store = SQLiteStore(db)
         venue = PaperExchange(
-            bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+            bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
         )
         feed = ReplayFeed(path=ticks, bus=bus, clock=clock)
         engine = Engine(

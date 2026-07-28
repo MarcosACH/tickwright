@@ -51,9 +51,11 @@ from tickwright.engine.execution import ExecutionManager
 from tickwright.engine.portfolio import PortfolioProjection
 from tickwright.strategies import SingleShotMarketStrategy
 
-# The paper account's opening cash. The venue requires it (ADR-0042 §1: the
-# engine supplies no collateral of its own); these tests do not exercise the
-# ledger, so one shared declaration keeps every wiring site honest and quiet.
+# The paper account's opening cash, declared here rather than taken from
+# ``ledgers.GENESIS``: this is one of the two suites ``tests/_support/ledgers.py``
+# names as being *about* the accounting surface, so how the account opens is part
+# of what it asserts. It cannot drift from the ledger's — the projection below is
+# opened off ``exchange.account_spec()``, one number by construction.
 _GENESIS = Decimal("100000")
 
 _ROWS = [

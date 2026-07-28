@@ -10,7 +10,7 @@ orders keep filling; the halt survives a restart. The same suite stays green wit
 import asyncio
 from decimal import Decimal
 
-from ledgers import ledger
+from ledgers import GENESIS, ledger
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
@@ -38,11 +38,6 @@ from tickwright.engine.cache import Cache
 from tickwright.engine.execution import ExecutionManager
 from tickwright.engine.guard import NoopGuard, RealGuard
 from tickwright.observability.testing import capture_events
-
-# The paper account's opening cash. The venue requires it (ADR-0042 §1: the
-# engine supplies no collateral of its own); these tests do not exercise the
-# ledger, so one shared declaration keeps every wiring site honest and quiet.
-_GENESIS = Decimal("100000")
 
 _SPEC = InstrumentSpec(
     symbol="BTC",
@@ -92,7 +87,7 @@ def _harness(
     clock = ManualClock(start_ns=1_000)
     store = SQLiteStore(":memory:")
     exchange = PaperExchange(
-        bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+        bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
     )
     cache = Cache(store=store)
     guard = guard or RealGuard(specs={"BTC": _SPEC}, store=store, clock=clock)
@@ -134,7 +129,7 @@ def test_market_below_min_notional_is_rejected_by_the_venue_via_sourced_specs() 
         bus=bus,
         clock=clock,
         fill_model=ImmediateFillModel(),
-        genesis_collateral=_GENESIS,
+        genesis_collateral=GENESIS,
         instrument_specs={"BTC": _SPEC},
     )
     cache = Cache(store=store)
@@ -233,7 +228,7 @@ def _revived_manager(
     bus = InMemoryBus()
     clock = ManualClock(start_ns=2_000)
     exchange = PaperExchange(
-        bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+        bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
     )
     cache = Cache(store=store)
     cache.rebuild()

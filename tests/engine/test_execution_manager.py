@@ -13,7 +13,7 @@ import random
 from decimal import Decimal
 
 import pytest
-from ledgers import ledger
+from ledgers import GENESIS, ledger
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
@@ -50,11 +50,6 @@ from tickwright.domain import (
 from tickwright.domain.enums import OrderType
 from tickwright.engine.cache import Cache
 from tickwright.engine.execution import ExecutionManager
-
-# The paper account's opening cash. The venue requires it (ADR-0042 §1: the
-# engine supplies no collateral of its own); these tests do not exercise the
-# ledger, so one shared declaration keeps every wiring site honest and quiet.
-_GENESIS = Decimal("100000")
 
 
 def _market_signal(seq: int = 1) -> PlaceSignal:
@@ -123,7 +118,7 @@ def _harness() -> tuple[InMemoryBus, ManualClock, SQLiteStore, list[OrderEvent]]
     clock = ManualClock(start_ns=1_000)
     store = SQLiteStore(":memory:")
     exchange = PaperExchange(
-        bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+        bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
     )
     cache = Cache(store=store)
     manager = ExecutionManager(
@@ -634,7 +629,7 @@ def test_a_restart_rebuilt_cache_dedups_a_redelivered_place_signal() -> None:
     bus2 = InMemoryBus()
     clock2 = ManualClock(start_ns=2_000)
     exchange2 = PaperExchange(
-        bus=bus2, clock=clock2, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+        bus=bus2, clock=clock2, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
     )
     cache2 = Cache(store=store)
     cache2.rebuild()
@@ -665,7 +660,7 @@ def _stochastic_harness(
         bus=bus,
         clock=clock,
         fill_model=fill_model,  # type: ignore[arg-type]
-        genesis_collateral=_GENESIS,
+        genesis_collateral=GENESIS,
     )
     cache = Cache(store=store)
     manager = ExecutionManager(

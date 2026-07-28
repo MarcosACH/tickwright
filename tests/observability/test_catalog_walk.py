@@ -18,7 +18,7 @@ from decimal import Decimal
 
 import pytest
 from hyperliquid_fakes import FakeExchangeApi, FakeWsConnection, trade, trades_frame
-from ledgers import ledger
+from ledgers import GENESIS, ledger
 from pydantic import SecretStr
 
 from tickwright.adapters.bus import InMemoryBus
@@ -59,11 +59,6 @@ from tickwright.venues.hyperliquid import (
     HyperliquidFeed,
     HyperliquidUniverse,
 )
-
-# The paper account's opening cash. The venue requires it (ADR-0042 §1: the
-# engine supplies no collateral of its own); these tests do not exercise the
-# ledger, so one shared declaration keeps every wiring site honest and quiet.
-_GENESIS = Decimal("100000")
 
 _SPEC = InstrumentSpec(
     symbol="BTC", sz_decimals=3, max_decimals=6, max_sig_figs=5, min_notional=Decimal("10")
@@ -246,7 +241,7 @@ def _drive_market_fill() -> None:
     bus = InMemoryBus()
     clock = ManualClock(start_ns=1_000)
     exchange = PaperExchange(
-        bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+        bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
     )
     _manager(bus, clock, exchange)
 
@@ -290,7 +285,7 @@ def _drive_position_changes(*, closing: bool) -> Callable[[], None]:
         bus = InMemoryBus()
         clock = ManualClock(start_ns=1_000)
         exchange = PaperExchange(
-            bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+            bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
         )
         _manager(bus, clock, exchange)
 
@@ -311,7 +306,7 @@ def _drive_position_changed() -> None:
     bus = InMemoryBus()
     clock = ManualClock(start_ns=1_000)
     exchange = PaperExchange(
-        bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+        bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
     )
     _manager(bus, clock, exchange)
 
@@ -535,7 +530,7 @@ def _drive_engine_faulted() -> None:
             clock=clock,
             store=SQLiteStore(":memory:"),
             exchange=PaperExchange(
-                bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+                bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
             ),
             feed=_PoisonedFeed(),
             portfolio=ledger(),
@@ -565,7 +560,7 @@ def _drive_engine_stop_hook_failed() -> None:
             clock=clock,
             store=_StoreThatBreaksOnClose(":memory:"),
             exchange=PaperExchange(
-                bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+                bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
             ),
             feed=_PoisonedFeed(),
             portfolio=ledger(),
@@ -586,7 +581,7 @@ def _drive_engine_lifecycle() -> None:
             clock=clock,
             store=SQLiteStore(":memory:"),
             exchange=PaperExchange(
-                bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+                bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
             ),
             feed=_IdleFeed(),
             portfolio=ledger(),
