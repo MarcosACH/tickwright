@@ -17,7 +17,9 @@ The Postgres arm carries the ``postgres`` marker and auto-skips when no server i
 reachable (see ``conftest``), so ``uv run pytest`` stays hermetic by default.
 """
 
+from collections.abc import Callable, Mapping
 from decimal import Decimal
+from typing import get_protocol_members
 
 import pytest
 from store_backends import PostgresBackend, SQLiteBackend
@@ -33,6 +35,7 @@ from tickwright.domain import (
     OrderType,
     Position,
     Side,
+    Store,
 )
 
 Backend = SQLiteBackend | PostgresBackend
@@ -82,6 +85,32 @@ def _account(*, genesis: str = "10000", ts_ns: int = 1_000) -> Account:
         AccountSpec(account_id="paper-default", genesis_collateral=Decimal(genesis)),
         ts_ns=ts_ns,
     )
+
+
+# One canned call per ``Store`` member, so the seam's single error contract can
+# be asserted across all of them rather than across the ones someone listed.
+# Arguments are arbitrary — every call is made against a *closed* store, so what
+# each one exercises is the driver failure, not the query. ``close()`` is absent
+# deliberately and that exclusion is itself asserted.
+_SEAM_CALLS: Mapping[str, Callable[[Store], object]] = {
+    "checkpoint": lambda store: store.checkpoint(_order(), ts_ns=1_000),
+    "get_order": lambda store: store.get_order("0xabc"),
+    "all_orders": lambda store: store.all_orders(),
+    "has_orders": lambda store: store.has_orders(),
+    "history": lambda store: store.history("0xabc"),
+    "save_strategy_snapshot": lambda store: store.save_strategy_snapshot(
+        "trivial", b"state", ts_ns=1_000
+    ),
+    "load_strategy_snapshot": lambda store: store.load_strategy_snapshot("trivial"),
+    "save_kill_switch": lambda store: store.save_kill_switch(
+        tripped=True, reason="drawdown", ts_ns=1_000
+    ),
+    "load_kill_switch": lambda store: store.load_kill_switch(),
+    "checkpoint_ledger": lambda store: store.checkpoint_ledger(account=_account(), ts_ns=1_000),
+    "all_positions": lambda store: store.all_positions(),
+    "load_account": lambda store: store.load_account(),
+    "funding_mark": lambda store: store.funding_mark("BTC"),
+}
 
 
 def test_get_order_returns_none_for_an_unknown_cloid(store_backend: Backend) -> None:
@@ -542,22 +571,33 @@ def test_a_store_that_cannot_reach_its_backend_raises_invariant_violation(
 
     A closed store stands in for any unreachable backend: both drivers raise from
     their own ``Error`` base, which is the whole of what each adapter contributes
-    to this rule."""
+    to this rule.
+
+    Driven from ``_SEAM_CALLS``, whose completeness against the Protocol is the
+    assertion below this one — the claim is universal, so the coverage must not
+    be a list someone remembers to extend."""
     store = store_backend.open()
     store.close()
 
-    with pytest.raises(InvariantViolation):
-        store.checkpoint(_order(), ts_ns=1_000)
-    with pytest.raises(InvariantViolation):
-        store.get_order("0xabc")
-    with pytest.raises(InvariantViolation):
-        store.all_positions()
-    with pytest.raises(InvariantViolation):
-        store.has_orders()
-    with pytest.raises(InvariantViolation):
-        store.load_account()
-    with pytest.raises(InvariantViolation):
-        store.checkpoint_ledger(account=_account(), ts_ns=1_000)
+    for member, call in _SEAM_CALLS.items():
+        with pytest.raises(InvariantViolation, match=member):
+            call(store)
+
+
+def test_the_seams_error_contract_is_asserted_on_every_member() -> None:
+    """The guard on the case above: a member added to ``Store`` without a
+    ``_SEAM_CALLS`` entry fails *here*, loudly, instead of silently narrowing the
+    universal claim that case makes.
+
+    Without it the coverage is a transcribed list, which goes stale in the one
+    direction nothing catches — a new member forgets ``@durable``, its driver
+    exception reaches the containment net as a strategy bug, and no assertion
+    fires. That is the same failure shape the Postgres ``TRUNCATE`` list had.
+
+    ``close()`` is the one deliberate exclusion (``_durability``): teardown that
+    fails is a leaked resource the runner already records as a stop-hook failure,
+    not a durability claim that proved false."""
+    assert set(_SEAM_CALLS) == get_protocol_members(Store) - {"close"}
 
 
 def test_the_funding_mark_is_absent_until_written_and_then_advances(
