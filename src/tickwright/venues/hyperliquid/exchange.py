@@ -100,6 +100,11 @@ class HyperliquidExchange:
         this step exists to host arrive with the leverage push (ADR-0044)."""
         return None
 
+    async def stop(self) -> None:
+        """Nothing to release: this adapter runs no loop of its own — every
+        request it makes is scoped to the call that made it."""
+        return None
+
     async def on_tick(self, tick: MarketTick) -> None:
         self._latest_price[tick.symbol] = tick.price
 

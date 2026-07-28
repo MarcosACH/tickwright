@@ -248,6 +248,7 @@ class Engine:
         """
         return (
             ("feed.stop", self._stop_feed),
+            ("exchange.stop", self._exchange.stop),
             ("reconcile.stop", self._stop_cadences),
             ("bus.drain", self._bus.drain),
             ("host.stop", self._host.stop),

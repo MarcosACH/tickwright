@@ -385,6 +385,15 @@ class Exchange(Protocol):
         empty one."""
         ...
 
+    async def stop(self) -> None:
+        """Stop anything the adapter runs of its own (ADR-0024 reverse shutdown).
+
+        Driven immediately after the feed is cut, so an adapter-owned loop stops
+        before the bus drains behind it and cannot publish into a closing bus.
+        The peer of ``start()``: whatever that connected, this releases.
+        """
+        ...
+
     def account_spec(self) -> AccountSpec:
         """The venue's static declarations about the account this process trades
         (ADR-0038): its qualified identity, its netting semantics, and — on

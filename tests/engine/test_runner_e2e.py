@@ -562,17 +562,18 @@ class _LifecycleRecordingVenue:
     what the rest of the process had already done by then. A network boundary is
     the one place a test double is allowed."""
 
-    def __init__(self, timeline: list[str], broker: FakeKafkaBroker) -> None:
+    def __init__(self, timeline: list[str], broker: FakeKafkaBroker | None = None) -> None:
         self._timeline = timeline
         self._broker = broker
         self.bus_connected_at_start = False
 
     async def start(self) -> None:
-        # Observed at the process boundary: the broker has handed out started
-        # clients, so the bus this venue would report on is already up.
-        self.bus_connected_at_start = bool(self._broker.producers) and all(
-            producer.started for producer in self._broker.producers
-        )
+        if self._broker is not None:
+            # Observed at the process boundary: the broker has handed out
+            # started clients, so the bus this venue reports on is already up.
+            self.bus_connected_at_start = bool(self._broker.producers) and all(
+                producer.started for producer in self._broker.producers
+            )
         self._timeline.append("exchange.start")
 
     async def stop(self) -> None:
@@ -643,6 +644,63 @@ def test_the_runner_starts_the_exchange_after_the_bus_and_before_the_barrier(
     assert venue.bus_connected_at_start, "the bus must be up before the venue is connected"
     assert "venue.read" in timeline, "the barrier must actually read for the proof to bite"
     assert timeline.index("exchange.start") < timeline.index("venue.read")
+
+
+class _TimelineFeed:
+    """A live-shaped feed — its read loop runs until cancelled — that records
+    the runner cutting it, so teardown order is observable at the seam. A
+    ``MarketFeed`` double at the venue boundary."""
+
+    def __init__(self, timeline: list[str]) -> None:
+        self._timeline = timeline
+        self.started = asyncio.Event()
+
+    async def start(self) -> None:
+        self.started.set()
+        await asyncio.Event().wait()
+
+    async def stop(self) -> None:
+        self._timeline.append("feed.stop")
+
+
+class _TimelineStore(SQLiteStore):
+    """The real store, recording the one teardown step it owns — the last."""
+
+    def __init__(self, path: Path, timeline: list[str]) -> None:
+        super().__init__(path)
+        self._timeline = timeline
+
+    def close(self) -> None:
+        self._timeline.append("store.close")
+        super().close()
+
+
+def test_the_reverse_shutdown_stops_the_exchange_immediately_after_the_feed(
+    tmp_path: Path,
+) -> None:
+    """ADR-0024's reverse shutdown: ``exchange.stop`` sits directly after
+    ``feed.stop`` in the one ordered membership, so whatever the adapter runs
+    is stopped before the bus drains and the store closes behind it."""
+    timeline: list[str] = []
+
+    async def main() -> int:
+        feed = _TimelineFeed(timeline)
+        engine = Engine(
+            bus=InMemoryBus(),
+            clock=ManualClock(),
+            store=_TimelineStore(tmp_path / "saga.db", timeline),
+            exchange=_LifecycleRecordingVenue(timeline),
+            feed=feed,
+            portfolio=ledger(),
+        )
+        run = asyncio.create_task(engine.run())
+        await asyncio.wait_for(feed.started.wait(), timeout=5)
+        await asyncio.wait_for(engine.stop(), timeout=5)
+        return await asyncio.wait_for(run, timeout=5)
+
+    assert asyncio.run(main()) == 0
+
+    assert timeline == ["exchange.start", "feed.stop", "exchange.stop", "store.close"]
 
 
 def test_graceful_stop_leaves_resting_live_orders_for_the_next_start_to_re_adopt(

@@ -280,6 +280,9 @@ class _DarkVenue:
     async def start(self) -> None:
         return None
 
+    async def stop(self) -> None:
+        return None
+
     async def place(self, order: PlaceOrder) -> None:
         raise AssertionError("nothing may be placed before the barrier clears")
 

@@ -261,6 +261,9 @@ class _ForgetfulVenue:
     async def start(self) -> None:
         return None
 
+    async def stop(self) -> None:
+        return None
+
     async def place(self, order: PlaceOrder) -> None:
         raise AssertionError("the ghost cycle must never place")
 
