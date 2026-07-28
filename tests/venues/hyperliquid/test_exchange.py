@@ -21,6 +21,7 @@ from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.domain import (
     AggressorSide,
+    Exchange,
     ExecutionReport,
     FillReport,
     InstrumentSpec,
@@ -735,3 +736,45 @@ def test_a_terminal_fetch_prunes_the_placed_order_so_the_cache_stays_bounded() -
     # happens because the terminal fetch pruned the placed-order memory.
     reads = [query for (_, query) in post.requests if query.get("type") == "orderStatus"]
     assert len(reads) == 2
+
+
+def test_connecting_asks_the_venue_for_nothing_because_posting_is_request_scoped() -> None:
+    """``start()`` is the connect half of ADR-0024 step 4. This adapter holds no
+    connection of its own — every request is scoped to the call that makes it —
+    so the step does no venue I/O until ADR-0046's account-mode gate and
+    ADR-0044's leverage push give it some.
+
+    The fake routes *nothing*, so a request of any type fails loudly here rather
+    than passing on a response a test never described. That is the assertion:
+    when the push arrives, this test must be rewritten, not silently survive."""
+    post = FakeExchangeApi({})
+    exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
+
+    asyncio.run(exchange.start())
+
+    assert post.requests == []
+
+
+def test_the_venue_link_is_released_without_a_start_having_run() -> None:
+    """The faulted teardown walks the same ordered membership as the graceful
+    one, so ``stop()`` is reached after a ``start()`` that refused — and after
+    one that never ran, an earlier step having faulted first. Releasing an
+    adapter that never connected must not reach the venue, and must not raise:
+    a break here would be recorded as a stop-hook failure and would cost the
+    steps behind it (ADR-0020/0024)."""
+    post = FakeExchangeApi({})
+    exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
+
+    asyncio.run(exchange.stop())
+
+    assert post.requests == []
+
+
+def test_the_hyperliquid_venue_satisfies_the_exchange_seam() -> None:
+    """Conformance asserted at the adapter, as both bus adapters assert theirs
+    (``tests/adapters/bus/``). ``Exchange`` is ``runtime_checkable``, so this is
+    a member-presence check: the seam cannot grow a member that leaves this
+    adapter behind without failing here."""
+    exchange = make_exchange(FakeExchangeApi({}), bus=InMemoryBus(), clock=ManualClock())
+
+    assert isinstance(exchange, Exchange)

@@ -17,6 +17,7 @@ from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.paper import ImmediateFillModel, PaperExchange, PaperExchangeConfig
 from tickwright.domain import (
     AggressorSide,
+    Exchange,
     FillReport,
     InstrumentSpec,
     MarketTick,
@@ -514,3 +515,61 @@ def test_the_paper_account_label_defaults_to_the_same_label_the_config_does() ->
 
     assert exchange.account_spec().account_id == "paper-default"
     assert exchange.account_spec().account_id == f"paper-{PaperExchangeConfig().account_label}"
+
+
+def test_the_lifecycle_pair_reaches_nothing_because_the_one_link_is_constructed() -> None:
+    """The two verbs the runner drives (ADR-0024 step 4 and the reverse
+    shutdown). In-process there is nothing to connect: this venue's only link —
+    the ``MarketTick`` subscription — is wired at construction, so a fill needs
+    neither verb. Pinned here because ADR-0037's funding generator will give
+    ``stop()`` real work, and that arrival should be a visible change to this
+    assertion rather than a silent one."""
+    exchange, bus, clock, reports = _harness()
+
+    async def scenario() -> None:
+        await exchange.start()
+        clock.advance_to(1_000)
+        await bus.publish(_tick("42000"))
+        await exchange.place(_market_order(qty="0.5"))
+        await exchange.stop()
+
+    asyncio.run(scenario())
+
+    assert len(reports) == 1
+
+
+def test_the_paper_venue_releases_without_a_start_and_keeps_its_book() -> None:
+    """The faulted teardown walks the same ordered membership as the graceful
+    one, so ``stop()`` is reached after a ``start()`` that refused — or that
+    never ran at all, an earlier step having faulted first. Releasing must
+    therefore be safe on a venue that never started, and it is a *release*, not
+    a reset: a resting order is still the venue's truth afterwards, which is
+    what lets restart reconciliation re-adopt it by cloid (ADR-0024)."""
+    exchange, bus, clock, fills, statuses = _limit_harness()
+
+    async def scenario() -> VenueOrderView | None:
+        clock.advance_to(1_000)
+        await bus.publish(_tick("42000"))
+        await exchange.place(_limit_order("41000"))  # rests, uncrossed
+        await exchange.stop()  # no start() ever ran
+        return await exchange.fetch_order("0xabc")
+
+    view = asyncio.run(scenario())
+
+    assert fills == []
+    assert view is not None
+    assert view.status is not None
+    assert view.status.status is OrderState.LIVE
+
+
+def test_the_paper_venue_satisfies_the_exchange_seam() -> None:
+    """Conformance asserted at the adapter, as both bus adapters assert theirs.
+
+    ``Exchange`` is ``runtime_checkable``, so this is precisely a member-presence
+    check — the completeness gate the seam gets for free: a member added to the
+    Protocol fails here for whichever adapter was left behind, without anyone
+    maintaining a transcribed list of what the seam contains.
+    """
+    exchange, _bus, _clock, _reports = _harness()
+
+    assert isinstance(exchange, Exchange)
