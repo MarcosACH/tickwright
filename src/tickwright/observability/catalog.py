@@ -29,6 +29,15 @@ class NamedEvent(StrEnum):
     ORDER_FAILED = "order.failed"
     ORDER_CANCELLED = "order.cancelled"
 
+    # Position changes (``PortfolioProjection``, ADR-0045 §2). A position change
+    # is an *output* derived from a fill already on the bus, so it is
+    # deliberately not a bus event — which makes this catalog the only place it
+    # is observable from outside. A flip through zero emits ``closed`` then
+    # ``opened``: the residual opens a fresh average-cost record.
+    POSITION_OPENED = "position.opened"
+    POSITION_CHANGED = "position.changed"
+    POSITION_CLOSED = "position.closed"
+
     # Live-feed ingress: a conflation drop under backpressure, and a
     # malformed-frame drop that is skipped instead of faulting the engine
     # (``HyperliquidFeed``, ADR-0023).
