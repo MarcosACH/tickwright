@@ -580,10 +580,12 @@ class _LifecycleRecordingVenue:
         self._timeline.append("exchange.stop")
 
     async def place(self, order: PlaceOrder) -> None:
-        raise AssertionError("this run never places")
+        # Recorded rather than refused: a refusal here would fault the engine
+        # through the saga path, which is not what these tests are asking about.
+        self._timeline.append("exchange.place")
 
     async def cancel(self, cloid: str) -> None:
-        raise AssertionError("this run never cancels")
+        self._timeline.append("exchange.cancel")
 
     async def fetch_order(self, cloid: str) -> VenueOrderView | None:
         self._timeline.append("venue.read")
@@ -700,6 +702,47 @@ def test_the_reverse_shutdown_stops_the_exchange_immediately_after_the_feed(
 
     assert asyncio.run(main()) == 0
 
+    assert timeline == ["exchange.start", "feed.stop", "exchange.stop", "store.close"]
+
+
+class _FaultingTimelineFeed:
+    """A feed whose read loop faults the engine, recording the teardown that
+    still cuts it. A ``MarketFeed`` double at the venue boundary."""
+
+    def __init__(self, timeline: list[str]) -> None:
+        self._timeline = timeline
+
+    async def start(self) -> None:
+        raise InvariantViolation("the read loop broke an engine assumption")
+
+    async def stop(self) -> None:
+        self._timeline.append("feed.stop")
+
+
+def test_the_fault_path_stops_the_exchange_in_the_same_position_as_a_graceful_stop(
+    tmp_path: Path,
+) -> None:
+    """The faulted teardown differs from the graceful one in failure *policy*,
+    never in membership or order (ADR-0024): a fault must release the venue
+    too, and in the same place — a second copy of the sequence is what this
+    one ordered membership exists to prevent."""
+    timeline: list[str] = []
+
+    async def faulted_life() -> tuple[int, Engine]:
+        engine = Engine(
+            bus=InMemoryBus(),
+            clock=ManualClock(),
+            store=_TimelineStore(tmp_path / "saga.db", timeline),
+            exchange=_LifecycleRecordingVenue(timeline),
+            feed=_FaultingTimelineFeed(timeline),
+            portfolio=ledger(),
+        )
+        return await engine.run(), engine
+
+    exit_code, engine = asyncio.run(faulted_life())
+
+    assert exit_code != 0
+    assert engine.state is ComponentState.FAULTED
     assert timeline == ["exchange.start", "feed.stop", "exchange.stop", "store.close"]
 
 
