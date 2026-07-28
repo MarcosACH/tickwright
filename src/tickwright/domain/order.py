@@ -87,7 +87,12 @@ class Order:
 
     @property
     def applied_event_ids(self) -> frozenset[str]:
-        """The reflected ``event_id``s — the dedup set a ``Store`` round-trips."""
+        """The reflected ``event_id``s — the dedup set a ``Store`` round-trips.
+
+        Durable, unlike ``Position``'s identically-named set: this one is
+        bounded by a single order's fills and dies with the order, which is
+        precisely why ADR-0043 §4 rejects the same shape on the ledger row.
+        """
         return frozenset(self._applied_event_ids)
 
     @property

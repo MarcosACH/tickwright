@@ -18,6 +18,7 @@ from decimal import Decimal
 
 import pytest
 from hyperliquid_fakes import FakeExchangeApi, FakeWsConnection, trade, trades_frame
+from ledgers import ledger
 from pydantic import SecretStr
 
 from tickwright.adapters.bus import InMemoryBus
@@ -46,6 +47,7 @@ from tickwright.domain.enums import OrderType, TimeInForce
 from tickwright.engine.cache import Cache
 from tickwright.engine.execution import ExecutionManager
 from tickwright.engine.guard import RealGuard
+from tickwright.engine.portfolio import PortfolioProjection
 from tickwright.engine.reconcile import ReconcileConfig, Reconciler
 from tickwright.engine.runner import Engine
 from tickwright.engine.strategy_host import StrategyHost
@@ -57,6 +59,11 @@ from tickwright.venues.hyperliquid import (
     HyperliquidFeed,
     HyperliquidUniverse,
 )
+
+# The paper account's opening cash. The venue requires it (ADR-0042 §1: the
+# engine supplies no collateral of its own); these tests do not exercise the
+# ledger, so one shared declaration keeps every wiring site honest and quiet.
+_GENESIS = Decimal("100000")
 
 _SPEC = InstrumentSpec(
     symbol="BTC", sz_decimals=3, max_decimals=6, max_sig_figs=5, min_notional=Decimal("10")
@@ -79,14 +86,14 @@ def _tick(price: str = "42000") -> MarketTick:
     )
 
 
-def _market_signal(*, quantity: str = "0.5") -> PlaceSignal:
+def _market_signal(*, quantity: str = "0.5", seq: int = 1, side: Side = Side.BUY) -> PlaceSignal:
     return PlaceSignal(
         ts_event=1_000,
         ts_init=1_000,
         strategy_id="trivial",
         symbol="BTC",
-        seq=1,
-        side=Side.BUY,
+        seq=seq,
+        side=side,
         quantity=Decimal(quantity),
         order_type=OrderType.MARKET,
         time_in_force=TimeInForce.IOC,
@@ -194,7 +201,12 @@ class _Strategy:
 
 
 def _manager(
-    bus: InMemoryBus, clock: ManualClock, exchange: object, *, guard: object | None = None
+    bus: InMemoryBus,
+    clock: ManualClock,
+    exchange: object,
+    *,
+    guard: object | None = None,
+    portfolio: PortfolioProjection | None = None,
 ) -> None:
     """Wire an ``ExecutionManager`` over ``exchange`` onto ``bus`` — the exchange
     must already share ``bus`` so its fills flow back to the manager."""
@@ -204,6 +216,7 @@ def _manager(
         clock=clock,
         exchange=exchange,  # type: ignore[arg-type]
         cache=cache,
+        portfolio=portfolio if portfolio is not None else ledger(),
         guard=guard,  # type: ignore[arg-type]
     )
     bus.subscribe(Signal, manager.on_signal)
@@ -232,7 +245,9 @@ def _drive_market_fill() -> None:
     """MARKET order through the paper exchange: placed → submitted → filled."""
     bus = InMemoryBus()
     clock = ManualClock(start_ns=1_000)
-    exchange = PaperExchange(bus=bus, clock=clock, fill_model=ImmediateFillModel())
+    exchange = PaperExchange(
+        bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+    )
     _manager(bus, clock, exchange)
 
     async def go() -> None:
@@ -260,6 +275,50 @@ def _drive_partial_fill() -> None:
                 price=Decimal("42000"),
             )
         )
+
+    asyncio.run(go())
+
+
+def _drive_position_changes(*, closing: bool) -> Callable[[], None]:
+    """A MARKET buy through the paper venue moves the ledger on the fill-apply
+    path — ``position.opened``. A second, opposite fill on the same partition
+    closes it, and the two names are the only place a position change is
+    observable at all: it is an output derived from a fill already on the bus,
+    never a bus event of its own (ADR-0045 §1)."""
+
+    def scenario() -> None:
+        bus = InMemoryBus()
+        clock = ManualClock(start_ns=1_000)
+        exchange = PaperExchange(
+            bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+        )
+        _manager(bus, clock, exchange)
+
+        async def go() -> None:
+            await bus.publish(_tick("42000"))
+            await bus.publish(_market_signal())
+            if closing:
+                await bus.publish(_market_signal(seq=2, side=Side.SELL))
+
+        asyncio.run(go())
+
+    return scenario
+
+
+def _drive_position_changed() -> None:
+    """Adding to an open position — the ``changed`` arm, which needs a *second*
+    fill on the same side rather than a second order going the other way."""
+    bus = InMemoryBus()
+    clock = ManualClock(start_ns=1_000)
+    exchange = PaperExchange(
+        bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+    )
+    _manager(bus, clock, exchange)
+
+    async def go() -> None:
+        await bus.publish(_tick("42000"))
+        await bus.publish(_market_signal())
+        await bus.publish(_market_signal(seq=2))
 
     asyncio.run(go())
 
@@ -475,8 +534,11 @@ def _drive_engine_faulted() -> None:
             bus=bus,
             clock=clock,
             store=SQLiteStore(":memory:"),
-            exchange=PaperExchange(bus=bus, clock=clock, fill_model=ImmediateFillModel()),
+            exchange=PaperExchange(
+                bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+            ),
             feed=_PoisonedFeed(),
+            portfolio=ledger(),
         )
         assert await engine.run() == 1
 
@@ -502,8 +564,11 @@ def _drive_engine_stop_hook_failed() -> None:
             bus=bus,
             clock=clock,
             store=_StoreThatBreaksOnClose(":memory:"),
-            exchange=PaperExchange(bus=bus, clock=clock, fill_model=ImmediateFillModel()),
+            exchange=PaperExchange(
+                bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+            ),
             feed=_PoisonedFeed(),
+            portfolio=ledger(),
         )
         assert await engine.run() == 1
 
@@ -520,8 +585,11 @@ def _drive_engine_lifecycle() -> None:
             bus=bus,
             clock=clock,
             store=SQLiteStore(":memory:"),
-            exchange=PaperExchange(bus=bus, clock=clock, fill_model=ImmediateFillModel()),
+            exchange=PaperExchange(
+                bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+            ),
             feed=_IdleFeed(),
+            portfolio=ledger(),
         )
         run = asyncio.create_task(engine.run())
         await engine.stop()
@@ -621,6 +689,9 @@ SCENARIOS: dict[NamedEvent, Callable[[], None]] = {
     NamedEvent.ORDER_REJECTED: _drive_status(OrderState.REJECTED),
     NamedEvent.ORDER_FAILED: _drive_status(OrderState.FAILED),
     NamedEvent.ORDER_CANCELLED: _drive_status(OrderState.LIVE, OrderState.CANCELLED),
+    NamedEvent.POSITION_OPENED: _drive_position_changes(closing=False),
+    NamedEvent.POSITION_CHANGED: _drive_position_changed,
+    NamedEvent.POSITION_CLOSED: _drive_position_changes(closing=True),
     NamedEvent.FEED_LAGGED: _drive_feed_lagged,
     NamedEvent.FEED_FRAME_DROPPED: _drive_feed_frame_dropped,
     NamedEvent.ENGINE_BARRIER_CLEARED: _drive_engine_lifecycle,

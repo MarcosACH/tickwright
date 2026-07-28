@@ -8,13 +8,16 @@ precedence chain: kwargs > environment > ``.env`` > class default.
 """
 
 import os
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
 from tickwright.adapters.feed import ReplayFeedConfig
+from tickwright.adapters.paper import PaperExchangeConfig
 from tickwright.app.config import AppConfig, AppSettings
+from tickwright.venues.hyperliquid import HyperliquidConfig
 
 _HOSTILE_ENV_FILE = (
     "TICKWRIGHT_FEED=hyperliquid\n"
@@ -39,7 +42,10 @@ def test_app_config_ignores_a_hostile_dotenv_and_exported_env(
     monkeypatch.setenv("TICKWRIGHT_FEED", "hyperliquid")
     monkeypatch.setenv("TICKWRIGHT_EXCHANGE", "hyperliquid")
 
-    config = AppConfig(replay=ReplayFeedConfig(path=tmp_path / "ticks.jsonl"))
+    config = AppConfig(
+        replay=ReplayFeedConfig(path=tmp_path / "ticks.jsonl"),
+        paper=PaperExchangeConfig(genesis_collateral=Decimal("100000")),
+    )
 
     assert config.feed == "replay"
     assert config.exchange == "paper"
@@ -90,6 +96,7 @@ def test_app_settings_resolves_the_documented_precedence_chain(
         "TICKWRIGHT_STORE=postgres\n"  # only here: beats the default
         "TICKWRIGHT_BUS=in_memory\n"  # also exported: loses to it
         "TICKWRIGHT_GUARD=noop\n"  # also a kwarg: loses to it
+        "TICKWRIGHT_PAPER__GENESIS_COLLATERAL=100000\n"  # the paper venue demands it
     )
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("TICKWRIGHT_BUS", "kafka")
@@ -102,3 +109,45 @@ def test_app_settings_resolves_the_documented_precedence_chain(
     assert settings.store == "postgres"  # .env file beats the class default
     assert settings.feed == "replay"  # class default, unmentioned by either
     assert settings.replay is not None and settings.replay.path == Path("ticks.jsonl")
+
+
+def test_a_paper_run_without_a_genesis_collateral_is_rejected_at_load(tmp_path: Path) -> None:
+    """The engine supplies no collateral of its own: a paper run reads the
+    number an operator stated, or it does not start (ADR-0042 §1)."""
+    (tmp_path / "ticks.jsonl").touch()
+
+    with pytest.raises(ValidationError, match="GENESIS_COLLATERAL"):
+        AppConfig(replay=ReplayFeedConfig(path=tmp_path / "ticks.jsonl"))
+
+
+def test_a_live_run_is_never_asked_for_the_paper_genesis_value(tmp_path: Path) -> None:
+    """The demand is keyed on the ``exchange`` discriminant, which is why it
+    cannot be a required *field* on the paper block: a partial ``paper`` section
+    is the ordinary case, and a required field would fire during that block's
+    own validation, before any validator can see the venue (ADR-0042 §1)."""
+    config = AppConfig(
+        exchange="hyperliquid",
+        feed="hyperliquid",
+        hyperliquid=HyperliquidConfig(symbols=["BTC"], signing_key=SecretStr("0xdeadbeef")),
+        # One paper variable is enough to construct the block — the shape that
+        # would trip a required field on a run that has no paper venue at all.
+        paper=PaperExchangeConfig(fill_model="immediate"),
+    )
+
+    assert config.paper.genesis_collateral is None
+
+
+def test_a_non_positive_paper_genesis_is_a_typo_not_a_scenario() -> None:
+    """An account cannot be *created* owing money (ADR-0042 §1). This is input
+    validation, not margin enforcement — derived free margin still goes
+    negative freely at runtime."""
+    with pytest.raises(ValidationError):
+        PaperExchangeConfig(genesis_collateral=Decimal("0"))
+
+
+@pytest.mark.parametrize("label", ["Main", "paper-main", "a" * 33, ""])
+def test_the_paper_account_label_is_slug_constrained(label: str) -> None:
+    """No hyphen, so ``paper-<label>`` stays unambiguously two segments against
+    a live id's three (ADR-0042 §5)."""
+    with pytest.raises(ValidationError):
+        PaperExchangeConfig(genesis_collateral=Decimal("1000"), account_label=label)

@@ -1,10 +1,16 @@
 """``SingleShotMarketStrategy`` — the minimal reference ``Strategy`` (ADR-0016).
 
 Emits exactly one MARKET order on its first tick, then stays quiet, and records
-the ``OrderFilled`` it receives. It owns its monotonic ``seq`` (so ``signal_id`` is
-deterministic and replayable, ADR-0006) and knows nothing of the saga, the store,
-or the venue — the whole point of the surrounding engine is that a strategy stays
-this small. Depends on ``domain`` only; it emits no named events itself.
+the ``OrderFilled`` it receives together with the position that fill produced. It
+owns its monotonic ``seq`` (so ``signal_id`` is deterministic and replayable,
+ADR-0006) and knows nothing of the saga, the store, or the venue — the whole
+point of the surrounding engine is that a strategy stays this small.
+
+It is also the ``Portfolio`` seam's only consumer (ADR-0041 §8). The facade
+arrives **already scoped** to this ``strategy_id``, constructor-injected beside
+the ``bus``/``clock`` pair, which is what keeps ``strategies`` free of an
+``engine`` import and the ``Strategy`` Protocol unchanged. Depends on ``domain``
+only; it emits no named events itself.
 """
 
 import json
@@ -17,6 +23,8 @@ from tickwright.domain import (
     OrderEvent,
     OrderFilled,
     OrderType,
+    Portfolio,
+    PositionView,
     Side,
     TimeInForce,
 )
@@ -33,12 +41,17 @@ class SingleShotMarketStrategy:
         strategy_id: str,
         bus: EventBus,
         clock: Clock,
+        portfolio: Portfolio,
         side: Side,
         quantity: Decimal,
         time_in_force: TimeInForce = TimeInForce.IOC,
     ) -> None:
         self.strategy_id = strategy_id
         self._emitter = SignalEmitter(strategy_id=strategy_id, bus=bus, clock=clock)
+        # The ``domain`` Protocol, never the ``engine`` projection behind it, and
+        # never the facade class either — the seam exists for exactly that
+        # dependency direction (ADR-0035, ADR-0041 §8).
+        self._portfolio = portfolio
         self._side = side
         self._quantity = quantity
         self._time_in_force = time_in_force
@@ -46,6 +59,11 @@ class SingleShotMarketStrategy:
         # ADR-0016); the fired flag is the snapshot content this strategy owns.
         self._fired = False
         self.fills: list[OrderFilled] = []
+        # The observable record of what this strategy read, the same shape as
+        # ``fills`` and written in the same handler — so a test asserts the
+        # traced position through the strategy's own surface rather than
+        # reaching into the projection.
+        self.positions: list[PositionView | None] = []
 
     async def on_tick(self, tick: MarketTick) -> None:
         if self._fired:
@@ -62,6 +80,11 @@ class SingleShotMarketStrategy:
     async def on_order_event(self, event: OrderEvent) -> None:
         if isinstance(event, OrderFilled):
             self.fills.append(event)
+            # Coherent by construction, not by luck: the projection is the
+            # fill's writer and applied it before publishing, so this read is
+            # the one that fill produced. Synchronous, so a second read in this
+            # handler could not straddle another fill either (ADR-0041 §7).
+            self.positions.append(self._portfolio.position(event.symbol))
 
     def set_next_seq(self, next_seq: int) -> None:
         """Resume the seq counter from the engine-recovered high-water (ADR-0016)."""

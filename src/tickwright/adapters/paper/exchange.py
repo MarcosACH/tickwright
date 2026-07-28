@@ -14,8 +14,10 @@ fees/margin/PnL (ADR-0013).
 """
 
 from collections.abc import Mapping
+from decimal import Decimal
 
 from tickwright.domain import (
+    AccountSpec,
     Clock,
     EventBus,
     FillReport,
@@ -33,6 +35,7 @@ from tickwright.domain import (
 )
 
 from .book import RestingBook
+from .config import DEFAULT_ACCOUNT_LABEL
 from .fill_model import Fill, FillModel
 
 
@@ -45,11 +48,22 @@ class PaperExchange:
         bus: EventBus,
         clock: Clock,
         fill_model: FillModel,
+        genesis_collateral: Decimal,
+        account_label: str = DEFAULT_ACCOUNT_LABEL,
         instrument_specs: Mapping[str, InstrumentSpec] | None = None,
     ) -> None:
         self._bus = bus
         self._clock = clock
         self._fill_model = fill_model
+        # The account's opening cash is the operator's declaration, never the
+        # venue's: the paper exchange has nobody to ask, and the engine supplies
+        # no collateral of its own (ADR-0042 §1). Required rather than defaulted
+        # for exactly that reason — a plausible-looking number nobody chose is
+        # the silent fiction the whole surface refuses everywhere else.
+        self._account_spec = AccountSpec(
+            account_id=f"paper-{account_label}",
+            genesis_collateral=genesis_collateral,
+        )
         # Config-sourced venue metadata (ADR-0031). The exchange owns venue
         # knowledge, so min-notional a MARKET can only be judged at its fill
         # price is enforced here; the Engine also reads these to wire the guard.
@@ -194,6 +208,17 @@ class PaperExchange:
         """The config-sourced per-symbol specs (ADR-0031), for the Engine to wire
         into the guard. A copy, so a caller can never mutate the venue's config."""
         return dict(self._specs)
+
+    def account_spec(self) -> AccountSpec:
+        """The paper account's static declaration (ADR-0038/0042).
+
+        ``paper-<label>`` is deliberately **two** segments where a live venue's
+        id is three (venue + network + address), and the label's slug
+        constraint is what keeps that distinction unambiguous to a reader and to
+        a parser. Netting is ``NET`` — the paper book fills one signed position
+        per symbol, which is what the v1 model assumes throughout.
+        """
+        return self._account_spec
 
     async def fetch_order(self, cloid: str) -> VenueOrderView | None:
         """Venue truth for ``cloid``: last reported status plus every fill.

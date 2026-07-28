@@ -19,6 +19,7 @@ from enum import Enum
 from typing import Any
 
 from tickwright.domain import (
+    AccountSpec,
     Clock,
     EventBus,
     FillReport,
@@ -35,6 +36,7 @@ from tickwright.domain import (
 )
 from tickwright.observability import NamedEvent, named_event
 
+from .account import account_spec
 from .config import HyperliquidConfig
 from .transport import PostJson, post_json
 from .universe import HyperliquidUniverse
@@ -77,6 +79,9 @@ class HyperliquidExchange:
         # /info queries ask about the account, which is the key's own address
         # unless the key is an API/agent wallet acting for a master account.
         self._user_address = config.account_address or self._wallet.address
+        # Read once at composition, like the instrument specs beside it: the
+        # account is a deployment fact, not something that moves at runtime.
+        self._account_spec = account_spec(config, address=self._user_address)
         self._latest_price: dict[str, Decimal] = {}
         # The last nonce sent: the venue requires per-address nonces to be
         # strictly increasing, and the ms-truncated clock would collide on two
@@ -331,6 +336,11 @@ class HyperliquidExchange:
         """The meta-sourced per-symbol specs (ADR-0031), for the Engine to wire
         into the guard. A copy, so a caller can never mutate the universe."""
         return dict(self._universe.specs)
+
+    def account_spec(self) -> AccountSpec:
+        """The venue's static declaration about this process's account, composed
+        by ``account.py`` — the one module that knows what qualifies one."""
+        return self._account_spec
 
     async def _info(self, query: dict[str, Any]) -> object:
         return await self._post(f"{self._config.api_url}/info", query)

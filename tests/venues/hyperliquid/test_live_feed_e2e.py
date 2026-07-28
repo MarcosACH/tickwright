@@ -11,6 +11,7 @@ import asyncio
 from decimal import Decimal
 
 from hyperliquid_fakes import FakeWsConnection, trade, trades_frame
+from ledgers import ledger
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
@@ -29,17 +30,34 @@ from tickwright.engine.execution import ExecutionManager
 from tickwright.strategies import SingleShotMarketStrategy
 from tickwright.venues.hyperliquid import HyperliquidConfig, HyperliquidFeed
 
+# The paper account's opening cash. The venue requires it (ADR-0042 §1: the
+# engine supplies no collateral of its own); these tests do not exercise the
+# ledger, so one shared declaration keeps every wiring site honest and quiet.
+_GENESIS = Decimal("100000")
+
 
 def test_mocked_frames_reach_a_paper_fill_through_the_whole_pipeline() -> None:
     async def main() -> SingleShotMarketStrategy:
         bus = InMemoryBus()
         clock = ManualClock()
-        exchange = PaperExchange(bus=bus, clock=clock, fill_model=ImmediateFillModel())
+        exchange = PaperExchange(
+            bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+        )
+        projection = ledger()
         manager = ExecutionManager(
-            bus=bus, clock=clock, exchange=exchange, cache=Cache(store=SQLiteStore(":memory:"))
+            bus=bus,
+            clock=clock,
+            exchange=exchange,
+            cache=Cache(store=SQLiteStore(":memory:")),
+            portfolio=projection,
         )
         strategy = SingleShotMarketStrategy(
-            strategy_id="live", bus=bus, clock=clock, side=Side.BUY, quantity=Decimal("0.5")
+            strategy_id="live",
+            bus=bus,
+            clock=clock,
+            portfolio=projection.for_strategy("live"),
+            side=Side.BUY,
+            quantity=Decimal("0.5"),
         )
         connection = FakeWsConnection([trades_frame(trade("BTC", "43250.5", 1, sz="3"))])
 

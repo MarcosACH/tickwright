@@ -14,12 +14,14 @@ from collections.abc import Mapping
 from decimal import Decimal
 
 import pytest
+from ledgers import ledger
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
+    AccountSpec,
     AggressorSide,
     ExecutionReport,
     InstrumentSpec,
@@ -42,6 +44,11 @@ from tickwright.engine.cache import Cache
 from tickwright.engine.execution import ExecutionManager
 from tickwright.engine.reconcile import ReconcileConfig, Reconciler
 from tickwright.observability.testing import capture_events
+
+# The paper account's opening cash. The venue requires it (ADR-0042 §1: the
+# engine supplies no collateral of its own); these tests do not exercise the
+# ledger, so one shared declaration keeps every wiring site honest and quiet.
+_GENESIS = Decimal("100000")
 
 
 def _tick(price: str, ts: int = 1_000) -> MarketTick:
@@ -86,7 +93,9 @@ def _saga(cloid: str, state: OrderState) -> Order:
 def _surviving_venue(clock: ManualClock) -> tuple[PaperExchange, InMemoryBus]:
     """A venue that outlived our crash: its first-life bus has no listeners."""
     dead_bus = InMemoryBus()
-    exchange = PaperExchange(bus=dead_bus, clock=clock, fill_model=ImmediateFillModel())
+    exchange = PaperExchange(
+        bus=dead_bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+    )
     return exchange, dead_bus
 
 
@@ -97,7 +106,9 @@ def _second_life(
     bus = InMemoryBus()
     cache = Cache(store=store)
     cache.rebuild()
-    manager = ExecutionManager(bus=bus, clock=clock, exchange=exchange, cache=cache)
+    manager = ExecutionManager(
+        bus=bus, clock=clock, exchange=exchange, cache=cache, portfolio=ledger()
+    )
     bus.subscribe(Signal, manager.on_signal)
     bus.subscribe(ExecutionReport, manager.on_execution_report)
     events: list[OrderEvent] = []
@@ -281,6 +292,9 @@ class _DarkVenue:
         self.reads += 1
         return None
 
+    def account_spec(self) -> AccountSpec:
+        return AccountSpec(account_id="fake-venue")
+
     def instrument_specs(self) -> Mapping[str, InstrumentSpec]:
         return {}
 
@@ -362,7 +376,9 @@ def test_a_transient_boot_time_blip_resolves_and_the_barrier_clears() -> None:
     cache = Cache(store=store)
     cache.rebuild()
     venue = _BlippingVenue(failures=2)
-    manager = ExecutionManager(bus=bus, clock=clock, exchange=venue, cache=cache)
+    manager = ExecutionManager(
+        bus=bus, clock=clock, exchange=venue, cache=cache, portfolio=ledger()
+    )
     bus.subscribe(ExecutionReport, manager.on_execution_report)
     reconciler = Reconciler(
         bus=bus, clock=clock, exchange=venue, cache=cache, config=ReconcileConfig()

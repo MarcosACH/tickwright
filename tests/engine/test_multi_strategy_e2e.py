@@ -14,6 +14,8 @@ import json
 from decimal import Decimal
 from pathlib import Path
 
+from ledgers import ledger
+
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.feed import ReplayFeed
@@ -30,6 +32,11 @@ from tickwright.engine.cache import Cache
 from tickwright.engine.execution import ExecutionManager
 from tickwright.engine.strategy_host import StrategyHost
 from tickwright.strategies import SingleShotMarketStrategy
+
+# The paper account's opening cash. The venue requires it (ADR-0042 §1: the
+# engine supplies no collateral of its own); these tests do not exercise the
+# ledger, so one shared declaration keeps every wiring site honest and quiet.
+_GENESIS = Decimal("100000")
 
 _BTC_CLOID = derive_cloid("btc-shot:BTC:1")
 _ETH_CLOID = derive_cloid("eth-shot:ETH:1")
@@ -60,16 +67,31 @@ def _life(
 ) -> tuple[StrategyHost, SingleShotMarketStrategy, SingleShotMarketStrategy, list[Signal]]:
     """One engine life over ``store``: full wiring, feed run to end-of-file."""
     bus = InMemoryBus()
-    venue = PaperExchange(bus=bus, clock=clock, fill_model=ImmediateFillModel())
+    venue = PaperExchange(
+        bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+    )
     cache = Cache(store=store)
     cache.rebuild()
-    manager = ExecutionManager(bus=bus, clock=clock, exchange=venue, cache=cache)
+    projection = ledger()
+    manager = ExecutionManager(
+        bus=bus, clock=clock, exchange=venue, cache=cache, portfolio=projection
+    )
     host = StrategyHost(bus=bus, clock=clock, store=store)
     btc_strat = SingleShotMarketStrategy(
-        strategy_id="btc-shot", bus=bus, clock=clock, side=Side.BUY, quantity=Decimal("1")
+        strategy_id="btc-shot",
+        bus=bus,
+        clock=clock,
+        portfolio=projection.for_strategy("btc-shot"),
+        side=Side.BUY,
+        quantity=Decimal("1"),
     )
     eth_strat = SingleShotMarketStrategy(
-        strategy_id="eth-shot", bus=bus, clock=clock, side=Side.SELL, quantity=Decimal("2")
+        strategy_id="eth-shot",
+        bus=bus,
+        clock=clock,
+        portfolio=projection.for_strategy("eth-shot"),
+        side=Side.SELL,
+        quantity=Decimal("2"),
     )
     host.register(btc_strat, symbols={"BTC"})
     host.register(eth_strat, symbols={"ETH"})

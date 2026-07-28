@@ -7,6 +7,7 @@ value, an interpolated message, or an exception string. The default paper
 path carries no secrets at all.
 """
 
+from decimal import Decimal
 from io import StringIO
 from pathlib import Path
 
@@ -24,6 +25,7 @@ def _config(tmp_path: Path, **overrides: object) -> AppConfig:
     defaults: dict[str, object] = {
         "replay": {"path": tmp_path / "ticks.jsonl"},
         "sqlite": {"path": tmp_path / "saga.db"},
+        "paper": {"genesis_collateral": Decimal("100000")},
     }
     return AppConfig(**{**defaults, **overrides})  # type: ignore[arg-type]
 

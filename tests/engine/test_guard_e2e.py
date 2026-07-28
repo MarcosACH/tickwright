@@ -10,6 +10,8 @@ orders keep filling; the halt survives a restart. The same suite stays green wit
 import asyncio
 from decimal import Decimal
 
+from ledgers import ledger
+
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
@@ -36,6 +38,11 @@ from tickwright.engine.cache import Cache
 from tickwright.engine.execution import ExecutionManager
 from tickwright.engine.guard import NoopGuard, RealGuard
 from tickwright.observability.testing import capture_events
+
+# The paper account's opening cash. The venue requires it (ADR-0042 §1: the
+# engine supplies no collateral of its own); these tests do not exercise the
+# ledger, so one shared declaration keeps every wiring site honest and quiet.
+_GENESIS = Decimal("100000")
 
 _SPEC = InstrumentSpec(
     symbol="BTC",
@@ -84,10 +91,14 @@ def _harness(
     bus = InMemoryBus()
     clock = ManualClock(start_ns=1_000)
     store = SQLiteStore(":memory:")
-    exchange = PaperExchange(bus=bus, clock=clock, fill_model=ImmediateFillModel())
+    exchange = PaperExchange(
+        bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+    )
     cache = Cache(store=store)
     guard = guard or RealGuard(specs={"BTC": _SPEC}, store=store, clock=clock)
-    manager = ExecutionManager(bus=bus, clock=clock, exchange=exchange, cache=cache, guard=guard)
+    manager = ExecutionManager(
+        bus=bus, clock=clock, exchange=exchange, cache=cache, guard=guard, portfolio=ledger()
+    )
 
     bus.subscribe(Signal, manager.on_signal)
     bus.subscribe(ExecutionReport, manager.on_execution_report)
@@ -120,11 +131,17 @@ def test_market_below_min_notional_is_rejected_by_the_venue_via_sourced_specs() 
     clock = ManualClock(start_ns=1_000)
     store = SQLiteStore(":memory:")
     exchange = PaperExchange(
-        bus=bus, clock=clock, fill_model=ImmediateFillModel(), instrument_specs={"BTC": _SPEC}
+        bus=bus,
+        clock=clock,
+        fill_model=ImmediateFillModel(),
+        genesis_collateral=_GENESIS,
+        instrument_specs={"BTC": _SPEC},
     )
     cache = Cache(store=store)
     guard = RealGuard(specs=exchange.instrument_specs(), store=store, clock=clock)
-    manager = ExecutionManager(bus=bus, clock=clock, exchange=exchange, cache=cache, guard=guard)
+    manager = ExecutionManager(
+        bus=bus, clock=clock, exchange=exchange, cache=cache, guard=guard, portfolio=ledger()
+    )
     bus.subscribe(Signal, manager.on_signal)
     bus.subscribe(ExecutionReport, manager.on_execution_report)
     order_events: list[OrderEvent] = []
@@ -215,11 +232,15 @@ def _revived_manager(
     """A fresh engine over a surviving store — the restart the barrier gates."""
     bus = InMemoryBus()
     clock = ManualClock(start_ns=2_000)
-    exchange = PaperExchange(bus=bus, clock=clock, fill_model=ImmediateFillModel())
+    exchange = PaperExchange(
+        bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+    )
     cache = Cache(store=store)
     cache.rebuild()
     guard = RealGuard(specs={"BTC": _SPEC}, store=store, clock=clock)
-    manager = ExecutionManager(bus=bus, clock=clock, exchange=exchange, cache=cache, guard=guard)
+    manager = ExecutionManager(
+        bus=bus, clock=clock, exchange=exchange, cache=cache, guard=guard, portfolio=ledger()
+    )
     bus.subscribe(Signal, manager.on_signal)
     bus.subscribe(ExecutionReport, manager.on_execution_report)
     events: list[OrderEvent] = []

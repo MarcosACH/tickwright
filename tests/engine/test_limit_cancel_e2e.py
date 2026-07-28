@@ -14,6 +14,8 @@ import json
 from decimal import Decimal
 from pathlib import Path
 
+from ledgers import ledger
+
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.feed import ReplayFeed
@@ -35,6 +37,11 @@ from tickwright.domain import (
 from tickwright.engine.cache import Cache
 from tickwright.engine.execution import ExecutionManager
 from tickwright.strategies import SingleShotLimitStrategy
+
+# The paper account's opening cash. The venue requires it (ADR-0042 §1: the
+# engine supplies no collateral of its own); these tests do not exercise the
+# ledger, so one shared declaration keeps every wiring site honest and quiet.
+_GENESIS = Decimal("100000")
 
 
 def _write_ticks(path: Path, prices: list[str]) -> Path:
@@ -59,9 +66,13 @@ def _run(
     bus = InMemoryBus()
     clock = ManualClock()
     store = SQLiteStore(":memory:")
-    exchange = PaperExchange(bus=bus, clock=clock, fill_model=ImmediateFillModel())
+    exchange = PaperExchange(
+        bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+    )
     cache = Cache(store=store)
-    manager = ExecutionManager(bus=bus, clock=clock, exchange=exchange, cache=cache)
+    manager = ExecutionManager(
+        bus=bus, clock=clock, exchange=exchange, cache=cache, portfolio=ledger()
+    )
     strategy = SingleShotLimitStrategy(
         strategy_id="trivial",
         bus=bus,

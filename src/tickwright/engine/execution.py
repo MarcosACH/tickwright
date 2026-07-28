@@ -13,6 +13,11 @@ never transitions a saga: nothing here subscribes to time; only venue facts and
 reconciliation verdicts move an order — and a status arriving after the saga
 already resolved terminally is absorbed as an idempotent no-op (ADR-0026).
 
+A **fill** additionally moves the ``PortfolioProjection`` before it is published:
+the manager is the projection's single writer, so a fill lands in the ledger
+exactly once and a strategy reading its position from the ``OrderFilled`` handler
+reads the state that fill produced (ADR-0035). No other transition touches it.
+
 A ``CancelSignal`` re-derives the target ``cloid`` from ``target_signal_id``,
 durably checkpoints the ``cancel_requested`` marker **before** calling
 ``Exchange.cancel``, and leaves the saga ``LIVE`` — the marker is metadata, not a
@@ -60,6 +65,7 @@ from tickwright.observability.correlation import operation
 
 from .cache import Cache
 from .guard import NoopGuard
+from .portfolio import PortfolioProjection
 
 # The saga transition → named event map (ADR-0020): every canonical ``OrderEvent``
 # this manager publishes has exactly one cataloged name, so "a state-affecting
@@ -88,6 +94,7 @@ class ExecutionManager:
         clock: Clock,
         exchange: Exchange,
         cache: Cache,
+        portfolio: PortfolioProjection,
         guard: PreTradeGuard | None = None,
     ) -> None:
         self._bus = bus
@@ -97,6 +104,11 @@ class ExecutionManager:
         # every checkpoint and is rebuilt from the Store on restart (ADR-0009),
         # so a redelivered signal dedups across a crash too.
         self._cache = cache
+        # The economic sibling of the Cache, written on the fill path below. It
+        # is a constructor argument rather than a subscriber on purpose: the
+        # manager is the projection's single writer, so a fill is applied exactly
+        # once and the two read-models move together (ADR-0035).
+        self._portfolio = portfolio
         # The pre-trade boundary run before any send (ADR-0017). Defaults to the
         # passthrough guard so the paper/test path needs no policy wired in.
         self._guard = guard if guard is not None else NoopGuard()
@@ -254,6 +266,12 @@ class ExecutionManager:
             # Redelivered fill: the saga already reflects it. Suppress the
             # duplicate publish so downstream consumers never double-count.
             return
+        # The ledger moves on the fill-apply path, strictly before the fill is
+        # published — so a strategy reading its position from the OrderFilled
+        # handler reads the state *this* fill produced, never a stale one
+        # (ADR-0035, ADR-0045 §1). The side rides the saga because the event
+        # carries the trade and the order carries the direction.
+        self._portfolio.apply_fill(event, side=order.side)
         await self._commit(order, event)
 
     async def _commit(self, order: Order, event: OrderEvent) -> None:

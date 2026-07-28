@@ -36,6 +36,19 @@ class TimeInForce(StrEnum):
     IOC = "ioc"
 
 
+class Netting(StrEnum):
+    """How a venue nets two opposing fills on one instrument (ADR-0034/0038).
+
+    ``NET`` — one signed position per symbol, which is what v1 models and what
+    makes ``(strategy, symbol)`` disjointness sufficient; ``HEDGE`` — long and
+    short legs held side by side, the named extension point. Venue-declared on
+    ``AccountSpec``, never operator config.
+    """
+
+    NET = "net"
+    HEDGE = "hedge"
+
+
 class ComponentState(StrEnum):
     """The shared component lifecycle (ADR-0014): ``READY → RUNNING → STOPPED``,
     plus ``FAULTED`` for an unrecoverable invariant violation (fail-fast)."""

@@ -93,6 +93,17 @@ class AppConfig(BaseModel):
                 "exchange='hyperliquid' needs a signing key: "
                 "set TICKWRIGHT_HYPERLIQUID__SIGNING_KEY"
             )
+        if self.exchange == "paper" and self.paper.genesis_collateral is None:
+            # The paper account has no venue to ask for its opening balance, so
+            # the operator states it or the run does not start (ADR-0042 §1).
+            # The demand lives here, keyed on the discriminant, because this
+            # validator is the only scope where ``exchange`` and the paper block
+            # are both visible — a required field on ``PaperExchangeConfig``
+            # would fire first and force a paper number onto a live run.
+            raise ValueError(
+                "exchange='paper' needs a starting collateral: "
+                "set TICKWRIGHT_PAPER__GENESIS_COLLATERAL"
+            )
         return self
 
     def secrets(self) -> tuple[str, ...]:

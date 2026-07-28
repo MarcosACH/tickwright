@@ -24,17 +24,20 @@ from tickwright.adapters.paper import (
 )
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
+    Account,
     Clock,
     EventBus,
     Exchange,
     InstrumentSpec,
     MarketFeed,
+    Portfolio,
     PreTradeGuard,
     ReplayClock,
     Store,
     Strategy,
 )
 from tickwright.engine.guard import NoopGuard, RealGuard
+from tickwright.engine.portfolio import PortfolioProjection
 from tickwright.engine.runner import Engine
 from tickwright.strategies import SingleShotLimitStrategy, SingleShotMarketStrategy
 
@@ -87,10 +90,17 @@ def build_exchange(config: AppConfig, *, bus: EventBus, clock: Clock) -> Exchang
         case "paper":
             # The paper venue subscribes itself to the tick stream (it fills off
             # ticks, a real venue would not) — no tick-wiring line to keep here.
+            # The one place the paper genesis narrows from ``Decimal | None``
+            # to ``Decimal``: ``AppConfig``'s validator has already refused a
+            # paper run without one, and this arm is the single reader of
+            # ``config.paper`` (ADR-0042 §1).
+            assert config.paper.genesis_collateral is not None
             return PaperExchange(
                 bus=bus,
                 clock=clock,
                 fill_model=build_fill_model(config.paper, clock=clock),
+                genesis_collateral=config.paper.genesis_collateral,
+                account_label=config.paper.account_label,
                 instrument_specs=config.paper.instrument_specs,
             )
         case "hyperliquid":
@@ -164,11 +174,28 @@ def build_guard(
             assert_never(unreachable)
 
 
+def build_portfolio(exchange: Exchange, *, clock: Clock) -> PortfolioProjection:
+    """Open the process's one ledger against the account the venue declares.
+
+    Which venue it is decides nothing here: the opening cash rides the
+    ``AccountSpec`` the exchange hands over, and how paper's declared number and
+    live's ingested one resolve is ``Account.open``'s rule (ADR-0042 §6). This
+    root's job is to open exactly one ledger, against exactly the account the
+    engine's own exchange trades.
+    """
+    return PortfolioProjection(
+        account=Account.open(exchange.account_spec(), ts_ns=clock.timestamp_ns())
+    )
+
+
 def build_engine(config: AppConfig) -> Engine:
     """Construct every concrete and hand the ``Engine`` a wired, tradable stack.
 
     The venue's ``InstrumentSpec``s flow into the venue-agnostic guard here
-    (ADR-0031) — the one placement where both sides are concrete.
+    (ADR-0031) — the one placement where both sides are concrete. The same holds
+    for the portfolio: this is where the projection and the strategies are both
+    in scope, so this is where each strategy gets its scoped ``Portfolio`` facade
+    (ADR-0041 §7), exactly as it already gets its ``Clock``.
     """
     bus = build_bus(config)
     clock = build_clock(config)
@@ -176,34 +203,47 @@ def build_engine(config: AppConfig) -> Engine:
     exchange = build_exchange(config, bus=bus, clock=clock)
     feed = build_feed(config, bus=bus, clock=clock)
     guard = build_guard(config, specs=exchange.instrument_specs(), store=store, clock=clock)
+    portfolio = build_portfolio(exchange, clock=clock)
     engine = Engine(
         bus=bus,
         clock=clock,
         store=store,
         exchange=exchange,
         feed=feed,
+        portfolio=portfolio,
         guard=guard,
         config=config.engine,
     )
     for strategy_config in config.strategies:
         engine.register(
-            _build_strategy(strategy_config, bus=bus, clock=clock),
+            _build_strategy(
+                strategy_config,
+                bus=bus,
+                clock=clock,
+                portfolio=portfolio.for_strategy(strategy_config.strategy_id),
+            ),
             symbols={strategy_config.symbol},
         )
     return engine
 
 
-def _build_strategy(config: StrategyConfig, *, bus: EventBus, clock: Clock) -> Strategy:
+def _build_strategy(
+    config: StrategyConfig, *, bus: EventBus, clock: Clock, portfolio: Portfolio
+) -> Strategy:
     match config.kind:
         case "single_shot_market":
             return SingleShotMarketStrategy(
                 strategy_id=config.strategy_id,
                 bus=bus,
                 clock=clock,
+                portfolio=portfolio,
                 side=config.side,
                 quantity=config.quantity,
             )
         case "single_shot_limit":
+            # Deliberately not handed a portfolio: it reads no position state,
+            # and a constructor parameter with no reader is not symmetry, it is
+            # an unused seam (ADR-0041 §7).
             assert config.price is not None  # enforced by StrategyConfig validation
             return SingleShotLimitStrategy(
                 strategy_id=config.strategy_id,

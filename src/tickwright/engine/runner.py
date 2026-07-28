@@ -41,6 +41,7 @@ from .cache import Cache
 from .cadence import run_cadence
 from .execution import ExecutionManager
 from .guard import NoopGuard
+from .portfolio import PortfolioProjection
 from .reconcile import ReconcileConfig, Reconciler
 from .strategy_host import StrategyHost
 
@@ -68,6 +69,7 @@ class Engine:
         store: Store,
         exchange: Exchange,
         feed: MarketFeed,
+        portfolio: PortfolioProjection,
         guard: PreTradeGuard | None = None,
         config: EngineConfig | None = None,
     ) -> None:
@@ -83,8 +85,17 @@ class Engine:
         # The engine-internal components, built here from the injected seams —
         # the composition root knows the concretes, the Engine knows the wiring.
         self._cache = Cache(store=store)
+        # Injected rather than built here, unlike the Cache: the composition
+        # root also hands each strategy a facade scoped off this same object, so
+        # it must own the one instance (ADR-0041 §7).
+        self._portfolio = portfolio
         self._execution = ExecutionManager(
-            bus=bus, clock=clock, exchange=exchange, cache=self._cache, guard=self._guard
+            bus=bus,
+            clock=clock,
+            exchange=exchange,
+            cache=self._cache,
+            portfolio=self._portfolio,
+            guard=self._guard,
         )
         # Resolved here (not left to the Reconciler default) because the runner
         # also paces the continuous cadences off the same intervals below.

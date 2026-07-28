@@ -19,6 +19,7 @@ import pytest
 from bus_backends import BUS_BACKENDS, make_bus
 from hypothesis import given
 from hypothesis import strategies as st
+from ledgers import ledger
 
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
@@ -42,6 +43,11 @@ from tickwright.domain import (
 from tickwright.engine.cache import Cache
 from tickwright.engine.execution import ExecutionManager
 
+# The paper account's opening cash. The venue requires it (ADR-0042 §1: the
+# engine supplies no collateral of its own); these tests do not exercise the
+# ledger, so one shared declaration keeps every wiring site honest and quiet.
+_GENESIS = Decimal("100000")
+
 _CLOID = derive_cloid("trivial:BTC:1")
 
 
@@ -49,9 +55,13 @@ def _wire(backend: str) -> tuple[EventBus, SQLiteStore, list[OrderEvent]]:
     bus = make_bus(backend)
     clock = ManualClock(start_ns=1_000)
     store = SQLiteStore(":memory:")
-    exchange = PaperExchange(bus=bus, clock=clock, fill_model=ImmediateFillModel())
+    exchange = PaperExchange(
+        bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+    )
     cache = Cache(store=store)
-    manager = ExecutionManager(bus=bus, clock=clock, exchange=exchange, cache=cache)
+    manager = ExecutionManager(
+        bus=bus, clock=clock, exchange=exchange, cache=cache, portfolio=ledger()
+    )
 
     bus.subscribe(Signal, manager.on_signal)
     bus.subscribe(ExecutionReport, manager.on_execution_report)

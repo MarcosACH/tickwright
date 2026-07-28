@@ -28,6 +28,11 @@ from tickwright.domain import (
     TimeInForce,
 )
 
+# The paper account's opening cash. The venue requires it (ADR-0042 §1: the
+# engine supplies no collateral of its own); these tests do not exercise the
+# ledger, so one shared declaration keeps every wiring site honest and quiet.
+_GENESIS = Decimal("100000")
+
 
 def _tick(price: str, ts: int = 1_000, symbol: str = "BTC") -> MarketTick:
     from tickwright.domain import AggressorSide
@@ -152,7 +157,9 @@ def test_a_resting_limit_partial_fills_across_ticks_and_converges() -> None:
     The exchange caps each fill to the remaining, so it never over-fills."""
     bus = InMemoryBus()
     clock = ManualClock()
-    exchange = PaperExchange(bus=bus, clock=clock, fill_model=_partial_model(fraction="0.4"))
+    exchange = PaperExchange(
+        bus=bus, clock=clock, fill_model=_partial_model(fraction="0.4"), genesis_collateral=_GENESIS
+    )
     fills: list[FillReport] = []
     bus.subscribe(FillReport, lambda r: _record(fills, r))
 
@@ -181,7 +188,9 @@ def test_a_marketable_limit_partial_fill_rests_its_remainder_and_converges() -> 
     ticks converge it to FILLED. The arrival fill must not be lost."""
     bus = InMemoryBus()
     clock = ManualClock()
-    exchange = PaperExchange(bus=bus, clock=clock, fill_model=_partial_model(fraction="0.4"))
+    exchange = PaperExchange(
+        bus=bus, clock=clock, fill_model=_partial_model(fraction="0.4"), genesis_collateral=_GENESIS
+    )
     fills: list[FillReport] = []
     bus.subscribe(FillReport, lambda r: _record(fills, r))
 
@@ -205,7 +214,9 @@ def test_a_marketable_ioc_limit_partial_fill_cancels_its_remainder() -> None:
     resting, and no later tick fills more."""
     bus = InMemoryBus()
     clock = ManualClock()
-    exchange = PaperExchange(bus=bus, clock=clock, fill_model=_partial_model(fraction="0.4"))
+    exchange = PaperExchange(
+        bus=bus, clock=clock, fill_model=_partial_model(fraction="0.4"), genesis_collateral=_GENESIS
+    )
     fills: list[FillReport] = []
     statuses: list[OrderStatusReport] = []
     bus.subscribe(FillReport, lambda r: _record(fills, r))
@@ -243,7 +254,7 @@ def test_a_queue_miss_emits_no_fill_and_leaves_the_order_resting() -> None:
     model = StochasticFillModel(
         rng=random.Random(0), clock=clock, params=StochasticParams(prob_fill_on_limit=0.0)
     )
-    exchange = PaperExchange(bus=bus, clock=clock, fill_model=model)
+    exchange = PaperExchange(bus=bus, clock=clock, fill_model=model, genesis_collateral=_GENESIS)
     fills: list[FillReport] = []
     statuses: list[OrderStatusReport] = []
     bus.subscribe(FillReport, lambda r: _record(fills, r))
@@ -273,7 +284,7 @@ def test_fill_latency_advances_virtual_time_via_the_injected_clock() -> None:
     model = StochasticFillModel(
         rng=random.Random(0), clock=clock, params=StochasticParams(latency_seconds=2.0)
     )
-    exchange = PaperExchange(bus=bus, clock=clock, fill_model=model)
+    exchange = PaperExchange(bus=bus, clock=clock, fill_model=model, genesis_collateral=_GENESIS)
     fills: list[FillReport] = []
     bus.subscribe(FillReport, lambda r: _record(fills, r))
 
@@ -304,7 +315,7 @@ def _run_stream(seed: int) -> list[tuple[Decimal, Decimal]]:
             partial_fill_fraction=Decimal("0.4"),
         ),
     )
-    exchange = PaperExchange(bus=bus, clock=clock, fill_model=model)
+    exchange = PaperExchange(bus=bus, clock=clock, fill_model=model, genesis_collateral=_GENESIS)
     fills: list[FillReport] = []
     bus.subscribe(FillReport, lambda r: _record(fills, r))
 
