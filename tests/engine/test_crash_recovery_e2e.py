@@ -14,7 +14,7 @@ the original signal thrown in.
 
 import asyncio
 import json
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator
 from decimal import Decimal
 from pathlib import Path
 
@@ -26,16 +26,15 @@ from store_backends import (
     SQLiteBackend,
     resolve_backend,
 )
+from venues import VenueLink
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.feed import ReplayFeed
 from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.domain import (
-    AccountSpec,
     AggressorSide,
     ExecutionReport,
-    InstrumentSpec,
     MarketTick,
     OrderEvent,
     OrderFailed,
@@ -71,7 +70,7 @@ def store_backend(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[Ba
     yield resolve_backend(request.param, tmp_path / "saga.db")
 
 
-class _CrashingTransport:
+class _CrashingTransport(VenueLink):
     """The venue link for the doomed first life: the process dies in the send
     window. ``pre_send=True`` crashes before the request reaches the venue;
     otherwise the venue receives it and only the ack is lost (ADR-0008's
@@ -79,14 +78,8 @@ class _CrashingTransport:
     is allowed."""
 
     def __init__(self, venue: PaperExchange, *, pre_send: bool) -> None:
-        self._venue = venue
+        super().__init__(venue)
         self._pre_send = pre_send
-
-    async def start(self) -> None:
-        await self._venue.start()
-
-    async def stop(self) -> None:
-        await self._venue.stop()
 
     async def place(self, order: PlaceOrder) -> None:
         if self._pre_send:
@@ -99,12 +92,6 @@ class _CrashingTransport:
 
     async def fetch_order(self, cloid: str) -> VenueOrderView | None:
         raise AssertionError("first life never fetches")
-
-    def account_spec(self) -> AccountSpec:
-        return self._venue.account_spec()
-
-    def instrument_specs(self) -> Mapping[str, InstrumentSpec]:
-        return self._venue.instrument_specs()
 
 
 def _ticks_file(path: Path, prices: list[str]) -> Path:
