@@ -559,7 +559,17 @@ def test_the_paper_venue_releases_without_a_start_and_keeps_its_book() -> None:
     never ran at all, an earlier step having faulted first. Releasing must
     therefore be safe on a venue that never started, and it is a *release*, not
     a reset: a resting order is still the venue's truth afterwards, which is
-    what lets restart reconciliation re-adopt it by cloid (ADR-0024)."""
+    what lets restart reconciliation re-adopt it by cloid (ADR-0024).
+
+    Driven **twice**, because one shutdown can drive it twice: a graceful step
+    that raises *behind* the venue release faults the run, and the best-effort
+    pass re-walks the membership from the top (the runner's half of this claim
+    is ``test_a_graceful_teardown_that_breaks_releases_the_venue_a_second_time``
+    — asserted there on a double, and here on the adapter itself). Trivially
+    true while this body releases nothing; pinned before ADR-0037's funding
+    generator gives it a task to cancel, which is the first way a second call
+    can break. The book survives both, so the second release is no more a reset
+    than the first."""
     exchange, bus, clock, fills, statuses = _limit_harness()
 
     async def scenario() -> VenueOrderView | None:
@@ -567,6 +577,7 @@ def test_the_paper_venue_releases_without_a_start_and_keeps_its_book() -> None:
         await bus.publish(_tick("42000"))
         await exchange.place(_limit_order("41000"))  # rests, uncrossed
         await exchange.stop()  # no start() ever ran
+        await exchange.stop()  # and again: the faulted pass re-walks the membership
         return await exchange.fetch_order("0xabc")
 
     view = asyncio.run(scenario())

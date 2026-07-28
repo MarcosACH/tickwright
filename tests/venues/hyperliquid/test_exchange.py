@@ -763,11 +763,23 @@ def test_the_venue_link_is_released_without_a_start_having_run() -> None:
     one that never ran, an earlier step having faulted first. Releasing an
     adapter that never connected must not reach the venue, and must not raise:
     a break here would be recorded as a stop-hook failure and would cost the
-    steps behind it (ADR-0020/0024)."""
+    steps behind it (ADR-0020/0024).
+
+    Driven **twice in the one shutdown**, which is the other way to read the
+    same membership: a graceful step that raises *behind* the venue release
+    faults the run and the best-effort pass re-walks it from the top, so the
+    second call must be a no-op rather than a failure (the runner's half is
+    ``test_a_graceful_teardown_that_breaks_releases_the_venue_a_second_time``,
+    asserted there on a double and here on the adapter). The fake still routes
+    nothing, so neither release may reach the venue."""
     post = FakeExchangeApi({})
     exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
 
-    asyncio.run(exchange.stop())
+    async def scenario() -> None:
+        await exchange.stop()  # no start() ever ran
+        await exchange.stop()  # and again: the faulted pass re-walks the membership
+
+    asyncio.run(scenario())
 
     assert post.requests == []
 

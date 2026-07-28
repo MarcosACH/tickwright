@@ -16,6 +16,12 @@ member does. So each adapter suite declares which of its tests claims each
 member, and this asserts the declaration covers the Protocol exactly and names
 only tests that exist.
 
+The gate is **member-grained, not clause-grained**, and cannot be otherwise: it
+sees that ``stop`` carries a claim, never that the claim covers every clause
+``stop``'s docstring makes. A member whose contract grows a clause stays green
+here. Read it as "nobody forgot this member entirely", not "this member is
+fully asserted" — widening a member is still a reviewer's job.
+
 Explicit assertion messages throughout: this module is not a test module, so
 pytest does not rewrite its asserts and a bare comparison would fail blind.
 """
