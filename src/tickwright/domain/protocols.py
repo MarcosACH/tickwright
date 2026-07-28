@@ -354,6 +354,10 @@ class Exchange(Protocol):
 
     Owns no saga. ``place`` emits ``ExecutionReport``s on the bus rather than
     returning them, so the ``ExecutionManager`` drives the FSM off venue facts.
+
+    Lifecycle rides the seam because the runner drives it in its ordered
+    sequence (ADR-0024): ``start`` at step 4, ``stop`` immediately behind the
+    feed. The two are declared as a pair and read as one.
     """
 
     async def start(self) -> None:
@@ -364,6 +368,20 @@ class Exchange(Protocol):
         here precedes every order, and the barrier observes an already-aligned
         venue. A refusal is an ``InvariantViolation``: the engine faults and
         exits non-zero rather than trading against a venue it could not align.
+        """
+        ...
+
+    async def stop(self) -> None:
+        """Release whatever ``start()`` connected (ADR-0024 reverse shutdown).
+
+        Driven immediately after the feed is cut, so an adapter-owned loop stops
+        before the bus drains behind it and cannot publish into a closing bus.
+
+        **Safe on an adapter that never started**, the peer of ``EventBus.close``
+        above: the faulted teardown walks the same ordered membership as the
+        graceful one, so a ``start()`` that *refused* — or that never ran at all,
+        because an earlier step faulted first — is still followed by this call.
+        Release what exists; never assume a successful ``start()`` preceded you.
         """
         ...
 
@@ -383,15 +401,6 @@ class Exchange(Protocol):
         itself failed (outage): a failed read must never look like "no record"
         (ADR-0011 inv 1). A successful read always returns a view, even an
         empty one."""
-        ...
-
-    async def stop(self) -> None:
-        """Stop anything the adapter runs of its own (ADR-0024 reverse shutdown).
-
-        Driven immediately after the feed is cut, so an adapter-owned loop stops
-        before the bus drains behind it and cannot publish into a closing bus.
-        The peer of ``start()``: whatever that connected, this releases.
-        """
         ...
 
     def account_spec(self) -> AccountSpec:
