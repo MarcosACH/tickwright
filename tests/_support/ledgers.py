@@ -10,8 +10,9 @@ Suites that *are* about the accounting surface (``tests/engine/test_portfolio.py
 ``tests/engine/test_tracer_e2e.py``) build theirs explicitly, because how the
 ledger is opened is part of what they assert.
 
-The ``GENESIS`` below is the other half of that: the one opening balance those
-suites also wire their *venue* with, so no suite declares the number twice.
+The ``GENESIS`` below is the other half of what those saga-focused suites take from
+here: the one opening balance they wire their *venue* with too, so no suite declares
+the number twice.
 """
 
 from decimal import Decimal
