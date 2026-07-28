@@ -210,7 +210,9 @@ def position_values(position: Position, *, ts_ns: int) -> tuple[Any, ...]:
     write is unconditional here, because margin mode does not yet exist in the
     model to condition on (ADR-0040 §5 makes it config-authoritative; #190/#176
     land it). The column is in its final shape; **the slice that introduces a
-    cross-margined position owns this branch**, not just the field.
+    cross-margined position owns this write branch**, not just the field — the
+    read half is already here, because a ``NULL`` the mapping cannot restore is a
+    row the schema admits and the recovery mass-read would crash on.
     """
     return (
         UNATTRIBUTED if position.strategy_id is None else position.strategy_id,
@@ -234,6 +236,14 @@ def restore_position(row: Sequence[Any]) -> Position:
     keeps is a *durable* one — a reader of the table can tell "never had an
     entry" from a real price — and it costs nothing in memory, where ``is_flat``
     already answers the same question.
+
+    ``isolated_collateral`` reads the same way, and **both** nullable columns are
+    handled here even though only one of them has a writer today: the schema
+    admits a ``NULL`` in either, and ``Decimal(None)`` raises ``TypeError`` —
+    which is not a driver error, so it would escape ``all_positions()`` unwrapped,
+    past the seam's ``InvariantViolation`` contract, on the recovery path. What
+    the deferral to #190/#176 covers is the *write* branch — emitting ``NULL``
+    for a genuinely cross-margined position — not this one.
     """
     return Position(
         strategy_id=None if row[0] == UNATTRIBUTED else row[0],
@@ -243,7 +253,7 @@ def restore_position(row: Sequence[Any]) -> Position:
         realized_pnl=Decimal(row[4]),
         fees=Decimal(row[5]),
         funding=Decimal(row[6]),
-        isolated_collateral=Decimal(row[7]),
+        isolated_collateral=_ZERO if row[7] is None else Decimal(row[7]),
     )
 
 
