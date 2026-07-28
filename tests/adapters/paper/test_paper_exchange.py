@@ -17,6 +17,7 @@ from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.paper import ImmediateFillModel, PaperExchange, PaperExchangeConfig
 from tickwright.domain import (
     AggressorSide,
+    Event,
     Exchange,
     FillReport,
     InstrumentSpec,
@@ -520,22 +521,34 @@ def test_the_paper_account_label_defaults_to_the_same_label_the_config_does() ->
 def test_the_lifecycle_pair_reaches_nothing_because_the_one_link_is_constructed() -> None:
     """The two verbs the runner drives (ADR-0024 step 4 and the reverse
     shutdown). In-process there is nothing to connect: this venue's only link —
-    the ``MarketTick`` subscription — is wired at construction, so a fill needs
-    neither verb. Pinned here because ADR-0037's funding generator will give
-    ``stop()`` real work, and that arrival should be a visible change to this
-    assertion rather than a silent one."""
-    exchange, bus, clock, reports = _harness()
+    the ``MarketTick`` subscription — is wired at construction, so neither verb
+    has anything to do.
+
+    Driven *alone*, with no tick and no order, and watched two ways — the paper
+    analogue of the live arm's ``post.requests == []``. Dispatch is
+    ``isinstance``-guarded (ADR-0023), so a subscription to ``Event`` itself sees
+    **everything** this venue publishes, including a type that does not exist
+    yet; and a venue that connected nothing leaves no task running behind it.
+
+    Both are needed for the claim to stay honest as the seam grows. ADR-0037's
+    funding generator would be started here and cancelled below: it publishes no
+    fill, so a test watching fills would survive its arrival silently, and it
+    publishes nothing at all until time advances, so even the catch-all would.
+    The task is what gives it away."""
+    exchange, bus, _clock, _fills = _harness()
+    published: list[Event] = []
+    bus.subscribe(Event, lambda event: _record(published, event))
+    running: list[asyncio.Task[object]] = []
 
     async def scenario() -> None:
         await exchange.start()
-        clock.advance_to(1_000)
-        await bus.publish(_tick("42000"))
-        await exchange.place(_market_order(qty="0.5"))
+        running.extend(task for task in asyncio.all_tasks() if task is not asyncio.current_task())
         await exchange.stop()
 
     asyncio.run(scenario())
 
-    assert len(reports) == 1
+    assert published == []
+    assert running == []
 
 
 def test_the_paper_venue_releases_without_a_start_and_keeps_its_book() -> None:
