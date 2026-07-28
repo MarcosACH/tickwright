@@ -40,6 +40,7 @@ from tickwright.domain import (
     OrderStatusReport,
     PlaceOrder,
     PlaceSignal,
+    PreTradeGuard,
     Side,
     Signal,
     VenueOrderView,
@@ -202,7 +203,7 @@ def _manager(
     clock: ManualClock,
     exchange: Exchange,
     *,
-    guard: object | None = None,
+    guard: PreTradeGuard | None = None,
     portfolio: PortfolioProjection | None = None,
 ) -> None:
     """Wire an ``ExecutionManager`` over ``exchange`` onto ``bus`` — the exchange
@@ -214,7 +215,7 @@ def _manager(
         exchange=exchange,
         cache=cache,
         portfolio=portfolio if portfolio is not None else ledger(),
-        guard=guard,  # type: ignore[arg-type]
+        guard=guard,
     )
     bus.subscribe(Signal, manager.on_signal)
     bus.subscribe(ExecutionReport, manager.on_execution_report)
