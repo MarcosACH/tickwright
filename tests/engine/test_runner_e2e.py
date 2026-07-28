@@ -663,13 +663,34 @@ class _TimelineStore(SQLiteStore):
         super().close()
 
 
-def test_the_reverse_shutdown_stops_the_exchange_immediately_after_the_feed(
+class _VenueWatchingTheCadences(_LifecycleRecordingVenue):
+    """Records, at the moment the runner releases it, whether the reconcile
+    cadences are still running. The timeline alone cannot show this: a cancelled
+    cadence appends nothing of its own, and the tasks are the runner's — there
+    is no seam to observe them through, so the test reads the attribute."""
+
+    def __init__(self, timeline: list[str]) -> None:
+        super().__init__(timeline)
+        self.engine: Engine | None = None
+        self.cadences_still_running = True
+
+    async def stop(self) -> None:
+        assert self.engine is not None, "the test must hand the venue its engine"
+        self.cadences_still_running = any(not task.done() for task in self.engine._cadence_tasks)
+        await super().stop()
+
+
+def test_the_reverse_shutdown_releases_the_exchange_once_the_cadences_are_cancelled(
     tmp_path: Path,
 ) -> None:
-    """ADR-0024's reverse shutdown: ``exchange.stop`` sits directly after
-    ``feed.stop`` in the one ordered membership, so whatever the adapter runs
-    is stopped before the bus drains and the store closes behind it."""
+    """ADR-0024's reverse shutdown: ``exchange.stop`` sits behind ``feed.stop``
+    and behind ``reconcile.stop``, and ahead of the drain — the venue is
+    released only once nothing is left to read it, and while the bus it may
+    still report on is open. The cadences call ``fetch_order``: releasing the
+    adapter under a live cycle would freeze that cycle against an adapter the
+    runner itself had just torn down (ADR-0011 inv 1)."""
     timeline: list[str] = []
+    venue = _VenueWatchingTheCadences(timeline)
 
     async def main() -> int:
         feed = _TimelineFeed(timeline)
@@ -677,10 +698,11 @@ def test_the_reverse_shutdown_stops_the_exchange_immediately_after_the_feed(
             bus=InMemoryBus(),
             clock=ManualClock(),
             store=_TimelineStore(tmp_path / "saga.db", timeline),
-            exchange=_LifecycleRecordingVenue(timeline),
+            exchange=venue,
             feed=feed,
             portfolio=ledger(),
         )
+        venue.engine = engine
         run = asyncio.create_task(engine.run())
         await asyncio.wait_for(feed.started.wait(), timeout=5)
         await asyncio.wait_for(engine.stop(), timeout=5)
@@ -689,6 +711,9 @@ def test_the_reverse_shutdown_stops_the_exchange_immediately_after_the_feed(
     assert asyncio.run(main()) == 0
 
     assert timeline == ["exchange.start", "feed.stop", "exchange.stop", "store.close"]
+    assert not venue.cadences_still_running, (
+        "the venue must not be released while a reconcile cycle can still read it"
+    )
 
 
 def test_the_fault_path_stops_the_exchange_in_the_same_position_as_a_graceful_stop(

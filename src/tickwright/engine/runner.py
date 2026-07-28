@@ -241,15 +241,22 @@ class Engine:
         in failure *policy* (graceful: bounded as a whole, propagate; faulted:
         bounded per step, record, keep going) — so a new teardown seam adds
         one entry here, never a second copy that the fault path silently
-        misses. Order: cut the source, let in-flight events land in the final
-        snapshots (ADR-0016), then flush the bus and close the store last —
-        resting LIVE orders stay in it for restart reconciliation to re-adopt
-        (crash and graceful stop converge on one recovery path).
+        misses. Order: cut the source, silence the cycles that read the venue,
+        release the venue, let in-flight events land in the final snapshots
+        (ADR-0016), then flush the bus and close the store last — resting LIVE
+        orders stay in it for restart reconciliation to re-adopt (crash and
+        graceful stop converge on one recovery path).
+
+        The venue is released *behind* the cadences deliberately: they read it
+        (``fetch_order``), so releasing it first would leave a live cycle
+        querying an adapter this very sequence had just torn down. It stays
+        ahead of the drain, so an adapter-owned loop is cut before the bus
+        closes under it — both ends of the slot are load-bearing.
         """
         return (
             ("feed.stop", self._stop_feed),
-            ("exchange.stop", self._exchange.stop),
             ("reconcile.stop", self._stop_cadences),
+            ("exchange.stop", self._exchange.stop),
             ("bus.drain", self._bus.drain),
             ("host.stop", self._host.stop),
             ("bus.close", self._bus.close),
