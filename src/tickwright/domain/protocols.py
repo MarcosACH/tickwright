@@ -203,8 +203,11 @@ class Store(Protocol):
     Throughput is explicitly not a goal; readable recovery is.
 
     **Every member either reaches durable storage or raises
-    ``InvariantViolation``** (ADR-0014) — one contract for the seam rather than
-    one per method, and a backend's own exception type is never part of it. The
+    ``InvariantViolation``** (ADR-0019) — one contract for the seam rather than
+    one per method, and a backend's own exception type is never part of it. That
+    widens ADR-0014, which names a failed checkpoint *write*; reads are covered
+    too, so a store call can move under the containment net later without its
+    failure mode changing shape. The
     type is load-bearing, not decorative: ``InvariantViolation`` is what pierces
     the engine's strategy-containment net and faults the run (ADR-0024), so a
     driver exception crossing here would be filed as a caller's bug and survived,

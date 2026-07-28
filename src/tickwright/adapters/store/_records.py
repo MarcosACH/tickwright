@@ -25,7 +25,7 @@ from tickwright.domain import Account, Order, OrderState, OrderType, Position, S
 _ZERO = Decimal("0")
 
 # The saga columns, in write order. ``history`` (the ADR-0008 checkpoint trail)
-# is last: it is an adapter-only audit surface, not part of what recovery reads.
+# is last: it is an audit surface, not part of what recovery reads.
 RECORD_COLUMNS: tuple[str, ...] = (
     "cloid",
     "strategy_id",

@@ -1,4 +1,4 @@
-"""One error contract for the whole ``Store`` seam (ADR-0014, ADR-0019).
+"""One error contract for the whole ``Store`` seam (ADR-0019).
 
 A store member either reaches durable storage or raises ``InvariantViolation``.
 That is a property of the *seam*, not of whichever method the caller happened to
@@ -6,6 +6,10 @@ touch: the engine's containment net keys on the exception's type — only an
 ``InvariantViolation`` pierces it and faults the run (ADR-0024) — so a driver
 exception crossing the seam is filed as a caller's bug and survived, when the
 truth is that the process can no longer make its state durable.
+
+Reads are covered as well as writes, which widens ADR-0014's "failed checkpoint
+write": one contract means a store call can move under the containment net later
+without its failure mode changing shape.
 
 Each adapter contributes exactly one thing to that rule: the base class its
 driver raises from. Both ``sqlite3`` and ``psycopg`` expose one (`sqlite3.Error`,
