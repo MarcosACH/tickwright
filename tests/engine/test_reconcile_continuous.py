@@ -16,7 +16,7 @@ import structlog.testing
 from hypothesis import given
 from hypothesis import strategies as st
 from ledgers import GENESIS, ledger
-from venues import VenueDouble, VenueLink
+from venue_doubles import VenueDouble, VenueLink
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock

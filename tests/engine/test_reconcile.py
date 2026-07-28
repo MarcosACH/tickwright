@@ -14,7 +14,7 @@ from decimal import Decimal
 
 import pytest
 from ledgers import GENESIS, ledger
-from venues import VenueDouble
+from venue_doubles import VenueDouble
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock

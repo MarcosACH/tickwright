@@ -16,7 +16,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from ledgers import GENESIS, ledger
-from venues import VenueLink
+from venue_doubles import VenueLink
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock

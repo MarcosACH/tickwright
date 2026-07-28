@@ -26,7 +26,7 @@ from store_backends import (
     SQLiteBackend,
     resolve_backend,
 )
-from venues import VenueLink
+from venue_doubles import VenueLink
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock

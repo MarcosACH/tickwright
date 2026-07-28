@@ -19,7 +19,7 @@ from pathlib import Path
 from kafka_fakes import FakeKafkaBroker
 from ledgers import GENESIS, ledger
 from structlog.typing import EventDict
-from venues import VenueDouble
+from venue_doubles import VenueDouble
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.bus.kafka import KafkaBus
