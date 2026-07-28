@@ -31,6 +31,30 @@ So the canonical pairings are **InMemoryBus + SQLite** (zero-setup, deterministi
 The last three are current-state rows, not an event log: recovery is a `SELECT`, and "snapshot"
 means the current row state (ADR-0043 §1, extending ADR-0009 from orders to accounting).
 
+## One error contract for the seam
+
+**Every member of the Protocol either reaches durable storage or raises `InvariantViolation`** —
+reads included, and a backend's own exception type is never part of the contract. This *widens*
+ADR-0014, which names "a failed checkpoint **write**"; the widening is recorded here, where the
+seam is decided, rather than left to the adapters.
+
+It is a property of the **seam**, not of whichever method the caller happened to touch. The type is
+load-bearing: `InvariantViolation` is what pierces the engine's strategy-containment net and faults
+the run (ADR-0024), so a raw `sqlite3.Error` or `psycopg.Error` crossing here is filed as a caller's
+bug and *survived*, while the process has in fact lost the ability to make its state durable. One
+contract also means a store call can move under the containment net later without its failure mode
+changing shape — which is the whole reason a read is covered and not just a write.
+
+Each adapter contributes exactly one thing to the rule: the base class its driver raises from
+(`sqlite3.Error`, `psycopg.Error`). Both drivers expose one, so the translation itself has no
+per-backend half.
+
+**`close()` is the one deliberate exception**: teardown that fails is a leaked resource, which the
+runner already records as a stop-hook failure, not a claim about durability that turned out false.
+The exclusion is asserted rather than assumed — the store contract suite checks its call table
+against `get_protocol_members(Store)`, so a member added without the translation fails loudly
+instead of silently narrowing the rule.
+
 The seq high-water-mark is **derived** from saga records (no separate table). There is **no
 "processed event id" table** — dedup is enforced by idempotent `Order.apply()` (ADR-0025); Kafka
 consumer offsets merely bound how much is redelivered, and the in-memory path has no redelivery.

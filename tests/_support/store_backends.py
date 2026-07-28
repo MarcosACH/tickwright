@@ -16,6 +16,7 @@ from pathlib import Path
 
 import psycopg
 import pytest
+from psycopg import sql
 
 from tickwright.adapters.store import SQLiteStore
 from tickwright.adapters.store.postgres import PostgresStore
@@ -52,10 +53,39 @@ class PostgresBackend:
 
     def reset(self) -> None:
         """Create the schema (a store open runs the DDL) and truncate every table,
-        so each test starts from a clean, isolated slate against the shared server."""
+        so each test starts from a clean, isolated slate against the shared server.
+
+        The table list comes from the server's own catalog rather than a literal
+        here. A transcribed list goes stale silently and in the one direction
+        nothing catches: a table omitted from it leaks rows between Postgres
+        tests without failing anything, and the always-on SQLite arm cannot
+        notice, because ``conftest`` hands that arm a fresh ``tmp_path`` per test.
+        So the isolation of the arm that only runs under ``-m postgres`` would
+        rest on someone remembering to edit this string.
+
+        **The fixture therefore owns the whole schema, not three named tables**,
+        and ``STORE_POSTGRES_DSN`` must address a database dedicated to this
+        suite — the ``docker compose up -d postgres`` service is exactly that.
+        Pointed at a database holding anything else, this truncates it. That is
+        the price of asking the server instead of transcribing the answer, and
+        it is the cheaper side: a too-narrow list corrupts test results silently,
+        while a too-wide one can only destroy data the suite was already told to
+        treat as disposable.
+        """
         PostgresStore(self._dsn).close()
         with psycopg.connect(self._dsn, autocommit=True) as conn:
-            conn.execute("TRUNCATE orders, strategy_snapshots, kill_switch")
+            tables = [
+                name
+                for (name,) in conn.execute(
+                    "SELECT tablename FROM pg_tables WHERE schemaname = current_schema()"
+                ).fetchall()
+            ]
+            if tables:
+                conn.execute(
+                    sql.SQL("TRUNCATE {}").format(
+                        sql.SQL(", ").join(sql.Identifier(name) for name in tables)
+                    )
+                )
 
 
 def resolve_backend(name: str, sqlite_path: Path) -> SQLiteBackend | PostgresBackend:

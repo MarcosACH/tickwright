@@ -7,15 +7,16 @@ tracer slice; later slices widen them (``Exchange.cancel``/``fetch_*``,
 ``Clock`` timers, strategy snapshots) as their behaviors land.
 """
 
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
-from .account import AccountSpec, AccountView
+from .account import Account, AccountSpec, AccountView
+from .enums import OrderState
 from .events import Event, MarketTick, OrderEvent, PlaceOrder, PlaceSignal, VenueOrderView
 from .instrument import GuardDecision, InstrumentSpec, KillSwitchState
 from .order import Order
-from .position import PositionView
+from .position import Position, PositionView
 
 type Handler[E: Event] = Callable[[E], Awaitable[None]]
 """An async subscriber of a single event family."""
@@ -193,13 +194,35 @@ class Portfolio(Protocol):
 
 @runtime_checkable
 class Store(Protocol):
-    """Durable saga checkpoints (ADR-0019). The write the crash-safety
-    argument rests on (ADR-0008).
+    """Durable saga checkpoints and the accounting ledger (ADR-0019, ADR-0043).
+    The write the crash-safety argument rests on (ADR-0008).
 
     Deliberately synchronous: a checkpoint is one atomic step of a handler —
     ``apply`` then persist with no yield point in between — so no other
     handler can ever observe a saga whose memory and durable states disagree.
     Throughput is explicitly not a goal; readable recovery is.
+
+    **Every member either reaches durable storage or raises
+    ``InvariantViolation``** (ADR-0019) — one contract for the seam rather than
+    one per method, and a backend's own exception type is never part of it. That
+    widens ADR-0014, which names a failed checkpoint *write*; reads are covered
+    too, so a store call can move under the containment net later without its
+    failure mode changing shape. The
+    type is load-bearing, not decorative: ``InvariantViolation`` is what pierces
+    the engine's strategy-containment net and faults the run (ADR-0024), so a
+    driver exception crossing here would be filed as a caller's bug and survived,
+    while the process silently loses the ability to make its state durable.
+    ``close()`` is the deliberate exception: teardown that fails is a leaked
+    resource the runner already records, not a durability claim that proved false.
+
+    ``checkpoint_ledger`` is the one method that knows about three aggregates at
+    once, which the rest of this Protocol's one-method-per-aggregate shape does
+    not. That coupling is the price of the atomicity guarantee (ADR-0043 §4),
+    paid deliberately: an explicit ``transaction()`` scope on this seam was
+    rejected because it cannot be built by wrapping the narrow methods, and
+    ``sqlite3``'s connection context manager does not nest — an inner ``with``
+    commits, so an outer failure would leave the inner writes durable on the
+    default backend.
     """
 
     def checkpoint(self, order: Order, *, ts_ns: int) -> None:
@@ -241,6 +264,81 @@ class Store(Protocol):
         read the guard restores from on startup (ADR-0026). ``None`` means never
         tripped; a restored ``tripped`` halt is cleared only by an explicit
         reset."""
+        ...
+
+    def checkpoint_ledger(
+        self,
+        *,
+        account: Account,
+        positions: Sequence[Position] = (),
+        order: Order | None = None,
+        funding_mark: tuple[str, int] | None = None,
+        ts_ns: int,
+    ) -> None:
+        """Durably record the accounting ledger as of ``ts_ns`` (ADR-0043 §9).
+
+        **One transaction across every aggregate handed to it.** A fill mutates
+        the order row and the ledger together, and either ordering as two
+        transactions is unsound — checkpoint-first loses the fill from the
+        ledger on a crash, ledger-first double-counts it (ADR-0043 §4). On paper
+        that never heals: the in-process venue holds no position state, so the
+        store is the sole authority. A write the backend cannot make durable
+        raises ``InvariantViolation`` rather than running on."""
+        ...
+
+    def all_positions(self) -> list[Position]:
+        """Every persisted partition — the ledger's recovery mass-read.
+
+        The reserved unattributed partition comes back **unfiltered**
+        (ADR-0043 §9): ADR-0034's Σ-invariant — Σ per-strategy signed size =
+        account net = venue size — holds by construction only if the partition
+        is restored with everything else, so filtering belongs at the
+        ``Portfolio`` seam and never in the store."""
+        ...
+
+    def has_orders(self) -> bool:
+        """Whether any saga history exists at all (ADR-0043 §9).
+
+        A member of its own rather than a reuse of ``all_orders()``: the startup
+        refusal asks this **before** ``cache.rebuild()``, and answering an
+        existence question with the mass-read would deserialize every saga in
+        the store twice on every start, on the recovery path. The ``bool`` also
+        keeps the check honest about what it is entitled to know — nothing about
+        the orders themselves, which belong to the ``Cache``'s recovery."""
+        ...
+
+    def funding_mark(self, symbol: str) -> int | None:
+        """The last funding boundary applied to ``symbol``, or ``None`` if none
+        ever was (ADR-0043 §5.2).
+
+        The ledger's one durable idempotency record, keyed by ``symbol``
+        because that is the grain of the key it is half of: ADR-0037 dedupes on
+        ``(account, symbol, boundary_ts)`` with the account ambient. ``None`` is
+        row absence, and it admits any boundary — nothing has been applied to
+        contradict it. The advance rides ``checkpoint_ledger`` rather than a
+        write of its own, so it lands in the same transaction as the funding
+        line it guards: **the only write that may advance the mark is the one
+        that applies the accrual.**"""
+        ...
+
+    def load_account(self) -> Account | None:
+        """The persisted account, or ``None`` if the ledger was never opened.
+
+        ``None`` is load-bearing rather than defensive (ADR-0043 §9): it is a
+        live first run, it is the paper seed-genesis case, and combined with a
+        non-empty ``orders`` table it is the paper-path startup refusal."""
+        ...
+
+    def history(self, cloid: str) -> list[tuple[OrderState, int]]:
+        """``cloid``'s durable transition trail: one ``(state, ts_ns)`` per
+        checkpoint (ADR-0008's checkpoint points).
+
+        Declared here despite no production caller, because the trail is what the
+        engine's own tests assert a saga *did* — the observation port for
+        "checkpointed once, at this state" — and a seam that disclaims its test
+        surface is a seam a conforming implementation cannot actually be swapped
+        into. Recovery still rebuilds from the current record alone; this is the
+        audit half, and audit is a real audience, not an accident."""
         ...
 
     def close(self) -> None:
