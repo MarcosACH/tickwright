@@ -62,6 +62,15 @@ class PostgresBackend:
         notice, because ``conftest`` hands that arm a fresh ``tmp_path`` per test.
         So the isolation of the arm that only runs under ``-m postgres`` would
         rest on someone remembering to edit this string.
+
+        **The fixture therefore owns the whole schema, not three named tables**,
+        and ``STORE_POSTGRES_DSN`` must address a database dedicated to this
+        suite — the ``docker compose up -d postgres`` service is exactly that.
+        Pointed at a database holding anything else, this truncates it. That is
+        the price of asking the server instead of transcribing the answer, and
+        it is the cheaper side: a too-narrow list corrupts test results silently,
+        while a too-wide one can only destroy data the suite was already told to
+        treat as disposable.
         """
         PostgresStore(self._dsn).close()
         with psycopg.connect(self._dsn, autocommit=True) as conn:
