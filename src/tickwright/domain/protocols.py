@@ -356,6 +356,17 @@ class Exchange(Protocol):
     returning them, so the ``ExecutionManager`` drives the FSM off venue facts.
     """
 
+    async def start(self) -> None:
+        """Connect the adapter to its venue (ADR-0024 step 4).
+
+        The *connect* half the runner's step 4 has always named, run after the
+        bus is up and **before** the startup barrier — so any refusal raised
+        here precedes every order, and the barrier observes an already-aligned
+        venue. A refusal is an ``InvariantViolation``: the engine faults and
+        exits non-zero rather than trading against a venue it could not align.
+        """
+        ...
+
     async def place(self, order: PlaceOrder) -> None:
         """Place ``order`` at the venue; emit the resulting raw ``ExecutionReport``(s)."""
         ...

@@ -94,6 +94,12 @@ class HyperliquidExchange:
         # stream is where prices live (ADR-0027) — subscribe like any consumer.
         bus.subscribe(MarketTick, self.on_tick)
 
+    async def start(self) -> None:
+        """Nothing to connect yet: placement is request-scoped HTTP and the
+        tick subscription is wired at construction. The venue-alignment reads
+        this step exists to host arrive with the leverage push (ADR-0044)."""
+        return None
+
     async def on_tick(self, tick: MarketTick) -> None:
         self._latest_price[tick.symbol] = tick.price
 

@@ -258,6 +258,9 @@ class _ForgetfulVenue:
     def __init__(self) -> None:
         self.views: dict[str, VenueOrderView] = {}
 
+    async def start(self) -> None:
+        return None
+
     async def place(self, order: PlaceOrder) -> None:
         raise AssertionError("the ghost cycle must never place")
 

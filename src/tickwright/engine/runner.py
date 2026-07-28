@@ -216,6 +216,11 @@ class Engine:
         # Start the bus (ADR-0024 step 3): in-memory a no-op; Kafka connects
         # the producer/consumer — before anything can publish or subscribe.
         await self._bus.start()
+        # Connect the exchange (ADR-0024 step 4), after the bus so an adapter
+        # that reports on it has somewhere to publish, and before the barrier
+        # below so a refusal precedes any order and the barrier's own venue
+        # reads observe an already-aligned venue.
+        await self._exchange.start()
         # Engine-internal handlers subscribe raw (ADR-0024): any exception in
         # the saga path propagates to the TaskGroup and faults the engine.
         self._bus.subscribe(Signal, self._execution.on_signal)
