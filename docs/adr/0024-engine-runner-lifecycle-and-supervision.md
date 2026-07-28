@@ -99,6 +99,16 @@ trailing `ExecutionReport`s → stop strategies (`on_stop` takes a **final `snap
 → stop the `Exchange`/`ExecutionManager` (disconnect; Kafka flush/commit) → stop the bus, close the
 store → exit **0**.
 
+**(Extended by [#186](https://github.com/MarcosACH/tickwright/issues/186):** the `Exchange` stop is
+**not** where the sentence above puts it. `exchange.stop` sits in `_teardown_steps` **immediately
+behind `feed.stop`** (ADR-0044 §7), not after the strategies stop. What an adapter owns at teardown
+is a loop of its own — ADR-0037's paper funding generator — and cutting it at the same moment the
+source is cut is what stops it publishing into a bus that is about to drain; deferring it past the
+drain would invert that. Everything else in the sentence stands: the drain still precedes the final
+strategy snapshots (ADR-0016), and the bus and the store still close last. The membership is
+**one ordered tuple** walked by both teardown paths, so the graceful and faulted paths cannot
+disagree about it — they differ in failure *policy* only.**)**
+
 - `SUBMITTED` orders in flight on the wire are **not** awaited — they stay `SUBMITTED`,
   checkpointed; restart reconciliation heals them (ADR-0008 residual risk).
 - A graceful stop **does not cancel resting `LIVE` orders.** Snapshot-plus-reconcile re-adopts them

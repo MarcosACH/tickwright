@@ -17,6 +17,14 @@ lifecycle, a readable component-state FSM:
 persistent connection of its own, posting per request. The contract above is unchanged; only the
 `Exchange` Protocol's coverage of it has moved.**)**
 
+**(Amended by [#186](https://github.com/MarcosACH/tickwright/issues/186):** `stop()` is now declared
+too, and ahead of the teardown that motivates it. ADR-0044 §7's condition is met by ADR-0037's paper
+funding generator — a `Clock`-driven task inside `PaperExchange`, which is teardown to do — but the
+pair lands *as a pair*, in one prefactor: four later slices hang a boot guard or a background loop
+off these two verbs, and the runner ordering is precisely the thing none of them should re-litigate
+separately. Both adapters implement `stop()` as a no-op until that generator exists. `state` and
+`health()` stay undeclared, on the original condition.**)**
+
 ## Error model (crash-only, two classes)
 
 - **Recoverable handler error** — a `Strategy`/`Feed` handler raises on a single event. Caught,
