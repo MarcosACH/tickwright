@@ -259,9 +259,14 @@ class Engine:
 
         One membership walked twice is the cost of one membership: the faulted
         pass restarts at the top, so a graceful step that raises drives every
-        step *ahead* of the break a second time. Every entry here is therefore
-        specified idempotent at its own seam — none may treat a second call as
-        an error, in the one window where nothing can act on it.
+        step *ahead* of the break a second time. No entry here may treat a
+        second call as an error, in the one window where nothing can act on it.
+        The five that cross a seam say so at that seam — ``MarketFeed.stop``,
+        ``Exchange.stop``, ``EventBus.drain``, ``EventBus.close``,
+        ``Store.close``; the other two are the engine's own and answer for it
+        here (``_stop_cadences`` re-cancels tasks already done, a no-op, and
+        ``StrategyHost.stop`` retakes the final snapshots into the same
+        latest-wins row per strategy — a rewrite, not a second effect).
         """
         return (
             ("feed.stop", self._stop_feed),

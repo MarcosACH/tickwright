@@ -139,9 +139,11 @@ can.
 The membership is **one ordered tuple** walked by both teardown paths, so the graceful and faulted
 paths cannot disagree about it — they differ in failure *policy* only. That one-membership rule has a
 cost every seam in it must carry, not just the venue: the faulted pass re-walks **from the top**, so a
-graceful step that raises drives every step ahead of the break a second time. `Exchange.stop()`,
-`MarketFeed.stop()`, `EventBus.close()` and `Store.close()` are each specified idempotent for that
-reason.**)**
+graceful step that raises drives every step ahead of the break a second time. No entry may treat a
+second call as an error. The five that cross a seam are each specified idempotent there —
+`MarketFeed.stop()`, `Exchange.stop()`, `EventBus.drain()`, `EventBus.close()` and `Store.close()`;
+the remaining two are the engine's own (`_stop_cadences`, `StrategyHost.stop`) and answer for it at
+the membership.**)**
 
 - `SUBMITTED` orders in flight on the wire are **not** awaited — they stay `SUBMITTED`,
   checkpointed; restart reconciliation heals them (ADR-0008 residual risk).

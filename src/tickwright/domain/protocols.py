@@ -47,7 +47,11 @@ class EventBus(Protocol):
         """Return once every event published so far — including events handlers
         published while draining — has been delivered (ADR-0024's shutdown
         drain). In-memory: no-op, ``publish`` already drained; Kafka: wait for
-        this process's produced records to be dispatched and committed."""
+        this process's produced records to be dispatched and committed.
+
+        Safe on a second call, like the ``close`` below: a teardown step behind
+        this one that raises faults the run, and the best-effort pass re-walks
+        the whole membership from the top (ADR-0024)."""
         ...
 
     async def close(self) -> None:
