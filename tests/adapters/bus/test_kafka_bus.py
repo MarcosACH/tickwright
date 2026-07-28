@@ -14,7 +14,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 from kafka_fakes import FakeKafkaBroker
-from ledgers import ledger
+from ledgers import GENESIS, ledger
 
 from tickwright.adapters.bus.kafka import KafkaBus
 from tickwright.adapters.bus.serde import decode_event
@@ -38,11 +38,6 @@ from tickwright.domain import (
 from tickwright.domain.enums import AggressorSide
 from tickwright.engine.cache import Cache
 from tickwright.engine.execution import ExecutionManager
-
-# The paper account's opening cash. The venue requires it (ADR-0042 §1: the
-# engine supplies no collateral of its own); these tests do not exercise the
-# ledger, so one shared declaration keeps every wiring site honest and quiet.
-_GENESIS = Decimal("100000")
 
 
 def _tick(seq: int = 1, symbol: str = "BTC", price: str = "100") -> MarketTick:
@@ -314,7 +309,7 @@ def _saga_pipeline(broker: FakeKafkaBroker) -> tuple[KafkaBus, SQLiteStore, list
     clock = ManualClock(start_ns=1_000)
     store = SQLiteStore(":memory:")
     exchange = PaperExchange(
-        bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+        bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
     )
     manager = ExecutionManager(
         bus=bus, clock=clock, exchange=exchange, cache=Cache(store=store), portfolio=ledger()

@@ -19,7 +19,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from ledgers import ledger
+from ledgers import GENESIS, ledger
 from store_backends import (
     STORE_BACKEND_PARAMS,
     PostgresBackend,
@@ -57,11 +57,6 @@ from tickwright.engine.cache import Cache
 from tickwright.engine.execution import ExecutionManager
 from tickwright.engine.reconcile import ReconcileConfig, Reconciler
 from tickwright.strategies import SingleShotLimitStrategy
-
-# The paper account's opening cash. The venue requires it (ADR-0042 §1: the
-# engine supplies no collateral of its own); these tests do not exercise the
-# ledger, so one shared declaration keeps every wiring site honest and quiet.
-_GENESIS = Decimal("100000")
 
 _CLOID = derive_cloid("trivial:BTC:1")
 
@@ -165,7 +160,7 @@ def _first_life(
     store = backend.open()
     venue_bus = InMemoryBus()  # the venue's report link — dies with the process
     venue = PaperExchange(
-        bus=venue_bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+        bus=venue_bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
     )
     cache = Cache(store=store)
     manager = ExecutionManager(

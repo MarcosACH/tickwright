@@ -10,6 +10,7 @@ import asyncio
 from decimal import Decimal
 
 import pytest
+from ledgers import GENESIS
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
@@ -28,11 +29,6 @@ from tickwright.domain import (
     TimeInForce,
     VenueOrderView,
 )
-
-# The paper account's opening cash. The venue requires it (ADR-0042 §1: the
-# engine supplies no collateral of its own); these tests do not exercise the
-# ledger, so one shared declaration keeps every wiring site honest and quiet.
-_GENESIS = Decimal("100000")
 
 
 def _tick(price: str, ts: int = 1_000, symbol: str = "BTC") -> MarketTick:
@@ -85,7 +81,7 @@ def _harness() -> tuple[PaperExchange, InMemoryBus, ManualClock, list[FillReport
     bus = InMemoryBus()
     clock = ManualClock()
     exchange = PaperExchange(
-        bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+        bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
     )
     reports: list[FillReport] = []
     bus.subscribe(FillReport, lambda r: _record(reports, r))
@@ -102,7 +98,7 @@ def test_the_paper_venue_consumes_ticks_off_its_bus_with_no_external_wiring() ->
     bus = InMemoryBus()
     clock = ManualClock()
     exchange = PaperExchange(
-        bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+        bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
     )
     fills: list[FillReport] = []
     bus.subscribe(FillReport, lambda r: _record(fills, r))
@@ -145,7 +141,7 @@ def _specced_harness() -> tuple[
         bus=bus,
         clock=clock,
         fill_model=ImmediateFillModel(),
-        genesis_collateral=_GENESIS,
+        genesis_collateral=GENESIS,
         instrument_specs={"BTC": _BTC_SPEC},
     )
     fills: list[FillReport] = []
@@ -513,7 +509,7 @@ def test_the_paper_account_label_defaults_to_the_same_label_the_config_does() ->
         bus=InMemoryBus(),
         clock=ManualClock(),
         fill_model=ImmediateFillModel(),
-        genesis_collateral=_GENESIS,
+        genesis_collateral=GENESIS,
     )
 
     assert exchange.account_spec().account_id == "paper-default"
