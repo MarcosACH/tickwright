@@ -15,6 +15,7 @@ def _account(genesis: str = "100000") -> Account:
 def test_an_account_opens_with_its_cash_line_at_the_genesis_collateral() -> None:
     account = _account("250000")
 
+    assert account.account_id == "paper-default"
     assert account.cash == Decimal("250000")
     assert account.genesis_collateral == Decimal("250000")
     assert account.genesis_ts_ns == 7
@@ -36,6 +37,9 @@ def test_a_redelivered_accrual_moves_no_cash() -> None:
     assert account.accrue_realized(Decimal("250"), event_id="0xabc:fill:f1") is False
 
     assert account.cash == Decimal("1250")
+    # The dedup set is contract, not bookkeeping: the durable ledger round-trips
+    # it so a fill that predates a restart is still a no-op after one.
+    assert account.applied_event_ids == frozenset({"0xabc:fill:f1"})
 
 
 def test_the_opening_declaration_is_write_once() -> None:

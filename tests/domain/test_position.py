@@ -116,6 +116,9 @@ def test_a_redelivered_fill_is_a_no_op() -> None:
     assert changes == ()
     assert position.signed_size == Decimal("2")
     assert position.entry_price == Decimal("100")
+    # The dedup set is contract, not bookkeeping: the durable ledger round-trips
+    # it so a fill that predates a restart is still a no-op after one.
+    assert position.applied_event_ids == frozenset({"0xf1:fill:f1"})
 
 
 def test_the_ledger_lines_no_slice_moves_yet_read_zero() -> None:
@@ -129,8 +132,19 @@ def test_the_ledger_lines_no_slice_moves_yet_read_zero() -> None:
     assert position.isolated_collateral == Decimal("0")
 
 
-def test_a_fill_for_another_partition_is_an_invariant_violation() -> None:
+def test_a_fill_for_another_symbol_is_an_invariant_violation() -> None:
+    """A misrouted fill is a broken engine assumption, not something to absorb:
+    silently applying it would corrupt two partitions at once (ADR-0014)."""
     position = _position("BTC")
 
     with pytest.raises(InvariantViolation):
         position.apply(_fill(trade_id="f1", quantity="1", price="100", symbol="ETH"), side=Side.BUY)
+
+
+def test_a_fill_for_another_strategy_is_an_invariant_violation() -> None:
+    """The partition is ``(strategy, symbol)``, so the strategy half is checked
+    too — otherwise one strategy's flow could land in another's attribution."""
+    position = Position(strategy_id="beta", symbol="BTC")
+
+    with pytest.raises(InvariantViolation):
+        position.apply(_fill(trade_id="f1", quantity="1", price="100"), side=Side.BUY)
