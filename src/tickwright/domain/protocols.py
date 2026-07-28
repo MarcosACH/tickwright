@@ -193,13 +193,22 @@ class Portfolio(Protocol):
 
 @runtime_checkable
 class Store(Protocol):
-    """Durable saga checkpoints (ADR-0019). The write the crash-safety
-    argument rests on (ADR-0008).
+    """Durable saga checkpoints and the accounting ledger (ADR-0019, ADR-0043).
+    The write the crash-safety argument rests on (ADR-0008).
 
     Deliberately synchronous: a checkpoint is one atomic step of a handler —
     ``apply`` then persist with no yield point in between — so no other
     handler can ever observe a saga whose memory and durable states disagree.
     Throughput is explicitly not a goal; readable recovery is.
+
+    ``checkpoint_ledger`` is the one method that knows about three aggregates at
+    once, which the rest of this Protocol's one-method-per-aggregate shape does
+    not. That coupling is the price of the atomicity guarantee (ADR-0043 §4),
+    paid deliberately: an explicit ``transaction()`` scope on this seam was
+    rejected because it cannot be built by wrapping the narrow methods, and
+    ``sqlite3``'s connection context manager does not nest — an inner ``with``
+    commits, so an outer failure would leave the inner writes durable on the
+    default backend.
     """
 
     def checkpoint(self, order: Order, *, ts_ns: int) -> None:

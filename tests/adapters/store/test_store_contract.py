@@ -3,9 +3,15 @@
 The store is the durability half of the crash-safety argument (ADR-0008): a
 checkpointed ``Order`` must round-trip losslessly — state, quantities, reason,
 transition history, and the applied-event dedup set — because recovery rebuilds
-the saga from exactly this record. This suite states that contract once and runs
-it through each backend the ``store_backend`` fixture names, so ``SQLiteStore``
-and ``PostgresStore`` are held to identical semantics; only durability differs.
+the saga from exactly this record. The accounting ledger (ADR-0043) is held to
+the same bar, and to one more: its write is atomic across the order row, the
+position rows and the account row together.
+
+This suite states that contract once and runs it through each backend the
+``store_backend`` fixture names, so ``SQLiteStore`` and ``PostgresStore`` are
+held to identical semantics; only durability differs. That parity is why the
+ledger grows cases here rather than per-backend ``SELECT``s: a column no read
+surfaces is one the two backends could disagree about unobserved.
 
 The Postgres arm carries the ``postgres`` marker and auto-skips when no server is
 reachable (see ``conftest``), so ``uv run pytest`` stays hermetic by default.

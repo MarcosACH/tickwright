@@ -1,14 +1,22 @@
 """``PostgresStore`` — the production-parity durable ``Store`` (ADR-0019).
 
-The KafkaBus pairing's durability half: identical saga semantics to
+The KafkaBus pairing's durability half: identical saga *and* ledger semantics to
 ``SQLiteStore`` over a real Postgres server, proven by the same store contract
-suite. Same three tables, the same derived seq high-water (no separate table),
-and no processed-event table — dedup is ``Order.apply``'s job (ADR-0025). The
-field mapping is shared with ``SQLiteStore`` (``_records``); only the SQL
+suite. The same six tables — three for the saga and its neighbours, three for
+the ADR-0043 accounting ledger — the same derived seq high-water (no separate
+table), and no processed-event table: dedup is ``Order.apply``'s job (ADR-0025).
+The field mapping is shared with ``SQLiteStore`` (``_records``); only the SQL
 dialect — ``%s`` placeholders and ``ON CONFLICT`` upserts — lives here.
 
+Money stays ``TEXT`` here rather than ``NUMERIC`` (ADR-0043 §7). ``NUMERIC``
+normalises representation — ``1000`` for ``1E+3``, ``0.00000000`` for ``0E-8`` —
+so it would fork the value mapping per backend, which is precisely what
+``_records`` exists to prevent. The cost is no bare ``SELECT SUM(realized_pnl)``;
+nothing in the engine needs SQL-side arithmetic, and the cast is standard.
+
 The connection is synchronous and each checkpoint is one ``conn.transaction()``
-block — the atomic write the crash-safety argument rests on (ADR-0008). The
+block — the atomic write the crash-safety argument rests on (ADR-0008), widened
+by ``checkpoint_ledger`` to cover the order row and the ledger together. The
 connection runs in autocommit mode so reads never leave a transaction idle open;
 the explicit transaction blocks wrap exactly the read-modify-write checkpoints.
 """

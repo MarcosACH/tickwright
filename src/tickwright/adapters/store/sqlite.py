@@ -2,11 +2,19 @@
 
 Zero-setup, in-process, real SQL: a file for durability or ``:memory:`` for
 tests, so the paper + in-memory-bus path runs and recovers with nothing
-installed. One saga-record table, keyed by cloid, holding exactly what
-recovery rebuilds an ``Order`` from: the order params, current state,
-``cum_qty``, venue oid, terminal reason, the applied-event dedup set, and the
-transition history (ADR-0008's checkpoint trail). Each checkpoint is one
-transaction — the write the crash-safety argument rests on.
+installed.
+
+The saga-record table is keyed by cloid and holds exactly what recovery rebuilds
+an ``Order`` from: the order params, current state, ``cum_qty``, venue oid,
+terminal reason, the applied-event dedup set, and the transition history
+(ADR-0008's checkpoint trail). Alongside it the accounting ledger (ADR-0043):
+``positions`` per ``(strategy, symbol)``, the single-row ``account``, and the
+``funding_marks`` watermark. Ledger rows are current state upserted in place,
+not an event log.
+
+Each checkpoint is one transaction — the write the crash-safety argument rests
+on — and ``checkpoint_ledger`` widens that to one transaction across the order
+row and the ledger together, because a fill moves both.
 """
 
 import sqlite3
