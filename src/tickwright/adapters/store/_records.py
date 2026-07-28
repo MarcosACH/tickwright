@@ -22,6 +22,8 @@ from typing import Any
 
 from tickwright.domain import Account, Order, OrderState, OrderType, Position, Side
 
+_ZERO = Decimal("0")
+
 # The saga columns, in write order. ``history`` (the ADR-0008 checkpoint trail)
 # is last: it is an adapter-only audit surface, not part of what recovery reads.
 RECORD_COLUMNS: tuple[str, ...] = (
@@ -196,12 +198,25 @@ POSITION_UPDATE_COLUMNS: tuple[str, ...] = tuple(
 
 
 def position_values(position: Position, *, ts_ns: int) -> tuple[Any, ...]:
-    """The position write tuple, in ``POSITION_COLUMNS`` order."""
+    """The position write tuple, in ``POSITION_COLUMNS`` order.
+
+    ``entry_price`` is ``NULL`` on a flat row (ADR-0043 §3): ``NULL`` says "no
+    position to have an entry for", where ``0`` would be indistinguishable from a
+    real price. A full close resets entry (P1 #119), so ``is_flat`` is the whole
+    of the condition — a row with no exposure has no entry worth keeping.
+
+    ``isolated_collateral`` is nullable for the parallel reason — ``NULL`` is
+    *cross-margined*, distinct from an isolated position wiped to ``0`` — but the
+    write is unconditional here, because margin mode does not yet exist in the
+    model to condition on (ADR-0040 §5 makes it config-authoritative; #190/#176
+    land it). The column is in its final shape; **the slice that introduces a
+    cross-margined position owns this branch**, not just the field.
+    """
     return (
         UNATTRIBUTED if position.strategy_id is None else position.strategy_id,
         position.symbol,
         str(position.signed_size),
-        str(position.entry_price),
+        None if position.is_flat else str(position.entry_price),
         str(position.realized_pnl),
         str(position.fees),
         str(position.funding),
@@ -211,12 +226,20 @@ def position_values(position: Position, *, ts_ns: int) -> tuple[Any, ...]:
 
 
 def restore_position(row: Sequence[Any]) -> Position:
-    """One position row, in ``POSITION_COLUMNS`` order, back into a ``Position``."""
+    """One position row, in ``POSITION_COLUMNS`` order, back into a ``Position``.
+
+    A ``NULL`` ``entry_price`` restores to ``0`` rather than to ``None``, because
+    the aggregate has no ``None`` to hold: ADR-0041 §3 has a flat-with-history
+    record read ``entry_price=0`` through the seam. The distinction the column
+    keeps is a *durable* one — a reader of the table can tell "never had an
+    entry" from a real price — and it costs nothing in memory, where ``is_flat``
+    already answers the same question.
+    """
     return Position(
         strategy_id=None if row[0] == UNATTRIBUTED else row[0],
         symbol=row[1],
         signed_size=Decimal(row[2]),
-        entry_price=Decimal(row[3]),
+        entry_price=_ZERO if row[3] is None else Decimal(row[3]),
         realized_pnl=Decimal(row[4]),
         fees=Decimal(row[5]),
         funding=Decimal(row[6]),

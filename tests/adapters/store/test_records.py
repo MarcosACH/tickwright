@@ -1,14 +1,17 @@
 """The shared row shape both ``Store`` adapters write through (ADR-0019).
 
 The contract suite proves the two backends *behave* identically over a real
-server each. These cases prove the narrower thing that makes that cheap: the SQL
-they behave identically through is one statement rendered twice, so a change to
-what a row is cannot reach one backend and miss the other.
+server each. These cases prove the narrower things that make that cheap and that
+no backend round trip can reach: that the SQL they behave identically through is
+one statement rendered twice, and that the ``NULL`` a column admits is a value
+this mapping can both write and read — a state the schema allows but no
+round-trip test can observe, because the two directions cancel.
 
-The claim under test is the module docstring's — that the parameter marker is
-the whole of the per-dialect difference. Asserted on the rendered text, because
-that is the level the two backends could silently diverge at.
+Asserted on the rendered text and on the write tuple, because those are the
+levels at which the two backends could silently diverge.
 """
+
+from decimal import Decimal
 
 from tickwright.adapters.store._records import (
     ACCOUNT_COLUMNS,
@@ -16,10 +19,15 @@ from tickwright.adapters.store._records import (
     POSITION_COLUMNS,
     RECORD_COLUMNS,
     Upserts,
+    position_values,
+    restore_position,
     upserts_for,
 )
+from tickwright.domain import Position
 
 _STATEMENTS = tuple(field for field in Upserts.__dataclass_fields__)
+
+_ENTRY_PRICE = POSITION_COLUMNS.index("entry_price")
 
 
 def test_the_two_dialects_differ_only_in_the_parameter_marker() -> None:
@@ -59,3 +67,46 @@ def test_the_accounts_write_once_trio_is_absent_from_its_update_list() -> None:
         assert column not in update_clause
     for column in ACCOUNT_UPDATE_COLUMNS:
         assert f"{column} = EXCLUDED.{column}" in update_clause
+
+
+def test_a_flat_position_writes_a_null_entry_price() -> None:
+    """``NULL`` says "no position to have an entry for"; ``0`` would be
+    indistinguishable from a real price (ADR-0043 §3), which is why the column is
+    nullable at all. A full close resets entry (P1 #119), so ``is_flat`` is
+    exactly the condition — the aggregate never holds an entry worth keeping on a
+    row with no exposure."""
+    flat = Position(strategy_id="trivial", symbol="BTC", realized_pnl=Decimal("125.5"))
+
+    assert flat.is_flat
+    assert position_values(flat, ts_ns=1_000)[_ENTRY_PRICE] is None
+
+
+def test_an_open_position_writes_its_entry_price() -> None:
+    """The other half of the rule: a row with exposure carries a real price, and
+    the nullability must not swallow it."""
+    open_position = Position(
+        strategy_id="trivial",
+        symbol="BTC",
+        signed_size=Decimal("2"),
+        entry_price=Decimal("50000.25"),
+    )
+
+    assert position_values(open_position, ts_ns=1_000)[_ENTRY_PRICE] == "50000.25"
+
+
+def test_a_null_entry_price_restores_a_flat_position() -> None:
+    """The read half. ``Decimal(None)`` raises ``TypeError``, so without this the
+    mapping could write a row neither backend could read back — and the schema
+    admits the row whether or not the mapping does.
+
+    It restores to ``0`` rather than ``None`` because the aggregate has no
+    ``None`` to hold: ADR-0041 §3 has a flat-with-history record read
+    ``entry_price=0`` through the seam. The distinction the column keeps is on
+    disk, where a reader can tell "never had an entry" from a real price."""
+    row = ("trivial", "BTC", "0", None, "125.5", "2", "-0.5", "0", 1_000)
+
+    restored = restore_position(row)
+
+    assert restored.is_flat
+    assert restored.entry_price == Decimal("0")
+    assert restored.realized_pnl == Decimal("125.5")

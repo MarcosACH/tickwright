@@ -446,6 +446,11 @@ def test_a_flat_position_keeps_its_history_across_the_round_trip(store_backend: 
     assert loaded.realized_pnl == Decimal("125.5")
     assert loaded.fees == Decimal("2")
     assert loaded.funding == Decimal("-0.5")
+    # The entry column goes to disk ``NULL`` on a flat row (ADR-0043 §3) and
+    # comes back ``0``, which is what ADR-0041 §3 reads through the seam. Both
+    # backends make that trip here; that the value written is ``NULL`` and not
+    # the string ``"0"`` is pinned in ``test_records``, where it is observable.
+    assert loaded.entry_price == Decimal("0")
 
 
 def test_the_accounts_opening_declaration_survives_a_later_checkpoint(
