@@ -5,7 +5,16 @@ This package *defines* the seams every adapter and the engine compile against.
 It is the stable contract of the system; keep it log-free and dependency-free.
 """
 
-from .enums import AggressorSide, ComponentState, OrderState, OrderType, Side, TimeInForce
+from .account import Account, AccountSpec, AccountView
+from .enums import (
+    AggressorSide,
+    ComponentState,
+    Netting,
+    OrderState,
+    OrderType,
+    Side,
+    TimeInForce,
+)
 from .errors import InvariantViolation, StartupReconciliationTimeout
 from .events import (
     CancelSignal,
@@ -42,12 +51,14 @@ from .instrument import (
     quantize_size,
 )
 from .order import Order
+from .position import Position, PositionChange, PositionView
 from .protocols import (
     Clock,
     EventBus,
     Exchange,
     Handler,
     MarketFeed,
+    Portfolio,
     PreTradeGuard,
     ReplayClock,
     Store,
@@ -58,6 +69,7 @@ __all__ = [
     # enums
     "AggressorSide",
     "ComponentState",
+    "Netting",
     "OrderState",
     "OrderType",
     "Side",
@@ -66,6 +78,9 @@ __all__ = [
     "InvariantViolation",
     "StartupReconciliationTimeout",
     # events + value types
+    "Account",
+    "AccountSpec",
+    "AccountView",
     "Approved",
     "CancelSignal",
     "Denied",
@@ -91,6 +106,9 @@ __all__ = [
     "OrderSubmitted",
     "PlaceOrder",
     "PlaceSignal",
+    "Position",
+    "PositionChange",
+    "PositionView",
     "Signal",
     "VenueOrderView",
     # id derivation
@@ -106,6 +124,7 @@ __all__ = [
     "Exchange",
     "Handler",
     "MarketFeed",
+    "Portfolio",
     "PreTradeGuard",
     "ReplayClock",
     "Store",

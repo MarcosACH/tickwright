@@ -11,9 +11,11 @@ from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
+from .account import AccountSpec, AccountView
 from .events import Event, MarketTick, OrderEvent, PlaceOrder, PlaceSignal, VenueOrderView
 from .instrument import GuardDecision, InstrumentSpec, KillSwitchState
 from .order import Order
+from .position import PositionView
 
 type Handler[E: Event] = Callable[[E], Awaitable[None]]
 """An async subscriber of a single event family."""
@@ -148,6 +150,48 @@ class Strategy(Protocol):
 
 
 @runtime_checkable
+class Portfolio(Protocol):
+    """The pull-state read seam a ``Strategy`` queries for its own economics
+    (ADR-0041). Reads are **method calls, never a PnL subscription** (ADR-0004).
+
+    Deliberately three synchronous methods returning frozen ``domain`` value
+    snapshots: every field of one view comes from a single read of the
+    projection, so two quantities in one view can never straddle a fill, and a
+    synchronous read has no ``await`` point, so two reads inside one handler
+    cannot either.
+
+    The facade a strategy holds is **already scoped to its ``strategy_id``** by
+    the composition root, which is why no method takes a strategy, venue,
+    account or currency argument — the account is ambient (one per process,
+    ADR-0038) and the reserved unattributed partition is structurally
+    unreachable through it (ADR-0041 §5).
+
+    This Protocol exists for **dependency direction**, not swappability: a
+    ``domain`` strategy must compile against a ``domain`` seam rather than
+    import ``engine``. There is one implementation by decision, and telemetry,
+    the CLI and reconciliation read the ``engine`` concrete instead (ADR-0041 §8).
+    """
+
+    def position(self, symbol: str) -> PositionView | None:
+        """This strategy's position in ``symbol``, or ``None`` if it never
+        traded it. A **flat-with-history** record is not ``None``: it reads
+        ``size = 0`` with its realized PnL retained (ADR-0041 §3)."""
+        ...
+
+    def open_positions(self) -> tuple[PositionView, ...]:
+        """Every partition of this strategy still holding exposure — flat
+        records are excluded, which is the whole distinction from
+        ``position()`` returning one."""
+        ...
+
+    def account(self) -> AccountView:
+        """The account-wide shared pool, **not** filtered to this strategy:
+        collateral is one pool, and reporting a scoped slice of it would be a
+        fiction (ADR-0041 §2)."""
+        ...
+
+
+@runtime_checkable
 class Store(Protocol):
     """Durable saga checkpoints (ADR-0019). The write the crash-safety
     argument rests on (ADR-0008).
@@ -230,6 +274,16 @@ class Exchange(Protocol):
         itself failed (outage): a failed read must never look like "no record"
         (ADR-0011 inv 1). A successful read always returns a view, even an
         empty one."""
+        ...
+
+    def account_spec(self) -> AccountSpec:
+        """The venue's static declarations about the account this process trades
+        (ADR-0038): its qualified identity, its netting semantics, and — on
+        paper — the operator's declared genesis collateral.
+
+        A synchronous accessor and the exact peer of ``instrument_specs()``: the
+        adapter is the one component that knows the venue, and this is read once
+        during composition, never on a hot path."""
         ...
 
     def instrument_specs(self) -> Mapping[str, InstrumentSpec]:
