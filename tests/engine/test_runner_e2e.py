@@ -431,7 +431,7 @@ def test_a_broken_stop_hook_on_the_fault_path_is_recorded_not_swallowed(tmp_path
             clock=clock,
             store=store,
             exchange=exchange,
-            feed=_PoisonedFeed(),
+            feed=_FaultingFeed(),
             portfolio=ledger(),
         )
         return await engine.run(), engine
@@ -449,15 +449,20 @@ def test_a_broken_stop_hook_on_the_fault_path_is_recorded_not_swallowed(tmp_path
     assert hook_failures[0]["hook"] == "store.close"
 
 
-class _PoisonedFeed:
-    """A feed whose read loop breaks an engine assumption — the fail-fast class.
-    A ``MarketFeed`` double at the venue boundary."""
+class _FaultingFeed:
+    """A feed whose read loop breaks an engine assumption — the fail-fast class
+    — recording the teardown that still cuts it, for the suites that ask where
+    in the sequence that happened. A ``MarketFeed`` double at the venue
+    boundary."""
+
+    def __init__(self, timeline: list[str] | None = None) -> None:
+        self._timeline = timeline if timeline is not None else []
 
     async def start(self) -> None:
         raise InvariantViolation("the read loop broke an engine assumption")
 
     async def stop(self) -> None:
-        return None
+        self._timeline.append("feed.stop")
 
 
 def _kafka_bus(broker: FakeKafkaBroker) -> KafkaBus:
@@ -511,21 +516,6 @@ def test_the_runner_owns_the_bus_lifecycle_connect_on_start_disconnect_on_stop(
     assert [c.started for c in broker.consumers] == [False]
 
 
-class _FaultingFeedThatRecordsStop:
-    """A feed whose read loop faults the engine, recording whether teardown
-    still stopped it — the fault path must cut the venue connection too.
-    A ``MarketFeed`` double at the venue boundary."""
-
-    def __init__(self) -> None:
-        self.stopped = False
-
-    async def start(self) -> None:
-        raise InvariantViolation("the read loop broke an engine assumption")
-
-    async def stop(self) -> None:
-        self.stopped = True
-
-
 def test_the_fault_path_walks_the_same_teardown_feed_stopped_and_bus_closed(
     tmp_path: Path,
 ) -> None:
@@ -534,7 +524,8 @@ def test_the_fault_path_walks_the_same_teardown_feed_stopped_and_bus_closed(
     feed (a live WS must not leak) and close the bus (a Kafka producer must
     flush — buffered writes survive the fault)."""
     broker = FakeKafkaBroker()
-    feed = _FaultingFeedThatRecordsStop()
+    timeline: list[str] = []
+    feed = _FaultingFeed(timeline)
 
     async def faulted_life() -> tuple[int, Engine]:
         bus = _kafka_bus(broker)
@@ -552,7 +543,7 @@ def test_the_fault_path_walks_the_same_teardown_feed_stopped_and_bus_closed(
 
     assert exit_code != 0
     assert engine.state is ComponentState.FAULTED
-    assert feed.stopped, "the fault path must stop the feed, not just cancel its task"
+    assert timeline == ["feed.stop"], "the fault path must stop the feed, not just cancel its task"
     assert [p.started for p in broker.producers] == [False]
     assert [c.started for c in broker.consumers] == [False]
 
@@ -648,18 +639,13 @@ def test_the_runner_starts_the_exchange_after_the_bus_and_before_the_barrier(
     assert timeline.index("exchange.start") < timeline.index("venue.read")
 
 
-class _TimelineFeed:
-    """A live-shaped feed — its read loop runs until cancelled — that records
-    the runner cutting it, so teardown order is observable at the seam. A
-    ``MarketFeed`` double at the venue boundary."""
+class _TimelineFeed(_BlockingFeed):
+    """A ``_BlockingFeed`` that records the runner cutting it, so teardown
+    order is observable at the seam."""
 
     def __init__(self, timeline: list[str]) -> None:
+        super().__init__()
         self._timeline = timeline
-        self.started = asyncio.Event()
-
-    async def start(self) -> None:
-        self.started.set()
-        await asyncio.Event().wait()
 
     async def stop(self) -> None:
         self._timeline.append("feed.stop")
@@ -705,20 +691,6 @@ def test_the_reverse_shutdown_stops_the_exchange_immediately_after_the_feed(
     assert timeline == ["exchange.start", "feed.stop", "exchange.stop", "store.close"]
 
 
-class _FaultingTimelineFeed:
-    """A feed whose read loop faults the engine, recording the teardown that
-    still cuts it. A ``MarketFeed`` double at the venue boundary."""
-
-    def __init__(self, timeline: list[str]) -> None:
-        self._timeline = timeline
-
-    async def start(self) -> None:
-        raise InvariantViolation("the read loop broke an engine assumption")
-
-    async def stop(self) -> None:
-        self._timeline.append("feed.stop")
-
-
 def test_the_fault_path_stops_the_exchange_in_the_same_position_as_a_graceful_stop(
     tmp_path: Path,
 ) -> None:
@@ -734,7 +706,7 @@ def test_the_fault_path_stops_the_exchange_in_the_same_position_as_a_graceful_st
             clock=ManualClock(),
             store=_TimelineStore(tmp_path / "saga.db", timeline),
             exchange=_LifecycleRecordingVenue(timeline),
-            feed=_FaultingTimelineFeed(timeline),
+            feed=_FaultingFeed(timeline),
             portfolio=ledger(),
         )
         return await engine.run(), engine
@@ -823,7 +795,7 @@ def test_a_venue_that_breaks_on_stop_is_recorded_and_the_teardown_carries_on(
             clock=ManualClock(),
             store=_TimelineStore(tmp_path / "saga.db", timeline),
             exchange=_VenueThatBreaksOnStop(timeline),
-            feed=_FaultingTimelineFeed(timeline),
+            feed=_FaultingFeed(timeline),
             portfolio=ledger(),
         )
         return await engine.run(), engine
