@@ -108,6 +108,57 @@ def test_checkpointed_order_round_trips(store_backend: Backend) -> None:
     assert loaded.venue_oid == "oid-1"
 
 
+def test_every_saga_column_round_trips_under_a_distinct_value(store_backend: Backend) -> None:
+    """One saga carrying a different value in every column, so no pair of columns
+    can be swapped on the way to disk and still read back correct.
+
+    The sibling of the position case below, and it earns its place for the same
+    reason: the write tuple and the statement are generated from one column list
+    (``_records``), and this is what proves the list is the *schema's* order and
+    not merely self-consistent. ``cum_qty`` differs from ``quantity`` and the
+    cancel trio is populated precisely because the happy-path round trip above
+    leaves those six columns either equal or unasserted."""
+    order = Order.restore(
+        cloid="0xcafe",
+        strategy_id="alpha",
+        signal_id="alpha:ETH:7",
+        symbol="ETH",
+        side=Side.SELL,
+        quantity=Decimal("9"),
+        order_type=OrderType.LIMIT,
+        state=OrderState.PARTIALLY_FILLED,
+        cum_qty=Decimal("4"),
+        venue_oid="oid-77",
+        reason="reduce-only rejected leg",
+        cancel_requested=True,
+        cancel_requested_ts=5_555,
+        cancel_signal_id="alpha:ETH:8",
+        applied_event_ids=["evt-1", "evt-2"],
+    )
+    with store_backend.open() as store:
+        store.checkpoint(order, ts_ns=1_000)
+
+    with store_backend.open() as reopened:
+        loaded = reopened.get_order("0xcafe")
+
+    assert loaded is not None
+    assert loaded.cloid == "0xcafe"
+    assert loaded.strategy_id == "alpha"
+    assert loaded.signal_id == "alpha:ETH:7"
+    assert loaded.symbol == "ETH"
+    assert loaded.side is Side.SELL
+    assert loaded.quantity == Decimal("9")
+    assert loaded.order_type is OrderType.LIMIT
+    assert loaded.state is OrderState.PARTIALLY_FILLED
+    assert loaded.cum_qty == Decimal("4")
+    assert loaded.venue_oid == "oid-77"
+    assert loaded.reason == "reduce-only rejected leg"
+    assert loaded.cancel_requested is True
+    assert loaded.cancel_requested_ts == 5_555
+    assert loaded.cancel_signal_id == "alpha:ETH:8"
+    assert loaded.applied_event_ids == frozenset({"evt-1", "evt-2"})
+
+
 def test_recheckpointing_upserts_the_record_and_appends_history(store_backend: Backend) -> None:
     order = _order()
     with store_backend.open() as store:

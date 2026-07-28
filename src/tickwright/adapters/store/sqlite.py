@@ -41,7 +41,6 @@ from ._records import (
     ACCOUNT_COLUMN_LIST,
     POSITION_COLUMN_LIST,
     READ_COLUMN_LIST,
-    RECORD_COLUMNS,
     account_values,
     funding_mark_values,
     next_history,
@@ -149,11 +148,7 @@ class SQLiteStore:
             "SELECT history FROM orders WHERE cloid = ?", (order.cloid,)
         ).fetchone()
         history = next_history(row[0] if row else None, order.state, ts_ns)
-        placeholders = ", ".join("?" * len(RECORD_COLUMNS))
-        self._conn.execute(
-            f"INSERT OR REPLACE INTO orders VALUES ({placeholders})",
-            record_values(order, history=history),
-        )
+        self._conn.execute(_UPSERTS.order, record_values(order, history=history))
 
     def get_order(self, cloid: str) -> Order | None:
         """Rebuild the checkpointed saga for ``cloid``, or ``None`` if unknown."""
