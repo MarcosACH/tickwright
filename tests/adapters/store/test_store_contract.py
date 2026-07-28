@@ -321,3 +321,92 @@ def test_recheckpointing_a_position_upserts_in_place(store_backend: Backend) -> 
         "trivial": Decimal("3"),
         None: Decimal("-1.5"),
     }
+
+
+def test_money_round_trips_exactly_in_representation(store_backend: Backend) -> None:
+    """Every money column is ``TEXT``, written ``str`` and read ``Decimal``, so the
+    round trip is exact in *representation* and not merely in numeric value
+    (ADR-0043 §7). A ``NUMERIC`` column normalises: it returns ``1000`` for
+    ``1E+3`` and ``0.00000000`` for ``0E-8`` — numerically lossless, and lossy in
+    exactly the way ``str(Decimal)`` is not. Asserted on the *text*, since
+    ``Decimal("1.10") == Decimal("1.1")``, which is what makes this silent."""
+    position = Position(
+        strategy_id="trivial",
+        symbol="BTC",
+        signed_size=Decimal("1.10"),
+        entry_price=Decimal("0E-8"),
+        realized_pnl=Decimal("-0"),
+        fees=Decimal("1E+3"),
+        funding=Decimal("-0.0"),
+        isolated_collateral=Decimal("1.000"),
+    )
+    account = Account.restore(
+        account_id="paper-default",
+        genesis_collateral=Decimal("2.50"),
+        genesis_ts_ns=1_000,
+        cash=Decimal("1E+4"),
+    )
+    with store_backend.open() as store:
+        store.checkpoint_ledger(account=account, positions=[position], ts_ns=2_000)
+
+    with store_backend.open() as reopened:
+        (loaded,) = reopened.all_positions()
+        restored_account = reopened.load_account()
+
+    assert str(loaded.signed_size) == "1.10"
+    assert str(loaded.entry_price) == "0E-8"
+    assert str(loaded.realized_pnl) == "-0"
+    assert str(loaded.fees) == "1E+3"
+    assert str(loaded.funding) == "-0.0"
+    assert str(loaded.isolated_collateral) == "1.000"
+
+    assert restored_account is not None
+    assert str(restored_account.genesis_collateral) == "2.50"
+    assert str(restored_account.cash) == "1E+4"
+
+
+def test_a_flat_position_keeps_its_history_across_the_round_trip(store_backend: Backend) -> None:
+    """A flat record is still a record (ADR-0041 §3): the exposure is gone, the
+    realized, fee and funding lines it left behind are not, so a restart must
+    not read them back as a fresh partition."""
+    flat = Position(
+        strategy_id="trivial",
+        symbol="BTC",
+        signed_size=Decimal("0"),
+        realized_pnl=Decimal("125.5"),
+        fees=Decimal("2"),
+        funding=Decimal("-0.5"),
+    )
+    with store_backend.open() as store:
+        store.checkpoint_ledger(account=_account(), positions=[flat], ts_ns=2_000)
+
+    with store_backend.open() as reopened:
+        (loaded,) = reopened.all_positions()
+
+    assert loaded.is_flat
+    assert loaded.realized_pnl == Decimal("125.5")
+    assert loaded.fees == Decimal("2")
+    assert loaded.funding == Decimal("-0.5")
+
+
+def test_the_accounts_opening_declaration_survives_a_later_checkpoint(
+    store_backend: Backend,
+) -> None:
+    """``account_id``, ``genesis_collateral`` and ``genesis_ts_ns`` are written
+    once with the row and excluded from the upsert's update list (ADR-0043 §3).
+    An instant nobody recorded is not recoverable afterwards, unlike a sum — so
+    a second checkpoint carrying different values must not move them, and only
+    the cash line follows the incoming account."""
+    with store_backend.open() as store:
+        store.checkpoint_ledger(account=_account(genesis="10000", ts_ns=1_000), ts_ns=1_000)
+
+        moved = _account(genesis="99999", ts_ns=8_888)
+        moved.accrue_realized(Decimal("-500"), event_id="0xabc:fill:v1")
+        store.checkpoint_ledger(account=moved, ts_ns=3_000)
+
+        loaded = store.load_account()
+
+    assert loaded is not None
+    assert loaded.genesis_collateral == Decimal("10000")
+    assert loaded.genesis_ts_ns == 1_000
+    assert loaded.cash == Decimal("99499")
