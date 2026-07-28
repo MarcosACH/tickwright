@@ -13,11 +13,13 @@ reachable (see ``conftest``), so ``uv run pytest`` stays hermetic by default.
 
 from decimal import Decimal
 
+import pytest
 from store_backends import PostgresBackend, SQLiteBackend
 
 from tickwright.domain import (
     Account,
     AccountSpec,
+    InvariantViolation,
     Order,
     OrderFilled,
     OrderState,
@@ -410,3 +412,55 @@ def test_the_accounts_opening_declaration_survives_a_later_checkpoint(
     assert loaded.genesis_collateral == Decimal("10000")
     assert loaded.genesis_ts_ns == 1_000
     assert loaded.cash == Decimal("99499")
+
+
+def test_checkpoint_ledger_writes_the_order_with_the_ledger(store_backend: Backend) -> None:
+    """A fill mutates the order row *and* the ledger, and as two transactions
+    either ordering is unsound (ADR-0043 §4): checkpoint-first loses the fill
+    from the ledger on a crash, ledger-first double-counts it. So they ride one
+    call, and the order row it carries is the one ``checkpoint`` would write —
+    same record, same appended transition trail."""
+    order = _order()
+    order.apply(_submitted())
+    order.apply(_filled())
+    position = Position(strategy_id="trivial", symbol="BTC")
+    position.apply(_filled(), side=Side.BUY)
+
+    with store_backend.open() as store:
+        store.checkpoint_ledger(order=order, account=_account(), positions=[position], ts_ns=2_000)
+
+    with store_backend.open() as reopened:
+        loaded_order = reopened.get_order("0xabc")
+        (loaded_position,) = reopened.all_positions()
+
+        assert loaded_order is not None
+        assert loaded_order.state is OrderState.FILLED
+        assert loaded_order.cum_qty == Decimal("2")
+        assert reopened.history("0xabc") == [(OrderState.FILLED, 2_000)]
+        assert loaded_position.signed_size == Decimal("2")
+        assert loaded_position.entry_price == Decimal("100")
+
+
+def test_a_refused_ledger_write_leaves_no_part_of_it_durable(store_backend: Backend) -> None:
+    """One transaction across every aggregate handed to it (ADR-0043 §4): a
+    failure part-way leaves none of them, and raises rather than running on
+    (ADR-0014). Half a fill is the state the atomic write exists to make
+    unreachable — on paper nothing ever heals it, because the in-process venue
+    holds no position state and the store is the sole authority.
+
+    The refused row is a position with no symbol: ``NOT NULL`` is the constraint
+    both backends enforce identically, standing in for any write the store
+    cannot make durable."""
+    good = Position(strategy_id="trivial", symbol="BTC", signed_size=Decimal("2"))
+    refused = Position(strategy_id="trivial", symbol=None, signed_size=Decimal("1"))  # type: ignore[arg-type]
+
+    with store_backend.open() as store:
+        with pytest.raises(InvariantViolation):
+            store.checkpoint_ledger(
+                order=_order(), account=_account(), positions=[good, refused], ts_ns=2_000
+            )
+
+    with store_backend.open() as reopened:
+        assert reopened.load_account() is None
+        assert reopened.all_positions() == []
+        assert reopened.get_order("0xabc") is None

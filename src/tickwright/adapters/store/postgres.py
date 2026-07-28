@@ -19,7 +19,14 @@ from types import TracebackType
 
 import psycopg
 
-from tickwright.domain import Account, KillSwitchState, Order, OrderState, Position
+from tickwright.domain import (
+    Account,
+    InvariantViolation,
+    KillSwitchState,
+    Order,
+    OrderState,
+    Position,
+)
 
 from ._records import (
     ACCOUNT_COLUMN_LIST,
@@ -153,11 +160,20 @@ class PostgresStore:
         history, atomically — one transaction per checkpoint.
         """
         with self._conn.transaction():
-            row = self._conn.execute(
-                "SELECT history FROM orders WHERE cloid = %s", (order.cloid,)
-            ).fetchone()
-            history = next_history(row[0] if row else None, order.state, ts_ns)
-            self._conn.execute(_UPSERT_ORDER, record_values(order, history=history))
+            self._write_order(order, ts_ns=ts_ns)
+
+    def _write_order(self, order: Order, *, ts_ns: int) -> None:
+        """Upsert the saga record and append its transition entry.
+
+        The caller owns the transaction, because ``checkpoint_ledger`` runs this
+        same body inside a wider one (ADR-0043 §4). Shared rather than repeated
+        so the two writes can never disagree about what a saga row is.
+        """
+        row = self._conn.execute(
+            "SELECT history FROM orders WHERE cloid = %s", (order.cloid,)
+        ).fetchone()
+        history = next_history(row[0] if row else None, order.state, ts_ns)
+        self._conn.execute(_UPSERT_ORDER, record_values(order, history=history))
 
     def get_order(self, cloid: str) -> Order | None:
         """Rebuild the checkpointed saga for ``cloid``, or ``None`` if unknown."""
@@ -218,15 +234,31 @@ class PostgresStore:
         *,
         account: Account,
         positions: Sequence[Position] = (),
+        order: Order | None = None,
         ts_ns: int,
     ) -> None:
-        """Durably record the ledger as of ``ts_ns`` — one transaction (ADR-0043 §4)."""
-        with self._conn.transaction(), self._conn.cursor() as cursor:
-            cursor.execute(_UPSERT_ACCOUNT, account_values(account, ts_ns=ts_ns))
-            cursor.executemany(
-                _UPSERT_POSITION,
-                [position_values(position, ts_ns=ts_ns) for position in positions],
-            )
+        """Durably record the ledger as of ``ts_ns`` — one transaction (ADR-0043 §4).
+
+        The order row, the position rows and the account row commit together or
+        not at all: as two transactions either ordering is unsound, and on paper
+        the resulting half-fill never heals, because the in-process venue holds
+        no position state and this store is the ledger's sole authority.
+
+        A write the backend refuses raises ``InvariantViolation`` — the
+        transaction has already rolled back, so what the caller must not do is
+        run on believing the ledger moved (ADR-0014).
+        """
+        try:
+            with self._conn.transaction(), self._conn.cursor() as cursor:
+                if order is not None:
+                    self._write_order(order, ts_ns=ts_ns)
+                cursor.execute(_UPSERT_ACCOUNT, account_values(account, ts_ns=ts_ns))
+                cursor.executemany(
+                    _UPSERT_POSITION,
+                    [position_values(position, ts_ns=ts_ns) for position in positions],
+                )
+        except psycopg.Error as exc:
+            raise InvariantViolation(f"ledger checkpoint at ts_ns={ts_ns} refused: {exc}") from exc
 
     def all_positions(self) -> list[Position]:
         """Every persisted partition — the recovery mass-read (ADR-0043 §9)."""

@@ -248,6 +248,7 @@ class Store(Protocol):
         *,
         account: Account,
         positions: Sequence[Position] = (),
+        order: Order | None = None,
         ts_ns: int,
     ) -> None:
         """Durably record the accounting ledger as of ``ts_ns`` (ADR-0043 §9).
