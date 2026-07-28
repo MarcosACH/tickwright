@@ -69,6 +69,7 @@ def _write_workspace(cwd: Path) -> None:
     (cwd / ".env").write_text(
         "TICKWRIGHT_REPLAY__PATH=ticks.jsonl\n"
         "TICKWRIGHT_SQLITE__PATH=saga.db\n"
+        "TICKWRIGHT_PAPER__GENESIS_COLLATERAL=100000\n"
         f"TICKWRIGHT_PAPER__INSTRUMENT_SPECS={json.dumps(_SPECS)}\n"
         f"TICKWRIGHT_STRATEGIES={json.dumps(_STRATEGIES)}\n"
     )

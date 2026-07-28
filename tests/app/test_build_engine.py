@@ -51,6 +51,8 @@ from tickwright.venues.hyperliquid import HyperliquidExchange, HyperliquidFeed
 _SPEC = InstrumentSpec(
     symbol="BTC", sz_decimals=3, max_decimals=6, max_sig_figs=5, min_notional=Decimal("10")
 )
+# The paper account's opening cash, which the venue demands (ADR-0042 §1).
+_GENESIS = Decimal("100000")
 
 
 def _config(tmp_path: Path, **overrides: object) -> AppConfig:
@@ -59,7 +61,7 @@ def _config(tmp_path: Path, **overrides: object) -> AppConfig:
     defaults: dict[str, object] = {
         "replay": {"path": tmp_path / "ticks.jsonl"},
         "sqlite": {"path": tmp_path / "saga.db"},
-        "paper": {"instrument_specs": {"BTC": _SPEC}},
+        "paper": {"instrument_specs": {"BTC": _SPEC}, "genesis_collateral": _GENESIS},
     }
     return AppConfig(**{**defaults, **overrides})  # type: ignore[arg-type]
 
@@ -198,7 +200,7 @@ def test_build_engine_wires_a_tradable_paper_engine(tmp_path: Path) -> None:
     config = AppConfig(
         replay=ReplayFeedConfig(path=ticks),
         sqlite=SQLiteStoreConfig(path=db),
-        paper=PaperExchangeConfig(instrument_specs={"BTC": _SPEC}),
+        paper=PaperExchangeConfig(instrument_specs={"BTC": _SPEC}, genesis_collateral=_GENESIS),
         strategies=[
             StrategyConfig(
                 kind="single_shot_market",
@@ -313,6 +315,7 @@ def test_paper_fill_model_selects_the_seeded_stochastic_model_from_config(tmp_pa
         tmp_path,
         paper={
             "instrument_specs": {"BTC": _SPEC},
+            "genesis_collateral": _GENESIS,
             "fill_model": "stochastic",
             "seed": 7,
             "stochastic": {"prob_slippage": 1.0, "max_slippage": "0.001"},
