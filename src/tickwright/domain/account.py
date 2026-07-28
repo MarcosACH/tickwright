@@ -52,7 +52,7 @@ class AccountView:
 class Account:
     """One collateral pool's Tier-1 cash line, plus the declaration it opened on."""
 
-    __slots__ = ("_account_id", "_applied_event_ids", "_cash", "_genesis", "_genesis_ts_ns")
+    __slots__ = ("_account_id", "_cash", "_genesis", "_genesis_ts_ns")
 
     def __init__(self, *, account_id: str, genesis_collateral: Decimal, genesis_ts_ns: int) -> None:
         self._account_id = account_id
@@ -62,7 +62,6 @@ class Account:
         # declaration above is retained separately as the account's identity,
         # never recomputed from the line (ADR-0042 §3).
         self._cash = genesis_collateral
-        self._applied_event_ids: set[str] = set()
 
     @property
     def account_id(self) -> str:
@@ -85,27 +84,32 @@ class Account:
         accrual methods, which are the closed write-set (ADR-0042 §4)."""
         return self._cash
 
-    @property
-    def applied_event_ids(self) -> frozenset[str]:
-        """The reflected ``event_id``s — the dedup set a ``Store`` round-trips."""
-        return frozenset(self._applied_event_ids)
-
     def view(self) -> AccountView:
         """A frozen Tier-1 snapshot of the account-wide pool."""
         return AccountView(cash=self._cash)
 
-    def accrue_realized(self, amount: Decimal, *, event_id: str) -> bool:
+    def accrue_realized(self, amount: Decimal, *, event_id: str) -> None:
         """``+`` realized PnL, one of the four accruing inputs (ADR-0042 §4).
 
-        Signed: a loss accrues negative. Idempotent on ``event_id`` on the same
-        terms as ``Position.apply``, so a redelivered fill moves no cash;
-        returns whether this call moved the line.
+        Signed: a loss accrues negative.
+
+        **Unconditional: this class writes the cash line, it does not police
+        what reaches it.** Each accruing input arrives already deduplicated by
+        the gatekeeper that owns its key — fills by ``Position.apply`` on
+        ``event_id``, funding by the per-symbol watermark at ``(symbol,
+        boundary_ts)`` grain (ADR-0037, ADR-0043 §5.2) — so an applied-event set
+        here would guard nothing and shadow those keys. It would also give one
+        fill's realized and fee legs a single dedup entry, silently dropping the
+        second: they ride one ``OrderFillEvent`` and so share one ``event_id``.
+        ADR-0043 §4 rejects a ledger-side applied set on the durable row for the
+        same reason it does not belong in memory — it grows for the life of the
+        ledger, where a saga's set dies with its order.
+
+        ``event_id`` is therefore provenance, not a key: it says *which fact*
+        moved the line, which is what ADR-0043 §1's deferred line-item audit log
+        records if it is ever taken up.
         """
-        if event_id in self._applied_event_ids:
-            return False
-        self._applied_event_ids.add(event_id)
         self._cash += amount
-        return True
 
     @classmethod
     def open(cls, spec: AccountSpec, *, genesis_collateral: Decimal, ts_ns: int) -> "Account":

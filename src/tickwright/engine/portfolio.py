@@ -70,8 +70,12 @@ class PortfolioProjection:
             return
         # Realized PnL is one of the four accruing inputs to cash (ADR-0042 §4),
         # and the position is what booked it — so the delta is read off the
-        # aggregate rather than recomputed here. Keyed by the same event id, so
-        # the two ledgers dedup on one fact.
+        # aggregate rather than recomputed here. That read is also what makes
+        # the cash line idempotent without a second applied set on ``Account``:
+        # ``Position.apply`` is the fill's one gatekeeper, so a redelivery books
+        # nothing and the delta it contributes here is zero by construction.
+        # (The early return above suppresses the *announcement*, not the accrual
+        # — it is not what keeps the cash line from double-counting.)
         self._account.accrue_realized(
             position.realized_pnl - realized_before, event_id=event.event_id
         )

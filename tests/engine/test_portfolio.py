@@ -129,15 +129,29 @@ def test_a_strategy_reads_only_its_own_partition() -> None:
 
 
 def test_a_redelivered_fill_moves_neither_the_position_nor_the_cash_line() -> None:
+    """The at-least-once guarantee (ADR-0025) for *both* ledgers, asserted here
+    because here is where it is produced: ``Position.apply`` is the fill's one
+    gatekeeper, and ``Account`` keeps no applied set of its own to fall back on.
+
+    The redelivered leg is a **partial** reduce, deliberately. Closing the whole
+    position instead would leave the redelivery landing on a flat record, where
+    it opens a fresh short rather than realizing again — realized PnL and cash
+    both survive by accident and the assertions pass with the gatekeeper gone.
+    Reducing 4 to 2 makes a second application genuinely double-count, so
+    deleting ``Position``'s dedup fails this test.
+    """
     projection = _projection("100000")
     portfolio = projection.for_strategy("alpha")
-    projection.apply_fill(_fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
+    projection.apply_fill(_fill(trade_id="f1", quantity="4", price="100"), side=Side.BUY)
     fill = _fill(trade_id="f2", quantity="2", price="150")
     projection.apply_fill(fill, side=Side.SELL)
 
     projection.apply_fill(fill, side=Side.SELL)
 
-    assert portfolio.position("BTC").realized_pnl == Decimal("100")  # type: ignore[union-attr]
+    view = portfolio.position("BTC")
+    assert view is not None
+    assert view.size == Decimal("2")  # not 0 — the reduce was applied once
+    assert view.realized_pnl == Decimal("100")  # 2 x (150 - 100), booked once
     assert portfolio.account().cash == Decimal("100100")
 
 

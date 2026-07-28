@@ -25,21 +25,34 @@ def test_an_account_opens_with_its_cash_line_at_the_genesis_collateral() -> None
 def test_realized_pnl_accrues_to_the_cash_line() -> None:
     account = _account("1000")
 
-    assert account.accrue_realized(Decimal("-40"), event_id="0xabc:fill:f1") is True
+    account.accrue_realized(Decimal("-40"), event_id="0xabc:fill:f1")
 
     assert account.cash == Decimal("960")
 
 
-def test_a_redelivered_accrual_moves_no_cash() -> None:
+def test_the_cash_line_accrues_unconditionally_and_dedups_nothing() -> None:
+    """``Account`` is the cash line's *writer*, never a second idempotency
+    authority — two accruals of one ``event_id`` move it twice.
+
+    The fill path dedups exactly once, at ``Position.apply``: a redelivery books
+    nothing, so the realized *delta* the projection accrues is zero and the cash
+    line cannot move. A second applied-event set here would guard nothing that
+    gatekeeper does not already guard, would shadow the different key funding
+    dedups on (ADR-0037), and would silently swallow the fee leg of a fill whose
+    realized leg it had already consumed — both ride one ``event_id``. ADR-0043
+    §4 rejects a ledger-side applied set outright; the ``hasattr`` assertion
+    below is what fails if one is reintroduced when the ledger becomes durable.
+
+    The redelivery guarantee itself is asserted where it is produced, in
+    ``tests/engine/test_portfolio.py``.
+    """
     account = _account("1000")
+
+    account.accrue_realized(Decimal("250"), event_id="0xabc:fill:f1")
     account.accrue_realized(Decimal("250"), event_id="0xabc:fill:f1")
 
-    assert account.accrue_realized(Decimal("250"), event_id="0xabc:fill:f1") is False
-
-    assert account.cash == Decimal("1250")
-    # The dedup set is contract, not bookkeeping: the durable ledger round-trips
-    # it so a fill that predates a restart is still a no-op after one.
-    assert account.applied_event_ids == frozenset({"0xabc:fill:f1"})
+    assert account.cash == Decimal("1500")
+    assert not hasattr(account, "applied_event_ids")
 
 
 def test_the_opening_declaration_is_write_once() -> None:
