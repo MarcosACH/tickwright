@@ -801,6 +801,46 @@ def test_a_venue_that_refuses_to_start_faults_the_engine_before_any_order(
     assert timeline == ["exchange.stop"]
 
 
+class _VenueThatBreaksOnStop(_LifecycleRecordingVenue):
+    """A venue whose release breaks mid-teardown — the wedged-link shape."""
+
+    async def stop(self) -> None:
+        raise RuntimeError("the venue link broke during teardown")
+
+
+def test_a_venue_that_breaks_on_stop_is_recorded_and_the_teardown_carries_on(
+    tmp_path: Path,
+) -> None:
+    """ADR-0020/0024: the faulted teardown is best-effort per step but never
+    silent. A venue that cannot be released is recorded as
+    ``engine.stop_hook_failed`` under its own name — and it can neither mask
+    the fault, block the non-zero exit, nor cost the store its close."""
+    timeline: list[str] = []
+
+    async def faulted_life() -> tuple[int, Engine]:
+        engine = Engine(
+            bus=InMemoryBus(),
+            clock=ManualClock(),
+            store=_TimelineStore(tmp_path / "saga.db", timeline),
+            exchange=_VenueThatBreaksOnStop(timeline),
+            feed=_FaultingTimelineFeed(timeline),
+            portfolio=ledger(),
+        )
+        return await engine.run(), engine
+
+    with capture_events() as logs:
+        exit_code, engine = asyncio.run(faulted_life())
+
+    names = [log["event"] for log in logs]
+    assert exit_code != 0
+    assert engine.state is ComponentState.FAULTED
+    assert "engine.faulted" in names, "the broken release must not mask the fault"
+    hook_failures = [log for log in logs if log["event"] == "engine.stop_hook_failed"]
+    assert [log["hook"] for log in hook_failures] == ["exchange.stop"]
+    # The steps behind the break still ran: the store is closed, not leaked.
+    assert timeline == ["exchange.start", "feed.stop", "store.close"]
+
+
 def test_graceful_stop_leaves_resting_live_orders_for_the_next_start_to_re_adopt(
     tmp_path: Path,
 ) -> None:
