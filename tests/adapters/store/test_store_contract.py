@@ -267,3 +267,57 @@ def test_position_round_trips(store_backend: Backend) -> None:
     assert loaded.fees == Decimal("3.75")
     assert loaded.funding == Decimal("0.125")
     assert loaded.isolated_collateral == Decimal("7500")
+
+
+def test_all_positions_returns_the_unattributed_partition_unfiltered(
+    store_backend: Backend,
+) -> None:
+    """ADR-0034's Σ-invariant holds by construction only if the reserved
+    partition is restored with everything else, so filtering belongs at the
+    ``Portfolio`` seam and never here (ADR-0043 §9). ``None`` is the partition
+    in memory; ``__unattributed__`` is what it is on disk (§2)."""
+    attributed = Position(strategy_id="trivial", symbol="BTC", signed_size=Decimal("2"))
+    unattributed = Position(strategy_id=None, symbol="BTC", signed_size=Decimal("-0.5"))
+    with store_backend.open() as store:
+        store.checkpoint_ledger(
+            account=_account(), positions=[attributed, unattributed], ts_ns=2_000
+        )
+
+    with store_backend.open() as reopened:
+        loaded = reopened.all_positions()
+
+    assert {position.strategy_id: position.signed_size for position in loaded} == {
+        "trivial": Decimal("2"),
+        None: Decimal("-0.5"),
+    }
+
+
+def test_recheckpointing_a_position_upserts_in_place(store_backend: Backend) -> None:
+    """Current-state rows, not an event log (ADR-0043 §1): a second write moves
+    the row rather than appending one. The count is the assertion that matters
+    for the unattributed partition — under a ``NULL`` key SQLite's upsert would
+    have inserted a second row rather than updating (§2)."""
+    with store_backend.open() as store:
+        store.checkpoint_ledger(
+            account=_account(),
+            positions=[
+                Position(strategy_id="trivial", symbol="BTC", signed_size=Decimal("2")),
+                Position(strategy_id=None, symbol="BTC", signed_size=Decimal("-0.5")),
+            ],
+            ts_ns=2_000,
+        )
+        store.checkpoint_ledger(
+            account=_account(),
+            positions=[
+                Position(strategy_id="trivial", symbol="BTC", signed_size=Decimal("3")),
+                Position(strategy_id=None, symbol="BTC", signed_size=Decimal("-1.5")),
+            ],
+            ts_ns=3_000,
+        )
+        loaded = store.all_positions()
+
+    assert len(loaded) == 2
+    assert {position.strategy_id: position.signed_size for position in loaded} == {
+        "trivial": Decimal("3"),
+        None: Decimal("-1.5"),
+    }

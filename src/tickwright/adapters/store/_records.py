@@ -145,6 +145,16 @@ def account_values(account: Account, *, ts_ns: int) -> tuple[Any, ...]:
     )
 
 
+# The reserved unattributed partition on disk (ADR-0043 §2). ADR-0038 models it
+# as ``strategy_id: None`` in memory, but the column is ``NOT NULL`` and part of
+# the primary key, so the translation happens here — at the one boundary both
+# backends share. A literal ``NULL`` is *differently* broken on each: SQLite
+# admits duplicate rows under the key and upserts insert rather than update, so
+# the partition would accrete a row per heal with the Σ-invariant quietly
+# counting all of them; Postgres rejects the row outright. The silent breakage
+# is the default path's, which is why this is a sentinel rather than a ``NULL``.
+UNATTRIBUTED = "__unattributed__"
+
 # The position columns, in write order. The key leads; the money lines follow in
 # the order ADR-0043 §3's DDL lists them.
 POSITION_COLUMNS: tuple[str, ...] = (
@@ -172,7 +182,7 @@ POSITION_UPDATE_COLUMNS: tuple[str, ...] = tuple(
 def position_values(position: Position, *, ts_ns: int) -> tuple[Any, ...]:
     """The position write tuple, in ``POSITION_COLUMNS`` order."""
     return (
-        position.strategy_id,
+        UNATTRIBUTED if position.strategy_id is None else position.strategy_id,
         position.symbol,
         str(position.signed_size),
         str(position.entry_price),
@@ -187,7 +197,7 @@ def position_values(position: Position, *, ts_ns: int) -> tuple[Any, ...]:
 def restore_position(row: Sequence[Any]) -> Position:
     """One position row, in ``POSITION_COLUMNS`` order, back into a ``Position``."""
     return Position(
-        strategy_id=row[0],
+        strategy_id=None if row[0] == UNATTRIBUTED else row[0],
         symbol=row[1],
         signed_size=Decimal(row[2]),
         entry_price=Decimal(row[3]),
