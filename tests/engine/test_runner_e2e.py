@@ -746,6 +746,61 @@ def test_the_fault_path_stops_the_exchange_in_the_same_position_as_a_graceful_st
     assert timeline == ["exchange.start", "feed.stop", "exchange.stop", "store.close"]
 
 
+class _RefusingVenue(_LifecycleRecordingVenue):
+    """A venue that refuses to align at connect time — the shape ADR-0044's
+    leverage mismatch and ADR-0046's unsupported account mode will take."""
+
+    async def start(self) -> None:
+        raise InvariantViolation("the venue refused to align with this config")
+
+
+def test_a_venue_that_refuses_to_start_faults_the_engine_before_any_order(
+    tmp_path: Path,
+) -> None:
+    """Why ``start()`` sits where it does (ADR-0024 step 4): a refusal is an
+    ``InvariantViolation`` on the existing fail-fast policy, and it lands
+    before the barrier — so the run that would otherwise have placed an order
+    against an unaligned venue never reaches the venue at all."""
+    timeline: list[str] = []
+    venue = _RefusingVenue(timeline)
+
+    async def refused_life() -> tuple[int, Engine]:
+        bus = InMemoryBus()
+        clock = ManualClock()
+        engine = Engine(
+            bus=bus,
+            clock=clock,
+            store=SQLiteStore(tmp_path / "saga.db"),
+            exchange=venue,
+            feed=ReplayFeed(path=_write_ticks(tmp_path / "ticks.jsonl"), bus=bus, clock=clock),
+            portfolio=ledger(),
+        )
+        engine.register(
+            SingleShotMarketStrategy(
+                strategy_id="eager",
+                bus=bus,
+                clock=clock,
+                portfolio=ledger().for_strategy("eager"),
+                side=Side.BUY,
+                quantity=Decimal("0.5"),
+            ),
+            symbols={"BTC"},
+        )
+        return await engine.run(), engine
+
+    with capture_events() as logs:
+        exit_code, engine = asyncio.run(refused_life())
+
+    assert exit_code != 0
+    assert engine.state is ComponentState.FAULTED
+    assert "engine.faulted" in [log["event"] for log in logs]
+    # A registered strategy and a feed full of ticks, and still nothing placed
+    # and nothing read: the refusal precedes both the barrier and the first
+    # tick. The lone entry is the teardown releasing the venue anyway — the
+    # same best-effort release the feed gets whether or not it ever started.
+    assert timeline == ["exchange.stop"]
+
+
 def test_graceful_stop_leaves_resting_live_orders_for_the_next_start_to_re_adopt(
     tmp_path: Path,
 ) -> None:
