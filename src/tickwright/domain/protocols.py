@@ -249,6 +249,7 @@ class Store(Protocol):
         account: Account,
         positions: Sequence[Position] = (),
         order: Order | None = None,
+        funding_mark: tuple[str, int] | None = None,
         ts_ns: int,
     ) -> None:
         """Durably record the accounting ledger as of ``ts_ns`` (ADR-0043 §9).
@@ -270,6 +271,20 @@ class Store(Protocol):
         account net = venue size — holds by construction only if the partition
         is restored with everything else, so filtering belongs at the
         ``Portfolio`` seam and never in the store."""
+        ...
+
+    def funding_mark(self, symbol: str) -> int | None:
+        """The last funding boundary applied to ``symbol``, or ``None`` if none
+        ever was (ADR-0043 §5.2).
+
+        The ledger's one durable idempotency record, keyed by ``symbol``
+        because that is the grain of the key it is half of: ADR-0037 dedupes on
+        ``(account, symbol, boundary_ts)`` with the account ambient. ``None`` is
+        row absence, and it admits any boundary — nothing has been applied to
+        contradict it. The advance rides ``checkpoint_ledger`` rather than a
+        write of its own, so it lands in the same transaction as the funding
+        line it guards: **the only write that may advance the mark is the one
+        that applies the accrual.**"""
         ...
 
     def load_account(self) -> Account | None:

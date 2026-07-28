@@ -28,6 +28,8 @@ from ._records import (
     ACCOUNT_COLUMN_LIST,
     ACCOUNT_COLUMNS,
     ACCOUNT_UPDATE_COLUMNS,
+    FUNDING_MARK_COLUMNS,
+    FUNDING_MARK_UPDATE_COLUMNS,
     POSITION_COLUMN_LIST,
     POSITION_COLUMNS,
     POSITION_KEY_COLUMNS,
@@ -35,6 +37,7 @@ from ._records import (
     READ_COLUMN_LIST,
     RECORD_COLUMNS,
     account_values,
+    funding_mark_values,
     next_history,
     position_values,
     record_values,
@@ -86,6 +89,11 @@ CREATE TABLE IF NOT EXISTS positions (
     ts_ns               INTEGER NOT NULL,
     PRIMARY KEY (strategy_id, symbol)
 );
+CREATE TABLE IF NOT EXISTS funding_marks (
+    symbol             TEXT PRIMARY KEY,
+    last_funding_ts_ns INTEGER NOT NULL,
+    ts_ns              INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS account (
     id                 INTEGER PRIMARY KEY CHECK (id = 1),
     account_id         TEXT NOT NULL,
@@ -112,6 +120,13 @@ _UPSERT_POSITION = (
     f"VALUES ({', '.join('?' * len(POSITION_COLUMNS))}) "
     f"ON CONFLICT ({', '.join(POSITION_KEY_COLUMNS)}) DO UPDATE SET "
     + ", ".join(f"{column} = excluded.{column}" for column in POSITION_UPDATE_COLUMNS)
+)
+
+_UPSERT_FUNDING_MARK = (
+    f"INSERT INTO funding_marks ({', '.join(FUNDING_MARK_COLUMNS)}) "
+    f"VALUES ({', '.join('?' * len(FUNDING_MARK_COLUMNS))}) "
+    "ON CONFLICT (symbol) DO UPDATE SET "
+    + ", ".join(f"{column} = excluded.{column}" for column in FUNDING_MARK_UPDATE_COLUMNS)
 )
 
 
@@ -209,6 +224,7 @@ class SQLiteStore:
         account: Account,
         positions: Sequence[Position] = (),
         order: Order | None = None,
+        funding_mark: tuple[str, int] | None = None,
         ts_ns: int,
     ) -> None:
         """Durably record the ledger as of ``ts_ns`` — one transaction (ADR-0043 §4).
@@ -231,6 +247,10 @@ class SQLiteStore:
                     _UPSERT_POSITION,
                     [position_values(position, ts_ns=ts_ns) for position in positions],
                 )
+                if funding_mark is not None:
+                    self._conn.execute(
+                        _UPSERT_FUNDING_MARK, funding_mark_values(funding_mark, ts_ns=ts_ns)
+                    )
         except sqlite3.Error as exc:
             raise InvariantViolation(f"ledger checkpoint at ts_ns={ts_ns} refused: {exc}") from exc
 
@@ -240,6 +260,16 @@ class SQLiteStore:
             f"SELECT {POSITION_COLUMN_LIST} FROM positions ORDER BY strategy_id, symbol"
         ).fetchall()
         return [restore_position(row) for row in rows]
+
+    def funding_mark(self, symbol: str) -> int | None:
+        """The last funding boundary applied to ``symbol``, or ``None`` if none
+        ever was — the "never accrued" state ADR-0043 §3 encodes as row absence,
+        which admits any boundary since nothing has been applied to contradict
+        it."""
+        row = self._conn.execute(
+            "SELECT last_funding_ts_ns FROM funding_marks WHERE symbol = ?", (symbol,)
+        ).fetchone()
+        return None if row is None else int(row[0])
 
     def load_account(self) -> Account | None:
         """The persisted account, or ``None`` if the ledger was never opened."""

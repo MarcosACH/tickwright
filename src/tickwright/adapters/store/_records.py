@@ -208,6 +208,20 @@ def restore_position(row: Sequence[Any]) -> Position:
     )
 
 
+# The funding watermark row (ADR-0043 §5.2). Both timestamps are ``INTEGER``,
+# not ``TEXT``: a boundary instant is a timestamp rather than money, so
+# ADR-0029's ``Decimal``-as-``TEXT`` rule does not reach it.
+FUNDING_MARK_COLUMNS: tuple[str, ...] = ("symbol", "last_funding_ts_ns", "ts_ns")
+
+FUNDING_MARK_UPDATE_COLUMNS: tuple[str, ...] = ("last_funding_ts_ns", "ts_ns")
+
+
+def funding_mark_values(funding_mark: tuple[str, int], *, ts_ns: int) -> tuple[Any, ...]:
+    """The watermark write tuple, in ``FUNDING_MARK_COLUMNS`` order."""
+    symbol, boundary_ts_ns = funding_mark
+    return (symbol, boundary_ts_ns, ts_ns)
+
+
 def restore_account(row: Sequence[Any]) -> Account:
     """One account row, in ``ACCOUNT_COLUMNS`` order, back into an ``Account``."""
     return Account.restore(

@@ -464,3 +464,27 @@ def test_a_refused_ledger_write_leaves_no_part_of_it_durable(store_backend: Back
         assert reopened.load_account() is None
         assert reopened.all_positions() == []
         assert reopened.get_order("0xabc") is None
+
+
+def test_the_funding_mark_is_absent_until_written_and_then_advances(
+    store_backend: Backend,
+) -> None:
+    """The ledger's one durable idempotency record (ADR-0043 §5.2), keyed by
+    symbol because that is the grain of the key it is half of. The absence of a
+    row is the "never accrued" state — distinct from a boundary applied at epoch
+    ``0``, which is why the column is ``NOT NULL`` and the read returns ``None``.
+
+    It rides ``checkpoint_ledger`` rather than a call of its own so the advance
+    lands in the same transaction as the funding line it guards."""
+    with store_backend.open() as store:
+        assert store.funding_mark("BTC") is None
+
+        store.checkpoint_ledger(account=_account(), funding_mark=("BTC", 1_700), ts_ns=2_000)
+
+        assert store.funding_mark("BTC") == 1_700
+        assert store.funding_mark("ETH") is None  # one row per traded symbol
+
+        store.checkpoint_ledger(account=_account(), funding_mark=("BTC", 1_800), ts_ns=3_000)
+
+    with store_backend.open() as reopened:
+        assert reopened.funding_mark("BTC") == 1_800
