@@ -167,23 +167,33 @@ def test_every_tier_one_field_reads_a_number(symbol: str) -> None:
     )
 
 
-def _names(logs: Sequence[Mapping[str, Any]]) -> list[str]:
-    """The position names in the order they were announced — the only place a
-    position change is observable from outside (ADR-0045 §1)."""
-    return [str(log["event"]) for log in logs if str(log["event"]).startswith("position.")]
+def _announcements(logs: Sequence[Mapping[str, Any]]) -> list[tuple[str, str]]:
+    """Each position announcement as ``(name, size)``, in order — the only place
+    a position change is observable from outside (ADR-0045 §1), so the payload
+    is as much of the contract as the name is."""
+    return [
+        (str(log["event"]), str(log["size"]))
+        for log in logs
+        if str(log["event"]).startswith("position.")
+    ]
 
 
 def test_a_fill_that_flips_through_zero_announces_closed_then_opened() -> None:
     """The residual opens a fresh average-cost record, so a flip is genuinely two
     facts and is announced as two — in that order (ADR-0045 §2). A position
-    change is never a bus event, so this catalog is the only place it shows."""
+    change is never a bus event, so this catalog is the only place it shows.
+
+    Each half carries the size *it* produced: the old leg closed at zero, and
+    only then did the residual open at -3. Announcing the residual on both would
+    report a close at a non-zero size and invert the name.
+    """
     projection = _projection()
     projection.apply_fill(_fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
 
     with capture_events() as logs:
         projection.apply_fill(_fill(trade_id="f2", quantity="5", price="120"), side=Side.SELL)
 
-    assert _names(logs) == ["position.closed", "position.opened"]
+    assert _announcements(logs) == [("position.closed", "0"), ("position.opened", "-3")]
     view = projection.for_strategy("alpha").position("BTC")
     assert view is not None
     assert view.size == Decimal("-3")
@@ -191,7 +201,7 @@ def test_a_fill_that_flips_through_zero_announces_closed_then_opened() -> None:
     assert view.realized_pnl == Decimal("40")  # the whole closed long leg
 
 
-def test_each_regime_announces_its_own_name() -> None:
+def test_each_regime_announces_its_own_name_and_the_size_it_produced() -> None:
     projection = _projection()
 
     with capture_events() as logs:
@@ -199,7 +209,11 @@ def test_each_regime_announces_its_own_name() -> None:
         projection.apply_fill(_fill(trade_id="f2", quantity="1", price="120"), side=Side.BUY)
         projection.apply_fill(_fill(trade_id="f3", quantity="3", price="130"), side=Side.SELL)
 
-    assert _names(logs) == ["position.opened", "position.changed", "position.closed"]
+    assert _announcements(logs) == [
+        ("position.opened", "2"),
+        ("position.changed", "3"),
+        ("position.closed", "0"),
+    ]
 
 
 def test_a_redelivered_fill_announces_nothing() -> None:
@@ -210,4 +224,4 @@ def test_a_redelivered_fill_announces_nothing() -> None:
     with capture_events() as logs:
         projection.apply_fill(fill, side=Side.BUY)
 
-    assert _names(logs) == []
+    assert _announcements(logs) == []

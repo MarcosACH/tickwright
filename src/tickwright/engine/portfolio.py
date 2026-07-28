@@ -84,7 +84,14 @@ class PortfolioProjection:
                 _POSITION_EVENTS[change],
                 strategy_id=event.strategy_id,
                 symbol=event.symbol,
-                size=str(position.signed_size),
+                # The size *that change* produced, not the fill's end state. The
+                # two differ only on a flip, where the old leg closes at zero
+                # before the residual opens: reusing the post-fill size for both
+                # halves would announce a close at the residual's size and
+                # invert the name. This catalog is the only place a position
+                # change is observable (ADR-0045 §1), so there is nothing else a
+                # reader could reconcile that against.
+                size="0" if change is PositionChange.CLOSED else str(position.signed_size),
             )
 
     def position(self, symbol: str, *, strategy_id: str | None) -> PositionView | None:
