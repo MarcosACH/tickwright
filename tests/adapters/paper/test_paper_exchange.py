@@ -13,7 +13,7 @@ import pytest
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
-from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
+from tickwright.adapters.paper import ImmediateFillModel, PaperExchange, PaperExchangeConfig
 from tickwright.domain import (
     AggressorSide,
     FillReport,
@@ -502,7 +502,13 @@ def test_the_paper_venue_declares_a_two_segment_account_id_and_its_genesis() -> 
     assert spec.netting is Netting.NET
 
 
-def test_the_paper_account_label_defaults() -> None:
+def test_the_paper_account_label_defaults_to_the_same_label_the_config_does() -> None:
+    """An unlabelled exchange and an unlabelled config must open the *same*
+    ledger. The two defaults are one constant precisely so they cannot drift —
+    a label decides the ``paper-<label>`` id, so two spellings of "the default"
+    would silently point a directly-constructed exchange and a
+    ``build_engine``-constructed one at different account histories.
+    """
     exchange = PaperExchange(
         bus=InMemoryBus(),
         clock=ManualClock(),
@@ -511,3 +517,4 @@ def test_the_paper_account_label_defaults() -> None:
     )
 
     assert exchange.account_spec().account_id == "paper-default"
+    assert exchange.account_spec().account_id == f"paper-{PaperExchangeConfig().account_label}"

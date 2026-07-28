@@ -35,6 +35,7 @@ from tickwright.domain import (
 )
 
 from .book import RestingBook
+from .config import DEFAULT_ACCOUNT_LABEL
 from .fill_model import Fill, FillModel
 
 
@@ -48,7 +49,7 @@ class PaperExchange:
         clock: Clock,
         fill_model: FillModel,
         genesis_collateral: Decimal,
-        account_label: str = "default",
+        account_label: str = DEFAULT_ACCOUNT_LABEL,
         instrument_specs: Mapping[str, InstrumentSpec] | None = None,
     ) -> None:
         self._bus = bus

@@ -10,6 +10,15 @@ from tickwright.domain import InstrumentSpec
 
 from .fill_model import StochasticParams
 
+DEFAULT_ACCOUNT_LABEL = "default"
+"""The label a paper account opens under when the operator names none.
+
+Declared once and read by both ``PaperExchangeConfig.account_label`` and
+``PaperExchange``'s own constructor default, because the two must not drift: a
+label decides the ``paper-<label>`` account id, so two spellings of "the
+default" would point a directly-constructed exchange and a ``build_engine``-
+constructed one at different ledgers (ADR-0042 §5)."""
+
 
 class PaperExchangeConfig(BaseModel):
     """Config-sourced venue metadata (ADR-0031): the paper venue has no meta
@@ -44,7 +53,7 @@ class PaperExchangeConfig(BaseModel):
     validation, not margin enforcement: derived free margin still goes negative
     freely and without consequence at runtime (ADR-0040 §7)."""
 
-    account_label: str = Field(default="default", pattern=r"^[a-z0-9_]{1,32}$")
+    account_label: str = Field(default=DEFAULT_ACCOUNT_LABEL, pattern=r"^[a-z0-9_]{1,32}$")
     """The label half of the ``paper-<label>`` account id (ADR-0042 §5).
 
     May default where the collateral may not: a wrong label cannot make a number
