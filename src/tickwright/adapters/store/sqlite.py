@@ -30,13 +30,13 @@ from types import TracebackType
 
 from tickwright.domain import (
     Account,
-    InvariantViolation,
     KillSwitchState,
     Order,
     OrderState,
     Position,
 )
 
+from ._durability import durable
 from ._records import (
     ACCOUNT_COLUMN_LIST,
     POSITION_COLUMN_LIST,
@@ -119,6 +119,10 @@ _UPSERTS = upserts_for("?")
 class SQLiteStore:
     """A ``Store`` over one SQLite database (file path or ``":memory:"``)."""
 
+    # The one thing this adapter contributes to the seam's error contract
+    # (``_durability``): the base its driver raises from.
+    _driver_error = sqlite3.Error
+
     def __init__(self, path: str | Path = ":memory:") -> None:
         self._conn = sqlite3.connect(str(path))
         # Tie the connection's lifetime to this store: close it on ``close()`` or,
@@ -128,6 +132,7 @@ class SQLiteStore:
         with self._conn:
             self._conn.executescript(_SCHEMA)
 
+    @durable
     def checkpoint(self, order: Order, *, ts_ns: int) -> None:
         """Durably record ``order``'s full saga state as of ``ts_ns``.
 
@@ -150,6 +155,7 @@ class SQLiteStore:
         history = next_history(row[0] if row else None, order.state, ts_ns)
         self._conn.execute(_UPSERTS.order, record_values(order, history=history))
 
+    @durable
     def get_order(self, cloid: str) -> Order | None:
         """Rebuild the checkpointed saga for ``cloid``, or ``None`` if unknown."""
         row = self._conn.execute(
@@ -159,6 +165,7 @@ class SQLiteStore:
             return None
         return restore_order(row)
 
+    @durable
     def all_orders(self) -> list[Order]:
         """Rebuild every checkpointed saga — the recovery mass-read (ADR-0009)."""
         rows = self._conn.execute(
@@ -166,6 +173,7 @@ class SQLiteStore:
         ).fetchall()
         return [restore_order(row) for row in rows]
 
+    @durable
     def save_strategy_snapshot(self, strategy_id: str, data: bytes, *, ts_ns: int) -> None:
         """Durably record ``strategy_id``'s opaque state bytes; latest wins (ADR-0016)."""
         with self._conn:
@@ -175,6 +183,7 @@ class SQLiteStore:
                 (strategy_id, data, ts_ns),
             )
 
+    @durable
     def load_strategy_snapshot(self, strategy_id: str) -> bytes | None:
         """The last persisted snapshot for ``strategy_id``, or ``None`` if never saved."""
         row = self._conn.execute(
@@ -182,6 +191,7 @@ class SQLiteStore:
         ).fetchone()
         return None if row is None else bytes(row[0])
 
+    @durable
     def save_kill_switch(self, *, tripped: bool, reason: str | None, ts_ns: int) -> None:
         """Durably record the single-row kill-switch state (ADR-0026)."""
         with self._conn:
@@ -191,6 +201,7 @@ class SQLiteStore:
                 (int(tripped), reason, ts_ns),
             )
 
+    @durable
     def load_kill_switch(self) -> KillSwitchState | None:
         """The persisted kill-switch state, or ``None`` if never written."""
         row = self._conn.execute(
@@ -200,6 +211,7 @@ class SQLiteStore:
             return None
         return KillSwitchState(tripped=bool(row[0]), reason=row[1], ts_ns=row[2])
 
+    @durable
     def checkpoint_ledger(
         self,
         *,
@@ -218,24 +230,24 @@ class SQLiteStore:
 
         A write the backend refuses raises ``InvariantViolation`` — the
         transaction has already rolled back, so what the caller must not do is
-        run on believing the ledger moved (ADR-0014).
+        run on believing the ledger moved (ADR-0014). That translation is the
+        seam's, not this method's (``_durability``): it was the one member that
+        made the promise, and now every member does.
         """
-        try:
-            with self._conn:
-                if order is not None:
-                    self._write_order(order, ts_ns=ts_ns)
-                self._conn.execute(_UPSERTS.account, account_values(account, ts_ns=ts_ns))
-                self._conn.executemany(
-                    _UPSERTS.position,
-                    [position_values(position, ts_ns=ts_ns) for position in positions],
+        with self._conn:
+            if order is not None:
+                self._write_order(order, ts_ns=ts_ns)
+            self._conn.execute(_UPSERTS.account, account_values(account, ts_ns=ts_ns))
+            self._conn.executemany(
+                _UPSERTS.position,
+                [position_values(position, ts_ns=ts_ns) for position in positions],
+            )
+            if funding_mark is not None:
+                self._conn.execute(
+                    _UPSERTS.funding_mark, funding_mark_values(funding_mark, ts_ns=ts_ns)
                 )
-                if funding_mark is not None:
-                    self._conn.execute(
-                        _UPSERTS.funding_mark, funding_mark_values(funding_mark, ts_ns=ts_ns)
-                    )
-        except sqlite3.Error as exc:
-            raise InvariantViolation(f"ledger checkpoint at ts_ns={ts_ns} refused: {exc}") from exc
 
+    @durable
     def all_positions(self) -> list[Position]:
         """Every persisted partition — the recovery mass-read (ADR-0043 §9)."""
         rows = self._conn.execute(
@@ -243,6 +255,7 @@ class SQLiteStore:
         ).fetchall()
         return [restore_position(row) for row in rows]
 
+    @durable
     def has_orders(self) -> bool:
         """Whether any saga history exists at all — the existence question the
         startup refusal asks before ``cache.rebuild()`` (ADR-0043 §9). Answering
@@ -250,6 +263,7 @@ class SQLiteStore:
         on every start, on the recovery path."""
         return self._conn.execute("SELECT 1 FROM orders LIMIT 1").fetchone() is not None
 
+    @durable
     def funding_mark(self, symbol: str) -> int | None:
         """The last funding boundary applied to ``symbol``, or ``None`` if none
         ever was — the "never accrued" state ADR-0043 §3 encodes as row absence,
@@ -260,6 +274,7 @@ class SQLiteStore:
         ).fetchone()
         return None if row is None else int(row[0])
 
+    @durable
     def load_account(self) -> Account | None:
         """The persisted account, or ``None`` if the ledger was never opened."""
         row = self._conn.execute(
@@ -267,6 +282,7 @@ class SQLiteStore:
         ).fetchone()
         return None if row is None else restore_account(row)
 
+    @durable
     def history(self, cloid: str) -> list[tuple[OrderState, int]]:
         """The durable transition trail: one ``(state, ts_ns)`` per checkpoint.
 

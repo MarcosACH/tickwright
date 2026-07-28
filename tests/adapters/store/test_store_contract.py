@@ -523,6 +523,38 @@ def test_a_refused_ledger_write_leaves_no_part_of_it_durable(store_backend: Back
         assert reopened.get_order("0xabc") is None
 
 
+def test_a_store_that_cannot_reach_its_backend_raises_invariant_violation(
+    store_backend: Backend,
+) -> None:
+    """One error contract for the whole seam, not one per method (ADR-0014).
+
+    ``checkpoint_ledger`` already promised ``InvariantViolation``; every other
+    member let the driver's own exception cross the seam, so the same failure had
+    two types depending on which method met it. That difference is load-bearing
+    rather than cosmetic: ``InvariantViolation`` is what pierces the engine's
+    strategy-containment net, and a raw ``sqlite3.Error`` reaching that net would
+    be filed as a strategy bug and survived, rather than faulting the engine.
+
+    A closed store stands in for any unreachable backend: both drivers raise from
+    their own ``Error`` base, which is the whole of what each adapter contributes
+    to this rule."""
+    store = store_backend.open()
+    store.close()
+
+    with pytest.raises(InvariantViolation):
+        store.checkpoint(_order(), ts_ns=1_000)
+    with pytest.raises(InvariantViolation):
+        store.get_order("0xabc")
+    with pytest.raises(InvariantViolation):
+        store.all_positions()
+    with pytest.raises(InvariantViolation):
+        store.has_orders()
+    with pytest.raises(InvariantViolation):
+        store.load_account()
+    with pytest.raises(InvariantViolation):
+        store.checkpoint_ledger(account=_account(), ts_ns=1_000)
+
+
 def test_the_funding_mark_is_absent_until_written_and_then_advances(
     store_backend: Backend,
 ) -> None:

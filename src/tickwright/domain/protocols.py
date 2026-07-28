@@ -201,6 +201,16 @@ class Store(Protocol):
     handler can ever observe a saga whose memory and durable states disagree.
     Throughput is explicitly not a goal; readable recovery is.
 
+    **Every member either reaches durable storage or raises
+    ``InvariantViolation``** (ADR-0014) — one contract for the seam rather than
+    one per method, and a backend's own exception type is never part of it. The
+    type is load-bearing, not decorative: ``InvariantViolation`` is what pierces
+    the engine's strategy-containment net and faults the run (ADR-0024), so a
+    driver exception crossing here would be filed as a caller's bug and survived,
+    while the process silently loses the ability to make its state durable.
+    ``close()`` is the deliberate exception: teardown that fails is a leaked
+    resource the runner already records, not a durability claim that proved false.
+
     ``checkpoint_ledger`` is the one method that knows about three aggregates at
     once, which the rest of this Protocol's one-method-per-aggregate shape does
     not. That coupling is the price of the atomicity guarantee (ADR-0043 §4),
