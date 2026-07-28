@@ -116,8 +116,10 @@ def test_a_redelivered_fill_is_a_no_op() -> None:
     assert changes == ()
     assert position.signed_size == Decimal("2")
     assert position.entry_price == Decimal("100")
-    # The dedup set is contract, not bookkeeping: the durable ledger round-trips
-    # it so a fill that predates a restart is still a no-op after one.
+    # The dedup set is contract, not bookkeeping — but a *process-lifetime* one.
+    # ADR-0043 §4 rejects persisting it on the position row, so what it promises
+    # is that a redelivery *within a run* is a no-op, not that one across a
+    # restart is; the atomic checkpoint-plus-ledger write closes that gap.
     assert position.applied_event_ids == frozenset({"0xf1:fill:f1"})
 
 

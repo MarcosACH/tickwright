@@ -75,7 +75,22 @@ class Position:
 
     @property
     def applied_event_ids(self) -> frozenset[str]:
-        """The reflected ``event_id``s — the dedup set a ``Store`` round-trips."""
+        """The reflected ``event_id``s — a **process-lifetime** dedup set.
+
+        Unlike ``Order``'s identically-named set, this one is *not* durable and
+        must not be made so: ADR-0043 §4 rejects a ledger-side applied set by
+        name, and §3's ``positions`` schema carries no column for it. A saga's
+        set is bounded by one order's fills and dies with the order; a
+        position's accumulates every fill for the life of the ledger, so
+        persisting it reintroduces on the hot row the unbounded growth ADR-0043
+        §1 declined. ``funding_marks`` is the ledger's one durable idempotency
+        record (ADR-0043 §5.2).
+
+        So what this set guarantees is *within a run*: at-least-once redelivery
+        of a fill is a no-op (ADR-0025). The restart gap is closed instead by
+        writing the order checkpoint and the ledger in one transaction
+        (ADR-0043 §4), which is why no set is needed here to survive one.
+        """
         return frozenset(self._applied_event_ids)
 
     @property
