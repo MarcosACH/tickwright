@@ -112,6 +112,31 @@ class Account:
         self._cash += amount
 
     @classmethod
+    def restore(
+        cls,
+        *,
+        account_id: str,
+        genesis_collateral: Decimal,
+        genesis_ts_ns: int,
+        cash: Decimal,
+    ) -> "Account":
+        """Rebuild a persisted account, cash line and all (ADR-0043 §9).
+
+        The sibling of ``Order.restore``: ``open`` seeds a *fresh* ledger, where
+        cash is genesis by definition, so it cannot express an account that has
+        since accrued. Recovery restores the two independently because the store
+        holds them as two columns — the opening declaration that never moves and
+        the line that has.
+        """
+        account = cls(
+            account_id=account_id,
+            genesis_collateral=genesis_collateral,
+            genesis_ts_ns=genesis_ts_ns,
+        )
+        account._cash = cash
+        return account
+
+    @classmethod
     def open(cls, spec: AccountSpec, *, ts_ns: int) -> "Account":
         """Seed a fresh ledger at the opening cash ``spec`` declares.
 

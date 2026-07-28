@@ -55,7 +55,7 @@ class PostgresBackend:
         so each test starts from a clean, isolated slate against the shared server."""
         PostgresStore(self._dsn).close()
         with psycopg.connect(self._dsn, autocommit=True) as conn:
-            conn.execute("TRUNCATE orders, strategy_snapshots, kill_switch")
+            conn.execute("TRUNCATE orders, strategy_snapshots, kill_switch, account")
 
 
 def resolve_backend(name: str, sqlite_path: Path) -> SQLiteBackend | PostgresBackend:

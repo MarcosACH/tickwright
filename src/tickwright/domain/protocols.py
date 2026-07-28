@@ -11,7 +11,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
-from .account import AccountSpec, AccountView
+from .account import Account, AccountSpec, AccountView
 from .events import Event, MarketTick, OrderEvent, PlaceOrder, PlaceSignal, VenueOrderView
 from .instrument import GuardDecision, InstrumentSpec, KillSwitchState
 from .order import Order
@@ -241,6 +241,26 @@ class Store(Protocol):
         read the guard restores from on startup (ADR-0026). ``None`` means never
         tripped; a restored ``tripped`` halt is cleared only by an explicit
         reset."""
+        ...
+
+    def checkpoint_ledger(self, *, account: Account, ts_ns: int) -> None:
+        """Durably record the accounting ledger as of ``ts_ns`` (ADR-0043 §9).
+
+        **One transaction across every aggregate handed to it.** A fill mutates
+        the order row and the ledger together, and either ordering as two
+        transactions is unsound — checkpoint-first loses the fill from the
+        ledger on a crash, ledger-first double-counts it (ADR-0043 §4). On paper
+        that never heals: the in-process venue holds no position state, so the
+        store is the sole authority. A write the backend cannot make durable
+        raises ``InvariantViolation`` rather than running on."""
+        ...
+
+    def load_account(self) -> Account | None:
+        """The persisted account, or ``None`` if the ledger was never opened.
+
+        ``None`` is load-bearing rather than defensive (ADR-0043 §9): it is a
+        live first run, it is the paper seed-genesis case, and combined with a
+        non-empty ``orders`` table it is the paper-path startup refusal."""
         ...
 
     def close(self) -> None:

@@ -14,13 +14,18 @@ import weakref
 from pathlib import Path
 from types import TracebackType
 
-from tickwright.domain import KillSwitchState, Order, OrderState
+from tickwright.domain import Account, KillSwitchState, Order, OrderState
 
 from ._records import (
+    ACCOUNT_COLUMN_LIST,
+    ACCOUNT_COLUMNS,
+    ACCOUNT_UPDATE_COLUMNS,
     READ_COLUMN_LIST,
     RECORD_COLUMNS,
+    account_values,
     next_history,
     record_values,
+    restore_account,
     restore_history,
     restore_order,
 )
@@ -55,7 +60,26 @@ CREATE TABLE IF NOT EXISTS kill_switch (
     reason   TEXT,
     ts_ns    INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS account (
+    id                 INTEGER PRIMARY KEY CHECK (id = 1),
+    account_id         TEXT NOT NULL,
+    genesis_collateral TEXT NOT NULL,
+    genesis_ts_ns      INTEGER NOT NULL,
+    cash               TEXT NOT NULL,
+    ts_ns              INTEGER NOT NULL
+);
 """
+
+# The account upsert, built from the shared column list so it cannot drift from
+# the write tuple. Deliberately not ``INSERT OR REPLACE`` like the saga row: a
+# replace rewrites every column, and the write-once trio (ADR-0043 §3) must
+# survive an upsert, so only ``ACCOUNT_UPDATE_COLUMNS`` are overwritten.
+_UPSERT_ACCOUNT = (
+    f"INSERT INTO account (id, {ACCOUNT_COLUMN_LIST}) "
+    f"VALUES (1, {', '.join('?' * len(ACCOUNT_COLUMNS))}) "
+    "ON CONFLICT (id) DO UPDATE SET "
+    + ", ".join(f"{column} = excluded.{column}" for column in ACCOUNT_UPDATE_COLUMNS)
+)
 
 
 class SQLiteStore:
@@ -136,6 +160,18 @@ class SQLiteStore:
         if row is None:
             return None
         return KillSwitchState(tripped=bool(row[0]), reason=row[1], ts_ns=row[2])
+
+    def checkpoint_ledger(self, *, account: Account, ts_ns: int) -> None:
+        """Durably record the ledger as of ``ts_ns`` — one transaction (ADR-0043 §4)."""
+        with self._conn:
+            self._conn.execute(_UPSERT_ACCOUNT, account_values(account, ts_ns=ts_ns))
+
+    def load_account(self) -> Account | None:
+        """The persisted account, or ``None`` if the ledger was never opened."""
+        row = self._conn.execute(
+            f"SELECT {ACCOUNT_COLUMN_LIST} FROM account WHERE id = 1"
+        ).fetchone()
+        return None if row is None else restore_account(row)
 
     def history(self, cloid: str) -> list[tuple[OrderState, int]]:
         """The durable transition trail: one ``(state, ts_ns)`` per checkpoint.

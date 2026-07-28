@@ -16,6 +16,8 @@ from decimal import Decimal
 from store_backends import PostgresBackend, SQLiteBackend
 
 from tickwright.domain import (
+    Account,
+    AccountSpec,
     Order,
     OrderFilled,
     OrderState,
@@ -63,6 +65,13 @@ def _filled(trade_id: str = "v1") -> OrderFilled:
         quantity=Decimal("2"),
         price=Decimal("100"),
         cum_qty=Decimal("2"),
+    )
+
+
+def _account(*, genesis: str = "10000", ts_ns: int = 1_000) -> Account:
+    return Account.open(
+        AccountSpec(account_id="paper-default", genesis_collateral=Decimal(genesis)),
+        ts_ns=ts_ns,
     )
 
 
@@ -209,3 +218,22 @@ def test_kill_switch_round_trips_and_is_none_until_written(store_backend: Backen
         assert state.tripped is True
         assert state.reason == "drawdown"
         assert state.ts_ns == 1_000
+
+
+def test_account_round_trips_and_is_none_until_checkpointed(store_backend: Backend) -> None:
+    """``None`` is the live-first-run / paper-seed-genesis state (ADR-0043 §9), and
+    the restored row carries both the opening declaration and the accrued line."""
+    with store_backend.open() as store:
+        assert store.load_account() is None
+
+        account = _account(genesis="10000", ts_ns=1_000)
+        account.accrue_realized(Decimal("250"), event_id="0xabc:fill:v1")
+        store.checkpoint_ledger(account=account, ts_ns=2_000)
+
+    with store_backend.open() as reopened:
+        loaded = reopened.load_account()
+        assert loaded is not None
+        assert loaded.account_id == "paper-default"
+        assert loaded.genesis_collateral == Decimal("10000")
+        assert loaded.genesis_ts_ns == 1_000
+        assert loaded.cash == Decimal("10250")

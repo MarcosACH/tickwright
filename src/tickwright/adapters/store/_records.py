@@ -1,10 +1,16 @@
-"""Shared saga-record (de)serialization for the ``Store`` adapters (ADR-0019).
+"""Shared record (de)serialization for the ``Store`` adapters (ADR-0019).
 
-Both ``SQLiteStore`` and ``PostgresStore`` persist the same saga record: the
-same columns, the same JSON encoding of the applied-event dedup set and the
-transition history. Only the SQL *dialect* differs — placeholder syntax and the
-upsert clause. This module owns the field mapping so the two backends cannot
-drift on what a saga row *is*; each backend keeps only its own SQL.
+Both ``SQLiteStore`` and ``PostgresStore`` persist the same rows: the same
+columns, the same JSON encoding of the applied-event dedup set and the
+transition history, the same ``Decimal``-as-``TEXT`` money mapping. Only the SQL
+*dialect* differs — placeholder syntax and the upsert clause. This module owns
+the field mapping so the two backends cannot drift on what a row *is*; each
+backend keeps only its own SQL.
+
+Money is written ``str(value)`` and read ``Decimal(text)``, exact in
+*representation* rather than merely in numeric value: trailing zeros, ``-0`` and
+exponent forms all survive, because ``str(Decimal)`` preserves coefficient and
+exponent (ADR-0043 §7).
 """
 
 import json
@@ -12,7 +18,7 @@ from collections.abc import Sequence
 from decimal import Decimal
 from typing import Any
 
-from tickwright.domain import Order, OrderState, OrderType, Side
+from tickwright.domain import Account, Order, OrderState, OrderType, Side
 
 # The saga columns, in write order. ``history`` (the ADR-0008 checkpoint trail)
 # is last: it is an adapter-only audit surface, not part of what recovery reads.
@@ -107,3 +113,43 @@ def restore_history(history_json: str | None) -> list[tuple[OrderState, int]]:
     if not history_json:
         return []
     return [(OrderState(state), ts_ns) for state, ts_ns in json.loads(history_json)]
+
+
+# The account row, in write order — the single row ADR-0043 §3 pins with
+# ``CHECK (id = 1)``, so ``id`` is a literal in the SQL rather than a value here.
+# ``account_id``, ``genesis_collateral`` and ``genesis_ts_ns`` lead because they
+# are the write-once trio: both backends insert them and exclude them from the
+# upsert's update list, which is what "written once, with the row" means in DDL.
+ACCOUNT_COLUMNS: tuple[str, ...] = (
+    "account_id",
+    "genesis_collateral",
+    "genesis_ts_ns",
+    "cash",
+    "ts_ns",
+)
+
+ACCOUNT_COLUMN_LIST = ", ".join(ACCOUNT_COLUMNS)
+
+# What an upsert may move: everything but the write-once trio and the key.
+ACCOUNT_UPDATE_COLUMNS: tuple[str, ...] = ("cash", "ts_ns")
+
+
+def account_values(account: Account, *, ts_ns: int) -> tuple[Any, ...]:
+    """The account write tuple, in ``ACCOUNT_COLUMNS`` order."""
+    return (
+        account.account_id,
+        str(account.genesis_collateral),
+        account.genesis_ts_ns,
+        str(account.cash),
+        ts_ns,
+    )
+
+
+def restore_account(row: Sequence[Any]) -> Account:
+    """One account row, in ``ACCOUNT_COLUMNS`` order, back into an ``Account``."""
+    return Account.restore(
+        account_id=row[0],
+        genesis_collateral=Decimal(row[1]),
+        genesis_ts_ns=row[2],
+        cash=Decimal(row[3]),
+    )
