@@ -18,7 +18,7 @@ from collections.abc import Sequence
 from decimal import Decimal
 from typing import Any
 
-from tickwright.domain import Account, Order, OrderState, OrderType, Side
+from tickwright.domain import Account, Order, OrderState, OrderType, Position, Side
 
 # The saga columns, in write order. ``history`` (the ADR-0008 checkpoint trail)
 # is last: it is an adapter-only audit surface, not part of what recovery reads.
@@ -142,6 +142,59 @@ def account_values(account: Account, *, ts_ns: int) -> tuple[Any, ...]:
         account.genesis_ts_ns,
         str(account.cash),
         ts_ns,
+    )
+
+
+# The position columns, in write order. The key leads; the money lines follow in
+# the order ADR-0043 §3's DDL lists them.
+POSITION_COLUMNS: tuple[str, ...] = (
+    "strategy_id",
+    "symbol",
+    "signed_size",
+    "entry_price",
+    "realized_pnl",
+    "fees",
+    "funding",
+    "isolated_collateral",
+    "ts_ns",
+)
+
+POSITION_COLUMN_LIST = ", ".join(POSITION_COLUMNS)
+
+POSITION_KEY_COLUMNS: tuple[str, ...] = ("strategy_id", "symbol")
+
+# What an upsert may move: every column but the key it collided on.
+POSITION_UPDATE_COLUMNS: tuple[str, ...] = tuple(
+    column for column in POSITION_COLUMNS if column not in POSITION_KEY_COLUMNS
+)
+
+
+def position_values(position: Position, *, ts_ns: int) -> tuple[Any, ...]:
+    """The position write tuple, in ``POSITION_COLUMNS`` order."""
+    return (
+        position.strategy_id,
+        position.symbol,
+        str(position.signed_size),
+        str(position.entry_price),
+        str(position.realized_pnl),
+        str(position.fees),
+        str(position.funding),
+        str(position.isolated_collateral),
+        ts_ns,
+    )
+
+
+def restore_position(row: Sequence[Any]) -> Position:
+    """One position row, in ``POSITION_COLUMNS`` order, back into a ``Position``."""
+    return Position(
+        strategy_id=row[0],
+        symbol=row[1],
+        signed_size=Decimal(row[2]),
+        entry_price=Decimal(row[3]),
+        realized_pnl=Decimal(row[4]),
+        fees=Decimal(row[5]),
+        funding=Decimal(row[6]),
+        isolated_collateral=Decimal(row[7]),
     )
 
 

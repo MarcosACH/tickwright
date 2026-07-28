@@ -23,6 +23,7 @@ from tickwright.domain import (
     OrderState,
     OrderSubmitted,
     OrderType,
+    Position,
     Side,
 )
 
@@ -237,3 +238,32 @@ def test_account_round_trips_and_is_none_until_checkpointed(store_backend: Backe
         assert loaded.genesis_collateral == Decimal("10000")
         assert loaded.genesis_ts_ns == 1_000
         assert loaded.cash == Decimal("10250")
+
+
+def test_position_round_trips(store_backend: Backend) -> None:
+    """Every Tier-1 line survives the round trip, each column distinct so a
+    mis-ordered write tuple cannot pass by coincidence."""
+    position = Position(
+        strategy_id="trivial",
+        symbol="BTC",
+        signed_size=Decimal("-1.5"),
+        entry_price=Decimal("50000.25"),
+        realized_pnl=Decimal("-12.5"),
+        fees=Decimal("3.75"),
+        funding=Decimal("0.125"),
+        isolated_collateral=Decimal("7500"),
+    )
+    with store_backend.open() as store:
+        store.checkpoint_ledger(account=_account(), positions=[position], ts_ns=2_000)
+
+    with store_backend.open() as reopened:
+        (loaded,) = reopened.all_positions()
+
+    assert loaded.strategy_id == "trivial"
+    assert loaded.symbol == "BTC"
+    assert loaded.signed_size == Decimal("-1.5")
+    assert loaded.entry_price == Decimal("50000.25")
+    assert loaded.realized_pnl == Decimal("-12.5")
+    assert loaded.fees == Decimal("3.75")
+    assert loaded.funding == Decimal("0.125")
+    assert loaded.isolated_collateral == Decimal("7500")

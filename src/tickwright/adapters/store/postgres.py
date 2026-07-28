@@ -14,24 +14,31 @@ the explicit transaction blocks wrap exactly the read-modify-write checkpoints.
 """
 
 import weakref
+from collections.abc import Sequence
 from types import TracebackType
 
 import psycopg
 
-from tickwright.domain import Account, KillSwitchState, Order, OrderState
+from tickwright.domain import Account, KillSwitchState, Order, OrderState, Position
 
 from ._records import (
     ACCOUNT_COLUMN_LIST,
     ACCOUNT_COLUMNS,
     ACCOUNT_UPDATE_COLUMNS,
+    POSITION_COLUMN_LIST,
+    POSITION_COLUMNS,
+    POSITION_KEY_COLUMNS,
+    POSITION_UPDATE_COLUMNS,
     READ_COLUMN_LIST,
     RECORD_COLUMNS,
     account_values,
     next_history,
+    position_values,
     record_values,
     restore_account,
     restore_history,
     restore_order,
+    restore_position,
 )
 
 # Individual DDL statements: psycopg's extended protocol runs one command per
@@ -73,6 +80,20 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS positions (
+        strategy_id         TEXT NOT NULL,
+        symbol              TEXT NOT NULL,
+        signed_size         TEXT NOT NULL,
+        entry_price         TEXT,
+        realized_pnl        TEXT NOT NULL,
+        fees                TEXT NOT NULL,
+        funding             TEXT NOT NULL,
+        isolated_collateral TEXT,
+        ts_ns               BIGINT NOT NULL,
+        PRIMARY KEY (strategy_id, symbol)
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS account (
         id                 INTEGER PRIMARY KEY CHECK (id = 1),
         account_id         TEXT NOT NULL,
@@ -101,6 +122,13 @@ _UPSERT_ACCOUNT = (
     f"VALUES (1, {', '.join(['%s'] * len(ACCOUNT_COLUMNS))}) "
     "ON CONFLICT (id) DO UPDATE SET "
     + ", ".join(f"{column} = EXCLUDED.{column}" for column in ACCOUNT_UPDATE_COLUMNS)
+)
+
+_UPSERT_POSITION = (
+    f"INSERT INTO positions ({POSITION_COLUMN_LIST}) "
+    f"VALUES ({', '.join(['%s'] * len(POSITION_COLUMNS))}) "
+    f"ON CONFLICT ({', '.join(POSITION_KEY_COLUMNS)}) DO UPDATE SET "
+    + ", ".join(f"{column} = EXCLUDED.{column}" for column in POSITION_UPDATE_COLUMNS)
 )
 
 
@@ -185,10 +213,27 @@ class PostgresStore:
             return None
         return KillSwitchState(tripped=bool(row[0]), reason=row[1], ts_ns=row[2])
 
-    def checkpoint_ledger(self, *, account: Account, ts_ns: int) -> None:
+    def checkpoint_ledger(
+        self,
+        *,
+        account: Account,
+        positions: Sequence[Position] = (),
+        ts_ns: int,
+    ) -> None:
         """Durably record the ledger as of ``ts_ns`` — one transaction (ADR-0043 §4)."""
-        with self._conn.transaction():
-            self._conn.execute(_UPSERT_ACCOUNT, account_values(account, ts_ns=ts_ns))
+        with self._conn.transaction(), self._conn.cursor() as cursor:
+            cursor.execute(_UPSERT_ACCOUNT, account_values(account, ts_ns=ts_ns))
+            cursor.executemany(
+                _UPSERT_POSITION,
+                [position_values(position, ts_ns=ts_ns) for position in positions],
+            )
+
+    def all_positions(self) -> list[Position]:
+        """Every persisted partition — the recovery mass-read (ADR-0043 §9)."""
+        rows = self._conn.execute(
+            f"SELECT {POSITION_COLUMN_LIST} FROM positions ORDER BY strategy_id, symbol"
+        ).fetchall()
+        return [restore_position(row) for row in rows]
 
     def load_account(self) -> Account | None:
         """The persisted account, or ``None`` if the ledger was never opened."""

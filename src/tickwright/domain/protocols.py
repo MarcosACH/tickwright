@@ -7,7 +7,7 @@ tracer slice; later slices widen them (``Exchange.cancel``/``fetch_*``,
 ``Clock`` timers, strategy snapshots) as their behaviors land.
 """
 
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
@@ -15,7 +15,7 @@ from .account import Account, AccountSpec, AccountView
 from .events import Event, MarketTick, OrderEvent, PlaceOrder, PlaceSignal, VenueOrderView
 from .instrument import GuardDecision, InstrumentSpec, KillSwitchState
 from .order import Order
-from .position import PositionView
+from .position import Position, PositionView
 
 type Handler[E: Event] = Callable[[E], Awaitable[None]]
 """An async subscriber of a single event family."""
@@ -243,7 +243,13 @@ class Store(Protocol):
         reset."""
         ...
 
-    def checkpoint_ledger(self, *, account: Account, ts_ns: int) -> None:
+    def checkpoint_ledger(
+        self,
+        *,
+        account: Account,
+        positions: Sequence[Position] = (),
+        ts_ns: int,
+    ) -> None:
         """Durably record the accounting ledger as of ``ts_ns`` (ADR-0043 §9).
 
         **One transaction across every aggregate handed to it.** A fill mutates
@@ -253,6 +259,16 @@ class Store(Protocol):
         that never heals: the in-process venue holds no position state, so the
         store is the sole authority. A write the backend cannot make durable
         raises ``InvariantViolation`` rather than running on."""
+        ...
+
+    def all_positions(self) -> list[Position]:
+        """Every persisted partition — the ledger's recovery mass-read.
+
+        The reserved unattributed partition comes back **unfiltered**
+        (ADR-0043 §9): ADR-0034's Σ-invariant — Σ per-strategy signed size =
+        account net = venue size — holds by construction only if the partition
+        is restored with everything else, so filtering belongs at the
+        ``Portfolio`` seam and never in the store."""
         ...
 
     def load_account(self) -> Account | None:
