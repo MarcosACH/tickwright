@@ -51,7 +51,9 @@ class EventBus(Protocol):
         ...
 
     async def close(self) -> None:
-        """Stop delivering and flush anything buffered; safe on a never-started bus."""
+        """Stop delivering and flush anything buffered; safe on a never-started
+        bus, and safe on a second call — the faulted teardown re-walks the whole
+        membership, this step included (ADR-0024)."""
         ...
 
 
@@ -106,7 +108,13 @@ class MarketFeed(Protocol):
         ...
 
     async def stop(self) -> None:
-        """Stop producing ticks."""
+        """Stop producing ticks.
+
+        The first step of the runner's one teardown membership, so it inherits
+        that membership's property (ADR-0024, and ``Engine._teardown_steps``):
+        the faulted pass re-walks from the top, so a graceful step that raises
+        behind this one drives it a second time. Idempotent; safe on a feed
+        that never started."""
         ...
 
 
@@ -385,8 +393,20 @@ class Exchange(Protocol):
 
         Driven once the feed is cut and the reconcile cadences are cancelled —
         so nothing is left to call ``fetch_order`` on a released adapter — and
-        still ahead of the bus drain, so an adapter-owned loop stops before the
-        bus closes under it and cannot publish into a closing bus.
+        still ahead of the bus *drain*, because a loop of the adapter's own that
+        outlived this call would keep publishing into that drain and keep
+        raising its high-water mark, so the cascade never reaches quiescence.
+
+        Ahead of the drain, though, is not ahead of the last caller: the drain
+        dispatches the cascade it is waiting on, and the strategies are still
+        subscribed behind it (they stop one step later, and stopping them only
+        snapshots). So an in-flight tick can still reach a strategy, and its
+        ``Signal`` still reaches the ``ExecutionManager``. **Leave ``place``
+        and ``cancel`` answerable** — refusing cleanly on a released link, never
+        hanging and never wedging the drain — until this call has returned *and*
+        the drain behind it is done. Reachable on the Kafka bus, where dispatch
+        runs in the poll loop; not on the in-memory bus, whose ``publish``
+        already drained the cascade before the feed was cut.
 
         **Safe on an adapter that never started**, the peer of ``EventBus.close``
         above: the faulted teardown walks the same ordered membership as the

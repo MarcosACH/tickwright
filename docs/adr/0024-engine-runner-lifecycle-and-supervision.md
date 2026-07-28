@@ -104,17 +104,32 @@ store → exit **0**.
 `feed.stop` (ADR-0044 §7) and behind `reconcile.stop`, ahead of the drain — not after the strategies
 stop. Both ends of that slot are load-bearing, and they pull in opposite directions. What an adapter
 owns at teardown is a loop of its own — ADR-0037's paper funding generator — so the release must
-precede the drain, or the loop publishes into a bus that is about to close; deferring it past the
-drain would invert that. But the reconcile cadences **read** the adapter (`fetch_order`), and they
-run until `reconcile.stop` cancels them, so releasing the venue ahead of that would leave a live
-cycle querying an adapter this very sequence had just torn down — a self-inflicted freeze
-(ADR-0011 inv 1) in the one window where nothing can act on it. Silence the readers, then release
-what they were reading. Everything else in the sentence stands: the drain still precedes the final
-strategy snapshots (ADR-0016), and the bus and the store still close last. The membership is
-**one ordered tuple** walked by both teardown paths, so the graceful and faulted paths cannot
-disagree about it — they differ in failure *policy* only. That one-membership rule has a cost the
-seam must carry: the faulted pass re-walks **from the top**, so a graceful step that raises behind
-`exchange.stop` drives it a second time, and `Exchange.stop()` is specified idempotent.**)**
+precede the **drain**: a loop still alive during the drain keeps publishing into it and keeps raising
+its high-water mark, so the cascade the drain is waiting on never quiesces and the bound is spent on
+a shutdown that is generating its own work. But the reconcile cadences **read** the adapter
+(`fetch_order`), and they run until `reconcile.stop` cancels them, so releasing the venue ahead of
+that would leave a live cycle querying an adapter this very sequence had just torn down — a
+self-inflicted freeze (ADR-0011 inv 1) in the one window where nothing can act on it. Silence the
+readers, then release what they were reading. Everything else in the sentence stands: the drain still
+precedes the final strategy snapshots (ADR-0016), and the bus and the store still close last.
+
+Ahead of the drain does **not** mean after the last caller, and the ordering cannot make it so. The
+drain dispatches the cascade it waits on, and `host.stop` — one step behind it — only snapshots; it
+never unsubscribes. So an in-flight tick can still reach a strategy after the venue is released, and
+its `Signal` still reaches the `ExecutionManager` and its `place`. On the in-memory bus this is
+unreachable (`publish` drained the cascade before the feed was cut); on Kafka, where dispatch runs in
+the poll loop, it is not. Moving the release behind the drain to close it would re-open the loop
+window above, which is the worse of the two — so this one is answered at the **seam** instead:
+`Exchange.stop()` must leave `place`/`cancel` answerable, refusing cleanly rather than hanging, until
+the drain behind it is done. A step order cannot express "released, but still answering"; a contract
+can.
+
+The membership is **one ordered tuple** walked by both teardown paths, so the graceful and faulted
+paths cannot disagree about it — they differ in failure *policy* only. That one-membership rule has a
+cost every seam in it must carry, not just the venue: the faulted pass re-walks **from the top**, so a
+graceful step that raises drives every step ahead of the break a second time. `Exchange.stop()`,
+`MarketFeed.stop()`, `EventBus.close()` and `Store.close()` are each specified idempotent for that
+reason.**)**
 
 - `SUBMITTED` orders in flight on the wire are **not** awaited — they stay `SUBMITTED`,
   checkpointed; restart reconciliation heals them (ADR-0008 residual risk).

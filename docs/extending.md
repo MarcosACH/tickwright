@@ -108,12 +108,16 @@ auth, quirk translation — and importing no other adapter. It provides both a `
   barrier reads an already-aligned venue. Retry a transient venue blip inside the
   `startup_reconciliation_timeout` budget yourself; the runner does not retry the call, so raising
   spends the last of it. `stop()` is driven once the feed is cut **and** the reconcile cadences are
-  cancelled — nothing is left to call `fetch_order` on you — and still ahead of the bus drain, so an
-  adapter-owned loop stops before the bus closes under it.
-- [ ] Write `stop()` to tolerate both edges the runner's one teardown membership creates: a `start()`
-  that never ran or refused (the fault path releases either way), and a **second** call (a graceful
-  step that raises behind it faults the run, and the best-effort pass re-walks from the top). Release
-  what exists; make the second call a no-op.
+  cancelled — nothing is left to call `fetch_order` on you — and still ahead of the bus drain,
+  because a loop of your own that outlived the call would publish into that drain and keep raising
+  its high-water mark, so it would never quiesce.
+- [ ] Write `stop()` to tolerate all three edges the runner's teardown creates. A `start()` that
+  never ran or refused (the fault path releases either way). A **second** call — one membership is
+  walked twice, the faulted pass restarting at the top, so a graceful step that raises behind you
+  drives you again; make it a no-op, not a failure. And a **late `place`/`cancel`**: the drain runs
+  behind your release and still dispatches, and the strategies stop one step later still, so an
+  in-flight tick can turn into a `Signal` after you have released. Keep those two answerable —
+  refuse cleanly on a dead link, never hang, or you wedge the drain you were released ahead of.
 - [ ] Keep secrets env-only: never persist a signing key, and register it for log redaction.
 - [ ] Add the venue to the `feed` and `exchange` `Literal`s in
   [`app/config.py`](../src/tickwright/app/config.py).

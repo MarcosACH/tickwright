@@ -250,8 +250,18 @@ class Engine:
         The venue is released *behind* the cadences deliberately: they read it
         (``fetch_order``), so releasing it first would leave a live cycle
         querying an adapter this very sequence had just torn down. It stays
-        ahead of the drain, so an adapter-owned loop is cut before the bus
-        closes under it — both ends of the slot are load-bearing.
+        ahead of the drain, because a loop the adapter owns would otherwise
+        publish into that drain and keep raising its high-water mark, so the
+        cascade never quiesces — both ends of the slot are load-bearing. The
+        drain still dispatches behind the release, and ``host.stop`` only
+        snapshots, so a late ``Signal`` can still reach the venue: the seam
+        answers for that (``Exchange.stop``), not the order.
+
+        One membership walked twice is the cost of one membership: the faulted
+        pass restarts at the top, so a graceful step that raises drives every
+        step *ahead* of the break a second time. Every entry here is therefore
+        specified idempotent at its own seam — none may treat a second call as
+        an error, in the one window where nothing can act on it.
         """
         return (
             ("feed.stop", self._stop_feed),
