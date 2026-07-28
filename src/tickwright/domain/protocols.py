@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Protocol, runtime_checkable
 
 from .account import Account, AccountSpec, AccountView
+from .enums import OrderState
 from .events import Event, MarketTick, OrderEvent, PlaceOrder, PlaceSignal, VenueOrderView
 from .instrument import GuardDecision, InstrumentSpec, KillSwitchState
 from .order import Order
@@ -323,6 +324,18 @@ class Store(Protocol):
         ``None`` is load-bearing rather than defensive (ADR-0043 §9): it is a
         live first run, it is the paper seed-genesis case, and combined with a
         non-empty ``orders`` table it is the paper-path startup refusal."""
+        ...
+
+    def history(self, cloid: str) -> list[tuple[OrderState, int]]:
+        """``cloid``'s durable transition trail: one ``(state, ts_ns)`` per
+        checkpoint (ADR-0008's checkpoint points).
+
+        Declared here despite no production caller, because the trail is what the
+        engine's own tests assert a saga *did* — the observation port for
+        "checkpointed once, at this state" — and a seam that disclaims its test
+        surface is a seam a conforming implementation cannot actually be swapped
+        into. Recovery still rebuilds from the current record alone; this is the
+        audit half, and audit is a real audience, not an accident."""
         ...
 
     def close(self) -> None:

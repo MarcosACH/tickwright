@@ -307,8 +307,10 @@ class PostgresStore:
     def history(self, cloid: str) -> list[tuple[OrderState, int]]:
         """The durable transition trail: one ``(state, ts_ns)`` per checkpoint.
 
-        Adapter surface (audit/tests), deliberately not on the ``Store``
-        Protocol — recovery rebuilds from the current record alone.
+        On the ``Store`` Protocol as the seam's audit surface: recovery rebuilds
+        from the current record alone, but the engine's tests read the trail to
+        assert what a saga did, so it is part of what an implementation must
+        provide.
         """
         row = self._conn.execute("SELECT history FROM orders WHERE cloid = %s", (cloid,)).fetchone()
         return restore_history(row[0] if row else None)
