@@ -5,7 +5,9 @@ fill-apply path's single entry) and read back through the ``domain`` seam a
 strategy actually holds, never through its internals.
 """
 
+from collections.abc import Mapping, Sequence
 from decimal import Decimal
+from typing import Any
 
 import pytest
 
@@ -18,6 +20,7 @@ from tickwright.domain import (
     Side,
 )
 from tickwright.engine.portfolio import PortfolioProjection
+from tickwright.observability.testing import capture_events
 
 _SPEC = AccountSpec(account_id="paper-default", genesis_collateral=Decimal("100000"))
 
@@ -151,3 +154,49 @@ def test_every_tier_one_field_reads_a_number(symbol: str) -> None:
         isinstance(value, Decimal)
         for value in (view.size, view.entry_price, view.realized_pnl, view.fees, view.funding)
     )
+
+
+def _names(logs: Sequence[Mapping[str, Any]]) -> list[str]:
+    """The position names in the order they were announced — the only place a
+    position change is observable from outside (ADR-0045 §1)."""
+    return [str(log["event"]) for log in logs if str(log["event"]).startswith("position.")]
+
+
+def test_a_fill_that_flips_through_zero_announces_closed_then_opened() -> None:
+    """The residual opens a fresh average-cost record, so a flip is genuinely two
+    facts and is announced as two — in that order (ADR-0045 §2). A position
+    change is never a bus event, so this catalog is the only place it shows."""
+    projection = _projection()
+    projection.apply_fill(_fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
+
+    with capture_events() as logs:
+        projection.apply_fill(_fill(trade_id="f2", quantity="5", price="120"), side=Side.SELL)
+
+    assert _names(logs) == ["position.closed", "position.opened"]
+    view = projection.for_strategy("alpha").position("BTC")
+    assert view is not None
+    assert view.size == Decimal("-3")
+    assert view.entry_price == Decimal("120")  # the residual, not a blended entry
+    assert view.realized_pnl == Decimal("40")  # the whole closed long leg
+
+
+def test_each_regime_announces_its_own_name() -> None:
+    projection = _projection()
+
+    with capture_events() as logs:
+        projection.apply_fill(_fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
+        projection.apply_fill(_fill(trade_id="f2", quantity="1", price="120"), side=Side.BUY)
+        projection.apply_fill(_fill(trade_id="f3", quantity="3", price="130"), side=Side.SELL)
+
+    assert _names(logs) == ["position.opened", "position.changed", "position.closed"]
+
+
+def test_a_redelivered_fill_announces_nothing() -> None:
+    projection = _projection()
+    fill = _fill(trade_id="f1", quantity="2", price="100")
+    projection.apply_fill(fill, side=Side.BUY)
+
+    with capture_events() as logs:
+        projection.apply_fill(fill, side=Side.BUY)
+
+    assert _names(logs) == []

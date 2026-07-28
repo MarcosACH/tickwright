@@ -39,9 +39,11 @@ from tickwright.domain import (
     OrderPlaced,
     OrderState,
     OrderSubmitted,
+    OrderType,
     PlaceSignal,
     Side,
     Signal,
+    TimeInForce,
     derive_cloid,
 )
 from tickwright.engine.cache import Cache
@@ -79,8 +81,15 @@ def _write_ticks(path: Path) -> Path:
     return path
 
 
-def _run(path: Path, backend: str) -> tuple[list[Event], SingleShotMarketStrategy, SQLiteStore]:
-    """Wire and drive the whole pipeline once; return every dispatched event."""
+def _run(
+    path: Path, backend: str, *, close_with: PlaceSignal | None = None
+) -> tuple[list[Event], SingleShotMarketStrategy, SQLiteStore]:
+    """Wire and drive the whole pipeline once; return every dispatched event.
+
+    ``close_with`` publishes one more signal after end-of-file, which is how the
+    round trip is reached: ``SingleShotMarketStrategy`` fires exactly once by
+    design, so the closing leg has to come from outside it.
+    """
     bus = make_bus(backend)
     clock = ManualClock()
     store = SQLiteStore(":memory:")
@@ -117,6 +126,8 @@ def _run(path: Path, backend: str) -> tuple[list[Event], SingleShotMarketStrateg
     async def drive() -> None:
         await bus.start()
         await feed.start()
+        if close_with is not None:
+            await bus.publish(close_with)
         await bus.drain()
         await bus.close()
 
@@ -165,6 +176,39 @@ def test_tracer_delivers_the_position_that_fill_produced_to_the_strategy(
     assert view.realized_pnl == Decimal("0")
     assert view.fees == Decimal("0")
     assert view.funding == Decimal("0")
+
+
+@pytest.mark.parametrize("backend", BUS_BACKENDS)
+def test_tracer_reads_realized_pnl_back_through_the_seam_after_a_round_trip(
+    tmp_path: Path, backend: str
+) -> None:
+    """The full economic tracer: a replayed buy, a closing sell, and the strategy
+    reading what the round trip earned — through the seam, not the projection."""
+    path = _write_ticks(tmp_path / "ticks.jsonl")
+    closing = PlaceSignal(
+        ts_event=3_000,
+        ts_init=3_000,
+        strategy_id="trivial",
+        symbol="BTC",
+        seq=2,
+        side=Side.SELL,
+        quantity=Decimal("0.5"),
+        order_type=OrderType.MARKET,
+        time_in_force=TimeInForce.IOC,
+    )
+
+    _, strategy, _ = _run(path, backend, close_with=closing)
+
+    opened, closed = strategy.positions
+    assert opened is not None and closed is not None
+    assert opened.size == Decimal("0.5")
+    # The venue's latest tick when the closing signal lands is row 2, 42100 —
+    # so 0.5 x (42100 - 42000) = 50, worked from the file rather than the code.
+    assert closed.size == Decimal("0")
+    assert closed.entry_price == Decimal("0")
+    assert closed.realized_pnl == Decimal("50")
+    # Flat with history is not "never here": the record survives its own close,
+    # realized retained (ADR-0041 §3).
 
 
 @pytest.mark.parametrize("backend", BUS_BACKENDS)
