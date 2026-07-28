@@ -1,11 +1,11 @@
 """The ``Engine`` host (ADR-0014/0024): ordered startup, supervision, shutdown.
 
 The runner is where the lifecycle knowledge lives that would otherwise smear
-across every component: the barrier-gated startup order (recover → subscribe
-engine internals raw → reconciliation barrier → strategies pull-then-subscribe
-→ feed *last*), ``asyncio.TaskGroup`` supervision, and the reverse shutdown
-that converges with crash recovery — final strategy snapshots, resting ``LIVE``
-orders left alone, store closed last.
+across every component: the barrier-gated startup order (recover → bus →
+connect the exchange → subscribe engine internals raw → reconciliation barrier
+→ strategies pull-then-subscribe → feed *last*), ``asyncio.TaskGroup``
+supervision, and the reverse shutdown that converges with crash recovery —
+final strategy snapshots, resting ``LIVE`` orders left alone, store closed last.
 
 The Engine consumes seam Protocols only (ADR-0032): the composition root hands
 it already-built concretes and it constructs its own internals (``Cache``,

@@ -96,11 +96,18 @@ auth, quirk translation — and importing no other adapter. It provides both a `
 [`venues/hyperliquid/`](../src/tickwright/venues/hyperliquid/) as the reference.
 
 - [ ] Create `src/tickwright/venues/<venue>/` with a `MarketFeed` adapter (`start`/`stop`, publishes
-  `MarketTick`s), an `Exchange` adapter (`place`/`cancel`/`fetch_order`/`instrument_specs`), spec
-  sourcing, and a `<Venue>Config`.
+  `MarketTick`s), an `Exchange` adapter
+  (`start`/`stop`/`place`/`cancel`/`fetch_order`/`account_spec`/`instrument_specs`), spec sourcing,
+  and a `<Venue>Config`.
 - [ ] Honor the `Exchange` contracts: `fetch_*` returns **`None` on a failed read** (never `[]` — an
   outage must not look like "no orders", ADR-0011); `place`/`cancel` emit raw `ExecutionReport`s on
   the bus rather than returning them; a cancel of an unknown order is a benign no-op.
+- [ ] Put venue alignment in `start()` and release in `stop()`, never in `__init__` or a placement.
+  The runner drives `start()` at ADR-0024 step 4 — after the bus, **before** the startup barrier — so
+  a refusal there (an `InvariantViolation`) faults the process before any order can go out, and the
+  barrier reads an already-aligned venue. `stop()` is driven immediately after the feed is cut, so an
+  adapter-owned loop stops before the bus drains behind it; it must tolerate a `start()` that never
+  ran or refused, because the teardown releases either way.
 - [ ] Keep secrets env-only: never persist a signing key, and register it for log redaction.
 - [ ] Add the venue to the `feed` and `exchange` `Literal`s in
   [`app/config.py`](../src/tickwright/app/config.py).
