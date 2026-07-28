@@ -91,6 +91,18 @@ without knowing what `clearinghouseState` *means* is exactly the state the gate 
 As with ADR-0044, this is *retry* policy only — an **unsupported** mode is not retryable and refuses
 immediately.**)**
 
+**Who enforces the budget at step 4.** The three extensions above put step 4's venue work under
+`startup_reconciliation_timeout` rather than minting a second timeout, and that is the decision — but
+the budget is enforced by the **adapter**, not the runner. The runner applies its timeout to the
+barrier at step 5; nothing wraps the `Exchange.start()` call at step 4, and `EngineConfig` does not
+reach the adapter, so an adapter cannot read the number it is told to retry inside. Two consequences
+the slice that first makes step 4 a real network call must handle: `start()` **must not hang** (a
+boot wedged there is unbounded, and the task watching SIGINT is not created until the start sequence
+returns, so SIGKILL is the only escape — the opposite of the bounded teardown below), and the
+composition root must **hand the adapter the budget** to size its own timeouts with. Bounding the
+start sequence in the runner is the alternative and was not taken here: `bus.start()` at step 3 has
+the same exposure, so the fix belongs to the whole sequence rather than to this one call.
+
 ## Shutdown reverses the sequence and leaves resting orders alone
 
 `Engine.stop()`, bounded by `shutdown_timeout` so teardown cannot hang: stop the feed (cut the

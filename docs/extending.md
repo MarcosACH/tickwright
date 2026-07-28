@@ -107,7 +107,11 @@ auth, quirk translation — and importing no other adapter. It provides both a `
   a refusal there (an `InvariantViolation`) faults the process before any order can go out, and the
   barrier reads an already-aligned venue. Retry a transient venue blip inside the
   `startup_reconciliation_timeout` budget yourself; the runner does not retry the call, so raising
-  spends the last of it. `stop()` is driven once the feed is cut **and** the reconcile cadences are
+  spends the last of it. That budget is **yours to enforce** — the runner neither retries nor bounds
+  `start()`, so it **must not hang**: a wedged boot has no bound and no operator escape (the task
+  that watches SIGINT is not created until the start sequence returns, so SIGKILL is the only way
+  out). Put a timeout on any blocking venue call you make here.
+  `stop()` is driven once the feed is cut **and** the reconcile cadences are
   cancelled — nothing is left to call `fetch_order` on you — and still ahead of the bus drain,
   because a loop of your own that outlived the call would publish into that drain and keep raising
   its high-water mark, so it would never quiesce.

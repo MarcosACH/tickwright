@@ -385,6 +385,20 @@ class Exchange(Protocol):
         ``startup_reconciliation_timeout`` budget before it becomes a refusal.
         The runner does not retry this call; raising is how you spend the last
         of that budget.
+
+        That budget is **the adapter's to enforce, and only the adapter's**.
+        The runner neither retries this call nor bounds it — the timeout it
+        holds is applied to the barrier one step later, and nothing wraps this
+        one — so **``start()`` must not hang**, the peer of the "never hanging"
+        clause on ``stop()`` below. The asymmetry is deliberate but sharp: a
+        teardown that cannot finish is bounded and faults non-zero
+        (``shutdown_timeout``), whereas a *boot* wedged here has no bound and
+        no operator escape — the signal handlers are installed, but the task
+        that watches them is only created once this sequence returns, so SIGINT
+        sets a flag nobody awaits and SIGKILL is the only way out. An adapter
+        that makes a blocking venue call here owns a timeout on it; the
+        composition root must hand it the budget to size that timeout with,
+        since ``EngineConfig`` does not reach the adapter.
         """
         ...
 
