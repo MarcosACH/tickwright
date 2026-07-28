@@ -83,7 +83,7 @@ Milestones are **not** used; sequencing comes from Status plus the `blocked` lab
 - **List issues**: `gh issue list -R MarcosACH/tickwright --state open --json number,title,body,labels --jq '[.[] | {number, title, labels: [.labels[].name]}]'`.
 - **Comment**: `gh issue comment <n> -R MarcosACH/tickwright --body "..."`.
 - **Apply / remove labels**: `gh issue edit <n> -R MarcosACH/tickwright --add-label "..."` / `--remove-label "..."`.
-- **Close**: never manually — the PR's `Closes #N` does it on merge. The exceptions are the issues that have **no merge event of their own**, so no `Closes #N` can ever reach them: a **parent PRD**, closed deliberately at release (see [Linking PRs to issues](#linking-prs-to-issues)), and a **wayfinder map or ticket**, closed on resolution (see [Wayfinding operations](#wayfinding-operations)). Never a child slice issue.
+- **Close**: never manually — the PR's `Closes #N` does it on merge. The exceptions are the issues that have **no merge event of their own**, so no `Closes #N` can ever reach them: a **parent PRD**, closed deliberately at release (see [Linking PRs to issues](#linking-prs-to-issues)), and a **wayfinder ticket**, closed on resolution, with its **map** closed on hand-off (see [Wayfinding operations](#wayfinding-operations)). Never a child slice issue.
 
 ## When a skill says "publish to the issue tracker"
 
