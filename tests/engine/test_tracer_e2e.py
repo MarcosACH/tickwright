@@ -97,11 +97,9 @@ def _run(
         bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
     )
     cache = Cache(store=store)
-    spec = exchange.account_spec()
-    assert spec.genesis_collateral is not None  # the paper venue always declares one
-    projection = PortfolioProjection(
-        account=Account.open(spec, genesis_collateral=spec.genesis_collateral, ts_ns=0)
-    )
+    # Opened off the venue's own spec, exactly as the composition root does, so
+    # the ledger this tracer asserts on is seeded the way a real run's is.
+    projection = PortfolioProjection(account=Account.open(exchange.account_spec(), ts_ns=0))
     manager = ExecutionManager(
         bus=bus, clock=clock, exchange=exchange, cache=cache, portfolio=projection
     )

@@ -112,16 +112,29 @@ class Account:
         self._cash += amount
 
     @classmethod
-    def open(cls, spec: AccountSpec, *, genesis_collateral: Decimal, ts_ns: int) -> "Account":
-        """Seed a fresh ledger for ``spec`` at ``genesis_collateral``.
+    def open(cls, spec: AccountSpec, *, ts_ns: int) -> "Account":
+        """Seed a fresh ledger at the opening cash ``spec`` declares.
 
-        The collateral is passed rather than read off the spec because live
-        declares ``None`` there and ingests its opening value from the venue —
-        resolving the two is the composition root's job (ADR-0042 §6).
+        Paper declares the operator's number, which ADR-0042 §1 demands and
+        never defaults, so a paper ledger opens at exactly what was configured.
+        Live declares ``None``: its opening state is ingested from the venue as
+        ``accountValue − Σ unrealized_pnl`` at the startup barrier (ADR-0042 §6),
+        which has not run at the moment a ledger is opened — so a fresh live
+        ledger opens at zero and the barrier materialises the real account row
+        (ADR-0043 §6).
+
+        That zero is what an *unstarted* live ledger reports, not a collateral
+        default standing in for a number nobody chose: §1 rejects the latter,
+        and only for paper, where the config validator makes ``None``
+        unreachable. Tier-1 forbids reporting ``None`` here (ADR-0041 §6), so
+        the unstarted state has to be *some* number. The ``None`` itself stays
+        on the spec as the predicate the startup checks read (ADR-0042 §6);
+        what this resolves is only what the ledger reads until they run.
         """
+        genesis = spec.genesis_collateral
         return cls(
             account_id=spec.account_id,
-            genesis_collateral=genesis_collateral,
+            genesis_collateral=genesis if genesis is not None else Decimal("0"),
             genesis_ts_ns=ts_ns,
         )
 

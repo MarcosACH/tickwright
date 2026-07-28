@@ -22,8 +22,6 @@ from tickwright.domain import (
 from tickwright.engine.portfolio import PortfolioProjection
 from tickwright.observability.testing import capture_events
 
-_SPEC = AccountSpec(account_id="paper-default", genesis_collateral=Decimal("100000"))
-
 
 def _fill(
     *,
@@ -48,9 +46,8 @@ def _fill(
 
 
 def _projection(genesis: str = "100000") -> PortfolioProjection:
-    return PortfolioProjection(
-        account=Account.open(_SPEC, genesis_collateral=Decimal(genesis), ts_ns=7)
-    )
+    spec = AccountSpec(account_id="paper-default", genesis_collateral=Decimal(genesis))
+    return PortfolioProjection(account=Account.open(spec, ts_ns=7))
 
 
 def test_a_fill_lands_in_its_partition_and_reads_back_through_the_seam() -> None:

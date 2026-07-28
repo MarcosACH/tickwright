@@ -10,7 +10,6 @@ already-built dependencies. Adding an impl is one ``Literal`` value in
 import asyncio
 import random
 from collections.abc import Mapping
-from decimal import Decimal
 from typing import assert_never
 
 from tickwright.adapters.bus import InMemoryBus
@@ -178,17 +177,14 @@ def build_guard(
 def build_portfolio(exchange: Exchange, *, clock: Clock) -> PortfolioProjection:
     """Open the process's one ledger against the account the venue declares.
 
-    The genesis resolution is the whole content: paper declares the operator's
-    number and live declares ``None``, its opening state being ingested from the
-    venue as ``accountValue − Σ unrealized_pnl`` (ADR-0042 §6). That read happens
-    at the startup barrier and is not yet wired, so a live ledger opens at zero
-    cash until it lands — visible here, at the composition root, rather than
-    hidden behind a ``domain`` default.
+    Which venue it is decides nothing here: the opening cash rides the
+    ``AccountSpec`` the exchange hands over, and how paper's declared number and
+    live's ingested one resolve is ``Account.open``'s rule (ADR-0042 §6). This
+    root's job is to open exactly one ledger, against exactly the account the
+    engine's own exchange trades.
     """
-    spec = exchange.account_spec()
-    genesis = spec.genesis_collateral if spec.genesis_collateral is not None else Decimal("0")
     return PortfolioProjection(
-        account=Account.open(spec, genesis_collateral=genesis, ts_ns=clock.timestamp_ns())
+        account=Account.open(exchange.account_spec(), ts_ns=clock.timestamp_ns())
     )
 
 

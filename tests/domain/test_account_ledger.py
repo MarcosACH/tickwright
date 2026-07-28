@@ -66,6 +66,38 @@ def test_the_opening_declaration_is_write_once() -> None:
         account.genesis_collateral = Decimal("9")  # type: ignore[misc]
 
 
+def test_a_ledger_opens_at_the_genesis_its_spec_declares() -> None:
+    """``open`` reads the opening cash off the spec that carries it — the paper
+    venue always declares one, which ADR-0042 §1 demands and never defaults."""
+    spec = AccountSpec(account_id="paper-default", genesis_collateral=Decimal("250000"))
+
+    account = Account.open(spec, ts_ns=7)
+
+    assert account.account_id == "paper-default"
+    assert account.genesis_collateral == Decimal("250000")
+    assert account.cash == Decimal("250000")
+    assert account.genesis_ts_ns == 7
+
+
+def test_a_live_spec_declaring_no_genesis_opens_the_ledger_at_zero() -> None:
+    """Live declares ``None`` because its opening state is ingested from the
+    venue as ``accountValue − Σ unrealized_pnl`` at the startup barrier, which
+    has not run when the ledger is opened (ADR-0042 §6, ADR-0043 §6).
+
+    Zero is what an *unstarted* live ledger reports, not a default standing in
+    for a number nobody chose — ADR-0042 §1 rejects the latter, and only for
+    paper, where the config validator makes ``None`` unreachable. Tier-1 forbids
+    reporting ``None`` here (ADR-0041 §6), so it has to be some number.
+    """
+    spec = AccountSpec(account_id="hyperliquid-testnet-0xabc", genesis_collateral=None)
+
+    account = Account.open(spec, ts_ns=11)
+
+    assert account.account_id == "hyperliquid-testnet-0xabc"
+    assert account.genesis_collateral == Decimal("0")
+    assert account.cash == Decimal("0")
+
+
 def test_an_account_spec_declares_the_venue_facts_and_defaults_to_net() -> None:
     spec = AccountSpec(account_id="paper-default", genesis_collateral=Decimal("1000"))
 

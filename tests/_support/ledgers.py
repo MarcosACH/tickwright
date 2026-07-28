@@ -25,4 +25,4 @@ not a test's declaration)."""
 def ledger(genesis: Decimal = GENESIS) -> PortfolioProjection:
     """A fresh in-memory ledger on a paper-shaped account."""
     spec = AccountSpec(account_id="paper-default", genesis_collateral=genesis)
-    return PortfolioProjection(account=Account.open(spec, genesis_collateral=genesis, ts_ns=0))
+    return PortfolioProjection(account=Account.open(spec, ts_ns=0))

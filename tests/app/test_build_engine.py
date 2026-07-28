@@ -29,6 +29,7 @@ from tickwright.app.build import (
     build_exchange,
     build_feed,
     build_guard,
+    build_portfolio,
     build_store,
 )
 from tickwright.app.config import AppConfig, StrategyConfig
@@ -174,6 +175,24 @@ def test_guard_discriminant_selects_its_impl(tmp_path: Path, kind: str, expected
         assert isinstance(guard, expected)
     finally:
         store.close()
+
+
+def test_the_ledger_opens_against_the_account_the_built_exchange_declares(
+    tmp_path: Path,
+) -> None:
+    """The root's one ledger is seeded from the venue's own ``AccountSpec``, so
+    the configured genesis reaches the cash line a strategy reads (ADR-0042 §6).
+
+    The assertion is on the *configured* number rather than a literal: this is
+    what catches a root that opens a ledger against some other account's
+    declaration, which no other test here would notice.
+    """
+    clock = ManualClock()
+    exchange = build_exchange(_config(tmp_path), bus=InMemoryBus(), clock=clock)
+
+    portfolio = build_portfolio(exchange, clock=clock)
+
+    assert portfolio.account().cash == _GENESIS
 
 
 @pytest.mark.parametrize("field", ["bus", "store", "exchange", "feed", "guard"])
