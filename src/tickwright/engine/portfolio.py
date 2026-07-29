@@ -44,7 +44,7 @@ _POSITION_EVENTS: dict[PositionChange, NamedEvent] = {
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class LedgerEntry:
+class LedgerChange:
     """One fill's effect on the ledger: folded in memory, not yet durable.
 
     The atomic path's hand-off (ADR-0043 §4). Making a fill durable is three
@@ -60,6 +60,11 @@ class LedgerEntry:
     reference. What ``project`` installs is the *partition* and the
     announcement — the two things a reader could otherwise see ahead of the
     durable record.
+
+    A *change*, deliberately not an *entry*: the ledger persists as mutable
+    current-state rows, and ADR-0043 §1 reserves an append-only line-item log as
+    an extension point it does not take. "Entry" is that log's word, so it would
+    name this the row of a table that does not exist.
     """
 
     account: Account
@@ -85,16 +90,17 @@ class PortfolioProjection:
         # partition, reachable here but never through the seam.
         self._positions: dict[tuple[str | None, str], Position] = {}
 
-    def apply_fill(self, event: OrderFillEvent, *, side: Side) -> LedgerEntry:
+    def apply_fill(self, event: OrderFillEvent, *, side: Side) -> LedgerChange:
         """Fold a fill into its partition and the cash line — the single write
         verb of the Tier-1 path.
 
         ``side`` comes from the saga rather than the event: ``OrderFillEvent``
         carries the trade and the ``Order`` carries the direction, and the
         ``ExecutionManager`` holds both. A redelivered fill is a no-op in both
-        aggregates and returns an entry with no changes, so it announces nothing.
+        aggregates and returns a change with nothing in it, so it announces
+        nothing.
 
-        Returns rather than publishes: the caller must make the returned entry
+        Returns rather than publishes: the caller must make the returned change
         durable before handing it back to ``project`` (ADR-0043 §4).
         """
         key = (event.strategy_id, event.symbol)
@@ -123,21 +129,21 @@ class PortfolioProjection:
             self._account.accrue_realized(
                 position.realized_pnl - realized_before, event_id=event.event_id
             )
-        return LedgerEntry(account=self._account, position=position, changes=changes)
+        return LedgerChange(account=self._account, position=position, changes=changes)
 
-    def project(self, entry: LedgerEntry) -> None:
-        """File ``entry``'s partition and announce what the fill did.
+    def project(self, change: LedgerChange) -> None:
+        """File ``change``'s partition and announce what the fill did.
 
         The in-memory half of the atomic path, and the caller's promise that the
-        entry is already durable: a partition filed ahead of the write would be
+        change is already durable: a partition filed ahead of the write would be
         readable state the store never recorded, and a ``position.*`` record
         emitted ahead of it would name a change that a crash could still undo.
         """
-        position = entry.position
+        position = change.position
         self._positions[(position.strategy_id, position.symbol)] = position
-        for change in entry.changes:
+        for change_kind in change.changes:
             named_event(
-                _POSITION_EVENTS[change],
+                _POSITION_EVENTS[change_kind],
                 strategy_id=position.strategy_id,
                 symbol=position.symbol,
                 # The size *that change* produced, not the fill's end state. The
@@ -147,7 +153,7 @@ class PortfolioProjection:
                 # invert the name. This catalog is the only place a position
                 # change is observable (ADR-0045 §1), so there is nothing else a
                 # reader could reconcile that against.
-                size="0" if change is PositionChange.CLOSED else str(position.signed_size),
+                size="0" if change_kind is PositionChange.CLOSED else str(position.signed_size),
             )
 
     def recover(self) -> None:

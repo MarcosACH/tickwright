@@ -66,7 +66,7 @@ from tickwright.observability.correlation import operation
 
 from .cache import Cache
 from .guard import NoopGuard
-from .portfolio import LedgerEntry, PortfolioProjection
+from .portfolio import LedgerChange, PortfolioProjection
 
 # The saga transition → named event map (ADR-0020): every canonical ``OrderEvent``
 # this manager publishes has exactly one cataloged name, so "a state-affecting
@@ -278,15 +278,15 @@ class ExecutionManager:
         # handler reads the state *this* fill produced, never a stale one
         # (ADR-0035, ADR-0045 §1). The side rides the saga because the event
         # carries the trade and the order carries the direction.
-        entry = self._portfolio.apply_fill(event, side=order.side)
+        change = self._portfolio.apply_fill(event, side=order.side)
         # One transaction across the order row and the ledger rows, then both
         # read-models projected behind it (ADR-0043 §4). ``_commit`` is
         # deliberately not reused: its ``Cache.checkpoint`` would write the order
         # row a second time, in a transaction of its own, which is exactly the
         # split this path exists to close.
-        ts_ns = self._checkpoint_fill(order, entry)
+        ts_ns = self._checkpoint_fill(order, change)
         self._cache.project(order, ts_ns=ts_ns)
-        self._portfolio.project(entry)
+        self._portfolio.project(change)
         await self._announce(event)
 
     async def _commit(self, order: Order, event: OrderEvent) -> None:
@@ -317,7 +317,7 @@ class ExecutionManager:
         named_event(_SAGA_EVENTS[type(event)], **({"reason": reason} if reason else {}))
         await self._bus.publish(event)
 
-    def _checkpoint_fill(self, order: Order, entry: LedgerEntry) -> int:
+    def _checkpoint_fill(self, order: Order, change: LedgerChange) -> int:
         """Make the advanced saga and the ledger it moved durable in one
         transaction, and return the ``ts_ns`` both were written at.
 
@@ -334,8 +334,8 @@ class ExecutionManager:
         try:
             self._store.checkpoint_ledger(
                 order=order,
-                positions=(entry.position,),
-                account=entry.account,
+                positions=(change.position,),
+                account=change.account,
                 ts_ns=ts_ns,
             )
         except Exception as exc:
