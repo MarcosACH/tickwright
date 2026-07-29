@@ -41,10 +41,8 @@ def _spec(genesis: Decimal) -> AccountSpec:
     return AccountSpec(account_id="paper-default", genesis_collateral=genesis)
 
 
-def checkpointer(
-    store: Store, *, clock: Clock | None = None, genesis: Decimal = GENESIS
-) -> Checkpointer:
-    """The manager's one collaborator, over the suite's own ``store``.
+def checkpointer(store: Store, *, clock: Clock, genesis: Decimal = GENESIS) -> Checkpointer:
+    """The manager's one collaborator, over the suite's own ``store`` and clock.
 
     This is what a saga-focused suite wires: the ``Checkpointer`` builds both
     read-models from the single ``store`` handed in, so the fill's one
@@ -52,18 +50,17 @@ def checkpointer(
     split it by pointing an order cache and a ledger at two stores. Reach the
     projections through ``.cache`` / ``.portfolio`` where a case reads them back.
 
-    Pass ``clock`` wherever the suite reads a timestamp back — the manager takes
-    its own time source from here, so the stamps on a store's order history and
-    on the events announcing it are the one timeline this clock drives.
+    ``clock`` is required for the same reason ``store`` is, and it is the reason
+    neither is defaulted here: the manager takes its time source from the
+    ``Checkpointer``, so a private default would let a suite advance its venue's
+    clock while the saga's stamps stayed frozen on another — the two-timeline
+    split the type exists to make unwireable, reintroduced by the helper that
+    wires it.
 
     Override ``genesis`` only where the opening balance is itself the subject; a
     suite that also wires a venue must move both or neither.
     """
-    return Checkpointer(
-        spec=_spec(genesis),
-        store=store,
-        clock=clock if clock is not None else ManualClock(start_ns=0),
-    )
+    return Checkpointer(spec=_spec(genesis), store=store, clock=clock)
 
 
 def ledger(store: Store, *, genesis: Decimal = GENESIS) -> PortfolioProjection:
