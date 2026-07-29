@@ -55,7 +55,12 @@ def _wire(backend: str) -> tuple[EventBus, SQLiteStore, list[OrderEvent]]:
     )
     cache = Cache(store=store)
     manager = ExecutionManager(
-        bus=bus, clock=clock, exchange=exchange, cache=cache, portfolio=ledger()
+        bus=bus,
+        clock=clock,
+        store=store,
+        exchange=exchange,
+        cache=cache,
+        portfolio=ledger(store),
     )
 
     bus.subscribe(Signal, manager.on_signal)

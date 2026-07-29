@@ -208,13 +208,15 @@ def _manager(
 ) -> None:
     """Wire an ``ExecutionManager`` over ``exchange`` onto ``bus`` — the exchange
     must already share ``bus`` so its fills flow back to the manager."""
-    cache = Cache(store=SQLiteStore(":memory:"))
+    store = SQLiteStore(":memory:")
+    cache = Cache(store=store)
     manager = ExecutionManager(
         bus=bus,
         clock=clock,
+        store=store,
         exchange=exchange,
         cache=cache,
-        portfolio=portfolio if portfolio is not None else ledger(),
+        portfolio=portfolio if portfolio is not None else ledger(store),
         guard=guard,
     )
     bus.subscribe(Signal, manager.on_signal)

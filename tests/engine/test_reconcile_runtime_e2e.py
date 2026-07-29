@@ -96,7 +96,7 @@ def test_a_missed_fill_landing_mid_run_is_healed_by_the_inflight_cadence(
             store=store,
             exchange=venue,
             feed=feed,
-            portfolio=ledger(),
+            portfolio=ledger(store),
             config=EngineConfig(reconcile=ReconcileConfig()),
         )
         strategy = SingleShotLimitStrategy(
@@ -208,7 +208,7 @@ def test_a_vanished_order_is_ghosted_only_after_grace_and_a_none_read_freezes(
             exchange=_VanishingLinkExchange(venue, clock),
             feed=feed,
             config=EngineConfig(reconcile=config),
-            portfolio=ledger(),
+            portfolio=ledger(store),
         )
         strategy = SingleShotLimitStrategy(
             strategy_id="trivial",

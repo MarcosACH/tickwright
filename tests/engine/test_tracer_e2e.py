@@ -29,7 +29,6 @@ from tickwright.adapters.feed import ReplayFeed
 from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
-    Account,
     Event,
     ExecutionReport,
     FillReport,
@@ -101,9 +100,9 @@ def _run(
     cache = Cache(store=store)
     # Opened off the venue's own spec, exactly as the composition root does, so
     # the ledger this tracer asserts on is seeded the way a real run's is.
-    projection = PortfolioProjection(account=Account.open(exchange.account_spec(), ts_ns=0))
+    projection = PortfolioProjection(spec=exchange.account_spec(), store=store, clock=clock)
     manager = ExecutionManager(
-        bus=bus, clock=clock, exchange=exchange, cache=cache, portfolio=projection
+        bus=bus, clock=clock, store=store, exchange=exchange, cache=cache, portfolio=projection
     )
     strategy = SingleShotMarketStrategy(
         strategy_id="trivial",

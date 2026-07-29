@@ -58,6 +58,7 @@ from tickwright.domain import (
     PlaceSignal,
     PreTradeGuard,
     Signal,
+    Store,
     derive_cloid,
 )
 from tickwright.observability import NamedEvent, named_event
@@ -65,7 +66,7 @@ from tickwright.observability.correlation import operation
 
 from .cache import Cache
 from .guard import NoopGuard
-from .portfolio import PortfolioProjection
+from .portfolio import LedgerChange, PortfolioProjection
 
 # The saga transition → named event map (ADR-0020): every canonical ``OrderEvent``
 # this manager publishes has exactly one cataloged name, so "a state-affecting
@@ -92,6 +93,7 @@ class ExecutionManager:
         *,
         bus: EventBus,
         clock: Clock,
+        store: Store,
         exchange: Exchange,
         cache: Cache,
         portfolio: PortfolioProjection,
@@ -99,6 +101,11 @@ class ExecutionManager:
     ) -> None:
         self._bus = bus
         self._clock = clock
+        # The seam itself, beside the ``Cache`` that wraps it: the fill path's
+        # one write spans the order row *and* the ledger rows, so it is a
+        # ``checkpoint_ledger`` call the Cache cannot make on its own behalf
+        # (ADR-0043 §4). Every other transition still goes through the Cache.
+        self._store = store
         self._exchange = exchange
         # The working set and the durable copy in one seam: the Cache projects
         # every checkpoint and is rebuilt from the Store on restart (ADR-0009),
@@ -271,8 +278,16 @@ class ExecutionManager:
         # handler reads the state *this* fill produced, never a stale one
         # (ADR-0035, ADR-0045 §1). The side rides the saga because the event
         # carries the trade and the order carries the direction.
-        self._portfolio.apply_fill(event, side=order.side)
-        await self._commit(order, event)
+        change = self._portfolio.apply_fill(event, side=order.side)
+        # One transaction across the order row and the ledger rows, then both
+        # read-models projected behind it (ADR-0043 §4). ``_commit`` is
+        # deliberately not reused: its ``Cache.checkpoint`` would write the order
+        # row a second time, in a transaction of its own, which is exactly the
+        # split this path exists to close.
+        ts_ns = self._checkpoint_fill(order, change)
+        self._cache.project(order, ts_ns=ts_ns)
+        self._portfolio.project(change)
+        await self._announce(event)
 
     async def _commit(self, order: Order, event: OrderEvent) -> None:
         """Durably record the advanced saga, then announce it — never the reverse.
@@ -302,13 +317,56 @@ class ExecutionManager:
         named_event(_SAGA_EVENTS[type(event)], **({"reason": reason} if reason else {}))
         await self._bus.publish(event)
 
+    def _checkpoint_fill(self, order: Order, change: LedgerChange) -> int:
+        """Make the advanced saga and the ledger it moved durable in one
+        transaction, and return the ``ts_ns`` both were written at.
+
+        The fill is the only transition that mutates two read-models, and as two
+        writes either ordering loses (ADR-0043 §4): order row first drops the
+        fill from the ledger on a crash between them, ledger first double-counts
+        it. On paper neither ever heals — the in-process venue holds no position
+        state, so this store is the ledger's sole authority.
+
+        The projections are the caller's to run, strictly after this returns,
+        which keeps a *new* partition and the ``position.*`` records behind the
+        write. The aggregates themselves have already moved and must have — this
+        call takes the *folded* state as its input, so the fold cannot follow the
+        write — so a refused write leaves the saga the ``Cache`` holds by
+        reference, and any partition already filed, ahead of the store. What
+        makes that safe is the raise rather than the ordering: an
+        ``InvariantViolation`` faults the run (ADR-0014), so nothing goes on to
+        trade or report against a read-model the store never recorded.
+        """
+        ts_ns = self._clock.timestamp_ns()
+        try:
+            self._store.checkpoint_ledger(
+                order=order,
+                positions=(change.position,),
+                account=change.account,
+                ts_ns=ts_ns,
+            )
+        except InvariantViolation as exc:
+            raise InvariantViolation(
+                f"ledger checkpoint write failed for cloid {order.cloid} "
+                f"in state {order.state.value}"
+            ) from exc
+        return ts_ns
+
     def _checkpoint(self, order: Order) -> None:
         try:
             self._cache.checkpoint(order, ts_ns=self._clock.timestamp_ns())
-        except Exception as exc:
+        except InvariantViolation as exc:
             # A checkpoint the store cannot make durable is a broken engine
             # assumption (ADR-0014): fail fast rather than run a saga whose
             # memory and durable states silently diverge.
+            #
+            # Only the seam's own failure type is relabelled. ``InvariantViolation``
+            # is the whole of the ``Store``'s error contract (ADR-0019), so anything
+            # else crossing it is a bug *below* the seam, not a failed write — and
+            # this wrapper spans ``Cache.checkpoint``, which writes the store and
+            # *then* projects, so a broader catch could report a failed write for a
+            # row already durable. The run faults on either: this handler is
+            # subscribed raw, so the type decides the diagnosis, not the outcome.
             raise InvariantViolation(
                 f"checkpoint write failed for cloid {order.cloid} in state {order.state.value}"
             ) from exc

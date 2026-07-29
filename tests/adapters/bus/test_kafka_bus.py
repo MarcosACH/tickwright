@@ -312,7 +312,12 @@ def _saga_pipeline(broker: FakeKafkaBroker) -> tuple[KafkaBus, SQLiteStore, list
         bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
     )
     manager = ExecutionManager(
-        bus=bus, clock=clock, exchange=exchange, cache=Cache(store=store), portfolio=ledger()
+        bus=bus,
+        clock=clock,
+        store=store,
+        exchange=exchange,
+        cache=Cache(store=store),
+        portfolio=ledger(store),
     )
     bus.subscribe(Signal, manager.on_signal)
     bus.subscribe(ExecutionReport, manager.on_execution_report)

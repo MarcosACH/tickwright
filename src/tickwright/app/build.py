@@ -24,7 +24,6 @@ from tickwright.adapters.paper import (
 )
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
-    Account,
     Clock,
     EventBus,
     Exchange,
@@ -174,7 +173,7 @@ def build_guard(
             assert_never(unreachable)
 
 
-def build_portfolio(exchange: Exchange, *, clock: Clock) -> PortfolioProjection:
+def build_portfolio(exchange: Exchange, *, store: Store, clock: Clock) -> PortfolioProjection:
     """Open the process's one ledger against the account the venue declares.
 
     Which venue it is decides nothing here: the opening cash rides the
@@ -182,10 +181,13 @@ def build_portfolio(exchange: Exchange, *, clock: Clock) -> PortfolioProjection:
     live's ingested one resolve is ``Account.open``'s rule (ADR-0042 §6). This
     root's job is to open exactly one ledger, against exactly the account the
     engine's own exchange trades.
+
+    The spec goes over rather than an account opened from it: the projection's
+    recovery reads ``genesis_collateral is not None`` to tell a *declared*
+    opening balance from an *ingested* one (ADR-0043 §10), and an ``Account``
+    has already resolved that distinction away.
     """
-    return PortfolioProjection(
-        account=Account.open(exchange.account_spec(), ts_ns=clock.timestamp_ns())
-    )
+    return PortfolioProjection(spec=exchange.account_spec(), store=store, clock=clock)
 
 
 def build_engine(config: AppConfig) -> Engine:
@@ -203,7 +205,7 @@ def build_engine(config: AppConfig) -> Engine:
     exchange = build_exchange(config, bus=bus, clock=clock)
     feed = build_feed(config, bus=bus, clock=clock)
     guard = build_guard(config, specs=exchange.instrument_specs(), store=store, clock=clock)
-    portfolio = build_portfolio(exchange, clock=clock)
+    portfolio = build_portfolio(exchange, store=store, clock=clock)
     engine = Engine(
         bus=bus,
         clock=clock,

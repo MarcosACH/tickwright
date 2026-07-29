@@ -29,8 +29,25 @@ class Cache:
 
         Store first — the projection must never be ahead of the durable record,
         or a crash between the two would recover less than readers already saw.
+
+        This is the whole of every **non-fill** transition: none of them touches
+        the ledger, so the narrow ``Store.checkpoint`` is the right write for
+        them (ADR-0043 §4).
         """
         self._store.checkpoint(order, ts_ns=ts_ns)
+        self.project(order, ts_ns=ts_ns)
+
+    def project(self, order: Order, *, ts_ns: int) -> None:
+        """Project ``order`` into the read-model, writing nothing durable.
+
+        ``checkpoint``'s in-memory half, exposed on its own for the atomic fill
+        path: there the order row is made durable *with the ledger rows* in one
+        ``Store.checkpoint_ledger`` transaction (ADR-0043 §4), so the caller has
+        already paid for durability and needs only the projection. Store-first
+        is unchanged by the split — it is the ``ExecutionManager`` that now
+        sequences the two halves on that one path, and it calls this only after
+        its write returned.
+        """
         self._orders[order.cloid] = order
         self._last_event_ns[order.cloid] = ts_ns
 

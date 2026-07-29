@@ -66,7 +66,12 @@ def _run(
     )
     cache = Cache(store=store)
     manager = ExecutionManager(
-        bus=bus, clock=clock, exchange=exchange, cache=cache, portfolio=ledger()
+        bus=bus,
+        clock=clock,
+        store=store,
+        exchange=exchange,
+        cache=cache,
+        portfolio=ledger(store),
     )
     strategy = SingleShotLimitStrategy(
         strategy_id="trivial",

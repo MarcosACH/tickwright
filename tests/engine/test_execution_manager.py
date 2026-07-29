@@ -10,7 +10,10 @@ our own classes.
 
 import asyncio
 import random
+from collections.abc import Sequence
+from dataclasses import dataclass
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from ledgers import GENESIS, ledger
@@ -25,12 +28,14 @@ from tickwright.adapters.paper import (
 )
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
+    Account,
     AggressorSide,
     CancelSignal,
     ExecutionReport,
     FillReport,
     InvariantViolation,
     MarketTick,
+    Order,
     OrderCancelled,
     OrderEvent,
     OrderFilled,
@@ -42,6 +47,7 @@ from tickwright.domain import (
     OrderStatusReport,
     OrderSubmitted,
     PlaceSignal,
+    Position,
     Side,
     Signal,
     TimeInForce,
@@ -50,6 +56,7 @@ from tickwright.domain import (
 from tickwright.domain.enums import OrderType
 from tickwright.engine.cache import Cache
 from tickwright.engine.execution import ExecutionManager
+from tickwright.engine.portfolio import PortfolioProjection
 
 
 def _market_signal(seq: int = 1) -> PlaceSignal:
@@ -113,16 +120,37 @@ def _tick(price: str = "42000") -> MarketTick:
     )
 
 
-def _harness() -> tuple[InMemoryBus, ManualClock, SQLiteStore, list[OrderEvent]]:
+@dataclass(frozen=True, slots=True)
+class _Wiring:
+    """The manager's collaborators, for the cases that read the two read-models
+    rather than the durable record. ``_harness`` hands back the four every other
+    case needs; this is the same wiring with the projections still in reach."""
+
+    bus: InMemoryBus
+    clock: ManualClock
+    store: SQLiteStore
+    cache: Cache
+    portfolio: PortfolioProjection
+    order_events: list[OrderEvent]
+
+
+def _wiring(store: SQLiteStore) -> _Wiring:
+    """The manager over its real collaborators, on the ``store`` handed in — so a
+    case can substitute one that fails at a chosen seam."""
     bus = InMemoryBus()
     clock = ManualClock(start_ns=1_000)
-    store = SQLiteStore(":memory:")
     exchange = PaperExchange(
         bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
     )
     cache = Cache(store=store)
+    portfolio = ledger(store)
     manager = ExecutionManager(
-        bus=bus, clock=clock, exchange=exchange, cache=cache, portfolio=ledger()
+        bus=bus,
+        clock=clock,
+        store=store,
+        exchange=exchange,
+        cache=cache,
+        portfolio=portfolio,
     )
 
     bus.subscribe(Signal, manager.on_signal)
@@ -130,7 +158,24 @@ def _harness() -> tuple[InMemoryBus, ManualClock, SQLiteStore, list[OrderEvent]]
 
     order_events: list[OrderEvent] = []
     bus.subscribe(OrderEvent, lambda ev: _record(order_events, ev))
-    return bus, clock, store, order_events
+    return _Wiring(
+        bus=bus,
+        clock=clock,
+        store=store,
+        cache=cache,
+        portfolio=portfolio,
+        order_events=order_events,
+    )
+
+
+def _harness(
+    path: str | Path = ":memory:",
+) -> tuple[InMemoryBus, ManualClock, SQLiteStore, list[OrderEvent]]:
+    """The manager over its real collaborators. ``path`` backs the store with a
+    file for the cases that must reopen it — closing a ``:memory:`` store takes
+    the durable record with it, so a "what survived?" assertion needs a file."""
+    wiring = _wiring(SQLiteStore(path))
+    return wiring.bus, wiring.clock, wiring.store, wiring.order_events
 
 
 def test_pending_intent_is_durable_before_the_send_can_crash() -> None:
@@ -175,6 +220,216 @@ def test_every_transition_is_checkpointed_on_the_happy_path() -> None:
         OrderState.SUBMITTED,
         OrderState.FILLED,
     ]
+
+
+def test_a_fill_makes_the_order_row_and_the_ledger_durable_together() -> None:
+    """The money line's crash-safety rests on this one write (ADR-0043 §4).
+
+    ``PaperExchange`` holds no position state and has no venue to heal from, so
+    the store is the paper ledger's sole authority: a fill that reached the
+    order row without reaching the positions row is a fill lost for good.
+    """
+    bus, _, store, _ = _harness()
+    cloid = derive_cloid("trivial:BTC:1")
+
+    async def scenario() -> None:
+        await bus.publish(_tick())
+        await bus.publish(_market_signal())
+
+    asyncio.run(scenario())
+
+    record = store.get_order(cloid)
+    assert record is not None
+    assert record.state is OrderState.FILLED
+    # The signal's quantity at the tick's price — the two literals the harness
+    # declares, not a number re-derived the way the ledger derives it.
+    assert [
+        (position.strategy_id, position.symbol, position.signed_size, position.entry_price)
+        for position in store.all_positions()
+    ] == [("trivial", "BTC", Decimal("0.5"), Decimal("42000"))]
+    account = store.load_account()
+    assert account is not None
+    assert account.cash == GENESIS  # An opening fill realizes nothing.
+
+
+def test_a_refused_ledger_write_leaves_neither_the_order_row_nor_the_ledger(
+    tmp_path: Path,
+) -> None:
+    """Half a fill is the state the atomic write exists to make unreachable, so a
+    write the store refuses must advance neither side of it (ADR-0043 §4).
+
+    It must also raise ``InvariantViolation`` rather than let the driver's own
+    error cross: that type is what pierces the engine's containment net and
+    faults the run (ADR-0014), while a raw ``sqlite3.Error`` would be filed as a
+    caller's bug and survived — the process running on with a ledger it can no
+    longer make durable.
+
+    A closed store stands in for any backend the write cannot reach. The saga is
+    left in-flight first, so the store is alive for the write-ahead intent and
+    dead only for the fill.
+    """
+    bus, _, store, _ = _harness(tmp_path / "saga.db")
+    cloid = derive_cloid("trivial:BTC:1")
+
+    async def scenario() -> None:
+        # No tick cached: the send raises, leaving the saga in-flight with its
+        # PENDING intent durable — then the venue's fill arrives against a store
+        # that can no longer be written.
+        with pytest.raises(ValueError):
+            await bus.publish(_market_signal())
+        store.close()
+        with pytest.raises(InvariantViolation, match="ledger checkpoint write failed"):
+            await bus.publish(_fill_report(cloid, trade_id="f1", quantity="0.5"))
+
+    asyncio.run(scenario())
+
+    with SQLiteStore(tmp_path / "saga.db") as reopened:
+        record = reopened.get_order(cloid)
+        assert record is not None
+        assert record.state is OrderState.PENDING  # the fill never advanced it
+        assert reopened.all_positions() == []
+        assert reopened.load_account() is None
+
+
+def test_a_refused_ledger_write_leaves_the_read_models_ahead_of_the_store(
+    tmp_path: Path,
+) -> None:
+    """What the atomic write does *not* buy, pinned where the claim is easy to
+    overstate: the durable record is all-or-nothing, the in-memory read-models
+    are not.
+
+    Both aggregates advance before the write is attempted, and they must —
+    ``checkpoint_ledger`` takes the *folded* state as its input, so the fold
+    cannot follow the write (ADR-0043 §4). ``Order.record_fill`` has likewise
+    already advanced the saga the ``Cache`` holds by reference. A refused write
+    therefore leaves both projections ahead of the store, and what makes that
+    survivable is the ``InvariantViolation``: it pierces containment and faults
+    the run (ADR-0014), so nothing goes on to trade or report against them.
+
+    The saga is left partially filled first, so the refused fill is one the
+    aggregates genuinely move on — a *first* fill would file its partition in
+    ``project``, behind the write, and hide the divergence this pins.
+    """
+    wiring = _wiring(SQLiteStore(tmp_path / "saga.db"))
+    cloid = derive_cloid("trivial:BTC:1")
+
+    async def scenario() -> None:
+        await wiring.bus.publish(_tick("42000"))
+        # A BUY LIMIT far below the market rests unfilled, so the saga stays
+        # open across two partials rather than resolving on the first.
+        await wiring.bus.publish(_limit_signal("1"))
+        await wiring.bus.publish(_fill_report(cloid, trade_id="f1", quantity="0.4"))
+        wiring.store.close()
+        with pytest.raises(InvariantViolation):
+            await wiring.bus.publish(_fill_report(cloid, trade_id="f2", quantity="0.4"))
+
+    asyncio.run(scenario())
+
+    order = wiring.cache.get_order(cloid)
+    assert order is not None
+    assert order.state is OrderState.FILLED  # the refused fill, readable in memory
+    assert order.cum_qty == Decimal("0.8")
+    position = wiring.portfolio.position("BTC", strategy_id="trivial")
+    assert position is not None
+    assert position.size == Decimal("0.8")
+
+    with SQLiteStore(tmp_path / "saga.db") as reopened:
+        record = reopened.get_order(cloid)
+        assert record is not None
+        assert record.state is OrderState.PARTIALLY_FILLED  # only the fill that landed
+        assert record.cum_qty == Decimal("0.4")
+        assert [stored.signed_size for stored in reopened.all_positions()] == [Decimal("0.4")]
+
+
+class _StoreThatBreaksTheLedgerWrite(SQLiteStore):
+    """The real store, except that the ledger write raises something the seam's
+    error contract does not admit. Every other member is the real one, so the
+    saga reaches its fill with the write-ahead intent durable."""
+
+    def checkpoint_ledger(
+        self,
+        *,
+        account: Account,
+        positions: Sequence[Position] = (),
+        order: Order | None = None,
+        funding_mark: tuple[str, int] | None = None,
+        ts_ns: int,
+    ) -> None:
+        raise RuntimeError("driver bug below the seam")
+
+
+class _StoreThatBreaksTheOrderWrite(SQLiteStore):
+    """The same contract break, on the narrow write every non-fill transition
+    takes (ADR-0043 §4) — the other half of the manager's checkpoint surface."""
+
+    def checkpoint(self, order: Order, *, ts_ns: int) -> None:
+        raise RuntimeError("driver bug below the seam")
+
+
+def test_a_broken_seam_contract_is_not_reported_as_a_failed_ledger_write() -> None:
+    """``InvariantViolation`` is the whole of the ``Store`` seam's error contract
+    (ADR-0019), and both adapters keep it through ``_durability``. Anything else
+    crossing it is a bug *below* the seam, not a durability failure — so the
+    manager must not relabel it as one: "ledger checkpoint write failed" is the
+    one diagnosis that says the ledger did not move, and a store broken this way
+    may well have moved it.
+
+    The run faults either way — the manager's handlers are subscribed raw, so
+    every exception reaches the runner. What the type decides is what the
+    operator is told, not whether the engine survives.
+    """
+    wiring = _wiring(_StoreThatBreaksTheLedgerWrite(":memory:"))
+
+    async def scenario() -> None:
+        await wiring.bus.publish(_tick())
+        with pytest.raises(RuntimeError, match="driver bug below the seam"):
+            await wiring.bus.publish(_market_signal())
+
+    asyncio.run(scenario())
+
+
+def test_a_broken_seam_contract_is_not_reported_as_a_failed_checkpoint() -> None:
+    """The non-fill half of the same rule. This path's wrapper spans
+    ``Cache.checkpoint``, which writes the store and *then* projects — so a
+    failure it did not narrow could report "checkpoint write failed" for a row
+    that is already durable."""
+    wiring = _wiring(_StoreThatBreaksTheOrderWrite(":memory:"))
+
+    async def scenario() -> None:
+        await wiring.bus.publish(_tick())
+        with pytest.raises(RuntimeError, match="driver bug below the seam"):
+            await wiring.bus.publish(_market_signal())
+
+    asyncio.run(scenario())
+
+
+def test_a_non_fill_transition_writes_the_order_row_and_no_ledger_row() -> None:
+    """A fill is the only transition that moves the ledger, so every other one
+    keeps the narrow ``Store.checkpoint`` (ADR-0043 §4).
+
+    Not a redundant restatement of what the ledger holds: routing the whole saga
+    through ``checkpoint_ledger`` would still pass every fill assertion in this
+    file, while writing an account row on every ``PENDING`` intent and a position
+    row for an order that never traded — a partition that reports a traded-flat
+    record for a symbol nothing filled on.
+    """
+    bus, _, store, order_events = _harness()
+    cloid = derive_cloid("trivial:BTC:1")
+
+    async def scenario() -> None:
+        await bus.publish(_tick("42000"))
+        # A BUY LIMIT below the market rests unfilled: PENDING -> SUBMITTED ->
+        # LIVE, three checkpoints and not one fill.
+        await bus.publish(_limit_signal("41000"))
+
+    asyncio.run(scenario())
+
+    assert [type(ev) for ev in order_events] == [OrderPlaced, OrderSubmitted, OrderLive]
+    record = store.get_order(cloid)
+    assert record is not None
+    assert record.state is OrderState.LIVE
+    assert store.all_positions() == []
+    assert store.load_account() is None
 
 
 def _fill_report(cloid: str, trade_id: str, quantity: str, *, ts_event: int = 1_000) -> FillReport:
@@ -634,7 +889,12 @@ def test_a_restart_rebuilt_cache_dedups_a_redelivered_place_signal() -> None:
     cache2 = Cache(store=store)
     cache2.rebuild()
     manager2 = ExecutionManager(
-        bus=bus2, clock=clock2, exchange=exchange2, cache=cache2, portfolio=ledger()
+        bus=bus2,
+        clock=clock2,
+        store=store,
+        exchange=exchange2,
+        cache=cache2,
+        portfolio=ledger(store),
     )
     bus2.subscribe(Signal, manager2.on_signal)
     bus2.subscribe(ExecutionReport, manager2.on_execution_report)
@@ -664,7 +924,12 @@ def _stochastic_harness(
     )
     cache = Cache(store=store)
     manager = ExecutionManager(
-        bus=bus, clock=clock, exchange=exchange, cache=cache, portfolio=ledger()
+        bus=bus,
+        clock=clock,
+        store=store,
+        exchange=exchange,
+        cache=cache,
+        portfolio=ledger(store),
     )
 
     bus.subscribe(Signal, manager.on_signal)

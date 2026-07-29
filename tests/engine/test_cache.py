@@ -55,6 +55,25 @@ def test_checkpoint_writes_through_to_the_store_and_the_projection() -> None:
     assert cache.get_order("0xabc") is order
 
 
+def test_project_serves_the_order_without_writing_it() -> None:
+    """The in-memory half on its own, for the one path whose durability is
+    already paid for: a fill's order row rides the ledger's single transaction
+    (ADR-0043 §4), so the caller needs the projection and nothing more.
+
+    Writing here as well would be the split the atomicity argument exists to
+    close — a second, separate transaction for the same order row.
+    """
+    store = SQLiteStore(":memory:")
+    cache = Cache(store=store)
+    order = _order("0xabc")
+
+    cache.project(order, ts_ns=7)
+
+    assert cache.get_order("0xabc") is order
+    assert cache.last_event_ts("0xabc") == 7
+    assert store.get_order("0xabc") is None
+
+
 def test_last_event_ts_tracks_this_sessions_writes_but_a_rebuild_forgets_them() -> None:
     store = SQLiteStore(":memory:")
     store.checkpoint(_order("0xold"), ts_ns=500)

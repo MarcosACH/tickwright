@@ -19,13 +19,16 @@ from dataclasses import dataclass
 
 from tickwright.domain import (
     Account,
+    AccountSpec,
     AccountView,
+    Clock,
     OrderFillEvent,
     Portfolio,
     Position,
     PositionChange,
     PositionView,
     Side,
+    Store,
 )
 from tickwright.observability import NamedEvent, named_event
 
@@ -40,57 +43,119 @@ _POSITION_EVENTS: dict[PositionChange, NamedEvent] = {
 }
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class LedgerChange:
+    """One fill's effect on the ledger: folded in memory, not yet durable.
+
+    The atomic path's hand-off (ADR-0043 §4). Making a fill durable is three
+    steps that cannot collapse into one call — fold the aggregates, write them
+    with the order row in a single transaction, *then* make the result readable
+    — because the write takes the *folded* state as its input, so the fold
+    cannot follow the write. This carries the middle state across: ``apply_fill``
+    returns it, the ``ExecutionManager`` checkpoints it, ``project`` publishes it.
+
+    ``account`` is the projection's own aggregate rather than a copy: cash is
+    one pool per process (ADR-0038), so there is nothing to hand over but the
+    reference. ``position`` is a live reference too — both aggregates are
+    mutable and ``apply_fill`` has already advanced them, so a partition that
+    has traded before reads its new size the moment the fold returns. What the
+    split defers is what a reader could otherwise reach *first*: a partition's
+    **first** filing — before it, ``position()`` reports ``None`` — and the
+    ``position.*`` announcement. Keeping the rest off a reader is the
+    ``ExecutionManager``'s doing rather than this type's: it holds no ``await``
+    between the fold and the write, the same no-yield discipline ``Store``
+    documents for a checkpoint.
+
+    A *change*, deliberately not an *entry*: the ledger persists as mutable
+    current-state rows, and ADR-0043 §1 reserves an append-only line-item log as
+    an extension point it does not take. "Entry" is that log's word, so it would
+    name this the row of a table that does not exist.
+    """
+
+    account: Account
+    position: Position
+    changes: tuple[PositionChange, ...]
+
+
 class PortfolioProjection:
     """The one owner of "what do I hold, and what has it earned"."""
 
-    def __init__(self, *, account: Account) -> None:
-        self._account = account
+    def __init__(self, *, spec: AccountSpec, store: Store, clock: Clock) -> None:
+        # The venue's declaration, not just the account opened from it: it is
+        # what tells the recovery path whether this run's genesis was *declared*
+        # (paper) or is *ingested* (live, ``None``), which is the predicate the
+        # genesis seed turns on (ADR-0043 §10).
+        self._spec = spec
+        self._store = store
+        self._clock = clock
+        self._account = Account.open(spec, ts_ns=clock.timestamp_ns())
         # Keyed ``(strategy_id, symbol)`` — the materialized runtime key of the
         # logical ``(account, strategy, symbol)`` grain, the account being a
         # deployment fact (ADR-0038). ``None`` is the reserved unattributed
         # partition, reachable here but never through the seam.
         self._positions: dict[tuple[str | None, str], Position] = {}
 
-    def apply_fill(self, event: OrderFillEvent, *, side: Side) -> None:
+    def apply_fill(self, event: OrderFillEvent, *, side: Side) -> LedgerChange:
         """Fold a fill into its partition and the cash line — the single write
         verb of the Tier-1 path.
 
         ``side`` comes from the saga rather than the event: ``OrderFillEvent``
         carries the trade and the ``Order`` carries the direction, and the
         ``ExecutionManager`` holds both. A redelivered fill is a no-op in both
-        aggregates and announces nothing.
+        aggregates and returns a change with nothing in it, so it announces
+        nothing.
+
+        Returns rather than publishes: the caller must make the returned change
+        durable before handing it back to ``project`` (ADR-0043 §4).
         """
         key = (event.strategy_id, event.symbol)
         position = self._positions.get(key)
         if position is None:
+            # Deliberately not filed here — ``project`` files it, once the write
+            # has landed. A fill the aggregate refuses therefore leaves no trace
+            # in either place: a partition materialized by a refusal would
+            # report a traded-flat record for a symbol that was never traded,
+            # inverting ``position``'s ``None``. The refusal that reaches here is
+            # the non-positive quantity — ``key`` is read off the event itself
+            # and no other writer files a partition, so this seam cannot
+            # misroute one.
             position = Position(strategy_id=event.strategy_id, symbol=event.symbol)
         realized_before = position.realized_pnl
-        # Applied before the partition is filed, so a fill the aggregate refuses
-        # leaves no trace here either: a partition materialized by a refusal
-        # would report a traded-flat record for a symbol that was never traded,
-        # inverting ``position``'s ``None``. The refusal that reaches here is the
-        # non-positive quantity — ``key`` is read off the event itself and no
-        # other writer files a partition, so this seam cannot misroute one.
         changes = position.apply(event, side=side)
-        self._positions[key] = position
-        if not changes:
-            return
-        # Realized PnL is one of the four accruing inputs to cash (ADR-0042 §4),
-        # and the position is what booked it — so the delta is read off the
-        # aggregate rather than recomputed here. That read is also what makes
-        # the cash line idempotent without a second applied set on ``Account``:
-        # ``Position.apply`` is the fill's one gatekeeper, so a redelivery books
-        # nothing and the delta it contributes here is zero by construction.
-        # (The early return above suppresses the *announcement*, not the accrual
-        # — it is not what keeps the cash line from double-counting.)
-        self._account.accrue_realized(
-            position.realized_pnl - realized_before, event_id=event.event_id
-        )
-        for change in changes:
+        if changes:
+            # Realized PnL is one of the four accruing inputs to cash (ADR-0042
+            # §4), and the position is what booked it — so the delta is read off
+            # the aggregate rather than recomputed here. That read is also what
+            # makes the cash line idempotent without a second applied set on
+            # ``Account``: ``Position.apply`` is the fill's one gatekeeper, so a
+            # redelivery books nothing and the delta it contributes here is zero
+            # by construction. Guarding the call on ``changes`` is therefore
+            # tidiness, not what keeps the line from double-counting.
+            self._account.accrue_realized(
+                position.realized_pnl - realized_before, event_id=event.event_id
+            )
+        return LedgerChange(account=self._account, position=position, changes=changes)
+
+    def project(self, change: LedgerChange) -> None:
+        """File ``change``'s partition and announce what the fill did.
+
+        The in-memory half of the atomic path, and the caller's promise that the
+        change is already durable: a partition filed ahead of the write would be
+        readable state the store never recorded, and a ``position.*`` record
+        emitted ahead of it would name a change that a crash could still undo.
+
+        The filing carries a partition's **first** fill and only that one: on
+        every later fill the key already holds this very object, advanced in
+        place by ``apply_fill``, so the announcement is the whole of what this
+        step still keeps behind the write.
+        """
+        position = change.position
+        self._positions[(position.strategy_id, position.symbol)] = position
+        for change_kind in change.changes:
             named_event(
-                _POSITION_EVENTS[change],
-                strategy_id=event.strategy_id,
-                symbol=event.symbol,
+                _POSITION_EVENTS[change_kind],
+                strategy_id=position.strategy_id,
+                symbol=position.symbol,
                 # The size *that change* produced, not the fill's end state. The
                 # two differ only on a flip, where the old leg closes at zero
                 # before the residual opens: reusing the post-fill size for both
@@ -98,8 +163,57 @@ class PortfolioProjection:
                 # invert the name. This catalog is the only place a position
                 # change is observable (ADR-0045 §1), so there is nothing else a
                 # reader could reconcile that against.
-                size="0" if change is PositionChange.CLOSED else str(position.signed_size),
+                size="0" if change_kind is PositionChange.CLOSED else str(position.signed_size),
             )
+
+    def recover(self) -> None:
+        """Restore the ledger from the durable record, seeding paper's genesis
+        row if the store holds none (ADR-0043 §6/§10).
+
+        The runner's **first** recovery step, ahead of ``cache.rebuild()``:
+        cumulative realized PnL, the fee and funding lines and per-strategy
+        attribution are reconstructible from nowhere else (ADR-0043 §1), so a
+        restart that skips this has silently lost them — and on paper there is no
+        venue to heal them from.
+
+        A store with no account row was never opened, so there is nothing to
+        restore and the partitions are empty by the same fact; reading them would
+        be a mass-read for rows that cannot exist.
+
+        (The store's disagreement refusals — a swapped account, a paper store
+        with order history and no ledger — are #188's, and land ahead of the seed
+        in this same step.)
+        """
+        stored = self._store.load_account()
+        if stored is None:
+            self._seed_genesis()
+            return
+        self._account = stored
+        # The reserved unattributed partition comes back with everything else
+        # (ADR-0043 §9): ADR-0034's Σ-invariant holds by construction only if it
+        # is restored too, so the filtering belongs at the seam, not here.
+        self._positions = {
+            (position.strategy_id, position.symbol): position
+            for position in self._store.all_positions()
+        }
+
+    def _seed_genesis(self) -> None:
+        """Open the durable ledger at the genesis the venue *declared* (ADR-0043 §6).
+
+        Gated on ``genesis_collateral is not None`` — the predicate that says the
+        opening balance was declared rather than ingested, which is the same fact
+        as "this path has no venue to heal from" (ADR-0043 §10). On live the
+        number is ``accountValue − Σ unrealized_pnl`` read at the startup barrier,
+        which has not run yet, so seeding here would persist a genesis of zero as
+        though someone had chosen it and leave the barrier correcting a row it was
+        supposed to create.
+
+        The in-memory account already opened at exactly this value, so the write
+        makes the ledger durable rather than changing it.
+        """
+        if self._spec.genesis_collateral is None:
+            return
+        self._store.checkpoint_ledger(account=self._account, ts_ns=self._clock.timestamp_ns())
 
     def position(self, symbol: str, *, strategy_id: str | None) -> PositionView | None:
         """One partition's frozen Tier-1 snapshot, or ``None`` if never traded."""
