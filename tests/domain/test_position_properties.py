@@ -9,7 +9,7 @@ oracles do in one shot.
 
 from decimal import Decimal
 
-from hypothesis import given
+from hypothesis import example, given
 from hypothesis import strategies as st
 
 from tickwright.domain import OrderFilled, OrderFillEvent, Position, Side
@@ -45,7 +45,7 @@ def _fold(fills: list[tuple[Side, Decimal, Decimal]]) -> Position:
     return position
 
 
-def _agrees(actual: Decimal, expected: Decimal) -> bool:
+def _agrees(actual: Decimal, expected: Decimal, *, scale: Decimal) -> bool:
     """Whether two ``Decimal``s agree to within the context's working precision.
 
     The aggregate folds one fill at a time, rounding at 28 significant digits on
@@ -54,9 +54,15 @@ def _agrees(actual: Decimal, expected: Decimal) -> bool:
     band below is that with room to spare. ADR-0034's "Tier-1 is exact at venue
     precision" is a claim about venue-quantized quantities, not about an
     arbitrary generated fold.
+
+    ``scale`` is the caller's — the magnitude of the *terms* the fold summed,
+    never of the value it arrived at. The rounding error is inherited from the
+    intermediates, so a result that cancelled down to a fraction of them (a
+    round trip closed near its entry realizes cents out of tens of thousands)
+    carries an error the result's own magnitude cannot pay for (#207). There is
+    no defensible default here: only the caller knows what its oracle summed.
     """
-    scale = max(abs(actual), abs(expected), Decimal(1))
-    return abs(actual - expected) <= scale * Decimal("1e-24")
+    return abs(actual - expected) <= max(scale, Decimal(1)) * Decimal("1e-24")
 
 
 @given(fills=_FILLS)
@@ -91,10 +97,21 @@ def test_average_entry_is_the_weighted_mean_whatever_order_the_fills_arrive_in(
     entry = _fold([(side, q, p) for q, p in fills]).entry_price
     reordered = _fold([(side, q, p) for q, p in shuffled]).entry_price
 
-    assert _agrees(entry, expected)
-    assert _agrees(reordered, entry)
+    # Every term the weighted mean divides is a price, so the dearest of them
+    # bounds the magnitude the fold's divisions round against.
+    scale = max(p for _q, p in fills)
+
+    assert _agrees(entry, expected, scale=scale)
+    assert _agrees(reordered, entry, scale=scale)
 
 
+@example(
+    fills=[
+        (Side.SELL, Decimal("0.002"), Decimal("1.00")),
+        (Side.SELL, Decimal("0.541"), Decimal("16113.91")),
+        (Side.BUY, Decimal("0.541"), Decimal("16107.44")),
+    ]
+)
 @given(fills=_FILLS)
 def test_a_sequence_that_ends_flat_realizes_proceeds_minus_cost(
     fills: list[tuple[Side, Decimal, Decimal]],
@@ -105,6 +122,11 @@ def test_a_sequence_that_ends_flat_realizes_proceeds_minus_cost(
 
     Appending the closing fill is what makes the case reachable at all: a
     generated sequence lands flat too rarely to test by filtering.
+
+    The pinned example is #207's: a round trip whose two legs cancel from
+    ~8.7e3 down to ~1.9, so the answer is ~4000× smaller than the terms that
+    produced it. It rides in the source because ``.hypothesis/`` is gitignored
+    and CI would otherwise never see it.
     """
     net = sum((q if side is Side.BUY else -q for side, q, _p in fills), start=Decimal("0"))
     closing_price = Decimal("777.77")
@@ -118,9 +140,13 @@ def test_a_sequence_that_ends_flat_realizes_proceeds_minus_cost(
         start=Decimal("0"),
     )
 
+    # Gross notional, not the netted result: the fold's error is carried by the
+    # legs, and the two can differ by orders of magnitude when they cancel.
+    gross = sum((abs(q * p) for _side, q, p in sequence), start=Decimal("0"))
+
     assert position.is_flat
     assert position.entry_price == Decimal("0")
-    assert _agrees(position.realized_pnl, proceeds)
+    assert _agrees(position.realized_pnl, proceeds, scale=gross)
 
 
 @given(fills=_FILLS, redelivery=st.randoms(use_true_random=False))
