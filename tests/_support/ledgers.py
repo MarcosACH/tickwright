@@ -1,10 +1,13 @@
-"""A ready-made ledger for suites whose subject is not the accounting surface.
+"""Ready-made accounting wiring for suites whose subject is not the accounting
+surface.
 
-The ``ExecutionManager`` and the ``Engine`` both require a ``PortfolioProjection``
-— the manager is the projection's single writer, and making that optional would
-ship an engine whose accounting can be silently absent. Most suites care about
-the saga rather than the ledger, so they take one from here rather than
-open a paper account by hand at every wiring site.
+The ``ExecutionManager`` requires a ``Checkpointer`` — it is the read-models'
+single writer, and making that optional would ship a manager whose accounting
+can be silently absent. Most suites care about the saga rather than the ledger,
+so they take one from ``checkpointer`` below rather than open a paper account by
+hand at every wiring site. An ``Engine`` needs none: it opens its own over the
+store it is given (#213), and hands out the scoped facade through
+``portfolio_for``.
 
 Suites that *are* about the accounting surface (``tests/engine/test_portfolio.py``,
 ``tests/engine/test_tracer_e2e.py``) build theirs explicitly, because how the
@@ -18,8 +21,8 @@ the number twice.
 from decimal import Decimal
 
 from tickwright.adapters.clock import ManualClock
-from tickwright.adapters.store import SQLiteStore
-from tickwright.domain import AccountSpec, OrderFillEvent, Side, Store
+from tickwright.domain import AccountSpec, Clock, OrderFillEvent, Side, Store
+from tickwright.engine.checkpoint import Checkpointer
 from tickwright.engine.portfolio import PortfolioProjection
 
 GENESIS = Decimal("100000")
@@ -34,23 +37,42 @@ so a suite that opens the two from separate declarations is a suite that can fai
 for a reason unrelated to what it asserts."""
 
 
-def ledger(store: Store | None = None, *, genesis: Decimal = GENESIS) -> PortfolioProjection:
-    """A fresh ledger on a paper-shaped account.
+def _spec(genesis: Decimal) -> AccountSpec:
+    return AccountSpec(account_id="paper-default", genesis_collateral=genesis)
 
-    Pass the suite's own ``store`` wherever the fill path is exercised: a fill
-    writes the order row and the ledger rows in one transaction (ADR-0043 §4), so
-    a projection pointed at a *different* store than the ``Cache`` splits the one
-    write the atomicity argument rests on. The private in-memory default is for
-    the wiring sites that never fill — they need a projection, not a ledger.
+
+def checkpointer(store: Store, *, clock: Clock, genesis: Decimal = GENESIS) -> Checkpointer:
+    """The manager's one collaborator, over the suite's own ``store`` and clock.
+
+    This is what a saga-focused suite wires: the ``Checkpointer`` builds both
+    read-models from the single ``store`` handed in, so the fill's one
+    transaction (ADR-0043 §4) is one by construction and a suite can no longer
+    split it by pointing an order cache and a ledger at two stores. Reach the
+    projections through ``.cache`` / ``.portfolio`` where a case reads them back.
+
+    ``clock`` is required for the same reason ``store`` is, and it is the reason
+    neither is defaulted here: the manager takes its time source from the
+    ``Checkpointer``, so a private default would let a suite advance its venue's
+    clock while the saga's stamps stayed frozen on another — the two-timeline
+    split the type exists to make unwireable, reintroduced by the helper that
+    wires it.
 
     Override ``genesis`` only where the opening balance is itself the subject; a
     suite that also wires a venue must move both or neither.
     """
-    return PortfolioProjection(
-        spec=AccountSpec(account_id="paper-default", genesis_collateral=genesis),
-        store=store if store is not None else SQLiteStore(":memory:"),
-        clock=ManualClock(start_ns=0),
-    )
+    return Checkpointer(spec=_spec(genesis), store=store, clock=clock)
+
+
+def ledger(store: Store, *, genesis: Decimal = GENESIS) -> PortfolioProjection:
+    """A bare ledger, for the few cases that read the accounting surface without
+    a saga in sight — a strategy harness, say, whose subject is the ``Portfolio``
+    seam rather than the write path that moves it.
+
+    Anything wiring an ``ExecutionManager`` wants ``checkpointer`` above instead:
+    the manager no longer takes a projection on its own, precisely so that the
+    store behind it cannot diverge from the order cache's.
+    """
+    return PortfolioProjection(spec=_spec(genesis), store=store, clock=ManualClock(start_ns=0))
 
 
 def book_fill(projection: PortfolioProjection, event: OrderFillEvent, *, side: Side) -> None:

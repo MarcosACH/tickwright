@@ -36,7 +36,6 @@ from tickwright.domain import (
     Strategy,
 )
 from tickwright.engine.guard import NoopGuard, RealGuard
-from tickwright.engine.portfolio import PortfolioProjection
 from tickwright.engine.runner import Engine
 from tickwright.strategies import SingleShotLimitStrategy, SingleShotMarketStrategy
 
@@ -173,31 +172,18 @@ def build_guard(
             assert_never(unreachable)
 
 
-def build_portfolio(exchange: Exchange, *, store: Store, clock: Clock) -> PortfolioProjection:
-    """Open the process's one ledger against the account the venue declares.
-
-    Which venue it is decides nothing here: the opening cash rides the
-    ``AccountSpec`` the exchange hands over, and how paper's declared number and
-    live's ingested one resolve is ``Account.open``'s rule (ADR-0042 §6). This
-    root's job is to open exactly one ledger, against exactly the account the
-    engine's own exchange trades.
-
-    The spec goes over rather than an account opened from it: the projection's
-    recovery reads ``genesis_collateral is not None`` to tell a *declared*
-    opening balance from an *ingested* one (ADR-0043 §10), and an ``Account``
-    has already resolved that distinction away.
-    """
-    return PortfolioProjection(spec=exchange.account_spec(), store=store, clock=clock)
-
-
 def build_engine(config: AppConfig) -> Engine:
     """Construct every concrete and hand the ``Engine`` a wired, tradable stack.
 
     The venue's ``InstrumentSpec``s flow into the venue-agnostic guard here
-    (ADR-0031) — the one placement where both sides are concrete. The same holds
-    for the portfolio: this is where the projection and the strategies are both
-    in scope, so this is where each strategy gets its scoped ``Portfolio`` facade
-    (ADR-0041 §7), exactly as it already gets its ``Clock``.
+    (ADR-0031) — the one placement where both sides are concrete. The portfolio
+    is the other half of that story and no longer built here: the ledger and the
+    order ``Cache`` must write one store for the fill's single transaction to be
+    single (ADR-0043 §4), so the ``Engine`` opens it beside the ``Cache`` from
+    the ``store`` and ``Exchange`` it already holds. This root keeps the job
+    ADR-0041 §7 gives it — a strategy receives its facade as an ``__init__``
+    argument, exactly as it receives its ``Clock`` — and now *resolves* that
+    facade off the engine rather than off a projection of its own.
     """
     bus = build_bus(config)
     clock = build_clock(config)
@@ -205,14 +191,12 @@ def build_engine(config: AppConfig) -> Engine:
     exchange = build_exchange(config, bus=bus, clock=clock)
     feed = build_feed(config, bus=bus, clock=clock)
     guard = build_guard(config, specs=exchange.instrument_specs(), store=store, clock=clock)
-    portfolio = build_portfolio(exchange, store=store, clock=clock)
     engine = Engine(
         bus=bus,
         clock=clock,
         store=store,
         exchange=exchange,
         feed=feed,
-        portfolio=portfolio,
         guard=guard,
         config=config.engine,
     )
@@ -222,7 +206,7 @@ def build_engine(config: AppConfig) -> Engine:
                 strategy_config,
                 bus=bus,
                 clock=clock,
-                portfolio=portfolio.for_strategy(strategy_config.strategy_id),
+                portfolio=engine.portfolio_for(strategy_config.strategy_id),
             ),
             symbols={strategy_config.symbol},
         )

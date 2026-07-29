@@ -16,7 +16,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from ledgers import GENESIS, ledger
+from ledgers import GENESIS, checkpointer
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
@@ -55,6 +55,7 @@ from tickwright.domain import (
 )
 from tickwright.domain.enums import OrderType
 from tickwright.engine.cache import Cache
+from tickwright.engine.checkpoint import Checkpointer
 from tickwright.engine.execution import ExecutionManager
 from tickwright.engine.portfolio import PortfolioProjection
 
@@ -129,29 +130,32 @@ class _Wiring:
     bus: InMemoryBus
     clock: ManualClock
     store: SQLiteStore
-    cache: Cache
-    portfolio: PortfolioProjection
+    checkpointer: Checkpointer
     order_events: list[OrderEvent]
+
+    @property
+    def cache(self) -> Cache:
+        return self.checkpointer.cache
+
+    @property
+    def portfolio(self) -> PortfolioProjection:
+        return self.checkpointer.portfolio
 
 
 def _wiring(store: SQLiteStore) -> _Wiring:
     """The manager over its real collaborators, on the ``store`` handed in — so a
-    case can substitute one that fails at a chosen seam."""
+    case can substitute one that fails at a chosen seam.
+
+    Both read-models come from the one ``Checkpointer`` built on that store, so
+    this harness cannot express the split write the atomic path exists to close
+    (ADR-0043 §4) even by accident."""
     bus = InMemoryBus()
     clock = ManualClock(start_ns=1_000)
     exchange = PaperExchange(
         bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
     )
-    cache = Cache(store=store)
-    portfolio = ledger(store)
-    manager = ExecutionManager(
-        bus=bus,
-        clock=clock,
-        store=store,
-        exchange=exchange,
-        cache=cache,
-        portfolio=portfolio,
-    )
+    checks = checkpointer(store, clock=clock)
+    manager = ExecutionManager(bus=bus, exchange=exchange, checkpointer=checks)
 
     bus.subscribe(Signal, manager.on_signal)
     bus.subscribe(ExecutionReport, manager.on_execution_report)
@@ -162,8 +166,7 @@ def _wiring(store: SQLiteStore) -> _Wiring:
         bus=bus,
         clock=clock,
         store=store,
-        cache=cache,
-        portfolio=portfolio,
+        checkpointer=checks,
         order_events=order_events,
     )
 
@@ -886,16 +889,9 @@ def test_a_restart_rebuilt_cache_dedups_a_redelivered_place_signal() -> None:
     exchange2 = PaperExchange(
         bus=bus2, clock=clock2, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
     )
-    cache2 = Cache(store=store)
-    cache2.rebuild()
-    manager2 = ExecutionManager(
-        bus=bus2,
-        clock=clock2,
-        store=store,
-        exchange=exchange2,
-        cache=cache2,
-        portfolio=ledger(store),
-    )
+    checkpointer2 = checkpointer(store, clock=clock2)
+    checkpointer2.recover()
+    manager2 = ExecutionManager(bus=bus2, exchange=exchange2, checkpointer=checkpointer2)
     bus2.subscribe(Signal, manager2.on_signal)
     bus2.subscribe(ExecutionReport, manager2.on_execution_report)
     second_life_events: list[OrderEvent] = []
@@ -922,14 +918,8 @@ def _stochastic_harness(
         fill_model=fill_model,  # type: ignore[arg-type]
         genesis_collateral=GENESIS,
     )
-    cache = Cache(store=store)
     manager = ExecutionManager(
-        bus=bus,
-        clock=clock,
-        store=store,
-        exchange=exchange,
-        cache=cache,
-        portfolio=ledger(store),
+        bus=bus, exchange=exchange, checkpointer=checkpointer(store, clock=clock)
     )
 
     bus.subscribe(Signal, manager.on_signal)

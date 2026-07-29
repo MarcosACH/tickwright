@@ -13,7 +13,7 @@ import asyncio
 from decimal import Decimal
 
 import pytest
-from ledgers import GENESIS, ledger
+from ledgers import GENESIS, checkpointer
 from venue_doubles import VenueDouble
 
 from tickwright.adapters.bus import InMemoryBus
@@ -97,15 +97,13 @@ def _second_life(
 ) -> tuple[InMemoryBus, Cache, Reconciler, list[OrderEvent]]:
     """Recovery wiring: rebuilt Cache, fresh bus/manager, the Reconciler."""
     bus = InMemoryBus()
-    cache = Cache(store=store)
+    checks = checkpointer(store, clock=clock)
+    cache = checks.cache
     cache.rebuild()
     manager = ExecutionManager(
         bus=bus,
-        clock=clock,
-        store=store,
         exchange=exchange,
-        cache=cache,
-        portfolio=ledger(store),
+        checkpointer=checks,
     )
     bus.subscribe(Signal, manager.on_signal)
     bus.subscribe(ExecutionReport, manager.on_execution_report)
@@ -297,7 +295,8 @@ def test_sustained_venue_outage_trips_the_barrier_to_faulted_after_the_window() 
     store.checkpoint(_saga("0xabc", OrderState.SUBMITTED), ts_ns=500)
 
     bus = InMemoryBus()
-    cache = Cache(store=store)
+    checks = checkpointer(store, clock=clock)
+    cache = checks.cache
     cache.rebuild()
     venue = _DarkVenue()
     reconciler = Reconciler(
@@ -330,7 +329,8 @@ def test_backoff_is_capped_so_faulting_never_overshoots_the_window_by_much() -> 
     store.checkpoint(_saga("0xabc", OrderState.SUBMITTED), ts_ns=500)
 
     bus = InMemoryBus()
-    cache = Cache(store=store)
+    checks = checkpointer(store, clock=clock)
+    cache = checks.cache
     cache.rebuild()
     venue = _DarkVenue()
     reconciler = Reconciler(
@@ -365,16 +365,14 @@ def test_a_transient_boot_time_blip_resolves_and_the_barrier_clears() -> None:
     store.checkpoint(_saga("0xabc", OrderState.SUBMITTED), ts_ns=500)
 
     bus = InMemoryBus()
-    cache = Cache(store=store)
+    checks = checkpointer(store, clock=clock)
+    cache = checks.cache
     cache.rebuild()
     venue = _BlippingVenue(failures=2)
     manager = ExecutionManager(
         bus=bus,
-        clock=clock,
-        store=store,
         exchange=venue,
-        cache=cache,
-        portfolio=ledger(store),
+        checkpointer=checks,
     )
     bus.subscribe(ExecutionReport, manager.on_execution_report)
     reconciler = Reconciler(

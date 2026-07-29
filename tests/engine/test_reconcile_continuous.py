@@ -15,7 +15,7 @@ import pytest
 import structlog.testing
 from hypothesis import given
 from hypothesis import strategies as st
-from ledgers import GENESIS, ledger
+from ledgers import GENESIS, checkpointer
 from venue_doubles import VenueDouble, VenueLink
 
 from tickwright.adapters.bus import InMemoryBus
@@ -106,15 +106,13 @@ def _wire(
     """The shared running-engine wiring: a Cache projection, the ExecutionManager,
     and the Reconciler on one bus, with an OrderEvent sink."""
     bus = InMemoryBus()
-    cache = Cache(store=store)
+    checks = checkpointer(store, clock=clock)
+    cache = checks.cache
     cache.rebuild()
     manager = ExecutionManager(
         bus=bus,
-        clock=clock,
-        store=store,
         exchange=exchange,
-        cache=cache,
-        portfolio=ledger(store),
+        checkpointer=checks,
     )
     bus.subscribe(Signal, manager.on_signal)
     bus.subscribe(ExecutionReport, manager.on_execution_report)

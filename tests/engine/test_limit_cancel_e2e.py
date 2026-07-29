@@ -14,7 +14,7 @@ import json
 from decimal import Decimal
 from pathlib import Path
 
-from ledgers import GENESIS, ledger
+from ledgers import GENESIS, checkpointer
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
@@ -34,7 +34,6 @@ from tickwright.domain import (
     Signal,
     derive_cloid,
 )
-from tickwright.engine.cache import Cache
 from tickwright.engine.execution import ExecutionManager
 from tickwright.strategies import SingleShotLimitStrategy
 
@@ -64,14 +63,11 @@ def _run(
     exchange = PaperExchange(
         bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
     )
-    cache = Cache(store=store)
+    checks = checkpointer(store, clock=clock)
     manager = ExecutionManager(
         bus=bus,
-        clock=clock,
-        store=store,
         exchange=exchange,
-        cache=cache,
-        portfolio=ledger(store),
+        checkpointer=checks,
     )
     strategy = SingleShotLimitStrategy(
         strategy_id="trivial",

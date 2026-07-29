@@ -15,6 +15,7 @@ from ledgers import book_fill, ledger
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
+from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     AggressorSide,
     MarketTick,
@@ -54,7 +55,9 @@ def _harness(
         clock=clock,
         # A real projection, scoped exactly as the composition root scopes it —
         # the strategy holds the ``domain`` Protocol and never the concrete.
-        portfolio=(projection if projection is not None else ledger()).for_strategy("trivial"),
+        portfolio=(
+            projection if projection is not None else ledger(SQLiteStore(":memory:"))
+        ).for_strategy("trivial"),
         side=Side.BUY,
         quantity=Decimal("0.5"),
     )
@@ -143,7 +146,7 @@ def test_records_order_filled_and_ignores_other_events() -> None:
 def test_records_the_position_it_reads_back_through_the_portfolio_seam() -> None:
     """The seam's only consumer, exercised against a real projection: the read
     is scoped to this strategy and needs no argument to say so."""
-    projection = ledger()
+    projection = ledger(SQLiteStore(":memory:"))
     _, _, strategy, _ = _harness(projection)
     filled = OrderFilled(
         ts_event=2,

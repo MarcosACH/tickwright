@@ -19,7 +19,7 @@ import pytest
 from bus_backends import BUS_BACKENDS, make_bus
 from hypothesis import given
 from hypothesis import strategies as st
-from ledgers import GENESIS, ledger
+from ledgers import GENESIS, checkpointer
 
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
@@ -40,7 +40,6 @@ from tickwright.domain import (
     TimeInForce,
     derive_cloid,
 )
-from tickwright.engine.cache import Cache
 from tickwright.engine.execution import ExecutionManager
 
 _CLOID = derive_cloid("trivial:BTC:1")
@@ -53,14 +52,11 @@ def _wire(backend: str) -> tuple[EventBus, SQLiteStore, list[OrderEvent]]:
     exchange = PaperExchange(
         bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
     )
-    cache = Cache(store=store)
+    checks = checkpointer(store, clock=clock)
     manager = ExecutionManager(
         bus=bus,
-        clock=clock,
-        store=store,
         exchange=exchange,
-        cache=cache,
-        portfolio=ledger(store),
+        checkpointer=checks,
     )
 
     bus.subscribe(Signal, manager.on_signal)

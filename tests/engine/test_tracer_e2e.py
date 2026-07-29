@@ -45,9 +45,8 @@ from tickwright.domain import (
     TimeInForce,
     derive_cloid,
 )
-from tickwright.engine.cache import Cache
+from tickwright.engine.checkpoint import Checkpointer
 from tickwright.engine.execution import ExecutionManager
-from tickwright.engine.portfolio import PortfolioProjection
 from tickwright.strategies import SingleShotMarketStrategy
 
 # The paper account's opening cash, declared here rather than taken from
@@ -97,13 +96,12 @@ def _run(
     exchange = PaperExchange(
         bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
     )
-    cache = Cache(store=store)
-    # Opened off the venue's own spec, exactly as the composition root does, so
-    # the ledger this tracer asserts on is seeded the way a real run's is.
-    projection = PortfolioProjection(spec=exchange.account_spec(), store=store, clock=clock)
-    manager = ExecutionManager(
-        bus=bus, clock=clock, store=store, exchange=exchange, cache=cache, portfolio=projection
-    )
+    # Opened off the venue's own spec, exactly as the ``Engine`` does, so the
+    # ledger this tracer asserts on is seeded the way a real run's is — and over
+    # the one store its order cache projects.
+    checks = Checkpointer(spec=exchange.account_spec(), store=store, clock=clock)
+    projection = checks.portfolio
+    manager = ExecutionManager(bus=bus, exchange=exchange, checkpointer=checks)
     strategy = SingleShotMarketStrategy(
         strategy_id="trivial",
         bus=bus,
