@@ -24,7 +24,9 @@ src/tickwright/
   engine/
     portfolio.py       # PortfolioProjection + ScopedPortfolio + mark cache   NEW
     ledger_reconcile.py# LedgerReconciliation — the account-grain heal cycle  NEW
-    execution.py       # + the atomic fill checkpoint
+    checkpoint.py      # Checkpointer: both read-models over one Store, and   NEW
+                       #   the orderings their writes obey (#213)
+    execution.py       # + the atomic fill checkpoint, taken via Checkpointer
     cache.py           # + project() (in-memory half, for the atomic path)
     strategy_host.py   # + symbol-ownership and __unattributed__ fail-fasts
     runner.py          # + recover step, exchange.start/stop, barrier
@@ -315,7 +317,8 @@ Callers must know: the strategy holds the **`domain` Protocol**, never the `Port
 app ────────────────▶ engine, adapters/*, venues/*, strategies, domain, observability
 engine/portfolio ───▶ domain (Protocols only), observability
 engine/ledger_reconcile ▶ domain, observability, engine/portfolio
-engine/execution ───▶ domain, observability, engine/{cache,portfolio}
+engine/checkpoint ──▶ domain, engine/{cache,portfolio}
+engine/execution ───▶ domain, observability, engine/checkpoint
 adapters/paper ─────▶ domain, observability
 adapters/feed ──────▶ domain, observability
 adapters/store ─────▶ domain, observability
@@ -327,7 +330,7 @@ domain ─────────────▶ (nothing)
 
 No cycles, and no new edge in the package graph — every addition lands inside a package that already had that dependency. `domain` stays stdlib-only and log-free; `strategies` reaches portfolio state through the `domain` `Portfolio` Protocol and still never imports `engine`. Enforced by the existing `import-linter` contract (ADR-0032).
 
-One intra-`engine` edge is new and deliberate: `ledger_reconcile` and `execution` both depend on `portfolio`, and `portfolio` depends on neither. The projection is the shared write path; nothing it owns reaches back out.
+One intra-`engine` edge is new and deliberate: `ledger_reconcile` and `checkpoint` both depend on `portfolio`, and `portfolio` depends on neither. The projection is the shared write path; nothing it owns reaches back out. Since [#213](https://github.com/MarcosACH/tickwright/issues/213) `execution` reaches it only *through* `checkpoint`, and holds no edge to `cache` or `portfolio` of its own — which is the graph-level statement of the same rule: the two read-models arrive together, from one module, over one `Store`.
 
 ## Out of scope
 
