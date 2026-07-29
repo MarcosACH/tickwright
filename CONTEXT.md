@@ -344,8 +344,10 @@ operation. A **restore constructor** (`Order.restore`, `Account.restore`,
 field-by-field and **deliberately bypasses those checks**, because a checkpointed row is the outcome
 of transitions already adjudicated — re-adjudicating it would refuse to recover a correct saga.
 `apply` guards the future; `restore` reproduces the past. Constructor-level validators are reserved
-for **configuration** dataclasses (`StochasticParams`), which are declared once at wiring and have no
-later operation to attach a rule to. See ADR-0047, ADR-0014, ADR-0008, ADR-0043.
+for **operator-authored configuration** (`StochasticParams`), validated at its declaration site in
+the config layer because there is no later operation to attach a rule to — never for the
+adapter-authored [[AccountSpec]] and [[Instrument spec]], which are built once at composition too
+but carry venue truth, not a knob. See ADR-0047, ADR-0014, ADR-0008, ADR-0043.
 _Avoid_: validation, sanitization (name the verb that is guarded).
 
 **Correlation id**:
