@@ -10,7 +10,9 @@ final strategy snapshots, resting ``LIVE`` orders left alone, store closed last.
 
 The Engine consumes seam Protocols only (ADR-0032): the composition root hands
 it already-built concretes and it constructs its own internals (``Cache``,
-``ExecutionManager``, ``Reconciler``, ``StrategyHost``) from them. Venue-sim
+``PortfolioProjection``, ``ExecutionManager``, ``Reconciler``, ``StrategyHost``)
+from them — the two read-models included, so the order cache and the ledger hold
+one ``Store`` and the fill's write is one transaction (ADR-0043 §4). Venue-sim
 wiring that is not a seam — the paper exchange filling off the tick stream — the
 paper adapter owns itself (it self-subscribes at construction, ADR-0012), so
 neither the Engine nor the composition root carries a paper-specific tick line;
