@@ -15,12 +15,15 @@ from ledgers import book_fill
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
+    Account,
     AccountSpec,
     InvariantViolation,
     OrderFilled,
     OrderFillEvent,
     Portfolio,
+    Position,
     Side,
+    Store,
 )
 from tickwright.engine.portfolio import PortfolioProjection
 from tickwright.observability.testing import capture_events
@@ -48,9 +51,21 @@ def _fill(
     )
 
 
-def _projection(genesis: str = "100000") -> PortfolioProjection:
-    spec = AccountSpec(account_id="paper-default", genesis_collateral=Decimal(genesis))
-    return PortfolioProjection(spec=spec, store=SQLiteStore(":memory:"), clock=ManualClock(7))
+def _projection(
+    genesis: str | None = "100000", *, store: Store | None = None
+) -> PortfolioProjection:
+    """A ledger on a paper-shaped account, unless ``genesis`` is ``None`` — which
+    is the *live* shape, where the opening value is ingested from the venue
+    rather than declared (ADR-0042 §6) and is the predicate recovery reads."""
+    spec = AccountSpec(
+        account_id="paper-default",
+        genesis_collateral=Decimal(genesis) if genesis is not None else None,
+    )
+    return PortfolioProjection(
+        spec=spec,
+        store=store if store is not None else SQLiteStore(":memory:"),
+        clock=ManualClock(7),
+    )
 
 
 def test_a_fill_lands_in_its_partition_and_reads_back_through_the_seam() -> None:
@@ -253,3 +268,151 @@ def test_a_zero_quantity_fill_faults_the_projection_and_announces_nothing() -> N
     assert _announcements(logs) == []
     assert portfolio.position("BTC") is None  # not even a materialized empty partition
     assert portfolio.account().cash == Decimal("100000")
+
+
+def test_recover_restores_the_cash_line_and_every_partition_it_finds() -> None:
+    """Cumulative realized PnL, the fee and funding lines and per-strategy
+    attribution are reconstructible from nowhere else (ADR-0043 §1), so a restart
+    that does not read them back has lost them.
+
+    The durable rows are declared here rather than produced by a first life's
+    fills: what a fill computes is asserted by the cases above, and what makes it
+    durable is asserted at the ``ExecutionManager`` seam. Restoring *these*
+    numbers is this case's subject, so they are literals — a first life would
+    hand recovery the same arithmetic the assertions would then have to repeat.
+    """
+    store = SQLiteStore(":memory:")
+    store.checkpoint_ledger(
+        account=Account.restore(
+            account_id="paper-default",
+            genesis_collateral=Decimal("100000"),
+            genesis_ts_ns=7,
+            cash=Decimal("100100"),
+        ),
+        positions=[
+            Position(
+                strategy_id="alpha",
+                symbol="BTC",
+                signed_size=Decimal("2"),
+                entry_price=Decimal("100"),
+                realized_pnl=Decimal("100"),
+            ),
+            Position(
+                strategy_id="beta",
+                symbol="ETH",
+                signed_size=Decimal("-5"),
+                entry_price=Decimal("3000"),
+            ),
+        ],
+        ts_ns=2_000,
+    )
+    projection = _projection(store=store)
+
+    projection.recover()
+
+    alpha = projection.for_strategy("alpha").position("BTC")
+    assert alpha is not None
+    assert alpha.size == Decimal("2")
+    assert alpha.realized_pnl == Decimal("100")
+    beta = projection.for_strategy("beta").position("ETH")
+    assert beta is not None
+    assert beta.size == Decimal("-5")
+    # One pool per process, so either facade reads the same restored line — and
+    # it is the accrued cash, not the genesis the projection opened at.
+    assert projection.for_strategy("alpha").account().cash == Decimal("100100")
+
+
+def test_recover_fabricates_no_partition_the_store_does_not_hold() -> None:
+    """A restart may not invent a flat position (ADR-0041 §3/§6). "Flat with
+    history" and "never traded here" are different answers, and recovery has to
+    keep telling them apart: the first is a row the store holds, the second is a
+    row it does not, and a projection that seeded partitions for the symbols it
+    expects would report the second as the first — a traded-flat record for a
+    symbol nothing ever filled on.
+    """
+    store = SQLiteStore(":memory:")
+    store.checkpoint_ledger(
+        account=Account.restore(
+            account_id="paper-default",
+            genesis_collateral=Decimal("100000"),
+            genesis_ts_ns=7,
+            cash=Decimal("100100"),
+        ),
+        positions=[Position(strategy_id="alpha", symbol="BTC", realized_pnl=Decimal("100"))],
+        ts_ns=2_000,
+    )
+    projection = _projection(store=store)
+
+    projection.recover()
+
+    portfolio = projection.for_strategy("alpha")
+    assert portfolio.position("ETH") is None  # no row: honestly absent
+    restored = portfolio.position("BTC")
+    assert restored is not None  # a row: flat, and its realized survives
+    assert restored.size == Decimal("0")
+    assert restored.realized_pnl == Decimal("100")
+    assert portfolio.open_positions() == ()  # flat holds no exposure to list
+
+
+def test_a_paper_start_against_an_empty_store_seeds_the_configured_genesis() -> None:
+    """The paper genesis row is written inside ``recover()``, not at the first fill
+    and not on a cadence (ADR-0043 §6).
+
+    Its opening cash is a config value already in hand, so the write cannot fail
+    on connectivity and has nothing to retry — which is why it sits here rather
+    than at the barrier where live's ingested twin has to. Writing it later would
+    reproduce on the *default* path the state the barrier's live step exists to
+    prevent: strategies started, ``account()`` read, and no cash at all.
+    """
+    store = SQLiteStore(":memory:")
+    projection = _projection("50000", store=store)
+
+    projection.recover()
+
+    seeded = store.load_account()
+    assert seeded is not None
+    assert seeded.account_id == "paper-default"
+    assert seeded.genesis_collateral == Decimal("50000")
+    assert seeded.cash == Decimal("50000")  # nothing has accrued away from it yet
+
+
+def test_a_restart_restores_the_ledger_rather_than_re_seeding_genesis() -> None:
+    """Seeded exactly once. The second life opens its in-memory account at the
+    same configured genesis, so a ``recover()`` that wrote unconditionally would
+    look correct on a first run and silently reset the cash line on every restart
+    after one — paper's ledger has no venue to be corrected against.
+    """
+    store = SQLiteStore(":memory:")
+    _projection("50000", store=store).recover()
+    # The first life then trades at a loss and checkpoints, as a fill would.
+    store.checkpoint_ledger(
+        account=Account.restore(
+            account_id="paper-default",
+            genesis_collateral=Decimal("50000"),
+            genesis_ts_ns=7,
+            cash=Decimal("49000"),
+        ),
+        ts_ns=3_000,
+    )
+
+    second = _projection("50000", store=store)
+    second.recover()
+
+    assert second.account().cash == Decimal("49000")  # restored, not back at genesis
+    reread = store.load_account()
+    assert reread is not None
+    assert reread.cash == Decimal("49000")
+
+
+def test_a_live_start_against_an_empty_store_seeds_nothing() -> None:
+    """The seed is paper's alone, gated on the genesis the venue declares
+    (ADR-0043 §10). Live's opening value is ``accountValue − Σ unrealized_pnl``,
+    ingested at the startup barrier that has not run yet — so a seed here would
+    persist a zero genesis as though an operator had chosen it, and #191's
+    materialisation would be correcting a row instead of creating one.
+    """
+    store = SQLiteStore(":memory:")
+
+    _projection(None, store=store).recover()
+
+    assert store.load_account() is None

@@ -150,6 +150,55 @@ class PortfolioProjection:
                 size="0" if change is PositionChange.CLOSED else str(position.signed_size),
             )
 
+    def recover(self) -> None:
+        """Restore the ledger from the durable record, seeding paper's genesis
+        row if the store holds none (ADR-0043 §6/§10).
+
+        The runner's **first** recovery step, ahead of ``cache.rebuild()``:
+        cumulative realized PnL, the fee and funding lines and per-strategy
+        attribution are reconstructible from nowhere else (ADR-0043 §1), so a
+        restart that skips this has silently lost them — and on paper there is no
+        venue to heal them from.
+
+        A store with no account row was never opened, so there is nothing to
+        restore and the partitions are empty by the same fact; reading them would
+        be a mass-read for rows that cannot exist.
+
+        (The store's disagreement refusals — a swapped account, a paper store
+        with order history and no ledger — are #188's, and land ahead of the seed
+        in this same step.)
+        """
+        stored = self._store.load_account()
+        if stored is None:
+            self._seed_genesis()
+            return
+        self._account = stored
+        # The reserved unattributed partition comes back with everything else
+        # (ADR-0043 §9): ADR-0034's Σ-invariant holds by construction only if it
+        # is restored too, so the filtering belongs at the seam, not here.
+        self._positions = {
+            (position.strategy_id, position.symbol): position
+            for position in self._store.all_positions()
+        }
+
+    def _seed_genesis(self) -> None:
+        """Open the durable ledger at the genesis the venue *declared* (ADR-0043 §6).
+
+        Gated on ``genesis_collateral is not None`` — the predicate that says the
+        opening balance was declared rather than ingested, which is the same fact
+        as "this path has no venue to heal from" (ADR-0043 §10). On live the
+        number is ``accountValue − Σ unrealized_pnl`` read at the startup barrier,
+        which has not run yet, so seeding here would persist a genesis of zero as
+        though someone had chosen it and leave the barrier correcting a row it was
+        supposed to create.
+
+        The in-memory account already opened at exactly this value, so the write
+        makes the ledger durable rather than changing it.
+        """
+        if self._spec.genesis_collateral is None:
+            return
+        self._store.checkpoint_ledger(account=self._account, ts_ns=self._clock.timestamp_ns())
+
     def position(self, symbol: str, *, strategy_id: str | None) -> PositionView | None:
         """One partition's frozen Tier-1 snapshot, or ``None`` if never traded."""
         position = self._positions.get((strategy_id, symbol))
