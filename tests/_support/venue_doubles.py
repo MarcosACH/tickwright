@@ -7,12 +7,17 @@ on doubles carry behaviour; the rest are there to typecheck, and every widening
 of ``Exchange`` (four more land with the trade-economics surface) writes another
 round of them into files whose subject is not the venue at all.
 
-These two bases hold that ceremony once. What they deliberately do **not** hold
-is ``place``/``cancel``/``fetch_order``: those carry each double's meaning —
-including the assertion-raisers, whose messages *are* the specification ("nothing
-may be placed before the barrier clears") — so they stay in the suite that
-asserts them. A base that absorbed those would move the specification away from
-the test and leave the ceremony behind, which is exactly backwards.
+These two bases hold that ceremony once, and they hold it differently because a
+double either invents the seam's answers or borrows a real venue's.
+``VenueDouble`` deliberately does **not** hold ``place``/``cancel``/
+``fetch_order``: those carry each double's meaning — including the
+assertion-raisers, whose messages *are* the specification ("nothing may be
+placed before the barrier clears") — so they stay in the suite that asserts
+them. A base that absorbed those would move the specification away from the test
+and leave the ceremony behind, which is exactly backwards. ``VenueLink`` does
+hold all three, delegating them to the venue it wraps, so a subclass overriding
+one is *replacing an answer* rather than adding a member — the meaning still
+lives in the suite, and the members it does not name stay the real venue's.
 
 Why bases and not subclasses of the real ``PaperExchange``, as every ``Store``
 double subclasses ``SQLiteStore``: the paper venue subscribes itself to
