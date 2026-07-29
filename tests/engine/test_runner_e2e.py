@@ -29,6 +29,7 @@ from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     Account,
+    AccountSpec,
     ComponentState,
     InstrumentSpec,
     InvariantViolation,
@@ -77,8 +78,15 @@ def _write_ticks(path: Path) -> Path:
     return path
 
 
-async def _run_to_fill_then_stop(ticks: Path, db: Path) -> tuple[int, Engine]:
-    """One supervised life: full real wiring, run until the fill, stop gracefully."""
+async def _run_to_fill_then_stop(
+    ticks: Path, db: Path
+) -> tuple[int, Engine, SingleShotMarketStrategy]:
+    """One supervised life: full real wiring, run until the fill, stop gracefully.
+
+    The strategy comes back with the engine because its ``Portfolio`` facade is
+    the engine's own (#213) — what it read is the other end of what the engine
+    wrote, and a caller asserting the pair needs both.
+    """
     bus = InMemoryBus()
     clock = ManualClock()
     store = SQLiteStore(db)
@@ -112,7 +120,7 @@ async def _run_to_fill_then_stop(ticks: Path, db: Path) -> tuple[int, Engine]:
     await asyncio.wait_for(filled.wait(), timeout=5)
     assert engine.state is ComponentState.RUNNING
     await engine.stop()
-    return await run, engine
+    return await run, engine, strategy
 
 
 def test_the_engine_lends_a_strategy_a_facade_onto_its_own_ledger(tmp_path: Path) -> None:
@@ -144,7 +152,7 @@ def test_run_replays_trades_and_exits_zero_on_graceful_stop(tmp_path: Path) -> N
     ticks = _write_ticks(tmp_path / "ticks.jsonl")
     db = tmp_path / "saga.db"
 
-    exit_code, engine = asyncio.run(_run_to_fill_then_stop(ticks, db))
+    exit_code, engine, _ = asyncio.run(_run_to_fill_then_stop(ticks, db))
 
     assert exit_code == 0
     assert engine.state is ComponentState.STOPPED
@@ -158,6 +166,114 @@ def test_run_replays_trades_and_exits_zero_on_graceful_stop(tmp_path: Path) -> N
         assert order.state is OrderState.FILLED
         assert order.cum_qty == Decimal("0.5")
         assert reopened.load_strategy_snapshot("trivial") is not None
+    finally:
+        reopened.close()
+
+
+def test_a_strategy_reads_back_the_fill_the_engine_wrote(tmp_path: Path) -> None:
+    """The facade and the engine's writer are one object, end to end (#213).
+
+    Asserted on what crossed the seam rather than by identity: the strategy read
+    ``position("BTC")`` inside its own ``on_order_event``, off the facade the
+    engine lent it, and got the partition the engine's own projection had just
+    folded that fill into. A facade bound to some other projection reads
+    ``None`` here — the shape a strategy sees for a symbol it never traded.
+    """
+    _, _, strategy = asyncio.run(
+        _run_to_fill_then_stop(_write_ticks(tmp_path / "ticks.jsonl"), tmp_path / "saga.db")
+    )
+
+    assert [(p.symbol, p.size) for p in strategy.positions if p is not None] == [
+        ("BTC", Decimal("0.5"))
+    ]
+
+
+class _LiveShapedVenue(VenueDouble):
+    """A venue whose genesis is *ingested*, not declared — the live shape.
+
+    The one member that matters here is ``account_spec()``; the rest is the
+    inherited paper ceremony, because what this double is for is the declaration
+    the engine opens its ledger from, not how it trades.
+    """
+
+    def account_spec(self) -> AccountSpec:
+        return AccountSpec(account_id="hyperliquid-testnet-0xabc", genesis_collateral=None)
+
+    async def place(self, order: PlaceOrder) -> None:
+        raise AssertionError("nothing is placed: no strategy is registered")
+
+    async def cancel(self, cloid: str) -> None:
+        raise AssertionError("nothing is cancelled: no order exists")
+
+    async def fetch_order(self, cloid: str) -> VenueOrderView | None:
+        return None
+
+
+def test_an_engine_over_a_live_shaped_account_constructs_and_seeds_nothing(
+    tmp_path: Path,
+) -> None:
+    """An ingested genesis is still an engine (ADR-0043 §10): the ledger opens
+    at the zero ``Account.open`` resolves ``None`` to, and startup writes no row.
+
+    The seed is paper-only on purpose — on live the opening balance is read at
+    the startup barrier, so seeding here would persist a zero as though someone
+    had chosen it. Worth holding at the *engine* seam now that the engine is
+    what reads the spec: nothing between the venue's declaration and the ledger
+    is left for a caller to get right or wrong.
+    """
+    store = SQLiteStore(tmp_path / "saga.db")
+
+    async def one_life() -> int:
+        bus = InMemoryBus()
+        clock = ManualClock()
+        engine = Engine(
+            bus=bus,
+            clock=clock,
+            store=store,
+            exchange=_LiveShapedVenue(),
+            feed=ReplayFeed(path=_write_ticks(tmp_path / "ticks.jsonl"), bus=bus, clock=clock),
+        )
+        assert engine.portfolio_for("live").account().cash == Decimal("0")
+        run = asyncio.create_task(engine.run())
+        await engine.stop()
+        return await run
+
+    assert asyncio.run(one_life()) == 0
+
+    reopened = SQLiteStore(tmp_path / "saga.db")
+    try:
+        assert reopened.load_account() is None
+    finally:
+        reopened.close()
+
+
+def test_a_fill_leaves_the_order_row_and_the_ledger_in_the_one_store(tmp_path: Path) -> None:
+    """The atomic write (ADR-0043 §4), proved on a fully-wired engine: both
+    halves are read back from the single store the engine was handed.
+
+    Structural rather than conventional since #213 — the engine opens its ledger
+    over that same store, so there is no second store the ledger could have gone
+    to and no wiring a caller could get wrong. The read is deliberately from a
+    *reopened* store: what the fill made durable, not what a live handle caches.
+    """
+    db = tmp_path / "saga.db"
+
+    asyncio.run(_run_to_fill_then_stop(_write_ticks(tmp_path / "ticks.jsonl"), db))
+
+    reopened = SQLiteStore(db)
+    try:
+        order = reopened.get_order(derive_cloid("trivial:BTC:1"))
+        assert order is not None
+        assert order.state is OrderState.FILLED
+        positions = reopened.all_positions()
+        assert [(p.strategy_id, p.symbol, p.signed_size) for p in positions] == [
+            ("trivial", "BTC", Decimal("0.5"))
+        ]
+        # The account row rode the same transaction (ADR-0043 §9) — still at
+        # genesis, an opening fill at zero fees realizing nothing to move it.
+        account = reopened.load_account()
+        assert account is not None
+        assert account.cash == GENESIS
     finally:
         reopened.close()
 
