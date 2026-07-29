@@ -129,7 +129,7 @@ def _wire(
 
 def _engine(
     store: SQLiteStore,
-    exchange: PaperExchange,
+    exchange: Exchange,
     clock: ManualClock,
     config: ReconcileConfig | None = None,
 ) -> tuple[InMemoryBus, Reconciler, list[OrderEvent]]:
@@ -144,11 +144,22 @@ async def _record(sink: list[OrderEvent], event: OrderEvent) -> None:
 
 class _FlakyLink:
     """A real venue behind a link that can drop: while down, every read fails
-    (``None``) — never to be confused with a venue that answers "no record"."""
+    (``None``) — never to be confused with a venue that answers "no record".
+
+    Everything but the read is delegated verbatim. The link is what varies; the
+    venue behind it is the real one, so the seam's other members are the real
+    one's answers rather than stubs this suite would have to keep true.
+    """
 
     def __init__(self, venue: PaperExchange) -> None:
         self._venue = venue
         self.down = False
+
+    async def start(self) -> None:
+        await self._venue.start()
+
+    async def stop(self) -> None:
+        await self._venue.stop()
 
     async def place(self, order: PlaceOrder) -> None:
         await self._venue.place(order)
@@ -160,6 +171,12 @@ class _FlakyLink:
         if self.down:
             return None
         return await self._venue.fetch_order(cloid)
+
+    def account_spec(self) -> AccountSpec:
+        return self._venue.account_spec()
+
+    def instrument_specs(self) -> Mapping[str, InstrumentSpec]:
+        return self._venue.instrument_specs()
 
 
 # --- Fast in-flight cycle -----------------------------------------------------
@@ -286,7 +303,7 @@ def test_a_live_order_absent_across_the_grace_window_resolves_rejected() -> None
     store.checkpoint(_saga("0xabc", OrderState.LIVE), ts_ns=500)
     venue = _ForgetfulVenue()
     config = ReconcileConfig(ghost_grace_seconds=90.0)
-    _, reconciler, events = _engine(store, venue, clock, config)  # type: ignore[arg-type]
+    _, reconciler, events = _engine(store, venue, clock, config)
 
     async def scenario() -> None:
         # First sighting of the absence arms the grace clock; well inside the
@@ -338,7 +355,7 @@ def test_a_ghost_whose_fill_history_has_fills_heals_to_filled_not_rejected() -> 
             ),
         ),
     )
-    _, reconciler, events = _engine(store, venue, clock)  # type: ignore[arg-type]
+    _, reconciler, events = _engine(store, venue, clock)
 
     assert asyncio.run(reconciler.reconcile_open_orders()) is True
 
@@ -444,7 +461,7 @@ def test_a_vanished_order_with_the_cancel_requested_marker_resolves_cancelled() 
     store.checkpoint(saga, ts_ns=500)
     venue = _ForgetfulVenue()
     config = ReconcileConfig(ghost_grace_seconds=90.0)
-    _, reconciler, events = _engine(store, venue, clock, config)  # type: ignore[arg-type]
+    _, reconciler, events = _engine(store, venue, clock, config)
 
     async def scenario() -> None:
         assert await reconciler.reconcile_open_orders() is True
@@ -474,7 +491,7 @@ def test_a_partially_filled_ghost_truly_gone_resolves_cancelled_with_fills_kept(
     store.checkpoint(saga, ts_ns=500)
     venue = _ForgetfulVenue()
     config = ReconcileConfig(ghost_grace_seconds=90.0)
-    _, reconciler, events = _engine(store, venue, clock, config)  # type: ignore[arg-type]
+    _, reconciler, events = _engine(store, venue, clock, config)
 
     async def scenario() -> None:
         assert await reconciler.reconcile_open_orders() is True
@@ -622,7 +639,7 @@ def test_a_none_read_freezes_the_cycle_emits_frozen_and_the_next_cycle_heals() -
     asyncio.run(ack_lost())
     store.checkpoint(_saga("0xabc", OrderState.SUBMITTED), ts_ns=500)
     link = _FlakyLink(exchange)
-    _, reconciler, events = _engine(store, link, clock)  # type: ignore[arg-type]
+    _, reconciler, events = _engine(store, link, clock)
 
     # An outage must never read as "all orders vanished" (ADR-0011 inv 1):
     # the cycle freezes, resolves nothing, and says so as telemetry.
@@ -665,7 +682,7 @@ def test_every_cadence_freezes_on_a_none_read_and_removes_nothing(
     exchange, _ = _surviving_venue(clock)
     store.checkpoint(_saga("0xabc", saga_state), ts_ns=500)
     link = _FlakyLink(exchange)
-    _, reconciler, events = _engine(store, link, clock)  # type: ignore[arg-type]
+    _, reconciler, events = _engine(store, link, clock)
 
     link.down = True
     with capture_events() as logs:
