@@ -130,6 +130,14 @@ auth, quirk translation — and importing no other adapter. It provides both a `
   feed drives virtual time (a live feed uses `LiveClock`).
 - [ ] Confirm the import boundary: `uv run lint-imports` must pass — the package imports `domain` and
   `observability` only, never `engine` or another adapter.
+- [ ] TDD the adapters at their own seam, and give the `Exchange` half a **claim per member**:
+  `assert isinstance(exchange, Exchange)`, plus a `_SEAM_CLAIMS` map — member → the test that says
+  what that member does on *your* venue — handed to `assert_every_member_is_claimed`
+  ([`tests/_support/seam_claims.py`](../tests/_support/seam_claims.py)), as both shipped adapters do.
+  The `isinstance` check alone cannot be that gate: you must implement every member for the engine
+  to run at all, so it goes green the moment the member exists while nothing asserts what it *does*.
+  The gate is member-grained, not clause-grained — it catches a forgotten member, never a forgotten
+  clause, so the three `stop()` edges above still need a reviewer.
 - [ ] Document the new config in [`.env.example`](../.env.example), and add an ADR if the integration
   makes a load-bearing decision.
 

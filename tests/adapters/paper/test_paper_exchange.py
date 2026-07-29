@@ -8,15 +8,19 @@ optimistic, zero-slippage, full-fill: no RNG at all.
 
 import asyncio
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from ledgers import GENESIS
+from seam_claims import assert_every_member_is_claimed
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.paper import ImmediateFillModel, PaperExchange, PaperExchangeConfig
 from tickwright.domain import (
     AggressorSide,
+    Event,
+    Exchange,
     FillReport,
     InstrumentSpec,
     MarketTick,
@@ -514,3 +518,146 @@ def test_the_paper_account_label_defaults_to_the_same_label_the_config_does() ->
 
     assert exchange.account_spec().account_id == "paper-default"
     assert exchange.account_spec().account_id == f"paper-{PaperExchangeConfig().account_label}"
+
+
+def test_the_lifecycle_pair_reaches_nothing_because_the_one_link_is_constructed() -> None:
+    """The two verbs the runner drives (ADR-0024 step 4 and the reverse
+    shutdown). In-process there is nothing to connect: this venue's only link —
+    the ``MarketTick`` subscription — is wired at construction, so neither verb
+    has anything to do.
+
+    Driven *alone*, with no tick and no order, and watched two ways — the paper
+    analogue of the live arm's ``post.requests == []``. Dispatch is
+    ``isinstance``-guarded (ADR-0023), so a subscription to ``Event`` itself sees
+    **everything** this venue publishes, including a type that does not exist
+    yet; and a venue that connected nothing leaves no task running behind it.
+
+    Both are needed for the claim to stay honest as the seam grows. ADR-0037's
+    funding generator would be started here and cancelled below: it publishes no
+    fill, so a test watching fills would survive its arrival silently, and it
+    publishes nothing at all until time advances, so even the catch-all would.
+    The task is what gives it away."""
+    exchange, bus, _clock, _fills = _harness()
+    published: list[Event] = []
+    bus.subscribe(Event, lambda event: _record(published, event))
+    running: list[asyncio.Task[object]] = []
+
+    async def scenario() -> None:
+        await exchange.start()
+        running.extend(task for task in asyncio.all_tasks() if task is not asyncio.current_task())
+        await exchange.stop()
+
+    asyncio.run(scenario())
+
+    assert published == []
+    assert running == []
+
+
+def test_the_paper_venue_releases_without_a_start_and_keeps_its_book() -> None:
+    """The faulted teardown walks the same ordered membership as the graceful
+    one, so ``stop()`` is reached after a ``start()`` that refused — or that
+    never ran at all, an earlier step having faulted first. Releasing must
+    therefore be safe on a venue that never started, and it is a *release*, not
+    a reset: a resting order is still the venue's truth afterwards, which is
+    what lets restart reconciliation re-adopt it by cloid (ADR-0024).
+
+    Driven **twice**, because one shutdown can drive it twice: a graceful step
+    that raises *behind* the venue release faults the run, and the best-effort
+    pass re-walks the membership from the top (the runner's half of this claim
+    is ``test_a_graceful_teardown_that_breaks_releases_the_venue_a_second_time``
+    — asserted there on a double, and here on the adapter itself). Trivially
+    true while this body releases nothing; pinned before ADR-0037's funding
+    generator gives it a task to cancel, which is the first way a second call
+    can break. The book survives both, so the second release is no more a reset
+    than the first."""
+    exchange, bus, clock, fills, statuses = _limit_harness()
+
+    async def scenario() -> VenueOrderView | None:
+        clock.advance_to(1_000)
+        await bus.publish(_tick("42000"))
+        await exchange.place(_limit_order("41000"))  # rests, uncrossed
+        await exchange.stop()  # no start() ever ran
+        await exchange.stop()  # and again: the faulted pass re-walks the membership
+        return await exchange.fetch_order("0xabc")
+
+    view = asyncio.run(scenario())
+
+    assert fills == []
+    assert view is not None
+    assert view.status is not None
+    assert view.status.status is OrderState.LIVE
+
+
+def test_the_released_paper_venue_still_answers_a_place_and_a_cancel() -> None:
+    """Ahead of the bus drain is not ahead of the last caller. ``stop()`` runs
+    before the drain, but the drain is what dispatches the cascade it is waiting
+    on, and the strategies are still subscribed behind it — so an in-flight tick
+    can still reach one, and its ``Signal`` still reaches the
+    ``ExecutionManager``, which calls ``place`` on an adapter already released.
+    The seam therefore requires both order verbs to stay **answerable** across
+    the release: refusing cleanly rather than raising, and above all never
+    hanging, because the drain is blocked on the very cascade they are in.
+
+    ``asyncio.wait_for`` is the "never hanging" half as an *assertion* — without
+    a bound, a release that wedged an order verb would hang the suite instead of
+    failing it, which is not a result.
+
+    In-process the release holds nothing, so answering here is answering
+    normally: the cancel still reports ``CANCELLED`` and the late order still
+    fills off the cached tick. That is the claim's shape today; when ADR-0037's
+    funding generator gives ``stop()`` something to tear down, this is the test
+    that says the teardown may not take the order path down with it."""
+    exchange, bus, clock, fills, statuses = _limit_harness()
+
+    async def scenario() -> None:
+        clock.advance_to(1_000)
+        await bus.publish(_tick("42000"))
+        await exchange.place(_limit_order("41000"))  # rests, uncrossed
+        await exchange.stop()
+        # Behind the release, inside the drain the runner has not reached yet.
+        await asyncio.wait_for(exchange.cancel("0xabc"), timeout=5)
+        await asyncio.wait_for(exchange.place(_market_order(qty="0.5", cloid="0xlate")), timeout=5)
+
+    asyncio.run(scenario())
+
+    assert [s.status for s in statuses] == [OrderState.LIVE, OrderState.CANCELLED]
+    assert [f.cloid for f in fills] == ["0xlate"]
+
+
+def test_the_paper_venue_satisfies_the_exchange_seam() -> None:
+    """Conformance asserted at the adapter, as both bus adapters assert theirs.
+
+    ``Exchange`` is ``runtime_checkable``, so this is precisely a member-presence
+    check: a member added to the Protocol fails here for whichever adapter was
+    left behind, without anyone maintaining a transcribed list of what the seam
+    contains. The half it cannot see — a member every adapter implements but no
+    test asserts — is what ``_SEAM_CLAIMS`` below covers.
+    """
+    exchange, _bus, _clock, _reports = _harness()
+
+    assert isinstance(exchange, Exchange)
+
+
+# Which test claims each ``Exchange`` member for *this* adapter. Not a second
+# copy of the seam: the gate below asserts it against the Protocol itself, so a
+# new member cannot arrive without someone naming what asserts it here.
+_SEAM_CLAIMS = {
+    "start": "test_the_lifecycle_pair_reaches_nothing_because_the_one_link_is_constructed",
+    "stop": "test_the_paper_venue_releases_without_a_start_and_keeps_its_book",
+    "place": "test_market_order_fills_at_the_latest_tick_price",
+    "cancel": "test_cancel_removes_a_resting_order_and_reports_cancelled",
+    "fetch_order": "test_fetch_order_reports_a_resting_limit_as_live",
+    "account_spec": "test_the_paper_venue_declares_a_two_segment_account_id_and_its_genesis",
+    "instrument_specs": "test_instrument_specs_exposes_the_configured_specs",
+}
+
+
+def test_every_exchange_member_carries_a_claim_in_the_paper_suite() -> None:
+    """The completeness gate the ``isinstance`` check above cannot be.
+
+    Both adapters must implement a new seam member for the engine to run at all,
+    so conformance passes the moment the member exists — while nothing asserts
+    what it *does* on this venue. Four more members are queued (#177, #173,
+    #174); each arrives cheaper against a gate that names the omission than
+    against a reviewer who has to notice it."""
+    assert_every_member_is_claimed(Exchange, _SEAM_CLAIMS, suite=Path(__file__).parent)

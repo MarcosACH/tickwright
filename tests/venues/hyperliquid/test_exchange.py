@@ -10,17 +10,20 @@ sent. Venue quirk translation lives in the adapter, never the engine
 
 import asyncio
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from eth_account import Account
 from hyperliquid.utils.signing import recover_agent_or_user_from_l1_action
 from hyperliquid_fakes import FakeExchangeApi, resting_response
 from pydantic import SecretStr
+from seam_claims import assert_every_member_is_claimed
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.domain import (
     AggressorSide,
+    Exchange,
     ExecutionReport,
     FillReport,
     InstrumentSpec,
@@ -735,3 +738,147 @@ def test_a_terminal_fetch_prunes_the_placed_order_so_the_cache_stays_bounded() -
     # happens because the terminal fetch pruned the placed-order memory.
     reads = [query for (_, query) in post.requests if query.get("type") == "orderStatus"]
     assert len(reads) == 2
+
+
+def test_connecting_asks_the_venue_for_nothing_because_posting_is_request_scoped() -> None:
+    """``start()`` is the connect half of ADR-0024 step 4. This adapter holds no
+    connection of its own — every request is scoped to the call that makes it —
+    so the step does no venue I/O until ADR-0046's account-mode gate and
+    ADR-0044's leverage push give it some.
+
+    The fake routes *nothing*, so a request of any type fails loudly here rather
+    than passing on a response a test never described. That is the assertion:
+    when the push arrives, this test must be rewritten, not silently survive."""
+    post = FakeExchangeApi({})
+    exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
+
+    asyncio.run(exchange.start())
+
+    assert post.requests == []
+
+
+def test_the_venue_link_is_released_without_a_start_having_run() -> None:
+    """The faulted teardown walks the same ordered membership as the graceful
+    one, so ``stop()`` is reached after a ``start()`` that refused — and after
+    one that never ran, an earlier step having faulted first. Releasing an
+    adapter that never connected must not reach the venue, and must not raise:
+    a break here would be recorded as a stop-hook failure and would cost the
+    steps behind it (ADR-0020/0024).
+
+    Driven **twice in the one shutdown**, which is the other way to read the
+    same membership: a graceful step that raises *behind* the venue release
+    faults the run and the best-effort pass re-walks it from the top, so the
+    second call must be a no-op rather than a failure (the runner's half is
+    ``test_a_graceful_teardown_that_breaks_releases_the_venue_a_second_time``,
+    asserted there on a double and here on the adapter). The fake still routes
+    nothing, so neither release may reach the venue."""
+    post = FakeExchangeApi({})
+    exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
+
+    async def scenario() -> None:
+        await exchange.stop()  # no start() ever ran
+        await exchange.stop()  # and again: the faulted pass re-walks the membership
+
+    asyncio.run(scenario())
+
+    assert post.requests == []
+
+
+def test_the_released_venue_link_still_answers_a_place_and_a_cancel() -> None:
+    """Ahead of the bus drain is not ahead of the last caller. ``stop()`` runs
+    before the drain, but the drain dispatches the cascade it is waiting on and
+    the strategies are still subscribed behind it, so a ``Signal`` can still
+    reach the ``ExecutionManager`` and land here as a ``place`` on a released
+    adapter. Both order verbs must stay **answerable** across the release —
+    never hanging, because the drain is blocked on the cascade they are in.
+
+    ``asyncio.wait_for`` is the "never hanging" half stated as an assertion: an
+    unbounded call would hang the suite rather than fail it.
+
+    This adapter holds no connection of its own — every request is scoped to the
+    call that makes it — so the release takes nothing away and both verbs reach
+    the venue exactly as before. The fake routes only what these two ask for, so
+    a released adapter that started sending something *else* fails loudly."""
+
+    async def main() -> tuple[FakeExchangeApi, list[ExecutionReport]]:
+        bus = InMemoryBus()
+        clock = ManualClock(start_ns=1_700_000_001_000 * _NS_PER_MS)
+        post = FakeExchangeApi(
+            {"order": resting_response(oid=77), "cancelByCloid": cancel_success_response()}
+        )
+        exchange = make_exchange(post, bus=bus, clock=clock)
+        reports: list[ExecutionReport] = []
+
+        async def collect(report: ExecutionReport) -> None:
+            reports.append(report)
+
+        bus.subscribe(ExecutionReport, collect)
+        await exchange.start()
+        await exchange.stop()
+        # Behind the release, inside the drain the runner has not reached yet.
+        await asyncio.wait_for(exchange.place(limit_order(Side.BUY, "0.5", "42000")), timeout=5)
+        await asyncio.wait_for(exchange.cancel(CLOID), timeout=5)
+        return post, reports
+
+    post, reports = asyncio.run(main())
+
+    assert [payload["action"]["type"] for (_url, payload) in post.requests] == [
+        "order",
+        "cancelByCloid",
+    ]
+    _live, cancelled = reports
+    assert isinstance(cancelled, OrderStatusReport)
+    assert cancelled.status is OrderState.CANCELLED
+    assert cancelled.cloid == CLOID
+
+
+def test_the_hyperliquid_venue_satisfies_the_exchange_seam() -> None:
+    """Conformance asserted at the adapter, as both bus adapters assert theirs
+    (``tests/adapters/bus/``). ``Exchange`` is ``runtime_checkable``, so this is
+    a member-presence check: the seam cannot grow a member that leaves this
+    adapter behind without failing here. What it cannot see — a member this
+    adapter implements but no test asserts — is ``_SEAM_CLAIMS`` below."""
+    exchange = make_exchange(FakeExchangeApi({}), bus=InMemoryBus(), clock=ManualClock())
+
+    assert isinstance(exchange, Exchange)
+
+
+def test_the_venue_hands_out_the_meta_sourced_specs_by_copy() -> None:
+    """The specs the composition root wires into the venue-agnostic guard come
+    from the venue itself (ADR-0031): the adapter is the one component that
+    knows what the meta endpoint said. Handed out as a copy — the universe is
+    read once at startup and must not be mutable through a caller that only
+    asked to read it, which is what would let a guard and an adapter disagree
+    about the same symbol's tick grid."""
+    exchange = make_exchange(FakeExchangeApi({}), bus=InMemoryBus(), clock=ManualClock())
+
+    specs = exchange.instrument_specs()
+
+    assert specs == {"BTC": BTC_SPEC}
+    assert specs is not UNIVERSE.specs
+
+
+# Which test claims each ``Exchange`` member for *this* adapter. The gate below
+# asserts it against the Protocol itself, so it cannot quietly fall behind. Two
+# claims live in the sibling module that owns their subject rather than here —
+# the gate reads the whole suite directory, not this file.
+_SEAM_CLAIMS = {
+    "start": "test_connecting_asks_the_venue_for_nothing_because_posting_is_request_scoped",
+    "stop": "test_the_venue_link_is_released_without_a_start_having_run",
+    "place": "test_market_buy_places_an_aggressive_ioc_limit_at_the_bounded_price",
+    "cancel": "test_cancel_sends_a_signed_cancel_by_cloid_and_reports_cancelled",
+    "fetch_order": "test_fetch_order_bundles_the_venue_status_and_fills_into_one_view",
+    # test_account.py — the module that owns what qualifies an account id.
+    "account_spec": "test_the_account_id_is_qualified_by_venue_network_and_address",
+    "instrument_specs": "test_the_venue_hands_out_the_meta_sourced_specs_by_copy",
+}
+
+
+def test_every_exchange_member_carries_a_claim_in_the_hyperliquid_suite() -> None:
+    """The completeness gate the ``isinstance`` check above cannot be — the live
+    arm of the same gate the paper suite runs.
+
+    It earned its place immediately: ``instrument_specs()`` was on this adapter
+    with no test of its own, reached only sideways through ``build_engine``'s
+    wiring, and the gate is what named the omission."""
+    assert_every_member_is_claimed(Exchange, _SEAM_CLAIMS, suite=Path(__file__).parent)
