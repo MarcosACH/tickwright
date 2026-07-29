@@ -334,6 +334,20 @@ illegal saga transition, a failed checkpoint) is **fail-fast → `FAULTED` → c
 restart. See ADR-0014.
 _Avoid_: exception, crash (be specific about which class).
 
+**Write verb** vs **restore constructor**:
+The two ways an aggregate's state moves, and the reason [[Event]]s and value objects in `domain/`
+carry **no `__post_init__`**. A **write verb** (`Order.apply`, `Position.apply`,
+`Account.accrue_realized`) advances state from a fact in flight and is **where every precondition is
+stated** — it raises an [[Invariant violation]] rather than admitting a value that would corrupt the
+operation. A **restore constructor** (`Order.restore`, `Account.restore`,
+`restore_position`) rebuilds persisted state
+field-by-field and **deliberately bypasses those checks**, because a checkpointed row is the outcome
+of transitions already adjudicated — re-adjudicating it would refuse to recover a correct saga.
+`apply` guards the future; `restore` reproduces the past. Constructor-level validators are reserved
+for **configuration** dataclasses (`StochasticParams`), which are declared once at wiring and have no
+later operation to attach a rule to. See ADR-0047, ADR-0014, ADR-0008, ADR-0043.
+_Avoid_: validation, sanitization (name the verb that is guarded).
+
 **Correlation id**:
 A `ContextVar`-bound id auto-injected into every log line, in two scopes: a **run id** (per
 process) and a **per-operation id** — the [[Client order id|cloid]] in a saga, the [[signal_id]]
