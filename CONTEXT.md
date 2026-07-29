@@ -176,6 +176,20 @@ the durable order store, not the source of truth. Rebuilt from the store on rest
 "what is true now"; the store answers "how did we get here." See ADR-0009.
 _Avoid_: source of truth, database (the durable store is the truth; the cache projects it).
 
+**Checkpointer**:
+The engine-internal owner of a [[Store]]'s **two** read-models — the order [[Cache]] and the
+[[PortfolioProjection]] — and of the ordered writes that move them. It **builds** both from one
+store, so the identity the fill's single transaction rests on (`store is cache's is
+portfolio's`, ADR-0043 §4) is a constructor fact rather than a convention a wiring site has to
+remember; it holds the run's [[Clock]] for the same reason, so a saga's event stamps and its
+durable stamps share one timeline. Three verbs, each a rule a caller could otherwise invert:
+the atomic fill write, the narrow non-fill checkpoint, and [[Recovery]]'s ledger-before-order-cache
+order. It lends the two projections out for **reads** — the [[Reconciliation|reconciler]]'s
+worklist, the [[ExecutionManager]]'s saga lookups, the scoped [[Portfolio]] facade — and owns
+only what writes them. Introduced by issue #213.
+_Avoid_: unit of work, transaction manager (it sequences writes, it does not open transactions —
+the [[Store]] owns those), repository, read-model registry.
+
 **Recovery** (snapshot-plus-reconcile):
 On restart: restore the [[Cache]] from the durable store, [[Reconciliation|reconcile]] each
 non-terminal order by [[Client order id|cloid]] against the venue, resume sagas. Event replay
@@ -647,6 +661,9 @@ funded), seed capital.
 - The **PortfolioProjection** projects **Position**/**Account** state and implements the **Portfolio**
   seam, fed by the **ExecutionManager** on the fill-apply path — the accounting sibling of the
   **Cache** (order read-model).
+- Both read-models are built and written by one **Checkpointer**, which the **Engine** constructs
+  from the one **Store** it was given; the **ExecutionManager** takes that single collaborator
+  rather than a store, a cache and a projection it would have to keep pointed at one another.
 
 ## Flagged ambiguities
 

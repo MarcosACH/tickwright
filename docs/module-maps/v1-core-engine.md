@@ -14,6 +14,7 @@ src/tickwright/
     execution.py     # ExecutionManager
     reconcile.py     # Reconciliation
     cache.py         # Cache
+    checkpoint.py    # Checkpointer: the Store's two read-models + their ordered writes
     guard.py         # RealGuard + NoopGuard (+ quantization, kill switch)
     strategy_host.py # StrategyHost: registry, routing, tick gate, snapshots, seq recovery
     runner.py        # Engine: barrier, supervision, containment
@@ -46,13 +47,25 @@ src/tickwright/
 
 ### ExecutionManager (`engine/execution.py`)
 
-**Interface:** Engine-internal orchestrator, deliberately **not** a Protocol (ADR-0015). Constructed with the `EventBus`, `Store`, `Cache`, `PreTradeGuard`, `Exchange`, and `Clock` Protocols. Subscribes to `Signal` and `ExecutionReport`; publishes canonical `OrderEvent`s. Callers (the runner) must know: `PENDING` is checkpointed **before** any network send; a timeout never transitions a saga (only reconciliation moves a stuck `SUBMITTED`); guard failure yields `DENIED` without a send; a cancel sets the `cancel_requested` marker on a still-`LIVE` saga. Checkpoint failure raises `InvariantViolation` (fail-fast).
+**Interface:** Engine-internal orchestrator, deliberately **not** a Protocol (ADR-0015). Constructed with the `EventBus`, `Exchange` and `PreTradeGuard` Protocols plus the engine-internal **`Checkpointer`** — which since [#213](https://github.com/MarcosACH/tickwright/issues/213) replaces the separate `Store`, `Cache` and `Clock` arguments, carrying all three so they cannot be pointed at different stores or timelines (see below). Subscribes to `Signal` and `ExecutionReport`; publishes canonical `OrderEvent`s. Callers (the runner) must know: `PENDING` is checkpointed **before** any network send; a timeout never transitions a saga (only reconciliation moves a stuck `SUBMITTED`); guard failure yields `DENIED` without a send; a cancel sets the `cancel_requested` marker on a still-`LIVE` saga. Checkpoint failure raises `InvariantViolation` (fail-fast).
 
 **Responsibilities:** cloid assignment from `signal_id`; pre-trade guard invocation; write-ahead intent + checkpointing to `Store`; driving `Order.apply()` and publishing the resulting `OrderEvent`; translating `CancelSignal` (re-derive cloid from `target_signal_id`, send cancel, set marker); publishing reconciliation's synthetic events (`reconciliation`-flagged).
 
-**Seams:** Consumes the `Exchange`, `Store`, `EventBus`, `PreTradeGuard`, `Clock` seams — all with two shipped adapters.
+**Seams:** Consumes the `Exchange`, `EventBus` and `PreTradeGuard` seams directly, and the `Store`/`Clock` seams through the `Checkpointer` — all with two shipped adapters.
 
 **Depth note:** The saga is written once and serves Paper and Hyperliquid identically. Deleting it forks the hardest logic (checkpoints, FSM driving, cloid authority) per venue — the rejected alternative of ADR-0015.
+
+---
+
+### Checkpointer (`engine/checkpoint.py`)
+
+**Interface:** Engine-internal, not a Protocol. Constructed with the `Store`, `Clock` and the venue's `AccountSpec`; **builds** the order `Cache` and the `PortfolioProjection` from that one store and lends them read-only (`.cache`, `.portfolio`, `.clock`). Three write verbs, each owning an ordering a caller could otherwise invert: `checkpoint_fill` (fold → one `checkpoint_ledger` transaction → project both read-models), `checkpoint` (the narrow non-fill write, store-first), and `recover` (the ledger **before** the order cache — ADR-0043 §6/§10). Callers must know: only the `Store` seam's own `InvariantViolation` is relabelled, so a contract break *below* the seam is never reported as a failed write; and a refused fill write leaves both in-memory aggregates ahead of the store, which the raise — not the ordering — is what makes safe (ADR-0014).
+
+**Responsibilities:** owning the one `Store` both read-models project and the one `Clock` that stamps them; sequencing the fill's three-step write and the non-fill's two-step one; the recovery order.
+
+**Seams:** Consumes `Store` and `Clock`. Implements none — there is one of it by decision, as with the `Cache` it holds.
+
+**Depth note:** Deleting it does not move the complexity, it scatters it: the "these all wrap one store" rule returns to the `Engine` as a comment and to every hand-wiring site as a convention, which is exactly the state [#213](https://github.com/MarcosACH/tickwright/issues/213) found — three `ExecutionManager` parameters that could be pointed at three stores, turning ADR-0043 §4's one transaction into a silent split with no failing assertion anywhere. Enforcing it in a constructor is type-level, which ADR-0047 leaves open where a runtime validator would be wrong.
 
 ---
 
