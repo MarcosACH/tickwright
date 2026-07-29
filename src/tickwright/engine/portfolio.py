@@ -50,16 +50,21 @@ class LedgerChange:
     The atomic path's hand-off (ADR-0043 §4). Making a fill durable is three
     steps that cannot collapse into one call — fold the aggregates, write them
     with the order row in a single transaction, *then* make the result readable
-    — because the write needs the folded state as its input and no reader may
-    see the fold before the write returned. This carries the middle state
-    across: ``apply_fill`` returns it, the ``ExecutionManager`` checkpoints it,
-    ``project`` publishes it.
+    — because the write takes the *folded* state as its input, so the fold
+    cannot follow the write. This carries the middle state across: ``apply_fill``
+    returns it, the ``ExecutionManager`` checkpoints it, ``project`` publishes it.
 
     ``account`` is the projection's own aggregate rather than a copy: cash is
     one pool per process (ADR-0038), so there is nothing to hand over but the
-    reference. What ``project`` installs is the *partition* and the
-    announcement — the two things a reader could otherwise see ahead of the
-    durable record.
+    reference. ``position`` is a live reference too — both aggregates are
+    mutable and ``apply_fill`` has already advanced them, so a partition that
+    has traded before reads its new size the moment the fold returns. What the
+    split defers is what a reader could otherwise reach *first*: a partition's
+    **first** filing — before it, ``position()`` reports ``None`` — and the
+    ``position.*`` announcement. Keeping the rest off a reader is the
+    ``ExecutionManager``'s doing rather than this type's: it holds no ``await``
+    between the fold and the write, the same no-yield discipline ``Store``
+    documents for a checkpoint.
 
     A *change*, deliberately not an *entry*: the ledger persists as mutable
     current-state rows, and ADR-0043 §1 reserves an append-only line-item log as
@@ -138,6 +143,11 @@ class PortfolioProjection:
         change is already durable: a partition filed ahead of the write would be
         readable state the store never recorded, and a ``position.*`` record
         emitted ahead of it would name a change that a crash could still undo.
+
+        The filing carries a partition's **first** fill and only that one: on
+        every later fill the key already holds this very object, advanced in
+        place by ``apply_fill``, so the announcement is the whole of what this
+        step still keeps behind the write.
         """
         position = change.position
         self._positions[(position.strategy_id, position.symbol)] = position

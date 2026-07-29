@@ -327,8 +327,15 @@ class ExecutionManager:
         it. On paper neither ever heals — the in-process venue holds no position
         state, so this store is the ledger's sole authority.
 
-        The projections are the caller's to run, strictly after this returns, so
-        a refused write leaves nothing readable that the store does not hold.
+        The projections are the caller's to run, strictly after this returns,
+        which keeps a *new* partition and the ``position.*`` records behind the
+        write. The aggregates themselves have already moved and must have — this
+        call takes the *folded* state as its input, so the fold cannot follow the
+        write — so a refused write leaves the saga the ``Cache`` holds by
+        reference, and any partition already filed, ahead of the store. What
+        makes that safe is the raise rather than the ordering: an
+        ``InvariantViolation`` faults the run (ADR-0014), so nothing goes on to
+        trade or report against a read-model the store never recorded.
         """
         ts_ns = self._clock.timestamp_ns()
         try:
@@ -338,7 +345,7 @@ class ExecutionManager:
                 account=change.account,
                 ts_ns=ts_ns,
             )
-        except Exception as exc:
+        except InvariantViolation as exc:
             raise InvariantViolation(
                 f"ledger checkpoint write failed for cloid {order.cloid} "
                 f"in state {order.state.value}"
@@ -348,10 +355,18 @@ class ExecutionManager:
     def _checkpoint(self, order: Order) -> None:
         try:
             self._cache.checkpoint(order, ts_ns=self._clock.timestamp_ns())
-        except Exception as exc:
+        except InvariantViolation as exc:
             # A checkpoint the store cannot make durable is a broken engine
             # assumption (ADR-0014): fail fast rather than run a saga whose
             # memory and durable states silently diverge.
+            #
+            # Only the seam's own failure type is relabelled. ``InvariantViolation``
+            # is the whole of the ``Store``'s error contract (ADR-0019), so anything
+            # else crossing it is a bug *below* the seam, not a failed write — and
+            # this wrapper spans ``Cache.checkpoint``, which writes the store and
+            # *then* projects, so a broader catch could report a failed write for a
+            # row already durable. The run faults on either: this handler is
+            # subscribed raw, so the type decides the diagnosis, not the outcome.
             raise InvariantViolation(
                 f"checkpoint write failed for cloid {order.cloid} in state {order.state.value}"
             ) from exc
