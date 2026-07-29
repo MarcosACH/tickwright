@@ -8,7 +8,6 @@ through the ``ExecutionManager`` so dedup makes every cycle idempotent.
 """
 
 import asyncio
-from collections.abc import Mapping
 from dataclasses import replace
 from decimal import Decimal
 
@@ -17,18 +16,17 @@ import structlog.testing
 from hypothesis import given
 from hypothesis import strategies as st
 from ledgers import GENESIS, ledger
+from venue_doubles import VenueDouble, VenueLink
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
-    AccountSpec,
     AggressorSide,
     Exchange,
     ExecutionReport,
     FillReport,
-    InstrumentSpec,
     MarketTick,
     Order,
     OrderCancelled,
@@ -142,41 +140,18 @@ async def _record(sink: list[OrderEvent], event: OrderEvent) -> None:
     sink.append(event)
 
 
-class _FlakyLink:
+class _FlakyLink(VenueLink):
     """A real venue behind a link that can drop: while down, every read fails
-    (``None``) — never to be confused with a venue that answers "no record".
-
-    Everything but the read is delegated verbatim. The link is what varies; the
-    venue behind it is the real one, so the seam's other members are the real
-    one's answers rather than stubs this suite would have to keep true.
-    """
+    (``None``) — never to be confused with a venue that answers "no record"."""
 
     def __init__(self, venue: PaperExchange) -> None:
-        self._venue = venue
+        super().__init__(venue)
         self.down = False
-
-    async def start(self) -> None:
-        await self._venue.start()
-
-    async def stop(self) -> None:
-        await self._venue.stop()
-
-    async def place(self, order: PlaceOrder) -> None:
-        await self._venue.place(order)
-
-    async def cancel(self, cloid: str) -> None:
-        await self._venue.cancel(cloid)
 
     async def fetch_order(self, cloid: str) -> VenueOrderView | None:
         if self.down:
             return None
         return await self._venue.fetch_order(cloid)
-
-    def account_spec(self) -> AccountSpec:
-        return self._venue.account_spec()
-
-    def instrument_specs(self) -> Mapping[str, InstrumentSpec]:
-        return self._venue.instrument_specs()
 
 
 # --- Fast in-flight cycle -----------------------------------------------------
@@ -268,18 +243,12 @@ def test_the_inflight_failed_verdict_is_announced_as_a_named_event() -> None:
 # --- Slow open-order / ghost cycle ----------------------------------------------
 
 
-class _ForgetfulVenue:
+class _ForgetfulVenue(VenueDouble):
     """A venue that answers every read positively but has lost this order —
     e.g. it expired the record. Placing through it is a test failure."""
 
     def __init__(self) -> None:
         self.views: dict[str, VenueOrderView] = {}
-
-    async def start(self) -> None:
-        return None
-
-    async def stop(self) -> None:
-        return None
 
     async def place(self, order: PlaceOrder) -> None:
         raise AssertionError("the ghost cycle must never place")
@@ -289,12 +258,6 @@ class _ForgetfulVenue:
 
     async def fetch_order(self, cloid: str) -> VenueOrderView | None:
         return self.views.get(cloid, VenueOrderView(status=None))
-
-    def account_spec(self) -> AccountSpec:
-        return AccountSpec(account_id="fake-venue")
-
-    def instrument_specs(self) -> Mapping[str, InstrumentSpec]:
-        return {}
 
 
 def test_a_live_order_absent_across_the_grace_window_resolves_rejected() -> None:

@@ -12,13 +12,14 @@ import asyncio
 import json
 import os
 import signal
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from decimal import Decimal
 from pathlib import Path
 
 from kafka_fakes import FakeKafkaBroker
 from ledgers import GENESIS, ledger
 from structlog.typing import EventDict
+from venue_doubles import VenueDouble
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.bus.kafka import KafkaBus
@@ -27,7 +28,6 @@ from tickwright.adapters.feed import ReplayFeed
 from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
-    AccountSpec,
     ComponentState,
     InstrumentSpec,
     InvariantViolation,
@@ -548,7 +548,7 @@ def test_the_fault_path_walks_the_same_teardown_feed_stopped_and_bus_closed(
     assert [c.started for c in broker.consumers] == [False]
 
 
-class _LifecycleRecordingVenue:
+class _LifecycleRecordingVenue(VenueDouble):
     """An ``Exchange`` that records the runner driving its lifecycle verbs, and
     what the rest of the process had already done by then. A network boundary is
     the one place a test double is allowed."""
@@ -581,12 +581,6 @@ class _LifecycleRecordingVenue:
     async def fetch_order(self, cloid: str) -> VenueOrderView | None:
         self._timeline.append("venue.read")
         return VenueOrderView(status=None)
-
-    def account_spec(self) -> AccountSpec:
-        return AccountSpec(account_id="paper-default", genesis_collateral=GENESIS)
-
-    def instrument_specs(self) -> Mapping[str, InstrumentSpec]:
-        return {}
 
 
 def _submitted_saga(cloid: str) -> Order:

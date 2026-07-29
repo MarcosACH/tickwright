@@ -12,11 +12,11 @@ replicas. Zero external services; the whole run is deterministic.
 
 import asyncio
 import json
-from collections.abc import Mapping
 from decimal import Decimal
 from pathlib import Path
 
 from ledgers import GENESIS, ledger
+from venue_doubles import VenueLink
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
@@ -24,15 +24,12 @@ from tickwright.adapters.feed import ReplayFeed
 from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
-    AccountSpec,
     ComponentState,
-    InstrumentSpec,
     MarketTick,
     OrderEvent,
     OrderFilled,
     OrderRejected,
     OrderState,
-    PlaceOrder,
     Side,
     VenueOrderView,
     derive_cloid,
@@ -152,7 +149,7 @@ def test_a_missed_fill_landing_mid_run_is_healed_by_the_inflight_cadence(
     assert any(isinstance(ev, OrderFilled) for ev in healing)
 
 
-class _VanishingLinkExchange:
+class _VanishingLinkExchange(VenueLink):
     """The venue link for the ghost scenario, its behavior keyed off *virtual*
     time so the whole script stays deterministic: delegate normally while the
     order settles, then read as vanished (a positive no-record view), with one
@@ -160,26 +157,8 @@ class _VanishingLinkExchange:
     network boundary is the one place a test double is allowed."""
 
     def __init__(self, venue: PaperExchange, clock: ManualClock) -> None:
-        self._venue = venue
+        super().__init__(venue)
         self._clock = clock
-
-    async def start(self) -> None:
-        await self._venue.start()
-
-    async def stop(self) -> None:
-        await self._venue.stop()
-
-    async def place(self, order: PlaceOrder) -> None:
-        await self._venue.place(order)
-
-    async def cancel(self, cloid: str) -> None:
-        await self._venue.cancel(cloid)
-
-    def account_spec(self) -> AccountSpec:
-        return self._venue.account_spec()
-
-    def instrument_specs(self) -> Mapping[str, InstrumentSpec]:
-        return self._venue.instrument_specs()
 
     async def fetch_order(self, cloid: str) -> VenueOrderView | None:
         now_s = self._clock.timestamp_ns() / _NS

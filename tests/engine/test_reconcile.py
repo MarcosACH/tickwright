@@ -10,21 +10,19 @@ life is dead air, exactly like acks that died with the process.
 """
 
 import asyncio
-from collections.abc import Mapping
 from decimal import Decimal
 
 import pytest
 from ledgers import GENESIS, ledger
+from venue_doubles import VenueDouble
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
-    AccountSpec,
     AggressorSide,
     ExecutionReport,
-    InstrumentSpec,
     MarketTick,
     Order,
     OrderEvent,
@@ -270,18 +268,12 @@ def test_a_crash_during_recovery_just_reruns_the_pass_and_converges() -> None:
     assert recovered.cum_qty == Decimal("0.5")
 
 
-class _DarkVenue:
+class _DarkVenue(VenueDouble):
     """An ``Exchange`` behind a dead link: every read fails (``None``), and
     placing anything is a test failure — the barrier must gate all sends."""
 
     def __init__(self) -> None:
         self.reads = 0
-
-    async def start(self) -> None:
-        return None
-
-    async def stop(self) -> None:
-        return None
 
     async def place(self, order: PlaceOrder) -> None:
         raise AssertionError("nothing may be placed before the barrier clears")
@@ -292,12 +284,6 @@ class _DarkVenue:
     async def fetch_order(self, cloid: str) -> VenueOrderView | None:
         self.reads += 1
         return None
-
-    def account_spec(self) -> AccountSpec:
-        return AccountSpec(account_id="fake-venue")
-
-    def instrument_specs(self) -> Mapping[str, InstrumentSpec]:
-        return {}
 
 
 def test_sustained_venue_outage_trips_the_barrier_to_faulted_after_the_window() -> None:

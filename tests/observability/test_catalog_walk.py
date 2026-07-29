@@ -20,6 +20,7 @@ import pytest
 from hyperliquid_fakes import FakeExchangeApi, FakeWsConnection, trade, trades_frame
 from ledgers import GENESIS, ledger
 from pydantic import SecretStr
+from venue_doubles import VenueDouble
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
@@ -27,6 +28,7 @@ from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     AggressorSide,
+    Exchange,
     ExecutionReport,
     FillReport,
     InstrumentSpec,
@@ -38,6 +40,7 @@ from tickwright.domain import (
     OrderStatusReport,
     PlaceOrder,
     PlaceSignal,
+    PreTradeGuard,
     Side,
     Signal,
     VenueOrderView,
@@ -130,11 +133,11 @@ def _status(status: OrderState, *, cloid: str = "0xabc") -> OrderStatusReport:
     )
 
 
-class _SilentExchange:
+class _SilentExchange(VenueDouble):
     """A venue that accepts a placement and says nothing back — an order rests
     ``SUBMITTED`` so a synthetic status/fill can drive the next transition."""
 
-    async def place(self, order: object) -> None:
+    async def place(self, order: PlaceOrder) -> None:
         return None
 
     async def cancel(self, cloid: str) -> None:
@@ -144,10 +147,10 @@ class _SilentExchange:
         return None
 
 
-class _ForgetfulVenue:
+class _ForgetfulVenue(VenueDouble):
     """A venue that answers positively but has lost this order (``status=None``)."""
 
-    async def place(self, order: object) -> None:
+    async def place(self, order: PlaceOrder) -> None:
         raise AssertionError("the reconcile walk never places")
 
     async def cancel(self, cloid: str) -> None:
@@ -157,10 +160,10 @@ class _ForgetfulVenue:
         return VenueOrderView(status=None)
 
 
-class _DarkVenue:
+class _DarkVenue(VenueDouble):
     """A venue whose reads all fail (``None``) — the connectivity guard trips."""
 
-    async def place(self, order: object) -> None:
+    async def place(self, order: PlaceOrder) -> None:
         raise AssertionError("the frozen cycle never places")
 
     async def cancel(self, cloid: str) -> None:
@@ -198,9 +201,9 @@ class _Strategy:
 def _manager(
     bus: InMemoryBus,
     clock: ManualClock,
-    exchange: object,
+    exchange: Exchange,
     *,
-    guard: object | None = None,
+    guard: PreTradeGuard | None = None,
     portfolio: PortfolioProjection | None = None,
 ) -> None:
     """Wire an ``ExecutionManager`` over ``exchange`` onto ``bus`` — the exchange
@@ -209,16 +212,16 @@ def _manager(
     manager = ExecutionManager(
         bus=bus,
         clock=clock,
-        exchange=exchange,  # type: ignore[arg-type]
+        exchange=exchange,
         cache=cache,
         portfolio=portfolio if portfolio is not None else ledger(),
-        guard=guard,  # type: ignore[arg-type]
+        guard=guard,
     )
     bus.subscribe(Signal, manager.on_signal)
     bus.subscribe(ExecutionReport, manager.on_execution_report)
 
 
-def _reconciler(state: OrderState, venue: object, config: ReconcileConfig) -> Reconciler:
+def _reconciler(state: OrderState, venue: Exchange, config: ReconcileConfig) -> Reconciler:
     clock = ManualClock(start_ns=0)
     store = SQLiteStore(":memory:")
     store.checkpoint(_saga(state), ts_ns=500)
@@ -227,7 +230,7 @@ def _reconciler(state: OrderState, venue: object, config: ReconcileConfig) -> Re
     return Reconciler(
         bus=InMemoryBus(),
         clock=clock,
-        exchange=venue,  # type: ignore[arg-type]
+        exchange=venue,
         cache=cache,
         config=config,
     )
@@ -393,7 +396,7 @@ def _drive_recency_skipped() -> None:
     reconciler = Reconciler(
         bus=InMemoryBus(),
         clock=clock,
-        exchange=_ForgetfulVenue(),  # type: ignore[arg-type]
+        exchange=_ForgetfulVenue(),
         cache=cache,
         config=ReconcileConfig(recent_order_protection_seconds=30.0, ghost_grace_seconds=90.0),
     )
@@ -409,7 +412,7 @@ def _drive_ghost_reconciled() -> None:
     reconciler = Reconciler(
         bus=InMemoryBus(),
         clock=clock,
-        exchange=_ForgetfulVenue(),  # type: ignore[arg-type]
+        exchange=_ForgetfulVenue(),
         cache=cache,
         config=ReconcileConfig(ghost_grace_seconds=90.0),
     )
