@@ -73,7 +73,10 @@ def _offer(
     event = _event(index, quantity, price)
     if quantity > _NOTHING:
         return position.apply(event, side=side)
-    with pytest.raises(InvariantViolation):
+    # Matched on the message, not just the type: every fill generated here is
+    # well-routed, so a refusal naming the *partition* would mean the fold broke
+    # somewhere this helper is not looking.
+    with pytest.raises(InvariantViolation, match="non-positive quantity"):
         position.apply(event, side=side)
     return None
 

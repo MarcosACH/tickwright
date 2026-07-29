@@ -238,7 +238,10 @@ def test_a_zero_quantity_fill_faults_the_projection_and_announces_nothing() -> N
     projection = _projection()
     portfolio: Portfolio = projection.for_strategy("alpha")
 
-    with capture_events() as logs, pytest.raises(InvariantViolation):
+    with (
+        capture_events() as logs,
+        pytest.raises(InvariantViolation, match="non-positive quantity"),
+    ):
         projection.apply_fill(_fill(trade_id="f1", quantity="0", price="100"), side=Side.BUY)
 
     assert _announcements(logs) == []
