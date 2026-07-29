@@ -11,6 +11,7 @@ our own classes.
 import asyncio
 import random
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from ledgers import GENESIS, ledger
@@ -113,10 +114,15 @@ def _tick(price: str = "42000") -> MarketTick:
     )
 
 
-def _harness() -> tuple[InMemoryBus, ManualClock, SQLiteStore, list[OrderEvent]]:
+def _harness(
+    path: str | Path = ":memory:",
+) -> tuple[InMemoryBus, ManualClock, SQLiteStore, list[OrderEvent]]:
+    """The manager over its real collaborators. ``path`` backs the store with a
+    file for the cases that must reopen it — closing a ``:memory:`` store takes
+    the durable record with it, so a "what survived?" assertion needs a file."""
     bus = InMemoryBus()
     clock = ManualClock(start_ns=1_000)
-    store = SQLiteStore(":memory:")
+    store = SQLiteStore(path)
     exchange = PaperExchange(
         bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
     )
@@ -210,6 +216,74 @@ def test_a_fill_makes_the_order_row_and_the_ledger_durable_together() -> None:
     account = store.load_account()
     assert account is not None
     assert account.cash == GENESIS  # An opening fill realizes nothing.
+
+
+def test_a_refused_ledger_write_leaves_neither_the_order_row_nor_the_ledger(
+    tmp_path: Path,
+) -> None:
+    """Half a fill is the state the atomic write exists to make unreachable, so a
+    write the store refuses must advance neither side of it (ADR-0043 §4).
+
+    It must also raise ``InvariantViolation`` rather than let the driver's own
+    error cross: that type is what pierces the engine's containment net and
+    faults the run (ADR-0014), while a raw ``sqlite3.Error`` would be filed as a
+    caller's bug and survived — the process running on with a ledger it can no
+    longer make durable.
+
+    A closed store stands in for any backend the write cannot reach. The saga is
+    left in-flight first, so the store is alive for the write-ahead intent and
+    dead only for the fill.
+    """
+    bus, _, store, _ = _harness(tmp_path / "saga.db")
+    cloid = derive_cloid("trivial:BTC:1")
+
+    async def scenario() -> None:
+        # No tick cached: the send raises, leaving the saga in-flight with its
+        # PENDING intent durable — then the venue's fill arrives against a store
+        # that can no longer be written.
+        with pytest.raises(ValueError):
+            await bus.publish(_market_signal())
+        store.close()
+        with pytest.raises(InvariantViolation, match="ledger checkpoint write failed"):
+            await bus.publish(_fill_report(cloid, trade_id="f1", quantity="0.5"))
+
+    asyncio.run(scenario())
+
+    with SQLiteStore(tmp_path / "saga.db") as reopened:
+        record = reopened.get_order(cloid)
+        assert record is not None
+        assert record.state is OrderState.PENDING  # the fill never advanced it
+        assert reopened.all_positions() == []
+        assert reopened.load_account() is None
+
+
+def test_a_non_fill_transition_writes_the_order_row_and_no_ledger_row() -> None:
+    """A fill is the only transition that moves the ledger, so every other one
+    keeps the narrow ``Store.checkpoint`` (ADR-0043 §4).
+
+    Not a redundant restatement of what the ledger holds: routing the whole saga
+    through ``checkpoint_ledger`` would still pass every fill assertion in this
+    file, while writing an account row on every ``PENDING`` intent and a position
+    row for an order that never traded — a partition that reports a traded-flat
+    record for a symbol nothing filled on.
+    """
+    bus, _, store, order_events = _harness()
+    cloid = derive_cloid("trivial:BTC:1")
+
+    async def scenario() -> None:
+        await bus.publish(_tick("42000"))
+        # A BUY LIMIT below the market rests unfilled: PENDING -> SUBMITTED ->
+        # LIVE, three checkpoints and not one fill.
+        await bus.publish(_limit_signal("41000"))
+
+    asyncio.run(scenario())
+
+    assert [type(ev) for ev in order_events] == [OrderPlaced, OrderSubmitted, OrderLive]
+    record = store.get_order(cloid)
+    assert record is not None
+    assert record.state is OrderState.LIVE
+    assert store.all_positions() == []
+    assert store.load_account() is None
 
 
 def _fill_report(cloid: str, trade_id: str, quantity: str, *, ts_event: int = 1_000) -> FillReport:
