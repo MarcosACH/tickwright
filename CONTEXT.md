@@ -345,9 +345,10 @@ field-by-field and **deliberately bypasses those checks**, because a checkpointe
 of transitions already adjudicated — re-adjudicating it would refuse to recover a correct saga.
 `apply` guards the future; `restore` reproduces the past. Constructor-level validators are reserved
 for **operator-authored configuration** (`StochasticParams`), validated at its declaration site in
-the config layer because there is no later operation to attach a rule to — never for the
-adapter-authored [[AccountSpec]] and [[Instrument spec]], which are built once at composition too
-but carry venue truth, not a knob. See ADR-0047, ADR-0014, ADR-0008, ADR-0043.
+the config layer because there is no later operation to attach a rule to — never on the domain
+dataclass a configured value is deserialized into ([[AccountSpec]], [[Instrument spec]]): a knob's
+rule belongs to the config model that declares it (`PaperExchangeConfig`, `AppConfig`), and a
+venue-sourced spec is a fact in flight like any other. See ADR-0047, ADR-0014, ADR-0008, ADR-0043.
 _Avoid_: validation, sanitization (name the verb that is guarded).
 
 **Correlation id**:
