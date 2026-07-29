@@ -60,12 +60,19 @@ class PortfolioProjection:
         ``ExecutionManager`` holds both. A redelivered fill is a no-op in both
         aggregates and announces nothing.
         """
-        position = self._positions.setdefault(
-            (event.strategy_id, event.symbol),
-            Position(strategy_id=event.strategy_id, symbol=event.symbol),
-        )
+        key = (event.strategy_id, event.symbol)
+        position = self._positions.get(key)
+        if position is None:
+            position = Position(strategy_id=event.strategy_id, symbol=event.symbol)
         realized_before = position.realized_pnl
+        # Applied before the partition is filed, so a fill the aggregate refuses
+        # leaves no trace here either: a partition materialized by a refusal
+        # would report a traded-flat record for a symbol that was never traded,
+        # inverting ``position``'s ``None``. The refusal that reaches here is the
+        # non-positive quantity — ``key`` is read off the event itself and no
+        # other writer files a partition, so this seam cannot misroute one.
         changes = position.apply(event, side=side)
+        self._positions[key] = position
         if not changes:
             return
         # Realized PnL is one of the four accruing inputs to cash (ADR-0042 §4),

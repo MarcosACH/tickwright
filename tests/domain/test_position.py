@@ -139,7 +139,7 @@ def test_a_fill_for_another_symbol_is_an_invariant_violation() -> None:
     silently applying it would corrupt two partitions at once (ADR-0014)."""
     position = _position("BTC")
 
-    with pytest.raises(InvariantViolation):
+    with pytest.raises(InvariantViolation, match="applied to position"):
         position.apply(_fill(trade_id="f1", quantity="1", price="100", symbol="ETH"), side=Side.BUY)
 
 
@@ -148,5 +148,51 @@ def test_a_fill_for_another_strategy_is_an_invariant_violation() -> None:
     too — otherwise one strategy's flow could land in another's attribution."""
     position = Position(strategy_id="beta", symbol="BTC")
 
-    with pytest.raises(InvariantViolation):
+    with pytest.raises(InvariantViolation, match="applied to position"):
         position.apply(_fill(trade_id="f1", quantity="1", price="100"), side=Side.BUY)
+
+
+def test_a_zero_quantity_fill_is_an_invariant_violation() -> None:
+    """Booking one would open a *flat* record at a non-zero entry price — the
+    aggregate's own documented invariant says an entry is meaningful only while
+    non-flat. There is no state for "open at zero size", so refuse the fill
+    rather than manufacture one (ADR-0014).
+
+    ``match`` is what keeps the assertion pinned to *this* guard: ``apply`` has
+    two refusal sites and one exception type, so a type-only assertion would
+    read green on a misroute that fired for an unrelated reason."""
+    position = _position()
+
+    with pytest.raises(InvariantViolation, match="non-positive quantity"):
+        position.apply(_fill(trade_id="f1", quantity="0", price="100"), side=Side.BUY)
+
+
+def test_a_negative_quantity_fill_is_an_invariant_violation() -> None:
+    """A fill's quantity is a magnitude — ``side`` carries the direction, so a
+    negative one would invert it behind the saga's back and book a sell as a
+    buy. The guard is on the magnitude, not just on zero."""
+    position = _position()
+
+    with pytest.raises(InvariantViolation, match="non-positive quantity"):
+        position.apply(_fill(trade_id="f1", quantity="-1", price="100"), side=Side.BUY)
+
+
+def test_a_refused_fill_leaves_the_ledger_exactly_as_it_was() -> None:
+    """The guard precedes the dedup, so a refusal is atomic in both directions:
+    it moves no line, and it does not burn the ``event_id``. A producer that
+    corrects a bad quantity and re-sends the same trade must still be booked,
+    not silently swallowed as a redelivery (ADR-0025)."""
+    position = _position()
+    position.apply(_fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
+
+    with pytest.raises(InvariantViolation, match="non-positive quantity"):
+        position.apply(_fill(trade_id="f2", quantity="0", price="500"), side=Side.BUY)
+
+    assert position.signed_size == Decimal("2")
+    assert position.entry_price == Decimal("100")
+    assert "0xf2:fill:f2" not in position.applied_event_ids
+
+    assert position.apply(_fill(trade_id="f2", quantity="2", price="200"), side=Side.BUY) == (
+        PositionChange.CHANGED,
+    )
+    assert position.entry_price == Decimal("150")

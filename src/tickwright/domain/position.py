@@ -111,11 +111,17 @@ class Position:
         )
 
     def apply(self, event: OrderFillEvent, *, side: Side) -> tuple[PositionChange, ...]:
-        """Fold ``event`` into this partition; idempotent and partition-checked.
+        """Fold ``event`` into this partition; idempotent and checked.
+
+        A bookable fill belongs to this partition and moves a positive quantity;
+        anything else is an ``InvariantViolation``. Stating both here is what
+        lets every producer — venue ingress, reconciler synthetics, replay —
+        inherit the precondition instead of each honouring it unstated.
 
         ``side`` rides the saga rather than the event: ``OrderFillEvent`` carries
         the trade (quantity, price, ids) and the ``Order`` carries the direction,
-        so the ``ExecutionManager`` — which holds both — supplies it.
+        so the ``ExecutionManager`` — which holds both — supplies it. Quantity is
+        therefore a magnitude: a negative one would invert the saga's direction.
 
         Returns the changes this fill made, or ``()`` for a redelivered fill the
         ledger already reflects, so a caller can suppress a duplicate
@@ -125,6 +131,15 @@ class Position:
             raise InvariantViolation(
                 f"fill {event.event_id} for ({event.strategy_id}, {event.symbol}) applied to "
                 f"position ({self.strategy_id}, {self.symbol})"
+            )
+        if event.quantity <= _ZERO:
+            # Ahead of the dedup, so the refusal burns nothing: a producer that
+            # corrects the quantity and re-sends the trade is still booked. A
+            # zero would take the flat branch below and leave the partition flat
+            # at a non-zero entry — a state the aggregate's own contract and the
+            # ``PositionChange`` catalog have no name for (ADR-0045 §2).
+            raise InvariantViolation(
+                f"fill {event.event_id} has non-positive quantity {event.quantity}"
             )
         if event.event_id in self._applied_event_ids:
             return ()  # Already reflected — duplicate delivery is a no-op.
