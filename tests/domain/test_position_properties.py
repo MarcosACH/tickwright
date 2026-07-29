@@ -7,12 +7,16 @@ recompute it. What the aggregate does incrementally, one fill at a time, these
 oracles do in one shot.
 """
 
+from dataclasses import dataclass
 from decimal import Decimal
 
 from hypothesis import example, given
 from hypothesis import strategies as st
 
 from tickwright.domain import OrderFilled, OrderFillEvent, Position, Side
+
+# The relative band an oracle allows, scaled by the magnitude of its own terms.
+_WORKING_PRECISION = Decimal("1e-24")
 
 _PRICES = st.decimals(
     min_value=Decimal("1"), max_value=Decimal("100000"), places=2, allow_nan=False
@@ -45,24 +49,89 @@ def _fold(fills: list[tuple[Side, Decimal, Decimal]]) -> Position:
     return position
 
 
-def _agrees(actual: Decimal, expected: Decimal, *, scale: Decimal) -> bool:
-    """Whether two ``Decimal``s agree to within the context's working precision.
+@dataclass(frozen=True, slots=True)
+class _Oracle:
+    """An expectation and the agreement band its own terms earn.
 
-    The aggregate folds one fill at a time, rounding at 28 significant digits on
-    every weighted-average division; the oracles below divide once, or not at
-    all. So the two agree to ~1e-27 relative rather than bit-for-bit, and the
-    band below is that with room to spare. ADR-0034's "Tier-1 is exact at venue
-    precision" is a claim about venue-quantized quantities, not about an
-    arbitrary generated fold.
+    "Oracle" here is the testing sense the module docstring uses — a value
+    derived a different way from the code under test — not CONTEXT.md's oracle
+    price.
 
-    ``scale`` is the caller's — the magnitude of the *terms* the fold summed,
-    never of the value it arrived at. The rounding error is inherited from the
-    intermediates, so a result that cancelled down to a fraction of them (a
-    round trip closed near its entry realizes cents out of tens of thousands)
-    carries an error the result's own magnitude cannot pay for (#207). There is
-    no defensible default here: only the caller knows what its oracle summed.
+    The two travel together because they are computed from the same terms, and
+    #207 was them drifting apart: the band was scaled by the value instead. The
+    aggregate folds one fill at a time, rounding at 28 significant digits on
+    every weighted-average division, while the oracles divide once or not at
+    all, so the error is inherited from the *intermediates*. A result that
+    cancelled down to a fraction of them — a round trip closed near its entry
+    realizing cents out of tens of thousands — carries an error its own
+    magnitude cannot pay for. Only whatever summed the terms knows how big they
+    were, so ``scale`` is settled by the constructors below and never passed in
+    by a test.
+
+    ADR-0034's "Tier-1 is exact at venue precision" is a claim about
+    venue-quantized quantities, not about an arbitrary generated fold.
     """
-    return abs(actual - expected) <= max(scale, Decimal(1)) * Decimal("1e-24")
+
+    value: Decimal
+    scale: Decimal
+
+    def agrees_with(self, actual: Decimal) -> bool:
+        """Whether ``actual`` matches to within the working precision, with room
+        to spare — the fold and the oracle agree to ~1e-27 relative, never
+        bit-for-bit."""
+        return abs(actual - self.value) <= max(self.scale, Decimal(1)) * _WORKING_PRECISION
+
+
+def _weighted_mean(fills: list[tuple[Decimal, Decimal]]) -> _Oracle:
+    """Σ(price × qty) / Σ qty in one division — the entry price of an
+    accumulating position, computed without touching the reducer.
+
+    Every term the division rounds against is a price, so the dearest of them
+    bounds the magnitude the error is carried at.
+    """
+    return _Oracle(
+        value=sum((p * q for q, p in fills), start=Decimal("0"))
+        / sum((q for q, _p in fills), start=Decimal("0")),
+        scale=max(p for _q, p in fills),
+    )
+
+
+def _net_proceeds(fills: list[tuple[Side, Decimal, Decimal]]) -> _Oracle:
+    """Total taken in less total paid out — what a round trip realized, knowing
+    nothing of average cost.
+
+    The band is the **gross** notional, not the netted result: the error rides
+    on the legs, and the two differ by orders of magnitude when they cancel.
+    """
+    return _Oracle(
+        value=sum(
+            ((q * p if side is Side.SELL else -q * p) for side, q, p in fills),
+            start=Decimal("0"),
+        ),
+        scale=sum((abs(q * p) for _side, q, p in fills), start=Decimal("0")),
+    )
+
+
+def test_the_band_is_paid_for_by_the_terms_summed_not_by_the_cancelled_result() -> None:
+    """#207, pinned on the oracle that was wrong rather than the fold that was right.
+
+    A round trip closed near its entry cancels ~1.7e4 of gross notional down to
+    ~1.9. The error the fold's divisions carried out of prices near 16113 is
+    ~2e-24 — larger than a band the *answer* could pay for, comfortably inside
+    one the *terms* pay for. Asserting both directions is what keeps a future
+    oracle from reintroducing the result-scaled band.
+    """
+    sequence = [
+        (Side.SELL, Decimal("0.002"), Decimal("1.00")),
+        (Side.SELL, Decimal("0.541"), Decimal("16113.91")),
+        (Side.BUY, Decimal("0.541"), Decimal("16107.44")),
+        (Side.BUY, Decimal("0.002"), Decimal("777.77")),
+    ]
+    oracle = _net_proceeds(sequence)
+    realized = _fold(sequence).realized_pnl
+
+    assert abs(realized - oracle.value) > abs(oracle.value) * _WORKING_PRECISION
+    assert oracle.agrees_with(realized)
 
 
 @given(fills=_FILLS)
@@ -86,23 +155,18 @@ def test_average_entry_is_the_weighted_mean_whatever_order_the_fills_arrive_in(
     fills: list[tuple[Decimal, Decimal]], side: Side, permutation: object
 ) -> None:
     """Accumulating on one side, the entry is Σ(price × qty) / Σ qty — one
-    division, computed here without touching the reducer — and reordering the
-    same fills cannot move it."""
-    expected = sum((p * q for q, p in fills), start=Decimal("0")) / sum(
-        (q for q, _p in fills), start=Decimal("0")
-    )
+    division, computed here without touching the reducer. Both orderings are
+    held against that same oracle, which is the reorder-invariance claim: no
+    permutation may walk the entry off the value the unordered sum predicts."""
+    oracle = _weighted_mean(fills)
     shuffled = list(fills)
     permutation.shuffle(shuffled)  # type: ignore[attr-defined]
 
     entry = _fold([(side, q, p) for q, p in fills]).entry_price
     reordered = _fold([(side, q, p) for q, p in shuffled]).entry_price
 
-    # Every term the weighted mean divides is a price, so the dearest of them
-    # bounds the magnitude the fold's divisions round against.
-    scale = max(p for _q, p in fills)
-
-    assert _agrees(entry, expected, scale=scale)
-    assert _agrees(reordered, entry, scale=scale)
+    assert oracle.agrees_with(entry)
+    assert oracle.agrees_with(reordered)
 
 
 @example(
@@ -123,10 +187,9 @@ def test_a_sequence_that_ends_flat_realizes_proceeds_minus_cost(
     Appending the closing fill is what makes the case reachable at all: a
     generated sequence lands flat too rarely to test by filtering.
 
-    The pinned example is #207's: a round trip whose two legs cancel from
-    ~8.7e3 down to ~1.9, so the answer is ~4000× smaller than the terms that
-    produced it. It rides in the source because ``.hypothesis/`` is gitignored
-    and CI would otherwise never see it.
+    The pinned example is #207's, riding in the source because ``.hypothesis/``
+    is gitignored and CI would otherwise never see the sequence that found the
+    bad band.
     """
     net = sum((q if side is Side.BUY else -q for side, q, _p in fills), start=Decimal("0"))
     closing_price = Decimal("777.77")
@@ -135,18 +198,11 @@ def test_a_sequence_that_ends_flat_realizes_proceeds_minus_cost(
         sequence.append((Side.SELL if net > 0 else Side.BUY, abs(net), closing_price))
 
     position = _fold(sequence)
-    proceeds = sum(
-        ((q * p if side is Side.SELL else -q * p) for side, q, p in sequence),
-        start=Decimal("0"),
-    )
-
-    # Gross notional, not the netted result: the fold's error is carried by the
-    # legs, and the two can differ by orders of magnitude when they cancel.
-    gross = sum((abs(q * p) for _side, q, p in sequence), start=Decimal("0"))
+    oracle = _net_proceeds(sequence)
 
     assert position.is_flat
     assert position.entry_price == Decimal("0")
-    assert _agrees(position.realized_pnl, proceeds, scale=gross)
+    assert oracle.agrees_with(position.realized_pnl)
 
 
 @given(fills=_FILLS, redelivery=st.randoms(use_true_random=False))
