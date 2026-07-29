@@ -327,10 +327,13 @@ def test_the_ledger_is_recovered_before_the_order_cache_is_rebuilt(tmp_path: Pat
     """``PortfolioProjection.recover()`` runs immediately after the run-id bind
     and **before** ``cache.rebuild()`` (ADR-0043 §6/§10).
 
-    The order is load-bearing rather than tidy: recovery's first step can refuse
-    the store outright (#188), and it asks only ``load_account`` / ``has_orders``
-    where the rebuild deserializes every saga in the store. Behind the rebuild, a
-    restart that must not trade at all would pay the mass read before finding out.
+    The order is load-bearing rather than tidy: recovery's first step asks for
+    ``load_account`` and the partitions behind it, where the rebuild deserializes
+    every saga in the store — partitions are bounded by strategy × symbol, sagas
+    by all the history the store holds. Behind the rebuild, a restart that must
+    not trade at all would pay that mass read before finding out; the refusal
+    that makes such a restart possible is #188's, and lands ahead of the seed in
+    this same step.
     """
     timeline: list[str] = []
 

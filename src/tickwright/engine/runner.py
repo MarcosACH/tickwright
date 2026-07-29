@@ -214,10 +214,13 @@ class Engine:
         run_id = self._config.run_id or f"run-{uuid.uuid4().hex[:12]}"
         bind_run_id(run_id)
         # Recover the ledger first, ahead of every other recovery step
-        # (ADR-0043 §6/§10): it can refuse the store outright, and it asks only
-        # for the account row and an existence check where the rebuild below
-        # deserializes every saga in the store. Behind the rebuild, a restart
-        # that must not trade at all would pay the mass read before finding out.
+        # (ADR-0043 §6/§10): it asks for the account row and the partitions
+        # behind it, where the rebuild below deserializes every saga in the
+        # store — partitions are bounded by strategy × symbol, sagas by all the
+        # history the store holds. Behind the rebuild, a restart that must not
+        # trade at all would pay that mass read before finding out; the refusal
+        # that makes such a restart possible is #188's, and lands ahead of the
+        # seed in this same step.
         # It is also where paper's genesis row is written, so ``account()`` has a
         # cash line long before ``host.start()`` lets a strategy read one.
         self._portfolio.recover()
