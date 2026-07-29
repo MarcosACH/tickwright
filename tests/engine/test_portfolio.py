@@ -14,6 +14,7 @@ import pytest
 from tickwright.domain import (
     Account,
     AccountSpec,
+    InvariantViolation,
     OrderFilled,
     OrderFillEvent,
     Portfolio,
@@ -225,3 +226,21 @@ def test_a_redelivered_fill_announces_nothing() -> None:
         projection.apply_fill(fill, side=Side.BUY)
 
     assert _announcements(logs) == []
+
+
+def test_a_zero_quantity_fill_faults_the_projection_and_announces_nothing() -> None:
+    """The aggregate's refusal is the projection's too: an ``InvariantViolation``
+    pierces containment and faults the engine rather than being absorbed
+    (ADR-0014). Without it the projection would announce ``position.opened``
+    with ``size="0"`` — the payload shape reserved for a *close* — so an observer
+    would read an open at zero size, which the catalog cannot name (ADR-0045 §2).
+    """
+    projection = _projection()
+    portfolio: Portfolio = projection.for_strategy("alpha")
+
+    with capture_events() as logs, pytest.raises(InvariantViolation):
+        projection.apply_fill(_fill(trade_id="f1", quantity="0", price="100"), side=Side.BUY)
+
+    assert _announcements(logs) == []
+    assert portfolio.position("BTC") is None  # not even a materialized empty partition
+    assert portfolio.account().cash == Decimal("100000")
