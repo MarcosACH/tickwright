@@ -88,6 +88,16 @@ class PaperExchange:
         # starts last (ADR-0024), so no tick is ever published before this.
         bus.subscribe(MarketTick, self.on_tick)
 
+    async def start(self) -> None:
+        """Nothing to connect: the venue is in-process and its one link — the
+        tick subscription — is wired at construction."""
+        return None
+
+    async def stop(self) -> None:
+        """Nothing to release: this venue runs no loop of its own — it fills
+        off the tick stream the feed drives, and the feed is already cut."""
+        return None
+
     async def on_tick(self, tick: MarketTick) -> None:
         # Cache the latest price per symbol; MARKET fills read it (ADR-0027).
         self._latest_tick[tick.symbol] = tick

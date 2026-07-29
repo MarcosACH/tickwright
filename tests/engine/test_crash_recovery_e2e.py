@@ -82,6 +82,12 @@ class _CrashingTransport:
         self._venue = venue
         self._pre_send = pre_send
 
+    async def start(self) -> None:
+        await self._venue.start()
+
+    async def stop(self) -> None:
+        await self._venue.stop()
+
     async def place(self, order: PlaceOrder) -> None:
         if self._pre_send:
             raise ConnectionError("process died before the send left the box")

@@ -163,6 +163,12 @@ class _VanishingLinkExchange:
         self._venue = venue
         self._clock = clock
 
+    async def start(self) -> None:
+        await self._venue.start()
+
+    async def stop(self) -> None:
+        await self._venue.stop()
+
     async def place(self, order: PlaceOrder) -> None:
         await self._venue.place(order)
 

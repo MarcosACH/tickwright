@@ -12,7 +12,7 @@ import asyncio
 import json
 import os
 import signal
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from decimal import Decimal
 from pathlib import Path
 
@@ -27,19 +27,23 @@ from tickwright.adapters.feed import ReplayFeed
 from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
+    AccountSpec,
     ComponentState,
     InstrumentSpec,
     InvariantViolation,
     MarketTick,
+    Order,
     OrderDenied,
     OrderEvent,
     OrderFilled,
     OrderLive,
     OrderState,
     OrderType,
+    PlaceOrder,
     PlaceSignal,
     Side,
     TimeInForce,
+    VenueOrderView,
     derive_cloid,
 )
 from tickwright.engine.guard import RealGuard
@@ -427,7 +431,7 @@ def test_a_broken_stop_hook_on_the_fault_path_is_recorded_not_swallowed(tmp_path
             clock=clock,
             store=store,
             exchange=exchange,
-            feed=_PoisonedFeed(),
+            feed=_FaultingFeed(),
             portfolio=ledger(),
         )
         return await engine.run(), engine
@@ -445,15 +449,20 @@ def test_a_broken_stop_hook_on_the_fault_path_is_recorded_not_swallowed(tmp_path
     assert hook_failures[0]["hook"] == "store.close"
 
 
-class _PoisonedFeed:
-    """A feed whose read loop breaks an engine assumption — the fail-fast class.
-    A ``MarketFeed`` double at the venue boundary."""
+class _FaultingFeed:
+    """A feed whose read loop breaks an engine assumption — the fail-fast class
+    — recording the teardown that still cuts it, for the suites that ask where
+    in the sequence that happened. A ``MarketFeed`` double at the venue
+    boundary."""
+
+    def __init__(self, timeline: list[str] | None = None) -> None:
+        self._timeline = timeline if timeline is not None else []
 
     async def start(self) -> None:
         raise InvariantViolation("the read loop broke an engine assumption")
 
     async def stop(self) -> None:
-        return None
+        self._timeline.append("feed.stop")
 
 
 def _kafka_bus(broker: FakeKafkaBroker) -> KafkaBus:
@@ -507,21 +516,6 @@ def test_the_runner_owns_the_bus_lifecycle_connect_on_start_disconnect_on_stop(
     assert [c.started for c in broker.consumers] == [False]
 
 
-class _FaultingFeedThatRecordsStop:
-    """A feed whose read loop faults the engine, recording whether teardown
-    still stopped it — the fault path must cut the venue connection too.
-    A ``MarketFeed`` double at the venue boundary."""
-
-    def __init__(self) -> None:
-        self.stopped = False
-
-    async def start(self) -> None:
-        raise InvariantViolation("the read loop broke an engine assumption")
-
-    async def stop(self) -> None:
-        self.stopped = True
-
-
 def test_the_fault_path_walks_the_same_teardown_feed_stopped_and_bus_closed(
     tmp_path: Path,
 ) -> None:
@@ -530,7 +524,8 @@ def test_the_fault_path_walks_the_same_teardown_feed_stopped_and_bus_closed(
     feed (a live WS must not leak) and close the bus (a Kafka producer must
     flush — buffered writes survive the fault)."""
     broker = FakeKafkaBroker()
-    feed = _FaultingFeedThatRecordsStop()
+    timeline: list[str] = []
+    feed = _FaultingFeed(timeline)
 
     async def faulted_life() -> tuple[int, Engine]:
         bus = _kafka_bus(broker)
@@ -548,9 +543,349 @@ def test_the_fault_path_walks_the_same_teardown_feed_stopped_and_bus_closed(
 
     assert exit_code != 0
     assert engine.state is ComponentState.FAULTED
-    assert feed.stopped, "the fault path must stop the feed, not just cancel its task"
+    assert timeline == ["feed.stop"], "the fault path must stop the feed, not just cancel its task"
     assert [p.started for p in broker.producers] == [False]
     assert [c.started for c in broker.consumers] == [False]
+
+
+class _LifecycleRecordingVenue:
+    """An ``Exchange`` that records the runner driving its lifecycle verbs, and
+    what the rest of the process had already done by then. A network boundary is
+    the one place a test double is allowed."""
+
+    def __init__(self, timeline: list[str], broker: FakeKafkaBroker | None = None) -> None:
+        self._timeline = timeline
+        self._broker = broker
+        self.bus_connected_at_start = False
+
+    async def start(self) -> None:
+        if self._broker is not None:
+            # Observed at the process boundary: the broker has handed out
+            # started clients, so the bus this venue reports on is already up.
+            self.bus_connected_at_start = bool(self._broker.producers) and all(
+                producer.started for producer in self._broker.producers
+            )
+        self._timeline.append("exchange.start")
+
+    async def stop(self) -> None:
+        self._timeline.append("exchange.stop")
+
+    async def place(self, order: PlaceOrder) -> None:
+        # Recorded rather than refused: a refusal here would fault the engine
+        # through the saga path, which is not what these tests are asking about.
+        self._timeline.append("exchange.place")
+
+    async def cancel(self, cloid: str) -> None:
+        self._timeline.append("exchange.cancel")
+
+    async def fetch_order(self, cloid: str) -> VenueOrderView | None:
+        self._timeline.append("venue.read")
+        return VenueOrderView(status=None)
+
+    def account_spec(self) -> AccountSpec:
+        return AccountSpec(account_id="paper-default", genesis_collateral=GENESIS)
+
+    def instrument_specs(self) -> Mapping[str, InstrumentSpec]:
+        return {}
+
+
+def _submitted_saga(cloid: str) -> Order:
+    """A saga the barrier must ask the venue about — without one, the mass
+    rebuild has nothing to read and the ordering proof has no venue read to
+    stand on."""
+    order = Order(
+        cloid=cloid,
+        strategy_id="trivial",
+        signal_id="trivial:BTC:1",
+        symbol="BTC",
+        side=Side.BUY,
+        quantity=Decimal("0.5"),
+        order_type=OrderType.LIMIT,
+    )
+    order.state = OrderState.SUBMITTED
+    return order
+
+
+def test_the_runner_starts_the_exchange_after_the_bus_and_before_the_barrier(
+    tmp_path: Path,
+) -> None:
+    """ADR-0024 step 4: the ``Exchange``'s connect half runs after the bus is up
+    — nothing can publish before that — and *before* the startup barrier, so a
+    venue refusal precedes any order and the barrier observes an aligned venue."""
+    broker = FakeKafkaBroker()
+    timeline: list[str] = []
+    venue = _LifecycleRecordingVenue(timeline, broker)
+
+    async def main() -> int:
+        store = SQLiteStore(tmp_path / "saga.db")
+        store.checkpoint(_submitted_saga("0xabc"), ts_ns=500)
+        engine = Engine(
+            bus=_kafka_bus(broker),
+            clock=ManualClock(),
+            store=store,
+            exchange=venue,
+            feed=_BlockingFeed(),
+            portfolio=ledger(),
+        )
+        run = asyncio.create_task(engine.run())
+        await asyncio.wait_for(_until(lambda: engine.state is ComponentState.RUNNING), timeout=5)
+        await asyncio.wait_for(engine.stop(), timeout=5)
+        return await asyncio.wait_for(run, timeout=5)
+
+    assert asyncio.run(main()) == 0
+
+    assert venue.bus_connected_at_start, "the bus must be up before the venue is connected"
+    assert "venue.read" in timeline, "the barrier must actually read for the proof to bite"
+    assert timeline.index("exchange.start") < timeline.index("venue.read")
+
+
+class _TimelineFeed(_BlockingFeed):
+    """A ``_BlockingFeed`` that records the runner cutting it, so teardown
+    order is observable at the seam."""
+
+    def __init__(self, timeline: list[str]) -> None:
+        super().__init__()
+        self._timeline = timeline
+
+    async def stop(self) -> None:
+        self._timeline.append("feed.stop")
+
+
+class _TimelineStore(SQLiteStore):
+    """The real store, recording the one teardown step it owns — the last."""
+
+    def __init__(self, path: Path, timeline: list[str]) -> None:
+        super().__init__(path)
+        self._timeline = timeline
+
+    def close(self) -> None:
+        self._timeline.append("store.close")
+        super().close()
+
+
+class _VenueWatchingTheCadences(_LifecycleRecordingVenue):
+    """Records, at the moment the runner releases it, whether the reconcile
+    cadences are still running. The timeline alone cannot show this: a cancelled
+    cadence appends nothing of its own, and the tasks are the runner's — there
+    is no seam to observe them through, so the test reads the attribute."""
+
+    def __init__(self, timeline: list[str]) -> None:
+        super().__init__(timeline)
+        self.engine: Engine | None = None
+        self.cadences_still_running = True
+
+    async def stop(self) -> None:
+        assert self.engine is not None, "the test must hand the venue its engine"
+        self.cadences_still_running = any(not task.done() for task in self.engine._cadence_tasks)
+        await super().stop()
+
+
+def test_the_reverse_shutdown_releases_the_exchange_once_the_cadences_are_cancelled(
+    tmp_path: Path,
+) -> None:
+    """ADR-0024's reverse shutdown: ``exchange.stop`` sits behind ``feed.stop``
+    and behind ``reconcile.stop``, and ahead of the drain — the venue is
+    released only once nothing is left to read it, and while the bus it may
+    still report on is open. The cadences call ``fetch_order``: releasing the
+    adapter under a live cycle would freeze that cycle against an adapter the
+    runner itself had just torn down (ADR-0011 inv 1)."""
+    timeline: list[str] = []
+    venue = _VenueWatchingTheCadences(timeline)
+
+    async def main() -> int:
+        feed = _TimelineFeed(timeline)
+        engine = Engine(
+            bus=InMemoryBus(),
+            clock=ManualClock(),
+            store=_TimelineStore(tmp_path / "saga.db", timeline),
+            exchange=venue,
+            feed=feed,
+            portfolio=ledger(),
+        )
+        venue.engine = engine
+        run = asyncio.create_task(engine.run())
+        await asyncio.wait_for(feed.started.wait(), timeout=5)
+        await asyncio.wait_for(engine.stop(), timeout=5)
+        return await asyncio.wait_for(run, timeout=5)
+
+    assert asyncio.run(main()) == 0
+
+    assert timeline == ["exchange.start", "feed.stop", "exchange.stop", "store.close"]
+    assert not venue.cadences_still_running, (
+        "the venue must not be released while a reconcile cycle can still read it"
+    )
+
+
+def test_the_fault_path_stops_the_exchange_in_the_same_position_as_a_graceful_stop(
+    tmp_path: Path,
+) -> None:
+    """The faulted teardown differs from the graceful one in failure *policy*,
+    never in membership or order (ADR-0024): a fault must release the venue
+    too, and in the same place — a second copy of the sequence is what this
+    one ordered membership exists to prevent."""
+    timeline: list[str] = []
+
+    async def faulted_life() -> tuple[int, Engine]:
+        engine = Engine(
+            bus=InMemoryBus(),
+            clock=ManualClock(),
+            store=_TimelineStore(tmp_path / "saga.db", timeline),
+            exchange=_LifecycleRecordingVenue(timeline),
+            feed=_FaultingFeed(timeline),
+            portfolio=ledger(),
+        )
+        return await engine.run(), engine
+
+    exit_code, engine = asyncio.run(faulted_life())
+
+    assert exit_code != 0
+    assert engine.state is ComponentState.FAULTED
+    assert timeline == ["exchange.start", "feed.stop", "exchange.stop", "store.close"]
+
+
+class _RefusingVenue(_LifecycleRecordingVenue):
+    """A venue that refuses to align at connect time — the shape ADR-0044's
+    leverage mismatch and ADR-0046's unsupported account mode will take."""
+
+    async def start(self) -> None:
+        raise InvariantViolation("the venue refused to align with this config")
+
+
+def test_a_venue_that_refuses_to_start_faults_the_engine_before_any_order(
+    tmp_path: Path,
+) -> None:
+    """Why ``start()`` sits where it does (ADR-0024 step 4): a refusal is an
+    ``InvariantViolation`` on the existing fail-fast policy, and it lands
+    before the barrier — so the run that would otherwise have placed an order
+    against an unaligned venue never reaches the venue at all."""
+    timeline: list[str] = []
+    venue = _RefusingVenue(timeline)
+
+    async def refused_life() -> tuple[int, Engine]:
+        bus = InMemoryBus()
+        clock = ManualClock()
+        engine = Engine(
+            bus=bus,
+            clock=clock,
+            store=SQLiteStore(tmp_path / "saga.db"),
+            exchange=venue,
+            feed=ReplayFeed(path=_write_ticks(tmp_path / "ticks.jsonl"), bus=bus, clock=clock),
+            portfolio=ledger(),
+        )
+        engine.register(
+            SingleShotMarketStrategy(
+                strategy_id="eager",
+                bus=bus,
+                clock=clock,
+                portfolio=ledger().for_strategy("eager"),
+                side=Side.BUY,
+                quantity=Decimal("0.5"),
+            ),
+            symbols={"BTC"},
+        )
+        return await engine.run(), engine
+
+    with capture_events() as logs:
+        exit_code, engine = asyncio.run(refused_life())
+
+    assert exit_code != 0
+    assert engine.state is ComponentState.FAULTED
+    assert "engine.faulted" in [log["event"] for log in logs]
+    # A registered strategy and a feed full of ticks, and still nothing placed
+    # and nothing read: the refusal precedes both the barrier and the first
+    # tick. The lone entry is the teardown releasing the venue anyway — the
+    # same best-effort release the feed gets whether or not it ever started.
+    assert timeline == ["exchange.stop"]
+
+
+class _VenueThatBreaksOnStop(_LifecycleRecordingVenue):
+    """A venue whose release breaks mid-teardown — the wedged-link shape."""
+
+    async def stop(self) -> None:
+        raise RuntimeError("the venue link broke during teardown")
+
+
+def test_a_venue_that_breaks_on_stop_is_recorded_and_the_teardown_carries_on(
+    tmp_path: Path,
+) -> None:
+    """ADR-0020/0024: the faulted teardown is best-effort per step but never
+    silent. A venue that cannot be released is recorded as
+    ``engine.stop_hook_failed`` under its own name — and it can neither mask
+    the fault, block the non-zero exit, nor cost the store its close."""
+    timeline: list[str] = []
+
+    async def faulted_life() -> tuple[int, Engine]:
+        engine = Engine(
+            bus=InMemoryBus(),
+            clock=ManualClock(),
+            store=_TimelineStore(tmp_path / "saga.db", timeline),
+            exchange=_VenueThatBreaksOnStop(timeline),
+            feed=_FaultingFeed(timeline),
+            portfolio=ledger(),
+        )
+        return await engine.run(), engine
+
+    with capture_events() as logs:
+        exit_code, engine = asyncio.run(faulted_life())
+
+    names = [log["event"] for log in logs]
+    assert exit_code != 0
+    assert engine.state is ComponentState.FAULTED
+    assert "engine.faulted" in names, "the broken release must not mask the fault"
+    hook_failures = [log for log in logs if log["event"] == "engine.stop_hook_failed"]
+    assert [log["hook"] for log in hook_failures] == ["exchange.stop"]
+    # The steps behind the break still ran: the store is closed, not leaked.
+    assert timeline == ["exchange.start", "feed.stop", "store.close"]
+
+
+class _StoreThatBreaksOnClose(_TimelineStore):
+    """The last teardown step, breaking — so the graceful pass fails *behind*
+    the venue release, which is the only way to reach the second one."""
+
+    def close(self) -> None:
+        self._timeline.append("store.close")
+        raise RuntimeError("the store would not close")
+
+
+def test_a_graceful_teardown_that_breaks_releases_the_venue_a_second_time(
+    tmp_path: Path,
+) -> None:
+    """Why ``Exchange.stop()`` must be idempotent: the two teardown paths are
+    one membership, and the faulted path walks it **from the top**. A graceful
+    step that raises behind the venue release (here the store's close) faults
+    the run, and the best-effort pass releases the venue again — so an adapter
+    is called twice in the one shutdown and may hold nothing the second time."""
+    timeline: list[str] = []
+
+    async def main() -> tuple[int, Engine]:
+        feed = _TimelineFeed(timeline)
+        engine = Engine(
+            bus=InMemoryBus(),
+            clock=ManualClock(),
+            store=_StoreThatBreaksOnClose(tmp_path / "saga.db", timeline),
+            exchange=_LifecycleRecordingVenue(timeline),
+            feed=feed,
+            portfolio=ledger(),
+        )
+        run = asyncio.create_task(engine.run())
+        await asyncio.wait_for(feed.started.wait(), timeout=5)
+        await asyncio.wait_for(engine.stop(), timeout=5)
+        return await asyncio.wait_for(run, timeout=5), engine
+
+    exit_code, engine = asyncio.run(main())
+
+    assert exit_code != 0, "a teardown that breaks faults the run, graceful request or not"
+    assert engine.state is ComponentState.FAULTED
+    assert timeline.count("exchange.stop") == 2, "the release is driven once per teardown pass"
+    assert timeline == [
+        "exchange.start",
+        "feed.stop",
+        "exchange.stop",
+        "store.close",
+        "feed.stop",
+        "exchange.stop",
+        "store.close",
+    ]
 
 
 def test_graceful_stop_leaves_resting_live_orders_for_the_next_start_to_re_adopt(

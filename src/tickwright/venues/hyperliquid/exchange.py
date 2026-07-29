@@ -94,6 +94,19 @@ class HyperliquidExchange:
         # stream is where prices live (ADR-0027) — subscribe like any consumer.
         bus.subscribe(MarketTick, self.on_tick)
 
+    async def start(self) -> None:
+        """Nothing to connect yet: placement is request-scoped HTTP and the
+        tick subscription is wired at construction. The venue alignment this
+        step exists to host arrives in order: the ``userAbstraction`` mode gate
+        first (ADR-0046 §3, which opens step 4 and gates everything after it),
+        then the leverage push (ADR-0044 §7)."""
+        return None
+
+    async def stop(self) -> None:
+        """Nothing to release: this adapter runs no loop of its own — every
+        request it makes is scoped to the call that made it."""
+        return None
+
     async def on_tick(self, tick: MarketTick) -> None:
         self._latest_price[tick.symbol] = tick.price
 

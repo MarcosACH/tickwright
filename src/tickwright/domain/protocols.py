@@ -47,11 +47,17 @@ class EventBus(Protocol):
         """Return once every event published so far — including events handlers
         published while draining — has been delivered (ADR-0024's shutdown
         drain). In-memory: no-op, ``publish`` already drained; Kafka: wait for
-        this process's produced records to be dispatched and committed."""
+        this process's produced records to be dispatched and committed.
+
+        Safe on a second call, like the ``close`` below: a teardown step behind
+        this one that raises faults the run, and the best-effort pass re-walks
+        the whole membership from the top (ADR-0024)."""
         ...
 
     async def close(self) -> None:
-        """Stop delivering and flush anything buffered; safe on a never-started bus."""
+        """Stop delivering and flush anything buffered; safe on a never-started
+        bus, and safe on a second call — the faulted teardown re-walks the whole
+        membership, this step included (ADR-0024)."""
         ...
 
 
@@ -106,7 +112,13 @@ class MarketFeed(Protocol):
         ...
 
     async def stop(self) -> None:
-        """Stop producing ticks."""
+        """Stop producing ticks.
+
+        The first step of the runner's one teardown membership, so it inherits
+        that membership's property (ADR-0024, and ``Engine._teardown_steps``):
+        the faulted pass re-walks from the top, so a graceful step that raises
+        behind this one drives it a second time. Idempotent; safe on a feed
+        that never started."""
         ...
 
 
@@ -354,7 +366,78 @@ class Exchange(Protocol):
 
     Owns no saga. ``place`` emits ``ExecutionReport``s on the bus rather than
     returning them, so the ``ExecutionManager`` drives the FSM off venue facts.
+
+    Lifecycle rides the seam because the runner drives it in its ordered
+    sequence (ADR-0024): ``start`` at step 4, ``stop`` behind the feed and the
+    reconcile cadences. The two are declared as a pair and read as one.
     """
+
+    async def start(self) -> None:
+        """Connect the adapter to its venue (ADR-0024 step 4).
+
+        The *connect* half the runner's step 4 has always named, run after the
+        bus is up and **before** the startup barrier — so any refusal raised
+        here precedes every order, and the barrier observes an already-aligned
+        venue. A refusal is an ``InvariantViolation``: the engine faults and
+        exits non-zero rather than trading against a venue it could not align.
+
+        Refusal and failure are not the same answer, and the split is the
+        adapter's to make (ADR-0024 barrier-failure policy, extended by
+        ADR-0044 §6 / ADR-0046 §3): a venue that *disagrees* with this config
+        refuses immediately and is never retried, while transient boot-window
+        venue I/O — a blip, a rate-limit — is retried with backoff inside the
+        ``startup_reconciliation_timeout`` budget before it becomes a refusal.
+        The runner does not retry this call; raising is how you spend the last
+        of that budget.
+
+        That budget is **the adapter's to enforce, and only the adapter's**.
+        The runner neither retries this call nor bounds it — the timeout it
+        holds is applied to the barrier one step later, and nothing wraps this
+        one — so **``start()`` must not hang**, the peer of the "never hanging"
+        clause on ``stop()`` below. The asymmetry is deliberate but sharp: a
+        teardown that cannot finish is bounded and faults non-zero
+        (``shutdown_timeout``), whereas a *boot* wedged here has no bound and
+        no operator escape — the signal handlers are installed, but the task
+        that watches them is only created once this sequence returns, so SIGINT
+        sets a flag nobody awaits and SIGKILL is the only way out. An adapter
+        that makes a blocking venue call here owns a timeout on it; the
+        composition root must hand it the budget to size that timeout with,
+        since ``EngineConfig`` does not reach the adapter.
+        """
+        ...
+
+    async def stop(self) -> None:
+        """Release whatever ``start()`` connected (ADR-0024 reverse shutdown).
+
+        Driven once the feed is cut and the reconcile cadences are cancelled —
+        so nothing is left to call ``fetch_order`` on a released adapter — and
+        still ahead of the bus *drain*, because a loop of the adapter's own that
+        outlived this call would keep publishing into that drain and keep
+        raising its high-water mark, so the cascade never reaches quiescence.
+
+        Ahead of the drain, though, is not ahead of the last caller: the drain
+        dispatches the cascade it is waiting on, and the strategies are still
+        subscribed behind it (they stop one step later, and stopping them only
+        snapshots). So an in-flight tick can still reach a strategy, and its
+        ``Signal`` still reaches the ``ExecutionManager``. **Leave ``place``
+        and ``cancel`` answerable** — refusing cleanly on a released link, never
+        hanging and never wedging the drain — until this call has returned *and*
+        the drain behind it is done. Reachable on the Kafka bus, where dispatch
+        runs in the poll loop; not on the in-memory bus, whose ``publish``
+        already drained the cascade before the feed was cut.
+
+        **Safe on an adapter that never started**, the peer of ``EventBus.close``
+        above: the faulted teardown walks the same ordered membership as the
+        graceful one, so a ``start()`` that *refused* — or that never ran at all,
+        because an earlier step faulted first — is still followed by this call.
+        Release what exists; never assume a successful ``start()`` preceded you.
+
+        **Idempotent**, for the same reason read the other way: a graceful step
+        that raises *behind* this one faults the run, and the best-effort pass
+        re-walks the membership from the top — so the runner may drive this
+        twice in one shutdown. The second call must be a no-op, not a failure.
+        """
+        ...
 
     async def place(self, order: PlaceOrder) -> None:
         """Place ``order`` at the venue; emit the resulting raw ``ExecutionReport``(s)."""

@@ -25,7 +25,7 @@ replaying missed firings would be pure noise. The loop ignores the cycle's resul
 semantics already guarantee nothing was guessed. The loop runs until cancelled; the runner supervises both
 cadence tasks in its `TaskGroup` and cancels them in the reverse shutdown, right after the feed
 stops and before the bus drains (ADR-0024) — no cycle is still publishing heals into a closing
-store.
+store, and none is still reading a venue the same sequence releases one step later.
 
 One consequence lands in the feed: on the hermetic path (`ReplayFeed` + `InMemoryBus` +
 `PaperExchange`) nothing ever suspends, so a waiter woken by `advance_to` would starve until

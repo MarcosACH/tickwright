@@ -1,11 +1,11 @@
 """The ``Engine`` host (ADR-0014/0024): ordered startup, supervision, shutdown.
 
 The runner is where the lifecycle knowledge lives that would otherwise smear
-across every component: the barrier-gated startup order (recover → subscribe
-engine internals raw → reconciliation barrier → strategies pull-then-subscribe
-→ feed *last*), ``asyncio.TaskGroup`` supervision, and the reverse shutdown
-that converges with crash recovery — final strategy snapshots, resting ``LIVE``
-orders left alone, store closed last.
+across every component: the barrier-gated startup order (recover → bus →
+connect the exchange → subscribe engine internals raw → reconciliation barrier
+→ strategies pull-then-subscribe → feed *last*), ``asyncio.TaskGroup``
+supervision, and the reverse shutdown that converges with crash recovery —
+final strategy snapshots, resting ``LIVE`` orders left alone, store closed last.
 
 The Engine consumes seam Protocols only (ADR-0032): the composition root hands
 it already-built concretes and it constructs its own internals (``Cache``,
@@ -216,6 +216,11 @@ class Engine:
         # Start the bus (ADR-0024 step 3): in-memory a no-op; Kafka connects
         # the producer/consumer — before anything can publish or subscribe.
         await self._bus.start()
+        # Connect the exchange (ADR-0024 step 4), after the bus so an adapter
+        # that reports on it has somewhere to publish, and before the barrier
+        # below so a refusal precedes any order and the barrier's own venue
+        # reads observe an already-aligned venue.
+        await self._exchange.start()
         # Engine-internal handlers subscribe raw (ADR-0024): any exception in
         # the saga path propagates to the TaskGroup and faults the engine.
         self._bus.subscribe(Signal, self._execution.on_signal)
@@ -236,14 +241,37 @@ class Engine:
         in failure *policy* (graceful: bounded as a whole, propagate; faulted:
         bounded per step, record, keep going) — so a new teardown seam adds
         one entry here, never a second copy that the fault path silently
-        misses. Order: cut the source, let in-flight events land in the final
-        snapshots (ADR-0016), then flush the bus and close the store last —
-        resting LIVE orders stay in it for restart reconciliation to re-adopt
-        (crash and graceful stop converge on one recovery path).
+        misses. Order: cut the source, silence the cycles that read the venue,
+        release the venue, let in-flight events land in the final snapshots
+        (ADR-0016), then flush the bus and close the store last — resting LIVE
+        orders stay in it for restart reconciliation to re-adopt (crash and
+        graceful stop converge on one recovery path).
+
+        The venue is released *behind* the cadences deliberately: they read it
+        (``fetch_order``), so releasing it first would leave a live cycle
+        querying an adapter this very sequence had just torn down. It stays
+        ahead of the drain, because a loop the adapter owns would otherwise
+        publish into that drain and keep raising its high-water mark, so the
+        cascade never quiesces — both ends of the slot are load-bearing. The
+        drain still dispatches behind the release, and ``host.stop`` only
+        snapshots, so a late ``Signal`` can still reach the venue: the seam
+        answers for that (``Exchange.stop``), not the order.
+
+        One membership walked twice is the cost of one membership: the faulted
+        pass restarts at the top, so a graceful step that raises drives every
+        step *ahead* of the break a second time. No entry here may treat a
+        second call as an error, in the one window where nothing can act on it.
+        The five that cross a seam say so at that seam — ``MarketFeed.stop``,
+        ``Exchange.stop``, ``EventBus.drain``, ``EventBus.close``,
+        ``Store.close``; the other two are the engine's own and answer for it
+        here (``_stop_cadences`` re-cancels tasks already done, a no-op, and
+        ``StrategyHost.stop`` retakes the final snapshots into the same
+        latest-wins row per strategy — a rewrite, not a second effect).
         """
         return (
             ("feed.stop", self._stop_feed),
             ("reconcile.stop", self._stop_cadences),
+            ("exchange.stop", self._exchange.stop),
             ("bus.drain", self._bus.drain),
             ("host.stop", self._host.stop),
             ("bus.close", self._bus.close),

@@ -91,6 +91,18 @@ without knowing what `clearinghouseState` *means* is exactly the state the gate 
 As with ADR-0044, this is *retry* policy only — an **unsupported** mode is not retryable and refuses
 immediately.**)**
 
+**Who enforces the budget at step 4.** The three extensions above put step 4's venue work under
+`startup_reconciliation_timeout` rather than minting a second timeout, and that is the decision — but
+the budget is enforced by the **adapter**, not the runner. The runner applies its timeout to the
+barrier at step 5; nothing wraps the `Exchange.start()` call at step 4, and `EngineConfig` does not
+reach the adapter, so an adapter cannot read the number it is told to retry inside. Two consequences
+the slice that first makes step 4 a real network call must handle: `start()` **must not hang** (a
+boot wedged there is unbounded, and the task watching SIGINT is not created until the start sequence
+returns, so SIGKILL is the only escape — the opposite of the bounded teardown below), and the
+composition root must **hand the adapter the budget** to size its own timeouts with. Bounding the
+start sequence in the runner is the alternative and was not taken here: `bus.start()` at step 3 has
+the same exposure, so the fix belongs to the whole sequence rather than to this one call.
+
 ## Shutdown reverses the sequence and leaves resting orders alone
 
 `Engine.stop()`, bounded by `shutdown_timeout` so teardown cannot hang: stop the feed (cut the
@@ -98,6 +110,40 @@ source) → let the drain-to-quiescence FIFO (ADR-0023) go idle, with a bounded 
 trailing `ExecutionReport`s → stop strategies (`on_stop` takes a **final `snapshot()`**, ADR-0016)
 → stop the `Exchange`/`ExecutionManager` (disconnect; Kafka flush/commit) → stop the bus, close the
 store → exit **0**.
+
+**(Extended by [#186](https://github.com/MarcosACH/tickwright/issues/186):** the `Exchange` stop is
+**not** where the sentence above puts it. `exchange.stop` sits in `_teardown_steps` behind
+`feed.stop` (ADR-0044 §7) and behind `reconcile.stop`, ahead of the drain — not after the strategies
+stop. Both ends of that slot are load-bearing, and they pull in opposite directions. What an adapter
+owns at teardown is a loop of its own — ADR-0037's paper funding generator — so the release must
+precede the **drain**: a loop still alive during the drain keeps publishing into it and keeps raising
+its high-water mark, so the cascade the drain is waiting on never quiesces and the bound is spent on
+a shutdown that is generating its own work. But the reconcile cadences **read** the adapter
+(`fetch_order`), and they run until `reconcile.stop` cancels them, so releasing the venue ahead of
+that would leave a live cycle querying an adapter this very sequence had just torn down — a
+self-inflicted freeze (ADR-0011 inv 1) in the one window where nothing can act on it. Silence the
+readers, then release what they were reading. Everything else in the sentence stands: the drain still
+precedes the final strategy snapshots (ADR-0016), and the bus and the store still close last.
+
+Ahead of the drain does **not** mean after the last caller, and the ordering cannot make it so. The
+drain dispatches the cascade it waits on, and `host.stop` — one step behind it — only snapshots; it
+never unsubscribes. So an in-flight tick can still reach a strategy after the venue is released, and
+its `Signal` still reaches the `ExecutionManager` and its `place`. On the in-memory bus this is
+unreachable (`publish` drained the cascade before the feed was cut); on Kafka, where dispatch runs in
+the poll loop, it is not. Moving the release behind the drain to close it would re-open the loop
+window above, which is the worse of the two — so this one is answered at the **seam** instead:
+`Exchange.stop()` must leave `place`/`cancel` answerable, refusing cleanly rather than hanging, until
+the drain behind it is done. A step order cannot express "released, but still answering"; a contract
+can.
+
+The membership is **one ordered tuple** walked by both teardown paths, so the graceful and faulted
+paths cannot disagree about it — they differ in failure *policy* only. That one-membership rule has a
+cost every seam in it must carry, not just the venue: the faulted pass re-walks **from the top**, so a
+graceful step that raises drives every step ahead of the break a second time. No entry may treat a
+second call as an error. The five that cross a seam are each specified idempotent there —
+`MarketFeed.stop()`, `Exchange.stop()`, `EventBus.drain()`, `EventBus.close()` and `Store.close()`;
+the remaining two are the engine's own (`_stop_cadences`, `StrategyHost.stop`) and answer for it at
+the membership.**)**
 
 - `SUBMITTED` orders in flight on the wire are **not** awaited — they stay `SUBMITTED`,
   checkpointed; restart reconciliation heals them (ADR-0008 residual risk).
