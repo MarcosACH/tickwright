@@ -583,7 +583,7 @@ class _LifecycleRecordingVenue:
         return VenueOrderView(status=None)
 
     def account_spec(self) -> AccountSpec:
-        return AccountSpec(account_id="paper-default", genesis_collateral=_GENESIS)
+        return AccountSpec(account_id="paper-default", genesis_collateral=GENESIS)
 
     def instrument_specs(self) -> Mapping[str, InstrumentSpec]:
         return {}
