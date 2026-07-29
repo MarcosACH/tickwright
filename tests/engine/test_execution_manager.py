@@ -122,7 +122,12 @@ def _harness() -> tuple[InMemoryBus, ManualClock, SQLiteStore, list[OrderEvent]]
     )
     cache = Cache(store=store)
     manager = ExecutionManager(
-        bus=bus, clock=clock, exchange=exchange, cache=cache, portfolio=ledger()
+        bus=bus,
+        clock=clock,
+        store=store,
+        exchange=exchange,
+        cache=cache,
+        portfolio=ledger(store),
     )
 
     bus.subscribe(Signal, manager.on_signal)
@@ -175,6 +180,36 @@ def test_every_transition_is_checkpointed_on_the_happy_path() -> None:
         OrderState.SUBMITTED,
         OrderState.FILLED,
     ]
+
+
+def test_a_fill_makes_the_order_row_and_the_ledger_durable_together() -> None:
+    """The money line's crash-safety rests on this one write (ADR-0043 §4).
+
+    ``PaperExchange`` holds no position state and has no venue to heal from, so
+    the store is the paper ledger's sole authority: a fill that reached the
+    order row without reaching the positions row is a fill lost for good.
+    """
+    bus, _, store, _ = _harness()
+    cloid = derive_cloid("trivial:BTC:1")
+
+    async def scenario() -> None:
+        await bus.publish(_tick())
+        await bus.publish(_market_signal())
+
+    asyncio.run(scenario())
+
+    record = store.get_order(cloid)
+    assert record is not None
+    assert record.state is OrderState.FILLED
+    # The signal's quantity at the tick's price — the two literals the harness
+    # declares, not a number re-derived the way the ledger derives it.
+    assert [
+        (position.strategy_id, position.symbol, position.signed_size, position.entry_price)
+        for position in store.all_positions()
+    ] == [("trivial", "BTC", Decimal("0.5"), Decimal("42000"))]
+    account = store.load_account()
+    assert account is not None
+    assert account.cash == GENESIS  # An opening fill realizes nothing.
 
 
 def _fill_report(cloid: str, trade_id: str, quantity: str, *, ts_event: int = 1_000) -> FillReport:
@@ -634,7 +669,12 @@ def test_a_restart_rebuilt_cache_dedups_a_redelivered_place_signal() -> None:
     cache2 = Cache(store=store)
     cache2.rebuild()
     manager2 = ExecutionManager(
-        bus=bus2, clock=clock2, exchange=exchange2, cache=cache2, portfolio=ledger()
+        bus=bus2,
+        clock=clock2,
+        store=store,
+        exchange=exchange2,
+        cache=cache2,
+        portfolio=ledger(store),
     )
     bus2.subscribe(Signal, manager2.on_signal)
     bus2.subscribe(ExecutionReport, manager2.on_execution_report)
@@ -664,7 +704,12 @@ def _stochastic_harness(
     )
     cache = Cache(store=store)
     manager = ExecutionManager(
-        bus=bus, clock=clock, exchange=exchange, cache=cache, portfolio=ledger()
+        bus=bus,
+        clock=clock,
+        store=store,
+        exchange=exchange,
+        cache=cache,
+        portfolio=ledger(store),
     )
 
     bus.subscribe(Signal, manager.on_signal)

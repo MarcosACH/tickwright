@@ -11,7 +11,7 @@ import asyncio
 from decimal import Decimal
 
 import pytest
-from ledgers import ledger
+from ledgers import book_fill, ledger
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
@@ -157,7 +157,7 @@ def test_records_the_position_it_reads_back_through_the_portfolio_seam() -> None
         price=Decimal("42000"),
         cum_qty=Decimal("0.5"),
     )
-    projection.apply_fill(filled, side=Side.BUY)
+    book_fill(projection, filled, side=Side.BUY)
 
     asyncio.run(_deliver(strategy, [filled]))
 

@@ -100,7 +100,12 @@ def _second_life(
     cache = Cache(store=store)
     cache.rebuild()
     manager = ExecutionManager(
-        bus=bus, clock=clock, exchange=exchange, cache=cache, portfolio=ledger()
+        bus=bus,
+        clock=clock,
+        store=store,
+        exchange=exchange,
+        cache=cache,
+        portfolio=ledger(store),
     )
     bus.subscribe(Signal, manager.on_signal)
     bus.subscribe(ExecutionReport, manager.on_execution_report)
@@ -364,7 +369,12 @@ def test_a_transient_boot_time_blip_resolves_and_the_barrier_clears() -> None:
     cache.rebuild()
     venue = _BlippingVenue(failures=2)
     manager = ExecutionManager(
-        bus=bus, clock=clock, exchange=venue, cache=cache, portfolio=ledger()
+        bus=bus,
+        clock=clock,
+        store=store,
+        exchange=venue,
+        cache=cache,
+        portfolio=ledger(store),
     )
     bus.subscribe(ExecutionReport, manager.on_execution_report)
     reconciler = Reconciler(

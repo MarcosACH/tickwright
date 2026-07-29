@@ -159,9 +159,10 @@ def _first_life(
     manager = ExecutionManager(
         bus=bus,
         clock=clock,
+        store=store,
         exchange=_CrashingTransport(venue, pre_send=pre_send),
         cache=cache,
-        portfolio=ledger(),
+        portfolio=ledger(store),
     )
     strategy = SingleShotLimitStrategy(
         strategy_id="trivial",
@@ -204,7 +205,12 @@ def _second_life(
     cache = Cache(store=store)
     cache.rebuild()
     manager = ExecutionManager(
-        bus=bus, clock=clock, exchange=venue, cache=cache, portfolio=ledger()
+        bus=bus,
+        clock=clock,
+        store=store,
+        exchange=venue,
+        cache=cache,
+        portfolio=ledger(store),
     )
     bus.subscribe(Signal, manager.on_signal)
     bus.subscribe(ExecutionReport, manager.on_execution_report)

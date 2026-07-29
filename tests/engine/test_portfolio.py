@@ -10,9 +10,11 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
+from ledgers import book_fill
 
+from tickwright.adapters.clock import ManualClock
+from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
-    Account,
     AccountSpec,
     InvariantViolation,
     OrderFilled,
@@ -48,14 +50,14 @@ def _fill(
 
 def _projection(genesis: str = "100000") -> PortfolioProjection:
     spec = AccountSpec(account_id="paper-default", genesis_collateral=Decimal(genesis))
-    return PortfolioProjection(account=Account.open(spec, ts_ns=7))
+    return PortfolioProjection(spec=spec, store=SQLiteStore(":memory:"), clock=ManualClock(7))
 
 
 def test_a_fill_lands_in_its_partition_and_reads_back_through_the_seam() -> None:
     projection = _projection()
     portfolio: Portfolio = projection.for_strategy("alpha")
 
-    projection.apply_fill(_fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
+    book_fill(projection, _fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
 
     view = portfolio.position("BTC")
     assert view is not None
@@ -75,9 +77,9 @@ def test_a_never_traded_symbol_reads_none() -> None:
 def test_a_symbol_traded_flat_keeps_its_realized_and_leaves_the_open_set() -> None:
     projection = _projection()
     portfolio = projection.for_strategy("alpha")
-    projection.apply_fill(_fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
+    book_fill(projection, _fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
 
-    projection.apply_fill(_fill(trade_id="f2", quantity="2", price="150"), side=Side.SELL)
+    book_fill(projection, _fill(trade_id="f2", quantity="2", price="150"), side=Side.SELL)
 
     view = portfolio.position("BTC")
     assert view is not None
@@ -91,12 +93,12 @@ def test_a_symbol_traded_flat_keeps_its_realized_and_leaves_the_open_set() -> No
 def test_open_positions_lists_only_the_non_flat_partitions() -> None:
     projection = _projection()
     portfolio = projection.for_strategy("alpha")
-    projection.apply_fill(_fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
-    projection.apply_fill(
-        _fill(trade_id="f2", quantity="1", price="3000", symbol="ETH"), side=Side.BUY
+    book_fill(projection, _fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
+    book_fill(
+        projection, _fill(trade_id="f2", quantity="1", price="3000", symbol="ETH"), side=Side.BUY
     )
-    projection.apply_fill(
-        _fill(trade_id="f3", quantity="1", price="3100", symbol="ETH"), side=Side.SELL
+    book_fill(
+        projection, _fill(trade_id="f3", quantity="1", price="3100", symbol="ETH"), side=Side.SELL
     )
 
     assert [view.symbol for view in portfolio.open_positions()] == ["BTC"]
@@ -106,20 +108,24 @@ def test_realized_pnl_accrues_to_the_account_cash_line() -> None:
     projection = _projection("100000")
     portfolio = projection.for_strategy("alpha")
 
-    projection.apply_fill(_fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
+    book_fill(projection, _fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
     assert portfolio.account().cash == Decimal("100000")  # opening a leg realizes nothing
 
-    projection.apply_fill(_fill(trade_id="f2", quantity="2", price="80"), side=Side.SELL)
+    book_fill(projection, _fill(trade_id="f2", quantity="2", price="80"), side=Side.SELL)
     assert portfolio.account().cash == Decimal("99960")  # 2 x (80 - 100) = -40
 
 
 def test_a_strategy_reads_only_its_own_partition() -> None:
     projection = _projection()
-    projection.apply_fill(
-        _fill(trade_id="f1", quantity="2", price="100", strategy_id="alpha"), side=Side.BUY
+    book_fill(
+        projection,
+        _fill(trade_id="f1", quantity="2", price="100", strategy_id="alpha"),
+        side=Side.BUY,
     )
-    projection.apply_fill(
-        _fill(trade_id="f1", quantity="5", price="100", strategy_id="beta"), side=Side.BUY
+    book_fill(
+        projection,
+        _fill(trade_id="f1", quantity="5", price="100", strategy_id="beta"),
+        side=Side.BUY,
     )
 
     assert projection.for_strategy("alpha").position("BTC").size == Decimal("2")  # type: ignore[union-attr]
@@ -140,11 +146,11 @@ def test_a_redelivered_fill_moves_neither_the_position_nor_the_cash_line() -> No
     """
     projection = _projection("100000")
     portfolio = projection.for_strategy("alpha")
-    projection.apply_fill(_fill(trade_id="f1", quantity="4", price="100"), side=Side.BUY)
+    book_fill(projection, _fill(trade_id="f1", quantity="4", price="100"), side=Side.BUY)
     fill = _fill(trade_id="f2", quantity="2", price="150")
-    projection.apply_fill(fill, side=Side.SELL)
+    book_fill(projection, fill, side=Side.SELL)
 
-    projection.apply_fill(fill, side=Side.SELL)
+    book_fill(projection, fill, side=Side.SELL)
 
     view = portfolio.position("BTC")
     assert view is not None
@@ -156,8 +162,8 @@ def test_a_redelivered_fill_moves_neither_the_position_nor_the_cash_line() -> No
 @pytest.mark.parametrize("symbol", ["BTC", "ETH"])
 def test_every_tier_one_field_reads_a_number(symbol: str) -> None:
     projection = _projection()
-    projection.apply_fill(
-        _fill(trade_id="f1", quantity="2", price="100", symbol=symbol), side=Side.BUY
+    book_fill(
+        projection, _fill(trade_id="f1", quantity="2", price="100", symbol=symbol), side=Side.BUY
     )
 
     view = projection.for_strategy("alpha").position(symbol)
@@ -189,10 +195,10 @@ def test_a_fill_that_flips_through_zero_announces_closed_then_opened() -> None:
     report a close at a non-zero size and invert the name.
     """
     projection = _projection()
-    projection.apply_fill(_fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
+    book_fill(projection, _fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
 
     with capture_events() as logs:
-        projection.apply_fill(_fill(trade_id="f2", quantity="5", price="120"), side=Side.SELL)
+        book_fill(projection, _fill(trade_id="f2", quantity="5", price="120"), side=Side.SELL)
 
     assert _announcements(logs) == [("position.closed", "0"), ("position.opened", "-3")]
     view = projection.for_strategy("alpha").position("BTC")
@@ -206,9 +212,9 @@ def test_each_regime_announces_its_own_name_and_the_size_it_produced() -> None:
     projection = _projection()
 
     with capture_events() as logs:
-        projection.apply_fill(_fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
-        projection.apply_fill(_fill(trade_id="f2", quantity="1", price="120"), side=Side.BUY)
-        projection.apply_fill(_fill(trade_id="f3", quantity="3", price="130"), side=Side.SELL)
+        book_fill(projection, _fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
+        book_fill(projection, _fill(trade_id="f2", quantity="1", price="120"), side=Side.BUY)
+        book_fill(projection, _fill(trade_id="f3", quantity="3", price="130"), side=Side.SELL)
 
     assert _announcements(logs) == [
         ("position.opened", "2"),
@@ -220,10 +226,10 @@ def test_each_regime_announces_its_own_name_and_the_size_it_produced() -> None:
 def test_a_redelivered_fill_announces_nothing() -> None:
     projection = _projection()
     fill = _fill(trade_id="f1", quantity="2", price="100")
-    projection.apply_fill(fill, side=Side.BUY)
+    book_fill(projection, fill, side=Side.BUY)
 
     with capture_events() as logs:
-        projection.apply_fill(fill, side=Side.BUY)
+        book_fill(projection, fill, side=Side.BUY)
 
     assert _announcements(logs) == []
 
@@ -242,7 +248,7 @@ def test_a_zero_quantity_fill_faults_the_projection_and_announces_nothing() -> N
         capture_events() as logs,
         pytest.raises(InvariantViolation, match="non-positive quantity"),
     ):
-        projection.apply_fill(_fill(trade_id="f1", quantity="0", price="100"), side=Side.BUY)
+        book_fill(projection, _fill(trade_id="f1", quantity="0", price="100"), side=Side.BUY)
 
     assert _announcements(logs) == []
     assert portfolio.position("BTC") is None  # not even a materialized empty partition

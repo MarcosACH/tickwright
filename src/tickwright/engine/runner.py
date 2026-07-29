@@ -92,6 +92,7 @@ class Engine:
         self._execution = ExecutionManager(
             bus=bus,
             clock=clock,
+            store=store,
             exchange=exchange,
             cache=self._cache,
             portfolio=self._portfolio,

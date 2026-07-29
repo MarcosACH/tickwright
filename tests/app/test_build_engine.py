@@ -189,7 +189,7 @@ def test_the_ledger_opens_against_the_account_the_built_exchange_declares(
     clock = ManualClock()
     exchange = build_exchange(_config(tmp_path), bus=InMemoryBus(), clock=clock)
 
-    portfolio = build_portfolio(exchange, clock=clock)
+    portfolio = build_portfolio(exchange, store=SQLiteStore(":memory:"), clock=clock)
 
     assert portfolio.account().cash == GENESIS
 

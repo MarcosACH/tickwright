@@ -67,9 +67,9 @@ def _life(
     )
     cache = Cache(store=store)
     cache.rebuild()
-    projection = ledger()
+    projection = ledger(store)
     manager = ExecutionManager(
-        bus=bus, clock=clock, exchange=venue, cache=cache, portfolio=projection
+        bus=bus, clock=clock, store=store, exchange=venue, cache=cache, portfolio=projection
     )
     host = StrategyHost(bus=bus, clock=clock, store=store)
     btc_strat = SingleShotMarketStrategy(

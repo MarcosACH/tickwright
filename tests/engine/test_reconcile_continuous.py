@@ -109,7 +109,12 @@ def _wire(
     cache = Cache(store=store)
     cache.rebuild()
     manager = ExecutionManager(
-        bus=bus, clock=clock, exchange=exchange, cache=cache, portfolio=ledger()
+        bus=bus,
+        clock=clock,
+        store=store,
+        exchange=exchange,
+        cache=cache,
+        portfolio=ledger(store),
     )
     bus.subscribe(Signal, manager.on_signal)
     bus.subscribe(ExecutionReport, manager.on_execution_report)

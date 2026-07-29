@@ -38,12 +38,14 @@ def test_mocked_frames_reach_a_paper_fill_through_the_whole_pipeline() -> None:
         exchange = PaperExchange(
             bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
         )
-        projection = ledger()
+        store = SQLiteStore(":memory:")
+        projection = ledger(store)
         manager = ExecutionManager(
             bus=bus,
             clock=clock,
+            store=store,
             exchange=exchange,
-            cache=Cache(store=SQLiteStore(":memory:")),
+            cache=Cache(store=store),
             portfolio=projection,
         )
         strategy = SingleShotMarketStrategy(
