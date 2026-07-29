@@ -14,7 +14,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 from kafka_fakes import FakeKafkaBroker
-from ledgers import GENESIS, ledger
+from ledgers import GENESIS, checkpointer
 
 from tickwright.adapters.bus.kafka import KafkaBus
 from tickwright.adapters.bus.serde import decode_event
@@ -36,7 +36,6 @@ from tickwright.domain import (
     derive_cloid,
 )
 from tickwright.domain.enums import AggressorSide
-from tickwright.engine.cache import Cache
 from tickwright.engine.execution import ExecutionManager
 
 
@@ -312,12 +311,7 @@ def _saga_pipeline(broker: FakeKafkaBroker) -> tuple[KafkaBus, SQLiteStore, list
         bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
     )
     manager = ExecutionManager(
-        bus=bus,
-        clock=clock,
-        store=store,
-        exchange=exchange,
-        cache=Cache(store=store),
-        portfolio=ledger(store),
+        bus=bus, exchange=exchange, checkpointer=checkpointer(store, clock=clock)
     )
     bus.subscribe(Signal, manager.on_signal)
     bus.subscribe(ExecutionReport, manager.on_execution_report)

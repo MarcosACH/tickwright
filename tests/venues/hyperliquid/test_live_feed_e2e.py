@@ -11,7 +11,7 @@ import asyncio
 from decimal import Decimal
 
 from hyperliquid_fakes import FakeWsConnection, trade, trades_frame
-from ledgers import GENESIS, ledger
+from ledgers import GENESIS, checkpointer
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
@@ -25,7 +25,6 @@ from tickwright.domain import (
     Side,
     Signal,
 )
-from tickwright.engine.cache import Cache
 from tickwright.engine.execution import ExecutionManager
 from tickwright.strategies import SingleShotMarketStrategy
 from tickwright.venues.hyperliquid import HyperliquidConfig, HyperliquidFeed
@@ -38,21 +37,13 @@ def test_mocked_frames_reach_a_paper_fill_through_the_whole_pipeline() -> None:
         exchange = PaperExchange(
             bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
         )
-        store = SQLiteStore(":memory:")
-        projection = ledger(store)
-        manager = ExecutionManager(
-            bus=bus,
-            clock=clock,
-            store=store,
-            exchange=exchange,
-            cache=Cache(store=store),
-            portfolio=projection,
-        )
+        checks = checkpointer(SQLiteStore(":memory:"), clock=clock)
+        manager = ExecutionManager(bus=bus, exchange=exchange, checkpointer=checks)
         strategy = SingleShotMarketStrategy(
             strategy_id="live",
             bus=bus,
             clock=clock,
-            portfolio=projection.for_strategy("live"),
+            portfolio=checks.portfolio.for_strategy("live"),
             side=Side.BUY,
             quantity=Decimal("0.5"),
         )

@@ -19,7 +19,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from ledgers import GENESIS, ledger
+from ledgers import GENESIS, checkpointer
 from store_backends import (
     STORE_BACKEND_PARAMS,
     PostgresBackend,
@@ -53,7 +53,6 @@ from tickwright.domain import (
     VenueOrderView,
     derive_cloid,
 )
-from tickwright.engine.cache import Cache
 from tickwright.engine.execution import ExecutionManager
 from tickwright.engine.reconcile import ReconcileConfig, Reconciler
 from tickwright.strategies import SingleShotLimitStrategy
@@ -156,14 +155,11 @@ def _first_life(
     venue = PaperExchange(
         bus=venue_bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
     )
-    cache = Cache(store=store)
+    checks = checkpointer(store, clock=clock)
     manager = ExecutionManager(
         bus=bus,
-        clock=clock,
-        store=store,
         exchange=_CrashingTransport(venue, pre_send=pre_send),
-        cache=cache,
-        portfolio=ledger(store),
+        checkpointer=checks,
     )
     strategy = SingleShotLimitStrategy(
         strategy_id="trivial",
@@ -203,15 +199,13 @@ def _second_life(
     backing, a Cache rebuilt from it, a fresh bus and manager."""
     bus = InMemoryBus()
     store = backend.open()
-    cache = Cache(store=store)
+    checks = checkpointer(store, clock=clock)
+    cache = checks.cache
     cache.rebuild()
     manager = ExecutionManager(
         bus=bus,
-        clock=clock,
-        store=store,
         exchange=venue,
-        cache=cache,
-        portfolio=ledger(store),
+        checkpointer=checks,
     )
     bus.subscribe(Signal, manager.on_signal)
     bus.subscribe(ExecutionReport, manager.on_execution_report)
@@ -304,10 +298,8 @@ def _life_through_the_fill(backend: Backend) -> ManualClock:
     venue = PaperExchange(
         bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
     )
-    cache = Cache(store=store)
-    manager = ExecutionManager(
-        bus=bus, clock=clock, store=store, exchange=venue, cache=cache, portfolio=ledger(store)
-    )
+    checks = checkpointer(store, clock=clock)
+    manager = ExecutionManager(bus=bus, exchange=venue, checkpointer=checks)
     bus.subscribe(Signal, manager.on_signal)
     bus.subscribe(ExecutionReport, manager.on_execution_report)
 
@@ -344,23 +336,19 @@ def test_a_landed_fill_is_restored_and_a_redelivery_does_not_double_count_it(
 
     bus = InMemoryBus()
     store = store_backend.open()
-    projection = ledger(store)
-    # The runner's order: the ledger before the order cache (ADR-0043 §6).
-    projection.recover()
-    cache = Cache(store=store)
-    cache.rebuild()
+    checks = checkpointer(store, clock=clock)
+    # The runner's order: the ledger before the order cache (ADR-0043 §6) — one
+    # call now, because that ordering is the ``Checkpointer``'s own rule.
+    checks.recover()
     manager = ExecutionManager(
         bus=bus,
-        clock=clock,
-        store=store,
         exchange=PaperExchange(
             bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
         ),
-        cache=cache,
-        portfolio=projection,
+        checkpointer=checks,
     )
     bus.subscribe(ExecutionReport, manager.on_execution_report)
-    portfolio = projection.for_strategy("trivial")
+    portfolio = checks.portfolio.for_strategy("trivial")
 
     # Nothing lost: the fill the first life booked is there before anything runs.
     restored = portfolio.position("BTC")

@@ -10,7 +10,7 @@ orders keep filling; the halt survives a restart. The same suite stays green wit
 import asyncio
 from decimal import Decimal
 
-from ledgers import GENESIS, ledger
+from ledgers import GENESIS, checkpointer
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
@@ -34,7 +34,6 @@ from tickwright.domain import (
     derive_cloid,
 )
 from tickwright.domain.enums import OrderType
-from tickwright.engine.cache import Cache
 from tickwright.engine.execution import ExecutionManager
 from tickwright.engine.guard import NoopGuard, RealGuard
 from tickwright.observability.testing import capture_events
@@ -89,16 +88,13 @@ def _harness(
     exchange = PaperExchange(
         bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
     )
-    cache = Cache(store=store)
+    checks = checkpointer(store, clock=clock)
     guard = guard or RealGuard(specs={"BTC": _SPEC}, store=store, clock=clock)
     manager = ExecutionManager(
         bus=bus,
-        clock=clock,
-        store=store,
         exchange=exchange,
-        cache=cache,
+        checkpointer=checks,
         guard=guard,
-        portfolio=ledger(store),
     )
 
     bus.subscribe(Signal, manager.on_signal)
@@ -138,16 +134,13 @@ def test_market_below_min_notional_is_rejected_by_the_venue_via_sourced_specs() 
         genesis_collateral=GENESIS,
         instrument_specs={"BTC": _SPEC},
     )
-    cache = Cache(store=store)
+    checks = checkpointer(store, clock=clock)
     guard = RealGuard(specs=exchange.instrument_specs(), store=store, clock=clock)
     manager = ExecutionManager(
         bus=bus,
-        clock=clock,
-        store=store,
         exchange=exchange,
-        cache=cache,
+        checkpointer=checks,
         guard=guard,
-        portfolio=ledger(store),
     )
     bus.subscribe(Signal, manager.on_signal)
     bus.subscribe(ExecutionReport, manager.on_execution_report)
@@ -242,17 +235,15 @@ def _revived_manager(
     exchange = PaperExchange(
         bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
     )
-    cache = Cache(store=store)
+    checks = checkpointer(store, clock=clock)
+    cache = checks.cache
     cache.rebuild()
     guard = RealGuard(specs={"BTC": _SPEC}, store=store, clock=clock)
     manager = ExecutionManager(
         bus=bus,
-        clock=clock,
-        store=store,
         exchange=exchange,
-        cache=cache,
+        checkpointer=checks,
         guard=guard,
-        portfolio=ledger(store),
     )
     bus.subscribe(Signal, manager.on_signal)
     bus.subscribe(ExecutionReport, manager.on_execution_report)

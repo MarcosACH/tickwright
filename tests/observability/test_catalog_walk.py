@@ -18,7 +18,7 @@ from decimal import Decimal
 
 import pytest
 from hyperliquid_fakes import FakeExchangeApi, FakeWsConnection, trade, trades_frame
-from ledgers import GENESIS, ledger
+from ledgers import GENESIS, checkpointer
 from pydantic import SecretStr
 from venue_doubles import VenueDouble
 
@@ -48,9 +48,9 @@ from tickwright.domain import (
 )
 from tickwright.domain.enums import OrderType, TimeInForce
 from tickwright.engine.cache import Cache
+from tickwright.engine.checkpoint import Checkpointer
 from tickwright.engine.execution import ExecutionManager
 from tickwright.engine.guard import RealGuard
-from tickwright.engine.portfolio import PortfolioProjection
 from tickwright.engine.reconcile import ReconcileConfig, Reconciler
 from tickwright.engine.runner import Engine
 from tickwright.engine.strategy_host import StrategyHost
@@ -204,19 +204,16 @@ def _manager(
     exchange: Exchange,
     *,
     guard: PreTradeGuard | None = None,
-    portfolio: PortfolioProjection | None = None,
+    checks: Checkpointer | None = None,
 ) -> None:
     """Wire an ``ExecutionManager`` over ``exchange`` onto ``bus`` — the exchange
     must already share ``bus`` so its fills flow back to the manager."""
-    store = SQLiteStore(":memory:")
-    cache = Cache(store=store)
     manager = ExecutionManager(
         bus=bus,
-        clock=clock,
-        store=store,
         exchange=exchange,
-        cache=cache,
-        portfolio=portfolio if portfolio is not None else ledger(store),
+        checkpointer=checks
+        if checks is not None
+        else checkpointer(SQLiteStore(":memory:"), clock=clock),
         guard=guard,
     )
     bus.subscribe(Signal, manager.on_signal)
