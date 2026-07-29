@@ -5,24 +5,39 @@ signed quantities, a single notional-weighted division, total proceeds minus
 total cost — so a property can genuinely disagree with the code rather than
 recompute it. What the aggregate does incrementally, one fill at a time, these
 oracles do in one shot.
+
+``_QUANTITIES`` is **total over what the aggregate accepts**: it reaches down to
+zero, which ``Position.apply`` refuses (#208), so every property here also
+exercises the refusal and the oracles account for a fill that was never booked.
 """
 
 from dataclasses import dataclass
 from decimal import Decimal
 
+import pytest
 from hypothesis import example, given
 from hypothesis import strategies as st
 
-from tickwright.domain import OrderFilled, OrderFillEvent, Position, Side
+from tickwright.domain import (
+    InvariantViolation,
+    OrderFilled,
+    OrderFillEvent,
+    Position,
+    PositionChange,
+    Side,
+)
 
 # The relative band an oracle allows, scaled by the magnitude of its own terms.
 _WORKING_PRECISION = Decimal("1e-24")
+# The quantity that is not a trade. ``_QUANTITIES`` generates it deliberately:
+# the aggregate refuses it, so it is a term no oracle may sum (#208).
+_NOTHING = Decimal("0")
 
 _PRICES = st.decimals(
     min_value=Decimal("1"), max_value=Decimal("100000"), places=2, allow_nan=False
 )
 _QUANTITIES = st.decimals(
-    min_value=Decimal("0.001"), max_value=Decimal("1000"), places=3, allow_nan=False
+    min_value=Decimal("0"), max_value=Decimal("1000"), places=3, allow_nan=False
 )
 _FILLS = st.lists(st.tuples(st.sampled_from(Side), _QUANTITIES, _PRICES), min_size=1, max_size=8)
 
@@ -42,10 +57,34 @@ def _event(index: int, quantity: Decimal, price: Decimal) -> OrderFillEvent:
     )
 
 
+def _offer(
+    position: Position, index: int, fill: tuple[Side, Decimal, Decimal]
+) -> tuple[PositionChange, ...] | None:
+    """Offer one generated fill, holding the aggregate to its precondition.
+
+    Returns the changes booked, or ``None`` for a fill refused as non-positive
+    — which is what makes the generator's zero a legal input to every property
+    below rather than a value ``_QUANTITIES`` has to exclude (#208). Asserting
+    the refusal here rather than swallowing it means every fold in this module
+    also checks that a zero is refused, and the oracles drop exactly the terms
+    the refusals never booked.
+    """
+    side, quantity, price = fill
+    event = _event(index, quantity, price)
+    if quantity > _NOTHING:
+        return position.apply(event, side=side)
+    # Matched on the message, not just the type: every fill generated here is
+    # well-routed, so a refusal naming the *partition* would mean the fold broke
+    # somewhere this helper is not looking.
+    with pytest.raises(InvariantViolation, match="non-positive quantity"):
+        position.apply(event, side=side)
+    return None
+
+
 def _fold(fills: list[tuple[Side, Decimal, Decimal]]) -> Position:
     position = Position(strategy_id="alpha", symbol="BTC")
-    for index, (side, quantity, price) in enumerate(fills):
-        position.apply(_event(index, quantity, price), side=side)
+    for index, fill in enumerate(fills):
+        _offer(position, index, fill)
     return position
 
 
@@ -88,11 +127,19 @@ def _weighted_mean(fills: list[tuple[Decimal, Decimal]]) -> _Oracle:
 
     Every term the division rounds against is a price, so the dearest of them
     bounds the magnitude the error is carried at.
+
+    A refused fill is not a term: it never reached the reducer, so summing it
+    would be an oracle disagreeing with the aggregate over a fill neither of
+    them booked. With none left the position never opened, and its untouched
+    entry of zero is what the oracle predicts.
     """
+    booked = [(q, p) for q, p in fills if q > _NOTHING]
+    if not booked:
+        return _Oracle(value=_NOTHING, scale=_NOTHING)
     return _Oracle(
-        value=sum((p * q for q, p in fills), start=Decimal("0"))
-        / sum((q for q, _p in fills), start=Decimal("0")),
-        scale=max(p for _q, p in fills),
+        value=sum((p * q for q, p in booked), start=Decimal("0"))
+        / sum((q for q, _p in booked), start=Decimal("0")),
+        scale=max(p for _q, p in booked),
     )
 
 
@@ -102,6 +149,10 @@ def _net_proceeds(fills: list[tuple[Side, Decimal, Decimal]]) -> _Oracle:
 
     The band is the **gross** notional, not the netted result: the error rides
     on the legs, and the two differ by orders of magnitude when they cancel.
+
+    Refused fills need no filtering here, unlike ``_weighted_mean``: a
+    zero-quantity term contributes zero to a sum of proceeds and zero to the
+    band, which is already what a fill the reducer never saw is worth.
     """
     return _Oracle(
         value=sum(
@@ -210,17 +261,23 @@ def test_redelivering_applied_fills_changes_no_outcome(
     fills: list[tuple[Side, Decimal, Decimal]], redelivery: object
 ) -> None:
     """At-least-once delivery converges: replaying any subset of already-applied
-    fills, in any order, leaves every Tier-1 line where it was (ADR-0025)."""
+    fills, in any order, leaves every Tier-1 line where it was (ADR-0025).
+
+    A redelivered fill the aggregate refused is refused again, not absorbed as a
+    duplicate: the guard precedes the dedup, so a refusal never burns the
+    ``event_id`` a corrected resend would need (#208).
+    """
     position = _fold(fills)
     settled = (position.signed_size, position.entry_price, position.realized_pnl)
 
     replay = [
-        (index, side, q, p)
-        for index, (side, q, p) in enumerate(fills)
+        (index, fill)
+        for index, fill in enumerate(fills)
         if redelivery.random() < 0.5  # type: ignore[attr-defined]
     ]
     redelivery.shuffle(replay)  # type: ignore[attr-defined]
-    for index, side, quantity, price in replay:
-        assert position.apply(_event(index, quantity, price), side=side) == ()
+    for index, fill in replay:
+        changes = _offer(position, index, fill)
+        assert changes is None or changes == ()
 
     assert (position.signed_size, position.entry_price, position.realized_pnl) == settled
