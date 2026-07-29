@@ -869,7 +869,7 @@ def test_a_graceful_teardown_that_breaks_releases_the_venue_a_second_time(
         )
         run = asyncio.create_task(engine.run())
         await asyncio.wait_for(feed.started.wait(), timeout=5)
-        engine._stop_requested.set()
+        await asyncio.wait_for(engine.stop(), timeout=5)
         return await asyncio.wait_for(run, timeout=5), engine
 
     exit_code, engine = asyncio.run(main())
