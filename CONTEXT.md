@@ -351,8 +351,8 @@ for **configuration chosen at wiring** (`StochasticParams`, `ReconcileConfig`), 
 declaration site in the config layer because there is no later operation to attach a rule to —
 never on the domain dataclass a configured value is deserialized into ([[AccountSpec]],
 [[Instrument spec]]): a knob's rule belongs to the config model that declares it
-(`PaperExchangeConfig`, `AppConfig`), and a spec is a *report* of venue truth, a fact in flight like
-any other. See ADR-0047, ADR-0014, ADR-0008, ADR-0043.
+(`PaperExchangeConfig`, `AppConfig`), and a **venue-sourced** spec is a *report* of venue truth, a
+fact in flight like any other. See ADR-0047, ADR-0014, ADR-0008, ADR-0043.
 _Avoid_: validation, sanitization (name the verb that is guarded).
 
 **Correlation id**:
