@@ -66,9 +66,11 @@ class PortfolioProjection:
             position = Position(strategy_id=event.strategy_id, symbol=event.symbol)
         realized_before = position.realized_pnl
         # Applied before the partition is filed, so a fill the aggregate refuses
-        # — a misroute, a non-positive quantity — leaves no trace here either. A
-        # partition materialized by a refusal would report a traded-flat record
-        # for a symbol that was never traded, inverting ``position``'s ``None``.
+        # leaves no trace here either: a partition materialized by a refusal
+        # would report a traded-flat record for a symbol that was never traded,
+        # inverting ``position``'s ``None``. The refusal that reaches here is the
+        # non-positive quantity — ``key`` is read off the event itself and no
+        # other writer files a partition, so this seam cannot misroute one.
         changes = position.apply(event, side=side)
         self._positions[key] = position
         if not changes:
