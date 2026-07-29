@@ -588,6 +588,42 @@ def test_the_paper_venue_releases_without_a_start_and_keeps_its_book() -> None:
     assert view.status.status is OrderState.LIVE
 
 
+def test_the_released_paper_venue_still_answers_a_place_and_a_cancel() -> None:
+    """Ahead of the bus drain is not ahead of the last caller. ``stop()`` runs
+    before the drain, but the drain is what dispatches the cascade it is waiting
+    on, and the strategies are still subscribed behind it — so an in-flight tick
+    can still reach one, and its ``Signal`` still reaches the
+    ``ExecutionManager``, which calls ``place`` on an adapter already released.
+    The seam therefore requires both order verbs to stay **answerable** across
+    the release: refusing cleanly rather than raising, and above all never
+    hanging, because the drain is blocked on the very cascade they are in.
+
+    ``asyncio.wait_for`` is the "never hanging" half as an *assertion* — without
+    a bound, a release that wedged an order verb would hang the suite instead of
+    failing it, which is not a result.
+
+    In-process the release holds nothing, so answering here is answering
+    normally: the cancel still reports ``CANCELLED`` and the late order still
+    fills off the cached tick. That is the claim's shape today; when ADR-0037's
+    funding generator gives ``stop()`` something to tear down, this is the test
+    that says the teardown may not take the order path down with it."""
+    exchange, bus, clock, fills, statuses = _limit_harness()
+
+    async def scenario() -> None:
+        clock.advance_to(1_000)
+        await bus.publish(_tick("42000"))
+        await exchange.place(_limit_order("41000"))  # rests, uncrossed
+        await exchange.stop()
+        # Behind the release, inside the drain the runner has not reached yet.
+        await asyncio.wait_for(exchange.cancel("0xabc"), timeout=5)
+        await asyncio.wait_for(exchange.place(_market_order(qty="0.5", cloid="0xlate")), timeout=5)
+
+    asyncio.run(scenario())
+
+    assert [s.status for s in statuses] == [OrderState.LIVE, OrderState.CANCELLED]
+    assert [f.cloid for f in fills] == ["0xlate"]
+
+
 def test_the_paper_venue_satisfies_the_exchange_seam() -> None:
     """Conformance asserted at the adapter, as both bus adapters assert theirs.
 

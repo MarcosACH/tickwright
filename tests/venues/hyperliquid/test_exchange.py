@@ -784,6 +784,54 @@ def test_the_venue_link_is_released_without_a_start_having_run() -> None:
     assert post.requests == []
 
 
+def test_the_released_venue_link_still_answers_a_place_and_a_cancel() -> None:
+    """Ahead of the bus drain is not ahead of the last caller. ``stop()`` runs
+    before the drain, but the drain dispatches the cascade it is waiting on and
+    the strategies are still subscribed behind it, so a ``Signal`` can still
+    reach the ``ExecutionManager`` and land here as a ``place`` on a released
+    adapter. Both order verbs must stay **answerable** across the release —
+    never hanging, because the drain is blocked on the cascade they are in.
+
+    ``asyncio.wait_for`` is the "never hanging" half stated as an assertion: an
+    unbounded call would hang the suite rather than fail it.
+
+    This adapter holds no connection of its own — every request is scoped to the
+    call that makes it — so the release takes nothing away and both verbs reach
+    the venue exactly as before. The fake routes only what these two ask for, so
+    a released adapter that started sending something *else* fails loudly."""
+
+    async def main() -> tuple[FakeExchangeApi, list[ExecutionReport]]:
+        bus = InMemoryBus()
+        clock = ManualClock(start_ns=1_700_000_001_000 * _NS_PER_MS)
+        post = FakeExchangeApi(
+            {"order": resting_response(oid=77), "cancelByCloid": cancel_success_response()}
+        )
+        exchange = make_exchange(post, bus=bus, clock=clock)
+        reports: list[ExecutionReport] = []
+
+        async def collect(report: ExecutionReport) -> None:
+            reports.append(report)
+
+        bus.subscribe(ExecutionReport, collect)
+        await exchange.start()
+        await exchange.stop()
+        # Behind the release, inside the drain the runner has not reached yet.
+        await asyncio.wait_for(exchange.place(limit_order(Side.BUY, "0.5", "42000")), timeout=5)
+        await asyncio.wait_for(exchange.cancel(CLOID), timeout=5)
+        return post, reports
+
+    post, reports = asyncio.run(main())
+
+    assert [payload["action"]["type"] for (_url, payload) in post.requests] == [
+        "order",
+        "cancelByCloid",
+    ]
+    _live, cancelled = reports
+    assert isinstance(cancelled, OrderStatusReport)
+    assert cancelled.status is OrderState.CANCELLED
+    assert cancelled.cloid == CLOID
+
+
 def test_the_hyperliquid_venue_satisfies_the_exchange_seam() -> None:
     """Conformance asserted at the adapter, as both bus adapters assert theirs
     (``tests/adapters/bus/``). ``Exchange`` is ``runtime_checkable``, so this is
