@@ -30,6 +30,7 @@ from tickwright.domain import (
     Exchange,
     ExecutionReport,
     MarketFeed,
+    Portfolio,
     PreTradeGuard,
     Signal,
     Store,
@@ -70,7 +71,6 @@ class Engine:
         store: Store,
         exchange: Exchange,
         feed: MarketFeed,
-        portfolio: PortfolioProjection,
         guard: PreTradeGuard | None = None,
         config: EngineConfig | None = None,
     ) -> None:
@@ -86,10 +86,15 @@ class Engine:
         # The engine-internal components, built here from the injected seams —
         # the composition root knows the concretes, the Engine knows the wiring.
         self._cache = Cache(store=store)
-        # Injected rather than built here, unlike the Cache: the composition
-        # root also hands each strategy a facade scoped off this same object, so
-        # it must own the one instance (ADR-0041 §7).
-        self._portfolio = portfolio
+        # Built here for the same reason as the Cache, and it is what makes the
+        # fill's one-transaction write (ADR-0043 §4) a property of the wiring
+        # rather than a convention: the ledger and the Cache read the one
+        # ``store`` above, so an Engine whose two projections write different
+        # stores is not constructible. Which account it opens is the venue's own
+        # declaration, taken off the ``Exchange`` seam.
+        self._portfolio = PortfolioProjection(
+            spec=exchange.account_spec(), store=store, clock=clock
+        )
         self._execution = ExecutionManager(
             bus=bus,
             clock=clock,
@@ -123,6 +128,18 @@ class Engine:
     @property
     def state(self) -> ComponentState:
         return self._state
+
+    def portfolio_for(self, strategy_id: str) -> Portfolio:
+        """The scoped read-facade to hand ``strategy_id``'s constructor.
+
+        The composition root still does the injecting (ADR-0041 §7) — a strategy
+        receives its facade as an ``__init__`` argument, not from the engine and
+        not through the ``Strategy`` Protocol — but it resolves the facade here,
+        off the one projection the engine writes, rather than off a projection of
+        its own. Only the facade leaves: the concrete stays engine-internal, as
+        the ``Cache`` does.
+        """
+        return self._portfolio.for_strategy(strategy_id)
 
     def register(self, strategy: Strategy, *, symbols: Iterable[str]) -> None:
         """Add ``strategy`` to the hosted set before ``run()`` (ADR-0018)."""

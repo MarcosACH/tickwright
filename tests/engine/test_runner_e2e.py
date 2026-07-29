@@ -17,7 +17,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from kafka_fakes import FakeKafkaBroker
-from ledgers import GENESIS, ledger
+from ledgers import GENESIS
 from structlog.typing import EventDict
 from venue_doubles import VenueDouble
 
@@ -86,15 +86,12 @@ async def _run_to_fill_then_stop(ticks: Path, db: Path) -> tuple[int, Engine]:
         bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
     )
     feed = ReplayFeed(path=ticks, bus=bus, clock=clock)
-    projection = ledger(store)
-    engine = Engine(
-        bus=bus, clock=clock, store=store, exchange=exchange, feed=feed, portfolio=projection
-    )
+    engine = Engine(bus=bus, clock=clock, store=store, exchange=exchange, feed=feed)
     strategy = SingleShotMarketStrategy(
         strategy_id="trivial",
         bus=bus,
         clock=clock,
-        portfolio=projection.for_strategy("trivial"),
+        portfolio=engine.portfolio_for("trivial"),
         side=Side.BUY,
         quantity=Decimal("0.5"),
     )
@@ -116,6 +113,31 @@ async def _run_to_fill_then_stop(ticks: Path, db: Path) -> tuple[int, Engine]:
     assert engine.state is ComponentState.RUNNING
     await engine.stop()
     return await run, engine
+
+
+def test_the_engine_lends_a_strategy_a_facade_onto_its_own_ledger(tmp_path: Path) -> None:
+    """The registration loop's seam (#213): the engine owns the projection the
+    way it owns the ``Cache``, and hands a strategy a scoped facade onto it — so
+    the composition root never builds a second one to inject.
+
+    Asserted on the number the *venue* was declared with rather than an
+    arbitrary literal: what makes the facade the engine's own is that its cash
+    line was opened from the same ``account_spec()`` the engine's exchange
+    declares, which nothing here passed in separately.
+    """
+    bus = InMemoryBus()
+    clock = ManualClock()
+    engine = Engine(
+        bus=bus,
+        clock=clock,
+        store=SQLiteStore(":memory:"),
+        exchange=PaperExchange(
+            bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
+        ),
+        feed=ReplayFeed(path=_write_ticks(tmp_path / "ticks.jsonl"), bus=bus, clock=clock),
+    )
+
+    assert engine.portfolio_for("trivial").account().cash == GENESIS
 
 
 def test_run_replays_trades_and_exits_zero_on_graceful_stop(tmp_path: Path) -> None:
@@ -186,9 +208,7 @@ def test_sigterm_stops_the_engine_gracefully(tmp_path: Path) -> None:
             bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
         )
         feed = ReplayFeed(path=ticks, bus=bus, clock=clock)
-        engine = Engine(
-            bus=bus, clock=clock, store=store, exchange=exchange, feed=feed, portfolio=ledger(store)
-        )
+        engine = Engine(bus=bus, clock=clock, store=store, exchange=exchange, feed=feed)
 
         run = asyncio.create_task(engine.run())
         await asyncio.wait_for(_until(lambda: engine.state is ComponentState.RUNNING), timeout=5)
@@ -238,7 +258,6 @@ def test_sigusr1_trips_the_kill_switch_and_sigusr2_resets_it(tmp_path: Path) -> 
             exchange=venue,
             feed=feed,
             guard=guard,
-            portfolio=ledger(store),
         )
 
         outcomes: list[OrderEvent] = []
@@ -350,7 +369,6 @@ def test_the_ledger_is_recovered_before_the_order_cache_is_rebuilt(tmp_path: Pat
                 bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
             ),
             feed=feed,
-            portfolio=ledger(store),
         )
         run = asyncio.create_task(engine.run())
         await asyncio.wait_for(feed.started.wait(), timeout=5)
@@ -380,7 +398,6 @@ def test_shutdown_is_bounded_a_hung_teardown_faults_instead_of_hanging(tmp_path:
             exchange=exchange,
             feed=_HangingFeed(),
             config=EngineConfig(shutdown_timeout_seconds=0.05),
-            portfolio=ledger(store),
         )
         run = asyncio.create_task(engine.run())
         await asyncio.wait_for(_until(lambda: engine.state is ComponentState.RUNNING), timeout=5)
@@ -408,9 +425,7 @@ def test_graceful_stop_cancels_a_still_running_feed(tmp_path: Path) -> None:
             bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
         )
         feed = _BlockingFeed()
-        engine = Engine(
-            bus=bus, clock=clock, store=store, exchange=exchange, feed=feed, portfolio=ledger(store)
-        )
+        engine = Engine(bus=bus, clock=clock, store=store, exchange=exchange, feed=feed)
 
         run = asyncio.create_task(engine.run())
         await asyncio.wait_for(_until(lambda: engine.state is ComponentState.RUNNING), timeout=5)
@@ -448,14 +463,13 @@ def test_invariant_violation_faults_the_engine_and_exits_nonzero(tmp_path: Path)
             exchange=exchange,
             feed=feed,
             guard=guard,
-            portfolio=ledger(store),
         )
         engine.register(
             SingleShotMarketStrategy(
                 strategy_id="doomed",
                 bus=bus,
                 clock=clock,
-                portfolio=ledger(store).for_strategy("doomed"),
+                portfolio=engine.portfolio_for("doomed"),
                 side=Side.BUY,
                 quantity=Decimal("0.5"),
             ),
@@ -494,7 +508,6 @@ def test_a_broken_stop_hook_on_the_fault_path_is_recorded_not_swallowed(tmp_path
             store=store,
             exchange=exchange,
             feed=_FaultingFeed(),
-            portfolio=ledger(store),
         )
         return await engine.run(), engine
 
@@ -558,7 +571,6 @@ def test_the_runner_owns_the_bus_lifecycle_connect_on_start_disconnect_on_stop(
             store=store,
             exchange=exchange,
             feed=_BlockingFeed(),
-            portfolio=ledger(store),
         )
 
         run = asyncio.create_task(engine.run())
@@ -596,9 +608,7 @@ def test_the_fault_path_walks_the_same_teardown_feed_stopped_and_bus_closed(
         exchange = PaperExchange(
             bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
         )
-        engine = Engine(
-            bus=bus, clock=clock, store=store, exchange=exchange, feed=feed, portfolio=ledger(store)
-        )
+        engine = Engine(bus=bus, clock=clock, store=store, exchange=exchange, feed=feed)
         return await engine.run(), engine
 
     exit_code, engine = asyncio.run(faulted_life())
@@ -681,7 +691,6 @@ def test_the_runner_starts_the_exchange_after_the_bus_and_before_the_barrier(
             store=store,
             exchange=venue,
             feed=_BlockingFeed(),
-            portfolio=ledger(store),
         )
         run = asyncio.create_task(engine.run())
         await asyncio.wait_for(_until(lambda: engine.state is ComponentState.RUNNING), timeout=5)
@@ -756,7 +765,6 @@ def test_the_reverse_shutdown_releases_the_exchange_once_the_cadences_are_cancel
             store=_TimelineStore(tmp_path / "saga.db", timeline),
             exchange=venue,
             feed=feed,
-            portfolio=ledger(),
         )
         venue.engine = engine
         run = asyncio.create_task(engine.run())
@@ -788,7 +796,6 @@ def test_the_fault_path_stops_the_exchange_in_the_same_position_as_a_graceful_st
             store=_TimelineStore(tmp_path / "saga.db", timeline),
             exchange=_LifecycleRecordingVenue(timeline),
             feed=_FaultingFeed(timeline),
-            portfolio=ledger(),
         )
         return await engine.run(), engine
 
@@ -826,14 +833,13 @@ def test_a_venue_that_refuses_to_start_faults_the_engine_before_any_order(
             store=SQLiteStore(tmp_path / "saga.db"),
             exchange=venue,
             feed=ReplayFeed(path=_write_ticks(tmp_path / "ticks.jsonl"), bus=bus, clock=clock),
-            portfolio=ledger(),
         )
         engine.register(
             SingleShotMarketStrategy(
                 strategy_id="eager",
                 bus=bus,
                 clock=clock,
-                portfolio=ledger().for_strategy("eager"),
+                portfolio=engine.portfolio_for("eager"),
                 side=Side.BUY,
                 quantity=Decimal("0.5"),
             ),
@@ -877,7 +883,6 @@ def test_a_venue_that_breaks_on_stop_is_recorded_and_the_teardown_carries_on(
             store=_TimelineStore(tmp_path / "saga.db", timeline),
             exchange=_VenueThatBreaksOnStop(timeline),
             feed=_FaultingFeed(timeline),
-            portfolio=ledger(),
         )
         return await engine.run(), engine
 
@@ -921,7 +926,6 @@ def test_a_graceful_teardown_that_breaks_releases_the_venue_a_second_time(
             store=_StoreThatBreaksOnClose(tmp_path / "saga.db", timeline),
             exchange=_LifecycleRecordingVenue(timeline),
             feed=feed,
-            portfolio=ledger(),
         )
         run = asyncio.create_task(engine.run())
         await asyncio.wait_for(feed.started.wait(), timeout=5)
@@ -961,9 +965,7 @@ def test_graceful_stop_leaves_resting_live_orders_for_the_next_start_to_re_adopt
             bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
         )
         feed = ReplayFeed(path=_write_ticks(tmp_path / "first.jsonl"), bus=bus, clock=clock)
-        engine = Engine(
-            bus=bus, clock=clock, store=store, exchange=venue, feed=feed, portfolio=ledger(store)
-        )
+        engine = Engine(bus=bus, clock=clock, store=store, exchange=venue, feed=feed)
         engine.register(
             SingleShotLimitStrategy(
                 strategy_id="resting",
@@ -1018,9 +1020,7 @@ def test_graceful_stop_leaves_resting_live_orders_for_the_next_start_to_re_adopt
         ]
         (tmp_path / "second.jsonl").write_text("\n".join(json.dumps(r) for r in later) + "\n")
         feed = ReplayFeed(path=tmp_path / "second.jsonl", bus=bus, clock=clock)
-        engine = Engine(
-            bus=bus, clock=clock, store=store, exchange=venue, feed=feed, portfolio=ledger(store)
-        )
+        engine = Engine(bus=bus, clock=clock, store=store, exchange=venue, feed=feed)
         engine.register(
             SingleShotLimitStrategy(
                 strategy_id="resting",

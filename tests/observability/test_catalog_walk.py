@@ -538,7 +538,6 @@ def _drive_engine_faulted() -> None:
                 bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
             ),
             feed=_PoisonedFeed(),
-            portfolio=ledger(),
         )
         assert await engine.run() == 1
 
@@ -568,7 +567,6 @@ def _drive_engine_stop_hook_failed() -> None:
                 bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
             ),
             feed=_PoisonedFeed(),
-            portfolio=ledger(),
         )
         assert await engine.run() == 1
 
@@ -589,7 +587,6 @@ def _drive_engine_lifecycle() -> None:
                 bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
             ),
             feed=_IdleFeed(),
-            portfolio=ledger(),
         )
         run = asyncio.create_task(engine.run())
         await engine.stop()
