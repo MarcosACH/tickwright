@@ -9,10 +9,11 @@ supervision, and the reverse shutdown that converges with crash recovery —
 final strategy snapshots, resting ``LIVE`` orders left alone, store closed last.
 
 The Engine consumes seam Protocols only (ADR-0032): the composition root hands
-it already-built concretes and it constructs its own internals (``Cache``,
-``PortfolioProjection``, ``ExecutionManager``, ``Reconciler``, ``StrategyHost``)
-from them — the two read-models included, so the order cache and the ledger hold
-one ``Store`` and the fill's write is one transaction (ADR-0043 §4). Venue-sim
+it already-built concretes and it constructs its own internals (``Checkpointer``,
+``ExecutionManager``, ``Reconciler``, ``StrategyHost``) from them — the two
+read-models included, arriving as the one ``Checkpointer`` that holds them, so
+the order cache and the ledger cannot be pointed at different stores and the
+fill's write is one transaction by construction (ADR-0043 §4). Venue-sim
 wiring that is not a seam — the paper exchange filling off the tick stream — the
 paper adapter owns itself (it self-subscribes at construction, ADR-0012), so
 neither the Engine nor the composition root carries a paper-specific tick line;
@@ -41,11 +42,10 @@ from tickwright.domain import (
 from tickwright.observability import NamedEvent, named_event
 from tickwright.observability.correlation import bind_run_id
 
-from .cache import Cache
 from .cadence import run_cadence
+from .checkpoint import Checkpointer
 from .execution import ExecutionManager
 from .guard import NoopGuard
-from .portfolio import PortfolioProjection
 from .reconcile import ReconcileConfig, Reconciler
 from .strategy_host import StrategyHost
 
@@ -87,24 +87,14 @@ class Engine:
         self._guard = guard if guard is not None else NoopGuard()
         # The engine-internal components, built here from the injected seams —
         # the composition root knows the concretes, the Engine knows the wiring.
-        self._cache = Cache(store=store)
-        # Built here for the same reason as the Cache, and it is what makes the
-        # fill's one-transaction write (ADR-0043 §4) a property of the wiring
-        # rather than a convention: the ledger and the Cache read the one
-        # ``store`` above, so an Engine whose two projections write different
-        # stores is not constructible. Which account it opens is the venue's own
-        # declaration, taken off the ``Exchange`` seam.
-        self._portfolio = PortfolioProjection(
-            spec=exchange.account_spec(), store=store, clock=clock
-        )
+        # Both read-models come from one object built on the one ``store`` above,
+        # so an Engine whose order cache and ledger write different stores is not
+        # constructible and the fill's write is one transaction by construction
+        # (ADR-0043 §4). Which account the ledger opens against is the venue's
+        # own declaration, taken off the ``Exchange`` seam.
+        self._checkpointer = Checkpointer(spec=exchange.account_spec(), store=store, clock=clock)
         self._execution = ExecutionManager(
-            bus=bus,
-            clock=clock,
-            store=store,
-            exchange=exchange,
-            cache=self._cache,
-            portfolio=self._portfolio,
-            guard=self._guard,
+            bus=bus, exchange=exchange, checkpointer=self._checkpointer, guard=self._guard
         )
         # Resolved here (not left to the Reconciler default) because the runner
         # also paces the continuous cadences off the same intervals below.
@@ -115,7 +105,7 @@ class Engine:
             bus=bus,
             clock=clock,
             exchange=exchange,
-            cache=self._cache,
+            cache=self._checkpointer.cache,
             config=self._reconcile_config,
         )
         self._host = StrategyHost(
@@ -141,7 +131,7 @@ class Engine:
         its own. Only the facade leaves: the concrete stays engine-internal, as
         the ``Cache`` does.
         """
-        return self._portfolio.for_strategy(strategy_id)
+        return self._checkpointer.portfolio.for_strategy(strategy_id)
 
     def register(self, strategy: Strategy, *, symbols: Iterable[str]) -> None:
         """Add ``strategy`` to the hosted set before ``run()`` (ADR-0018)."""
@@ -232,19 +222,13 @@ class Engine:
         # — the engine's and every component's — is traceable to this run.
         run_id = self._config.run_id or f"run-{uuid.uuid4().hex[:12]}"
         bind_run_id(run_id)
-        # Recover the ledger first, ahead of every other recovery step
-        # (ADR-0043 §6/§10): it asks for the account row and the partitions
-        # behind it, where the rebuild below deserializes every saga in the
-        # store — partitions are bounded by strategy × symbol, sagas by all the
-        # history the store holds. Behind the rebuild, a restart that must not
-        # trade at all would pay that mass read before finding out; the refusal
-        # that makes such a restart possible is #188's, and lands ahead of the
-        # seed in this same step.
-        # It is also where paper's genesis row is written, so ``account()`` has a
-        # cash line long before ``host.start()`` lets a strategy read one.
-        self._portfolio.recover()
-        # Recover: rebuild the read-model projection from the durable record.
-        self._cache.rebuild()
+        # Restore both read-models from the durable record, ledger first — the
+        # ordering is ADR-0043 §6/§10's and belongs to the ``Checkpointer``,
+        # which is why the rule is stated there rather than reproduced here.
+        # What this step still owns is *when* it runs: ahead of everything else,
+        # so paper's genesis row is written long before ``host.start()`` lets a
+        # strategy read a cash line.
+        self._checkpointer.recover()
         # Start the bus (ADR-0024 step 3): in-memory a no-op; Kafka connects
         # the producer/consumer — before anything can publish or subscribe.
         await self._bus.start()
