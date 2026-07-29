@@ -35,6 +35,7 @@ from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.domain import (
     AggressorSide,
     ExecutionReport,
+    FillReport,
     MarketTick,
     OrderEvent,
     OrderFailed,
@@ -275,4 +276,107 @@ def test_pre_send_kill_resolves_the_unlanded_intent_failed_never_resent(
     assert not [ev for ev in events if isinstance(ev, OrderPlaced)]
     view = asyncio.run(venue.fetch_order(_CLOID))
     assert view is not None and not view.has_record
+    store.close()
+
+
+def _fill_report(trade_id: str) -> FillReport:
+    """The venue's fill for the resting BUY, as the adapter reports it."""
+    return FillReport(
+        ts_event=5_000,
+        ts_init=5_000,
+        cloid=_CLOID,
+        symbol="BTC",
+        trade_id=trade_id,
+        quantity=Decimal("0.5"),
+        price=Decimal("41000"),
+    )
+
+
+def _life_through_the_fill(backend: Backend) -> ManualClock:
+    """One life that places, fills, and dies with both halves durable.
+
+    The venue is not returned: this life's fill already landed, so the second
+    life's subject is the redelivery rather than a barrier heal.
+    """
+    bus = InMemoryBus()
+    clock = ManualClock()
+    store = backend.open()
+    venue = PaperExchange(
+        bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
+    )
+    cache = Cache(store=store)
+    manager = ExecutionManager(
+        bus=bus, clock=clock, store=store, exchange=venue, cache=cache, portfolio=ledger(store)
+    )
+    bus.subscribe(Signal, manager.on_signal)
+    bus.subscribe(ExecutionReport, manager.on_execution_report)
+
+    async def scenario() -> None:
+        await bus.publish(_crossing_tick(1_000))
+        await bus.publish(_redelivered_signal())
+
+    asyncio.run(scenario())
+
+    record = store.get_order(_CLOID)
+    assert record is not None and record.state is OrderState.FILLED
+    store.close()  # the crash: the process, and its store connection, die
+    return clock
+
+
+def test_a_landed_fill_is_restored_and_a_redelivery_does_not_double_count_it(
+    store_backend: Backend,
+) -> None:
+    """No lost fill and no double-counted one, across a real restart.
+
+    The two halves have different owners. Nothing is lost because ``recover()``
+    reads the ledger back before anything else runs — without it the second life
+    reports a flat position for a symbol the venue holds 0.5 of, and on paper
+    there is no venue to heal that from. Nothing doubles because the *restored*
+    saga still carries the trade in its applied set, so the venue's redelivery
+    dies at ``Order.record_fill`` and never reaches the ledger at all.
+
+    What this case deliberately does **not** prove is the atomicity itself: the
+    crash here lands after both halves are durable, so a split write would pass
+    it. The window between two writes is only observable where one of them can
+    fail — asserted at the ``ExecutionManager`` seam and in the store contract.
+    """
+    clock = _life_through_the_fill(store_backend)
+
+    bus = InMemoryBus()
+    store = store_backend.open()
+    projection = ledger(store)
+    # The runner's order: the ledger before the order cache (ADR-0043 §6).
+    projection.recover()
+    cache = Cache(store=store)
+    cache.rebuild()
+    manager = ExecutionManager(
+        bus=bus,
+        clock=clock,
+        store=store,
+        exchange=PaperExchange(
+            bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
+        ),
+        cache=cache,
+        portfolio=projection,
+    )
+    bus.subscribe(ExecutionReport, manager.on_execution_report)
+    portfolio = projection.for_strategy("trivial")
+
+    # Nothing lost: the fill the first life booked is there before anything runs.
+    restored = portfolio.position("BTC")
+    assert restored is not None
+    assert restored.size == Decimal("0.5")
+    assert restored.entry_price == Decimal("41000")
+    assert portfolio.account().cash == GENESIS  # an opening fill realizes nothing
+    # And nothing fabricated: a symbol the ledger has no row for stays absent.
+    assert portfolio.position("ETH") is None
+
+    # At-least-once redelivery of the venue's own fill, across the restart.
+    asyncio.run(bus.publish(_fill_report(f"{_CLOID}-1")))
+
+    unchanged = portfolio.position("BTC")
+    assert unchanged is not None
+    assert unchanged.size == Decimal("0.5")  # booked once, not twice
+    assert portfolio.account().cash == GENESIS
+    assert [position.signed_size for position in store.all_positions()] == [Decimal("0.5")]
     store.close()

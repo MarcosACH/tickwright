@@ -1,9 +1,10 @@
 """The ``Engine`` host (ADR-0014/0024): ordered startup, supervision, shutdown.
 
 The runner is where the lifecycle knowledge lives that would otherwise smear
-across every component: the barrier-gated startup order (recover → bus →
-connect the exchange → subscribe engine internals raw → reconciliation barrier
-→ strategies pull-then-subscribe → feed *last*), ``asyncio.TaskGroup``
+across every component: the barrier-gated startup order (recover the ledger →
+rebuild the order cache → bus → connect the exchange → subscribe engine
+internals raw → reconciliation barrier → strategies pull-then-subscribe → feed
+*last*), ``asyncio.TaskGroup``
 supervision, and the reverse shutdown that converges with crash recovery —
 final strategy snapshots, resting ``LIVE`` orders left alone, store closed last.
 
@@ -212,6 +213,14 @@ class Engine:
         # — the engine's and every component's — is traceable to this run.
         run_id = self._config.run_id or f"run-{uuid.uuid4().hex[:12]}"
         bind_run_id(run_id)
+        # Recover the ledger first, ahead of every other recovery step
+        # (ADR-0043 §6/§10): it can refuse the store outright, and it asks only
+        # for the account row and an existence check where the rebuild below
+        # deserializes every saga in the store. Behind the rebuild, a restart
+        # that must not trade at all would pay the mass read before finding out.
+        # It is also where paper's genesis row is written, so ``account()`` has a
+        # cash line long before ``host.start()`` lets a strategy read one.
+        self._portfolio.recover()
         # Recover: rebuild the read-model projection from the durable record.
         self._cache.rebuild()
         # Start the bus (ADR-0024 step 3): in-memory a no-op; Kafka connects

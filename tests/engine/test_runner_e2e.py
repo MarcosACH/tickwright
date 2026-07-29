@@ -28,6 +28,7 @@ from tickwright.adapters.feed import ReplayFeed
 from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
+    Account,
     ComponentState,
     InstrumentSpec,
     InvariantViolation,
@@ -85,7 +86,7 @@ async def _run_to_fill_then_stop(ticks: Path, db: Path) -> tuple[int, Engine]:
         bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
     )
     feed = ReplayFeed(path=ticks, bus=bus, clock=clock)
-    projection = ledger()
+    projection = ledger(store)
     engine = Engine(
         bus=bus, clock=clock, store=store, exchange=exchange, feed=feed, portfolio=projection
     )
@@ -186,7 +187,7 @@ def test_sigterm_stops_the_engine_gracefully(tmp_path: Path) -> None:
         )
         feed = ReplayFeed(path=ticks, bus=bus, clock=clock)
         engine = Engine(
-            bus=bus, clock=clock, store=store, exchange=exchange, feed=feed, portfolio=ledger()
+            bus=bus, clock=clock, store=store, exchange=exchange, feed=feed, portfolio=ledger(store)
         )
 
         run = asyncio.create_task(engine.run())
@@ -237,7 +238,7 @@ def test_sigusr1_trips_the_kill_switch_and_sigusr2_resets_it(tmp_path: Path) -> 
             exchange=venue,
             feed=feed,
             guard=guard,
-            portfolio=ledger(),
+            portfolio=ledger(store),
         )
 
         outcomes: list[OrderEvent] = []
@@ -300,6 +301,64 @@ class _BlockingFeed:
         return None
 
 
+class _RecoveryOrderStore(SQLiteStore):
+    """The real store, recording the two recovery reads whose order is the
+    contract: the ledger's ``load_account`` and the ``Cache``'s ``all_orders``.
+
+    The ordering has no other observation port. Both steps are the runner's own
+    and neither leaves a distinguishing durable trace, so the seam they share is
+    where it shows — recorded, not simulated: every call still reaches the real
+    store underneath."""
+
+    def __init__(self, path: Path, timeline: list[str]) -> None:
+        super().__init__(path)
+        self._timeline = timeline
+
+    def load_account(self) -> Account | None:
+        self._timeline.append("ledger.load_account")
+        return super().load_account()
+
+    def all_orders(self) -> list[Order]:
+        self._timeline.append("cache.all_orders")
+        return super().all_orders()
+
+
+def test_the_ledger_is_recovered_before_the_order_cache_is_rebuilt(tmp_path: Path) -> None:
+    """``PortfolioProjection.recover()`` runs immediately after the run-id bind
+    and **before** ``cache.rebuild()`` (ADR-0043 §6/§10).
+
+    The order is load-bearing rather than tidy: recovery's first step can refuse
+    the store outright (#188), and it asks only ``load_account`` / ``has_orders``
+    where the rebuild deserializes every saga in the store. Behind the rebuild, a
+    restart that must not trade at all would pay the mass read before finding out.
+    """
+    timeline: list[str] = []
+
+    async def main() -> int:
+        store = _RecoveryOrderStore(tmp_path / "saga.db", timeline)
+        bus = InMemoryBus()
+        clock = ManualClock()
+        feed = _BlockingFeed()
+        engine = Engine(
+            bus=bus,
+            clock=clock,
+            store=store,
+            exchange=PaperExchange(
+                bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
+            ),
+            feed=feed,
+            portfolio=ledger(store),
+        )
+        run = asyncio.create_task(engine.run())
+        await asyncio.wait_for(feed.started.wait(), timeout=5)
+        await asyncio.wait_for(engine.stop(), timeout=5)
+        return await asyncio.wait_for(run, timeout=5)
+
+    assert asyncio.run(main()) == 0
+
+    assert timeline[:2] == ["ledger.load_account", "cache.all_orders"]
+
+
 def test_shutdown_is_bounded_a_hung_teardown_faults_instead_of_hanging(tmp_path: Path) -> None:
     """ADR-0024: the reverse shutdown is bounded by ``shutdown_timeout`` — a
     teardown that cannot finish must fault non-zero, never wedge the process."""
@@ -318,7 +377,7 @@ def test_shutdown_is_bounded_a_hung_teardown_faults_instead_of_hanging(tmp_path:
             exchange=exchange,
             feed=_HangingFeed(),
             config=EngineConfig(shutdown_timeout_seconds=0.05),
-            portfolio=ledger(),
+            portfolio=ledger(store),
         )
         run = asyncio.create_task(engine.run())
         await asyncio.wait_for(_until(lambda: engine.state is ComponentState.RUNNING), timeout=5)
@@ -347,7 +406,7 @@ def test_graceful_stop_cancels_a_still_running_feed(tmp_path: Path) -> None:
         )
         feed = _BlockingFeed()
         engine = Engine(
-            bus=bus, clock=clock, store=store, exchange=exchange, feed=feed, portfolio=ledger()
+            bus=bus, clock=clock, store=store, exchange=exchange, feed=feed, portfolio=ledger(store)
         )
 
         run = asyncio.create_task(engine.run())
@@ -386,14 +445,14 @@ def test_invariant_violation_faults_the_engine_and_exits_nonzero(tmp_path: Path)
             exchange=exchange,
             feed=feed,
             guard=guard,
-            portfolio=ledger(),
+            portfolio=ledger(store),
         )
         engine.register(
             SingleShotMarketStrategy(
                 strategy_id="doomed",
                 bus=bus,
                 clock=clock,
-                portfolio=ledger().for_strategy("doomed"),
+                portfolio=ledger(store).for_strategy("doomed"),
                 side=Side.BUY,
                 quantity=Decimal("0.5"),
             ),
@@ -432,7 +491,7 @@ def test_a_broken_stop_hook_on_the_fault_path_is_recorded_not_swallowed(tmp_path
             store=store,
             exchange=exchange,
             feed=_FaultingFeed(),
-            portfolio=ledger(),
+            portfolio=ledger(store),
         )
         return await engine.run(), engine
 
@@ -496,7 +555,7 @@ def test_the_runner_owns_the_bus_lifecycle_connect_on_start_disconnect_on_stop(
             store=store,
             exchange=exchange,
             feed=_BlockingFeed(),
-            portfolio=ledger(),
+            portfolio=ledger(store),
         )
 
         run = asyncio.create_task(engine.run())
@@ -535,7 +594,7 @@ def test_the_fault_path_walks_the_same_teardown_feed_stopped_and_bus_closed(
             bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
         )
         engine = Engine(
-            bus=bus, clock=clock, store=store, exchange=exchange, feed=feed, portfolio=ledger()
+            bus=bus, clock=clock, store=store, exchange=exchange, feed=feed, portfolio=ledger(store)
         )
         return await engine.run(), engine
 
@@ -619,7 +678,7 @@ def test_the_runner_starts_the_exchange_after_the_bus_and_before_the_barrier(
             store=store,
             exchange=venue,
             feed=_BlockingFeed(),
-            portfolio=ledger(),
+            portfolio=ledger(store),
         )
         run = asyncio.create_task(engine.run())
         await asyncio.wait_for(_until(lambda: engine.state is ComponentState.RUNNING), timeout=5)
@@ -900,7 +959,7 @@ def test_graceful_stop_leaves_resting_live_orders_for_the_next_start_to_re_adopt
         )
         feed = ReplayFeed(path=_write_ticks(tmp_path / "first.jsonl"), bus=bus, clock=clock)
         engine = Engine(
-            bus=bus, clock=clock, store=store, exchange=venue, feed=feed, portfolio=ledger()
+            bus=bus, clock=clock, store=store, exchange=venue, feed=feed, portfolio=ledger(store)
         )
         engine.register(
             SingleShotLimitStrategy(
@@ -957,7 +1016,7 @@ def test_graceful_stop_leaves_resting_live_orders_for_the_next_start_to_re_adopt
         (tmp_path / "second.jsonl").write_text("\n".join(json.dumps(r) for r in later) + "\n")
         feed = ReplayFeed(path=tmp_path / "second.jsonl", bus=bus, clock=clock)
         engine = Engine(
-            bus=bus, clock=clock, store=store, exchange=venue, feed=feed, portfolio=ledger()
+            bus=bus, clock=clock, store=store, exchange=venue, feed=feed, portfolio=ledger(store)
         )
         engine.register(
             SingleShotLimitStrategy(
