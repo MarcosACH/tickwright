@@ -93,10 +93,11 @@ def normalize_account_state(response: object) -> VenueAccountState | None:
                 )
             except (ArithmeticError, KeyError, TypeError, ValueError) as exc:
                 # The root shape matched but something inside it did not: a
-                # position row missing a field, a figure that is not a number (or
-                # is a *non-finite* one — see ``_figure``), a margin mode outside
-                # the two the venue reports (the ``ValueError`` — neither
-                # ``_figure`` nor ``_isolated_collateral`` guesses what it means).
+                # position row missing a field, a figure that is not a number —
+                # or is one the venue re-typed or reported non-finite, both of
+                # which ``_figure`` refuses — a margin mode outside the two the
+                # venue reports (the ``ValueError`` — neither ``_figure`` nor
+                # ``_isolated_collateral`` guesses what it means).
                 _name_failed_read(f"{exc!r} in clearinghouseState response {_rendered(response)}")
                 return None
     _name_failed_read(f"unrecognized clearinghouseState response: {_rendered(response)}")
@@ -141,24 +142,39 @@ def _rendered(response: object) -> str:
     return f"{shape}{body}"
 
 
-def _figure(reported: Any) -> Decimal:
+def _figure(reported: object) -> Decimal:
     """One venue figure as an exact number, or a failed read if it is not one.
 
-    Every quantity in this response goes through here, because a non-finite
-    figure is the one unreadable value that does not announce itself:
-    ``Decimal("nan")`` and ``Decimal("Infinity")`` are *valid* constructions, so
-    they raise nothing and would ride through into a whole ``VenueAccountState``
-    while a missing field or a non-numeric string freezes the read.
+    Every quantity in this response goes through here, for the two unreadable
+    values that do not announce themselves. Both would otherwise construct a
+    perfectly valid ``Decimal`` and ride into a whole ``VenueAccountState``,
+    where a missing field or a non-numeric string freezes the read.
 
-    Letting one through would be fail-*open* in the worst direction available at
-    this grain. Every comparison against a ``NaN`` is false, so a reconcile
-    handed a ``NaN`` equity would find no divergence to act on, read the ledger
-    as agreeing with the venue and decline to freeze — the exact inversion of
-    inv 1, and quieter than the outage it is supposed to behave like. An infinity
-    is no better: it would drive an unbounded heal toward a figure no venue
-    holds. So a figure that is not finite is a failed read like any other
+    **Not a string.** The venue reports every one of these figures as a decimal
+    string, so a JSON *number* is the venue changing its contract — the same
+    "we are not reading what we think we are" a missing field means, and frozen
+    for the same reason (``_position``). It cannot be waved through as
+    equivalent: ``Decimal`` built from a float carries the binary value, so a
+    reported `0.002` becomes ``0.00200000000000000004163…``, no longer the exact
+    figure this surface is built on, and durable once ``_records.py`` round-trips
+    it. Taking ``object`` rather than ``Any`` is what makes the check
+    load-bearing — the type checker will not let a caller reach ``Decimal``
+    around it.
+
+    **Not finite.** ``Decimal("nan")`` and ``Decimal("Infinity")`` are *valid*
+    constructions, so they raise nothing on the way in. Letting one through would
+    be fail-*open* in the worst direction available at this grain: every
+    comparison against a ``NaN`` is false, so a reconcile handed a ``NaN`` equity
+    would find no divergence to act on, read the ledger as agreeing with the
+    venue and decline to freeze — the exact inversion of inv 1, and quieter than
+    the outage it is supposed to behave like. An infinity is no better; it would
+    drive an unbounded heal toward a figure no venue holds.
+
+    So a figure that is not an exact number is a failed read like any other
     (ADR-0011 inv 1, ADR-0034 — never a fabricated number).
     """
+    if not isinstance(reported, str):
+        raise TypeError(f"non-string figure {reported!r}")
     figure = Decimal(reported)
     if not figure.is_finite():
         raise ValueError(f"non-finite figure {reported!r}")

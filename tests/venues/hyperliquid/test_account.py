@@ -282,16 +282,18 @@ def _with_margin_mode(snapshot: dict, mode: str) -> dict:
     }
 
 
-def _with_summary_figure(snapshot: dict, summary: str, field: str, value: str) -> dict:
+def _with_summary_figure(snapshot: dict, summary: str, field: str, value: object) -> dict:
     """``snapshot`` with one account-grain figure replaced by ``value``.
 
     Used for the figures that *parse* — ``Decimal`` accepts ``"nan"`` and
     ``"Infinity"`` as valid constructions — so unlike a deleted field these reach
-    the constructor rather than the match pattern."""
+    the constructor rather than the match pattern. ``value`` is ``object`` rather
+    than ``str`` because a figure the venue re-types as a JSON *number* is one of
+    the cases, and it is the type change that has to be described."""
     return snapshot | {summary: snapshot[summary] | {field: value}}
 
 
-def _with_position_figure(snapshot: dict, field: str, value: str) -> dict:
+def _with_position_figure(snapshot: dict, field: str, value: object) -> dict:
     """``snapshot`` with one figure on its position row replaced, same shape as
     ``_with_summary_figure`` one level down."""
     (entry,) = snapshot["assetPositions"]
@@ -633,6 +635,28 @@ def test_a_transport_failure_reads_as_no_venue_truth_never_as_a_flat_book() -> N
         (
             "an infinite liquidation price",
             _with_position_figure(CROSS_SNAPSHOT, "liquidationPx", "-Infinity"),
+        ),
+        # A figure the venue re-types as a JSON *number*. Every one of these
+        # arrives as a string today, so a number is the venue changing its
+        # contract — "we are not reading what we think we are", the same thing a
+        # missing field means, and it must freeze for the same reason.
+        # ``Decimal`` would otherwise accept the float and answer a whole state
+        # built on a value that is no longer exact: ``Decimal(0.002)`` is
+        # ``0.00200000000000000004163…``, which ``_records.py`` would then
+        # round-trip into the ledger verbatim (#218). Both grains, because the
+        # two used to disagree — the account grain froze on the ``str`` in the
+        # match pattern while the position grain let the number through.
+        (
+            "a position size the venue re-typed as a number",
+            _with_position_figure(CROSS_SNAPSHOT, "szi", 0.002),
+        ),
+        (
+            "a liquidation price the venue re-typed as a number",
+            _with_position_figure(CROSS_SNAPSHOT, "liquidationPx", 52522.497721519),
+        ),
+        (
+            "an account figure the venue re-typed as a number",
+            _with_summary_figure(CROSS_SNAPSHOT, "marginSummary", "accountValue", 25.9264),
         ),
     ],
 )
