@@ -41,6 +41,7 @@ from .events import (
     VenueOrderView,
     VenuePositionState,
 )
+from .figures import exact_figure
 from .ids import SignalId, derive_cloid
 from .instrument import (
     Approved,
@@ -118,6 +119,8 @@ __all__ = [
     # id derivation
     "derive_cloid",
     "SignalId",
+    # figure guard
+    "exact_figure",
     # quantization
     "below_min_notional",
     "quantize_price",

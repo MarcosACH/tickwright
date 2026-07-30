@@ -14,7 +14,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import TypedDict
 
-from tickwright.domain import AggressorSide, EventBus, MarketTick, ReplayClock
+from tickwright.domain import AggressorSide, EventBus, MarketTick, ReplayClock, exact_figure
 
 
 class _TickRow(TypedDict):
@@ -71,8 +71,14 @@ class ReplayFeed:
             ts_event=ts_event,
             ts_init=self._clock.timestamp_ns(),
             symbol=symbol,
-            price=Decimal(str(row["price"])),
-            size=Decimal(str(row["size"])),
+            # A recorded file is not a venue, but ``Decimal("NaN")`` is just as
+            # valid a construction here, and replay feeds the tracer E2E and
+            # every strategy test — a ``NaN`` price published from a file would
+            # surface as an ``InvalidOperation`` from whichever guard compared
+            # against it, blaming a layer that read the tick correctly. An
+            # unreadable row raises, which is what replay has always done.
+            price=exact_figure(Decimal(str(row["price"]))),
+            size=exact_figure(Decimal(str(row["size"]))),
             aggressor_side=AggressorSide(row["aggressor_side"]),
             trade_id=str(row["trade_id"]),
             seq=seq,

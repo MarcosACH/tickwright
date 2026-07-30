@@ -18,7 +18,16 @@ Consumed by `/code-review` (any regression is BLOCKING) and `/python-codebase-ma
    never read as "all orders vanished." *At the account grain the same guard is
    `fetch_account_state() -> VenueAccountState | None`, and `None` means no venue truth to
    compare against, never a flat book: nothing heals. A response the adapter cannot **parse**
-   is a failed read too, not an empty account — and paper's `None` is its permanent answer,
+   is a failed read too, not an empty account — including one that parses *cleanly* into a
+   figure the engine cannot stand behind. `Decimal("nan")`/`Decimal("Infinity")` are valid
+   constructions, and a figure re-typed as a JSON number lost digits and scale to `float` in
+   `json.loads` before any parse of ours saw it, so neither announces
+   itself; every boundary that reads a reported figure passes it through one guard and turns
+   the refusal into its own layer's failed read (a dropped frame on a feed, a named `None` on
+   a venue read). `domain.exact_figure` holds the universal half — a figure must be a number —
+   and each venue owns what its own figures may be *encoded* as, Hyperliquid's being
+   `venues/hyperliquid/reading.py` (`figure`, plus the `UNREADABLE` vocabulary every grain of
+   that venue catches). Paper's `None` is its permanent answer,
    because it holds no account state at all, so a cadence mistakenly pointed at it freezes
    rather than healing a restored ledger to flat.* (ADR-0011, ADR-0034)
 4. **Rejections are explicit events.** A placed-but-rejected order surfaces as its taxonomy

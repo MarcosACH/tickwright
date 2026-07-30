@@ -21,6 +21,7 @@ from tickwright.domain import (
 from tickwright.observability import NamedEvent, named_event
 
 from .config import HyperliquidConfig
+from .reading import UNREADABLE, figure
 
 
 def account_spec(config: HyperliquidConfig, *, address: str) -> AccountSpec:
@@ -86,18 +87,24 @@ def normalize_account_state(response: object) -> VenueAccountState | None:
         }:
             try:
                 return VenueAccountState(
-                    equity=_figure(equity),
-                    free_margin=_figure(cross_equity) - _figure(cross_margin_used),
-                    cross_maintenance_margin=_figure(cross_maintenance),
+                    equity=figure(equity),
+                    free_margin=figure(cross_equity) - figure(cross_margin_used),
+                    cross_maintenance_margin=figure(cross_maintenance),
                     positions=tuple(_position(entry["position"]) for entry in entries),
                 )
-            except (ArithmeticError, KeyError, TypeError, ValueError) as exc:
+            except UNREADABLE as exc:
                 # The root shape matched but something inside it did not: a
                 # position row missing a field, a figure that is not a number —
                 # or is one the venue re-typed or reported non-finite, both of
-                # which ``_figure`` refuses — a margin mode outside the two the
-                # venue reports (the ``ValueError`` — neither ``_figure`` nor
-                # ``_isolated_collateral`` guesses what it means).
+                # which ``figure`` refuses — a margin mode outside the two the
+                # venue reports (neither ``figure`` nor ``_isolated_collateral``
+                # guesses what it means). What the refusal buys *this* grain: a
+                # reconcile handed a ``NaN`` equity never agrees with the ledger
+                # (``nan == nan`` is false), so it would read permanent
+                # divergence and heal toward a figure no venue holds, and any
+                # tolerance comparison it made would signal an
+                # ``InvalidOperation`` mid-cycle rather than freezing on the read
+                # that admitted it. An infinity drives that same heal unbounded.
                 _name_failed_read(f"{exc!r} in clearinghouseState response {_rendered(response)}")
                 return None
     _name_failed_read(f"unrecognized clearinghouseState response: {_rendered(response)}")
@@ -142,45 +149,6 @@ def _rendered(response: object) -> str:
     return f"{shape}{body}"
 
 
-def _figure(reported: object) -> Decimal:
-    """One venue figure as an exact number, or a failed read if it is not one.
-
-    Every quantity in this response goes through here, for the two unreadable
-    values that do not announce themselves. Both would otherwise construct a
-    perfectly valid ``Decimal`` and ride into a whole ``VenueAccountState``,
-    where a missing field or a non-numeric string freezes the read.
-
-    **Not a string.** The venue reports every one of these figures as a decimal
-    string, so a JSON *number* is the venue changing its contract — the same
-    "we are not reading what we think we are" a missing field means, and frozen
-    for the same reason (``_position``). It cannot be waved through as
-    equivalent: ``Decimal`` built from a float carries the binary value, so a
-    reported `0.002` becomes ``0.00200000000000000004163…``, no longer the exact
-    figure this surface is built on, and durable once ``_records.py`` round-trips
-    it. Taking ``object`` rather than ``Any`` is what makes the check
-    load-bearing — the type checker will not let a caller reach ``Decimal``
-    around it.
-
-    **Not finite.** ``Decimal("nan")`` and ``Decimal("Infinity")`` are *valid*
-    constructions, so they raise nothing on the way in. Letting one through would
-    be fail-*open* in the worst direction available at this grain: every
-    comparison against a ``NaN`` is false, so a reconcile handed a ``NaN`` equity
-    would find no divergence to act on, read the ledger as agreeing with the
-    venue and decline to freeze — the exact inversion of inv 1, and quieter than
-    the outage it is supposed to behave like. An infinity is no better; it would
-    drive an unbounded heal toward a figure no venue holds.
-
-    So a figure that is not an exact number is a failed read like any other
-    (ADR-0011 inv 1, ADR-0034 — never a fabricated number).
-    """
-    if not isinstance(reported, str):
-        raise TypeError(f"non-string figure {reported!r}")
-    figure = Decimal(reported)
-    if not figure.is_finite():
-        raise ValueError(f"non-finite figure {reported!r}")
-    return figure
-
-
 def _position(reported: Mapping[str, Any]) -> VenuePositionState:
     """One ``assetPositions[].position`` row as ``domain``.
 
@@ -194,21 +162,21 @@ def _position(reported: Mapping[str, Any]) -> VenuePositionState:
     other field is required: missing one means we are not reading what we think
     we are, and the caller turns that into a failed read.
     """
-    margin_used = _figure(reported["marginUsed"])
-    unrealized_pnl = _figure(reported["unrealizedPnl"])
+    margin_used = figure(reported["marginUsed"])
+    unrealized_pnl = figure(reported["unrealizedPnl"])
     entry_price = reported.get("entryPx")
     liquidation_price = reported["liquidationPx"]
     return VenuePositionState(
         symbol=str(reported["coin"]),
-        signed_size=_figure(reported["szi"]),
-        entry_price=None if entry_price is None else _figure(entry_price),
-        notional=_figure(reported["positionValue"]),
+        signed_size=figure(reported["szi"]),
+        entry_price=None if entry_price is None else figure(entry_price),
+        notional=figure(reported["positionValue"]),
         unrealized_pnl=unrealized_pnl,
         margin_used=margin_used,
         isolated_collateral=_isolated_collateral(
             reported["leverage"], margin_used=margin_used, unrealized_pnl=unrealized_pnl
         ),
-        liquidation_price=None if liquidation_price is None else _figure(liquidation_price),
+        liquidation_price=None if liquidation_price is None else figure(liquidation_price),
     )
 
 

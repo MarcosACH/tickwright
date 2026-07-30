@@ -11,6 +11,7 @@ import json
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
 from hyperliquid_fakes import FakeWsConnection, trade, trades_frame
 from structlog.typing import EventDict
 
@@ -304,6 +305,111 @@ def test_non_trades_frames_are_ignored() -> None:
     assert [t.trade_id for t in seen] == ["1"]
 
 
+@pytest.mark.parametrize("figure", ["NaN", "Infinity", "-Infinity"])
+def test_a_non_finite_tick_figure_is_dropped_not_ticked(figure: str) -> None:
+    """``Decimal("NaN")``/``Decimal("Infinity")`` are *valid* constructions, so a
+    non-finite ``px``/``sz`` is the one unreadable venue figure that raises
+    nothing on the way in. It must be a dropped row like any other: a ``NaN``
+    tick does not clear a downstream band check quietly — ``Decimal`` ordering
+    *signals* on it — it detonates one layers away from the read that admitted
+    it, and its equality and arithmetic are silently wrong all the way there."""
+
+    async def main() -> tuple[list[MarketTick], list[EventDict]]:
+        bus = InMemoryBus()
+        clock = ManualClock()
+        seen: list[MarketTick] = []
+        enough = asyncio.Event()
+
+        async def record(tick: MarketTick) -> None:
+            seen.append(tick)
+            enough.set()
+
+        bus.subscribe(MarketTick, record)
+        connection = FakeWsConnection(
+            [
+                trades_frame(trade("BTC", figure, 1)),  # non-finite price
+                trades_frame(trade("BTC", "100", 2, sz=figure)),  # non-finite size
+                trades_frame(trade("BTC", "100", 3)),  # the sentinel that must arrive
+            ]
+        )
+
+        async def connect(url: str) -> FakeWsConnection:
+            return connection
+
+        feed = HyperliquidFeed(
+            config=HyperliquidConfig(symbols=["BTC"]), bus=bus, clock=clock, connect=connect
+        )
+        with capture_events() as logs:
+            run = asyncio.create_task(feed.start())
+            await asyncio.wait_for(enough.wait(), timeout=2)
+            await feed.stop()
+            await asyncio.wait_for(run, timeout=2)
+        return seen, [log for log in logs if log["event"] == "feed.frame_dropped"]
+
+    seen, dropped = asyncio.run(main())
+
+    # Only the finite trade reached the bus; neither non-finite row became a tick.
+    assert [t.trade_id for t in seen] == ["3"]
+    assert len(dropped) == 2
+
+
+@pytest.mark.parametrize("figure", [100.5, 100, 1e30, 43250.123456789012345])
+def test_a_re_typed_tick_figure_is_dropped_not_coerced(figure: object) -> None:
+    """A ``px``/``sz`` the venue re-types as a JSON *number* is a dropped row.
+
+    The venue reports both as decimal strings — first-party ``WsTrade`` is
+    ``px: string, sz: string`` — so a number is the venue changing its contract,
+    the same "we are not reading what we think we are" a missing field means. It
+    cannot be coerced through either, and not because of our own parse —
+    ``Decimal(str(x))`` would round-trip ``0.002`` exactly. ``json.loads`` is
+    where it goes: a JSON number is a ``float`` before this reader sees it, so a
+    reported ``43250.123456789012345`` arrives as ``43250.12345678901`` and a
+    reported ``0.10`` is indistinguishable from ``0.1``. Neither is recoverable
+    downstream, so the tick is no longer the exact figure ADR-0029 builds every
+    price on — durable once a fill computed against it is written.
+
+    The account grain has frozen on this since #217; the tick grain waved it
+    through, which is the divergence this closes: one venue, one contract.
+    """
+
+    async def main() -> tuple[list[MarketTick], list[EventDict]]:
+        bus = InMemoryBus()
+        clock = ManualClock()
+        seen: list[MarketTick] = []
+        enough = asyncio.Event()
+
+        async def record(tick: MarketTick) -> None:
+            seen.append(tick)
+            enough.set()
+
+        bus.subscribe(MarketTick, record)
+        connection = FakeWsConnection(
+            [
+                trades_frame(trade("BTC", figure, 1)),  # re-typed price
+                trades_frame(trade("BTC", "100", 2, sz=figure)),  # re-typed size
+                trades_frame(trade("BTC", "100", 3)),  # the sentinel that must arrive
+            ]
+        )
+
+        async def connect(url: str) -> FakeWsConnection:
+            return connection
+
+        feed = HyperliquidFeed(
+            config=HyperliquidConfig(symbols=["BTC"]), bus=bus, clock=clock, connect=connect
+        )
+        with capture_events() as logs:
+            run = asyncio.create_task(feed.start())
+            await asyncio.wait_for(enough.wait(), timeout=2)
+            await feed.stop()
+            await asyncio.wait_for(run, timeout=2)
+        return seen, [log for log in logs if log["event"] == "feed.frame_dropped"]
+
+    seen, dropped = asyncio.run(main())
+
+    assert [t.trade_id for t in seen] == ["3"]
+    assert len(dropped) == 2
+
+
 def test_malformed_frames_are_skipped_and_named_while_good_frames_keep_flowing() -> None:
     """A corrupt frame or trade row must never fault the feed (ADR-0023): each
     emits one ``feed.frame_dropped`` and is skipped, and good rows — even in the
@@ -327,7 +433,7 @@ def test_malformed_frames_are_skipped_and_named_while_good_frames_keep_flowing()
                 json.dumps({"channel": "trades", "data": "oops"}),  # trades frame, data not a list
                 trades_frame({"coin": "BTC", "side": "B", "px": "nope"}),  # unparseable row
                 trades_frame(trade("BTC", "100", 1), {"coin": "BTC"}),  # one good, one bad row
-                trades_frame(trade("BTC", "101", 2)),
+                trades_frame(trade("BTC", "101", 2), trade("BTC", "NaN", 9)),  # good + non-finite
             ]
         )
 
@@ -349,5 +455,7 @@ def test_malformed_frames_are_skipped_and_named_while_good_frames_keep_flowing()
     # Both good trades ticked through despite the garbage around and beside them.
     assert [t.trade_id for t in seen] == ["1", "2"]
     # One drop each: the non-JSON frame, the non-list `data`, the bad-only row,
-    # and the bad row in the mixed batch.
-    assert len(dropped) == 4
+    # the bad row in the mixed batch, and the non-finite row beside trade 2 —
+    # a figure that is not a number drops at row grain like any other, so the
+    # good trade batched with it is unaffected.
+    assert len(dropped) == 5

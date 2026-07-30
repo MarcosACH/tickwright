@@ -286,6 +286,18 @@ circuit-breakers deferred), and **durable/sticky** — persisted to the [[Store]
 restart, cleared only by an explicit reset, so a halt outlives a crash. See ADR-0026.
 _Avoid_: circuit breaker (implies the deferred automatic-trip policy), panic button (it does not flatten).
 
+**Figure**:
+One numeric value as an outside source *reports* it — a venue response body, a replay row —
+before it is a domain quantity. A figure is unreadable, and therefore a failed read at whatever
+grain read it, unless it is an exact number: `Decimal("nan")`/`Decimal("Infinity")` construct
+cleanly, and a figure re-typed as a JSON *number* has already lost digits and scale to `float`
+in `json.loads` before any parse of ours sees it, so neither is caught by the
+absence of an exception. The universal half of the guard is `domain.exact_figure`; what a
+figure may be *encoded* as is each venue's own contract (Hyperliquid: a decimal string, in
+`venues/hyperliquid/reading.py`). See ADR-0029, ADR-0011 inv 1.
+_Avoid_: value, amount, number (all read as "the quantity we hold" rather than "what the venue
+said"). A figure is the *reported* form; the `Decimal` it becomes is a domain quantity.
+
 **Quantization**:
 Rule-based rounding of an order's price and size at the boundary, so the venue never silently
 rejects it: size rounds **down** to `sz_decimals` (rounds-to-zero → `DENIED`), price rounds

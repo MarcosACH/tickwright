@@ -39,6 +39,7 @@ from tickwright.observability import NamedEvent, named_event
 
 from .account import account_spec, normalize_account_state
 from .config import HyperliquidConfig
+from .reading import UNREADABLE, figure
 from .transport import PostJson, post_json
 from .universe import HyperliquidUniverse
 
@@ -348,19 +349,44 @@ class HyperliquidExchange:
                 error=f"unrecognized fills response: {entries!r}",
             )
             return None
-        return [
-            FillReport(
-                ts_event=int(entry["time"]) * _NS_PER_MS,
-                ts_init=self._clock.timestamp_ns(),
+        try:
+            return [
+                FillReport(
+                    ts_event=int(entry["time"]) * _NS_PER_MS,
+                    ts_init=self._clock.timestamp_ns(),
+                    cloid=cloid,
+                    symbol=symbol,
+                    trade_id=str(entry["tid"]),
+                    # A non-finite figure raises nothing on the way in, so without
+                    # ``figure`` a ``NaN`` quantity would ride into a
+                    # ``FillReport``, poison ``cum_qty`` by arithmetic and leave
+                    # its equality cross-check permanently disagreeing — durably,
+                    # since the store round-trips ``"NaN"`` back on recovery. A
+                    # re-typed one is the same verdict for a different reason: it
+                    # would land a fill priced off a figure ``json.loads`` had
+                    # already rounded into a ``float``, no longer provably the
+                    # one the venue sent.
+                    quantity=figure(entry["sz"]),
+                    price=figure(entry["px"]),
+                )
+                for entry in entries
+                if entry["oid"] == oid
+            ]
+        except UNREADABLE as exc:
+            # The container was a list but a row inside it is not one we can read
+            # — a missing field, a figure that is not a number or not a string,
+            # or a row that is not even a mapping. Same verdict as above: a
+            # failed read, named and ``None``, never a partial list that reads as
+            # the whole truth (ADR-0011 inv 1). ``oid`` is dereferenced by the
+            # filter itself, so a malformed row belonging to *another* order is
+            # inside this guard too.
+            named_event(
+                NamedEvent.EXCHANGE_REQUEST_FAILED,
+                request="userFills",
                 cloid=cloid,
-                symbol=symbol,
-                trade_id=str(entry["tid"]),
-                quantity=Decimal(str(entry["sz"])),
-                price=Decimal(str(entry["px"])),
+                error=f"{exc!r} in fills response",
             )
-            for entry in entries
-            if entry["oid"] == oid
-        ]
+            return None
 
     def instrument_specs(self) -> Mapping[str, InstrumentSpec]:
         """The meta-sourced per-symbol specs (ADR-0031), for the Engine to wire
