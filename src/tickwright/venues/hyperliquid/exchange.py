@@ -33,13 +33,13 @@ from tickwright.domain import (
     TimeInForce,
     VenueAccountState,
     VenueOrderView,
-    exact_figure,
     quantize_price,
 )
 from tickwright.observability import NamedEvent, named_event
 
 from .account import account_spec, normalize_account_state
 from .config import HyperliquidConfig
+from .reading import UNREADABLE, figure
 from .transport import PostJson, post_json
 from .universe import HyperliquidUniverse
 
@@ -357,21 +357,23 @@ class HyperliquidExchange:
                     cloid=cloid,
                     symbol=symbol,
                     trade_id=str(entry["tid"]),
-                    # A non-finite figure raises nothing on the way in, so
-                    # without ``exact_figure`` a ``NaN`` quantity would ride into
-                    # a ``FillReport``, poison ``cum_qty`` by arithmetic and leave
+                    # A non-finite figure raises nothing on the way in, so without
+                    # ``figure`` a ``NaN`` quantity would ride into a
+                    # ``FillReport``, poison ``cum_qty`` by arithmetic and leave
                     # its equality cross-check permanently disagreeing — durably,
-                    # since the store round-trips ``"NaN"`` back on recovery.
-                    quantity=exact_figure(Decimal(str(entry["sz"]))),
-                    price=exact_figure(Decimal(str(entry["px"]))),
+                    # since the store round-trips ``"NaN"`` back on recovery. A
+                    # re-typed one is the same verdict for a different reason: it
+                    # would land a fill priced off a float, no longer exact.
+                    quantity=figure(entry["sz"]),
+                    price=figure(entry["px"]),
                 )
                 for entry in entries
                 if entry["oid"] == oid
             ]
-        except (ArithmeticError, KeyError, TypeError, ValueError) as exc:
+        except UNREADABLE as exc:
             # The container was a list but a row inside it is not one we can read
-            # — a missing field, a figure that is not a number, or a row that is
-            # not even a mapping. Same verdict as the container check above: a
+            # — a missing field, a figure that is not a number or not a string,
+            # or a row that is not even a mapping. Same verdict as above: a
             # failed read, named and ``None``, never a partial list that reads as
             # the whole truth (ADR-0011 inv 1). ``oid`` is dereferenced by the
             # filter itself, so a malformed row belonging to *another* order is

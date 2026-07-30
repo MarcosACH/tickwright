@@ -12,15 +12,15 @@ no network.
 import asyncio
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable
-from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Protocol
 
-from tickwright.domain import AggressorSide, Clock, EventBus, MarketTick, exact_figure
+from tickwright.domain import AggressorSide, Clock, EventBus, MarketTick
 from tickwright.observability import NamedEvent, named_event
 
 from .backoff import Backoff
 from .config import HyperliquidConfig
 from .ingress import ConflatingIngress
+from .reading import UNREADABLE, figure
 
 if TYPE_CHECKING:
     from websockets.asyncio.client import ClientConnection
@@ -187,7 +187,7 @@ class HyperliquidFeed:
         for row in rows:
             try:
                 ticks.append(self._to_tick(row))
-            except (KeyError, ValueError, TypeError, InvalidOperation):
+            except UNREADABLE:
                 self._drop_frame(frame, row)
         return ticks
 
@@ -208,13 +208,14 @@ class HyperliquidFeed:
         self._seq_by_symbol[symbol] = seq + 1
         return MarketTick(
             symbol=symbol,
-            # ``exact_figure`` is what makes a non-finite ``px``/``sz`` a *dropped
-            # row* rather than a ``NaN`` tick, refused here at the read instead of
-            # signalling an ``InvalidOperation`` out of some guard's comparison
-            # far downstream. It raises the ``ValueError`` the caller's row guard
-            # already catches, so no new control flow appears here.
-            price=exact_figure(Decimal(str(trade["px"]))),
-            size=exact_figure(Decimal(str(trade["sz"]))),
+            # ``figure`` is what makes an unreadable ``px``/``sz`` a *dropped row*
+            # rather than a tick built on a value we cannot stand behind — a
+            # non-finite one that would signal an ``InvalidOperation`` out of some
+            # guard's comparison far downstream, or a re-typed one coerced through
+            # a float and no longer exact. It raises into ``UNREADABLE``, which the
+            # caller's row guard already catches, so no new control flow is added.
+            price=figure(trade["px"]),
+            size=figure(trade["sz"]),
             aggressor_side=AggressorSide.BUY if trade["side"] == "B" else AggressorSide.SELL,
             trade_id=str(trade["tid"]),
             seq=seq,

@@ -5,11 +5,16 @@ a figure someone else reported — a venue body, a replay file. ``Decimal`` acce
 two values that are not numbers at all, and this is where they are refused.
 
 It lives in ``domain`` because both ``venues`` and ``adapters`` parse such
-figures and neither may import the other (ADR-0032); it stays a bare check over
-an already-built ``Decimal`` rather than a parser, because *what a figure is
-encoded as* is a boundary's own business — the venue reports decimal strings and
-freezes on a JSON number (``venues/hyperliquid/account.py``), a replay file is
-looser — while *what qualifies as a quantity* is the same everywhere.
+figures and neither may import the other (ADR-0032), and it stays a bare check
+over an already-built ``Decimal`` rather than a parser, because the two halves of
+"can this figure be read" do not belong in the same place. *What qualifies as a
+quantity* is the same everywhere and is here. *What a figure may be encoded as*
+is the reporting source's own contract: Hyperliquid reports decimal strings and
+freezes on a JSON number, which is why its three grains share a stricter verb of
+their own (``venues/hyperliquid/reading.py``) that delegates here for this half.
+A replay file is looser on purpose — its rows are the operator's, so there is no
+venue contract to detect a change in, and refusing a hand-written number would
+reject a valid file rather than catch anything.
 """
 
 from decimal import Decimal
