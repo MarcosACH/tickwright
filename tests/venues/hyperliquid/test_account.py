@@ -161,3 +161,24 @@ def test_a_recorded_cross_snapshot_normalizes_to_the_measured_account_figures() 
     assert state.equity == Decimal("25.9264")
     assert state.free_margin == Decimal("0.0096")
     assert state.cross_maintenance_margin == Decimal("1.6198")
+
+
+def test_free_margin_ignores_withdrawable_once_an_order_is_resting() -> None:
+    """The one snapshot where the two answers part company — and the state of a
+    running engine, not a corner of one.
+
+    Resting-order margin is deducted from ``withdrawable`` and from nothing else
+    in the response, so the recorded account plus **one** exposure-increasing
+    order moves that field without moving either summary. The order is
+    ADR-0046 §2's measured one — 128.40 notional at 5x, `25.68` of initial
+    margin — and the venue's withdrawal rule, ``max(0, accountValue − max(IM,
+    0.1 × totalNtlPos))``, then floors the field at zero: ``25.9264 −
+    max(25.9168 + 25.68, 12.9584)`` is negative. Reading it would report a
+    healthy account as having no free collateral at all, and ADR-0024 leaves
+    resting orders on the venue across a graceful stop — so nothing about this
+    is exceptional.
+    """
+    state = _fetch_state(CROSS_SNAPSHOT | {"withdrawable": "0.0"})
+
+    assert state is not None
+    assert state.free_margin == Decimal("0.0096")
