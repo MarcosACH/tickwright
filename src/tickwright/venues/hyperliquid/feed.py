@@ -211,9 +211,10 @@ class HyperliquidFeed:
             # ``figure`` is what makes an unreadable ``px``/``sz`` a *dropped row*
             # rather than a tick built on a value we cannot stand behind — a
             # non-finite one that would signal an ``InvalidOperation`` out of some
-            # guard's comparison far downstream, or a re-typed one coerced through
-            # a float and no longer exact. It raises into ``UNREADABLE``, which the
-            # caller's row guard already catches, so no new control flow is added.
+            # guard's comparison far downstream, or a re-typed one whose digits and
+            # scale ``json.loads`` already dropped into a ``float`` before we saw
+            # it. It raises into ``UNREADABLE``, which the caller's row guard
+            # already catches, so no new control flow is added.
             price=figure(trade["px"]),
             size=figure(trade["sz"]),
             aggressor_side=AggressorSide.BUY if trade["side"] == "B" else AggressorSide.SELL,

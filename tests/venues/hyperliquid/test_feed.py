@@ -353,17 +353,20 @@ def test_a_non_finite_tick_figure_is_dropped_not_ticked(figure: str) -> None:
     assert len(dropped) == 2
 
 
-@pytest.mark.parametrize("figure", [100.5, 100, 1e30])
+@pytest.mark.parametrize("figure", [100.5, 100, 1e30, 43250.123456789012345])
 def test_a_re_typed_tick_figure_is_dropped_not_coerced(figure: object) -> None:
     """A ``px``/``sz`` the venue re-types as a JSON *number* is a dropped row.
 
     The venue reports both as decimal strings — first-party ``WsTrade`` is
     ``px: string, sz: string`` — so a number is the venue changing its contract,
     the same "we are not reading what we think we are" a missing field means. It
-    cannot be coerced through: a ``Decimal`` built from a float carries the
-    binary value, so a reported ``0.002`` becomes ``0.00200000000000000004163…``
-    and is no longer the exact figure ADR-0029 builds every price on — durable
-    once a fill computed against it is written.
+    cannot be coerced through either, and not because of our own parse —
+    ``Decimal(str(x))`` would round-trip ``0.002`` exactly. ``json.loads`` is
+    where it goes: a JSON number is a ``float`` before this reader sees it, so a
+    reported ``43250.123456789012345`` arrives as ``43250.12345678901`` and a
+    reported ``0.10`` is indistinguishable from ``0.1``. Neither is recoverable
+    downstream, so the tick is no longer the exact figure ADR-0029 builds every
+    price on — durable once a fill computed against it is written.
 
     The account grain has frozen on this since #217; the tick grain waved it
     through, which is the divergence this closes: one venue, one contract.

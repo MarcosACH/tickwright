@@ -290,7 +290,8 @@ _Avoid_: circuit breaker (implies the deferred automatic-trip policy), panic but
 One numeric value as an outside source *reports* it — a venue response body, a replay row —
 before it is a domain quantity. A figure is unreadable, and therefore a failed read at whatever
 grain read it, unless it is an exact number: `Decimal("nan")`/`Decimal("Infinity")` construct
-cleanly and a `Decimal` built from a float is no longer exact, so neither is caught by the
+cleanly, and a figure re-typed as a JSON *number* has already lost digits and scale to `float`
+in `json.loads` before any parse of ours sees it, so neither is caught by the
 absence of an exception. The universal half of the guard is `domain.exact_figure`; what a
 figure may be *encoded* as is each venue's own contract (Hyperliquid: a decimal string, in
 `venues/hyperliquid/reading.py`). See ADR-0029, ADR-0011 inv 1.

@@ -363,7 +363,9 @@ class HyperliquidExchange:
                     # its equality cross-check permanently disagreeing — durably,
                     # since the store round-trips ``"NaN"`` back on recovery. A
                     # re-typed one is the same verdict for a different reason: it
-                    # would land a fill priced off a float, no longer exact.
+                    # would land a fill priced off a figure ``json.loads`` had
+                    # already rounded into a ``float``, no longer provably the
+                    # one the venue sent.
                     quantity=figure(entry["sz"]),
                     price=figure(entry["px"]),
                 )

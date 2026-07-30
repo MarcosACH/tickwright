@@ -597,15 +597,17 @@ def test_fetch_order_freezes_on_a_non_finite_fill_figure(figure: str) -> None:
         assert any(e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED for e in events)
 
 
-@pytest.mark.parametrize("figure", [18.435, 93, 1e30])
+@pytest.mark.parametrize("figure", [18.435, 93, 1e30, 43250.123456789012345])
 def test_fetch_order_freezes_on_a_re_typed_fill_figure(figure: object) -> None:
     # The venue reports `px`/`sz` as decimal strings — first-party `userFills`
     # and the pinned SDK `Fill` TypedDict agree — so a JSON *number* is the venue
     # changing its contract, and inv 1 says a body we cannot read is a failed
-    # read, never a partial truth. It cannot be coerced through either: a
-    # `Decimal` built from a float carries the binary value, so a reported
-    # `0.002` becomes `0.00200000000000000004163…` — no longer exact (ADR-0029),
-    # and durable the moment `_records.py` round-trips the fill it computed.
+    # read, never a partial truth. It cannot be coerced through either, and the
+    # loss is not in our parse — `Decimal(str(x))` round-trips `0.002` exactly.
+    # It is in `json.loads`: a JSON number is a `float` before this reader sees
+    # it, so a reported `43250.123456789012345` arrives as `43250.12345678901`
+    # and the reported scale is gone too. No longer exact (ADR-0029), and durable
+    # the moment `_records.py` round-trips the fill it computed.
     for entry in (
         fill_entry(oid=91, tid=556, px=figure, sz="0.5"),
         fill_entry(oid=91, tid=556, px="43250.0", sz=figure),

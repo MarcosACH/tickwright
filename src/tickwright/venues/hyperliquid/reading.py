@@ -56,12 +56,21 @@ def figure(reported: object) -> Decimal:
     ``userFills`` ``Fill`` the same, and ``clearinghouseState`` likewise — so a
     JSON *number* is the venue changing its contract: the same "we are not
     reading what we think we are" a missing field means, and frozen for the same
-    reason. It cannot be waved through as equivalent, because ``Decimal`` built
-    from a float carries the binary value: a reported ``0.002`` becomes
-    ``0.00200000000000000004163…``, no longer the exact figure ADR-0029 builds
-    every price on, and durable once ``_records.py`` round-trips it. Taking
-    ``object`` rather than ``Any`` is what makes the check load-bearing — the
-    type checker will not let a caller reach ``Decimal`` around it.
+    reason.
+
+    It cannot be waved through as equivalent either, and the reason is one layer
+    earlier than it looks. The loss is not in *our* coercion — ``Decimal(str(x))``
+    goes through the shortest round-tripping repr, so a re-typed ``0.002`` would
+    still land as an exact ``Decimal("0.002")``. It is in ``json.loads``: a JSON
+    number is a ``float`` before this function is ever reached, so any digit the
+    venue reported beyond what a double holds is *already gone* — a reported
+    ``43250.123456789012345`` arrives as ``43250.12345678901`` — and the reported
+    scale is gone with it, ``0.10`` and ``0.1`` being the same double. Neither is
+    recoverable downstream, and both are durable once ``_records.py`` round-trips
+    the figure. A number we cannot prove is the one the venue sent is not the
+    exact figure ADR-0029 builds every price on. Taking ``object`` rather than
+    ``Any`` is what makes the check load-bearing — the type checker will not let
+    a caller reach ``Decimal`` around it.
 
     *(The pinned ``hyperliquid-python-sdk`` 0.24.0 disagrees at the tick grain:
     its ``Trade`` TypedDict declares ``sz: int`` and omits ``tid``/``users``
