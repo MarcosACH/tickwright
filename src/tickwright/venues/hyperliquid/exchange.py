@@ -33,6 +33,7 @@ from tickwright.domain import (
     TimeInForce,
     VenueAccountState,
     VenueOrderView,
+    exact_figure,
     quantize_price,
 )
 from tickwright.observability import NamedEvent, named_event
@@ -348,19 +349,39 @@ class HyperliquidExchange:
                 error=f"unrecognized fills response: {entries!r}",
             )
             return None
-        return [
-            FillReport(
-                ts_event=int(entry["time"]) * _NS_PER_MS,
-                ts_init=self._clock.timestamp_ns(),
+        try:
+            return [
+                FillReport(
+                    ts_event=int(entry["time"]) * _NS_PER_MS,
+                    ts_init=self._clock.timestamp_ns(),
+                    cloid=cloid,
+                    symbol=symbol,
+                    trade_id=str(entry["tid"]),
+                    # A non-finite figure raises nothing on the way in, so
+                    # without ``exact_figure`` a ``NaN`` quantity would ride into
+                    # a ``FillReport`` and make ``cum_qty`` absorb the fill
+                    # silently — and the store would round-trip it back.
+                    quantity=exact_figure(Decimal(str(entry["sz"]))),
+                    price=exact_figure(Decimal(str(entry["px"]))),
+                )
+                for entry in entries
+                if entry["oid"] == oid
+            ]
+        except (ArithmeticError, KeyError, TypeError, ValueError) as exc:
+            # The container was a list but a row inside it is not one we can read
+            # — a missing field, a figure that is not a number, or a row that is
+            # not even a mapping. Same verdict as the container check above: a
+            # failed read, named and ``None``, never a partial list that reads as
+            # the whole truth (ADR-0011 inv 1). ``oid`` is dereferenced by the
+            # filter itself, so a malformed row belonging to *another* order is
+            # inside this guard too.
+            named_event(
+                NamedEvent.EXCHANGE_REQUEST_FAILED,
+                request="userFills",
                 cloid=cloid,
-                symbol=symbol,
-                trade_id=str(entry["tid"]),
-                quantity=Decimal(str(entry["sz"])),
-                price=Decimal(str(entry["px"])),
+                error=f"{exc!r} in fills response",
             )
-            for entry in entries
-            if entry["oid"] == oid
-        ]
+            return None
 
     def instrument_specs(self) -> Mapping[str, InstrumentSpec]:
         """The meta-sourced per-symbol specs (ADR-0031), for the Engine to wire

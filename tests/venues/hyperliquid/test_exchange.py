@@ -565,6 +565,31 @@ def test_fetch_order_freezes_on_a_fills_body_it_cannot_parse() -> None:
     assert any(e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED for e in events)
 
 
+@pytest.mark.parametrize("figure", ["NaN", "Infinity", "-Infinity"])
+def test_fetch_order_freezes_on_a_non_finite_fill_figure(figure: str) -> None:
+    # `Decimal("NaN")`/`Decimal("Infinity")` construct cleanly, so a non-finite
+    # `sz`/`px` is the one unreadable fill figure that raises nothing on the way
+    # in. It must freeze like any other unparseable body (ADR-0011 inv 1): a NaN
+    # quantity would make cum_qty arithmetic absorb the fill silently, and it is
+    # durable once written — the store round-trips "NaN" back into a Decimal.
+    for entry in (
+        fill_entry(oid=91, tid=556, px=figure, sz="0.5"),
+        fill_entry(oid=91, tid=556, px="43250.0", sz=figure),
+    ):
+        post = FakeExchangeApi(
+            {
+                "orderStatus": order_status_response(status="filled", oid=91),
+                "userFillsByTime": [entry],
+            }
+        )
+
+        with capture_events() as events:
+            view = asyncio.run(fetch_view(post))
+
+        assert view is None
+        assert any(e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED for e in events)
+
+
 @pytest.mark.parametrize(
     ("venue_status", "state"),
     [
