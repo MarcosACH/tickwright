@@ -100,7 +100,19 @@ def trades_frame(*trades: dict) -> str:
 
 
 def trade(
-    coin: str, px: str, tid: int, *, side: str = "B", sz: str = "1", time: int = 1_700_000_000_000
+    coin: str,
+    px: object,
+    tid: int,
+    *,
+    side: str = "B",
+    sz: object = "1",
+    time: int = 1_700_000_000_000,
 ) -> dict:
-    """One venue ``WsTrade`` payload row."""
+    """One venue ``WsTrade`` payload row.
+
+    ``px``/``sz`` are ``object`` rather than ``str`` deliberately: the venue
+    reports both as decimal strings, and a test that a *re-typed* figure freezes
+    the read has to be able to build the payload the venue would send if that
+    contract changed.
+    """
     return {"coin": coin, "side": side, "px": px, "sz": sz, "time": time, "tid": tid}

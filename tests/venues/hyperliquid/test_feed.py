@@ -353,6 +353,60 @@ def test_a_non_finite_tick_figure_is_dropped_not_ticked(figure: str) -> None:
     assert len(dropped) == 2
 
 
+@pytest.mark.parametrize("figure", [100.5, 100, 1e30])
+def test_a_re_typed_tick_figure_is_dropped_not_coerced(figure: object) -> None:
+    """A ``px``/``sz`` the venue re-types as a JSON *number* is a dropped row.
+
+    The venue reports both as decimal strings — first-party ``WsTrade`` is
+    ``px: string, sz: string`` — so a number is the venue changing its contract,
+    the same "we are not reading what we think we are" a missing field means. It
+    cannot be coerced through: a ``Decimal`` built from a float carries the
+    binary value, so a reported ``0.002`` becomes ``0.00200000000000000004163…``
+    and is no longer the exact figure ADR-0029 builds every price on — durable
+    once a fill computed against it is written.
+
+    The account grain has frozen on this since #217; the tick grain waved it
+    through, which is the divergence this closes: one venue, one contract.
+    """
+
+    async def main() -> tuple[list[MarketTick], list[EventDict]]:
+        bus = InMemoryBus()
+        clock = ManualClock()
+        seen: list[MarketTick] = []
+        enough = asyncio.Event()
+
+        async def record(tick: MarketTick) -> None:
+            seen.append(tick)
+            enough.set()
+
+        bus.subscribe(MarketTick, record)
+        connection = FakeWsConnection(
+            [
+                trades_frame(trade("BTC", figure, 1)),  # re-typed price
+                trades_frame(trade("BTC", "100", 2, sz=figure)),  # re-typed size
+                trades_frame(trade("BTC", "100", 3)),  # the sentinel that must arrive
+            ]
+        )
+
+        async def connect(url: str) -> FakeWsConnection:
+            return connection
+
+        feed = HyperliquidFeed(
+            config=HyperliquidConfig(symbols=["BTC"]), bus=bus, clock=clock, connect=connect
+        )
+        with capture_events() as logs:
+            run = asyncio.create_task(feed.start())
+            await asyncio.wait_for(enough.wait(), timeout=2)
+            await feed.stop()
+            await asyncio.wait_for(run, timeout=2)
+        return seen, [log for log in logs if log["event"] == "feed.frame_dropped"]
+
+    seen, dropped = asyncio.run(main())
+
+    assert [t.trade_id for t in seen] == ["3"]
+    assert len(dropped) == 2
+
+
 def test_malformed_frames_are_skipped_and_named_while_good_frames_keep_flowing() -> None:
     """A corrupt frame or trade row must never fault the feed (ADR-0023): each
     emits one ``feed.frame_dropped`` and is skipped, and good rows — even in the

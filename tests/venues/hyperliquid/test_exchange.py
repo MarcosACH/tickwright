@@ -293,8 +293,14 @@ def filled_response(*, oid: int, total_sz: str, avg_px: str) -> dict:
     }
 
 
-def fill_entry(*, oid: int, tid: int, px: str, sz: str, time: int = 1_700_000_000_500) -> dict:
-    """One venue ``userFills`` entry (the fields the docs pin, ADR-0011)."""
+def fill_entry(
+    *, oid: int, tid: int, px: object, sz: object, time: int = 1_700_000_000_500
+) -> dict:
+    """One venue ``userFills`` entry (the fields the docs pin, ADR-0011).
+
+    ``px``/``sz`` are ``object``: the venue reports both as decimal strings, so
+    building a re-typed one is how a contract change gets tested.
+    """
     return {
         "coin": "BTC",
         "px": px,
@@ -573,6 +579,33 @@ def test_fetch_order_freezes_on_a_non_finite_fill_figure(figure: str) -> None:
     # quantity poisons cum_qty by arithmetic and leaves its equality cross-check
     # permanently disagreeing, and it is durable once written — the store
     # round-trips "NaN" back into a Decimal("NaN") on recovery.
+    for entry in (
+        fill_entry(oid=91, tid=556, px=figure, sz="0.5"),
+        fill_entry(oid=91, tid=556, px="43250.0", sz=figure),
+    ):
+        post = FakeExchangeApi(
+            {
+                "orderStatus": order_status_response(status="filled", oid=91),
+                "userFillsByTime": [entry],
+            }
+        )
+
+        with capture_events() as events:
+            view = asyncio.run(fetch_view(post))
+
+        assert view is None
+        assert any(e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED for e in events)
+
+
+@pytest.mark.parametrize("figure", [18.435, 93, 1e30])
+def test_fetch_order_freezes_on_a_re_typed_fill_figure(figure: object) -> None:
+    # The venue reports `px`/`sz` as decimal strings — first-party `userFills`
+    # and the pinned SDK `Fill` TypedDict agree — so a JSON *number* is the venue
+    # changing its contract, and inv 1 says a body we cannot read is a failed
+    # read, never a partial truth. It cannot be coerced through either: a
+    # `Decimal` built from a float carries the binary value, so a reported
+    # `0.002` becomes `0.00200000000000000004163…` — no longer exact (ADR-0029),
+    # and durable the moment `_records.py` round-trips the fill it computed.
     for entry in (
         fill_entry(oid=91, tid=556, px=figure, sz="0.5"),
         fill_entry(oid=91, tid=556, px="43250.0", sz=figure),
