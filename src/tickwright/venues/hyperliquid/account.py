@@ -88,13 +88,43 @@ def normalize_account_state(response: object) -> VenueAccountState | None:
 
 
 def _position(reported: Mapping[str, Any]) -> VenuePositionState:
-    """One ``assetPositions[].position`` row as ``domain``."""
+    """One ``assetPositions[].position`` row as ``domain``.
+
+    ``liquidationPx`` rides through verbatim, ``null`` included: the venue omits
+    it whenever the price would be non-positive, which is the majority case for a
+    long (ADR-0046 §6), and nothing here may substitute a number for it.
+    """
+    margin_used = Decimal(reported["marginUsed"])
+    unrealized_pnl = Decimal(reported["unrealizedPnl"])
+    liquidation_price = reported["liquidationPx"]
     return VenuePositionState(
         symbol=str(reported["coin"]),
         signed_size=Decimal(reported["szi"]),
         entry_price=Decimal(reported["entryPx"]),
         notional=Decimal(reported["positionValue"]),
-        unrealized_pnl=Decimal(reported["unrealizedPnl"]),
-        margin_used=Decimal(reported["marginUsed"]),
-        isolated_collateral=None,
+        unrealized_pnl=unrealized_pnl,
+        margin_used=margin_used,
+        isolated_collateral=_isolated_collateral(
+            reported["leverage"], margin_used=margin_used, unrealized_pnl=unrealized_pnl
+        ),
+        liquidation_price=None if liquidation_price is None else Decimal(liquidation_price),
     )
+
+
+def _isolated_collateral(
+    leverage: Mapping[str, Any], *, margin_used: Decimal, unrealized_pnl: Decimal
+) -> Decimal | None:
+    """The position's own locked bucket, or ``None`` when it is cross-margined.
+
+    Recovered as ``marginUsed − unrealizedPnl``, **never** from
+    ``leverage.rawUsd``. That field is the position's cash leg net of its cost
+    basis, so it measures *negative* for a long — `−103.731933` against a
+    measured collateral of `25.898067` on the same position — and reading it
+    would report a funded long as owing the venue money. The subtraction is the
+    venue's own identity read backwards: its ``marginUsed`` for an isolated
+    position *is* ``collateral + unrealizedPnl``, and moves with the mark while
+    ``rawUsd`` holds still.
+    """
+    if leverage["type"] != "isolated":
+        return None
+    return margin_used - unrealized_pnl

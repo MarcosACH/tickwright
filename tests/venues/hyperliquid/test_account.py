@@ -85,6 +85,51 @@ CROSS_SNAPSHOT: dict = {
     "withdrawable": "0.0096",
 }
 
+# The recorded isolated snapshot: the same 0.002 BTC long at 5x, entry 64815,
+# mark 64794, with 25.898067 of collateral locked into its own bucket. Measured
+# (#142 §4): ``marginUsed = positionValue + rawUsd = 129.588 − 103.731933 =
+# 25.856067`` and ``rawUsd = collateral − entryPx·|szi| = 25.898067 − 129.63``,
+# so ``unrealizedPnl`` is ``129.588 − 129.63 = −0.042``. The whole balance sits
+# in the bucket, so the cross summary is empty and the cross maintenance figure
+# reads 0.0 against a position that plainly has maintenance (ADR-0046 §2.1).
+# ``liquidationPx`` is the venue's own, reproduced by the canonical formula to
+# 28 significant figures and invariant to the mark.
+ISOLATED_SNAPSHOT: dict = {
+    "assetPositions": [
+        {
+            "type": "oneWay",
+            "position": {
+                "coin": "BTC",
+                "szi": "0.002",
+                "entryPx": "64815.0",
+                "positionValue": "129.588",
+                "unrealizedPnl": "-0.042",
+                "returnOnEquity": "-0.0016217",
+                "marginUsed": "25.856067",
+                "liquidationPx": "52522.497721519",
+                "maxLeverage": 40,
+                "leverage": {"type": "isolated", "value": 5, "rawUsd": "-103.731933"},
+                "cumFunding": {"allTime": "0.0", "sinceOpen": "0.0", "sinceChange": "0.0"},
+            },
+        }
+    ],
+    "crossMaintenanceMarginUsed": "0.0",
+    "crossMarginSummary": {
+        "accountValue": "0.0",
+        "totalMarginUsed": "0.0",
+        "totalNtlPos": "0.0",
+        "totalRawUsd": "0.0",
+    },
+    "marginSummary": {
+        "accountValue": "25.856067",
+        "totalMarginUsed": "25.856067",
+        "totalNtlPos": "129.588",
+        "totalRawUsd": "-103.731933",
+    },
+    "time": 1_730_000_060_000,
+    "withdrawable": "0.0",
+}
+
 
 def _exchange(
     *,
@@ -206,3 +251,49 @@ def test_a_cross_position_normalizes_to_the_measured_row_and_holds_no_collateral
     assert position.unrealized_pnl == Decimal("-0.034")
     assert position.margin_used == Decimal("25.9168")
     assert position.isolated_collateral is None
+
+
+def test_an_isolated_long_recovers_positive_collateral_from_a_negative_raw_usd_leg() -> None:
+    """The trap the second measurement round closed.
+
+    ``leverage.rawUsd`` looks like the position's locked collateral and is not:
+    it is the cash leg **net of cost basis**, so for a long it measures
+    *negative* — `−103.731933` against a collateral of `25.898067` on this very
+    position. Reading it would report a funded position as owing the venue a
+    hundred dollars. The collateral is recovered as ``marginUsed −
+    unrealizedPnl``, which is the venue's own arithmetic read the other way
+    round (``marginUsed`` ≡ ``isolated_collateral + unrealizedPnl``, and it moves
+    with the mark while ``rawUsd`` holds).
+    """
+    state = _fetch_state(ISOLATED_SNAPSHOT)
+
+    assert state is not None
+    (position,) = state.positions
+    assert position.isolated_collateral == Decimal("25.898067")
+
+
+def test_the_venue_liquidation_price_is_passed_through_verbatim() -> None:
+    """Read, never recomputed: re-deriving it needs the maintenance-margin tier
+    fixed point, and the venue already publishes the number exactly (ADR-0040
+    §3). So the digits that arrive are the digits that leave."""
+    state = _fetch_state(ISOLATED_SNAPSHOT)
+
+    assert state is not None
+    (position,) = state.positions
+    assert position.liquidation_price == Decimal("52522.497721519")
+
+
+def test_an_absent_liquidation_price_stays_absent() -> None:
+    """The recorded cross long came back with no liquidation price at all, and
+    that is the **majority** reading for a long — 12 of 17 cross longs across 22
+    mainnet accounts, every null a long and not one a short (ADR-0046 §6).
+
+    So the absence is ordinary, and substituting anything for it — a zero, the
+    mark, a computed price — would hand a strategy a fabricated liquidation level
+    in the common case.
+    """
+    state = _fetch_state(CROSS_SNAPSHOT)
+
+    assert state is not None
+    (position,) = state.positions
+    assert position.liquidation_price is None

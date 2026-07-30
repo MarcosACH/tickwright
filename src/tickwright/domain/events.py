@@ -387,6 +387,13 @@ class VenuePositionState:
     with the mark on both modes, which is why it sits inside the divergence
     band rather than being the same constant on both sides (ADR-0040 §3, as
     corrected).
+
+    ``liquidation_price`` is the venue's own number read through rather than
+    recomputed, and its ``None`` is the **majority** case for a long, not a
+    corner: the venue omits the field whenever the price would be non-positive,
+    which happens once collateral is large relative to notional and is
+    structurally impossible for a short (ADR-0046 §6). Nothing may substitute a
+    value for it — a frozen absence beats a fabricated price (ADR-0034).
     """
 
     symbol: str
@@ -396,6 +403,7 @@ class VenuePositionState:
     unrealized_pnl: Decimal
     margin_used: Decimal
     isolated_collateral: Decimal | None
+    liquidation_price: Decimal | None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
