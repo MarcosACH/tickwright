@@ -359,8 +359,9 @@ class HyperliquidExchange:
                     trade_id=str(entry["tid"]),
                     # A non-finite figure raises nothing on the way in, so
                     # without ``exact_figure`` a ``NaN`` quantity would ride into
-                    # a ``FillReport`` and make ``cum_qty`` absorb the fill
-                    # silently — and the store would round-trip it back.
+                    # a ``FillReport``, poison ``cum_qty`` by arithmetic and leave
+                    # its equality cross-check permanently disagreeing — durably,
+                    # since the store round-trips ``"NaN"`` back on recovery.
                     quantity=exact_figure(Decimal(str(entry["sz"]))),
                     price=exact_figure(Decimal(str(entry["px"]))),
                 )

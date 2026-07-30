@@ -23,15 +23,25 @@ def exact_figure(reported: Decimal) -> Decimal:
     parses without raising and rides into a domain quantity, where a missing
     field or a non-numeric string would have frozen the read.
 
-    Letting one through is fail-*open* in the worst direction available, because
-    a ``NaN`` does not propagate as an error — it propagates as **agreement**.
-    Every comparison against it is false, so a ``NaN`` price passes any band,
-    slippage or min-notional check it is measured against rather than failing it,
-    and a ``NaN`` quantity makes ``cum_qty`` arithmetic absorb a fill silently.
-    An infinity is the mirror: it wins every comparison and would drive an
-    unbounded action. Either is durable once written — the store round-trips
-    ``"NaN"`` back into a ``Decimal("NaN")`` — which is why the boundary is the
-    only place to stop it.
+    Letting one through fails open, though not the way the ``float`` intuition
+    says. ``Decimal`` is stricter than IEEE-754 here: an *ordering* comparison
+    against a ``NaN`` raises ``InvalidOperation`` rather than returning false
+    (measured — ``<``, ``>``, ``min``, ``sorted`` all signal). So a ``NaN`` price
+    does not quietly clear a band check; it detonates one, at an arbitrary later
+    point deep in the engine, where the surrounding guard is ``except OSError``
+    or nothing and the fault is attributed to the wrong layer.
+
+    What *is* silent is everything else. ``nan == nan`` is false, so a ``cum_qty``
+    cross-check never agrees and an order never reaches FILLED, while a reconcile
+    equality reads permanent divergence and heals toward a figure no venue holds.
+    Arithmetic propagates it: one ``NaN`` fill poisons the running total and
+    every figure derived from it. And it is **durable** — the store round-trips
+    ``"NaN"`` back into a ``Decimal("NaN")`` on recovery, so a single bad read
+    outlives the process that took it.
+
+    An infinity is the mirror and needs no subtlety: it compares greater than
+    anything, so it clears whatever ceiling it meets and would drive an unbounded
+    action. Which is why the boundary is the only place to stop either.
 
     ``ValueError`` and not a new exception type: a figure that is not a number is
     an unreadable response, and every caller already has a guard that says what

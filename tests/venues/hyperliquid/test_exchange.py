@@ -570,8 +570,9 @@ def test_fetch_order_freezes_on_a_non_finite_fill_figure(figure: str) -> None:
     # `Decimal("NaN")`/`Decimal("Infinity")` construct cleanly, so a non-finite
     # `sz`/`px` is the one unreadable fill figure that raises nothing on the way
     # in. It must freeze like any other unparseable body (ADR-0011 inv 1): a NaN
-    # quantity would make cum_qty arithmetic absorb the fill silently, and it is
-    # durable once written — the store round-trips "NaN" back into a Decimal.
+    # quantity poisons cum_qty by arithmetic and leaves its equality cross-check
+    # permanently disagreeing, and it is durable once written — the store
+    # round-trips "NaN" back into a Decimal("NaN") on recovery.
     for entry in (
         fill_entry(oid=91, tid=556, px=figure, sz="0.5"),
         fill_entry(oid=91, tid=556, px="43250.0", sz=figure),

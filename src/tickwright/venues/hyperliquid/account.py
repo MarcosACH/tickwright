@@ -165,11 +165,11 @@ def _figure(reported: object) -> Decimal:
     **Not finite.** Deferred to ``exact_figure``, the shared guard — this is not
     the only boundary that parses a reported figure, and the argument for
     refusing a non-finite one does not vary by grain. What it means *here* does:
-    every comparison against a ``NaN`` is false, so a reconcile handed a ``NaN``
-    equity would find no divergence to act on, read the ledger as agreeing with
-    the venue and decline to freeze — the exact inversion of inv 1, and quieter
-    than the outage it is supposed to behave like. An infinity is no better; it
-    would drive an unbounded heal toward a figure no venue holds.
+    a reconcile handed a ``NaN`` equity never agrees with the ledger — ``nan ==
+    nan`` is false — so it reads permanent divergence and heals toward a figure
+    no venue holds, and any tolerance comparison it makes signals an
+    ``InvalidOperation`` mid-cycle instead of freezing on the read that caused
+    it. An infinity is no better; it drives that heal unbounded.
 
     So a figure that is not an exact number is a failed read like any other
     (ADR-0011 inv 1, ADR-0034 — never a fabricated number).

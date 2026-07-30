@@ -209,8 +209,10 @@ class HyperliquidFeed:
         return MarketTick(
             symbol=symbol,
             # ``exact_figure`` is what makes a non-finite ``px``/``sz`` a *dropped
-            # row* rather than a ``NaN`` tick: it raises the ``ValueError`` the
-            # caller's guard already catches, so no new control flow appears here.
+            # row* rather than a ``NaN`` tick, refused here at the read instead of
+            # signalling an ``InvalidOperation`` out of some guard's comparison
+            # far downstream. It raises the ``ValueError`` the caller's row guard
+            # already catches, so no new control flow appears here.
             price=exact_figure(Decimal(str(trade["px"]))),
             size=exact_figure(Decimal(str(trade["sz"]))),
             aggressor_side=AggressorSide.BUY if trade["side"] == "B" else AggressorSide.SELL,

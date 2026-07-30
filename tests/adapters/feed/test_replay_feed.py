@@ -56,9 +56,9 @@ def test_replay_refuses_a_non_finite_figure_rather_than_publishing_it(
     """A recorded file is not a venue, but it is the same parse, and a
     ``Decimal("NaN")`` is just as valid a construction here. A figure that is not
     a number is an unreadable row, which replay has always refused by raising —
-    what must never happen is that it publishes as a tick, because every
-    comparison against a ``NaN`` price is false and it would pass every guard
-    downstream of this feed rather than failing one."""
+    what must never happen is that it publishes as a tick, because the failure
+    then surfaces as an ``InvalidOperation`` from whichever guard downstream
+    compared against it, blaming a layer that read the tick correctly."""
     path = _write_jsonl(
         tmp_path / "ticks.jsonl",
         [

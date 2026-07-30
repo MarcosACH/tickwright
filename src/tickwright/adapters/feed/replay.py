@@ -73,9 +73,10 @@ class ReplayFeed:
             symbol=symbol,
             # A recorded file is not a venue, but ``Decimal("NaN")`` is just as
             # valid a construction here, and replay feeds the tracer E2E and
-            # every strategy test — a ``NaN`` price would pass every guard
-            # downstream rather than failing one. An unreadable row raises, which
-            # is what replay has always done with one.
+            # every strategy test — a ``NaN`` price published from a file would
+            # surface as an ``InvalidOperation`` from whichever guard compared
+            # against it, blaming a layer that read the tick correctly. An
+            # unreadable row raises, which is what replay has always done.
             price=exact_figure(Decimal(str(row["price"]))),
             size=exact_figure(Decimal(str(row["size"]))),
             aggressor_side=AggressorSide(row["aggressor_side"]),

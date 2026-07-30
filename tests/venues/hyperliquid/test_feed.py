@@ -309,9 +309,10 @@ def test_non_trades_frames_are_ignored() -> None:
 def test_a_non_finite_tick_figure_is_dropped_not_ticked(figure: str) -> None:
     """``Decimal("NaN")``/``Decimal("Infinity")`` are *valid* constructions, so a
     non-finite ``px``/``sz`` is the one unreadable venue figure that raises
-    nothing on the way in. It must be a dropped row like any other, because a
-    ``NaN`` is fail-*open*: every comparison against it is false, so it would
-    pass whatever band or min-notional check it was measured against."""
+    nothing on the way in. It must be a dropped row like any other: a ``NaN``
+    tick does not clear a downstream band check quietly — ``Decimal`` ordering
+    *signals* on it — it detonates one layers away from the read that admitted
+    it, and its equality and arithmetic are silently wrong all the way there."""
 
     async def main() -> tuple[list[MarketTick], list[EventDict]]:
         bus = InMemoryBus()
