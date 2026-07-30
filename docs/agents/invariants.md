@@ -15,7 +15,12 @@ Consumed by `/code-review` (any regression is BLOCKING) and `/python-codebase-ma
    terminal state. (ADR-0008, ADR-0009)
 3. **Reconciliation freezes on connectivity failure.** A failed venue read returns `None`,
    never `[]`; on `None` the cycle freezes — no order is ghosted or removed. An outage must
-   never read as "all orders vanished." (ADR-0011)
+   never read as "all orders vanished." *At the account grain the same guard is
+   `fetch_account_state() -> VenueAccountState | None`, and `None` means no venue truth to
+   compare against, never a flat book: nothing heals. A response the adapter cannot **parse**
+   is a failed read too, not an empty account — and paper's `None` is its permanent answer,
+   because it holds no account state at all, so a cadence mistakenly pointed at it freezes
+   rather than healing a restored ledger to flat.* (ADR-0011, ADR-0034)
 4. **Rejections are explicit events.** A placed-but-rejected order surfaces as its taxonomy
    terminal (`DENIED` / `REJECTED` / `FAILED`), propagated as an event — never a silent
    `return None`. (ADR-0010)

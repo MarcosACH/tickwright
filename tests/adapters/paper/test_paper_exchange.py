@@ -693,7 +693,8 @@ def test_every_exchange_member_carries_a_claim_in_the_paper_suite() -> None:
 
     Both adapters must implement a new seam member for the engine to run at all,
     so conformance passes the moment the member exists — while nothing asserts
-    what it *does* on this venue. Four more members are queued (#177, #173,
-    #174); each arrives cheaper against a gate that names the omission than
-    against a reviewer who has to notice it."""
+    what it *does* on this venue. ``fetch_account_state`` (#177) is the first to
+    arrive against it, and more are queued (#173, #174); each arrives cheaper
+    against a gate that names the omission than against a reviewer who has to
+    notice it."""
     assert_every_member_is_claimed(Exchange, _SEAM_CLAIMS, suite=Path(__file__).parent)
