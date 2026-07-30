@@ -282,6 +282,22 @@ def _with_margin_mode(snapshot: dict, mode: str) -> dict:
     }
 
 
+def _with_summary_figure(snapshot: dict, summary: str, field: str, value: str) -> dict:
+    """``snapshot`` with one account-grain figure replaced by ``value``.
+
+    Used for the figures that *parse* — ``Decimal`` accepts ``"nan"`` and
+    ``"Infinity"`` as valid constructions — so unlike a deleted field these reach
+    the constructor rather than the match pattern."""
+    return snapshot | {summary: snapshot[summary] | {field: value}}
+
+
+def _with_position_figure(snapshot: dict, field: str, value: str) -> dict:
+    """``snapshot`` with one figure on its position row replaced, same shape as
+    ``_with_summary_figure`` one level down."""
+    (entry,) = snapshot["assetPositions"]
+    return snapshot | {"assetPositions": [entry | {"position": entry["position"] | {field: value}}]}
+
+
 def _exchange(
     *,
     testnet: bool,
@@ -593,6 +609,31 @@ def test_a_transport_failure_reads_as_no_venue_truth_never_as_a_flat_book() -> N
         # collateral bucket as backed by the account pool, and ``None`` collateral
         # is indistinguishable downstream from a genuine cross read.
         ("a margin mode we do not recognize", _with_margin_mode(CROSS_SNAPSHOT, "portfolioMargin")),
+        # A figure that is not a number but *is* a legal ``Decimal``. These are
+        # the one class of unreadable figure that does not announce itself:
+        # ``Decimal("nan")`` and ``Decimal("Infinity")`` construct fine, so
+        # without an explicit finiteness check they ride through into a whole
+        # state. That is fail-*open* in the worst direction available here —
+        # every comparison against a ``NaN`` is false, so a reconcile would read
+        # the ledger as agreeing with the venue and decline to freeze, which is
+        # exactly inverted from inv 1. Both grains and both spellings, since each
+        # figure is parsed at its own site.
+        (
+            "a NaN account figure",
+            _with_summary_figure(CROSS_SNAPSHOT, "marginSummary", "accountValue", "nan"),
+        ),
+        (
+            "an infinite cross figure",
+            _with_summary_figure(
+                CROSS_SNAPSHOT, "crossMarginSummary", "totalMarginUsed", "Infinity"
+            ),
+        ),
+        ("a NaN maintenance figure", CROSS_SNAPSHOT | {"crossMaintenanceMarginUsed": "NaN"}),
+        ("a NaN position size", _with_position_figure(CROSS_SNAPSHOT, "szi", "NaN")),
+        (
+            "an infinite liquidation price",
+            _with_position_figure(CROSS_SNAPSHOT, "liquidationPx", "-Infinity"),
+        ),
     ],
 )
 def test_an_unparseable_response_reads_as_no_venue_truth_and_is_named(

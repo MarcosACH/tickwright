@@ -86,16 +86,17 @@ def normalize_account_state(response: object) -> VenueAccountState | None:
         }:
             try:
                 return VenueAccountState(
-                    equity=Decimal(equity),
-                    free_margin=Decimal(cross_equity) - Decimal(cross_margin_used),
-                    cross_maintenance_margin=Decimal(cross_maintenance),
+                    equity=_figure(equity),
+                    free_margin=_figure(cross_equity) - _figure(cross_margin_used),
+                    cross_maintenance_margin=_figure(cross_maintenance),
                     positions=tuple(_position(entry["position"]) for entry in entries),
                 )
             except (ArithmeticError, KeyError, TypeError, ValueError) as exc:
                 # The root shape matched but something inside it did not: a
-                # position row missing a field, a figure that is not a number, a
-                # margin mode outside the two the venue reports (the ``ValueError``
-                # — ``_isolated_collateral`` refuses to guess which one it means).
+                # position row missing a field, a figure that is not a number (or
+                # is a *non-finite* one — see ``_figure``), a margin mode outside
+                # the two the venue reports (the ``ValueError`` — neither
+                # ``_figure`` nor ``_isolated_collateral`` guesses what it means).
                 _name_failed_read(f"{exc!r} in clearinghouseState response {_rendered(response)}")
                 return None
     _name_failed_read(f"unrecognized clearinghouseState response: {_rendered(response)}")
@@ -140,6 +141,30 @@ def _rendered(response: object) -> str:
     return f"{shape}{body}"
 
 
+def _figure(reported: Any) -> Decimal:
+    """One venue figure as an exact number, or a failed read if it is not one.
+
+    Every quantity in this response goes through here, because a non-finite
+    figure is the one unreadable value that does not announce itself:
+    ``Decimal("nan")`` and ``Decimal("Infinity")`` are *valid* constructions, so
+    they raise nothing and would ride through into a whole ``VenueAccountState``
+    while a missing field or a non-numeric string freezes the read.
+
+    Letting one through would be fail-*open* in the worst direction available at
+    this grain. Every comparison against a ``NaN`` is false, so a reconcile
+    handed a ``NaN`` equity would find no divergence to act on, read the ledger
+    as agreeing with the venue and decline to freeze — the exact inversion of
+    inv 1, and quieter than the outage it is supposed to behave like. An infinity
+    is no better: it would drive an unbounded heal toward a figure no venue
+    holds. So a figure that is not finite is a failed read like any other
+    (ADR-0011 inv 1, ADR-0034 — never a fabricated number).
+    """
+    figure = Decimal(reported)
+    if not figure.is_finite():
+        raise ValueError(f"non-finite figure {reported!r}")
+    return figure
+
+
 def _position(reported: Mapping[str, Any]) -> VenuePositionState:
     """One ``assetPositions[].position`` row as ``domain``.
 
@@ -153,21 +178,21 @@ def _position(reported: Mapping[str, Any]) -> VenuePositionState:
     other field is required: missing one means we are not reading what we think
     we are, and the caller turns that into a failed read.
     """
-    margin_used = Decimal(reported["marginUsed"])
-    unrealized_pnl = Decimal(reported["unrealizedPnl"])
+    margin_used = _figure(reported["marginUsed"])
+    unrealized_pnl = _figure(reported["unrealizedPnl"])
     entry_price = reported.get("entryPx")
     liquidation_price = reported["liquidationPx"]
     return VenuePositionState(
         symbol=str(reported["coin"]),
-        signed_size=Decimal(reported["szi"]),
-        entry_price=None if entry_price is None else Decimal(entry_price),
-        notional=Decimal(reported["positionValue"]),
+        signed_size=_figure(reported["szi"]),
+        entry_price=None if entry_price is None else _figure(entry_price),
+        notional=_figure(reported["positionValue"]),
         unrealized_pnl=unrealized_pnl,
         margin_used=margin_used,
         isolated_collateral=_isolated_collateral(
             reported["leverage"], margin_used=margin_used, unrealized_pnl=unrealized_pnl
         ),
-        liquidation_price=None if liquidation_price is None else Decimal(liquidation_price),
+        liquidation_price=None if liquidation_price is None else _figure(liquidation_price),
     )
 
 
