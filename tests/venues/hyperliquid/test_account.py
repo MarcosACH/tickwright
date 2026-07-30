@@ -12,8 +12,10 @@ number or is forced by one, so the expected values these tests assert are the
 venue's own arithmetic and not this normalizer's restated.
 """
 
+import ast
 import asyncio
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from hyperliquid_fakes import FakeExchangeApi
@@ -352,3 +354,94 @@ def test_an_unparseable_response_reads_as_no_venue_truth_and_is_named(
     assert state is None, label
     failed = [e for e in events if e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED]
     assert failed and failed[0]["request"] == "clearinghouseState", label
+
+
+# Every venue field name that carries an account or position *quantity*. Not the
+# vocabulary a venue response shares generally — ``coin`` and ``time`` appear on
+# trades and order records too, and ``szDecimals`` on the instrument meta, so
+# naming those elsewhere is not this leak. Four of these are here because reading
+# them is the documented mistake rather than because we read them: root
+# ``withdrawable`` (ADR-0046 §2), ``rawUsd`` and ``totalRawUsd`` (the cash leg
+# net of cost basis, negative for a long), and ``returnOnEquity``.
+_QUANTITY_FIELDS = (
+    "accountValue",
+    "assetPositions",
+    "crossMaintenanceMarginUsed",
+    "crossMarginSummary",
+    "cumFunding",
+    "entryPx",
+    "liquidationPx",
+    "marginSummary",
+    "marginUsed",
+    "positionValue",
+    "rawUsd",
+    "returnOnEquity",
+    "szi",
+    "totalMarginUsed",
+    "totalNtlPos",
+    "totalRawUsd",
+    "unrealizedPnl",
+    "withdrawable",
+)
+
+_SRC = Path(__file__).parents[3] / "src" / "tickwright"
+_OWNER = _SRC / "venues" / "hyperliquid" / "account.py"
+
+
+def _code_strings(module: Path) -> list[str]:
+    """Every string literal in ``module`` that is not a docstring.
+
+    Docstrings are excluded because prose is not a read: ``engine/portfolio.py``
+    and ``domain/account.py`` both cite ``accountValue`` when explaining where
+    the live genesis figure comes from, which is exactly the cross-reference that
+    keeps a decision findable. Comments are excluded for free — ``ast`` drops
+    them. What is left is the code that would actually reach into a venue
+    response.
+    """
+    tree = ast.parse(module.read_text(encoding="utf-8"))
+    docstrings = {
+        id(node.body[0].value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef)
+        and node.body
+        and isinstance(node.body[0], ast.Expr)
+        and isinstance(node.body[0].value, ast.Constant)
+        and isinstance(node.body[0].value.value, str)
+    }
+    return [
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and id(node) not in docstrings
+    ]
+
+
+def test_no_module_outside_this_one_names_a_venue_field_for_these_quantities() -> None:
+    """The containment claim the module exists for, enforced rather than asserted
+    in a docstring.
+
+    Six field-semantic corrections have landed on this response already, and each
+    one was a statement about what a single field means. Concentrating them here
+    is what makes a seventh a one-file change instead of a hunt — but only for as
+    long as nothing else reaches past the normalizer, and a second reader would
+    look like ordinary code review-by-review. ``lint-imports`` cannot see this:
+    the leak would be a *string literal* inside a module that is already allowed
+    to import this package.
+
+    Honest about its reach: it sees literals, so a field name assembled at
+    runtime or held in a variable slips past. It catches the way the mistake
+    actually gets made.
+    """
+    leaks = sorted(
+        f"{module.relative_to(_SRC)} names {field!r}"
+        for module in _SRC.rglob("*.py")
+        if module != _OWNER
+        for field in _QUANTITY_FIELDS
+        if any(field in literal for literal in _code_strings(module))
+    )
+
+    assert not leaks, (
+        "Hyperliquid account/position field names outside venues/hyperliquid/account.py: "
+        f"{leaks} — normalize there and pass VenueAccountState/VenuePositionState on"
+    )
