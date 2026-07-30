@@ -22,6 +22,8 @@ from pydantic import SecretStr
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.domain import InstrumentSpec, Netting, VenueAccountState
+from tickwright.observability import NamedEvent
+from tickwright.observability.testing import capture_events
 from tickwright.venues.hyperliquid import (
     HyperliquidConfig,
     HyperliquidExchange,
@@ -129,6 +131,19 @@ ISOLATED_SNAPSHOT: dict = {
     "time": 1_730_000_060_000,
     "withdrawable": "0.0",
 }
+
+
+def _without(snapshot: dict, field: str) -> dict:
+    """``snapshot`` with one root field deleted — a venue response we cannot read."""
+    return {name: value for name, value in snapshot.items() if name != field}
+
+
+def _position_without(snapshot: dict, field: str) -> dict:
+    """``snapshot`` with one field deleted from its position row: the same
+    unreadable-response case one level down, where a partial parse would
+    otherwise report a position the venue never described."""
+    (entry,) = snapshot["assetPositions"]
+    return snapshot | {"assetPositions": [entry | {"position": _without(entry["position"], field)}]}
 
 
 def _exchange(
@@ -297,3 +312,43 @@ def test_an_absent_liquidation_price_stays_absent() -> None:
     assert state is not None
     (position,) = state.positions
     assert position.liquidation_price is None
+
+
+def test_a_transport_failure_reads_as_no_venue_truth_never_as_a_flat_book() -> None:
+    """The connectivity guard in the return type (ADR-0011 inv 1).
+
+    An unreachable venue is *no truth to compare against*, and the reconcile
+    freezes on it. A zero-filled state would be fail-open — the fabricated flat
+    ADR-0034 forbids — and would heal a restored ledger down to nothing.
+    """
+    assert _fetch_state(TimeoutError("the venue never answered")) is None
+
+
+@pytest.mark.parametrize(
+    ("label", "response"),
+    [
+        ("not a response at all", {"status": "err"}),
+        (
+            "no cross summary to take the difference of",
+            _without(CROSS_SNAPSHOT, "crossMarginSummary"),
+        ),
+        ("no positions list", _without(CROSS_SNAPSHOT, "assetPositions")),
+        ("a position row missing a field", _position_without(CROSS_SNAPSHOT, "marginUsed")),
+    ],
+)
+def test_an_unparseable_response_reads_as_no_venue_truth_and_is_named(
+    label: str, response: object
+) -> None:
+    """A shape we cannot read is a *failed* read, not a flat account.
+
+    This is where a venue contract change lands, so it must stay visible rather
+    than degrade quietly into a heal: ``None`` freezes the cycle, and the named
+    event is what tells an operator the response — not the connection — is what
+    changed.
+    """
+    with capture_events() as events:
+        state = _fetch_state(response)
+
+    assert state is None, label
+    failed = [e for e in events if e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED]
+    assert failed and failed[0]["request"] == "clearinghouseState", label

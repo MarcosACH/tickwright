@@ -18,6 +18,7 @@ from tickwright.domain import (
     VenueAccountState,
     VenuePositionState,
 )
+from tickwright.observability import NamedEvent, named_event
 
 from .config import HyperliquidConfig
 
@@ -67,6 +68,11 @@ def normalize_account_state(response: object) -> VenueAccountState | None:
 
     Plus one row per open position — a coin the account is flat in is simply
     absent from ``assetPositions``, the venue running one-way net positions.
+
+    A body this cannot read is a **failed read**, answered ``None`` and named:
+    every branch out of here is either a whole state or no state at all, so a
+    venue contract change freezes the reconcile rather than degrading into a
+    partial account that would read as truth (ADR-0011 inv 1).
     """
     match response:
         case {
@@ -78,13 +84,31 @@ def normalize_account_state(response: object) -> VenueAccountState | None:
             "crossMaintenanceMarginUsed": str(cross_maintenance),
             "assetPositions": list(entries),
         }:
-            return VenueAccountState(
-                equity=Decimal(equity),
-                free_margin=Decimal(cross_equity) - Decimal(cross_margin_used),
-                cross_maintenance_margin=Decimal(cross_maintenance),
-                positions=tuple(_position(entry["position"]) for entry in entries),
-            )
+            try:
+                return VenueAccountState(
+                    equity=Decimal(equity),
+                    free_margin=Decimal(cross_equity) - Decimal(cross_margin_used),
+                    cross_maintenance_margin=Decimal(cross_maintenance),
+                    positions=tuple(_position(entry["position"]) for entry in entries),
+                )
+            except (ArithmeticError, KeyError, TypeError) as exc:
+                # The root shape matched but something inside it did not: a
+                # position row missing a field, a figure that is not a number.
+                _name_failed_read(f"{exc!r} in clearinghouseState response {response!r}")
+                return None
+    _name_failed_read(f"unrecognized clearinghouseState response: {response!r}")
     return None
+
+
+def _name_failed_read(error: str) -> None:
+    """Name a read that came back unreadable rather than unreachable.
+
+    The named event is the difference between the two ways this read comes back
+    empty: a transport failure is a connection, and this is the *response* — the
+    shape a venue contract change would arrive as. It must stay visible rather
+    than look like a quiet outage.
+    """
+    named_event(NamedEvent.EXCHANGE_REQUEST_FAILED, request="clearinghouseState", error=error)
 
 
 def _position(reported: Mapping[str, Any]) -> VenuePositionState:
