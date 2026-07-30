@@ -8,9 +8,16 @@ one-file change (ADR-0031, ADR-0045 §3 — venue conventions are normalized in 
 adapter, never in ``domain``).
 """
 
+from collections.abc import Mapping
 from decimal import Decimal
+from typing import Any
 
-from tickwright.domain import AccountSpec, Netting, VenueAccountState
+from tickwright.domain import (
+    AccountSpec,
+    Netting,
+    VenueAccountState,
+    VenuePositionState,
+)
 
 from .config import HyperliquidConfig
 
@@ -57,6 +64,9 @@ def normalize_account_state(response: object) -> VenueAccountState | None:
       which is **cross-only** — the asymmetry is inside one response, since
       ``marginSummary.totalMarginUsed`` *includes* isolated positions and nothing
       but the ``cross`` prefix says which is which.
+
+    Plus one row per open position — a coin the account is flat in is simply
+    absent from ``assetPositions``, the venue running one-way net positions.
     """
     match response:
         case {
@@ -66,10 +76,25 @@ def normalize_account_state(response: object) -> VenueAccountState | None:
                 "totalMarginUsed": str(cross_margin_used),
             },
             "crossMaintenanceMarginUsed": str(cross_maintenance),
+            "assetPositions": list(entries),
         }:
             return VenueAccountState(
                 equity=Decimal(equity),
                 free_margin=Decimal(cross_equity) - Decimal(cross_margin_used),
                 cross_maintenance_margin=Decimal(cross_maintenance),
+                positions=tuple(_position(entry["position"]) for entry in entries),
             )
     return None
+
+
+def _position(reported: Mapping[str, Any]) -> VenuePositionState:
+    """One ``assetPositions[].position`` row as ``domain``."""
+    return VenuePositionState(
+        symbol=str(reported["coin"]),
+        signed_size=Decimal(reported["szi"]),
+        entry_price=Decimal(reported["entryPx"]),
+        notional=Decimal(reported["positionValue"]),
+        unrealized_pnl=Decimal(reported["unrealizedPnl"]),
+        margin_used=Decimal(reported["marginUsed"]),
+        isolated_collateral=None,
+    )

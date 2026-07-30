@@ -182,3 +182,27 @@ def test_free_margin_ignores_withdrawable_once_an_order_is_resting() -> None:
 
     assert state is not None
     assert state.free_margin == Decimal("0.0096")
+
+
+def test_a_cross_position_normalizes_to_the_measured_row_and_holds_no_collateral() -> None:
+    """The position half: the signed size the venue reports, the mark notional,
+    and the unrealized PnL — with ``isolated_collateral`` ``None``, because a
+    cross position is backed by the account pool and has no bucket of its own
+    (ADR-0040 §7: isolated buckets are the locked, excluded ones).
+
+    Recorded: 0.002 long at entry 64809, mark 64792, so the venue's
+    ``positionValue`` is 129.584 and its ``unrealizedPnl`` is
+    ``129.584 − 0.002 × 64809 = −0.034`` — the arithmetic is the venue's, not
+    this normalizer's.
+    """
+    state = _fetch_state(CROSS_SNAPSHOT)
+
+    assert state is not None
+    (position,) = state.positions
+    assert position.symbol == "BTC"
+    assert position.signed_size == Decimal("0.002")
+    assert position.entry_price == Decimal("64809.0")
+    assert position.notional == Decimal("129.584")
+    assert position.unrealized_pnl == Decimal("-0.034")
+    assert position.margin_used == Decimal("25.9168")
+    assert position.isolated_collateral is None

@@ -373,6 +373,32 @@ class VenueOrderView:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class VenuePositionState:
+    """One position inside a successful venue account read, normalized.
+
+    ``signed_size`` carries the direction the venue reports it with — positive
+    long, negative short — where our own ledger keeps a magnitude and rides the
+    side on the saga.
+
+    ``isolated_collateral`` is the position's own locked bucket, and its
+    ``None`` is what says the position is **cross**: a cross position is backed
+    by the account pool and has no bucket of its own, while an isolated one
+    always has a positive number here. Its counterpart ``margin_used`` moves
+    with the mark on both modes, which is why it sits inside the divergence
+    band rather than being the same constant on both sides (ADR-0040 §3, as
+    corrected).
+    """
+
+    symbol: str
+    signed_size: Decimal
+    entry_price: Decimal | None
+    notional: Decimal
+    unrealized_pnl: Decimal
+    margin_used: Decimal
+    isolated_collateral: Decimal | None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class VenueAccountState:
     """One *successful* venue account read (``Exchange.fetch_account_state``).
 
@@ -396,6 +422,7 @@ class VenueAccountState:
     equity: Decimal
     free_margin: Decimal
     cross_maintenance_margin: Decimal
+    positions: tuple[VenuePositionState, ...] = ()
 
 
 # --- Venue-neutral order request (not an event) -----------------------------
