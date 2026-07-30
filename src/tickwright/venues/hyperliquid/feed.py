@@ -15,7 +15,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Protocol
 
-from tickwright.domain import AggressorSide, Clock, EventBus, MarketTick
+from tickwright.domain import AggressorSide, Clock, EventBus, MarketTick, exact_figure
 from tickwright.observability import NamedEvent, named_event
 
 from .backoff import Backoff
@@ -208,8 +208,11 @@ class HyperliquidFeed:
         self._seq_by_symbol[symbol] = seq + 1
         return MarketTick(
             symbol=symbol,
-            price=Decimal(str(trade["px"])),
-            size=Decimal(str(trade["sz"])),
+            # ``exact_figure`` is what makes a non-finite ``px``/``sz`` a *dropped
+            # row* rather than a ``NaN`` tick: it raises the ``ValueError`` the
+            # caller's guard already catches, so no new control flow appears here.
+            price=exact_figure(Decimal(str(trade["px"]))),
+            size=exact_figure(Decimal(str(trade["sz"]))),
             aggressor_side=AggressorSide.BUY if trade["side"] == "B" else AggressorSide.SELL,
             trade_id=str(trade["tid"]),
             seq=seq,

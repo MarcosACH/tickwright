@@ -11,6 +11,7 @@ import json
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
 from hyperliquid_fakes import FakeWsConnection, trade, trades_frame
 from structlog.typing import EventDict
 
@@ -302,6 +303,53 @@ def test_non_trades_frames_are_ignored() -> None:
     seen, _ = _drive(frames, symbols=["BTC"], until_ticks=1)
 
     assert [t.trade_id for t in seen] == ["1"]
+
+
+@pytest.mark.parametrize("figure", ["NaN", "Infinity", "-Infinity"])
+def test_a_non_finite_tick_figure_is_dropped_not_ticked(figure: str) -> None:
+    """``Decimal("NaN")``/``Decimal("Infinity")`` are *valid* constructions, so a
+    non-finite ``px``/``sz`` is the one unreadable venue figure that raises
+    nothing on the way in. It must be a dropped row like any other, because a
+    ``NaN`` is fail-*open*: every comparison against it is false, so it would
+    pass whatever band or min-notional check it was measured against."""
+
+    async def main() -> tuple[list[MarketTick], list[EventDict]]:
+        bus = InMemoryBus()
+        clock = ManualClock()
+        seen: list[MarketTick] = []
+        enough = asyncio.Event()
+
+        async def record(tick: MarketTick) -> None:
+            seen.append(tick)
+            enough.set()
+
+        bus.subscribe(MarketTick, record)
+        connection = FakeWsConnection(
+            [
+                trades_frame(trade("BTC", figure, 1)),  # non-finite price
+                trades_frame(trade("BTC", "100", 2, sz=figure)),  # non-finite size
+                trades_frame(trade("BTC", "100", 3)),  # the sentinel that must arrive
+            ]
+        )
+
+        async def connect(url: str) -> FakeWsConnection:
+            return connection
+
+        feed = HyperliquidFeed(
+            config=HyperliquidConfig(symbols=["BTC"]), bus=bus, clock=clock, connect=connect
+        )
+        with capture_events() as logs:
+            run = asyncio.create_task(feed.start())
+            await asyncio.wait_for(enough.wait(), timeout=2)
+            await feed.stop()
+            await asyncio.wait_for(run, timeout=2)
+        return seen, [log for log in logs if log["event"] == "feed.frame_dropped"]
+
+    seen, dropped = asyncio.run(main())
+
+    # Only the finite trade reached the bus; neither non-finite row became a tick.
+    assert [t.trade_id for t in seen] == ["3"]
+    assert len(dropped) == 2
 
 
 def test_malformed_frames_are_skipped_and_named_while_good_frames_keep_flowing() -> None:
