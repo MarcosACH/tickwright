@@ -89,6 +89,32 @@ CROSS_SNAPSHOT: dict = {
     "withdrawable": "0.0096",
 }
 
+# The same account with its one position closed — the ordinary shape of a funded
+# account that holds nothing, and the *first* response a live startup barrier
+# ever reads. The venue drops a flat coin from ``assetPositions`` entirely rather
+# than reporting a zero row, so the list is empty; the whole balance is cash, and
+# the venue's own identity still holds: accountValue = totalRawUsd + totalNtlPos
+# = 25.9264 + 0. Not a measured snapshot but forced by one — every figure is the
+# cross snapshot's with the position's contribution removed.
+FLAT_SNAPSHOT: dict = {
+    "assetPositions": [],
+    "crossMaintenanceMarginUsed": "0.0",
+    "crossMarginSummary": {
+        "accountValue": "25.9264",
+        "totalMarginUsed": "0.0",
+        "totalNtlPos": "0.0",
+        "totalRawUsd": "25.9264",
+    },
+    "marginSummary": {
+        "accountValue": "25.9264",
+        "totalMarginUsed": "0.0",
+        "totalNtlPos": "0.0",
+        "totalRawUsd": "25.9264",
+    },
+    "time": 1_730_000_120_000,
+    "withdrawable": "25.9264",
+}
+
 # The recorded isolated snapshot: the same 0.002 BTC long at 5x, entry 64815,
 # mark 64794, with 25.898067 of collateral locked into its own bucket. Measured
 # (#142 §4): ``marginUsed = positionValue + rawUsd = 129.588 − 103.731933 =
@@ -350,6 +376,9 @@ def test_a_transport_failure_reads_as_no_venue_truth_never_as_a_flat_book() -> N
     ("label", "response"),
     [
         ("not a response at all", {"status": "err"}),
+        # Not every unreadable body is even an object: an /info error can come
+        # back as a bare list or string, which has no key set to name.
+        ("a bare list where an object was expected", []),
         (
             "no cross summary to take the difference of",
             _without(CROSS_SNAPSHOT, "crossMarginSummary"),
@@ -374,6 +403,47 @@ def test_an_unparseable_response_reads_as_no_venue_truth_and_is_named(
     assert state is None, label
     failed = [e for e in events if e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED]
     assert failed and failed[0]["request"] == "clearinghouseState", label
+
+
+def test_a_flat_account_is_positive_proof_of_flat_not_a_failed_read() -> None:
+    """The other side of inv 1, and the one the failure cases cannot stand in for.
+
+    A flat account is not an edge case: the venue omits a coin the account is
+    flat in, so an account holding nothing reports ``assetPositions: []`` — the
+    first response a live startup barrier ever reads, and the response every
+    account gives before its first fill. It must normalize to a *whole* state
+    whose ``positions`` is empty, never to the ``None`` that freezes the cycle.
+    The account-grain figures still have to arrive with it: an empty book is
+    proof about positions, not about cash.
+    """
+    state = _fetch_state(FLAT_SNAPSHOT)
+
+    assert state is not None
+    assert state.positions == ()
+    assert state.equity == Decimal("25.9264")
+    assert state.free_margin == Decimal("25.9264")
+    assert state.cross_maintenance_margin == Decimal("0.0")
+
+
+def test_a_named_unparseable_read_carries_the_response_shape_not_its_whole_body() -> None:
+    """The branch a venue contract change lands on, so it repeats every cycle for
+    as long as the contract stays broken — a fifty-position body is kilobytes an
+    operator does not need served fifty times over.
+
+    What diagnoses a contract change is the **key set**, so that is what must
+    survive the bound; the body follows it truncated, for the value-shaped
+    failures a key set cannot show (a figure that is not a number).
+    """
+    fat = _without(CROSS_SNAPSHOT, "crossMarginSummary") | {
+        "assetPositions": CROSS_SNAPSHOT["assetPositions"] * 50
+    }
+
+    with capture_events() as events:
+        assert _fetch_state(fat) is None
+
+    (failed,) = [e for e in events if e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED]
+    assert "crossMaintenanceMarginUsed" in failed["error"]  # the shape survives
+    assert len(failed["error"]) < len(repr(fat)) // 10  # the body does not
 
 
 # Every venue field name that carries an account or position *quantity*. Not the
@@ -408,8 +478,8 @@ _SRC = Path(__file__).parents[3] / "src" / "tickwright"
 _OWNER = _SRC / "venues" / "hyperliquid" / "account.py"
 
 
-def _code_strings(module: Path) -> list[str]:
-    """Every string literal in ``module`` that is not a docstring.
+def _code_strings(source: str) -> list[str]:
+    """Every string literal in ``source`` that is not a docstring.
 
     Docstrings are excluded because prose is not a read: ``engine/portfolio.py``
     and ``domain/account.py`` both cite ``accountValue`` when explaining where
@@ -417,24 +487,53 @@ def _code_strings(module: Path) -> list[str]:
     keeps a decision findable. Comments are excluded for free — ``ast`` drops
     them. What is left is the code that would actually reach into a venue
     response.
+
+    The test is *any string used as a statement*, not the canonical
+    first-statement docstring: that catches an **attribute** docstring too — the
+    bare string under an annotated field, the form ``domain/events.py`` and
+    ``domain/protocols.py`` already use — and it costs nothing, because a literal
+    that reaches into a venue response is always a subscript, an argument or a
+    comparand, never a statement on its own.
     """
-    tree = ast.parse(module.read_text(encoding="utf-8"))
-    docstrings = {
-        id(node.body[0].value)
+    tree = ast.parse(source)
+    prose = {
+        id(node.value)
         for node in ast.walk(tree)
-        if isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef)
-        and node.body
-        and isinstance(node.body[0], ast.Expr)
-        and isinstance(node.body[0].value, ast.Constant)
-        and isinstance(node.body[0].value.value, str)
+        if isinstance(node, ast.Expr)
+        and isinstance(node.value, ast.Constant)
+        and isinstance(node.value.value, str)
     }
     return [
         node.value
         for node in ast.walk(tree)
-        if isinstance(node, ast.Constant)
-        and isinstance(node.value, str)
-        and id(node) not in docstrings
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in prose
     ]
+
+
+def test_the_guard_reads_a_docstring_as_prose_wherever_it_sits() -> None:
+    """The exclusion has to cover an **attribute** docstring, not just the
+    canonical first-statement kind.
+
+    Citing the venue field a quantity is sourced from is the cross-reference the
+    guard exists to permit — ``engine/portfolio.py`` and ``domain/account.py``
+    both carry one — and ``domain/events.py`` and ``domain/protocols.py``, the
+    two modules holding ``VenueAccountState`` and ``fetch_account_state``,
+    already use the trailing-string form for other fields. So a field docstring
+    naming ``marginSummary.accountValue`` is the likeliest next one written, on
+    the likeliest module to write it. Reading it as a leak would fail the build
+    over prose and teach the next author to delete the citation — the opposite of
+    what this guard is for.
+    """
+    source = '''"""A module that cites ``accountValue`` in prose alone."""
+
+class VenueAccountState:
+    """Its class docstring cites ``marginSummary.accountValue`` too."""
+
+    equity: Decimal
+    """The whole account marked to market — ``marginSummary.accountValue``."""
+'''
+
+    assert not [literal for literal in _code_strings(source) if "accountValue" in literal]
 
 
 def test_no_module_outside_this_one_names_a_venue_field_for_these_quantities() -> None:
@@ -453,13 +552,16 @@ def test_no_module_outside_this_one_names_a_venue_field_for_these_quantities() -
     runtime or held in a variable slips past. It catches the way the mistake
     actually gets made.
     """
-    leaks = sorted(
-        f"{module.relative_to(_SRC)} names {field!r}"
-        for module in _SRC.rglob("*.py")
-        if module != _OWNER
-        for field in _QUANTITY_FIELDS
-        if any(field in literal for literal in _code_strings(module))
-    )
+    leaks = []
+    for module in sorted(_SRC.rglob("*.py")):
+        if module == _OWNER:
+            continue
+        literals = _code_strings(module.read_text(encoding="utf-8"))
+        leaks += [
+            f"{module.relative_to(_SRC)} names {field!r}"
+            for field in _QUANTITY_FIELDS
+            if any(field in literal for literal in literals)
+        ]
 
     assert not leaks, (
         "Hyperliquid account/position field names outside venues/hyperliquid/account.py: "
