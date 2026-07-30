@@ -49,22 +49,30 @@ def _collect(path: Path) -> tuple[list[MarketTick], ManualClock]:
     return seen, clock
 
 
+@pytest.mark.parametrize("field", ["price", "size"])
 @pytest.mark.parametrize("figure", ["NaN", "Infinity", "-Infinity"])
 def test_replay_refuses_a_non_finite_figure_rather_than_publishing_it(
-    tmp_path: Path, figure: str
+    tmp_path: Path, figure: str, field: str
 ) -> None:
     """A recorded file is not a venue, but it is the same parse, and a
     ``Decimal("NaN")`` is just as valid a construction here. A figure that is not
     a number is an unreadable row, which replay has always refused by raising —
     what must never happen is that it publishes as a tick, because the failure
     then surfaces as an ``InvalidOperation`` from whichever guard downstream
-    compared against it, blaming a layer that read the tick correctly."""
+    compared against it, blaming a layer that read the tick correctly.
+
+    ``field`` is parametrized rather than putting both figures in one file: the
+    first bad row raises out of ``start()``, so a second one below it would never
+    be parsed at all and the guard on that field would go unexercised — invisibly,
+    since the other rows keep its line covered."""
+    bad = _row("BTC", "100", 2_000, "b")
+    bad[field] = figure
     path = _write_jsonl(
         tmp_path / "ticks.jsonl",
         [
             _row("BTC", "100", 1_000, "a"),
-            _row("BTC", figure, 2_000, "b"),
-            _row("BTC", "102", 3_000, "c", size=figure),
+            bad,
+            _row("BTC", "102", 3_000, "c"),
         ],
     )
     bus = InMemoryBus()
@@ -79,7 +87,8 @@ def test_replay_refuses_a_non_finite_figure_rather_than_publishing_it(
     with pytest.raises(ValueError):
         asyncio.run(feed.start())
 
-    # The good row ahead of it published; the non-finite one never did.
+    # The good row ahead of it published; the non-finite one never did, and
+    # nothing behind it was reached — a raise is replay's whole answer.
     assert [t.trade_id for t in seen] == ["a"]
 
 
