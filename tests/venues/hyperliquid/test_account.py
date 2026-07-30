@@ -1,17 +1,27 @@
-"""The Hyperliquid account declaration (ADR-0038/0042).
+"""The Hyperliquid account boundary (ADR-0038/0042; ADR-0040/0046 for the state).
 
 The one place a venue-native account identity becomes a ``domain``
-``AccountSpec``: nothing else in the codebase composes a Hyperliquid account id.
+``AccountSpec``, and the one place ``clearinghouseState`` becomes a
+``VenueAccountState``: nothing else in the codebase composes a Hyperliquid
+account id or names a Hyperliquid field for these quantities.
+
+The two ``clearinghouseState`` bodies below are **recorded**, from the funded
+testnet position [#142](https://github.com/MarcosACH/tickwright/issues/142)
+measured — one cross, one isolated. Every figure in them is a measured venue
+number or is forced by one, so the expected values these tests assert are the
+venue's own arithmetic and not this normalizer's restated.
 """
 
+import asyncio
 from decimal import Decimal
 
 import pytest
+from hyperliquid_fakes import FakeExchangeApi
 from pydantic import SecretStr
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
-from tickwright.domain import InstrumentSpec, Netting
+from tickwright.domain import InstrumentSpec, Netting, VenueAccountState
 from tickwright.venues.hyperliquid import (
     HyperliquidConfig,
     HyperliquidExchange,
@@ -32,8 +42,56 @@ UNIVERSE = HyperliquidUniverse(
     asset_indices={"BTC": 3},
 )
 
+# The recorded cross snapshot: 0.002 BTC long at 5x, entry 64809, mark 64792.
+# Measured (#142 §2): accountValue = totalRawUsd + totalNtlPos = −103.6576 +
+# 129.584 = 25.9264, withdrawable = accountValue − totalMarginUsed = 0.0096, and
+# crossMaintenanceMarginUsed = 129.584 × 1/(2·40) = 1.6198. Cross-only, so
+# ``marginSummary`` and ``crossMarginSummary`` are the same numbers (research §2).
+# ``liquidationPx`` came back ``null`` — the majority case for a long
+# (ADR-0046 §6), and the reason this snapshot doubles as the pass-through case.
+CROSS_SNAPSHOT: dict = {
+    "assetPositions": [
+        {
+            "type": "oneWay",
+            "position": {
+                "coin": "BTC",
+                "szi": "0.002",
+                "entryPx": "64809.0",
+                "positionValue": "129.584",
+                "unrealizedPnl": "-0.034",
+                "returnOnEquity": "-0.0026231",
+                "marginUsed": "25.9168",
+                "liquidationPx": None,
+                "maxLeverage": 40,
+                "leverage": {"type": "cross", "value": 5},
+                "cumFunding": {"allTime": "0.0", "sinceOpen": "0.0", "sinceChange": "0.0"},
+            },
+        }
+    ],
+    "crossMaintenanceMarginUsed": "1.6198",
+    "crossMarginSummary": {
+        "accountValue": "25.9264",
+        "totalMarginUsed": "25.9168",
+        "totalNtlPos": "129.584",
+        "totalRawUsd": "-103.6576",
+    },
+    "marginSummary": {
+        "accountValue": "25.9264",
+        "totalMarginUsed": "25.9168",
+        "totalNtlPos": "129.584",
+        "totalRawUsd": "-103.6576",
+    },
+    "time": 1_730_000_000_000,
+    "withdrawable": "0.0096",
+}
 
-def _exchange(*, testnet: bool, account_address: str | None = None) -> HyperliquidExchange:
+
+def _exchange(
+    *,
+    testnet: bool,
+    account_address: str | None = None,
+    post: FakeExchangeApi | None = None,
+) -> HyperliquidExchange:
     return HyperliquidExchange(
         config=HyperliquidConfig(
             testnet=testnet,
@@ -44,7 +102,19 @@ def _exchange(*, testnet: bool, account_address: str | None = None) -> Hyperliqu
         bus=InMemoryBus(),
         clock=ManualClock(),
         universe=UNIVERSE,
+        **({"post": post} if post is not None else {}),
     )
+
+
+def _fetch_state(response: object) -> VenueAccountState | None:
+    """The account read as the reconciler makes it: through the real adapter,
+    with the POST transport — the process boundary — the only fake."""
+
+    async def main() -> VenueAccountState | None:
+        exchange = _exchange(testnet=True, post=FakeExchangeApi({"clearinghouseState": response}))
+        return await exchange.fetch_account_state()
+
+    return asyncio.run(main())
 
 
 @pytest.mark.parametrize(
@@ -73,3 +143,21 @@ def test_the_live_path_declares_no_genesis_collateral() -> None:
     """Live's opening state is ingested from the venue, never configured — and
     the ``None`` is the predicate the startup checks read (ADR-0042 §6)."""
     assert _exchange(testnet=True).account_spec().genesis_collateral is None
+
+
+def test_a_recorded_cross_snapshot_normalizes_to_the_measured_account_figures() -> None:
+    """Equity, free margin and the cross maintenance figure, each from the field
+    ADR-0046 §2/§2.1 pins — the three account-grain numbers the reconcile
+    compares against.
+
+    ``equity`` is ``marginSummary.accountValue`` (whole account, isolated
+    included); ``free_margin`` is the ``crossMarginSummary`` difference;
+    ``cross_maintenance_margin`` is the root cross-only figure, named for the
+    subset it covers so no caller can mistake it for a Σ over all positions.
+    """
+    state = _fetch_state(CROSS_SNAPSHOT)
+
+    assert state is not None
+    assert state.equity == Decimal("25.9264")
+    assert state.free_margin == Decimal("0.0096")
+    assert state.cross_maintenance_margin == Decimal("1.6198")

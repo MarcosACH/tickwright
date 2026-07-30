@@ -369,6 +369,35 @@ class VenueOrderView:
         return self.status is not None or bool(self.fills)
 
 
+# --- Venue truth for the account (a query result, not an event) --------------
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class VenueAccountState:
+    """One *successful* venue account read (``Exchange.fetch_account_state``).
+
+    The account-grain half of the reconcile's cross-check, already normalized:
+    every field is a ``domain`` quantity, and which venue field each came from
+    is the adapter's knowledge alone (ADR-0045 §3). A read that *failed* is
+    never a state — ``fetch_account_state`` returns ``None`` for that, the same
+    inv-1 guard ``VenueOrderView`` carries: an outage must never read as a flat
+    book.
+
+    ``cross_maintenance_margin`` is named for the **subset** it covers, not for
+    the quantity: the venue publishes maintenance margin over cross positions
+    only, so it cross-checks the cross subset while our own reported figure is a
+    Σ over every position (ADR-0046 §2.1). Isolated maintenance has no venue
+    counterpart at all. Free margin is deliberately *not* the venue's
+    withdrawable figure, which additionally deducts margin reserved by resting
+    orders — the normal state of a running engine, and a gap no tolerance
+    absorbs (ADR-0046 §2).
+    """
+
+    equity: Decimal
+    free_margin: Decimal
+    cross_maintenance_margin: Decimal
+
+
 # --- Venue-neutral order request (not an event) -----------------------------
 
 
