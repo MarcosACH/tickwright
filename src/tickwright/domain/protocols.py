@@ -13,7 +13,15 @@ from typing import Protocol, runtime_checkable
 
 from .account import Account, AccountSpec, AccountView
 from .enums import OrderState
-from .events import Event, MarketTick, OrderEvent, PlaceOrder, PlaceSignal, VenueOrderView
+from .events import (
+    Event,
+    MarketTick,
+    OrderEvent,
+    PlaceOrder,
+    PlaceSignal,
+    VenueAccountState,
+    VenueOrderView,
+)
 from .instrument import GuardDecision, InstrumentSpec, KillSwitchState
 from .order import Order
 from .position import Position, PositionView
@@ -455,6 +463,26 @@ class Exchange(Protocol):
         itself failed (outage): a failed read must never look like "no record"
         (ADR-0011 inv 1). A successful read always returns a view, even an
         empty one."""
+        ...
+
+    async def fetch_account_state(self) -> VenueAccountState | None:
+        """Venue truth for the account — the reconcile's account-grain pull, the
+        exact peer of ``fetch_order`` one grain up (ADR-0004): a query-shaped
+        direct read, never a bus message.
+
+        ``None`` means **no venue truth to compare against**, never "flat"
+        (ADR-0011 inv 1 in the return type). The reconcile freezes on it and
+        heals nothing — anything else would let an unanswered read pass for an
+        empty book and correct a restored ledger down to it, which is the
+        fabricated flat ADR-0034 forbids.
+
+        The two paths reach that ``None`` differently and the contract is the
+        same either way. On live it is a **failed read** — an outage, a timeout,
+        or a response the adapter cannot parse. On paper it is the **permanent
+        answer**: that venue holds resting orders, fill reports and the latest
+        tick, and no position, cash or equity state at all, so it has no account
+        truth to report rather than none to report *yet*.
+        """
         ...
 
     def account_spec(self) -> AccountSpec:

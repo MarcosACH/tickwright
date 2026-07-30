@@ -31,6 +31,7 @@ from tickwright.domain import (
     PlaceOrder,
     Side,
     TimeInForce,
+    VenueAccountState,
     VenueOrderView,
 )
 
@@ -484,6 +485,40 @@ def test_fetch_order_for_an_unknown_cloid_is_positive_proof_of_no_record() -> No
     assert view.status is None and view.fills == ()
 
 
+def test_the_paper_venue_reports_no_account_truth_even_on_a_healthy_read() -> None:
+    """``None`` **always — by construction, not by failure**.
+
+    This venue holds resting orders, per-cloid fill reports and the latest tick,
+    and no position, cash or equity state at all (ADR-0043 §4) — so there is no
+    account truth here to answer with, and no state of the book changes that.
+    The read is taken on a *fully exercised* venue — a tick in, an order placed,
+    a fill emitted — precisely so the claim cannot be read as "nothing has
+    happened yet".
+
+    ``None`` is the only answer that stays fail-closed under every wiring,
+    including a future one that mistakenly points the reconcile cadence at
+    paper: it freezes and heals nothing (ADR-0011 inv 1). A zero-filled
+    ``VenueAccountState`` would be fail-*open* — the fabricated flat ADR-0034
+    forbids — and would heal a restored ledger down to flat. Same contract as a
+    failed live read (*no truth to compare against ⇒ never heal*), reached by a
+    different route.
+    """
+    exchange, bus, clock, fills, _statuses = _specced_harness()
+
+    async def scenario() -> tuple[VenueAccountState | None, VenueAccountState | None]:
+        cold = await exchange.fetch_account_state()
+        clock.advance_to(1_000)
+        await bus.publish(_tick("100"))
+        await exchange.place(_market_order(qty="0.2"))
+        return cold, await exchange.fetch_account_state()
+
+    cold, healthy = asyncio.run(scenario())
+
+    assert len(fills) == 1  # the book really did work
+    assert cold is None
+    assert healthy is None
+
+
 def test_the_paper_venue_declares_a_two_segment_account_id_and_its_genesis() -> None:
     """``paper-<label>`` stays unambiguously two segments against a live venue's
     three (ADR-0042 §5), and the operator's declared collateral rides the spec."""
@@ -647,6 +682,7 @@ _SEAM_CLAIMS = {
     "place": "test_market_order_fills_at_the_latest_tick_price",
     "cancel": "test_cancel_removes_a_resting_order_and_reports_cancelled",
     "fetch_order": "test_fetch_order_reports_a_resting_limit_as_live",
+    "fetch_account_state": "test_the_paper_venue_reports_no_account_truth_even_on_a_healthy_read",
     "account_spec": "test_the_paper_venue_declares_a_two_segment_account_id_and_its_genesis",
     "instrument_specs": "test_instrument_specs_exposes_the_configured_specs",
 }
