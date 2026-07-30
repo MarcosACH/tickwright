@@ -37,6 +37,7 @@ from tickwright.domain import (
     Exchange,
     InstrumentSpec,
     PlaceOrder,
+    VenueAccountState,
     VenueOrderView,
 )
 
@@ -54,6 +55,14 @@ class VenueDouble:
         return None
 
     async def stop(self) -> None:
+        return None
+
+    async def fetch_account_state(self) -> VenueAccountState | None:
+        # The paper venue's permanent answer, and the fail-closed one for a
+        # double as well: no account truth to compare against, so nothing heals
+        # (ADR-0011 inv 1). A double that needs a venue account read to *succeed*
+        # overrides this, which is the seam's meaning arriving in the suite that
+        # asserts it rather than being inherited from here.
         return None
 
     def account_spec(self) -> AccountSpec:
@@ -88,6 +97,9 @@ class VenueLink:
 
     async def fetch_order(self, cloid: str) -> VenueOrderView | None:
         return await self._venue.fetch_order(cloid)
+
+    async def fetch_account_state(self) -> VenueAccountState | None:
+        return await self._venue.fetch_account_state()
 
     def account_spec(self) -> AccountSpec:
         return self._venue.account_spec()

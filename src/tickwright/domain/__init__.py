@@ -37,7 +37,9 @@ from .events import (
     PlaceOrder,
     PlaceSignal,
     Signal,
+    VenueAccountState,
     VenueOrderView,
+    VenuePositionState,
 )
 from .ids import SignalId, derive_cloid
 from .instrument import (
@@ -110,7 +112,9 @@ __all__ = [
     "PositionChange",
     "PositionView",
     "Signal",
+    "VenueAccountState",
     "VenueOrderView",
+    "VenuePositionState",
     # id derivation
     "derive_cloid",
     "SignalId",

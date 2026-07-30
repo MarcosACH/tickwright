@@ -369,6 +369,70 @@ class VenueOrderView:
         return self.status is not None or bool(self.fills)
 
 
+# --- Venue truth for the account (a query result, not an event) --------------
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class VenuePositionState:
+    """One position inside a successful venue account read, normalized.
+
+    ``signed_size`` carries the direction the venue reports it with — positive
+    long, negative short — where our own ledger keeps a magnitude and rides the
+    side on the saga.
+
+    ``isolated_collateral`` is the position's own locked bucket, and its
+    ``None`` is what says the position is **cross**: a cross position is backed
+    by the account pool and has no bucket of its own, while an isolated one
+    always has a positive number here. Its counterpart ``margin_used`` moves
+    with the mark on both modes, which is why it sits inside the divergence
+    band rather than being the same constant on both sides (ADR-0040 §3, as
+    corrected).
+
+    ``liquidation_price`` is the venue's own number read through rather than
+    recomputed, and its ``None`` is the **majority** case for a long, not a
+    corner: the venue omits the field whenever the price would be non-positive,
+    which happens once collateral is large relative to notional and is
+    structurally impossible for a short (ADR-0046 §6). Nothing may substitute a
+    value for it — a frozen absence beats a fabricated price (ADR-0034).
+    """
+
+    symbol: str
+    signed_size: Decimal
+    entry_price: Decimal | None
+    notional: Decimal
+    unrealized_pnl: Decimal
+    margin_used: Decimal
+    isolated_collateral: Decimal | None
+    liquidation_price: Decimal | None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class VenueAccountState:
+    """One *successful* venue account read (``Exchange.fetch_account_state``).
+
+    The account-grain half of the reconcile's cross-check, already normalized:
+    every field is a ``domain`` quantity, and which venue field each came from
+    is the adapter's knowledge alone (ADR-0045 §3). A read that *failed* is
+    never a state — ``fetch_account_state`` returns ``None`` for that, the same
+    inv-1 guard ``VenueOrderView`` carries: an outage must never read as a flat
+    book.
+
+    ``cross_maintenance_margin`` is named for the **subset** it covers, not for
+    the quantity: the venue publishes maintenance margin over cross positions
+    only, so it cross-checks the cross subset while our own reported figure is a
+    Σ over every position (ADR-0046 §2.1). Isolated maintenance has no venue
+    counterpart at all. Free margin is deliberately *not* the venue's
+    withdrawable figure, which additionally deducts margin reserved by resting
+    orders — the normal state of a running engine, and a gap no tolerance
+    absorbs (ADR-0046 §2).
+    """
+
+    equity: Decimal
+    free_margin: Decimal
+    cross_maintenance_margin: Decimal
+    positions: tuple[VenuePositionState, ...] = ()
+
+
 # --- Venue-neutral order request (not an event) -----------------------------
 
 

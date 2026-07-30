@@ -30,6 +30,7 @@ from tickwright.domain import (
     PlaceOrder,
     Side,
     TimeInForce,
+    VenueAccountState,
     VenueOrderView,
     below_min_notional,
 )
@@ -241,6 +242,26 @@ class PaperExchange:
             status=self._statuses.get(cloid),
             fills=tuple(self._fills.get(cloid, [])),
         )
+
+    async def fetch_account_state(self) -> VenueAccountState | None:
+        """``None`` **always — by construction, not by failure**.
+
+        Unlike ``fetch_order`` above, which answers an empty view because this
+        venue genuinely knows every cloid it was asked to place, there is no
+        account truth here to answer with at all: this venue holds resting
+        orders, per-cloid fill reports and the latest tick, and no position, cash
+        or equity state (ADR-0043 §4). The ledger lives in the engine, and
+        reconciling it against itself would answer nothing.
+
+        ``None`` is therefore the only value that stays fail-closed under every
+        wiring, including a future one that mistakenly points the reconcile
+        cadence at paper: it freezes and heals nothing (ADR-0011 inv 1). A
+        zero-filled ``VenueAccountState`` would be fail-*open* — precisely the
+        fabricated flat ADR-0034 forbids — and would heal a restored ledger down
+        to flat. This is not the outage sentinel abused; it is the same contract,
+        *no truth to compare against ⇒ never heal*, reached by a different route.
+        """
+        return None
 
     def _status_report(
         self, order: PlaceOrder, status: OrderState, *, reason: str | None = None

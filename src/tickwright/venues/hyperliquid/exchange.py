@@ -31,12 +31,13 @@ from tickwright.domain import (
     PlaceOrder,
     Side,
     TimeInForce,
+    VenueAccountState,
     VenueOrderView,
     quantize_price,
 )
 from tickwright.observability import NamedEvent, named_event
 
-from .account import account_spec
+from .account import account_spec, normalize_account_state
 from .config import HyperliquidConfig
 from .transport import PostJson, post_json
 from .universe import HyperliquidUniverse
@@ -236,6 +237,22 @@ class HyperliquidExchange:
             ),
             fills=tuple(fills),
         )
+
+    async def fetch_account_state(self) -> VenueAccountState | None:
+        """Venue truth for the account: one ``clearinghouseState`` read, the
+        whole account-and-positions snapshot in one response.
+
+        ``None`` only when the read itself failed — an outage must never read as
+        a flat book (ADR-0011 inv 1), exactly as ``fetch_order`` carries it.
+        """
+        try:
+            response = await self._info({"type": "clearinghouseState", "user": self._user_address})
+        except OSError:
+            # Timeout or transport failure (TimeoutError is an OSError): the read
+            # failed, and a failed read is None — the reconciler freezes rather
+            # than healing a restored ledger toward a fabricated flat.
+            return None
+        return normalize_account_state(response)
 
     async def _order_status(self, cloid: str) -> object:
         """The venue's ``orderStatus`` answer for ``cloid`` — the one read both
