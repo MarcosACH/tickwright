@@ -94,9 +94,9 @@ def normalize_account_state(response: object) -> VenueAccountState | None:
             except (ArithmeticError, KeyError, TypeError) as exc:
                 # The root shape matched but something inside it did not: a
                 # position row missing a field, a figure that is not a number.
-                _name_failed_read(f"{exc!r} in clearinghouseState response {response!r}")
+                _name_failed_read(f"{exc!r} in clearinghouseState response {_rendered(response)}")
                 return None
-    _name_failed_read(f"unrecognized clearinghouseState response: {response!r}")
+    _name_failed_read(f"unrecognized clearinghouseState response: {_rendered(response)}")
     return None
 
 
@@ -109,6 +109,33 @@ def _name_failed_read(error: str) -> None:
     than look like a quiet outage.
     """
     named_event(NamedEvent.EXCHANGE_REQUEST_FAILED, request="clearinghouseState", error=error)
+
+
+_RENDER_LIMIT = 300
+"""Characters of response body a failed read carries. Enough for the value-shaped
+failures; short of a fifty-position body."""
+
+
+def _rendered(response: object) -> str:
+    """``response`` bounded for a log line — its shape first, its body truncated.
+
+    This branch is what a venue contract change arrives as, so it repeats on
+    every reconcile cycle for as long as the contract stays broken: a
+    fifty-position body would be kilobytes an operator does not need served fifty
+    times over. The **key set** is what identifies a contract change, so it leads
+    and is never truncated; the body follows, bounded, for the failures a key set
+    cannot show — a figure that is not a number.
+
+    Nothing in here may raise: it runs only on the path that has already decided
+    to answer ``None``, and an exception escaping would turn a fail-closed read
+    into a crashed one. Hence ``list`` over ``sorted`` on the keys — mixed key
+    types have no order but always have a repr.
+    """
+    shape = f"keys={list(response)} " if isinstance(response, Mapping) else ""
+    body = repr(response)
+    if len(body) > _RENDER_LIMIT:
+        body = f"{body[:_RENDER_LIMIT]}… ({len(body)} chars)"
+    return f"{shape}{body}"
 
 
 def _position(reported: Mapping[str, Any]) -> VenuePositionState:
