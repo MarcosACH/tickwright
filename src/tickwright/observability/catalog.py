@@ -64,9 +64,15 @@ class NamedEvent(StrEnum):
     GHOST_RECONCILED = "ghost.reconciled"
     RECONCILE_FROZEN = "reconcile.frozen"
 
-    # Live-exchange write path: a place/cancel send that failed in transport —
-    # outcome unknown, no report emitted; reconcile-by-cloid resolves the
-    # in-flight order (``HyperliquidExchange``, ADR-0008 rule 2).
+    # A live-exchange request that yielded no usable answer, on either path and
+    # for either reason (``HyperliquidExchange``): a send or read that failed in
+    # **transport** — outcome unknown, no report emitted — or a 200-OK body the
+    # adapter cannot **parse**, which is a failed read and never venue truth
+    # (ADR-0011 inv 1). ``request`` names the venue request (``place``,
+    # ``cancel``, ``userFills``, ``clearinghouseState``, …); ``cloid`` rides
+    # along only where the request has one, so the account-grain read carries
+    # none. Nothing is reported either way — reconcile-by-cloid resolves an
+    # in-flight order (ADR-0008 rule 2) and the account-grain cycle freezes.
     EXCHANGE_REQUEST_FAILED = "exchange.request_failed"
     # Live-exchange write path: the venue refused the whole action envelope (bad
     # nonce/signature, an action rate-limit) at HTTP 200 — distinct from a failed

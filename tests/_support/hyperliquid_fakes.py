@@ -16,7 +16,7 @@ class FakeExchangeApi:
     are keyed by the venue's own request discriminator: the action ``type`` for
     ``/exchange`` posts (``order``, ``cancelByCloid``) and the query ``type``
     for ``/info`` posts (``meta``, ``orderStatus``, ``userFills``,
-    ``userFillsByTime``). One response
+    ``userFillsByTime``, ``clearinghouseState``). One response
     serves every request of that type — the venue's state does not change
     between reads — so a test describes venue state, not a call script. An
     exception value is raised instead of returned (the transport-failure case);
