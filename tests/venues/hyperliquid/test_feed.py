@@ -375,7 +375,7 @@ def test_malformed_frames_are_skipped_and_named_while_good_frames_keep_flowing()
                 json.dumps({"channel": "trades", "data": "oops"}),  # trades frame, data not a list
                 trades_frame({"coin": "BTC", "side": "B", "px": "nope"}),  # unparseable row
                 trades_frame(trade("BTC", "100", 1), {"coin": "BTC"}),  # one good, one bad row
-                trades_frame(trade("BTC", "101", 2)),
+                trades_frame(trade("BTC", "101", 2), trade("BTC", "NaN", 9)),  # good + non-finite
             ]
         )
 
@@ -397,5 +397,7 @@ def test_malformed_frames_are_skipped_and_named_while_good_frames_keep_flowing()
     # Both good trades ticked through despite the garbage around and beside them.
     assert [t.trade_id for t in seen] == ["1", "2"]
     # One drop each: the non-JSON frame, the non-list `data`, the bad-only row,
-    # and the bad row in the mixed batch.
-    assert len(dropped) == 4
+    # the bad row in the mixed batch, and the non-finite row beside trade 2 —
+    # a figure that is not a number drops at row grain like any other, so the
+    # good trade batched with it is unaffected.
+    assert len(dropped) == 5
