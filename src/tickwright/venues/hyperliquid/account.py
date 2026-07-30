@@ -91,9 +91,11 @@ def normalize_account_state(response: object) -> VenueAccountState | None:
                     cross_maintenance_margin=Decimal(cross_maintenance),
                     positions=tuple(_position(entry["position"]) for entry in entries),
                 )
-            except (ArithmeticError, KeyError, TypeError) as exc:
+            except (ArithmeticError, KeyError, TypeError, ValueError) as exc:
                 # The root shape matched but something inside it did not: a
-                # position row missing a field, a figure that is not a number.
+                # position row missing a field, a figure that is not a number, a
+                # margin mode outside the two the venue reports (the ``ValueError``
+                # — ``_isolated_collateral`` refuses to guess which one it means).
                 _name_failed_read(f"{exc!r} in clearinghouseState response {_rendered(response)}")
                 return None
     _name_failed_read(f"unrecognized clearinghouseState response: {_rendered(response)}")
@@ -182,7 +184,19 @@ def _isolated_collateral(
     venue's own identity read backwards: its ``marginUsed`` for an isolated
     position *is* ``collateral + unrealizedPnl``, and moves with the mark while
     ``rawUsd`` holds still.
+
+    The two modes are matched **explicitly** and anything else is a failed read,
+    because ``None`` here is not "unknown" — it is the positive claim *this
+    position is backed by the account pool*, and downstream nothing can tell it
+    apart from a measured cross read. A third or renamed mode answered as cross
+    would report a position holding a locked bucket as pool-backed, inflating
+    free margin by the whole bucket; freezing instead is inv 1 at the one grain
+    where this module could otherwise degrade quietly (ADR-0044 pins the pair
+    ``cross``/``isolated``).
     """
-    if leverage["type"] != "isolated":
-        return None
-    return margin_used - unrealized_pnl
+    match leverage["type"]:
+        case "cross":
+            return None
+        case "isolated":
+            return margin_used - unrealized_pnl
+    raise ValueError(f"unrecognized margin mode {leverage['type']!r}")

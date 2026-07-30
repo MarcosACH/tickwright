@@ -270,6 +270,18 @@ def _position_without(snapshot: dict, field: str) -> dict:
     return snapshot | {"assetPositions": [entry | {"position": _without(entry["position"], field)}]}
 
 
+def _with_margin_mode(snapshot: dict, mode: str) -> dict:
+    """``snapshot`` with its position's margin mode replaced — the venue naming a
+    mode this adapter has never been measured against."""
+    (entry,) = snapshot["assetPositions"]
+    position = entry["position"]
+    return snapshot | {
+        "assetPositions": [
+            entry | {"position": position | {"leverage": position["leverage"] | {"type": mode}}}
+        ]
+    }
+
+
 def _exchange(
     *,
     testnet: bool,
@@ -575,6 +587,12 @@ def test_a_transport_failure_reads_as_no_venue_truth_never_as_a_flat_book() -> N
         ),
         ("no positions list", _without(CROSS_SNAPSHOT, "assetPositions")),
         ("a position row missing a field", _position_without(CROSS_SNAPSHOT, "marginUsed")),
+        # A margin mode outside the two the venue has ever reported. Every other
+        # unreadable thing here freezes, and this must too: reading an
+        # unrecognized mode as cross would report a position holding a locked
+        # collateral bucket as backed by the account pool, and ``None`` collateral
+        # is indistinguishable downstream from a genuine cross read.
+        ("a margin mode we do not recognize", _with_margin_mode(CROSS_SNAPSHOT, "portfolioMargin")),
     ],
 )
 def test_an_unparseable_response_reads_as_no_venue_truth_and_is_named(
