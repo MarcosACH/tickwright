@@ -639,12 +639,14 @@ def test_a_transport_failure_reads_as_no_venue_truth_never_as_a_flat_book() -> N
         # A figure the venue re-types as a JSON *number*. Every one of these
         # arrives as a string today, so a number is the venue changing its
         # contract — "we are not reading what we think we are", the same thing a
-        # missing field means, and it must freeze for the same reason.
-        # ``Decimal`` would otherwise accept the float and answer a whole state
-        # built on a value that is no longer exact: ``Decimal(0.002)`` is
-        # ``0.00200000000000000004163…``, which ``_records.py`` would then
-        # round-trip into the ledger verbatim (#218). Both grains, because the
-        # two used to disagree — the account grain froze on the ``str`` in the
+        # missing field means, and it must freeze for the same reason. What makes
+        # it unreadable is one layer earlier than the coercion: ``json.loads`` has
+        # already decoded it to a ``float``, so any digit beyond what a double
+        # holds is gone and the reported scale with it (``0.10`` and ``0.1`` are
+        # one value) — neither recoverable, and both durable once ``_records.py``
+        # round-trips the figure into the ledger. The argument lives with the
+        # guard, in ``venues/hyperliquid/reading.py`` (#218). Both grains, because
+        # the two used to disagree — the account grain froze on the ``str`` in the
         # match pattern while the position grain let the number through.
         (
             "a position size the venue re-typed as a number",
