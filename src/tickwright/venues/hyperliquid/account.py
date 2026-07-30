@@ -17,6 +17,7 @@ from tickwright.domain import (
     Netting,
     VenueAccountState,
     VenuePositionState,
+    exact_figure,
 )
 from tickwright.observability import NamedEvent, named_event
 
@@ -161,24 +162,21 @@ def _figure(reported: object) -> Decimal:
     load-bearing — the type checker will not let a caller reach ``Decimal``
     around it.
 
-    **Not finite.** ``Decimal("nan")`` and ``Decimal("Infinity")`` are *valid*
-    constructions, so they raise nothing on the way in. Letting one through would
-    be fail-*open* in the worst direction available at this grain: every
-    comparison against a ``NaN`` is false, so a reconcile handed a ``NaN`` equity
-    would find no divergence to act on, read the ledger as agreeing with the
-    venue and decline to freeze — the exact inversion of inv 1, and quieter than
-    the outage it is supposed to behave like. An infinity is no better; it would
-    drive an unbounded heal toward a figure no venue holds.
+    **Not finite.** Deferred to ``exact_figure``, the shared guard — this is not
+    the only boundary that parses a reported figure, and the argument for
+    refusing a non-finite one does not vary by grain. What it means *here* does:
+    every comparison against a ``NaN`` is false, so a reconcile handed a ``NaN``
+    equity would find no divergence to act on, read the ledger as agreeing with
+    the venue and decline to freeze — the exact inversion of inv 1, and quieter
+    than the outage it is supposed to behave like. An infinity is no better; it
+    would drive an unbounded heal toward a figure no venue holds.
 
     So a figure that is not an exact number is a failed read like any other
     (ADR-0011 inv 1, ADR-0034 — never a fabricated number).
     """
     if not isinstance(reported, str):
         raise TypeError(f"non-string figure {reported!r}")
-    figure = Decimal(reported)
-    if not figure.is_finite():
-        raise ValueError(f"non-finite figure {reported!r}")
-    return figure
+    return exact_figure(Decimal(reported))
 
 
 def _position(reported: Mapping[str, Any]) -> VenuePositionState:
