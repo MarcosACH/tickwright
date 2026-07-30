@@ -164,7 +164,10 @@ def _exchange(
         bus=InMemoryBus(),
         clock=ManualClock(),
         universe=UNIVERSE,
-        **({"post": post} if post is not None else {}),
+        # No routes by default: the ``account_spec`` tests below reach the venue
+        # for nothing, and an unrouted request is a loud failure rather than a
+        # silent one against a real socket.
+        post=post if post is not None else FakeExchangeApi({}),
     )
 
 
@@ -314,6 +317,23 @@ def test_an_absent_liquidation_price_stays_absent() -> None:
     assert state is not None
     (position,) = state.positions
     assert position.liquidation_price is None
+
+
+def test_a_position_with_no_entry_price_still_normalizes() -> None:
+    """``entryPx`` is the one position field the venue types **optional**, and
+    the freeze has to be reserved for responses we cannot read.
+
+    Freezing on a legal response would be the worse failure of the two: it would
+    stop *all* healing over a field no comparison depends on — the divergence
+    checks read notional, unrealized PnL and margin, each of which is its own
+    field. So the absence rides through as ``None`` and the state is still whole.
+    """
+    state = _fetch_state(_position_without(CROSS_SNAPSHOT, "entryPx"))
+
+    assert state is not None
+    (position,) = state.positions
+    assert position.entry_price is None
+    assert position.notional == Decimal("129.584")
 
 
 def test_a_transport_failure_reads_as_no_venue_truth_never_as_a_flat_book() -> None:

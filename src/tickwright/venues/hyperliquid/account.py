@@ -117,14 +117,21 @@ def _position(reported: Mapping[str, Any]) -> VenuePositionState:
     ``liquidationPx`` rides through verbatim, ``null`` included: the venue omits
     it whenever the price would be non-positive, which is the majority case for a
     long (ADR-0046 §6), and nothing here may substitute a number for it.
+
+    ``entryPx`` is the one field here the venue types **optional**, so its absence
+    is a legal response and must not freeze the reconcile — the freeze is for
+    responses we cannot read, and no comparison depends on this field. Every
+    other field is required: missing one means we are not reading what we think
+    we are, and the caller turns that into a failed read.
     """
     margin_used = Decimal(reported["marginUsed"])
     unrealized_pnl = Decimal(reported["unrealizedPnl"])
+    entry_price = reported.get("entryPx")
     liquidation_price = reported["liquidationPx"]
     return VenuePositionState(
         symbol=str(reported["coin"]),
         signed_size=Decimal(reported["szi"]),
-        entry_price=Decimal(reported["entryPx"]),
+        entry_price=None if entry_price is None else Decimal(entry_price),
         notional=Decimal(reported["positionValue"]),
         unrealized_pnl=unrealized_pnl,
         margin_used=margin_used,
