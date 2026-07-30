@@ -5,11 +5,13 @@ The one place a venue-native account identity becomes a ``domain``
 ``VenueAccountState``: nothing else in the codebase composes a Hyperliquid
 account id or names a Hyperliquid field for these quantities.
 
-The two ``clearinghouseState`` bodies below are **recorded**, from the funded
-testnet position [#142](https://github.com/MarcosACH/tickwright/issues/142)
-measured — one cross, one isolated. Every figure in them is a measured venue
-number or is forced by one, so the expected values these tests assert are the
-venue's own arithmetic and not this normalizer's restated.
+Three of the four ``clearinghouseState`` bodies below are **recorded**: two from
+the funded testnet position [#142](https://github.com/MarcosACH/tickwright/issues/142)
+measured — one cross, one isolated — and one from a sampled mainnet account
+holding both modes at once, which is the only shape that can tell the two
+account-grain summaries apart. The fourth is derived and says so. Every figure is
+a measured venue number or is forced by one, so the expected values these tests
+assert are the venue's own arithmetic and not this normalizer's restated.
 """
 
 import ast
@@ -157,6 +159,100 @@ ISOLATED_SNAPSHOT: dict = {
         "totalRawUsd": "-103.731933",
     },
     "time": 1_730_000_060_000,
+    "withdrawable": "0.0",
+}
+
+
+# A **mainnet** account holding one cross short and one isolated long at once —
+# recorded from `0x92ae…86a8`, sampled from the public leaderboard, because it is
+# the shape the two testnet bodies above cannot express between them and the one
+# where every account-grain mapping becomes falsifiable:
+#
+# - ``marginSummary`` and ``crossMarginSummary`` finally **disagree**
+#   (`50937.813103` vs `20348.018132`), where both single-mode bodies above carry
+#   the same numbers in each — so this is the only fixture that can tell
+#   ADR-0046 §2's equity source from the wrong one.
+# - ADR-0046 §2's cancellation is reproduced independently: ``equity − Σ
+#   marginUsed`` = `50937.813103 − 52258.194971` = **`−1320.381868`**, exactly
+#   the venue's own ``crossAV − crossTMU``. Negative, and ``withdrawable`` is
+#   floored at `0.0` — §2's two reasons for not reading that field, in one body.
+# - §2.1's asymmetry, measured inside one response:
+#   ``marginSummary.totalMarginUsed`` = `52258.194971` = Σ over **both**
+#   positions, while ``crossMaintenanceMarginUsed`` = `5417.1` =
+#   `108342.0 × 1/(2·10)` — the cross position's alone, the isolated one's
+#   `1/(2·3) × 46910.0` contributing **nothing**.
+# - The ``rawUsd`` trap again, and on this account it is a *long* whose bucket is
+#   funded: collateral `30589.794971 − (−6841.452781)` = `37431.247752` against a
+#   ``rawUsd`` of `−16320.205029`.
+# - Both directions in one body: ``szi`` `−2000.0` and `+1000000.0`, and the
+#   short's ``liquidationPx`` is non-null as ADR-0046 §6 requires it to be.
+#
+# One caveat this body is the first to expose: the identity the two comments above
+# state as ``accountValue = totalRawUsd + totalNtlPos`` is **long-only**.
+# ``totalNtlPos`` is an unsigned Σ of ``positionValue``, so the identity needs the
+# *signed* sum — here `112369.813103 + (−108342.0 + 46910.0)` = `50937.813103`.
+# Measured across 431 leaderboard accounts holding positions: the unsigned form
+# holds on 203/203 long-only accounts and **0/228** holding any short, while the
+# signed form holds on all 228 to ~1e-9. Neither field is read by this normalizer;
+# they are here for provenance, and the note is so the file does not teach the
+# unsigned form as a general rule.
+MIXED_SNAPSHOT: dict = {
+    "assetPositions": [
+        {
+            "type": "oneWay",
+            "position": {
+                "coin": "HYPE",
+                "szi": "-2000.0",
+                "entryPx": "57.1359",
+                "positionValue": "108342.0",
+                "unrealizedPnl": "5929.91487",
+                "returnOnEquity": "0.2594651046",
+                "marginUsed": "21668.4",
+                "liquidationPx": "426.1797710395",
+                "maxLeverage": 10,
+                "leverage": {"type": "cross", "value": 5},
+                "cumFunding": {
+                    "allTime": "10373.419637",
+                    "sinceOpen": "-69.628649",
+                    "sinceChange": "-63.075936",
+                },
+            },
+        },
+        {
+            "type": "oneWay",
+            "position": {
+                "coin": "CASHCAT",
+                "szi": "1000000.0",
+                "entryPx": "0.053751",
+                "positionValue": "46910.0",
+                "unrealizedPnl": "-6841.452781",
+                "returnOnEquity": "-0.2545588045",
+                "marginUsed": "30589.794971",
+                "liquidationPx": "0.019584246",
+                "maxLeverage": 3,
+                "leverage": {"type": "isolated", "value": 2, "rawUsd": "-16320.205029"},
+                "cumFunding": {
+                    "allTime": "254.350734",
+                    "sinceOpen": "5.869039",
+                    "sinceChange": "6.733688",
+                },
+            },
+        },
+    ],
+    "crossMaintenanceMarginUsed": "5417.1",
+    "crossMarginSummary": {
+        "accountValue": "20348.018132",
+        "totalMarginUsed": "21668.4",
+        "totalNtlPos": "108342.0",
+        "totalRawUsd": "128690.018132",
+    },
+    "marginSummary": {
+        "accountValue": "50937.813103",
+        "totalMarginUsed": "52258.194971",
+        "totalNtlPos": "155252.0",
+        "totalRawUsd": "112369.813103",
+    },
+    "time": 1_785_377_282_053,
     "withdrawable": "0.0",
 }
 
@@ -316,6 +412,100 @@ def test_an_isolated_long_recovers_positive_collateral_from_a_negative_raw_usd_l
     assert state is not None
     (position,) = state.positions
     assert position.isolated_collateral == Decimal("25.898067")
+
+
+def test_the_isolated_snapshot_takes_equity_from_the_whole_account_not_the_cross_pool() -> None:
+    """The first body where the two summaries disagree, so the first that can tell
+    ADR-0046 §2's equity source from the wrong one.
+
+    The recorded cross body carries identical numbers in ``marginSummary`` and
+    ``crossMarginSummary`` (it holds no isolated position, so there is nothing to
+    differ), which means it cannot distinguish them. Here the whole balance sits in
+    the position's own bucket: equity is `25.856067` and the **cross pool is
+    empty**, so an equity read narrowed to ``crossMarginSummary`` would report this
+    funded account as worth nothing and heal a restored ledger down to it.
+
+    The cross maintenance figure reading `0.0` against a position that plainly has
+    maintenance is ADR-0046 §2.1's trap, asserted rather than described: the venue
+    publishes no isolated counterpart, so this is the honest reading and not a bug
+    to be corrected downstream.
+    """
+    state = _fetch_state(ISOLATED_SNAPSHOT)
+
+    assert state is not None
+    assert state.equity == Decimal("25.856067")
+    assert state.free_margin == Decimal("0.0")
+    assert state.cross_maintenance_margin == Decimal("0.0")
+
+
+def test_a_mixed_book_reads_equity_over_all_positions_and_free_margin_over_the_cross_pool() -> None:
+    """Both account-grain mappings against a body where every wrong source gives a
+    different, visibly wrong number (ADR-0046 §2/§2.1).
+
+    Equity is the whole account including the isolated bucket (`50937.813103`),
+    while free margin is the cross pair alone and comes out **negative**
+    (`−1320.381868`) — which the venue's own arithmetic confirms twice over: it is
+    exactly ``equity − Σ marginUsed``, §2's cancellation, and this account's
+    ``withdrawable`` is floored at `0.0`, so reading that field instead would call
+    a book with 50k of equity flat broke.
+
+    The cross maintenance figure covers the cross position only: `5417.1` is
+    `108342.0 × 1/(2·10)`, and the isolated position's maintenance is absent from
+    it entirely (§2.1).
+    """
+    state = _fetch_state(MIXED_SNAPSHOT)
+
+    assert state is not None
+    assert state.equity == Decimal("50937.813103")
+    assert state.free_margin == Decimal("-1320.381868")
+    assert state.cross_maintenance_margin == Decimal("5417.1")
+
+
+def test_a_mixed_book_keeps_both_rows_in_venue_order_with_each_mode_read_as_its_own() -> None:
+    """Two positions in one response, one per mode — the discrimination every
+    single-mode fixture can only make in isolation.
+
+    ``isolated_collateral`` is the field that says which is which, so both arms
+    have to be right *within one read*: ``None`` for the cross row because it is
+    backed by the account pool, and the recovered bucket for the isolated one.
+    That recovery is the ``rawUsd`` trap on this body too, and here on a **long**:
+    `30589.794971 − (−6841.452781)` = `37431.247752`, where ``rawUsd`` reads
+    `−16320.205029`.
+
+    Row order is the venue's, since nothing here may sort or de-duplicate a book
+    the venue nets per coin.
+    """
+    state = _fetch_state(MIXED_SNAPSHOT)
+
+    assert state is not None
+    cross, isolated = state.positions
+    assert (cross.symbol, isolated.symbol) == ("HYPE", "CASHCAT")
+    assert cross.isolated_collateral is None
+    assert cross.margin_used == Decimal("21668.4")
+    assert isolated.isolated_collateral == Decimal("37431.247752")
+    assert isolated.margin_used == Decimal("30589.794971")
+
+
+def test_a_short_keeps_the_direction_the_venue_reports_it_with() -> None:
+    """``signed_size`` is the only thing a consumer can reconstruct side from.
+
+    Our own ledger keeps a magnitude and rides the side on the saga, so the sign
+    the venue reports is the whole of the direction crossing this boundary. Drop it
+    and a reconcile heals an open short into a long of the same size — a sign flip
+    is the worst outcome available on this surface, worse than freezing.
+
+    The short also pins ADR-0046 §6's other half, which no long can state: a
+    short's liquidation price sits *above* the mark and is therefore **never**
+    null, where 12 of 17 cross longs read null. So an absent liquidation price is
+    the ordinary reading for a long and an impossible one here.
+    """
+    state = _fetch_state(MIXED_SNAPSHOT)
+
+    assert state is not None
+    short, long = state.positions
+    assert short.signed_size == Decimal("-2000.0")
+    assert long.signed_size == Decimal("1000000.0")
+    assert short.liquidation_price == Decimal("426.1797710395")
 
 
 def test_the_venue_liquidation_price_is_passed_through_verbatim() -> None:
