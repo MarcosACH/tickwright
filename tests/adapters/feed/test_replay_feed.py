@@ -11,6 +11,8 @@ import json
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.feed import ReplayFeed
@@ -45,6 +47,40 @@ def _collect(path: Path) -> tuple[list[MarketTick], ManualClock]:
     feed = ReplayFeed(path=path, bus=bus, clock=clock)
     asyncio.run(feed.start())
     return seen, clock
+
+
+@pytest.mark.parametrize("figure", ["NaN", "Infinity", "-Infinity"])
+def test_replay_refuses_a_non_finite_figure_rather_than_publishing_it(
+    tmp_path: Path, figure: str
+) -> None:
+    """A recorded file is not a venue, but it is the same parse, and a
+    ``Decimal("NaN")`` is just as valid a construction here. A figure that is not
+    a number is an unreadable row, which replay has always refused by raising —
+    what must never happen is that it publishes as a tick, because every
+    comparison against a ``NaN`` price is false and it would pass every guard
+    downstream of this feed rather than failing one."""
+    path = _write_jsonl(
+        tmp_path / "ticks.jsonl",
+        [
+            _row("BTC", "100", 1_000, "a"),
+            _row("BTC", figure, 2_000, "b"),
+            _row("BTC", "102", 3_000, "c", size=figure),
+        ],
+    )
+    bus = InMemoryBus()
+    seen: list[MarketTick] = []
+
+    async def record(tick: MarketTick) -> None:
+        seen.append(tick)
+
+    bus.subscribe(MarketTick, record)
+    feed = ReplayFeed(path=path, bus=bus, clock=ManualClock())
+
+    with pytest.raises(ValueError):
+        asyncio.run(feed.start())
+
+    # The good row ahead of it published; the non-finite one never did.
+    assert [t.trade_id for t in seen] == ["a"]
 
 
 def test_replay_publishes_every_tick_in_file_order(tmp_path: Path) -> None:
