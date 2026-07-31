@@ -192,6 +192,13 @@ def test_a_strategy_reads_back_the_fill_the_engine_wrote(tmp_path: Path) -> None
 
 _LIVE_CLOID = "0xlive"
 
+# The venue's answers when a test says nothing about them. Both are defaults
+# rather than fallbacks inside ``__init__``: ``None`` is a *meaning* on both
+# members — a failed account read, a venue with no record — so a double that
+# resolved it back to the healthy answer could never model an outage.
+_DERIVED_STATE = account_state("25.9264", "-0.034")
+_NO_RECORD = VenueOrderView(status=None)
+
 
 class _LiveShapedVenue(VenueDouble):
     """A venue whose genesis is *ingested*, not declared — the live shape.
@@ -206,12 +213,12 @@ class _LiveShapedVenue(VenueDouble):
     def __init__(
         self,
         *,
-        state: VenueAccountState | None = None,
-        view: VenueOrderView | None = None,
+        state: VenueAccountState | None = _DERIVED_STATE,
+        view: VenueOrderView | None = _NO_RECORD,
     ) -> None:
         self.account_reads = 0
-        self._state = state if state is not None else account_state("25.9264", "-0.034")
-        self._view = view if view is not None else VenueOrderView(status=None)
+        self._state = state
+        self._view = view
 
     def account_spec(self) -> AccountSpec:
         return AccountSpec(account_id="hyperliquid-testnet-0xabc", genesis_collateral=None)
@@ -278,6 +285,31 @@ def test_a_live_first_start_materialises_its_account_row_at_the_barrier(
         assert row.account_id == "hyperliquid-testnet-0xabc"
         assert row.genesis_collateral == Decimal("25.9604")
         assert row.cash == Decimal("25.9604")
+    finally:
+        reopened.close()
+
+
+def test_an_account_read_that_never_answers_faults_rather_than_clearing(
+    tmp_path: Path,
+) -> None:
+    """The barrier is never cleared on an assumed-flat account (ADR-0043 §6).
+
+    A ``clearinghouseState`` that will not answer exhausts the same
+    ``startup_reconciliation_timeout`` budget the mass-rebuild spends and then
+    faults, for the supervisor to backoff-restart. The alternative — starting
+    anyway — is the one outcome this step exists to prevent: strategies running
+    against a ledger with no account row at all, which is also the fabricated
+    flat ADR-0034 forbids.
+    """
+    store = SQLiteStore(tmp_path / "saga.db")
+    venue = _LiveShapedVenue(state=None)
+
+    assert _live_run(tmp_path, store, venue) == 1  # FAULTED → non-zero exit
+
+    assert venue.account_reads > 1, "the budget must be retried, not spent on one read"
+    reopened = SQLiteStore(tmp_path / "saga.db")
+    try:
+        assert reopened.load_account() is None  # nothing guessed in the meantime
     finally:
         reopened.close()
 
