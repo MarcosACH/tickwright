@@ -246,14 +246,55 @@ class Engine:
         # The sequence is the ordering rule, and it lives here rather than inside
         # any step — lifecycle ordering is the runner's, and the barrier owns
         # only the retry-then-fault policy the steps share.
+        #
+        # The account row is materialised **before** the mass-rebuild rather than
+        # merely inside the same barrier (ADR-0043 §6): the rebuild emits
+        # synthetic fills, every fill's write carries the account row (§9 — every
+        # mutation moves cash), so a rebuild that ran first would *create* the
+        # live row itself at the zero ``Account.open`` resolves a ``None``
+        # genesis to. The materialisation behind it would then decline to
+        # overwrite a row that exists, and that zero would stand for the life of
+        # the ledger with nothing to refuse it — #188's genesis comparison is
+        # paper-only. The live row must be materialised, never fallen into.
         await StartupBarrier(
             clock=self._clock,
-            steps=(self._reconciler.reconcile_startup,),
+            steps=(self._materialise_account, self._reconciler.reconcile_startup),
         ).run(timeout_seconds=self._config.startup_reconciliation_timeout_seconds)
         named_event(NamedEvent.ENGINE_BARRIER_CLEARED)
         # Strategies after the barrier: restore snapshot, resume seq, subscribe.
         self._host.start()
         self._state = ComponentState.RUNNING
+
+    async def _materialise_account(self) -> bool:
+        """The barrier's live-only first step: create the account row when the
+        store holds none (ADR-0042 §6, ADR-0043 §6).
+
+        The predicate is the *row*, not the venue: paper reaches here already
+        opened, seeded inside ``recover()`` from a config value that could not
+        fail on connectivity, and a live restart reaches here opened by an
+        earlier life. So the one state that reads the venue is a live **first**
+        start, and both of the other two skip the read entirely rather than
+        making one they would then discard.
+
+        Declining to re-derive on a restart is ADR-0042 §3's write-once rule: on
+        live the genesis is *provenance only* — nothing cross-checks it, because
+        there is no configured counterpart — so a second derivation would move a
+        recorded number that no later check could ever contradict.
+
+        ``False`` is a failed venue read, and the barrier retries it inside the
+        one startup budget before faulting. Clearing the barrier on an account
+        the venue never answered for is not an available outcome: that is
+        ADR-0011's freeze-don't-guess applied to the cash line, and what keeps
+        ADR-0041 §6's "``cash`` is never ``None``" true rather than intended.
+        """
+        portfolio = self._checkpointer.portfolio
+        if portfolio.is_opened:
+            return True
+        state = await self._exchange.fetch_account_state()
+        if state is None:
+            return False
+        portfolio.materialise(state)
+        return True
 
     def _teardown_steps(self) -> tuple[tuple[str, Callable[[], Awaitable[None] | None]], ...]:
         """The reverse shutdown, described once (ADR-0024).
