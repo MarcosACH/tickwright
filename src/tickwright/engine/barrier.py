@@ -2,23 +2,22 @@
 every proof it holds has cleared.
 
 The gate is a *lifecycle* concept rather than a reconciliation one, which is why
-it is its own type: it drives two steps from two owners — the live-only account
-materialisation (ADR-0043 §6) and ADR-0011's order mass-rebuild — and what it
-owns is neither of them. It owns the **policy they share**: drive the steps in
-order, retry the whole attempt with capped backoff when one freezes, and fault
-on the deadline. The runner composes the sequence, so the ordering stays in the
-one place lifecycle ordering lives (``runner.py``'s module docstring) rather
-than being smeared into whichever component happens to run first.
+it is its own type: it drives steps from more than one owner, and what it owns is
+none of them. It owns the **policy they share**: drive the steps in order, retry
+the whole attempt with capped backoff when one freezes, and fault on the
+deadline. The runner composes the sequence, so the ordering — and the reasons a
+particular order is load-bearing — stays in the one place lifecycle ordering
+lives (``runner.py``), rather than being smeared into whichever component happens
+to run first. **This type therefore never names a step**: it knows their shape
+and their order, and nothing about what any of them proves.
 
 A step reports ``bool``: ``True`` means it cleared, ``False`` means it could not
 prove what it was asked to and **guessed nothing** — ADR-0011 inv 1's
-freeze-don't-guess, which every step here shares because every one of them reads
-the venue. A step that raises is not a freeze but a broken assumption, and rides
-out to the runner unchanged.
+freeze-don't-guess, in the return type. A step that raises is not a freeze but a
+broken assumption, and rides out to the runner unchanged.
 
 **Steps are re-driven from the top on every attempt**, so each must be safe to
-repeat: a step that has already cleared has by construction nothing left to do
-(the account row exists; the sagas already reconciled converge under dedup).
+repeat — a step that has already cleared is expected to find nothing left to do.
 """
 
 from collections.abc import Awaitable, Callable
@@ -51,8 +50,10 @@ class StartupBarrier:
         resolves and startup proceeds; a sustained outage trips
         ``startup_reconciliation_timeout`` → ``StartupReconciliationTimeout``
         (an ``InvariantViolation``), which the runner maps to ``FAULTED`` and a
-        non-zero exit for the external supervisor to backoff-restart. On the
-        paper path no step can fail, so the barrier always clears.
+        non-zero exit for the external supervisor to backoff-restart. A sequence
+        whose steps cannot fail clears on the first attempt and pays none of
+        this; whether a given composition is one of those is the caller's fact,
+        not this type's.
 
         **Clearing with a step unproved is not an available outcome**, which is
         the whole of what the gate is for: a venue that will not answer stops the
@@ -77,11 +78,11 @@ class StartupBarrier:
     async def _attempt(self) -> bool:
         """One pass over the steps, in order, stopping at the first freeze.
 
-        Stopping is load-bearing rather than an optimization: the steps are
-        ordered because a later one depends on an earlier having landed —
-        ADR-0043 §6's rebuild would *create* the live account row itself, at a
-        zero genesis, if it ran behind a materialisation that could not read the
-        venue.
+        Stopping is load-bearing rather than an optimization: the sequence is
+        ordered because a later step may depend on an earlier one having landed,
+        so running the tail behind a freeze would be running it against state its
+        predecessor could not prove. Which dependence, and what it costs to get
+        it wrong, is the composing caller's to state (``runner.py``).
         """
         for step in self._steps:
             if not await step():
