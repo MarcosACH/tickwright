@@ -31,6 +31,7 @@ from tickwright.domain import (
     Account,
     AccountSpec,
     ComponentState,
+    Exchange,
     FillReport,
     InstrumentSpec,
     InvariantViolation,
@@ -237,8 +238,20 @@ class _LiveShapedVenue(VenueDouble):
         return self._view
 
 
-def _live_run(tmp_path: Path, store: SQLiteStore, venue: _LiveShapedVenue) -> int:
-    """One supervised life of a strategy-less engine over ``venue``."""
+def _live_run(
+    tmp_path: Path,
+    store: SQLiteStore,
+    venue: Exchange,
+    *,
+    opening_cash: Decimal = Decimal("0"),
+) -> int:
+    """One supervised life of a strategy-less engine over ``venue``.
+
+    ``opening_cash`` is what the ledger reads *before* the barrier: zero on
+    live, where ``Account.open`` resolves a ``None`` genesis and the real number
+    has not been read yet, and the declared genesis on paper, where it has been
+    in hand since composition.
+    """
 
     async def one_life() -> int:
         bus = InMemoryBus()
@@ -250,10 +263,10 @@ def _live_run(tmp_path: Path, store: SQLiteStore, venue: _LiveShapedVenue) -> in
             exchange=venue,
             feed=ReplayFeed(path=_write_ticks(tmp_path / "ticks.jsonl"), bus=bus, clock=clock),
         )
-        # Before the barrier the live ledger reads the zero ``Account.open``
-        # resolves a ``None`` genesis to — never ``None``, which ADR-0041 §6
-        # forbids, and never a number anybody chose.
-        assert engine.portfolio_for("live").account().cash == Decimal("0")
+        # Never ``None``, which ADR-0041 §6 forbids — and on live never a number
+        # anybody chose either: the zero ``Account.open`` resolves is what an
+        # *unstarted* live ledger reports, not a collateral default.
+        assert engine.portfolio_for("live").account().cash == opening_cash
         run = asyncio.create_task(engine.run())
         await engine.stop()
         return await run
@@ -285,6 +298,50 @@ def test_a_live_first_start_materialises_its_account_row_at_the_barrier(
         assert row.account_id == "hyperliquid-testnet-0xabc"
         assert row.genesis_collateral == Decimal("25.9604")
         assert row.cash == Decimal("25.9604")
+    finally:
+        reopened.close()
+
+
+class _PaperShapedVenue(VenueDouble):
+    """The paper declaration, over a venue account read that must never happen."""
+
+    async def fetch_account_state(self) -> VenueAccountState | None:
+        raise AssertionError("paper has no account truth: the barrier must not ask for one")
+
+    async def place(self, order: PlaceOrder) -> None:
+        raise AssertionError("nothing is placed: no strategy is registered")
+
+    async def cancel(self, cloid: str) -> None:
+        raise AssertionError("nothing is cancelled: no order exists")
+
+    async def fetch_order(self, cloid: str) -> VenueOrderView | None:
+        return _NO_RECORD
+
+
+def test_a_paper_start_performs_no_venue_account_read_at_the_barrier(
+    tmp_path: Path,
+) -> None:
+    """The materialisation is live-only, and what makes it so is the row rather
+    than a venue-kind flag (ADR-0043 §6): paper's genesis was seeded three steps
+    earlier inside ``recover()``, from a config value already in hand, so by the
+    time the barrier runs there is nothing left to create.
+
+    Asserted as a refusal rather than a call count: ``PaperExchange`` answers
+    ``None`` to this read by construction — the fail-closed value — so a
+    materialisation that asked anyway would freeze the barrier and fault the
+    default path on a venue that has nothing to say. The double raises instead,
+    which is the same mistake made loud.
+    """
+    store = SQLiteStore(tmp_path / "saga.db")
+
+    assert _live_run(tmp_path, store, _PaperShapedVenue(), opening_cash=GENESIS) == 0
+
+    reopened = SQLiteStore(tmp_path / "saga.db")
+    try:
+        row = reopened.load_account()
+        assert row is not None
+        assert row.account_id == "paper-default"
+        assert row.genesis_collateral == GENESIS
     finally:
         reopened.close()
 
