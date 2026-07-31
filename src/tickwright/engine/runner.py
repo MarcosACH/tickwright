@@ -42,6 +42,7 @@ from tickwright.domain import (
 from tickwright.observability import NamedEvent, named_event
 from tickwright.observability.correlation import bind_run_id
 
+from .barrier import StartupBarrier
 from .cadence import run_cadence
 from .checkpoint import Checkpointer
 from .execution import ExecutionManager
@@ -241,10 +242,14 @@ class Engine:
         # the saga path propagates to the TaskGroup and faults the engine.
         self._bus.subscribe(Signal, self._execution.on_signal)
         self._bus.subscribe(ExecutionReport, self._execution.on_execution_report)
-        # The hard gate: nothing places until reconciliation succeeds.
-        await self._reconciler.run_startup_barrier(
-            timeout_seconds=self._config.startup_reconciliation_timeout_seconds
-        )
+        # The hard gate: nothing places until every proof it holds has cleared.
+        # The sequence is the ordering rule, and it lives here rather than inside
+        # any step — lifecycle ordering is the runner's, and the barrier owns
+        # only the retry-then-fault policy the steps share.
+        await StartupBarrier(
+            clock=self._clock,
+            steps=(self._reconciler.reconcile_startup,),
+        ).run(timeout_seconds=self._config.startup_reconciliation_timeout_seconds)
         named_event(NamedEvent.ENGINE_BARRIER_CLEARED)
         # Strategies after the barrier: restore snapshot, resume seq, subscribe.
         self._host.start()
