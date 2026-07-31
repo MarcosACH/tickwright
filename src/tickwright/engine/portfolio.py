@@ -90,12 +90,6 @@ class PortfolioProjection:
         self._store = store
         self._clock = clock
         self._account = Account.open(spec, ts_ns=clock.timestamp_ns())
-        # Whether the *durable* ledger holds this account's row yet, which is a
-        # different question from whether this object has an ``Account``: it
-        # always does (ADR-0041 §6 forbids reporting ``None`` cash), and on a
-        # live first start the one it holds is the zero ``Account.open``
-        # resolved. ``recover()`` and ``materialise`` are the only writers.
-        self._opened = False
         # Keyed ``(strategy_id, symbol)`` — the materialized runtime key of the
         # logical ``(account, strategy, symbol)`` grain, the account being a
         # deployment fact (ADR-0038). ``None`` is the reserved unattributed
@@ -196,7 +190,6 @@ class PortfolioProjection:
             self._seed_genesis()
             return
         self._account = stored
-        self._opened = True
         # The reserved unattributed partition comes back with everything else
         # (ADR-0043 §9): ADR-0034's Σ-invariant holds by construction only if it
         # is restored too, so the filtering belongs at the seam, not here.
@@ -222,23 +215,37 @@ class PortfolioProjection:
         if self._spec.genesis_collateral is None:
             return
         self._store.checkpoint_ledger(account=self._account, ts_ns=self._clock.timestamp_ns())
-        self._opened = True
 
-    @property
     def is_opened(self) -> bool:
         """Whether the **durable** ledger holds this account's row yet.
 
         The predicate the startup barrier's live-only materialisation reads
-        (ADR-0043 §6), and it is deliberately about the row rather than about
-        which venue this is: paper is skipped there because ``recover()`` seeded
-        its row three steps earlier, and a live *restart* is skipped because its
-        row was materialised in an earlier life. A venue-kind flag would say the
-        same thing about the first case and the wrong thing about the second.
+        (ADR-0043 §6, "solely to create the row when absent"), and it is
+        deliberately about the row rather than about which venue this is: paper
+        is skipped there because ``recover()`` seeded its row three steps
+        earlier, and a live *restart* is skipped because its row was materialised
+        in an earlier life. A venue-kind flag would say the same thing about the
+        first case and the wrong thing about the second.
 
         ``False`` is therefore exactly one state — a live first start, before the
         barrier — and it is the only one in which a venue account read is owed.
+
+        **Asked of the store rather than cached**, and that is not a detail: the
+        row has a writer neither opener goes through — a fill's own
+        ``checkpoint_ledger`` carries it, because ADR-0043 §9 makes ``account``
+        required and every mutation moves cash. A flag maintained by the two
+        openers would therefore answer "not open" against a row a fill had
+        already written, and the barrier's whole ordering rationale rests on the
+        opposite: a rebuild that ran first *creates* the row, and the
+        materialisation behind it declines to overwrite rather than resetting the
+        cash line that fill just moved. One question, one source — a store read
+        cannot drift from the table it reads.
+
+        A method rather than a property for the same reason: this reaches the
+        store, and a property would invite a caller to treat it as a field. Both
+        callers are startup-only, so the read is paid once per barrier attempt.
         """
-        return self._opened
+        return self._store.load_account() is not None
 
     def materialise(self, state: VenueAccountState) -> None:
         """Open the durable ledger at the genesis ``state`` implies (ADR-0043 §6).
@@ -249,10 +256,11 @@ class PortfolioProjection:
         venue and so waits for the startup barrier, under the barrier's own
         bounded-retry-then-fault policy.
 
-        Driven only when ``is_opened`` is ``False``, which is what keeps a live
-        restart from re-deriving a genesis that ADR-0042 §3 wrote once. The order
-        against the barrier's mass-rebuild is the caller's to keep and is
-        load-bearing: the rebuild emits synthetic fills, every fill's write
+        Driven only when ``is_opened()`` is ``False``, which is what keeps a live
+        restart from re-deriving a genesis that ADR-0042 §3 wrote once.
+
+        The order against the barrier's mass-rebuild is the caller's to keep and
+        is load-bearing: the rebuild emits synthetic fills, every fill's write
         carries the account row (ADR-0043 §9), so a rebuild that ran first would
         *create* the row at the zero ``Account.open`` resolved — and this method,
         declining to overwrite it, would leave that zero standing for the life of
@@ -264,7 +272,6 @@ class PortfolioProjection:
         ts_ns = self._clock.timestamp_ns()
         self._account = Account.ingest(self._spec, state, ts_ns=ts_ns)
         self._store.checkpoint_ledger(account=self._account, ts_ns=ts_ns)
-        self._opened = True
         # Announced behind the write, as ``project`` is: a record naming an
         # opening balance a crash could still undo would be worse than none.
         named_event(

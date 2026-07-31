@@ -295,7 +295,7 @@ class Engine:
         *does* matter here is the barrier's, and it is right above.
         """
         portfolio = self._checkpointer.portfolio
-        if portfolio.is_opened:
+        if portfolio.is_opened():
             return True
         state = await self._exchange.fetch_account_state()
         if state is None:

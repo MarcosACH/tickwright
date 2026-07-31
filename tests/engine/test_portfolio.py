@@ -434,11 +434,11 @@ def test_a_live_ledger_materialises_at_the_figures_the_venue_reported() -> None:
     store = SQLiteStore(":memory:")
     projection = _projection(None, store=store)
     projection.recover()
-    assert projection.is_opened is False  # nothing restored, and live seeds nothing
+    assert projection.is_opened() is False  # nothing restored, and live seeds nothing
 
     projection.materialise(account_state("25.9264", "-0.034"))
 
-    assert projection.is_opened is True
+    assert projection.is_opened() is True
     assert projection.account().cash == Decimal("25.9604")
     row = store.load_account()
     assert row is not None
