@@ -71,6 +71,7 @@ time: a name lands only with its emitting path and a catalog-walk test"):
 | `position.changed` | a fill or accrual moves a non-flat record |
 | `position.closed` | a fill returns a record to `size = 0` |
 | `account.reconciled` | a ledger reconcile cycle completes (its divergences already have their own alert types — ADR-0040 §6's `VALUATION_DIVERGENCE`, ADR-0044 §10's `LEVERAGE_DIVERGENCE`, and ADR-0046 §4's `ACCOUNT_MODE_UNVERIFIED` / `account.mode_unverified`, which reports the account-grain cross-check *stopping* rather than diverging) |
+| `account.materialised` | the startup barrier creates a **live** ledger's account row from the venue's own account read (ADR-0042 §6, ADR-0043 §6). Added by [#191](https://github.com/MarcosACH/tickwright/issues/191), which is also where it ships. It earns a name on §2's own argument rather than by analogy: the derivation happens **once** and nothing checks it afterwards — live genesis is *provenance only*, with no configured counterpart to compare against — so this record is the only account of where a ledger's opening balance came from. Paper's genesis seed is deliberately **not** named: its number is the operator's own config value, so a record of it would report back what was already declared |
 
 A flip through zero (P1, [#119](https://github.com/MarcosACH/tickwright/issues/119)) is one fill
 that closes and reopens; it emits `position.closed` then `position.opened`, because the residual

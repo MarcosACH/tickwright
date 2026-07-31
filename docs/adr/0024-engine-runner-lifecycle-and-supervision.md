@@ -54,7 +54,18 @@ those components.
    exists by the time the barrier runs, seeded three steps earlier by step 2's check — paper's
    opening value is declared config, so that write needs no venue read and no gate. A *full* ledger
    reconcile inside the barrier was rejected; positions, Tier-1 heals and the ADR-0040 §6
-   divergence alerts stay on the cadence.**)**
+   divergence alerts stay on the cadence.**)** **(Sharpened by
+   [#191](https://github.com/MarcosACH/tickwright/issues/191), which landed it:** the
+   materialisation is ordered **before** the mass-rebuild, not merely inside the same step. The
+   rebuild emits synthetic fills; every fill's write carries the account row (ADR-0043 §9 — every
+   mutation moves cash), so a rebuild that ran first would *create* the live row itself at the zero
+   `Account.open` resolves a `None` genesis to, and the materialisation behind it would decline to
+   overwrite a row that now exists — leaving that zero standing for the life of the ledger with
+   nothing to refuse it, since #188's genesis comparison is paper-only. The live row must be
+   materialised, never fallen into. The gate is therefore an **ordered** sequence of proofs rather
+   than one call, and the runner composes it: a `StartupBarrier` holds the shared retry policy
+   below, the step order lives in the runner's own sequence, and an attempt stops at the first step
+   that froze.**)**
 6. Start the `Strategy` instances (`on_start`: restore snapshot; seq high-water from the saga
    store, ADR-0016; then **pull current open-order state from the `Cache` read-model** by direct
    method call, ADR-0004 — the barrier's reconciliation `OrderEvent`s (step 5) were published
