@@ -289,6 +289,39 @@ def test_a_live_first_start_materialises_its_account_row_at_the_barrier(
         reopened.close()
 
 
+def test_a_live_restart_neither_re_derives_nor_overwrites_the_recorded_genesis(
+    tmp_path: Path,
+) -> None:
+    """Genesis is written once (ADR-0042 §3), and on live nothing could ever
+    catch a second write: the value is *provenance only* — there is no
+    configured counterpart to check it against, so #188's genesis refusal is
+    paper-only by ADR-0043 §10's predicate.
+
+    The second life is handed a venue whose equity has moved (a deposit, or the
+    same position marked differently), which is exactly the legitimate change
+    that must **not** rewrite the opening declaration. The read is skipped
+    outright rather than made and discarded: the row's existence is the
+    predicate, so a restart owes the venue nothing at this step.
+    """
+    db = tmp_path / "saga.db"
+    assert _live_run(tmp_path, SQLiteStore(db), _LiveShapedVenue()) == 0
+
+    # A second life over the store the first one left behind — its graceful stop
+    # closed the handle, exactly as a restart would.
+    moved = _LiveShapedVenue(state=account_state("99999", "-0.034"))
+    assert _live_run(tmp_path, SQLiteStore(db), moved) == 0
+
+    assert moved.account_reads == 0
+    reopened = SQLiteStore(tmp_path / "saga.db")
+    try:
+        row = reopened.load_account()
+        assert row is not None
+        assert row.genesis_collateral == Decimal("25.9604")  # the first life's
+        assert row.cash == Decimal("25.9604")
+    finally:
+        reopened.close()
+
+
 def test_an_account_read_that_never_answers_faults_rather_than_clearing(
     tmp_path: Path,
 ) -> None:
