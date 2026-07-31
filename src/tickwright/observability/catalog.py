@@ -38,6 +38,14 @@ class NamedEvent(StrEnum):
     POSITION_CHANGED = "position.changed"
     POSITION_CLOSED = "position.closed"
 
+    # The live account row created at the startup barrier from the venue's own
+    # account read (``PortfolioProjection``, ADR-0042 §6/ADR-0043 §6). Named
+    # because the derivation happens once and is never checked again: live
+    # genesis is provenance only, so this record is the only account of where a
+    # ledger's opening balance came from. Paper's genesis seed emits nothing —
+    # its number is in the operator's own config, not read from anywhere.
+    ACCOUNT_MATERIALISED = "account.materialised"
+
     # Live-feed ingress: a conflation drop under backpressure, and a
     # malformed-frame drop that is skipped instead of faulting the engine
     # (``HyperliquidFeed``, ADR-0023).

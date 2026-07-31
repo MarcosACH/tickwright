@@ -265,6 +265,13 @@ class PortfolioProjection:
         self._account = Account.ingest(self._spec, state, ts_ns=ts_ns)
         self._store.checkpoint_ledger(account=self._account, ts_ns=ts_ns)
         self._opened = True
+        # Announced behind the write, as ``project`` is: a record naming an
+        # opening balance a crash could still undo would be worse than none.
+        named_event(
+            NamedEvent.ACCOUNT_MATERIALISED,
+            account_id=self._account.account_id,
+            genesis_collateral=str(self._account.genesis_collateral),
+        )
 
     def position(self, symbol: str, *, strategy_id: str | None) -> PositionView | None:
         """One partition's frozen Tier-1 snapshot, or ``None`` if never traded."""

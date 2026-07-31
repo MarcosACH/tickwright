@@ -302,6 +302,26 @@ def test_a_live_first_start_materialises_its_account_row_at_the_barrier(
         reopened.close()
 
 
+def test_the_derived_genesis_is_named_in_the_trail(tmp_path: Path) -> None:
+    """Every component state change emits a named event (ADR-0020), and this one
+    earns it more than most: the number is derived once, from a venue response
+    nobody kept, and then stands for the life of the ledger. Nothing
+    cross-checks it afterwards — live genesis is provenance only — so the record
+    of *what was read* is the only account an operator will ever get of where
+    the opening balance came from.
+    """
+    store = SQLiteStore(tmp_path / "saga.db")
+
+    with capture_events() as logs:
+        assert _live_run(tmp_path, store, _LiveShapedVenue()) == 0
+
+    materialised = [log for log in logs if log["event"] == "account.materialised"]
+    assert len(materialised) == 1
+    assert materialised[0]["account_id"] == "hyperliquid-testnet-0xabc"
+    assert materialised[0]["genesis_collateral"] == "25.9604"
+    assert materialised[0]["run_id"]  # inside the run's correlation (ADR-0020)
+
+
 class _PaperShapedVenue(VenueDouble):
     """The paper declaration, over a venue account read that must never happen."""
 
