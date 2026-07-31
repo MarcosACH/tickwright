@@ -29,6 +29,7 @@ from tickwright.domain import (
     PositionView,
     Side,
     Store,
+    VenueAccountState,
 )
 from tickwright.observability import NamedEvent, named_event
 
@@ -89,6 +90,12 @@ class PortfolioProjection:
         self._store = store
         self._clock = clock
         self._account = Account.open(spec, ts_ns=clock.timestamp_ns())
+        # Whether the *durable* ledger holds this account's row yet, which is a
+        # different question from whether this object has an ``Account``: it
+        # always does (ADR-0041 §6 forbids reporting ``None`` cash), and on a
+        # live first start the one it holds is the zero ``Account.open``
+        # resolved. ``recover()`` and ``materialise`` are the only writers.
+        self._opened = False
         # Keyed ``(strategy_id, symbol)`` — the materialized runtime key of the
         # logical ``(account, strategy, symbol)`` grain, the account being a
         # deployment fact (ADR-0038). ``None`` is the reserved unattributed
@@ -189,6 +196,7 @@ class PortfolioProjection:
             self._seed_genesis()
             return
         self._account = stored
+        self._opened = True
         # The reserved unattributed partition comes back with everything else
         # (ADR-0043 §9): ADR-0034's Σ-invariant holds by construction only if it
         # is restored too, so the filtering belongs at the seam, not here.
@@ -214,6 +222,49 @@ class PortfolioProjection:
         if self._spec.genesis_collateral is None:
             return
         self._store.checkpoint_ledger(account=self._account, ts_ns=self._clock.timestamp_ns())
+        self._opened = True
+
+    @property
+    def is_opened(self) -> bool:
+        """Whether the **durable** ledger holds this account's row yet.
+
+        The predicate the startup barrier's live-only materialisation reads
+        (ADR-0043 §6), and it is deliberately about the row rather than about
+        which venue this is: paper is skipped there because ``recover()`` seeded
+        its row three steps earlier, and a live *restart* is skipped because its
+        row was materialised in an earlier life. A venue-kind flag would say the
+        same thing about the first case and the wrong thing about the second.
+
+        ``False`` is therefore exactly one state — a live first start, before the
+        barrier — and it is the only one in which a venue account read is owed.
+        """
+        return self._opened
+
+    def materialise(self, state: VenueAccountState) -> None:
+        """Open the durable ledger at the genesis ``state`` implies (ADR-0043 §6).
+
+        Live's counterpart to ``_seed_genesis``, and the two differ only in where
+        the number comes from: paper's is a config value already in hand, so it
+        is written inside ``recover()``, while this one has to be read from the
+        venue and so waits for the startup barrier, under the barrier's own
+        bounded-retry-then-fault policy.
+
+        Driven only when ``is_opened`` is ``False``, which is what keeps a live
+        restart from re-deriving a genesis that ADR-0042 §3 wrote once. The order
+        against the barrier's mass-rebuild is the caller's to keep and is
+        load-bearing: the rebuild emits synthetic fills, every fill's write
+        carries the account row (ADR-0043 §9), so a rebuild that ran first would
+        *create* the row at the zero ``Account.open`` resolved — and this method,
+        declining to overwrite it, would leave that zero standing for the life of
+        the ledger with nothing to refuse it.
+        """
+        # One clock read for both: the opening instant the row is stamped with
+        # and the instant it was made durable are the same fact here, and two
+        # reads would let a live clock put them a tick apart for no reason.
+        ts_ns = self._clock.timestamp_ns()
+        self._account = Account.ingest(self._spec, state, ts_ns=ts_ns)
+        self._store.checkpoint_ledger(account=self._account, ts_ns=ts_ns)
+        self._opened = True
 
     def position(self, symbol: str, *, strategy_id: str | None) -> PositionView | None:
         """One partition's frozen Tier-1 snapshot, or ``None`` if never traded."""

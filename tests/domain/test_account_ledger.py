@@ -4,14 +4,9 @@ opening declaration (ADR-0042 §3/§4)."""
 from decimal import Decimal
 
 import pytest
+from venue_doubles import account_state
 
-from tickwright.domain import (
-    Account,
-    AccountSpec,
-    Netting,
-    VenueAccountState,
-    VenuePositionState,
-)
+from tickwright.domain import Account, AccountSpec, Netting
 
 
 def _account(genesis: str = "100000") -> Account:
@@ -104,42 +99,14 @@ def test_a_live_spec_declaring_no_genesis_opens_the_ledger_at_zero() -> None:
     assert account.cash == Decimal("0")
 
 
-def _venue_state(equity: str, *unrealized: str) -> VenueAccountState:
-    """A venue account read holding one position per ``unrealized`` figure.
-
-    Only the two fields the genesis formula reads carry meaning here; the rest
-    are the recorded cross snapshot's, so the state is a shape the venue could
-    actually have returned rather than a hand-made one.
-    """
-    return VenueAccountState(
-        equity=Decimal(equity),
-        free_margin=Decimal("0.0096"),
-        cross_maintenance_margin=Decimal("1.6198"),
-        positions=tuple(
-            VenuePositionState(
-                symbol="BTC",
-                signed_size=Decimal("0.002"),
-                entry_price=Decimal("64809.0"),
-                notional=Decimal("129.584"),
-                unrealized_pnl=Decimal(pnl),
-                margin_used=Decimal("25.9168"),
-                isolated_collateral=None,
-                liquidation_price=None,
-            )
-            for pnl in unrealized
-        ),
-    )
-
-
 def test_a_live_ledger_ingests_its_genesis_net_of_unrealized_pnl() -> None:
     """The opening cash of a live account is read from the venue, never
     configured: ``genesis = accountValue − Σ unrealized_pnl`` (ADR-0042 §6).
 
-    The figures are the recorded cross snapshot's (issue #142 §2, reproduced in
-    ``tests/venues/hyperliquid/test_account.py``): a funded testnet account
-    holding 0.002 BTC long at 5x, ``accountValue`` 25.9264 against an unrealized
-    −0.034 — so the cash behind that equity is 25.9604, which is the venue's own
-    arithmetic and not this constructor's restated.
+    The figures are the recorded cross snapshot's (issue #142 §2): a funded
+    testnet account holding 0.002 BTC long at 5x, ``accountValue`` 25.9264
+    against an unrealized −0.034 — so the cash behind that equity is 25.9604,
+    which is the venue's own arithmetic and not this constructor's restated.
 
     The subtraction is load-bearing rather than tidy: ``accountValue`` is
     *equity* and already contains unrealized PnL, so writing it into the cash
@@ -148,7 +115,7 @@ def test_a_live_ledger_ingests_its_genesis_net_of_unrealized_pnl() -> None:
     """
     spec = AccountSpec(account_id="hyperliquid-testnet-0xabc", genesis_collateral=None)
 
-    account = Account.ingest(spec, _venue_state("25.9264", "-0.034"), ts_ns=11)
+    account = Account.ingest(spec, account_state("25.9264", "-0.034"), ts_ns=11)
 
     assert account.account_id == "hyperliquid-testnet-0xabc"
     assert account.genesis_collateral == Decimal("25.9604")
