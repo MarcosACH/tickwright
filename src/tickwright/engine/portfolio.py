@@ -22,6 +22,7 @@ from tickwright.domain import (
     AccountSpec,
     AccountView,
     Clock,
+    InvariantViolation,
     OrderFillEvent,
     Portfolio,
     Position,
@@ -256,8 +257,17 @@ class PortfolioProjection:
         venue and so waits for the startup barrier, under the barrier's own
         bounded-retry-then-fault policy.
 
-        Driven only when ``is_opened()`` is ``False``, which is what keeps a live
-        restart from re-deriving a genesis that ADR-0042 §3 wrote once.
+        **Refuses an already-open ledger**, which is where ADR-0042 §3's
+        write-once rule belongs: this is the operation a second derivation would
+        corrupt, and ADR-0047 §1 puts a precondition on the verb rather than on
+        the caller that happens to observe it first. Nothing downstream could
+        catch the overwrite — on live the genesis is *provenance only*, with no
+        configured counterpart to compare against, so #188's refusal is
+        paper-only by ADR-0043 §10's predicate. The barrier's caller checks
+        ``is_opened`` too, and the two are not a doubled rule: the caller is
+        deciding whether it owes the venue a *read*, this is deciding whether it
+        may *write*. They cannot disagree — both ask the store the one question,
+        and this one is the answer no future caller can inherit its way around.
 
         The order against the barrier's mass-rebuild is the caller's to keep and
         is load-bearing: the rebuild emits synthetic fills, every fill's write
@@ -266,6 +276,11 @@ class PortfolioProjection:
         declining to overwrite it, would leave that zero standing for the life of
         the ledger with nothing to refuse it.
         """
+        if self.is_opened():
+            raise InvariantViolation(
+                f"ledger for {self._spec.account_id} is already open: genesis is "
+                "written once and never re-derived (ADR-0042 §3)"
+            )
         # One clock read for both: the opening instant the row is stamped with
         # and the instant it was made durable are the same fact here, and two
         # reads would let a live clock put them a tick apart for no reason.

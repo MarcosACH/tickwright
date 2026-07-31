@@ -446,3 +446,35 @@ def test_a_live_ledger_materialises_at_the_figures_the_venue_reported() -> None:
     assert row.genesis_collateral == Decimal("25.9604")
     assert row.cash == Decimal("25.9604")
     assert row.genesis_ts_ns == 7  # the run's clock, not the venue's own stamp
+
+
+def test_a_second_materialisation_is_refused_rather_than_moving_the_genesis() -> None:
+    """Genesis is written once (ADR-0042 §3), and the verb that would corrupt it
+    is where that rule is stated (ADR-0047 §1).
+
+    On live nothing could ever catch a second write after the fact: the value is
+    *provenance only* — there is no configured counterpart to compare it against,
+    so #188's genesis refusal is paper-only by ADR-0043 §10's predicate. The
+    barrier's caller skips this verb on a ledger that is already open, but that
+    check answers a different question — "do I owe the venue a read?" — and a
+    rule enforced only by the one caller that exists today is a rule the next
+    caller inherits nothing from. The equity handed in here has moved, which is
+    exactly the legitimate change (a deposit, or the same position marked
+    differently) that must not rewrite an opening declaration.
+    """
+    store = SQLiteStore(":memory:")
+    projection = _projection(None, store=store)
+    projection.recover()
+    projection.materialise(account_state("25.9264", "-0.034"))
+
+    with pytest.raises(InvariantViolation):
+        projection.materialise(account_state("99999", "-0.034"))
+
+    # Neither half moved: the refusal lands ahead of the in-memory assignment, so
+    # a caught violation cannot leave the ledger reporting a cash line the store
+    # never recorded. ``cash`` is what a reader would see move — ``Account.ingest``
+    # opens the line *at* genesis, so a second one resets it too.
+    assert projection.account().cash == Decimal("25.9604")
+    row = store.load_account()
+    assert row is not None
+    assert row.genesis_collateral == Decimal("25.9604")

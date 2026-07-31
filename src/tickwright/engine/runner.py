@@ -276,10 +276,15 @@ class Engine:
         start, and both of the other two skip the read entirely rather than
         making one they would then discard.
 
-        Declining to re-derive on a restart is ADR-0042 §3's write-once rule: on
-        live the genesis is *provenance only* — nothing cross-checks it, because
-        there is no configured counterpart — so a second derivation would move a
-        recorded number that no later check could ever contradict.
+        What that check decides here is only whether a **read is owed**, not
+        whether the write is allowed. ADR-0042 §3's write-once rule is stated on
+        ``materialise`` itself, which refuses an already-open ledger (ADR-0047
+        §1): on live the genesis is *provenance only* — nothing cross-checks it,
+        because there is no configured counterpart — so a second derivation would
+        move a recorded number no later check could ever contradict, and a rule
+        that lived only in this method would be one the next caller of that verb
+        inherits nothing from. The two read the same predicate off the same
+        store, so they cannot disagree about the row.
 
         ``False`` is a failed venue read, and the barrier retries it inside the
         one startup budget before faulting. Clearing the barrier on an account
