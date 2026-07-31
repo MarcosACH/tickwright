@@ -84,8 +84,14 @@ class Checkpointer:
 
     @property
     def portfolio(self) -> PortfolioProjection:
-        """The accounting read-model, lent for reads and for the scoped
-        ``Portfolio`` facade the composition root injects into a strategy."""
+        """The accounting read-model, lent for reads, for the scoped
+        ``Portfolio`` facade the composition root injects into a strategy, and —
+        the one borrow that *writes* — for the startup barrier's account
+        materialisation (``runner.py``). That write stays off this type's verbs
+        deliberately: what these own is an ordering a caller could silently
+        invert, and opening a ledger is one write to one read-model with no
+        ordering inside it. The ordering it does have is the barrier's, which is
+        the runner's to keep."""
         return self._portfolio
 
     def recover(self) -> None:
