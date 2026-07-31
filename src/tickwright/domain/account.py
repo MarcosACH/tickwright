@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from .enums import Netting
+from .events import VenueAccountState
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -160,6 +161,39 @@ class Account:
         return cls(
             account_id=spec.account_id,
             genesis_collateral=genesis if genesis is not None else Decimal("0"),
+            genesis_ts_ns=ts_ns,
+        )
+
+    @classmethod
+    def ingest(cls, spec: AccountSpec, state: VenueAccountState, *, ts_ns: int) -> "Account":
+        """Open a fresh ledger at the genesis the *venue* reports (ADR-0042 §6).
+
+        The third way an account comes into being, and the live path's: ``open``
+        takes the operator's declaration, ``restore`` takes the durable row, and
+        this takes the venue's own account read — which is why live configures no
+        collateral at all. Configuring one would invent a number the venue
+        already knows, contradict ADR-0034's venue-is-authoritative rule for
+        Tier-1, and fail-fast on every legitimate deposit.
+
+        ``genesis = equity − Σ unrealized_pnl``, and **the subtraction is
+        load-bearing rather than tidy**: the venue's equity figure already
+        contains unrealized PnL, so writing it straight into the cash line would
+        double-count that PnL the instant ``equity = cash + Σ uPnL``
+        (ADR-0040 §7) was evaluated — an account opened holding a position would
+        report its uPnL twice from the very first cycle.
+
+        Driven once, at the startup barrier, and only when the store holds no
+        account row (ADR-0043 §6): the value is **provenance only** on this path
+        — nothing cross-checks it, because there is no configured counterpart to
+        check against — so re-deriving it on a later start would silently move a
+        line that is supposed to have been written once.
+        """
+        genesis = state.equity - sum(
+            (position.unrealized_pnl for position in state.positions), Decimal("0")
+        )
+        return cls(
+            account_id=spec.account_id,
+            genesis_collateral=genesis,
             genesis_ts_ns=ts_ns,
         )
 

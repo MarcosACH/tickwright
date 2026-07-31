@@ -25,7 +25,8 @@ coverage of state-affecting paths is a requirement, not optional.
   `ghost.reconciled`, `fill.healed`, `feed.connected`, `feed.disconnected`,
   `guard.denied`, `strategy.snapshot`, `engine.faulted`, and — added by ADR-0045 §2 for the
   accounting surface — `position.opened`, `position.changed`, `position.closed`,
-  `account.reconciled`. Those four are load-bearing rather than incidental: ADR-0045 §1 declines a
+  `account.reconciled`, `account.materialised`. The first four are load-bearing rather than
+  incidental: ADR-0045 §1 declines a
   position/account **bus** event on the grounds that this catalog already carries the telemetry, so
   they are what that decision rests on. (A flip through zero is one fill that emits
   `position.closed` then `position.opened` — the residual opens a fresh average-cost record, and
@@ -38,7 +39,10 @@ coverage of state-affecting paths is a requirement, not optional.
   so the guard family currently ships only `guard.kill_switch_tripped`/`guard.kill_switch_reset`;
   `strategy.snapshot_incompatible` names the incompatible-restore path; the runner's
   startup-order proof ships as `engine.barrier_cleared`/`engine.feed_started` (the ADR-0024
-  ordering, test-assertable) alongside the roadmap's `engine.faulted`.
+  ordering, test-assertable) alongside the roadmap's `engine.faulted`;
+  `account.materialised` ships with the barrier step that emits it
+  ([#191](https://github.com/MarcosACH/tickwright/issues/191)), while its roadmap sibling
+  `account.reconciled` waits for the ledger cadence.
 
 ## Coverage requirement
 

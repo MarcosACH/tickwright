@@ -2,11 +2,13 @@
 
 Two phases, one healing discipline. *Startup* (recovery step 3): after the
 ``Cache`` is rebuilt from the ``Store``, every non-terminal saga is reconciled
-against venue truth by cloid **before anything can be placed**. *Continuous*:
-two cycles thereafter — a fast in-flight check resolving ``SUBMITTED`` orders
-that never acked, and a slower open-order/ghost reconcile in which only
-continuous absence across the grace window (with a fill-history cross-check on
-every read) resolves a resting order terminally. Each heal is a
+against venue truth by cloid **before anything can be placed** — as one step of
+the ``StartupBarrier``, which owns the retry-then-fault policy and the ordering
+against the account materialisation that precedes it (``barrier.py``).
+*Continuous*: two cycles thereafter — a fast in-flight check resolving
+``SUBMITTED`` orders that never acked, and a slower open-order/ghost reconcile
+in which only continuous absence across the grace window (with a fill-history
+cross-check on every read) resolves a resting order terminally. Each heal is a
 ``reconciliation``-flagged synthetic replica of a raw venue fact, published on
 the bus and routed through the ``ExecutionManager`` — the one saga writer — so
 dedup by ``event_id`` and ``trade_id`` makes every pass idempotent: re-running
@@ -27,7 +29,6 @@ from tickwright.domain import (
     Order,
     OrderState,
     OrderStatusReport,
-    StartupReconciliationTimeout,
     VenueOrderView,
 )
 from tickwright.observability import NamedEvent, named_event
@@ -133,7 +134,9 @@ class Reconciler:
         """One mass-rebuild pass over every non-terminal saga; ``True`` on success.
 
         ``False`` means a venue read failed and the pass froze — the caller
-        (the startup barrier) retries; nothing was guessed in the meantime.
+        (the ``StartupBarrier``, which holds the retry-then-fault policy this
+        step shares with the account materialisation ordered ahead of it)
+        retries; nothing was guessed in the meantime.
         """
         return await self._drive("startup", None, self._adopt)
 
@@ -249,38 +252,6 @@ class Reconciler:
         the order whose read failed ride the ambient context (ADR-0020)."""
         named_event(NamedEvent.RECONCILE_FROZEN)
         return False
-
-    async def run_startup_barrier(
-        self,
-        *,
-        timeout_seconds: float,
-        initial_backoff_seconds: float = 1.0,
-        max_backoff_seconds: float = 30.0,
-    ) -> None:
-        """The hard startup gate (ADR-0024): nothing places until this clears.
-
-        Retries the mass-rebuild with exponential backoff so a transient
-        boot-time venue blip resolves and startup proceeds; a sustained outage
-        trips ``startup_reconciliation_timeout`` → ``StartupReconciliationTimeout``
-        (an ``InvariantViolation``), which the runner maps to ``FAULTED`` and a
-        non-zero exit for the external supervisor to backoff-restart. On the
-        paper path reads cannot fail, so the barrier always clears.
-
-        The backoff is capped at ``max_backoff_seconds`` so an uncapped doubling
-        cannot carry the clock far past the deadline: without the cap a large
-        ``timeout_seconds`` would fault nearly a whole backoff interval late,
-        making real time-to-``FAULTED`` up to ~2× the configured window.
-        """
-        deadline_ns = self._clock.timestamp_ns() + int(timeout_seconds * _NS_PER_SECOND)
-        backoff_seconds = initial_backoff_seconds
-        while not await self.reconcile_startup():
-            if self._clock.timestamp_ns() >= deadline_ns:
-                raise StartupReconciliationTimeout(
-                    f"venue unreachable for {timeout_seconds}s during startup "
-                    "reconciliation; refusing to start on unverified state"
-                )
-            await self._clock.sleep(backoff_seconds)
-            backoff_seconds = min(backoff_seconds * 2, max_backoff_seconds)
 
     async def _adopt(self, order: Order, view: VenueOrderView) -> None:
         """Align one saga with the venue's view of its cloid."""

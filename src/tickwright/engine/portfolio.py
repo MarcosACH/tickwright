@@ -22,6 +22,7 @@ from tickwright.domain import (
     AccountSpec,
     AccountView,
     Clock,
+    InvariantViolation,
     OrderFillEvent,
     Portfolio,
     Position,
@@ -29,6 +30,7 @@ from tickwright.domain import (
     PositionView,
     Side,
     Store,
+    VenueAccountState,
 )
 from tickwright.observability import NamedEvent, named_event
 
@@ -214,6 +216,84 @@ class PortfolioProjection:
         if self._spec.genesis_collateral is None:
             return
         self._store.checkpoint_ledger(account=self._account, ts_ns=self._clock.timestamp_ns())
+
+    def is_opened(self) -> bool:
+        """Whether the **durable** ledger holds this account's row yet.
+
+        The predicate the startup barrier's live-only materialisation reads
+        (ADR-0043 §6, "solely to create the row when absent"), and it is
+        deliberately about the row rather than about which venue this is: paper
+        is skipped there because ``recover()`` seeded its row three steps
+        earlier, and a live *restart* is skipped because its row was materialised
+        in an earlier life. A venue-kind flag would say the same thing about the
+        first case and the wrong thing about the second.
+
+        ``False`` is therefore exactly one state — a live first start, before the
+        barrier — and it is the only one in which a venue account read is owed.
+
+        **Asked of the store rather than cached**, and that is not a detail: the
+        row has a writer neither opener goes through — a fill's own
+        ``checkpoint_ledger`` carries it, because ADR-0043 §9 makes ``account``
+        required and every mutation moves cash. A flag maintained by the two
+        openers would therefore answer "not open" against a row a fill had
+        already written, and the barrier's whole ordering rationale rests on the
+        opposite: a rebuild that ran first *creates* the row, and the
+        materialisation behind it declines to overwrite rather than resetting the
+        cash line that fill just moved. One question, one source — a store read
+        cannot drift from the table it reads.
+
+        A method rather than a property for the same reason: this reaches the
+        store, and a property would invite a caller to treat it as a field. Both
+        callers are startup-only, so the read is paid once per barrier attempt.
+        """
+        return self._store.load_account() is not None
+
+    def materialise(self, state: VenueAccountState) -> None:
+        """Open the durable ledger at the genesis ``state`` implies (ADR-0043 §6).
+
+        Live's counterpart to ``_seed_genesis``, and the two differ only in where
+        the number comes from: paper's is a config value already in hand, so it
+        is written inside ``recover()``, while this one has to be read from the
+        venue and so waits for the startup barrier, under the barrier's own
+        bounded-retry-then-fault policy.
+
+        **Refuses an already-open ledger**, which is where ADR-0042 §3's
+        write-once rule belongs: this is the operation a second derivation would
+        corrupt, and ADR-0047 §1 puts a precondition on the verb rather than on
+        the caller that happens to observe it first. Nothing downstream could
+        catch the overwrite — on live the genesis is *provenance only*, with no
+        configured counterpart to compare against, so #188's refusal is
+        paper-only by ADR-0043 §10's predicate. The barrier's caller checks
+        ``is_opened`` too, and the two are not a doubled rule: the caller is
+        deciding whether it owes the venue a *read*, this is deciding whether it
+        may *write*. They cannot disagree — both ask the store the one question,
+        and this one is the answer no future caller can inherit its way around.
+
+        The order against the barrier's mass-rebuild is the caller's to keep and
+        is load-bearing: the rebuild emits synthetic fills, every fill's write
+        carries the account row (ADR-0043 §9), so a rebuild that ran first would
+        *create* the row at the zero ``Account.open`` resolved — and this method,
+        declining to overwrite it, would leave that zero standing for the life of
+        the ledger with nothing to refuse it.
+        """
+        if self.is_opened():
+            raise InvariantViolation(
+                f"ledger for {self._spec.account_id} is already open: genesis is "
+                "written once and never re-derived (ADR-0042 §3)"
+            )
+        # One clock read for both: the opening instant the row is stamped with
+        # and the instant it was made durable are the same fact here, and two
+        # reads would let a live clock put them a tick apart for no reason.
+        ts_ns = self._clock.timestamp_ns()
+        self._account = Account.ingest(self._spec, state, ts_ns=ts_ns)
+        self._store.checkpoint_ledger(account=self._account, ts_ns=ts_ns)
+        # Announced behind the write, as ``project`` is: a record naming an
+        # opening balance a crash could still undo would be worse than none.
+        named_event(
+            NamedEvent.ACCOUNT_MATERIALISED,
+            account_id=self._account.account_id,
+            genesis_collateral=str(self._account.genesis_collateral),
+        )
 
     def position(self, symbol: str, *, strategy_id: str | None) -> PositionView | None:
         """One partition's frozen Tier-1 snapshot, or ``None`` if never traded."""

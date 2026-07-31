@@ -20,7 +20,7 @@ import pytest
 from hyperliquid_fakes import FakeExchangeApi, FakeWsConnection, trade, trades_frame
 from ledgers import GENESIS, checkpointer
 from pydantic import SecretStr
-from venue_doubles import VenueDouble
+from venue_doubles import LiveVenueDouble, VenueDouble
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
@@ -155,6 +155,20 @@ class _ForgetfulVenue(VenueDouble):
 
     async def cancel(self, cloid: str) -> None:
         raise AssertionError("the reconcile walk never cancels")
+
+    async def fetch_order(self, cloid: str) -> VenueOrderView | None:
+        return VenueOrderView(status=None)
+
+
+class _LiveShapedVenue(LiveVenueDouble):
+    """A venue whose genesis is *ingested* rather than declared — so the startup
+    barrier has an account row to create, and reads this venue to do it."""
+
+    async def place(self, order: PlaceOrder) -> None:
+        raise AssertionError("the materialisation walk never places")
+
+    async def cancel(self, cloid: str) -> None:
+        raise AssertionError("the materialisation walk never cancels")
 
     async def fetch_order(self, cloid: str) -> VenueOrderView | None:
         return VenueOrderView(status=None)
@@ -316,6 +330,29 @@ def _drive_position_changed() -> None:
         await bus.publish(_tick("42000"))
         await bus.publish(_market_signal())
         await bus.publish(_market_signal(seq=2))
+
+    asyncio.run(go())
+
+
+def _drive_account_materialised() -> None:
+    """A live first start: the startup barrier reads the venue account and
+    creates the ledger's row from it (ADR-0042 §6, ADR-0043 §6). The venue
+    declares no genesis — the live shape — so the row does not exist until the
+    barrier makes it."""
+
+    async def go() -> None:
+        bus = InMemoryBus()
+        clock = ManualClock()
+        engine = Engine(
+            bus=bus,
+            clock=clock,
+            store=SQLiteStore(":memory:"),
+            exchange=_LiveShapedVenue(),
+            feed=_IdleFeed(),
+        )
+        run = asyncio.create_task(engine.run())
+        await engine.stop()
+        assert await run == 0
 
     asyncio.run(go())
 
@@ -686,6 +723,7 @@ SCENARIOS: dict[NamedEvent, Callable[[], None]] = {
     NamedEvent.POSITION_OPENED: _drive_position_changes(closing=False),
     NamedEvent.POSITION_CHANGED: _drive_position_changed,
     NamedEvent.POSITION_CLOSED: _drive_position_changes(closing=True),
+    NamedEvent.ACCOUNT_MATERIALISED: _drive_account_materialised,
     NamedEvent.FEED_LAGGED: _drive_feed_lagged,
     NamedEvent.FEED_FRAME_DROPPED: _drive_feed_frame_dropped,
     NamedEvent.ENGINE_BARRIER_CLEARED: _drive_engine_lifecycle,

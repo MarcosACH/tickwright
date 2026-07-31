@@ -29,7 +29,12 @@ Consumed by `/code-review` (any regression is BLOCKING) and `/python-codebase-ma
    `venues/hyperliquid/reading.py` (`figure`, plus the `UNREADABLE` vocabulary every grain of
    that venue catches). Paper's `None` is its permanent answer,
    because it holds no account state at all, so a cadence mistakenly pointed at it freezes
-   rather than healing a restored ledger to flat.* (ADR-0011, ADR-0034)
+   rather than healing a restored ledger to flat. At the **startup barrier** the same `None`
+   costs more than a frozen cycle: the live-only account materialisation retries inside the one
+   startup budget and then **faults** the process, because clearing the barrier with no account
+   row is the state that step exists to prevent — freeze-don't-guess applied to the cash line,
+   and what keeps ADR-0041 §6's "`cash` is never `None`" true rather than merely intended.*
+   (ADR-0011, ADR-0034, ADR-0043 §6)
 4. **Rejections are explicit events.** A placed-but-rejected order surfaces as its taxonomy
    terminal (`DENIED` / `REJECTED` / `FAILED`), propagated as an event — never a silent
    `return None`. (ADR-0010)

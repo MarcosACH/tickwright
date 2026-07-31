@@ -29,9 +29,14 @@ SPEC = AccountSpec(account_id="paper-default", genesis_collateral=GENESIS)
 """The paper-shaped account every case here opens against — declared genesis, so
 ``recover`` seeds rather than waits for a venue to report one (ADR-0043 §10)."""
 
+LIVE_SPEC = AccountSpec(account_id="hyperliquid-testnet-0xabc", genesis_collateral=None)
+"""The ingested shape (ADR-0042 §6), for the one case below whose subject is a
+ledger the seed deliberately leaves unopened. Three segments against paper's two,
+so a row written under one is never confusable with the other's."""
 
-def _checkpointer(store: SQLiteStore) -> Checkpointer:
-    return Checkpointer(spec=SPEC, store=store, clock=ManualClock(start_ns=1_000))
+
+def _checkpointer(store: SQLiteStore, *, spec: AccountSpec = SPEC) -> Checkpointer:
+    return Checkpointer(spec=spec, store=store, clock=ManualClock(start_ns=1_000))
 
 
 def _submitted_order(*, quantity: str = "0.5") -> Order:
@@ -93,6 +98,36 @@ def test_a_fill_moves_the_one_store_and_both_read_models_together() -> None:
     position = checkpointer.portfolio.position("BTC", strategy_id="trivial")
     assert position is not None
     assert position.size == Decimal("0.5")
+
+
+def test_a_fill_opens_the_durable_ledger_and_the_projection_says_so() -> None:
+    """A fill's write is a **third** way the account row comes into being, beside
+    paper's genesis seed and live's materialisation — ``account`` is required on
+    ``checkpoint_ledger`` because every mutation moves cash (ADR-0043 §9).
+
+    So "is the ledger open?" is a question about the *row*, whoever wrote it
+    (ADR-0043 §6: the barrier reads the venue "solely to create the row when
+    absent"), and this is the writer that does not go through either opener. The
+    whole ordering rationale for the barrier's two steps rests on the fallback
+    being real — a rebuild that ran first would create the row, and the
+    materialisation behind it *declines to overwrite* rather than resetting the
+    cash line a fill just moved. A predicate that missed this writer would answer
+    "not open" against a populated row and make that fallback a fiction.
+
+    Live-shaped on purpose: paper's row exists from ``recover()`` onward, so it
+    is the ingested shape that can reach a fill with no row yet at all.
+    """
+    store = SQLiteStore(":memory:")
+    checkpointer = _checkpointer(store, spec=LIVE_SPEC)
+    checkpointer.recover()
+    assert checkpointer.portfolio.is_opened() is False  # live seeds nothing
+    order = _submitted_order()
+    event = _fill(order, trade_id="f1", quantity="0.5")
+
+    checkpointer.checkpoint_fill(order, event, side=order.side)
+
+    assert store.load_account() is not None
+    assert checkpointer.portfolio.is_opened() is True
 
 
 def test_a_non_fill_transition_writes_the_order_row_and_no_ledger_row() -> None:

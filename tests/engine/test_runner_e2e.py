@@ -19,7 +19,14 @@ from pathlib import Path
 from kafka_fakes import FakeKafkaBroker
 from ledgers import GENESIS
 from structlog.typing import EventDict
-from venue_doubles import VenueDouble
+from venue_doubles import (
+    DERIVED_GENESIS,
+    DERIVED_STATE,
+    LIVE_ACCOUNT_ID,
+    LiveVenueDouble,
+    VenueDouble,
+    account_state,
+)
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.bus.kafka import KafkaBus
@@ -29,8 +36,9 @@ from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     Account,
-    AccountSpec,
     ComponentState,
+    Exchange,
+    FillReport,
     InstrumentSpec,
     InvariantViolation,
     MarketTick,
@@ -43,8 +51,10 @@ from tickwright.domain import (
     OrderType,
     PlaceOrder,
     PlaceSignal,
+    Portfolio,
     Side,
     TimeInForce,
+    VenueAccountState,
     VenueOrderView,
     derive_cloid,
 )
@@ -188,16 +198,28 @@ def test_a_strategy_reads_back_the_fill_the_engine_wrote(tmp_path: Path) -> None
     ]
 
 
-class _LiveShapedVenue(VenueDouble):
-    """A venue whose genesis is *ingested*, not declared — the live shape.
+_LIVE_CLOID = "0xlive"
+_NO_RECORD = VenueOrderView(status=None)
 
-    The one member that matters here is ``account_spec()``; the rest is the
-    inherited paper ceremony, because what this double is for is the declaration
-    the engine opens its ledger from, not how it trades.
+
+class _LiveShapedVenue(LiveVenueDouble):
+    """A live-shaped venue that also answers the barrier's order reads.
+
+    The account half — the ingested-genesis declaration and the account read
+    itself — is the shared ceremony. What this adds is ``view``: what the
+    mass-rebuild finds for a surviving saga, so a case can put a fill *inside*
+    the barrier, which is where the ordering against the materialisation is
+    decided.
     """
 
-    def account_spec(self) -> AccountSpec:
-        return AccountSpec(account_id="hyperliquid-testnet-0xabc", genesis_collateral=None)
+    def __init__(
+        self,
+        *,
+        state: VenueAccountState | None = DERIVED_STATE,
+        view: VenueOrderView | None = _NO_RECORD,
+    ) -> None:
+        super().__init__(state=state)
+        self._view = view
 
     async def place(self, order: PlaceOrder) -> None:
         raise AssertionError("nothing is placed: no strategy is registered")
@@ -206,22 +228,23 @@ class _LiveShapedVenue(VenueDouble):
         raise AssertionError("nothing is cancelled: no order exists")
 
     async def fetch_order(self, cloid: str) -> VenueOrderView | None:
-        return None
+        return self._view
 
 
-def test_an_engine_over_a_live_shaped_account_constructs_and_seeds_nothing(
+def _live_run(
     tmp_path: Path,
-) -> None:
-    """An ingested genesis is still an engine (ADR-0043 §10): the ledger opens
-    at the zero ``Account.open`` resolves ``None`` to, and startup writes no row.
+    store: SQLiteStore,
+    venue: Exchange,
+    *,
+    opening_cash: Decimal = Decimal("0"),
+) -> int:
+    """One supervised life of a strategy-less engine over ``venue``.
 
-    The seed is paper-only on purpose — on live the opening balance is read at
-    the startup barrier, so seeding here would persist a zero as though someone
-    had chosen it. Worth holding at the *engine* seam now that the engine is
-    what reads the spec: nothing between the venue's declaration and the ledger
-    is left for a caller to get right or wrong.
+    ``opening_cash`` is what the ledger reads *before* the barrier: zero on
+    live, where ``Account.open`` resolves a ``None`` genesis and the real number
+    has not been read yet, and the declared genesis on paper, where it has been
+    in hand since composition.
     """
-    store = SQLiteStore(tmp_path / "saga.db")
 
     async def one_life() -> int:
         bus = InMemoryBus()
@@ -230,19 +253,282 @@ def test_an_engine_over_a_live_shaped_account_constructs_and_seeds_nothing(
             bus=bus,
             clock=clock,
             store=store,
-            exchange=_LiveShapedVenue(),
+            exchange=venue,
             feed=ReplayFeed(path=_write_ticks(tmp_path / "ticks.jsonl"), bus=bus, clock=clock),
         )
-        assert engine.portfolio_for("live").account().cash == Decimal("0")
+        # Never ``None``, which ADR-0041 §6 forbids — and on live never a number
+        # anybody chose either: the zero ``Account.open`` resolves is what an
+        # *unstarted* live ledger reports, not a collateral default.
+        assert engine.portfolio_for("live").account().cash == opening_cash
         run = asyncio.create_task(engine.run())
         await engine.stop()
         return await run
 
-    assert asyncio.run(one_life()) == 0
+    return asyncio.run(one_life())
+
+
+def test_a_live_first_start_materialises_its_account_row_at_the_barrier(
+    tmp_path: Path,
+) -> None:
+    """A live run's account row exists before any strategy starts (ADR-0043 §6).
+
+    Paper declares its genesis and live derives one; the two reach the same
+    populated row by different routes, and neither ever starts against a row
+    that does not exist. 25.9604 is the recorded cross snapshot's own arithmetic
+    — ``accountValue`` 25.9264 net of an unrealized −0.034 — not this engine's
+    restated.
+    """
+    store = SQLiteStore(tmp_path / "saga.db")
+    venue = _LiveShapedVenue()
+
+    assert _live_run(tmp_path, store, venue) == 0
+
+    assert venue.account_reads == 1  # read once, to create the row it lacked
+    reopened = SQLiteStore(tmp_path / "saga.db")
+    try:
+        row = reopened.load_account()
+        assert row is not None
+        assert row.account_id == LIVE_ACCOUNT_ID
+        assert row.genesis_collateral == DERIVED_GENESIS
+        assert row.cash == DERIVED_GENESIS
+    finally:
+        reopened.close()
+
+
+class _AccountReadingStrategy:
+    """A strategy that does nothing but read its cash line on the first tick —
+    the reader ADR-0041 §6's "``cash`` is Tier-1, never ``None``" is a promise to."""
+
+    def __init__(self, portfolio: Portfolio) -> None:
+        self.strategy_id = "live"
+        self._portfolio = portfolio
+        self.first_read: Decimal | None = None
+        self.read = asyncio.Event()
+
+    async def on_tick(self, tick: MarketTick) -> None:
+        if self.first_read is None:
+            self.first_read = self._portfolio.account().cash
+            self.read.set()
+
+    async def on_order_event(self, event: OrderEvent) -> None:
+        return None
+
+    def set_next_seq(self, next_seq: int) -> None:
+        return None
+
+    def snapshot(self) -> bytes:
+        return b""
+
+    def restore(self, data: bytes) -> None:
+        return None
+
+
+def test_a_strategys_first_account_read_on_a_live_start_is_the_derived_one(
+    tmp_path: Path,
+) -> None:
+    """The whole point of materialising at the *barrier* (ADR-0043 §6).
+
+    Strategies start one step behind the barrier and the feed one behind them,
+    so the earliest a strategy can read anything is already past the
+    materialisation — which is why a first reader sees the venue's number and
+    never the zero an unstarted live ledger reports, and never a missing
+    account. Put the same write on a cadence instead and this read is the one
+    that breaks.
+    """
+
+    async def one_life() -> Decimal | None:
+        bus = InMemoryBus()
+        clock = ManualClock()
+        engine = Engine(
+            bus=bus,
+            clock=clock,
+            store=SQLiteStore(tmp_path / "saga.db"),
+            exchange=_LiveShapedVenue(),
+            feed=ReplayFeed(path=_write_ticks(tmp_path / "ticks.jsonl"), bus=bus, clock=clock),
+        )
+        strategy = _AccountReadingStrategy(engine.portfolio_for("live"))
+        engine.register(strategy, symbols={"BTC"})
+
+        run = asyncio.create_task(engine.run())
+        await asyncio.wait_for(strategy.read.wait(), timeout=5)
+        await engine.stop()
+        assert await run == 0
+        return strategy.first_read
+
+    assert asyncio.run(one_life()) == DERIVED_GENESIS
+
+
+def test_the_derived_genesis_is_named_in_the_trail(tmp_path: Path) -> None:
+    """Every component state change emits a named event (ADR-0020), and this one
+    earns it more than most: the number is derived once, from a venue response
+    nobody kept, and then stands for the life of the ledger. Nothing
+    cross-checks it afterwards — live genesis is provenance only — so the record
+    of *what was read* is the only account an operator will ever get of where
+    the opening balance came from.
+    """
+    store = SQLiteStore(tmp_path / "saga.db")
+
+    with capture_events() as logs:
+        assert _live_run(tmp_path, store, _LiveShapedVenue()) == 0
+
+    materialised = [log for log in logs if log["event"] == "account.materialised"]
+    assert len(materialised) == 1
+    assert materialised[0]["account_id"] == LIVE_ACCOUNT_ID
+    assert materialised[0]["genesis_collateral"] == "25.9604"
+    assert materialised[0]["run_id"]  # inside the run's correlation (ADR-0020)
+
+
+class _PaperShapedVenue(VenueDouble):
+    """The paper declaration, over a venue account read that must never happen."""
+
+    async def fetch_account_state(self) -> VenueAccountState | None:
+        raise AssertionError("paper has no account truth: the barrier must not ask for one")
+
+    async def place(self, order: PlaceOrder) -> None:
+        raise AssertionError("nothing is placed: no strategy is registered")
+
+    async def cancel(self, cloid: str) -> None:
+        raise AssertionError("nothing is cancelled: no order exists")
+
+    async def fetch_order(self, cloid: str) -> VenueOrderView | None:
+        return _NO_RECORD
+
+
+def test_a_paper_start_performs_no_venue_account_read_at_the_barrier(
+    tmp_path: Path,
+) -> None:
+    """The materialisation is live-only, and what makes it so is the row rather
+    than a venue-kind flag (ADR-0043 §6): paper's genesis was seeded three steps
+    earlier inside ``recover()``, from a config value already in hand, so by the
+    time the barrier runs there is nothing left to create.
+
+    Asserted as a refusal rather than a call count: ``PaperExchange`` answers
+    ``None`` to this read by construction — the fail-closed value — so a
+    materialisation that asked anyway would freeze the barrier and fault the
+    default path on a venue that has nothing to say. The double raises instead,
+    which is the same mistake made loud.
+    """
+    store = SQLiteStore(tmp_path / "saga.db")
+
+    assert _live_run(tmp_path, store, _PaperShapedVenue(), opening_cash=GENESIS) == 0
 
     reopened = SQLiteStore(tmp_path / "saga.db")
     try:
-        assert reopened.load_account() is None
+        row = reopened.load_account()
+        assert row is not None
+        assert row.account_id == "paper-default"
+        assert row.genesis_collateral == GENESIS
+    finally:
+        reopened.close()
+
+
+def test_a_live_restart_neither_re_derives_nor_overwrites_the_recorded_genesis(
+    tmp_path: Path,
+) -> None:
+    """Genesis is written once (ADR-0042 §3), and on live nothing could ever
+    catch a second write: the value is *provenance only* — there is no
+    configured counterpart to check it against, so #188's genesis refusal is
+    paper-only by ADR-0043 §10's predicate.
+
+    The second life is handed a venue whose equity has moved (a deposit, or the
+    same position marked differently), which is exactly the legitimate change
+    that must **not** rewrite the opening declaration. The read is skipped
+    outright rather than made and discarded: the row's existence is the
+    predicate, so a restart owes the venue nothing at this step.
+    """
+    db = tmp_path / "saga.db"
+    assert _live_run(tmp_path, SQLiteStore(db), _LiveShapedVenue()) == 0
+
+    # A second life over the store the first one left behind — its graceful stop
+    # closed the handle, exactly as a restart would.
+    moved = _LiveShapedVenue(state=account_state("99999", "-0.034"))
+    assert _live_run(tmp_path, SQLiteStore(db), moved) == 0
+
+    assert moved.account_reads == 0
+    reopened = SQLiteStore(tmp_path / "saga.db")
+    try:
+        row = reopened.load_account()
+        assert row is not None
+        assert row.genesis_collateral == DERIVED_GENESIS  # the first life's
+        assert row.cash == DERIVED_GENESIS
+    finally:
+        reopened.close()
+
+
+def test_an_account_read_that_never_answers_faults_rather_than_clearing(
+    tmp_path: Path,
+) -> None:
+    """The barrier is never cleared on an assumed-flat account (ADR-0043 §6).
+
+    A ``clearinghouseState`` that will not answer exhausts the same
+    ``startup_reconciliation_timeout`` budget the mass-rebuild spends and then
+    faults, for the supervisor to backoff-restart. The alternative — starting
+    anyway — is the one outcome this step exists to prevent: strategies running
+    against a ledger with no account row at all, which is also the fabricated
+    flat ADR-0034 forbids.
+    """
+    store = SQLiteStore(tmp_path / "saga.db")
+    venue = _LiveShapedVenue(state=None)
+
+    assert _live_run(tmp_path, store, venue) == 1  # FAULTED → non-zero exit
+
+    assert venue.account_reads > 1, "the budget must be retried, not spent on one read"
+    reopened = SQLiteStore(tmp_path / "saga.db")
+    try:
+        assert reopened.load_account() is None  # nothing guessed in the meantime
+    finally:
+        reopened.close()
+
+
+def test_a_barrier_fill_lands_on_the_materialised_row_not_a_zero_one(
+    tmp_path: Path,
+) -> None:
+    """The materialisation is ordered *before* the mass-rebuild, not merely
+    inside the same barrier (ADR-0043 §6).
+
+    The rebuild emits synthetic fills; every fill routes through the atomic
+    ledger write, and that write carries the account row because ADR-0043 §9
+    makes ``account`` required — every mutation moves cash. So a rebuild that
+    ran first would **create** the live row itself, at the zero ``Account.open``
+    resolves a ``None`` genesis to; the materialisation behind it would decline
+    to overwrite a non-``None`` row, and that zero would stand for the life of
+    the ledger with nothing to refuse it — #188's genesis comparison is
+    paper-only by ADR-0043 §10's predicate.
+
+    The fill is an opening one at zero fees, so it realizes nothing: the cash
+    line is the derived genesis either way, and only ``genesis_collateral``
+    tells the two orderings apart.
+    """
+    store = SQLiteStore(tmp_path / "saga.db")
+    store.checkpoint(_submitted_saga(_LIVE_CLOID), ts_ns=500)
+    venue = _LiveShapedVenue(
+        view=VenueOrderView(
+            status=None,
+            fills=(
+                FillReport(
+                    ts_event=900,
+                    ts_init=900,
+                    cloid=_LIVE_CLOID,
+                    symbol="BTC",
+                    trade_id="t-1",
+                    quantity=Decimal("0.002"),
+                    price=Decimal("64809"),
+                ),
+            ),
+        )
+    )
+
+    assert _live_run(tmp_path, store, venue) == 0
+
+    reopened = SQLiteStore(tmp_path / "saga.db")
+    try:
+        healed = reopened.get_order(_LIVE_CLOID)
+        assert healed is not None
+        assert healed.cum_qty == Decimal("0.002"), "the barrier must reconcile a fill to bite"
+        row = reopened.load_account()
+        assert row is not None
+        assert row.genesis_collateral == DERIVED_GENESIS  # derived, never the fill's zero
+        assert row.cash == DERIVED_GENESIS
     finally:
         reopened.close()
 

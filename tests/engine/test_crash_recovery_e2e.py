@@ -53,6 +53,7 @@ from tickwright.domain import (
     VenueOrderView,
     derive_cloid,
 )
+from tickwright.engine.barrier import StartupBarrier
 from tickwright.engine.execution import ExecutionManager
 from tickwright.engine.reconcile import ReconcileConfig, Reconciler
 from tickwright.strategies import SingleShotLimitStrategy
@@ -231,7 +232,9 @@ def test_post_send_kill_recovers_the_landed_order_and_its_fill(
     asyncio.run(venue.on_tick(_crossing_tick()))
 
     bus, reconciler, events, store = _second_life(store_backend, venue, clock)
-    asyncio.run(reconciler.run_startup_barrier(timeout_seconds=30.0))
+    asyncio.run(
+        StartupBarrier(clock=clock, steps=(reconciler.reconcile_startup,)).run(timeout_seconds=30.0)
+    )
 
     # No lost fill: the saga converged on the venue's executed truth.
     recovered = store.get_order(_CLOID)
@@ -256,7 +259,9 @@ def test_pre_send_kill_resolves_the_unlanded_intent_failed_never_resent(
     venue, clock = _first_life(tmp_path, store_backend, pre_send=True)
 
     bus, reconciler, events, store = _second_life(store_backend, venue, clock)
-    asyncio.run(reconciler.run_startup_barrier(timeout_seconds=30.0))
+    asyncio.run(
+        StartupBarrier(clock=clock, steps=(reconciler.reconcile_startup,)).run(timeout_seconds=30.0)
+    )
 
     # The venue never saw the cloid: proven never-landed → FAILED (ADR-0010).
     recovered = store.get_order(_CLOID)

@@ -38,6 +38,7 @@ from tickwright.domain import (
     TimeInForce,
     VenueOrderView,
 )
+from tickwright.engine.barrier import StartupBarrier
 from tickwright.engine.cache import Cache
 from tickwright.engine.execution import ExecutionManager
 from tickwright.engine.reconcile import ReconcileConfig, Reconciler
@@ -117,6 +118,18 @@ def _second_life(
 
 async def _record(sink: list[OrderEvent], event: OrderEvent) -> None:
     sink.append(event)
+
+
+def _barrier(clock: ManualClock, reconciler: Reconciler) -> StartupBarrier:
+    """The gate as the runner composes it here — the mass-rebuild alone.
+
+    The runner's own sequence orders a live-only account materialisation ahead
+    of this step (ADR-0043 §6); this suite's venue is paper, whose account row
+    exists before the barrier ever runs, so the step is a no-op and what is left
+    is the rebuild under the gate's retry policy (``tests/engine/test_barrier.py``
+    holds the policy itself, and ``test_runner_e2e.py`` the composed order).
+    """
+    return StartupBarrier(clock=clock, steps=(reconciler.reconcile_startup,))
 
 
 def test_recovered_submitted_saga_adopts_the_venue_live_state() -> None:
@@ -305,7 +318,7 @@ def test_sustained_venue_outage_trips_the_barrier_to_faulted_after_the_window() 
 
     with capture_events() as logs:
         with pytest.raises(StartupReconciliationTimeout):
-            asyncio.run(reconciler.run_startup_barrier(timeout_seconds=30.0))
+            asyncio.run(_barrier(clock, reconciler).run(timeout_seconds=30.0))
 
     # Bounded retry with backoff: several attempts, never a tight loop.
     assert 3 <= venue.reads <= 10
@@ -338,7 +351,9 @@ def test_backoff_is_capped_so_faulting_never_overshoots_the_window_by_much() -> 
     )
 
     with pytest.raises(StartupReconciliationTimeout):
-        asyncio.run(reconciler.run_startup_barrier(timeout_seconds=300.0, max_backoff_seconds=30.0))
+        asyncio.run(
+            _barrier(clock, reconciler).run(timeout_seconds=300.0, max_backoff_seconds=30.0)
+        )
 
     # Fault lands within one capped backoff of the deadline — not ~2x the window.
     faulted_at_seconds = clock.timestamp_ns() / 1_000_000_000
@@ -379,7 +394,7 @@ def test_a_transient_boot_time_blip_resolves_and_the_barrier_clears() -> None:
         bus=bus, clock=clock, exchange=venue, cache=cache, config=ReconcileConfig()
     )
 
-    asyncio.run(reconciler.run_startup_barrier(timeout_seconds=30.0))
+    asyncio.run(_barrier(clock, reconciler).run(timeout_seconds=30.0))
 
     # The retry absorbed the blip; the pass then resolved the saga normally.
     assert venue.reads == 3
@@ -402,7 +417,7 @@ def test_on_the_paper_path_the_barrier_always_clears() -> None:
     _, _, reconciler, _ = _second_life(store, exchange, clock)
 
     before_ns = clock.timestamp_ns()
-    asyncio.run(reconciler.run_startup_barrier(timeout_seconds=30.0))
+    asyncio.run(_barrier(clock, reconciler).run(timeout_seconds=30.0))
 
     # In-process reads cannot fail (ADR-0024): one pass, no backoff burned.
     assert clock.timestamp_ns() == before_ns

@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 from ledgers import book_fill
+from venue_doubles import account_state
 
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.store import SQLiteStore
@@ -58,7 +59,9 @@ def _projection(
     is the *live* shape, where the opening value is ingested from the venue
     rather than declared (ADR-0042 §6) and is the predicate recovery reads."""
     spec = AccountSpec(
-        account_id="paper-default",
+        # Two segments on paper against live's three (ADR-0038/0042 §5), so a
+        # row written by one shape is never confusable with the other's.
+        account_id="paper-default" if genesis is not None else "hyperliquid-testnet-0xabc",
         genesis_collateral=Decimal(genesis) if genesis is not None else None,
     )
     return PortfolioProjection(
@@ -416,3 +419,62 @@ def test_a_live_start_against_an_empty_store_seeds_nothing() -> None:
     _projection(None, store=store).recover()
 
     assert store.load_account() is None
+
+
+def test_a_live_ledger_materialises_at_the_figures_the_venue_reported() -> None:
+    """The other half of the seed's absence: the live row is *materialised* from
+    the venue's own account read at the startup barrier (ADR-0043 §6).
+
+    The write is the same ``checkpoint_ledger(account=…)`` paper's genesis takes,
+    and it lands for the same reason — so that ``account()`` has a cash line
+    before a strategy is ever let near one — but the number comes from the venue
+    rather than from config, which is why it cannot be written three steps
+    earlier where paper's is.
+    """
+    store = SQLiteStore(":memory:")
+    projection = _projection(None, store=store)
+    projection.recover()
+    assert projection.is_opened() is False  # nothing restored, and live seeds nothing
+
+    projection.materialise(account_state("25.9264", "-0.034"))
+
+    assert projection.is_opened() is True
+    assert projection.account().cash == Decimal("25.9604")
+    row = store.load_account()
+    assert row is not None
+    assert row.account_id == "hyperliquid-testnet-0xabc"
+    assert row.genesis_collateral == Decimal("25.9604")
+    assert row.cash == Decimal("25.9604")
+    assert row.genesis_ts_ns == 7  # the run's clock, not the venue's own stamp
+
+
+def test_a_second_materialisation_is_refused_rather_than_moving_the_genesis() -> None:
+    """Genesis is written once (ADR-0042 §3), and the verb that would corrupt it
+    is where that rule is stated (ADR-0047 §1).
+
+    On live nothing could ever catch a second write after the fact: the value is
+    *provenance only* — there is no configured counterpart to compare it against,
+    so #188's genesis refusal is paper-only by ADR-0043 §10's predicate. The
+    barrier's caller skips this verb on a ledger that is already open, but that
+    check answers a different question — "do I owe the venue a read?" — and a
+    rule enforced only by the one caller that exists today is a rule the next
+    caller inherits nothing from. The equity handed in here has moved, which is
+    exactly the legitimate change (a deposit, or the same position marked
+    differently) that must not rewrite an opening declaration.
+    """
+    store = SQLiteStore(":memory:")
+    projection = _projection(None, store=store)
+    projection.recover()
+    projection.materialise(account_state("25.9264", "-0.034"))
+
+    with pytest.raises(InvariantViolation):
+        projection.materialise(account_state("99999", "-0.034"))
+
+    # Neither half moved: the refusal lands ahead of the in-memory assignment, so
+    # a caught violation cannot leave the ledger reporting a cash line the store
+    # never recorded. ``cash`` is what a reader would see move — ``Account.ingest``
+    # opens the line *at* genesis, so a second one resets it too.
+    assert projection.account().cash == Decimal("25.9604")
+    row = store.load_account()
+    assert row is not None
+    assert row.genesis_collateral == Decimal("25.9604")
