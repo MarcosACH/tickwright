@@ -286,6 +286,13 @@ class Engine:
         the venue never answered for is not an available outcome: that is
         ADR-0011's freeze-don't-guess applied to the cash line, and what keeps
         ADR-0041 §6's "``cash`` is never ``None``" true rather than intended.
+
+        The write itself is the projection's rather than a ``Checkpointer``
+        verb, for the same reason paper's genesis seed is: the ``Checkpointer``
+        owns the orderings a caller could silently invert — fold before write
+        before project, ledger before order cache — and opening a ledger is one
+        write to one read-model with no ordering inside it. The ordering that
+        *does* matter here is the barrier's, and it is right above.
         """
         portfolio = self._checkpointer.portfolio
         if portfolio.is_opened:

@@ -20,14 +20,13 @@ import pytest
 from hyperliquid_fakes import FakeExchangeApi, FakeWsConnection, trade, trades_frame
 from ledgers import GENESIS, checkpointer
 from pydantic import SecretStr
-from venue_doubles import VenueDouble, account_state
+from venue_doubles import LiveVenueDouble, VenueDouble
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
-    AccountSpec,
     AggressorSide,
     Exchange,
     ExecutionReport,
@@ -44,7 +43,6 @@ from tickwright.domain import (
     PreTradeGuard,
     Side,
     Signal,
-    VenueAccountState,
     VenueOrderView,
     derive_cloid,
 )
@@ -162,15 +160,9 @@ class _ForgetfulVenue(VenueDouble):
         return VenueOrderView(status=None)
 
 
-class _LiveShapedVenue(VenueDouble):
-    """A venue whose genesis is *ingested* rather than declared, answering the
-    account read the live startup barrier makes."""
-
-    def account_spec(self) -> AccountSpec:
-        return AccountSpec(account_id="hyperliquid-testnet-0xabc", genesis_collateral=None)
-
-    async def fetch_account_state(self) -> VenueAccountState | None:
-        return account_state("25.9264", "-0.034")
+class _LiveShapedVenue(LiveVenueDouble):
+    """A venue whose genesis is *ingested* rather than declared — so the startup
+    barrier has an account row to create, and reads this venue to do it."""
 
     async def place(self, order: PlaceOrder) -> None:
         raise AssertionError("the materialisation walk never places")

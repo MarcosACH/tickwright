@@ -19,7 +19,14 @@ from pathlib import Path
 from kafka_fakes import FakeKafkaBroker
 from ledgers import GENESIS
 from structlog.typing import EventDict
-from venue_doubles import VenueDouble, account_state
+from venue_doubles import (
+    DERIVED_GENESIS,
+    DERIVED_STATE,
+    LIVE_ACCOUNT_ID,
+    LiveVenueDouble,
+    VenueDouble,
+    account_state,
+)
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.bus.kafka import KafkaBus
@@ -29,7 +36,6 @@ from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     Account,
-    AccountSpec,
     ComponentState,
     Exchange,
     FillReport,
@@ -192,41 +198,27 @@ def test_a_strategy_reads_back_the_fill_the_engine_wrote(tmp_path: Path) -> None
 
 
 _LIVE_CLOID = "0xlive"
-
-# The venue's answers when a test says nothing about them. Both are defaults
-# rather than fallbacks inside ``__init__``: ``None`` is a *meaning* on both
-# members — a failed account read, a venue with no record — so a double that
-# resolved it back to the healthy answer could never model an outage.
-_DERIVED_STATE = account_state("25.9264", "-0.034")
 _NO_RECORD = VenueOrderView(status=None)
 
 
-class _LiveShapedVenue(VenueDouble):
-    """A venue whose genesis is *ingested*, not declared — the live shape.
+class _LiveShapedVenue(LiveVenueDouble):
+    """A live-shaped venue that also answers the barrier's order reads.
 
-    Two members carry the meaning: ``account_spec()``, the declaration the
-    engine opens its ledger from, and ``fetch_account_state()``, the read the
-    startup barrier materialises that ledger from. ``view`` is what the barrier's
-    mass-rebuild finds for a surviving saga, so a test can put a fill inside the
-    barrier where the ordering against the materialisation is decided.
+    The account half — the ingested-genesis declaration and the account read
+    itself — is the shared ceremony. What this adds is ``view``: what the
+    mass-rebuild finds for a surviving saga, so a case can put a fill *inside*
+    the barrier, which is where the ordering against the materialisation is
+    decided.
     """
 
     def __init__(
         self,
         *,
-        state: VenueAccountState | None = _DERIVED_STATE,
+        state: VenueAccountState | None = DERIVED_STATE,
         view: VenueOrderView | None = _NO_RECORD,
     ) -> None:
-        self.account_reads = 0
-        self._state = state
+        super().__init__(state=state)
         self._view = view
-
-    def account_spec(self) -> AccountSpec:
-        return AccountSpec(account_id="hyperliquid-testnet-0xabc", genesis_collateral=None)
-
-    async def fetch_account_state(self) -> VenueAccountState | None:
-        self.account_reads += 1
-        return self._state
 
     async def place(self, order: PlaceOrder) -> None:
         raise AssertionError("nothing is placed: no strategy is registered")
@@ -295,9 +287,9 @@ def test_a_live_first_start_materialises_its_account_row_at_the_barrier(
     try:
         row = reopened.load_account()
         assert row is not None
-        assert row.account_id == "hyperliquid-testnet-0xabc"
-        assert row.genesis_collateral == Decimal("25.9604")
-        assert row.cash == Decimal("25.9604")
+        assert row.account_id == LIVE_ACCOUNT_ID
+        assert row.genesis_collateral == DERIVED_GENESIS
+        assert row.cash == DERIVED_GENESIS
     finally:
         reopened.close()
 
@@ -317,7 +309,7 @@ def test_the_derived_genesis_is_named_in_the_trail(tmp_path: Path) -> None:
 
     materialised = [log for log in logs if log["event"] == "account.materialised"]
     assert len(materialised) == 1
-    assert materialised[0]["account_id"] == "hyperliquid-testnet-0xabc"
+    assert materialised[0]["account_id"] == LIVE_ACCOUNT_ID
     assert materialised[0]["genesis_collateral"] == "25.9604"
     assert materialised[0]["run_id"]  # inside the run's correlation (ADR-0020)
 
@@ -393,8 +385,8 @@ def test_a_live_restart_neither_re_derives_nor_overwrites_the_recorded_genesis(
     try:
         row = reopened.load_account()
         assert row is not None
-        assert row.genesis_collateral == Decimal("25.9604")  # the first life's
-        assert row.cash == Decimal("25.9604")
+        assert row.genesis_collateral == DERIVED_GENESIS  # the first life's
+        assert row.cash == DERIVED_GENESIS
     finally:
         reopened.close()
 
@@ -471,8 +463,8 @@ def test_a_barrier_fill_lands_on_the_materialised_row_not_a_zero_one(
         assert healed.cum_qty == Decimal("0.002"), "the barrier must reconcile a fill to bite"
         row = reopened.load_account()
         assert row is not None
-        assert row.genesis_collateral == Decimal("25.9604")  # derived, never the fill's zero
-        assert row.cash == Decimal("25.9604")
+        assert row.genesis_collateral == DERIVED_GENESIS  # derived, never the fill's zero
+        assert row.cash == DERIVED_GENESIS
     finally:
         reopened.close()
 

@@ -105,6 +105,49 @@ class VenueDouble:
         return {}
 
 
+DERIVED_STATE = account_state("25.9264", "-0.034")
+"""The healthy account read a live double answers unless a case says otherwise."""
+
+LIVE_ACCOUNT_ID = "hyperliquid-testnet-0xabc"
+"""Three segments where paper's is two (ADR-0038/0042 §5), so a row written by
+one shape is never confusable with the other's."""
+
+DERIVED_GENESIS = Decimal("25.9604")
+"""What ``account_state``'s default figures imply: ``25.9264 − (−0.034)``, the
+venue's own arithmetic rather than the engine's restated (ADR-0042 §6)."""
+
+
+class LiveVenueDouble(VenueDouble):
+    """The same ceremony in the **live** shape: a genesis the venue reports.
+
+    ``VenueDouble`` declares the paper account — a genesis in hand and no
+    account truth to read — and that is the wrong shape for every case about the
+    startup barrier's materialisation, where the point is precisely that the
+    opening balance is *ingested* (ADR-0042 §6). The two members that say so
+    live here rather than in each suite; ``place``/``cancel``/``fetch_order``
+    still do not, because those carry each double's meaning.
+
+    ``state`` is what the venue answers the account read with, and ``None`` is a
+    **failed read** — the outage that must fault the barrier rather than clear
+    it — so it is a default rather than a fallback resolved inside ``__init__``:
+    a double that quietly swapped ``None`` for the healthy answer could not model
+    the case at all. ``account_reads`` is public because "how many times was the
+    venue asked" is the assertion for both a first start (once) and a restart
+    (never).
+    """
+
+    def __init__(self, *, state: VenueAccountState | None = DERIVED_STATE) -> None:
+        self.account_reads = 0
+        self._state = state
+
+    def account_spec(self) -> AccountSpec:
+        return AccountSpec(account_id=LIVE_ACCOUNT_ID, genesis_collateral=None)
+
+    async def fetch_account_state(self) -> VenueAccountState | None:
+        self.account_reads += 1
+        return self._state
+
+
 class VenueLink:
     """A link in front of a **real** venue, delegating the whole seam.
 
