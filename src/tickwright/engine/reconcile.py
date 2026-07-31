@@ -6,10 +6,9 @@ against venue truth by cloid **before anything can be placed** — as one step o
 the ``StartupBarrier``, which owns the retry-then-fault policy and the ordering
 against the account materialisation that precedes it (``barrier.py``).
 *Continuous*: two cycles thereafter — a fast in-flight check resolving
-``SUBMITTED`` orders that never acked, and a slower open-order/ghost reconcile in
-which only
-continuous absence across the grace window (with a fill-history cross-check on
-every read) resolves a resting order terminally. Each heal is a
+``SUBMITTED`` orders that never acked, and a slower open-order/ghost reconcile
+in which only continuous absence across the grace window (with a fill-history
+cross-check on every read) resolves a resting order terminally. Each heal is a
 ``reconciliation``-flagged synthetic replica of a raw venue fact, published on
 the bus and routed through the ``ExecutionManager`` — the one saga writer — so
 dedup by ``event_id`` and ``trade_id`` makes every pass idempotent: re-running
