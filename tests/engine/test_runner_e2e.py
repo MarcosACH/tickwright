@@ -51,6 +51,7 @@ from tickwright.domain import (
     OrderType,
     PlaceOrder,
     PlaceSignal,
+    Portfolio,
     Side,
     TimeInForce,
     VenueAccountState,
@@ -292,6 +293,69 @@ def test_a_live_first_start_materialises_its_account_row_at_the_barrier(
         assert row.cash == DERIVED_GENESIS
     finally:
         reopened.close()
+
+
+class _AccountReadingStrategy:
+    """A strategy that does nothing but read its cash line on the first tick —
+    the reader ADR-0041 §6's "``cash`` is Tier-1, never ``None``" is a promise to."""
+
+    def __init__(self, portfolio: Portfolio) -> None:
+        self.strategy_id = "live"
+        self._portfolio = portfolio
+        self.first_read: Decimal | None = None
+        self.read = asyncio.Event()
+
+    async def on_tick(self, tick: MarketTick) -> None:
+        if self.first_read is None:
+            self.first_read = self._portfolio.account().cash
+            self.read.set()
+
+    async def on_order_event(self, event: OrderEvent) -> None:
+        return None
+
+    def set_next_seq(self, next_seq: int) -> None:
+        return None
+
+    def snapshot(self) -> bytes:
+        return b""
+
+    def restore(self, data: bytes) -> None:
+        return None
+
+
+def test_a_strategys_first_account_read_on_a_live_start_is_the_derived_one(
+    tmp_path: Path,
+) -> None:
+    """The whole point of materialising at the *barrier* (ADR-0043 §6).
+
+    Strategies start one step behind the barrier and the feed one behind them,
+    so the earliest a strategy can read anything is already past the
+    materialisation — which is why a first reader sees the venue's number and
+    never the zero an unstarted live ledger reports, and never a missing
+    account. Put the same write on a cadence instead and this read is the one
+    that breaks.
+    """
+
+    async def one_life() -> Decimal | None:
+        bus = InMemoryBus()
+        clock = ManualClock()
+        engine = Engine(
+            bus=bus,
+            clock=clock,
+            store=SQLiteStore(tmp_path / "saga.db"),
+            exchange=_LiveShapedVenue(),
+            feed=ReplayFeed(path=_write_ticks(tmp_path / "ticks.jsonl"), bus=bus, clock=clock),
+        )
+        strategy = _AccountReadingStrategy(engine.portfolio_for("live"))
+        engine.register(strategy, symbols={"BTC"})
+
+        run = asyncio.create_task(engine.run())
+        await asyncio.wait_for(strategy.read.wait(), timeout=5)
+        await engine.stop()
+        assert await run == 0
+        return strategy.first_read
+
+    assert asyncio.run(one_life()) == DERIVED_GENESIS
 
 
 def test_the_derived_genesis_is_named_in_the_trail(tmp_path: Path) -> None:
