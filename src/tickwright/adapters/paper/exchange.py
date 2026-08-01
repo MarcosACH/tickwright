@@ -9,8 +9,12 @@ LIMIT semantics: a marketable order fills on arrival; ``post_only`` that would
 cross is rejected; an unfilled IOC is cancelled on receipt; a GTC rests (LIVE)
 until a later tick crosses it. ``cancel`` lifts a resting order off the book. It
 owns no saga — the ``ExecutionManager`` turns these raw facts into canonical
-``OrderEvent``s (ADR-0015). Frictionless in v1: price and quantity only, no
-fees/margin/PnL (ADR-0013).
+``OrderEvent``s (ADR-0015).
+
+It also stamps each fill's signed **fee**, the one economic figure it computes
+rather than observes: the matching semantics above already say which side
+provided liquidity, so the maker/taker bit is read off them and never configured
+(ADR-0036). Margin and PnL remain deferred (ADR-0013).
 """
 
 from collections.abc import Mapping
@@ -33,6 +37,7 @@ from tickwright.domain import (
     VenueAccountState,
     VenueOrderView,
     below_min_notional,
+    fill_fee,
 )
 
 from .book import RestingBook
@@ -109,21 +114,36 @@ class PaperExchange:
         # The book lifts a fully-filled order off itself, so a partial just stays.
         for order in self._book.resting():
             if order.symbol == tick.symbol and self._crosses(order, tick):
-                await self._fill_crossing_limit(order, tick)
+                # Off the book on a later tick: this order was the resting side,
+                # so it *made* liquidity (ADR-0036). ``post_only`` reaches a fill
+                # only down this path — one that would have crossed on arrival is
+                # already rejected — so its maker-only guarantee is structural
+                # here rather than a flag anyone has to re-read.
+                await self._fill_crossing_limit(order, tick, maker=True)
 
-    async def _fill_crossing_limit(self, order: PlaceOrder, tick: MarketTick) -> bool:
+    async def _fill_crossing_limit(
+        self, order: PlaceOrder, tick: MarketTick, *, maker: bool
+    ) -> bool:
         """Fill a crossing LIMIT per the model against its working remainder.
 
         Returns ``True`` once the order is fully filled. A ``None`` decision (a
         queue miss) or a partial returns ``False``; the book keeps the reduced
         remainder resting for a later tick. The order must already be on the
         book — the book caps the fill and lifts it off on completion.
+
+        ``maker`` rides in from the caller because this is the one path both
+        boundaries share and neither the order nor the book records which it
+        came down: an arrival that crosses took liquidity, a later tick lifting a
+        resting order provided it. The bit is consumed here and not stored — it
+        selects the rate, and no v1 consumer reads it back (ADR-0036).
         """
         fill = await self._fill_model.limit_fill(order, tick)
         if fill is None:
             return False  # queue miss (ADR-0012): nothing fills this tick.
         quantity, complete = self._book.apply_fill(order.cloid, fill.quantity)
-        await self._bus.publish(self._fill_report(order, Fill(quantity=quantity, price=fill.price)))
+        await self._bus.publish(
+            self._fill_report(order, Fill(quantity=quantity, price=fill.price), maker=maker)
+        )
         return complete
 
     async def place(self, order: PlaceOrder) -> None:
@@ -148,7 +168,9 @@ class PaperExchange:
             return
 
         fill = await self._fill_model.market_fill(order, tick)
-        await self._bus.publish(self._fill_report(order, fill))
+        # A MARKET fills on arrival against the price the venue already holds: it
+        # takes liquidity by definition, so there is no maker branch (ADR-0036).
+        await self._bus.publish(self._fill_report(order, fill, maker=False))
 
     async def _place_limit(self, order: PlaceOrder) -> None:
         tick = self._latest_tick.get(order.symbol)
@@ -170,7 +192,11 @@ class PaperExchange:
             # model may only partial-fill, and the remainder is then handled
             # exactly like a resting order's — GTC keeps it, IOC cancels it.
             self._book.rest(order)
-            if await self._fill_crossing_limit(order, tick):
+            # Marketable on arrival: it crossed the moment it landed, so this
+            # fill took liquidity exactly as a MARKET's does (ADR-0036). A
+            # remainder that survives to a later tick is a *different* fill and
+            # comes back down ``_match_book`` as a maker.
+            if await self._fill_crossing_limit(order, tick, maker=False):
                 return  # fully filled on arrival: the book already lifted it off.
             if order.time_in_force is TimeInForce.IOC:
                 # IOC never rests: drop whatever remainder didn't fill now.
@@ -278,7 +304,7 @@ class PaperExchange:
         self._statuses[order.cloid] = report
         return report
 
-    def _fill_report(self, order: PlaceOrder, fill: Fill) -> FillReport:
+    def _fill_report(self, order: PlaceOrder, fill: Fill, *, maker: bool) -> FillReport:
         index = self._fill_counts.get(order.cloid, 0) + 1
         self._fill_counts[order.cloid] = index
         now = self._clock.timestamp_ns()
@@ -290,6 +316,25 @@ class PaperExchange:
             trade_id=f"{order.cloid}-{index}",
             quantity=fill.quantity,
             price=fill.price,
+            fee=self._fee(order.symbol, fill, maker=maker),
         )
         self._fills.setdefault(order.cloid, []).append(report)
         return report
+
+    def _fee(self, symbol: str, fill: Fill, *, maker: bool) -> Decimal:
+        """This fill's signed fee, or zero for a symbol carrying no spec.
+
+        Computed **after** matching, off the fill the model already decided, so
+        the ``FillModel`` seam still emits price and quantity only and no money
+        math enters the matching path — the principle ADR-0013 was protecting
+        and ADR-0036 carries forward while lifting its fee deferral.
+
+        An unspecced symbol charges nothing rather than raising: the venue is
+        already tradable without a spec — min-notional is skipped the same way in
+        ``_place_market`` — so a spec is what an operator adds to *model* venue
+        friction, not a precondition for filling.
+        """
+        spec = self._specs.get(symbol)
+        if spec is None:
+            return Decimal("0")
+        return fill_fee(price=fill.price, quantity=fill.quantity, maker=maker, spec=spec)

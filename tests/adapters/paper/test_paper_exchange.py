@@ -195,6 +195,53 @@ def test_market_order_at_or_above_min_notional_fills_normally() -> None:
     assert not [s for s in statuses if s.status is OrderState.REJECTED]
 
 
+# Hyperliquid's base rates, both a **cost**: a maker fill is not a rebate on a
+# fresh account (ADR-0036, #152). Sized so the two are told apart by the number.
+_FEE_SPEC = InstrumentSpec(
+    symbol="BTC",
+    sz_decimals=3,
+    max_decimals=6,
+    min_notional=Decimal("0"),
+    maker_fee=Decimal("0.00015"),
+    taker_fee=Decimal("0.00045"),
+)
+
+
+def _fee_harness() -> tuple[
+    PaperExchange, InMemoryBus, ManualClock, list[FillReport], list[OrderStatusReport]
+]:
+    bus = InMemoryBus()
+    clock = ManualClock()
+    exchange = PaperExchange(
+        bus=bus,
+        clock=clock,
+        fill_model=ImmediateFillModel(),
+        genesis_collateral=GENESIS,
+        instrument_specs={"BTC": _FEE_SPEC},
+    )
+    fills: list[FillReport] = []
+    statuses: list[OrderStatusReport] = []
+    bus.subscribe(FillReport, lambda r: _record(fills, r))
+    bus.subscribe(OrderStatusReport, lambda r: _record(statuses, r))
+    return exchange, bus, clock, fills, statuses
+
+
+def test_a_market_fill_is_taker_and_carries_the_taker_fee() -> None:
+    # A MARKET takes liquidity by definition — it fills on arrival, at the price
+    # the venue already has — so it pays the taker rate (ADR-0036). 0.5 @ 42 000
+    # is a 21 000 notional; 0.045 % of it is 9.45 USDC, charged as a positive cost.
+    exchange, bus, clock, fills, _ = _fee_harness()
+
+    async def scenario() -> None:
+        clock.advance_to(1_000)
+        await bus.publish(_tick("42000"))
+        await exchange.place(_market_order(qty="0.5"))
+
+    asyncio.run(scenario())
+
+    assert [f.fee for f in fills] == [Decimal("9.45")]
+
+
 def test_market_order_fills_at_the_latest_tick_price() -> None:
     exchange, bus, clock, reports = _harness()
 
