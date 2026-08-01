@@ -7,6 +7,8 @@ optimistic, zero-slippage, full-fill: no RNG at all.
 """
 
 import asyncio
+import random
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 
@@ -16,7 +18,13 @@ from seam_claims import assert_every_member_is_claimed
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
-from tickwright.adapters.paper import ImmediateFillModel, PaperExchange, PaperExchangeConfig
+from tickwright.adapters.paper import (
+    ImmediateFillModel,
+    PaperExchange,
+    PaperExchangeConfig,
+    StochasticFillModel,
+    StochasticParams,
+)
 from tickwright.domain import (
     AggressorSide,
     Event,
@@ -327,6 +335,61 @@ def test_a_symbol_with_no_spec_at_all_charges_nothing() -> None:
     asyncio.run(scenario())
 
     assert [f.fee for f in fills] == [Decimal("0")]
+
+
+def test_configured_rates_change_no_fill_the_matching_path_produces() -> None:
+    """The no-smear rule, asserted against the one model that could reveal a
+    breach (ADR-0013 affirmed by ADR-0036).
+
+    The fee is computed *after* matching, so the rates may not touch which
+    quantity fills, at what price, or on which tick. A seeded
+    ``StochasticFillModel`` is what makes that checkable: every decision it makes
+    comes from its RNG, so a fee computation that reached the matching path —
+    consuming a draw, or reading a price through the rate — would desynchronize
+    the two runs and diverge the sequences. Under ``ImmediateFillModel`` the
+    prices are fixed and the comparison would pass with the rule broken.
+    """
+
+    def sequence(spec: InstrumentSpec) -> list[tuple[Decimal, Decimal]]:
+        bus = InMemoryBus()
+        clock = ManualClock()
+        exchange = PaperExchange(
+            bus=bus,
+            clock=clock,
+            fill_model=StochasticFillModel(
+                rng=random.Random(11),
+                clock=clock,
+                params=StochasticParams(
+                    prob_slippage=1.0,
+                    max_slippage=Decimal("0.001"),
+                    prob_fill_on_limit=0.6,
+                    partial_fill_fraction=Decimal("0.4"),
+                ),
+            ),
+            genesis_collateral=GENESIS,
+            instrument_specs={"BTC": spec},
+        )
+        fills: list[FillReport] = []
+        bus.subscribe(FillReport, lambda r: _record(fills, r))
+
+        async def scenario() -> None:
+            clock.advance_to(1_000)
+            await bus.publish(_tick("42000"))
+            await exchange.place(_market_order(qty="0.5"))
+            await exchange.place(_limit_order("41000", cloid="0xrest"))
+            for step, price in enumerate(("41500", "40900", "40800", "40950"), start=2):
+                await bus.publish(_tick(price, ts=step * 1_000))
+
+        asyncio.run(scenario())
+        return [(f.quantity, f.price) for f in fills]
+
+    charged = sequence(_FEE_SPEC)
+    frictionless = sequence(
+        replace(_FEE_SPEC, maker_fee=Decimal("0"), taker_fee=Decimal("0")),
+    )
+
+    assert charged == frictionless
+    assert len(charged) > 1  # the scenario really did exercise the resting book
 
 
 def test_market_order_fills_at_the_latest_tick_price() -> None:

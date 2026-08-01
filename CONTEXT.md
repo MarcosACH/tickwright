@@ -261,7 +261,9 @@ _Avoid_: fake event, manual event.
 **Paper exchange** / `PaperExchange`:
 The in-process deterministic `Exchange` impl and the default v1 target. Holds a book of resting
 LIMIT orders, fills MARKET on receipt against the latest [[MarketTick]], re-checks limits each
-tick. Frictionless — emits price + quantity, no fees/margin/PnL. See ADR-0012, ADR-0013.
+tick. It also stamps each fill's [[Fee]], computed after matching from the instrument's rates —
+so the [[Fill model]] still emits price + quantity only. Margin and PnL stay deferred.
+See ADR-0012, ADR-0036, ADR-0013.
 _Avoid_: simulator, mock exchange, backtester (it is a live/paper venue, not a backtest engine).
 
 **Fill model**:
