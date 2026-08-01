@@ -123,6 +123,7 @@ class PortfolioProjection:
             # misroute one.
             position = Position(strategy_id=event.strategy_id, symbol=event.symbol)
         realized_before = position.realized_pnl
+        fees_before = position.fees
         changes = position.apply(event, side=side)
         if changes:
             # Realized PnL is one of the four accruing inputs to cash (ADR-0042
@@ -136,6 +137,13 @@ class PortfolioProjection:
             self._account.accrue_realized(
                 position.realized_pnl - realized_before, event_id=event.event_id
             )
+            # The fee is the second input, read off the aggregate for the same
+            # reason the first is: the position booked it behind its own dedup,
+            # so the delta a redelivery contributes is zero by construction and
+            # the cash line needs no applied set to stay idempotent. Reading
+            # ``event.fee`` here instead would bypass that gatekeeper and charge
+            # a redelivered fill again. ``Account`` owns the sign (ADR-0042 §4).
+            self._account.accrue_fee(position.fees - fees_before, event_id=event.event_id)
         return LedgerChange(account=self._account, position=position, changes=changes)
 
     def project(self, change: LedgerChange) -> None:

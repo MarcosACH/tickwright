@@ -145,6 +145,13 @@ class Position:
             return ()  # Already reflected — duplicate delivery is a no-op.
 
         self._applied_event_ids.add(event.event_id)
+        # Behind the dedup and outside ``_book``, both deliberately. Behind it,
+        # because this is the fill's one gatekeeper and the fee must be charged
+        # exactly once for the same reason the size may only move once. Outside
+        # ``_book``, because the reducer is average-cost accounting and a fee is
+        # not part of it: it accrues on this line whatever regime the fill lands
+        # in, and never reaches ``entry_price`` or ``realized_pnl`` (ADR-0036).
+        self.fees += event.fee
         return self._book(
             signed=event.quantity if side is Side.BUY else -event.quantity, price=event.price
         )

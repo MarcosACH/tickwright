@@ -112,6 +112,22 @@ class Account:
         """
         self._cash += amount
 
+    def accrue_fee(self, fee: Decimal, *, event_id: str) -> None:
+        """``−`` fees, the second of the four accruing inputs (ADR-0042 §4).
+
+        **The negation is this method's whole subject.** ``fee`` arrives in the
+        convention every producer states it in — ``> 0`` a cost, ``< 0`` a maker
+        rebate (ADR-0036) — and cash moves the other way, so a cost debits and a
+        rebate credits. Doing it here rather than at the call site is what makes
+        the sign one decision instead of one per caller, and what lets this class
+        answer "what may move cash, and in which direction" on its own.
+
+        Unconditional and keyed by nothing, exactly as ``accrue_realized`` is and
+        for the same reason: the fill has already passed ``Position.apply``, its
+        one gatekeeper. ``event_id`` is provenance — *which fact* moved the line.
+        """
+        self._cash -= fee
+
     @classmethod
     def restore(
         cls,
