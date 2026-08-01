@@ -145,9 +145,26 @@ _BTC_SPEC = InstrumentSpec(
 )
 
 
-def _specced_harness() -> tuple[
-    PaperExchange, InMemoryBus, ManualClock, list[FillReport], list[OrderStatusReport]
-]:
+# Hyperliquid's base rates, both a **cost**: a maker fill is not a rebate on a
+# fresh account (ADR-0036, #152). Sized so the two are told apart by the number,
+# and free of a min-notional so nothing else adjudicates the fills below.
+_FEE_SPEC = InstrumentSpec(
+    symbol="BTC",
+    sz_decimals=3,
+    max_decimals=6,
+    min_notional=Decimal("0"),
+    maker_fee=Decimal("0.00015"),
+    taker_fee=Decimal("0.00045"),
+)
+
+
+def _specced_harness(
+    spec: InstrumentSpec = _BTC_SPEC,
+) -> tuple[PaperExchange, InMemoryBus, ManualClock, list[FillReport], list[OrderStatusReport]]:
+    """A venue that knows ``spec``'s symbol. Defaulting to ``_BTC_SPEC`` — which
+    declares only the quantizer's fields — is what lets the fee tests pass
+    ``_FEE_SPEC`` and every other specced test keep asserting a frictionless
+    venue against the same wiring."""
     bus = InMemoryBus()
     clock = ManualClock()
     exchange = PaperExchange(
@@ -155,7 +172,7 @@ def _specced_harness() -> tuple[
         clock=clock,
         fill_model=ImmediateFillModel(),
         genesis_collateral=GENESIS,
-        instrument_specs={"BTC": _BTC_SPEC},
+        instrument_specs={spec.symbol: spec},
     )
     fills: list[FillReport] = []
     statuses: list[OrderStatusReport] = []
@@ -203,42 +220,11 @@ def test_market_order_at_or_above_min_notional_fills_normally() -> None:
     assert not [s for s in statuses if s.status is OrderState.REJECTED]
 
 
-# Hyperliquid's base rates, both a **cost**: a maker fill is not a rebate on a
-# fresh account (ADR-0036, #152). Sized so the two are told apart by the number.
-_FEE_SPEC = InstrumentSpec(
-    symbol="BTC",
-    sz_decimals=3,
-    max_decimals=6,
-    min_notional=Decimal("0"),
-    maker_fee=Decimal("0.00015"),
-    taker_fee=Decimal("0.00045"),
-)
-
-
-def _fee_harness() -> tuple[
-    PaperExchange, InMemoryBus, ManualClock, list[FillReport], list[OrderStatusReport]
-]:
-    bus = InMemoryBus()
-    clock = ManualClock()
-    exchange = PaperExchange(
-        bus=bus,
-        clock=clock,
-        fill_model=ImmediateFillModel(),
-        genesis_collateral=GENESIS,
-        instrument_specs={"BTC": _FEE_SPEC},
-    )
-    fills: list[FillReport] = []
-    statuses: list[OrderStatusReport] = []
-    bus.subscribe(FillReport, lambda r: _record(fills, r))
-    bus.subscribe(OrderStatusReport, lambda r: _record(statuses, r))
-    return exchange, bus, clock, fills, statuses
-
-
 def test_a_market_fill_is_taker_and_carries_the_taker_fee() -> None:
     # A MARKET takes liquidity by definition — it fills on arrival, at the price
     # the venue already has — so it pays the taker rate (ADR-0036). 0.5 @ 42 000
     # is a 21 000 notional; 0.045 % of it is 9.45 USDC, charged as a positive cost.
-    exchange, bus, clock, fills, _ = _fee_harness()
+    exchange, bus, clock, fills, _ = _specced_harness(_FEE_SPEC)
 
     async def scenario() -> None:
         clock.advance_to(1_000)
@@ -255,7 +241,7 @@ def test_a_fill_off_the_resting_book_carries_the_maker_fee() -> None:
     # liquidity (ADR-0036). The model fills a LIMIT at its own price: 1 @ 41 000
     # is a 41 000 notional, and 0.015 % of it is 6.15 USDC — still a cost, a
     # rebate being a volume-tier property rather than a liquidity-side one.
-    exchange, bus, clock, fills, _ = _fee_harness()
+    exchange, bus, clock, fills, _ = _specced_harness(_FEE_SPEC)
 
     async def scenario() -> None:
         clock.advance_to(1_000)
@@ -273,7 +259,7 @@ def test_a_limit_marketable_on_arrival_carries_the_taker_fee() -> None:
     # does — resting on the book first is bookkeeping for the remainder, not a
     # claim about who provided liquidity (ADR-0036). 1 @ 43 000 at 0.045 % is
     # 19.35, three times the maker charge on the same notional.
-    exchange, bus, clock, fills, _ = _fee_harness()
+    exchange, bus, clock, fills, _ = _specced_harness(_FEE_SPEC)
 
     async def scenario() -> None:
         clock.advance_to(1_000)
@@ -290,7 +276,7 @@ def test_a_post_only_fill_is_always_a_maker_fill() -> None:
     # structurally rather than by consulting the flag at the fee boundary: one
     # that would cross on arrival is rejected before any fill exists, so the only
     # path a post_only fill can reach is the resting book's (ADR-0036).
-    exchange, bus, clock, fills, statuses = _fee_harness()
+    exchange, bus, clock, fills, statuses = _specced_harness(_FEE_SPEC)
 
     async def scenario() -> None:
         clock.advance_to(1_000)
