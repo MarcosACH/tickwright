@@ -32,6 +32,7 @@ from tickwright.domain import (
     Event,
     ExecutionReport,
     FillReport,
+    InstrumentSpec,
     MarketTick,
     OrderEvent,
     OrderFilled,
@@ -55,6 +56,18 @@ from tickwright.strategies import SingleShotMarketStrategy
 # of what it asserts. It cannot drift from the ledger's — the projection below is
 # opened off ``exchange.account_spec()``, one number by construction.
 _GENESIS = Decimal("100000")
+
+# Hyperliquid's base rates, both costs. Wired only into the fee test below: the
+# rest of this suite asserts a frictionless venue, which is what the defaulted
+# spec fields keep reachable (ADR-0036).
+_FEE_SPEC = InstrumentSpec(
+    symbol="BTC",
+    sz_decimals=3,
+    max_decimals=6,
+    min_notional=Decimal("0"),
+    maker_fee=Decimal("0.00015"),
+    taker_fee=Decimal("0.00045"),
+)
 
 _ROWS = [
     {
@@ -82,19 +95,30 @@ def _write_ticks(path: Path) -> Path:
 
 
 def _run(
-    path: Path, backend: str, *, close_with: PlaceSignal | None = None
+    path: Path,
+    backend: str,
+    *,
+    close_with: PlaceSignal | None = None,
+    instrument_specs: dict[str, InstrumentSpec] | None = None,
 ) -> tuple[list[Event], SingleShotMarketStrategy, SQLiteStore]:
     """Wire and drive the whole pipeline once; return every dispatched event.
 
     ``close_with`` publishes one more signal after end-of-file, which is how the
     round trip is reached: ``SingleShotMarketStrategy`` fires exactly once by
     design, so the closing leg has to come from outside it.
+
+    ``instrument_specs`` is what turns venue friction on: absent, the venue is
+    frictionless and every figure below is gross (ADR-0036).
     """
     bus = make_bus(backend)
     clock = ManualClock()
     store = SQLiteStore(":memory:")
     exchange = PaperExchange(
-        bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=_GENESIS
+        bus=bus,
+        clock=clock,
+        fill_model=ImmediateFillModel(),
+        genesis_collateral=_GENESIS,
+        instrument_specs=instrument_specs or {},
     )
     # Opened off the venue's own spec, exactly as the ``Engine`` does, so the
     # ledger this tracer asserts on is seeded the way a real run's is — and over
@@ -206,6 +230,47 @@ def test_tracer_reads_realized_pnl_back_through_the_seam_after_a_round_trip(
     assert closed.realized_pnl == Decimal("50")
     # Flat with history is not "never here": the record survives its own close,
     # realized retained (ADR-0041 §3).
+
+
+@pytest.mark.parametrize("backend", BUS_BACKENDS)
+def test_tracer_charges_a_fee_end_to_end_and_lands_it_in_the_durable_ledger(
+    tmp_path: Path, backend: str
+) -> None:
+    """The fee's whole vertical in one run: a replayed tick, a strategy signal,
+    a venue that computes the charge at its fill boundary, and a ledger that
+    accrues it — read back off the **store**, so what is asserted is the record a
+    crash would recover, not a projection sitting in front of it.
+
+    Both legs are MARKET, so both are taker: 0.5 @ 42 000 and 0.5 @ 42 100 are
+    21 000 and 21 050 of notional, charged 0.045 % — 9.45 and 9.4725, worked from
+    the replay file rather than from the code. Realized PnL is the same 50 the
+    frictionless round trip books above, because it is **gross** of them
+    (ADR-0036); the difference lands entirely on the cash line.
+    """
+    path = _write_ticks(tmp_path / "ticks.jsonl")
+    closing = PlaceSignal(
+        ts_event=3_000,
+        ts_init=3_000,
+        strategy_id="trivial",
+        symbol="BTC",
+        seq=2,
+        side=Side.SELL,
+        quantity=Decimal("0.5"),
+        order_type=OrderType.MARKET,
+        time_in_force=TimeInForce.IOC,
+    )
+
+    _, strategy, store = _run(
+        path, backend, close_with=closing, instrument_specs={"BTC": _FEE_SPEC}
+    )
+
+    _opened, closed = strategy.positions
+    assert closed is not None
+    assert closed.fees == Decimal("18.9225")  # 9.45 + 9.4725
+    assert closed.realized_pnl == Decimal("50")  # gross, unchanged by the charges
+    account = store.load_account()
+    assert account is not None
+    assert account.cash == Decimal("100031.0775")  # 100000 + 50 - 18.9225
 
 
 @pytest.mark.parametrize("backend", BUS_BACKENDS)
