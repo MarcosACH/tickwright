@@ -242,6 +242,93 @@ def test_a_market_fill_is_taker_and_carries_the_taker_fee() -> None:
     assert [f.fee for f in fills] == [Decimal("9.45")]
 
 
+def test_a_fill_off_the_resting_book_carries_the_maker_fee() -> None:
+    # This order sat on the book and a later tick came to it, so it provided the
+    # liquidity (ADR-0036). The model fills a LIMIT at its own price: 1 @ 41 000
+    # is a 41 000 notional, and 0.015 % of it is 6.15 USDC — still a cost, a
+    # rebate being a volume-tier property rather than a liquidity-side one.
+    exchange, bus, clock, fills, _ = _fee_harness()
+
+    async def scenario() -> None:
+        clock.advance_to(1_000)
+        await bus.publish(_tick("42000"))
+        await exchange.place(_limit_order("41000"))  # uncrossed: rests
+        await bus.publish(_tick("40000", ts=2_000))  # crosses it off the book
+
+    asyncio.run(scenario())
+
+    assert [f.fee for f in fills] == [Decimal("6.15")]
+
+
+def test_a_limit_marketable_on_arrival_carries_the_taker_fee() -> None:
+    # It crossed the moment it landed, so it took liquidity exactly as a MARKET
+    # does — resting on the book first is bookkeeping for the remainder, not a
+    # claim about who provided liquidity (ADR-0036). 1 @ 43 000 at 0.045 % is
+    # 19.35, three times the maker charge on the same notional.
+    exchange, bus, clock, fills, _ = _fee_harness()
+
+    async def scenario() -> None:
+        clock.advance_to(1_000)
+        await bus.publish(_tick("42000"))
+        await exchange.place(_limit_order("43000"))  # a BUY above the market: crosses
+
+    asyncio.run(scenario())
+
+    assert [f.fee for f in fills] == [Decimal("19.35")]
+
+
+def test_a_post_only_fill_is_always_a_maker_fill() -> None:
+    # ``post_only`` is the maker-only guarantee, and the venue keeps it
+    # structurally rather than by consulting the flag at the fee boundary: one
+    # that would cross on arrival is rejected before any fill exists, so the only
+    # path a post_only fill can reach is the resting book's (ADR-0036).
+    exchange, bus, clock, fills, statuses = _fee_harness()
+
+    async def scenario() -> None:
+        clock.advance_to(1_000)
+        await bus.publish(_tick("42000"))
+        await exchange.place(_limit_order("41000", post_only=True))  # uncrossed: rests
+        await bus.publish(_tick("40000", ts=2_000))
+
+    asyncio.run(scenario())
+
+    assert not [s for s in statuses if s.status is OrderState.REJECTED]
+    assert [f.fee for f in fills] == [Decimal("6.15")]  # 41 000 × 0.015 %
+
+
+def test_a_spec_with_default_rates_charges_nothing() -> None:
+    # The frictionless-spec guarantee (ADR-0036): fees default to zero, so every
+    # configuration authored before they existed keeps producing exactly the
+    # outcomes it did. ``_BTC_SPEC`` declares only the quantizer's fields.
+    exchange, bus, clock, fills, _ = _specced_harness()
+
+    async def scenario() -> None:
+        clock.advance_to(1_000)
+        await bus.publish(_tick("42000"))
+        await exchange.place(_market_order(qty="0.5"))
+
+    asyncio.run(scenario())
+
+    assert [f.fee for f in fills] == [Decimal("0")]
+
+
+def test_a_symbol_with_no_spec_at_all_charges_nothing() -> None:
+    # A spec is what an operator adds to *model* venue friction, not a
+    # precondition for filling: this venue already trades an unspecced symbol
+    # (min-notional is skipped the same way), so an absent spec charges zero
+    # rather than faulting the fill.
+    exchange, bus, clock, fills = _harness()
+
+    async def scenario() -> None:
+        clock.advance_to(1_000)
+        await bus.publish(_tick("42000"))
+        await exchange.place(_market_order(qty="0.5"))
+
+    asyncio.run(scenario())
+
+    assert [f.fee for f in fills] == [Decimal("0")]
+
+
 def test_market_order_fills_at_the_latest_tick_price() -> None:
     exchange, bus, clock, reports = _harness()
 
