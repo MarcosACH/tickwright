@@ -264,6 +264,11 @@ class ExecutionManager:
             price=report.price,
             ts_event=report.ts_event,
             ts_init=now,
+            # The fee travels the same way ``ts_event`` above does: the venue is
+            # its authority, so this path propagates and never derives it — paper
+            # computed it at its fill boundary, live read it off the payload
+            # (ADR-0036).
+            fee=report.fee,
             reconciliation=report.reconciliation,
         )
         if event is None:

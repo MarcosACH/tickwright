@@ -277,12 +277,20 @@ class OrderFillEvent(OrderEvent):
     ``event_id`` is ``{cloid}:fill:{trade_id}`` — a correctness key: a
     redelivered or reconciler-synthesized copy of the same trade collapses to
     one id, so ``cum_qty`` can never double-count.
+
+    ``fee`` is the reporting venue's figure, propagated from the ``FillReport``
+    rather than derived here: the ``Exchange`` is its authority, and the same
+    dedup key that protects ``cum_qty`` protects it from accruing twice. It is
+    **per trade, never cumulative** — unlike ``cum_qty`` beside it — because the
+    ledger line it feeds accumulates on the account, so a running total here
+    would be summed a second time (ADR-0036).
     """
 
     trade_id: str
     quantity: Decimal
     price: Decimal
     cum_qty: Decimal
+    fee: Decimal = Decimal("0")
 
     @property
     def event_id(self) -> str:
