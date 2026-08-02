@@ -28,6 +28,15 @@ class InstrumentSpec:
     significant-figures cap (Hyperliquid has no fixed tick — a price is valid iff
     it has ≤ ``max_sig_figs`` sig figs *and* ≤ ``max_decimals − sz_decimals``
     decimal places, with integer prices always valid).
+
+    ``maker_fee``/``taker_fee`` are signed rates on notional, the **paper**
+    computation's one input (ADR-0036): live ignores them and accrues the fee the
+    venue itself reports, so the two paths can never disagree on a number the
+    venue is the authority for. Additive and defaulted to ``0`` — a frictionless
+    spec stays valid and every existing construction site keeps compiling — which
+    is a guarantee about *this default*, not a claim about any venue: an operator
+    modelling Hyperliquid configures the positive base rates, a rebate being a
+    volume-tier property rather than a liquidity-side one.
     """
 
     symbol: str
@@ -35,6 +44,8 @@ class InstrumentSpec:
     max_decimals: int
     min_notional: Decimal
     max_sig_figs: int | None = None
+    maker_fee: Decimal = Decimal("0")
+    taker_fee: Decimal = Decimal("0")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

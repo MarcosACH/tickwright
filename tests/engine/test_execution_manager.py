@@ -435,7 +435,9 @@ def test_a_non_fill_transition_writes_the_order_row_and_no_ledger_row() -> None:
     assert store.load_account() is None
 
 
-def _fill_report(cloid: str, trade_id: str, quantity: str, *, ts_event: int = 1_000) -> FillReport:
+def _fill_report(
+    cloid: str, trade_id: str, quantity: str, *, ts_event: int = 1_000, fee: str = "0"
+) -> FillReport:
     return FillReport(
         ts_event=ts_event,
         ts_init=ts_event,
@@ -444,6 +446,7 @@ def _fill_report(cloid: str, trade_id: str, quantity: str, *, ts_event: int = 1_
         trade_id=trade_id,
         quantity=Decimal(quantity),
         price=Decimal("42000"),
+        fee=Decimal(fee),
     )
 
 
@@ -474,6 +477,26 @@ def test_partial_fills_accumulate_to_filled_with_checkpoints() -> None:
         OrderState.PARTIALLY_FILLED,
         OrderState.FILLED,
     ]
+
+
+def test_each_fill_event_carries_the_fee_the_venue_reported_for_that_trade() -> None:
+    # The venue is the fee's authority, so the manager propagates rather than
+    # derives it — exactly as it already does for the report's ``ts_event`` and
+    # ``reconciliation`` (ADR-0036). Per ``trade_id``, so two partials of one
+    # order carry two independently reported fees and neither is a running total.
+    bus, _, _, order_events = _harness()
+    cloid = derive_cloid("trivial:BTC:1")
+
+    async def scenario() -> None:
+        with pytest.raises(ValueError):
+            await bus.publish(_market_signal())
+        await bus.publish(_fill_report(cloid, trade_id="f1", quantity="0.2", fee="3.78"))
+        await bus.publish(_fill_report(cloid, trade_id="f2", quantity="0.3", fee="5.67"))
+
+    asyncio.run(scenario())
+
+    fills = [ev for ev in order_events if isinstance(ev, OrderPartiallyFilled | OrderFilled)]
+    assert [ev.fee for ev in fills] == [Decimal("3.78"), Decimal("5.67")]
 
 
 def test_a_failed_checkpoint_write_is_an_invariant_violation() -> None:

@@ -20,8 +20,15 @@ from tickwright.domain import (
 )
 
 
-def _fill(*, trade_id: str, quantity: str, price: str, symbol: str = "BTC") -> OrderFillEvent:
-    """One fill of ``quantity`` @ ``price``. ``Side`` rides the saga, not the event."""
+def _fill(
+    *, trade_id: str, quantity: str, price: str, symbol: str = "BTC", fee: str = "0"
+) -> OrderFillEvent:
+    """One fill of ``quantity`` @ ``price``. ``Side`` rides the saga, not the event.
+
+    ``fee`` defaults to the frictionless zero, so every case whose subject is
+    average-cost accounting states no rate and reads exactly as it did before
+    fees existed (ADR-0036).
+    """
     return OrderFilled(
         ts_event=1_000,
         ts_init=1_000,
@@ -33,6 +40,7 @@ def _fill(*, trade_id: str, quantity: str, price: str, symbol: str = "BTC") -> O
         quantity=Decimal(quantity),
         price=Decimal(price),
         cum_qty=Decimal(quantity),
+        fee=Decimal(fee),
     )
 
 
@@ -124,14 +132,74 @@ def test_a_redelivered_fill_is_a_no_op() -> None:
 
 
 def test_the_ledger_lines_no_slice_moves_yet_read_zero() -> None:
-    """``fees``/``funding``/``isolated_collateral`` exist from the first slice so
-    the view's shape does not churn when the lines that move them land."""
+    """``funding``/``isolated_collateral`` exist from the first slice so the
+    view's shape does not churn when the lines that move them land.
+
+    ``fees`` was one of these until the fee slice; it now has a writer of its
+    own and is asserted below.
+    """
     position = _position()
     position.apply(_fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
 
-    assert position.fees == Decimal("0")
     assert position.funding == Decimal("0")
     assert position.isolated_collateral == Decimal("0")
+
+
+def test_a_fills_fee_accrues_on_its_own_line_and_never_into_price_or_pnl() -> None:
+    """The three places a fee could have been smeared into, and is not (ADR-0036).
+
+    ``fees`` is its own cumulative line; ``realized_pnl`` stays **gross** of it,
+    as the venue keeps ``closedPnl`` separate; and ``entry_price`` is the price
+    the fill traded at, never a cost basis loaded with charges (ADR-0045 §3).
+    The sequence closes flat on purpose — a flat record still retains its
+    ledger lines (P1 #119), so the fee must survive the close that resets the
+    entry.
+    """
+    position = _position()
+
+    position.apply(_fill(trade_id="f1", quantity="2", price="100", fee="0.09"), side=Side.BUY)
+    assert position.entry_price == Decimal("100")  # the traded price, not 100.045
+
+    changes = position.apply(
+        _fill(trade_id="f2", quantity="2", price="150", fee="0.135"), side=Side.SELL
+    )
+
+    assert changes == (PositionChange.CLOSED,)
+    assert position.fees == Decimal("0.225")  # 0.09 + 0.135, per trade, accumulated
+    assert position.realized_pnl == Decimal("100")  # 2 x (150 - 100), gross of the 0.225
+    assert position.entry_price == Decimal("0")  # reset by the close, carrying no fee
+    assert position.is_flat
+
+
+def test_a_maker_rebate_accrues_as_a_negative_fee() -> None:
+    """A signed line, so a credit is the same arithmetic as a debit (ADR-0036).
+
+    The aggregate never asks which side of the book the fill came from — the
+    sign arrives already decided by the venue that reported it, which is why
+    nothing here says "maker".
+    """
+    position = _position()
+
+    position.apply(_fill(trade_id="f1", quantity="2", price="100", fee="-0.03"), side=Side.BUY)
+
+    assert position.fees == Decimal("-0.03")
+
+
+def test_a_redelivered_fill_charges_its_fee_once() -> None:
+    """The fee rides the dedup that guards the size, because it sits behind it.
+
+    ``apply`` is the fill's one gatekeeper, so at-least-once redelivery
+    (ADR-0025) cannot charge twice. Asserted on an *adding* fill, where a second
+    application would otherwise leave both the size and the fee line doubled —
+    and doubled by the same amount, which a totals-only check would miss.
+    """
+    position = _position()
+    fill = _fill(trade_id="f1", quantity="2", price="100", fee="0.09")
+    position.apply(fill, side=Side.BUY)
+
+    assert position.apply(fill, side=Side.BUY) == ()
+    assert position.signed_size == Decimal("2")
+    assert position.fees == Decimal("0.09")
 
 
 def test_a_fill_for_another_symbol_is_an_invariant_violation() -> None:
@@ -181,15 +249,21 @@ def test_a_refused_fill_leaves_the_ledger_exactly_as_it_was() -> None:
     """The guard precedes the dedup, so a refusal is atomic in both directions:
     it moves no line, and it does not burn the ``event_id``. A producer that
     corrects a bad quantity and re-sends the same trade must still be booked,
-    not silently swallowed as a redelivery (ADR-0025)."""
+    not silently swallowed as a redelivery (ADR-0025).
+
+    The refused fill carries a fee, so "moves no line" covers the fee line too:
+    the accrual sits *behind* both guards, and a fill the aggregate never booked
+    must not leave a charge for a trade that did not happen (ADR-0036).
+    """
     position = _position()
     position.apply(_fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
 
     with pytest.raises(InvariantViolation, match="non-positive quantity"):
-        position.apply(_fill(trade_id="f2", quantity="0", price="500"), side=Side.BUY)
+        position.apply(_fill(trade_id="f2", quantity="0", price="500", fee="7.5"), side=Side.BUY)
 
     assert position.signed_size == Decimal("2")
     assert position.entry_price == Decimal("100")
+    assert position.fees == Decimal("0")
     assert "0xf2:fill:f2" not in position.applied_event_ids
 
     assert position.apply(_fill(trade_id="f2", quantity="2", price="200"), side=Side.BUY) == (

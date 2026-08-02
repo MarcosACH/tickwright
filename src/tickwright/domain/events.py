@@ -185,11 +185,25 @@ class OrderStatusReport(ExecutionReport):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class FillReport(ExecutionReport):
-    """A raw fill fact: the venue reports ``trade_id`` filled ``quantity`` @ ``price``."""
+    """A raw fill fact: the venue reports ``trade_id`` filled ``quantity`` @ ``price``.
+
+    ``fee`` is what that trade cost, signed — ``> 0`` debited, ``< 0`` a maker
+    rebate credited — and settled in USDC, left implicit per ADR-0029's bare-
+    ``Decimal`` money convention. The producing ``Exchange`` is its authority:
+    paper computes it from the spec's rates at the fill boundary, live reads the
+    venue's own reported figure and refuses a fill settled in another token. One
+    fee per ``trade_id``, so a redelivered or reconciler-synthesized copy
+    collapses under ``event_id`` and can never accrue twice (ADR-0036).
+
+    Defaulted to zero, as ``reconciliation`` above is: a frictionless venue
+    charges nothing, and every construction site that predates fees keeps
+    reporting exactly what it did.
+    """
 
     trade_id: str
     quantity: Decimal
     price: Decimal
+    fee: Decimal = Decimal("0")
 
     @property
     def event_id(self) -> str:
@@ -263,12 +277,20 @@ class OrderFillEvent(OrderEvent):
     ``event_id`` is ``{cloid}:fill:{trade_id}`` — a correctness key: a
     redelivered or reconciler-synthesized copy of the same trade collapses to
     one id, so ``cum_qty`` can never double-count.
+
+    ``fee`` is the reporting venue's figure, propagated from the ``FillReport``
+    rather than derived here: the ``Exchange`` is its authority, and the same
+    dedup key that protects ``cum_qty`` protects it from accruing twice. It is
+    **per trade, never cumulative** — unlike ``cum_qty`` beside it — because the
+    ledger line it feeds accumulates on the account, so a running total here
+    would be summed a second time (ADR-0036).
     """
 
     trade_id: str
     quantity: Decimal
     price: Decimal
     cum_qty: Decimal
+    fee: Decimal = Decimal("0")
 
     @property
     def event_id(self) -> str:

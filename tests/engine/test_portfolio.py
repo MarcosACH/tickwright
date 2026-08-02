@@ -37,6 +37,7 @@ def _fill(
     price: str,
     symbol: str = "BTC",
     strategy_id: str = "alpha",
+    fee: str = "0",
 ) -> OrderFillEvent:
     return OrderFilled(
         ts_event=1_000,
@@ -49,6 +50,7 @@ def _fill(
         quantity=Decimal(quantity),
         price=Decimal(price),
         cum_qty=Decimal(quantity),
+        fee=Decimal(fee),
     )
 
 
@@ -131,6 +133,70 @@ def test_realized_pnl_accrues_to_the_account_cash_line() -> None:
 
     book_fill(projection, _fill(trade_id="f2", quantity="2", price="80"), side=Side.SELL)
     assert portfolio.account().cash == Decimal("99960")  # 2 x (80 - 100) = -40
+
+
+def test_a_fee_accrues_on_its_own_line_and_debits_cash_without_touching_pnl() -> None:
+    """Three separate places a fee could have been smeared into, and is not.
+
+    It is its own cumulative Tier-1 line; ``realized_pnl`` stays **gross** of it,
+    as the venue keeps ``closedPnl`` separate; and ``entry_price`` is the price
+    the fill traded at, not a cost basis loaded with charges (ADR-0036/0045 §3).
+    Cash moves by the fee's **negative** — the second of its four accruing
+    inputs — so a debited cost leaves less collateral than the run opened with.
+    """
+    projection = _projection("100000")
+    portfolio = projection.for_strategy("alpha")
+
+    book_fill(
+        projection, _fill(trade_id="f1", quantity="2", price="100", fee="0.09"), side=Side.BUY
+    )
+    book_fill(
+        projection, _fill(trade_id="f2", quantity="2", price="150", fee="0.135"), side=Side.SELL
+    )
+
+    view = portfolio.position("BTC")
+    assert view is not None
+    assert view.fees == Decimal("0.225")  # 0.09 + 0.135, accumulated per trade
+    assert view.realized_pnl == Decimal("100")  # 2 x (150 - 100), gross of the fees
+    assert view.entry_price == Decimal("0")  # closed flat: no fee loaded into a basis
+    assert portfolio.account().cash == Decimal("100099.775")  # 100000 + 100 - 0.225
+
+
+def test_a_maker_rebate_credits_the_cash_line_rather_than_debiting_it() -> None:
+    # The sign convention is the whole of what makes a fee a credit (ADR-0036):
+    # a negative fee is a rebate, and cash moving by its negative therefore
+    # *adds*. Reached by a rebate volume tier, not by making liquidity — which is
+    # why nothing here says "maker" and the projection never asks.
+    projection = _projection("100000")
+    portfolio = projection.for_strategy("alpha")
+
+    book_fill(
+        projection, _fill(trade_id="f1", quantity="2", price="100", fee="-0.03"), side=Side.BUY
+    )
+
+    view = portfolio.position("BTC")
+    assert view is not None
+    assert view.fees == Decimal("-0.03")
+    assert portfolio.account().cash == Decimal("100000.03")
+
+
+def test_a_redelivered_fill_charges_its_fee_once() -> None:
+    # The fee rides the same gatekeeper the position does — ``Position.apply``
+    # dedups on ``event_id`` — so at-least-once delivery cannot charge it twice.
+    # Asserted on an *adding* fill, where a second application would otherwise
+    # leave both the size and the fee line silently doubled.
+    projection = _projection("100000")
+    portfolio = projection.for_strategy("alpha")
+    fill = _fill(trade_id="f1", quantity="2", price="100", fee="0.09")
+
+    book_fill(projection, fill, side=Side.BUY)
+    book_fill(projection, fill, side=Side.BUY)
+
+    view = portfolio.position("BTC")
+    assert view is not None
+    assert view.size == Decimal("2")
+    assert view.fees == Decimal("0.09")
+    assert portfolio.account().cash == Decimal("99999.91")
 
 
 def test_a_strategy_reads_only_its_own_partition() -> None:

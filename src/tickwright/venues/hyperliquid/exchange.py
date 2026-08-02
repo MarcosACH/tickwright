@@ -368,6 +368,14 @@ class HyperliquidExchange:
                     # one the venue sent.
                     quantity=figure(entry["sz"]),
                     price=figure(entry["px"]),
+                    # Read, never reconstructed (ADR-0036): the venue's figure
+                    # already carries this account's volume tier, any referral
+                    # discount, and its own 6-dp truncation — none of it
+                    # knowable from a schedule here. Its ``crossed`` flag is
+                    # baked in for the same reason, which is why the maker/taker
+                    # bit is not carried onto the report: on this path there is
+                    # nothing left to select with it.
+                    fee=_settled_in_usdc(entry),
                 )
                 for entry in entries
                 if entry["oid"] == oid
@@ -560,6 +568,26 @@ def _action_outcome(response: object) -> list[Any] | _ActionError:
         case {"status": "err", "response": message}:
             return _ActionError(str(message))
     raise ValueError(f"unrecognized Hyperliquid action response: {response!r}")
+
+
+def _settled_in_usdc(entry: Mapping[str, Any]) -> Decimal:
+    """One fill's reported fee, refusing a fee settled in any other token.
+
+    Money in this engine is a bare ``Decimal`` with USDC left implicit
+    (ADR-0029), so a fee denominated in another token has nowhere to go: accruing
+    it would add a figure of one currency to a line of another and misstate cash
+    with nothing in the ledger recording which token it came from. The assumption
+    is guarded here rather than carried as a ``fee_currency`` field nothing yet
+    reads — perp fees are USDC-settled today, and spot is out of scope (ADR-0030).
+
+    ``ValueError``, so it joins ``UNREADABLE`` and the caller answers it exactly
+    as it answers a missing field: a named failed read and ``None``, never a
+    partial list that reads as the whole truth (ADR-0011 inv 1).
+    """
+    token = entry["feeToken"]
+    if token != "USDC":
+        raise ValueError(f"fee settled in {token!r}, not USDC")
+    return figure(entry["fee"])
 
 
 def _wire_decimal(value: Decimal) -> str:

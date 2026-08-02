@@ -294,7 +294,15 @@ def filled_response(*, oid: int, total_sz: str, avg_px: str) -> dict:
 
 
 def fill_entry(
-    *, oid: int, tid: int, px: object, sz: object, time: int = 1_700_000_000_500
+    *,
+    oid: int,
+    tid: int,
+    px: object,
+    sz: object,
+    time: int = 1_700_000_000_500,
+    fee: object = "0.0",
+    fee_token: str = "USDC",
+    crossed: bool = True,
 ) -> dict:
     """One venue ``userFills`` entry (the fields the docs pin, ADR-0011).
 
@@ -312,9 +320,9 @@ def fill_entry(
         "closedPnl": "0.0",
         "hash": "0x" + "00" * 32,
         "oid": oid,
-        "crossed": True,
-        "fee": "0.0",
-        "feeToken": "USDC",
+        "crossed": crossed,
+        "fee": fee,
+        "feeToken": fee_token,
         "tid": tid,
     }
 
@@ -356,6 +364,53 @@ def test_a_filled_placement_fetches_and_emits_the_real_venue_fills() -> None:
     )
     assert first.cloid == CLOID
     assert first.ts_event == 1_700_000_000_500 * _NS_PER_MS  # the venue's fill time
+
+
+def test_a_live_fill_reports_the_fee_the_venue_charged_verbatim() -> None:
+    # The venue is the fee's authority on this path, so the adapter reads its
+    # number rather than reconstructing one from a tier schedule (ADR-0036): the
+    # account's own volume tier, any referral discount and the venue's 6-dp
+    # truncation are all already in it, and none of them is knowable from here.
+    # The maker/taker flag is baked in for the same reason — the reported figure
+    # for a `crossed: false` fill already reflects the maker rate, so nothing
+    # downstream needs the bit and it is not carried (ADR-0036).
+    post = FakeExchangeApi(
+        {
+            "order": filled_response(oid=91, total_sz="0.002", avg_px="65239.0"),
+            "userFills": [
+                fill_entry(oid=91, tid=556, px="65239.0", sz="0.002", fee="0.019571", crossed=False)
+            ],
+        }
+    )
+
+    reports = asyncio.run(place_and_collect_reports(post, market_order(Side.BUY, "0.002")))
+
+    (report,) = reports
+    assert isinstance(report, FillReport)
+    assert report.fee == Decimal("0.019571")
+
+
+def test_a_live_fill_settled_in_another_token_is_a_failed_read() -> None:
+    # Money is a bare `Decimal` with USDC left implicit (ADR-0029), so a fee
+    # denominated in anything else has no home in the ledger — accruing it would
+    # add a number of one currency to a line of another and silently misstate
+    # cash. The assumption is guarded at the boundary rather than carried as a
+    # token constant: a body we cannot read is a failed read, named and `None`,
+    # and reconciliation is the backstop (ADR-0011 inv 1, ADR-0036).
+    post = FakeExchangeApi(
+        {
+            "orderStatus": order_status_response(status="filled", oid=91),
+            "userFillsByTime": [
+                fill_entry(oid=91, tid=556, px="43250.0", sz="0.5", fee="0.02", fee_token="HYPE")
+            ],
+        }
+    )
+
+    with capture_events() as events:
+        view = asyncio.run(fetch_view(post))
+
+    assert view is None
+    assert any(e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED for e in events)
 
 
 def test_a_filled_placement_whose_fills_read_fails_names_a_fills_failure_not_a_place() -> None:

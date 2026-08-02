@@ -204,6 +204,7 @@ class Order:
         price: Decimal,
         ts_event: int,
         ts_init: int,
+        fee: Decimal = Decimal("0"),
         reconciliation: bool = False,
     ) -> OrderFillEvent | None:
         """Account a raw fill and return the canonical event to publish, or ``None``.
@@ -215,6 +216,11 @@ class Order:
         authority. Returns ``None`` on a redelivered ``trade_id`` (a deduped
         no-op) so the caller suppresses the duplicate publish; ``cum_qty`` can
         never double-count.
+
+        ``fee`` is carried onto the event untouched. The venue that reported it
+        is its authority (ADR-0036), and unlike ``cum_qty`` there is nothing for
+        the saga to accumulate: the fee accrues on the ledger's own line, per
+        trade. Riding the same dedup is what keeps it from being charged twice.
         """
         cum_qty = self.cum_qty + quantity
         event_type = OrderFilled if cum_qty >= self.quantity else OrderPartiallyFilled
@@ -230,6 +236,7 @@ class Order:
             quantity=quantity,
             price=price,
             cum_qty=cum_qty,
+            fee=fee,
             reconciliation=reconciliation,
         )
         return event if self.apply(event) else None
