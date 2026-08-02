@@ -309,7 +309,8 @@ def test_one_order_filling_on_arrival_and_again_off_the_book_pays_both_rates() -
         # The partial fill on arrival is the whole point and ``ImmediateFillModel``
         # is full-fill, so the remainder this test turns on would never exist.
         # Certain fills and no slippage leave the RNG deciding nothing asserted
-        # below: every leg is the 40 % fraction of what was still working.
+        # below: the model offers 40 % of the order's *own* quantity every time,
+        # and the book caps the last leg at the 0.2 that was still working.
         fill_model=StochasticFillModel(
             rng=random.Random(11),
             clock=clock,
