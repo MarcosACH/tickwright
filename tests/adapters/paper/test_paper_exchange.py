@@ -290,6 +290,64 @@ def test_a_post_only_fill_is_always_a_maker_fill() -> None:
     assert [f.fee for f in fills] == [Decimal("6.15")]  # 41 000 × 0.015 %
 
 
+def test_one_order_filling_on_arrival_and_again_off_the_book_pays_both_rates() -> None:
+    """The aggressor bit is a property of the **fill**, never of the order.
+
+    Every boundary above covers an order whose legs are all one side, so deciding
+    maker/taker once per order — stashing it when the order rests, or reading
+    ``post_only`` — would satisfy all four while being wrong. This is the order
+    that tells the two apart: it crosses on arrival and *takes*, the model fills
+    only part of it, and the remainder then sits on the book and *provides* the
+    liquidity a later tick comes for. One order, one price, three fills, two
+    rates (ADR-0036).
+    """
+    bus = InMemoryBus()
+    clock = ManualClock()
+    exchange = PaperExchange(
+        bus=bus,
+        clock=clock,
+        # The partial fill on arrival is the whole point and ``ImmediateFillModel``
+        # is full-fill, so the remainder this test turns on would never exist.
+        # Certain fills and no slippage leave the RNG deciding nothing asserted
+        # below: every leg is the 40 % fraction of what was still working.
+        fill_model=StochasticFillModel(
+            rng=random.Random(11),
+            clock=clock,
+            params=StochasticParams(
+                prob_slippage=0.0,
+                max_slippage=Decimal("0"),
+                prob_fill_on_limit=1.0,
+                partial_fill_fraction=Decimal("0.4"),
+            ),
+        ),
+        genesis_collateral=GENESIS,
+        instrument_specs={"BTC": _FEE_SPEC},
+    )
+    fills: list[FillReport] = []
+    bus.subscribe(FillReport, lambda r: _record(fills, r))
+
+    async def scenario() -> None:
+        clock.advance_to(1_000)
+        await bus.publish(_tick("42000"))
+        await exchange.place(_limit_order("43000"))  # a BUY above the market: crosses
+        # Still crossing — but the order is now the side that was already there,
+        # so these two legs are made, not taken.
+        await bus.publish(_tick("41000", ts=2_000))
+        await bus.publish(_tick("41000", ts=3_000))
+
+    asyncio.run(scenario())
+
+    # Every leg fills at the order's own 43 000, so nothing but the rate can move
+    # the fee: 0.4 × 43 000 = 17 200 is 7.74 at 0.045 % and 2.58 at 0.015 %, and
+    # the closing 0.2's 8 600 is 1.29 at 0.015 %.
+    assert [(f.quantity, f.price) for f in fills] == [
+        (Decimal("0.4"), Decimal("43000")),
+        (Decimal("0.4"), Decimal("43000")),
+        (Decimal("0.2"), Decimal("43000")),
+    ]
+    assert [f.fee for f in fills] == [Decimal("7.74"), Decimal("2.58"), Decimal("1.29")]
+
+
 def test_a_spec_with_default_rates_charges_nothing() -> None:
     # The frictionless-spec guarantee (ADR-0036): fees default to zero, so every
     # configuration authored before they existed keeps producing exactly the
