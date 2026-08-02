@@ -34,7 +34,14 @@ superset, which is a difference no one intended and nothing would have surfaced.
 * ``TypeError`` — a value is the wrong type: a re-typed figure, or a row that is
   not a mapping at all.
 * ``ValueError`` — a value is the right type and still unreadable: a non-finite
-  figure (``exact_figure``), or a margin mode outside the two the venue reports.
+  figure (``exact_figure``), a margin mode outside the two the venue reports, or
+  a fill fee settled in a token other than USDC (``_settled_in_usdc``, ADR-0036).
+  That last one is the vocabulary's one **semantic** member and the odd one out:
+  the other raisers describe a body we could not parse, and a re-read may well
+  succeed, where a fill's settlement token is a fact the venue has already stored
+  and will report identically forever. Every caller here answers it as the
+  transient failure it is not — a frozen cycle rather than a fault — which
+  ADR-0036 §4 states as shipped and #216 owns correcting.
 * ``ArithmeticError`` — how ``decimal`` signals. ``Decimal("nope")`` raises
   ``InvalidOperation``, which is **not** a ``ValueError``, so this branch is what
   catches an unparseable numeric string.
