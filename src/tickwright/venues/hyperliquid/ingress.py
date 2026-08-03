@@ -56,10 +56,17 @@ class ConflatingIngress:
             named_event(
                 NamedEvent.FEED_LAGGED,
                 symbol=dropped.symbol,
-                # Only a trade has one, and a mark carries no id of its own —
-                # it is a latest-value, so there is nothing to identify but the
-                # symbol and the stream it was dropped from.
-                dropped_trade_id=getattr(dropped, "trade_id", None),
+                # Only a trade has one, and a mark carries no id of its own — it
+                # is a latest-value, so there is nothing to identify but the
+                # symbol and the stream it was dropped from. Narrowed rather
+                # than read reflectively: ``MarketData`` is a closed union, and
+                # the whole point of spelling it once is that adding a third
+                # stream makes the type checker visit both sides. A
+                # ``getattr(..., None)`` would answer that third stream ``None``
+                # and compile, which is the one outcome the alias exists to
+                # prevent. #229 owns retiring the field; until then this keeps
+                # the checker on it.
+                dropped_trade_id=dropped.trade_id if isinstance(dropped, MarketTick) else None,
                 stream=type(dropped).__name__,
             )
         self._pending[key] = event

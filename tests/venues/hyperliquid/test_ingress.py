@@ -173,7 +173,15 @@ def test_a_superseded_mark_is_dropped_and_named_like_any_other_stale_tick() -> N
 
     assert [m.price for m in seen] == [Decimal("100"), Decimal("102")]
     assert len(lagged) == 1
+    # The whole record, not just the symbol: this catalog entry is the *only*
+    # place a conflation drop is observable (ADR-0020), so its field set is the
+    # operator contract. ``stream`` is what tells an operator which of the two
+    # market-data streams thinned, and a mark carries no ``dropped_trade_id``
+    # to report — pinning both is what would catch a mark drop that started
+    # claiming a trade's id, or a ``stream`` silently lost.
     assert lagged[0]["symbol"] == "BTC"
+    assert lagged[0]["stream"] == "MarkTick"
+    assert lagged[0]["dropped_trade_id"] is None
 
 
 def test_backpressure_keeps_only_the_latest_per_symbol_and_names_each_drop() -> None:
@@ -223,4 +231,5 @@ def test_backpressure_keeps_only_the_latest_per_symbol_and_names_each_drop() -> 
     ]
     assert len(lagged) == 1
     assert lagged[0]["symbol"] == "BTC"
+    assert lagged[0]["stream"] == "MarketTick"
     assert lagged[0]["dropped_trade_id"] == "2"
