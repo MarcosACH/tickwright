@@ -32,6 +32,7 @@ from tickwright.domain import (
     EventBus,
     Exchange,
     ExecutionReport,
+    FundingAccrual,
     MarketFeed,
     Portfolio,
     PreTradeGuard,
@@ -242,6 +243,30 @@ class Engine:
         # the saga path propagates to the TaskGroup and faults the engine.
         self._bus.subscribe(Signal, self._execution.on_signal)
         self._bus.subscribe(ExecutionReport, self._execution.on_execution_report)
+        # Funding is the one accounting input that arrives on the bus rather
+        # than on the fill-apply path, because it has no carrier fill (ADR-0037)
+        # — so it is subscribed here, beside the saga's own raw handlers.
+        #
+        # It does **not** yet inherit their containment, and the difference is
+        # worth stating rather than assuming. A raw handler's refusal reaches
+        # the TaskGroup because the publisher is a supervised task; this one's
+        # publisher is the paper venue's generator, which ``exchange.start()``
+        # spawns with a bare ``create_task``. A refused ledger write therefore
+        # kills that generator and nothing else: the engine runs on, accruing
+        # nothing, until the teardown reaches ``exchange.stop()`` — which
+        # re-raises rather than reaping it, so the run faults and the hook is
+        # recorded by name instead of exiting 0 on a silently empty funding
+        # line. Loud, then, but late: the containment that would fault it *at*
+        # the refusal needs the seam to have a supervised long-lived half, the
+        # way ``MarketFeed.start()`` already does — its own slice (#226), since
+        # it changes the ``Exchange`` Protocol.
+        #
+        # Subscribed **before** the exchange can produce one. The generator is
+        # spawned by ``exchange.start()`` one step above, but it is parked on a
+        # boundary the clock has not reached and the feed does not start until
+        # step 7 — so the first accrual is only possible once virtual time
+        # moves, which is behind this line and behind the barrier.
+        self._bus.subscribe(FundingAccrual, self._on_funding_accrual)
         # The hard gate: nothing places until every proof it holds has cleared.
         # The sequence is the ordering rule, and it lives here rather than inside
         # any step — lifecycle ordering is the runner's, and the barrier owns
@@ -264,6 +289,22 @@ class Engine:
         # Strategies after the barrier: restore snapshot, resume seq, subscribe.
         self._host.start()
         self._state = ComponentState.RUNNING
+
+    async def _on_funding_accrual(self, accrual: FundingAccrual) -> None:
+        """Apply one settled boundary to the ledger — the bus's only ledger entry.
+
+        The adapting layer between an ``async`` subscriber and a synchronous
+        write verb, and it is deliberately nothing more. The gate, the split and
+        the single transaction all belong to the ``Checkpointer``, which owns
+        every ordering a caller could invert; what this owns is the *wiring* —
+        which event reaches which verb — which is the runner's, exactly as the
+        two saga subscriptions above are.
+
+        Synchronous inside, with no ``await`` between the fold and the write, so
+        no other handler can observe a ledger whose memory and durable states
+        disagree — the same no-yield discipline the fill path keeps.
+        """
+        self._checkpointer.checkpoint_funding(accrual)
 
     async def _materialise_account(self) -> bool:
         """The barrier's live-only first step: create the account row when the

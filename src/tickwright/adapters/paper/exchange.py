@@ -15,9 +15,20 @@ It also stamps each fill's signed **fee**, the one economic figure it computes
 rather than observes: the matching semantics above already say which side
 provided liquidity, so the maker/taker bit is read off them and never configured
 (ADR-0036). Margin and PnL remain deferred (ADR-0013).
+
+**Funding** is the second thing it produces rather than observes, and the first
+that arrives on no carrier: ``start()`` spawns the boundary generator and
+``stop()`` cancels it (ADR-0037, ADR-0044 §7). The loop lives in ``funding.py``;
+what stays here is the pricing — the last tick and the instrument's rate — while
+the *size* each accrual is computed from is read from the ledger through the
+injected ``account_net``. So this venue **holds no position state at all**,
+which is ADR-0043 §4 verbatim rather than narrowed: after a crash it reports
+nothing, the ``Store`` remains the sole authority for the paper ledger, and
+``fetch_account_state`` still has no account truth to answer with.
 """
 
-from collections.abc import Mapping
+import asyncio
+from collections.abc import Callable, Mapping
 from decimal import Decimal
 
 from tickwright.domain import (
@@ -43,6 +54,7 @@ from tickwright.domain import (
 from .book import RestingBook
 from .config import DEFAULT_ACCOUNT_LABEL
 from .fill_model import Fill, FillModel
+from .funding import HOUR_NS, FundingBasis, cancel, run_funding
 
 
 class PaperExchange:
@@ -56,11 +68,23 @@ class PaperExchange:
         fill_model: FillModel,
         genesis_collateral: Decimal,
         account_label: str = DEFAULT_ACCOUNT_LABEL,
+        account_net: Callable[[], Mapping[str, Decimal]],
         instrument_specs: Mapping[str, InstrumentSpec] | None = None,
+        funding_interval_ns: int = HOUR_NS,
     ) -> None:
         self._bus = bus
         self._clock = clock
         self._fill_model = fill_model
+        # Where this venue's funding notional comes from: the **account net
+        # size** per symbol, read from the ledger that owns it rather than
+        # tallied here (ADR-0034's Σ-invariant, ADR-0043 §4). Required, and for
+        # the same reason ``genesis_collateral`` is — a venue defaulted to
+        # holding nothing is not a neutral default but a silent decision to
+        # charge no funding, which is indistinguishable from a correct run right
+        # up until it isn't.
+        self._account_net = account_net
+        self._funding_interval_ns = funding_interval_ns
+        self._funding_task: asyncio.Task[None] | None = None
         # The account's opening cash is the operator's declaration, never the
         # venue's: the paper exchange has nobody to ask, and the engine supplies
         # no collateral of its own (ADR-0042 §1). Required rather than defaulted
@@ -95,14 +119,91 @@ class PaperExchange:
         bus.subscribe(MarketTick, self.on_tick)
 
     async def start(self) -> None:
-        """Nothing to connect: the venue is in-process and its one link — the
-        tick subscription — is wired at construction."""
-        return None
+        """Nothing to connect — the venue is in-process and its one link, the
+        tick subscription, is wired at construction — but one loop to spawn.
+
+        The funding generator is what this venue *runs* rather than what it is
+        connected to (ADR-0037): a real venue pushes funding at its own
+        boundaries, and paper has nobody to ask, so it settles them itself off
+        the injected clock. Spawned here rather than at construction so that a
+        venue built but never started publishes nothing, and so the loop's life
+        is exactly the seam's declared ``start``/``stop`` pair.
+        """
+        self._funding_task = asyncio.create_task(
+            run_funding(
+                bus=self._bus,
+                clock=self._clock,
+                account_id=self._account_spec.account_id,
+                basis=self._funding_basis,
+                interval_ns=self._funding_interval_ns,
+            )
+        )
 
     async def stop(self) -> None:
-        """Nothing to release: this venue runs no loop of its own — it fills
-        off the tick stream the feed drives, and the feed is already cut."""
-        return None
+        """Cancel the funding generator — the one thing this venue holds open.
+
+        This is the teardown ADR-0044 §7 left undeclared "until there is
+        teardown to do". Driven ahead of the bus drain deliberately: a generator
+        that outlived this call would keep publishing into that drain and keep
+        raising its high-water mark, so the cascade would never reach quiescence
+        and a graceful stop would never finish.
+
+        Safe on a venue that never started and safe on a second call, both
+        because the runner's faulted teardown re-walks its whole membership from
+        the top (ADR-0024). A generator that died of a refused ledger write is
+        reported here rather than reaped quietly, so that re-walk is exactly
+        where the reference has to be released **before** the wait rather than
+        after it: kept until ``cancel`` returned, a surfaced failure would leave
+        the dead task in place for the second pass to report all over again,
+        turning one refusal into a fault recorded twice.
+        """
+        task, self._funding_task = self._funding_task, None
+        await cancel(task)
+
+    def _funding_basis(self) -> tuple[FundingBasis, ...]:
+        """What each held symbol's accrual is computed from, as of now.
+
+        The size is the **account net** the ledger reports; the price and the
+        spec are the venue's own. That split is the decision: a paper venue is
+        in-process and non-durable, so a size it tallied itself would survive
+        exactly as long as the process — and a position outlives processes.
+        Tallying here would put a second, unpersisted answer to "how much of
+        this symbol is held" beside the durable one, and every way the two can
+        drift is a wrong number nobody is watching: after a restart the tally
+        reads flat while the ledger holds a position, and after a restart
+        *followed by a trade* it reads that trade alone, which for a partial
+        close is the wrong **sign**.
+
+        Reading it per span rather than seeding it once is what makes that
+        structural instead of merely fixed: there is no second copy to keep in
+        step, so no path — recovery, a reconciliation heal, an absorbed
+        unattributed fill — can move the ledger without moving this.
+
+        A flat symbol is **not** filtered out: it produces a zero, and the
+        generator's single "a zero accrues nothing" rule then covers both the
+        flat position and the default ``funding_rate`` of ``0`` — one rule for
+        one fact, rather than the same skip expressed twice in two places that
+        could disagree.
+
+        A symbol with no cached tick is genuinely absent rather than
+        zero-priced: paper cannot price what it has never seen trade. That is
+        reachable now in a way it was not when the size was local — a recovered
+        position is held before this life has seen a single tick in its symbol —
+        and it is still the right answer, since the alternative is to invent a
+        price for a boundary. The next tick restores pricing, and the boundaries
+        crossed before it are the restart gap the loop already skips
+        (ADR-0043 §5.1).
+        """
+        return tuple(
+            FundingBasis(
+                symbol=symbol,
+                signed_size=signed_size,
+                price=tick.price,
+                spec=self._specs[symbol],
+            )
+            for symbol, signed_size in self._account_net().items()
+            if (tick := self._latest_tick.get(symbol)) is not None and symbol in self._specs
+        )
 
     async def on_tick(self, tick: MarketTick) -> None:
         # Cache the latest price per symbol; MARKET fills read it (ADR-0027).

@@ -18,6 +18,7 @@ from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     Account,
     AccountSpec,
+    FundingAccrual,
     InvariantViolation,
     OrderFilled,
     OrderFillEvent,
@@ -51,6 +52,29 @@ def _fill(
         price=Decimal(price),
         cum_qty=Decimal(quantity),
         fee=Decimal(fee),
+    )
+
+
+_HOUR = 3_600_000_000_000
+"""One epoch-aligned funding boundary, and the unit the cases below step in."""
+
+
+def _accrual(
+    *, amount: str, boundary: int, symbol: str = "BTC", account_id: str = "paper-default"
+) -> FundingAccrual:
+    """One boundary's settled funding, as an ``Exchange`` adapter produced it.
+
+    Signed as the venue reports it (ADR-0037): ``< 0`` paid, ``> 0`` received.
+    The projection never recomputes the amount — paper generated it and live
+    ingests it verbatim, so what arrives here is already the payment.
+    """
+    return FundingAccrual(
+        ts_event=boundary,
+        ts_init=boundary,
+        account_id=account_id,
+        symbol=symbol,
+        boundary_ts_ns=boundary,
+        amount=Decimal(amount),
     )
 
 
@@ -160,6 +184,158 @@ def test_a_fee_accrues_on_its_own_line_and_debits_cash_without_touching_pnl() ->
     assert view.realized_pnl == Decimal("100")  # 2 x (150 - 100), gross of the fees
     assert view.entry_price == Decimal("0")  # closed flat: no fee loaded into a basis
     assert portfolio.account().cash == Decimal("100099.775")  # 100000 + 100 - 0.225
+
+
+def test_funding_accrues_on_its_own_line_and_moves_cash_by_the_amount() -> None:
+    """Funding's Tier-1 line beside the fee's, and the same three exclusions.
+
+    ``cash += amount`` here where the fee's rule is ``cash -= fee``: the two
+    mirror venue fields with opposite raw signs, so a payment (``< 0``) leaves
+    less collateral and a credit (``> 0``) leaves more, with neither reaching
+    ``entry_price`` nor ``realized_pnl`` (ADR-0037, ADR-0042 §4).
+
+    The position is open and untouched by any second fill, so every field but
+    ``funding`` and ``cash`` reads exactly what the opening fill left.
+    """
+    projection = _projection("100000")
+    portfolio = projection.for_strategy("alpha")
+    book_fill(projection, _fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
+
+    projection.apply_funding(_accrual(amount="-10", boundary=_HOUR))
+
+    view = portfolio.position("BTC")
+    assert view is not None
+    assert view.funding == Decimal("-10")
+    assert view.entry_price == Decimal("100")  # the traded price, carrying no funding
+    assert view.realized_pnl == Decimal("0")  # gross, and nothing has closed anyway
+    assert view.fees == Decimal("0")  # funding is not a fee and never lands on that line
+    assert portfolio.account().cash == Decimal("99990")  # 100000 - 10, paid out
+
+
+def test_an_accrual_at_or_below_the_stored_mark_is_dropped_whole() -> None:
+    """The durable gate, and it drops the accrual *entirely* (ADR-0043 §5.2).
+
+    The mark is what an in-memory key set cannot be — it survives the process —
+    and it is read on both paths: it gates live's re-delivered history and a
+    replay rerun, which re-derives every boundary in the file against a store
+    that already holds the ledger. Ungated, each of those would apply a second
+    time and the funding line and ``cash`` would double-count.
+
+    "At or below", not "below": the mark records a boundary **already applied**,
+    so re-offering it must change nothing. And the drop is whole — no line, no
+    cash, no ``FundingChange`` to write — because a half-dropped accrual that
+    still moved cash is the failure the symbol grain exists to prevent.
+    """
+    store = SQLiteStore(":memory:")
+    projection = _projection("100000", store=store)
+    portfolio = projection.for_strategy("alpha")
+    book_fill(projection, _fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
+    # The ledger already carries the first two boundaries, as it would after the
+    # crash that a re-delivery follows.
+    store.checkpoint_ledger(
+        account=Account.restore(
+            account_id="paper-default",
+            genesis_collateral=Decimal("100000"),
+            genesis_ts_ns=7,
+            cash=Decimal("100000"),
+        ),
+        funding_mark=("BTC", 2 * _HOUR),
+        ts_ns=7,
+    )
+
+    at_the_mark = projection.apply_funding(_accrual(amount="-10", boundary=2 * _HOUR))
+    below_the_mark = projection.apply_funding(_accrual(amount="-10", boundary=_HOUR))
+
+    assert at_the_mark is None
+    assert below_the_mark is None
+    view = portfolio.position("BTC")
+    assert view is not None
+    assert view.funding == Decimal("0")
+    assert portfolio.account().cash == Decimal("100000")
+
+
+def test_the_boundary_above_the_mark_applies_and_carries_the_advance_with_it() -> None:
+    """The mark travels *with* the funding line, never behind it (ADR-0043 §5.2).
+
+    The advance rides the same ``FundingChange`` the line does, so the one
+    ``checkpoint_ledger`` that makes the payment durable is the one that records
+    it as applied. Handing them to the store separately is what would let a crash
+    land between them, and the whole point of the mark is that it can never
+    disagree with the sum it guards.
+
+    So this asserts the pairing at the seam that produces it: the change carries
+    the advance, at this accrual's own boundary and at symbol grain.
+    """
+    store = SQLiteStore(":memory:")
+    projection = _projection("100000", store=store)
+    book_fill(projection, _fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
+
+    change = projection.apply_funding(_accrual(amount="-10", boundary=3 * _HOUR))
+
+    assert change is not None
+    assert change.funding_mark == ("BTC", 3 * _HOUR)
+    assert [position.symbol for position in change.positions] == ["BTC"]
+    assert change.account.cash == Decimal("99990")
+
+
+def test_one_accrual_splits_across_every_partition_holding_the_symbol() -> None:
+    """Attribution is pro-rata by signed size, and sums to the amount exactly.
+
+    Two strategies hold BTC — 3 long and 1 short, a net of 2 — and the account
+    pays 10 against that net. Pro-rata reproduces each partition's own accrual
+    from the net one, which is why the short *receives* 5 out of a payment the
+    account made: at the same price and rate it was owed funding while the
+    account on balance paid.
+
+    The sum is asserted beside the shares because it is the property, not the
+    arithmetic: ``Σ funding lines`` must equal the ``cash`` movement, or the
+    ledger drifts a little further every boundary with nothing to correct it.
+    """
+    projection = _projection("100000")
+    book_fill(projection, _fill(trade_id="f1", quantity="3", price="100"), side=Side.BUY)
+    book_fill(
+        projection,
+        _fill(trade_id="f2", quantity="1", price="100", strategy_id="beta"),
+        side=Side.SELL,
+    )
+
+    projection.apply_funding(_accrual(amount="-10", boundary=_HOUR))
+
+    alpha = projection.for_strategy("alpha").position("BTC")
+    beta = projection.for_strategy("beta").position("BTC")
+    assert alpha is not None and beta is not None
+    assert alpha.funding == Decimal("-15")  # -10 x (+3 / +2)
+    assert beta.funding == Decimal("5")  # -10 x (-1 / +2)
+    assert alpha.funding + beta.funding == Decimal("-10")
+    assert projection.account().cash == Decimal("99990")
+
+
+def test_an_accrual_with_no_partition_to_attribute_to_still_moves_cash() -> None:
+    """The payment is a fact about the **account**; the attribution is separate.
+
+    Cash moves by the full amount even where there is no open partition to file
+    it against, because those are two different questions and only the first one
+    is about whether the payment happened. The consequence is deliberate and
+    worth pinning: ``Σ funding lines`` is *short* of the ``cash`` movement in
+    exactly this case, which is the one place the two are allowed to disagree.
+
+    Unreachable on the paper path as wired today — paper generates an accrual
+    only for a symbol its own ledger holds, and holding it means a partition — so
+    the case that reaches here is foreign flow into the account, which is
+    [#189](https://github.com/MarcosACH/tickwright/issues/189)'s reserved
+    unattributed partition. Asserted now because the behaviour ships now: the
+    branch is live the moment a live venue reports funding on a symbol this
+    engine never traded.
+    """
+    projection = _projection("100000")
+
+    change = projection.apply_funding(_accrual(amount="-10", boundary=_HOUR))
+
+    assert change is not None
+    assert change.positions == ()  # nothing to attribute to, and nothing invented
+    assert change.funding_mark == ("BTC", _HOUR)  # still applied, so still marked
+    assert projection.account().cash == Decimal("99990")
+    assert projection.for_strategy("alpha").position("BTC") is None
 
 
 def test_a_maker_rebate_credits_the_cash_line_rather_than_debiting_it() -> None:

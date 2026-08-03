@@ -308,7 +308,11 @@ def _saga_pipeline(broker: FakeKafkaBroker) -> tuple[KafkaBus, SQLiteStore, list
     clock = ManualClock(start_ns=1_000)
     store = SQLiteStore(":memory:")
     exchange = PaperExchange(
-        bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
+        bus=bus,
+        clock=clock,
+        fill_model=ImmediateFillModel(),
+        genesis_collateral=GENESIS,
+        account_net=dict,
     )
     manager = ExecutionManager(
         bus=bus, exchange=exchange, checkpointer=checkpointer(store, clock=clock)

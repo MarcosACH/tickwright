@@ -62,7 +62,11 @@ def _life(
     """One engine life over ``store``: full wiring, feed run to end-of-file."""
     bus = InMemoryBus()
     venue = PaperExchange(
-        bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
+        bus=bus,
+        clock=clock,
+        fill_model=ImmediateFillModel(),
+        genesis_collateral=GENESIS,
+        account_net=dict,
     )
     checks = checkpointer(store, clock=clock)
     checks.cache.rebuild()

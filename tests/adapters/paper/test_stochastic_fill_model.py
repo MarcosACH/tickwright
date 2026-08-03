@@ -154,7 +154,11 @@ def test_a_resting_limit_partial_fills_across_ticks_and_converges() -> None:
     bus = InMemoryBus()
     clock = ManualClock()
     exchange = PaperExchange(
-        bus=bus, clock=clock, fill_model=_partial_model(fraction="0.4"), genesis_collateral=GENESIS
+        bus=bus,
+        clock=clock,
+        fill_model=_partial_model(fraction="0.4"),
+        genesis_collateral=GENESIS,
+        account_net=dict,
     )
     fills: list[FillReport] = []
     bus.subscribe(FillReport, lambda r: _record(fills, r))
@@ -185,7 +189,11 @@ def test_a_marketable_limit_partial_fill_rests_its_remainder_and_converges() -> 
     bus = InMemoryBus()
     clock = ManualClock()
     exchange = PaperExchange(
-        bus=bus, clock=clock, fill_model=_partial_model(fraction="0.4"), genesis_collateral=GENESIS
+        bus=bus,
+        clock=clock,
+        fill_model=_partial_model(fraction="0.4"),
+        genesis_collateral=GENESIS,
+        account_net=dict,
     )
     fills: list[FillReport] = []
     bus.subscribe(FillReport, lambda r: _record(fills, r))
@@ -211,7 +219,11 @@ def test_a_marketable_ioc_limit_partial_fill_cancels_its_remainder() -> None:
     bus = InMemoryBus()
     clock = ManualClock()
     exchange = PaperExchange(
-        bus=bus, clock=clock, fill_model=_partial_model(fraction="0.4"), genesis_collateral=GENESIS
+        bus=bus,
+        clock=clock,
+        fill_model=_partial_model(fraction="0.4"),
+        genesis_collateral=GENESIS,
+        account_net=dict,
     )
     fills: list[FillReport] = []
     statuses: list[OrderStatusReport] = []
@@ -250,7 +262,9 @@ def test_a_queue_miss_emits_no_fill_and_leaves_the_order_resting() -> None:
     model = StochasticFillModel(
         rng=random.Random(0), clock=clock, params=StochasticParams(prob_fill_on_limit=0.0)
     )
-    exchange = PaperExchange(bus=bus, clock=clock, fill_model=model, genesis_collateral=GENESIS)
+    exchange = PaperExchange(
+        bus=bus, clock=clock, fill_model=model, genesis_collateral=GENESIS, account_net=dict
+    )
     fills: list[FillReport] = []
     statuses: list[OrderStatusReport] = []
     bus.subscribe(FillReport, lambda r: _record(fills, r))
@@ -280,7 +294,9 @@ def test_fill_latency_advances_virtual_time_via_the_injected_clock() -> None:
     model = StochasticFillModel(
         rng=random.Random(0), clock=clock, params=StochasticParams(latency_seconds=2.0)
     )
-    exchange = PaperExchange(bus=bus, clock=clock, fill_model=model, genesis_collateral=GENESIS)
+    exchange = PaperExchange(
+        bus=bus, clock=clock, fill_model=model, genesis_collateral=GENESIS, account_net=dict
+    )
     fills: list[FillReport] = []
     bus.subscribe(FillReport, lambda r: _record(fills, r))
 
@@ -311,7 +327,9 @@ def _run_stream(seed: int) -> list[tuple[Decimal, Decimal]]:
             partial_fill_fraction=Decimal("0.4"),
         ),
     )
-    exchange = PaperExchange(bus=bus, clock=clock, fill_model=model, genesis_collateral=GENESIS)
+    exchange = PaperExchange(
+        bus=bus, clock=clock, fill_model=model, genesis_collateral=GENESIS, account_net=dict
+    )
     fills: list[FillReport] = []
     bus.subscribe(FillReport, lambda r: _record(fills, r))
 

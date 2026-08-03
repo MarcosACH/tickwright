@@ -11,6 +11,7 @@ rather than silently skipping an application it cannot make (ADR-0014).
 partition holding flow the engine never placed (ADR-0038).
 """
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import StrEnum
@@ -51,6 +52,30 @@ class PositionView:
     realized_pnl: Decimal
     fees: Decimal
     funding: Decimal
+
+
+def account_net_size(positions: Iterable["Position"]) -> dict[str, Decimal]:
+    """The **account net size** per symbol — ADR-0034's Σ over every partition.
+
+    ``Σ(per-strategy signed size per symbol) = account net size = venue szi`` is
+    the one invariant bridging the per-strategy partitions to the venue's own
+    truth, and this is its left-hand side computed. Every partition counts,
+    the reserved unattributed one included: it holds flow the engine never
+    placed, which the venue is nonetheless holding, so omitting it would net to
+    something no venue reports (ADR-0043 §9).
+
+    A pure fold over whatever partitions the caller has — the durable mass-read
+    on the recovery path, the projection's own map on the live one — so that
+    "how much of this symbol does the account hold" has exactly one definition
+    to disagree with. Symbols that net to flat are kept rather than dropped:
+    zero *is* the answer for a symbol traded to flat, and a caller that must
+    distinguish it from "never traded" can, while one that need not can treat
+    both alike.
+    """
+    net: dict[str, Decimal] = {}
+    for position in positions:
+        net[position.symbol] = net.get(position.symbol, _ZERO) + position.signed_size
+    return net
 
 
 @dataclass(slots=True)
@@ -155,6 +180,27 @@ class Position:
         return self._book(
             signed=event.quantity if side is Side.BUY else -event.quantity, price=event.price
         )
+
+    def accrue_funding(self, amount: Decimal) -> None:
+        """Add one boundary's signed funding to this partition's own line.
+
+        A verb of its own rather than a field on ``apply``, because funding is
+        the one accounting input that arrives on **no carrier fill** (ADR-0037):
+        there is nothing to fold it into. It reaches neither ``entry_price`` nor
+        ``realized_pnl`` — the same separation the fee keeps, and for the same
+        reason (ADR-0045 §3) — and it is **retained through a close**: the
+        payment left the account when the boundary settled, so unwinding it on
+        the way to flat would invent a refund the venue never made.
+
+        **Takes no ``event_id`` and dedups nothing**, which is the deliberate
+        difference from ``apply``. A fill's gatekeeper is this aggregate's
+        process-lifetime applied set; an accrual's is the *durable* per-symbol
+        watermark in the ledger, at ``(symbol, boundary_ts)`` grain (ADR-0043
+        §5.2) — a grain no position row is entitled to hold, since one accrual
+        may be split across several of them. A second key here would shadow that
+        one and answer for a boundary it cannot see.
+        """
+        self.funding += amount
 
     def _book(self, *, signed: Decimal, price: Decimal) -> tuple[PositionChange, ...]:
         """The average-cost reducer, in four regimes (P1 [#119]).

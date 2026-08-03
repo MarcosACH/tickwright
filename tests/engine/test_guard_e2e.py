@@ -86,7 +86,11 @@ def _harness(
     clock = ManualClock(start_ns=1_000)
     store = SQLiteStore(":memory:")
     exchange = PaperExchange(
-        bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
+        bus=bus,
+        clock=clock,
+        fill_model=ImmediateFillModel(),
+        genesis_collateral=GENESIS,
+        account_net=dict,
     )
     checks = checkpointer(store, clock=clock)
     guard = guard or RealGuard(specs={"BTC": _SPEC}, store=store, clock=clock)
@@ -133,6 +137,7 @@ def test_market_below_min_notional_is_rejected_by_the_venue_via_sourced_specs() 
         fill_model=ImmediateFillModel(),
         genesis_collateral=GENESIS,
         instrument_specs={"BTC": _SPEC},
+        account_net=dict,
     )
     checks = checkpointer(store, clock=clock)
     guard = RealGuard(specs=exchange.instrument_specs(), store=store, clock=clock)
@@ -233,7 +238,11 @@ def _revived_manager(
     bus = InMemoryBus()
     clock = ManualClock(start_ns=2_000)
     exchange = PaperExchange(
-        bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
+        bus=bus,
+        clock=clock,
+        fill_model=ImmediateFillModel(),
+        genesis_collateral=GENESIS,
+        account_net=dict,
     )
     checks = checkpointer(store, clock=clock)
     cache = checks.cache

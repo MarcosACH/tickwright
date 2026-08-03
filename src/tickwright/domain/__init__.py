@@ -6,7 +6,7 @@ It is the stable contract of the system; keep it log-free and dependency-free.
 """
 
 from .account import Account, AccountSpec, AccountView
-from .economics import fill_fee
+from .economics import fill_fee, funding_amount, funding_boundaries
 from .enums import (
     AggressorSide,
     ComponentState,
@@ -22,6 +22,7 @@ from .events import (
     Event,
     ExecutionReport,
     FillReport,
+    FundingAccrual,
     MarketTick,
     OrderCancelled,
     OrderDenied,
@@ -55,7 +56,7 @@ from .instrument import (
     quantize_size,
 )
 from .order import Order
-from .position import Position, PositionChange, PositionView
+from .position import Position, PositionChange, PositionView, account_net_size
 from .protocols import (
     Clock,
     EventBus,
@@ -91,6 +92,7 @@ __all__ = [
     "Event",
     "ExecutionReport",
     "FillReport",
+    "FundingAccrual",
     "GuardDecision",
     "InstrumentSpec",
     "KillSwitchState",
@@ -126,8 +128,12 @@ __all__ = [
     "below_min_notional",
     "quantize_price",
     "quantize_size",
-    # fill-boundary economics
+    # boundary economics
     "fill_fee",
+    "funding_amount",
+    "funding_boundaries",
+    # the Σ-invariant's left-hand side
+    "account_net_size",
     # seam Protocols
     "Clock",
     "EventBus",

@@ -16,12 +16,14 @@ implements the seam.
 """
 
 from dataclasses import dataclass
+from decimal import Decimal
 
 from tickwright.domain import (
     Account,
     AccountSpec,
     AccountView,
     Clock,
+    FundingAccrual,
     InvariantViolation,
     OrderFillEvent,
     Portfolio,
@@ -77,6 +79,31 @@ class LedgerChange:
     account: Account
     position: Position
     changes: tuple[PositionChange, ...]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class FundingChange:
+    """One accrual's effect on the ledger: folded in memory, not yet durable.
+
+    ``LedgerChange``'s sibling on the path with no carrier fill, and the shape
+    differs exactly where the two facts differ. It carries **many** positions
+    rather than one, because a symbol's accrual is split across every partition
+    holding it; it carries no ``changes``, because an accrual moves a record
+    without ever opening or closing one, so the announcement behind the write is
+    ``position.changed`` for every partition here and nothing else to choose
+    between (ADR-0045 §2); and it carries the **watermark advance**, which is the
+    whole reason the pair exists — the mark must land in the same transaction as
+    the funding line it guards, so it travels with that line rather than
+    following it (ADR-0043 §5.2).
+
+    ``funding_mark`` is a ``(symbol, boundary_ts)`` pair, at the grain the key it
+    is the durable half of: one value per symbol, deliberately not a column on
+    any of the position rows beside it here.
+    """
+
+    account: Account
+    positions: tuple[Position, ...]
+    funding_mark: tuple[str, int]
 
 
 class PortfolioProjection:
@@ -145,6 +172,142 @@ class PortfolioProjection:
             # a redelivered fill again. ``Account`` owns the sign (ADR-0042 §4).
             self._account.accrue_fee(position.fees - fees_before, event_id=event.event_id)
         return LedgerChange(account=self._account, position=position, changes=changes)
+
+    def apply_funding(self, accrual: FundingAccrual) -> FundingChange | None:
+        """Fold one settled boundary into the funding line and the cash line.
+
+        The **gate comes first**, and it is a durable read rather than an
+        in-memory one: an accrual whose boundary is at or below its symbol's
+        watermark has already been applied and is dropped, returning ``None`` —
+        nothing folded, nothing to write (ADR-0043 §5.2). That single value is
+        what makes all three convergence paths no-ops across a restart, which an
+        in-memory key set cannot be: paper's catch-up, live's reconcile
+        re-ingest, and a replay rerun that re-derives every boundary in the file.
+
+        The **gate is read before the split, never per partition**. A mark on the
+        position row would be a value per row, and a row created *after* a
+        boundary starts with no mark — so anything reaching back past its
+        creation would find nothing to stop it, and an accrual dropped on one row
+        but applied on another would still move ``cash``, leaving the ledger
+        recording a payment one partition never sees.
+
+        Cash moves by the amount **whether or not there is a partition to
+        attribute it to**: the payment is a fact about the account, and the
+        attribution is an accounting question with no bearing on whether it
+        happened. That is ADR-0043 §5.2's decision rather than this method's
+        convenience — the gate is read *before* the split precisely so the two
+        questions are answered independently.
+
+        **The two do come apart, and where they do the cash line is the one that
+        stays right.** The venue computes the amount from the account net it read
+        at the boundary; this folds it across the partitions held when it
+        arrives. Let a fill take the symbol flat in between and ``exposed`` is
+        empty: ``Σ funding lines`` falls short of the cash movement by the whole
+        amount, and the mark advances in the same write, so no later pass
+        corrects it. On the hermetic path that is unreachable — ``ReplayFeed``
+        advances the clock and yields *before* it publishes, so the generator
+        wakes with no cascade in flight and its own publish drains to quiescence
+        before it returns. It is reachable wherever the generator instead wakes
+        at an arbitrary point in the loop: a ``LiveClock`` paper run, where
+        ``sleep_until`` is a real ``asyncio.sleep``, and ``KafkaBus``, where the
+        accrual round-trips the broker and is dispatched behind whatever fills
+        are already queued. The residue is the unattributed flow
+        [#189](https://github.com/MarcosACH/tickwright/issues/189)'s reserved
+        partition absorbs; until that partition exists the account line carries
+        it alone, which is the direction that keeps ``cash`` faithful to what
+        was actually paid.
+
+        Returns rather than writes: the caller must make the change durable
+        before the run goes on, exactly as ``apply_fill``'s does.
+        """
+        mark = self._store.funding_mark(accrual.symbol)
+        if mark is not None and accrual.boundary_ts_ns <= mark:
+            return None
+        exposed = tuple(
+            position
+            for (_owner, symbol), position in self._positions.items()
+            if symbol == accrual.symbol and not position.is_flat
+        )
+        self._split(accrual.amount, across=exposed)
+        # ``Account`` owns no sign here, unlike the fee's leg: the amount already
+        # mirrors the venue's ``usdc``, so a payment arrives negative (ADR-0037).
+        self._account.accrue_funding(accrual.amount, event_id=accrual.event_id)
+        return FundingChange(
+            account=self._account,
+            positions=exposed,
+            funding_mark=(accrual.symbol, accrual.boundary_ts_ns),
+        )
+
+    @staticmethod
+    def _split(amount: Decimal, *, across: tuple[Position, ...]) -> None:
+        """Attribute one symbol's accrual across the partitions holding it.
+
+        Pro-rata by signed size, which is not a policy choice but the identity
+        that makes it exact: the amount is ``− net × price × rate`` and a
+        partition's own share is ``− size_i × price × rate``, so scaling by
+        ``size_i / net`` reproduces each partition's own accrual from the net
+        one. A short partition against a longer one therefore *receives* out of a
+        payment the account made, which is what actually happened.
+
+        **The last partition takes the residue rather than its quotient**, so the
+        shares sum to the amount exactly. ``Decimal`` division is inexact at any
+        precision, and a rounded split would leave ``Σ funding lines`` short of
+        the ``cash`` movement beside it — a discrepancy that accumulates every
+        boundary and has no later step to correct it. The single-partition case,
+        which is every paper run today, divides not at all.
+
+        A net of zero is not divisible and needs no division. Offsetting
+        partitions arise where the account is flat in the symbol, and a flat
+        account accrues nothing to split — so on the hermetic path the guard is
+        simply unreachable. Where it *is* reachable, the symbol having gone flat
+        between the venue's read and this fold, the early return is the same
+        decision ``apply_funding`` records one method up: the accrual stays whole
+        on the cash line and attributes to nothing, rather than being forced onto
+        a partition that no longer holds what it was charged for.
+        """
+        net = sum((position.signed_size for position in across), Decimal("0"))
+        if not across or net == 0:
+            return
+        allocated = Decimal("0")
+        for position in across[:-1]:
+            share = amount * position.signed_size / net
+            position.accrue_funding(share)
+            allocated += share
+        across[-1].accrue_funding(amount - allocated)
+
+    def project_funding(self, change: FundingChange) -> None:
+        """Announce the partitions one accrual moved — ``project``'s funding half.
+
+        ADR-0045 §2 names ``position.changed`` for "a fill **or accrual** moves a
+        non-flat record", and this is the accrual arm. It matters more here than
+        on the fill path rather than less: funding is the one accounting input
+        with no carrier event (ADR-0037), so unlike a fill there is no ``order.*``
+        record beside it that an operator could read the movement off instead —
+        and the catalog is already the only place a position change is observable
+        at all, being an output derived from an input on the bus rather than a bus
+        event of its own (ADR-0045 §1). A funding line that moved with no record
+        moved invisibly.
+
+        **Nothing is filed**, which is the difference from its sibling. An accrual
+        splits only across partitions the projection already holds — it is read
+        out of ``_positions`` to be split at all — so there is no first filing to
+        defer behind the write, and the announcement is the whole of what this
+        step keeps.
+
+        One name and no branch: an accrual moves a record without ever opening or
+        closing one, so ``_POSITION_EVENTS`` has nothing to choose between here
+        and the map stays the fill path's. ``funding`` rides the record because it
+        is what moved, beside the ``size`` that did not — a reader filtering on
+        ``position.changed`` gets one shape from both emitters.
+        """
+        for position in change.positions:
+            named_event(
+                NamedEvent.POSITION_CHANGED,
+                strategy_id=position.strategy_id,
+                symbol=position.symbol,
+                size=str(position.signed_size),
+                funding=str(position.funding),
+            )
 
     def project(self, change: LedgerChange) -> None:
         """File ``change``'s partition and announce what the fill did.

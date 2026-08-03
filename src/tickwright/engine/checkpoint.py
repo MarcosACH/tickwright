@@ -24,6 +24,8 @@ would otherwise have to know and could silently invert:
 
 - **the fill write** — fold, then one transaction, then project both read-models
   (``checkpoint_fill``)
+- **the funding write** — gate on the durable mark, then one transaction that
+  carries the mark's advance beside the line it guards (``checkpoint_funding``)
 - **the non-fill write** — store first, then project (``checkpoint``)
 - **recovery** — the ledger before the order cache (``recover``, ADR-0043 §6/§10)
 
@@ -35,6 +37,7 @@ facade a strategy holds. This type owns what *moves* them, not what asks them.
 from tickwright.domain import (
     AccountSpec,
     Clock,
+    FundingAccrual,
     InvariantViolation,
     Order,
     OrderFillEvent,
@@ -179,3 +182,54 @@ class Checkpointer:
             ) from exc
         self._cache.project(order, ts_ns=ts_ns)
         self._portfolio.project(change)
+
+    def checkpoint_funding(self, accrual: FundingAccrual) -> None:
+        """Make one settled funding boundary durable — gate, then one transaction.
+
+        The ordering a caller could invert is the same one ``checkpoint_fill``
+        keeps, minus the order row and plus the watermark: the projection folds
+        the accrual across its partitions and the cash line, and the write that
+        makes that durable is the write that advances the mark. **The only write
+        that may advance the mark is the one that applies the accrual**
+        (ADR-0043 §9) — split them and the mark falls behind the sum it guards,
+        which is §5.2's double-count reached from the other side.
+
+        A **dropped** accrual writes nothing at all. The gate is the projection's
+        (it holds the store read and the partitions), so a ``None`` here means
+        the boundary was already applied and there is no state to persist —
+        re-stamping the row would make a re-delivery indistinguishable from a
+        payment by anything but the number.
+
+        There **is** something to project behind the write, and it is narrower
+        than the fill path's: no partition to file — an accrual only ever splits
+        across partitions the projection already holds — but one
+        ``position.changed`` per partition it moved, which is what ADR-0045 §2
+        names for "a fill or accrual moves a non-flat record". Behind the write
+        for the fill path's reason: a record naming a payment a crash could still
+        undo would report money that never left.
+
+        **Synchronous, like its siblings**, even though its one production caller
+        is a bus subscriber and subscribers are ``async``. The adapting belongs
+        to the runner that does the subscribing, not here: what makes the fold
+        and the write safe is that no yield point separates them, and a
+        coroutine on this verb would put the seam that guarantees it inside the
+        type rather than around it.
+        """
+        change = self._portfolio.apply_funding(accrual)
+        if change is None:
+            return
+        try:
+            self._store.checkpoint_ledger(
+                account=change.account,
+                positions=change.positions,
+                funding_mark=change.funding_mark,
+                ts_ns=self._clock.timestamp_ns(),
+            )
+        except InvariantViolation as exc:
+            # Only the seam's own failure type is relabelled, as above: anything
+            # else crossing it is a bug below the store, not a failed write.
+            raise InvariantViolation(
+                f"funding checkpoint write failed for {accrual.symbol} "
+                f"at boundary {accrual.boundary_ts_ns}"
+            ) from exc
+        self._portfolio.project_funding(change)

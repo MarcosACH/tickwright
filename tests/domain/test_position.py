@@ -17,6 +17,7 @@ from tickwright.domain import (
     Position,
     PositionChange,
     Side,
+    account_net_size,
 )
 
 
@@ -132,17 +133,61 @@ def test_a_redelivered_fill_is_a_no_op() -> None:
 
 
 def test_the_ledger_lines_no_slice_moves_yet_read_zero() -> None:
-    """``funding``/``isolated_collateral`` exist from the first slice so the
-    view's shape does not churn when the lines that move them land.
+    """``isolated_collateral`` exists from the first slice so the view's shape
+    does not churn when the line that moves it lands.
 
-    ``fees`` was one of these until the fee slice; it now has a writer of its
-    own and is asserted below.
+    ``fees`` and ``funding`` were both of these once; each now has a writer of
+    its own and is asserted below.
     """
     position = _position()
     position.apply(_fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
 
-    assert position.funding == Decimal("0")
     assert position.isolated_collateral == Decimal("0")
+
+
+def test_funding_accrues_on_its_own_line_and_never_into_price_or_pnl() -> None:
+    """Funding's own line, and the three places it is not smeared into (ADR-0037).
+
+    The same treatment the fee gets one grain down, and for the same reason:
+    ``realized_pnl`` stays **gross**, ``entry_price`` is the price the fill
+    traded at and never a carry-adjusted basis, and ``funding`` accumulates on
+    its own. The two accruals differ only in that this one arrives on no fill at
+    all, which is why it has a verb rather than a field on one.
+
+    A payment and a credit, because the line is signed and the aggregate never
+    asks which: the sign arrives already decided by the venue that reported it
+    or by the generator that reproduced its formula.
+    """
+    position = _position()
+    position.apply(_fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
+
+    position.accrue_funding(Decimal("-0.5"))
+    position.accrue_funding(Decimal("0.2"))
+
+    assert position.funding == Decimal("-0.3")
+    assert position.entry_price == Decimal("100")
+    assert position.realized_pnl == Decimal("0")
+    assert position.fees == Decimal("0")
+    assert position.view().funding == Decimal("-0.3")
+
+
+def test_funding_accrued_while_open_survives_the_close_that_flattens_the_position() -> None:
+    """It is realized cash, never reversed (ADR-0037).
+
+    A flat record is still a record (P1 #119), and funding is the line that most
+    invites the opposite reading: it was charged *for holding* something no
+    longer held. But the payment left the account when the boundary settled, so
+    unwinding it on the close would be inventing a refund the venue never made.
+    """
+    position = _position()
+    position.apply(_fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
+    position.accrue_funding(Decimal("-0.5"))
+
+    position.apply(_fill(trade_id="f2", quantity="2", price="150"), side=Side.SELL)
+
+    assert position.is_flat
+    assert position.entry_price == Decimal("0")  # reset by the close
+    assert position.funding == Decimal("-0.5")  # retained through it
 
 
 def test_a_fills_fee_accrues_on_its_own_line_and_never_into_price_or_pnl() -> None:
@@ -270,3 +315,45 @@ def test_a_refused_fill_leaves_the_ledger_exactly_as_it_was() -> None:
         PositionChange.CHANGED,
     )
     assert position.entry_price == Decimal("150")
+
+
+def _held(strategy_id: str | None, symbol: str, size: str) -> Position:
+    return Position(strategy_id=strategy_id, symbol=symbol, signed_size=Decimal(size))
+
+
+def test_the_account_net_sums_every_partition_of_a_symbol_including_the_unattributed_one() -> None:
+    """ADR-0034's Σ-invariant, computed: Σ(per-strategy signed size) = account net.
+
+    The reserved ``None`` partition counts like any other. It holds flow the
+    engine never placed — which the venue is nonetheless holding — so a net that
+    omitted it would be a number no venue reports, and the invariant it is the
+    left-hand side of would not close (ADR-0043 §9).
+
+    Two symbols at once, because the fold is per-symbol: an implementation that
+    summed everything into one figure would pass a single-symbol case.
+    """
+    net = account_net_size(
+        [
+            _held("alpha", "BTC", "2"),
+            _held("beta", "BTC", "0.5"),
+            _held(None, "BTC", "1"),
+            _held("alpha", "ETH", "-3"),
+        ]
+    )
+
+    assert net == {"BTC": Decimal("3.5"), "ETH": Decimal("-3")}
+
+
+def test_partitions_that_offset_net_to_a_zero_that_is_reported_rather_than_dropped() -> None:
+    """A symbol traded to flat nets to zero, and zero is an answer.
+
+    A flat partition is still a record (P1 #119), so "held nothing" and "never
+    traded" stay distinguishable to a caller that cares — and a caller that does
+    not can treat both alike, which is what the funding generator does when its
+    "a zero accrues nothing" rule collapses them.
+    """
+    assert account_net_size([_held("alpha", "BTC", "2"), _held("beta", "BTC", "-2")]) == {
+        "BTC": Decimal("0")
+    }
+    assert account_net_size([_held("alpha", "BTC", "0")]) == {"BTC": Decimal("0")}
+    assert account_net_size([]) == {}

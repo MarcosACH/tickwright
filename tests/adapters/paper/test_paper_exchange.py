@@ -94,7 +94,11 @@ def _harness() -> tuple[PaperExchange, InMemoryBus, ManualClock, list[FillReport
     bus = InMemoryBus()
     clock = ManualClock()
     exchange = PaperExchange(
-        bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
+        bus=bus,
+        clock=clock,
+        fill_model=ImmediateFillModel(),
+        genesis_collateral=GENESIS,
+        account_net=dict,
     )
     reports: list[FillReport] = []
     bus.subscribe(FillReport, lambda r: _record(reports, r))
@@ -111,7 +115,11 @@ def test_the_paper_venue_consumes_ticks_off_its_bus_with_no_external_wiring() ->
     bus = InMemoryBus()
     clock = ManualClock()
     exchange = PaperExchange(
-        bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
+        bus=bus,
+        clock=clock,
+        fill_model=ImmediateFillModel(),
+        genesis_collateral=GENESIS,
+        account_net=dict,
     )
     fills: list[FillReport] = []
     bus.subscribe(FillReport, lambda r: _record(fills, r))
@@ -173,6 +181,7 @@ def _specced_harness(
         fill_model=ImmediateFillModel(),
         genesis_collateral=GENESIS,
         instrument_specs={spec.symbol: spec},
+        account_net=dict,
     )
     fills: list[FillReport] = []
     statuses: list[OrderStatusReport] = []
@@ -323,6 +332,7 @@ def test_one_order_filling_on_arrival_and_again_off_the_book_pays_both_rates() -
         ),
         genesis_collateral=GENESIS,
         instrument_specs={"BTC": _FEE_SPEC},
+        account_net=dict,
     )
     fills: list[FillReport] = []
     bus.subscribe(FillReport, lambda r: _record(fills, r))
@@ -413,6 +423,7 @@ def test_configured_rates_change_no_fill_the_matching_path_produces() -> None:
             ),
             genesis_collateral=GENESIS,
             instrument_specs={"BTC": spec},
+            account_net=dict,
         )
         fills: list[FillReport] = []
         bus.subscribe(FillReport, lambda r: _record(fills, r))
@@ -770,6 +781,7 @@ def test_the_paper_venue_declares_a_two_segment_account_id_and_its_genesis() -> 
         fill_model=ImmediateFillModel(),
         genesis_collateral=Decimal("250000"),
         account_label="momentum_v2",
+        account_net=dict,
     )
 
     spec = exchange.account_spec()
@@ -791,43 +803,55 @@ def test_the_paper_account_label_defaults_to_the_same_label_the_config_does() ->
         clock=ManualClock(),
         fill_model=ImmediateFillModel(),
         genesis_collateral=GENESIS,
+        account_net=dict,
     )
 
     assert exchange.account_spec().account_id == "paper-default"
     assert exchange.account_spec().account_id == f"paper-{PaperExchangeConfig().account_label}"
 
 
-def test_the_lifecycle_pair_reaches_nothing_because_the_one_link_is_constructed() -> None:
+def test_the_lifecycle_pair_spawns_exactly_the_funding_generator_and_cancels_it() -> None:
     """The two verbs the runner drives (ADR-0024 step 4 and the reverse
-    shutdown). In-process there is nothing to connect: this venue's only link —
-    the ``MarketTick`` subscription — is wired at construction, so neither verb
-    has anything to do.
+    shutdown). There is still nothing to *connect* in-process — this venue's one
+    link, the ``MarketTick`` subscription, is wired at construction — but there
+    is now something to **run**: ADR-0037's funding generator, which a real venue
+    would push and paper has to settle itself.
 
-    Driven *alone*, with no tick and no order, and watched two ways — the paper
-    analogue of the live arm's ``post.requests == []``. Dispatch is
-    ``isinstance``-guarded (ADR-0023), so a subscription to ``Event`` itself sees
-    **everything** this venue publishes, including a type that does not exist
-    yet; and a venue that connected nothing leaves no task running behind it.
+    Driven *alone*, with no tick and no order, and watched the two ways this
+    test has always watched. Dispatch is ``isinstance``-guarded (ADR-0023), so a
+    subscription to ``Event`` itself sees **everything** this venue publishes,
+    including a type that does not exist yet — and it stays empty, because the
+    generator is parked on a boundary no advancing clock has reached. The
+    running task is what gives its arrival away, which is exactly what this test
+    predicted when the pair was landed with nothing behind it: a generator
+    publishes no fill, so a fill-watcher would have survived its arrival
+    silently, and it publishes nothing at all until time advances, so even the
+    catch-all would.
 
-    Both are needed for the claim to stay honest as the seam grows. ADR-0037's
-    funding generator would be started here and cancelled below: it publishes no
-    fill, so a test watching fills would survive its arrival silently, and it
-    publishes nothing at all until time advances, so even the catch-all would.
-    The task is what gives it away."""
+    So the count is asserted rather than the emptiness: **one** task, so a second
+    loop cannot be added unnoticed, and **none** surviving ``stop()``, which is
+    the half the bus drain depends on — a generator that outlived the release
+    would keep publishing into the drain and the cascade would never quiesce."""
     exchange, bus, _clock, _fills = _harness()
     published: list[Event] = []
     bus.subscribe(Event, lambda event: _record(published, event))
-    running: list[asyncio.Task[object]] = []
+    while_running: list[asyncio.Task[object]] = []
+    surviving: list[asyncio.Task[object]] = []
+
+    def _others() -> list[asyncio.Task[object]]:
+        return [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
 
     async def scenario() -> None:
         await exchange.start()
-        running.extend(task for task in asyncio.all_tasks() if task is not asyncio.current_task())
+        while_running.extend(_others())
         await exchange.stop()
+        surviving.extend(task for task in _others() if not task.done())
 
     asyncio.run(scenario())
 
     assert published == []
-    assert running == []
+    assert len(while_running) == 1  # the funding generator, and nothing else
+    assert surviving == []
 
 
 def test_the_paper_venue_releases_without_a_start_and_keeps_its_book() -> None:
@@ -919,7 +943,7 @@ def test_the_paper_venue_satisfies_the_exchange_seam() -> None:
 # copy of the seam: the gate below asserts it against the Protocol itself, so a
 # new member cannot arrive without someone naming what asserts it here.
 _SEAM_CLAIMS = {
-    "start": "test_the_lifecycle_pair_reaches_nothing_because_the_one_link_is_constructed",
+    "start": "test_the_lifecycle_pair_spawns_exactly_the_funding_generator_and_cancels_it",
     "stop": "test_the_paper_venue_releases_without_a_start_and_keeps_its_book",
     "place": "test_market_order_fills_at_the_latest_tick_price",
     "cancel": "test_cancel_removes_a_resting_order_and_reports_cancelled",

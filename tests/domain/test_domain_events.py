@@ -15,6 +15,7 @@ from tickwright.domain import (
     AggressorSide,
     CancelSignal,
     FillReport,
+    FundingAccrual,
     MarketTick,
     OrderFilled,
     OrderPlaced,
@@ -179,6 +180,51 @@ def test_reconciliation_flag_is_excluded_from_the_event_id() -> None:
 
     # A venue-pushed fill and a reconciler-healed copy collapse to one id.
     assert _filled(reconciliation=False).event_id == _filled(reconciliation=True).event_id
+
+
+def test_funding_accrual_keys_the_boundary_and_partitions_by_symbol() -> None:
+    """``(account, symbol, boundary_ts)``, symbol-partitioned (ADR-0037/0038).
+
+    The account is a real component of the key — it is the identity stamped on
+    the durable row — while the *ordering* key stays the symbol, which is what
+    ADR-0003's account-scope caveat asked for: account identity as a property,
+    partitioning unchanged. ``amount`` is excluded, so a re-derived accrual whose
+    price proxy moved cannot slip past the dedup as a second payment.
+    """
+    accrual = FundingAccrual(
+        ts_event=3_600_000_000_000,
+        ts_init=3_600_000_000_000,
+        account_id="paper-default",
+        symbol="BTC",
+        boundary_ts_ns=3_600_000_000_000,
+        amount=Decimal("-10"),
+    )
+
+    assert accrual.event_id == "paper-default:BTC:funding:3600000000000"
+    assert accrual.partition_key == "BTC"
+
+
+def test_the_same_boundary_at_a_different_amount_is_the_same_accrual() -> None:
+    """The key is the boundary, never the money (ADR-0037).
+
+    All three convergence paths hand back an accrual already applied — paper's
+    catch-up, live's reconcile re-ingest, and a replay rerun — and the last of
+    those re-derives the amount against whatever price proxy the run reached.
+    An ``amount`` in the key would make a re-derivation that priced differently
+    read as a second, genuine payment.
+    """
+
+    def _accrual(amount: str) -> FundingAccrual:
+        return FundingAccrual(
+            ts_event=3_600_000_000_000,
+            ts_init=3_600_000_000_000,
+            account_id="paper-default",
+            symbol="BTC",
+            boundary_ts_ns=3_600_000_000_000,
+            amount=Decimal(amount),
+        )
+
+    assert _accrual("-10").event_id == _accrual("-11.5").event_id
 
 
 # ---- Property tests: the derivations hold for arbitrary field values --------
