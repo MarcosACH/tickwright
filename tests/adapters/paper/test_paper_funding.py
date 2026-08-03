@@ -15,6 +15,7 @@ import asyncio
 from collections.abc import Callable, Mapping
 from decimal import Decimal
 
+import pytest
 from ledgers import GENESIS
 
 from tickwright.adapters.bus import InMemoryBus
@@ -25,6 +26,7 @@ from tickwright.domain import (
     Event,
     FundingAccrual,
     InstrumentSpec,
+    InvariantViolation,
     MarketTick,
 )
 
@@ -93,12 +95,14 @@ async def _drive(
     through: float,
     funding_rate: str = "0.0001",
     start: float = 0.5,
+    priced: bool = True,
 ) -> list[FundingAccrual]:
     """Open the venue at ``start`` holding ``held``, price it at 50 000, jump to ``through``.
 
     One driver for every case here, because the cases differ only in what is
-    held, at what rate, and how far time moved — and a boundary loop is testable
-    *only* through those three, which is the point of the injected clock.
+    held, at what rate, how far time moved, and whether the venue has ever seen
+    the symbol trade — and a boundary loop is testable *only* through those,
+    which is the point of the injected clock.
 
     ``held`` is the **account net size** per symbol, handed to the venue the way
     the ledger hands it in production. It is stated rather than traded into
@@ -106,6 +110,11 @@ async def _drive(
     of what this process filled — a recovered position was filled by a process
     that is gone — so a driver that could only express holdings by placing
     orders could not express the ordinary case at all.
+
+    ``priced=False`` withholds the opening tick, which is the *only* way to
+    express a venue that holds something it cannot price. It became expressible
+    at all when the size moved to the ledger: a venue tallying its own fills
+    could never hold what it had not just seen trade.
     """
     bus = InMemoryBus()
     clock = ManualClock(start_ns=_at(start))
@@ -118,7 +127,8 @@ async def _drive(
     bus.subscribe(FundingAccrual, collect)
     net = dict(held or {})
     venue = _venue(bus, clock, account_net=lambda: net, funding_rate=funding_rate)
-    await bus.publish(_tick("50000", ts=_at(start)))
+    if priced:
+        await bus.publish(_tick("50000", ts=_at(start)))
 
     await venue.start()
     await _quiesce()
@@ -223,6 +233,102 @@ def test_neither_a_zero_rate_nor_a_flat_position_accrues_anything() -> None:
 
     assert at_a_zero_rate == []
     assert flat_after_closing == []
+
+
+def test_a_position_the_venue_cannot_price_settles_nothing_however_far_time_moved() -> None:
+    """A venue with nothing to price accrues nothing, and skips the span whole.
+
+    Paper has one price signal — the last trade — so a symbol it has never seen
+    trade cannot be priced at all, and the alternative to skipping is inventing a
+    price for a boundary. This is the restart gap one grain smaller and it became
+    reachable only when the size moved to the ledger: a recovered position is
+    held before this life has seen a single tick in its symbol.
+
+    Load-bearing beyond the accrual it withholds. The span is skipped *before*
+    its boundaries are enumerated, which is what keeps the first row of a replay
+    cheap — the clock opens at zero and the first row jumps to a real timestamp,
+    so an implementation that enumerated first and priced per boundary would walk
+    every hour since the Unix epoch to produce exactly this nothing.
+
+    Three boundaries cross, so the silence is not for want of time, and the same
+    holding at the same rate pays over one boundary in the case above — so it is
+    the missing price doing the work here and nothing else.
+    """
+    accruals = asyncio.run(_drive(held=_LONG, through=3.25, priced=False))
+
+    assert accruals == []
+
+
+def test_a_generator_killed_by_a_refused_write_surfaces_the_refusal_at_stop() -> None:
+    """A dead generator is *reported* by ``stop()``, never quietly reaped.
+
+    The refusal reaches the loop because ``InMemoryBus.publish`` re-raises a
+    handler's exception into its caller, and on this path the caller is the
+    generator: a ledger write the store refuses therefore kills it, and this
+    venue runs no other task that would notice.
+
+    **Containing** that refusal — faulting the engine the way a raw saga
+    handler's does — needs a supervised long-lived half on the ``Exchange`` seam
+    and is #226's. What ``stop()`` owes in the meantime is narrower and separable:
+    that the failure not be *silent*. An exception retrieved from the task and
+    discarded leaves a run that accrued nothing indistinguishable from one that
+    had nothing to accrue, which is the worst of the two available outcomes.
+
+    A cancellation is not a failure and stays invisible — every other case here
+    stops cleanly, which is what pins this to a real exception rather than to the
+    teardown itself.
+    """
+    bus = InMemoryBus()
+    clock = ManualClock(start_ns=_at(0.5))
+
+    async def refuse(event: Event) -> None:
+        raise InvariantViolation("ledger write refused")
+
+    async def scenario() -> None:
+        bus.subscribe(FundingAccrual, refuse)
+        venue = _venue(bus, clock, account_net=lambda: dict(_LONG))
+        await bus.publish(_tick("50000", ts=_at(0.5)))
+        await venue.start()
+        await _quiesce()
+        clock.advance_to(_at(1.25))
+        await _quiesce()
+
+        with pytest.raises(InvariantViolation, match="ledger write refused"):
+            await venue.stop()
+
+    asyncio.run(scenario())
+
+
+def test_a_second_stop_after_a_surfaced_failure_is_a_clean_no_op() -> None:
+    """The faulted teardown re-walks the whole membership, so ``stop()`` is
+    driven again behind the raise above — and must not raise a second time.
+
+    "No entry may treat a second call as an error" is the reverse shutdown's
+    standing rule (ADR-0024), and surfacing a failure is exactly where it would
+    be easiest to break: a venue that kept the dead task around to re-report
+    would turn one refusal into a fault recorded twice, the second naming a
+    teardown that had already happened.
+    """
+    bus = InMemoryBus()
+    clock = ManualClock(start_ns=_at(0.5))
+
+    async def refuse(event: Event) -> None:
+        raise InvariantViolation("ledger write refused")
+
+    async def scenario() -> None:
+        bus.subscribe(FundingAccrual, refuse)
+        venue = _venue(bus, clock, account_net=lambda: dict(_LONG))
+        await bus.publish(_tick("50000", ts=_at(0.5)))
+        await venue.start()
+        await _quiesce()
+        clock.advance_to(_at(1.25))
+        await _quiesce()
+        with pytest.raises(InvariantViolation):
+            await venue.stop()
+
+        await venue.stop()  # the re-walk: nothing left to cancel, nothing to report
+
+    asyncio.run(scenario())
 
 
 def test_a_short_is_paid_over_the_same_boundary_a_long_would_pay() -> None:

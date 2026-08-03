@@ -150,10 +150,15 @@ class PaperExchange:
 
         Safe on a venue that never started and safe on a second call, both
         because the runner's faulted teardown re-walks its whole membership from
-        the top (ADR-0024).
+        the top (ADR-0024). A generator that died of a refused ledger write is
+        reported here rather than reaped quietly, so that re-walk is exactly
+        where the reference has to be released **before** the wait rather than
+        after it: kept until ``cancel`` returned, a surfaced failure would leave
+        the dead task in place for the second pass to report all over again,
+        turning one refusal into a fault recorded twice.
         """
-        await cancel(self._funding_task)
-        self._funding_task = None
+        task, self._funding_task = self._funding_task, None
+        await cancel(task)
 
     def _funding_basis(self) -> tuple[FundingBasis, ...]:
         """What each held symbol's accrual is computed from, as of now.

@@ -253,9 +253,13 @@ class Engine:
         # publisher is the paper venue's generator, which ``exchange.start()``
         # spawns with a bare ``create_task``. A refused ledger write therefore
         # kills that generator and nothing else: the engine runs on, accruing
-        # nothing, and stops with exit 0. Closing it means giving the seam a
-        # supervised long-lived half, the way ``MarketFeed.start()`` already
-        # has one — its own slice, since it changes the ``Exchange`` Protocol.
+        # nothing, until the teardown reaches ``exchange.stop()`` — which
+        # re-raises rather than reaping it, so the run faults and the hook is
+        # recorded by name instead of exiting 0 on a silently empty funding
+        # line. Loud, then, but late: the containment that would fault it *at*
+        # the refusal needs the seam to have a supervised long-lived half, the
+        # way ``MarketFeed.start()`` already does — its own slice (#226), since
+        # it changes the ``Exchange`` Protocol.
         #
         # Subscribed **before** the exchange can produce one. The generator is
         # spawned by ``exchange.start()`` one step above, but it is parked on a
