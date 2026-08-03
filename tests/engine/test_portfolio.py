@@ -293,6 +293,92 @@ def test_an_account_holding_nothing_reads_its_equity_as_its_cash() -> None:
     assert account.equity == Decimal("100000")
 
 
+def test_a_stale_mark_freezes_at_its_last_value_and_is_never_rejected_on_read() -> None:
+    """Staleness is **exposed, not decided** (ADR-0039, ADR-0041 §6).
+
+    The mark is ages older than the clock the projection holds, and the read
+    still values against it and reports its instant. That is deliberate on both
+    counts: there is no max-age on the read path, which keeps the ``Clock`` off
+    it entirely, and a strategy — which has its own — compares ``mark_ts`` to now
+    and decides for itself. Refusing here would turn every stale-mark read into
+    the ``None`` that means *never valued*, collapsing two states a reader must
+    be able to tell apart. The safety net for a dead mark stream is the reconcile
+    cross-check, not a read-time age gate.
+    """
+    projection = _projection()
+    portfolio = projection.for_strategy("alpha")
+    book_fill(projection, _fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
+    # ``_projection`` runs on ``ManualClock(7)``; this mark predates even that.
+    projection.observe_mark(_mark(price="110", ts_event=1))
+
+    first = portfolio.position("BTC")
+    second = portfolio.position("BTC")
+
+    assert first is not None and second is not None
+    assert first.unrealized_pnl == second.unrealized_pnl == Decimal("20")
+    assert first.mark_ts == second.mark_ts == 1
+
+
+def test_a_moved_mark_moves_the_valuation_on_the_very_next_read() -> None:
+    """Nothing is memoized between reads (ADR-0034): the second read recomputes
+    off the new mark rather than replaying the first read's answer.
+
+    Two positions in one symbol, so the account-net half is exercised too — a
+    cached notional would be just as wrong as a cached PnL, and the two are
+    assembled from different inputs.
+    """
+    projection = _projection()
+    portfolio = projection.for_strategy("alpha")
+    book_fill(projection, _fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
+
+    projection.observe_mark(_mark(price="110", ts_event=9_000))
+    before = portfolio.position("BTC")
+    projection.observe_mark(_mark(price="120", ts_event=9_500))
+    after = portfolio.position("BTC")
+
+    assert before is not None and after is not None
+    assert (before.unrealized_pnl, before.notional) == (Decimal("20"), Decimal("220"))
+    assert (after.unrealized_pnl, after.notional) == (Decimal("40"), Decimal("240"))
+    assert after.mark_ts == 9_500
+
+
+def test_no_tier_two_value_reaches_the_durable_ledger() -> None:
+    """Tier-2 is **never persisted** (ADR-0034, ADR-0043 §3): a restart recomputes
+    a valuation, it does not recover one.
+
+    The store here refuses to record anything the mark produced — it is asked
+    what the ledger row holds after a marked fill, and the answer must be the
+    Tier-1 lines alone. Persisting a valuation would make it heal-able state,
+    which is the exact distinction the two-tier split rests on.
+    """
+    store = SQLiteStore(":memory:")
+    projection = _projection("100000", store=store)
+    # The atomic path in full this time, write included — the store is the
+    # subject here, so the write that ``book_fill`` leaves out is the point.
+    change = projection.apply_fill(_fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
+    store.checkpoint_ledger(account=change.account, positions=(change.position,), ts_ns=1_000)
+    projection.project(change)
+
+    projection.observe_mark(_mark(price="110", ts_event=9_000))
+
+    # The mark moved the *view*; the durable row is untouched by it.
+    view = projection.for_strategy("alpha").position("BTC")
+    assert view is not None and view.unrealized_pnl == Decimal("20")
+    stored = {position.symbol: position for position in store.all_positions()}["BTC"]
+    assert stored.signed_size == Decimal("2")
+    assert stored.entry_price == Decimal("100")
+    account = store.load_account()
+    assert account is not None
+    assert account.cash == Decimal("100000")  # +20 of unrealized reached nothing
+    # And a fresh projection over the same store reads no mark back at all.
+    restarted = _projection("100000", store=store)
+    restarted.recover()
+    recovered = restarted.for_strategy("alpha").position("BTC")
+    assert recovered is not None
+    assert recovered.mark_ts is None
+    assert recovered.unrealized_pnl is None
+
+
 def test_a_position_the_projection_has_no_mark_for_reports_no_instant() -> None:
     """``mark_ts is None`` ⟺ the mark is absent — the one signal a reader has for
     telling "never valued" from "valued a while ago" (ADR-0041 §6)."""
