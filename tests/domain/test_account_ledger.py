@@ -31,6 +31,28 @@ def test_realized_pnl_accrues_to_the_cash_line() -> None:
     assert account.cash == Decimal("960")
 
 
+def test_funding_accrues_to_the_cash_line_with_the_venue_s_own_sign() -> None:
+    """``cash += funding``, where the fee's rule is ``cash -= fee`` (ADR-0042 §4).
+
+    The two lines' cash rules legitimately differ because their venue source
+    fields carry opposite raw signs: a fee mirrors ``fee``, where positive is a
+    cost, and funding mirrors ``userFunding.usdc``, where negative is a payment
+    made. Each stays faithful to its own source rather than to a forced house
+    convention, which is what keeps live's ingest a verbatim read with no flip
+    bug to have.
+
+    So both directions are asserted here: negating in the wrong place turns a
+    payment into a credit and still passes a one-sided case.
+    """
+    account = _account("1000")
+
+    account.accrue_funding(Decimal("-10"), event_id="paper-default:BTC:funding:3600000000000")
+    assert account.cash == Decimal("990")  # < 0: paid out
+
+    account.accrue_funding(Decimal("4"), event_id="paper-default:BTC:funding:7200000000000")
+    assert account.cash == Decimal("994")  # > 0: received
+
+
 def test_the_cash_line_accrues_unconditionally_and_dedups_nothing() -> None:
     """``Account`` is the cash line's *writer*, never a second idempotency
     authority — two accruals of one ``event_id`` move it twice.

@@ -132,17 +132,61 @@ def test_a_redelivered_fill_is_a_no_op() -> None:
 
 
 def test_the_ledger_lines_no_slice_moves_yet_read_zero() -> None:
-    """``funding``/``isolated_collateral`` exist from the first slice so the
-    view's shape does not churn when the lines that move them land.
+    """``isolated_collateral`` exists from the first slice so the view's shape
+    does not churn when the line that moves it lands.
 
-    ``fees`` was one of these until the fee slice; it now has a writer of its
-    own and is asserted below.
+    ``fees`` and ``funding`` were both of these once; each now has a writer of
+    its own and is asserted below.
     """
     position = _position()
     position.apply(_fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
 
-    assert position.funding == Decimal("0")
     assert position.isolated_collateral == Decimal("0")
+
+
+def test_funding_accrues_on_its_own_line_and_never_into_price_or_pnl() -> None:
+    """Funding's own line, and the three places it is not smeared into (ADR-0037).
+
+    The same treatment the fee gets one grain down, and for the same reason:
+    ``realized_pnl`` stays **gross**, ``entry_price`` is the price the fill
+    traded at and never a carry-adjusted basis, and ``funding`` accumulates on
+    its own. The two accruals differ only in that this one arrives on no fill at
+    all, which is why it has a verb rather than a field on one.
+
+    A payment and a credit, because the line is signed and the aggregate never
+    asks which: the sign arrives already decided by the venue that reported it
+    or by the generator that reproduced its formula.
+    """
+    position = _position()
+    position.apply(_fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
+
+    position.accrue_funding(Decimal("-0.5"))
+    position.accrue_funding(Decimal("0.2"))
+
+    assert position.funding == Decimal("-0.3")
+    assert position.entry_price == Decimal("100")
+    assert position.realized_pnl == Decimal("0")
+    assert position.fees == Decimal("0")
+    assert position.view().funding == Decimal("-0.3")
+
+
+def test_funding_accrued_while_open_survives_the_close_that_flattens_the_position() -> None:
+    """It is realized cash, never reversed (ADR-0037).
+
+    A flat record is still a record (P1 #119), and funding is the line that most
+    invites the opposite reading: it was charged *for holding* something no
+    longer held. But the payment left the account when the boundary settled, so
+    unwinding it on the close would be inventing a refund the venue never made.
+    """
+    position = _position()
+    position.apply(_fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
+    position.accrue_funding(Decimal("-0.5"))
+
+    position.apply(_fill(trade_id="f2", quantity="2", price="150"), side=Side.SELL)
+
+    assert position.is_flat
+    assert position.entry_price == Decimal("0")  # reset by the close
+    assert position.funding == Decimal("-0.5")  # retained through it
 
 
 def test_a_fills_fee_accrues_on_its_own_line_and_never_into_price_or_pnl() -> None:

@@ -128,6 +128,28 @@ class Account:
         """
         self._cash -= fee
 
+    def accrue_funding(self, funding: Decimal, *, event_id: str) -> None:
+        """``+`` funding, the third of the four accruing inputs (ADR-0042 §4).
+
+        **The absence of a negation is this method's whole subject**, and it is
+        the deliberate opposite of ``accrue_fee`` above. ``funding`` arrives
+        mirroring ``userFunding.usdc`` — ``< 0`` paid out, ``> 0`` received
+        (ADR-0037) — where a fee arrives mirroring ``fee``, positive being a
+        cost. The two venue fields carry opposite raw signs, so the two cash
+        rules must differ for the two lines to stay faithful to their own
+        sources; forcing one house convention would put a flip somewhere, and
+        the place it would go is live's ingest, whose value is that it reads the
+        venue's number verbatim.
+
+        Unconditional and keyed by nothing, exactly as its two siblings are.
+        The gatekeeper here is neither of theirs: an accrual is deduped by the
+        durable per-symbol watermark at ``(symbol, boundary_ts)`` grain
+        (ADR-0043 §5.2), which is the one key ``Position.apply``'s
+        ``event_id`` set could never stand in for — funding has no fill to be
+        applied to. ``event_id`` is provenance, not a key.
+        """
+        self._cash += funding
+
     @classmethod
     def restore(
         cls,
