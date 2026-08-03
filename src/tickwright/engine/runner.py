@@ -245,9 +245,17 @@ class Engine:
         self._bus.subscribe(ExecutionReport, self._execution.on_execution_report)
         # Funding is the one accounting input that arrives on the bus rather
         # than on the fill-apply path, because it has no carrier fill (ADR-0037)
-        # — so it is subscribed here, beside the saga's own raw handlers and
-        # under the same containment rule: a refused ledger write propagates to
-        # the TaskGroup and faults the engine rather than being survived.
+        # — so it is subscribed here, beside the saga's own raw handlers.
+        #
+        # It does **not** yet inherit their containment, and the difference is
+        # worth stating rather than assuming. A raw handler's refusal reaches
+        # the TaskGroup because the publisher is a supervised task; this one's
+        # publisher is the paper venue's generator, which ``exchange.start()``
+        # spawns with a bare ``create_task``. A refused ledger write therefore
+        # kills that generator and nothing else: the engine runs on, accruing
+        # nothing, and stops with exit 0. Closing it means giving the seam a
+        # supervised long-lived half, the way ``MarketFeed.start()`` already
+        # has one — its own slice, since it changes the ``Exchange`` Protocol.
         #
         # Subscribed **before** the exchange can produce one. The generator is
         # spawned by ``exchange.start()`` one step above, but it is parked on a
