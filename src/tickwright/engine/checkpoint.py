@@ -31,7 +31,14 @@ would otherwise have to know and could silently invert:
 
 Reads stay on the projections themselves: ``cache`` and ``portfolio`` are lent
 out for the ``Reconciler``'s worklist, the manager's saga lookups and the scoped
-facade a strategy holds. This type owns what *moves* them, not what asks them.
+facade a strategy holds.
+
+A lent projection is therefore written through in two places — the barrier's
+account materialisation and the Tier-2 mark cache, both from ``runner.py`` — and
+that is the rule above read in the other direction rather than a hole in it:
+this type owns the movements whose **ordering** a caller could invert, and a
+write with no ordering inside it has nothing here to protect. See ``portfolio``
+below, where the rule is stated on the borrow itself.
 """
 
 from tickwright.domain import (
@@ -89,12 +96,19 @@ class Checkpointer:
     def portfolio(self) -> PortfolioProjection:
         """The accounting read-model, lent for reads, for the scoped
         ``Portfolio`` facade the composition root injects into a strategy, and —
-        the one borrow that *writes* — for the startup barrier's account
-        materialisation (``runner.py``). That write stays off this type's verbs
-        deliberately: what these own is an ordering a caller could silently
-        invert, and opening a ledger is one write to one read-model with no
-        ordering inside it. The ordering it does have is the barrier's, which is
-        the runner's to keep."""
+        for the borrows that *write* — for the startup barrier's account
+        materialisation and for taking a ``MarkTick`` into the Tier-2 latest-value
+        cache (both ``runner.py``).
+
+        Those writes stay off this type's verbs by a rule rather than by
+        exception, so a third can be placed without re-deciding: **what these
+        verbs own is an ordering a caller could silently invert** — a fold whose
+        result must be durable before it is readable, a watermark that must land
+        in the same transaction as the line it guards. A write with no such
+        ordering inside it has nothing for a verb to protect. Opening a ledger is
+        one write to one read-model; taking a mark is one in-memory assignment
+        with no store behind it at all. The ordering they *do* have is the
+        barrier's and the subscription's, which is the runner's to keep."""
         return self._portfolio
 
     def recover(self) -> None:
