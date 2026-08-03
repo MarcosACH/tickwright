@@ -87,22 +87,38 @@ async def run_funding(
     a wall-clock restart — which is why the gate is invisible there and
     load-bearing under replay, where the feed genuinely rewinds virtual time.
 
-    ``basis`` is re-read per boundary rather than captured once, but a jump
-    crosses boundaries *between* two ticks, where nothing filled and no price
-    moved — so the caught-up accruals are identical but for their timestamps,
-    which is exactly what makes catch-up "post N keyed payments" rather than a
-    re-simulation.
+    ``basis`` is read **once per catch-up span**, not once per boundary, and
+    ADR-0037 is what licenses that: a jump crosses boundaries *between* two
+    ticks, where no fill happened and no price moved, so position and last price
+    are constant across every boundary caught up. Catch-up is therefore "post N
+    keyed payments distinguished only by their timestamps" rather than a
+    re-simulation — and reading the basis per boundary would only invite the
+    opposite reading.
+
+    **A venue with nothing to price settles nothing, however far time moved.**
+    That is the same argument as the restart gap one grain smaller: boundaries
+    with no exposure and no cached tick have no accrual to compute and no price
+    to compute one at. It is also what keeps the first tick of a replay cheap —
+    the clock opens at zero and the first row jumps to a real timestamp, so
+    without it every hour since the Unix epoch would be enumerated to produce
+    nothing.
     """
     settled_through_ns = clock.timestamp_ns()
     while True:
         await clock.sleep_until(settled_through_ns // interval_ns * interval_ns + interval_ns)
         now_ns = clock.timestamp_ns()
-        for boundary_ns in funding_boundaries(
-            after_ns=settled_through_ns, through_ns=now_ns, interval_ns=interval_ns
-        ):
-            await _settle(
-                bus=bus, clock=clock, account_id=account_id, boundary_ns=boundary_ns, basis=basis()
-            )
+        exposure = basis()
+        if exposure:
+            for boundary_ns in funding_boundaries(
+                after_ns=settled_through_ns, through_ns=now_ns, interval_ns=interval_ns
+            ):
+                await _settle(
+                    bus=bus,
+                    clock=clock,
+                    account_id=account_id,
+                    boundary_ns=boundary_ns,
+                    basis=exposure,
+                )
         settled_through_ns = now_ns
 
 
