@@ -63,3 +63,29 @@ def funding_amount(*, signed_size: Decimal, price: Decimal, spec: InstrumentSpec
     which live never does (it ingests). Unrounded for the same reason the fee is.
     """
     return -signed_size * price * spec.funding_rate
+
+
+def funding_boundaries(*, after_ns: int, through_ns: int, interval_ns: int) -> tuple[int, ...]:
+    """The epoch-aligned funding boundaries strictly crossed in ``(after, through]``.
+
+    A boundary is any instant that is an integer multiple of ``interval_ns``
+    **measured from the Unix epoch** (ADR-0037), which at the default hour is
+    exactly the top of each UTC hour — the venue's real schedule. Measuring from
+    the epoch rather than from the run's start is what makes a replayed run cross
+    the *same absolute* boundaries a live one would; a start-relative phase would
+    be arbitrary and irreproducible across launches.
+
+    **Every** boundary in the span is returned, ascending, and that is the whole
+    point of enumerating them rather than answering "has one passed?": funding is
+    **additive** where the reconcile cadences are convergent (ADR-0033), so a
+    virtual-time jump across N boundaries is N distinct payments and collapsing
+    them to one would silently under-charge.
+
+    Half-open — ``after`` exclusive, ``through`` inclusive — so consecutive spans
+    tile the timeline exactly once. A caller that has just settled ``t`` passes it
+    as ``after_ns`` and is never handed it again, while an instant that lands
+    *on* a boundary has crossed it and settles it now rather than next time.
+    """
+    first = after_ns // interval_ns + 1
+    last = through_ns // interval_ns
+    return tuple(index * interval_ns for index in range(first, last + 1))

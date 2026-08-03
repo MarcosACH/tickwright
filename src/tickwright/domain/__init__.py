@@ -6,7 +6,7 @@ It is the stable contract of the system; keep it log-free and dependency-free.
 """
 
 from .account import Account, AccountSpec, AccountView
-from .economics import fill_fee, funding_amount
+from .economics import fill_fee, funding_amount, funding_boundaries
 from .enums import (
     AggressorSide,
     ComponentState,
@@ -129,6 +129,7 @@ __all__ = [
     # boundary economics
     "fill_fee",
     "funding_amount",
+    "funding_boundaries",
     # seam Protocols
     "Clock",
     "EventBus",

@@ -9,9 +9,24 @@ credited — and making liquidity is *not* what makes a fee negative — while a
 funding amount mirrors ``userFunding.usdc``, ``< 0`` paid and ``> 0`` received.
 """
 
+from datetime import UTC, datetime
 from decimal import Decimal
 
-from tickwright.domain import InstrumentSpec, fill_fee, funding_amount
+from tickwright.domain import InstrumentSpec, fill_fee, funding_amount, funding_boundaries
+
+HOUR_NS = 3_600_000_000_000
+"""The venue's real funding interval (ADR-0037), spelled out once for the cases below."""
+
+
+def _at(text: str) -> int:
+    """A UTC wall-clock instant as epoch ns — the tests' independent timeline.
+
+    The boundary rule is stated in wall-clock terms ("the top of each UTC hour")
+    and implemented in integer arithmetic off the epoch, so the cases below name
+    the instants they mean and let ``datetime`` do the conversion. A case that
+    spelled its own epoch integers would be re-deriving the thing under test.
+    """
+    return int(datetime.fromisoformat(text).replace(tzinfo=UTC).timestamp()) * 1_000_000_000
 
 
 def _spec(*, maker_fee: str = "0", taker_fee: str = "0", funding_rate: str = "0") -> InstrumentSpec:
@@ -179,3 +194,66 @@ def test_a_spec_that_declares_no_funding_rate_accrues_nothing() -> None:
     amount = funding_amount(signed_size=Decimal("2"), price=Decimal("50000"), spec=frictionless)
 
     assert amount == Decimal("0")
+
+
+def test_every_boundary_a_span_crosses_is_returned_in_order() -> None:
+    """A jump across three boundaries yields three, not one (ADR-0037).
+
+    Funding is **additive** where a reconcile cadence is convergent: each
+    boundary is a distinct real payment, so a span that crosses several must
+    enumerate them all. At the default one-hour interval that is the top of each
+    UTC hour — the venue's real schedule — which the case names in wall-clock
+    terms and the helper derives from the epoch.
+    """
+    crossed = funding_boundaries(
+        after_ns=_at("2024-01-01 00:30:00"),
+        through_ns=_at("2024-01-01 03:15:00"),
+        interval_ns=HOUR_NS,
+    )
+
+    assert crossed == (
+        _at("2024-01-01 01:00:00"),
+        _at("2024-01-01 02:00:00"),
+        _at("2024-01-01 03:00:00"),
+    )
+
+
+def test_consecutive_spans_settle_each_boundary_exactly_once() -> None:
+    """The half-open span, asserted as the property it exists for.
+
+    A generator settles up to ``t`` and passes ``t`` as the next span's
+    ``after_ns``. If the span were closed at both ends, ``t`` would come back a
+    second time and the boundary would be re-settled; if it were open at both,
+    an instant landing exactly on a boundary would drop it and never return.
+    Both ends are asserted here because either error alone reads as a plausible
+    off-by-one somewhere else.
+    """
+    first = funding_boundaries(
+        after_ns=_at("2024-01-01 00:30:00"),
+        through_ns=_at("2024-01-01 02:00:00"),
+        interval_ns=HOUR_NS,
+    )
+    second = funding_boundaries(
+        after_ns=_at("2024-01-01 02:00:00"),
+        through_ns=_at("2024-01-01 04:00:00"),
+        interval_ns=HOUR_NS,
+    )
+
+    # ``through`` is inclusive: 02:00 is crossed by the first span, not deferred.
+    assert first == (_at("2024-01-01 01:00:00"), _at("2024-01-01 02:00:00"))
+    # ``after`` is exclusive: the second span resumes past it, never repeating it.
+    assert second == (_at("2024-01-01 03:00:00"), _at("2024-01-01 04:00:00"))
+
+
+def test_a_span_that_crosses_nothing_is_empty() -> None:
+    """Two instants inside one interval have no boundary between them — the
+    ordinary case between two ticks, and the one the generator must not treat as
+    a payment. An empty tuple rather than a sentinel: there is nothing to settle,
+    which is a real answer."""
+    crossed = funding_boundaries(
+        after_ns=_at("2024-01-01 00:10:00"),
+        through_ns=_at("2024-01-01 00:50:00"),
+        interval_ns=HOUR_NS,
+    )
+
+    assert crossed == ()
