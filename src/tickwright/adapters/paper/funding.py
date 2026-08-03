@@ -49,8 +49,11 @@ _ZERO = Decimal("0")
 class FundingBasis:
     """What one symbol's accrual is computed from at a boundary.
 
-    A snapshot, taken at the moment a boundary is settled: the venue's own net
-    exposure and the price it would mark it at. ``price`` is paper's single
+    A snapshot, taken at the moment a boundary is settled: the **account net
+    size** the ledger reports for the symbol (ADR-0034's Σ-invariant) and the
+    price the venue would mark it at. The size is the ledger's because a paper
+    venue is in-process and a position outlives processes; the price is the
+    venue's because pricing is what a venue is for. ``price`` is paper's single
     signal — the last trade — collapsing the venue's oracle/mark distinction,
     which only bites where funding is computed against a real venue and so is
     moot here (ADR-0037).
@@ -82,6 +85,14 @@ async def run_funding(
     elapsed while down, which is preferable to a restart-invariant number
     produced by a pricing rule nobody can defend.
 
+    **The gap is the whole of the cost, and the boundaries after it are charged
+    in full.** That is a claim about the notional basis rather than about this
+    loop: the size comes from the ledger, which recovered the position, so the
+    new life resumes charging it. It would not hold of a venue that tallied its
+    own size — such a venue restarts empty, settles nothing, and only a fresh
+    fill would ever wake it, so the "gap" would silently be every boundary from
+    the restart onward.
+
     That is a statement about which boundaries this **produces**. Which of them
     are **applied** is the ledger's watermark to decide, and the two never meet on
     a wall-clock restart — which is why the gate is invisible there and
@@ -95,13 +106,18 @@ async def run_funding(
     re-simulation — and reading the basis per boundary would only invite the
     opposite reading.
 
+    Once per span is nonetheless a genuine **re-read**, and the supplier is the
+    ledger rather than any memory of this loop's or the venue's: nothing here is
+    captured at start, so no path that moves the ledger can leave a stale size
+    behind for the next boundary to price against.
+
     **A venue with nothing to price settles nothing, however far time moved.**
     That is the same argument as the restart gap one grain smaller: boundaries
-    with no exposure and no cached tick have no accrual to compute and no price
-    to compute one at. It is also what keeps the first tick of a replay cheap —
-    the clock opens at zero and the first row jumps to a real timestamp, so
-    without it every hour since the Unix epoch would be enumerated to produce
-    nothing.
+    where nothing is held, or where nothing has traded yet to price it at, have
+    no accrual to compute and no price to compute one at. It is also what keeps
+    the first tick of a replay cheap — the clock opens at zero and the first row
+    jumps to a real timestamp, so without it every hour since the Unix epoch
+    would be enumerated to produce nothing.
     """
     settled_through_ns = clock.timestamp_ns()
     while True:

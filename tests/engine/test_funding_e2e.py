@@ -33,6 +33,7 @@ from tickwright.domain import (
     OrderFilled,
     Portfolio,
     Side,
+    account_net_size,
 )
 from tickwright.engine.runner import Engine
 from tickwright.strategies import SingleShotMarketStrategy
@@ -45,6 +46,13 @@ multiple of the interval measured from zero, so shrinking it changes only how
 much virtual time a row has to cover. Wiring the real hour here would mean
 timestamps in the 10^18 range for no gain in what is being asserted.
 """
+
+_SLOTS = 50
+"""Event-loop slots given to a life with no fill to wait on.
+
+A count rather than a sleep, because nothing here may sleep: the replay task and
+the funding generator interleave over a handful of turns, and this is simply
+more than either needs. It bounds a *quiescence*, never a duration."""
 
 _SPEC = InstrumentSpec(
     symbol="BTC",
@@ -80,9 +88,13 @@ _ROWS: list[dict[str, str | int]] = [
 ]
 
 
-def _write_ticks(path: Path) -> Path:
-    path.write_text("\n".join(json.dumps(row) for row in _ROWS) + "\n")
+def _write_rows(path: Path, rows: list[dict[str, str | int]]) -> Path:
+    path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
     return path
+
+
+def _write_ticks(path: Path) -> Path:
+    return _write_rows(path, _ROWS)
 
 
 class Run(NamedTuple):
@@ -100,7 +112,14 @@ class Run(NamedTuple):
     accruals: list[FundingAccrual]
 
 
-async def _run(ticks: Path, db: Path, *, advance_after_stop: int | None = None) -> Run:
+async def _run(
+    ticks: Path,
+    db: Path,
+    *,
+    advance_after_stop: int | None = None,
+    trade: bool = True,
+    start_ns: int = 0,
+) -> Run:
     """One supervised life: buy on the first tick, jump the boundaries, stop.
 
     ``advance_after_stop`` drives virtual time further **once the run has
@@ -108,9 +127,16 @@ async def _run(ticks: Path, db: Path, *, advance_after_stop: int | None = None) 
     place that question can be asked. Advancing a clock after ``asyncio.run``
     has closed the loop would find nothing to run either way, so a case built
     that way would pass against a generator that was very much alive.
+
+    ``trade=False`` registers no strategy, which is what a **second** life looks
+    like when the book it holds was opened by the first: the position comes back
+    from the ledger, not from a strategy re-placing anything, and the run has
+    nothing to wait for but the clock. ``start_ns`` opens that life's clock
+    where the previous one stopped, since the generator resumes from the startup
+    instant and never from the watermark (ADR-0043 §5.1).
     """
     bus = InMemoryBus()
-    clock = ManualClock()
+    clock = ManualClock(start_ns=start_ns)
     store = SQLiteStore(db)
     exchange = PaperExchange(
         bus=bus,
@@ -119,18 +145,23 @@ async def _run(ticks: Path, db: Path, *, advance_after_stop: int | None = None) 
         genesis_collateral=GENESIS,
         instrument_specs={"BTC": _SPEC},
         funding_interval_ns=_INTERVAL_NS,
+        # The production wiring verbatim (``app/build.py``), because the thing
+        # under test across two lives is precisely that the venue's notional
+        # basis is the ledger's and not a tally of its own.
+        account_net=lambda: account_net_size(store.all_positions()),
     )
     feed = ReplayFeed(path=ticks, bus=bus, clock=clock)
     engine = Engine(bus=bus, clock=clock, store=store, exchange=exchange, feed=feed)
-    strategy = SingleShotMarketStrategy(
-        strategy_id="trivial",
-        bus=bus,
-        clock=clock,
-        portfolio=engine.portfolio_for("trivial"),
-        side=Side.BUY,
-        quantity=Decimal("0.5"),
-    )
-    engine.register(strategy, symbols={"BTC"})
+    if trade:
+        strategy = SingleShotMarketStrategy(
+            strategy_id="trivial",
+            bus=bus,
+            clock=clock,
+            portfolio=engine.portfolio_for("trivial"),
+            side=Side.BUY,
+            quantity=Decimal("0.5"),
+        )
+        engine.register(strategy, symbols={"BTC"})
 
     filled = asyncio.Event()
     accruals: list[FundingAccrual] = []
@@ -146,7 +177,13 @@ async def _run(ticks: Path, db: Path, *, advance_after_stop: int | None = None) 
     bus.subscribe(FundingAccrual, on_accrual)
 
     run = asyncio.create_task(engine.run())
-    await asyncio.wait_for(filled.wait(), timeout=5)
+    if trade:
+        await asyncio.wait_for(filled.wait(), timeout=5)
+    else:
+        # Nothing to wait *for* but the file: replay runs to end-of-file on its
+        # own, and the boundaries this life crosses are carried by its rows.
+        for _ in range(_SLOTS):
+            await asyncio.sleep(0)
     # Replay runs to end-of-file, which is what carries virtual time across the
     # boundaries; the engine keeps running after it, so the stop is ours to ask.
     await asyncio.sleep(0)
@@ -213,6 +250,70 @@ def test_the_generator_is_dead_once_the_engine_has_stopped(tmp_path: Path) -> No
     # Only the three the run itself crossed; the four after the stop settled none.
     assert [accrual.boundary_ts_ns for accrual in finished.accruals] == [1_000, 2_000, 3_000]
     assert finished.exit_code == 0
+
+
+def test_a_position_recovered_from_the_ledger_keeps_accruing(tmp_path: Path) -> None:
+    """A restart is not a reason to stop charging funding on a position still open.
+
+    The second life places nothing: its book is the one the **ledger** handed
+    back, which is the whole of what ADR-0043 §6 recovery is for. A generator
+    whose notional basis were the venue's own in-process memory would find that
+    memory empty and settle nothing — for this life and every one after it,
+    since only a new fill would ever refill it. So the position would sit open
+    and free of funding indefinitely, and the ledger would record a long that
+    never paid.
+
+    That is a different claim from the restart **gap**, which stands unchanged:
+    boundaries that elapsed while the process was down are still skipped, the
+    loop resuming from the startup instant (ADR-0043 §5.1). What is asserted
+    here is that the boundaries *after* it are charged — 5 000, 6 000 and 7 000,
+    against the 0.5 BTC the first life left open — at the price cached when each
+    matured, a matured cadence firing before the row that carried time past it
+    (ADR-0033).
+    """
+    db = tmp_path / "saga.db"
+    asyncio.run(_run(_write_ticks(tmp_path / "first.jsonl"), db))
+
+    second = asyncio.run(
+        _run(
+            _write_rows(
+                tmp_path / "second.jsonl",
+                [
+                    {
+                        "symbol": "BTC",
+                        "price": "42000",
+                        "size": "3",
+                        "aggressor_side": "buy",
+                        "trade_id": "c",
+                        "ts_event": 4_100,
+                    },
+                    # Past 5 000, 6 000 and 7 000, exactly as the first life's
+                    # second row jumped past its own three.
+                    {
+                        "symbol": "BTC",
+                        "price": "42200",
+                        "size": "3",
+                        "aggressor_side": "sell",
+                        "trade_id": "d",
+                        "ts_event": 7_500,
+                    },
+                ],
+            ),
+            db,
+            trade=False,
+            start_ns=4_000,
+        )
+    )
+
+    assert [accrual.boundary_ts_ns for accrual in second.accruals] == [5_000, 6_000, 7_000]
+    assert [accrual.amount for accrual in second.accruals] == [Decimal("-2.1")] * 3
+    # Six boundaries charged across the two lives, on one unbroken 0.5 long.
+    store = SQLiteStore(db)
+    assert [position.funding for position in store.all_positions()] == [Decimal("-12.6")]
+    account = store.load_account()
+    assert account is not None
+    assert account.cash == GENESIS - Decimal("12.6")
+    assert second.exit_code == 0
 
 
 def test_a_graceful_stop_leaves_the_funding_line_and_its_mark_durable(tmp_path: Path) -> None:

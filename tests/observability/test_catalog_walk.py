@@ -257,7 +257,11 @@ def _drive_market_fill() -> None:
     bus = InMemoryBus()
     clock = ManualClock(start_ns=1_000)
     exchange = PaperExchange(
-        bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
+        bus=bus,
+        clock=clock,
+        fill_model=ImmediateFillModel(),
+        genesis_collateral=GENESIS,
+        account_net=dict,
     )
     _manager(bus, clock, exchange)
 
@@ -301,7 +305,11 @@ def _drive_position_changes(*, closing: bool) -> Callable[[], None]:
         bus = InMemoryBus()
         clock = ManualClock(start_ns=1_000)
         exchange = PaperExchange(
-            bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
+            bus=bus,
+            clock=clock,
+            fill_model=ImmediateFillModel(),
+            genesis_collateral=GENESIS,
+            account_net=dict,
         )
         _manager(bus, clock, exchange)
 
@@ -322,7 +330,11 @@ def _drive_position_changed() -> None:
     bus = InMemoryBus()
     clock = ManualClock(start_ns=1_000)
     exchange = PaperExchange(
-        bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
+        bus=bus,
+        clock=clock,
+        fill_model=ImmediateFillModel(),
+        genesis_collateral=GENESIS,
+        account_net=dict,
     )
     _manager(bus, clock, exchange)
 
@@ -569,7 +581,11 @@ def _drive_engine_faulted() -> None:
             clock=clock,
             store=SQLiteStore(":memory:"),
             exchange=PaperExchange(
-                bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
+                bus=bus,
+                clock=clock,
+                fill_model=ImmediateFillModel(),
+                genesis_collateral=GENESIS,
+                account_net=dict,
             ),
             feed=_PoisonedFeed(),
         )
@@ -598,7 +614,11 @@ def _drive_engine_stop_hook_failed() -> None:
             clock=clock,
             store=_StoreThatBreaksOnClose(":memory:"),
             exchange=PaperExchange(
-                bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
+                bus=bus,
+                clock=clock,
+                fill_model=ImmediateFillModel(),
+                genesis_collateral=GENESIS,
+                account_net=dict,
             ),
             feed=_PoisonedFeed(),
         )
@@ -618,7 +638,11 @@ def _drive_engine_lifecycle() -> None:
             clock=clock,
             store=SQLiteStore(":memory:"),
             exchange=PaperExchange(
-                bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
+                bus=bus,
+                clock=clock,
+                fill_model=ImmediateFillModel(),
+                genesis_collateral=GENESIS,
+                account_net=dict,
             ),
             feed=_IdleFeed(),
         )

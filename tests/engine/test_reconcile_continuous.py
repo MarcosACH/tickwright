@@ -92,7 +92,11 @@ def _surviving_venue(clock: ManualClock) -> tuple[PaperExchange, InMemoryBus]:
     """A venue whose acks we never heard: its bus has no engine listeners."""
     dead_bus = InMemoryBus()
     exchange = PaperExchange(
-        bus=dead_bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
+        bus=dead_bus,
+        clock=clock,
+        fill_model=ImmediateFillModel(),
+        genesis_collateral=GENESIS,
+        account_net=dict,
     )
     return exchange, dead_bus
 

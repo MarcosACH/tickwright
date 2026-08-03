@@ -12,6 +12,7 @@ virtual time is advanced by hand, which is the whole point of the primitive.
 """
 
 import asyncio
+from collections.abc import Callable, Mapping
 from decimal import Decimal
 
 from ledgers import GENESIS
@@ -25,10 +26,6 @@ from tickwright.domain import (
     FundingAccrual,
     InstrumentSpec,
     MarketTick,
-    OrderType,
-    PlaceOrder,
-    Side,
-    TimeInForce,
 )
 
 HOUR_NS = 3_600_000_000_000
@@ -67,24 +64,20 @@ def _tick(price: str, ts: int, symbol: str = "BTC") -> MarketTick:
     )
 
 
-def _market_order(*, side: Side = Side.BUY, qty: str = "2", cloid: str = "0xabc") -> PlaceOrder:
-    return PlaceOrder(
-        cloid=cloid,
-        symbol="BTC",
-        side=side,
-        quantity=Decimal(qty),
-        order_type=OrderType.MARKET,
-        time_in_force=TimeInForce.IOC,
-    )
-
-
-def _venue(bus: InMemoryBus, clock: ManualClock, *, funding_rate: str = "0.0001") -> PaperExchange:
+def _venue(
+    bus: InMemoryBus,
+    clock: ManualClock,
+    *,
+    account_net: Callable[[], Mapping[str, Decimal]],
+    funding_rate: str = "0.0001",
+) -> PaperExchange:
     return PaperExchange(
         bus=bus,
         clock=clock,
         fill_model=ImmediateFillModel(),
         genesis_collateral=GENESIS,
         instrument_specs={"BTC": _spec(funding_rate)},
+        account_net=account_net,
     )
 
 
@@ -96,18 +89,23 @@ async def _quiesce(times: int = 5) -> None:
 
 async def _drive(
     *,
-    orders: tuple[PlaceOrder, ...] = (),
+    held: Mapping[str, Decimal] | None = None,
     through: float,
     funding_rate: str = "0.0001",
     start: float = 0.5,
 ) -> list[FundingAccrual]:
-    """Open the venue at ``start``, fill ``orders`` at 50 000, then jump to ``through``.
+    """Open the venue at ``start`` holding ``held``, price it at 50 000, jump to ``through``.
 
-    One driver for every case here, because the cases differ only in what was
-    filled, at what rate, and how far time moved — and a boundary loop is
-    testable *only* through those three, which is the point of the injected
-    clock. The venue is started after the fills so every case begins from a
-    settled position, exactly as a restart would.
+    One driver for every case here, because the cases differ only in what is
+    held, at what rate, and how far time moved — and a boundary loop is testable
+    *only* through those three, which is the point of the injected clock.
+
+    ``held`` is the **account net size** per symbol, handed to the venue the way
+    the ledger hands it in production. It is stated rather than traded into
+    existence, and that is the point: what the venue holds is not a consequence
+    of what this process filled — a recovered position was filled by a process
+    that is gone — so a driver that could only express holdings by placing
+    orders could not express the ordinary case at all.
     """
     bus = InMemoryBus()
     clock = ManualClock(start_ns=_at(start))
@@ -118,10 +116,9 @@ async def _drive(
         accruals.append(event)
 
     bus.subscribe(FundingAccrual, collect)
-    venue = _venue(bus, clock, funding_rate=funding_rate)
+    net = dict(held or {})
+    venue = _venue(bus, clock, account_net=lambda: net, funding_rate=funding_rate)
     await bus.publish(_tick("50000", ts=_at(start)))
-    for order in orders:
-        await venue.place(order)
 
     await venue.start()
     await _quiesce()
@@ -129,6 +126,9 @@ async def _drive(
     await _quiesce()
     await venue.stop()
     return accruals
+
+
+_LONG = {"BTC": Decimal("2")}
 
 
 def test_a_jump_across_three_boundaries_accrues_three_separate_payments() -> None:
@@ -139,10 +139,67 @@ def test_a_jump_across_three_boundaries_accrues_three_separate_payments() -> Non
     and 03:00 — three distinct real payments. Collapsing them to one, as a
     convergent cadence would, silently under-charges by two hours of funding.
     """
-    accruals = asyncio.run(_drive(orders=(_market_order(),), through=3.25))
+    accruals = asyncio.run(_drive(held=_LONG, through=3.25))
 
     assert [accrual.boundary_ts_ns for accrual in accruals] == [_at(1), _at(2), _at(3)]
     assert [accrual.amount for accrual in accruals] == [Decimal("-10")] * 3
+
+
+def test_a_position_this_process_never_filled_still_accrues() -> None:
+    """The notional basis is what the **ledger** holds, not what this venue traded.
+
+    Nothing is placed here and the venue fills nothing, yet the boundary is
+    charged — because a paper venue is in-process and a position is not. Every
+    life after the one that opened it inherits the position from the ledger and
+    must go on charging it; a venue that answered from its own memory would find
+    that memory empty and settle nothing, for this life and every one after,
+    since only a new fill could ever refill it.
+
+    Stated at the venue's own seam because that is where the basis is chosen.
+    The two-life version — recover, then keep accruing — is
+    ``tests/engine/test_funding_e2e.py``'s.
+    """
+    accruals = asyncio.run(_drive(held=_LONG, through=1.25))
+
+    assert [accrual.amount for accrual in accruals] == [Decimal("-10")]
+
+
+def test_the_held_size_is_re_read_every_span_rather_than_captured_at_start() -> None:
+    """A position that moves between boundaries is priced at what is held *now*.
+
+    The venue keeps no copy of the size to go stale, which is what makes the
+    ledger its single owner rather than merely its seed. Halving the holding
+    between two spans halves the next payment, with no restart and nothing to
+    invalidate — and every path that moves the ledger without a paper fill
+    (recovery, a heal, an absorbed unattributed fill) is covered by the same
+    fact rather than each needing its own hook.
+    """
+    bus = InMemoryBus()
+    clock = ManualClock(start_ns=_at(0.5))
+    accruals: list[FundingAccrual] = []
+
+    async def collect(event: Event) -> None:
+        assert isinstance(event, FundingAccrual)
+        accruals.append(event)
+
+    async def scenario() -> None:
+        bus.subscribe(FundingAccrual, collect)
+        net = {"BTC": Decimal("2")}
+        venue = _venue(bus, clock, account_net=lambda: net)
+        await bus.publish(_tick("50000", ts=_at(0.5)))
+        await venue.start()
+        await _quiesce()
+
+        clock.advance_to(_at(1.25))  # crosses 01:00 holding 2
+        await _quiesce()
+        net["BTC"] = Decimal("1")
+        clock.advance_to(_at(2.25))  # crosses 02:00 holding 1
+        await _quiesce()
+        await venue.stop()
+
+    asyncio.run(scenario())
+
+    assert [accrual.amount for accrual in accruals] == [Decimal("-10"), Decimal("-5")]
 
 
 def test_neither_a_zero_rate_nor_a_flat_position_accrues_anything() -> None:
@@ -155,31 +212,27 @@ def test_neither_a_zero_rate_nor_a_flat_position_accrues_anything() -> None:
     funding on nothing, and one implemented only on the size would churn a keyed
     zero through the ledger for every frictionless spec.
 
+    The flat case is a symbol the ledger reports at **zero** rather than one it
+    omits: a symbol traded to flat keeps its partition (P1 #119), so the net is
+    a real zero reaching the skip, not an absence sidestepping it.
+
     Both cases cross three boundaries, so neither is silent for want of time.
     """
-    at_a_zero_rate = asyncio.run(_drive(orders=(_market_order(),), through=3.25, funding_rate="0"))
-    flat_after_closing = asyncio.run(
-        _drive(
-            orders=(
-                _market_order(),
-                _market_order(side=Side.SELL, cloid="0xdef"),
-            ),
-            through=3.25,
-        )
-    )
+    at_a_zero_rate = asyncio.run(_drive(held=_LONG, through=3.25, funding_rate="0"))
+    flat_after_closing = asyncio.run(_drive(held={"BTC": Decimal("0")}, through=3.25))
 
     assert at_a_zero_rate == []
     assert flat_after_closing == []
 
 
 def test_a_short_is_paid_over_the_same_boundary_a_long_would_pay() -> None:
-    """The venue reads its own direction off the order, not off the fill.
+    """The direction rides the held size, which is signed at the ledger's grain.
 
-    A ``FillReport`` carries a magnitude — direction lives on the saga's side —
-    so the net size the accrual is computed from is folded where the venue still
-    holds the order. Selling 2 BTC from flat is a short, and at the same positive
-    rate the long paid 10 USDC for, the short is credited 10.
+    Which side of a funding payment you are on *is* the direction of the
+    position, so the sign travels with the size rather than being decided here.
+    Holding −2 BTC is a short, and at the same positive rate the long paid 10
+    USDC for, the short is credited 10.
     """
-    accruals = asyncio.run(_drive(orders=(_market_order(side=Side.SELL),), through=1.25))
+    accruals = asyncio.run(_drive(held={"BTC": Decimal("-2")}, through=1.25))
 
     assert [accrual.amount for accrual in accruals] == [Decimal("10")]

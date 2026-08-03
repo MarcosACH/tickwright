@@ -87,7 +87,11 @@ def test_a_missed_fill_landing_mid_run_is_healed_by_the_inflight_cadence(
         # private bus, so the engine sees nothing it doesn't reconcile for.
         venue_bus = InMemoryBus()
         venue = PaperExchange(
-            bus=venue_bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
+            bus=venue_bus,
+            clock=clock,
+            fill_model=ImmediateFillModel(),
+            genesis_collateral=GENESIS,
+            account_net=dict,
         )
         feed = ReplayFeed(path=ticks, bus=bus, clock=clock)
         engine = Engine(
@@ -197,7 +201,11 @@ def test_a_vanished_order_is_ghosted_only_after_grace_and_a_none_read_freezes(
         clock = ManualClock()
         store = SQLiteStore(db)
         venue = PaperExchange(
-            bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
+            bus=bus,
+            clock=clock,
+            fill_model=ImmediateFillModel(),
+            genesis_collateral=GENESIS,
+            account_net=dict,
         )
         feed = ReplayFeed(path=ticks, bus=bus, clock=clock)
         engine = Engine(

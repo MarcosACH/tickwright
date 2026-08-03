@@ -19,16 +19,16 @@ provided liquidity, so the maker/taker bit is read off them and never configured
 **Funding** is the second thing it produces rather than observes, and the first
 that arrives on no carrier: ``start()`` spawns the boundary generator and
 ``stop()`` cancels it (ADR-0037, ADR-0044 §7). The loop lives in ``funding.py``;
-what stays here is the venue's own knowledge the accrual is computed from — the
-net signed size it has filled per symbol, and the last tick it would price it at.
-That memory is in-process and **never persisted**, which is what keeps ADR-0043
-§4's argument intact: after a crash this venue reports nothing, so the ``Store``
-remains the sole authority for the paper ledger and ``fetch_account_state``
-still has no account truth to answer with.
+what stays here is the pricing — the last tick and the instrument's rate — while
+the *size* each accrual is computed from is read from the ledger through the
+injected ``account_net``. So this venue **holds no position state at all**,
+which is ADR-0043 §4 verbatim rather than narrowed: after a crash it reports
+nothing, the ``Store`` remains the sole authority for the paper ledger, and
+``fetch_account_state`` still has no account truth to answer with.
 """
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from decimal import Decimal
 
 from tickwright.domain import (
@@ -68,12 +68,21 @@ class PaperExchange:
         fill_model: FillModel,
         genesis_collateral: Decimal,
         account_label: str = DEFAULT_ACCOUNT_LABEL,
+        account_net: Callable[[], Mapping[str, Decimal]],
         instrument_specs: Mapping[str, InstrumentSpec] | None = None,
         funding_interval_ns: int = HOUR_NS,
     ) -> None:
         self._bus = bus
         self._clock = clock
         self._fill_model = fill_model
+        # Where this venue's funding notional comes from: the **account net
+        # size** per symbol, read from the ledger that owns it rather than
+        # tallied here (ADR-0034's Σ-invariant, ADR-0043 §4). Required, and for
+        # the same reason ``genesis_collateral`` is — a venue defaulted to
+        # holding nothing is not a neutral default but a silent decision to
+        # charge no funding, which is indistinguishable from a correct run right
+        # up until it isn't.
+        self._account_net = account_net
         self._funding_interval_ns = funding_interval_ns
         self._funding_task: asyncio.Task[None] | None = None
         # The account's opening cash is the operator's declaration, never the
@@ -91,12 +100,6 @@ class PaperExchange:
         self._specs = dict(instrument_specs or {})
         self._latest_tick: dict[str, MarketTick] = {}
         self._fill_counts: dict[str, int] = {}
-        # The net signed size this venue has filled per symbol — the notional
-        # basis its funding generator computes each accrual from (ADR-0037). A
-        # venue knows what it filled and which way; this is that, in memory and
-        # never persisted, so ADR-0043 §4's "holds no position state to recover
-        # from, and no account truth to reconcile against" is untouched.
-        self._net_size: dict[str, Decimal] = {}
         # Resting LIMITs and their working remainders. The fill model may
         # partial-fill a crossing LIMIT, so the book caps each fill to what is
         # still working and lifts the order off once it converges (ADR-0012).
@@ -153,18 +156,38 @@ class PaperExchange:
         self._funding_task = None
 
     def _funding_basis(self) -> tuple[FundingBasis, ...]:
-        """What each traded symbol's accrual is computed from, as of now.
+        """What each held symbol's accrual is computed from, as of now.
 
-        Every symbol this venue has filled and can still price. A flat one is
-        **not** filtered out here: it produces a zero, and the generator's single
-        "a zero accrues nothing" rule then covers both the flat position and the
-        default ``funding_rate`` of ``0`` — one rule for one fact, rather than
-        the same skip expressed twice in two places that could disagree.
+        The size is the **account net** the ledger reports; the price and the
+        spec are the venue's own. That split is the decision: a paper venue is
+        in-process and non-durable, so a size it tallied itself would survive
+        exactly as long as the process — and a position outlives processes.
+        Tallying here would put a second, unpersisted answer to "how much of
+        this symbol is held" beside the durable one, and every way the two can
+        drift is a wrong number nobody is watching: after a restart the tally
+        reads flat while the ledger holds a position, and after a restart
+        *followed by a trade* it reads that trade alone, which for a partial
+        close is the wrong **sign**.
 
-        A symbol with no cached tick is genuinely absent rather than zero-priced:
-        paper cannot price what it has never seen trade. There is no edge behind
-        that — a non-flat position implies a prior fill on a tick, which is what
-        set the price this reads.
+        Reading it per span rather than seeding it once is what makes that
+        structural instead of merely fixed: there is no second copy to keep in
+        step, so no path — recovery, a reconciliation heal, an absorbed
+        unattributed fill — can move the ledger without moving this.
+
+        A flat symbol is **not** filtered out: it produces a zero, and the
+        generator's single "a zero accrues nothing" rule then covers both the
+        flat position and the default ``funding_rate`` of ``0`` — one rule for
+        one fact, rather than the same skip expressed twice in two places that
+        could disagree.
+
+        A symbol with no cached tick is genuinely absent rather than
+        zero-priced: paper cannot price what it has never seen trade. That is
+        reachable now in a way it was not when the size was local — a recovered
+        position is held before this life has seen a single tick in its symbol —
+        and it is still the right answer, since the alternative is to invent a
+        price for a boundary. The next tick restores pricing, and the boundaries
+        crossed before it are the restart gap the loop already skips
+        (ADR-0043 §5.1).
         """
         return tuple(
             FundingBasis(
@@ -173,7 +196,7 @@ class PaperExchange:
                 price=tick.price,
                 spec=self._specs[symbol],
             )
-            for symbol, signed_size in self._net_size.items()
+            for symbol, signed_size in self._account_net().items()
             if (tick := self._latest_tick.get(symbol)) is not None and symbol in self._specs
         )
 
@@ -380,12 +403,6 @@ class PaperExchange:
     def _fill_report(self, order: PlaceOrder, fill: Fill, *, maker: bool) -> FillReport:
         index = self._fill_counts.get(order.cloid, 0) + 1
         self._fill_counts[order.cloid] = index
-        # Direction rides the order, as it does everywhere else on this surface:
-        # a ``Fill`` carries a magnitude and the side is the order's. This is the
-        # one place the venue learns which way its own exposure moved, so the
-        # funding basis is folded here rather than re-derived from the reports.
-        signed = fill.quantity if order.side is Side.BUY else -fill.quantity
-        self._net_size[order.symbol] = self._net_size.get(order.symbol, Decimal("0")) + signed
         now = self._clock.timestamp_ns()
         report = FillReport(
             ts_event=now,

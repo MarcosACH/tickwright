@@ -100,7 +100,10 @@ def test_store_discriminant_selects_the_postgres_store(
 
 def test_exchange_discriminant_selects_the_paper_exchange(tmp_path: Path) -> None:
     exchange = build_exchange(
-        _config(tmp_path, exchange="paper"), bus=InMemoryBus(), clock=ManualClock()
+        _config(tmp_path, exchange="paper"),
+        bus=InMemoryBus(),
+        clock=ManualClock(),
+        store=SQLiteStore(":memory:"),
     )
     assert isinstance(exchange, PaperExchange)
     # The venue owns the specs (ADR-0031): config flowed through to the seam.
@@ -127,7 +130,9 @@ def test_exchange_discriminant_selects_hyperliquid_with_meta_sourced_specs(
         exchange="hyperliquid",
         hyperliquid={"signing_key": TEST_SIGNING_KEY, "symbols": ["BTC"], "testnet": True},
     )
-    exchange = build_exchange(config, bus=InMemoryBus(), clock=LiveClock())
+    exchange = build_exchange(
+        config, bus=InMemoryBus(), clock=LiveClock(), store=SQLiteStore(":memory:")
+    )
 
     assert isinstance(exchange, HyperliquidExchange)
     # The venue authored its specs from meta (ADR-0031), ready for the guard.
@@ -306,7 +311,9 @@ def _btc_market_order() -> PlaceOrder:
 
 def _fill_price_from_built_paper(config: AppConfig) -> Decimal:
     bus = InMemoryBus()
-    exchange = build_exchange(config, bus=bus, clock=ManualClock(start_ns=1_000))
+    exchange = build_exchange(
+        config, bus=bus, clock=ManualClock(start_ns=1_000), store=SQLiteStore(":memory:")
+    )
     fills: list[FillReport] = []
     bus.subscribe(FillReport, lambda r: _record_fill(fills, r))
 

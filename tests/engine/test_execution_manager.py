@@ -152,7 +152,11 @@ def _wiring(store: SQLiteStore) -> _Wiring:
     bus = InMemoryBus()
     clock = ManualClock(start_ns=1_000)
     exchange = PaperExchange(
-        bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
+        bus=bus,
+        clock=clock,
+        fill_model=ImmediateFillModel(),
+        genesis_collateral=GENESIS,
+        account_net=dict,
     )
     checks = checkpointer(store, clock=clock)
     manager = ExecutionManager(bus=bus, exchange=exchange, checkpointer=checks)
@@ -910,7 +914,11 @@ def test_a_restart_rebuilt_cache_dedups_a_redelivered_place_signal() -> None:
     bus2 = InMemoryBus()
     clock2 = ManualClock(start_ns=2_000)
     exchange2 = PaperExchange(
-        bus=bus2, clock=clock2, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
+        bus=bus2,
+        clock=clock2,
+        fill_model=ImmediateFillModel(),
+        genesis_collateral=GENESIS,
+        account_net=dict,
     )
     checkpointer2 = checkpointer(store, clock=clock2)
     checkpointer2.recover()
@@ -940,6 +948,7 @@ def _stochastic_harness(
         clock=clock,
         fill_model=fill_model,  # type: ignore[arg-type]
         genesis_collateral=GENESIS,
+        account_net=dict,
     )
     manager = ExecutionManager(
         bus=bus, exchange=exchange, checkpointer=checkpointer(store, clock=clock)

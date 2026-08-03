@@ -35,7 +35,11 @@ def test_mocked_frames_reach_a_paper_fill_through_the_whole_pipeline() -> None:
         bus = InMemoryBus()
         clock = ManualClock()
         exchange = PaperExchange(
-            bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
+            bus=bus,
+            clock=clock,
+            fill_model=ImmediateFillModel(),
+            genesis_collateral=GENESIS,
+            account_net=dict,
         )
         checks = checkpointer(SQLiteStore(":memory:"), clock=clock)
         manager = ExecutionManager(bus=bus, exchange=exchange, checkpointer=checks)

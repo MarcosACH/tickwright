@@ -34,6 +34,7 @@ from tickwright.domain import (
     ReplayClock,
     Store,
     Strategy,
+    account_net_size,
 )
 from tickwright.engine.guard import NoopGuard, RealGuard
 from tickwright.engine.runner import Engine
@@ -83,7 +84,16 @@ def build_store(config: AppConfig) -> Store:
             assert_never(unreachable)
 
 
-def build_exchange(config: AppConfig, *, bus: EventBus, clock: Clock) -> Exchange:
+def build_exchange(config: AppConfig, *, bus: EventBus, clock: Clock, store: Store) -> Exchange:
+    """Select the venue.
+
+    ``store`` is the paper arm's alone, and it is a **read**: the paper venue is
+    in-process, so the only durable answer to "how much of this symbol is held"
+    is the ledger's, and its funding generator needs one (ADR-0034's
+    Σ-invariant). Wiring it here rather than handing the venue a ledger of its
+    own is what keeps that answer single — the live venue is asked nothing,
+    because a real one knows.
+    """
     match config.exchange:
         case "paper":
             # The paper venue subscribes itself to the tick stream (it fills off
@@ -100,6 +110,11 @@ def build_exchange(config: AppConfig, *, bus: EventBus, clock: Clock) -> Exchang
                 genesis_collateral=config.paper.genesis_collateral,
                 account_label=config.paper.account_label,
                 instrument_specs=config.paper.instrument_specs,
+                # Read per funding span, never cached: the mass-read is the
+                # ledger's own recovery read (ADR-0043 §9) and this asks it once
+                # an hour, so there is nothing to buy by holding a copy and a
+                # drift to own if we did.
+                account_net=lambda: account_net_size(store.all_positions()),
             )
         case "hyperliquid":
             # The venue authors its own specs from the meta endpoint
@@ -188,7 +203,7 @@ def build_engine(config: AppConfig) -> Engine:
     bus = build_bus(config)
     clock = build_clock(config)
     store = build_store(config)
-    exchange = build_exchange(config, bus=bus, clock=clock)
+    exchange = build_exchange(config, bus=bus, clock=clock, store=store)
     feed = build_feed(config, bus=bus, clock=clock)
     guard = build_guard(config, specs=exchange.instrument_specs(), store=store, clock=clock)
     engine = Engine(

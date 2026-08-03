@@ -154,7 +154,11 @@ def _first_life(
     store = backend.open()
     venue_bus = InMemoryBus()  # the venue's report link — dies with the process
     venue = PaperExchange(
-        bus=venue_bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
+        bus=venue_bus,
+        clock=clock,
+        fill_model=ImmediateFillModel(),
+        genesis_collateral=GENESIS,
+        account_net=dict,
     )
     checks = checkpointer(store, clock=clock)
     manager = ExecutionManager(
@@ -301,7 +305,11 @@ def _life_through_the_fill(backend: Backend) -> ManualClock:
     clock = ManualClock()
     store = backend.open()
     venue = PaperExchange(
-        bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
+        bus=bus,
+        clock=clock,
+        fill_model=ImmediateFillModel(),
+        genesis_collateral=GENESIS,
+        account_net=dict,
     )
     checks = checkpointer(store, clock=clock)
     manager = ExecutionManager(bus=bus, exchange=venue, checkpointer=checks)
@@ -348,7 +356,11 @@ def test_a_landed_fill_is_restored_and_a_redelivery_does_not_double_count_it(
     manager = ExecutionManager(
         bus=bus,
         exchange=PaperExchange(
-            bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
+            bus=bus,
+            clock=clock,
+            fill_model=ImmediateFillModel(),
+            genesis_collateral=GENESIS,
+            account_net=dict,
         ),
         checkpointer=checks,
     )

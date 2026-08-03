@@ -61,7 +61,11 @@ def _run(
     clock = ManualClock()
     store = SQLiteStore(":memory:")
     exchange = PaperExchange(
-        bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
+        bus=bus,
+        clock=clock,
+        fill_model=ImmediateFillModel(),
+        genesis_collateral=GENESIS,
+        account_net=dict,
     )
     checks = checkpointer(store, clock=clock)
     manager = ExecutionManager(

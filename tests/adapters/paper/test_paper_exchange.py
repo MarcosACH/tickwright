@@ -94,7 +94,11 @@ def _harness() -> tuple[PaperExchange, InMemoryBus, ManualClock, list[FillReport
     bus = InMemoryBus()
     clock = ManualClock()
     exchange = PaperExchange(
-        bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
+        bus=bus,
+        clock=clock,
+        fill_model=ImmediateFillModel(),
+        genesis_collateral=GENESIS,
+        account_net=dict,
     )
     reports: list[FillReport] = []
     bus.subscribe(FillReport, lambda r: _record(reports, r))
@@ -111,7 +115,11 @@ def test_the_paper_venue_consumes_ticks_off_its_bus_with_no_external_wiring() ->
     bus = InMemoryBus()
     clock = ManualClock()
     exchange = PaperExchange(
-        bus=bus, clock=clock, fill_model=ImmediateFillModel(), genesis_collateral=GENESIS
+        bus=bus,
+        clock=clock,
+        fill_model=ImmediateFillModel(),
+        genesis_collateral=GENESIS,
+        account_net=dict,
     )
     fills: list[FillReport] = []
     bus.subscribe(FillReport, lambda r: _record(fills, r))
@@ -173,6 +181,7 @@ def _specced_harness(
         fill_model=ImmediateFillModel(),
         genesis_collateral=GENESIS,
         instrument_specs={spec.symbol: spec},
+        account_net=dict,
     )
     fills: list[FillReport] = []
     statuses: list[OrderStatusReport] = []
@@ -323,6 +332,7 @@ def test_one_order_filling_on_arrival_and_again_off_the_book_pays_both_rates() -
         ),
         genesis_collateral=GENESIS,
         instrument_specs={"BTC": _FEE_SPEC},
+        account_net=dict,
     )
     fills: list[FillReport] = []
     bus.subscribe(FillReport, lambda r: _record(fills, r))
@@ -413,6 +423,7 @@ def test_configured_rates_change_no_fill_the_matching_path_produces() -> None:
             ),
             genesis_collateral=GENESIS,
             instrument_specs={"BTC": spec},
+            account_net=dict,
         )
         fills: list[FillReport] = []
         bus.subscribe(FillReport, lambda r: _record(fills, r))
@@ -770,6 +781,7 @@ def test_the_paper_venue_declares_a_two_segment_account_id_and_its_genesis() -> 
         fill_model=ImmediateFillModel(),
         genesis_collateral=Decimal("250000"),
         account_label="momentum_v2",
+        account_net=dict,
     )
 
     spec = exchange.account_spec()
@@ -791,6 +803,7 @@ def test_the_paper_account_label_defaults_to_the_same_label_the_config_does() ->
         clock=ManualClock(),
         fill_model=ImmediateFillModel(),
         genesis_collateral=GENESIS,
+        account_net=dict,
     )
 
     assert exchange.account_spec().account_id == "paper-default"
