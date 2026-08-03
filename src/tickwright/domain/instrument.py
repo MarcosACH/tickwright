@@ -37,6 +37,13 @@ class InstrumentSpec:
     is a guarantee about *this default*, not a claim about any venue: an operator
     modelling Hyperliquid configures the positive base rates, a rebate being a
     volume-tier property rather than a liquidity-side one.
+
+    ``funding_rate`` is the fee fields' exact counterpart one grain up (ADR-0037):
+    the signed **per-boundary** rate paper's generator computes each accrual from,
+    ignored by live, which ingests the venue's own reported payment. Positive ⇒
+    longs pay. Defaulted to ``0`` on the same frictionless-spec guarantee — and it
+    is the *effective* rate rather than the venue's 8-hourly headline figure, so
+    the boundary arithmetic stays the clean ``− signed_size × price × rate``.
     """
 
     symbol: str
@@ -46,6 +53,7 @@ class InstrumentSpec:
     max_sig_figs: int | None = None
     maker_fee: Decimal = Decimal("0")
     taker_fee: Decimal = Decimal("0")
+    funding_rate: Decimal = Decimal("0")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
