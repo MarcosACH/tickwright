@@ -98,7 +98,7 @@ class _RealWsConnection:
 
 
 class HyperliquidFeed:
-    """The live ``MarketFeed`` adapter for Hyperliquid's ``trades`` channel."""
+    """The live ``MarketFeed`` adapter for Hyperliquid's two market-data channels."""
 
     def __init__(
         self,
@@ -250,10 +250,17 @@ class HyperliquidFeed:
         return [MarkTick(symbol=symbol, price=price, ts_event=now, ts_init=now)]
 
     def _drop_frame(self, frame: str, row: object = None) -> None:
-        """Name one unparseable ``trades`` frame or row and skip it (ADR-0020/0023).
+        """Name one unparseable market-data frame or row and skip it (ADR-0020/0023).
 
-        The trades channel is public and unauthenticated (no key material), so
-        echoing the offending payload — truncated — is safe and aids triage."""
+        Both arms reach here — a ``trades`` batch or one of its rows, and an
+        ``activeAssetCtx`` context whose mark could not be read — because a
+        refusal is one fact however it was shaped.
+
+        **Both** sourced channels are public and unauthenticated (no key
+        material anywhere in either payload), so echoing the offending body —
+        truncated — is safe and aids triage. That is what licenses the echo, so
+        it is stated of the set rather than of one member: a future channel that
+        carried key material would have to answer this line before reusing it."""
         named_event(
             NamedEvent.FEED_FRAME_DROPPED,
             frame=frame[:_MAX_LOGGED_FRAME],
