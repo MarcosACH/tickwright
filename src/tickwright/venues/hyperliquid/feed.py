@@ -26,7 +26,7 @@ from tickwright.observability import NamedEvent, named_event
 
 from .backoff import Backoff
 from .config import HyperliquidConfig
-from .ingress import ConflatingIngress
+from .ingress import ConflatingIngress, MarketData
 from .reading import UNREADABLE, figure
 
 if TYPE_CHECKING:
@@ -178,7 +178,7 @@ class HyperliquidFeed:
                 message = {"method": "subscribe", "subscription": {"type": channel, "coin": symbol}}
                 await connection.send(json.dumps(message))
 
-    def _parse(self, frame: str) -> list[MarketTick | MarkTick]:
+    def _parse(self, frame: str) -> list[MarketData]:
         """Parse a WS frame into market data, skipping (and naming) the malformed.
 
         A corrupt frame or row must never fault the feed: the live stream is
@@ -206,7 +206,7 @@ class HyperliquidFeed:
         if not isinstance(rows, list):
             self._drop_frame(frame)
             return []
-        ticks: list[MarketTick | MarkTick] = []
+        ticks: list[MarketData] = []
         for row in rows:
             try:
                 ticks.append(self._to_tick(row))
@@ -214,7 +214,7 @@ class HyperliquidFeed:
                 self._drop_frame(frame, row)
         return ticks
 
-    def _parse_mark(self, frame: str, data: Any) -> list[MarketTick | MarkTick]:
+    def _parse_mark(self, frame: str, data: Any) -> list[MarketData]:
         """One ``activeAssetCtx`` update → one ``MarkTick`` (ADR-0039).
 
         ``ctx.markPx`` and nothing else in that context: ``oraclePx`` is

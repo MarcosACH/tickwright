@@ -26,7 +26,15 @@ from tickwright.domain import EventBus, MarketTick, MarkTick
 from tickwright.observability import NamedEvent, named_event
 
 type MarketData = MarketTick | MarkTick
-"""What the live feed sources: the two last-value-wins market-data events."""
+"""What the live feed sources: the two last-value-wins market-data events.
+
+The **one** spelling of that set — ``HyperliquidFeed`` parses to it and this
+buffer conflates it, so a third stream widens this line and the type checker
+finds both sides. It sits here rather than in ``feed.py``, which is the producer
+and would read as its more natural home, only because the dependency runs
+feed → ingress: declaring it there would close a cycle. A shared home comes
+with the ingress itself, when a second venue promotes it out of this package
+(ADR-0031)."""
 
 
 class ConflatingIngress:
