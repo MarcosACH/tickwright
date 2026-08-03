@@ -1,0 +1,156 @@
+"""Paper's funding generator — the boundary loop the deterministic venue runs
+(ADR-0037).
+
+Live never runs this: the venue emits funding at its own boundaries and the
+adapter ingests it. Paper has nobody to ask, so it **generates** the same keyed
+``FundingAccrual`` shape off the injected ``Clock``.
+
+Built on ``Clock.sleep_until``, the pure waiter (ADR-0033), and deliberately
+**not** on ``run_cadence``. That loop reschedules from *now* with no catch-up,
+which is right for the reconcile cadences because reconciling is **convergent** —
+re-running heals nothing new, so replaying missed firings is noise. Funding is
+the opposite: **additive**. Every boundary is a distinct real payment, so a
+virtual-time jump across N of them must settle N, and collapsing would silently
+under-charge. This is the one cadence in the engine that must catch up.
+
+It lives in its own module rather than on ``PaperExchange`` so that a running
+task and its cancellation stay out of a class whose other 200 lines are a
+synchronous matching book.
+"""
+
+import asyncio
+from collections.abc import Callable
+from dataclasses import dataclass
+from decimal import Decimal
+
+from tickwright.domain import (
+    Clock,
+    EventBus,
+    FundingAccrual,
+    InstrumentSpec,
+    funding_amount,
+    funding_boundaries,
+)
+
+HOUR_NS = 3_600_000_000_000
+"""The venue's real funding interval and this generator's default (ADR-0037).
+
+Epoch-aligned at one hour is exactly the top of each UTC hour — Hyperliquid's own
+schedule. It stays a parameter rather than a constant so a future venue or a test
+can settle on another interval, but it is deliberately **not** an environment
+variable: nothing about a paper run's economics should be reachable from ambient
+config that a live run could also read.
+"""
+
+_ZERO = Decimal("0")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class FundingBasis:
+    """What one symbol's accrual is computed from at a boundary.
+
+    A snapshot, taken at the moment a boundary is settled: the venue's own net
+    exposure and the price it would mark it at. ``price`` is paper's single
+    signal — the last trade — collapsing the venue's oracle/mark distinction,
+    which only bites where funding is computed against a real venue and so is
+    moot here (ADR-0037).
+    """
+
+    symbol: str
+    signed_size: Decimal
+    price: Decimal
+    spec: InstrumentSpec
+
+
+async def run_funding(
+    *,
+    bus: EventBus,
+    clock: Clock,
+    account_id: str,
+    basis: Callable[[], tuple[FundingBasis, ...]],
+    interval_ns: int = HOUR_NS,
+) -> None:
+    """Settle every funding boundary crossed, for as long as the task lives.
+
+    **Resumes from the startup instant, never from the durable watermark**
+    (ADR-0043 §5.1). Boundaries that elapsed while the process was down are not
+    settled: the catch-up pricing rule assumes a jump *between two consecutive
+    ticks*, where position and last price are constant, and a restart gap is not
+    that — the price genuinely moved and the venue's tick cache is empty at the
+    moment catch-up would run. The accepted cost is that paper funding is **not
+    restart-invariant** across a wall-clock gap; it understates by whatever
+    elapsed while down, which is preferable to a restart-invariant number
+    produced by a pricing rule nobody can defend.
+
+    That is a statement about which boundaries this **produces**. Which of them
+    are **applied** is the ledger's watermark to decide, and the two never meet on
+    a wall-clock restart — which is why the gate is invisible there and
+    load-bearing under replay, where the feed genuinely rewinds virtual time.
+
+    ``basis`` is re-read per boundary rather than captured once, but a jump
+    crosses boundaries *between* two ticks, where nothing filled and no price
+    moved — so the caught-up accruals are identical but for their timestamps,
+    which is exactly what makes catch-up "post N keyed payments" rather than a
+    re-simulation.
+    """
+    settled_through_ns = clock.timestamp_ns()
+    while True:
+        await clock.sleep_until(settled_through_ns // interval_ns * interval_ns + interval_ns)
+        now_ns = clock.timestamp_ns()
+        for boundary_ns in funding_boundaries(
+            after_ns=settled_through_ns, through_ns=now_ns, interval_ns=interval_ns
+        ):
+            await _settle(
+                bus=bus, clock=clock, account_id=account_id, boundary_ns=boundary_ns, basis=basis()
+            )
+        settled_through_ns = now_ns
+
+
+async def _settle(
+    *,
+    bus: EventBus,
+    clock: Clock,
+    account_id: str,
+    boundary_ns: int,
+    basis: tuple[FundingBasis, ...],
+) -> None:
+    """Publish one keyed accrual per symbol that owes or is owed one.
+
+    **A zero accrues nothing at all** — no event, no ledger churn — which covers
+    both a flat position and a ``funding_rate`` of ``0``, the default. One rule
+    rather than two, because it is one fact: there is no payment to record. It is
+    safe to leave no durable trace of a zero precisely because catch-up
+    re-derives boundaries and re-skips them (ADR-0037).
+    """
+    for entry in basis:
+        amount = funding_amount(signed_size=entry.signed_size, price=entry.price, spec=entry.spec)
+        if amount == _ZERO:
+            continue
+        await bus.publish(
+            FundingAccrual(
+                # The boundary is when the fact occurred; ``ts_init`` is when the
+                # object was built, which on a caught-up boundary is genuinely
+                # later (ADR-0005).
+                ts_event=boundary_ns,
+                ts_init=clock.timestamp_ns(),
+                account_id=account_id,
+                symbol=entry.symbol,
+                boundary_ts_ns=boundary_ns,
+                amount=amount,
+            )
+        )
+
+
+async def cancel(task: asyncio.Task[None] | None) -> None:
+    """Cancel a generator task and wait it out — safe on ``None`` and on a task
+    already done.
+
+    Both of those are the ``Exchange.stop()`` contract rather than defensiveness:
+    the runner's faulted teardown re-walks the whole membership from the top, so
+    this may be driven twice in one shutdown, and it is driven at all even when
+    ``start()`` refused or never ran.
+    """
+    if task is None:
+        return
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
