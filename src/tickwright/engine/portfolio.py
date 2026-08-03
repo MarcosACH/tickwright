@@ -25,6 +25,7 @@ from tickwright.domain import (
     Clock,
     FundingAccrual,
     InvariantViolation,
+    MarkTick,
     OrderFillEvent,
     Portfolio,
     Position,
@@ -33,8 +34,13 @@ from tickwright.domain import (
     Side,
     Store,
     VenueAccountState,
+    account_net_size,
+    account_view,
+    position_view,
 )
 from tickwright.observability import NamedEvent, named_event
+
+_ZERO = Decimal("0")
 
 # What a fill did to a position → its cataloged name (ADR-0045 §2). A position
 # change is never a bus event — it is an output derived from a fill already on
@@ -123,6 +129,27 @@ class PortfolioProjection:
         # deployment fact (ADR-0038). ``None`` is the reserved unattributed
         # partition, reachable here but never through the seam.
         self._positions: dict[tuple[str | None, str], Position] = {}
+        # The Tier-2 half, and the asymmetry with the line above is the model:
+        # accumulated ledger state is ordering-critical and so is written
+        # synchronously on the fill path, while a latest-value cache is not —
+        # a slightly-late mark is a slightly-stale valuation, which Tier-2
+        # tolerates by construction, being alert-only and never healed
+        # (ADR-0039). So this half arrives by plain bus subscription.
+        self._marks: dict[str, MarkTick] = {}
+
+    def observe_mark(self, mark: MarkTick) -> None:
+        """Take the latest mark for a symbol — the Tier-2 write verb (ADR-0039).
+
+        Last-value-wins and nothing else: no history, no accumulation, and
+        deliberately **no store write**, because a mark is an *input* the venue
+        keeps sending rather than state this engine owns. Persisting it would
+        make a restart recover a valuation instead of recomputing one, which is
+        the whole distinction Tier-2 rests on.
+
+        A late or superseded mark is therefore harmless, which is what licenses
+        this half of the projection being bus-fed where Tier-1's is not.
+        """
+        self._marks[mark.symbol] = mark
 
     def apply_fill(self, event: OrderFillEvent, *, side: Side) -> LedgerChange:
         """Fold a fill into its partition and the cash line — the single write
@@ -467,21 +494,45 @@ class PortfolioProjection:
         )
 
     def position(self, symbol: str, *, strategy_id: str | None) -> PositionView | None:
-        """One partition's frozen Tier-1 snapshot, or ``None`` if never traded."""
+        """One partition's frozen snapshot, or ``None`` if never traded.
+
+        **Recomputed on every call**, never memoized: the mark moves under the
+        reader between two reads and a cached view would report the older one
+        with no way to tell (ADR-0034).
+        """
         position = self._positions.get((strategy_id, symbol))
-        return position.view() if position is not None else None
+        return self._view(position) if position is not None else None
 
     def open_positions(self, *, strategy_id: str | None) -> tuple[PositionView, ...]:
         """Every partition of ``strategy_id`` still holding exposure."""
         return tuple(
-            position.view()
+            self._view(position)
             for (owner, _symbol), position in self._positions.items()
             if owner == strategy_id and not position.is_flat
         )
 
+    def _view(self, position: Position) -> PositionView:
+        """Assemble one partition's view against the mark held for its symbol.
+
+        The mark is resolved here, from the private cache, rather than passed in
+        by the caller: pushing mark-sourcing onto every reader is exactly what
+        the single always-available read path exists to prevent (ADR-0034/0039).
+        """
+        mark = self._marks.get(position.symbol)
+        return position_view(
+            position,
+            # Summed over *every* partition, the reserved unattributed one
+            # included: the venue holds one position per symbol, so the
+            # position-grain half is computed at that grain or it is computed
+            # against a book the venue does not have (ADR-0034/0041 §4).
+            account_net=account_net_size(self._positions.values()).get(position.symbol, _ZERO),
+            mark=mark.price if mark is not None else None,
+            mark_ts=mark.ts_event if mark is not None else None,
+        )
+
     def account(self) -> AccountView:
         """The account-wide pool — one collateral bucket, never scoped."""
-        return self._account.view()
+        return account_view(self._account)
 
     def for_strategy(self, strategy_id: str) -> Portfolio:
         """The scoped ``Portfolio`` facade the composition root injects into a

@@ -70,6 +70,7 @@ from .protocols import (
     Store,
     Strategy,
 )
+from .valuation import account_view, position_view
 
 __all__ = [
     # enums
@@ -136,6 +137,9 @@ __all__ = [
     "funding_boundaries",
     # the Σ-invariant's left-hand side
     "account_net_size",
+    # Tier-2 view assembly (pure, never stored)
+    "account_view",
+    "position_view",
     # seam Protocols
     "Clock",
     "EventBus",

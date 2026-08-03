@@ -6,6 +6,7 @@ strategy actually holds, never through its internals.
 """
 
 from collections.abc import Mapping, Sequence
+from dataclasses import fields
 from decimal import Decimal
 from typing import Any
 
@@ -20,10 +21,12 @@ from tickwright.domain import (
     AccountSpec,
     FundingAccrual,
     InvariantViolation,
+    MarkTick,
     OrderFilled,
     OrderFillEvent,
     Portfolio,
     Position,
+    PositionView,
     Side,
     Store,
 )
@@ -53,6 +56,21 @@ def _fill(
         cum_qty=Decimal(quantity),
         fee=Decimal(fee),
     )
+
+
+def _mark(*, price: str, ts_event: int, symbol: str = "BTC") -> MarkTick:
+    """One symbol's mark as a feed published it — the Tier-2 valuation input.
+
+    Provenance-free by construction (ADR-0039): this is the same shape the live
+    ``activeAssetCtx`` mark and replay's last-trade proxy both arrive in, which
+    is what lets the projection hold no ``if live:`` for the mark.
+    """
+    return MarkTick(ts_event=ts_event, ts_init=ts_event, symbol=symbol, price=Decimal(price))
+
+
+def _view_fields() -> list[str]:
+    """Every field the ``Portfolio`` seam's position snapshot exposes."""
+    return [field.name for field in fields(PositionView)]
 
 
 _HOUR = 3_600_000_000_000
@@ -109,6 +127,135 @@ def test_a_fill_lands_in_its_partition_and_reads_back_through_the_seam() -> None
     assert view.size == Decimal("2")
     assert view.entry_price == Decimal("100")
     assert view.realized_pnl == Decimal("0")
+
+
+def test_an_observed_mark_surfaces_its_instant_and_never_its_value() -> None:
+    """The mark reaches the seam as **freshness only** (ADR-0039, ADR-0041 §6).
+
+    A strategy holds a ``Clock``, so ``mark_ts`` is all it needs to judge a
+    stale-but-present mark for itself — and there is no max-age on the read path
+    to judge it for them. The mark **value** stays off the view deliberately: it
+    is an accounting input, not a strategy signal, and exposing it would make it
+    one without any of the callbacks ADR-0027 reserves for that.
+    """
+    projection = _projection()
+    portfolio: Portfolio = projection.for_strategy("alpha")
+    book_fill(projection, _fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
+
+    projection.observe_mark(_mark(price="110", ts_event=9_000))
+
+    view = portfolio.position("BTC")
+    assert view is not None
+    assert view.mark_ts == 9_000
+    # Freshness is the *only* thing the mark contributes to the view's own field
+    # set: nothing here carries 110.
+    assert [name for name in _view_fields() if "mark" in name] == ["mark_ts"]
+    assert Decimal("110") not in [getattr(view, name) for name in _view_fields()]
+
+
+def test_a_long_marked_above_its_entry_reads_an_unrealized_profit() -> None:
+    """``signed_size × (mark − entry)`` — 2 × (110 − 100) = +20, worked by hand.
+
+    Tier-2 and therefore **recomputed on read** rather than accumulated: nothing
+    booked it, and nothing has to un-book it when the mark moves back.
+    """
+    projection = _projection()
+    portfolio = projection.for_strategy("alpha")
+    book_fill(projection, _fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
+
+    projection.observe_mark(_mark(price="110", ts_event=9_000))
+
+    view = portfolio.position("BTC")
+    assert view is not None
+    assert view.unrealized_pnl == Decimal("20")
+    # Tier-1 is untouched by the mark: nothing was closed, so nothing realized.
+    assert view.realized_pnl == Decimal("0")
+
+
+def test_a_short_marked_above_its_entry_reads_an_unrealized_loss() -> None:
+    """The sign rides the *position*, not the mark's direction: −2 × (110 − 100)
+    = −20. A short losing as the mark rises is the case a magnitude-only
+    formula gets backwards, and it costs an account its margin silently."""
+    projection = _projection()
+    portfolio = projection.for_strategy("alpha")
+    book_fill(projection, _fill(trade_id="f1", quantity="2", price="100"), side=Side.SELL)
+
+    projection.observe_mark(_mark(price="110", ts_event=9_000))
+
+    view = portfolio.position("BTC")
+    assert view is not None
+    assert view.size == Decimal("-2")
+    assert view.unrealized_pnl == Decimal("-20")
+
+
+def test_notional_is_the_whole_accounts_exposure_not_the_strategys_own_slice() -> None:
+    """The two grains one view carries, and the case that tells them apart.
+
+    ``unrealized_pnl`` is the **own-attribution slice** — a number a fill
+    partitions linearly. ``notional`` is **position-grain**: the venue holds one
+    position per symbol, keyed per position and never per strategy, so it is
+    computed off the symbol's *account-net* size summed over every partition
+    (ADR-0041 §4). Two strategies long the same symbol therefore read one
+    notional and two different unrealized PnLs.
+
+    Alpha is long 2 and beta long 3, so the account nets +5 and the mark is 110:
+    notional 550, against the 220 alpha's own slice would have given.
+    """
+    projection = _projection()
+    book_fill(projection, _fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
+    book_fill(
+        projection,
+        _fill(trade_id="f2", quantity="3", price="100", strategy_id="beta"),
+        side=Side.BUY,
+    )
+
+    projection.observe_mark(_mark(price="110", ts_event=9_000))
+
+    alpha = projection.for_strategy("alpha").position("BTC")
+    beta = projection.for_strategy("beta").position("BTC")
+    assert alpha is not None and beta is not None
+    assert alpha.notional == beta.notional == Decimal("550")
+    assert alpha.unrealized_pnl == Decimal("20")  # 2 x (110 - 100)
+    assert beta.unrealized_pnl == Decimal("30")  # 3 x (110 - 100)
+
+
+def test_notional_is_a_magnitude_so_a_short_account_still_reads_positive() -> None:
+    """Exposure has no direction — ``|account net| × mark``. A negative notional
+    would flip the sign of every margin figure computed off it downstream."""
+    projection = _projection()
+    portfolio = projection.for_strategy("alpha")
+    book_fill(projection, _fill(trade_id="f1", quantity="2", price="100"), side=Side.SELL)
+
+    projection.observe_mark(_mark(price="110", ts_event=9_000))
+
+    view = portfolio.position("BTC")
+    assert view is not None
+    assert view.notional == Decimal("220")
+
+
+def test_a_position_the_projection_has_no_mark_for_reports_no_instant() -> None:
+    """``mark_ts is None`` ⟺ the mark is absent — the one signal a reader has for
+    telling "never valued" from "valued a while ago" (ADR-0041 §6)."""
+    projection = _projection()
+    portfolio = projection.for_strategy("alpha")
+    book_fill(projection, _fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
+
+    view = portfolio.position("BTC")
+    assert view is not None
+    assert view.mark_ts is None
+
+
+def test_a_mark_for_one_symbol_does_not_value_another() -> None:
+    """The cache is keyed per symbol, so ETH's mark is not BTC's."""
+    projection = _projection()
+    portfolio = projection.for_strategy("alpha")
+    book_fill(projection, _fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
+
+    projection.observe_mark(_mark(price="3000", ts_event=9_000, symbol="ETH"))
+
+    view = portfolio.position("BTC")
+    assert view is not None
+    assert view.mark_ts is None
 
 
 def test_a_never_traded_symbol_reads_none() -> None:

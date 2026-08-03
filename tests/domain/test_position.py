@@ -18,6 +18,7 @@ from tickwright.domain import (
     PositionChange,
     Side,
     account_net_size,
+    position_view,
 )
 
 
@@ -168,7 +169,10 @@ def test_funding_accrues_on_its_own_line_and_never_into_price_or_pnl() -> None:
     assert position.entry_price == Decimal("100")
     assert position.realized_pnl == Decimal("0")
     assert position.fees == Decimal("0")
-    assert position.view().funding == Decimal("-0.3")
+    # And it reaches the seam's snapshot on its own line, assembled off the
+    # aggregate rather than by it (ADR-0035).
+    view = position_view(position, account_net=position.signed_size, mark=None, mark_ts=None)
+    assert view.funding == Decimal("-0.3")
 
 
 def test_funding_accrued_while_open_survives_the_close_that_flattens_the_position() -> None:
