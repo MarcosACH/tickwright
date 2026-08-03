@@ -82,6 +82,46 @@ class MarketTick(Event):
         return self.symbol
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class MarkTick(Event):
+    """A symbol's **mark price**, the Tier-2 valuation input (ADR-0039).
+
+    Market data like ``MarketTick``, and it enters the same way — through the
+    ``MarketFeed`` — but it is not a trade: no ``size``, no ``aggressor_side``,
+    no trade id, and it is never a fill input. The ``PortfolioProjection`` caches
+    the latest one per symbol and recomputes every Tier-2 read from it; no
+    ``Strategy`` sees one (ADR-0039), which is why nothing here is a callback.
+
+    **Provenance differs per deployment, compute does not.** Live carries the
+    venue's own mark (``activeAssetCtx.ctx.markPx``); paper and replay carry the
+    last-trade proxy, derived at the feed so the projection consumes one uniform
+    stream everywhere and holds no ``if live:`` for the mark.
+    """
+
+    symbol: str
+    price: Decimal
+    seq: int | None = None
+    """The feed's per-symbol source sequence, on a feed that needs one to keep
+    two marks apart. ``None`` on the live channel, whose receipt-time
+    ``ts_event`` already does; set on ``ReplayFeed``, where a recorded file may
+    hold several rows at one ``ts_event``."""
+
+    @property
+    def event_id(self) -> str:
+        # Weak key (audit/log only, never a correctness key), ADR-0039: a mark is
+        # a latest-value, so nothing downstream dedups on this. The replay form
+        # carries ``seq`` for the same reason ``MarketTick``'s does — the file's
+        # instants are not unique — and the live form has no id to lean on the
+        # way ``MarketTick`` leans on the venue's ``tid``, only its own receipt.
+        if self.seq is None:
+            return f"{self.symbol}:{self.ts_event}"
+        return f"{self.symbol}:{self.ts_event}:{self.seq}"
+
+    @property
+    def partition_key(self) -> str:
+        return self.symbol
+
+
 # --- Accounting inputs with no carrier ---------------------------------------
 
 
