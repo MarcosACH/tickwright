@@ -48,10 +48,14 @@ class AccountView:
 
     Assembled by ``domain.valuation``, never by the aggregate: every Tier-2 Σ
     here ranges over positions the ``Account`` knows nothing about.
+
+    **No field defaults**, for the reason ``PositionView`` states: a defaulted
+    ``equity`` would let a view be built claiming the Σ was uncomputable without
+    any term having been examined.
     """
 
     cash: Decimal
-    equity: Decimal | None = None
+    equity: Decimal | None
     """``cash + Σ unrealized_pnl`` over **every** position — the account's real
     backing value (ADR-0041 §4).
 

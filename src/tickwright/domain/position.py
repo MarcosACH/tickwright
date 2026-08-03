@@ -48,6 +48,15 @@ class PositionView:
     Assembled by ``domain.valuation``, never by the aggregate itself: the
     position-grain half is computed off the symbol's *account-net* size, which
     no single partition holds (ADR-0035).
+
+    **No field defaults**, the Tier-2 ones included. The nullability is real —
+    an absent mark is a genuine state — but *defaulting* to it is a different
+    thing: it would let a caller construct a view that claims "no mark was ever
+    seen" without going near the per-term rule that decides when that is true.
+    That is the same silent-wrong-answer ``position_view`` refuses for its own
+    inputs, and refusing it here is what makes the assembly function the only
+    way to obtain a view whose fields all came from one ``(position, mark)``
+    read (ADR-0041 §1). ``kw_only`` throughout, so this costs no field ordering.
     """
 
     symbol: str
@@ -56,7 +65,7 @@ class PositionView:
     realized_pnl: Decimal
     fees: Decimal
     funding: Decimal
-    unrealized_pnl: Decimal | None = None
+    unrealized_pnl: Decimal | None
     """This partition's own open exposure marked to the latest mark, Tier-2 and
     recomputed on every read (ADR-0034).
 
@@ -64,7 +73,7 @@ class PositionView:
     reads ``0``, because ``0 × (mark − entry)`` needs no mark (ADR-0041 §6).
     Never fabricated as a zero on a real position: unknown and worthless are
     different answers, and only one of them is safe to trade on."""
-    notional: Decimal | None = None
+    notional: Decimal | None
     """The symbol's exposure at position grain: ``|account net size| × mark``.
 
     **Not** this strategy's slice — the venue holds one position per symbol and
@@ -72,7 +81,7 @@ class PositionView:
     so two strategies long the same symbol read one notional. A magnitude, since
     exposure has no direction. ``None`` on an absent mark unless the account nets
     flat, where ``|0| × mark`` is zero at every mark."""
-    mark_ts: int | None = None
+    mark_ts: int | None
     """The observation instant of the mark this view was valued at, ``None`` when
     the projection holds none for the symbol (ADR-0041 §6).
 
