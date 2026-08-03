@@ -16,12 +16,14 @@ implements the seam.
 """
 
 from dataclasses import dataclass
+from decimal import Decimal
 
 from tickwright.domain import (
     Account,
     AccountSpec,
     AccountView,
     Clock,
+    FundingAccrual,
     InvariantViolation,
     OrderFillEvent,
     Portfolio,
@@ -77,6 +79,29 @@ class LedgerChange:
     account: Account
     position: Position
     changes: tuple[PositionChange, ...]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class FundingChange:
+    """One accrual's effect on the ledger: folded in memory, not yet durable.
+
+    ``LedgerChange``'s sibling on the path with no carrier fill, and the shape
+    differs exactly where the two facts differ. It carries **many** positions
+    rather than one, because a symbol's accrual is split across every partition
+    holding it; it carries no ``changes``, because funding opens and closes
+    nothing that the ``PositionChange`` catalog has a name for; and it carries
+    the **watermark advance**, which is the whole reason the pair exists — the
+    mark must land in the same transaction as the funding line it guards, so it
+    travels with that line rather than following it (ADR-0043 §5.2).
+
+    ``funding_mark`` is a ``(symbol, boundary_ts)`` pair, at the grain the key it
+    is the durable half of: one value per symbol, deliberately not a column on
+    any of the position rows beside it here.
+    """
+
+    account: Account
+    positions: tuple[Position, ...]
+    funding_mark: tuple[str, int]
 
 
 class PortfolioProjection:
@@ -145,6 +170,85 @@ class PortfolioProjection:
             # a redelivered fill again. ``Account`` owns the sign (ADR-0042 §4).
             self._account.accrue_fee(position.fees - fees_before, event_id=event.event_id)
         return LedgerChange(account=self._account, position=position, changes=changes)
+
+    def apply_funding(self, accrual: FundingAccrual) -> FundingChange | None:
+        """Fold one settled boundary into the funding line and the cash line.
+
+        The **gate comes first**, and it is a durable read rather than an
+        in-memory one: an accrual whose boundary is at or below its symbol's
+        watermark has already been applied and is dropped, returning ``None`` —
+        nothing folded, nothing to write (ADR-0043 §5.2). That single value is
+        what makes all three convergence paths no-ops across a restart, which an
+        in-memory key set cannot be: paper's catch-up, live's reconcile
+        re-ingest, and a replay rerun that re-derives every boundary in the file.
+
+        The **gate is read before the split, never per partition**. A mark on the
+        position row would be a value per row, and a row created *after* a
+        boundary starts with no mark — so anything reaching back past its
+        creation would find nothing to stop it, and an accrual dropped on one row
+        but applied on another would still move ``cash``, leaving the ledger
+        recording a payment one partition never sees.
+
+        Cash moves by the amount **whether or not there is a partition to
+        attribute it to**: the payment is a fact about the account, and the
+        attribution is an accounting question with no bearing on whether it
+        happened. On this path the two never come apart — paper generates an
+        accrual only for a symbol its own fills opened, and those same fills
+        opened the partitions — so the unattributed case belongs to the foreign
+        flow that #189's reserved partition absorbs.
+
+        Returns rather than writes: the caller must make the change durable
+        before the run goes on, exactly as ``apply_fill``'s does.
+        """
+        mark = self._store.funding_mark(accrual.symbol)
+        if mark is not None and accrual.boundary_ts_ns <= mark:
+            return None
+        exposed = tuple(
+            position
+            for (_owner, symbol), position in self._positions.items()
+            if symbol == accrual.symbol and not position.is_flat
+        )
+        self._split(accrual.amount, across=exposed)
+        # ``Account`` owns no sign here, unlike the fee's leg: the amount already
+        # mirrors the venue's ``usdc``, so a payment arrives negative (ADR-0037).
+        self._account.accrue_funding(accrual.amount, event_id=accrual.event_id)
+        return FundingChange(
+            account=self._account,
+            positions=exposed,
+            funding_mark=(accrual.symbol, accrual.boundary_ts_ns),
+        )
+
+    @staticmethod
+    def _split(amount: Decimal, *, across: tuple[Position, ...]) -> None:
+        """Attribute one symbol's accrual across the partitions holding it.
+
+        Pro-rata by signed size, which is not a policy choice but the identity
+        that makes it exact: the amount is ``− net × price × rate`` and a
+        partition's own share is ``− size_i × price × rate``, so scaling by
+        ``size_i / net`` reproduces each partition's own accrual from the net
+        one. A short partition against a longer one therefore *receives* out of a
+        payment the account made, which is what actually happened.
+
+        **The last partition takes the residue rather than its quotient**, so the
+        shares sum to the amount exactly. ``Decimal`` division is inexact at any
+        precision, and a rounded split would leave ``Σ funding lines`` short of
+        the ``cash`` movement beside it — a discrepancy that accumulates every
+        boundary and has no later step to correct it. The single-partition case,
+        which is every paper run today, divides not at all.
+
+        A net of zero is not divisible and needs no division: offsetting
+        partitions can only arise where the account is flat in the symbol, and a
+        flat account accrues nothing to split.
+        """
+        net = sum((position.signed_size for position in across), Decimal("0"))
+        if not across or net == 0:
+            return
+        allocated = Decimal("0")
+        for position in across[:-1]:
+            share = amount * position.signed_size / net
+            position.accrue_funding(share)
+            allocated += share
+        across[-1].accrue_funding(amount - allocated)
 
     def project(self, change: LedgerChange) -> None:
         """File ``change``'s partition and announce what the fill did.

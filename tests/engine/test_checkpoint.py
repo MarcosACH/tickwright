@@ -17,6 +17,7 @@ from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     Account,
     AccountSpec,
+    FundingAccrual,
     Order,
     OrderFillEvent,
     OrderState,
@@ -24,6 +25,9 @@ from tickwright.domain import (
 )
 from tickwright.domain.enums import OrderType
 from tickwright.engine.checkpoint import Checkpointer
+
+_HOUR = 3_600_000_000_000
+"""One epoch-aligned funding boundary — the unit the accrual cases step in."""
 
 SPEC = AccountSpec(account_id="paper-default", genesis_collateral=GENESIS)
 """The paper-shaped account every case here opens against — declared genesis, so
@@ -65,6 +69,19 @@ def _fill(order: Order, *, trade_id: str, quantity: str, price: str = "42000") -
     )
     assert event is not None
     return event
+
+
+def _accrual(*, amount: str, boundary: int, symbol: str = "BTC") -> FundingAccrual:
+    """One settled boundary, as an ``Exchange`` adapter produced it — signed as
+    the venue reports it, ``< 0`` paid (ADR-0037)."""
+    return FundingAccrual(
+        ts_event=boundary,
+        ts_init=boundary,
+        account_id=SPEC.account_id,
+        symbol=symbol,
+        boundary_ts_ns=boundary,
+        amount=Decimal(amount),
+    )
 
 
 def test_a_fill_moves_the_one_store_and_both_read_models_together() -> None:
@@ -128,6 +145,63 @@ def test_a_fill_opens_the_durable_ledger_and_the_projection_says_so() -> None:
 
     assert store.load_account() is not None
     assert checkpointer.portfolio.is_opened() is True
+
+
+def test_an_accrual_makes_the_funding_line_and_its_mark_durable_together() -> None:
+    """The mark lands in the same write as the line it guards (ADR-0043 §5.2).
+
+    They are handed to the store as one ``checkpoint_ledger`` call rather than
+    two, so there is no crash point between them: the mark can never be ahead of
+    a payment that was not recorded, nor behind one that was. Carrying no order
+    is the other half of the shape — funding has no carrier fill (ADR-0037), so
+    the write that applies it touches the ledger alone.
+
+    Read back from the store rather than from the projection, because what is
+    being asserted is durability: the projection moved in memory the moment the
+    fold ran, and that is precisely what a crash would have discarded.
+    """
+    store = SQLiteStore(":memory:")
+    checkpointer = _checkpointer(store)
+    checkpointer.recover()
+    order = _submitted_order()
+    checkpointer.checkpoint_fill(
+        order, _fill(order, trade_id="f1", quantity="0.5"), side=order.side
+    )
+
+    checkpointer.checkpoint_funding(_accrual(amount="-3.5", boundary=_HOUR))
+
+    assert store.funding_mark("BTC") == _HOUR
+    assert [position.funding for position in store.all_positions()] == [Decimal("-3.5")]
+    account = store.load_account()
+    assert account is not None
+    assert account.cash == GENESIS - Decimal("3.5")
+
+
+def test_a_dropped_accrual_writes_nothing_at_all() -> None:
+    """A boundary already applied leaves the store exactly as it was.
+
+    The gate's job is to make a re-delivery a no-op, and "no-op" has to reach the
+    durable side too: a dropped accrual that still wrote would re-stamp the
+    account row and could only be distinguished from a real payment by reading
+    the number. So the second delivery is asserted to move neither the funding
+    line nor cash — the double-count ADR-0043 §5.2 exists to prevent, reached
+    through the path that actually re-delivers.
+    """
+    store = SQLiteStore(":memory:")
+    checkpointer = _checkpointer(store)
+    checkpointer.recover()
+    order = _submitted_order()
+    checkpointer.checkpoint_fill(
+        order, _fill(order, trade_id="f1", quantity="0.5"), side=order.side
+    )
+    checkpointer.checkpoint_funding(_accrual(amount="-3.5", boundary=_HOUR))
+
+    checkpointer.checkpoint_funding(_accrual(amount="-3.5", boundary=_HOUR))
+
+    assert [position.funding for position in store.all_positions()] == [Decimal("-3.5")]
+    account = store.load_account()
+    assert account is not None
+    assert account.cash == GENESIS - Decimal("3.5")
 
 
 def test_a_non_fill_transition_writes_the_order_row_and_no_ledger_row() -> None:
