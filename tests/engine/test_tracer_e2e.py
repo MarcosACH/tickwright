@@ -34,6 +34,7 @@ from tickwright.domain import (
     FillReport,
     InstrumentSpec,
     MarketTick,
+    MarkTick,
     OrderEvent,
     OrderFilled,
     OrderPlaced,
@@ -280,12 +281,14 @@ def test_tracer_event_cascade_is_the_canonical_sequence(tmp_path: Path, backend:
     recorded, _, _ = _run(path, backend)
 
     assert [type(ev) for ev in recorded] == [
+        MarkTick,  # row 1's mark, derived from the trade price and published first
         MarketTick,  # tick 1 published by the feed
         PlaceSignal,  # strategy reacts (reentrant -> FIFO)
         OrderPlaced,  # manager records PENDING
         OrderSubmitted,  # manager sends
         FillReport,  # paper exchange fills at the cached tick
         OrderFilled,  # manager's canonical transition; strategy sees it
+        MarkTick,  # row 2's mark, again ahead of its trade
         MarketTick,  # tick 2: strategy already fired, no new order
     ]
 

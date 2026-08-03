@@ -16,7 +16,7 @@ import pytest
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.feed import ReplayFeed
-from tickwright.domain import MarketTick
+from tickwright.domain import Event, MarketTick, MarkTick
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> Path:
@@ -119,6 +119,65 @@ def test_replay_never_conflates_same_symbol_ticks(tmp_path: Path) -> None:
     )
     seen, _ = _collect(path)
     assert len(seen) == 3
+
+
+def test_replay_derives_one_mark_per_row_ahead_of_the_trade_it_came_from(
+    tmp_path: Path,
+) -> None:
+    """Replay is a paper deployment, so its mark is the last-trade proxy derived
+    per row — no new column, because the file is trades-only (ADR-0039).
+
+    **Ahead of** the ``MarketTick`` deliberately: the mark a trade implies is
+    known as of that trade, so a handler reacting to the trade already holds it.
+    Published behind, a fill on the first row would value at a mark that had not
+    arrived yet and read ``None`` for one cascade.
+    """
+    path = _write_jsonl(
+        tmp_path / "ticks.jsonl",
+        [_row("BTC", "100", 1_000, "a"), _row("BTC", "101", 2_000, "b")],
+    )
+    bus = InMemoryBus()
+    seen: list[Event] = []
+
+    async def record(event: Event) -> None:
+        seen.append(event)
+
+    bus.subscribe(Event, record)
+    asyncio.run(ReplayFeed(path=path, bus=bus, clock=ManualClock()).start())
+
+    assert [(type(e).__name__, str(getattr(e, "price", ""))) for e in seen] == [
+        ("MarkTick", "100"),
+        ("MarketTick", "100"),
+        ("MarkTick", "101"),
+        ("MarketTick", "101"),
+    ]
+
+
+def test_replay_never_conflates_the_marks_it_derives(tmp_path: Path) -> None:
+    """One mark per row, three rows, three marks — replay must stay faithful
+    (ADR-0023), and a derived event is no more droppable than a read one."""
+    path = _write_jsonl(
+        tmp_path / "ticks.jsonl",
+        [
+            _row("BTC", "100", 1_000, "a"),
+            _row("BTC", "101", 2_000, "b"),
+            _row("BTC", "102", 3_000, "c"),
+        ],
+    )
+    bus = InMemoryBus()
+    marks: list[MarkTick] = []
+
+    async def record(mark: MarkTick) -> None:
+        marks.append(mark)
+
+    bus.subscribe(MarkTick, record)
+    asyncio.run(ReplayFeed(path=path, bus=bus, clock=ManualClock()).start())
+
+    assert [m.price for m in marks] == [Decimal("100"), Decimal("101"), Decimal("102")]
+    # Each carries the row's own instant and the per-symbol seq that keeps two
+    # marks at one instant apart, so the derived stream is as replayable as the
+    # trades it came from.
+    assert [m.event_id for m in marks] == ["BTC:1000:0", "BTC:2000:1", "BTC:3000:2"]
 
 
 def test_replay_advances_the_clock_to_each_tick_ts_event(tmp_path: Path) -> None:

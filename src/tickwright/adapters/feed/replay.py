@@ -5,6 +5,10 @@ and, for each row, advances the injected ``ReplayClock`` to the row's ``ts_event
 before publishing. Replay is therefore deterministic in time and never conflates
 (ADR-0023): every recorded tick is delivered in file order. The tracer E2E and
 every strategy test stand on this feed.
+
+Each row publishes **two** events: the ``MarkTick`` the trade price implies
+(ADR-0039's last-trade proxy — replay is a paper deployment, so no row schema
+changes) and then the ``MarketTick`` itself.
 """
 
 import asyncio
@@ -14,7 +18,14 @@ from decimal import Decimal
 from pathlib import Path
 from typing import TypedDict
 
-from tickwright.domain import AggressorSide, EventBus, MarketTick, ReplayClock, exact_figure
+from tickwright.domain import (
+    AggressorSide,
+    EventBus,
+    MarketTick,
+    MarkTick,
+    ReplayClock,
+    exact_figure,
+)
 
 
 class _TickRow(TypedDict):
@@ -48,6 +59,14 @@ class ReplayFeed:
             # would starve until end-of-file.
             tick = self._to_tick(row)
             await asyncio.sleep(0)
+            # The mark goes **ahead of** the trade it was derived from, not
+            # behind it: the two describe one instant, and a handler reacting to
+            # the trade — a strategy placing, the venue filling, the projection
+            # valuing what that fill produced — must already hold the mark that
+            # instant implies. Behind it, the first row's fill would value
+            # against a mark that had not arrived and read ``None`` for one
+            # cascade, curing only on the next row.
+            await self._bus.publish(self._to_mark(tick))
             await self._bus.publish(tick)
 
     async def stop(self) -> None:  # noqa: B027 - replay has no live resources to release.
@@ -59,6 +78,29 @@ class ReplayFeed:
                 line = line.strip()
                 if line:
                     yield json.loads(line)
+
+    @staticmethod
+    def _to_mark(tick: MarketTick) -> MarkTick:
+        """The last-trade proxy, derived per row (ADR-0039).
+
+        Replay is a **paper deployment** reading the same trades-only file, so
+        the mark is the trade price and the row schema gains nothing — there is
+        no separate mark channel in a recording of trades. Deriving it here
+        rather than letting the projection read ``MarketTick`` on paper is what
+        keeps one uniform ``MarkTick`` stream on every deployment: provenance
+        differs at the adapter, compute downstream does not.
+
+        It inherits the tick's own instants and ``seq``, so the derived stream is
+        exactly as replayable as the trades it came from — same file, same
+        order, same ids, run after run.
+        """
+        return MarkTick(
+            ts_event=tick.ts_event,
+            ts_init=tick.ts_init,
+            symbol=tick.symbol,
+            price=tick.price,
+            seq=tick.seq,
+        )
 
     def _to_tick(self, row: _TickRow) -> MarketTick:
         symbol = row["symbol"]
