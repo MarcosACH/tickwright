@@ -16,6 +16,7 @@ import asyncio
 import json
 from decimal import Decimal
 from pathlib import Path
+from typing import NamedTuple
 
 from ledgers import GENESIS
 
@@ -26,6 +27,7 @@ from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     ComponentState,
+    FundingAccrual,
     InstrumentSpec,
     OrderEvent,
     OrderFilled,
@@ -83,13 +85,29 @@ def _write_ticks(path: Path) -> Path:
     return path
 
 
-async def _run(ticks: Path, db: Path) -> tuple[int, Portfolio]:
+class Run(NamedTuple):
+    """One finished life, and the two ways its cases read it back.
+
+    ``portfolio`` is the scoped facade the engine lent the strategy — the seam
+    the whole surface exists to serve, and still readable after the store closes.
+    ``accruals`` is every accrual the bus carried, which is how a case asks
+    whether the generator was still alive. The durable half is read separately,
+    by reopening the file.
+    """
+
+    exit_code: int
+    portfolio: Portfolio
+    accruals: list[FundingAccrual]
+
+
+async def _run(ticks: Path, db: Path, *, advance_after_stop: int | None = None) -> Run:
     """One supervised life: buy on the first tick, jump the boundaries, stop.
 
-    The scoped facade comes back with the exit code because it is the seam the
-    assertions read: it is the engine's own projection, the other end of what the
-    run wrote, and it stays readable after the store closes — the durable half is
-    asserted separately, by reopening the file.
+    ``advance_after_stop`` drives virtual time further **once the run has
+    returned and while the event loop is still turning** — which is the only
+    place that question can be asked. Advancing a clock after ``asyncio.run``
+    has closed the loop would find nothing to run either way, so a case built
+    that way would pass against a generator that was very much alive.
     """
     bus = InMemoryBus()
     clock = ManualClock()
@@ -115,12 +133,17 @@ async def _run(ticks: Path, db: Path) -> tuple[int, Portfolio]:
     engine.register(strategy, symbols={"BTC"})
 
     filled = asyncio.Event()
+    accruals: list[FundingAccrual] = []
 
     async def on_order_event(event: OrderEvent) -> None:
         if isinstance(event, OrderFilled):
             filled.set()
 
+    async def on_accrual(accrual: FundingAccrual) -> None:
+        accruals.append(accrual)
+
     bus.subscribe(OrderEvent, on_order_event)
+    bus.subscribe(FundingAccrual, on_accrual)
 
     run = asyncio.create_task(engine.run())
     await asyncio.wait_for(filled.wait(), timeout=5)
@@ -130,7 +153,11 @@ async def _run(ticks: Path, db: Path) -> tuple[int, Portfolio]:
     await engine.stop()
     exit_code = await run
     assert engine.state is ComponentState.STOPPED
-    return exit_code, engine.portfolio_for("trivial")
+    if advance_after_stop is not None:
+        clock.advance_to(advance_after_stop)
+        for _ in range(5):  # every slot a surviving generator would need
+            await asyncio.sleep(0)
+    return Run(exit_code, engine.portfolio_for("trivial"), accruals)
 
 
 def test_a_replayed_time_jump_accrues_every_boundary_onto_the_strategys_own_line(
@@ -149,17 +176,43 @@ def test_a_replayed_time_jump_accrues_every_boundary_onto_the_strategys_own_line
     its deadline is published (ADR-0033), so all three price at 42 000 rather
     than the 42 100 the jumping row brings.
     """
-    exit_code, portfolio = asyncio.run(
-        _run(_write_ticks(tmp_path / "ticks.jsonl"), tmp_path / "saga.db")
-    )
+    finished = asyncio.run(_run(_write_ticks(tmp_path / "ticks.jsonl"), tmp_path / "saga.db"))
 
-    view = portfolio.position("BTC")
+    view = finished.portfolio.position("BTC")
     assert view is not None
     assert view.funding == Decimal("-6.3")  # 3 x -(0.5 x 42000 x 0.0001)
     assert view.entry_price == Decimal("42000")  # funding reaches no basis
     assert view.realized_pnl == Decimal("0")  # nor any PnL
-    assert portfolio.account().cash == GENESIS - Decimal("6.3")
-    assert exit_code == 0
+    assert finished.portfolio.account().cash == GENESIS - Decimal("6.3")
+    assert finished.exit_code == 0
+
+
+def test_the_generator_is_dead_once_the_engine_has_stopped(tmp_path: Path) -> None:
+    """The reverse shutdown's whole point at this seam, asserted by outliving it.
+
+    ``exchange.stop`` sits ahead of the bus drain (ADR-0024) precisely because a
+    generator that outlived the release would keep publishing into that drain and
+    keep raising its high-water mark, so the cascade would never quiesce and a
+    graceful stop would never finish. The exit code says the stop finished; this
+    says why it could — driving virtual time across three *more* boundaries after
+    the run returns produces nothing, because the loop is cancelled rather than
+    merely unobserved.
+
+    A stopped engine is what a cancelled task looks like from outside: there is
+    no seam that reports a loop's liveness, so the observation is what it would
+    have published.
+    """
+    finished = asyncio.run(
+        _run(
+            _write_ticks(tmp_path / "ticks.jsonl"),
+            tmp_path / "saga.db",
+            advance_after_stop=7_000,  # past 4 000, 5 000, 6 000 and 7 000
+        )
+    )
+
+    # Only the three the run itself crossed; the four after the stop settled none.
+    assert [accrual.boundary_ts_ns for accrual in finished.accruals] == [1_000, 2_000, 3_000]
+    assert finished.exit_code == 0
 
 
 def test_a_graceful_stop_leaves_the_funding_line_and_its_mark_durable(tmp_path: Path) -> None:
