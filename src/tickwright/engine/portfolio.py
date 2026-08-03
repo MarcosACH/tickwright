@@ -194,10 +194,28 @@ class PortfolioProjection:
         Cash moves by the amount **whether or not there is a partition to
         attribute it to**: the payment is a fact about the account, and the
         attribution is an accounting question with no bearing on whether it
-        happened. On this path the two never come apart — paper generates an
-        accrual only for a symbol its own fills opened, and those same fills
-        opened the partitions — so the unattributed case belongs to the foreign
-        flow that #189's reserved partition absorbs.
+        happened. That is ADR-0043 §5.2's decision rather than this method's
+        convenience — the gate is read *before* the split precisely so the two
+        questions are answered independently.
+
+        **The two do come apart, and where they do the cash line is the one that
+        stays right.** The venue computes the amount from the account net it read
+        at the boundary; this folds it across the partitions held when it
+        arrives. Let a fill take the symbol flat in between and ``exposed`` is
+        empty: ``Σ funding lines`` falls short of the cash movement by the whole
+        amount, and the mark advances in the same write, so no later pass
+        corrects it. On the hermetic path that is unreachable — ``ReplayFeed``
+        advances the clock and yields *before* it publishes, so the generator
+        wakes with no cascade in flight and its own publish drains to quiescence
+        before it returns. It is reachable wherever the generator instead wakes
+        at an arbitrary point in the loop: a ``LiveClock`` paper run, where
+        ``sleep_until`` is a real ``asyncio.sleep``, and ``KafkaBus``, where the
+        accrual round-trips the broker and is dispatched behind whatever fills
+        are already queued. The residue is the unattributed flow
+        [#189](https://github.com/MarcosACH/tickwright/issues/189)'s reserved
+        partition absorbs; until that partition exists the account line carries
+        it alone, which is the direction that keeps ``cash`` faithful to what
+        was actually paid.
 
         Returns rather than writes: the caller must make the change durable
         before the run goes on, exactly as ``apply_fill``'s does.
@@ -238,9 +256,14 @@ class PortfolioProjection:
         boundary and has no later step to correct it. The single-partition case,
         which is every paper run today, divides not at all.
 
-        A net of zero is not divisible and needs no division: offsetting
-        partitions can only arise where the account is flat in the symbol, and a
-        flat account accrues nothing to split.
+        A net of zero is not divisible and needs no division. Offsetting
+        partitions arise where the account is flat in the symbol, and a flat
+        account accrues nothing to split — so on the hermetic path the guard is
+        simply unreachable. Where it *is* reachable, the symbol having gone flat
+        between the venue's read and this fold, the early return is the same
+        decision ``apply_funding`` records one method up: the accrual stays whole
+        on the cash line and attributes to nothing, rather than being forced onto
+        a partition that no longer holds what it was charged for.
         """
         net = sum((position.signed_size for position in across), Decimal("0"))
         if not across or net == 0:

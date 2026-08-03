@@ -49,14 +49,20 @@ def _checkpointer(store: SQLiteStore, *, spec: AccountSpec = SPEC) -> Checkpoint
     return Checkpointer(spec=spec, store=store, clock=ManualClock(start_ns=1_000))
 
 
-def _submitted_order(*, quantity: str = "0.5") -> Order:
-    """A saga at the one state a fill legally advances from (``_LEGAL_TRANSITIONS``)."""
+def _submitted_order(*, quantity: str = "0.5", side: Side = Side.BUY, seq: int = 1) -> Order:
+    """A saga at the one state a fill legally advances from (``_LEGAL_TRANSITIONS``).
+
+    ``side`` and ``seq`` vary only for the one case below needing a **second**
+    saga — the close that takes the symbol flat — since a partition is advanced
+    by the fills of distinct orders, never by one order filled twice. ``seq``
+    moves the cloid and the signal id together so the pair can never collide.
+    """
     return Order(
-        cloid="0xtrivial-1",
+        cloid=f"0xtrivial-{seq}",
         strategy_id="trivial",
-        signal_id="trivial:BTC:1",
+        signal_id=f"trivial:BTC:{seq}",
         symbol="BTC",
-        side=Side.BUY,
+        side=side,
         quantity=Decimal(quantity),
         order_type=OrderType.MARKET,
         state=OrderState.SUBMITTED,
@@ -181,6 +187,59 @@ def test_an_accrual_makes_the_funding_line_and_its_mark_durable_together() -> No
     account = store.load_account()
     assert account is not None
     assert account.cash == GENESIS - Decimal("3.5")
+
+
+def test_an_accrual_whose_symbol_went_flat_moves_cash_and_attributes_nothing() -> None:
+    """The one place the cash line and the funding lines come apart, pinned.
+
+    The venue computes the amount from the account net it read **at the
+    boundary**; the projection folds it across the partitions held **when it
+    arrives**. A fill closing the symbol in between leaves nothing to attribute
+    to, and ADR-0043 §5.2 has already decided which of the two questions wins:
+    the gate is read before the split so that whether a payment *happened* is
+    answered independently of who it is charged to. So ``cash`` moves whole, the
+    funding line stays at zero, and the mark advances in the same write — which
+    means no later pass revisits it.
+
+    Asserted here rather than left to the docstring because it is the ledger a
+    reader would otherwise have to discover the hard way: ``Σ funding lines``
+    genuinely falls short of the cash movement, and that is a recorded decision
+    rather than a bug. It is unreachable on the hermetic path — ``ReplayFeed``
+    yields before it publishes, so the generator's read and its
+    drain-to-quiescence publish are one uninterrupted stretch — and reachable
+    wherever the generator wakes at an arbitrary point instead: a ``LiveClock``
+    paper run, or ``KafkaBus`` dispatching the accrual behind queued fills. The
+    residue is what [#189](https://github.com/MarcosACH/tickwright/issues/189)'s
+    reserved partition will absorb; until then the account line carries it, which
+    is the direction that keeps ``cash`` faithful to what was actually paid.
+
+    Driven at this seam rather than through the venue because the interleaving
+    is what is under test, and only a caller holding both verbs can place a
+    close *between* a boundary's basis and its application.
+    """
+    store = SQLiteStore(":memory:")
+    checkpointer = _checkpointer(store)
+    checkpointer.recover()
+    opening = _submitted_order()
+    checkpointer.checkpoint_fill(
+        opening, _fill(opening, trade_id="f1", quantity="0.5"), side=opening.side
+    )
+    closing = _submitted_order(side=Side.SELL, seq=2)
+    checkpointer.checkpoint_fill(
+        closing, _fill(closing, trade_id="f2", quantity="0.5"), side=closing.side
+    )
+
+    with capture_events() as logs:
+        checkpointer.checkpoint_funding(_accrual(amount="-2.1", boundary=_HOUR))
+
+    assert [position.funding for position in store.all_positions()] == [Decimal("0")]
+    account = store.load_account()
+    assert account is not None
+    assert account.cash == GENESIS - Decimal("2.1")  # the payment still happened
+    assert store.funding_mark("BTC") == _HOUR  # and is never revisited
+    # Nothing moved, so nothing is announced: the movement is invisible in the
+    # trail too, which is the whole of what #189 has left to pick up.
+    assert logs == []
 
 
 def test_a_dropped_accrual_writes_nothing_at_all() -> None:
