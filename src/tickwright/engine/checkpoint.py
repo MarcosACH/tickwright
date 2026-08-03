@@ -200,9 +200,13 @@ class Checkpointer:
         re-stamping the row would make a re-delivery indistinguishable from a
         payment by anything but the number.
 
-        Nothing to project behind the write: funding opens and closes no
-        position, so there is no partition to file and no ``position.*`` record
-        to emit (ADR-0045 §2 names no change for it).
+        There **is** something to project behind the write, and it is narrower
+        than the fill path's: no partition to file — an accrual only ever splits
+        across partitions the projection already holds — but one
+        ``position.changed`` per partition it moved, which is what ADR-0045 §2
+        names for "a fill or accrual moves a non-flat record". Behind the write
+        for the fill path's reason: a record naming a payment a crash could still
+        undo would report money that never left.
 
         **Synchronous, like its siblings**, even though its one production caller
         is a bus subscriber and subscribers are ``async``. The adapting belongs
@@ -228,3 +232,4 @@ class Checkpointer:
                 f"funding checkpoint write failed for {accrual.symbol} "
                 f"at boundary {accrual.boundary_ts_ns}"
             ) from exc
+        self._portfolio.project_funding(change)

@@ -310,6 +310,34 @@ def test_one_accrual_splits_across_every_partition_holding_the_symbol() -> None:
     assert projection.account().cash == Decimal("99990")
 
 
+def test_an_accrual_with_no_partition_to_attribute_to_still_moves_cash() -> None:
+    """The payment is a fact about the **account**; the attribution is separate.
+
+    Cash moves by the full amount even where there is no open partition to file
+    it against, because those are two different questions and only the first one
+    is about whether the payment happened. The consequence is deliberate and
+    worth pinning: ``Σ funding lines`` is *short* of the ``cash`` movement in
+    exactly this case, which is the one place the two are allowed to disagree.
+
+    Unreachable on the paper path as wired today — paper generates an accrual
+    only for a symbol its own ledger holds, and holding it means a partition — so
+    the case that reaches here is foreign flow into the account, which is
+    [#189](https://github.com/MarcosACH/tickwright/issues/189)'s reserved
+    unattributed partition. Asserted now because the behaviour ships now: the
+    branch is live the moment a live venue reports funding on a symbol this
+    engine never traded.
+    """
+    projection = _projection("100000")
+
+    change = projection.apply_funding(_accrual(amount="-10", boundary=_HOUR))
+
+    assert change is not None
+    assert change.positions == ()  # nothing to attribute to, and nothing invented
+    assert change.funding_mark == ("BTC", _HOUR)  # still applied, so still marked
+    assert projection.account().cash == Decimal("99990")
+    assert projection.for_strategy("alpha").position("BTC") is None
+
+
 def test_a_maker_rebate_credits_the_cash_line_rather_than_debiting_it() -> None:
     # The sign convention is the whole of what makes a fee a credit (ADR-0036):
     # a negative fee is a rebate, and cash moving by its negative therefore

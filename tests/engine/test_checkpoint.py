@@ -8,8 +8,10 @@ transaction (ADR-0043 §4), which no caller can any longer get wrong by wiring
 two.
 """
 
+from collections.abc import Sequence
 from decimal import Decimal
 
+import pytest
 from ledgers import GENESIS
 
 from tickwright.adapters.clock import ManualClock
@@ -18,13 +20,17 @@ from tickwright.domain import (
     Account,
     AccountSpec,
     FundingAccrual,
+    InvariantViolation,
     Order,
     OrderFillEvent,
     OrderState,
+    Position,
     Side,
 )
 from tickwright.domain.enums import OrderType
 from tickwright.engine.checkpoint import Checkpointer
+from tickwright.observability import NamedEvent
+from tickwright.observability.testing import capture_events
 
 _HOUR = 3_600_000_000_000
 """One epoch-aligned funding boundary — the unit the accrual cases step in."""
@@ -202,6 +208,109 @@ def test_a_dropped_accrual_writes_nothing_at_all() -> None:
     account = store.load_account()
     assert account is not None
     assert account.cash == GENESIS - Decimal("3.5")
+
+
+def test_an_applied_accrual_announces_every_partition_it_moved() -> None:
+    """An accrual moving a non-flat record is a ``position.changed`` (ADR-0045 §2).
+
+    The catalog is the **only** place a position change is observable from
+    outside — it is an output derived from an input already on the bus, never a
+    bus event of its own (ADR-0045 §1) — so a funding line that moved with no
+    record moved invisibly. That matters more here than on the fill path, not
+    less: funding is the one accounting input with no carrier, so there is no
+    ``order.*`` record beside it that an operator could read the movement off
+    instead.
+
+    Announced *behind* the write, like the fill path's: a record naming a change
+    a crash could still undo would report a payment the ledger never kept. The
+    capture opens after the opening fill so what it holds is the accrual's alone.
+    """
+    store = SQLiteStore(":memory:")
+    checkpointer = _checkpointer(store)
+    checkpointer.recover()
+    order = _submitted_order()
+    checkpointer.checkpoint_fill(
+        order, _fill(order, trade_id="f1", quantity="0.5"), side=order.side
+    )
+
+    with capture_events() as logs:
+        checkpointer.checkpoint_funding(_accrual(amount="-3.5", boundary=_HOUR))
+
+    assert [log["event"] for log in logs] == [NamedEvent.POSITION_CHANGED.value]
+    assert logs[0]["symbol"] == "BTC"
+    assert logs[0]["strategy_id"] == "trivial"
+    assert logs[0]["funding"] == "-3.5"  # what moved, where the fill path reports size
+
+
+def test_a_dropped_accrual_announces_nothing_either() -> None:
+    """The drop is whole, and "whole" reaches the trail as well as the store.
+
+    A re-delivery that still emitted a ``position.changed`` would put a payment
+    in the operator's record that the ledger deliberately did not take — the
+    double-count ADR-0043 §5.2 prevents, reappearing in the one place left that
+    a reader would believe.
+    """
+    store = SQLiteStore(":memory:")
+    checkpointer = _checkpointer(store)
+    checkpointer.recover()
+    order = _submitted_order()
+    checkpointer.checkpoint_fill(
+        order, _fill(order, trade_id="f1", quantity="0.5"), side=order.side
+    )
+    checkpointer.checkpoint_funding(_accrual(amount="-3.5", boundary=_HOUR))
+
+    with capture_events() as logs:
+        checkpointer.checkpoint_funding(_accrual(amount="-3.5", boundary=_HOUR))
+
+    assert logs == []
+
+
+class _FundingRefusingStore(SQLiteStore):
+    """The real store, refusing exactly the ledger write that carries a mark.
+
+    Narrowed to the funding write so the opening fill still lands: what is under
+    test is a refusal of *this* write, against a ledger that was healthy up to
+    it, rather than a store that was never usable.
+    """
+
+    def checkpoint_ledger(
+        self,
+        *,
+        account: Account,
+        positions: Sequence[Position] = (),
+        order: Order | None = None,
+        funding_mark: tuple[str, int] | None = None,
+        ts_ns: int,
+    ) -> None:
+        if funding_mark is not None:
+            raise InvariantViolation("disk is full")
+        super().checkpoint_ledger(account=account, positions=positions, order=order, ts_ns=ts_ns)
+
+
+def test_a_refused_funding_write_is_relabelled_with_the_boundary_it_lost() -> None:
+    """The diagnosis an operator gets when the funding write cannot be made.
+
+    ``InvariantViolation`` is the whole of the ``Store``'s error contract
+    (ADR-0019), so it is the one type this seam relabels — and the label has to
+    carry what the store's own message cannot: *which* boundary on *which* symbol
+    failed to land. With #226 open that message is the only account of a
+    generator that then dies, so it is asserted rather than assumed, chained
+    cause included.
+    """
+    store = _FundingRefusingStore(":memory:")
+    checkpointer = _checkpointer(store)
+    checkpointer.recover()
+    order = _submitted_order()
+    checkpointer.checkpoint_fill(
+        order, _fill(order, trade_id="f1", quantity="0.5"), side=order.side
+    )
+
+    with pytest.raises(InvariantViolation, match="funding checkpoint write failed for BTC") as exc:
+        checkpointer.checkpoint_funding(_accrual(amount="-3.5", boundary=_HOUR))
+
+    assert str(_HOUR) in str(exc.value)
+    assert isinstance(exc.value.__cause__, InvariantViolation)
+    assert "disk is full" in str(exc.value.__cause__)
 
 
 def test_a_non_fill_transition_writes_the_order_row_and_no_ledger_row() -> None:

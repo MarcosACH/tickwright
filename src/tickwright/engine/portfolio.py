@@ -88,11 +88,13 @@ class FundingChange:
     ``LedgerChange``'s sibling on the path with no carrier fill, and the shape
     differs exactly where the two facts differ. It carries **many** positions
     rather than one, because a symbol's accrual is split across every partition
-    holding it; it carries no ``changes``, because funding opens and closes
-    nothing that the ``PositionChange`` catalog has a name for; and it carries
-    the **watermark advance**, which is the whole reason the pair exists — the
-    mark must land in the same transaction as the funding line it guards, so it
-    travels with that line rather than following it (ADR-0043 §5.2).
+    holding it; it carries no ``changes``, because an accrual moves a record
+    without ever opening or closing one, so the announcement behind the write is
+    ``position.changed`` for every partition here and nothing else to choose
+    between (ADR-0045 §2); and it carries the **watermark advance**, which is the
+    whole reason the pair exists — the mark must land in the same transaction as
+    the funding line it guards, so it travels with that line rather than
+    following it (ADR-0043 §5.2).
 
     ``funding_mark`` is a ``(symbol, boundary_ts)`` pair, at the grain the key it
     is the durable half of: one value per symbol, deliberately not a column on
@@ -249,6 +251,40 @@ class PortfolioProjection:
             position.accrue_funding(share)
             allocated += share
         across[-1].accrue_funding(amount - allocated)
+
+    def project_funding(self, change: FundingChange) -> None:
+        """Announce the partitions one accrual moved — ``project``'s funding half.
+
+        ADR-0045 §2 names ``position.changed`` for "a fill **or accrual** moves a
+        non-flat record", and this is the accrual arm. It matters more here than
+        on the fill path rather than less: funding is the one accounting input
+        with no carrier event (ADR-0037), so unlike a fill there is no ``order.*``
+        record beside it that an operator could read the movement off instead —
+        and the catalog is already the only place a position change is observable
+        at all, being an output derived from an input on the bus rather than a bus
+        event of its own (ADR-0045 §1). A funding line that moved with no record
+        moved invisibly.
+
+        **Nothing is filed**, which is the difference from its sibling. An accrual
+        splits only across partitions the projection already holds — it is read
+        out of ``_positions`` to be split at all — so there is no first filing to
+        defer behind the write, and the announcement is the whole of what this
+        step keeps.
+
+        One name and no branch: an accrual moves a record without ever opening or
+        closing one, so ``_POSITION_EVENTS`` has nothing to choose between here
+        and the map stays the fill path's. ``funding`` rides the record because it
+        is what moved, beside the ``size`` that did not — a reader filtering on
+        ``position.changed`` gets one shape from both emitters.
+        """
+        for position in change.positions:
+            named_event(
+                NamedEvent.POSITION_CHANGED,
+                strategy_id=position.strategy_id,
+                symbol=position.symbol,
+                size=str(position.signed_size),
+                funding=str(position.funding),
+            )
 
     def project(self, change: LedgerChange) -> None:
         """File ``change``'s partition and announce what the fill did.
