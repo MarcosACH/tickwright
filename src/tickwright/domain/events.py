@@ -82,6 +82,60 @@ class MarketTick(Event):
         return self.symbol
 
 
+# --- Accounting inputs with no carrier ---------------------------------------
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class FundingAccrual(Event):
+    """One boundary's periodic cash adjustment on a perp position (ADR-0037).
+
+    A first-class event rather than an internal adjustment, and the *only*
+    accounting input that is one: the fee got to be a read-model because it
+    rides an existing carrier — the fill — and funding has none. So it becomes
+    its own event rather than reinventing durable-keyed idempotent state outside
+    the taxonomy built for it (ADR-0025, ADR-0045 §1).
+
+    One shape, both modes: ``PaperExchange`` **generates** it on the ``Clock``
+    cadence and ``HyperliquidExchange`` **ingests** the venue's reported payment
+    verbatim. ``amount`` is signed and mirrors ``userFunding.usdc`` — ``< 0``
+    paid, ``> 0`` received — so live transforms nothing and reconcile is a direct
+    field compare. The account applies ``cash += amount``.
+
+    ``boundary_ts_ns`` is the settlement instant the key is built on, distinct
+    from ``ts_event``: paper's is the epoch-aligned boundary, live's the venue's
+    own ``time``. A given account is either paper or live, so the two never need
+    to agree — only to dedupe within one account's stream.
+    """
+
+    account_id: str
+    symbol: str
+    boundary_ts_ns: int
+    amount: Decimal
+
+    @property
+    def event_id(self) -> str:
+        """``{account}:{symbol}:funding:{boundary}`` — ADR-0037's key.
+
+        ``amount`` is deliberately not in it. All three convergence paths can
+        re-deliver a boundary already applied — catch-up, live's reconcile
+        re-ingest, and a replay rerun — and the last re-derives the amount
+        against whatever price proxy that run reached, so keying on the money
+        would let a differently-priced re-derivation read as a second payment.
+        """
+        return f"{self.account_id}:{self.symbol}:funding:{self.boundary_ts_ns}"
+
+    @property
+    def partition_key(self) -> str:
+        """The symbol, with account identity riding as a *property* of the event.
+
+        This is the resolution ADR-0003's account-scope caveat asked for: the
+        one account-qualified event in the taxonomy still orders per symbol,
+        because one process trades one account (ADR-0038) — so an account-scoped
+        partition would be a single key for the whole stream.
+        """
+        return self.symbol
+
+
 # --- Signals (strategy intent) ----------------------------------------------
 
 
