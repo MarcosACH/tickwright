@@ -206,6 +206,31 @@ def test_a_strategy_reads_back_the_fill_the_engine_wrote(tmp_path: Path) -> None
     ]
 
 
+def test_the_engine_subscribes_the_mark_so_tier_two_is_readable_through_the_facade(
+    tmp_path: Path,
+) -> None:
+    """The mark's ingress is the **runner's** wiring, not the projection's own.
+
+    A ``MarkTick`` reaches the ledger by subscription — the one accounting input
+    that does, funding aside — and nothing else in the engine subscribes on the
+    projection's behalf. Without that line the whole Tier-2 surface reads
+    ``None`` on a run whose feed is publishing marks every row, which is exactly
+    the failure a strategy would misread as "no position worth anything".
+
+    The strategy is long 0.5 from 42 000 and the file's last mark is 42 100, so
+    the open leg is worth +50 — worked from the file, and readable through the
+    facade the engine lent out.
+    """
+    _, engine, _ = asyncio.run(
+        _run_to_fill_then_stop(_write_ticks(tmp_path / "ticks.jsonl"), tmp_path / "saga.db")
+    )
+
+    view = engine.portfolio_for("trivial").position("BTC")
+    assert view is not None
+    assert view.mark_ts == 2_000
+    assert view.unrealized_pnl == Decimal("50")
+
+
 _LIVE_CLOID = "0xlive"
 _NO_RECORD = VenueOrderView(status=None)
 

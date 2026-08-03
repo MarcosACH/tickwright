@@ -34,6 +34,7 @@ from tickwright.domain import (
     ExecutionReport,
     FundingAccrual,
     MarketFeed,
+    MarkTick,
     Portfolio,
     PreTradeGuard,
     Signal,
@@ -267,6 +268,13 @@ class Engine:
         # step 7 — so the first accrual is only possible once virtual time
         # moves, which is behind this line and behind the barrier.
         self._bus.subscribe(FundingAccrual, self._on_funding_accrual)
+        # The mark is the *other* input the ledger subscribes to, and it is the
+        # gentler of the two: it moves no money and reaches no store, so unlike
+        # the accrual above there is nothing here a refusal could leave half
+        # done. Subscribed beside it because the wiring is the runner's either
+        # way — which event reaches which verb — and subscribed **before** the
+        # feed starts at step 7, so no mark can be published to nobody.
+        self._bus.subscribe(MarkTick, self._on_mark_tick)
         # The hard gate: nothing places until every proof it holds has cleared.
         # The sequence is the ordering rule, and it lives here rather than inside
         # any step — lifecycle ordering is the runner's, and the barrier owns
@@ -305,6 +313,22 @@ class Engine:
         disagree — the same no-yield discipline the fill path keeps.
         """
         self._checkpointer.checkpoint_funding(accrual)
+
+    async def _on_mark_tick(self, mark: MarkTick) -> None:
+        """Hand one mark to the ledger's latest-value cache (ADR-0039).
+
+        The adapting layer between an ``async`` subscriber and a synchronous
+        verb, as ``_on_funding_accrual`` is — and nothing more. It goes to the
+        projection directly rather than through the ``Checkpointer``, and the
+        line is the same one that type draws for itself: what it owns is an
+        ordering a caller could invert, and taking a mark is one in-memory
+        write with no store behind it and no ordering inside it.
+
+        The provenance-agnosticism is the feed's doing, not this method's: paper
+        and live both publish a ``MarkTick``, so there is no branch here and
+        nothing to tell the two deployments apart.
+        """
+        self._checkpointer.portfolio.observe_mark(mark)
 
     async def _materialise_account(self) -> bool:
         """The barrier's live-only first step: create the account row when the
