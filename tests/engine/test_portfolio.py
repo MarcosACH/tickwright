@@ -233,6 +233,66 @@ def test_notional_is_a_magnitude_so_a_short_account_still_reads_positive() -> No
     assert view.notional == Decimal("220")
 
 
+def test_account_equity_is_cash_plus_the_unrealized_pnl_of_every_partition() -> None:
+    """``equity = cash + Σ uPnL`` over the **whole** account (ADR-0041 §4).
+
+    Not the reading strategy's share of it: collateral is one pool per process
+    and every partition's open exposure backs the same bucket, so a strategy
+    reading equity reads the account's, unscoped. Alpha is long 2 BTC from 100
+    and beta short 1 ETH from 3000; marked at 110 and 2900 that is +20 and +100
+    against a 100 000 opening cash line — 100 120, worked by hand.
+    """
+    projection = _projection("100000")
+    book_fill(projection, _fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
+    book_fill(
+        projection,
+        _fill(trade_id="f2", quantity="1", price="3000", symbol="ETH", strategy_id="beta"),
+        side=Side.SELL,
+    )
+
+    projection.observe_mark(_mark(price="110", ts_event=9_000))
+    projection.observe_mark(_mark(price="2900", ts_event=9_000, symbol="ETH"))
+
+    account = projection.for_strategy("alpha").account()
+    assert account.cash == Decimal("100000")  # Tier-1, untouched by any mark
+    assert account.equity == Decimal("100120")
+
+
+def test_one_unmarked_symbol_makes_the_whole_account_equity_unknown() -> None:
+    """The cross-strategy coupling ADR-0041 §6 names, and it is not a defect.
+
+    Account equity sums over every position, so one symbol with no mark makes
+    the total genuinely uncomputable — for *every* strategy, including one whose
+    own symbols are all marked. Reporting the marked subset's total instead
+    would be a number that looks like equity and is not.
+
+    ``cash`` is exempt outright: it is Tier-1, so a cold start is not a
+    reporting blackout.
+    """
+    projection = _projection("100000")
+    book_fill(projection, _fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
+    book_fill(
+        projection,
+        _fill(trade_id="f2", quantity="1", price="3000", symbol="ETH", strategy_id="beta"),
+        side=Side.SELL,
+    )
+
+    projection.observe_mark(_mark(price="110", ts_event=9_000))
+
+    account = projection.for_strategy("alpha").account()
+    assert account.equity is None
+    assert account.cash == Decimal("100000")
+
+
+def test_an_account_holding_nothing_reads_its_equity_as_its_cash() -> None:
+    """Per-term again: with no open exposure the Σ has no mark-dependent term to
+    wait on, so equity is the cash line rather than ``None`` (ADR-0041 §6)."""
+    projection = _projection("100000")
+
+    account = projection.for_strategy("alpha").account()
+    assert account.equity == Decimal("100000")
+
+
 def test_a_position_the_projection_has_no_mark_for_reports_no_instant() -> None:
     """``mark_ts is None`` ⟺ the mark is absent — the one signal a reader has for
     telling "never valued" from "valued a while ago" (ADR-0041 §6)."""

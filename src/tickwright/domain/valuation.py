@@ -14,6 +14,7 @@ construction**: every field comes from one ``(position, mark)`` read, so two
 fields of one view can never straddle a fill (ADR-0041 §1).
 """
 
+from collections.abc import Iterable, Mapping
 from decimal import Decimal
 
 from .account import Account, AccountView
@@ -89,13 +90,45 @@ def _unrealized_pnl(position: Position, mark: Decimal | None) -> Decimal | None:
     return position.unrealized_pnl(mark)
 
 
-def account_view(account: Account) -> AccountView:
+def account_view(
+    account: Account,
+    *,
+    positions: Iterable[Position],
+    marks: Mapping[str, Decimal],
+) -> AccountView:
     """The account-wide pool's frozen snapshot — one collateral bucket.
 
     Never scoped to a strategy: collateral is one pool per process (ADR-0038),
-    and reporting a slice of it would be a fiction (ADR-0041 §2).
+    and reporting a slice of it would be a fiction (ADR-0041 §2). So
+    ``positions`` is **every** partition, the reserved unattributed one
+    included — anything the account is holding backs the same bucket, whether or
+    not this engine placed it.
+
+    ``marks`` carries only the symbols a mark has been seen for; a symbol absent
+    from it is what makes the Σ unknown.
     """
-    return AccountView(cash=account.cash)
+    return AccountView(cash=account.cash, equity=_equity(account, positions, marks))
+
+
+def _equity(
+    account: Account, positions: Iterable[Position], marks: Mapping[str, Decimal]
+) -> Decimal | None:
+    """``cash + Σ uPnL``, or ``None`` the moment one term cannot be computed.
+
+    The condition is per-**term**, so a flat partition contributes its real zero
+    and never blocks the sum: its uPnL is zero at every mark, mark or no mark.
+    A held partition whose symbol has no mark does block it, and that is the
+    honest answer — the alternative is a partial sum reported as the whole.
+    """
+    total = account.cash
+    for position in positions:
+        if position.is_flat:
+            continue
+        mark = marks.get(position.symbol)
+        if mark is None:
+            return None
+        total += position.unrealized_pnl(mark)
+    return total
 
 
 __all__ = ["account_view", "position_view"]

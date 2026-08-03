@@ -6,7 +6,7 @@ from decimal import Decimal
 import pytest
 from venue_doubles import account_state
 
-from tickwright.domain import Account, AccountSpec, Netting
+from tickwright.domain import Account, AccountSpec, Netting, account_view
 
 
 def _account(genesis: str = "100000") -> Account:
@@ -20,7 +20,10 @@ def test_an_account_opens_with_its_cash_line_at_the_genesis_collateral() -> None
     assert account.cash == Decimal("250000")
     assert account.genesis_collateral == Decimal("250000")
     assert account.genesis_ts_ns == 7
-    assert account.view().cash == Decimal("250000")
+    # And it reaches the seam's snapshot, assembled off the aggregate rather
+    # than by it: every Tier-2 Σ on that view ranges over positions an
+    # ``Account`` knows nothing about (ADR-0035).
+    assert account_view(account, positions=(), marks={}).cash == Decimal("250000")
 
 
 def test_realized_pnl_accrues_to_the_cash_line() -> None:

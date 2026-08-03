@@ -531,8 +531,17 @@ class PortfolioProjection:
         )
 
     def account(self) -> AccountView:
-        """The account-wide pool — one collateral bucket, never scoped."""
-        return account_view(self._account)
+        """The account-wide pool — one collateral bucket, never scoped.
+
+        Every partition contributes, the reserved unattributed one included:
+        flow the engine never placed still backs the same collateral, so leaving
+        it out would report an equity the venue does not hold.
+        """
+        return account_view(
+            self._account,
+            positions=self._positions.values(),
+            marks={symbol: mark.price for symbol, mark in self._marks.items()},
+        )
 
     def for_strategy(self, strategy_id: str) -> Portfolio:
         """The scoped ``Portfolio`` facade the composition root injects into a
