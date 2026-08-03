@@ -422,6 +422,21 @@ never placed. A pure `domain` aggregate, the economic sibling of the [[Order sag
 ADR-0034, ADR-0038.
 _Avoid_: holding, lot, order (the FSM saga is the [[Order saga]]).
 
+**Account net size**:
+How much of one symbol the [[Account]] holds, **signed** — `Σ(per-strategy signed size)` over
+**every** [[Position]] partition of that symbol, the reserved unattributed one included. The
+left-hand side of ADR-0034's bridging invariant `Σ(per-strategy signed size) = account net size =
+venue szi`, and the one answer to "how much is held": a symbol traded to flat reports a **zero**
+rather than dropping out, so "held nothing" stays distinguishable from "never traded". Linear and
+summable, unlike PnL — which is why *this* is what reconciles against the venue and per-strategy
+PnL never does. Computed by `domain.account_net_size` over whichever partitions the caller has
+(the durable mass-read on recovery, the projection's map in flight). The [[Paper exchange]] reads
+it for its funding notional because it holds no position state of its own; a live venue is asked
+nothing, because a real one knows. See ADR-0034, ADR-0037, ADR-0043 §4.
+_Avoid_: net exposure (the deferred RiskEngine's signed portfolio quantity — [[Notional]]),
+position size unqualified (a *partition's* size is one term of this sum), venue size (the
+right-hand side, which is the venue's own report and only equal by invariant).
+
 **Account**:
 One collateral pool's balances — `total = locked + free` — plus its **reported** margin, effective
 leverage, and liquidation price recomputed from marks; the boundary reconciled against the venue's
