@@ -501,17 +501,37 @@ class PortfolioProjection:
         with no way to tell (ADR-0034).
         """
         position = self._positions.get((strategy_id, symbol))
-        return self._view(position) if position is not None else None
+        if position is None:
+            return None
+        return self._view(position, net=self._account_net())
 
     def open_positions(self, *, strategy_id: str | None) -> tuple[PositionView, ...]:
-        """Every partition of ``strategy_id`` still holding exposure."""
+        """Every partition of ``strategy_id`` still holding exposure.
+
+        One fold for the whole call, deliberately: the net is an aggregation over
+        every partition, so folding it per view would be quadratic in the book —
+        and, worse, would let two views in one returned tuple be computed
+        against two different folds if a fill landed between them. The reads are
+        synchronous so that cannot actually happen today; taking the fold once
+        is what keeps it impossible rather than merely unreachable.
+        """
+        net = self._account_net()
         return tuple(
-            self._view(position)
+            self._view(position, net=net)
             for (owner, _symbol), position in self._positions.items()
             if owner == strategy_id and not position.is_flat
         )
 
-    def _view(self, position: Position) -> PositionView:
+    def _account_net(self) -> dict[str, Decimal]:
+        """The account-net size per symbol, over *every* partition.
+
+        The reserved unattributed one included: the venue holds one position per
+        symbol, so the position-grain half is computed at that grain or it is
+        computed against a book the venue does not have (ADR-0034/0041 §4).
+        """
+        return account_net_size(self._positions.values())
+
+    def _view(self, position: Position, *, net: dict[str, Decimal]) -> PositionView:
         """Assemble one partition's view against the mark held for its symbol.
 
         The mark is resolved here, from the private cache, rather than passed in
@@ -521,11 +541,7 @@ class PortfolioProjection:
         mark = self._marks.get(position.symbol)
         return position_view(
             position,
-            # Summed over *every* partition, the reserved unattributed one
-            # included: the venue holds one position per symbol, so the
-            # position-grain half is computed at that grain or it is computed
-            # against a book the venue does not have (ADR-0034/0041 §4).
-            account_net=account_net_size(self._positions.values()).get(position.symbol, _ZERO),
+            account_net=net.get(position.symbol, _ZERO),
             mark=mark.price if mark is not None else None,
             mark_ts=mark.ts_event if mark is not None else None,
         )

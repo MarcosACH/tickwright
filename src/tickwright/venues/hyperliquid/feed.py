@@ -19,7 +19,7 @@ through the real parse/publish path with no network.
 import asyncio
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from tickwright.domain import AggressorSide, Clock, EventBus, MarketTick, MarkTick
 from tickwright.observability import NamedEvent, named_event
@@ -214,7 +214,7 @@ class HyperliquidFeed:
                 self._drop_frame(frame, row)
         return ticks
 
-    def _parse_mark(self, frame: str, data: object) -> list[MarketTick | MarkTick]:
+    def _parse_mark(self, frame: str, data: Any) -> list[MarketTick | MarkTick]:
         """One ``activeAssetCtx`` update → one ``MarkTick`` (ADR-0039).
 
         ``ctx.markPx`` and nothing else in that context: ``oraclePx`` is
@@ -225,10 +225,17 @@ class HyperliquidFeed:
         The channel carries no timestamp, so ``ts_event`` is receipt time — the
         instant this process learned the mark, which is also the freshness a
         strategy judges against its own clock (ADR-0005).
+
+        No shape check ahead of the read, unlike the ``trades`` arm above: that
+        one needs to know whether it has a *list to iterate*, so a malformed
+        batch is a different fact from a malformed row in it. Here there is one
+        value and one way to fail, and every shape it could fail in — a ``data``
+        that is not an object, a missing ``ctx``, a ``ctx`` that is a string —
+        already lands in ``UNREADABLE`` as the ``TypeError``/``KeyError`` it is.
+        A guard in front would be a second spelling of the same refusal — which
+        is why ``data`` is typed as the unparsed body it is: the refusal here is
+        the ``except``, not a narrowing.
         """
-        if not isinstance(data, dict):
-            self._drop_frame(frame)
-            return []
         try:
             symbol = str(data["coin"])
             price = figure(data["ctx"]["markPx"])

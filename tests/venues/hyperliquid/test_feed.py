@@ -377,6 +377,36 @@ def test_a_non_finite_mark_is_dropped_rather_than_valuing_a_position(figure: str
     assert [record["event"] for record in logs] == ["feed.frame_dropped"]
 
 
+@pytest.mark.parametrize(
+    "data",
+    [
+        pytest.param({"coin": "BTC", "ctx": {"oraclePx": "1"}}, id="ctx-without-markPx"),
+        pytest.param({"coin": "BTC"}, id="no-ctx-at-all"),
+        pytest.param({"coin": "BTC", "ctx": "43251.0"}, id="ctx-not-an-object"),
+        pytest.param(["BTC", {"markPx": "1"}], id="data-not-an-object"),
+        pytest.param(None, id="data-null"),
+    ],
+)
+def test_a_mark_frame_we_cannot_read_is_dropped_and_named_not_faulted(data: object) -> None:
+    """Every shape the mark could arrive malformed in answers the same way: one
+    ``feed.frame_dropped`` and a skip, never a fault and never a mark.
+
+    The live stream is lossy by contract (ADR-0023), and a dead mark surfaces as
+    Tier-2 divergence on the reconcile cycle — so refusing one frame costs a
+    valuation refresh, where faulting the feed would cost the run. The next good
+    frame still flows, which is what makes that trade-off honest.
+    """
+    frames = [
+        json.dumps({"channel": "activeAssetCtx", "data": data}),
+        asset_ctx_frame("BTC", "100"),
+    ]
+    with capture_events() as logs:
+        seen, _ = _drive_marks(frames, symbols=["BTC"], until_marks=1)
+
+    assert [m.price for m in seen] == [Decimal("100")]
+    assert [record["event"] for record in logs] == ["feed.frame_dropped"]
+
+
 def test_non_trades_frames_are_ignored() -> None:
     frames = [
         json.dumps({"channel": "subscriptionResponse", "data": {"method": "subscribe"}}),
