@@ -361,7 +361,15 @@ paper funding generator is a running `Clock`-driven task inside `PaperExchange`,
 to do; the map gives it `Exchange.stop()` as its cancellation point and one `exchange.stop` entry in
 the runner's `_teardown_steps`, ordered after `feed.stop` so the generator stops before the bus
 drains. `state` and `health()` stay undeclared. `HyperliquidExchange.stop()` is a no-op, the
-per-request posting rationale above being unchanged for it.**)**
+per-request posting rationale above being unchanged for it.
+
+**The teardown itself landed in [#174](https://github.com/MarcosACH/tickwright/issues/174)**, which
+is where the generator arrived: `PaperExchange.start()` spawns it and `stop()` cancels it and waits
+it out, safe on a venue that never started and idempotent on the second call — both because the
+faulted teardown re-walks the whole membership from the top. The pair was declared one slice earlier
+([#186](https://github.com/MarcosACH/tickwright/issues/186)) with nothing behind it, and the
+lifecycle test landed with it predicted this exact arrival, asserting no task ran; it now asserts
+**one** while running and none surviving.**)**
 
 Doing it in `build_exchange` instead — which already runs `asyncio.run(fetch_instrument_specs(...))`
 at composition, "the one read-once moment" — was rejected: it would put a **signed venue write** in
