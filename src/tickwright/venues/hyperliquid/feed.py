@@ -1,12 +1,19 @@
-"""``HyperliquidFeed`` — the live ``MarketFeed``: async WS ``trades`` client.
+"""``HyperliquidFeed`` — the live ``MarketFeed``: async WS market-data client.
 
 Connects to the venue WS endpoint directly with an async client — no SDK on
-the hot path (ADR-0021) — subscribes the ``trades`` channel per configured
-coin, and publishes each venue trade as a ``MarketTick`` (ADR-0027 field
-mapping: ``px``/``sz`` → ``Decimal``, ``time`` ms → engine ns, ``tid`` → the
-live dedup key's trade id). The connection factory is injectable, so the
-default suite drives recorded frames through the real parse/publish path with
-no network.
+the hot path (ADR-0021) — and subscribes **two public channels per configured
+coin**:
+
+* ``trades`` → one ``MarketTick`` per venue trade (ADR-0027 field mapping:
+  ``px``/``sz`` → ``Decimal``, ``time`` ms → engine ns, ``tid`` → the live dedup
+  key's trade id);
+* ``activeAssetCtx`` → one ``MarkTick`` per update, from ``ctx.markPx``
+  (ADR-0039) — the venue's own robust-median valuation price, which is what it
+  margins and liquidates against.
+
+Both are unauthenticated, so the feed holds no key material at all. The
+connection factory is injectable, so the default suite drives recorded frames
+through the real parse/publish path with no network.
 """
 
 import asyncio
@@ -14,7 +21,7 @@ import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import TYPE_CHECKING, Protocol
 
-from tickwright.domain import AggressorSide, Clock, EventBus, MarketTick
+from tickwright.domain import AggressorSide, Clock, EventBus, MarketTick, MarkTick
 from tickwright.observability import NamedEvent, named_event
 
 from .backoff import Backoff
@@ -158,38 +165,82 @@ class HyperliquidFeed:
             ingress.close()
 
     async def _subscribe(self, connection: WsConnection) -> None:
+        """Both public channels, per coin: the trades that make ticks and the
+        per-coin context that carries the mark (ADR-0027/0039).
+
+        Neither is authenticated, so the live feed still holds no key material
+        at all (ADR-0021) — the mark is public market data exactly as the trade
+        is, and reading it off the *account* endpoint instead would have needed
+        one.
+        """
         for symbol in self._config.symbols:
-            message = {"method": "subscribe", "subscription": {"type": "trades", "coin": symbol}}
-            await connection.send(json.dumps(message))
+            for channel in ("trades", "activeAssetCtx"):
+                message = {"method": "subscribe", "subscription": {"type": channel, "coin": symbol}}
+                await connection.send(json.dumps(message))
 
-    def _parse(self, frame: str) -> list[MarketTick]:
-        """Parse a WS frame into ticks, skipping (and naming) anything malformed.
+    def _parse(self, frame: str) -> list[MarketTick | MarkTick]:
+        """Parse a WS frame into market data, skipping (and naming) the malformed.
 
-        A corrupt frame or trade row must never fault the feed: the live tick
-        stream is lossy by contract (ADR-0023), so trades data we cannot read
-        emits one ``feed.frame_dropped`` (ADR-0020) and is skipped — good rows in
-        the same batch still flow. Frames from other channels are *ignored*, not
-        dropped: only the ``trades`` channel is a tick source (like the venue's
-        ``subscriptionResponse``/``pong``).
+        A corrupt frame or row must never fault the feed: the live stream is
+        lossy by contract (ADR-0023), so data we cannot read emits one
+        ``feed.frame_dropped`` (ADR-0020) and is skipped — good rows in the same
+        batch still flow. Frames from channels this feed does not source are
+        *ignored*, not dropped (the venue's ``subscriptionResponse``/``pong``).
+
+        The two channels are shaped differently and the branch is the venue's,
+        not a choice: ``trades`` batches rows into a list, ``activeAssetCtx``
+        sends one context object per update.
         """
         try:
             message = json.loads(frame)
         except json.JSONDecodeError:
             self._drop_frame(frame)
             return []
-        if not isinstance(message, dict) or message.get("channel") != "trades":
+        if not isinstance(message, dict):
+            return []
+        if message.get("channel") == "activeAssetCtx":
+            return self._parse_mark(frame, message.get("data"))
+        if message.get("channel") != "trades":
             return []
         rows = message.get("data")
         if not isinstance(rows, list):
             self._drop_frame(frame)
             return []
-        ticks: list[MarketTick] = []
+        ticks: list[MarketTick | MarkTick] = []
         for row in rows:
             try:
                 ticks.append(self._to_tick(row))
             except UNREADABLE:
                 self._drop_frame(frame, row)
         return ticks
+
+    def _parse_mark(self, frame: str, data: object) -> list[MarketTick | MarkTick]:
+        """One ``activeAssetCtx`` update → one ``MarkTick`` (ADR-0039).
+
+        ``ctx.markPx`` and nothing else in that context: ``oraclePx`` is
+        funding's price and ``midPx`` is the book's, both riding the same frame,
+        and either would value a position against a number the venue does not
+        margin it with. ``allMids`` stays rejected for the same reason.
+
+        The channel carries no timestamp, so ``ts_event`` is receipt time — the
+        instant this process learned the mark, which is also the freshness a
+        strategy judges against its own clock (ADR-0005).
+        """
+        if not isinstance(data, dict):
+            self._drop_frame(frame)
+            return []
+        try:
+            symbol = str(data["coin"])
+            price = figure(data["ctx"]["markPx"])
+        except UNREADABLE:
+            # A mark we cannot stand behind is worse than a trade we cannot: it
+            # would not merely mis-publish but propagate into every Tier-2
+            # number recomputed from it, surfacing as an ``InvalidOperation``
+            # out of some comparison far downstream.
+            self._drop_frame(frame, data)
+            return []
+        now = self._clock.timestamp_ns()
+        return [MarkTick(symbol=symbol, price=price, ts_event=now, ts_init=now)]
 
     def _drop_frame(self, frame: str, row: object = None) -> None:
         """Name one unparseable ``trades`` frame or row and skip it (ADR-0020/0023).

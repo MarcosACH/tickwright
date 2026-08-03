@@ -99,6 +99,35 @@ def trades_frame(*trades: dict) -> str:
     return json.dumps({"channel": "trades", "data": list(trades)})
 
 
+def asset_ctx_frame(coin: str, mark: object, **ctx: object) -> str:
+    """One ``activeAssetCtx`` frame, the venue's per-coin context channel.
+
+    ``data`` is a **single object** here, not a list: the venue batches trades
+    and does not batch contexts. The extra ``ctx`` members the venue sends
+    beside ``markPx`` — ``oraclePx``, ``midPx``, ``funding`` — are carried by
+    default and overridable, because the mark being read out of a *populated*
+    context is part of what these frames test: ``oraclePx`` is funding's price
+    and ``midPx`` is the book's, and neither is the mark.
+    """
+    return json.dumps(
+        {
+            "channel": "activeAssetCtx",
+            "data": {
+                "coin": coin,
+                "ctx": {
+                    "markPx": mark,
+                    "oraclePx": "1",
+                    "midPx": "2",
+                    "funding": "0.0000125",
+                    "openInterest": "1234.5",
+                    "prevDayPx": "3",
+                    **ctx,
+                },
+            },
+        }
+    )
+
+
 def trade(
     coin: str,
     px: object,

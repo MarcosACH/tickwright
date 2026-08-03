@@ -12,12 +12,12 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from hyperliquid_fakes import FakeWsConnection, trade, trades_frame
+from hyperliquid_fakes import FakeWsConnection, asset_ctx_frame, trade, trades_frame
 from structlog.typing import EventDict
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
-from tickwright.domain import AggressorSide, MarketTick
+from tickwright.domain import AggressorSide, MarketTick, MarkTick
 from tickwright.observability.testing import capture_events
 from tickwright.venues.hyperliquid import HyperliquidConfig, HyperliquidFeed
 
@@ -79,16 +79,6 @@ def test_recorded_trades_frames_parse_into_market_ticks() -> None:
 
     assert sell.aggressor_side is AggressorSide.SELL
     assert sell.price == Decimal("43249.0")
-
-
-def test_subscribes_the_trades_channel_per_configured_symbol() -> None:
-    frames = [trades_frame(trade("BTC", "100", 1))]
-    _, connection = _drive(frames, symbols=["BTC", "ETH"], until_ticks=1)
-
-    assert [json.loads(m) for m in connection.sent] == [
-        {"method": "subscribe", "subscription": {"type": "trades", "coin": "BTC"}},
-        {"method": "subscribe", "subscription": {"type": "trades", "coin": "ETH"}},
-    ]
 
 
 def test_prices_and_sizes_parse_to_decimal_never_float() -> None:
@@ -292,6 +282,99 @@ def test_stop_does_not_trigger_a_reconnect() -> None:
 
     asyncio.run(main())
     assert connect_count == 1
+
+
+def _drive_marks(
+    frames: list[str], *, symbols: list[str], until_marks: int
+) -> tuple[list[MarkTick], FakeWsConnection]:
+    """``_drive``'s mark twin: run until ``until_marks`` marks arrive, then stop."""
+
+    async def main() -> tuple[list[MarkTick], FakeWsConnection]:
+        bus = InMemoryBus()
+        seen: list[MarkTick] = []
+        enough = asyncio.Event()
+
+        async def record(mark: MarkTick) -> None:
+            seen.append(mark)
+            if len(seen) >= until_marks:
+                enough.set()
+
+        bus.subscribe(MarkTick, record)
+        connection = FakeWsConnection(frames)
+
+        async def connect(url: str) -> FakeWsConnection:
+            return connection
+
+        feed = HyperliquidFeed(
+            config=HyperliquidConfig(symbols=symbols),
+            bus=bus,
+            clock=ManualClock(start_ns=4_000),
+            connect=connect,
+        )
+        run = asyncio.create_task(feed.start())
+        await asyncio.wait_for(enough.wait(), timeout=2)
+        await feed.stop()
+        await asyncio.wait_for(run, timeout=2)
+        return seen, connection
+
+    return asyncio.run(main())
+
+
+def test_the_active_asset_ctx_channel_yields_one_mark_per_update() -> None:
+    """The live mark's ingress (ADR-0039): ``ctx.markPx``, and nothing else in
+    that context.
+
+    ``oraclePx`` is funding's price and ``midPx`` is the book's — both ride the
+    same frame, and either would value a position against a number the venue
+    does not margin it with. The channel carries no timestamp of its own, so
+    ``ts_event`` is receipt time off the injected clock (ADR-0005/0039).
+    """
+    frames = [asset_ctx_frame("BTC", "43251.0")]
+    seen, _ = _drive_marks(frames, symbols=["BTC"], until_marks=1)
+
+    mark = seen[0]
+    assert mark.symbol == "BTC"
+    assert mark.price == Decimal("43251.0")
+    assert mark.ts_event == 4_000
+    # The live form of the weak key: no ``seq``, because receipt time already
+    # separates two marks on a channel that updates every few seconds.
+    assert mark.event_id == "BTC:4000"
+
+
+def test_the_mark_channel_is_subscribed_per_symbol_beside_the_trades_one() -> None:
+    """Both channels, per coin, on one connection — and both **unauthenticated**,
+    so the live feed still needs no key at all (ADR-0021)."""
+    frames = [asset_ctx_frame("BTC", "100")]
+    _, connection = _drive_marks(frames, symbols=["BTC", "ETH"], until_marks=1)
+
+    assert [json.loads(m) for m in connection.sent] == [
+        {"method": "subscribe", "subscription": {"type": "trades", "coin": "BTC"}},
+        {"method": "subscribe", "subscription": {"type": "activeAssetCtx", "coin": "BTC"}},
+        {"method": "subscribe", "subscription": {"type": "trades", "coin": "ETH"}},
+        {"method": "subscribe", "subscription": {"type": "activeAssetCtx", "coin": "ETH"}},
+    ]
+
+
+def test_mark_prices_parse_to_decimal_never_float() -> None:
+    frames = [asset_ctx_frame("BTC", "0.1")]
+    seen, _ = _drive_marks(frames, symbols=["BTC"], until_marks=1)
+
+    assert isinstance(seen[0].price, Decimal)
+    assert seen[0].price == Decimal("0.1")  # exact — a float round-trip would not be
+
+
+@pytest.mark.parametrize("figure", ["NaN", "Infinity", "-Infinity"])
+def test_a_non_finite_mark_is_dropped_rather_than_valuing_a_position(figure: str) -> None:
+    """The same refusal the tick figures get, and it matters more here: a
+    ``NaN`` mark would not merely mis-publish, it would propagate into every
+    Tier-2 number the projection recomputes from it and surface as an
+    ``InvalidOperation`` from some comparison far downstream."""
+    frames = [asset_ctx_frame("BTC", figure), asset_ctx_frame("BTC", "100")]
+    with capture_events() as logs:
+        seen, _ = _drive_marks(frames, symbols=["BTC"], until_marks=1)
+
+    assert [m.price for m in seen] == [Decimal("100")]
+    assert [record["event"] for record in logs] == ["feed.frame_dropped"]
 
 
 def test_non_trades_frames_are_ignored() -> None:
