@@ -29,23 +29,35 @@ def _fixture_frames() -> list[str]:
     return [line for line in text.splitlines() if line.strip()]
 
 
-def _drive(
-    frames: list[str], *, symbols: list[str], until_ticks: int
-) -> tuple[list[MarketTick], FakeWsConnection]:
-    """Run the feed over ``frames`` until ``until_ticks`` ticks arrive, then stop."""
+def _run_feed[E: (MarketTick, MarkTick)](
+    frames: list[str],
+    *,
+    symbols: list[str],
+    event_type: type[E],
+    until: int,
+    clock: ManualClock,
+) -> tuple[list[E], FakeWsConnection]:
+    """Run the feed over ``frames`` until ``until`` events of ``event_type``
+    arrive, then stop.
 
-    async def main() -> tuple[list[MarketTick], FakeWsConnection]:
+    Parameterized on the event type rather than copied per stream: the two the
+    feed sources reach the bus down one identical connect/subscribe/read/drain
+    path, so a driver per stream would be the same thirty lines asserting
+    nothing the other does not. A third stream costs the wrapper below, not
+    another copy of this.
+    """
+
+    async def main() -> tuple[list[E], FakeWsConnection]:
         bus = InMemoryBus()
-        clock = ManualClock()
-        seen: list[MarketTick] = []
+        seen: list[E] = []
         enough = asyncio.Event()
 
-        async def record(tick: MarketTick) -> None:
-            seen.append(tick)
-            if len(seen) >= until_ticks:
+        async def record(event: E) -> None:
+            seen.append(event)
+            if len(seen) >= until:
                 enough.set()
 
-        bus.subscribe(MarketTick, record)
+        bus.subscribe(event_type, record)
         connection = FakeWsConnection(frames)
 
         async def connect(url: str) -> FakeWsConnection:
@@ -64,6 +76,16 @@ def _drive(
         return seen, connection
 
     return asyncio.run(main())
+
+
+def _drive(
+    frames: list[str], *, symbols: list[str], until_ticks: int
+) -> tuple[list[MarketTick], FakeWsConnection]:
+    """Run the feed until ``until_ticks`` ticks arrive. A tick's ``ts_event`` is
+    mapped from the venue's own ``time``, so the clock here is never read."""
+    return _run_feed(
+        frames, symbols=symbols, event_type=MarketTick, until=until_ticks, clock=ManualClock()
+    )
 
 
 def test_recorded_trades_frames_parse_into_market_ticks() -> None:
@@ -287,37 +309,19 @@ def test_stop_does_not_trigger_a_reconnect() -> None:
 def _drive_marks(
     frames: list[str], *, symbols: list[str], until_marks: int
 ) -> tuple[list[MarkTick], FakeWsConnection]:
-    """``_drive``'s mark twin: run until ``until_marks`` marks arrive, then stop."""
+    """``_drive``'s mark twin: run until ``until_marks`` marks arrive, then stop.
 
-    async def main() -> tuple[list[MarkTick], FakeWsConnection]:
-        bus = InMemoryBus()
-        seen: list[MarkTick] = []
-        enough = asyncio.Event()
-
-        async def record(mark: MarkTick) -> None:
-            seen.append(mark)
-            if len(seen) >= until_marks:
-                enough.set()
-
-        bus.subscribe(MarkTick, record)
-        connection = FakeWsConnection(frames)
-
-        async def connect(url: str) -> FakeWsConnection:
-            return connection
-
-        feed = HyperliquidFeed(
-            config=HyperliquidConfig(symbols=symbols),
-            bus=bus,
-            clock=ManualClock(start_ns=4_000),
-            connect=connect,
-        )
-        run = asyncio.create_task(feed.start())
-        await asyncio.wait_for(enough.wait(), timeout=2)
-        await feed.stop()
-        await asyncio.wait_for(run, timeout=2)
-        return seen, connection
-
-    return asyncio.run(main())
+    The clock is pinned rather than defaulted because unlike a tick's, a mark's
+    ``ts_event`` **is** the clock read — the ``activeAssetCtx`` channel carries
+    no instant of its own — so it is an assertable value here (ADR-0039).
+    """
+    return _run_feed(
+        frames,
+        symbols=symbols,
+        event_type=MarkTick,
+        until=until_marks,
+        clock=ManualClock(start_ns=4_000),
+    )
 
 
 def test_the_active_asset_ctx_channel_yields_one_mark_per_update() -> None:
