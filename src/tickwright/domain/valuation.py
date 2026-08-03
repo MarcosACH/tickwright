@@ -119,15 +119,19 @@ def _equity(
     and never blocks the sum: its uPnL is zero at every mark, mark or no mark.
     A held partition whose symbol has no mark does block it, and that is the
     honest answer — the alternative is a partial sum reported as the whole.
+
+    The Σ **inherits** that rule from ``_unrealized_pnl`` rather than restating
+    it: it is one rule at two grains, and the account's half is the one with no
+    unit test of its own for each future exemption. Spelled twice, the two would
+    agree until the first term that is exempt at one grain and not the other,
+    and the disagreement would surface as an equity that is silently ``None``.
     """
     total = account.cash
     for position in positions:
-        if position.is_flat:
-            continue
-        mark = marks.get(position.symbol)
-        if mark is None:
+        term = _unrealized_pnl(position, marks.get(position.symbol))
+        if term is None:
             return None
-        total += position.unrealized_pnl(mark)
+        total += term
     return total
 
 
