@@ -56,7 +56,7 @@ from .instrument import (
     quantize_size,
 )
 from .order import Order
-from .position import Position, PositionChange, PositionView
+from .position import Position, PositionChange, PositionView, account_net_size
 from .protocols import (
     Clock,
     EventBus,
@@ -132,6 +132,8 @@ __all__ = [
     "fill_fee",
     "funding_amount",
     "funding_boundaries",
+    # the Σ-invariant's left-hand side
+    "account_net_size",
     # seam Protocols
     "Clock",
     "EventBus",

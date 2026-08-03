@@ -17,6 +17,7 @@ from tickwright.domain import (
     Position,
     PositionChange,
     Side,
+    account_net_size,
 )
 
 
@@ -314,3 +315,45 @@ def test_a_refused_fill_leaves_the_ledger_exactly_as_it_was() -> None:
         PositionChange.CHANGED,
     )
     assert position.entry_price == Decimal("150")
+
+
+def _held(strategy_id: str | None, symbol: str, size: str) -> Position:
+    return Position(strategy_id=strategy_id, symbol=symbol, signed_size=Decimal(size))
+
+
+def test_the_account_net_sums_every_partition_of_a_symbol_including_the_unattributed_one() -> None:
+    """ADR-0034's Σ-invariant, computed: Σ(per-strategy signed size) = account net.
+
+    The reserved ``None`` partition counts like any other. It holds flow the
+    engine never placed — which the venue is nonetheless holding — so a net that
+    omitted it would be a number no venue reports, and the invariant it is the
+    left-hand side of would not close (ADR-0043 §9).
+
+    Two symbols at once, because the fold is per-symbol: an implementation that
+    summed everything into one figure would pass a single-symbol case.
+    """
+    net = account_net_size(
+        [
+            _held("alpha", "BTC", "2"),
+            _held("beta", "BTC", "0.5"),
+            _held(None, "BTC", "1"),
+            _held("alpha", "ETH", "-3"),
+        ]
+    )
+
+    assert net == {"BTC": Decimal("3.5"), "ETH": Decimal("-3")}
+
+
+def test_partitions_that_offset_net_to_a_zero_that_is_reported_rather_than_dropped() -> None:
+    """A symbol traded to flat nets to zero, and zero is an answer.
+
+    A flat partition is still a record (P1 #119), so "held nothing" and "never
+    traded" stay distinguishable to a caller that cares — and a caller that does
+    not can treat both alike, which is what the funding generator does when its
+    "a zero accrues nothing" rule collapses them.
+    """
+    assert account_net_size([_held("alpha", "BTC", "2"), _held("beta", "BTC", "-2")]) == {
+        "BTC": Decimal("0")
+    }
+    assert account_net_size([_held("alpha", "BTC", "0")]) == {"BTC": Decimal("0")}
+    assert account_net_size([]) == {}

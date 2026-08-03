@@ -11,6 +11,7 @@ rather than silently skipping an application it cannot make (ADR-0014).
 partition holding flow the engine never placed (ADR-0038).
 """
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import StrEnum
@@ -51,6 +52,30 @@ class PositionView:
     realized_pnl: Decimal
     fees: Decimal
     funding: Decimal
+
+
+def account_net_size(positions: Iterable["Position"]) -> dict[str, Decimal]:
+    """The **account net size** per symbol — ADR-0034's Σ over every partition.
+
+    ``Σ(per-strategy signed size per symbol) = account net size = venue szi`` is
+    the one invariant bridging the per-strategy partitions to the venue's own
+    truth, and this is its left-hand side computed. Every partition counts,
+    the reserved unattributed one included: it holds flow the engine never
+    placed, which the venue is nonetheless holding, so omitting it would net to
+    something no venue reports (ADR-0043 §9).
+
+    A pure fold over whatever partitions the caller has — the durable mass-read
+    on the recovery path, the projection's own map on the live one — so that
+    "how much of this symbol does the account hold" has exactly one definition
+    to disagree with. Symbols that net to flat are kept rather than dropped:
+    zero *is* the answer for a symbol traded to flat, and a caller that must
+    distinguish it from "never traded" can, while one that need not can treat
+    both alike.
+    """
+    net: dict[str, Decimal] = {}
+    for position in positions:
+        net[position.symbol] = net.get(position.symbol, _ZERO) + position.signed_size
+    return net
 
 
 @dataclass(slots=True)
