@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 from eth_account import Account
 from hyperliquid.utils.signing import recover_agent_or_user_from_l1_action
-from hyperliquid_fakes import FakeExchangeApi, resting_response
+from hyperliquid_fakes import FakeExchangeApi, request_type, resting_response
 from pydantic import SecretStr
 from seam_claims import assert_every_member_is_claimed
 
@@ -79,15 +79,6 @@ def make_exchange(
         # bounded by. Only the mode-gate tests in ``test_preflight.py`` spend it.
         startup_timeout_seconds=60.0,
     )
-
-
-def _request_type(payload: dict) -> str:
-    """What a recorded request asked for — the action ``type`` for a signed
-    ``/exchange`` post, the query ``type`` for an unsigned ``/info`` one. Both
-    now appear in one adapter's traffic, ``start()``'s boot read being an
-    ``/info`` query in a suite that was otherwise all actions."""
-    action = payload.get("action")
-    return str(action["type"] if isinstance(action, dict) else payload["type"])
 
 
 def tick(symbol: str, price: str) -> MarketTick:
@@ -948,7 +939,7 @@ def test_the_released_venue_link_still_answers_a_place_and_a_cancel() -> None:
 
     # The boot read, then both order verbs *behind* the release: what the
     # release took away is nothing, which is the claim.
-    assert [_request_type(payload) for (_url, payload) in post.requests] == [
+    assert [request_type(url, payload) for (url, payload) in post.requests] == [
         "userAbstraction",
         "order",
         "cancelByCloid",

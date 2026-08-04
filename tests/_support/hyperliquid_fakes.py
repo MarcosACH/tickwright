@@ -30,21 +30,27 @@ class FakeExchangeApi:
 
     async def __call__(self, url: str, payload: dict) -> object:
         self.requests.append((url, payload))
-        request_type = _request_type(url, payload)
-        if request_type not in self._responses:
+        asked = request_type(url, payload)
+        if asked not in self._responses:
             raise AssertionError(
-                f"FakeExchangeApi got an unrouted {request_type!r} request to {url}; "
+                f"FakeExchangeApi got an unrouted {asked!r} request to {url}; "
                 f"routed types: {sorted(self._responses)}"
             )
-        response = self._responses[request_type]
+        response = self._responses[asked]
         if isinstance(response, BaseException):
             raise response
         return response
 
 
-def _request_type(url: str, payload: dict) -> str:
+def request_type(url: str, payload: dict) -> str:
     """The venue's discriminator for a request: the action ``type`` for an
-    ``/exchange`` post, the query ``type`` for an ``/info`` post."""
+    ``/exchange`` post, the query ``type`` for an ``/info`` post.
+
+    Public because routing a request and *asserting* on a recorded one are the
+    same question, and one adapter's traffic now carries both kinds — the boot
+    gate's ``/info`` read beside the order verbs' signed actions. A caller that
+    re-derived the rule from the payload shape would be a second encoding of a
+    venue fact, free to drift from the one the fake routes on."""
     if url.endswith("/exchange"):
         return str(payload["action"]["type"])
     return str(payload["type"])
