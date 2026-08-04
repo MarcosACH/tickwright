@@ -115,7 +115,12 @@ class HyperliquidExchange:
         noise on top of an error. The leverage push (ADR-0044 §7) lands behind
         it. Both refusals precede the barrier, so neither can let an order out.
         """
-        await verify_account_mode(info=self._info, address=self._user_address)
+        await verify_account_mode(
+            info=self._info,
+            address=self._user_address,
+            clock=self._clock,
+            timeout_seconds=self._startup_timeout_seconds,
+        )
 
     async def stop(self) -> None:
         """Nothing to release: this adapter runs no loop of its own — every
