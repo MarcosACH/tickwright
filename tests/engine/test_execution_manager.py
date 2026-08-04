@@ -159,6 +159,11 @@ def _wiring(store: SQLiteStore) -> _Wiring:
         account_net=dict,
     )
     checks = checkpointer(store, clock=clock)
+    # Recovered before a signal can reach it, exactly as the runner starts it
+    # (ADR-0043 §6): the paper genesis row is seeded here or never, and a life
+    # that skipped this step would leave behind the one shape #188 refuses —
+    # order history with no ledger — for whatever life reopens the store next.
+    checks.recover()
     manager = ExecutionManager(bus=bus, exchange=exchange, checkpointer=checks)
 
     bus.subscribe(Signal, manager.on_signal)
@@ -295,7 +300,11 @@ def test_a_refused_ledger_write_leaves_neither_the_order_row_nor_the_ledger(
         assert record is not None
         assert record.state is OrderState.PENDING  # the fill never advanced it
         assert reopened.all_positions() == []
-        assert reopened.load_account() is None
+        # The ledger is the genesis row recovery seeded and nothing more: the
+        # refused write moved neither the cash line nor a partition.
+        account = reopened.load_account()
+        assert account is not None
+        assert account.cash == GENESIS
 
 
 def test_a_refused_ledger_write_leaves_the_read_models_ahead_of_the_store(
@@ -351,7 +360,16 @@ def test_a_refused_ledger_write_leaves_the_read_models_ahead_of_the_store(
 class _StoreThatBreaksTheLedgerWrite(SQLiteStore):
     """The real store, except that the ledger write raises something the seam's
     error contract does not admit. Every other member is the real one, so the
-    saga reaches its fill with the write-ahead intent durable."""
+    saga reaches its fill with the write-ahead intent durable.
+
+    **Armed by the case rather than from birth**: recovery's genesis seed takes
+    this same write (ADR-0043 §6), so a store broken from the first call never
+    gets a life at all — and the subject here is what happens to a *fill*, on a
+    ledger that opened normally."""
+
+    def __init__(self, path: str) -> None:
+        super().__init__(path)
+        self.armed = False
 
     def checkpoint_ledger(
         self,
@@ -362,6 +380,15 @@ class _StoreThatBreaksTheLedgerWrite(SQLiteStore):
         funding_mark: tuple[str, int] | None = None,
         ts_ns: int,
     ) -> None:
+        if not self.armed:
+            super().checkpoint_ledger(
+                account=account,
+                positions=positions,
+                order=order,
+                funding_mark=funding_mark,
+                ts_ns=ts_ns,
+            )
+            return
         raise RuntimeError("driver bug below the seam")
 
 
@@ -385,7 +412,9 @@ def test_a_broken_seam_contract_is_not_reported_as_a_failed_ledger_write() -> No
     every exception reaches the runner. What the type decides is what the
     operator is told, not whether the engine survives.
     """
-    wiring = _wiring(_StoreThatBreaksTheLedgerWrite(":memory:"))
+    store = _StoreThatBreaksTheLedgerWrite(":memory:")
+    wiring = _wiring(store)
+    store.armed = True  # the ledger opened; from here the write is broken
 
     async def scenario() -> None:
         await wiring.bus.publish(_tick())
@@ -436,7 +465,11 @@ def test_a_non_fill_transition_writes_the_order_row_and_no_ledger_row() -> None:
     assert record is not None
     assert record.state is OrderState.LIVE
     assert store.all_positions() == []
-    assert store.load_account() is None
+    # The account row is recovery's genesis seed, untouched: a non-fill
+    # transition never re-stamps the cash line.
+    account = store.load_account()
+    assert account is not None
+    assert account.cash == GENESIS
 
 
 def _fill_report(
