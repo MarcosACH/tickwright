@@ -1064,8 +1064,8 @@ def test_a_ledger_recorded_against_another_account_is_refused() -> None:
     with pytest.raises(StoreAccountMismatch) as refusal:
         _projection("50000", store=store).recover()
 
-    # Named, not merely counted: the operator's remedy is to point the store at a
-    # fresh path or restore the declared value, and neither is choosable without
+    # Named, not merely counted: the operator's remedy is to point the run at a
+    # fresh store or restore the declared value, and neither is choosable without
     # knowing which field disagreed and what the two sides said.
     assert "account_id" in str(refusal.value)
     assert "paper-other" in str(refusal.value)
