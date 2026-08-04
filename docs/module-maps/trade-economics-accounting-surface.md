@@ -188,7 +188,7 @@ All three landed as named: `fill_fee` in [#173](https://github.com/MarcosACH/tic
 
 **Responsibilities:** divergence classification by tier; synthetic-event construction; the three alert types; the mode-verification gate; the freeze discipline.
 
-**Seams:** Consumes `Exchange.fetch_account_state()` — query-shaped, never a bus message (ADR-0004).
+**Seams:** Consumes `Exchange.fetch_account_state()` — query-shaped, never a bus message (ADR-0004). The pre-heal mode re-read in the bullets above is a **second** such consumer and needs a seam member of its own: this class is engine-internal, so it reads the venue's verdict across the `Exchange` seam rather than importing `venues/hyperliquid/preflight.py`, which the dependency-direction contract forbids (see that module's *Seams*).
 
 **Depth note:** The correctness net for the money line, and separate from `Reconciliation` for a reason the interface makes obvious: every rule above is about an account snapshot, a mode, and a tolerance band, none of which the cloid-anchored order cycle has any use for. Folded together, one class would carry two anchors, two freeze grains and four alert types — and the mode gate, which must run *before* a write the order reconciler never makes.
 
@@ -268,7 +268,9 @@ The slice reached that by first getting it wrong, which is the part worth keepin
 
 **Responsibilities:** the mode allowlist and its remediation text; the three-way push split; `updateLeverage` and nothing else.
 
-**Seams:** Called from `HyperliquidExchange.start()`.
+**Seams:** Called from `HyperliquidExchange.start()`. [#195](https://github.com/MarcosACH/tickwright/issues/195)'s in-flight re-verification is the second caller, and it cannot reach this module the way that ticket's wording ("reuses the boot gate's allowlist and read") reads: `LedgerReconciliation` is engine-internal, and the `engine never imports a concrete impl` contract forbids `engine` → `venues`. Nor may the allowlist move to `domain` to meet it — `userAbstraction` literals are venue knowledge, and ADR-0031 keeps venue knowledge in the venue. So *one module owns the mode semantics on both paths* is satisfied by this module keeping the literals and the venue answering the **verdict** across the `Exchange` seam, not by a shared import: a new seam member, which paper implements as the no-op #195 already specifies. The member's exact shape is that slice's to fix; the constraint on it is not, and discovering it late would cost that slice its approach.
+
+**Status:** the **mode gate landed** in [#179](https://github.com/MarcosACH/tickwright/issues/179); the leverage push is still to come, and `start()` currently makes the mode read and no other venue request. The gate's bounded retry takes ADR-0024's barrier budget from the composition root — it runs at step 4, ahead of the step-5 barrier, so it cannot be a barrier step, and `venues` may not import `engine` — rather than minting a second timeout (ADR-0044 §6). What is handed down is that **number, not one wall-clock window**: `start()` and the barrier each open a deadline off it, so a boot can spend two (ADR-0046 §3, stated on the `Exchange.start()` contract). The push landing here opens a third unless a single boot deadline is passed into `start()` — the decision that slice should make rather than inherit.
 
 **Depth note:** Both guards are refusals that must fire before the barrier and before any order, and both fail **closed**. Isolating them makes that testable against recorded responses without touching the order path, and keeps the one signed write in this whole map in a module a reader can audit in full.
 

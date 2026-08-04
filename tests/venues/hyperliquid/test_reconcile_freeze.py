@@ -75,6 +75,7 @@ def test_a_venue_outage_freezes_reconciliation_instead_of_resolving_inflight() -
             clock=clock,
             universe=HyperliquidUniverse(specs={"BTC": BTC_SPEC}, asset_indices={"BTC": 3}),
             post=post,
+            startup_timeout_seconds=60.0,
         )
         store = SQLiteStore(":memory:")
         store.checkpoint(_submitted_saga(), ts_ns=500)

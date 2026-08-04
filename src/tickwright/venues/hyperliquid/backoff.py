@@ -1,10 +1,15 @@
-"""``Backoff`` — doubling-with-cap reconnect pacing on the injected ``Clock``.
+"""``Backoff`` — doubling-with-cap retry pacing on the injected ``Clock``.
 
-The reconnect loop retries from two places (a refused connect, a venue hangup)
-and resets after a good connection; keeping the "sleep the current delay, then
-double up to the cap" rule in one value object means those sites can never skew
-(ADR-0021). Always slept on the injected ``Clock``, so a reconnect storm can
-never hammer the venue and virtual time carries it under ``ManualClock``.
+Two loops in this package pace a retry, and keeping the "sleep the current
+delay, then double up to the cap" rule in one value object means they cannot
+skew. The feed's reconnect loop retries from two places (a refused connect, a
+venue hangup) and ``reset``s after a good connection (ADR-0021). The boot
+guards' account-mode read retries an unreadable response and never resets:
+it has one bounded window in which to clear or refuse, so there is no "good
+connection" to return to (ADR-0046 §3).
+
+Always slept on the injected ``Clock``, so a retry storm can never hammer the
+venue and virtual time carries it under ``ManualClock``.
 """
 
 from tickwright.domain import Clock

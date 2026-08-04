@@ -320,6 +320,7 @@ def _exchange(
         # for nothing, and an unrouted request is a loud failure rather than a
         # silent one against a real socket.
         post=post if post is not None else FakeExchangeApi({}),
+        startup_timeout_seconds=60.0,
     )
 
 

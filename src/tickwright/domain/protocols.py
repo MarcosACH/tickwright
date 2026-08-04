@@ -411,6 +411,16 @@ class Exchange(Protocol):
         that makes a blocking venue call here owns a timeout on it; the
         composition root must hand it the budget to size that timeout with,
         since ``EngineConfig`` does not reach the adapter.
+
+        What is handed down is that **value**, not one wall-clock window: this
+        call is bounded by the budget and the barrier one step later opens a
+        fresh one off its own ``timestamp_ns``. A venue that clears here late
+        and then goes dark therefore reaches ``FAULTED`` after up to two of
+        them, plus each loop's capped overshoot. So "one boot-time budget,
+        never a second timeout" — how the adapters below word it — is a claim
+        about the configured number, not about how long a boot may take. One
+        shared deadline would have to be passed *into* this call, which is a
+        change to this signature and nothing an adapter can arrange for itself.
         """
         ...
 

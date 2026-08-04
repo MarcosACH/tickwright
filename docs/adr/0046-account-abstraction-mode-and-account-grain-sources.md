@@ -357,6 +357,39 @@ perps clearinghouse fully populated and spot empty.
 - **No configuration surface.** The mode is read from the venue, never declared. `.env.example` gains
   nothing.
 
+**(Shipped in [#179](https://github.com/MarcosACH/tickwright/issues/179)** as
+`venues/hyperliquid/preflight.py`, called from `HyperliquidExchange.start()`. Two implementation
+facts this section did not fix, both settled by the code:
+
+*The barrier budget reaches the adapter through the composition root — and is a number, not a
+window.* The gate runs at step 4 and so cannot **be** a barrier step — the barrier is step 5, and
+`venues` may not import `engine` (ADR-0032) — but bounding it on a timeout of its own would be the
+second timeout ADR-0044 §6 refuses. `build_exchange` therefore hands `HyperliquidExchange` the
+engine's `startup_reconciliation_timeout_seconds`, pinned by a composition-root test that builds the
+arm on a non-default budget and spends it against a dark venue: at the 60 s default a hard-coded
+timeout would be indistinguishable from a wired one. The 1 s/30 s doubling is the venue package's
+own `Backoff`, shared with the feed's reconnect loop, so only the deadline arithmetic is written
+twice — here and in `StartupBarrier.run`, on opposite sides of the layer rule. Nothing new is
+configurable.
+
+What is shared, though, is that **number** rather than one wall-clock window. `start()` is bounded
+by the budget and the barrier one step later opens a fresh one, so a venue that clears the gate late
+and then goes dark reaches `FAULTED` after up to two budgets plus each loop's capped overshoot —
+which is worth stating precisely because both loops argue at length against a ~2× overshoot. A
+single boot deadline would have to be passed *into* `Exchange.start()`, a change to that signature
+and nothing an adapter can arrange for itself; ADR-0044 §7's second guard, which will otherwise open
+a third window of its own, is the point at which it becomes worth making. The `Exchange.start()`
+contract in `domain/protocols.py` carries this, so "one boot-time budget, never a second timeout" in
+the adapters reads as the configured number and never as a bound on boot time.
+
+*A body that is not a mode literal is a failed read, not an unrecognised one.* This section splits
+"unreadable" from "unrecognised" but states the split against the **mode**, and the venue answers
+this query with a bare JSON string — so there is a third case it does not name: a response that is
+not a string at all. That is the venue changing its contract, it says nothing about the mode, and it
+takes the **retry** rather than the allowlist's refusal. The distinction is load-bearing in the
+error text as much as in the control flow: printing the remediation there would send an operator to
+re-set a mode that was never in question.**)**
+
 ## 4. Re-verification in flight: divergence-triggered, freeze on change
 
 **Decision: read the mode at boot, and re-read it before applying any Tier-1 **account cash** heal.

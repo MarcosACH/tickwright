@@ -123,7 +123,16 @@ def build_exchange(config: AppConfig, *, bus: EventBus, clock: Clock, store: Sto
             # the guard gets the specs through exchange.instrument_specs().
             universe = asyncio.run(fetch_instrument_specs(config.hyperliquid))
             return HyperliquidExchange(
-                config=config.hyperliquid, bus=bus, clock=clock, universe=universe
+                config=config.hyperliquid,
+                bus=bus,
+                clock=clock,
+                universe=universe,
+                # The boot guards run before the barrier and so cannot be
+                # barrier steps, but they face the same boot-time venue and
+                # must not mint a budget of their own to disagree with it
+                # (ADR-0044 §6, ADR-0046 §3) — handed the engine's, from the
+                # one place that holds both configs.
+                startup_timeout_seconds=config.engine.startup_reconciliation_timeout_seconds,
             )
         case unreachable:
             assert_never(unreachable)

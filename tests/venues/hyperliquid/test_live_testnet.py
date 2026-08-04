@@ -66,7 +66,13 @@ def test_place_reconcile_cancel_round_trip_on_testnet() -> None:
 
         bus = InMemoryBus()
         clock = LiveClock()
-        exchange = HyperliquidExchange(config=config, bus=bus, clock=clock, universe=universe)
+        exchange = HyperliquidExchange(
+            config=config,
+            bus=bus,
+            clock=clock,
+            universe=universe,
+            startup_timeout_seconds=60.0,
+        )
         reports: list[ExecutionReport] = []
 
         async def collect(report: ExecutionReport) -> None:

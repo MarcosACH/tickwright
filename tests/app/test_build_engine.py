@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from hyperliquid_fakes import FakeExchangeApi
 from ledgers import GENESIS
 from pydantic import ValidationError
 
@@ -43,6 +44,7 @@ from tickwright.domain import (
     PlaceOrder,
     Side,
     TimeInForce,
+    VenueAccountModeUnsupported,
     derive_cloid,
 )
 from tickwright.engine.guard import NoopGuard, RealGuard
@@ -138,6 +140,55 @@ def test_exchange_discriminant_selects_hyperliquid_with_meta_sourced_specs(
     # The venue authored its specs from meta (ADR-0031), ready for the guard.
     spec = exchange.instrument_specs()["BTC"]
     assert (spec.sz_decimals, spec.max_decimals, spec.max_sig_figs) == (5, 6, 5)
+
+
+def test_the_hyperliquid_arm_hands_the_adapter_the_engine_s_startup_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one obligation ``Exchange.start()`` puts on *this* function.
+
+    The protocol states it outright: an adapter that makes a blocking venue
+    call in ``start()`` owns a timeout on it, and "the composition root must
+    hand it the budget to size that timeout with, since ``EngineConfig`` does
+    not reach the adapter." ADR-0044 §6 is why it must be *that* budget and not
+    one of its own — a boot-time venue read bounded separately would be a second
+    timeout free to disagree with the first.
+
+    Asserted end-to-end through the built adapter rather than on the keyword,
+    because the budget is only observably wired when it is *spent*: a dark venue
+    holds ADR-0046 §3's mode gate in its bounded retry until the window is gone.
+
+    The window is deliberately **not** ``EngineConfig``'s 60 s default. Every
+    other construction site in the suite passes 60.0 literally, so at the
+    default a hard-coded budget here would be indistinguishable from a wired
+    one — the regression this test exists to catch would pass it.
+    """
+    post = FakeExchangeApi(
+        {
+            "meta": {"universe": [{"name": "BTC", "szDecimals": 5, "maxLeverage": 40}]},
+            "userAbstraction": ConnectionError("venue dark"),
+        }
+    )
+    monkeypatch.setattr("tickwright.venues.hyperliquid.transport.post_json", post)
+    clock = ManualClock(start_ns=0)
+    config = _config(
+        tmp_path,
+        exchange="hyperliquid",
+        hyperliquid={"signing_key": TEST_SIGNING_KEY, "symbols": ["BTC"], "testnet": True},
+        engine={"startup_reconciliation_timeout_seconds": 300.0},
+    )
+    exchange = build_exchange(config, bus=InMemoryBus(), clock=clock, store=SQLiteStore(":memory:"))
+
+    with pytest.raises(VenueAccountModeUnsupported):
+        asyncio.run(exchange.start())
+
+    asked = [query["type"] for (_url, query) in post.requests]
+    assert asked[0] == "meta", "the universe read composition makes before building the adapter"
+    assert set(asked[1:]) == {"userAbstraction"}, "then the boot gate, through the built adapter"
+    # Spent the configured window, not the 60 s default — within one capped
+    # backoff interval of it, which is the overshoot the cap bounds.
+    elapsed_seconds = clock.timestamp_ns() / 1_000_000_000
+    assert 300.0 <= elapsed_seconds < 330.0
 
 
 def test_the_hyperliquid_exchange_requires_a_signing_key(tmp_path: Path) -> None:
