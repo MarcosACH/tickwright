@@ -70,10 +70,18 @@ class _FlakyApi(FakeExchangeApi):
         return await super().__call__(url, payload)
 
 
-def _exchange(post: FakeExchangeApi, *, clock: ManualClock | None = None) -> HyperliquidExchange:
+def _exchange(
+    post: FakeExchangeApi,
+    *,
+    clock: ManualClock | None = None,
+    account_address: str | None = None,
+) -> HyperliquidExchange:
     return HyperliquidExchange(
         config=HyperliquidConfig(
-            testnet=True, symbols=["BTC"], signing_key=SecretStr(TEST_SIGNING_KEY)
+            testnet=True,
+            symbols=["BTC"],
+            signing_key=SecretStr(TEST_SIGNING_KEY),
+            account_address=account_address,
         ),
         bus=InMemoryBus(),
         clock=clock if clock is not None else ManualClock(),
@@ -219,3 +227,72 @@ def test_a_body_that_is_not_a_mode_literal_is_a_failed_read_not_a_refused_mode(
     message = str(refusal.value)
     assert repr(body) in message, "the operator needs the body we could not read"
     assert "userSetAbstraction" not in message, "there is no mode here to remediate"
+
+
+def test_a_mode_literal_the_venue_has_not_shipped_yet_refuses_on_the_first_read() -> None:
+    """Allowlist, not denylist: a fifth literal refuses rather than passing.
+
+    A mode nobody has measured is the worst possible case in which to guess, and
+    guessing "it is probably fine" is precisely what a denylist of the two known
+    pooled modes would do the day the venue ships a third.
+
+    It refuses on the **first** read, spending none of the budget, because this
+    is not a failed read — the venue answered, clearly, with a mode. Retrying
+    would re-ask a question already answered and delay the operator's error by
+    the whole startup window, and the clock assertion is what pins that."""
+    clock = ManualClock(start_ns=0)
+    post = FakeExchangeApi({"userAbstraction": "someNewMode"})
+
+    with pytest.raises(VenueAccountModeUnsupported) as refusal:
+        asyncio.run(_exchange(post, clock=clock).start())
+
+    assert len(post.requests) == 1
+    assert clock.timestamp_ns() == 0, "an answered question consumes no backoff"
+    assert "someNewMode" in str(refusal.value)
+
+
+MASTER_ACCOUNT = "0x049d0000000000000000000000000000000015F76"
+
+
+def test_the_gate_classifies_the_trading_account_not_the_agent_wallet() -> None:
+    """The mode is a property of the account the **ledger** is bound to.
+
+    With an API/agent wallet the signing key's own address and the account it
+    acts for are different addresses, and the agent's is its own empty account
+    — #152 measured the venue treating it exactly that way, refusing a
+    user-signed action addressed to the master with *"Must deposit before
+    performing actions"* against the **signer's** address. So a gate that
+    classified the key's address would read the mode of an account that holds
+    nothing and trades nothing, and wave through a master account in any mode
+    at all.
+
+    Asserted on the outbound query rather than on the outcome, because the
+    outcome is identical either way on a single-wallet deployment — which is
+    what would let this regress unnoticed."""
+    post = FakeExchangeApi({"userAbstraction": "disabled"})
+    exchange = _exchange(post, account_address=MASTER_ACCOUNT)
+
+    asyncio.run(exchange.start())
+
+    ((_url, query),) = post.requests
+    assert query == {"type": "userAbstraction", "user": MASTER_ACCOUNT}
+
+
+def test_connecting_makes_the_mode_read_and_no_other_venue_request() -> None:
+    """``start()`` is ADR-0024 step 4, and the gate opens it (ADR-0046 §3).
+
+    Two claims in one recorded exchange. The mode read **is** the step's first
+    venue traffic — it gates everything after it, because a wrong mode
+    invalidates the premise the leverage push's own check would reason from, so
+    reporting mismatches computed against a margin model that does not apply
+    would be noise on top of an error. And it is so far the step's **only**
+    traffic: the fake routes nothing else, so the leverage push arriving behind
+    it (ADR-0044 §7) must rewrite this test rather than silently survive it.
+
+    The adapter still holds no connection of its own — every request is scoped
+    to the call that makes it — so this is the whole of what connecting does."""
+    post = FakeExchangeApi({"userAbstraction": "default"})
+
+    asyncio.run(_exchange(post).start())
+
+    assert [query["type"] for (_url, query) in post.requests] == ["userAbstraction"]
