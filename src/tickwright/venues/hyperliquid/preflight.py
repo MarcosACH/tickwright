@@ -22,6 +22,7 @@ from typing import Any
 
 from tickwright.domain import Clock, VenueAccountModeUnsupported
 
+from .backoff import Backoff
 from .reading import UNREADABLE
 
 InfoRead = Callable[[dict[str, Any]], Awaitable[object]]
@@ -46,10 +47,13 @@ _RETRY_INITIAL_BACKOFF_SECONDS = 1.0
 _RETRY_MAX_BACKOFF_SECONDS = 30.0
 """``StartupBarrier.run``'s own pacing, matched deliberately.
 
-This read cannot *be* a barrier step — it has to clear before the barrier's own
-venue reads run, and ``venues`` may not import ``engine`` (ADR-0032) — so it
-repeats the policy rather than sharing the mechanism, under the same budget the
-barrier is given (ADR-0044 §6: one boot-time budget, never a second timeout).
+The *values* are matched; the doubling itself is the package's own ``Backoff``,
+the one home this venue keeps that rule in so its retry loops cannot skew. What
+this read cannot share is the barrier's copy: it has to clear before the
+barrier's own venue reads run, and ``venues`` may not import ``engine``
+(ADR-0032). So the deadline arithmetic below is written twice — here and in
+``engine/barrier.py`` — under the same budget the barrier is given (ADR-0044 §6:
+one boot-time budget, never a second timeout).
 
 The cap is what keeps an uncapped doubling from carrying the clock far past the
 deadline: without it a large budget would refuse nearly a whole interval late,
@@ -85,7 +89,7 @@ async def verify_account_mode(
     window — it would only delay the remediation the operator needs.
     """
     deadline_ns = clock.timestamp_ns() + int(timeout_seconds * _NS_PER_SECOND)
-    backoff_seconds = _RETRY_INITIAL_BACKOFF_SECONDS
+    backoff = Backoff(initial=_RETRY_INITIAL_BACKOFF_SECONDS, maximum=_RETRY_MAX_BACKOFF_SECONDS)
     while True:
         try:
             mode = await _read_account_mode(info, address=address)
@@ -101,8 +105,7 @@ async def verify_account_mode(
                     f"{timeout_seconds}s ({exc}); refusing to start rather than assume "
                     f"it is {_accepted()}"
                 ) from exc
-            await clock.sleep(backoff_seconds)
-            backoff_seconds = min(backoff_seconds * 2, _RETRY_MAX_BACKOFF_SECONDS)
+            await backoff.sleep_on(clock)
             continue
         if mode in SUPPORTED_ACCOUNT_MODES:
             return
