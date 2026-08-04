@@ -16,6 +16,31 @@ class StartupReconciliationTimeout(InvariantViolation):
     rather than trade on unverified state — freeze, don't guess (ADR-0011)."""
 
 
+class StoreAccountMismatch(InvariantViolation):
+    """The durable ledger and the venue's ``AccountSpec`` disagree about the
+    account this engine is trading (ADR-0042 §3, ADR-0043 §10).
+
+    Raised from the **first** step of the startup sequence, before the order
+    cache is rebuilt, so a store that must not be traded at all is refused
+    without paying the mass read behind it.
+
+    **One type, two disjoint conditions** — they cannot both fire, since a
+    missing account row leaves no fields to compare:
+
+    - recorded fields disagree with what the adapter declares, and
+    - a paper store carries order history with no ledger behind it (ADR-0043
+      §8), which cannot be backfilled: the per-fill fee only exists on the event
+      as of ADR-0036 and funding did not exist at all, so a reconstruction would
+      write zeroes for money that was actually charged.
+
+    A second class was rejected because the operator's remedy is the same
+    sentence either way — point the store at a fresh path, or restore the
+    declared values — so a distinct name would buy precision nobody acts on.
+    Every disagreeing field is named at once, so an operator who changed two
+    learns both on the first restart rather than one per restart.
+    """
+
+
 class VenueAccountModeUnsupported(InvariantViolation):
     """The venue account is not in a mode whose numbers this engine can read
     (ADR-0046 §3): its abstraction mode is outside Manual/Standard, or could not

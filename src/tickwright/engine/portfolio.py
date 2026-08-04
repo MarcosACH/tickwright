@@ -33,6 +33,7 @@ from tickwright.domain import (
     PositionView,
     Side,
     Store,
+    StoreAccountMismatch,
     VenueAccountState,
     account_net_size,
     account_view,
@@ -380,11 +381,13 @@ class PortfolioProjection:
         restore and the partitions are empty by the same fact; reading them would
         be a mass-read for rows that cannot exist.
 
-        (The store's disagreement refusals — a swapped account, a paper store
-        with order history and no ledger — are #188's, and land ahead of the seed
-        in this same step.)
+        The store's disagreement refusals land **ahead of the seed**, on the one
+        ``load_account`` this step already makes: a store this engine may not
+        trade is refused before it is written to, and before the mass read behind
+        this step ever runs.
         """
         stored = self._store.load_account()
+        self._refuse_disagreement(stored)
         if stored is None:
             self._seed_genesis()
             return
@@ -396,6 +399,56 @@ class PortfolioProjection:
             (position.strategy_id, position.symbol): position
             for position in self._store.all_positions()
         }
+
+    def _refuse_disagreement(self, stored: Account | None) -> None:
+        """Refuse a store this engine may not trade (ADR-0043 §10).
+
+        Takes ``stored`` rather than reading it, so the field comparison is paid
+        for by the one ``load_account`` ``recover`` already makes.
+
+        **Two disjoint conditions**, and they cannot both fire: a missing account
+        row leaves no fields to compare. The absent-row arm asks ``has_orders()``
+        — an existence question, never the mass read — because this whole step
+        runs *ahead* of ``cache.rebuild()`` precisely so a store that must not be
+        traded is refused before its history is deserialized.
+        """
+        declared = self._spec.genesis_collateral
+        if stored is None:
+            # Paper-only, on ADR-0043 §10's one predicate: order history behind an
+            # unopened ledger is the legitimate, self-healing state of a *live*
+            # store that predates the ledger — the barrier materialises the row
+            # and positions heal from venue truth. Paper has no venue to heal
+            # from, so the same state is the §8 upgrade hazard.
+            if declared is not None and self._store.has_orders():
+                raise StoreAccountMismatch(
+                    "this paper store holds order history but no ledger: its "
+                    "positions, fees and funding cannot be reconstructed from "
+                    "the orders alone (ADR-0043 §8), and seeding a fresh ledger "
+                    "would report a flat account at full cash. Point the store "
+                    "at a fresh path."
+                )
+            return
+        disagreements = []
+        if stored.account_id != self._spec.account_id:
+            disagreements.append(
+                f"account_id: stored {stored.account_id!r}, configured {self._spec.account_id!r}"
+            )
+        # Compared **only when the adapter declares one**: a ``None`` declaration
+        # is no counterpart to check against, not a disagreement (ADR-0043 §10).
+        # Ungated, live's stored genesis — ``equity − Σ unrealized_pnl``, ingested
+        # at the barrier — would differ from its declared ``None`` on every start,
+        # so a check meant to catch a swapped account would brick the path it was
+        # never meant to police.
+        if declared is not None and stored.genesis_collateral != declared:
+            disagreements.append(
+                f"genesis_collateral: stored {stored.genesis_collateral}, configured {declared}"
+            )
+        if disagreements:
+            raise StoreAccountMismatch(
+                "the durable ledger belongs to a different account than this run "
+                f"declares — {'; '.join(disagreements)}. Point the store at a fresh "
+                "path, or restore the declared values."
+            )
 
     def _seed_genesis(self) -> None:
         """Open the durable ledger at the genesis the venue *declared* (ADR-0043 §6).

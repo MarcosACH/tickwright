@@ -188,6 +188,65 @@ def test_run_replays_trades_and_exits_zero_on_graceful_stop(tmp_path: Path) -> N
         reopened.close()
 
 
+def test_a_restart_on_a_changed_genesis_refuses_before_a_tick_is_ever_replayed(
+    tmp_path: Path,
+) -> None:
+    """The store refusal fires from the runner's own start sequence (ADR-0043 §10),
+    and it is the **first** of the surface's three — ahead of both venue refusals.
+
+    A full first life leaves a ledger behind. The second is wired to a paper venue
+    declaring a different opening balance, which is the operator editing
+    ``TICKWRIGHT_PAPER__GENESIS_COLLATERAL`` against a store that has already
+    accrued away from the old one. It faults before the feed is ever started, so
+    the run that must not trade places nothing — and the durable ledger it refused
+    is exactly as the first life left it, the remedy (a fresh store path) still
+    open.
+    """
+    ticks = _write_ticks(tmp_path / "ticks.jsonl")
+    db = tmp_path / "saga.db"
+    assert asyncio.run(_run_to_fill_then_stop(ticks, db))[0] == 0
+
+    async def second_life() -> tuple[int, Engine]:
+        bus = InMemoryBus()
+        clock = ManualClock()
+        engine = Engine(
+            bus=bus,
+            clock=clock,
+            store=SQLiteStore(db),
+            exchange=PaperExchange(
+                bus=bus,
+                clock=clock,
+                fill_model=ImmediateFillModel(),
+                genesis_collateral=GENESIS * 2,
+                account_net=dict,
+            ),
+            feed=ReplayFeed(path=ticks, bus=bus, clock=clock),
+        )
+        return await engine.run(), engine
+
+    with capture_events() as logs:
+        exit_code, engine = asyncio.run(second_life())
+
+    assert exit_code != 0
+    assert engine.state is ComponentState.FAULTED
+    # Faulted *for this reason*, not merely faulted: a start sequence has several
+    # ways to fail, and only the trail says which one a restart hit.
+    faults = [log for log in logs if log["event"] == "engine.faulted"]
+    assert len(faults) == 1
+    assert "StoreAccountMismatch" in faults[0]["error"]
+    # And the feed never started — the refusal is ahead of every step that could
+    # have put an order on the venue.
+    assert [log for log in logs if log["event"] == "engine.feed_started"] == []
+
+    reopened = SQLiteStore(db)
+    try:
+        row = reopened.load_account()
+        assert row is not None
+        assert row.genesis_collateral == GENESIS  # the first life's, unrewritten
+    finally:
+        reopened.close()
+
+
 def test_a_strategy_reads_back_the_fill_the_engine_wrote(tmp_path: Path) -> None:
     """The facade and the engine's writer are one object, end to end (#213).
 
@@ -1155,6 +1214,19 @@ def test_the_runner_starts_the_exchange_after_the_bus_and_before_the_barrier(
 
     async def main() -> int:
         store = SQLiteStore(tmp_path / "saga.db")
+        # The ledger the prior life opened, beside the saga it left in flight:
+        # order history with no account row behind it is the one shape #188
+        # refuses outright (ADR-0043 §8), and this case is about lifecycle
+        # ordering rather than about a store no engine may start on.
+        store.checkpoint_ledger(
+            account=Account.restore(
+                account_id="paper-default",
+                genesis_collateral=GENESIS,
+                genesis_ts_ns=400,
+                cash=GENESIS,
+            ),
+            ts_ns=400,
+        )
         store.checkpoint(_submitted_saga("0xabc"), ts_ns=500)
         engine = Engine(
             bus=_kafka_bus(broker),
