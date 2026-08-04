@@ -37,11 +37,12 @@ from tickwright.domain import (
 )
 from tickwright.observability import NamedEvent, named_event
 
+from . import transport
 from .account import account_spec, normalize_account_state
 from .config import HyperliquidConfig
 from .preflight import verify_account_mode
 from .reading import UNREADABLE, figure
-from .transport import PostJson, post_json
+from .transport import PostJson
 from .universe import HyperliquidUniverse
 
 _NS_PER_MS = 1_000_000
@@ -64,7 +65,7 @@ class HyperliquidExchange:
         clock: Clock,
         universe: HyperliquidUniverse,
         startup_timeout_seconds: float,
-        post: PostJson = post_json,
+        post: PostJson | None = None,
     ) -> None:
         if config.signing_key is None:
             raise ValueError(
@@ -78,7 +79,12 @@ class HyperliquidExchange:
         self._bus = bus
         self._clock = clock
         self._universe = universe
-        self._post = post
+        # Late-bound default, exactly as ``fetch_instrument_specs`` resolves its
+        # own: on the composition root's arm nothing injects this seam, so a
+        # def-time-bound default argument would capture the real client and stay
+        # captured — leaving the one HTTP boundary of the built adapter, and so
+        # everything ``start()`` reads through it, unreachable from a test.
+        self._post = post if post is not None else transport.post_json
         # ADR-0024's barrier budget, handed down rather than minted again
         # (ADR-0044 §6): the boot guards run *before* the barrier, so they
         # cannot be barrier steps, but a boot-time venue read they bound
