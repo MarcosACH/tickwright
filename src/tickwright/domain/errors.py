@@ -14,3 +14,19 @@ class StartupReconciliationTimeout(InvariantViolation):
     """The startup barrier could not reconcile against the venue within its
     bounded window (ADR-0024): the engine must go ``FAULTED`` and exit non-zero
     rather than trade on unverified state — freeze, don't guess (ADR-0011)."""
+
+
+class VenueAccountModeUnsupported(InvariantViolation):
+    """The venue account is not in a mode whose numbers this engine can read
+    (ADR-0046 §3): its abstraction mode is outside Manual/Standard, or could not
+    be read at all within the startup budget.
+
+    Deliberately **not** a ``*Mismatch``. Its siblings — ``StoreAccountMismatch``
+    (ADR-0042) and ``VenueLeverageMismatch`` (ADR-0044 §5) — report a recorded
+    value disagreeing with an observed one, and either one can be reasoned about
+    by comparing the two. This one reports that the observed values do not
+    *mean* what the engine reads them to mean: under a pooled mode the perps
+    clearinghouse is a sub-ledger, so equity and free margin come back an order
+    of magnitude low with nothing in the response indicating it. Nothing
+    downstream can be compared, so nothing downstream may run.
+    """

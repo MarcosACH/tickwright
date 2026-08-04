@@ -496,6 +496,7 @@ def _drive_exchange_request_failed() -> None:
             bus=InMemoryBus(),
             clock=ManualClock(),
             universe=HyperliquidUniverse(specs={"BTC": _SPEC}, asset_indices={"BTC": 0}),
+            startup_timeout_seconds=60.0,
             post=FakeExchangeApi({"order": ConnectionError("connection refused")}),
         )
         await exchange.place(
@@ -532,6 +533,7 @@ def _drive_exchange_action_rejected() -> None:
             bus=InMemoryBus(),
             clock=ManualClock(),
             universe=HyperliquidUniverse(specs={"BTC": _SPEC}, asset_indices={"BTC": 0}),
+            startup_timeout_seconds=60.0,
             post=FakeExchangeApi({"order": {"status": "err", "response": "Invalid nonce"}}),
         )
         await exchange.place(

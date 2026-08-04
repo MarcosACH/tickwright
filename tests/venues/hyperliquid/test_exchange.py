@@ -69,7 +69,25 @@ def make_exchange(
         signing_key=SecretStr(TEST_SIGNING_KEY),
         slippage_bound=Decimal("0.05"),
     )
-    return HyperliquidExchange(config=config, bus=bus, clock=clock, universe=UNIVERSE, post=post)
+    return HyperliquidExchange(
+        config=config,
+        bus=bus,
+        clock=clock,
+        universe=UNIVERSE,
+        post=post,
+        # ADR-0024's barrier budget, which the boot guards in ``start()`` are
+        # bounded by. Only the mode-gate tests in ``test_preflight.py`` spend it.
+        startup_timeout_seconds=60.0,
+    )
+
+
+def _request_type(payload: dict) -> str:
+    """What a recorded request asked for — the action ``type`` for a signed
+    ``/exchange`` post, the query ``type`` for an unsigned ``/info`` one. Both
+    now appear in one adapter's traffic, ``start()``'s boot read being an
+    ``/info`` query in a suite that was otherwise all actions."""
+    action = payload.get("action")
+    return str(action["type"] if isinstance(action, dict) else payload["type"])
 
 
 def tick(symbol: str, price: str) -> MarketTick:
@@ -856,23 +874,6 @@ def test_a_terminal_fetch_prunes_the_placed_order_so_the_cache_stays_bounded() -
     assert len(reads) == 2
 
 
-def test_connecting_asks_the_venue_for_nothing_because_posting_is_request_scoped() -> None:
-    """``start()`` is the connect half of ADR-0024 step 4. This adapter holds no
-    connection of its own — every request is scoped to the call that makes it —
-    so the step does no venue I/O until ADR-0046's account-mode gate and
-    ADR-0044's leverage push give it some.
-
-    The fake routes *nothing*, so a request of any type fails loudly here rather
-    than passing on a response a test never described. That is the assertion:
-    when the push arrives, this test must be rewritten, not silently survive."""
-    post = FakeExchangeApi({})
-    exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
-
-    asyncio.run(exchange.start())
-
-    assert post.requests == []
-
-
 def test_the_venue_link_is_released_without_a_start_having_run() -> None:
     """The faulted teardown walks the same ordered membership as the graceful
     one, so ``stop()`` is reached after a ``start()`` that refused — and after
@@ -920,7 +921,14 @@ def test_the_released_venue_link_still_answers_a_place_and_a_cancel() -> None:
         bus = InMemoryBus()
         clock = ManualClock(start_ns=1_700_000_001_000 * _NS_PER_MS)
         post = FakeExchangeApi(
-            {"order": resting_response(oid=77), "cancelByCloid": cancel_success_response()}
+            {
+                # The boot gate ``start()`` runs first (ADR-0046 §3), answered
+                # with a supported mode so this test reaches the release it is
+                # actually about.
+                "userAbstraction": "disabled",
+                "order": resting_response(oid=77),
+                "cancelByCloid": cancel_success_response(),
+            }
         )
         exchange = make_exchange(post, bus=bus, clock=clock)
         reports: list[ExecutionReport] = []
@@ -938,7 +946,10 @@ def test_the_released_venue_link_still_answers_a_place_and_a_cancel() -> None:
 
     post, reports = asyncio.run(main())
 
-    assert [payload["action"]["type"] for (_url, payload) in post.requests] == [
+    # The boot read, then both order verbs *behind* the release: what the
+    # release took away is nothing, which is the claim.
+    assert [_request_type(payload) for (_url, payload) in post.requests] == [
+        "userAbstraction",
         "order",
         "cancelByCloid",
     ]
@@ -979,7 +990,8 @@ def test_the_venue_hands_out_the_meta_sourced_specs_by_copy() -> None:
 # claims live in the sibling module that owns their subject rather than here —
 # the gate reads the whole suite directory, not this file.
 _SEAM_CLAIMS = {
-    "start": "test_connecting_asks_the_venue_for_nothing_because_posting_is_request_scoped",
+    # test_preflight.py — the module that owns what start() now proves.
+    "start": "test_a_pooled_account_mode_refuses_to_start_with_the_operator_s_remediation",
     "stop": "test_the_venue_link_is_released_without_a_start_having_run",
     "place": "test_market_buy_places_an_aggressive_ioc_limit_at_the_bounded_price",
     "cancel": "test_cancel_sends_a_signed_cancel_by_cloid_and_reports_cancelled",

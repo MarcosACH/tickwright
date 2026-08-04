@@ -39,6 +39,7 @@ from tickwright.observability import NamedEvent, named_event
 
 from .account import account_spec, normalize_account_state
 from .config import HyperliquidConfig
+from .preflight import verify_account_mode
 from .reading import UNREADABLE, figure
 from .transport import PostJson, post_json
 from .universe import HyperliquidUniverse
@@ -62,6 +63,7 @@ class HyperliquidExchange:
         bus: EventBus,
         clock: Clock,
         universe: HyperliquidUniverse,
+        startup_timeout_seconds: float,
         post: PostJson = post_json,
     ) -> None:
         if config.signing_key is None:
@@ -77,6 +79,11 @@ class HyperliquidExchange:
         self._clock = clock
         self._universe = universe
         self._post = post
+        # ADR-0024's barrier budget, handed down rather than minted again
+        # (ADR-0044 §6): the boot guards run *before* the barrier, so they
+        # cannot be barrier steps, but a boot-time venue read they bound
+        # separately would be a second timeout free to disagree with the first.
+        self._startup_timeout_seconds = startup_timeout_seconds
         self._wallet = Account.from_key(config.signing_key.get_secret_value())
         # /info queries ask about the account, which is the key's own address
         # unless the key is an API/agent wallet acting for a master account.
@@ -97,12 +104,18 @@ class HyperliquidExchange:
         bus.subscribe(MarketTick, self.on_tick)
 
     async def start(self) -> None:
-        """Nothing to connect yet: placement is request-scoped HTTP and the
-        tick subscription is wired at construction. The venue alignment this
-        step exists to host arrives in order: the ``userAbstraction`` mode gate
-        first (ADR-0046 §3, which opens step 4 and gates everything after it),
-        then the leverage push (ADR-0044 §7)."""
-        return None
+        """Nothing to connect — placement is request-scoped HTTP and the tick
+        subscription is wired at construction — but the venue alignment this
+        step exists to host, in order.
+
+        The ``userAbstraction`` mode gate is first and gates everything after it
+        (ADR-0046 §3, which opens ADR-0024 step 4): a wrong mode invalidates the
+        premise the leverage push's own check reasons from, so reporting
+        mismatches computed against a margin model that does not apply would be
+        noise on top of an error. The leverage push (ADR-0044 §7) lands behind
+        it. Both refusals precede the barrier, so neither can let an order out.
+        """
+        await verify_account_mode(info=self._info, address=self._user_address)
 
     async def stop(self) -> None:
         """Nothing to release: this adapter runs no loop of its own — every

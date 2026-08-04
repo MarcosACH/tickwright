@@ -16,7 +16,11 @@ from .enums import (
     Side,
     TimeInForce,
 )
-from .errors import InvariantViolation, StartupReconciliationTimeout
+from .errors import (
+    InvariantViolation,
+    StartupReconciliationTimeout,
+    VenueAccountModeUnsupported,
+)
 from .events import (
     CancelSignal,
     Event,
@@ -84,6 +88,7 @@ __all__ = [
     # errors
     "InvariantViolation",
     "StartupReconciliationTimeout",
+    "VenueAccountModeUnsupported",
     # events + value types
     "Account",
     "AccountSpec",
