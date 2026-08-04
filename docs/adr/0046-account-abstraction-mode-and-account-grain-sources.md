@@ -357,6 +357,25 @@ perps clearinghouse fully populated and spot empty.
 - **No configuration surface.** The mode is read from the venue, never declared. `.env.example` gains
   nothing.
 
+**(Shipped in [#179](https://github.com/MarcosACH/tickwright/issues/179)** as
+`venues/hyperliquid/preflight.py`, called from `HyperliquidExchange.start()`. Two implementation
+facts this section did not fix, both settled by the code:
+
+*The barrier budget reaches the adapter through the composition root.* The gate runs at step 4 and
+so cannot **be** a barrier step — the barrier is step 5, and `venues` may not import `engine`
+(ADR-0032) — but bounding it on a timeout of its own would be the second timeout ADR-0044 §6
+refuses. `build_exchange` therefore hands `HyperliquidExchange` the engine's
+`startup_reconciliation_timeout_seconds`, and the retry mirrors `StartupBarrier.run`'s own 1 s/30 s
+capped-doubling pacing rather than sharing the mechanism. Nothing new is configurable.
+
+*A body that is not a mode literal is a failed read, not an unrecognised one.* This section splits
+"unreadable" from "unrecognised" but states the split against the **mode**, and the venue answers
+this query with a bare JSON string — so there is a third case it does not name: a response that is
+not a string at all. That is the venue changing its contract, it says nothing about the mode, and it
+takes the **retry** rather than the allowlist's refusal. The distinction is load-bearing in the
+error text as much as in the control flow: printing the remediation there would send an operator to
+re-set a mode that was never in question.**)**
+
 ## 4. Re-verification in flight: divergence-triggered, freeze on change
 
 **Decision: read the mode at boot, and re-read it before applying any Tier-1 **account cash** heal.

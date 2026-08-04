@@ -270,6 +270,8 @@ The slice reached that by first getting it wrong, which is the part worth keepin
 
 **Seams:** Called from `HyperliquidExchange.start()`.
 
+**Status:** the **mode gate landed** in [#179](https://github.com/MarcosACH/tickwright/issues/179); the leverage push is still to come, and `start()` currently makes the mode read and no other venue request. The gate's bounded retry takes ADR-0024's barrier budget from the composition root — it runs at step 4, ahead of the step-5 barrier, so it cannot be a barrier step, and `venues` may not import `engine` — rather than minting a second timeout (ADR-0044 §6).
+
 **Depth note:** Both guards are refusals that must fire before the barrier and before any order, and both fail **closed**. Isolating them makes that testable against recorded responses without touching the order path, and keeps the one signed write in this whole map in a module a reader can audit in full.
 
 ---
