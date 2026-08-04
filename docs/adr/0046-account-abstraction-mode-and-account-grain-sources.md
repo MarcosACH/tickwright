@@ -361,12 +361,26 @@ perps clearinghouse fully populated and spot empty.
 `venues/hyperliquid/preflight.py`, called from `HyperliquidExchange.start()`. Two implementation
 facts this section did not fix, both settled by the code:
 
-*The barrier budget reaches the adapter through the composition root.* The gate runs at step 4 and
-so cannot **be** a barrier step — the barrier is step 5, and `venues` may not import `engine`
-(ADR-0032) — but bounding it on a timeout of its own would be the second timeout ADR-0044 §6
-refuses. `build_exchange` therefore hands `HyperliquidExchange` the engine's
-`startup_reconciliation_timeout_seconds`, and the retry mirrors `StartupBarrier.run`'s own 1 s/30 s
-capped-doubling pacing rather than sharing the mechanism. Nothing new is configurable.
+*The barrier budget reaches the adapter through the composition root — and is a number, not a
+window.* The gate runs at step 4 and so cannot **be** a barrier step — the barrier is step 5, and
+`venues` may not import `engine` (ADR-0032) — but bounding it on a timeout of its own would be the
+second timeout ADR-0044 §6 refuses. `build_exchange` therefore hands `HyperliquidExchange` the
+engine's `startup_reconciliation_timeout_seconds`, pinned by a composition-root test that builds the
+arm on a non-default budget and spends it against a dark venue: at the 60 s default a hard-coded
+timeout would be indistinguishable from a wired one. The 1 s/30 s doubling is the venue package's
+own `Backoff`, shared with the feed's reconnect loop, so only the deadline arithmetic is written
+twice — here and in `StartupBarrier.run`, on opposite sides of the layer rule. Nothing new is
+configurable.
+
+What is shared, though, is that **number** rather than one wall-clock window. `start()` is bounded
+by the budget and the barrier one step later opens a fresh one, so a venue that clears the gate late
+and then goes dark reaches `FAULTED` after up to two budgets plus each loop's capped overshoot —
+which is worth stating precisely because both loops argue at length against a ~2× overshoot. A
+single boot deadline would have to be passed *into* `Exchange.start()`, a change to that signature
+and nothing an adapter can arrange for itself; ADR-0044 §7's second guard, which will otherwise open
+a third window of its own, is the point at which it becomes worth making. The `Exchange.start()`
+contract in `domain/protocols.py` carries this, so "one boot-time budget, never a second timeout" in
+the adapters reads as the configured number and never as a bound on boot time.
 
 *A body that is not a mode literal is a failed read, not an unrecognised one.* This section splits
 "unreadable" from "unrecognised" but states the split against the **mode**, and the venue answers
