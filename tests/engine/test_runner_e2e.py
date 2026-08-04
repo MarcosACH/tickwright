@@ -853,8 +853,9 @@ def test_the_ledger_is_recovered_before_the_order_cache_is_rebuilt(tmp_path: Pat
     every saga in the store — partitions are bounded by strategy × symbol, sagas
     by all the history the store holds. Behind the rebuild, a restart that must
     not trade at all would pay that mass read before finding out; the refusal
-    that makes such a restart possible is #188's, and lands ahead of the seed in
-    this same step.
+    that makes such a restart possible is the ledger step's own first act, and it
+    asks ``has_orders()`` rather than the mass read precisely so a refused store
+    costs one existence question.
     """
     timeline: list[str] = []
 
