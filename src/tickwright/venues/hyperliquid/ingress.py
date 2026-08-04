@@ -10,7 +10,7 @@ because both ``MarketTick`` and ``MarkTick`` are last-value-wins. This is
 market-data only and upstream of ``publish`` (both bus backends see the same
 conflated stream). Sound per CONTEXT.md **Conflation**.
 
-The key is ``(kind, symbol)`` rather than the symbol alone, and that is the whole
+The key is ``(stream, symbol)`` rather than the symbol alone, and that is the whole
 of what makes the two streams independent: a mark is not a later version of a
 trade, so one BTC mark must never swallow the BTC trade queued beside it — the
 account would stop filling against a stream that was still arriving — and a busy
