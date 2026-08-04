@@ -46,7 +46,7 @@ Consumed by `/code-review` (any regression is BLOCKING) and `/python-codebase-ma
 7. **Account exclusivity.** One process trades exactly one account, and an account is owned by
    exactly one process — the cloid ownership boundary protects the order saga but has no analogue
    on a position, so two engines on one account each heal their ledger toward the other's flow.
-   *Enforcement lands with the accounting surface — the `Store` binds its ledger to the account's
+   *Enforced from the ledger's own recovery step — the `Store` binds its ledger to the account's
    whole opening declaration (`account_id`, plus the genesis collateral a paper ledger was opened
    at) and fail-fasts when the adapter or config reports another, one error naming every field that
    disagrees; the same error also refuses a paper store holding order history but no ledger, which
