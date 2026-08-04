@@ -129,6 +129,12 @@ def _run(
     # ledger this tracer asserts on is seeded the way a real run's is — and over
     # the one store its order cache projects.
     checks = Checkpointer(spec=exchange.account_spec(), store=store, clock=clock)
+    # Recovered before the feed starts, as the runner starts a process (ADR-0043
+    # §6): this is where paper's genesis row is written, so a tracer that skipped
+    # it would run its whole saga against a ledger no start sequence could have
+    # left — order rows with no account row behind them, the shape recovery's own
+    # check refuses (§8).
+    checks.recover()
     projection = checks.portfolio
     manager = ExecutionManager(bus=bus, exchange=exchange, checkpointer=checks)
     strategy = SingleShotMarketStrategy(

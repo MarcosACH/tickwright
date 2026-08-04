@@ -26,6 +26,7 @@ from tickwright.domain import (
     OrderState,
     Position,
     Side,
+    StoreAccountMismatch,
 )
 from tickwright.domain.enums import OrderType
 from tickwright.engine.checkpoint import Checkpointer
@@ -435,3 +436,31 @@ def test_recovery_reads_the_ledger_before_it_rebuilds_the_order_cache() -> None:
     checkpointer.recover()
 
     assert timeline == ["ledger.load_account", "cache.all_orders"]
+
+
+def test_a_refused_store_is_never_mass_read_for_the_cache_it_will_not_use() -> None:
+    """What the ordering above is *for* (ADR-0043 §10).
+
+    The refusal is the reason the ledger goes first: a store this engine may not
+    trade is rejected on one row read, without deserializing every saga in it
+    first. Ordered the other way the refusal would still fire and still be
+    correct — it would just arrive after the most expensive read on the startup
+    path, on a run that is about to exit non-zero.
+    """
+    timeline: list[str] = []
+    store = _RecoveryOrderStore(timeline)
+    store.checkpoint_ledger(
+        account=Account.restore(
+            account_id="paper-other",
+            genesis_collateral=GENESIS,
+            genesis_ts_ns=7,
+            cash=GENESIS,
+        ),
+        ts_ns=2_000,
+    )
+    timeline.clear()
+
+    with pytest.raises(StoreAccountMismatch):
+        _checkpointer(store).recover()
+
+    assert timeline == ["ledger.load_account"]  # the rebuild was never reached

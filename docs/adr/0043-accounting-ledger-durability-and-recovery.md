@@ -257,7 +257,7 @@ This is a different call from ADR-0042 §2's refusal of a collateral-*currency* 
 
 **That predicate is the decision, not an implementation detail, and it gates both conditions.** The check must know which path it is on, and it is entitled to exactly one venue-declared object: `account_spec()`. Genesis is `None` precisely when the account's opening value is *ingested* rather than *declared*, which is the same fact as "this path has a venue to heal from" — so the field already carries the distinction both conditions turn on, and no venue-kind flag needs inventing to sit beside it. Each condition gets it wrong in a way the operator feels, and in opposite directions. Ungated, the second refuses a live store predating the ledger instead of healing it. Ungated, the **first** is worse: live's stored genesis is `accountValue − Σ unrealized_pnl` (ADR-0042 §6) while its declared genesis is `None`, so the two always differ and **every live restart after the first fail-fasts** — a check whose whole purpose is to catch a swapped account bricking the path it was never meant to police. ADR-0042 §6 already states the rule ("§3's fail-fast is inherently paper-only; ADR-0038's `account_id` check applies on both paths"); this bullet is where it becomes a condition rather than a remark.
 
-A second exception class was rejected: the operator's remedy is the same sentence either way — point the store at a fresh path, or restore the declared values — and a distinct name would buy precision nobody acts on differently.
+A second exception class was rejected: the operator's remedy is the same sentence either way — point the run at a fresh store, or restore the declared values — and a distinct name would buy precision nobody acts on differently.
 
 ## Consequences
 

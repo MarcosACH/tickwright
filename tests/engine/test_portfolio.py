@@ -22,14 +22,18 @@ from tickwright.domain import (
     FundingAccrual,
     InvariantViolation,
     MarkTick,
+    Order,
     OrderFilled,
     OrderFillEvent,
+    OrderState,
     Portfolio,
     Position,
     PositionView,
     Side,
     Store,
+    StoreAccountMismatch,
 )
+from tickwright.domain.enums import OrderType
 from tickwright.engine.portfolio import PortfolioProjection
 from tickwright.observability.testing import capture_events
 
@@ -112,6 +116,28 @@ def _projection(
         spec=spec,
         store=store if store is not None else SQLiteStore(":memory:"),
         clock=ManualClock(7),
+    )
+
+
+def _record_order_history(store: Store) -> None:
+    """Leave the store holding saga history and nothing else — the shape a
+    pre-ledger database upgrades in (ADR-0043 §8).
+
+    One order is enough: the refusal turns on ``has_orders()``, an existence
+    question the startup check is entitled to ask *instead of* the mass read.
+    """
+    store.checkpoint(
+        Order(
+            cloid="0xalpha-1",
+            strategy_id="alpha",
+            signal_id="alpha:BTC:1",
+            symbol="BTC",
+            side=Side.BUY,
+            quantity=Decimal("0.5"),
+            order_type=OrderType.MARKET,
+            state=OrderState.SUBMITTED,
+        ),
+        ts_ns=1_000,
     )
 
 
@@ -1013,3 +1039,221 @@ def test_a_second_materialisation_is_refused_rather_than_moving_the_genesis() ->
     row = store.load_account()
     assert row is not None
     assert row.genesis_collateral == Decimal("25.9604")
+
+
+def test_a_ledger_recorded_against_another_account_is_refused() -> None:
+    """The first of the surface's three refusals (ADR-0043 §10): the stored row
+    and ``account_spec()`` are two declarations about one account, and a restart
+    that finds them disagreeing has been pointed at somebody else's history.
+
+    ``account_id`` compares on **both** paths — it is the venue-qualified identity
+    ADR-0038 defines, declared rather than ingested on either — so this is the one
+    condition that is not gated on the genesis predicate.
+    """
+    store = SQLiteStore(":memory:")
+    store.checkpoint_ledger(
+        account=Account.restore(
+            account_id="paper-other",
+            genesis_collateral=Decimal("50000"),
+            genesis_ts_ns=7,
+            cash=Decimal("50000"),
+        ),
+        ts_ns=2_000,
+    )
+
+    with pytest.raises(StoreAccountMismatch) as refusal:
+        _projection("50000", store=store).recover()
+
+    # Named, not merely counted: the operator's remedy is to point the run at a
+    # fresh store or restore the declared value, and neither is choosable without
+    # knowing which field disagreed and what the two sides said.
+    assert "account_id" in str(refusal.value)
+    assert "paper-other" in str(refusal.value)
+    assert "paper-default" in str(refusal.value)
+
+
+def test_a_changed_paper_genesis_against_a_recorded_ledger_is_refused() -> None:
+    """A different opening balance is a different account history (ADR-0042 §3).
+
+    Genesis is written once and never re-derived, so an operator who edits
+    ``TICKWRIGHT_PAPER__GENESIS_COLLATERAL`` against a store that already holds a
+    ledger is asking for two irreconcilable things: the equity and effective
+    leverage that ledger's cash line was accrued against, and a different capital
+    base to measure them from. Silently keeping the stored number would report
+    against capital nobody chose, which is the very failure ADR-0042 §1 refuses a
+    *default* collateral to prevent.
+    """
+    store = SQLiteStore(":memory:")
+    store.checkpoint_ledger(
+        account=Account.restore(
+            account_id="paper-default",
+            genesis_collateral=Decimal("50000"),
+            genesis_ts_ns=7,
+            cash=Decimal("49000"),
+        ),
+        ts_ns=2_000,
+    )
+
+    with pytest.raises(StoreAccountMismatch) as refusal:
+        _projection("75000", store=store).recover()
+
+    assert "genesis_collateral" in str(refusal.value)
+    assert "50000" in str(refusal.value)
+    assert "75000" in str(refusal.value)
+
+
+def test_two_disagreeing_fields_are_reported_in_one_refusal() -> None:
+    """Every disagreeing field at once, not one per restart (ADR-0042 §3).
+
+    An operator who edited both the label and the collateral fixes what the first
+    restart told them about, restarts, and is refused again for the other — twice
+    the downtime for one mistake, and each cycle looks like a *new* fault rather
+    than the remainder of the known one.
+    """
+    store = SQLiteStore(":memory:")
+    store.checkpoint_ledger(
+        account=Account.restore(
+            account_id="paper-other",
+            genesis_collateral=Decimal("50000"),
+            genesis_ts_ns=7,
+            cash=Decimal("49000"),
+        ),
+        ts_ns=2_000,
+    )
+
+    with pytest.raises(StoreAccountMismatch) as refusal:
+        _projection("75000", store=store).recover()
+
+    # One field per line, both sides on it, and the remedy last — ADR-0042 §3's
+    # own layout. Read as a single blob, two mismatches are a sentence an operator
+    # has to parse; laid out, the report is a diff they can act on.
+    lines = str(refusal.value).splitlines()
+    assert [line.split(":")[0].strip() for line in lines[1:3]] == [
+        "account_id",
+        "genesis_collateral",
+    ]
+    assert "paper-other" in lines[1] and "paper-default" in lines[1]
+    assert "50000" in lines[2] and "75000" in lines[2]
+    assert "fresh" in lines[-1] or "fresh" in lines[-2]
+
+
+def test_a_genesis_that_round_tripped_to_another_representation_still_agrees() -> None:
+    """The comparison is on value, not on the string the store handed back.
+
+    Money is persisted as ``TEXT`` and is exact in *representation* (ADR-0043 §7),
+    so trailing zeros and exponent forms survive the round trip — and an operator
+    who wrote ``100000`` against a row recorded as ``1.00000E+5`` has changed
+    nothing about the account. Refusing that would make the check fire on the
+    store's own faithfulness.
+    """
+    store = SQLiteStore(":memory:")
+    store.checkpoint_ledger(
+        account=Account.restore(
+            account_id="paper-default",
+            genesis_collateral=Decimal("1.00000E+5"),
+            genesis_ts_ns=7,
+            cash=Decimal("100000"),
+        ),
+        ts_ns=2_000,
+    )
+
+    projection = _projection("100000", store=store)
+    projection.recover()
+
+    assert projection.account().cash == Decimal("100000")
+
+
+def test_a_paper_store_with_order_history_and_no_ledger_is_refused() -> None:
+    """The upgrade hazard, refused rather than backfilled (ADR-0043 §8).
+
+    A paper store predating the ledger carries an ``orders`` table full of filled
+    sagas. Left to seed, it would open a fresh ledger and report a flat account at
+    full cash — silently ignoring every fill it ever recorded. And it cannot be
+    reconstructed from those orders: that is event-sourced recovery through the
+    back door (ADR-0009), and it would not even work, because the per-fill fee
+    only exists on the event as of ADR-0036 and funding did not exist at all. The
+    fee and funding lines would be permanently zero and wrong — money invented as
+    never-charged. A loud failure is the only honest outcome.
+    """
+    store = SQLiteStore(":memory:")
+    _record_order_history(store)
+
+    with pytest.raises(StoreAccountMismatch):
+        _projection("100000", store=store).recover()
+
+    # No backfill and no seed: the refusal lands ahead of the genesis write, so a
+    # caught violation cannot leave behind the very fabricated ledger it refused.
+    assert store.load_account() is None
+
+
+def test_a_live_store_predating_the_ledger_starts_rather_than_being_refused() -> None:
+    """The ledger-less refusal is **paper-only**, and the gate is not optional
+    (ADR-0043 §8).
+
+    On live the same store — orders, no account row — is legitimate and
+    self-correcting: the barrier materialises the row from the venue's own account
+    read and positions heal from venue truth. Applied unconditionally, the
+    refusal would brick every live upgrade from a pre-ledger store, which is a
+    state the ADR calls legitimate one sentence above the refusal.
+    """
+    store = SQLiteStore(":memory:")
+    _record_order_history(store)
+
+    _projection(None, store=store).recover()
+
+    # Nothing seeded either: live's row is the barrier's to materialise.
+    assert store.load_account() is None
+
+
+def test_a_live_restart_is_not_refused_for_the_genesis_it_never_declared() -> None:
+    """The genesis comparison is gated on the same predicate, and this is the
+    direction that would hurt most (ADR-0043 §10).
+
+    Live's stored genesis is ``equity − Σ unrealized_pnl``, ingested at the
+    barrier; its declared genesis is ``None``, because there is no configured
+    counterpart to check against. Ungated, the two differ on every start after the
+    first — a check whose whole purpose is catching a swapped account would instead
+    fail-fast every live restart. ``account_id`` still compares here, and agrees.
+    """
+    store = SQLiteStore(":memory:")
+    store.checkpoint_ledger(
+        account=Account.restore(
+            account_id="hyperliquid-testnet-0xabc",
+            genesis_collateral=Decimal("25.9604"),
+            genesis_ts_ns=7,
+            cash=Decimal("31.5"),
+        ),
+        ts_ns=2_000,
+    )
+    projection = _projection(None, store=store)
+
+    projection.recover()
+
+    assert projection.account().cash == Decimal("31.5")
+
+
+def test_a_live_ledger_recorded_against_another_address_is_still_refused() -> None:
+    """``account_id`` compares on **both** paths (ADR-0042 §6, ADR-0038).
+
+    It is the venue-qualified identity, declared rather than ingested on either
+    venue, so it is the one field live has a counterpart for — and a live engine
+    pointed at another address's ledger would otherwise restore that account's
+    cash line and heal *this* account's positions into it.
+    """
+    store = SQLiteStore(":memory:")
+    store.checkpoint_ledger(
+        account=Account.restore(
+            account_id="hyperliquid-testnet-0xdef",
+            genesis_collateral=Decimal("25.9604"),
+            genesis_ts_ns=7,
+            cash=Decimal("31.5"),
+        ),
+        ts_ns=2_000,
+    )
+
+    with pytest.raises(StoreAccountMismatch) as refusal:
+        _projection(None, store=store).recover()
+
+    message = str(refusal.value)
+    assert "account_id" in message
+    assert "genesis_collateral" not in message  # nothing declared to disagree with

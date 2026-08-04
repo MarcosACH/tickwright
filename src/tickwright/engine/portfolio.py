@@ -33,6 +33,7 @@ from tickwright.domain import (
     PositionView,
     Side,
     Store,
+    StoreAccountMismatch,
     VenueAccountState,
     account_net_size,
     account_view,
@@ -51,6 +52,36 @@ _POSITION_EVENTS: dict[PositionChange, NamedEvent] = {
     PositionChange.CHANGED: NamedEvent.POSITION_CHANGED,
     PositionChange.CLOSED: NamedEvent.POSITION_CLOSED,
 }
+
+
+def _mismatch_report(disagreements: list[tuple[str, str, str]]) -> str:
+    """Lay every disagreeing field out as a two-column diff (ADR-0042 §3).
+
+    One line per field, both sides on it, remedy last — because two mismatches
+    read as a sentence are something an operator has to parse, and read as a diff
+    are something they can act on. The columns are padded to the widest entry for
+    the same reason: what matters is which side of which row changed.
+
+    The **store path** ADR-0042 §3's example also names is deliberately absent,
+    from the remedy as well as from the opening line. The check holds a ``Store``,
+    not a file — a path or a DSN is the adapter's own fact (ADR-0019) — and the
+    operator already knows which store they pointed the run at. What only the
+    engine can tell them is which fields disagreed.
+    """
+    label_width = max(len(label) for label, _, _ in disagreements) + 1
+    stored_width = max(len(stored) for _, stored, _ in disagreements)
+    rows = "\n".join(
+        f"  {label + ':':<{label_width}} stored {stored:<{stored_width}}  "
+        f"config declares {configured}"
+        for label, stored, configured in disagreements
+    )
+    return (
+        "the durable ledger belongs to a different account.\n"
+        f"{rows}\n"
+        "A different genesis is a different account history. Point the run at a "
+        "fresh store to open a new ledger, or restore the declared values to "
+        "resume this one."
+    )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -380,11 +411,13 @@ class PortfolioProjection:
         restore and the partitions are empty by the same fact; reading them would
         be a mass-read for rows that cannot exist.
 
-        (The store's disagreement refusals — a swapped account, a paper store
-        with order history and no ledger — are #188's, and land ahead of the seed
-        in this same step.)
+        The store's disagreement refusals land **ahead of the seed**, on the one
+        ``load_account`` this step already makes: a store this engine may not
+        trade is refused before it is written to, and before the mass read behind
+        this step ever runs.
         """
         stored = self._store.load_account()
+        self._refuse_disagreement(stored)
         if stored is None:
             self._seed_genesis()
             return
@@ -396,6 +429,52 @@ class PortfolioProjection:
             (position.strategy_id, position.symbol): position
             for position in self._store.all_positions()
         }
+
+    def _refuse_disagreement(self, stored: Account | None) -> None:
+        """Refuse a store this engine may not trade (ADR-0043 §10).
+
+        Takes ``stored`` rather than reading it, so the field comparison is paid
+        for by the one ``load_account`` ``recover`` already makes.
+
+        **Two disjoint conditions**, and they cannot both fire: a missing account
+        row leaves no fields to compare. The absent-row arm asks ``has_orders()``
+        — an existence question, never the mass read — because this whole step
+        runs *ahead* of ``cache.rebuild()`` precisely so a store that must not be
+        traded is refused before its history is deserialized.
+        """
+        declared = self._spec.genesis_collateral
+        if stored is None:
+            # Paper-only, on ADR-0043 §10's one predicate: order history behind an
+            # unopened ledger is the legitimate, self-healing state of a *live*
+            # store that predates the ledger — the barrier materialises the row
+            # and positions heal from venue truth. Paper has no venue to heal
+            # from, so the same state is the §8 upgrade hazard.
+            if declared is not None and self._store.has_orders():
+                raise StoreAccountMismatch(
+                    "this paper store holds order history but no ledger: its "
+                    "positions, fees and funding cannot be reconstructed from "
+                    "the orders alone (ADR-0043 §8), and seeding a fresh ledger "
+                    "would report a flat account at full cash. Point the run at "
+                    "a fresh store."
+                )
+            return
+        disagreements = []
+        if stored.account_id != self._spec.account_id:
+            disagreements.append(
+                ("account_id", repr(stored.account_id), repr(self._spec.account_id))
+            )
+        # Compared **only when the adapter declares one**: a ``None`` declaration
+        # is no counterpart to check against, not a disagreement (ADR-0043 §10).
+        # Ungated, live's stored genesis — ``equity − Σ unrealized_pnl``, ingested
+        # at the barrier — would differ from its declared ``None`` on every start,
+        # so a check meant to catch a swapped account would brick the path it was
+        # never meant to police.
+        if declared is not None and stored.genesis_collateral != declared:
+            disagreements.append(
+                ("genesis_collateral", str(stored.genesis_collateral), str(declared))
+            )
+        if disagreements:
+            raise StoreAccountMismatch(_mismatch_report(disagreements))
 
     def _seed_genesis(self) -> None:
         """Open the durable ledger at the genesis the venue *declared* (ADR-0043 §6).

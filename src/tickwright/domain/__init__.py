@@ -19,6 +19,7 @@ from .enums import (
 from .errors import (
     InvariantViolation,
     StartupReconciliationTimeout,
+    StoreAccountMismatch,
     VenueAccountModeUnsupported,
 )
 from .events import (
@@ -88,6 +89,7 @@ __all__ = [
     # errors
     "InvariantViolation",
     "StartupReconciliationTimeout",
+    "StoreAccountMismatch",
     "VenueAccountModeUnsupported",
     # events + value types
     "Account",

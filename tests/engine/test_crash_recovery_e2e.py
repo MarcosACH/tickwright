@@ -161,6 +161,12 @@ def _first_life(
         account_net=dict,
     )
     checks = checkpointer(store, clock=clock)
+    # Recovered before the feed starts, exactly as the runner starts a process
+    # (ADR-0043 §6): this is where paper's genesis row is written, so a life that
+    # skipped it would checkpoint its saga against a ledger that was never opened
+    # — order history with no account row behind it, the one shape #188 refuses
+    # outright. The crash below must leave a store the *runner* could have left.
+    checks.recover()
     manager = ExecutionManager(
         bus=bus,
         exchange=_CrashingTransport(venue, pre_send=pre_send),
@@ -201,12 +207,20 @@ def _second_life(
     backend: Backend, venue: PaperExchange, clock: ManualClock
 ) -> tuple[InMemoryBus, Reconciler, list[OrderEvent], Store]:
     """Recovery wiring over the survivors: a store reopened on the same durable
-    backing, a Cache rebuilt from it, a fresh bus and manager."""
+    backing, both read-models restored from it, a fresh bus and manager.
+
+    Restored through ``recover()`` rather than by rebuilding the ``Cache`` alone,
+    because the ordering of the two is the ``Checkpointer``'s own rule (ADR-0043
+    §6/§10) and this is the suite that most resembles the restart it governs.
+    Reaching past it for ``cache.rebuild()`` exercised half the verb and skipped
+    the half that can refuse the store — so the refusal had no crash-shaped case
+    behind it, and this wiring could drift from the runner's without a red test.
+    """
     bus = InMemoryBus()
     store = backend.open()
     checks = checkpointer(store, clock=clock)
+    checks.recover()
     cache = checks.cache
-    cache.rebuild()
     manager = ExecutionManager(
         bus=bus,
         exchange=venue,
@@ -312,6 +326,7 @@ def _life_through_the_fill(backend: Backend) -> ManualClock:
         account_net=dict,
     )
     checks = checkpointer(store, clock=clock)
+    checks.recover()  # a life starts the way the runner starts one (ADR-0043 §6)
     manager = ExecutionManager(bus=bus, exchange=venue, checkpointer=checks)
     bus.subscribe(Signal, manager.on_signal)
     bus.subscribe(ExecutionReport, manager.on_execution_report)
