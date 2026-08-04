@@ -10,16 +10,19 @@ come back an order of magnitude low with nothing in the response saying so
 (ADR-0046 §1). A wrong mode does not make one number wrong; it makes every
 account-grain number mean something else.
 
-Isolated here rather than inlined into the adapter because both guards are
-refusals that must fire before the barrier and before any order, and both fail
-**closed** — which is testable against recorded responses only if it is reachable
-without going near the order path.
+It is the first of the two guards this module is mapped to hold; ADR-0044 §7's
+leverage push lands behind it, gated by it, and is not here yet. Isolated from
+the adapter because both are refusals that must fire before the barrier and
+before any order, and both fail **closed** — which is testable against recorded
+responses only while it is reachable without going near the order path.
 """
 
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 from tickwright.domain import Clock, VenueAccountModeUnsupported
+
+from .reading import UNREADABLE
 
 InfoRead = Callable[[dict[str, Any]], Awaitable[object]]
 """One unsigned ``POST /info`` query, as the adapter makes it."""
@@ -86,7 +89,12 @@ async def verify_account_mode(
     while True:
         try:
             mode = await _read_account_mode(info, address=address)
-        except (OSError, ValueError) as exc:
+        # The two ways a boot read comes back empty, answered identically
+        # because at boot they cost the same thing: the venue was unreachable
+        # (``OSError``), or it answered with a body that is not a mode
+        # (``UNREADABLE`` — the venue read vocabulary every other grain of this
+        # adapter already catches, rather than a fourth hand-picked tuple).
+        except (OSError, *UNREADABLE) as exc:
             if clock.timestamp_ns() >= deadline_ns:
                 raise VenueAccountModeUnsupported(
                     f"could not read the abstraction mode of account {address} within "
@@ -110,13 +118,18 @@ async def _read_account_mode(info: InfoRead, *, address: str) -> str:
     control flow: the allowlist's refusal prints a remediation, and printing one
     here would send an operator to re-set a mode that was never the problem.
 
+    Raised as the ``TypeError`` ``reading.UNREADABLE`` already names, and for
+    the reason ``figure`` refuses a re-typed number: a body of the wrong type is
+    the same "we are not reading what we think we are" a missing field is. This
+    grain has no figure to parse, but it has the same contract to lose.
+
     Asked about the **trading** account rather than the signing key's own
     address: with an agent wallet those differ, and the mode is a property of
     the account whose numbers the ledger is bound to.
     """
     response = await info({"type": "userAbstraction", "user": address})
     if not isinstance(response, str):
-        raise ValueError(f"unrecognized userAbstraction response: {response!r}")
+        raise TypeError(f"non-string userAbstraction response {response!r}")
     return response
 
 
