@@ -54,6 +54,35 @@ _POSITION_EVENTS: dict[PositionChange, NamedEvent] = {
 }
 
 
+def _mismatch_report(disagreements: list[tuple[str, str, str]]) -> str:
+    """Lay every disagreeing field out as a two-column diff (ADR-0042 §3).
+
+    One line per field, both sides on it, remedy last — because two mismatches
+    read as a sentence are something an operator has to parse, and read as a diff
+    are something they can act on. The columns are padded to the widest entry for
+    the same reason: what matters is which side of which row changed.
+
+    The **store path** ADR-0042 §3's example also names is deliberately absent.
+    The check holds a ``Store``, not a file — a path or a DSN is the adapter's own
+    fact (ADR-0019) — and the operator already knows which store they pointed the
+    run at. What only the engine can tell them is which fields disagreed.
+    """
+    label_width = max(len(label) for label, _, _ in disagreements) + 1
+    stored_width = max(len(stored) for _, stored, _ in disagreements)
+    rows = "\n".join(
+        f"  {label + ':':<{label_width}} stored {stored:<{stored_width}}  "
+        f"config declares {configured}"
+        for label, stored, configured in disagreements
+    )
+    return (
+        "the durable ledger belongs to a different account.\n"
+        f"{rows}\n"
+        "A different genesis is a different account history. Point the store at a "
+        "fresh path to open a new ledger, or restore the declared values to resume "
+        "this one."
+    )
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class LedgerChange:
     """One fill's effect on the ledger: folded in memory, not yet durable.
@@ -431,7 +460,7 @@ class PortfolioProjection:
         disagreements = []
         if stored.account_id != self._spec.account_id:
             disagreements.append(
-                f"account_id: stored {stored.account_id!r}, configured {self._spec.account_id!r}"
+                ("account_id", repr(stored.account_id), repr(self._spec.account_id))
             )
         # Compared **only when the adapter declares one**: a ``None`` declaration
         # is no counterpart to check against, not a disagreement (ADR-0043 §10).
@@ -441,14 +470,10 @@ class PortfolioProjection:
         # never meant to police.
         if declared is not None and stored.genesis_collateral != declared:
             disagreements.append(
-                f"genesis_collateral: stored {stored.genesis_collateral}, configured {declared}"
+                ("genesis_collateral", str(stored.genesis_collateral), str(declared))
             )
         if disagreements:
-            raise StoreAccountMismatch(
-                "the durable ledger belongs to a different account than this run "
-                f"declares — {'; '.join(disagreements)}. Point the store at a fresh "
-                "path, or restore the declared values."
-            )
+            raise StoreAccountMismatch(_mismatch_report(disagreements))
 
     def _seed_genesis(self) -> None:
         """Open the durable ledger at the genesis the venue *declared* (ADR-0043 §6).

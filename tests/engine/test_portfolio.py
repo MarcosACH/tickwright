@@ -1124,9 +1124,17 @@ def test_two_disagreeing_fields_are_reported_in_one_refusal() -> None:
     with pytest.raises(StoreAccountMismatch) as refusal:
         _projection("75000", store=store).recover()
 
-    message = str(refusal.value)
-    assert "account_id" in message
-    assert "genesis_collateral" in message
+    # One field per line, both sides on it, and the remedy last — ADR-0042 §3's
+    # own layout. Read as a single blob, two mismatches are a sentence an operator
+    # has to parse; laid out, the report is a diff they can act on.
+    lines = str(refusal.value).splitlines()
+    assert [line.split(":")[0].strip() for line in lines[1:3]] == [
+        "account_id",
+        "genesis_collateral",
+    ]
+    assert "paper-other" in lines[1] and "paper-default" in lines[1]
+    assert "50000" in lines[2] and "75000" in lines[2]
+    assert "fresh" in lines[-1] or "fresh" in lines[-2]
 
 
 def test_a_genesis_that_round_tripped_to_another_representation_still_agrees() -> None:
