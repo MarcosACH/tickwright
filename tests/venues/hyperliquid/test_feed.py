@@ -12,12 +12,12 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from hyperliquid_fakes import FakeWsConnection, trade, trades_frame
+from hyperliquid_fakes import FakeWsConnection, asset_ctx_frame, trade, trades_frame
 from structlog.typing import EventDict
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
-from tickwright.domain import AggressorSide, MarketTick
+from tickwright.domain import AggressorSide, MarketTick, MarkTick
 from tickwright.observability.testing import capture_events
 from tickwright.venues.hyperliquid import HyperliquidConfig, HyperliquidFeed
 
@@ -29,23 +29,35 @@ def _fixture_frames() -> list[str]:
     return [line for line in text.splitlines() if line.strip()]
 
 
-def _drive(
-    frames: list[str], *, symbols: list[str], until_ticks: int
-) -> tuple[list[MarketTick], FakeWsConnection]:
-    """Run the feed over ``frames`` until ``until_ticks`` ticks arrive, then stop."""
+def _run_feed[E: (MarketTick, MarkTick)](
+    frames: list[str],
+    *,
+    symbols: list[str],
+    event_type: type[E],
+    until: int,
+    clock: ManualClock,
+) -> tuple[list[E], FakeWsConnection]:
+    """Run the feed over ``frames`` until ``until`` events of ``event_type``
+    arrive, then stop.
 
-    async def main() -> tuple[list[MarketTick], FakeWsConnection]:
+    Parameterized on the event type rather than copied per stream: the two the
+    feed sources reach the bus down one identical connect/subscribe/read/drain
+    path, so a driver per stream would be the same thirty lines asserting
+    nothing the other does not. A third stream costs the wrapper below, not
+    another copy of this.
+    """
+
+    async def main() -> tuple[list[E], FakeWsConnection]:
         bus = InMemoryBus()
-        clock = ManualClock()
-        seen: list[MarketTick] = []
+        seen: list[E] = []
         enough = asyncio.Event()
 
-        async def record(tick: MarketTick) -> None:
-            seen.append(tick)
-            if len(seen) >= until_ticks:
+        async def record(event: E) -> None:
+            seen.append(event)
+            if len(seen) >= until:
                 enough.set()
 
-        bus.subscribe(MarketTick, record)
+        bus.subscribe(event_type, record)
         connection = FakeWsConnection(frames)
 
         async def connect(url: str) -> FakeWsConnection:
@@ -66,6 +78,16 @@ def _drive(
     return asyncio.run(main())
 
 
+def _drive(
+    frames: list[str], *, symbols: list[str], until_ticks: int
+) -> tuple[list[MarketTick], FakeWsConnection]:
+    """Run the feed until ``until_ticks`` ticks arrive. A tick's ``ts_event`` is
+    mapped from the venue's own ``time``, so the clock here is never read."""
+    return _run_feed(
+        frames, symbols=symbols, event_type=MarketTick, until=until_ticks, clock=ManualClock()
+    )
+
+
 def test_recorded_trades_frames_parse_into_market_ticks() -> None:
     seen, _ = _drive(_fixture_frames(), symbols=["BTC"], until_ticks=2)
 
@@ -79,16 +101,6 @@ def test_recorded_trades_frames_parse_into_market_ticks() -> None:
 
     assert sell.aggressor_side is AggressorSide.SELL
     assert sell.price == Decimal("43249.0")
-
-
-def test_subscribes_the_trades_channel_per_configured_symbol() -> None:
-    frames = [trades_frame(trade("BTC", "100", 1))]
-    _, connection = _drive(frames, symbols=["BTC", "ETH"], until_ticks=1)
-
-    assert [json.loads(m) for m in connection.sent] == [
-        {"method": "subscribe", "subscription": {"type": "trades", "coin": "BTC"}},
-        {"method": "subscribe", "subscription": {"type": "trades", "coin": "ETH"}},
-    ]
 
 
 def test_prices_and_sizes_parse_to_decimal_never_float() -> None:
@@ -292,6 +304,111 @@ def test_stop_does_not_trigger_a_reconnect() -> None:
 
     asyncio.run(main())
     assert connect_count == 1
+
+
+def _drive_marks(
+    frames: list[str], *, symbols: list[str], until_marks: int
+) -> tuple[list[MarkTick], FakeWsConnection]:
+    """``_drive``'s mark twin: run until ``until_marks`` marks arrive, then stop.
+
+    The clock is pinned rather than defaulted because unlike a tick's, a mark's
+    ``ts_event`` **is** the clock read — the ``activeAssetCtx`` channel carries
+    no instant of its own — so it is an assertable value here (ADR-0039).
+    """
+    return _run_feed(
+        frames,
+        symbols=symbols,
+        event_type=MarkTick,
+        until=until_marks,
+        clock=ManualClock(start_ns=4_000),
+    )
+
+
+def test_the_active_asset_ctx_channel_yields_one_mark_per_update() -> None:
+    """The live mark's ingress (ADR-0039): ``ctx.markPx``, and nothing else in
+    that context.
+
+    ``oraclePx`` is funding's price and ``midPx`` is the book's — both ride the
+    same frame, and either would value a position against a number the venue
+    does not margin it with. The channel carries no timestamp of its own, so
+    ``ts_event`` is receipt time off the injected clock (ADR-0005/0039).
+    """
+    frames = [asset_ctx_frame("BTC", "43251.0")]
+    seen, _ = _drive_marks(frames, symbols=["BTC"], until_marks=1)
+
+    mark = seen[0]
+    assert mark.symbol == "BTC"
+    assert mark.price == Decimal("43251.0")
+    assert mark.ts_event == 4_000
+    # The live form of the weak key: no ``seq``, because receipt time already
+    # separates two marks on a channel that updates every few seconds.
+    assert mark.event_id == "BTC:4000"
+
+
+def test_the_mark_channel_is_subscribed_per_symbol_beside_the_trades_one() -> None:
+    """Both channels, per coin, on one connection — and both **unauthenticated**,
+    so the live feed still needs no key at all (ADR-0021)."""
+    frames = [asset_ctx_frame("BTC", "100")]
+    _, connection = _drive_marks(frames, symbols=["BTC", "ETH"], until_marks=1)
+
+    assert [json.loads(m) for m in connection.sent] == [
+        {"method": "subscribe", "subscription": {"type": "trades", "coin": "BTC"}},
+        {"method": "subscribe", "subscription": {"type": "activeAssetCtx", "coin": "BTC"}},
+        {"method": "subscribe", "subscription": {"type": "trades", "coin": "ETH"}},
+        {"method": "subscribe", "subscription": {"type": "activeAssetCtx", "coin": "ETH"}},
+    ]
+
+
+def test_mark_prices_parse_to_decimal_never_float() -> None:
+    frames = [asset_ctx_frame("BTC", "0.1")]
+    seen, _ = _drive_marks(frames, symbols=["BTC"], until_marks=1)
+
+    assert isinstance(seen[0].price, Decimal)
+    assert seen[0].price == Decimal("0.1")  # exact — a float round-trip would not be
+
+
+@pytest.mark.parametrize("figure", ["NaN", "Infinity", "-Infinity"])
+def test_a_non_finite_mark_is_dropped_rather_than_valuing_a_position(figure: str) -> None:
+    """The same refusal the tick figures get, and it matters more here: a
+    ``NaN`` mark would not merely mis-publish, it would propagate into every
+    Tier-2 number the projection recomputes from it and surface as an
+    ``InvalidOperation`` from some comparison far downstream."""
+    frames = [asset_ctx_frame("BTC", figure), asset_ctx_frame("BTC", "100")]
+    with capture_events() as logs:
+        seen, _ = _drive_marks(frames, symbols=["BTC"], until_marks=1)
+
+    assert [m.price for m in seen] == [Decimal("100")]
+    assert [record["event"] for record in logs] == ["feed.frame_dropped"]
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        pytest.param({"coin": "BTC", "ctx": {"oraclePx": "1"}}, id="ctx-without-markPx"),
+        pytest.param({"coin": "BTC"}, id="no-ctx-at-all"),
+        pytest.param({"coin": "BTC", "ctx": "43251.0"}, id="ctx-not-an-object"),
+        pytest.param(["BTC", {"markPx": "1"}], id="data-not-an-object"),
+        pytest.param(None, id="data-null"),
+    ],
+)
+def test_a_mark_frame_we_cannot_read_is_dropped_and_named_not_faulted(data: object) -> None:
+    """Every shape the mark could arrive malformed in answers the same way: one
+    ``feed.frame_dropped`` and a skip, never a fault and never a mark.
+
+    The live stream is lossy by contract (ADR-0023), and a dead mark surfaces as
+    Tier-2 divergence on the reconcile cycle — so refusing one frame costs a
+    valuation refresh, where faulting the feed would cost the run. The next good
+    frame still flows, which is what makes that trade-off honest.
+    """
+    frames = [
+        json.dumps({"channel": "activeAssetCtx", "data": data}),
+        asset_ctx_frame("BTC", "100"),
+    ]
+    with capture_events() as logs:
+        seen, _ = _drive_marks(frames, symbols=["BTC"], until_marks=1)
+
+    assert [m.price for m in seen] == [Decimal("100")]
+    assert [record["event"] for record in logs] == ["feed.frame_dropped"]
 
 
 def test_non_trades_frames_are_ignored() -> None:

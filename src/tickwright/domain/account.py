@@ -45,9 +45,25 @@ class AccountView:
     Carries no realized PnL and no liquidation price — both are wrong at this
     grain (ADR-0041 §2/§4). ``cash`` is Tier-1 and therefore never ``None``, so
     a cold start is not a reporting blackout (ADR-0041 §6).
+
+    Assembled by ``domain.valuation``, never by the aggregate: every Tier-2 Σ
+    here ranges over positions the ``Account`` knows nothing about.
+
+    **No field defaults**, for the reason ``PositionView`` states: a defaulted
+    ``equity`` would let a view be built claiming the Σ was uncomputable without
+    any term having been examined.
     """
 
     cash: Decimal
+    equity: Decimal | None
+    """``cash + Σ unrealized_pnl`` over **every** position — the account's real
+    backing value (ADR-0041 §4).
+
+    ``None`` iff a contributing term needs a mark that is absent, which is a
+    genuine cross-strategy coupling: one un-marked symbol makes the total
+    uncomputable for every strategy, because equity is an account-wide fact and
+    a partial sum of it is a different quantity wearing its name (ADR-0041 §6).
+    An account holding nothing has no such term and reads its cash line."""
 
 
 class Account:
@@ -84,10 +100,6 @@ class Account:
         """The Tier-1 collateral balance. Moves only through this class's
         accrual methods, which are the closed write-set (ADR-0042 §4)."""
         return self._cash
-
-    def view(self) -> AccountView:
-        """A frozen Tier-1 snapshot of the account-wide pool."""
-        return AccountView(cash=self._cash)
 
     def accrue_realized(self, amount: Decimal, *, event_id: str) -> None:
         """``+`` realized PnL, one of the four accruing inputs (ADR-0042 §4).

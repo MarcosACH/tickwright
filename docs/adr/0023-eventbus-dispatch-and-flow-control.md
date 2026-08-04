@@ -24,6 +24,17 @@ per symbol ever matters. The **`MarkTick`** valuation event (ADR-0039) joins it 
 — also last-value-wins per symbol, so it conflates identically and only its latest value drives the
 recomputed Tier-2 read.
 
+**(Refined by [#175](https://github.com/MarcosACH/tickwright/issues/175) — the buffer key is
+`(stream, symbol)`, not the symbol alone.** Every "per symbol" above was written when `MarketTick`
+was the only market data there was, so the symbol *was* the whole key; with a second stream on the
+buffer that wording reads as one slot both share, which would be wrong. "The same rule" means
+last-value-wins **within each stream**: a mark is not a later version of a trade, so a BTC mark
+landing on a queued BTC trade must not supersede it — the account would stop filling against a
+stream that was still arriving — and a busy symbol's marks must not starve behind its trades.
+Within its own stream a mark conflates exactly as a trade does, drop named. This narrows the key
+and reopens nothing: the two scoping rules below, the soundness argument above, and `ReplayFeed`'s
+no-conflation exemption are all untouched.**)**
+
 Two load-bearing scoping rules:
 
 1. **Conflation is market-data-only.** `Signal`, `ExecutionReport`, and `OrderEvent` are never

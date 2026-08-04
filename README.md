@@ -26,9 +26,9 @@ order, and how the system recovers when the process dies mid-placement.
 ## v1 scope (deliberately narrow)
 
 - **One real venue:** [Hyperliquid](https://hyperliquid.gitbook.io/hyperliquid-docs) — market data
-  needs **no auth** (the `trades` WebSocket channel is unauthenticated), so the repo runs end-to-end
-  with zero API keys. The write path (placing orders) needs a signing key; the paper default needs
-  none.
+  needs **no auth** (both WebSocket channels it reads — `trades` and `activeAssetCtx` — are
+  unauthenticated), so the repo runs end-to-end with zero API keys. The write path (placing orders)
+  needs a signing key; the paper default needs none.
 - **One simulated venue:** a deterministic, in-process **paper exchange** — the default and the star
   of the MVP. It fills off the tick stream with a configurable fill model (slippage / partials /
   latency), so the repo is runnable and fully testable by anyone with zero setup.

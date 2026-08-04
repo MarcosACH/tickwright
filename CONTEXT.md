@@ -335,14 +335,17 @@ leverage, liquidation price); **never a fill input** and **never seen by a [[Str
 (reached only through the [[Portfolio]] seam). Provenance differs by deployment, compute does not:
 live carries the venue mark (`activeAssetCtx`), paper and replay carry the **last-trade proxy** (the
 latest [[MarketTick]] `price`), so there is one mark per deployment and no runtime fallback.
-[[Conflation|Conflates]] last-value-wins per symbol like a [[MarketTick]]; a stale mark **freezes**
+[[Conflation|Conflates]] last-value-wins per symbol like a [[MarketTick]] — on its own stream,
+never against one; a stale mark **freezes**
 at its last value, a wholly-absent mark makes the mark-dependent Tier-2 reads **`None`** (never a
 fabricated flat). Prices are `Decimal`. See ADR-0039, ADR-0034, ADR-0027.
 _Avoid_: oracle price (a different venue price — used for funding, not margining), mid, index price.
 
 **Conflation**:
-Shedding stale market data under backpressure by keeping only the **latest tick per symbol** (both
-[[MarketTick]] and [[MarkTick]] — each last-value-wins). The
+Shedding stale market data under backpressure by keeping only the **latest value per stream per
+symbol** — [[MarketTick]] and [[MarkTick]] are two streams, each last-value-wins **on its own**,
+because a mark is not a later version of a trade and swallowing one for the other would stop the
+account filling against a stream that is still arriving. The
 live [[MarketFeed]] conflates at ingress (emitting a `feed.lagged` named event on each drop), never
 the [[EventBus]]; it is **market-data only** — [[Signal]]s and order-lifecycle [[Event]]s are never
 dropped — and happens **upstream of publish**, so both bus backends see the same stream. The

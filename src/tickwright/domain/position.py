@@ -44,6 +44,19 @@ class PositionView:
     A distinct type from the mutable aggregate, which moves under the reader on
     the next fill. Every Tier-1 field is a real ``Decimal``, never ``None`` —
     readable even in the recovery window before any mark (ADR-0041 §6).
+
+    Assembled by ``domain.valuation``, never by the aggregate itself: the
+    position-grain half is computed off the symbol's *account-net* size, which
+    no single partition holds (ADR-0035).
+
+    **No field defaults**, the Tier-2 ones included. The nullability is real —
+    an absent mark is a genuine state — but *defaulting* to it is a different
+    thing: it would let a caller construct a view that claims "no mark was ever
+    seen" without going near the per-term rule that decides when that is true.
+    That is the same silent-wrong-answer ``position_view`` refuses for its own
+    inputs, and refusing it here is what makes the assembly function the only
+    way to obtain a view whose fields all came from one ``(position, mark)``
+    read (ADR-0041 §1). ``kw_only`` throughout, so this costs no field ordering.
     """
 
     symbol: str
@@ -52,6 +65,30 @@ class PositionView:
     realized_pnl: Decimal
     fees: Decimal
     funding: Decimal
+    unrealized_pnl: Decimal | None
+    """This partition's own open exposure marked to the latest mark, Tier-2 and
+    recomputed on every read (ADR-0034).
+
+    ``None`` when the mark is absent **and this term needs it** — a flat slice
+    reads ``0``, because ``0 × (mark − entry)`` needs no mark (ADR-0041 §6).
+    Never fabricated as a zero on a real position: unknown and worthless are
+    different answers, and only one of them is safe to trade on."""
+    notional: Decimal | None
+    """The symbol's exposure at position grain: ``|account net size| × mark``.
+
+    **Not** this strategy's slice — the venue holds one position per symbol and
+    keys every economic property of it there, never per strategy (ADR-0041 §4),
+    so two strategies long the same symbol read one notional. A magnitude, since
+    exposure has no direction. ``None`` on an absent mark unless the account nets
+    flat, where ``|0| × mark`` is zero at every mark."""
+    mark_ts: int | None
+    """The observation instant of the mark this view was valued at, ``None`` when
+    the projection holds none for the symbol (ADR-0041 §6).
+
+    Staleness is **exposed, not decided**: there is no max-age on the read path,
+    so a strategy — which holds a ``Clock`` — compares this to now and judges for
+    itself. Without it a stale-but-present mark would be undetectable, since a
+    frozen mark still produces real numbers."""
 
 
 def account_net_size(positions: Iterable["Position"]) -> dict[str, Decimal]:
@@ -124,16 +161,19 @@ class Position:
         record: realized PnL, fees and funding are retained (P1 #119)."""
         return self.signed_size == _ZERO
 
-    def view(self) -> PositionView:
-        """A frozen Tier-1 snapshot of this partition's own-attribution slice."""
-        return PositionView(
-            symbol=self.symbol,
-            size=self.signed_size,
-            entry_price=self.entry_price,
-            realized_pnl=self.realized_pnl,
-            fees=self.fees,
-            funding=self.funding,
-        )
+    def unrealized_pnl(self, mark: Decimal) -> Decimal:
+        """This partition's open exposure marked to ``mark`` (ADR-0045).
+
+        ``signed_size × (mark − entry_price)``, so the sign rides the position
+        rather than the mark's direction: a short gains as the mark falls. The
+        one Tier-2 query the aggregate keeps, because its own state plus a mark
+        is the whole of what it needs — everything account-net- or pool-coupled
+        lives in ``valuation`` instead (ADR-0035).
+
+        **Gross**, like realized PnL: fees and funding accrue on their own lines
+        and are never folded in (ADR-0045 §3).
+        """
+        return self.signed_size * (mark - self.entry_price)
 
     def apply(self, event: OrderFillEvent, *, side: Side) -> tuple[PositionChange, ...]:
         """Fold ``event`` into this partition; idempotent and checked.

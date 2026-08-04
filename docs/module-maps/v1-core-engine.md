@@ -179,7 +179,7 @@ src/tickwright/
 
 ### hyperliquid (`venues/hyperliquid/`)
 
-**Interface:** The one self-contained venue package (venue = extension unit, ADR-0031/0032): `HyperliquidFeed` (async WS `trades` channel, no auth, conflation at ingress with `feed.lagged`), `HyperliquidExchange` (async HTTP + SDK/`eth-account` signing utilities only; MARKET → aggressive-IOC-limit translation with slippage bound; `post_only` → ALO; perps only), instrument-spec sourcing from the meta endpoint, and `HyperliquidConfig`. Callers must know: signing key is env-only, never persisted, redacted from logs; `fetch_*` → `None` on failure; testnet/mainnet via `TICKWRIGHT_HYPERLIQUID__TESTNET`.
+**Interface:** The one self-contained venue package (venue = extension unit, ADR-0031/0032): `HyperliquidFeed` (async WS, two public channels per coin — `trades` → `MarketTick`, `activeAssetCtx` → `MarkTick` from `ctx.markPx` (ADR-0039) — both unauthenticated, so the feed holds no key material at all; conflation at ingress with `feed.lagged`, keyed `(stream, symbol)` so a mark never swallows the trade queued beside it), `HyperliquidExchange` (async HTTP + SDK/`eth-account` signing utilities only; MARKET → aggressive-IOC-limit translation with slippage bound; `post_only` → ALO; perps only), instrument-spec sourcing from the meta endpoint, and `HyperliquidConfig`. Callers must know: signing key is env-only, never persisted, redacted from logs; `fetch_*` → `None` on failure; testnet/mainnet via `TICKWRIGHT_HYPERLIQUID__TESTNET`.
 
 **Responsibilities:** All venue knowledge — symbol/asset mapping, endpoints, auth, quirk translation. No saga, no engine imports, no other-adapter imports.
 

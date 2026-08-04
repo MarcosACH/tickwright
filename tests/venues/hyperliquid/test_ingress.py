@@ -12,7 +12,7 @@ from decimal import Decimal
 from structlog.typing import EventDict
 
 from tickwright.adapters.bus import InMemoryBus
-from tickwright.domain import AggressorSide, MarketTick
+from tickwright.domain import AggressorSide, MarketTick, MarkTick
 from tickwright.observability.testing import capture_events
 from tickwright.venues.hyperliquid.ingress import ConflatingIngress
 
@@ -26,6 +26,15 @@ def _tick(symbol: str, price: str, trade_id: str) -> MarketTick:
         trade_id=trade_id,
         seq=0,
         venue_trade_id=True,
+        ts_event=1_700_000_000_000_000_000,
+        ts_init=1_700_000_000_000_000_000,
+    )
+
+
+def _mark(symbol: str, price: str) -> MarkTick:
+    return MarkTick(
+        symbol=symbol,
+        price=Decimal(price),
         ts_event=1_700_000_000_000_000_000,
         ts_init=1_700_000_000_000_000_000,
     )
@@ -69,6 +78,110 @@ def test_close_on_an_empty_buffer_ends_the_drain() -> None:
         await asyncio.wait_for(drain, timeout=2)
 
     asyncio.run(main())  # returns iff close() unblocks the parked drain
+
+
+def test_a_marks_conflation_is_independent_of_the_trades_for_the_same_symbol() -> None:
+    """Two market-data streams, each last-value-wins **on its own** (ADR-0023).
+
+    They share a symbol and nothing else: a mark is not a later version of a
+    trade. Keyed on the symbol alone, one BTC mark would silently swallow the
+    BTC trade queued beside it — the account would stop filling against a stream
+    that was arriving — and a busy symbol's marks would starve behind its
+    trades. So the buffer keeps one slot per stream per symbol.
+
+    Both are folded while the first publish is stuck, so the whole exchange
+    happens under real backpressure rather than passing by draining fast.
+    """
+
+    async def main() -> tuple[list[object], list[EventDict]]:
+        bus = InMemoryBus()
+        seen: list[object] = []
+        release = asyncio.Event()
+        first_delivered = asyncio.Event()
+
+        async def slow_consumer(event: object) -> None:
+            seen.append(event)
+            if len(seen) == 1:
+                first_delivered.set()
+                await release.wait()
+
+        bus.subscribe(MarketTick, slow_consumer)
+        bus.subscribe(MarkTick, slow_consumer)
+        ingress = ConflatingIngress(bus=bus)
+
+        with capture_events() as logs:
+            drain = asyncio.create_task(ingress.drain())
+            ingress.offer(_tick("ETH", "50", "0"))  # blocks the drain
+            await asyncio.wait_for(first_delivered.wait(), timeout=2)
+            ingress.offer(_tick("BTC", "100", "1"))
+            ingress.offer(_mark("BTC", "101"))
+            release.set()
+
+            async def rest_published() -> None:
+                while len(seen) < 3:
+                    await asyncio.sleep(0)
+
+            await asyncio.wait_for(rest_published(), timeout=2)
+            ingress.close()
+            await asyncio.wait_for(drain, timeout=2)
+        return seen, [log for log in logs if log["event"] == "feed.lagged"]
+
+    seen, lagged = asyncio.run(main())
+
+    assert [type(event).__name__ for event in seen] == ["MarketTick", "MarketTick", "MarkTick"]
+    assert lagged == []  # neither superseded the other, so nothing was dropped
+
+
+def test_a_superseded_mark_is_dropped_and_named_like_any_other_stale_tick() -> None:
+    """Within its own stream a mark conflates exactly as a trade does — it is a
+    latest-value by nature, so an unpublished one is the most droppable thing
+    the feed carries. The drop is still named, never silent."""
+
+    async def main() -> tuple[list[MarkTick], list[EventDict]]:
+        bus = InMemoryBus()
+        seen: list[MarkTick] = []
+        release = asyncio.Event()
+        first_delivered = asyncio.Event()
+
+        async def slow_consumer(mark: MarkTick) -> None:
+            seen.append(mark)
+            if len(seen) == 1:
+                first_delivered.set()
+                await release.wait()
+
+        bus.subscribe(MarkTick, slow_consumer)
+        ingress = ConflatingIngress(bus=bus)
+
+        with capture_events() as logs:
+            drain = asyncio.create_task(ingress.drain())
+            ingress.offer(_mark("BTC", "100"))
+            await asyncio.wait_for(first_delivered.wait(), timeout=2)
+            ingress.offer(_mark("BTC", "101"))
+            ingress.offer(_mark("BTC", "102"))  # supersedes 101 → one drop
+            release.set()
+
+            async def rest_published() -> None:
+                while len(seen) < 2:
+                    await asyncio.sleep(0)
+
+            await asyncio.wait_for(rest_published(), timeout=2)
+            ingress.close()
+            await asyncio.wait_for(drain, timeout=2)
+        return seen, [log for log in logs if log["event"] == "feed.lagged"]
+
+    seen, lagged = asyncio.run(main())
+
+    assert [m.price for m in seen] == [Decimal("100"), Decimal("102")]
+    assert len(lagged) == 1
+    # The whole record, not just the symbol: this catalog entry is the *only*
+    # place a conflation drop is observable (ADR-0020), so its field set is the
+    # operator contract. ``stream`` is what tells an operator which of the two
+    # market-data streams thinned, and a mark carries no ``dropped_trade_id``
+    # to report — pinning both is what would catch a mark drop that started
+    # claiming a trade's id, or a ``stream`` silently lost.
+    assert lagged[0]["symbol"] == "BTC"
+    assert lagged[0]["stream"] == "MarkTick"
+    assert lagged[0]["dropped_trade_id"] is None
 
 
 def test_backpressure_keeps_only_the_latest_per_symbol_and_names_each_drop() -> None:
@@ -118,4 +231,5 @@ def test_backpressure_keeps_only_the_latest_per_symbol_and_names_each_drop() -> 
     ]
     assert len(lagged) == 1
     assert lagged[0]["symbol"] == "BTC"
+    assert lagged[0]["stream"] == "MarketTick"
     assert lagged[0]["dropped_trade_id"] == "2"

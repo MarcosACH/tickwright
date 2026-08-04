@@ -96,7 +96,9 @@ auth, quirk translation — and importing no other adapter. It provides both a `
 [`venues/hyperliquid/`](../src/tickwright/venues/hyperliquid/) as the reference.
 
 - [ ] Create `src/tickwright/venues/<venue>/` with a `MarketFeed` adapter (`start`/`stop`, publishes
-  `MarketTick`s), an `Exchange` adapter
+  `MarketTick`s **and `MarkTick`s** — the mark is market data and enters here, never off a reconcile
+  pull, so a feed that omits it leaves every Tier-2 valuation reading `None`, ADR-0039), an
+  `Exchange` adapter
   (`start`/`stop`/`place`/`cancel`/`fetch_order`/`account_spec`/`instrument_specs`), spec sourcing,
   and a `<Venue>Config`.
 - [ ] Honor the `Exchange` contracts: `fetch_*` returns **`None` on a failed read** (never `[]` — an

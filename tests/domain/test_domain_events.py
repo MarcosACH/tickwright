@@ -17,6 +17,7 @@ from tickwright.domain import (
     FillReport,
     FundingAccrual,
     MarketTick,
+    MarkTick,
     OrderFilled,
     OrderPlaced,
     OrderState,
@@ -59,6 +60,33 @@ def test_market_tick_with_a_venue_trade_id_dedups_on_symbol_and_tid() -> None:
     )
     # Live-form weak key (ADR-0027): {symbol}:{tid} — tid is a real venue id.
     assert tick.event_id == "BTC:900000000000001"
+
+
+def test_mark_tick_dedups_on_symbol_and_instant_and_orders_per_symbol() -> None:
+    """The live form of the mark's weak key (ADR-0039): ``{symbol}:{ts_event}``.
+
+    A mark is a latest-value, not a correctness key, so the id is audit-only —
+    which is why receipt time is enough to tell two of them apart on a channel
+    the venue pushes every few seconds.
+    """
+    mark = MarkTick(ts_event=1_000, ts_init=1_000, symbol="BTC", price=Decimal("42000.5"))
+
+    assert mark.event_id == "BTC:1000"
+    assert mark.partition_key == "BTC"
+
+
+def test_a_replayed_mark_tick_disambiguates_a_shared_instant_with_its_seq() -> None:
+    """The replay form (ADR-0039): ``{symbol}:{ts_event}:{seq}``.
+
+    A recorded file can hold several rows at one ``ts_event`` — the venue's own
+    millisecond stamp, widened to ns — so the derived marks would otherwise
+    collide on a key the live channel's receipt time keeps distinct.
+    """
+    first = MarkTick(ts_event=1_000, ts_init=1_000, symbol="BTC", price=Decimal("42000"), seq=0)
+    second = MarkTick(ts_event=1_000, ts_init=1_000, symbol="BTC", price=Decimal("42100"), seq=1)
+
+    assert first.event_id == "BTC:1000:0"
+    assert second.event_id == "BTC:1000:1"
 
 
 def test_place_signal_event_id_is_the_signal_id() -> None:

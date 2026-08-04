@@ -44,7 +44,7 @@ A new market-data variant in the `MarketTick` lineage (ADR-0027), a frozen datac
 | `price` | `activeAssetCtx` `ctx.markPx` | `Decimal` |
 | `ts_event` | receipt time (ns, ADR-0005) | `int` |
 
-It carries no `size`, `aggressor_side`, or `trade_id` — it is not a trade. Like `MarketTick` its dedup key is **weak** (a mark is a latest-value, not a correctness key, ADR-0025): `event_id = {symbol}:{ts_event}` on live, `{symbol}:{ts_event}:{seq}` on `ReplayFeed`. It **conflates identically to `MarketTick`** — last-value-wins per symbol at feed ingress, `tick.conflated` on each drop, never on `ReplayFeed` (ADR-0023).
+It carries no `size`, `aggressor_side`, or `trade_id` — it is not a trade. Like `MarketTick` its dedup key is **weak** (a mark is a latest-value, not a correctness key, ADR-0025): `event_id = {symbol}:{ts_event}` on live, `{symbol}:{ts_event}:{seq}` on `ReplayFeed`. It **conflates identically to `MarketTick`** — last-value-wins per symbol at feed ingress, `tick.conflated` on each drop, never on `ReplayFeed` (ADR-0023). **(Refined by [#175](https://github.com/MarcosACH/tickwright/issues/175): "identically" means *within its own stream*.** The ingress buffer keys `(stream, symbol)`, not the symbol alone — a mark is not a later version of a trade, so one BTC mark must never swallow the BTC trade queued beside it, and a busy symbol's marks must not starve behind its trades. Read as a shared per-symbol slot this sentence would have specified exactly the defect the key exists to prevent. ADR-0023's conflation section carries the same note; the drop is named `feed.lagged` there, which is the name that shipped.**)**
 
 ## Strategies do not see the mark (in v1)
 

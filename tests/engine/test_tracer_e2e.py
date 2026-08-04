@@ -32,8 +32,10 @@ from tickwright.domain import (
     Event,
     ExecutionReport,
     FillReport,
+    Handler,
     InstrumentSpec,
     MarketTick,
+    MarkTick,
     OrderEvent,
     OrderFilled,
     OrderPlaced,
@@ -41,6 +43,7 @@ from tickwright.domain import (
     OrderSubmitted,
     OrderType,
     PlaceSignal,
+    Portfolio,
     Side,
     Signal,
     TimeInForce,
@@ -48,6 +51,7 @@ from tickwright.domain import (
 )
 from tickwright.engine.checkpoint import Checkpointer
 from tickwright.engine.execution import ExecutionManager
+from tickwright.engine.portfolio import PortfolioProjection
 from tickwright.strategies import SingleShotMarketStrategy
 
 # The paper account's opening cash, declared here rather than taken from
@@ -100,7 +104,7 @@ def _run(
     *,
     close_with: PlaceSignal | None = None,
     instrument_specs: dict[str, InstrumentSpec] | None = None,
-) -> tuple[list[Event], SingleShotMarketStrategy, SQLiteStore]:
+) -> tuple[list[Event], SingleShotMarketStrategy, SQLiteStore, Portfolio]:
     """Wire and drive the whole pipeline once; return every dispatched event.
 
     ``close_with`` publishes one more signal after end-of-file, which is how the
@@ -141,6 +145,10 @@ def _run(
     recorded: list[Event] = []
     bus.subscribe(Event, lambda ev: _record(recorded, ev))
     bus.subscribe(MarketTick, strategy.on_tick)
+    # The Tier-2 half's ingress, exactly as the runner wires it: the mark is the
+    # one accounting input the projection *subscribes* to rather than being
+    # handed on a write path (ADR-0039).
+    bus.subscribe(MarkTick, _observe(projection))
     bus.subscribe(Signal, manager.on_signal)
     bus.subscribe(ExecutionReport, manager.on_execution_report)
     bus.subscribe(OrderEvent, strategy.on_order_event)
@@ -154,13 +162,13 @@ def _run(
         await bus.close()
 
     asyncio.run(drive())
-    return recorded, strategy, store
+    return recorded, strategy, store, projection.for_strategy("trivial")
 
 
 @pytest.mark.parametrize("backend", BUS_BACKENDS)
 def test_tracer_delivers_order_filled_to_the_strategy(tmp_path: Path, backend: str) -> None:
     path = _write_ticks(tmp_path / "ticks.jsonl")
-    _, strategy, _ = _run(path, backend)
+    _, strategy, _, _ = _run(path, backend)
 
     assert len(strategy.fills) == 1
     fill = strategy.fills[0]
@@ -185,7 +193,7 @@ def test_tracer_delivers_the_position_that_fill_produced_to_the_strategy(
     (ADR-0035, ADR-0045 §1).
     """
     path = _write_ticks(tmp_path / "ticks.jsonl")
-    _, strategy, _ = _run(path, backend)
+    _, strategy, _, _ = _run(path, backend)
 
     assert len(strategy.positions) == 1
     view = strategy.positions[0]
@@ -198,6 +206,54 @@ def test_tracer_delivers_the_position_that_fill_produced_to_the_strategy(
     assert view.realized_pnl == Decimal("0")
     assert view.fees == Decimal("0")
     assert view.funding == Decimal("0")
+
+
+@pytest.mark.parametrize("backend", BUS_BACKENDS)
+def test_tracer_reads_a_live_unrealized_pnl_off_the_replayed_mark(
+    tmp_path: Path, backend: str
+) -> None:
+    """The Tier-2 tracer: a replayed fill, a replayed mark, and a valuation that
+    was never stored anywhere — recomputed on read from the two.
+
+    The strategy fills 0.5 @ 42 000 on row 1 and the file's last mark is row 2's
+    42 100, so the open leg is worth 0.5 × (42 100 − 42 000) = **+50** and the
+    account's exposure is 0.5 × 42 100 = 21 050, both worked from the file. The
+    numbers are the same +50 the round-trip case *realizes* one test below — the
+    identical leg, read once before the closing sell and once after — which is
+    the point: Tier-2 is what the position is worth while it is still open.
+
+    Read through the seam the strategy holds, at the instant of the last read
+    rather than the fill's: the fill-time read is the strategy's own (asserted
+    above), and this one is what a later handler would see.
+    """
+    path = _write_ticks(tmp_path / "ticks.jsonl")
+    _, _, _, portfolio = _run(path, backend)
+
+    view = portfolio.position("BTC")
+    assert view is not None
+    assert view.unrealized_pnl == Decimal("50")
+    assert view.notional == Decimal("21050")
+    assert view.mark_ts == 2_000  # row 2's instant: the freshest mark in the file
+    assert portfolio.account().equity == Decimal("100050")  # 100000 cash + 50 open
+
+
+@pytest.mark.parametrize("backend", BUS_BACKENDS)
+def test_tracer_values_the_fill_at_the_mark_that_produced_it(tmp_path: Path, backend: str) -> None:
+    """The strategy's own fill-time read carries a mark, not a ``None``.
+
+    Row 1's mark publishes ahead of row 1's trade, so by the time the fill
+    cascades back the projection already holds 42 000 — and the leg it just
+    opened at that same price is worth exactly nothing yet. A ``0`` here and a
+    ``None`` would be indistinguishable to a careless reader, so ``mark_ts``
+    is asserted beside it: the zero is a valuation, not an absence.
+    """
+    path = _write_ticks(tmp_path / "ticks.jsonl")
+    _, strategy, _, _ = _run(path, backend)
+
+    view = strategy.positions[0]
+    assert view is not None
+    assert view.unrealized_pnl == Decimal("0")
+    assert view.mark_ts == 1_000
 
 
 @pytest.mark.parametrize("backend", BUS_BACKENDS)
@@ -219,7 +275,7 @@ def test_tracer_reads_realized_pnl_back_through_the_seam_after_a_round_trip(
         time_in_force=TimeInForce.IOC,
     )
 
-    _, strategy, _ = _run(path, backend, close_with=closing)
+    _, strategy, _, _ = _run(path, backend, close_with=closing)
 
     opened, closed = strategy.positions
     assert opened is not None and closed is not None
@@ -261,7 +317,7 @@ def test_tracer_charges_a_fee_end_to_end_and_lands_it_in_the_durable_ledger(
         time_in_force=TimeInForce.IOC,
     )
 
-    _, strategy, store = _run(
+    _, strategy, store, _ = _run(
         path, backend, close_with=closing, instrument_specs={"BTC": _FEE_SPEC}
     )
 
@@ -277,15 +333,17 @@ def test_tracer_charges_a_fee_end_to_end_and_lands_it_in_the_durable_ledger(
 @pytest.mark.parametrize("backend", BUS_BACKENDS)
 def test_tracer_event_cascade_is_the_canonical_sequence(tmp_path: Path, backend: str) -> None:
     path = _write_ticks(tmp_path / "ticks.jsonl")
-    recorded, _, _ = _run(path, backend)
+    recorded, _, _, _ = _run(path, backend)
 
     assert [type(ev) for ev in recorded] == [
+        MarkTick,  # row 1's mark, derived from the trade price and published first
         MarketTick,  # tick 1 published by the feed
         PlaceSignal,  # strategy reacts (reentrant -> FIFO)
         OrderPlaced,  # manager records PENDING
         OrderSubmitted,  # manager sends
         FillReport,  # paper exchange fills at the cached tick
         OrderFilled,  # manager's canonical transition; strategy sees it
+        MarkTick,  # row 2's mark, again ahead of its trade
         MarketTick,  # tick 2: strategy already fired, no new order
     ]
 
@@ -295,7 +353,7 @@ def test_tracer_checkpoints_the_saga_durably_through_the_store(
     tmp_path: Path, backend: str
 ) -> None:
     path = _write_ticks(tmp_path / "ticks.jsonl")
-    _, _, store = _run(path, backend)
+    _, _, store, _ = _run(path, backend)
 
     cloid = derive_cloid("trivial:BTC:1")
     record = store.get_order(cloid)
@@ -314,8 +372,8 @@ def test_tracer_checkpoints_the_saga_durably_through_the_store(
 def test_tracer_is_deterministic_across_repeated_runs(tmp_path: Path, backend: str) -> None:
     path = _write_ticks(tmp_path / "ticks.jsonl")
 
-    first, _, _ = _run(path, backend)
-    second, _, _ = _run(path, backend)
+    first, _, _, _ = _run(path, backend)
+    second, _, _, _ = _run(path, backend)
 
     # The entire event stream — ids, timestamps, prices — is identical each run.
     assert _fingerprint(first) == _fingerprint(second)
@@ -326,8 +384,8 @@ def test_tracer_behaves_identically_over_both_backends(tmp_path: Path) -> None:
     one observable event stream."""
     path = _write_ticks(tmp_path / "ticks.jsonl")
 
-    in_memory, _, _ = _run(path, "in_memory")
-    kafka, _, _ = _run(path, "kafka")
+    in_memory, _, _, _ = _run(path, "in_memory")
+    kafka, _, _, _ = _run(path, "kafka")
 
     assert _fingerprint(in_memory) == _fingerprint(kafka)
 
@@ -338,3 +396,13 @@ def _fingerprint(events: list[Event]) -> list[tuple[str, str, int]]:
 
 async def _record(sink: list, event: object) -> None:
     sink.append(event)
+
+
+def _observe(projection: PortfolioProjection) -> Handler[MarkTick]:
+    """Adapt the projection's synchronous mark verb to an ``async`` subscriber —
+    the same one-line adapting the runner does for it."""
+
+    async def observe(mark: MarkTick) -> None:
+        projection.observe_mark(mark)
+
+    return observe
