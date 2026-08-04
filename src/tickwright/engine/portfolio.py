@@ -62,10 +62,11 @@ def _mismatch_report(disagreements: list[tuple[str, str, str]]) -> str:
     are something they can act on. The columns are padded to the widest entry for
     the same reason: what matters is which side of which row changed.
 
-    The **store path** ADR-0042 §3's example also names is deliberately absent.
-    The check holds a ``Store``, not a file — a path or a DSN is the adapter's own
-    fact (ADR-0019) — and the operator already knows which store they pointed the
-    run at. What only the engine can tell them is which fields disagreed.
+    The **store path** ADR-0042 §3's example also names is deliberately absent,
+    from the remedy as well as from the opening line. The check holds a ``Store``,
+    not a file — a path or a DSN is the adapter's own fact (ADR-0019) — and the
+    operator already knows which store they pointed the run at. What only the
+    engine can tell them is which fields disagreed.
     """
     label_width = max(len(label) for label, _, _ in disagreements) + 1
     stored_width = max(len(stored) for _, stored, _ in disagreements)
@@ -77,9 +78,9 @@ def _mismatch_report(disagreements: list[tuple[str, str, str]]) -> str:
     return (
         "the durable ledger belongs to a different account.\n"
         f"{rows}\n"
-        "A different genesis is a different account history. Point the store at a "
-        "fresh path to open a new ledger, or restore the declared values to resume "
-        "this one."
+        "A different genesis is a different account history. Point the run at a "
+        "fresh store to open a new ledger, or restore the declared values to "
+        "resume this one."
     )
 
 
@@ -453,8 +454,8 @@ class PortfolioProjection:
                     "this paper store holds order history but no ledger: its "
                     "positions, fees and funding cannot be reconstructed from "
                     "the orders alone (ADR-0043 §8), and seeding a fresh ledger "
-                    "would report a flat account at full cash. Point the store "
-                    "at a fresh path."
+                    "would report a flat account at full cash. Point the run at "
+                    "a fresh store."
                 )
             return
         disagreements = []

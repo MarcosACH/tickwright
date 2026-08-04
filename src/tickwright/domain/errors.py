@@ -34,7 +34,7 @@ class StoreAccountMismatch(InvariantViolation):
       write zeroes for money that was actually charged.
 
     A second class was rejected because the operator's remedy is the same
-    sentence either way — point the store at a fresh path, or restore the
+    sentence either way — point the run at a fresh store, or restore the
     declared values — so a distinct name would buy precision nobody acts on.
     Every disagreeing field is named at once, so an operator who changed two
     learns both on the first restart rather than one per restart.
