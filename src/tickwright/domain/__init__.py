@@ -21,6 +21,7 @@ from .errors import (
     StartupReconciliationTimeout,
     StoreAccountMismatch,
     VenueAccountModeUnsupported,
+    VenueFactUnsupported,
 )
 from .events import (
     CancelSignal,
@@ -91,6 +92,7 @@ __all__ = [
     "StartupReconciliationTimeout",
     "StoreAccountMismatch",
     "VenueAccountModeUnsupported",
+    "VenueFactUnsupported",
     # events + value types
     "Account",
     "AccountSpec",

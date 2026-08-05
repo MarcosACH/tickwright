@@ -34,6 +34,7 @@ from tickwright.domain import (
     PlaceOrder,
     Side,
     TimeInForce,
+    VenueFactUnsupported,
     VenueOrderView,
 )
 from tickwright.observability import NamedEvent
@@ -399,13 +400,16 @@ def test_a_live_fill_reports_the_fee_the_venue_charged_verbatim() -> None:
     assert report.fee == Decimal("0.019571")
 
 
-def test_a_live_fill_settled_in_another_token_is_a_failed_read() -> None:
+def test_a_live_fill_settled_in_another_token_escalates_instead_of_freezing() -> None:
     # Money is a bare `Decimal` with USDC left implicit (ADR-0029), so a fee
     # denominated in anything else has no home in the ledger — accruing it would
     # add a number of one currency to a line of another and silently misstate
-    # cash. The assumption is guarded at the boundary rather than carried as a
-    # token constant: a body we cannot read is a failed read, named and `None`,
-    # and reconciliation is the backstop (ADR-0011 inv 1, ADR-0036).
+    # cash. It is refused, but deliberately *not* as the transient failed read
+    # every other unreadable body gets: the venue's stored fill row is immutable,
+    # so the read fails identically on every later pass, and a `None` here would
+    # freeze the reconcile cycle permanently — one HYPE-settled fee stalling
+    # every order behind it, forever, on a `RECONCILE_FROZEN` a cycle. A
+    # condition no retry can resolve leaves the seam instead (ADR-0036 §4).
     post = FakeExchangeApi(
         {
             "orderStatus": order_status_response(status="filled", oid=91),
@@ -415,11 +419,8 @@ def test_a_live_fill_settled_in_another_token_is_a_failed_read() -> None:
         }
     )
 
-    with capture_events() as events:
-        view = asyncio.run(fetch_view(post))
-
-    assert view is None
-    assert any(e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED for e in events)
+    with pytest.raises(VenueFactUnsupported, match="HYPE"):
+        asyncio.run(fetch_view(post))
 
 
 def test_a_filled_placement_whose_fills_read_fails_names_a_fills_failure_not_a_place() -> None:

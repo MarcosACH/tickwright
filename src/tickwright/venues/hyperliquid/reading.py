@@ -34,14 +34,7 @@ superset, which is a difference no one intended and nothing would have surfaced.
 * ``TypeError`` — a value is the wrong type: a re-typed figure, or a row that is
   not a mapping at all.
 * ``ValueError`` — a value is the right type and still unreadable: a non-finite
-  figure (``exact_figure``), a margin mode outside the two the venue reports, or
-  a fill fee settled in a token other than USDC (``_settled_in_usdc``, ADR-0036).
-  That last one is the vocabulary's one **semantic** member and the odd one out:
-  the other raisers describe a body we could not parse, and a re-read may well
-  succeed, where a fill's settlement token is a fact the venue has already stored
-  and will report identically forever. Every caller here answers it as the
-  transient failure it is not — a frozen cycle rather than a fault — which
-  ADR-0036 §4 states as shipped and #216 owns correcting.
+  figure (``exact_figure``), or a margin mode outside the two the venue reports.
 * ``ArithmeticError`` — how ``decimal`` signals. ``Decimal("nope")`` raises
   ``InvalidOperation``, which is **not** a ``ValueError``, so this branch is what
   catches an unparseable numeric string.
@@ -49,6 +42,14 @@ superset, which is a difference no one intended and nothing would have surfaced.
 Deliberately a tuple and not a new exception type: a body we cannot read is a
 failed read, and every caller already has a guard that says what that means at
 its own layer. This names control flow that exists; it does not add any.
+
+What is deliberately **outside** it is ``VenueFactUnsupported`` (ADR-0048): the
+venue reporting a fact we understand and cannot represent — a fill fee settled in
+a token other than USDC. Every member above describes a body we could not parse,
+where a re-read may succeed, so a named ``None`` the cycle retries is the honest
+verdict. A settled venue row never changes, so that verdict would freeze the
+reconciler on it forever; it escalates past every guard here instead, and being a
+type no caller catches is what keeps that true by construction.
 """
 
 

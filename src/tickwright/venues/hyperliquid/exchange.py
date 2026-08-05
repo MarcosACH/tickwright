@@ -32,6 +32,7 @@ from tickwright.domain import (
     Side,
     TimeInForce,
     VenueAccountState,
+    VenueFactUnsupported,
     VenueOrderView,
     quantize_price,
 )
@@ -604,13 +605,22 @@ def _settled_in_usdc(entry: Mapping[str, Any]) -> Decimal:
     is guarded here rather than carried as a ``fee_currency`` field nothing yet
     reads — perp fees are USDC-settled today, and spot is out of scope (ADR-0030).
 
-    ``ValueError``, so it joins ``UNREADABLE`` and the caller answers it exactly
-    as it answers a missing field: a named failed read and ``None``, never a
-    partial list that reads as the whole truth (ADR-0011 inv 1).
+    ``VenueFactUnsupported`` and deliberately **not** a member of ``UNREADABLE``
+    (ADR-0048): every neighbour there describes a body we could not parse, which
+    a re-read may well fix, so they are answered with the named ``None`` a cycle
+    retries. A settled fill row never changes, so this one would be re-read to
+    the same refusal forever — and because ``_drive`` freezes ahead of any retry
+    budget and returns on the first frozen read, answering it that way stalls
+    every order behind it too, indefinitely and silently. It escalates out of
+    the seam instead, faulting the engine as ADR-0036 §4 promises.
     """
     token = entry["feeToken"]
     if token != "USDC":
-        raise ValueError(f"fee settled in {token!r}, not USDC")
+        raise VenueFactUnsupported(
+            f"fill fee settled in {token!r}, not USDC: this engine's money is a bare "
+            "Decimal with USDC implicit (ADR-0029), so the fee has no home in the "
+            "ledger. Retrying cannot change a settled fill row."
+        )
     return figure(entry["fee"])
 
 
