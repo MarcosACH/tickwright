@@ -449,6 +449,13 @@ def test_a_filled_placement_whose_fills_read_fails_names_a_fills_failure_not_a_p
     # placement itself succeeded, so naming it a *place* failure would mislead
     # triage — name it a fills-read failure, emit nothing, and let
     # reconciliation's fetch_order re-read FILLED and heal the fills (R004).
+    #
+    # The label is the venue query, `userFills`, which is what the event catalog
+    # documents and what the *unreadable* half of this same read always emitted.
+    # It used to be `fills` on this half alone: one read naming itself two ways
+    # depending on which way it failed, which is the disagreement the shared read
+    # exists to end. The R004 distinction is untouched — it is about not saying
+    # `place`.
     post = FakeExchangeApi(
         {
             "order": filled_response(oid=91, total_sz="0.5", avg_px="43250.0"),
@@ -461,7 +468,7 @@ def test_a_filled_placement_whose_fills_read_fails_names_a_fills_failure_not_a_p
 
     assert reports == []
     failed = [e for e in events if e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED]
-    assert failed and failed[0]["request"] == "fills"
+    assert failed and failed[0]["request"] == "userFills"
 
 
 def cancel_success_response() -> dict:
