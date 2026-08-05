@@ -423,6 +423,27 @@ def test_a_live_fill_settled_in_another_token_escalates_instead_of_freezing() ->
         asyncio.run(fetch_view(post))
 
 
+def test_a_permanent_refusal_escapes_the_write_guard_that_catches_everything_else() -> None:
+    # The write path now answers an unreadable body with a named no-report, and
+    # this is the one body it must not answer that way. A fee in a token the
+    # ledger cannot hold is permanent, so filing it as retryable would bury it:
+    # the placement returns quietly, and every later reconcile pass re-reads the
+    # same settled row to the same refusal and freezes on it. The guard catches
+    # `UNREADABLE`, and this deliberately is not in it (ADR-0048) — nothing here
+    # has to remember the distinction for it to hold.
+    post = FakeExchangeApi(
+        {
+            "order": filled_response(oid=91, total_sz="0.5", avg_px="43250.0"),
+            "userFills": [
+                fill_entry(oid=91, tid=556, px="43250.0", sz="0.5", fee="0.02", fee_token="HYPE")
+            ],
+        }
+    )
+
+    with pytest.raises(VenueFactUnsupported, match="HYPE"):
+        asyncio.run(place_and_collect_reports(post, market_order(Side.BUY, "0.5")))
+
+
 def test_a_filled_placement_whose_fills_read_fails_names_a_fills_failure_not_a_place() -> None:
     # The order filled, but the follow-up fills read dies in transport. The
     # placement itself succeeded, so naming it a *place* failure would mislead
