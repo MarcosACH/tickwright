@@ -9,7 +9,7 @@ sent. Venue quirk translation lives in the adapter, never the engine
 """
 
 import asyncio
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 import pytest
@@ -885,6 +885,112 @@ def test_a_placement_adjudication_the_adapter_cannot_read_is_named_not_silent(bo
     assert reports == []
     failures = [e for e in events if e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED]
     assert failures and failures[0]["request"] == "place"
+
+
+def test_an_unreadable_placement_body_is_named_with_the_body_it_could_not_read() -> None:
+    # The read path quotes what it choked on — key set first, since that is what
+    # identifies a venue contract change — and the write path must not be the
+    # one place that names a failed read without saying what failed. An
+    # unreadable adjudication repeats on every placement for as long as the
+    # contract stays broken, so an operator holding only `ValueError()` has
+    # nothing to act on.
+    post = FakeExchangeApi(
+        {"order": {"status": "ok", "response": {"type": "order", "data": {"statuses": [{}]}}}}
+    )
+
+    with capture_events() as events:
+        asyncio.run(place_and_collect_reports(post, limit_order(Side.BUY, "0.5", "42000")))
+
+    (failed,) = [e for e in events if e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED]
+    assert "keys=['status', 'response']" in str(failed["error"])
+
+
+class _HandlerFailure(ValueError):
+    """A bug anywhere downstream of a published venue fact.
+
+    Deliberately a ``ValueError``: an engine bug does not get to pick an
+    exception type outside the venue's ``UNREADABLE`` vocabulary, and one that
+    lands inside it is the whole point — a stand-in that raised something else
+    would pass against a guard that swallows the real thing.
+    """
+
+
+@pytest.mark.parametrize(
+    "raised",
+    [
+        ValueError("a saga bug"),
+        KeyError("a missing key"),
+        TypeError("a bad type"),
+        InvalidOperation("a decimal that blew up"),
+    ],
+    ids=["ValueError", "KeyError", "TypeError", "InvalidOperation"],
+)
+def test_a_handler_failure_on_the_placement_publish_is_not_an_unreadable_body(
+    raised: Exception,
+) -> None:
+    """A subscriber's exception is an engine fault, never a venue read failure.
+
+    The write guard catches ``UNREADABLE`` around a coroutine that both *reads*
+    the venue's adjudication and *publishes* it — and ``InMemoryBus.publish``
+    dispatches subscribers inline and re-raises, so the guard spans the whole
+    cascade the report sets off: the saga, the checkpoint, the portfolio fold.
+    Every member of ``UNREADABLE`` is a shape an engine bug takes too
+    (``InvalidOperation`` out of a ``Decimal`` comparison being the likeliest),
+    so each was caught by the *venue adapter*, named against a response that had
+    parsed cleanly, and survived — flatly against ``runner.py``'s guarantee that
+    a raw handler's exception reaches the ``TaskGroup`` and faults the engine
+    (ADR-0024).
+
+    ``read`` splits its send from a **pure** ``normalize`` for exactly this
+    reason (ADR-0048 §4). The write path took the vocabulary without the split.
+    """
+
+    async def main() -> None:
+        bus = InMemoryBus()
+
+        async def blows_up(report: ExecutionReport) -> None:
+            raise raised
+
+        bus.subscribe(ExecutionReport, blows_up)
+        exchange = make_exchange(
+            FakeExchangeApi({"order": resting_response(oid=77)}), bus=bus, clock=ManualClock()
+        )
+        await exchange.place(limit_order(Side.BUY, "0.5", "42000"))
+
+    with capture_events() as events:
+        with pytest.raises(type(raised)):
+            asyncio.run(main())
+
+    # And it is not *also* mislabelled on the way out: naming a clean body as
+    # unreadable would point triage at the venue for a bug in this process.
+    assert not [e for e in events if e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED]
+
+
+def test_a_handler_failure_on_the_cancel_publish_is_not_an_unreadable_body() -> None:
+    # The same hole on the other write verb, guarded by the same tuple.
+    async def main() -> None:
+        bus = InMemoryBus()
+
+        async def blows_up(report: OrderStatusReport) -> None:
+            if report.status is OrderState.CANCELLED:
+                raise _HandlerFailure("downstream of the cancel report")
+
+        bus.subscribe(OrderStatusReport, blows_up)
+        exchange = make_exchange(
+            FakeExchangeApi(
+                {"order": resting_response(oid=77), "cancelByCloid": cancel_success_response()}
+            ),
+            bus=bus,
+            clock=ManualClock(),
+        )
+        await exchange.place(limit_order(Side.BUY, "0.5", "42000"))
+        await exchange.cancel(CLOID)
+
+    with capture_events() as events:
+        with pytest.raises(_HandlerFailure):
+            asyncio.run(main())
+
+    assert not [e for e in events if e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED]
 
 
 def test_a_transport_failure_on_cancel_emits_no_report_and_does_not_raise() -> None:

@@ -105,13 +105,40 @@ async def read[T](
     try:
         response = await send(query)
     except OSError as exc:
-        _failed_read(request, cloid, str(exc))
+        failed_send(request=request, cloid=cloid, error=exc)
         return None
     try:
         return normalize(response)
     except UNREADABLE as exc:
-        _failed_read(request, cloid, f"{exc!r} in {request} response {rendered(response)}")
+        unreadable_body(request=request, cloid=cloid, error=exc, response=response)
         return None
+
+
+def failed_send(*, request: str, cloid: str | None = None, error: OSError) -> None:
+    """Name a request whose send died: no body arrived, so nothing was parsed.
+
+    Public because the **write** verbs fail this way too. ``place`` and
+    ``cancel`` send a signed action rather than a query, so they cannot go
+    through ``read`` — but what a dead transport *means* must not be theirs to
+    decide again, which is the per-site drift owning the taxonomy once exists to
+    end (ADR-0048 §4).
+    """
+    _failed_read(request, cloid, str(error))
+
+
+def unreadable_body(
+    *, request: str, cloid: str | None = None, error: Exception, response: object
+) -> None:
+    """Name a body that arrived and could not be read, quoting what arrived.
+
+    The body is not optional garnish: an unreadable body is how a venue contract
+    change presents, so it repeats every cycle for as long as the contract stays
+    broken, and an operator holding only the exception has nothing to act on.
+    ``rendered`` leads with the key set for that reason. The write verbs used to
+    name their half without it — the same failure, diagnosable on one path and
+    not the other.
+    """
+    _failed_read(request, cloid, f"{error!r} in {request} response {rendered(response)}")
 
 
 def _failed_read(request: str, cloid: str | None, error: str) -> None:
@@ -121,6 +148,11 @@ def _failed_read(request: str, cloid: str | None, error: str) -> None:
     frozen cycle, nothing healed — and ``error`` carries which it was. ``cloid``
     rides along only where the request has one, so the account grain omits it
     rather than logging a ``None`` that reads as a missing value.
+
+    Private, with the two causes above as the way in: a caller that reached this
+    directly would be choosing its own words for a failure the taxonomy already
+    has words for, which is how the write path drifted from the read path in the
+    first place.
     """
     context = {"cloid": cloid} if cloid is not None else {}
     named_event(NamedEvent.EXCHANGE_REQUEST_FAILED, request=request, error=error, **context)
