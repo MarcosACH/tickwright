@@ -1107,6 +1107,54 @@ def test_a_cancel_adjudication_the_adapter_cannot_read_is_a_named_no_op() -> Non
     assert failed == ["cancel"]
 
 
+def test_a_per_cancel_error_status_is_a_silent_benign_no_op() -> None:
+    # The one adjudication branch on either write verb that is *correctly*
+    # silent, pinned so it stays distinguishable from the one that was silent by
+    # accident. A per-cancel error means the order is already gone — filled,
+    # cancelled, or never landed — which is positive venue truth, not an
+    # unreadable body: nothing to name, and nothing to emit, since the venue's
+    # real state arrives as its own report or through reconciliation (ADR-0026).
+    #
+    # Its twin on `place` fell through every branch and reported nothing at all,
+    # which read identically from the outside and was a defect (ADR-0048 §4).
+    # Only a test that fixes which of the two this is keeps them apart.
+    async def main() -> tuple[list[ExecutionReport], list[str]]:
+        bus = InMemoryBus()
+        post = FakeExchangeApi(
+            {
+                "order": resting_response(oid=77),
+                "cancelByCloid": {
+                    "status": "ok",
+                    "response": {
+                        "type": "cancel",
+                        "data": {"statuses": [{"error": "Order was never placed"}]},
+                    },
+                },
+            }
+        )
+        exchange = make_exchange(post, bus=bus, clock=ManualClock())
+        reports: list[ExecutionReport] = []
+
+        async def collect(report: ExecutionReport) -> None:
+            reports.append(report)
+
+        bus.subscribe(ExecutionReport, collect)
+        await exchange.place(limit_order(Side.BUY, "0.5", "42000"))
+        with capture_events() as events:
+            await exchange.cancel(CLOID)
+        return reports, [str(e["event"]) for e in events]
+
+    reports, named = asyncio.run(main())
+
+    # No CANCELLED — the adapter never adjudicates a cancel the venue refused.
+    (live,) = reports
+    assert isinstance(live, OrderStatusReport) and live.status is OrderState.LIVE
+    # And silent: neither a failed read nor a rejected action, because it is
+    # neither. A name here would page an operator for the ordinary race between
+    # a cancel and a fill.
+    assert named == []
+
+
 def test_placements_within_one_millisecond_get_strictly_increasing_nonces() -> None:
     # Hyperliquid requires per-address nonces to be strictly increasing; the ms
     # truncation of the wall clock would collide on two sends inside one
