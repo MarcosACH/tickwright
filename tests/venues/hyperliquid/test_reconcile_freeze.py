@@ -10,6 +10,7 @@ outage for "no record".
 import asyncio
 from decimal import Decimal
 
+import pytest
 from hyperliquid_fakes import FakeExchangeApi
 from pydantic import SecretStr
 
@@ -23,6 +24,7 @@ from tickwright.domain import (
     OrderState,
     OrderType,
     Side,
+    VenueFactUnsupported,
 )
 from tickwright.engine.cache import Cache
 from tickwright.engine.reconcile import ReconcileConfig, Reconciler
@@ -102,3 +104,72 @@ def test_a_venue_outage_freezes_reconciliation_instead_of_resolving_inflight() -
     assert cleared is False
     assert reports == []
     assert any(e["event"] == NamedEvent.RECONCILE_FROZEN for e in events)
+
+
+def test_a_permanent_refusal_leaves_the_cycle_instead_of_freezing_it_forever() -> None:
+    # The other half of the guard, and the reason it needs two outcomes and not
+    # one (ADR-0048). A fee settled in a token this ledger cannot hold is not an
+    # outage: the venue's fill row is already settled, so every later pass reads
+    # it to the same refusal. Answered with the `None` above it would freeze this
+    # cycle on every tick forever — and `_drive` returns on the first frozen read,
+    # so every order behind this one in the iteration would stop reconciling too,
+    # with one `RECONCILE_FROZEN` a cycle the only trace. Nothing between the
+    # adapter and the runner may absorb it: it has to reach the TaskGroup and
+    # fault the engine, where an operator can see it (ADR-0036 §4).
+    async def main() -> None:
+        bus = InMemoryBus()
+        clock = ManualClock(start_ns=0)
+        post = FakeExchangeApi(
+            {
+                "orderStatus": {
+                    "status": "order",
+                    "order": {
+                        "order": {
+                            "coin": "BTC",
+                            "oid": 91,
+                            "timestamp": 1_700_000_000_000,
+                            "cloid": "0x" + "ab" * 16,
+                        },
+                        "status": "filled",
+                    },
+                },
+                "userFillsByTime": [
+                    {
+                        "coin": "BTC",
+                        "px": "43250.0",
+                        "sz": "0.5",
+                        "time": 1_700_000_000_500,
+                        "oid": 91,
+                        "fee": "0.02",
+                        "feeToken": "HYPE",
+                        "tid": 556,
+                    }
+                ],
+            }
+        )
+        exchange = HyperliquidExchange(
+            config=HyperliquidConfig(
+                testnet=True, symbols=["BTC"], signing_key=SecretStr(TEST_SIGNING_KEY)
+            ),
+            bus=bus,
+            clock=clock,
+            universe=HyperliquidUniverse(specs={"BTC": BTC_SPEC}, asset_indices={"BTC": 3}),
+            post=post,
+            startup_timeout_seconds=60.0,
+        )
+        store = SQLiteStore(":memory:")
+        store.checkpoint(_submitted_saga(), ts_ns=500)
+        cache = Cache(store=store)
+        cache.rebuild()
+        reconciler = Reconciler(
+            bus=bus, clock=clock, exchange=exchange, cache=cache, config=ReconcileConfig()
+        )
+        await reconciler.reconcile_inflight()
+
+    with capture_events() as events:
+        with pytest.raises(VenueFactUnsupported, match="HYPE"):
+            asyncio.run(main())
+
+    # It escalated rather than freezing: a freeze here is the failure mode this
+    # test exists to catch, because it is the one that looks like nothing.
+    assert not any(e["event"] == NamedEvent.RECONCILE_FROZEN for e in events)
