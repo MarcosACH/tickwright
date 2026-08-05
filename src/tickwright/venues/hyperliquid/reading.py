@@ -98,9 +98,23 @@ async def read[T](
     Owning the taxonomy once is what makes a new read inherit it instead of
     re-deriving it (issue #216).
 
-    Boot reads are deliberately not callers. ``universe.py`` and the account-mode
-    gate raise and fault the barrier, because a boot precondition has no next
-    deadline to retry at — a different policy, correctly expressed elsewhere.
+    What decides whether a read belongs here is **whether something above it
+    retries**, not whether it runs at boot. ``None`` is a freeze signal, and a
+    freeze only means anything to a caller that will ask again:
+
+    - ``fetch_account_state`` is a boot read *and* a caller. It runs as a
+      ``StartupBarrier`` step, and the barrier re-drives its whole sequence with
+      capped backoff until the startup budget is spent — so ``None`` is exactly
+      the "could not prove it, guessed nothing" the barrier is written to take.
+    - ``universe.py`` runs at composition, before anything that could re-drive
+      it, and the account-mode gate runs in ``start()`` ahead of the barrier.
+      Neither has a retry above it, so each owns its own refusal: the mode gate
+      builds the retry loop it needs and then raises, ``universe.py`` raises
+      outright. Both fault the startup barrier rather than freezing it.
+
+    Two policies, and the line between them is the retry, which is why a future
+    in-flight read inherits this one by default and a new pre-barrier read does
+    not.
     """
     try:
         response = await send(query)

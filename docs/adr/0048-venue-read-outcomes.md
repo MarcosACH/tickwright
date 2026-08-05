@@ -16,7 +16,7 @@ An in-flight venue read can fail three ways, and only two of them are the same f
 
 `venues/hyperliquid/reading.py` holds all three: `read(request, query, send, normalize) -> T | None` for the two that answer `None`, `UNREADABLE` for the vocabulary they catch, and — by *not* being in that tuple — `VenueFactUnsupported` for the one that does not stop there.
 
-**Boot reads are deliberately not covered.** `universe.py` and the ADR-0046 account-mode gate raise and fault the startup barrier. A boot precondition has no next deadline to retry at, so "freeze and retry" is not a verdict available to it. Two policies, each stated where it applies.
+**What decides coverage is whether something above the read retries it — not whether it runs at boot.** `None` is a freeze signal, and freezing only means anything to a caller that will ask again. `fetch_account_state` is a boot read *and* a `read` caller: it runs as a `StartupBarrier` step, and the barrier re-drives its whole sequence with capped backoff until the startup budget is spent, so `None` is precisely the "could not prove it, guessed nothing" its step contract is written around. `universe.py` runs at composition and the ADR-0046 account-mode gate runs in `start()` ahead of the barrier; neither has a retry above it, so each owns its own refusal — the mode gate builds the retry loop it needs and then raises, `universe.py` raises outright, and both fault the barrier rather than freezing it. Two policies, split on the retry.
 
 ## 2. Why the third outcome exists: the transient verdict is a poison pill for a permanent condition
 

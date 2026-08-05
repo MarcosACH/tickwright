@@ -41,8 +41,10 @@ Consumed by `/code-review` (any regression is BLOCKING) and `/python-codebase-ma
    permanently and silently — and `_drive` returns on the first frozen read, so it stalls every
    order behind it too. Those refuse as `VenueFactUnsupported`, deliberately outside the
    `UNREADABLE` vocabulary every transient guard catches, and **fault** the engine. One venue
-   read, three outcomes, mapped once per venue (`venues/hyperliquid/reading.py`); **boot** reads
-   are excluded and raise, having no next deadline to retry at.
+   read, three outcomes, mapped once per venue (`venues/hyperliquid/reading.py`). What a read
+   is covered by is **whether something above it retries** — a barrier step freezes on `None`
+   because the barrier re-drives it, while a read with no retry above it (`universe.py`, the
+   ADR-0046 mode gate) owns its own refusal and raises.
    (ADR-0011, ADR-0034, ADR-0043 §6, ADR-0048)
 4. **Rejections are explicit events.** A placed-but-rejected order surfaces as its taxonomy
    terminal (`DENIED` / `REJECTED` / `FAILED`), propagated as an event — never a silent
