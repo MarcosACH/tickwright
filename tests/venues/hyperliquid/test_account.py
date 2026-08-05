@@ -584,13 +584,27 @@ def test_a_position_with_no_entry_price_still_normalizes() -> None:
 
 
 def test_a_transport_failure_reads_as_no_venue_truth_never_as_a_flat_book() -> None:
-    """The connectivity guard in the return type (ADR-0011 inv 1).
+    """The connectivity guard in the return type (ADR-0011 inv 1), and the name
+    that makes the freeze attributable.
 
     An unreachable venue is *no truth to compare against*, and the reconcile
     freezes on it. A zero-filled state would be fail-open — the fabricated flat
     ADR-0034 forbids — and would heal a restored ledger down to nothing.
+
+    The ``None`` alone is only half the contract. This read used to swallow the
+    ``OSError`` with a bare ``return None``, so the freeze it caused was
+    indistinguishable from a quiet cycle — while the *unreadable body* beside it
+    was named all along. Two ways for one read to fail, one of them invisible,
+    is the drift owning the taxonomy once exists to end: both are named now, and
+    the ``error`` is what says which it was.
     """
-    assert _fetch_state(TimeoutError("the venue never answered")) is None
+    with capture_events() as events:
+        state = _fetch_state(TimeoutError("the venue never answered"))
+
+    assert state is None
+    failed = [e for e in events if e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED]
+    assert failed and failed[0]["request"] == "clearinghouseState"
+    assert "the venue never answered" in str(failed[0]["error"])
 
 
 @pytest.mark.parametrize(

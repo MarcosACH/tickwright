@@ -630,22 +630,36 @@ def test_fetch_order_returns_none_when_the_read_itself_fails() -> None:
     # The connectivity guard (ADR-0011 inv 1): a timeout or transport error is
     # None — never an empty view, which would read as "no record" and let
     # recovery resend into an outage.
+    #
+    # And *named*, on the half where the read died. This freeze used to go out
+    # silently — `fetch_order` swallowed the OSError with a bare `return None` —
+    # which is the same quiet outage the unreadable-body branches beside it were
+    # fixed for: an operator holding a frozen cycle and no event cannot tell a
+    # dead venue from a healthy quiet one. The `request` label is what says which
+    # half of the two-part read (ADR-0011's cross-check) failed, so it is pinned
+    # per case rather than asserted as "something was named".
     for failure in (TimeoutError("venue timed out"), ConnectionError("connection refused")):
-        view = asyncio.run(fetch_view(FakeExchangeApi({"orderStatus": failure})))
+        with capture_events() as events:
+            view = asyncio.run(fetch_view(FakeExchangeApi({"orderStatus": failure})))
         assert view is None
+        failures = [e for e in events if e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED]
+        assert failures and failures[0]["request"] == "orderStatus", failure
 
     # A failure on the *fills* half of the read poisons the whole view too.
-    view = asyncio.run(
-        fetch_view(
-            FakeExchangeApi(
-                {
-                    "orderStatus": order_status_response(),
-                    "userFillsByTime": ConnectionError("reset"),
-                }
+    with capture_events() as events:
+        view = asyncio.run(
+            fetch_view(
+                FakeExchangeApi(
+                    {
+                        "orderStatus": order_status_response(),
+                        "userFillsByTime": ConnectionError("reset"),
+                    }
+                )
             )
         )
-    )
     assert view is None
+    failures = [e for e in events if e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED]
+    assert failures and failures[0]["request"] == "userFills"
 
 
 def test_fetch_order_names_an_order_status_body_it_cannot_parse() -> None:
