@@ -1,0 +1,70 @@
+# Venue read outcomes: a failed read, and the refusal that is not one
+
+_Recorded while delivering [#216](https://github.com/MarcosACH/tickwright/issues/216), which was filed as a bug — `fetch_order` raising on a malformed fill row and faulting the engine — and whose surgical fix would have cemented the very taxonomy that made a second, quieter bug permanent. **Resolves [ADR-0036](./0036-perp-fee-model.md) §4's deferred "fails closed, not fast"**, which named this issue as its owner. **Extends [ADR-0011](./0011-reconciliation-model.md) inv 1**: the `None` contract is unchanged, and gains a stated boundary — what inv 1 does *not* cover. **Supports [ADR-0014](./0014-component-lifecycle-and-error-model.md)** (what a violated invariant does) and [ADR-0031](./0031-venue-extensibility-process-per-venue.md) (venue knowledge stays in the venue)._
+
+An in-flight venue read can fail three ways, and only two of them are the same failure.
+
+## 1. Decision
+
+**Every in-flight venue read resolves to one of three outcomes, and the venue package owns the mapping once.**
+
+| Outcome | Raised as | Verdict | Why |
+| --- | --- | --- | --- |
+| Transport failure | `OSError` (`TimeoutError` among it) | named, `None`, retried at the next deadline | No body arrived. The venue may be reachable next cycle. |
+| Unreadable body | `UNREADABLE` — `ArithmeticError`, `KeyError`, `TypeError`, `ValueError` | named, `None`, retried at the next deadline | A body arrived and could not be read. A venue contract change is durable; a truncated or transitional response is not, and nothing here can tell them apart from one sample. |
+| **Permanent refusal** | `VenueFactUnsupported` (an `InvariantViolation`) | named, **raised**, faults the engine | The venue reported a fact this engine cannot represent. It is already stored at the venue, so every later read returns it identically. |
+
+`venues/hyperliquid/reading.py` holds all three: `read(request, query, send, normalize) -> T | None` for the two that answer `None`, `UNREADABLE` for the vocabulary they catch, and — by *not* being in that tuple — `VenueFactUnsupported` for the one that does not stop there.
+
+**Boot reads are deliberately not covered.** `universe.py` and the ADR-0046 account-mode gate raise and fault the startup barrier. A boot precondition has no next deadline to retry at, so "freeze and retry" is not a verdict available to it. Two policies, each stated where it applies.
+
+## 2. Why the third outcome exists: the transient verdict is a poison pill for a permanent condition
+
+ADR-0036 §4 guards a fill fee settled in any token but USDC, because money in this engine is a bare `Decimal` with USDC left implicit (ADR-0029) and a foreign-token fee has nowhere to go. As shipped, that guard raised a `ValueError` — a member of `UNREADABLE` — so the fills read answered it exactly as it answers a missing field: a named `EXCHANGE_REQUEST_FAILED` and `None`, on which the reconcile cycle freezes.
+
+For a body we could not parse, that is the right verdict. For this condition it compounds into a permanent, silent stall, and three facts have to line up before that is visible:
+
+1. **The venue's stored fill row is immutable.** The read fails identically on every subsequent pass. There is no state the reconciler can reach where it succeeds.
+2. **`_drive` returns `self._freeze()` *before* `handle` runs.** So `_resolve_inflight`'s `ConsecutiveMisses` budget never advances, and the escalation that would eventually resolve `FAILED` is unreachable.
+3. **`_drive` returns on the first frozen read.** It iterates `self._cache.open_orders()`, so the affected order freezes **every order behind it in the iteration** too, on every cycle.
+
+Net effect: one HYPE-settled fee freezes the whole reconciler indefinitely, emitting one `RECONCILE_FROZEN` per cycle and nothing else. No money is ever misstated — which is why the fee slice shipped it — but a permanent silent freeze is not the fail-fast ADR-0036 §4 promises. It is the worst available failure: the engine keeps running, keeps trading, and stops reconciling.
+
+**The distinction is permanence, not severity.** A malformed row and a foreign-token fee are equally serious; they differ in whether waiting can resolve them. That is what makes them different outcomes rather than one outcome with two log levels.
+
+## 3. Why a type and not a flag
+
+`VenueFactUnsupported` is an `InvariantViolation` (ADR-0014), sibling to `VenueAccountModeUnsupported`, and being outside `UNREADABLE` is what makes the third outcome hold **by construction**.
+
+Every guard that answers a transient failure catches `UNREADABLE`. A refusal that is not in that tuple passes through all of them without any of them naming it, deciding about it, or being written to know it exists. The alternative — a sentinel value, or a flag on the return — would put the burden on each call site to remember the distinction, which is exactly the per-site drift §4 exists to end. There are five such sites today and #191/#192/#193 add more.
+
+The verdict on reaching the runner is the ordinary one: `except Exception` → `ComponentState.FAULTED`, `ENGINE_FAULTED` carrying the `repr`, exit 1. **No new named event.** The catalog is closed (ADR-0045), and a second name for a condition that already produces `ENGINE_FAULTED` with the message attached would be a name nothing acts on separately.
+
+**The cost is stated plainly:** a foreign-token fee kills a running process holding positions. That is intended. The condition means the ledger cannot account for money that has already left the account, and the remedy is an operator's, not a retry's. Likelihood is low — perp fees are USDC-settled (ADR-0036 §4), and spot is out of scope (ADR-0030).
+
+## 4. Why the venue owns the read and not just the vocabulary
+
+Before this, "one venue read" was three collaborators: `_info` sent, a per-caller `try`/`except` decided what a transport failure meant, and a normalizer decided what an unreadable body meant. **Which layer owned which failure was chosen freshly at every read site** — so the five in-package sites disagreed:
+
+- `account.py` returned `None` and named it;
+- `_fetch_fills` returned `None` and named it, but let `OSError` escape to two callers that handled it differently — one swallowing it, one naming it under a *different* `request` label for the same venue query;
+- `_decode_order_status` returned `None` **silently**, and so did the unmappable-status branch beside it — two freezes an operator could not attribute, neither of which had a test, because nothing forced one to exist;
+- `_action_outcome` and `universe.py` raised.
+
+The write path had the same hole with the opposite verdict: `status["resting"]["oid"]` and `int(status["filled"]["oid"])` sat inside `OSError`-only guards, so an unreadable field faulted the engine — and one `statuses` shape fell through every branch and reported *nothing at all*.
+
+`read` survives the deletion test: delete it and three sites regrow a `try`/`except`, a namer, and the `None` contract, and are free to disagree about all three again. It is why normalizers here only *read* — they raise and no longer decide, so `normalize_account_state` returns a state rather than a state-or-`None`, and `_order_state` returns a state rather than a maybe.
+
+## 5. Why it lives in the venue package
+
+Same reasoning as `figure` and `ingress.py` (ADR-0031): the load-bearing facts are Hyperliquid's. Which exceptions a body raises depends on how that venue encodes its figures; which conditions are *permanent* depends on what that venue stores immutably. A second venue may well differ on both. The universal half — that a figure must be a number — already lives in `domain.exact_figure`, and `VenueFactUnsupported` lives in `domain.errors` because faulting the engine is a domain verdict, not a venue one.
+
+A second venue is the signal to promote `read` to a shared home. Not before.
+
+## 6. Consequences
+
+- **A permanent refusal now stops the engine.** Previously it stopped only the reconciler, quietly. Anyone reading `RECONCILE_FROZEN` in a dashboard should know it no longer covers this case.
+- **Every failed read is named**, including the two that were silent, and each carries the bounded response body it could not read — key set first, since that is what identifies a contract change.
+- **One venue query has one `request` label.** The post-fill fills read used to name its transport failure `fills` and its parse failure `userFills`; both are `userFills` now, which is what the event catalog documents. ADR-0011's R004 distinction — a fills-read failure is not a *place* failure — is untouched.
+- **An unreadable write body no longer faults the engine.** It is a failed read on the write path too: no report, and reconcile-by-cloid resolves the order (ADR-0008 rule 2). The engine keeps its backstop instead of dying next to it.
+- **The next in-flight read inherits all of it.** #191/#192/#193 pass a `normalize` and get the taxonomy, rather than re-deriving which layer owns what.

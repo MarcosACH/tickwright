@@ -226,8 +226,22 @@ vanished." The sentinel reads as *no truth to compare against*, which an outage 
 on the account pull [[Ledger reconciliation]] anchors on, the paper exchange answers `None`
 **permanently and without failing**, holding no account state to report — same freeze, different
 route, and the only value that stays fail-closed if a paper ledger cadence is ever wired by
-mistake. See ADR-0011.
+mistake. Bounded by [[Permanent refusal]], which is the one venue answer this sentinel must
+*not* carry. See ADR-0011, ADR-0048.
 _Avoid_: empty result, no orders (the whole point is that these differ from a failure).
+
+**Permanent refusal**:
+A venue answer that is understood and cannot be represented — a fill fee settled in a token
+other than USDC, against money that is a bare `Decimal` with USDC implicit (ADR-0029). Named
+against the two *transient* failures beside it, a dead transport and an unreadable body, which
+the [[Connectivity guard]] answers with `None` and a retry at the next deadline. The venue has
+already stored the fact, so a retry re-reads it identically forever: answered as transient it
+would freeze the reconcile cycle permanently and silently, and every order behind it in the
+same pass with it. It refuses as `VenueFactUnsupported`, deliberately outside the `UNREADABLE`
+vocabulary every transient guard catches, and **faults** the engine — the one condition an
+operator, not a deadline, has to resolve. See ADR-0048, ADR-0036.
+_Avoid_: parse error, bad response (both read as the transient case this exists to be distinct
+from); hard failure (says how loud, not why it cannot be retried).
 
 **Ghost** / ghost-reconciled:
 An order absent from the venue continuously across the grace window. Only after a fill-history
