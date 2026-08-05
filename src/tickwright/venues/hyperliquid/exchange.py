@@ -421,6 +421,14 @@ class HyperliquidExchange:
         when this order's fills are the newest. ``None`` on a read that failed —
         a body we could not parse or a transport that died, both named by
         ``read`` and both frozen on by the caller, never silent truth.
+
+        Both queries name themselves ``userFills``, and the mismatch with the
+        windowed ``type`` is deliberate rather than missed: the ``request`` label
+        names the **read**, not the endpoint (ADR-0048 §6). This is one read at
+        one grain — the same fills, for the same order, differing only in how far
+        back it looks — and an operator triaging it wants the two windows under
+        one name. Deriving the label from ``query["type"]`` would split one read's
+        history across two labels for a distinction no triage turns on.
         """
         query: dict[str, Any] = (
             {"type": "userFills", "user": self._user_address}
