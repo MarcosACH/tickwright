@@ -765,6 +765,100 @@ def test_a_transport_failure_on_place_emits_no_report_and_does_not_raise() -> No
     assert any(e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED for e in events)
 
 
+def test_a_resting_status_the_adapter_cannot_read_names_it_instead_of_faulting() -> None:
+    # The write path carried the read path's hole. `status["resting"]["oid"]`
+    # sat inside a `try` catching only `OSError`, so a 200-OK body of the wrong
+    # shape raised a `KeyError` straight out of `place` — and nothing downstream
+    # catches it: `execution.py` awaits the send unguarded, so it reaches the
+    # runner's TaskGroup and takes the whole engine to FAULTED and exit 1 over
+    # one unreadable field. An unreadable body is a failed read wherever it is
+    # read (inv 1); on the write path that verdict is no report and
+    # reconcile-by-cloid as the backstop, exactly as a dead transport gets.
+    post = FakeExchangeApi(
+        {
+            "order": {
+                "status": "ok",
+                "response": {"type": "order", "data": {"statuses": [{"resting": {}}]}},
+            }
+        }
+    )
+
+    with capture_events() as events:
+        reports = asyncio.run(
+            place_and_collect_reports(post, limit_order(Side.BUY, "0.5", "42000"))
+        )
+
+    assert reports == []
+    failures = [e for e in events if e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED]
+    assert failures and failures[0]["request"] == "place"
+
+
+@pytest.mark.parametrize(
+    "filled",
+    [
+        {"totalSz": "0.5", "avgPx": "43250.0"},  # no oid to fetch the fills by
+        {"totalSz": "0.5", "avgPx": "43250.0", "oid": "n/a"},  # an oid that is not one
+    ],
+)
+def test_a_filled_status_whose_oid_is_unreadable_names_it_instead_of_faulting(
+    filled: dict,
+) -> None:
+    # The `filled` branch's `int(status["filled"]["oid"])` is the second
+    # dereference the OSError-only guard left exposed, and it is the worse of
+    # the two: this order *executed*, so faulting here kills the engine holding
+    # a position it has not recorded. No report is still the right answer — the
+    # placement response carries no trade ids, so there is nothing to emit
+    # without the fills read this oid is the key to — but the engine has to
+    # survive to let reconciliation heal the fills (ADR-0011).
+    post = FakeExchangeApi(
+        {
+            "order": {
+                "status": "ok",
+                "response": {"type": "order", "data": {"statuses": [{"filled": filled}]}},
+            }
+        }
+    )
+
+    with capture_events() as events:
+        reports = asyncio.run(place_and_collect_reports(post, market_order(Side.BUY, "0.5")))
+
+    assert reports == []
+    failures = [e for e in events if e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED]
+    assert failures and failures[0]["request"] == "place"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # An envelope that is neither the documented `ok` nor the documented
+        # `err`: `_action_outcome` used to fail fast on this by raising.
+        {"status": "ok", "response": {"type": "order", "data": {}}},
+        # The envelope parses, but the adjudication inside it is not one of the
+        # three the adapter knows (`resting`, `error`, `filled`).
+        {"status": "ok", "response": {"type": "order", "data": {"statuses": [{"queued": {}}]}}},
+    ],
+)
+def test_a_placement_adjudication_the_adapter_cannot_read_is_named_not_silent(body: dict) -> None:
+    # Two failure modes that were opposites and are now one answer. The
+    # unrecognized *envelope* raised a ValueError out of `place` and faulted the
+    # engine — deliberately, per `_action_outcome`, but an unreadable body is a
+    # failed read wherever it is read (inv 1), and the write path has the same
+    # backstop the read path does. The unrecognized *status entry* did the
+    # reverse and was worse: it fell through every branch and returned, emitting
+    # nothing at all, so a venue that started adjudicating a fourth way would
+    # leave orders silently unreported with no trace anywhere.
+    post = FakeExchangeApi({"order": body})
+
+    with capture_events() as events:
+        reports = asyncio.run(
+            place_and_collect_reports(post, limit_order(Side.BUY, "0.5", "42000"))
+        )
+
+    assert reports == []
+    failures = [e for e in events if e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED]
+    assert failures and failures[0]["request"] == "place"
+
+
 def test_a_transport_failure_on_cancel_emits_no_report_and_does_not_raise() -> None:
     async def main() -> None:
         post = FakeExchangeApi(
@@ -839,6 +933,44 @@ def test_a_top_level_action_error_on_cancel_emits_no_report_and_names_it() -> No
     (live,) = reports
     assert isinstance(live, OrderStatusReport) and live.status is OrderState.LIVE
     assert reasons == ["Invalid nonce"]
+
+
+def test_a_cancel_adjudication_the_adapter_cannot_read_is_a_named_no_op() -> None:
+    # The same hole on the cancel verb, where faulting costs the most for the
+    # least: the durable `cancel_requested` marker is written before the send
+    # (ADR-0026), so an unanswered cancel is already reconciliation's to resolve.
+    # Killing the engine over the *shape* of the answer discards a run that was
+    # covered either way.
+    async def main() -> tuple[list[ExecutionReport], list[str]]:
+        bus = InMemoryBus()
+        post = FakeExchangeApi(
+            {
+                "order": resting_response(oid=77),
+                "cancelByCloid": {"status": "ok", "response": {"type": "cancel", "data": {}}},
+            }
+        )
+        exchange = make_exchange(post, bus=bus, clock=ManualClock())
+        reports: list[ExecutionReport] = []
+
+        async def collect(report: ExecutionReport) -> None:
+            reports.append(report)
+
+        bus.subscribe(ExecutionReport, collect)
+        await exchange.place(limit_order(Side.BUY, "0.5", "42000"))
+        with capture_events() as events:
+            await exchange.cancel(CLOID)
+        failed = [
+            str(e["request"]) for e in events if e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED
+        ]
+        return reports, failed
+
+    reports, failed = asyncio.run(main())
+
+    # Only the LIVE from placement: an unreadable adjudication proves nothing
+    # about the cancel, so it must not manufacture a CANCELLED either.
+    (live,) = reports
+    assert isinstance(live, OrderStatusReport) and live.status is OrderState.LIVE
+    assert failed == ["cancel"]
 
 
 def test_placements_within_one_millisecond_get_strictly_increasing_nonces() -> None:

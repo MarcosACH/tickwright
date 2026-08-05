@@ -146,12 +146,27 @@ class HyperliquidExchange:
         self._placed[order.cloid] = order
         try:
             response = await self._send_action(action)
-            await self._report_placement(order, response)
         except OSError as exc:
             # The send window's truth is unknown — the order may or may not
             # have landed — so there is no fact to report. Name the failure;
             # reconcile-by-cloid resolves the in-flight order (ADR-0008 rule 2).
             self._request_failed("place", order.cloid, exc)
+            return
+        try:
+            await self._report_placement(order, response)
+        except UNREADABLE as exc:
+            # The send landed and the venue answered, but its adjudication is in
+            # a shape we cannot read. Same verdict as the failed send above and
+            # for the same reason (inv 1): we hold no fact worth reporting, so
+            # name it and let reconcile-by-cloid resolve the order.
+            #
+            # Guarding the parse and not the send is the point. Everything above
+            # is our own construction — an unknown symbol, an unsigned action —
+            # where a raise is a bug in this process and must keep faulting.
+            # ``VenueFactUnsupported`` is outside this tuple by design, so a
+            # permanent refusal from the post-fill fills read still escalates
+            # rather than being filed here as something a retry could fix.
+            self._read_failed("place", order.cloid, f"{exc!r} in placement response")
 
     def _request_failed(self, request: str, cloid: str, exc: OSError) -> None:
         named_event(
@@ -192,6 +207,21 @@ class HyperliquidExchange:
             # ack-lost cancel is reconciliation's to resolve — just name it.
             self._request_failed("cancel", cloid, exc)
             return
+        try:
+            await self._report_cancellation(cloid=cloid, symbol=symbol, response=response)
+        except UNREADABLE as exc:
+            # An adjudication we cannot read proves nothing about the cancel, so
+            # the only safe verdict is the one an unanswered cancel already gets
+            # (ADR-0026): name it and emit nothing. The durable cancel_requested
+            # marker was written before the send, so reconciliation resolves this
+            # order regardless — faulting the engine over the *shape* of the
+            # answer would discard a run that was covered either way.
+            self._read_failed("cancel", cloid, f"{exc!r} in cancel response")
+
+    async def _report_cancellation(self, *, cloid: str, symbol: str, response: object) -> None:
+        """Translate the venue's cancel adjudication into raw facts on the bus —
+        the peer of ``_report_placement`` on the other order verb, guarded the
+        same way, so one unreadable-body policy covers both writes."""
         outcome = _action_outcome(response)
         if isinstance(outcome, _ActionError):
             # The cancel action was refused, not adjudicated: a benign no-op —
@@ -358,6 +388,14 @@ class HyperliquidExchange:
             # reconciliation is the backstop.
             for report in fills or ():
                 await self._bus.publish(report)
+        else:
+            # An adjudication that is none of the three the venue documents. It
+            # used to fall out of here silently, which is the one outcome inv 1
+            # forbids outright: a venue that started adjudicating a fourth way
+            # would leave orders unreported with nothing recording that it had.
+            # Raised into ``UNREADABLE`` rather than named here, so the one guard
+            # on ``place`` decides what an unreadable placement body means.
+            raise ValueError(f"unrecognized placement status: {status!r}")
 
     async def _fetch_fills(
         self, *, cloid: str, symbol: str, oid: int, since_ms: int | None = None
@@ -600,8 +638,15 @@ class _ActionError:
 def _action_outcome(response: object) -> list[Any] | _ActionError:
     """The ``statuses`` array out of an ok /exchange action response (dicts for
     orders, bare strings for cancels), or an ``_ActionError`` for the venue's
-    documented action-level ``err`` envelope. A shape that is neither is a
-    genuine parse failure we fail fast on (``ValueError``)."""
+    documented action-level ``err`` envelope.
+
+    A shape that is neither raises into ``UNREADABLE``. It used to fault the
+    engine from here, on the reasoning that a body we cannot parse is a genuine
+    failure — which is true, and is not the same as saying it is *this* layer's
+    to answer. An unreadable body is a failed read wherever it is read (inv 1),
+    and both write verbs already hold the backstop that makes the milder verdict
+    safe: nothing is reported, and reconcile-by-cloid resolves the order.
+    """
     match response:
         case {"status": "ok", "response": {"data": {"statuses": list(statuses)}}}:
             return statuses
