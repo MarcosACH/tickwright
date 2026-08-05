@@ -620,6 +620,23 @@ def test_fetch_order_returns_none_when_the_read_itself_fails() -> None:
     assert view is None
 
 
+def test_fetch_order_names_an_order_status_body_it_cannot_parse() -> None:
+    # An orderStatus body outside the venue's two documented shapes — an order
+    # record, or the positive `unknownOid` — is a failed read, and the adapter
+    # already froze the reconciler on it. What it did not do is *say so*: the
+    # freeze went out with no named event behind it, which is the quiet outage
+    # inv 1 exists to prevent, and left a venue contract change looking exactly
+    # like an ordinary quiet cycle.
+    post = FakeExchangeApi({"orderStatus": {"status": "someNewEnvelope"}})
+
+    with capture_events() as events:
+        view = asyncio.run(fetch_view(post))
+
+    assert view is None
+    failures = [e for e in events if e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED]
+    assert failures and failures[0]["request"] == "orderStatus"
+
+
 def test_fetch_order_freezes_on_a_fills_body_it_cannot_parse() -> None:
     # A 200-OK fills body of the wrong shape is a failed read, not "no fills":
     # it must freeze the reconciler (None), the same as an unparseable
@@ -714,13 +731,22 @@ def test_fetch_order_maps_the_venue_status_taxonomy_by_suffix(
     assert view.status.status is state
 
 
-def test_fetch_order_treats_a_status_it_cannot_map_as_a_failed_read() -> None:
+def test_fetch_order_treats_a_status_it_cannot_map_as_a_named_failed_read() -> None:
     # A venue status outside the known taxonomy (say, a trigger state v1 never
-    # places) must freeze the reconciler, not get misclassified as venue truth.
-    view = asyncio.run(
-        fetch_view(FakeExchangeApi({"orderStatus": order_status_response(status="triggered")}))
-    )
+    # places) must freeze the reconciler, not get misclassified as venue truth —
+    # and must name which status did it. This body parses perfectly; the freeze
+    # comes from a *value* the saga vocabulary has no term for, so the venue
+    # string is the whole of the triage, and an unnamed freeze leaves an operator
+    # with a stalled cycle and nowhere to look.
+    with capture_events() as events:
+        view = asyncio.run(
+            fetch_view(FakeExchangeApi({"orderStatus": order_status_response(status="triggered")}))
+        )
+
     assert view is None
+    failures = [e for e in events if e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED]
+    assert failures and failures[0]["request"] == "orderStatus"
+    assert "triggered" in str(failures[0]["error"])
 
 
 def test_a_transport_failure_on_place_emits_no_report_and_does_not_raise() -> None:

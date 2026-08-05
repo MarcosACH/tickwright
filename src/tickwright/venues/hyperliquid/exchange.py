@@ -158,6 +158,13 @@ class HyperliquidExchange:
             NamedEvent.EXCHANGE_REQUEST_FAILED, request=request, cloid=cloid, error=str(exc)
         )
 
+    def _read_failed(self, request: str, cloid: str, error: str) -> None:
+        # A 200-OK body the adapter cannot parse: the same failed read as a dead
+        # transport, and the same named event, since the caller's verdict is the
+        # same too. Separate from ``_request_failed`` only in what it takes — an
+        # explanation rather than an ``OSError``.
+        named_event(NamedEvent.EXCHANGE_REQUEST_FAILED, request=request, cloid=cloid, error=error)
+
     def _action_rejected(self, request: str, cloid: str, reason: str) -> None:
         # The venue refused the whole action (bad nonce/signature, an action
         # rate-limit): a 200-OK `err` envelope, not a transport failure and not
@@ -234,11 +241,19 @@ class HyperliquidExchange:
             return VenueOrderView(status=None)
         if read is _OrderStatusRead.UNRECOGNIZED:
             # A shape we cannot parse is a failed read, not a record: freezing
-            # (ADR-0011) beats misclassifying venue truth.
+            # (ADR-0011) beats misclassifying venue truth. Named, because a
+            # freeze the operator cannot attribute is the quiet outage inv 1
+            # exists to prevent — a venue contract change would otherwise look
+            # exactly like an ordinary quiet cycle.
+            self._read_failed("orderStatus", cloid, "unrecognized orderStatus response")
             return None
         state = _order_state(read.status)
         if state is None:
-            # A status outside the taxonomy is likewise a failed read.
+            # A status outside the taxonomy is likewise a failed read — and this
+            # body parsed cleanly, so the venue's own string is the whole of the
+            # triage. Without it an operator sees a stalled cycle and nothing
+            # pointing at the one word that stalled it.
+            self._read_failed("orderStatus", cloid, f"unmappable order status {read.status!r}")
             return None
         # Bound the fills read to this order's own lifetime (ADR-0011): starting
         # at the venue's recorded placement time keeps its fills at the front of
