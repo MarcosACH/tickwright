@@ -30,6 +30,7 @@ from tickwright.domain import (
     OrderState,
     OrderStatusReport,
     VenueOrderView,
+    VenueReadFailure,
 )
 from tickwright.observability import NamedEvent, named_event
 from tickwright.observability.correlation import operation
@@ -166,25 +167,44 @@ class Reconciler:
     ) -> bool:
         """The one skeleton every cadence shares: over each non-terminal saga in
         ``states`` (all of them when ``None``), read venue truth by cloid and let
-        ``handle`` resolve the gap. A failed read (``None``) trips the connectivity
-        guard — the whole pass freezes here and nowhere else, so ADR-0011 inv 1
-        lives in exactly one place. ``True`` on a completed pass, ``False`` when a
-        read froze it.
+        ``handle`` resolve the gap. A failed read trips the connectivity guard —
+        the whole pass freezes here and nowhere else, so ADR-0011 inv 1 lives in
+        exactly one place. ``True`` only on a pass that proved **every** order it
+        looked at; ``False`` when any read failed.
+
+        **How much a failed read costs turns on whether the venue answered**
+        (ADR-0049). A dead send says nothing about this order in particular — the
+        venue is unreachable, and every order behind it would pay a full request
+        timeout to learn the same thing — so the pass stops at it. An unreadable
+        body is the opposite: the venue is up and answering at full speed, so it
+        says nothing about the orders behind it, and stopping on it lets one
+        durably unreadable body stall every other order forever. That one order
+        is skipped, its own budget is charged, and the pass carries on.
+
+        The verdict is ``False`` either way, and that is what keeps the startup
+        phase's contract intact (inv 5): a pass that could not prove one order
+        never clears the ``StartupBarrier``, whichever way the read failed.
         """
         # The cycle id scopes the whole pass; the per-order cloid nests inside it
         # (ADR-0020), so every reconcile record — a verdict or a freeze — is
         # traceable to its cycle and its order without either being repeated as a
         # field. Correlation binding lives here, at the one cadence chokepoint.
         with operation(cycle=cycle):
+            proved_all = True
             for order in self._cache.open_orders():
                 if states is not None and order.state not in states:
                     continue
                 with operation(cloid=order.cloid):
                     view = await self._exchange.fetch_order(order.cloid)
-                    if view is None:
-                        return self._freeze()
-                    await handle(order, view)
-            return True
+                    match view:
+                        case VenueReadFailure.SEND_FAILED:
+                            return self._freeze()
+                        case VenueReadFailure.UNREADABLE_BODY:
+                            self._freeze()
+                            proved_all = False
+                        case _:
+                            await handle(order, view)
+            return proved_all
 
     async def _resolve_inflight(self, order: Order, view: VenueOrderView) -> None:
         """Resolve one ``SUBMITTED`` order against its venue reading. A record

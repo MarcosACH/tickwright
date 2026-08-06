@@ -37,6 +37,7 @@ from tickwright.domain import (
     StartupReconciliationTimeout,
     TimeInForce,
     VenueOrderView,
+    VenueReadFailure,
 )
 from tickwright.engine.barrier import StartupBarrier
 from tickwright.engine.cache import Cache
@@ -184,7 +185,7 @@ def test_recovered_submitted_saga_the_venue_never_saw_resolves_failed_not_resent
     assert events[0].reconciliation is True
     # Never blind-resent (ADR-0008 rule 2): the venue still has no record.
     view = asyncio.run(exchange.fetch_order("0xabc"))
-    assert view is not None and not view.has_record
+    assert isinstance(view, VenueOrderView) and not view.has_record
 
 
 def test_recovered_pending_intent_the_venue_never_saw_resolves_failed() -> None:
@@ -205,7 +206,7 @@ def test_recovered_pending_intent_the_venue_never_saw_resolves_failed() -> None:
     assert [type(ev) for ev in events] == [OrderFailed]
     # Attempted and proven never-landed (ADR-0010): resolved, never resent.
     view = asyncio.run(exchange.fetch_order("0xabc"))
-    assert view is not None and not view.has_record
+    assert isinstance(view, VenueOrderView) and not view.has_record
 
 
 def test_recovered_live_saga_the_venue_lost_ghost_resolves_rejected_not_failed() -> None:
@@ -301,9 +302,9 @@ class _DarkVenue(VenueDouble):
     async def cancel(self, cloid: str) -> None:
         raise AssertionError("nothing may be cancelled before the barrier clears")
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | None:
+    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
         self.reads += 1
-        return None
+        return VenueReadFailure.SEND_FAILED
 
 
 def test_sustained_venue_outage_trips_the_barrier_to_faulted_after_the_window() -> None:
@@ -371,10 +372,10 @@ class _BlippingVenue(_DarkVenue):
         super().__init__()
         self._failures = failures
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | None:
+    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
         self.reads += 1
         if self.reads <= self._failures:
-            return None
+            return VenueReadFailure.SEND_FAILED
         return VenueOrderView(status=None)  # link restored: positively no record
 
 

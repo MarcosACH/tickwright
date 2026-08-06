@@ -29,6 +29,7 @@ from tickwright.domain import (
     PlaceOrder,
     Side,
     TimeInForce,
+    VenueOrderView,
     derive_cloid,
     quantize_price,
     quantize_size,
@@ -109,7 +110,7 @@ def test_place_reconcile_cancel_round_trip_on_testnet() -> None:
 
         # Reconcile-visible: the fetch path sees the resting order as venue truth.
         view = await exchange.fetch_order(cloid)
-        assert view is not None and view.status is not None
+        assert isinstance(view, VenueOrderView) and view.status is not None
         assert view.status.status is OrderState.LIVE
         assert view.fills == ()
 
@@ -123,7 +124,7 @@ def test_place_reconcile_cancel_round_trip_on_testnet() -> None:
 
         # And the venue agrees: the order record itself reads canceled.
         after = await exchange.fetch_order(cloid)
-        assert after is not None and after.status is not None
+        assert isinstance(after, VenueOrderView) and after.status is not None
         assert after.status.status is OrderState.CANCELLED
 
     asyncio.run(main())

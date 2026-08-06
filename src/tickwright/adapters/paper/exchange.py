@@ -47,6 +47,7 @@ from tickwright.domain import (
     TimeInForce,
     VenueAccountState,
     VenueOrderView,
+    VenueReadFailure,
     below_min_notional,
     fill_fee,
 )
@@ -358,12 +359,13 @@ class PaperExchange:
         """
         return self._account_spec
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | None:
+    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
         """Venue truth for ``cloid``: last reported status plus every fill.
 
-        In-process reads cannot fail, so this never returns ``None`` — the
-        startup reconciliation barrier always clears on paper (ADR-0024). An
-        unknown cloid gets an empty view: positive proof of no record.
+        In-process reads cannot fail, so this never returns a
+        ``VenueReadFailure`` — the startup reconciliation barrier always clears
+        on paper (ADR-0024). An unknown cloid gets an empty view: positive proof
+        of no record.
         """
         return VenueOrderView(
             status=self._statuses.get(cloid),

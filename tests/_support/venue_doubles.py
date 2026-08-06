@@ -41,6 +41,7 @@ from tickwright.domain import (
     VenueAccountState,
     VenueOrderView,
     VenuePositionState,
+    VenueReadFailure,
 )
 
 
@@ -171,7 +172,7 @@ class VenueLink:
     async def cancel(self, cloid: str) -> None:
         await self._venue.cancel(cloid)
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | None:
+    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
         return await self._venue.fetch_order(cloid)
 
     async def fetch_account_state(self) -> VenueAccountState | None:

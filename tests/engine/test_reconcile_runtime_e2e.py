@@ -32,6 +32,7 @@ from tickwright.domain import (
     OrderState,
     Side,
     VenueOrderView,
+    VenueReadFailure,
     derive_cloid,
 )
 from tickwright.engine.reconcile import ReconcileConfig
@@ -163,12 +164,14 @@ class _VanishingLinkExchange(VenueLink):
         super().__init__(venue)
         self._clock = clock
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | None:
+    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
         now_s = self._clock.timestamp_ns() / _NS
         if now_s < 3:
             return await self._venue.fetch_order(cloid)  # settled and acked
         if 10 <= now_s < 12:
-            return None  # the outage: a failed read, never "no record"
+            # The outage: a failed *send*, never "no record" — and never the
+            # unreadable body beside it, which the venue is up to answer.
+            return VenueReadFailure.SEND_FAILED
         return VenueOrderView(status=None)  # vanished from the venue
 
 

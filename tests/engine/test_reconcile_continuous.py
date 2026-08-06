@@ -42,6 +42,7 @@ from tickwright.domain import (
     Signal,
     TimeInForce,
     VenueOrderView,
+    VenueReadFailure,
 )
 from tickwright.engine.cache import Cache
 from tickwright.engine.execution import ExecutionManager
@@ -155,9 +156,9 @@ class _FlakyLink(VenueLink):
         super().__init__(venue)
         self.down = False
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | None:
+    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
         if self.down:
-            return None
+            return VenueReadFailure.SEND_FAILED
         return await self._venue.fetch_order(cloid)
 
 
@@ -263,7 +264,7 @@ class _ForgetfulVenue(VenueDouble):
     async def cancel(self, cloid: str) -> None:
         raise AssertionError("the ghost cycle must never cancel")
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | None:
+    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
         return self.views.get(cloid, VenueOrderView(status=None))
 
 
@@ -406,7 +407,7 @@ def test_a_healed_fill_and_the_venues_late_duplicate_collapse_to_one_apply() -> 
     # replica shares its event_id — provenance is excluded from the dedup key
     # (ADR-0025) — so the duplicate collapses: applied once, republished never.
     venue_view = asyncio.run(exchange.fetch_order("0xabc"))
-    assert venue_view is not None
+    assert isinstance(venue_view, VenueOrderView)
     (venue_fill,) = venue_view.fills
     healed_twin = replace(venue_fill, reconciliation=True)
     assert healed_twin.event_id == venue_fill.event_id

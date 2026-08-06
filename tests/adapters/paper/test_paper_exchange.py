@@ -41,6 +41,7 @@ from tickwright.domain import (
     TimeInForce,
     VenueAccountState,
     VenueOrderView,
+    VenueReadFailure,
 )
 
 
@@ -695,7 +696,7 @@ async def _record(sink: list, report: object) -> None:
 def test_fetch_order_reports_a_resting_limit_as_live() -> None:
     exchange, bus, _, _, _ = _limit_harness()
 
-    async def scenario() -> VenueOrderView | None:
+    async def scenario() -> VenueOrderView | VenueReadFailure:
         await bus.publish(_tick("42000"))
         await exchange.place(_limit_order("41000"))
         # The reconciler's query-shaped read (ADR-0004): venue truth by cloid,
@@ -703,7 +704,8 @@ def test_fetch_order_reports_a_resting_limit_as_live() -> None:
         return await exchange.fetch_order("0xabc")
 
     view = asyncio.run(scenario())
-    assert view is not None  # a paper read can never fail (ADR-0024)
+    # A view, never a `VenueReadFailure`: a paper read can never fail (ADR-0024).
+    assert isinstance(view, VenueOrderView)
     assert view.status is not None
     assert view.status.status is OrderState.LIVE
     assert view.fills == ()
@@ -712,13 +714,13 @@ def test_fetch_order_reports_a_resting_limit_as_live() -> None:
 def test_fetch_order_carries_the_fills_of_a_filled_order() -> None:
     exchange, bus, _, _ = _harness()
 
-    async def scenario() -> VenueOrderView | None:
+    async def scenario() -> VenueOrderView | VenueReadFailure:
         await bus.publish(_tick("42000"))
         await exchange.place(_market_order())
         return await exchange.fetch_order("0xabc")
 
     view = asyncio.run(scenario())
-    assert view is not None
+    assert isinstance(view, VenueOrderView)
     # The fill-history half of the ADR-0011 cross-check: a vanished order that
     # actually filled is provable from the view alone.
     assert view.has_record
@@ -731,9 +733,9 @@ def test_fetch_order_for_an_unknown_cloid_is_positive_proof_of_no_record() -> No
 
     view = asyncio.run(exchange.fetch_order("0xghost"))
 
-    # An empty view, never None: on paper a read cannot fail, and "no record"
-    # must stay distinguishable from an outage (ADR-0011 inv 1).
-    assert view is not None
+    # An empty view, never a failure: on paper a read cannot fail, and "no
+    # record" must stay distinguishable from an outage (ADR-0011 inv 1).
+    assert isinstance(view, VenueOrderView)
     assert not view.has_record
     assert view.status is None and view.fills == ()
 
@@ -873,7 +875,7 @@ def test_the_paper_venue_releases_without_a_start_and_keeps_its_book() -> None:
     than the first."""
     exchange, bus, clock, fills, statuses = _limit_harness()
 
-    async def scenario() -> VenueOrderView | None:
+    async def scenario() -> VenueOrderView | VenueReadFailure:
         clock.advance_to(1_000)
         await bus.publish(_tick("42000"))
         await exchange.place(_limit_order("41000"))  # rests, uncrossed
@@ -884,7 +886,7 @@ def test_the_paper_venue_releases_without_a_start_and_keeps_its_book() -> None:
     view = asyncio.run(scenario())
 
     assert fills == []
-    assert view is not None
+    assert isinstance(view, VenueOrderView)
     assert view.status is not None
     assert view.status.status is OrderState.LIVE
 

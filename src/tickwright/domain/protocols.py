@@ -21,6 +21,7 @@ from .events import (
     PlaceSignal,
     VenueAccountState,
     VenueOrderView,
+    VenueReadFailure,
 )
 from .instrument import GuardDecision, InstrumentSpec, KillSwitchState
 from .order import Order
@@ -467,12 +468,19 @@ class Exchange(Protocol):
         benign no-op (ADR-0026)."""
         ...
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | None:
+    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
         """Venue truth for ``cloid`` — the reconciler's query-shaped direct read
-        (ADR-0004), never a bus message. Returns ``None`` only when the read
-        itself failed (outage): a failed read must never look like "no record"
-        (ADR-0011 inv 1). A successful read always returns a view, even an
-        empty one."""
+        (ADR-0004), never a bus message. A successful read always returns a
+        view, even an empty one; a read that *failed* returns a
+        ``VenueReadFailure`` and never a view, which is ADR-0011 inv 1 in the
+        return type.
+
+        The failure carries **which way** it failed, and this is the one read
+        with a caller that acts on the difference: the reconciler drives a
+        worklist, so it must know whether the venue answered at all before
+        deciding whether one order's failure should cost the orders behind it
+        (ADR-0049). ``fetch_account_state`` below reads a single grain and
+        collapses the two."""
         ...
 
     async def fetch_account_state(self) -> VenueAccountState | None:
