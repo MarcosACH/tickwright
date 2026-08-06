@@ -31,6 +31,7 @@ from tickwright.domain import (
     OrderStatusReport,
     VenueOrderView,
     VenueReadFailure,
+    VenueReadUnresolvable,
 )
 from tickwright.observability import NamedEvent, named_event
 from tickwright.observability.correlation import operation
@@ -57,6 +58,13 @@ class ReconcileConfig:
     so no runtime path ever holds a config under which an order still being
     retried could be ghosted as missing.
 
+    ``unreadable_max_attempts`` is the per-cloid budget of ADR-0049: how many
+    *consecutive* reads of one order may come back with a body the adapter
+    cannot read before the condition is taken as durable and escalated. It is
+    deliberately outside the timing invariant below — a skipped order is never
+    counted absent, so this budget cannot race the ghost grace window the way
+    the in-flight retry budget could.
+
     ``recent_order_protection_seconds`` is the second clause of ADR-0011 inv 3:
     the ghost cycle skips a resting order whose last saga event is fresher than
     this, so a just-acked order the venue's open-orders snapshot has not yet
@@ -71,6 +79,7 @@ class ReconcileConfig:
     open_order_interval_seconds: float = 30.0
     ghost_grace_seconds: float = 90.0
     recent_order_protection_seconds: float = 30.0
+    unreadable_max_attempts: int = 3
 
     def __post_init__(self) -> None:
         for name in (
@@ -79,6 +88,7 @@ class ReconcileConfig:
             "open_order_interval_seconds",
             "ghost_grace_seconds",
             "recent_order_protection_seconds",
+            "unreadable_max_attempts",
         ):
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be positive")
@@ -126,6 +136,12 @@ class Reconciler:
         # — the recent-order protection pre-filter in front of the grace window —
         # so the "is it a ghost yet?" timing rule lives in one place.
         self._inflight_run = ConsecutiveMisses(limit=self._config.inflight_max_attempts)
+        # The third run of the same shape, and the one that judges the *read*
+        # rather than what it found (ADR-0049): consecutive unreadable bodies
+        # for one cloid, cleared by any read that came back readable. A failed
+        # send neither advances nor clears it — an outage is no evidence either
+        # way about a body nobody received.
+        self._unreadable_run = ConsecutiveMisses(limit=self._config.unreadable_max_attempts)
         self._ghost_gate = GhostGate(
             grace_span_ns=int(self._config.ghost_grace_seconds * _NS_PER_SECOND),
             protection_span_ns=int(self._config.recent_order_protection_seconds * _NS_PER_SECOND),
@@ -200,9 +216,10 @@ class Reconciler:
                         case VenueReadFailure.SEND_FAILED:
                             return self._freeze()
                         case VenueReadFailure.UNREADABLE_BODY:
-                            self._freeze()
+                            self._charge_unreadable(order)
                             proved_all = False
                         case _:
+                            self._unreadable_run.record_present(order.cloid)
                             await handle(order, view)
             return proved_all
 
@@ -263,6 +280,33 @@ class Reconciler:
             status, reason = OrderState.REJECTED, "ghost: vanished from the venue"
         await self._bus.publish(self._verdict(order, status, reason))
         named_event(NamedEvent.GHOST_RECONCILED, resolution=status.value)
+
+    def _charge_unreadable(self, order: Order) -> None:
+        """Charge one unreadable read against ``order``'s budget and freeze it —
+        or escalate, once the budget says the condition is durable (ADR-0049).
+
+        A single unreadable body is transient by assumption and stays one: the
+        order is skipped, the pass carries on, and the next cycle re-reads it.
+        What no single sample can show is whether waiting will ever help
+        (ADR-0048 §1) — a truncated response resolves itself, a venue contract
+        change never does — and consecutive reads across the cadence are the
+        several samples that answer it.
+
+        At the budget the answer is in, and the verdict is a fault rather than a
+        resolution: nothing here read the order's state, so there is no terminal
+        to resolve it to that would not be invented. ``read`` has already named
+        each of these reads against this cloid with the body it could not read,
+        so the refusal names the order and leaves the evidence where it is.
+        """
+        if not self._unreadable_run.record_absent(order.cloid):
+            self._freeze()
+            return
+        raise VenueReadUnresolvable(
+            f"venue body for cloid {order.cloid} unreadable on "
+            f"{self._config.unreadable_max_attempts} consecutive reads: the condition "
+            "is durable and no later pass can resolve it — see the "
+            "exchange.request_failed reads for this cloid, each quoting the body"
+        )
 
     def _freeze(self) -> bool:
         """The connectivity guard tripping (ADR-0011 inv 1): a failed venue read

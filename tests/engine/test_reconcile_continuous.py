@@ -150,15 +150,34 @@ async def _record(sink: list[OrderEvent], event: OrderEvent) -> None:
 
 class _FlakyLink(VenueLink):
     """A real venue behind a link that can drop: while down, every read fails
-    (``None``) — never to be confused with a venue that answers "no record"."""
+    the *send* — never to be confused with a venue that answers "no record"."""
 
     def __init__(self, venue: PaperExchange) -> None:
         super().__init__(venue)
         self.down = False
+        self.reads: list[str] = []
 
     async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
+        self.reads.append(cloid)
         if self.down:
             return VenueReadFailure.SEND_FAILED
+        return await self._venue.fetch_order(cloid)
+
+
+class _GarbledLink(VenueLink):
+    """A real venue behind a link that answers, badly: while ``garbled`` names a
+    cloid, that order's body comes back unreadable and every other order's comes
+    back as the venue's own truth (ADR-0049)."""
+
+    def __init__(self, venue: PaperExchange) -> None:
+        super().__init__(venue)
+        self.garbled: set[str] = set()
+        self.reads: list[str] = []
+
+    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
+        self.reads.append(cloid)
+        if cloid in self.garbled:
+            return VenueReadFailure.UNREADABLE_BODY
         return await self._venue.fetch_order(cloid)
 
 
@@ -668,6 +687,58 @@ def test_every_cadence_freezes_on_a_none_read_and_removes_nothing(
     assert frozen[0]["cycle"] == frozen_label
 
 
+def test_a_dead_send_stops_the_worklist_where_an_unreadable_body_does_not() -> None:
+    # The half of the guard the #236 fix deliberately keeps. A dead send says
+    # the venue may be unreachable, and each request is bounded at 30s: driving
+    # the rest of the worklist into it would pay that per order, per cycle, to
+    # learn what the first read already showed. So the pass stops at the first
+    # one — while an unreadable body, from a venue answering at full speed,
+    # stops only its own order. Same cycle, same skeleton, two costs.
+    clock = ManualClock(start_ns=2_000)
+    store = SQLiteStore(":memory:")
+    exchange, _ = _surviving_venue(clock)
+    store.checkpoint(_saga("0xaaa", OrderState.LIVE), ts_ns=500)
+    store.checkpoint(_saga("0xbbb", OrderState.LIVE), ts_ns=500)
+
+    dead = _FlakyLink(exchange)
+    dead.down = True
+    _, frozen_reconciler, _ = _engine(store, dead, clock)
+    assert asyncio.run(frozen_reconciler.reconcile_open_orders()) is False
+    assert dead.reads == ["0xaaa"]  # nothing behind it was even asked
+
+    garbled = _GarbledLink(exchange)
+    garbled.garbled = {"0xaaa"}
+    _, skipping_reconciler, _ = _engine(store, garbled, clock)
+    assert asyncio.run(skipping_reconciler.reconcile_open_orders()) is False
+    assert garbled.reads == ["0xaaa", "0xbbb"]
+
+
+def test_a_readable_read_clears_the_unreadable_run_before_it_can_escalate() -> None:
+    # The budget escalates on *consecutive* unreadable bodies, and the word is
+    # load-bearing: a venue that garbles one response, answers the next, and
+    # garbles again is the transitional case ADR-0048 §1 says a single sample
+    # cannot rule out — precisely what the budget exists to wait for. Without
+    # the reset, a long-lived order would accumulate unrelated blips over days
+    # and fault the engine for a venue that was never durably broken.
+    clock = ManualClock(start_ns=2_000)
+    store = SQLiteStore(":memory:")
+    exchange, _ = _surviving_venue(clock)
+    store.checkpoint(_saga("0xabc", OrderState.LIVE), ts_ns=500)
+
+    link = _GarbledLink(exchange)
+    config = ReconcileConfig(unreadable_max_attempts=3)
+    _, reconciler, _ = _engine(store, link, clock, config)
+
+    async def blip_twice_then_answer_then_blip_twice() -> None:
+        for garbled in (True, True, False, True, True):
+            link.garbled = {"0xabc"} if garbled else set()
+            await reconciler.reconcile_open_orders()
+
+    # Five unreadable reads in total, never three in a row: nothing escalates.
+    asyncio.run(blip_twice_then_answer_then_blip_twice())
+    assert len(link.reads) == 5
+
+
 # --- Timing rule (ADR-0008/0011) --------------------------------------------------
 
 
@@ -726,6 +797,7 @@ def test_a_config_whose_protection_window_reaches_the_ghost_grace_is_rejected() 
         "open_order_interval_seconds",
         "ghost_grace_seconds",
         "recent_order_protection_seconds",
+        "unreadable_max_attempts",
     ],
 )
 @pytest.mark.parametrize("value", [0, -1])
