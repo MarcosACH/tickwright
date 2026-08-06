@@ -15,12 +15,18 @@ ADR-0009).
 
 ## Invariants (load-bearing — do not erode)
 
-1. **Connectivity guard.** A failed venue read returns **`None`, never `[]`**. On `None` the
-   cycle **freezes** — no order is ghosted or removed. An outage must never read as "all
-   orders vanished." *A dead transport and a body the adapter cannot parse are both failed
-   reads and both `None`; what is **not** covered is a venue fact the engine cannot represent,
+1. **Connectivity guard.** A failed venue read returns a **`VenueReadFailure`, never a view and
+   never `[]`**. Nothing heals on one — no order is ghosted, removed or counted. An outage must
+   never read as "all orders vanished." *A dead transport and a body the adapter cannot parse
+   are both failed reads; what is **not** covered is a venue fact the engine cannot represent,
    which a retry re-reads identically forever and which therefore faults rather than freezing —
-   [ADR-0048](./0048-venue-read-outcomes.md) fixes the three outcomes and where they are mapped.*
+   [ADR-0048](./0048-venue-read-outcomes.md) fixes the three outcomes and where they are mapped.
+   How much of a pass one failed read costs turns on **which** of the two it is, which is why
+   the failure is a two-member type rather than one sentinel: a failed send stops the pass (the
+   venue may be unreachable, and every order behind it would pay a request timeout to learn the
+   same), while an unreadable body — from a venue that is up and answering — skips only its own
+   order, against a per-cloid budget that faults the engine once the condition is proven durable
+   ([ADR-0049](./0049-failed-read-blast-radius.md)).*
 2. **Cross-check before ghosting.** Before any terminal "gone" resolution, issue a targeted
    single-order/cloid query **and** consult fill history — a vanished order may have filled.
 3. **Grace window.** An order must be **continuously absent across the grace window** (default

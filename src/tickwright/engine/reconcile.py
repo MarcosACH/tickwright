@@ -14,9 +14,16 @@ the bus and routed through the ``ExecutionManager`` — the one saga writer — 
 dedup by ``event_id`` and ``trade_id`` makes every pass idempotent: re-running
 converges.
 
-A failed venue read (``fetch_order`` → ``None``) freezes the running pass: it
+A failed venue read (``fetch_order`` → a ``VenueReadFailure``) freezes: it
 reports failure, emits ``reconcile.frozen``, and heals nothing it could not
 prove — an outage must never read as "all orders vanished" (ADR-0011 inv 1).
+**How much freezes turns on which failure it is** (ADR-0049): a failed *send*
+stops the whole pass, since the venue may be unreachable and every order behind
+this one would pay a request timeout to learn the same; an unreadable *body*
+comes from a venue that is up and answering, so it skips only its own order —
+against a per-cloid budget that faults the engine once several consecutive
+reads prove the condition durable, rather than inventing a terminal state for
+an order whose body was never read.
 """
 
 from collections.abc import Awaitable, Callable

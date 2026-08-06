@@ -1,10 +1,13 @@
-"""The connectivity guard, end to end (issue #23): a venue outage freezes the
-real ``Reconciler`` against the real ``HyperliquidExchange``.
+"""The connectivity guard, end to end (issues #23, #216, #236): the real
+``Reconciler`` against the real ``HyperliquidExchange``, and how far each way a
+venue read can fail reaches.
 
-Only the HTTP transport is fake (and dark). The adapter's ``fetch_order``
-answers ``None`` for a failed read (ADR-0011 inv 1), and the reconciler must
-freeze on it — no synthetic events, no resend — rather than mistake the
-outage for "no record".
+Only the HTTP transport is fake (and, where the case calls for it, dark). The
+adapter answers a failed read with a ``VenueReadFailure`` and never a view
+(ADR-0011 inv 1) — no synthetic events, no resend, never mistaken for "no
+record". What the reconciler then does with it is the rest of this file: a
+dead send stops the pass, an unreadable body stops only its own order, and a
+body that stays unreadable across its budget stops the engine (ADR-0048/0049).
 """
 
 import asyncio
