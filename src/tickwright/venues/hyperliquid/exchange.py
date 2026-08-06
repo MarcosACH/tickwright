@@ -768,12 +768,28 @@ def _placement_adjudication(response: object) -> _Adjudication:
 
 def _cancel_adjudication(response: object) -> _CancelAdjudication:
     """Read a venue cancel response — the peer of ``_placement_adjudication``
-    on the other write verb, pure for the same reason."""
+    on the other write verb, pure for the same reason.
+
+    The venue adjudicates a cancel two ways and both are matched, rather than
+    one matched and everything else swept into the other. ``ALREADY_GONE`` is a
+    *claim* — the venue says this order is filled, cancelled, or never landed —
+    and reading it as "not ``success``" would let a status the venue has never
+    sent make that claim on its behalf, going out silent as the ordinary
+    cancel/fill race. Any third shape raises into ``UNREADABLE`` for the reason
+    its placement twin does: a venue that started adjudicating a fourth way
+    would leave orders unreported with nothing recording that it had (ADR-0048
+    §4). The backstop is untouched — the durable ``cancel_requested`` marker
+    leaves the order to reconciliation either way (ADR-0026).
+    """
     outcome = _action_outcome(response)
     if isinstance(outcome, _ActionError):
         return outcome
     (status,) = outcome
-    return _CancelVerdict.CANCELLED if status == "success" else _CancelVerdict.ALREADY_GONE
+    if status == "success":
+        return _CancelVerdict.CANCELLED
+    if isinstance(status, Mapping) and "error" in status:
+        return _CancelVerdict.ALREADY_GONE
+    raise ValueError(f"unrecognized cancel status: {status!r}")
 
 
 def _settled_in_usdc(entry: Mapping[str, Any]) -> Decimal:

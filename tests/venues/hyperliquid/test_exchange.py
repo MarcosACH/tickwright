@@ -1169,6 +1169,59 @@ def test_a_per_cancel_error_status_is_a_silent_benign_no_op() -> None:
     assert named == []
 
 
+def test_a_cancel_status_outside_the_venue_vocabulary_is_a_failed_read_not_already_gone() -> None:
+    # The boundary of the silence above. `ALREADY_GONE` is a claim — the venue
+    # says this order is filled, cancelled, or never landed — and the venue makes
+    # it one way: a per-cancel `{"error": ...}`. Reading it as "anything that is
+    # not the string `success`" would fold a status the venue has never sent into
+    # a positive verdict, so a cancel-side contract change would land as the
+    # ordinary cancel/fill race and go out silent (ADR-0048 §4).
+    #
+    # That is the exact defect the place verb was fixed for, and the argument in
+    # `_placement_adjudication` is the same one here: a venue that started
+    # adjudicating a fourth way would leave orders unreported with nothing
+    # recording that it had. An unreadable body is the honest verdict, and the
+    # backstop is unchanged — the durable `cancel_requested` marker (ADR-0026)
+    # leaves the order to reconciliation either way.
+    async def main() -> tuple[list[ExecutionReport], list[str]]:
+        bus = InMemoryBus()
+        post = FakeExchangeApi(
+            {
+                "order": resting_response(oid=77),
+                "cancelByCloid": {
+                    "status": "ok",
+                    "response": {"type": "cancel", "data": {"statuses": ["queued"]}},
+                },
+            }
+        )
+        exchange = make_exchange(post, bus=bus, clock=ManualClock())
+        reports: list[ExecutionReport] = []
+
+        async def collect(report: ExecutionReport) -> None:
+            reports.append(report)
+
+        bus.subscribe(ExecutionReport, collect)
+        await exchange.place(limit_order(Side.BUY, "0.5", "42000"))
+        with capture_events() as events:
+            await exchange.cancel(CLOID)
+        failed = [
+            str(e["request"]) for e in events if e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED
+        ]
+        return reports, failed
+
+    reports, failed = asyncio.run(main())
+
+    # Only the LIVE from placement: a status we cannot read proves nothing about
+    # the cancel, so it manufactures no CANCELLED — the same verdict as a body
+    # the adapter cannot parse at all, because that is what this is.
+    (live,) = reports
+    assert isinstance(live, OrderStatusReport) and live.status is OrderState.LIVE
+    # Named, unlike its already-gone neighbour: the operator's only signal that
+    # the venue's cancel vocabulary moved. The status itself rides along, since
+    # on a body that parsed cleanly the unrecognized value is the whole triage.
+    assert failed == ["cancel"]
+
+
 def test_placements_within_one_millisecond_get_strictly_increasing_nonces() -> None:
     # Hyperliquid requires per-address nonces to be strictly increasing; the ms
     # truncation of the wall clock would collide on two sends inside one
