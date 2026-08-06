@@ -34,7 +34,18 @@ Consumed by `/code-review` (any regression is BLOCKING) and `/python-codebase-ma
    startup budget and then **faults** the process, because clearing the barrier with no account
    row is the state that step exists to prevent — freeze-don't-guess applied to the cash line,
    and what keeps ADR-0041 §6's "`cash` is never `None`" true rather than merely intended.*
-   (ADR-0011, ADR-0034, ADR-0043 §6)
+   **The boundary of this invariant is permanence.** `None`-and-retry is the answer for a read
+   that *may* succeed later — a dead transport, an unreadable body. A venue fact this engine
+   cannot represent (a fill fee settled in a token other than USDC) is already stored at the
+   venue and reads back identically forever, so answering it that way freezes the cycle
+   permanently and silently — and `_drive` returns on the first frozen read, so it stalls every
+   order behind it too. Those refuse as `VenueFactUnsupported`, deliberately outside the
+   `UNREADABLE` vocabulary every transient guard catches, and **fault** the engine. One venue
+   read, three outcomes, mapped once per venue (`venues/hyperliquid/reading.py`). What a read
+   is covered by is **whether something above it retries** — a barrier step freezes on `None`
+   because the barrier re-drives it, while a read with no retry above it (`universe.py`, the
+   ADR-0046 mode gate) owns its own refusal and raises.
+   (ADR-0011, ADR-0034, ADR-0043 §6, ADR-0048)
 4. **Rejections are explicit events.** A placed-but-rejected order surfaces as its taxonomy
    terminal (`DENIED` / `REJECTED` / `FAILED`), propagated as an event — never a silent
    `return None`. (ADR-0010)

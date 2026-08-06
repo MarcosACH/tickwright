@@ -17,7 +17,10 @@ ADR-0009).
 
 1. **Connectivity guard.** A failed venue read returns **`None`, never `[]`**. On `None` the
    cycle **freezes** — no order is ghosted or removed. An outage must never read as "all
-   orders vanished."
+   orders vanished." *A dead transport and a body the adapter cannot parse are both failed
+   reads and both `None`; what is **not** covered is a venue fact the engine cannot represent,
+   which a retry re-reads identically forever and which therefore faults rather than freezing —
+   [ADR-0048](./0048-venue-read-outcomes.md) fixes the three outcomes and where they are mapped.*
 2. **Cross-check before ghosting.** Before any terminal "gone" resolution, issue a targeted
    single-order/cloid query **and** consult fill history — a vanished order may have filled.
 3. **Grace window.** An order must be **continuously absent across the grace window** (default

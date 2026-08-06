@@ -18,10 +18,9 @@ from tickwright.domain import (
     VenueAccountState,
     VenuePositionState,
 )
-from tickwright.observability import NamedEvent, named_event
 
 from .config import HyperliquidConfig
-from .reading import UNREADABLE, figure
+from .reading import figure
 
 
 def account_spec(config: HyperliquidConfig, *, address: str) -> AccountSpec:
@@ -45,8 +44,8 @@ def account_spec(config: HyperliquidConfig, *, address: str) -> AccountSpec:
     )
 
 
-def normalize_account_state(response: object) -> VenueAccountState | None:
-    """A ``clearinghouseState`` body as ``domain``, or ``None`` if it is not one.
+def normalize_account_state(response: object) -> VenueAccountState:
+    """A ``clearinghouseState`` body as ``domain``.
 
     Three account-grain figures, each from the field two rounds of testnet and
     mainnet measurement pinned (ADR-0046 §2, §2.1):
@@ -70,10 +69,24 @@ def normalize_account_state(response: object) -> VenueAccountState | None:
     Plus one row per open position — a coin the account is flat in is simply
     absent from ``assetPositions``, the venue running one-way net positions.
 
-    A body this cannot read is a **failed read**, answered ``None`` and named:
-    every branch out of here is either a whole state or no state at all, so a
-    venue contract change freezes the reconcile rather than degrading into a
-    partial account that would read as truth (ADR-0011 inv 1).
+    A body this cannot read **raises** into ``UNREADABLE``, and ``read`` turns
+    that into the named ``None`` the reconcile freezes on: every branch out of
+    here is either a whole state or no state at all, so a venue contract change
+    freezes rather than degrading into a partial account that would read as
+    truth (ADR-0011 inv 1). Deciding what that refusal *means* is deliberately
+    not this function's job — it reads a body, and one module owns the verdict
+    for every grain of this venue (ADR-0048).
+
+    The figures inside can fail after the root shape matched: a position row
+    missing a field, a figure that is not a number — or is one the venue
+    re-typed or reported non-finite, both of which ``figure`` refuses — a margin
+    mode outside the two the venue reports (neither ``figure`` nor
+    ``_isolated_collateral`` guesses what it means). What refusing buys *this*
+    grain: a reconcile handed a ``NaN`` equity never agrees with the ledger
+    (``nan == nan`` is false), so it would read permanent divergence and heal
+    toward a figure no venue holds, and any tolerance comparison it made would
+    signal an ``InvalidOperation`` mid-cycle rather than freezing on the read
+    that admitted it. An infinity drives that same heal unbounded.
     """
     match response:
         case {
@@ -85,68 +98,13 @@ def normalize_account_state(response: object) -> VenueAccountState | None:
             "crossMaintenanceMarginUsed": str(cross_maintenance),
             "assetPositions": list(entries),
         }:
-            try:
-                return VenueAccountState(
-                    equity=figure(equity),
-                    free_margin=figure(cross_equity) - figure(cross_margin_used),
-                    cross_maintenance_margin=figure(cross_maintenance),
-                    positions=tuple(_position(entry["position"]) for entry in entries),
-                )
-            except UNREADABLE as exc:
-                # The root shape matched but something inside it did not: a
-                # position row missing a field, a figure that is not a number —
-                # or is one the venue re-typed or reported non-finite, both of
-                # which ``figure`` refuses — a margin mode outside the two the
-                # venue reports (neither ``figure`` nor ``_isolated_collateral``
-                # guesses what it means). What the refusal buys *this* grain: a
-                # reconcile handed a ``NaN`` equity never agrees with the ledger
-                # (``nan == nan`` is false), so it would read permanent
-                # divergence and heal toward a figure no venue holds, and any
-                # tolerance comparison it made would signal an
-                # ``InvalidOperation`` mid-cycle rather than freezing on the read
-                # that admitted it. An infinity drives that same heal unbounded.
-                _name_failed_read(f"{exc!r} in clearinghouseState response {_rendered(response)}")
-                return None
-    _name_failed_read(f"unrecognized clearinghouseState response: {_rendered(response)}")
-    return None
-
-
-def _name_failed_read(error: str) -> None:
-    """Name a read that came back unreadable rather than unreachable.
-
-    The named event is the difference between the two ways this read comes back
-    empty: a transport failure is a connection, and this is the *response* — the
-    shape a venue contract change would arrive as. It must stay visible rather
-    than look like a quiet outage.
-    """
-    named_event(NamedEvent.EXCHANGE_REQUEST_FAILED, request="clearinghouseState", error=error)
-
-
-_RENDER_LIMIT = 300
-"""Characters of response body a failed read carries. Enough for the value-shaped
-failures; short of a fifty-position body."""
-
-
-def _rendered(response: object) -> str:
-    """``response`` bounded for a log line — its shape first, its body truncated.
-
-    This branch is what a venue contract change arrives as, so it repeats on
-    every reconcile cycle for as long as the contract stays broken: a
-    fifty-position body would be kilobytes an operator does not need served fifty
-    times over. The **key set** is what identifies a contract change, so it leads
-    and is never truncated; the body follows, bounded, for the failures a key set
-    cannot show — a figure that is not a number.
-
-    Nothing in here may raise: it runs only on the path that has already decided
-    to answer ``None``, and an exception escaping would turn a fail-closed read
-    into a crashed one. Hence ``list`` over ``sorted`` on the keys — mixed key
-    types have no order but always have a repr.
-    """
-    shape = f"keys={list(response)} " if isinstance(response, Mapping) else ""
-    body = repr(response)
-    if len(body) > _RENDER_LIMIT:
-        body = f"{body[:_RENDER_LIMIT]}… ({len(body)} chars)"
-    return f"{shape}{body}"
+            return VenueAccountState(
+                equity=figure(equity),
+                free_margin=figure(cross_equity) - figure(cross_margin_used),
+                cross_maintenance_margin=figure(cross_maintenance),
+                positions=tuple(_position(entry["position"]) for entry in entries),
+            )
+    raise ValueError("unrecognized clearinghouseState response")
 
 
 def _position(reported: Mapping[str, Any]) -> VenuePositionState:

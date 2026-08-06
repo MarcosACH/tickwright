@@ -12,11 +12,11 @@ bounded against is the tick stream's — the adapter subscribes itself, like
 every consumer of market data.
 """
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
-from typing import Any
+from typing import Any, assert_never
 
 from tickwright.domain import (
     AccountSpec,
@@ -32,6 +32,7 @@ from tickwright.domain import (
     Side,
     TimeInForce,
     VenueAccountState,
+    VenueFactUnsupported,
     VenueOrderView,
     quantize_price,
 )
@@ -41,7 +42,7 @@ from . import transport
 from .account import account_spec, normalize_account_state
 from .config import HyperliquidConfig
 from .preflight import verify_account_mode
-from .reading import UNREADABLE, figure
+from .reading import UNREADABLE, failed_send, figure, read, unreadable_body
 from .transport import PostJson
 from .universe import HyperliquidUniverse
 
@@ -145,17 +146,99 @@ class HyperliquidExchange:
         self._placed[order.cloid] = order
         try:
             response = await self._send_action(action)
-            await self._report_placement(order, response)
         except OSError as exc:
             # The send window's truth is unknown — the order may or may not
             # have landed — so there is no fact to report. Name the failure;
             # reconcile-by-cloid resolves the in-flight order (ADR-0008 rule 2).
-            self._request_failed("place", order.cloid, exc)
+            failed_send(request="place", cloid=order.cloid, error=exc)
+            return
+        try:
+            adjudication = _placement_adjudication(response)
+        except UNREADABLE as exc:
+            # The send landed and the venue answered, but its adjudication is in
+            # a shape we cannot read. Same verdict as the failed send above and
+            # for the same reason (inv 1): we hold no fact worth reporting, so
+            # name it and let reconcile-by-cloid resolve the order.
+            #
+            # Guarding the parse and not the send is the point. Everything above
+            # is our own construction — an unknown symbol, an unsigned action —
+            # where a raise is a bug in this process and must keep faulting.
+            # ``VenueFactUnsupported`` is outside this tuple by design, so a
+            # permanent refusal from the post-fill fills read still escalates
+            # rather than being filed here as something a retry could fix.
+            unreadable_body(request="place", cloid=order.cloid, error=exc, response=response)
+            return
+        await self._apply_placement(order, adjudication)
 
-    def _request_failed(self, request: str, cloid: str, exc: OSError) -> None:
-        named_event(
-            NamedEvent.EXCHANGE_REQUEST_FAILED, request=request, cloid=cloid, error=str(exc)
-        )
+    async def _apply_placement(self, order: PlaceOrder, adjudication: "_Adjudication") -> None:
+        """Carry out an adjudication that has already been read (ADR-0015): the
+        raw venue facts onto the bus, and on a fill the follow-up fills read.
+
+        Outside the unreadable-body guard **by construction**, and that is the
+        whole reason it is a separate step. ``publish`` dispatches subscribers
+        inline and re-raises (ADR-0023), so a guard spanning this would span the
+        entire cascade a report sets off — the saga, the checkpoint, the
+        portfolio fold — and every member of ``UNREADABLE`` is a shape an engine
+        bug takes too. Catching one here would file a bug in this process as a
+        venue that answered badly, and leave the engine running against
+        ``runner.py``'s guarantee that a raw handler's failure faults it.
+
+        The same split ``read`` makes for the same reason (ADR-0048 §4): what
+        the guard covers is a *pure* reading of the body, and nothing else.
+        """
+        match adjudication:
+            case _ActionError(message=message):
+                # The venue refused the whole action (bad nonce/signature/
+                # rate-limit) — the order never entered the book. Drop the placed
+                # memory and name it, emitting no terminal: a transient refusal
+                # must leave the order resendable, and reconcile-by-cloid
+                # resolves it (ADR-0008 rule 2).
+                self._placed.pop(order.cloid, None)
+                self._action_rejected("place", order.cloid, message)
+            case _Resting(venue_oid=venue_oid):
+                await self._bus.publish(
+                    self._status_report(
+                        cloid=order.cloid,
+                        symbol=order.symbol,
+                        status=OrderState.LIVE,
+                        venue_oid=venue_oid,
+                    )
+                )
+            case _Rejected(reason=reason):
+                # Venue-adjudicated refusal: REJECTED, never DENIED (ADR-0010) —
+                # the order was sent and judged, and the venue's reason rides along.
+                self._placed.pop(order.cloid, None)  # terminal: drop the placed memory
+                await self._bus.publish(
+                    self._status_report(
+                        cloid=order.cloid,
+                        symbol=order.symbol,
+                        status=OrderState.REJECTED,
+                        reason=reason,
+                    )
+                )
+            case _Filled(oid=oid):
+                # The placement response carries no trade ids, and a synthetic one
+                # would double-count against reconciliation's venue-tid fills under
+                # {cloid}:fill:{tid} dedup — so fetch the venue's own fill records
+                # and emit those. This is the read right after placement: the fills
+                # are the newest, so the whole-history read cannot miss them. An IOC
+                # that filled is terminal, so drop the placed memory regardless of
+                # how the fills read resolves.
+                self._placed.pop(order.cloid, None)  # terminal: drop the placed memory
+                # A failed fills read is ``None`` and already named as a *fills*
+                # read, never as this placement: the placement succeeded, and
+                # calling it a place failure would point triage at the wrong
+                # request. Emit nothing and let reconcile's fetch_order re-read
+                # FILLED and heal the fills (ADR-0011).
+                fills = await self._fetch_fills(cloid=order.cloid, symbol=order.symbol, oid=oid)
+                for fill in fills or ():
+                    await self._bus.publish(fill)
+            case unreachable:
+                # An adjudication the reader can produce and this cannot carry
+                # out would otherwise be a silent no-op — the exact shape of the
+                # defect ADR-0048 §4 catalogues. Checked by the type checker, so
+                # growing the union fails the build rather than a live order.
+                assert_never(unreachable)
 
     def _action_rejected(self, request: str, cloid: str, reason: str) -> None:
         # The venue refused the whole action (bad nonce/signature, an action
@@ -182,23 +265,48 @@ class HyperliquidExchange:
         except OSError as exc:
             # The cancel_requested marker is already durable (ADR-0026), so an
             # ack-lost cancel is reconciliation's to resolve — just name it.
-            self._request_failed("cancel", cloid, exc)
+            failed_send(request="cancel", cloid=cloid, error=exc)
             return
-        outcome = _action_outcome(response)
-        if isinstance(outcome, _ActionError):
-            # The cancel action was refused, not adjudicated: a benign no-op —
-            # the durable cancel_requested marker leaves it to reconciliation.
-            self._action_rejected("cancel", cloid, outcome.message)
+        try:
+            adjudication = _cancel_adjudication(response)
+        except UNREADABLE as exc:
+            # An adjudication we cannot read proves nothing about the cancel, so
+            # the only safe verdict is the one an unanswered cancel already gets
+            # (ADR-0026): name it and emit nothing. The durable cancel_requested
+            # marker was written before the send, so reconciliation resolves this
+            # order regardless — faulting the engine over the *shape* of the
+            # answer would discard a run that was covered either way.
+            unreadable_body(request="cancel", cloid=cloid, error=exc, response=response)
             return
-        (status,) = outcome
-        if status == "success":
-            self._placed.pop(cloid, None)  # terminal: drop the placed memory
-            await self._bus.publish(
-                self._status_report(cloid=cloid, symbol=symbol, status=OrderState.CANCELLED)
-            )
-        # A per-cancel error means the order is already gone (filled/cancelled/
-        # never landed): a benign no-op — the venue's real state arrives as its
-        # own report or through reconciliation (ADR-0026).
+        await self._apply_cancellation(cloid=cloid, symbol=symbol, adjudication=adjudication)
+
+    async def _apply_cancellation(
+        self, *, cloid: str, symbol: str, adjudication: "_CancelAdjudication"
+    ) -> None:
+        """Carry out a cancel adjudication that has already been read — the peer
+        of ``_apply_placement`` on the other write verb, outside the
+        unreadable-body guard for the same reason."""
+        match adjudication:
+            case _ActionError(message=message):
+                # The cancel action was refused, not adjudicated: a benign no-op —
+                # the durable cancel_requested marker leaves it to reconciliation.
+                self._action_rejected("cancel", cloid, message)
+            case _CancelVerdict.CANCELLED:
+                self._placed.pop(cloid, None)  # terminal: drop the placed memory
+                await self._bus.publish(
+                    self._status_report(cloid=cloid, symbol=symbol, status=OrderState.CANCELLED)
+                )
+            case _CancelVerdict.ALREADY_GONE:
+                # The order is filled, cancelled, or never landed: positive venue
+                # truth, not an unreadable body — nothing to name, and nothing to
+                # emit, since its real state arrives as its own report or through
+                # reconciliation (ADR-0026). Silent *by decision*, which is why it
+                # is a named verdict rather than the branch that falls off the end:
+                # the accidental silence on the place verb read identically from
+                # the outside and was a defect (ADR-0048 §4).
+                return
+            case unreachable:
+                assert_never(unreachable)
 
     async def _cancel_symbol(self, cloid: str) -> str | None:
         """The coin to cancel ``cloid`` under (the venue cancels by asset
@@ -209,36 +317,37 @@ class HyperliquidExchange:
         order = self._placed.get(cloid)
         if order is not None:
             return order.symbol
-        read = _decode_order_status(await self._order_status(cloid))
-        return read.coin if isinstance(read, _OrderRecord) else None
+        # The plain decode, not ``fetch_order``'s: a cancel goes by asset index
+        # whatever the status, so a status the saga vocabulary cannot map is no
+        # obstacle here and must not become one.
+        record = await self._order_status(cloid, normalize=_decode_order_status)
+        return record.coin if isinstance(record, _OrderRecord) else None
 
     async def fetch_order(self, cloid: str) -> VenueOrderView | None:
         """Venue truth for ``cloid``: the order record plus its fill history,
         the ADR-0011 cross-check in one read. ``unknownOid`` is positive proof
         of no record (an empty view); a read that *failed* is ``None`` — an
         outage must never look like "no record" (inv 1)."""
-        try:
-            return await self._fetch_view(cloid)
-        except OSError:
-            # Timeout or transport failure (TimeoutError is an OSError): the
-            # read failed, and a failed read is None — the reconciler freezes
-            # rather than mistaking an outage for an empty book.
+        record = await self._order_status(cloid, normalize=_decode_order_view)
+        if record is None:
+            # The read failed and ``read`` already named which way — an outage or
+            # a body outside the venue's contract. Either freezes the reconciler
+            # rather than being mistaken for an empty book.
             return None
-
-    async def _fetch_view(self, cloid: str) -> VenueOrderView | None:
-        read = _decode_order_status(await self._order_status(cloid))
-        if read is _OrderStatusRead.NO_RECORD:
+        if record is _OrderStatusRead.NO_RECORD:
             # unknownOid: a *successful* read that positively has no record —
             # the order never landed (an empty view, not a failed read).
             return VenueOrderView(status=None)
-        if read is _OrderStatusRead.UNRECOGNIZED:
-            # A shape we cannot parse is a failed read, not a record: freezing
-            # (ADR-0011) beats misclassifying venue truth.
-            return None
-        state = _order_state(read.status)
-        if state is None:
-            # A status outside the taxonomy is likewise a failed read.
-            return None
+        # Cannot fail: ``_decode_order_view`` refused an unmappable status on the
+        # way in, so the read is already ``None`` above if this had no answer.
+        state = _order_state(record.status)
+        return await self._view_with_fills(cloid, record, state)
+
+    async def _view_with_fills(
+        self, cloid: str, record: "_OrderRecord", state: OrderState
+    ) -> VenueOrderView | None:
+        """The second half of the ADR-0011 cross-check: this order's record
+        joined to its fill history, or ``None`` if that half failed to read."""
         # Bound the fills read to this order's own lifetime (ADR-0011): starting
         # at the venue's recorded placement time keeps its fills at the front of
         # the returned window, so a busy account's later fills can never push
@@ -246,7 +355,7 @@ class HyperliquidExchange:
         # {cloid}:fill:{tid} dedup. The timestamp is the venue's own, so the
         # bound is exact regardless of local clock skew.
         fills = await self._fetch_fills(
-            cloid=cloid, symbol=read.coin, oid=read.oid, since_ms=read.timestamp
+            cloid=cloid, symbol=record.coin, oid=record.oid, since_ms=record.timestamp
         )
         if fills is None:
             # An unparseable fills half is a failed read too — freeze, never a
@@ -258,7 +367,7 @@ class HyperliquidExchange:
             self._placed.pop(cloid, None)
         return VenueOrderView(
             status=self._status_report(
-                cloid=cloid, symbol=read.coin, status=state, venue_oid=str(read.oid)
+                cloid=cloid, symbol=record.coin, status=state, venue_oid=str(record.oid)
             ),
             fills=tuple(fills),
         )
@@ -268,80 +377,36 @@ class HyperliquidExchange:
         whole account-and-positions snapshot in one response.
 
         ``None`` only when the read itself failed — an outage must never read as
-        a flat book (ADR-0011 inv 1), exactly as ``fetch_order`` carries it.
+        a flat book (ADR-0011 inv 1), exactly as ``fetch_order`` carries it. No
+        ``cloid``: this grain is the whole account, not one order.
         """
-        try:
-            response = await self._info({"type": "clearinghouseState", "user": self._user_address})
-        except OSError:
-            # Timeout or transport failure (TimeoutError is an OSError): the read
-            # failed, and a failed read is None — the reconciler freezes rather
-            # than healing a restored ledger toward a fabricated flat.
-            return None
-        return normalize_account_state(response)
+        return await read(
+            request="clearinghouseState",
+            query={"type": "clearinghouseState", "user": self._user_address},
+            send=self._info,
+            normalize=normalize_account_state,
+        )
 
-    async def _order_status(self, cloid: str) -> object:
+    async def _order_status(
+        self, cloid: str, *, normalize: "Callable[[object], _OrderDecode]"
+    ) -> "_OrderDecode | None":
         """The venue's ``orderStatus`` answer for ``cloid`` — the one read both
-        the reconciler's ``fetch_order`` and a post-restart ``cancel`` share."""
-        return await self._info({"type": "orderStatus", "user": self._user_address, "oid": cloid})
+        the reconciler's ``fetch_order`` and a post-restart ``cancel`` share.
 
-    async def _report_placement(self, order: PlaceOrder, response: object) -> None:
-        """Translate the venue's placement adjudication into raw facts on the
-        bus (ADR-0015): one order in, one status out of ``statuses``."""
-        outcome = _action_outcome(response)
-        if isinstance(outcome, _ActionError):
-            # The venue refused the whole action (bad nonce/signature/rate-limit)
-            # — the order never entered the book. Drop the placed memory and name
-            # it, emitting no terminal: a transient refusal must leave the order
-            # resendable, and reconcile-by-cloid resolves it (ADR-0008 rule 2).
-            self._placed.pop(order.cloid, None)
-            self._action_rejected("place", order.cloid, outcome.message)
-            return
-        (status,) = outcome
-        if "resting" in status:
-            await self._bus.publish(
-                self._status_report(
-                    cloid=order.cloid,
-                    symbol=order.symbol,
-                    status=OrderState.LIVE,
-                    venue_oid=str(status["resting"]["oid"]),
-                )
-            )
-        elif "error" in status:
-            # Venue-adjudicated refusal: REJECTED, never DENIED (ADR-0010) —
-            # the order was sent and judged, and the venue's reason rides along.
-            self._placed.pop(order.cloid, None)  # terminal: drop the placed memory
-            await self._bus.publish(
-                self._status_report(
-                    cloid=order.cloid,
-                    symbol=order.symbol,
-                    status=OrderState.REJECTED,
-                    reason=str(status["error"]),
-                )
-            )
-        elif "filled" in status:
-            # The placement response carries no trade ids, and a synthetic one
-            # would double-count against reconciliation's venue-tid fills under
-            # {cloid}:fill:{tid} dedup — so fetch the venue's own fill records
-            # and emit those. This is the read right after placement: the fills
-            # are the newest, so the whole-history read cannot miss them. An IOC
-            # that filled is terminal, so drop the placed memory regardless of
-            # how the fills read resolves.
-            self._placed.pop(order.cloid, None)  # terminal: drop the placed memory
-            try:
-                fills = await self._fetch_fills(
-                    cloid=order.cloid, symbol=order.symbol, oid=int(status["filled"]["oid"])
-                )
-            except OSError as exc:
-                # The order filled but reading its fills failed in transport.
-                # The placement succeeded, so this is a fills-read failure, not a
-                # place failure — name it as such and emit nothing; reconcile's
-                # fetch_order re-reads FILLED and heals the fills (ADR-0011).
-                self._request_failed("fills", order.cloid, exc)
-                return
-            # An unparseable (non-transport) fills read is None: emit nothing —
-            # reconciliation is the backstop.
-            for report in fills or ():
-                await self._bus.publish(report)
+        The query is shared and the ``normalize`` is not, because the two callers
+        disagree about one thing only: ``fetch_order`` must map the status into
+        saga vocabulary and freezes on one it cannot, while a cancel goes by asset
+        index whatever the status. Passing the decode in keeps that the *whole*
+        difference between them, rather than a second read site free to drift on
+        everything else too.
+        """
+        return await read(
+            request="orderStatus",
+            query={"type": "orderStatus", "user": self._user_address, "oid": cloid},
+            send=self._info,
+            normalize=normalize,
+            cloid=cloid,
+        )
 
     async def _fetch_fills(
         self, *, cloid: str, symbol: str, oid: int, since_ms: int | None = None
@@ -353,27 +418,36 @@ class HyperliquidExchange:
         (``userFillsByTime``), so an aged order's fills sit at the front of the
         window rather than risking the venue's page cap; without it the whole
         recent history is read (``userFills``), safe only right after placement
-        when this order's fills are the newest. ``None`` on a body we cannot
-        parse — a failed read the caller freezes on, never silent truth.
+        when this order's fills are the newest. ``None`` on a read that failed —
+        a body we could not parse or a transport that died, both named by
+        ``read`` and both frozen on by the caller, never silent truth.
+
+        Both queries name themselves ``userFills``, and the mismatch with the
+        windowed ``type`` is deliberate rather than missed: the ``request`` label
+        names the **read**, not the endpoint (ADR-0048 §6). This is one read at
+        one grain — the same fills, for the same order, differing only in how far
+        back it looks — and an operator triaging it wants the two windows under
+        one name. Deriving the label from ``query["type"]`` would split one read's
+        history across two labels for a distinction no triage turns on.
         """
         query: dict[str, Any] = (
             {"type": "userFills", "user": self._user_address}
             if since_ms is None
             else {"type": "userFillsByTime", "user": self._user_address, "startTime": since_ms}
         )
-        entries = await self._info(query)
-        if not isinstance(entries, list):
-            # A shape we cannot parse is a failed read, not "no fills": name it
-            # (a venue contract change stays visible) and let the caller freeze
-            # or heal, never misread it as truth.
-            named_event(
-                NamedEvent.EXCHANGE_REQUEST_FAILED,
-                request="userFills",
-                cloid=cloid,
-                error=f"unrecognized fills response: {entries!r}",
-            )
-            return None
-        try:
+
+        def rows(response: object) -> list[FillReport]:
+            if not isinstance(response, list):
+                # Not a container we can walk. Raised rather than answered here,
+                # so this function only ever *reads* and ``read`` owns the verdict
+                # for every way this read can fail.
+                raise TypeError(f"fills response is not a list: {type(response).__name__}")
+            # A row inside it can fail on its own — a missing field, a figure that
+            # is not a number or not a string, a row that is not even a mapping —
+            # and ``oid`` is dereferenced by the filter itself, so a malformed row
+            # belonging to *another* order poisons this read too. Correctly: the
+            # whole body is one answer, and a partial list would read as the whole
+            # truth (ADR-0011 inv 1).
             return [
                 FillReport(
                     ts_event=int(entry["time"]) * _NS_PER_MS,
@@ -401,24 +475,13 @@ class HyperliquidExchange:
                     # nothing left to select with it.
                     fee=_settled_in_usdc(entry),
                 )
-                for entry in entries
+                for entry in response
                 if entry["oid"] == oid
             ]
-        except UNREADABLE as exc:
-            # The container was a list but a row inside it is not one we can read
-            # — a missing field, a figure that is not a number or not a string,
-            # or a row that is not even a mapping. Same verdict as above: a
-            # failed read, named and ``None``, never a partial list that reads as
-            # the whole truth (ADR-0011 inv 1). ``oid`` is dereferenced by the
-            # filter itself, so a malformed row belonging to *another* order is
-            # inside this guard too.
-            named_event(
-                NamedEvent.EXCHANGE_REQUEST_FAILED,
-                request="userFills",
-                cloid=cloid,
-                error=f"{exc!r} in fills response",
-            )
-            return None
+
+        return await read(
+            request="userFills", query=query, send=self._info, normalize=rows, cloid=cloid
+        )
 
     def instrument_specs(self) -> Mapping[str, InstrumentSpec]:
         """The meta-sourced per-symbol specs (ADR-0031), for the Engine to wire
@@ -524,18 +587,31 @@ class _OrderRecord:
 
 
 class _OrderStatusRead(Enum):
-    """An ``orderStatus`` read that yielded no usable order record."""
+    """An ``orderStatus`` read that succeeded and holds no order record.
+
+    One member, and it stays an enum for that reason: ``NO_RECORD`` is a
+    *positive* claim — the venue says this cloid never landed — and the type is
+    what keeps it from ever being written as the ``None`` that means the read
+    failed. The two are opposite answers (ADR-0008's resend gate turns on which),
+    so they must not share a representation.
+    """
 
     NO_RECORD = "no_record"  # unknownOid — the venue positively has no record
-    UNRECOGNIZED = "unrecognized"  # a shape we cannot parse — a failed read
 
 
-def _decode_order_status(response: object) -> _OrderRecord | _OrderStatusRead:
-    """Decode a venue ``orderStatus`` response into its order record, or which
-    kind of no-record it is: ``NO_RECORD`` for the venue's positive
-    ``unknownOid``, ``UNRECOGNIZED`` for any shape outside that and the order
-    record (a failed read — never venue truth). The one decode both
-    ``fetch_order`` and a post-restart ``cancel`` read the venue through."""
+# What either ``orderStatus`` decode below answers with. Never ``None``: that is
+# ``read``'s to return, and it means something else entirely.
+_OrderDecode = _OrderRecord | _OrderStatusRead
+
+
+def _decode_order_status(response: object) -> _OrderDecode:
+    """Decode a venue ``orderStatus`` response into its order record, or the
+    venue's positive ``unknownOid``. Any shape outside those two raises into
+    ``UNREADABLE`` — a failed read, never venue truth.
+
+    The decode a post-restart ``cancel`` reads the venue through: it needs the
+    coin to cancel by asset index, whatever status the order is in.
+    """
     match response:
         case {"status": "unknownOid"}:
             return _OrderStatusRead.NO_RECORD
@@ -547,12 +623,27 @@ def _decode_order_status(response: object) -> _OrderRecord | _OrderStatusRead:
             },
         }:
             return _OrderRecord(coin=coin, oid=oid, timestamp=timestamp, status=status)
-    return _OrderStatusRead.UNRECOGNIZED
+    raise ValueError("unrecognized orderStatus response")
 
 
-def _order_state(status: str) -> OrderState | None:
-    """The saga vocabulary for a venue order-status string, or ``None`` for a
-    status we cannot map (freeze, never misclassify).
+def _decode_order_view(response: object) -> _OrderDecode:
+    """``_decode_order_status`` plus the one thing ``fetch_order`` needs of it:
+    that the record's status maps into saga vocabulary.
+
+    A status outside the taxonomy is a failed read like any unreadable body, and
+    refusing it *here* rather than after the read is what puts it inside
+    ``read``'s naming — the venue's own string reaches the operator, which on a
+    body that parsed cleanly is the entire triage.
+    """
+    decoded = _decode_order_status(response)
+    if isinstance(decoded, _OrderRecord):
+        _order_state(decoded.status)  # raises if the saga has no term for it
+    return decoded
+
+
+def _order_state(status: str) -> OrderState:
+    """The saga vocabulary for a venue order-status string, raising into
+    ``UNREADABLE`` for a status we cannot map (freeze, never misclassify).
 
     The venue's taxonomy is a long list of specific causes, but every entry
     resolves by suffix: ``…Rejected`` refusals, ``…Canceled`` / ``…Cancel``
@@ -567,7 +658,7 @@ def _order_state(status: str) -> OrderState | None:
             return OrderState.CANCELLED
         case _ if status.endswith("ejected"):
             return OrderState.REJECTED
-    return None
+    raise ValueError(f"unmappable order status {status!r}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -584,14 +675,121 @@ class _ActionError:
 def _action_outcome(response: object) -> list[Any] | _ActionError:
     """The ``statuses`` array out of an ok /exchange action response (dicts for
     orders, bare strings for cancels), or an ``_ActionError`` for the venue's
-    documented action-level ``err`` envelope. A shape that is neither is a
-    genuine parse failure we fail fast on (``ValueError``)."""
+    documented action-level ``err`` envelope.
+
+    A shape that is neither raises into ``UNREADABLE``. It used to fault the
+    engine from here, on the reasoning that a body we cannot parse is a genuine
+    failure — which is true, and is not the same as saying it is *this* layer's
+    to answer. An unreadable body is a failed read wherever it is read (inv 1),
+    and both write verbs already hold the backstop that makes the milder verdict
+    safe: nothing is reported, and reconcile-by-cloid resolves the order.
+    """
     match response:
         case {"status": "ok", "response": {"data": {"statuses": list(statuses)}}}:
             return statuses
         case {"status": "err", "response": message}:
             return _ActionError(str(message))
     raise ValueError(f"unrecognized Hyperliquid action response: {response!r}")
+
+
+@dataclass(frozen=True, slots=True)
+class _Resting:
+    """The venue booked the order: it is LIVE at ``venue_oid``."""
+
+    venue_oid: str
+
+
+@dataclass(frozen=True, slots=True)
+class _Rejected:
+    """The venue judged the order and refused it, with its own reason."""
+
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class _Filled:
+    """The order filled on arrival. Carries only the oid, because the placement
+    response has no trade ids and the fills must be read from the venue's own
+    records (ADR-0011)."""
+
+    oid: int
+
+
+# One placement adjudication, read. Four members for the three per-order
+# statuses the venue documents plus the action-level refusal that precedes
+# adjudication — a union rather than one record with optional fields, so a
+# combination the venue cannot produce is one this adapter cannot represent.
+_Adjudication = _ActionError | _Resting | _Rejected | _Filled
+
+
+class _CancelVerdict(Enum):
+    """A cancel the venue adjudicated, either way it went.
+
+    ``ALREADY_GONE`` is a *named* outcome rather than the branch that falls off
+    the end, and that is the whole reason this is an enum and not a ``bool``:
+    the adapter deliberately emits nothing for it, and an accidental silence
+    looks exactly the same from outside (ADR-0048 §4).
+    """
+
+    CANCELLED = "cancelled"  # the venue confirmed it
+    ALREADY_GONE = "already_gone"  # filled, cancelled, or never landed
+
+
+# One cancel adjudication, read — the verdict, or the action-level refusal that
+# precedes any verdict. The peer of ``_Adjudication`` on the other write verb.
+_CancelAdjudication = _ActionError | _CancelVerdict
+
+
+def _placement_adjudication(response: object) -> _Adjudication:
+    """Read a venue placement response: one order in, one status out of
+    ``statuses`` (ADR-0015).
+
+    Pure, and that is load-bearing rather than tidy — everything unreadable
+    about a placement body is decided in here, so the caller's guard can cover
+    exactly this and never the publishing that follows it (ADR-0048 §4).
+
+    Any shape outside the three documented adjudications raises into
+    ``UNREADABLE``. It used to fall out of the reporting silently, which is the
+    one outcome inv 1 forbids outright: a venue that started adjudicating a
+    fourth way would leave orders unreported with nothing recording that it had.
+    """
+    outcome = _action_outcome(response)
+    if isinstance(outcome, _ActionError):
+        return outcome
+    (status,) = outcome
+    if "resting" in status:
+        return _Resting(venue_oid=str(status["resting"]["oid"]))
+    if "error" in status:
+        return _Rejected(reason=str(status["error"]))
+    if "filled" in status:
+        return _Filled(oid=int(status["filled"]["oid"]))
+    raise ValueError(f"unrecognized placement status: {status!r}")
+
+
+def _cancel_adjudication(response: object) -> _CancelAdjudication:
+    """Read a venue cancel response — the peer of ``_placement_adjudication``
+    on the other write verb, pure for the same reason.
+
+    The venue adjudicates a cancel two ways and both are matched, rather than
+    one matched and everything else swept into the other. ``ALREADY_GONE`` is a
+    *claim* — the venue says this order is filled, cancelled, or never landed —
+    and reading it as "not ``success``" would let a status the venue has never
+    sent make that claim on its behalf, going out silent as the ordinary
+    cancel/fill race. Any third shape raises into ``UNREADABLE`` for the reason
+    its placement twin does: a venue that started adjudicating a fourth way
+    would leave orders unreported with nothing recording that it had (ADR-0048
+    §4). The backstop is untouched — the durable ``cancel_requested`` marker
+    leaves the order to reconciliation either way (ADR-0026).
+    """
+    outcome = _action_outcome(response)
+    if isinstance(outcome, _ActionError):
+        return outcome
+    (status,) = outcome
+    if status == "success":
+        return _CancelVerdict.CANCELLED
+    if isinstance(status, Mapping) and "error" in status:
+        return _CancelVerdict.ALREADY_GONE
+    raise ValueError(f"unrecognized cancel status: {status!r}")
 
 
 def _settled_in_usdc(entry: Mapping[str, Any]) -> Decimal:
@@ -604,13 +802,22 @@ def _settled_in_usdc(entry: Mapping[str, Any]) -> Decimal:
     is guarded here rather than carried as a ``fee_currency`` field nothing yet
     reads — perp fees are USDC-settled today, and spot is out of scope (ADR-0030).
 
-    ``ValueError``, so it joins ``UNREADABLE`` and the caller answers it exactly
-    as it answers a missing field: a named failed read and ``None``, never a
-    partial list that reads as the whole truth (ADR-0011 inv 1).
+    ``VenueFactUnsupported`` and deliberately **not** a member of ``UNREADABLE``
+    (ADR-0048): every neighbour there describes a body we could not parse, which
+    a re-read may well fix, so they are answered with the named ``None`` a cycle
+    retries. A settled fill row never changes, so this one would be re-read to
+    the same refusal forever — and because ``_drive`` freezes ahead of any retry
+    budget and returns on the first frozen read, answering it that way stalls
+    every order behind it too, indefinitely and silently. It escalates out of
+    the seam instead, faulting the engine as ADR-0036 §4 promises.
     """
     token = entry["feeToken"]
     if token != "USDC":
-        raise ValueError(f"fee settled in {token!r}, not USDC")
+        raise VenueFactUnsupported(
+            f"fill fee settled in {token!r}, not USDC: this engine's money is a bare "
+            "Decimal with USDC implicit (ADR-0029), so the fee has no home in the "
+            "ledger. Retrying cannot change a settled fill row."
+        )
     return figure(entry["fee"])
 
 

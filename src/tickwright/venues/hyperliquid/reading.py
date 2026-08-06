@@ -17,9 +17,12 @@ this delegates to. Same discipline as ``ingress.py``: a second venue is the
 signal to promote something here to a shared home, not before.
 """
 
+from collections.abc import Awaitable, Callable, Mapping
 from decimal import Decimal
+from typing import Any
 
 from tickwright.domain import exact_figure
+from tickwright.observability import NamedEvent, named_event
 
 UNREADABLE = (ArithmeticError, KeyError, TypeError, ValueError)
 """What reading a reported body raises when it cannot be read.
@@ -34,14 +37,7 @@ superset, which is a difference no one intended and nothing would have surfaced.
 * ``TypeError`` — a value is the wrong type: a re-typed figure, or a row that is
   not a mapping at all.
 * ``ValueError`` — a value is the right type and still unreadable: a non-finite
-  figure (``exact_figure``), a margin mode outside the two the venue reports, or
-  a fill fee settled in a token other than USDC (``_settled_in_usdc``, ADR-0036).
-  That last one is the vocabulary's one **semantic** member and the odd one out:
-  the other raisers describe a body we could not parse, and a re-read may well
-  succeed, where a fill's settlement token is a fact the venue has already stored
-  and will report identically forever. Every caller here answers it as the
-  transient failure it is not — a frozen cycle rather than a fault — which
-  ADR-0036 §4 states as shipped and #216 owns correcting.
+  figure (``exact_figure``), or a margin mode outside the two the venue reports.
 * ``ArithmeticError`` — how ``decimal`` signals. ``Decimal("nope")`` raises
   ``InvalidOperation``, which is **not** a ``ValueError``, so this branch is what
   catches an unparseable numeric string.
@@ -49,7 +45,158 @@ superset, which is a difference no one intended and nothing would have surfaced.
 Deliberately a tuple and not a new exception type: a body we cannot read is a
 failed read, and every caller already has a guard that says what that means at
 its own layer. This names control flow that exists; it does not add any.
+
+What is deliberately **outside** it is ``VenueFactUnsupported`` (ADR-0048): the
+venue reporting a fact we understand and cannot represent — a fill fee settled in
+a token other than USDC. Every member above describes a body we could not parse,
+where a re-read may succeed, so a named ``None`` the cycle retries is the honest
+verdict. A settled venue row never changes, so that verdict would freeze the
+reconciler on it forever; it escalates past every guard here instead, and being a
+type no caller catches is what keeps that true by construction.
 """
+
+
+async def read[T](
+    *,
+    request: str,
+    query: dict[str, Any],
+    send: Callable[[dict[str, Any]], Awaitable[object]],
+    normalize: Callable[[object], T],
+    cloid: str | None = None,
+) -> T | None:
+    """One in-flight venue read: send ``query``, and answer the three ways it
+    can come back other than an answer.
+
+    ``None`` means the read **failed** — never "the venue said nothing"
+    (ADR-0011 inv 1). Two disjoint causes reach it, and both are named before
+    it is returned, because a freeze an operator cannot attribute is the quiet
+    outage that guard exists to prevent:
+
+    - the **send** failed (``OSError``, ``TimeoutError`` among it) — no body
+      arrived, so there is nothing to parse;
+    - the **body** arrived and could not be read (``UNREADABLE``) — a shape
+      outside the venue's contract, a missing field, a figure that is not one.
+
+    Both are transient by assumption: the caller retries at its next deadline
+    and nothing was guessed in the meantime. What deliberately does *not* stop
+    here is ``VenueFactUnsupported`` — a fact the venue reported and this engine
+    cannot represent, which a retry re-reads identically forever, so it
+    escalates past every guard here rather than being answered as something time
+    could fix (ADR-0048).
+
+    Splitting the two ``try`` blocks is what lets the unreadable branch quote the
+    body it could not read; splitting them *this* way is what keeps ``normalize``
+    honest, since a normalizer that raised ``OSError`` would otherwise be filed
+    as a dead connection.
+
+    Why the read and not just the vocabulary lives here: before this, "one venue
+    read" was spread across three collaborators — a sender, a per-caller
+    ``try``/``except`` deciding what a transport failure meant, and a normalizer
+    deciding what an unreadable body meant — so **which layer owned which
+    failure was chosen freshly at every read site**, and the sites disagreed. One
+    returned ``None`` and named it, one returned ``None`` silently, one raised.
+    Owning the taxonomy once is what makes a new read inherit it instead of
+    re-deriving it (issue #216).
+
+    What decides whether a read belongs here is **whether something above it
+    retries**, not whether it runs at boot. ``None`` is a freeze signal, and a
+    freeze only means anything to a caller that will ask again:
+
+    - ``fetch_account_state`` is a boot read *and* a caller. It runs as a
+      ``StartupBarrier`` step, and the barrier re-drives its whole sequence with
+      capped backoff until the startup budget is spent — so ``None`` is exactly
+      the "could not prove it, guessed nothing" the barrier is written to take.
+    - ``universe.py`` runs at composition, before anything that could re-drive
+      it, and the account-mode gate runs in ``start()`` ahead of the barrier.
+      Neither has a retry above it, so each owns its own refusal: the mode gate
+      builds the retry loop it needs and then raises, ``universe.py`` raises
+      outright. Both fault the startup barrier rather than freezing it.
+
+    Two policies, and the line between them is the retry, which is why a future
+    in-flight read inherits this one by default and a new pre-barrier read does
+    not.
+    """
+    try:
+        response = await send(query)
+    except OSError as exc:
+        failed_send(request=request, cloid=cloid, error=exc)
+        return None
+    try:
+        return normalize(response)
+    except UNREADABLE as exc:
+        unreadable_body(request=request, cloid=cloid, error=exc, response=response)
+        return None
+
+
+def failed_send(*, request: str, cloid: str | None = None, error: OSError) -> None:
+    """Name a request whose send died: no body arrived, so nothing was parsed.
+
+    Public because the **write** verbs fail this way too. ``place`` and
+    ``cancel`` send a signed action rather than a query, so they cannot go
+    through ``read`` — but what a dead transport *means* must not be theirs to
+    decide again, which is the per-site drift owning the taxonomy once exists to
+    end (ADR-0048 §4).
+    """
+    _failed_read(request, cloid, str(error))
+
+
+def unreadable_body(
+    *, request: str, cloid: str | None = None, error: Exception, response: object
+) -> None:
+    """Name a body that arrived and could not be read, quoting what arrived.
+
+    The body is not optional garnish: an unreadable body is how a venue contract
+    change presents, so it repeats every cycle for as long as the contract stays
+    broken, and an operator holding only the exception has nothing to act on.
+    ``rendered`` leads with the key set for that reason. The write verbs used to
+    name their half without it — the same failure, diagnosable on one path and
+    not the other.
+    """
+    _failed_read(request, cloid, f"{error!r} in {request} response {rendered(response)}")
+
+
+def _failed_read(request: str, cloid: str | None, error: str) -> None:
+    """Name a read that yielded no usable answer, either way it failed.
+
+    One event for both causes because the caller's verdict is one verdict — a
+    frozen cycle, nothing healed — and ``error`` carries which it was. ``cloid``
+    rides along only where the request has one, so the account grain omits it
+    rather than logging a ``None`` that reads as a missing value.
+
+    Private, with the two causes above as the way in: a caller that reached this
+    directly would be choosing its own words for a failure the taxonomy already
+    has words for, which is how the write path drifted from the read path in the
+    first place.
+    """
+    context = {"cloid": cloid} if cloid is not None else {}
+    named_event(NamedEvent.EXCHANGE_REQUEST_FAILED, request=request, error=error, **context)
+
+
+_RENDER_LIMIT = 300
+"""Characters of response body a failed read carries. Enough for the value-shaped
+failures; short of a fifty-position body."""
+
+
+def rendered(response: object) -> str:
+    """``response`` bounded for a log line — its shape first, its body truncated.
+
+    An unreadable body is what a venue contract change arrives as, so it repeats
+    on every cycle for as long as the contract stays broken: a fifty-position
+    body would be kilobytes an operator does not need served fifty times over.
+    The **key set** is what identifies a contract change, so it leads and is
+    never truncated; the body follows, bounded, for the failures a key set cannot
+    show — a figure that is not a number.
+
+    Nothing in here may raise: it runs only on the path that has already decided
+    to answer ``None``, and an exception escaping would turn a fail-closed read
+    into a crashed one. Hence ``list`` over ``sorted`` on the keys — mixed key
+    types have no order but always have a repr.
+    """
+    shape = f"keys={list(response)} " if isinstance(response, Mapping) else ""
+    body = repr(response)
+    if len(body) > _RENDER_LIMIT:
+        body = f"{body[:_RENDER_LIMIT]}… ({len(body)} chars)"
+    return f"{shape}{body}"
 
 
 def figure(reported: object) -> Decimal:

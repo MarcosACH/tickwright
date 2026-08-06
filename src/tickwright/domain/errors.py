@@ -41,6 +41,31 @@ class StoreAccountMismatch(InvariantViolation):
     """
 
 
+class VenueFactUnsupported(InvariantViolation):
+    """The venue reported a fact this engine has no way to represent, and will
+    report it identically forever (ADR-0048): a fill fee settled in a token
+    other than USDC, against a ledger whose money is a bare ``Decimal`` with
+    USDC left implicit (ADR-0029).
+
+    The **permanence** is the whole reason this is a type and not a member of
+    the venue's ``UNREADABLE`` vocabulary. Its neighbours there describe a body
+    we could not parse, where a re-read may well succeed, so their verdict is a
+    named ``None`` the cycle retries. A stored venue row is immutable: the read
+    fails identically on every later pass, the reconciler's ``_drive`` returns
+    its freeze *before* any retry budget advances, and the first affected order
+    freezes every order behind it in the iteration too. Answered as transient,
+    one such fact would stall the whole reconciler indefinitely on a
+    ``RECONCILE_FROZEN`` a cycle and nothing else — a permanent silent freeze
+    where ADR-0036 §4 promises a fail-fast.
+
+    So it leaves the venue seam rather than being answered inside it, faulting
+    the engine the way a broken boot precondition does
+    (``VenueAccountModeUnsupported``): loud, non-zero, and awaiting an operator,
+    which is the only thing that can resolve it. No money is ever misstated on
+    either verdict — this one is about which failure an operator can see.
+    """
+
+
 class VenueAccountModeUnsupported(InvariantViolation):
     """The venue account is not in a mode whose numbers this engine can read
     (ADR-0046 §3): its abstraction mode is outside Manual/Standard, or could not
