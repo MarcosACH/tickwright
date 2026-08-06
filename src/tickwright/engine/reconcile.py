@@ -21,6 +21,7 @@ prove — an outage must never read as "all orders vanished" (ADR-0011 inv 1).
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
+from enum import Enum
 
 from tickwright.domain import (
     Clock,
@@ -46,6 +47,19 @@ _NS_PER_SECOND = 1_000_000_000
 # Startup filters nothing — it reconciles every non-terminal saga.
 _INFLIGHT_STATES = frozenset({OrderState.SUBMITTED})
 _OPEN_ORDER_STATES = frozenset({OrderState.LIVE, OrderState.PARTIALLY_FILLED})
+
+
+class _FreezeScope(Enum):
+    """How much of a pass one failed read froze (ADR-0049) — the ``scope`` field
+    on ``reconcile.frozen``.
+
+    ``CYCLE`` is the whole remaining worklist: the venue did not answer, so
+    nothing behind this order was read. ``ORDER`` is this order alone: the venue
+    answered, unreadably, and every order behind it reconciled normally.
+    """
+
+    CYCLE = "cycle"
+    ORDER = "order"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -214,7 +228,7 @@ class Reconciler:
                     view = await self._exchange.fetch_order(order.cloid)
                     match view:
                         case VenueReadFailure.SEND_FAILED:
-                            return self._freeze()
+                            return self._freeze(_FreezeScope.CYCLE)
                         case VenueReadFailure.UNREADABLE_BODY:
                             self._charge_unreadable(order)
                             proved_all = False
@@ -299,7 +313,7 @@ class Reconciler:
         so the refusal names the order and leaves the evidence where it is.
         """
         if not self._unreadable_run.record_absent(order.cloid):
-            self._freeze()
+            self._freeze(_FreezeScope.ORDER)
             return
         raise VenueReadUnresolvable(
             f"venue body for cloid {order.cloid} unreadable on "
@@ -308,13 +322,20 @@ class Reconciler:
             "exchange.request_failed reads for this cloid, each quoting the body"
         )
 
-    def _freeze(self) -> bool:
+    def _freeze(self, scope: "_FreezeScope") -> bool:
         """The connectivity guard tripping (ADR-0011 inv 1): a failed venue read
-        aborts the whole cycle — nothing is ghosted, removed, or counted, since
-        an outage must never read as "all orders vanished". Returns ``False``
-        for the caller to propagate as the cycle verdict. The frozen cycle and
-        the order whose read failed ride the ambient context (ADR-0020)."""
-        named_event(NamedEvent.RECONCILE_FROZEN)
+        heals nothing — nothing is ghosted, removed, or counted, since an outage
+        must never read as "all orders vanished". Returns ``False`` for the
+        caller to propagate as the cycle verdict. The frozen cycle and the order
+        whose read failed ride the ambient context (ADR-0020).
+
+        ``scope`` is what says **how much** froze, and it is a field rather than
+        a second event name because the catalog is closed (ADR-0045) and nothing
+        routes on the difference — but plenty reads it. Both scopes name the
+        cloid whose read failed, so without this an operator watching
+        ``reconcile.frozen`` cannot tell a pass that stopped dead from a pass
+        that reconciled everything except one order (ADR-0049)."""
+        named_event(NamedEvent.RECONCILE_FROZEN, scope=scope.value)
         return False
 
     async def _adopt(self, order: Order, view: VenueOrderView) -> None:

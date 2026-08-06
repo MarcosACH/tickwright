@@ -703,14 +703,24 @@ def test_a_dead_send_stops_the_worklist_where_an_unreadable_body_does_not() -> N
     dead = _FlakyLink(exchange)
     dead.down = True
     _, frozen_reconciler, _ = _engine(store, dead, clock)
-    assert asyncio.run(frozen_reconciler.reconcile_open_orders()) is False
+    with capture_events() as outage_logs:
+        assert asyncio.run(frozen_reconciler.reconcile_open_orders()) is False
     assert dead.reads == ["0xaaa"]  # nothing behind it was even asked
 
     garbled = _GarbledLink(exchange)
     garbled.garbled = {"0xaaa"}
     _, skipping_reconciler, _ = _engine(store, garbled, clock)
-    assert asyncio.run(skipping_reconciler.reconcile_open_orders()) is False
+    with capture_events() as skip_logs:
+        assert asyncio.run(skipping_reconciler.reconcile_open_orders()) is False
     assert garbled.reads == ["0xaaa", "0xbbb"]
+
+    # And the two are told apart in telemetry. Both name the cloid whose read
+    # failed, so without the scope a dashboard cannot distinguish "the pass
+    # stopped here" from "this one order was skipped" — which is the whole
+    # difference between an outage and a contract change, and now the whole
+    # difference in what else got reconciled.
+    assert [log["scope"] for log in outage_logs if log["event"] == "reconcile.frozen"] == ["cycle"]
+    assert [log["scope"] for log in skip_logs if log["event"] == "reconcile.frozen"] == ["order"]
 
 
 def test_a_readable_read_clears_the_unreadable_run_before_it_can_escalate() -> None:

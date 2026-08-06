@@ -273,3 +273,86 @@ def test_a_vanished_order_is_ghosted_only_after_grace_and_a_none_read_freezes(
         assert order.state is OrderState.REJECTED
     finally:
         reopened.close()
+
+
+class _GarbledLinkExchange(VenueLink):
+    """A venue that answers every order read with a body the adapter cannot
+    read — the durable shape of #236, where the venue is up and its stored
+    value never changes. A network boundary is the one place a double is
+    allowed."""
+
+    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
+        return VenueReadFailure.UNREADABLE_BODY
+
+
+def test_a_durably_unreadable_body_faults_the_composed_engine(tmp_path: Path) -> None:
+    """The escalation's whole claim, in the composed runtime: the fault reaches
+    the ``TaskGroup`` and stops the process (ADR-0024/0049).
+
+    Nothing between the reconciler and the runner may absorb it. Its
+    predecessor is the permanent silent freeze — an engine that keeps running,
+    keeps trading and stops reconciling — which is the failure an operator
+    cannot see, and the one this exists to replace.
+    """
+    config = ReconcileConfig(
+        inflight_interval_seconds=2.0,
+        inflight_max_attempts=3,
+        open_order_interval_seconds=5.0,
+        ghost_grace_seconds=20.0,
+        recent_order_protection_seconds=4.0,
+        unreadable_max_attempts=3,
+    )
+    # The open-order cadence fires at t=6, 11 and 16: three consecutive
+    # unreadable reads of the one resting order, which spends its budget.
+    ticks = _ticks_file(
+        tmp_path / "ticks.jsonl",
+        [("42000", t * _NS) for t in (1, 6, 11, 16, 21)],
+    )
+
+    async def main() -> tuple[int, Engine]:
+        bus = InMemoryBus()
+        clock = ManualClock()
+        store = SQLiteStore(tmp_path / "saga.db")
+        venue = PaperExchange(
+            bus=bus,
+            clock=clock,
+            fill_model=ImmediateFillModel(),
+            genesis_collateral=GENESIS,
+            account_net=dict,
+        )
+        engine = Engine(
+            bus=bus,
+            clock=clock,
+            store=store,
+            exchange=_GarbledLinkExchange(venue),
+            feed=ReplayFeed(path=ticks, bus=bus, clock=clock),
+            config=EngineConfig(reconcile=config),
+        )
+        engine.register(
+            SingleShotLimitStrategy(
+                strategy_id="trivial",
+                bus=bus,
+                clock=clock,
+                side=Side.BUY,
+                quantity=Decimal("0.5"),
+                price=Decimal("41000"),  # rests below the 42000 prints: never fills
+            ),
+            symbols={"BTC"},
+        )
+        return await asyncio.wait_for(engine.run(), timeout=5), engine
+
+    with capture_events() as logs:
+        exit_code, engine = asyncio.run(main())
+
+    assert exit_code != 0
+    assert engine.state is ComponentState.FAULTED
+
+    # No new named event (ADR-0045's catalog is closed): the ordinary
+    # `engine.faulted` carries the refusal's own words, cloid included.
+    (faulted,) = [log for log in logs if log["event"] == "engine.faulted"]
+    assert "VenueReadUnresolvable" in str(faulted["error"])
+    assert _CLOID in str(faulted["error"])
+
+    # It escalated rather than freezing forever: the budget's freezes are there,
+    # bounded by it, and never a fourth cycle's.
+    assert len([log for log in logs if log["event"] == "reconcile.frozen"]) == 2
