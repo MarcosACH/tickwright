@@ -43,11 +43,14 @@ from tickwright.domain import (
     TimeInForce,
     VenueOrderView,
     VenueReadFailure,
+    VenueReadUnresolvable,
 )
 from tickwright.engine.cache import Cache
 from tickwright.engine.execution import ExecutionManager
 from tickwright.engine.reconcile import ReconcileConfig, Reconciler
 from tickwright.observability.testing import capture_events
+
+_NS_PER_SECOND = 1_000_000_000
 
 
 def _tick(price: str, ts: int = 1_000) -> MarketTick:
@@ -723,30 +726,85 @@ def test_a_dead_send_stops_the_worklist_where_an_unreadable_body_does_not() -> N
     assert [log["scope"] for log in skip_logs if log["event"] == "reconcile.frozen"] == ["order"]
 
 
-def test_a_readable_read_clears_the_unreadable_run_before_it_can_escalate() -> None:
-    # The budget escalates on *consecutive* unreadable bodies, and the word is
-    # load-bearing: a venue that garbles one response, answers the next, and
-    # garbles again is the transitional case ADR-0048 §1 says a single sample
-    # cannot rule out — precisely what the budget exists to wait for. Without
-    # the reset, a long-lived order would accumulate unrelated blips over days
-    # and fault the engine for a venue that was never durably broken.
+def test_a_readable_read_restarts_the_span_before_it_can_escalate() -> None:
+    # The span measures *continuous* unreadability, and the word is load-bearing:
+    # a venue that garbles one response, answers the next, and garbles again is
+    # the transitional case ADR-0048 §1 says a single sample cannot rule out —
+    # precisely what the span exists to wait through. Without the restart, a
+    # long-lived order would accumulate unrelated blips and fault a process
+    # whose venue was never durably broken.
     clock = ManualClock(start_ns=2_000)
     store = SQLiteStore(":memory:")
     exchange, _ = _surviving_venue(clock)
     store.checkpoint(_saga("0xabc", OrderState.LIVE), ts_ns=500)
 
     link = _GarbledLink(exchange)
-    config = ReconcileConfig(unreadable_max_attempts=3)
-    _, reconciler, _ = _engine(store, link, clock, config)
+    config = ReconcileConfig()
+    _, reconciler, _, cache = _wire(store, link, clock, config)
 
-    async def blip_twice_then_answer_then_blip_twice() -> None:
+    async def garble_answer_garble() -> None:
         for garbled in (True, True, False, True, True):
             link.garbled = {"0xabc"} if garbled else set()
             await reconciler.reconcile_open_orders()
+            clock.advance_to(
+                clock.timestamp_ns() + int(config.open_order_interval_seconds * _NS_PER_SECOND)
+            )
 
-    # Five unreadable reads in total, never three in a row: nothing escalates.
-    asyncio.run(blip_twice_then_answer_then_blip_twice())
+    asyncio.run(garble_answer_garble())
+
+    # Five reads spanning more wall-clock than the span itself: only the restart
+    # keeps this under it, so passing here is the restart working and nothing else.
     assert len(link.reads) == 5
+    assert clock.timestamp_ns() / _NS_PER_SECOND > config.unreadable_grace_seconds
+    # And the order is still there to be read — nothing resolved it on a body
+    # this process never parsed.
+    resting = cache.get_order("0xabc")
+    assert resting is not None and resting.state is OrderState.LIVE
+
+
+def test_the_unreadable_budget_buys_the_same_wall_clock_on_either_cadence() -> None:
+    # The budget answers one question — has waiting been tried and failed? —
+    # and waiting is measured in time, not in polls. The two continuous cadences
+    # poll 6x apart (5s in-flight, 30s open-order), so a budget counted in reads
+    # gives the same three unreadable answers two different meanings: 15 seconds
+    # of evidence on one cadence, 90 on the other, decided by nothing more than
+    # which state filter the order fell under. Same condition, same verdict, so
+    # the same span has to be spent before it is reached.
+    config = ReconcileConfig()
+
+    def escalates_after_seconds(state: OrderState, interval: float) -> float:
+        clock = ManualClock(start_ns=2_000)
+        store = SQLiteStore(":memory:")
+        exchange, _ = _surviving_venue(clock)
+        store.checkpoint(_saga("0xabc", state), ts_ns=500)
+        link = _GarbledLink(exchange)
+        link.garbled = {"0xabc"}
+        _, reconciler, _ = _engine(store, link, clock, config)
+        drive = (
+            reconciler.reconcile_inflight
+            if state is OrderState.SUBMITTED
+            else reconciler.reconcile_open_orders
+        )
+        started_ns = clock.timestamp_ns()
+
+        async def poll_until_it_escalates() -> float:
+            # A generous ceiling: the point is which cadence *stops* first, so
+            # the loop must be able to outrun either.
+            for _ in range(200):
+                await drive()
+                clock.advance_to(clock.timestamp_ns() + int(interval * _NS_PER_SECOND))
+            raise AssertionError("the durably unreadable body never escalated")
+
+        with pytest.raises(VenueReadUnresolvable):
+            asyncio.run(poll_until_it_escalates())
+        return (clock.timestamp_ns() - started_ns) / _NS_PER_SECOND
+
+    inflight = escalates_after_seconds(OrderState.SUBMITTED, config.inflight_interval_seconds)
+    open_order = escalates_after_seconds(OrderState.LIVE, config.open_order_interval_seconds)
+
+    # Within one poll of each other on cadences six times apart: the span is the
+    # unit, and the cadence only decides how finely it is sampled.
+    assert abs(inflight - open_order) <= config.open_order_interval_seconds
 
 
 # --- Timing rule (ADR-0008/0011) --------------------------------------------------
@@ -807,7 +865,7 @@ def test_a_config_whose_protection_window_reaches_the_ghost_grace_is_rejected() 
         "open_order_interval_seconds",
         "ghost_grace_seconds",
         "recent_order_protection_seconds",
-        "unreadable_max_attempts",
+        "unreadable_grace_seconds",
     ],
 )
 @pytest.mark.parametrize("value", [0, -1])

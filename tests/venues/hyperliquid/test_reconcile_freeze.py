@@ -174,15 +174,18 @@ def test_an_unreadable_body_stops_its_own_order_and_not_the_ones_behind_it() -> 
     assert [e["cloid"] for e in failed] == [POISON]
 
 
-def test_a_durably_unreadable_body_escalates_once_its_budget_is_spent() -> None:
+def test_a_durably_unreadable_body_escalates_once_its_span_is_spent() -> None:
     # The other half of #236, and the reason skipping the order is not the whole
     # fix: skipped forever, that order is never reconciled again and the stall is
     # merely quieter. ADR-0048 §1 concedes that one sample cannot tell a venue
-    # contract change from a truncated response — so this takes several. Once the
-    # budget is spent the condition is proven durable, and a durable one is an
+    # contract change from a truncated response — so this takes waiting. Once the
+    # span is spent the condition is proven durable, and a durable one is an
     # operator's to resolve, never a retry's (ADR-0048 §3): it faults the engine
     # rather than inventing a terminal state for an order whose body was never
     # read.
+    grace_seconds = 60.0
+    interval_seconds = 30.0
+
     async def main(cycles: int) -> None:
         bus = InMemoryBus()
         clock = ManualClock(start_ns=0)
@@ -197,18 +200,24 @@ def test_a_durably_unreadable_body_escalates_once_its_budget_is_spent() -> None:
             clock=clock,
             exchange=exchange,
             cache=cache,
-            config=ReconcileConfig(unreadable_max_attempts=3),
+            config=ReconcileConfig(
+                open_order_interval_seconds=interval_seconds,
+                unreadable_grace_seconds=grace_seconds,
+            ),
         )
         for _ in range(cycles):
             await reconciler.reconcile_open_orders()
+            clock.advance_to(clock.timestamp_ns() + int(interval_seconds * 1_000_000_000))
 
-    # Two passes are within budget: still skipped, still running, nothing raised.
+    # Two passes span 30s of a 60s window: still skipped, still running, nothing
+    # raised. The order is unreadable, but waiting has not been tried yet.
     asyncio.run(main(cycles=2))
 
-    # The third spends it, and the refusal names the order it is about. The
-    # venue's own string is not repeated here: `read` already named it against
-    # this cloid on each of the three reads, quoting the body it could not
-    # read — the fault points at those rather than re-deriving one of them.
+    # The third pass lands on the far edge of the span, and the refusal names the
+    # order it is about. The venue's own string is not repeated here: `read`
+    # already named it against this cloid on each of the three reads, quoting the
+    # body it could not read — the fault points at those rather than re-deriving
+    # one of them.
     with capture_events() as events:
         with pytest.raises(VenueReadUnresolvable, match=POISON):
             asyncio.run(main(cycles=3))

@@ -300,10 +300,11 @@ def test_a_durably_unreadable_body_faults_the_composed_engine(tmp_path: Path) ->
         open_order_interval_seconds=5.0,
         ghost_grace_seconds=20.0,
         recent_order_protection_seconds=4.0,
-        unreadable_max_attempts=3,
+        unreadable_grace_seconds=10.0,
     )
-    # The open-order cadence fires at t=6, 11 and 16: three consecutive
-    # unreadable reads of the one resting order, which spends its budget.
+    # The open-order cadence fires at t=6, 11 and 16: the first unreadable read
+    # starts the span and the last is 10s past it, so the one resting order is
+    # continuously unreadable across the whole of it.
     ticks = _ticks_file(
         tmp_path / "ticks.jsonl",
         [("42000", t * _NS) for t in (1, 6, 11, 16, 21)],

@@ -1,21 +1,32 @@
-"""Per-cloid consecutive-absence trackers for the continuous reconcile cycles.
+"""Per-cloid continuous-absence trackers for the reconcile cycles.
 
-The ``Reconciler`` never resolves an order terminally on a *single* absent read
-— that would let an outage or a transient blip read as "gone". Both continuous
-cadences instead require **continuous** absence before they act, and each owns a
-small ledger that concentrates the reset-on-presence discipline: observe a
-present record and the run is cleared; observe absence and the run grows until it
-crosses the cadence's threshold.
+The ``Reconciler`` never acts terminally on a *single* absent reading — that
+would let an outage or a transient blip read as proof. Every cadence instead
+requires **continuous** absence, and each ledger here concentrates the
+reset-on-presence discipline: observe presence and the run is cleared; observe
+absence and the run grows until it crosses a threshold.
 
-The two cadences measure the run in genuinely different units, so they are two
-types, not one parametrized ledger:
+**What is "absent" is the caller's to name.** These types know only that
+something the caller was waiting for did not arrive, so they serve any question
+of that shape. Two are live: a venue *record* absent from a read (the ghost
+cycle and the in-flight retry budget), and a *readable body* absent from one
+(ADR-0049's unreadable-body span, where the venue answered and the answer could
+not be parsed). Keeping the vocabulary at "absent/present" rather than "no
+record" is what lets the second question reuse the first's ledger instead of
+minting a third.
+
+The two types differ in the **unit** the run is measured in, and that is a
+property of the question rather than of the caller:
 
 * ``ConsecutiveMisses`` counts absent **observations** — the in-flight retry
-  budget (ADR-0011 inv 7). A missed poll is the unit of retry, so it holds
-  regardless of how the runner spaces its calls.
-* ``GraceWindow`` measures absent **wall-clock time** — the ghost grace window
-  (ADR-0011 inv 3). A resting order must be absent across the whole span, so the
-  unit must be the clock, not a call count.
+  budget (ADR-0011 inv 7). Its unit is right precisely because the thing being
+  budgeted *is* the polling: a missed poll is the unit of retry, so the count
+  holds regardless of how the runner spaces its calls.
+* ``GraceWindow`` measures absent **wall-clock time** — ADR-0011 inv 3's ghost
+  grace window, and ADR-0049's unreadable-body span. Both ask whether waiting
+  has been tried, and waiting is measured on a clock: a count would mean a
+  different amount of it under each driver, and the unreadable span has three
+  drivers polling as far apart as 5s, 30s and the startup barrier's backoff.
 
 Both are deliberately in-memory: a restart resets them, and the startup pass
 re-proves every saga against venue truth before anything places (ADR-0009).
@@ -54,10 +65,16 @@ class GraceWindow:
     """Measures continuous absent wall-clock time per key; resets on presence.
 
     ``record_absent`` stamps the first absent observation and returns ``True``
-    once ``span_ns`` has elapsed since then with no intervening presence — the
-    resting order is then a ghost past its grace window (ADR-0011 inv 3). Any
-    ``record_present`` in between clears the run, so only *continuous* absence,
-    never a transient blip, ever fires. Firing clears the run so it re-arms.
+    once ``span_ns`` has elapsed since then with no intervening presence: the
+    resting order is a ghost past its grace window (ADR-0011 inv 3), or the
+    unreadable body has stayed unreadable long enough to be durable (ADR-0049).
+    Any ``record_present`` in between clears the run, so only *continuous*
+    absence, never a transient blip, ever fires. Firing clears the run so it
+    re-arms.
+
+    **The first observation only starts the clock**, whatever the span — so a
+    single absent reading can never fire, and "more than one sample" is
+    structural here rather than a threshold a caller has to configure for.
     """
 
     def __init__(self, *, span_ns: int) -> None:
