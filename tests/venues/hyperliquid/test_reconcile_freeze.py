@@ -91,7 +91,9 @@ def _order_status_body(*, oid: int, status: str, cloid: str) -> dict:
     }
 
 
-def _make_exchange(post: FakeExchangeApi, bus: InMemoryBus, clock: ManualClock):
+def _make_exchange(
+    post: FakeExchangeApi, bus: InMemoryBus, clock: ManualClock
+) -> HyperliquidExchange:
     return HyperliquidExchange(
         config=HyperliquidConfig(
             testnet=True, symbols=["BTC"], signing_key=SecretStr(TEST_SIGNING_KEY)
@@ -223,16 +225,7 @@ def test_a_venue_outage_freezes_reconciliation_instead_of_resolving_inflight() -
         # Every orderStatus read the reconciler makes dies in transport: the
         # outage case (one route answers them all — the venue's state holds).
         post = FakeExchangeApi({"orderStatus": ConnectionError("venue unreachable")})
-        exchange = HyperliquidExchange(
-            config=HyperliquidConfig(
-                testnet=True, symbols=["BTC"], signing_key=SecretStr(TEST_SIGNING_KEY)
-            ),
-            bus=bus,
-            clock=clock,
-            universe=HyperliquidUniverse(specs={"BTC": BTC_SPEC}, asset_indices={"BTC": 3}),
-            post=post,
-            startup_timeout_seconds=60.0,
-        )
+        exchange = _make_exchange(post, bus, clock)
         store = SQLiteStore(":memory:")
         store.checkpoint(_submitted_saga(), ts_ns=500)
         cache = Cache(store=store)
@@ -275,18 +268,7 @@ def test_a_permanent_refusal_leaves_the_cycle_instead_of_freezing_it_forever() -
         clock = ManualClock(start_ns=0)
         post = FakeExchangeApi(
             {
-                "orderStatus": {
-                    "status": "order",
-                    "order": {
-                        "order": {
-                            "coin": "BTC",
-                            "oid": 91,
-                            "timestamp": 1_700_000_000_000,
-                            "cloid": "0x" + "ab" * 16,
-                        },
-                        "status": "filled",
-                    },
-                },
+                "orderStatus": _order_status_body(oid=91, status="filled", cloid="0x" + "ab" * 16),
                 "userFillsByTime": [
                     {
                         "coin": "BTC",
@@ -301,16 +283,7 @@ def test_a_permanent_refusal_leaves_the_cycle_instead_of_freezing_it_forever() -
                 ],
             }
         )
-        exchange = HyperliquidExchange(
-            config=HyperliquidConfig(
-                testnet=True, symbols=["BTC"], signing_key=SecretStr(TEST_SIGNING_KEY)
-            ),
-            bus=bus,
-            clock=clock,
-            universe=HyperliquidUniverse(specs={"BTC": BTC_SPEC}, asset_indices={"BTC": 3}),
-            post=post,
-            startup_timeout_seconds=60.0,
-        )
+        exchange = _make_exchange(post, bus, clock)
         store = SQLiteStore(":memory:")
         store.checkpoint(_submitted_saga(), ts_ns=500)
         cache = Cache(store=store)
