@@ -86,10 +86,10 @@ class ReconcileConfig:
     time, while the number of reads inside any given wait is set by whoever is
     driving. The three drivers disagree wildly: the in-flight cadence polls
     every 5s, the open-order cadence every 30s, and the ``StartupBarrier``
-    re-drives on capped exponential backoff. Counted in reads, the same budget
-    would mean 15 seconds of evidence on one cadence, 90 on another, and about 3
-    at boot — where it would quietly overrule the operator's configured startup
-    window (ADR-0049 §4).
+    re-drives on capped exponential backoff. Counted in reads, the same three
+    answers bought 10 seconds of waiting on the in-flight cadence, 60 on the
+    open-order one, and about 3 at boot — where they quietly overruled the
+    operator's configured startup window (ADR-0049 §4.1 tabulates it).
 
     It is deliberately outside the timing invariant below — a skipped order is
     never counted absent, so this span cannot race the ghost grace window the
