@@ -157,7 +157,7 @@ class _VanishingLinkExchange(VenueLink):
     """The venue link for the ghost scenario, its behavior keyed off *virtual*
     time so the whole script stays deterministic: delegate normally while the
     order settles, then read as vanished (a positive no-record view), with one
-    outage window in the middle where the read itself fails (``None``). A
+    outage window in the middle where the send itself dies. A
     network boundary is the one place a test double is allowed."""
 
     def __init__(self, venue: PaperExchange, clock: ManualClock) -> None:
@@ -175,7 +175,7 @@ class _VanishingLinkExchange(VenueLink):
         return VenueOrderView(status=None)  # vanished from the venue
 
 
-def test_a_vanished_order_is_ghosted_only_after_grace_and_a_none_read_freezes(
+def test_a_vanished_order_is_ghosted_only_after_grace_and_a_failed_read_freezes(
     tmp_path: Path,
 ) -> None:
     """ADR-0011's ghost discipline, live in the composed engine: a resting

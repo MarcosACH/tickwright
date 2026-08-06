@@ -236,13 +236,16 @@ caller needs to decide **how much** one order's failure costs. `SEND_FAILED`: no
 so the venue may be unreachable — the pass stops, since every order behind this one would pay a
 30s request timeout to learn the same thing. `UNREADABLE_BODY`: a body arrived and could not be
 read, from a venue that is up and answering at full speed — that order alone is skipped, its
-per-cloid budget is charged, and the pass carries on. Both are still "not venue truth"; neither
-is ever a view. The budget is what makes the durable case escape the transient verdict: several
-consecutive unreadable reads of one cloid are the more-than-one-sample a [[Permanent refusal]]
+per-cloid span runs, and the pass carries on. Both are still "not venue truth"; neither is ever
+a view. The span is what makes the durable case escape the transient verdict: staying unreadable
+across `unreadable_grace_seconds` of waiting is the more-than-one-sample a [[Permanent refusal]]
 cannot be told from otherwise, and spending it raises `VenueReadUnresolvable` — never a terminal
-state invented for an order whose body was never read. See ADR-0049, ADR-0048.
+state invented for an order whose body was never read. Measured in **wall-clock and never in
+reads**: the three drivers poll 5s, 30s and the startup barrier's backoff apart, so a count
+would buy a different amount of waiting under each. See ADR-0049 §4.1, ADR-0048.
 _Avoid_: `None` read, failed request (the first names the old single sentinel, the second is
-what an operator sees on either member).
+what an operator sees on either member); unreadable-read *budget* (says count where the unit is
+time).
 
 **Permanent refusal**:
 A venue answer that is understood and cannot be represented — a fill fee settled in a token

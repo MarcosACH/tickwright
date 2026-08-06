@@ -620,7 +620,7 @@ def test_a_recent_order_resumes_normal_ghost_resolution_once_it_ages_out() -> No
 # --- Connectivity guard ---------------------------------------------------------
 
 
-def test_a_none_read_freezes_the_cycle_emits_frozen_and_the_next_cycle_heals() -> None:
+def test_a_failed_read_freezes_the_cycle_emits_frozen_and_the_next_cycle_heals() -> None:
     clock = ManualClock(start_ns=2_000)
     store = SQLiteStore(":memory:")
     exchange, dead_bus = _surviving_venue(clock)
@@ -664,7 +664,7 @@ def test_a_none_read_freezes_the_cycle_emits_frozen_and_the_next_cycle_heals() -
         ("reconcile_open_orders", OrderState.LIVE, "open_order"),
     ],
 )
-def test_every_cadence_freezes_on_a_none_read_and_removes_nothing(
+def test_every_cadence_freezes_on_a_failed_read_and_removes_nothing(
     cycle_method: str, saga_state: OrderState, frozen_label: str
 ) -> None:
     # The connectivity guard (ADR-0011 inv 1) is one skeleton behind every

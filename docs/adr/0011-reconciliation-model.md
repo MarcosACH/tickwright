@@ -25,8 +25,10 @@ ADR-0009).
    the failure is a two-member type rather than one sentinel: a failed send stops the pass (the
    venue may be unreachable, and every order behind it would pay a request timeout to learn the
    same), while an unreadable body — from a venue that is up and answering — skips only its own
-   order, against a per-cloid budget that faults the engine once the condition is proven durable
-   ([ADR-0049](./0049-failed-read-blast-radius.md)).*
+   order, against a per-cloid **span of continuous unreadability** that faults the engine once
+   the condition is proven durable. The span is wall-clock and not a read count because its
+   three drivers poll as far apart as 5s, 30s and the startup barrier's backoff, so a count
+   would mean a different amount of waiting under each ([ADR-0049](./0049-failed-read-blast-radius.md)).*
 2. **Cross-check before ghosting.** Before any terminal "gone" resolution, issue a targeted
    single-order/cloid query **and** consult fill history — a vanished order may have filled.
 3. **Grace window.** An order must be **continuously absent across the grace window** (default

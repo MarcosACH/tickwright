@@ -22,7 +22,7 @@ lives in the suite, and the members it does not name stay the real venue's.
 Why bases and not subclasses of the real ``PaperExchange``, as every ``Store``
 double subclasses ``SQLiteStore``: the paper venue subscribes itself to
 ``MarketTick`` at construction (ADR-0012), so it needs a bus and a clock even
-when a test only wants a read to return ``None``.
+when a test only wants a read to fail.
 
 Doubling here is legitimate under ADR-0022 — a venue is a process boundary, the
 one place a double is allowed.

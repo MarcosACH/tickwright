@@ -290,7 +290,7 @@ def test_a_crash_during_recovery_just_reruns_the_pass_and_converges() -> None:
 
 
 class _DarkVenue(VenueDouble):
-    """An ``Exchange`` behind a dead link: every read fails (``None``), and
+    """An ``Exchange`` behind a dead link: every read fails its *send*, and
     placing anything is a test failure — the barrier must gate all sends."""
 
     def __init__(self) -> None:
