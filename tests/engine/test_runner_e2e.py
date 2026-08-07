@@ -56,6 +56,7 @@ from tickwright.domain import (
     TimeInForce,
     VenueAccountState,
     VenueOrderView,
+    VenueReadFailure,
     derive_cloid,
 )
 from tickwright.engine.guard import RealGuard
@@ -308,7 +309,7 @@ class _LiveShapedVenue(LiveVenueDouble):
         self,
         *,
         state: VenueAccountState | None = DERIVED_STATE,
-        view: VenueOrderView | None = _NO_RECORD,
+        view: VenueOrderView | VenueReadFailure = _NO_RECORD,
     ) -> None:
         super().__init__(state=state)
         self._view = view
@@ -319,7 +320,7 @@ class _LiveShapedVenue(LiveVenueDouble):
     async def cancel(self, cloid: str) -> None:
         raise AssertionError("nothing is cancelled: no order exists")
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | None:
+    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
         return self._view
 
 
@@ -482,7 +483,7 @@ class _PaperShapedVenue(VenueDouble):
     async def cancel(self, cloid: str) -> None:
         raise AssertionError("nothing is cancelled: no order exists")
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | None:
+    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
         return _NO_RECORD
 
 
@@ -1181,7 +1182,7 @@ class _LifecycleRecordingVenue(VenueDouble):
     async def cancel(self, cloid: str) -> None:
         self._timeline.append("exchange.cancel")
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | None:
+    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
         self._timeline.append("venue.read")
         return VenueOrderView(status=None)
 
@@ -1610,4 +1611,4 @@ def test_graceful_stop_leaves_resting_live_orders_for_the_next_start_to_re_adopt
         after.close()
     # The venue still holds exactly the one resting order — no duplicate send.
     view = asyncio.run(venue.fetch_order(cloid))
-    assert view is not None and view.has_record
+    assert isinstance(view, VenueOrderView) and view.has_record

@@ -20,6 +20,7 @@ construction (ADR-0025):
 
 from dataclasses import dataclass
 from decimal import Decimal
+from enum import Enum
 
 from .enums import AggressorSide, OrderState, OrderType, Side, TimeInForce
 from .ids import SignalId
@@ -464,6 +465,35 @@ class OrderFailed(OrderEvent):
 # --- Venue truth for one cloid (a query result, not an event) ---------------
 
 
+class VenueReadFailure(Enum):
+    """How an in-flight venue read failed — the two transient outcomes of
+    ADR-0048's taxonomy, told apart (ADR-0049).
+
+    Both are still "not venue truth", which is the whole of ADR-0011 inv 1: a
+    failed read is never a view and never an empty book. What they differ on is
+    **whether the venue answered at all**, and that is the only thing a caller
+    needs to know to decide how much of its worklist a single failure should
+    cost:
+
+    - ``SEND_FAILED`` — no body arrived. The venue may be unreachable, so every
+      other order in the pass would pay a full request timeout to learn the
+      same thing. The pass stops here.
+    - ``UNREADABLE_BODY`` — a body arrived and could not be read. The venue is
+      up and answering at full speed; the next order's read is one ordinary
+      round-trip away, and the unreadable one says nothing about it. Only that
+      order is skipped.
+
+    Deliberately not a third state on ``VenueOrderView``: a view is a
+    *successful* read, and a failure that could be carried inside one would be
+    one `if` away from being read as an empty book — which is precisely what
+    inv 1 forbids and what the ``None`` this replaces guaranteed by not being a
+    view at all.
+    """
+
+    SEND_FAILED = "send_failed"
+    UNREADABLE_BODY = "unreadable_body"
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class VenueOrderView:
     """One *successful* venue read for a cloid (``Exchange.fetch_order``).
@@ -472,8 +502,8 @@ class VenueOrderView:
     positively has no record) with that cloid's fill history, so the ADR-0011
     open-orders-plus-fill-history cross-check is one read: a view with no
     status and no fills is proof the order never landed. A read that *failed*
-    is never a view — ``fetch_order`` returns ``None`` for that (inv 1:
-    an outage must never read as "no record").
+    is never a view — ``fetch_order`` returns a ``VenueReadFailure`` for that
+    (inv 1: an outage must never read as "no record").
     """
 
     status: OrderStatusReport | None

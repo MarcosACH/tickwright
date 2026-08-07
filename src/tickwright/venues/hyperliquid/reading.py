@@ -21,7 +21,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from decimal import Decimal
 from typing import Any
 
-from tickwright.domain import exact_figure
+from tickwright.domain import VenueReadFailure, exact_figure
 from tickwright.observability import NamedEvent, named_event
 
 UNREADABLE = (ArithmeticError, KeyError, TypeError, ValueError)
@@ -63,26 +63,31 @@ async def read[T](
     send: Callable[[dict[str, Any]], Awaitable[object]],
     normalize: Callable[[object], T],
     cloid: str | None = None,
-) -> T | None:
+) -> T | VenueReadFailure:
     """One in-flight venue read: send ``query``, and answer the three ways it
     can come back other than an answer.
 
-    ``None`` means the read **failed** — never "the venue said nothing"
-    (ADR-0011 inv 1). Two disjoint causes reach it, and both are named before
-    it is returned, because a freeze an operator cannot attribute is the quiet
-    outage that guard exists to prevent:
+    A ``VenueReadFailure`` means the read **failed** — never "the venue said
+    nothing" (ADR-0011 inv 1). Two disjoint causes reach it, and both are named
+    before it is returned, because a freeze an operator cannot attribute is the
+    quiet outage that guard exists to prevent:
 
     - the **send** failed (``OSError``, ``TimeoutError`` among it) — no body
-      arrived, so there is nothing to parse;
+      arrived, so there is nothing to parse: ``SEND_FAILED``;
     - the **body** arrived and could not be read (``UNREADABLE``) — a shape
-      outside the venue's contract, a missing field, a figure that is not one.
+      outside the venue's contract, a missing field, a figure that is not one:
+      ``UNREADABLE_BODY``.
 
     Both are transient by assumption: the caller retries at its next deadline
-    and nothing was guessed in the meantime. What deliberately does *not* stop
-    here is ``VenueFactUnsupported`` — a fact the venue reported and this engine
-    cannot represent, which a retry re-reads identically forever, so it
-    escalates past every guard here rather than being answered as something time
-    could fix (ADR-0048).
+    and nothing was guessed in the meantime. They are **two members and not
+    one** because a caller reading a *worklist* needs to know whether the venue
+    answered at all before deciding how many of its other orders one failure
+    should cost (ADR-0049); a caller reading a single grain ignores the
+    distinction and collapses both. What deliberately does *not* stop here is
+    ``VenueFactUnsupported`` — a fact the venue reported and this engine cannot
+    represent, which a retry re-reads identically forever, so it escalates past
+    every guard here rather than being answered as something time could fix
+    (ADR-0048).
 
     Splitting the two ``try`` blocks is what lets the unreadable branch quote the
     body it could not read; splitting them *this* way is what keeps ``normalize``
@@ -120,12 +125,12 @@ async def read[T](
         response = await send(query)
     except OSError as exc:
         failed_send(request=request, cloid=cloid, error=exc)
-        return None
+        return VenueReadFailure.SEND_FAILED
     try:
         return normalize(response)
     except UNREADABLE as exc:
         unreadable_body(request=request, cloid=cloid, error=exc, response=response)
-        return None
+        return VenueReadFailure.UNREADABLE_BODY
 
 
 def failed_send(*, request: str, cloid: str | None = None, error: OSError) -> None:

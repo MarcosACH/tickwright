@@ -219,16 +219,33 @@ ADR-0034, ADR-0040, ADR-0046, ADR-0044.
 _Avoid_: portfolio sync, PnL refresh; **[[Reconciliation]]** unqualified (that one is the order
 saga's, on a different anchor with a different freeze grain).
 
-**Connectivity guard** (`None`-not-`[]`):
-The invariant that a failed venue read returns `None`, never `[]`; on `None`, [[Reconciliation]]
-**freezes** the cycle and removes nothing. An outage must never be misread as "all orders
-vanished." The sentinel reads as *no truth to compare against*, which an outage is one route to:
-on the account pull [[Ledger reconciliation]] anchors on, the paper exchange answers `None`
+**Connectivity guard** (never-`[]`):
+The invariant that a failed venue read returns a [[Failed read]] — never a view, never `[]`; on
+one, [[Reconciliation]] **freezes** and removes nothing. An outage must never be misread as "all
+orders vanished." The value reads as *no truth to compare against*, which an outage is one route
+to: on the account pull [[Ledger reconciliation]] anchors on, the paper exchange answers `None`
 **permanently and without failing**, holding no account state to report — same freeze, different
 route, and the only value that stays fail-closed if a paper ledger cadence is ever wired by
-mistake. Bounded by [[Permanent refusal]], which is the one venue answer this sentinel must
-*not* carry. See ADR-0011, ADR-0048.
+mistake. Bounded by [[Permanent refusal]], which is the one venue answer this must *not* carry.
+See ADR-0011, ADR-0048, ADR-0049.
 _Avoid_: empty result, no orders (the whole point is that these differ from a failure).
+
+**Failed read** (`VenueReadFailure`):
+The two-member vocabulary the [[Connectivity guard]] answers with, and the whole of what a
+caller needs to decide **how much** one order's failure costs. `SEND_FAILED`: no body arrived,
+so the venue may be unreachable — the pass stops, since every order behind this one would pay a
+30s request timeout to learn the same thing. `UNREADABLE_BODY`: a body arrived and could not be
+read, from a venue that is up and answering at full speed — that order alone is skipped, its
+per-cloid span runs, and the pass carries on. Both are still "not venue truth"; neither is ever
+a view. The span is what makes the durable case escape the transient verdict: staying unreadable
+across `unreadable_grace_seconds` of waiting is the more-than-one-sample a [[Permanent refusal]]
+cannot be told from otherwise, and spending it raises `VenueReadUnresolvable` — never a terminal
+state invented for an order whose body was never read. Measured in **wall-clock and never in
+reads**: the three drivers poll 5s, 30s and the startup barrier's backoff apart, so a count
+would buy a different amount of waiting under each. See ADR-0049 §4.1, ADR-0048.
+_Avoid_: `None` read, failed request (the first names the old single sentinel, the second is
+what an operator sees on either member); unreadable-read *budget* (says count where the unit is
+time).
 
 **Permanent refusal**:
 A venue answer that is understood and cannot be represented — a fill fee settled in a token
@@ -236,10 +253,12 @@ other than USDC, against money that is a bare `Decimal` with USDC implicit (ADR-
 against the two *transient* failures beside it, a dead transport and an unreadable body, which
 the [[Connectivity guard]] answers with `None` and a retry at the next deadline. The venue has
 already stored the fact, so a retry re-reads it identically forever: answered as transient it
-would freeze the reconcile cycle permanently and silently, and every order behind it in the
-same pass with it. It refuses as `VenueFactUnsupported`, deliberately outside the `UNREADABLE`
-vocabulary every transient guard catches, and **faults** the engine — the one condition an
-operator, not a deadline, has to resolve. See ADR-0048, ADR-0036.
+would freeze the reconcile cycle permanently and silently. It refuses as `VenueFactUnsupported`,
+deliberately outside the `UNREADABLE` vocabulary every transient guard catches, and **faults**
+the engine — the one condition an operator, not a deadline, has to resolve. Its sibling
+`VenueReadUnresolvable` faults for the same reason with less knowledge: nothing was ever read
+there, and the permanence is *inferred* from a spent budget rather than observed in one sample
+([[Failed read]]). See ADR-0048, ADR-0049, ADR-0036.
 _Avoid_: parse error, bad response (both read as the transient case this exists to be distinct
 from); hard failure (says how loud, not why it cannot be retried).
 

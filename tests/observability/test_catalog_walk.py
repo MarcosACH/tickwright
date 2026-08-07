@@ -44,6 +44,7 @@ from tickwright.domain import (
     Side,
     Signal,
     VenueOrderView,
+    VenueReadFailure,
     derive_cloid,
 )
 from tickwright.domain.enums import OrderType, TimeInForce
@@ -143,8 +144,8 @@ class _SilentExchange(VenueDouble):
     async def cancel(self, cloid: str) -> None:
         return None
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | None:
-        return None
+    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
+        return VenueReadFailure.SEND_FAILED
 
 
 class _ForgetfulVenue(VenueDouble):
@@ -156,7 +157,7 @@ class _ForgetfulVenue(VenueDouble):
     async def cancel(self, cloid: str) -> None:
         raise AssertionError("the reconcile walk never cancels")
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | None:
+    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
         return VenueOrderView(status=None)
 
 
@@ -170,7 +171,7 @@ class _LiveShapedVenue(LiveVenueDouble):
     async def cancel(self, cloid: str) -> None:
         raise AssertionError("the materialisation walk never cancels")
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | None:
+    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
         return VenueOrderView(status=None)
 
 
@@ -183,8 +184,8 @@ class _DarkVenue(VenueDouble):
     async def cancel(self, cloid: str) -> None:
         raise AssertionError("the frozen cycle never cancels")
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | None:
-        return None
+    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
+        return VenueReadFailure.SEND_FAILED
 
 
 class _Strategy:

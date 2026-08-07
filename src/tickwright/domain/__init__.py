@@ -22,6 +22,7 @@ from .errors import (
     StoreAccountMismatch,
     VenueAccountModeUnsupported,
     VenueFactUnsupported,
+    VenueReadUnresolvable,
 )
 from .events import (
     CancelSignal,
@@ -49,6 +50,7 @@ from .events import (
     VenueAccountState,
     VenueOrderView,
     VenuePositionState,
+    VenueReadFailure,
 )
 from .figures import exact_figure
 from .ids import SignalId, derive_cloid
@@ -93,6 +95,7 @@ __all__ = [
     "StoreAccountMismatch",
     "VenueAccountModeUnsupported",
     "VenueFactUnsupported",
+    "VenueReadUnresolvable",
     # events + value types
     "Account",
     "AccountSpec",
@@ -130,6 +133,7 @@ __all__ = [
     "Signal",
     "VenueAccountState",
     "VenueOrderView",
+    "VenueReadFailure",
     "VenuePositionState",
     # id derivation
     "derive_cloid",
