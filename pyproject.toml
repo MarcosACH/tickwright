@@ -15,7 +15,7 @@ dependencies = [
     "hyperliquid-python-sdk~=0.24",
     "msgspec>=0.21.1",
     "psycopg[binary]>=3.3.4",
-    "pydantic-settings>=2.14.2",
+    "pydantic-settings>=2.15.0",
     "structlog>=26.1.0",
     "websockets>=17.0.1",
 ]
@@ -30,7 +30,7 @@ dev = [
     "mypy>=2.3.0",
     "pytest>=8.3",
     "pytest-cov>=6.0",
-    "hypothesis>=6.161.0",
+    "hypothesis>=6.165.0",
     "import-linter>=2.13",
 ]
 
