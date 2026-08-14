@@ -72,6 +72,7 @@ async def load_config(path: Path) -> Config:
     with open(path) as f:  # sync I/O
         return json.load(f)
 
+
 async def fetch_price():
     return requests.get(URL).json()  # sync HTTP — blocks every coroutine
 ```
@@ -82,6 +83,7 @@ async def load_config(path: Path) -> Config:
     async with aiofiles.open(path) as f:
         data = await f.read()
     return json.loads(data)
+
 
 async def fetch_price():
     async with aiohttp.ClientSession() as s:
@@ -120,11 +122,13 @@ Shared async resources (a connection, a session) are **not** safe to share acros
 async def runner(conn):
     await asyncio.gather(handler_a(conn), handler_b(conn))
 
+
 # GOOD — one connection per task
 async def runner(conn_factory):
     async def with_conn(coro):
         async with conn_factory() as c:
             await coro(c)
+
     await asyncio.gather(with_conn(handler_a), with_conn(handler_b))
 ```
 
@@ -194,6 +198,7 @@ class OrderView:
     id: str
     symbol: str
     status: OrderStatus
+
 
 async def get_order(order_id: str) -> OrderView:
     raw = await sdk.fetch_order(order_id)
@@ -281,8 +286,10 @@ The cost of typing the names is the cost of a SemVer review, which is the point.
 # BAD — running_strategies mutated by both the bus handler and main loop without lock
 running_strategies: dict[str, Strategy] = {}
 
+
 async def handle_start(strategy_id: str):
     running_strategies[strategy_id] = Strategy(...)
+
 
 async def handle_bus_update(msg):
     running_strategies[msg["strategy_id"]].config.threshold = msg["threshold"]
@@ -292,6 +299,7 @@ async def handle_bus_update(msg):
 # GOOD — explicit asyncio.Lock around mutations, or a single owner task that processes a queue
 running_strategies: dict[str, Strategy] = {}
 _strategies_lock = asyncio.Lock()
+
 
 async def handle_start(strategy_id: str):
     strat = Strategy(...)

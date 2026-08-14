@@ -93,14 +93,14 @@ The expected value restates the implementation, so the test passes by constructi
 ```python
 # BAD: the expected value is recomputed the way the code computes it
 def test_notional_is_price_times_qty(order):
-    expected = order.price * order.qty          # the implementation IS price * qty
-    assert notional(order) == expected          # passes by construction
+    expected = order.price * order.qty  # the implementation IS price * qty
+    assert notional(order) == expected  # passes by construction
 
 
 # GOOD: expected value is an independent, known literal
 def test_notional_is_price_times_qty():
     order = limit_order(price=Decimal("50000"), qty=Decimal("0.1"))
-    assert notional(order) == Decimal("5000")   # worked by hand, from the spec
+    assert notional(order) == Decimal("5000")  # worked by hand, from the spec
 ```
 
 For a `hypothesis` property, the oracle must not be a copy of the function under test. Assert an **invariant** the code doesn't compute the same way — duplicate-delivery convergence, a saga never leaving a legal state, `reconcile` freezing on a `VenueReadFailure` and never on `[]` (ADR-0022) — not the function's own output re-derived from the same inputs.
