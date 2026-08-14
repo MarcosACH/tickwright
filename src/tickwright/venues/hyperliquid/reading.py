@@ -21,17 +21,18 @@ from collections.abc import Awaitable, Callable, Mapping
 from decimal import Decimal
 from typing import Any
 
-from tickwright.domain import exact_figure
+from tickwright.domain import VenueReadFailure, exact_figure
 from tickwright.observability import NamedEvent, named_event
 
 UNREADABLE = (ArithmeticError, KeyError, TypeError, ValueError)
 """What reading a reported body raises when it cannot be read.
 
 Every grain answers an unreadable body the same way — a dropped frame on the
-feed, a named ``None`` on a venue read — so every grain catches the same four,
-and naming them once is what keeps that true. They had already drifted: the tick
-grain caught ``InvalidOperation`` where the other two caught its ``ArithmeticError``
-superset, which is a difference no one intended and nothing would have surfaced.
+feed, a named ``VenueReadFailure`` on a venue read — so every grain catches the
+same four, and naming them once is what keeps that true. They had already
+drifted: the tick grain caught ``InvalidOperation`` where the other two caught
+its ``ArithmeticError`` superset, which is a difference no one intended and
+nothing would have surfaced.
 
 * ``KeyError`` — a field the shape check did not cover is absent.
 * ``TypeError`` — a value is the wrong type: a re-typed figure, or a row that is
@@ -49,10 +50,13 @@ its own layer. This names control flow that exists; it does not add any.
 What is deliberately **outside** it is ``VenueFactUnsupported`` (ADR-0048): the
 venue reporting a fact we understand and cannot represent — a fill fee settled in
 a token other than USDC. Every member above describes a body we could not parse,
-where a re-read may succeed, so a named ``None`` the cycle retries is the honest
-verdict. A settled venue row never changes, so that verdict would freeze the
-reconciler on it forever; it escalates past every guard here instead, and being a
-type no caller catches is what keeps that true by construction.
+where a re-read may succeed, so a named ``VenueReadFailure`` the cycle retries is
+the honest verdict. A settled venue row never changes, so this one is already
+known permanent at the *first* read: answering it that way would spend the whole
+unreadable span re-reading it to the same refusal and then fault on a cloid,
+naming strictly less than the fact does (ADR-0049 §4). It escalates past every
+guard here instead, and being a type no caller catches is what keeps that true by
+construction.
 """
 
 
@@ -63,26 +67,31 @@ async def read[T](
     send: Callable[[dict[str, Any]], Awaitable[object]],
     normalize: Callable[[object], T],
     cloid: str | None = None,
-) -> T | None:
+) -> T | VenueReadFailure:
     """One in-flight venue read: send ``query``, and answer the three ways it
     can come back other than an answer.
 
-    ``None`` means the read **failed** — never "the venue said nothing"
-    (ADR-0011 inv 1). Two disjoint causes reach it, and both are named before
-    it is returned, because a freeze an operator cannot attribute is the quiet
-    outage that guard exists to prevent:
+    A ``VenueReadFailure`` means the read **failed** — never "the venue said
+    nothing" (ADR-0011 inv 1). Two disjoint causes reach it, and both are named
+    before it is returned, because a freeze an operator cannot attribute is the
+    quiet outage that guard exists to prevent:
 
     - the **send** failed (``OSError``, ``TimeoutError`` among it) — no body
-      arrived, so there is nothing to parse;
+      arrived, so there is nothing to parse: ``SEND_FAILED``;
     - the **body** arrived and could not be read (``UNREADABLE``) — a shape
-      outside the venue's contract, a missing field, a figure that is not one.
+      outside the venue's contract, a missing field, a figure that is not one:
+      ``UNREADABLE_BODY``.
 
     Both are transient by assumption: the caller retries at its next deadline
-    and nothing was guessed in the meantime. What deliberately does *not* stop
-    here is ``VenueFactUnsupported`` — a fact the venue reported and this engine
-    cannot represent, which a retry re-reads identically forever, so it
-    escalates past every guard here rather than being answered as something time
-    could fix (ADR-0048).
+    and nothing was guessed in the meantime. They are **two members and not
+    one** because a caller reading a *worklist* needs to know whether the venue
+    answered at all before deciding how many of its other orders one failure
+    should cost (ADR-0049); a caller reading a single grain ignores the
+    distinction and collapses both. What deliberately does *not* stop here is
+    ``VenueFactUnsupported`` — a fact the venue reported and this engine cannot
+    represent, which a retry re-reads identically forever, so it escalates past
+    every guard here rather than being answered as something time could fix
+    (ADR-0048).
 
     Splitting the two ``try`` blocks is what lets the unreadable branch quote the
     body it could not read; splitting them *this* way is what keeps ``normalize``
@@ -99,8 +108,8 @@ async def read[T](
     re-deriving it (issue #216).
 
     What decides whether a read belongs here is **whether something above it
-    retries**, not whether it runs at boot. ``None`` is a freeze signal, and a
-    freeze only means anything to a caller that will ask again:
+    retries**, not whether it runs at boot. A ``VenueReadFailure`` is a freeze
+    signal, and a freeze only means anything to a caller that will ask again:
 
     - ``fetch_account_state`` is a boot read *and* a caller. It runs as a
       ``StartupBarrier`` step, and the barrier re-drives its whole sequence with
@@ -120,12 +129,12 @@ async def read[T](
         response = await send(query)
     except OSError as exc:
         failed_send(request=request, cloid=cloid, error=exc)
-        return None
+        return VenueReadFailure.SEND_FAILED
     try:
         return normalize(response)
     except UNREADABLE as exc:
         unreadable_body(request=request, cloid=cloid, error=exc, response=response)
-        return None
+        return VenueReadFailure.UNREADABLE_BODY
 
 
 def failed_send(*, request: str, cloid: str | None = None, error: OSError) -> None:
@@ -188,9 +197,9 @@ def rendered(response: object) -> str:
     show — a figure that is not a number.
 
     Nothing in here may raise: it runs only on the path that has already decided
-    to answer ``None``, and an exception escaping would turn a fail-closed read
-    into a crashed one. Hence ``list`` over ``sorted`` on the keys — mixed key
-    types have no order but always have a repr.
+    to answer ``UNREADABLE_BODY``, and an exception escaping would turn a
+    fail-closed read into a crashed one. Hence ``list`` over ``sorted`` on the
+    keys — mixed key types have no order but always have a repr.
     """
     shape = f"keys={list(response)} " if isinstance(response, Mapping) else ""
     body = repr(response)
@@ -239,9 +248,9 @@ def figure(reported: object) -> Decimal:
     for refusing it does not vary by venue.
 
     What each refusal *means* is the caller's own: a tick drops its row, a fills
-    read is a named ``None``, an account read freezes the reconcile. This raises
-    into ``UNREADABLE``, which every one of them already catches, so it adds a
-    check and never a control flow.
+    read is a named ``VenueReadFailure``, an account read freezes the reconcile.
+    This raises into ``UNREADABLE``, which every one of them already catches, so
+    it adds a check and never a control flow.
     """
     if not isinstance(reported, str):
         raise TypeError(f"non-string figure {reported!r}")

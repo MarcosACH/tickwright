@@ -42,11 +42,15 @@ from tickwright.domain import (
     Signal,
     TimeInForce,
     VenueOrderView,
+    VenueReadFailure,
+    VenueReadUnresolvable,
 )
 from tickwright.engine.cache import Cache
 from tickwright.engine.execution import ExecutionManager
 from tickwright.engine.reconcile import ReconcileConfig, Reconciler
 from tickwright.observability.testing import capture_events
+
+_NS_PER_SECOND = 1_000_000_000
 
 
 def _tick(price: str, ts: int = 1_000) -> MarketTick:
@@ -149,15 +153,34 @@ async def _record(sink: list[OrderEvent], event: OrderEvent) -> None:
 
 class _FlakyLink(VenueLink):
     """A real venue behind a link that can drop: while down, every read fails
-    (``None``) — never to be confused with a venue that answers "no record"."""
+    the *send* — never to be confused with a venue that answers "no record"."""
 
     def __init__(self, venue: PaperExchange) -> None:
         super().__init__(venue)
         self.down = False
+        self.reads: list[str] = []
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | None:
+    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
+        self.reads.append(cloid)
         if self.down:
-            return None
+            return VenueReadFailure.SEND_FAILED
+        return await self._venue.fetch_order(cloid)
+
+
+class _GarbledLink(VenueLink):
+    """A real venue behind a link that answers, badly: while ``garbled`` names a
+    cloid, that order's body comes back unreadable and every other order's comes
+    back as the venue's own truth (ADR-0049)."""
+
+    def __init__(self, venue: PaperExchange) -> None:
+        super().__init__(venue)
+        self.garbled: set[str] = set()
+        self.reads: list[str] = []
+
+    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
+        self.reads.append(cloid)
+        if cloid in self.garbled:
+            return VenueReadFailure.UNREADABLE_BODY
         return await self._venue.fetch_order(cloid)
 
 
@@ -263,7 +286,7 @@ class _ForgetfulVenue(VenueDouble):
     async def cancel(self, cloid: str) -> None:
         raise AssertionError("the ghost cycle must never cancel")
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | None:
+    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
         return self.views.get(cloid, VenueOrderView(status=None))
 
 
@@ -406,7 +429,7 @@ def test_a_healed_fill_and_the_venues_late_duplicate_collapse_to_one_apply() -> 
     # replica shares its event_id — provenance is excluded from the dedup key
     # (ADR-0025) — so the duplicate collapses: applied once, republished never.
     venue_view = asyncio.run(exchange.fetch_order("0xabc"))
-    assert venue_view is not None
+    assert isinstance(venue_view, VenueOrderView)
     (venue_fill,) = venue_view.fills
     healed_twin = replace(venue_fill, reconciliation=True)
     assert healed_twin.event_id == venue_fill.event_id
@@ -597,7 +620,7 @@ def test_a_recent_order_resumes_normal_ghost_resolution_once_it_ages_out() -> No
 # --- Connectivity guard ---------------------------------------------------------
 
 
-def test_a_none_read_freezes_the_cycle_emits_frozen_and_the_next_cycle_heals() -> None:
+def test_a_failed_read_freezes_the_cycle_emits_frozen_and_the_next_cycle_heals() -> None:
     clock = ManualClock(start_ns=2_000)
     store = SQLiteStore(":memory:")
     exchange, dead_bus = _surviving_venue(clock)
@@ -641,7 +664,7 @@ def test_a_none_read_freezes_the_cycle_emits_frozen_and_the_next_cycle_heals() -
         ("reconcile_open_orders", OrderState.LIVE, "open_order"),
     ],
 )
-def test_every_cadence_freezes_on_a_none_read_and_removes_nothing(
+def test_every_cadence_freezes_on_a_failed_read_and_removes_nothing(
     cycle_method: str, saga_state: OrderState, frozen_label: str
 ) -> None:
     # The connectivity guard (ADR-0011 inv 1) is one skeleton behind every
@@ -665,6 +688,123 @@ def test_every_cadence_freezes_on_a_none_read_and_removes_nothing(
     frozen = [log for log in logs if log["event"] == "reconcile.frozen"]
     assert len(frozen) == 1
     assert frozen[0]["cycle"] == frozen_label
+
+
+def test_a_dead_send_stops_the_worklist_where_an_unreadable_body_does_not() -> None:
+    # The half of the guard the #236 fix deliberately keeps. A dead send says
+    # the venue may be unreachable, and each request is bounded at 30s: driving
+    # the rest of the worklist into it would pay that per order, per cycle, to
+    # learn what the first read already showed. So the pass stops at the first
+    # one — while an unreadable body, from a venue answering at full speed,
+    # stops only its own order. Same cycle, same skeleton, two costs.
+    clock = ManualClock(start_ns=2_000)
+    store = SQLiteStore(":memory:")
+    exchange, _ = _surviving_venue(clock)
+    store.checkpoint(_saga("0xaaa", OrderState.LIVE), ts_ns=500)
+    store.checkpoint(_saga("0xbbb", OrderState.LIVE), ts_ns=500)
+
+    dead = _FlakyLink(exchange)
+    dead.down = True
+    _, frozen_reconciler, _ = _engine(store, dead, clock)
+    with capture_events() as outage_logs:
+        assert asyncio.run(frozen_reconciler.reconcile_open_orders()) is False
+    assert dead.reads == ["0xaaa"]  # nothing behind it was even asked
+
+    garbled = _GarbledLink(exchange)
+    garbled.garbled = {"0xaaa"}
+    _, skipping_reconciler, _ = _engine(store, garbled, clock)
+    with capture_events() as skip_logs:
+        assert asyncio.run(skipping_reconciler.reconcile_open_orders()) is False
+    assert garbled.reads == ["0xaaa", "0xbbb"]
+
+    # And the two are told apart in telemetry. Both name the cloid whose read
+    # failed, so without the scope a dashboard cannot distinguish "the pass
+    # stopped here" from "this one order was skipped" — which is the whole
+    # difference between an outage and a contract change, and now the whole
+    # difference in what else got reconciled.
+    assert [log["scope"] for log in outage_logs if log["event"] == "reconcile.frozen"] == ["cycle"]
+    assert [log["scope"] for log in skip_logs if log["event"] == "reconcile.frozen"] == ["order"]
+
+
+def test_a_readable_read_restarts_the_span_before_it_can_escalate() -> None:
+    # The span measures *continuous* unreadability, and the word is load-bearing:
+    # a venue that garbles one response, answers the next, and garbles again is
+    # the transitional case ADR-0048 §1 says a single sample cannot rule out —
+    # precisely what the span exists to wait through. Without the restart, a
+    # long-lived order would accumulate unrelated blips and fault a process
+    # whose venue was never durably broken.
+    clock = ManualClock(start_ns=2_000)
+    store = SQLiteStore(":memory:")
+    exchange, _ = _surviving_venue(clock)
+    store.checkpoint(_saga("0xabc", OrderState.LIVE), ts_ns=500)
+
+    link = _GarbledLink(exchange)
+    config = ReconcileConfig()
+    _, reconciler, _, cache = _wire(store, link, clock, config)
+
+    async def garble_answer_garble() -> None:
+        for garbled in (True, True, False, True, True):
+            link.garbled = {"0xabc"} if garbled else set()
+            await reconciler.reconcile_open_orders()
+            clock.advance_to(
+                clock.timestamp_ns() + int(config.open_order_interval_seconds * _NS_PER_SECOND)
+            )
+
+    asyncio.run(garble_answer_garble())
+
+    # Five reads spanning more wall-clock than the span itself: only the restart
+    # keeps this under it, so passing here is the restart working and nothing else.
+    assert len(link.reads) == 5
+    assert clock.timestamp_ns() / _NS_PER_SECOND > config.unreadable_grace_seconds
+    # And the order is still there to be read — nothing resolved it on a body
+    # this process never parsed.
+    resting = cache.get_order("0xabc")
+    assert resting is not None and resting.state is OrderState.LIVE
+
+
+def test_the_unreadable_budget_buys_the_same_wall_clock_on_either_cadence() -> None:
+    # The budget answers one question — has waiting been tried and failed? —
+    # and waiting is measured in time, not in polls. The two continuous cadences
+    # poll 6x apart (5s in-flight, 30s open-order), so a budget counted in reads
+    # gives the same three unreadable answers two different meanings: 15 seconds
+    # of evidence on one cadence, 90 on the other, decided by nothing more than
+    # which state filter the order fell under. Same condition, same verdict, so
+    # the same span has to be spent before it is reached.
+    config = ReconcileConfig()
+
+    def escalates_after_seconds(state: OrderState, interval: float) -> float:
+        clock = ManualClock(start_ns=2_000)
+        store = SQLiteStore(":memory:")
+        exchange, _ = _surviving_venue(clock)
+        store.checkpoint(_saga("0xabc", state), ts_ns=500)
+        link = _GarbledLink(exchange)
+        link.garbled = {"0xabc"}
+        _, reconciler, _ = _engine(store, link, clock, config)
+        drive = (
+            reconciler.reconcile_inflight
+            if state is OrderState.SUBMITTED
+            else reconciler.reconcile_open_orders
+        )
+        started_ns = clock.timestamp_ns()
+
+        async def poll_until_it_escalates() -> float:
+            # A generous ceiling: the point is which cadence *stops* first, so
+            # the loop must be able to outrun either.
+            for _ in range(200):
+                await drive()
+                clock.advance_to(clock.timestamp_ns() + int(interval * _NS_PER_SECOND))
+            raise AssertionError("the durably unreadable body never escalated")
+
+        with pytest.raises(VenueReadUnresolvable):
+            asyncio.run(poll_until_it_escalates())
+        return (clock.timestamp_ns() - started_ns) / _NS_PER_SECOND
+
+    inflight = escalates_after_seconds(OrderState.SUBMITTED, config.inflight_interval_seconds)
+    open_order = escalates_after_seconds(OrderState.LIVE, config.open_order_interval_seconds)
+
+    # Within one poll of each other on cadences six times apart: the span is the
+    # unit, and the cadence only decides how finely it is sampled.
+    assert abs(inflight - open_order) <= config.open_order_interval_seconds
 
 
 # --- Timing rule (ADR-0008/0011) --------------------------------------------------
@@ -725,6 +865,7 @@ def test_a_config_whose_protection_window_reaches_the_ghost_grace_is_rejected() 
         "open_order_interval_seconds",
         "ghost_grace_seconds",
         "recent_order_protection_seconds",
+        "unreadable_grace_seconds",
     ],
 )
 @pytest.mark.parametrize("value", [0, -1])

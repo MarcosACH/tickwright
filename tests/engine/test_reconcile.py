@@ -37,6 +37,7 @@ from tickwright.domain import (
     StartupReconciliationTimeout,
     TimeInForce,
     VenueOrderView,
+    VenueReadFailure,
 )
 from tickwright.engine.barrier import StartupBarrier
 from tickwright.engine.cache import Cache
@@ -184,7 +185,7 @@ def test_recovered_submitted_saga_the_venue_never_saw_resolves_failed_not_resent
     assert events[0].reconciliation is True
     # Never blind-resent (ADR-0008 rule 2): the venue still has no record.
     view = asyncio.run(exchange.fetch_order("0xabc"))
-    assert view is not None and not view.has_record
+    assert isinstance(view, VenueOrderView) and not view.has_record
 
 
 def test_recovered_pending_intent_the_venue_never_saw_resolves_failed() -> None:
@@ -205,7 +206,7 @@ def test_recovered_pending_intent_the_venue_never_saw_resolves_failed() -> None:
     assert [type(ev) for ev in events] == [OrderFailed]
     # Attempted and proven never-landed (ADR-0010): resolved, never resent.
     view = asyncio.run(exchange.fetch_order("0xabc"))
-    assert view is not None and not view.has_record
+    assert isinstance(view, VenueOrderView) and not view.has_record
 
 
 def test_recovered_live_saga_the_venue_lost_ghost_resolves_rejected_not_failed() -> None:
@@ -289,7 +290,7 @@ def test_a_crash_during_recovery_just_reruns_the_pass_and_converges() -> None:
 
 
 class _DarkVenue(VenueDouble):
-    """An ``Exchange`` behind a dead link: every read fails (``None``), and
+    """An ``Exchange`` behind a dead link: every read fails its *send*, and
     placing anything is a test failure — the barrier must gate all sends."""
 
     def __init__(self) -> None:
@@ -301,9 +302,9 @@ class _DarkVenue(VenueDouble):
     async def cancel(self, cloid: str) -> None:
         raise AssertionError("nothing may be cancelled before the barrier clears")
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | None:
+    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
         self.reads += 1
-        return None
+        return VenueReadFailure.SEND_FAILED
 
 
 def test_sustained_venue_outage_trips_the_barrier_to_faulted_after_the_window() -> None:
@@ -371,10 +372,10 @@ class _BlippingVenue(_DarkVenue):
         super().__init__()
         self._failures = failures
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | None:
+    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
         self.reads += 1
         if self.reads <= self._failures:
-            return None
+            return VenueReadFailure.SEND_FAILED
         return VenueOrderView(status=None)  # link restored: positively no record
 
 
@@ -402,6 +403,95 @@ def test_a_transient_boot_time_blip_resolves_and_the_barrier_clears() -> None:
 
     # The retry absorbed the blip; the pass then resolved the saga normally.
     assert venue.reads == 3
+    recovered = store.get_order("0xabc")
+    assert recovered is not None
+    assert recovered.state is OrderState.FAILED
+
+
+class _GarbledVenue(_DarkVenue):
+    """A venue that answers every read, unreadably — up, fast, and outside its
+    own contract. The opposite of ``_DarkVenue``: nothing is wrong with the
+    link, so a retry costs one ordinary round-trip rather than a timeout."""
+
+    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
+        self.reads += 1
+        return VenueReadFailure.UNREADABLE_BODY
+
+
+class _GarbledThenReadableVenue(_DarkVenue):
+    """A venue whose bodies come back readable once the boot-time blip passes."""
+
+    def __init__(self, garbled: int) -> None:
+        super().__init__()
+        self._garbled = garbled
+
+    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
+        self.reads += 1
+        if self.reads <= self._garbled:
+            return VenueReadFailure.UNREADABLE_BODY
+        return VenueOrderView(status=None)  # readable again: positively no record
+
+
+def test_a_durably_unreadable_body_at_boot_still_gets_the_whole_startup_window() -> None:
+    # The unreadable budget is spent by *reads*, and at boot the reads are the
+    # barrier's retries — which land at t=0,1,3,7,15,31,61s under the capped
+    # backoff, not on any cadence. A budget counted in reads is therefore spent
+    # within the first few seconds of a window configured for a minute, and the
+    # engine faults long before the transient case it exists to wait out has
+    # had a chance to resolve. The window is the operator's number; the budget
+    # must not silently overrule it (ADR-0049 §4).
+    clock = ManualClock(start_ns=0)
+    store = SQLiteStore(":memory:")
+    store.checkpoint(_saga("0xabc", OrderState.SUBMITTED), ts_ns=500)
+
+    bus = InMemoryBus()
+    checks = checkpointer(store, clock=clock)
+    cache = checks.cache
+    cache.rebuild()
+    venue = _GarbledVenue()
+    reconciler = Reconciler(
+        bus=bus, clock=clock, exchange=venue, cache=cache, config=ReconcileConfig()
+    )
+
+    with pytest.raises(StartupReconciliationTimeout):
+        asyncio.run(_barrier(clock, reconciler).run(timeout_seconds=60.0))
+
+    # The configured window was actually spent, not cut short by the budget.
+    assert clock.timestamp_ns() / 1_000_000_000 >= 60.0
+    # Freeze, don't guess (inv 1/5): nothing was resolved on unread bodies.
+    recovered = store.get_order("0xabc")
+    assert recovered is not None
+    assert recovered.state is OrderState.SUBMITTED
+
+
+def test_a_boot_time_garble_that_clears_inside_the_window_lets_the_barrier_clear() -> None:
+    # The same asymmetry from the other side, and the one that costs a start. A
+    # venue that garbles its first few boot answers and then reads cleanly is
+    # the transitional case ADR-0048 §1 says one sample cannot rule out — over
+    # a span of seconds, by any measure a blip. Counted in reads it exhausts a
+    # three-read budget before the barrier's second backoff, so the engine
+    # faults on a venue that was about to answer perfectly well.
+    clock = ManualClock(start_ns=0)
+    store = SQLiteStore(":memory:")
+    store.checkpoint(_saga("0xabc", OrderState.SUBMITTED), ts_ns=500)
+
+    bus = InMemoryBus()
+    checks = checkpointer(store, clock=clock)
+    cache = checks.cache
+    cache.rebuild()
+    venue = _GarbledThenReadableVenue(garbled=4)
+    manager = ExecutionManager(bus=bus, exchange=venue, checkpointer=checks)
+    bus.subscribe(ExecutionReport, manager.on_execution_report)
+    reconciler = Reconciler(
+        bus=bus, clock=clock, exchange=venue, cache=cache, config=ReconcileConfig()
+    )
+
+    asyncio.run(_barrier(clock, reconciler).run(timeout_seconds=60.0))
+
+    # The retry absorbed the garble — well inside the window — and the pass then
+    # resolved the saga off a body it could actually read.
+    assert venue.reads == 5
+    assert clock.timestamp_ns() / 1_000_000_000 < 60.0
     recovered = store.get_order("0xabc")
     assert recovered is not None
     assert recovered.state is OrderState.FAILED

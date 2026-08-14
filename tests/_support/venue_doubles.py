@@ -22,7 +22,7 @@ lives in the suite, and the members it does not name stay the real venue's.
 Why bases and not subclasses of the real ``PaperExchange``, as every ``Store``
 double subclasses ``SQLiteStore``: the paper venue subscribes itself to
 ``MarketTick`` at construction (ADR-0012), so it needs a bus and a clock even
-when a test only wants a read to return ``None``.
+when a test only wants a read to fail.
 
 Doubling here is legitimate under ADR-0022 — a venue is a process boundary, the
 one place a double is allowed.
@@ -41,6 +41,7 @@ from tickwright.domain import (
     VenueAccountState,
     VenueOrderView,
     VenuePositionState,
+    VenueReadFailure,
 )
 
 
@@ -171,7 +172,7 @@ class VenueLink:
     async def cancel(self, cloid: str) -> None:
         await self._venue.cancel(cloid)
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | None:
+    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
         return await self._venue.fetch_order(cloid)
 
     async def fetch_account_state(self) -> VenueAccountState | None:

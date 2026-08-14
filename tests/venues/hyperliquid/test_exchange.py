@@ -36,6 +36,7 @@ from tickwright.domain import (
     TimeInForce,
     VenueFactUnsupported,
     VenueOrderView,
+    VenueReadFailure,
 )
 from tickwright.observability import NamedEvent
 from tickwright.observability.testing import capture_events
@@ -406,10 +407,11 @@ def test_a_live_fill_settled_in_another_token_escalates_instead_of_freezing() ->
     # add a number of one currency to a line of another and silently misstate
     # cash. It is refused, but deliberately *not* as the transient failed read
     # every other unreadable body gets: the venue's stored fill row is immutable,
-    # so the read fails identically on every later pass, and a `None` here would
-    # freeze the reconcile cycle permanently — one HYPE-settled fee stalling
-    # every order behind it, forever, on a `RECONCILE_FROZEN` a cycle. A
-    # condition no retry can resolve leaves the seam instead (ADR-0036 §4).
+    # so the read fails identically on every later pass, and a `VenueReadFailure`
+    # here would buy nothing but delay — the order skipped and re-read for the
+    # whole unreadable span, then a fault naming the cloid where this refusal can
+    # name the token. A condition no retry can resolve leaves the seam instead
+    # (ADR-0036 §4).
     post = FakeExchangeApi(
         {
             "orderStatus": order_status_response(status="filled", oid=91),
@@ -577,7 +579,7 @@ def test_cancel_of_a_cloid_the_venue_never_saw_is_a_benign_no_op() -> None:
     assert len(post.requests) == 1
 
 
-async def fetch_view(post: FakeExchangeApi) -> VenueOrderView | None:
+async def fetch_view(post: FakeExchangeApi) -> VenueOrderView | VenueReadFailure:
     exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
     return await exchange.fetch_order(CLOID)
 
@@ -594,7 +596,7 @@ def test_fetch_order_bundles_the_venue_status_and_fills_into_one_view() -> None:
     )
     view = asyncio.run(fetch_view(post))
 
-    assert view is not None
+    assert isinstance(view, VenueOrderView)
     assert view.has_record
     assert view.status is not None
     assert view.status.status is OrderState.FILLED
@@ -620,16 +622,21 @@ def test_fetch_order_returns_an_empty_view_when_the_venue_has_no_record() -> Non
     # (the ADR-0008 resend gate), categorically different from a failed read.
     view = asyncio.run(fetch_view(FakeExchangeApi({"orderStatus": {"status": "unknownOid"}})))
 
-    assert view is not None
+    assert isinstance(view, VenueOrderView)
     assert not view.has_record
     assert view.status is None
     assert view.fills == ()
 
 
-def test_fetch_order_returns_none_when_the_read_itself_fails() -> None:
+def test_fetch_order_reports_a_failed_send_when_the_read_itself_fails() -> None:
     # The connectivity guard (ADR-0011 inv 1): a timeout or transport error is
-    # None — never an empty view, which would read as "no record" and let
+    # a failure — never an empty view, which would read as "no record" and let
     # recovery resend into an outage.
+    #
+    # `SEND_FAILED` specifically, and that is not decoration: no body arrived,
+    # so the venue may be unreachable, and it is the one failure on which the
+    # reconciler is entitled to stop reading the rest of its worklist rather
+    # than pay a request timeout per order to learn the same thing (ADR-0049).
     #
     # And *named*, on the half where the read died. This freeze used to go out
     # silently — `fetch_order` swallowed the OSError with a bare `return None` —
@@ -641,7 +648,7 @@ def test_fetch_order_returns_none_when_the_read_itself_fails() -> None:
     for failure in (TimeoutError("venue timed out"), ConnectionError("connection refused")):
         with capture_events() as events:
             view = asyncio.run(fetch_view(FakeExchangeApi({"orderStatus": failure})))
-        assert view is None
+        assert view is VenueReadFailure.SEND_FAILED
         failures = [e for e in events if e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED]
         assert failures and failures[0]["request"] == "orderStatus", failure
 
@@ -657,7 +664,7 @@ def test_fetch_order_returns_none_when_the_read_itself_fails() -> None:
                 )
             )
         )
-    assert view is None
+    assert view is VenueReadFailure.SEND_FAILED
     failures = [e for e in events if e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED]
     assert failures and failures[0]["request"] == "userFills"
 
@@ -674,7 +681,10 @@ def test_fetch_order_names_an_order_status_body_it_cannot_parse() -> None:
     with capture_events() as events:
         view = asyncio.run(fetch_view(post))
 
-    assert view is None
+    # `UNREADABLE_BODY`, not the failed send beside it: the venue answered, and
+    # answered promptly. Nothing about this body says anything about the next
+    # order's, so the reconciler may skip this one and keep reading (ADR-0049).
+    assert view is VenueReadFailure.UNREADABLE_BODY
     failures = [e for e in events if e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED]
     assert failures and failures[0]["request"] == "orderStatus"
 
@@ -691,7 +701,7 @@ def test_fetch_order_freezes_on_a_fills_body_it_cannot_parse() -> None:
     with capture_events() as events:
         view = asyncio.run(fetch_view(post))
 
-    assert view is None
+    assert view is VenueReadFailure.UNREADABLE_BODY
     assert any(e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED for e in events)
 
 
@@ -717,7 +727,7 @@ def test_fetch_order_freezes_on_a_non_finite_fill_figure(figure: str) -> None:
         with capture_events() as events:
             view = asyncio.run(fetch_view(post))
 
-        assert view is None
+        assert view is VenueReadFailure.UNREADABLE_BODY
         assert any(e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED for e in events)
 
 
@@ -746,7 +756,7 @@ def test_fetch_order_freezes_on_a_re_typed_fill_figure(figure: object) -> None:
         with capture_events() as events:
             view = asyncio.run(fetch_view(post))
 
-        assert view is None
+        assert view is VenueReadFailure.UNREADABLE_BODY
         assert any(e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED for e in events)
 
 
@@ -769,7 +779,7 @@ def test_fetch_order_maps_the_venue_status_taxonomy_by_suffix(
     )
     view = asyncio.run(fetch_view(post))
 
-    assert view is not None and view.status is not None
+    assert isinstance(view, VenueOrderView) and view.status is not None
     assert view.status.status is state
 
 
@@ -785,7 +795,11 @@ def test_fetch_order_treats_a_status_it_cannot_map_as_a_named_failed_read() -> N
             fetch_view(FakeExchangeApi({"orderStatus": order_status_response(status="triggered")}))
         )
 
-    assert view is None
+    # The unreadable body, not the failed send: this is issue #236's own case at
+    # the venue grain, and the venue's stored status string does not change, so
+    # every later pass reads it identically. Answering it as an outage is what
+    # let one order freeze every order behind it, forever.
+    assert view is VenueReadFailure.UNREADABLE_BODY
     failures = [e for e in events if e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED]
     assert failures and failures[0]["request"] == "orderStatus"
     assert "triggered" in str(failures[0]["error"])

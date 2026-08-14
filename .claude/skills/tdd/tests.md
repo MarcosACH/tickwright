@@ -38,7 +38,7 @@ Project specifics:
 - **Duplicate deliveries are actively injected.** The bus is at-least-once; a behavior isn't
   green until it survives a replayed event (ADR-0002).
 - Use `hypothesis` for invariant properties — ADR-0022 lists the catalog (duplicate-delivery
-  convergence, legal-only saga transitions, reconcile freezes on `None`, …).
+  convergence, legal-only saga transitions, reconcile freezes on a `VenueReadFailure`, …).
 - Parametrize with `pytest.mark.parametrize` instead of copy-pasted near-duplicates.
 
 ## Bad Tests
@@ -103,7 +103,7 @@ def test_notional_is_price_times_qty():
     assert notional(order) == Decimal("5000")  # worked by hand, from the spec
 ```
 
-For a `hypothesis` property, the oracle must not be a copy of the function under test. Assert an **invariant** the code doesn't compute the same way — duplicate-delivery convergence, a saga never leaving a legal state, `reconcile` freezing on `None` (ADR-0022) — not the function's own output re-derived from the same inputs.
+For a `hypothesis` property, the oracle must not be a copy of the function under test. Assert an **invariant** the code doesn't compute the same way — duplicate-delivery convergence, a saga never leaving a legal state, `reconcile` freezing on a `VenueReadFailure` and never on `[]` (ADR-0022) — not the function's own output re-derived from the same inputs.
 
 ## Useful libraries
 

@@ -44,8 +44,11 @@ Each real venue is **one self-contained adapter** that fully encapsulates everyt
 
 - **order-model translation** — the engine's clean model (MARKET/LIMIT × GTC/IOC × `post_only`) into
   venue actions (ADR-0030's Hyperliquid MARKET→aggressive-IOC, asset indexing, TIF mapping);
-- **reconciliation queries** — `fetch_*` open-orders / fill-history with the `None`-not-`[]`
-  connectivity guard (ADR-0011);
+- **reconciliation queries** — `fetch_*` open-orders / fill-history with the never-a-view,
+  never-`[]` connectivity guard (ADR-0011 inv 1): `fetch_order` answers a failed read with a
+  `VenueReadFailure` naming which way it failed — `SEND_FAILED` stops the reconciler's whole pass,
+  `UNREADABLE_BODY` skips only that order — while `fetch_account_state` collapses both to `None`
+  ([ADR-0049](./0049-failed-read-blast-radius.md));
 - **instrument-spec sourcing** — see below;
 - its own **`*Config`** (ADR-0021).
 

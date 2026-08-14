@@ -22,7 +22,14 @@ class FakeExchangeApi:
     exception value is raised instead of returned (the transport-failure case);
     a request of an unrouted type is a loud failure (the adapter asked
     something the test never set up). Every request is recorded in order in
-    ``requests`` for wire assertions."""
+    ``requests`` for wire assertions.
+
+    A routed value may also be a **callable** taking the request payload, for
+    the one thing a single response cannot express: an answer that varies by
+    *which order* is asked about. The venue's state still does not change
+    between reads — ``orderStatus`` is per-oid, so two orders in one reconcile
+    pass are two different questions to the same endpoint, not one endpoint
+    changing its mind."""
 
     def __init__(self, responses: dict[str, object]) -> None:
         self.requests: list[tuple[str, dict]] = []
@@ -37,6 +44,8 @@ class FakeExchangeApi:
                 f"routed types: {sorted(self._responses)}"
             )
         response = self._responses[asked]
+        if callable(response):
+            response = response(payload)
         if isinstance(response, BaseException):
             raise response
         return response
