@@ -101,9 +101,16 @@ auth, quirk translation — and importing no other adapter. It provides both a `
   `Exchange` adapter
   (`start`/`stop`/`place`/`cancel`/`fetch_order`/`account_spec`/`instrument_specs`), spec sourcing,
   and a `<Venue>Config`.
-- [ ] Honor the `Exchange` contracts: `fetch_*` returns **`None` on a failed read** (never `[]` — an
-  outage must not look like "no orders", ADR-0011); `place`/`cancel` emit raw `ExecutionReport`s on
-  the bus rather than returning them; a cancel of an unknown order is a benign no-op.
+- [ ] Honor the `Exchange` contracts: a failed read is **never venue truth** (never `[]`, never a
+  view — an outage must not look like "no orders", ADR-0011 inv 1), and the two read grains say so
+  differently. `fetch_order` returns a **`VenueReadFailure`**, whose member says *which way* it
+  failed: `SEND_FAILED` when no body arrived (the reconciler stops its whole pass — the venue may
+  be unreachable, and every order behind this one would pay a full request timeout to learn the
+  same) and `UNREADABLE_BODY` when a body arrived and could not be parsed (only that order is
+  skipped, against a per-cloid span that faults once the condition is proven durable, ADR-0049).
+  `fetch_account_state` reads one grain with no worklist behind it, so it collapses both and
+  returns **`None`**. `place`/`cancel` emit raw `ExecutionReport`s on the bus rather than
+  returning them; a cancel of an unknown order is a benign no-op.
 - [ ] Put venue alignment in `start()` and release in `stop()`, never in `__init__` or a placement.
   The runner drives `start()` at ADR-0024 step 4 — after the bus, **before** the startup barrier — so
   a refusal there (an `InvariantViolation`) faults the process before any order can go out, and the

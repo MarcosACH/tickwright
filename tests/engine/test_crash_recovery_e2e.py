@@ -51,6 +51,7 @@ from tickwright.domain import (
     Store,
     TimeInForce,
     VenueOrderView,
+    VenueReadFailure,
     derive_cloid,
 )
 from tickwright.engine.barrier import StartupBarrier
@@ -91,7 +92,7 @@ class _CrashingTransport(VenueLink):
     async def cancel(self, cloid: str) -> None:
         raise AssertionError("first life never cancels")
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | None:
+    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
         raise AssertionError("first life never fetches")
 
 
@@ -265,7 +266,7 @@ def test_post_send_kill_recovers_the_landed_order_and_its_fill(
     # At-least-once redelivery of the original signal: no duplicate placement.
     asyncio.run(bus.publish(_redelivered_signal()))
     view = asyncio.run(venue.fetch_order(_CLOID))
-    assert view is not None
+    assert isinstance(view, VenueOrderView)
     assert [fill.trade_id for fill in view.fills] == [f"{_CLOID}-1"]
     assert [type(ev) for ev in events] == [OrderSubmitted, OrderFilled]
     store.close()
@@ -292,7 +293,7 @@ def test_pre_send_kill_resolves_the_unlanded_intent_failed_never_resent(
     assert [type(ev) for ev in events] == [OrderFailed]
     assert not [ev for ev in events if isinstance(ev, OrderPlaced)]
     view = asyncio.run(venue.fetch_order(_CLOID))
-    assert view is not None and not view.has_record
+    assert isinstance(view, VenueOrderView) and not view.has_record
     store.close()
 
 

@@ -70,6 +70,12 @@ class NamedEvent(StrEnum):
     INFLIGHT_RECONCILED = "inflight.reconciled"
     RECONCILE_RECENCY_SKIPPED = "reconcile.recency_skipped"
     GHOST_RECONCILED = "ghost.reconciled"
+    # A venue read that failed, healing nothing (ADR-0011 inv 1). ``scope`` says
+    # how much it froze: ``cycle`` when the send died — the venue may be
+    # unreachable, so nothing behind that order was read — or ``order`` when the
+    # body arrived unreadable, where that order alone was skipped and the rest of
+    # the pass reconciled normally (ADR-0049). Both carry the cloid, so the field
+    # is the only thing telling an outage from a venue contract change.
     RECONCILE_FROZEN = "reconcile.frozen"
 
     # A live-exchange request that yielded no usable answer, on either path and

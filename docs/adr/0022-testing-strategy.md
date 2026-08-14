@@ -12,8 +12,10 @@ classes" structural rather than aspirational.
 - **Unit** — per component.
 - **Property (hypothesis)** — the invariant catalog: duplicate-delivery convergence (ADR-0002),
   cross-symbol ordering never relied upon (ADR-0003), only-legal saga transitions
-  (ADR-0007/0010), reconcile freezes on `None` and never on `[]` (ADR-0011), retry-budget <
-  ghost-grace timing (ADR-0008/0011), seq-never-reused-after-restart (ADR-0016), duplicate/stale
+  (ADR-0007/0010), reconcile freezes on a failed read and never on `[]` (ADR-0011; the sentinel
+  became a two-member `VenueReadFailure` in ADR-0049, and *how much* freezes turns on which
+  member), retry-budget < ghost-grace timing (ADR-0008/0011),
+  seq-never-reused-after-restart (ADR-0016), duplicate/stale
   ticks never reach `on_tick` (the per-symbol monotonic gate, ADR-0025).
 - **Integration / E2E** — the tracer (`ReplayFeed → strategy → PaperExchange → OrderFilled` on
   `InMemoryBus` + `SQLiteStore`, fully deterministic, **zero external services**); a

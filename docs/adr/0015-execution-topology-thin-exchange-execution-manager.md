@@ -45,7 +45,11 @@ decision logic in the Manager, puts inspectable raw venue facts on the bus (Kafk
 debugging), and gives reconciliation's synthetic events a natural origin (the Manager publishes
 them, `reconciliation`-flagged).
 
-The `Exchange.fetch_*` methods return `None` on failure (the ADR-0011 connectivity guard,
-expressed in the type signature). This also partly settles the data-path-vs-execution-path
+The `Exchange.fetch_*` methods answer a failed read with something that is never venue truth (the
+ADR-0011 connectivity guard, expressed in the type signature), and the grain decides with what:
+`fetch_order` returns a `VenueReadFailure` — never a view — whose member says *which way* the read
+failed, because the reconciler behind it drives a worklist and acts on the difference;
+`fetch_account_state` reads one grain with nothing behind it to spare and collapses both to `None`
+([ADR-0049](./0049-failed-read-blast-radius.md)). This also partly settles the data-path-vs-execution-path
 question (Open Q#18): the `Strategy`/`ExecutionManager` seam *is* our data/execution split,
 without importing a full DataEngine/ExecutionEngine surface.

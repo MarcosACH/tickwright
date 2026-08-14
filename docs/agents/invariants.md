@@ -13,9 +13,9 @@ Consumed by `/code-review` (any regression is BLOCKING) and `/python-codebase-ma
 2. **Crash-safe recovery.** The `PENDING` intent is written ahead of the send; recovery is
    snapshot-plus-reconcile and a saga checkpoint replayed after restart converges to the same
    terminal state. (ADR-0008, ADR-0009)
-3. **Reconciliation freezes on connectivity failure.** A failed venue read returns `None`,
-   never `[]`; on `None` the cycle freezes — no order is ghosted or removed. An outage must
-   never read as "all orders vanished." *At the account grain the same guard is
+3. **Reconciliation freezes on connectivity failure.** A failed venue read returns a
+   `VenueReadFailure`, never a view and never `[]`; nothing heals on one — no order is ghosted
+   or removed. An outage must never read as "all orders vanished." *At the account grain the same guard is
    `fetch_account_state() -> VenueAccountState | None`, and `None` means no venue truth to
    compare against, never a flat book: nothing heals. A response the adapter cannot **parse**
    is a failed read too, not an empty account — including one that parses *cleanly* into a
@@ -23,29 +23,44 @@ Consumed by `/code-review` (any regression is BLOCKING) and `/python-codebase-ma
    constructions, and a figure re-typed as a JSON number lost digits and scale to `float` in
    `json.loads` before any parse of ours saw it, so neither announces
    itself; every boundary that reads a reported figure passes it through one guard and turns
-   the refusal into its own layer's failed read (a dropped frame on a feed, a named `None` on
-   a venue read). `domain.exact_figure` holds the universal half — a figure must be a number —
-   and each venue owns what its own figures may be *encoded* as, Hyperliquid's being
-   `venues/hyperliquid/reading.py` (`figure`, plus the `UNREADABLE` vocabulary every grain of
-   that venue catches). Paper's `None` is its permanent answer,
+   the refusal into its own layer's failed read (a dropped frame on a feed, a named
+   `VenueReadFailure` on a venue read). `domain.exact_figure` holds the universal half — a
+   figure must be a number — and each venue owns what its own figures may be *encoded* as,
+   Hyperliquid's being `venues/hyperliquid/reading.py` (`figure`, plus the `UNREADABLE`
+   vocabulary every grain of that venue catches). Paper's `None` is its permanent answer,
    because it holds no account state at all, so a cadence mistakenly pointed at it freezes
    rather than healing a restored ledger to flat. At the **startup barrier** the same `None`
    costs more than a frozen cycle: the live-only account materialisation retries inside the one
    startup budget and then **faults** the process, because clearing the barrier with no account
    row is the state that step exists to prevent — freeze-don't-guess applied to the cash line,
    and what keeps ADR-0041 §6's "`cash` is never `None`" true rather than merely intended.*
-   **The boundary of this invariant is permanence.** `None`-and-retry is the answer for a read
-   that *may* succeed later — a dead transport, an unreadable body. A venue fact this engine
-   cannot represent (a fill fee settled in a token other than USDC) is already stored at the
-   venue and reads back identically forever, so answering it that way freezes the cycle
-   permanently and silently — and `_drive` returns on the first frozen read, so it stalls every
-   order behind it too. Those refuse as `VenueFactUnsupported`, deliberately outside the
+   **The boundary of this invariant is permanence.** A failed read and a retry is the answer
+   for a read that *may* succeed later — a dead transport, an unreadable body — with the
+   per-cloid span below as how that retrying finds out whether waiting helps. A venue fact this
+   engine cannot represent (a fill fee settled in a token other than USDC) is already stored at
+   the venue and reads back identically forever, so it is durable at the *first* read and the
+   span has nothing to discover: answering it that way spends the whole span re-reading it and
+   then faults naming only the cloid, where the refusal itself can name the offending fact.
+   Those refuse as `VenueFactUnsupported`, deliberately outside the
    `UNREADABLE` vocabulary every transient guard catches, and **fault** the engine. One venue
    read, three outcomes, mapped once per venue (`venues/hyperliquid/reading.py`). What a read
-   is covered by is **whether something above it retries** — a barrier step freezes on `None`
-   because the barrier re-drives it, while a read with no retry above it (`universe.py`, the
-   ADR-0046 mode gate) owns its own refusal and raises.
-   (ADR-0011, ADR-0034, ADR-0043 §6, ADR-0048)
+   is covered by is **whether something above it retries** — a barrier step freezes because the
+   barrier re-drives it, while a read with no retry above it (`universe.py`, the ADR-0046 mode
+   gate) owns its own refusal and raises.
+   **How much one failed read costs is the second half**, and why the failure is a two-member
+   type: a failed **send** stops the pass (no body arrived, so the venue may be unreachable and
+   every order behind it would pay a 30s request timeout to learn the same), while an unreadable
+   **body** — from a venue that is up and answering — skips only its own order and the pass
+   reconciles the rest. `_drive` may never again let one order's failure stop the orders behind
+   it on a venue that answered. The durable case is caught by a per-cloid **span of continuous
+   unreadability** (`unreadable_grace_seconds`), escalating to `VenueReadUnresolvable`, which
+   **faults** rather than inventing a terminal state for an order whose body was never read; it
+   restarts on any readable read, so blips can never accumulate into a fault. The span is
+   wall-clock and **never a read count**: its three drivers poll 5s, 30s and the startup
+   barrier's backoff apart, so a count buys a different amount of waiting under each — and at
+   boot would silently overrule `startup_reconciliation_timeout_seconds`. The pass verdict stays
+   `False` on either failure, so a startup pass that could not prove an order never clears the
+   barrier (inv 5). (ADR-0011, ADR-0034, ADR-0043 §6, ADR-0048, ADR-0049)
 4. **Rejections are explicit events.** A placed-but-rejected order surfaces as its taxonomy
    terminal (`DENIED` / `REJECTED` / `FAILED`), propagated as an event — never a silent
    `return None`. (ADR-0010)

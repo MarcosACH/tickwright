@@ -14,13 +14,21 @@ the bus and routed through the ``ExecutionManager`` — the one saga writer — 
 dedup by ``event_id`` and ``trade_id`` makes every pass idempotent: re-running
 converges.
 
-A failed venue read (``fetch_order`` → ``None``) freezes the running pass: it
+A failed venue read (``fetch_order`` → a ``VenueReadFailure``) freezes: it
 reports failure, emits ``reconcile.frozen``, and heals nothing it could not
 prove — an outage must never read as "all orders vanished" (ADR-0011 inv 1).
+**How much freezes turns on which failure it is** (ADR-0049): a failed *send*
+stops the whole pass, since the venue may be unreachable and every order behind
+this one would pay a request timeout to learn the same; an unreadable *body*
+comes from a venue that is up and answering, so it skips only its own order —
+against a per-cloid budget that faults the engine once several consecutive
+reads prove the condition durable, rather than inventing a terminal state for
+an order whose body was never read.
 """
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
+from enum import Enum
 
 from tickwright.domain import (
     Clock,
@@ -30,11 +38,13 @@ from tickwright.domain import (
     OrderState,
     OrderStatusReport,
     VenueOrderView,
+    VenueReadFailure,
+    VenueReadUnresolvable,
 )
 from tickwright.observability import NamedEvent, named_event
 from tickwright.observability.correlation import operation
 
-from .absence import ConsecutiveMisses
+from .absence import ConsecutiveMisses, GraceWindow
 from .cache import Cache
 from .ghost_gate import GhostGate, GhostVerdict
 
@@ -46,6 +56,19 @@ _INFLIGHT_STATES = frozenset({OrderState.SUBMITTED})
 _OPEN_ORDER_STATES = frozenset({OrderState.LIVE, OrderState.PARTIALLY_FILLED})
 
 
+class _FreezeScope(Enum):
+    """How much of a pass one failed read froze (ADR-0049) — the ``scope`` field
+    on ``reconcile.frozen``.
+
+    ``CYCLE`` is the whole remaining worklist: the venue did not answer, so
+    nothing behind this order was read. ``ORDER`` is this order alone: the venue
+    answered, unreadably, and every order behind it reconciled normally.
+    """
+
+    CYCLE = "cycle"
+    ORDER = "order"
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReconcileConfig:
     """Timing knobs for the continuous loops (ADR-0011 defaults).
@@ -55,6 +78,22 @@ class ReconcileConfig:
     ``inflight_max_attempts`` — stays strictly under ``ghost_grace_seconds``,
     so no runtime path ever holds a config under which an order still being
     retried could be ghosted as missing.
+
+    ``unreadable_grace_seconds`` is the per-cloid budget of ADR-0049: how long
+    one order's body may be *continuously* unreadable before the condition is
+    taken as durable and escalated. It is a **span and not a read count**
+    because the question it answers — has waiting been tried? — is answered in
+    time, while the number of reads inside any given wait is set by whoever is
+    driving. The three drivers disagree wildly: the in-flight cadence polls
+    every 5s, the open-order cadence every 30s, and the ``StartupBarrier``
+    re-drives on capped exponential backoff. Counted in reads, the same three
+    answers bought 10 seconds of waiting on the in-flight cadence, 60 on the
+    open-order one, and about 3 at boot — where they quietly overruled the
+    operator's configured startup window (ADR-0049 §4.1 tabulates it).
+
+    It is deliberately outside the timing invariant below — a skipped order is
+    never counted absent, so this span cannot race the ghost grace window the
+    way the in-flight retry budget could.
 
     ``recent_order_protection_seconds`` is the second clause of ADR-0011 inv 3:
     the ghost cycle skips a resting order whose last saga event is fresher than
@@ -70,6 +109,7 @@ class ReconcileConfig:
     open_order_interval_seconds: float = 30.0
     ghost_grace_seconds: float = 90.0
     recent_order_protection_seconds: float = 30.0
+    unreadable_grace_seconds: float = 90.0
 
     def __post_init__(self) -> None:
         for name in (
@@ -78,6 +118,7 @@ class ReconcileConfig:
             "open_order_interval_seconds",
             "ghost_grace_seconds",
             "recent_order_protection_seconds",
+            "unreadable_grace_seconds",
         ):
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be positive")
@@ -125,6 +166,17 @@ class Reconciler:
         # — the recent-order protection pre-filter in front of the grace window —
         # so the "is it a ghost yet?" timing rule lives in one place.
         self._inflight_run = ConsecutiveMisses(limit=self._config.inflight_max_attempts)
+        # The third run of the same shape, and the one that judges the *read*
+        # rather than what it found (ADR-0049): how long one cloid's body has
+        # been continuously unreadable, restarted by any read that came back
+        # readable. A failed send neither arms nor restarts it — an outage is no
+        # evidence either way about a body nobody received. Measured in time and
+        # not in reads because its three drivers poll six times apart and the
+        # barrier not on a cadence at all, so a read count would mean a
+        # different amount of waiting under each of them (ADR-0049 §4).
+        self._unreadable_run = GraceWindow(
+            span_ns=int(self._config.unreadable_grace_seconds * _NS_PER_SECOND)
+        )
         self._ghost_gate = GhostGate(
             grace_span_ns=int(self._config.ghost_grace_seconds * _NS_PER_SECOND),
             protection_span_ns=int(self._config.recent_order_protection_seconds * _NS_PER_SECOND),
@@ -166,25 +218,45 @@ class Reconciler:
     ) -> bool:
         """The one skeleton every cadence shares: over each non-terminal saga in
         ``states`` (all of them when ``None``), read venue truth by cloid and let
-        ``handle`` resolve the gap. A failed read (``None``) trips the connectivity
-        guard — the whole pass freezes here and nowhere else, so ADR-0011 inv 1
-        lives in exactly one place. ``True`` on a completed pass, ``False`` when a
-        read froze it.
+        ``handle`` resolve the gap. A failed read trips the connectivity guard —
+        the whole pass freezes here and nowhere else, so ADR-0011 inv 1 lives in
+        exactly one place. ``True`` only on a pass that proved **every** order it
+        looked at; ``False`` when any read failed.
+
+        **How much a failed read costs turns on whether the venue answered**
+        (ADR-0049). A dead send says nothing about this order in particular — the
+        venue is unreachable, and every order behind it would pay a full request
+        timeout to learn the same thing — so the pass stops at it. An unreadable
+        body is the opposite: the venue is up and answering at full speed, so it
+        says nothing about the orders behind it, and stopping on it lets one
+        durably unreadable body stall every other order forever. That one order
+        is skipped, its own budget is charged, and the pass carries on.
+
+        The verdict is ``False`` either way, and that is what keeps the startup
+        phase's contract intact (inv 5): a pass that could not prove one order
+        never clears the ``StartupBarrier``, whichever way the read failed.
         """
         # The cycle id scopes the whole pass; the per-order cloid nests inside it
         # (ADR-0020), so every reconcile record — a verdict or a freeze — is
         # traceable to its cycle and its order without either being repeated as a
         # field. Correlation binding lives here, at the one cadence chokepoint.
         with operation(cycle=cycle):
+            proved_all = True
             for order in self._cache.open_orders():
                 if states is not None and order.state not in states:
                     continue
                 with operation(cloid=order.cloid):
                     view = await self._exchange.fetch_order(order.cloid)
-                    if view is None:
-                        return self._freeze()
-                    await handle(order, view)
-            return True
+                    match view:
+                        case VenueReadFailure.SEND_FAILED:
+                            return self._freeze(_FreezeScope.CYCLE)
+                        case VenueReadFailure.UNREADABLE_BODY:
+                            self._charge_unreadable(order)
+                            proved_all = False
+                        case _:
+                            self._unreadable_run.record_present(order.cloid)
+                            await handle(order, view)
+            return proved_all
 
     async def _resolve_inflight(self, order: Order, view: VenueOrderView) -> None:
         """Resolve one ``SUBMITTED`` order against its venue reading. A record
@@ -244,13 +316,49 @@ class Reconciler:
         await self._bus.publish(self._verdict(order, status, reason))
         named_event(NamedEvent.GHOST_RECONCILED, resolution=status.value)
 
-    def _freeze(self) -> bool:
+    def _charge_unreadable(self, order: Order) -> None:
+        """Hold one unreadable read against ``order``'s span and freeze it — or
+        escalate, once the span says the condition is durable (ADR-0049).
+
+        A single unreadable body is transient by assumption and stays one: the
+        order is skipped, the pass carries on, and the next cycle re-reads it.
+        What no single sample can show is whether waiting will ever help
+        (ADR-0048 §1) — a truncated response resolves itself, a venue contract
+        change never does — and the span is that waiting, made explicit. More
+        than one sample is structural rather than configured: the first
+        unreadable read only starts the clock, so no setting of
+        ``unreadable_grace_seconds`` can fault on a single body.
+
+        Past the span the answer is in, and the verdict is a fault rather than a
+        resolution: nothing here read the order's state, so there is no terminal
+        to resolve it to that would not be invented. ``read`` has already named
+        each of these reads against this cloid with the body it could not read,
+        so the refusal names the order and leaves the evidence where it is.
+        """
+        if not self._unreadable_run.record_absent(order.cloid, now_ns=self._clock.timestamp_ns()):
+            self._freeze(_FreezeScope.ORDER)
+            return
+        raise VenueReadUnresolvable(
+            f"venue body for cloid {order.cloid} continuously unreadable across "
+            f"{self._config.unreadable_grace_seconds}s: the condition is durable "
+            "and no later pass can resolve it — see the exchange.request_failed "
+            "reads for this cloid, each quoting the body"
+        )
+
+    def _freeze(self, scope: "_FreezeScope") -> bool:
         """The connectivity guard tripping (ADR-0011 inv 1): a failed venue read
-        aborts the whole cycle — nothing is ghosted, removed, or counted, since
-        an outage must never read as "all orders vanished". Returns ``False``
-        for the caller to propagate as the cycle verdict. The frozen cycle and
-        the order whose read failed ride the ambient context (ADR-0020)."""
-        named_event(NamedEvent.RECONCILE_FROZEN)
+        heals nothing — nothing is ghosted, removed, or counted, since an outage
+        must never read as "all orders vanished". Returns ``False`` for the
+        caller to propagate as the cycle verdict. The frozen cycle and the order
+        whose read failed ride the ambient context (ADR-0020).
+
+        ``scope`` is what says **how much** froze, and it is a field rather than
+        a second event name because the catalog is closed (ADR-0045) and nothing
+        routes on the difference — but plenty reads it. Both scopes name the
+        cloid whose read failed, so without this an operator watching
+        ``reconcile.frozen`` cannot tell a pass that stopped dead from a pass
+        that reconciled everything except one order (ADR-0049)."""
+        named_event(NamedEvent.RECONCILE_FROZEN, scope=scope.value)
         return False
 
     async def _adopt(self, order: Order, view: VenueOrderView) -> None:

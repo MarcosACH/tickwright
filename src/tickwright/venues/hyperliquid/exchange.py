@@ -34,6 +34,7 @@ from tickwright.domain import (
     VenueAccountState,
     VenueFactUnsupported,
     VenueOrderView,
+    VenueReadFailure,
     quantize_price,
 )
 from tickwright.observability import NamedEvent, named_event
@@ -225,13 +226,18 @@ class HyperliquidExchange:
                 # that filled is terminal, so drop the placed memory regardless of
                 # how the fills read resolves.
                 self._placed.pop(order.cloid, None)  # terminal: drop the placed memory
-                # A failed fills read is ``None`` and already named as a *fills*
-                # read, never as this placement: the placement succeeded, and
-                # calling it a place failure would point triage at the wrong
-                # request. Emit nothing and let reconcile's fetch_order re-read
-                # FILLED and heal the fills (ADR-0011).
+                # A failed fills read is already named as a *fills* read, never
+                # as this placement: the placement succeeded, and calling it a
+                # place failure would point triage at the wrong request. Emit
+                # nothing and let reconcile's fetch_order re-read FILLED and heal
+                # the fills (ADR-0011). Which way it failed changes nothing here
+                # — there is no worklist behind this read to spare (ADR-0049) —
+                # but it is checked for explicitly rather than falsily, since a
+                # ``VenueReadFailure`` is truthy and would otherwise be iterated.
                 fills = await self._fetch_fills(cloid=order.cloid, symbol=order.symbol, oid=oid)
-                for fill in fills or ():
+                if isinstance(fills, VenueReadFailure):
+                    return
+                for fill in fills:
                     await self._bus.publish(fill)
             case unreachable:
                 # An adjudication the reader can produce and this cannot carry
@@ -323,31 +329,36 @@ class HyperliquidExchange:
         record = await self._order_status(cloid, normalize=_decode_order_status)
         return record.coin if isinstance(record, _OrderRecord) else None
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | None:
+    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
         """Venue truth for ``cloid``: the order record plus its fill history,
         the ADR-0011 cross-check in one read. ``unknownOid`` is positive proof
-        of no record (an empty view); a read that *failed* is ``None`` — an
-        outage must never look like "no record" (inv 1)."""
+        of no record (an empty view); a read that *failed* is a
+        ``VenueReadFailure`` — an outage must never look like "no record"
+        (inv 1)."""
         record = await self._order_status(cloid, normalize=_decode_order_view)
-        if record is None:
-            # The read failed and ``read`` already named which way — an outage or
-            # a body outside the venue's contract. Either freezes the reconciler
-            # rather than being mistaken for an empty book.
-            return None
+        if isinstance(record, VenueReadFailure):
+            # The read failed and ``read`` already named which way. Which way is
+            # carried out rather than collapsed: an outage says the venue is
+            # unreachable and the reconciler's whole pass should stop, while an
+            # unreadable body says only that *this* order cannot be read, from a
+            # venue answering everything else at full speed (ADR-0049). Neither
+            # may ever be mistaken for an empty book.
+            return record
         if record is _OrderStatusRead.NO_RECORD:
             # unknownOid: a *successful* read that positively has no record —
             # the order never landed (an empty view, not a failed read).
             return VenueOrderView(status=None)
         # Cannot fail: ``_decode_order_view`` refused an unmappable status on the
-        # way in, so the read is already ``None`` above if this had no answer.
+        # way in, so a read with no answer already returned its
+        # ``VenueReadFailure`` above.
         state = _order_state(record.status)
         return await self._view_with_fills(cloid, record, state)
 
     async def _view_with_fills(
         self, cloid: str, record: "_OrderRecord", state: OrderState
-    ) -> VenueOrderView | None:
+    ) -> VenueOrderView | VenueReadFailure:
         """The second half of the ADR-0011 cross-check: this order's record
-        joined to its fill history, or ``None`` if that half failed to read."""
+        joined to its fill history, or how that half failed to read."""
         # Bound the fills read to this order's own lifetime (ADR-0011): starting
         # at the venue's recorded placement time keeps its fills at the front of
         # the returned window, so a busy account's later fills can never push
@@ -357,10 +368,11 @@ class HyperliquidExchange:
         fills = await self._fetch_fills(
             cloid=cloid, symbol=record.coin, oid=record.oid, since_ms=record.timestamp
         )
-        if fills is None:
-            # An unparseable fills half is a failed read too — freeze, never a
-            # partial view that would read as "no fills" (ADR-0011 inv 1).
-            return None
+        if isinstance(fills, VenueReadFailure):
+            # A failed fills half fails the whole read — never a partial view
+            # that would read as "no fills" (ADR-0011 inv 1) — and carries its
+            # own cause out, since the fills half is the one that died.
+            return fills
         if state in _TERMINAL_STATES:
             # This order is done: drop the placed-order memory a cancel would
             # have used, so the adapter's cache tracks only still-open orders.
@@ -380,16 +392,21 @@ class HyperliquidExchange:
         a flat book (ADR-0011 inv 1), exactly as ``fetch_order`` carries it. No
         ``cloid``: this grain is the whole account, not one order.
         """
-        return await read(
+        state = await read(
             request="clearinghouseState",
             query={"type": "clearinghouseState", "user": self._user_address},
             send=self._info,
             normalize=normalize_account_state,
         )
+        # One grain, one order, no worklist: this read has nothing behind it to
+        # protect, so the two failure causes buy it nothing and it collapses
+        # them (ADR-0049). Its caller — the ``StartupBarrier`` — retries the
+        # whole sequence either way.
+        return None if isinstance(state, VenueReadFailure) else state
 
     async def _order_status(
         self, cloid: str, *, normalize: "Callable[[object], _OrderDecode]"
-    ) -> "_OrderDecode | None":
+    ) -> "_OrderDecode | VenueReadFailure":
         """The venue's ``orderStatus`` answer for ``cloid`` — the one read both
         the reconciler's ``fetch_order`` and a post-restart ``cancel`` share.
 
@@ -410,7 +427,7 @@ class HyperliquidExchange:
 
     async def _fetch_fills(
         self, *, cloid: str, symbol: str, oid: int, since_ms: int | None = None
-    ) -> list[FillReport] | None:
+    ) -> list[FillReport] | VenueReadFailure:
         """This order's fills from the venue's fill history, by its oid — the
         one id fills carry (they have no cloid on the wire).
 
@@ -418,9 +435,9 @@ class HyperliquidExchange:
         (``userFillsByTime``), so an aged order's fills sit at the front of the
         window rather than risking the venue's page cap; without it the whole
         recent history is read (``userFills``), safe only right after placement
-        when this order's fills are the newest. ``None`` on a read that failed —
-        a body we could not parse or a transport that died, both named by
-        ``read`` and both frozen on by the caller, never silent truth.
+        when this order's fills are the newest. A ``VenueReadFailure`` on a read
+        that failed — a body we could not parse or a transport that died, both
+        named by ``read`` and neither ever silent truth.
 
         Both queries name themselves ``userFills``, and the mismatch with the
         windowed ``type`` is deliberate rather than missed: the ``request`` label
@@ -591,16 +608,17 @@ class _OrderStatusRead(Enum):
 
     One member, and it stays an enum for that reason: ``NO_RECORD`` is a
     *positive* claim — the venue says this cloid never landed — and the type is
-    what keeps it from ever being written as the ``None`` that means the read
-    failed. The two are opposite answers (ADR-0008's resend gate turns on which),
-    so they must not share a representation.
+    what keeps it from ever being written as the ``VenueReadFailure`` that means
+    the read failed. The two are opposite answers (ADR-0008's resend gate turns
+    on which), so they must not share a representation.
     """
 
     NO_RECORD = "no_record"  # unknownOid — the venue positively has no record
 
 
-# What either ``orderStatus`` decode below answers with. Never ``None``: that is
-# ``read``'s to return, and it means something else entirely.
+# What either ``orderStatus`` decode below answers with. Never a
+# ``VenueReadFailure``: that is ``read``'s to return, and it means something else
+# entirely.
 _OrderDecode = _OrderRecord | _OrderStatusRead
 
 
@@ -804,12 +822,16 @@ def _settled_in_usdc(entry: Mapping[str, Any]) -> Decimal:
 
     ``VenueFactUnsupported`` and deliberately **not** a member of ``UNREADABLE``
     (ADR-0048): every neighbour there describes a body we could not parse, which
-    a re-read may well fix, so they are answered with the named ``None`` a cycle
-    retries. A settled fill row never changes, so this one would be re-read to
-    the same refusal forever — and because ``_drive`` freezes ahead of any retry
-    budget and returns on the first frozen read, answering it that way stalls
-    every order behind it too, indefinitely and silently. It escalates out of
-    the seam instead, faulting the engine as ADR-0036 §4 promises.
+    a re-read may well fix, so they are answered with the named
+    ``VenueReadFailure`` a cycle retries. A settled fill row never changes, so
+    this one is already known permanent at the *first* read, and the unreadable
+    verdict is built to find that out by waiting: answering it that way would
+    skip the order for the whole ``unreadable_grace_seconds`` span, re-reading it
+    to the same refusal, and then fault on the cloid alone — naming strictly less
+    than this refusal already can, since only here is the offending token in
+    hand. It escalates out of the seam instead, faulting the engine as ADR-0036
+    §4 promises (ADR-0049 §4 for why spending the span is the alternative, and
+    ADR-0048 §2's amended note for what the escalation no longer has to prevent).
     """
     token = entry["feeToken"]
     if token != "USDC":
