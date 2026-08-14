@@ -86,8 +86,11 @@ _Avoid_: algo, bot, trader.
 
 **Exchange** *(Protocol)*:
 A **thin boundary adapter** translating venue ↔ our types: `place`/`cancel`/`fetch_*` and
-emitting raw [[ExecutionReport]]s. Owns no saga. `fetch_*` returns `None` on failure (the
-[[Connectivity guard]]). Impls: [[Paper exchange|PaperExchange]], `HyperliquidExchange`; the seam
+emitting raw [[ExecutionReport]]s. Owns no saga. A failed `fetch_*` never answers as truth (the
+[[Connectivity guard]]), and the grain decides how: `fetch_order` returns a [[Failed read]] —
+never a view — because the reconciler behind it drives a worklist and acts on *which way* the
+read failed; `fetch_account_state` reads one grain with nothing behind it to spare and collapses
+both to `None`. Impls: [[Paper exchange|PaperExchange]], `HyperliquidExchange`; the seam
 **accepts N** — each real venue is a self-contained [[Venue adapter]] (two ship only to prove the
 seam). See ADR-0011, ADR-0015, ADR-0031.
 _Avoid_: broker, venue client, gateway (fine informally).
@@ -251,14 +254,14 @@ time).
 A venue answer that is understood and cannot be represented — a fill fee settled in a token
 other than USDC, against money that is a bare `Decimal` with USDC implicit (ADR-0029). Named
 against the two *transient* failures beside it, a dead transport and an unreadable body, which
-the [[Connectivity guard]] answers with `None` and a retry at the next deadline. The venue has
-already stored the fact, so a retry re-reads it identically forever: answered as transient it
-would freeze the reconcile cycle permanently and silently. It refuses as `VenueFactUnsupported`,
-deliberately outside the `UNREADABLE` vocabulary every transient guard catches, and **faults**
-the engine — the one condition an operator, not a deadline, has to resolve. Its sibling
-`VenueReadUnresolvable` faults for the same reason with less knowledge: nothing was ever read
-there, and the permanence is *inferred* from a spent budget rather than observed in one sample
-([[Failed read]]). See ADR-0048, ADR-0049, ADR-0036.
+the [[Connectivity guard]] answers with a [[Failed read]] and a retry at the next deadline. The
+venue has already stored the fact, so a retry re-reads it identically forever: answered as
+transient it would freeze the reconcile cycle permanently and silently. It refuses as
+`VenueFactUnsupported`, deliberately outside the `UNREADABLE` vocabulary every transient guard
+catches, and **faults** the engine — the one condition an operator, not a deadline, has to
+resolve. Its sibling `VenueReadUnresolvable` faults for the same reason with less knowledge:
+nothing was ever read there, and the permanence is *inferred* from a spent budget rather than
+observed in one sample ([[Failed read]]). See ADR-0048, ADR-0049, ADR-0036.
 _Avoid_: parse error, bad response (both read as the transient case this exists to be distinct
 from); hard failure (says how loud, not why it cannot be retried).
 
