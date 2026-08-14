@@ -439,11 +439,16 @@ class Engine:
         — the ``_stop_feed`` shape one seam over, and one membership entry for
         the same reason: a seam whose loop the runner owns is still *one* seam.
 
-        Cancelled and **waited out**, unlike the feed's task: the generator
-        behind it publishes, and this slot sits ahead of the bus drain precisely
-        so nothing is left publishing into it and raising its high-water mark.
-        Cancelling without waiting would leave that guarantee to whichever turn
-        the loop happened to be on. Exceptions are absorbed here rather than
+        Cancelled and **waited out**, which the feed's task is not — and the
+        difference is *how each loop ends*, not what it publishes (both do).
+        ``MarketFeed.stop`` is a cooperative signal a live feed's loop reads and
+        returns on, so the cancel behind it is belt-and-braces; the generator has
+        no such signal, so cancellation is the only thing that ends it and the
+        wait is the only thing that proves it did. That proof is what this slot
+        owes the bus drain below it: anything still publishing keeps raising the
+        drain's high-water mark, so cancelling without waiting would leave the
+        guarantee to whichever turn the loop happened to be on. Exceptions are
+        absorbed here rather than
         raised: a task that died of its own accord already reached the
         ``TaskGroup``, which is what faulted the run and is where that failure
         belongs — reporting it a second time out of the teardown would name a
