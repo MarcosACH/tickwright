@@ -46,6 +46,7 @@ Good interfaces make testing natural:
    Cloid = NewType("Cloid", str)
    Symbol = NewType("Symbol", str)
 
+
    def get_order(cloid: Cloid) -> Order: ...
    ```
 
