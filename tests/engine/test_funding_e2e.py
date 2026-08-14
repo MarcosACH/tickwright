@@ -236,6 +236,12 @@ async def _run(
     if ask_to_stop:
         await engine.stop()
         exit_code = await run
+        # Asserted here rather than left to each case: a graceful life that
+        # faulted still re-walks the whole teardown membership, so every durable
+        # number a case reopens the file to read was already written and would
+        # come back identical. A case that reads only those numbers would pass on
+        # a run this branch is meant to have stopped cleanly.
+        assert engine.state is ComponentState.STOPPED
     else:
         # Nobody is going to end this life, so the only thing to wait on is the
         # engine ending it. Slots rather than a timeout, for the reason the whole
