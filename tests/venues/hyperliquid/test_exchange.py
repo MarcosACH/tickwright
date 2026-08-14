@@ -407,10 +407,11 @@ def test_a_live_fill_settled_in_another_token_escalates_instead_of_freezing() ->
     # add a number of one currency to a line of another and silently misstate
     # cash. It is refused, but deliberately *not* as the transient failed read
     # every other unreadable body gets: the venue's stored fill row is immutable,
-    # so the read fails identically on every later pass, and a `None` here would
-    # freeze the reconcile cycle permanently — one HYPE-settled fee stalling
-    # every order behind it, forever, on a `RECONCILE_FROZEN` a cycle. A
-    # condition no retry can resolve leaves the seam instead (ADR-0036 §4).
+    # so the read fails identically on every later pass, and a `VenueReadFailure`
+    # here would buy nothing but delay — the order skipped and re-read for the
+    # whole unreadable span, then a fault naming the cloid where this refusal can
+    # name the token. A condition no retry can resolve leaves the seam instead
+    # (ADR-0036 §4).
     post = FakeExchangeApi(
         {
             "orderStatus": order_status_response(status="filled", oid=91),

@@ -47,7 +47,7 @@ coverage of state-affecting paths is a requirement, not optional.
 ## Coverage requirement
 
 Every saga transition, every reconcile decision (including a failed-read freeze and the `scope`
-saying how much of the pass it froze, ADR-0049), every guard
-denial, every fill (venue or healed), and every component state change emits a named event with
-the correlation id bound. The named-event catalog is documented and is a test-assertable
-contract — a state-affecting path with no named event is a defect.
+saying how much of the pass it froze, ADR-0049), every guard denial, every fill (venue or healed),
+and every component state change emits a named event with the correlation id bound. The named-event
+catalog is documented and is a test-assertable contract — a state-affecting path with no named
+event is a defect.

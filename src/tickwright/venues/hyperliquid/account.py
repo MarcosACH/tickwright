@@ -70,8 +70,9 @@ def normalize_account_state(response: object) -> VenueAccountState:
     absent from ``assetPositions``, the venue running one-way net positions.
 
     A body this cannot read **raises** into ``UNREADABLE``, and ``read`` turns
-    that into the named ``None`` the reconcile freezes on: every branch out of
-    here is either a whole state or no state at all, so a venue contract change
+    that into the named ``VenueReadFailure`` the reconcile freezes on (collapsed
+    to ``None`` by ``fetch_account_state``, this grain's caller): every branch
+    out of here is either a whole state or no state at all, so a contract change
     freezes rather than degrading into a partial account that would read as
     truth (ADR-0011 inv 1). Deciding what that refusal *means* is deliberately
     not this function's job — it reads a body, and one module owns the verdict

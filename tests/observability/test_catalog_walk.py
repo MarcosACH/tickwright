@@ -176,7 +176,7 @@ class _LiveShapedVenue(LiveVenueDouble):
 
 
 class _DarkVenue(VenueDouble):
-    """A venue whose reads all fail (``None``) — the connectivity guard trips."""
+    """A venue whose reads all fail (``SEND_FAILED``) — the connectivity guard trips."""
 
     async def place(self, order: PlaceOrder) -> None:
         raise AssertionError("the frozen cycle never places")

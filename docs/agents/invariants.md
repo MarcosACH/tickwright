@@ -23,22 +23,25 @@ Consumed by `/code-review` (any regression is BLOCKING) and `/python-codebase-ma
    constructions, and a figure re-typed as a JSON number lost digits and scale to `float` in
    `json.loads` before any parse of ours saw it, so neither announces
    itself; every boundary that reads a reported figure passes it through one guard and turns
-   the refusal into its own layer's failed read (a dropped frame on a feed, a named `None` on
-   a venue read). `domain.exact_figure` holds the universal half — a figure must be a number —
-   and each venue owns what its own figures may be *encoded* as, Hyperliquid's being
-   `venues/hyperliquid/reading.py` (`figure`, plus the `UNREADABLE` vocabulary every grain of
-   that venue catches). Paper's `None` is its permanent answer,
+   the refusal into its own layer's failed read (a dropped frame on a feed, a named
+   `VenueReadFailure` on a venue read). `domain.exact_figure` holds the universal half — a
+   figure must be a number — and each venue owns what its own figures may be *encoded* as,
+   Hyperliquid's being `venues/hyperliquid/reading.py` (`figure`, plus the `UNREADABLE`
+   vocabulary every grain of that venue catches). Paper's `None` is its permanent answer,
    because it holds no account state at all, so a cadence mistakenly pointed at it freezes
    rather than healing a restored ledger to flat. At the **startup barrier** the same `None`
    costs more than a frozen cycle: the live-only account materialisation retries inside the one
    startup budget and then **faults** the process, because clearing the barrier with no account
    row is the state that step exists to prevent — freeze-don't-guess applied to the cash line,
    and what keeps ADR-0041 §6's "`cash` is never `None`" true rather than merely intended.*
-   **The boundary of this invariant is permanence.** `None`-and-retry is the answer for a read
-   that *may* succeed later — a dead transport, an unreadable body. A venue fact this engine
-   cannot represent (a fill fee settled in a token other than USDC) is already stored at the
-   venue and reads back identically forever, so answering it that way freezes the cycle
-   permanently and silently. Those refuse as `VenueFactUnsupported`, deliberately outside the
+   **The boundary of this invariant is permanence.** A failed read and a retry is the answer
+   for a read that *may* succeed later — a dead transport, an unreadable body — with the
+   per-cloid span below as how that retrying finds out whether waiting helps. A venue fact this
+   engine cannot represent (a fill fee settled in a token other than USDC) is already stored at
+   the venue and reads back identically forever, so it is durable at the *first* read and the
+   span has nothing to discover: answering it that way spends the whole span re-reading it and
+   then faults naming only the cloid, where the refusal itself can name the offending fact.
+   Those refuse as `VenueFactUnsupported`, deliberately outside the
    `UNREADABLE` vocabulary every transient guard catches, and **fault** the engine. One venue
    read, three outcomes, mapped once per venue (`venues/hyperliquid/reading.py`). What a read
    is covered by is **whether something above it retries** — a barrier step freezes because the

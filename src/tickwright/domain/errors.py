@@ -50,13 +50,16 @@ class VenueFactUnsupported(InvariantViolation):
     The **permanence** is the whole reason this is a type and not a member of
     the venue's ``UNREADABLE`` vocabulary. Its neighbours there describe a body
     we could not parse, where a re-read may well succeed, so their verdict is a
-    named ``None`` the cycle retries. A stored venue row is immutable: the read
-    fails identically on every later pass, the reconciler's ``_drive`` returns
-    its freeze *before* any retry budget advances, and the first affected order
-    freezes every order behind it in the iteration too. Answered as transient,
-    one such fact would stall the whole reconciler indefinitely on a
-    ``RECONCILE_FROZEN`` a cycle and nothing else — a permanent silent freeze
-    where ADR-0036 §4 promises a fail-fast.
+    named ``VenueReadFailure`` the cycle retries — and, when the retrying stops
+    helping, a per-cloid span that escalates to ``VenueReadUnresolvable``
+    (ADR-0049 §4). That span exists to *find out* whether a condition is durable,
+    by waiting. This one is durable at the first read and known to be: a stored
+    venue row is immutable, so the read fails identically on every later pass.
+    Answered as transient, one such fact would skip its order and re-read it for
+    the whole span before faulting — and fault naming only the cloid, where this
+    type names the fact, which is the one thing an operator's first question
+    turns on. Waiting to learn what is already known is the opposite of the
+    fail-fast ADR-0036 §4 promises.
 
     So it leaves the venue seam rather than being answered inside it, faulting
     the engine the way a broken boot precondition does

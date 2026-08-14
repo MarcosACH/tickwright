@@ -262,16 +262,17 @@ def test_a_venue_outage_freezes_reconciliation_instead_of_resolving_inflight() -
     assert any(e["event"] == NamedEvent.RECONCILE_FROZEN for e in events)
 
 
-def test_a_permanent_refusal_leaves_the_cycle_instead_of_freezing_it_forever() -> None:
+def test_a_permanent_refusal_leaves_the_cycle_instead_of_spending_the_span() -> None:
     # The other half of the guard, and the reason it needs two outcomes and not
     # one (ADR-0048). A fee settled in a token this ledger cannot hold is not an
     # outage: the venue's fill row is already settled, so every later pass reads
-    # it to the same refusal. Answered with the `None` above it would freeze this
-    # cycle on every tick forever — and `_drive` returns on the first frozen read,
-    # so every order behind this one in the iteration would stop reconciling too,
-    # with one `RECONCILE_FROZEN` a cycle the only trace. Nothing between the
-    # adapter and the runner may absorb it: it has to reach the TaskGroup and
-    # fault the engine, where an operator can see it (ADR-0036 §4).
+    # it to the same refusal. Answered with the `VenueReadFailure` above, this
+    # order would be skipped and re-read for the whole `unreadable_grace_seconds`
+    # span before faulting — waiting to discover what is already known at the
+    # first read, and faulting on the cloid alone, where this refusal can name
+    # the offending token. Nothing between the adapter and the runner may absorb
+    # it: it has to reach the TaskGroup and fault the engine, where an operator
+    # can see it (ADR-0036 §4; ADR-0049 §4 for the span it skips).
     async def main() -> None:
         bus = InMemoryBus()
         clock = ManualClock(start_ns=0)

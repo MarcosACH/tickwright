@@ -28,10 +28,11 @@ UNREADABLE = (ArithmeticError, KeyError, TypeError, ValueError)
 """What reading a reported body raises when it cannot be read.
 
 Every grain answers an unreadable body the same way — a dropped frame on the
-feed, a named ``None`` on a venue read — so every grain catches the same four,
-and naming them once is what keeps that true. They had already drifted: the tick
-grain caught ``InvalidOperation`` where the other two caught its ``ArithmeticError``
-superset, which is a difference no one intended and nothing would have surfaced.
+feed, a named ``VenueReadFailure`` on a venue read — so every grain catches the
+same four, and naming them once is what keeps that true. They had already
+drifted: the tick grain caught ``InvalidOperation`` where the other two caught
+its ``ArithmeticError`` superset, which is a difference no one intended and
+nothing would have surfaced.
 
 * ``KeyError`` — a field the shape check did not cover is absent.
 * ``TypeError`` — a value is the wrong type: a re-typed figure, or a row that is
@@ -49,10 +50,13 @@ its own layer. This names control flow that exists; it does not add any.
 What is deliberately **outside** it is ``VenueFactUnsupported`` (ADR-0048): the
 venue reporting a fact we understand and cannot represent — a fill fee settled in
 a token other than USDC. Every member above describes a body we could not parse,
-where a re-read may succeed, so a named ``None`` the cycle retries is the honest
-verdict. A settled venue row never changes, so that verdict would freeze the
-reconciler on it forever; it escalates past every guard here instead, and being a
-type no caller catches is what keeps that true by construction.
+where a re-read may succeed, so a named ``VenueReadFailure`` the cycle retries is
+the honest verdict. A settled venue row never changes, so this one is already
+known permanent at the *first* read: answering it that way would spend the whole
+unreadable span re-reading it to the same refusal and then fault on a cloid,
+naming strictly less than the fact does (ADR-0049 §4). It escalates past every
+guard here instead, and being a type no caller catches is what keeps that true by
+construction.
 """
 
 
@@ -104,8 +108,8 @@ async def read[T](
     re-deriving it (issue #216).
 
     What decides whether a read belongs here is **whether something above it
-    retries**, not whether it runs at boot. ``None`` is a freeze signal, and a
-    freeze only means anything to a caller that will ask again:
+    retries**, not whether it runs at boot. A ``VenueReadFailure`` is a freeze
+    signal, and a freeze only means anything to a caller that will ask again:
 
     - ``fetch_account_state`` is a boot read *and* a caller. It runs as a
       ``StartupBarrier`` step, and the barrier re-drives its whole sequence with
@@ -193,9 +197,9 @@ def rendered(response: object) -> str:
     show — a figure that is not a number.
 
     Nothing in here may raise: it runs only on the path that has already decided
-    to answer ``None``, and an exception escaping would turn a fail-closed read
-    into a crashed one. Hence ``list`` over ``sorted`` on the keys — mixed key
-    types have no order but always have a repr.
+    to answer ``UNREADABLE_BODY``, and an exception escaping would turn a
+    fail-closed read into a crashed one. Hence ``list`` over ``sorted`` on the
+    keys — mixed key types have no order but always have a repr.
     """
     shape = f"keys={list(response)} " if isinstance(response, Mapping) else ""
     body = repr(response)
@@ -244,9 +248,9 @@ def figure(reported: object) -> Decimal:
     for refusing it does not vary by venue.
 
     What each refusal *means* is the caller's own: a tick drops its row, a fills
-    read is a named ``None``, an account read freezes the reconcile. This raises
-    into ``UNREADABLE``, which every one of them already catches, so it adds a
-    check and never a control flow.
+    read is a named ``VenueReadFailure``, an account read freezes the reconcile.
+    This raises into ``UNREADABLE``, which every one of them already catches, so
+    it adds a check and never a control flow.
     """
     if not isinstance(reported, str):
         raise TypeError(f"non-string figure {reported!r}")

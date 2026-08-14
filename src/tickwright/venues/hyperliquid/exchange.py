@@ -349,7 +349,8 @@ class HyperliquidExchange:
             # the order never landed (an empty view, not a failed read).
             return VenueOrderView(status=None)
         # Cannot fail: ``_decode_order_view`` refused an unmappable status on the
-        # way in, so the read is already ``None`` above if this had no answer.
+        # way in, so a read with no answer already returned its
+        # ``VenueReadFailure`` above.
         state = _order_state(record.status)
         return await self._view_with_fills(cloid, record, state)
 
@@ -607,16 +608,17 @@ class _OrderStatusRead(Enum):
 
     One member, and it stays an enum for that reason: ``NO_RECORD`` is a
     *positive* claim — the venue says this cloid never landed — and the type is
-    what keeps it from ever being written as the ``None`` that means the read
-    failed. The two are opposite answers (ADR-0008's resend gate turns on which),
-    so they must not share a representation.
+    what keeps it from ever being written as the ``VenueReadFailure`` that means
+    the read failed. The two are opposite answers (ADR-0008's resend gate turns
+    on which), so they must not share a representation.
     """
 
     NO_RECORD = "no_record"  # unknownOid — the venue positively has no record
 
 
-# What either ``orderStatus`` decode below answers with. Never ``None``: that is
-# ``read``'s to return, and it means something else entirely.
+# What either ``orderStatus`` decode below answers with. Never a
+# ``VenueReadFailure``: that is ``read``'s to return, and it means something else
+# entirely.
 _OrderDecode = _OrderRecord | _OrderStatusRead
 
 
@@ -820,12 +822,16 @@ def _settled_in_usdc(entry: Mapping[str, Any]) -> Decimal:
 
     ``VenueFactUnsupported`` and deliberately **not** a member of ``UNREADABLE``
     (ADR-0048): every neighbour there describes a body we could not parse, which
-    a re-read may well fix, so they are answered with the named ``None`` a cycle
-    retries. A settled fill row never changes, so this one would be re-read to
-    the same refusal forever — and because ``_drive`` freezes ahead of any retry
-    budget and returns on the first frozen read, answering it that way stalls
-    every order behind it too, indefinitely and silently. It escalates out of
-    the seam instead, faulting the engine as ADR-0036 §4 promises.
+    a re-read may well fix, so they are answered with the named
+    ``VenueReadFailure`` a cycle retries. A settled fill row never changes, so
+    this one is already known permanent at the *first* read, and the unreadable
+    verdict is built to find that out by waiting: answering it that way would
+    skip the order for the whole ``unreadable_grace_seconds`` span, re-reading it
+    to the same refusal, and then fault on the cloid alone — naming strictly less
+    than this refusal already can, since only here is the offending token in
+    hand. It escalates out of the seam instead, faulting the engine as ADR-0036
+    §4 promises (ADR-0049 §4 for why spending the span is the alternative, and
+    ADR-0048 §2's amended note for what the escalation no longer has to prevent).
     """
     token = entry["feeToken"]
     if token != "USDC":

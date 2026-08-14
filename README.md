@@ -123,8 +123,9 @@ type. The **order lifecycle** is a saga/state machine (`PENDING → SUBMITTED �
 CANCELLED / …`) whose transitions checkpoint to the `Store` **before** any network send, so a crash
 mid-placement is recoverable. **Reconciliation** periodically compares local saga state against
 venue truth, with a grace period and a connectivity-failure guard — a failed read is never a view
-and never `[]` — so an outage is never misread as "all orders vanished." **Recovery** replays from the store and rebuilds the `Cache`
-read-model; restarting converges to the same state — no double-fills, no orphaned orders.
+and never `[]` — so an outage is never misread as "all orders vanished." **Recovery** replays from
+the store and rebuilds the `Cache` read-model; restarting converges to the same state — no
+double-fills, no orphaned orders.
 
 The runtime is a **single `asyncio` process**. All time flows through an injected `Clock` (so the
 test suite never sleeps), and every state-affecting path emits a named observability event.
