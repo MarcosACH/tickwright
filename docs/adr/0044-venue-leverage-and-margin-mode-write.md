@@ -346,7 +346,9 @@ which is why it cannot be an `AppConfig` validator like §3's.**)**
 
 The `Exchange` Protocol gains **`async def start(self) -> None`**, called by
 `Engine._start_sequence` at step 4. `PaperExchange.start()` performs the §9 validation and no write;
-`HyperliquidExchange.start()` validates, reads, and pushes.
+`HyperliquidExchange.start()` validates, reads, and pushes. **This member is the *connect* half
+only** — the adapter's long-lived half is `run()`, added by
+[#226](https://github.com/MarcosACH/tickwright/issues/226) and explained at the end of this section.
 
 This declares a method the architecture already assumed rather than inventing a seam. ADR-0014
 names `Exchange` among the long-lived components with `async start()` / `async stop()`; the Protocol
@@ -357,19 +359,36 @@ own, posting per request.
 
 **(`stop()` is now declared, on this section's own condition — the
 [trade-economics module map](../module-maps/trade-economics-accounting-surface.md).** ADR-0037's
-paper funding generator is a running `Clock`-driven task inside `PaperExchange`, which is teardown
-to do; the map gives it `Exchange.stop()` as its cancellation point and one `exchange.stop` entry in
-the runner's `_teardown_steps`, ordered after `feed.stop` so the generator stops before the bus
-drains. `state` and `health()` stay undeclared. `HyperliquidExchange.stop()` is a no-op, the
-per-request posting rationale above being unchanged for it.
+paper funding generator is a running `Clock`-driven task, which is teardown to do; the map gives it
+one `exchange.stop` entry in the runner's `_teardown_steps`, ordered after `feed.stop` so the
+generator stops before the bus drains. `state` and `health()` stay undeclared.
+`HyperliquidExchange.stop()` is a no-op, the per-request posting rationale above being unchanged for
+it.
 
-**The teardown itself landed in [#174](https://github.com/MarcosACH/tickwright/issues/174)**, which
-is where the generator arrived: `PaperExchange.start()` spawns it and `stop()` cancels it and waits
-it out, safe on a venue that never started and idempotent on the second call — both because the
-faulted teardown re-walks the whole membership from the top. The pair was declared one slice earlier
+**The teardown landed in [#174](https://github.com/MarcosACH/tickwright/issues/174)**, which is
+where the generator arrived, with `PaperExchange` owning the task: `start()` spawned it and `stop()`
+cancelled it and waited it out. The pair was declared one slice earlier
 ([#186](https://github.com/MarcosACH/tickwright/issues/186)) with nothing behind it, and the
-lifecycle test landed with it predicted this exact arrival, asserting no task ran; it now asserts
-**one** while running and none surviving.**)**
+lifecycle test landed with it predicted this exact arrival, asserting no task ran.
+
+**[#226](https://github.com/MarcosACH/tickwright/issues/226) then moved the task off the adapter,
+and `PaperExchange.stop()` is empty again — as this section originally had it.** An adapter that
+owns a running task owns no way to *report* one that died: the loop's one failure mode is a ledger
+write the store refuses, and killed by that it left the engine `RUNNING` and accruing nothing, with
+the refusal reaching an operator only if something later asked for a stop. So the seam gained a
+**third** member, `run()` — the supervised long-lived half, task-created inside the runner's
+`TaskGroup` beside the feed, where a refusal aborts the group and faults the run *at* the refusal
+(ADR-0024 containment). `start()` could not be it: this section's own step-4 call is awaited inline
+and must return so the barrier can run at step 5.
+
+That leaves the three verbs split by what each is for — `start()` connects and refuses (this
+section), `run()` is the loop the engine supervises, `stop()` releases. Paper's `stop()` releasing
+nothing is then the honest shape rather than a regression: an in-process venue holds no connection,
+and the teardown this section wanted still happens — the runner cancels the supervised half in
+`exchange.stop`'s slot, ahead of the bus drain, so the ordering claim above is unchanged. The
+lifecycle test asserts **one** task while the supervised half runs, none surviving its cancellation,
+and — the claim #226 added — **none at all** after `start()`. `HyperliquidExchange.run()` returns at
+once, for the same reason its `stop()` is a no-op.**)**
 
 Doing it in `build_exchange` instead — which already runs `asyncio.run(fetch_instrument_specs(...))`
 at composition, "the one read-once moment" — was rejected: it would put a **signed venue write** in

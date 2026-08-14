@@ -25,6 +25,17 @@ off these two verbs, and the runner ordering is precisely the thing none of them
 separately. Both adapters implement `stop()` as a no-op until that generator exists. `state` and
 `health()` stay undeclared, on the original condition.**)**
 
+**(Amended again by [#226](https://github.com/MarcosACH/tickwright/issues/226):** the generator is
+**not** a task inside `PaperExchange`, and the `start`/`stop` pair above cannot be the whole of a
+long-lived component's lifecycle. The error model below turns on a `FAULTED` engine and a non-zero
+exit, and neither is reachable from a task nobody supervises: killed by an invariant violation, the
+generator died alone while the engine ran on. So the `Exchange` Protocol declares a **third** verb,
+`run()` — the loop the engine's `TaskGroup` supervises, distinct from `start()` because ADR-0024's
+step 4 awaits that one inline and it must return. `PaperExchange.run()` is the generator;
+`HyperliquidExchange.run()` returns at once; both `stop()`s are no-ops again, which is what an
+adapter holding no connection should be. `state` and `health()` stay undeclared, on the original
+condition — `run()` earns its place by carrying a fault, which is exactly what those two do not.**)**
+
 ## Error model (crash-only, two classes)
 
 - **Recoverable handler error** — a `Strategy`/`Feed` handler raises on a single event. Caught,
