@@ -812,31 +812,38 @@ def test_the_paper_account_label_defaults_to_the_same_label_the_config_does() ->
     assert exchange.account_spec().account_id == f"paper-{PaperExchangeConfig().account_label}"
 
 
-def test_the_lifecycle_pair_spawns_exactly_the_funding_generator_and_cancels_it() -> None:
-    """The two verbs the runner drives (ADR-0024 step 4 and the reverse
-    shutdown). There is still nothing to *connect* in-process — this venue's one
-    link, the ``MarketTick`` subscription, is wired at construction — but there
-    is now something to **run**: ADR-0037's funding generator, which a real venue
-    would push and paper has to settle itself.
+def test_start_connects_nothing_and_leaves_the_one_loop_to_the_supervised_half() -> None:
+    """The three verbs the runner drives (ADR-0024 step 4, the ``TaskGroup``, the
+    reverse shutdown). There is nothing to *connect* in-process — this venue's
+    one link, the ``MarketTick`` subscription, is wired at construction — and
+    there is exactly one thing to **run**: ADR-0037's funding generator, which a
+    real venue would push and paper has to settle itself.
 
-    Driven *alone*, with no tick and no order, and watched the two ways this
-    test has always watched. Dispatch is ``isinstance``-guarded (ADR-0023), so a
+    **``start()`` spawns nothing**, and that emptiness is the claim rather than
+    an absence of work. A loop spawned there is a loop the runner does not
+    supervise, so its one failure mode — a refused ledger write — kills it alone
+    while the engine runs on accruing nothing (#226). The loop belongs to
+    ``run()``, whose task the runner creates and owns; here that ownership is
+    stood in for by creating and cancelling it in the same place.
+
+    Driven *alone*, with no tick and no order, and watched the two ways this test
+    has always watched. Dispatch is ``isinstance``-guarded (ADR-0023), so a
     subscription to ``Event`` itself sees **everything** this venue publishes,
     including a type that does not exist yet — and it stays empty, because the
-    generator is parked on a boundary no advancing clock has reached. The
-    running task is what gives its arrival away, which is exactly what this test
-    predicted when the pair was landed with nothing behind it: a generator
-    publishes no fill, so a fill-watcher would have survived its arrival
-    silently, and it publishes nothing at all until time advances, so even the
-    catch-all would.
+    generator is parked on a boundary no advancing clock has reached. The running
+    task is what gives its arrival away: a generator publishes no fill, so a
+    fill-watcher would have survived it silently, and it publishes nothing at all
+    until time advances, so even the catch-all would.
 
-    So the count is asserted rather than the emptiness: **one** task, so a second
-    loop cannot be added unnoticed, and **none** surviving ``stop()``, which is
-    the half the bus drain depends on — a generator that outlived the release
-    would keep publishing into the drain and the cascade would never quiesce."""
+    So the count is asserted rather than the emptiness: **one** task while the
+    supervised half runs, so a second loop cannot be added unnoticed, and
+    **none** surviving the cancellation, which is the half the bus drain depends
+    on — a generator that outlived the teardown's slot would keep publishing into
+    the drain and the cascade would never quiesce."""
     exchange, bus, _clock, _fills = _harness()
     published: list[Event] = []
     bus.subscribe(Event, lambda event: _record(published, event))
+    after_start: list[asyncio.Task[object]] = []
     while_running: list[asyncio.Task[object]] = []
     surviving: list[asyncio.Task[object]] = []
 
@@ -845,13 +852,19 @@ def test_the_lifecycle_pair_spawns_exactly_the_funding_generator_and_cancels_it(
 
     async def scenario() -> None:
         await exchange.start()
+        after_start.extend(_others())
+        running = asyncio.create_task(exchange.run())
+        await asyncio.sleep(0)
         while_running.extend(_others())
         await exchange.stop()
+        running.cancel()
+        await asyncio.gather(running, return_exceptions=True)
         surviving.extend(task for task in _others() if not task.done())
 
     asyncio.run(scenario())
 
     assert published == []
+    assert after_start == []  # nothing the runner would not be supervising
     assert len(while_running) == 1  # the funding generator, and nothing else
     assert surviving == []
 
@@ -869,10 +882,11 @@ def test_the_paper_venue_releases_without_a_start_and_keeps_its_book() -> None:
     pass re-walks the membership from the top (the runner's half of this claim
     is ``test_a_graceful_teardown_that_breaks_releases_the_venue_a_second_time``
     — asserted there on a double, and here on the adapter itself). Trivially
-    true while this body releases nothing; pinned before ADR-0037's funding
-    generator gives it a task to cancel, which is the first way a second call
-    can break. The book survives both, so the second release is no more a reset
-    than the first."""
+    true while this body releases nothing, and it stayed that way: ADR-0037's
+    funding generator was the one candidate for giving this a task to cancel,
+    and the task went to the runner instead (``Exchange.run()``, #226), so what
+    an in-process venue releases here is still nothing. The book survives both
+    calls, so the second release is no more a reset than the first."""
     exchange, bus, clock, fills, statuses = _limit_harness()
 
     async def scenario() -> VenueOrderView | VenueReadFailure:
@@ -945,7 +959,8 @@ def test_the_paper_venue_satisfies_the_exchange_seam() -> None:
 # copy of the seam: the gate below asserts it against the Protocol itself, so a
 # new member cannot arrive without someone naming what asserts it here.
 _SEAM_CLAIMS = {
-    "start": "test_the_lifecycle_pair_spawns_exactly_the_funding_generator_and_cancels_it",
+    "start": "test_start_connects_nothing_and_leaves_the_one_loop_to_the_supervised_half",
+    "run": "test_a_jump_across_three_boundaries_accrues_three_separate_payments",
     "stop": "test_the_paper_venue_releases_without_a_start_and_keeps_its_book",
     "place": "test_market_order_fills_at_the_latest_tick_price",
     "cancel": "test_cancel_removes_a_resting_order_and_reports_cancelled",

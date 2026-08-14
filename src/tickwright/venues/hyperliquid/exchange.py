@@ -130,6 +130,16 @@ class HyperliquidExchange:
             timeout_seconds=self._startup_timeout_seconds,
         )
 
+    async def run(self) -> None:
+        """Returns at once: this adapter runs no loop of its own.
+
+        The venue pushes funding at its own boundaries and this adapter ingests
+        it, so there is nothing here to generate and nothing to supervise — the
+        exact half of ADR-0037 paper has to run for itself. The supervised task
+        the runner creates for this simply completes, which the seam names as a
+        legitimate implementation rather than an omission."""
+        return None
+
     async def stop(self) -> None:
         """Nothing to release: this adapter runs no loop of its own — every
         request it makes is scoped to the call that made it."""

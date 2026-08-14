@@ -13,12 +13,13 @@ the opposite: **additive**. Every boundary is a distinct real payment, so a
 virtual-time jump across N of them must settle N, and collapsing would silently
 under-charge. This is the one cadence in the engine that must catch up.
 
-It lives in its own module rather than on ``PaperExchange`` so that a running
-task and its cancellation stay out of a class whose other 200 lines are a
-synchronous matching book.
+It lives in its own module rather than on ``PaperExchange`` so that a
+non-terminating loop stays out of a class whose other 200 lines are a
+synchronous matching book. Its life and its cancellation are the runner's:
+``PaperExchange.run()`` awaits this, the runner supervises *that* in its
+``TaskGroup``, and nothing here owns a task or knows how one ends.
 """
 
-import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
@@ -171,37 +172,3 @@ async def _settle(
                 amount=amount,
             )
         )
-
-
-async def cancel(task: asyncio.Task[None] | None) -> None:
-    """Cancel a generator task and wait it out — safe on ``None`` and on a task
-    already done, but **not** silent about one that died of its own accord.
-
-    The two safe cases are the ``Exchange.stop()`` contract rather than
-    defensiveness: the runner's faulted teardown re-walks the whole membership
-    from the top, so this may be driven twice in one shutdown, and it is driven
-    at all even when ``start()`` refused or never ran.
-
-    A cancellation is the expected outcome and stays invisible. **Anything else
-    is re-raised**, and the distinction is the whole of what this function
-    decides. The loop can die on its own — ``InMemoryBus.publish`` re-raises a
-    handler's refusal into its caller, and on this path the caller is the
-    generator — and this venue runs no other task that would notice. Retrieving
-    that exception and discarding it would leave a run that accrued nothing
-    looking exactly like one that had nothing to accrue, which is the money line
-    failing quietly. Raising out of ``stop()`` instead reaches the runner's
-    teardown, which faults the run and records the hook by name (ADR-0020).
-
-    This is deliberately *not* the containment a raw saga handler has — the
-    refusal is reported at shutdown rather than the moment it happens, and the
-    engine goes on accruing nothing until then. Closing that needs a supervised
-    long-lived half on the ``Exchange`` seam, which changes the Protocol and is
-    [#226](https://github.com/MarcosACH/tickwright/issues/226)'s. What is
-    separable, and taken here, is making the failure loud.
-    """
-    if task is None:
-        return
-    task.cancel()
-    (outcome,) = await asyncio.gather(task, return_exceptions=True)
-    if isinstance(outcome, BaseException) and not isinstance(outcome, asyncio.CancelledError):
-        raise outcome

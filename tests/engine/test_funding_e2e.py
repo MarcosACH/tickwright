@@ -14,6 +14,7 @@ without waiting would mean the injection had bought nothing.
 
 import asyncio
 import json
+from collections.abc import Callable, Sequence
 from decimal import Decimal
 from pathlib import Path
 from typing import NamedTuple
@@ -26,13 +27,18 @@ from tickwright.adapters.feed import ReplayFeed
 from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
+    Account,
     ComponentState,
     FundingAccrual,
     InstrumentSpec,
+    InvariantViolation,
+    Order,
     OrderEvent,
     OrderFilled,
     Portfolio,
+    Position,
     Side,
+    Store,
     account_net_size,
 )
 from tickwright.engine.runner import Engine
@@ -97,17 +103,48 @@ def _write_ticks(path: Path) -> Path:
     return _write_rows(path, _ROWS)
 
 
+class _FundingRefusingStore(SQLiteStore):
+    """The real store, refusing exactly the ledger write that carries a mark.
+
+    Narrowed to the funding write so the opening fill still lands: what is under
+    test is a refusal of *this* write, against a ledger that was healthy up to
+    it, rather than a store that was never usable. Same narrowing, and the same
+    reason, as the ``Checkpointer``'s own unit case
+    (``tests/engine/test_checkpoint.py``); what this suite adds is the *whole
+    pipeline's* answer to that refusal rather than the verb's.
+    """
+
+    def checkpoint_ledger(
+        self,
+        *,
+        account: Account,
+        positions: Sequence[Position] = (),
+        order: Order | None = None,
+        funding_mark: tuple[str, int] | None = None,
+        ts_ns: int,
+    ) -> None:
+        if funding_mark is not None:
+            raise InvariantViolation("disk is full")
+        super().checkpoint_ledger(account=account, positions=positions, order=order, ts_ns=ts_ns)
+
+
 class Run(NamedTuple):
-    """One finished life, and the two ways its cases read it back.
+    """One finished life, and the three ways its cases read it back.
 
     ``portfolio`` is the scoped facade the engine lent the strategy — the seam
     the whole surface exists to serve, and still readable after the store closes.
     ``accruals`` is every accrual the bus carried, which is how a case asks
     whether the generator was still alive. The durable half is read separately,
     by reopening the file.
+
+    ``exit_code`` is ``None`` when the life was **still running** as the driver
+    ran out of slots — reachable only under ``ask_to_stop=False``, where the
+    question is precisely whether anything inside the engine ended it. A driver
+    that awaited the run instead would hang there forever rather than fail.
     """
 
-    exit_code: int
+    exit_code: int | None
+    state: ComponentState
     portfolio: Portfolio
     accruals: list[FundingAccrual]
 
@@ -119,6 +156,8 @@ async def _run(
     advance_after_stop: int | None = None,
     trade: bool = True,
     start_ns: int = 0,
+    store_factory: Callable[[Path], Store] = SQLiteStore,
+    ask_to_stop: bool = True,
 ) -> Run:
     """One supervised life: buy on the first tick, jump the boundaries, stop.
 
@@ -134,10 +173,16 @@ async def _run(
     nothing to wait for but the clock. ``start_ns`` opens that life's clock
     where the previous one stopped, since the generator resumes from the startup
     instant and never from the watermark (ADR-0043 §5.1).
+
+    ``ask_to_stop=False`` withholds the stop request, which is the only way to
+    ask whether the engine ended the life **itself**. Every other case here asks
+    for the stop, so a fault they observed would be one the ask produced; this
+    one observes a run that had nobody to ask it. ``store_factory`` is what gives
+    it something to fault *on*.
     """
     bus = InMemoryBus()
     clock = ManualClock(start_ns=start_ns)
-    store = SQLiteStore(db)
+    store = store_factory(db)
     exchange = PaperExchange(
         bus=bus,
         clock=clock,
@@ -187,14 +232,28 @@ async def _run(
     # Replay runs to end-of-file, which is what carries virtual time across the
     # boundaries; the engine keeps running after it, so the stop is ours to ask.
     await asyncio.sleep(0)
-    await engine.stop()
-    exit_code = await run
-    assert engine.state is ComponentState.STOPPED
+    exit_code: int | None
+    if ask_to_stop:
+        await engine.stop()
+        exit_code = await run
+    else:
+        # Nobody is going to end this life, so the only thing to wait on is the
+        # engine ending it. Slots rather than a timeout, for the reason the whole
+        # suite has: a wall-clock wait here would be a wait for nothing on the
+        # path where the engine never faults, and every case must stay fast.
+        for _ in range(_SLOTS):
+            if run.done():
+                break
+            await asyncio.sleep(0)
+        exit_code = await run if run.done() else None
+        if exit_code is None:
+            run.cancel()
+            await asyncio.gather(run, return_exceptions=True)
     if advance_after_stop is not None:
         clock.advance_to(advance_after_stop)
         for _ in range(5):  # every slot a surviving generator would need
             await asyncio.sleep(0)
-    return Run(exit_code, engine.portfolio_for("trivial"), accruals)
+    return Run(exit_code, engine.state, engine.portfolio_for("trivial"), accruals)
 
 
 def test_a_replayed_time_jump_accrues_every_boundary_onto_the_strategys_own_line(
@@ -250,6 +309,47 @@ def test_the_generator_is_dead_once_the_engine_has_stopped(tmp_path: Path) -> No
     # Only the three the run itself crossed; the four after the stop settled none.
     assert [accrual.boundary_ts_ns for accrual in finished.accruals] == [1_000, 2_000, 3_000]
     assert finished.exit_code == 0
+    assert finished.state is ComponentState.STOPPED
+
+
+def test_a_refused_funding_write_faults_the_engine_at_the_refusal(tmp_path: Path) -> None:
+    """The containment ADR-0024 gives every engine-internal handler, at this one.
+
+    Funding reaches the ledger through the bus rather than on a fill, so its
+    publisher is the paper venue's boundary generator. That generator is a
+    **supervised** task — ``Exchange.run()``, task-created in the runner's
+    ``TaskGroup`` beside the feed — which is the whole of what makes this
+    refusal behave like the fill path's: ``InMemoryBus.publish`` re-raises the
+    handler's ``InvariantViolation`` into the generator, the ``TaskGroup``
+    cancels its siblings, and the engine is ``FAULTED`` with a non-zero exit for
+    the supervisor to restart on (ADR-0043 §4: the store is the sole authority
+    on the paper path, so a write it refuses is not survivable).
+
+    **Nobody asks this life to stop**, and that is the assertion rather than an
+    incidental detail. A generator spawned outside the group dies alone: the
+    engine stays ``RUNNING``, accrues nothing for the rest of the process, and
+    the refusal surfaces only once a teardown someone else asked for reaches
+    ``exchange.stop`` — loud, but arbitrarily late, and never at all in a run
+    that is left alone. Asking for the stop would produce the non-zero exit
+    either way and prove nothing about *when*.
+
+    The one accrual on the bus is the boundary whose write was refused: the
+    collector is subscribed ahead of the engine's own handler, so it sees the
+    event that then fails. 2 000 and 3 000 never happen — which is the money
+    line the fault exists to stop the process over.
+    """
+    finished = asyncio.run(
+        _run(
+            _write_ticks(tmp_path / "ticks.jsonl"),
+            tmp_path / "saga.db",
+            store_factory=_FundingRefusingStore,
+            ask_to_stop=False,
+        )
+    )
+
+    assert finished.exit_code == 1
+    assert finished.state is ComponentState.FAULTED
+    assert [accrual.boundary_ts_ns for accrual in finished.accruals] == [1_000]
 
 
 def test_a_position_recovered_from_the_ledger_keeps_accruing(tmp_path: Path) -> None:

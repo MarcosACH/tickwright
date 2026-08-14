@@ -377,8 +377,9 @@ class Exchange(Protocol):
     returning them, so the ``ExecutionManager`` drives the FSM off venue facts.
 
     Lifecycle rides the seam because the runner drives it in its ordered
-    sequence (ADR-0024): ``start`` at step 4, ``stop`` behind the feed and the
-    reconcile cadences. The two are declared as a pair and read as one.
+    sequence (ADR-0024): ``start`` at step 4, ``run`` supervised for the life of
+    the ``TaskGroup``, ``stop`` behind the feed and the reconcile cadences. The
+    three are declared together and read as one.
     """
 
     async def start(self) -> None:
@@ -422,6 +423,42 @@ class Exchange(Protocol):
         about the configured number, not about how long a boot may take. One
         shared deadline would have to be passed *into* this call, which is a
         change to this signature and nothing an adapter can arrange for itself.
+        """
+        ...
+
+    async def run(self) -> None:
+        """The adapter's supervised long-lived half — the peer of
+        ``MarketFeed.start()``, one seam over (ADR-0024).
+
+        ``start()`` cannot be this. The runner awaits it inline at step 4 and it
+        must **return** so the barrier can run at step 5, so a loop that lived
+        there would either block the boot or be spawned into a task the runner
+        does not supervise. This is that task, created inside the runner's
+        ``TaskGroup`` beside the feed: an exception raised here cancels the
+        group's siblings and faults the engine non-zero, exactly as one raised
+        in a raw saga handler does. An adapter whose loop is spawned any other
+        way has **no fault channel at all** — it dies alone while the engine runs
+        on, which is the containment hole this member closes ([#226]).
+
+        **Returning immediately is a legitimate implementation**, and the common
+        one: an adapter that runs no loop of its own has nothing to supervise,
+        and its task simply completes. ``HyperliquidExchange`` is that case —
+        every request it makes is scoped to the call that made it — while
+        ``PaperExchange`` runs ADR-0037's funding boundary generator here,
+        because a venue that has nobody to ask for funding must settle it itself.
+
+        **Started behind the barrier, not at step 4.** The ``TaskGroup`` opens
+        once the start sequence has returned, so anything this produces is
+        produced after reconciliation cleared — which is the same guarantee the
+        feed has, and for the same reason: nothing this engine does may act on a
+        venue it has not finished aligning. Under a virtual clock the instant is
+        unobservable; under a live one, boundaries that elapse *during* the
+        barrier are skipped rather than settled on a book still being proved.
+
+        Cancelled by the runner as part of ``stop``'s slot in the reverse
+        shutdown, ahead of the bus drain — so nothing this publishes can keep
+        raising the drain's high-water mark. Cancellation is the ordinary end of
+        this call and must not be caught.
         """
         ...
 
