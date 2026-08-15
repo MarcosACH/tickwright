@@ -98,9 +98,9 @@ auth, quirk translation — and importing no other adapter. It provides both a `
 - [ ] Create `src/tickwright/venues/<venue>/` with a `MarketFeed` adapter (`start`/`stop`, publishes
   `MarketTick`s **and `MarkTick`s** — the mark is market data and enters here, never off a reconcile
   pull, so a feed that omits it leaves every Tier-2 valuation reading `None`, ADR-0039), an
-  `Exchange` adapter
-  (`start`/`stop`/`place`/`cancel`/`fetch_order`/`account_spec`/`instrument_specs`), spec sourcing,
-  and a `<Venue>Config`.
+  `Exchange` adapter (`start`/`run`/`stop` plus
+  `place`/`cancel`/`fetch_order`/`fetch_account_state`/`account_spec`/`instrument_specs`), spec
+  sourcing, and a `<Venue>Config`.
 - [ ] Honor the `Exchange` contracts: a failed read is **never venue truth** (never `[]`, never a
   view — an outage must not look like "no orders", ADR-0011 inv 1), and the two read grains say so
   differently. `fetch_order` returns a **`VenueReadFailure`**, whose member says *which way* it
@@ -111,7 +111,8 @@ auth, quirk translation — and importing no other adapter. It provides both a `
   `fetch_account_state` reads one grain with no worklist behind it, so it collapses both and
   returns **`None`**. `place`/`cancel` emit raw `ExecutionReport`s on the bus rather than
   returning them; a cancel of an unknown order is a benign no-op.
-- [ ] Put venue alignment in `start()` and release in `stop()`, never in `__init__` or a placement.
+- [ ] Put venue alignment in `start()`, a loop of your own in `run()`, and release in `stop()` —
+  never in `__init__` or a placement.
   The runner drives `start()` at ADR-0024 step 4 — after the bus, **before** the startup barrier — so
   a refusal there (an `InvariantViolation`) faults the process before any order can go out, and the
   barrier reads an already-aligned venue. Retry a transient venue blip inside the
@@ -120,10 +121,23 @@ auth, quirk translation — and importing no other adapter. It provides both a `
   `start()`, so it **must not hang**: a wedged boot has no bound and no operator escape (the task
   that watches SIGINT is not created until the start sequence returns, so SIGKILL is the only way
   out). Put a timeout on any blocking venue call you make here.
+  `run()` is the **supervised long-lived half** — the peer of `MarketFeed.start()`, one seam over.
+  Anything of yours that loops for the life of the run goes here and nowhere else: the runner
+  task-creates it inside its `TaskGroup`, so a failure in it aborts the group and faults the engine
+  **at the moment it happens**. A loop you spawn for yourself in `start()` has no fault channel at
+  all — it dies alone while the engine runs on, accruing nothing, and exits 0
+  ([#226](https://github.com/MarcosACH/tickwright/issues/226)). `start()` cannot be that loop: the
+  runner awaits it inline and it must return for the barrier to run. Returning at once is the
+  common case and a legitimate implementation rather than an omission — an adapter that only
+  answers requests has nothing to supervise, which is `HyperliquidExchange`; `PaperExchange`
+  settles ADR-0037's funding boundaries there, because a venue with nobody to ask for funding has
+  to generate it. Note the instant: the `TaskGroup` opens *behind* the barrier, so anything `run()`
+  publishes is produced after reconciliation cleared.
   `stop()` is driven once the feed is cut **and** the reconcile cadences are
   cancelled — nothing is left to call `fetch_order` on you — and still ahead of the bus drain,
-  because a loop of your own that outlived the call would publish into that drain and keep raising
-  its high-water mark, so it would never quiesce.
+  because your `run()` loop — which the runner cancels in this same slot, not you — would otherwise
+  publish into that drain and keep raising its high-water mark, so it would never quiesce. Let that
+  cancellation through: `CancelledError` is the ordinary end of `run()` and must not be caught.
 - [ ] Write `stop()` to tolerate all three edges the runner's teardown creates. A `start()` that
   never ran or refused (the fault path releases either way). A **second** call — one membership is
   walked twice, the faulted pass restarting at the top, so a graceful step that raises behind you
