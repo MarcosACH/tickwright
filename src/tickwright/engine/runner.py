@@ -448,12 +448,12 @@ class Engine:
         owes the bus drain below it: anything still publishing keeps raising the
         drain's high-water mark, so cancelling without waiting would leave the
         guarantee to whichever turn the loop happened to be on. Exceptions are
-        absorbed here rather than
-        raised: a task that died of its own accord already reached the
-        ``TaskGroup``, which is what faulted the run and is where that failure
-        belongs — reporting it a second time out of the teardown would name a
-        hook for a refusal that happened long before it. On the fault path the
-        group already cancelled it, and cancelling a done task is a no-op.
+        absorbed here rather than raised: a task that died of its own accord
+        already reached the ``TaskGroup``, which is what faulted the run and is
+        where that failure belongs — reporting it a second time out of the
+        teardown would name a hook for a refusal that happened long before it.
+        On the fault path the group already cancelled it, and cancelling a done
+        task is a no-op.
         """
         await self._exchange.stop()
         if self._exchange_task is not None:
