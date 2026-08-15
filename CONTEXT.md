@@ -391,7 +391,12 @@ _Avoid_: throttling, sampling, debounce (conflation is last-value-wins, not rate
 **Component lifecycle**:
 The shared contract of every long-lived component (`MarketFeed`, `Strategy`, `Exchange`,
 `Engine`): `async start()`/`stop()`, a `state` of `READY → RUNNING → STOPPED` plus `FAULTED`,
-and `on_start`/`on_stop` hooks. `DEGRADED` is deferred. See ADR-0014.
+and `on_start`/`on_stop` hooks. `DEGRADED` is deferred. That pair is the shared *minimum*, not
+the whole of any one lifecycle: a component running a loop of its own also has a **supervised
+long-lived half** the engine's `TaskGroup` holds, so a failure in it faults the run instead of
+killing a task nobody watches. `MarketFeed`'s is `start()` itself, which the runner never awaits
+inline; `Exchange` declares a third verb, `run()`, because ADR-0024 step 4 *does* await
+`Exchange.start()` inline and it must return for the barrier to run. See ADR-0014, ADR-0024.
 _Avoid_: service lifecycle, daemon (those imply separate processes — see [[Engine]]).
 
 **Invariant violation** vs **handler error**:
