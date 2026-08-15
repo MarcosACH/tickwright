@@ -88,6 +88,12 @@ class VenueDouble:
     async def start(self) -> None:
         return None
 
+    async def run(self) -> None:
+        # No loop to supervise: a double models a venue's *answers*, and the one
+        # adapter with a long-lived half of its own is the real paper venue's
+        # funding generator. The runner still task-creates this; it completes.
+        return None
+
     async def stop(self) -> None:
         return None
 
@@ -162,6 +168,9 @@ class VenueLink:
 
     async def start(self) -> None:
         await self._venue.start()
+
+    async def run(self) -> None:
+        await self._venue.run()
 
     async def stop(self) -> None:
         await self._venue.stop()

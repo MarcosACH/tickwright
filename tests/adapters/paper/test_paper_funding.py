@@ -7,12 +7,15 @@ because reconciling is convergent, while funding is **additive** and a jump
 across N boundaries is N distinct payments.
 
 The seam is the ``Exchange``: a real ``PaperExchange`` over a real ``InMemoryBus``
-and a ``ManualClock``, driven by the venue's own verbs. Nothing here sleeps —
-virtual time is advanced by hand, which is the whole point of the primitive.
+and a ``ManualClock``, driven by the venue's own verbs — ``run()`` supervised as
+a task, exactly as the runner supervises it in its ``TaskGroup``. Nothing here
+sleeps: virtual time is advanced by hand, which is the whole point of the
+primitive.
 """
 
 import asyncio
-from collections.abc import Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
+from contextlib import asynccontextmanager
 from decimal import Decimal
 
 import pytest
@@ -89,6 +92,27 @@ async def _quiesce(times: int = 5) -> None:
         await asyncio.sleep(0)
 
 
+@asynccontextmanager
+async def _supervising(venue: PaperExchange) -> AsyncIterator[asyncio.Task[None]]:
+    """Drive the venue's lifecycle the way the runner does (ADR-0024).
+
+    ``start()`` connects nothing on this venue; the boundary loop is ``run()``,
+    the seam's supervised long-lived half, so a case can only observe it by
+    holding the task the way the runner's ``TaskGroup`` holds it — which is also
+    the only way the loop's *failure* is reachable at all. The task is yielded
+    for exactly that: a case about a refused write awaits it, and every other
+    case ignores it and takes the runner's own cancel-and-wait on the way out.
+    """
+    await venue.start()
+    task = asyncio.create_task(venue.run())
+    try:
+        yield task
+    finally:
+        await venue.stop()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
 async def _drive(
     *,
     held: Mapping[str, Decimal] | None = None,
@@ -130,11 +154,10 @@ async def _drive(
     if priced:
         await bus.publish(_tick("50000", ts=_at(start)))
 
-    await venue.start()
-    await _quiesce()
-    clock.advance_to(_at(through))
-    await _quiesce()
-    await venue.stop()
+    async with _supervising(venue):
+        await _quiesce()
+        clock.advance_to(_at(through))
+        await _quiesce()
     return accruals
 
 
@@ -197,15 +220,13 @@ def test_the_held_size_is_re_read_every_span_rather_than_captured_at_start() -> 
         net = {"BTC": Decimal("2")}
         venue = _venue(bus, clock, account_net=lambda: net)
         await bus.publish(_tick("50000", ts=_at(0.5)))
-        await venue.start()
-        await _quiesce()
-
-        clock.advance_to(_at(1.25))  # crosses 01:00 holding 2
-        await _quiesce()
-        net["BTC"] = Decimal("1")
-        clock.advance_to(_at(2.25))  # crosses 02:00 holding 1
-        await _quiesce()
-        await venue.stop()
+        async with _supervising(venue):
+            await _quiesce()
+            clock.advance_to(_at(1.25))  # crosses 01:00 holding 2
+            await _quiesce()
+            net["BTC"] = Decimal("1")
+            clock.advance_to(_at(2.25))  # crosses 02:00 holding 1
+            await _quiesce()
 
     asyncio.run(scenario())
 
@@ -259,24 +280,27 @@ def test_a_position_the_venue_cannot_price_settles_nothing_however_far_time_move
     assert accruals == []
 
 
-def test_a_generator_killed_by_a_refused_write_surfaces_the_refusal_at_stop() -> None:
-    """A dead generator is *reported* by ``stop()``, never quietly reaped.
+def test_a_refused_ledger_write_raises_out_of_run_rather_than_dying_alone() -> None:
+    """``run()``'s failure reaches whoever supervises it — the seam's whole point.
 
     The refusal reaches the loop because ``InMemoryBus.publish`` re-raises a
     handler's exception into its caller, and on this path the caller is the
     generator: a ledger write the store refuses therefore kills it, and this
-    venue runs no other task that would notice.
+    venue runs nothing else that would notice. What decides whether that matters
+    is *who holds the task*. Held by the adapter, nobody is awaiting it and the
+    engine runs on accruing nothing; held by the runner's ``TaskGroup`` — which
+    is what awaiting ``run()`` here stands in for — the same exception aborts the
+    group and faults the run at the refusal (ADR-0024, ADR-0043 §4).
 
-    **Containing** that refusal — faulting the engine the way a raw saga
-    handler's does — needs a supervised long-lived half on the ``Exchange`` seam
-    and is #226's. What ``stop()`` owes in the meantime is narrower and separable:
-    that the failure not be *silent*. An exception retrieved from the task and
-    discarded leaves a run that accrued nothing indistinguishable from one that
-    had nothing to accrue, which is the worst of the two available outcomes.
+    Asserted at the *moment* it happens rather than at a later teardown: the task
+    is already done when the boundary's turn is over, so nothing had to be asked
+    to stop for the failure to surface. The engine-level half — non-zero exit,
+    ``FAULTED``, later boundaries never settled — is
+    ``tests/engine/test_funding_e2e.py``'s.
 
-    A cancellation is not a failure and stays invisible — every other case here
-    stops cleanly, which is what pins this to a real exception rather than to the
-    teardown itself.
+    A cancellation is not a failure and stays invisible: every other case here
+    ends the same loop by cancelling it and sees nothing, which is what pins this
+    to a real exception rather than to the ending itself.
     """
     bus = InMemoryBus()
     clock = ManualClock(start_ns=_at(0.5))
@@ -288,45 +312,14 @@ def test_a_generator_killed_by_a_refused_write_surfaces_the_refusal_at_stop() ->
         bus.subscribe(FundingAccrual, refuse)
         venue = _venue(bus, clock, account_net=lambda: dict(_LONG))
         await bus.publish(_tick("50000", ts=_at(0.5)))
-        await venue.start()
-        await _quiesce()
-        clock.advance_to(_at(1.25))
-        await _quiesce()
+        async with _supervising(venue) as running:
+            await _quiesce()
+            clock.advance_to(_at(1.25))
+            await _quiesce()
 
-        with pytest.raises(InvariantViolation, match="ledger write refused"):
-            await venue.stop()
-
-    asyncio.run(scenario())
-
-
-def test_a_second_stop_after_a_surfaced_failure_is_a_clean_no_op() -> None:
-    """The faulted teardown re-walks the whole membership, so ``stop()`` is
-    driven again behind the raise above — and must not raise a second time.
-
-    "No entry may treat a second call as an error" is the reverse shutdown's
-    standing rule (ADR-0024), and surfacing a failure is exactly where it would
-    be easiest to break: a venue that kept the dead task around to re-report
-    would turn one refusal into a fault recorded twice, the second naming a
-    teardown that had already happened.
-    """
-    bus = InMemoryBus()
-    clock = ManualClock(start_ns=_at(0.5))
-
-    async def refuse(event: Event) -> None:
-        raise InvariantViolation("ledger write refused")
-
-    async def scenario() -> None:
-        bus.subscribe(FundingAccrual, refuse)
-        venue = _venue(bus, clock, account_net=lambda: dict(_LONG))
-        await bus.publish(_tick("50000", ts=_at(0.5)))
-        await venue.start()
-        await _quiesce()
-        clock.advance_to(_at(1.25))
-        await _quiesce()
-        with pytest.raises(InvariantViolation):
-            await venue.stop()
-
-        await venue.stop()  # the re-walk: nothing left to cancel, nothing to report
+            assert running.done()  # at the refusal, with nobody asked to stop
+            with pytest.raises(InvariantViolation, match="ledger write refused"):
+                await running
 
     asyncio.run(scenario())
 

@@ -118,6 +118,7 @@ class Engine:
         self._stop_requested = asyncio.Event()
         self._stopped = asyncio.Event()
         self._feed_task: asyncio.Task[None] | None = None
+        self._exchange_task: asyncio.Task[None] | None = None
         self._cadence_tasks: list[asyncio.Task[None]] = []
 
     @property
@@ -169,6 +170,17 @@ class Engine:
                         )
                     ),
                 ]
+                # The venue's own long-lived half (ADR-0037's paper funding
+                # generator, today), supervised beside the cadences rather than
+                # spawned by the adapter: an exception raised in it aborts this
+                # group and faults the run at the refusal, which is the whole
+                # of why the seam declares ``run`` separately from ``start``.
+                # Awaiting it at step 4 instead is not available — that step
+                # must return so the barrier can run — and a task the adapter
+                # created for itself would have no fault channel at all.
+                # An adapter with no loop returns here immediately and its task
+                # simply completes; nothing downstream distinguishes the two.
+                self._exchange_task = tg.create_task(self._exchange.run())
                 # The feed starts last (ADR-0024 step 7): the first tick is only
                 # possible after the barrier cleared, so nothing places before
                 # reconciliation completes. Replay end-of-file ends the task but
@@ -246,27 +258,18 @@ class Engine:
         self._bus.subscribe(ExecutionReport, self._execution.on_execution_report)
         # Funding is the one accounting input that arrives on the bus rather
         # than on the fill-apply path, because it has no carrier fill (ADR-0037)
-        # — so it is subscribed here, beside the saga's own raw handlers.
+        # — so it is subscribed here, beside the saga's own raw handlers, and it
+        # inherits their containment in full. That containment is not a property
+        # of subscribing raw: it holds only because the *publisher* is a
+        # supervised task, which for this event is ``Exchange.run()``, created
+        # in the TaskGroup below. A refused ledger write therefore faults the
+        # engine at the refusal and exits non-zero, rather than killing a
+        # generator the adapter had spawned for itself and leaving the run
+        # accruing nothing behind a still-``RUNNING`` state (#226).
         #
-        # It does **not** yet inherit their containment, and the difference is
-        # worth stating rather than assuming. A raw handler's refusal reaches
-        # the TaskGroup because the publisher is a supervised task; this one's
-        # publisher is the paper venue's generator, which ``exchange.start()``
-        # spawns with a bare ``create_task``. A refused ledger write therefore
-        # kills that generator and nothing else: the engine runs on, accruing
-        # nothing, until the teardown reaches ``exchange.stop()`` — which
-        # re-raises rather than reaping it, so the run faults and the hook is
-        # recorded by name instead of exiting 0 on a silently empty funding
-        # line. Loud, then, but late: the containment that would fault it *at*
-        # the refusal needs the seam to have a supervised long-lived half, the
-        # way ``MarketFeed.start()`` already does — its own slice (#226), since
-        # it changes the ``Exchange`` Protocol.
-        #
-        # Subscribed **before** the exchange can produce one. The generator is
-        # spawned by ``exchange.start()`` one step above, but it is parked on a
-        # boundary the clock has not reached and the feed does not start until
-        # step 7 — so the first accrual is only possible once virtual time
-        # moves, which is behind this line and behind the barrier.
+        # Subscribed **before** the exchange can produce one, and now trivially
+        # so: the generator does not exist until the TaskGroup opens, which is
+        # behind this line and behind the barrier.
         self._bus.subscribe(FundingAccrual, self._on_funding_accrual)
         # The mark is the *other* input the ledger subscribes to, and it is the
         # gentler of the two: it moves no money and reaches no store, so unlike
@@ -389,9 +392,12 @@ class Engine:
         The venue is released *behind* the cadences deliberately: they read it
         (``fetch_order``), so releasing it first would leave a live cycle
         querying an adapter this very sequence had just torn down. It stays
-        ahead of the drain, because a loop the adapter owns would otherwise
-        publish into that drain and keep raising its high-water mark, so the
-        cascade never quiesces — both ends of the slot are load-bearing. The
+        ahead of the drain, because the venue's supervised long-lived half would
+        otherwise publish into that drain and keep raising its high-water mark,
+        so the cascade never quiesces — both ends of the slot are load-bearing.
+        That half is the runner's to end rather than the adapter's, so the entry
+        is ``_stop_exchange``: the seam's ``stop`` plus the cancellation, exactly
+        as ``feed.stop`` is one entry over two things. The
         drain still dispatches behind the release, and ``host.stop`` only
         snapshots, so a late ``Signal`` can still reach the venue: the seam
         answers for that (``Exchange.stop``), not the order.
@@ -405,12 +411,14 @@ class Engine:
         ``Store.close``; the other two are the engine's own and answer for it
         here (``_stop_cadences`` re-cancels tasks already done, a no-op, and
         ``StrategyHost.stop`` retakes the final snapshots into the same
-        latest-wins row per strategy — a rewrite, not a second effect).
+        latest-wins row per strategy — a rewrite, not a second effect). The two
+        entries that are both — ``feed.stop`` and ``exchange.stop`` wrap a seam
+        call *and* a task cancellation — inherit the property from each half.
         """
         return (
             ("feed.stop", self._stop_feed),
             ("reconcile.stop", self._stop_cadences),
-            ("exchange.stop", self._exchange.stop),
+            ("exchange.stop", self._stop_exchange),
             ("bus.drain", self._bus.drain),
             ("host.stop", self._host.stop),
             ("bus.close", self._bus.close),
@@ -425,6 +433,32 @@ class Engine:
         for task in self._cadence_tasks:
             task.cancel()
         await asyncio.gather(*self._cadence_tasks, return_exceptions=True)
+
+    async def _stop_exchange(self) -> None:
+        """Release the venue, then end the long-lived half this runner supervises
+        — the ``_stop_feed`` shape one seam over, and one membership entry for
+        the same reason: a seam whose loop the runner owns is still *one* seam.
+
+        Cancelled and **waited out**, which the feed's task is not — and the
+        difference is *how each loop ends*, not what it publishes (both do).
+        ``MarketFeed.stop`` is a cooperative signal a live feed's loop reads and
+        returns on, so the cancel behind it is belt-and-braces; the generator has
+        no such signal, so cancellation is the only thing that ends it and the
+        wait is the only thing that proves it did. That proof is what this slot
+        owes the bus drain below it: anything still publishing keeps raising the
+        drain's high-water mark, so cancelling without waiting would leave the
+        guarantee to whichever turn the loop happened to be on. Exceptions are
+        absorbed here rather than raised: a task that died of its own accord
+        already reached the ``TaskGroup``, which is what faulted the run and is
+        where that failure belongs — reporting it a second time out of the
+        teardown would name a hook for a refusal that happened long before it.
+        On the fault path the group already cancelled it, and cancelling a done
+        task is a no-op.
+        """
+        await self._exchange.stop()
+        if self._exchange_task is not None:
+            self._exchange_task.cancel()
+            await asyncio.gather(self._exchange_task, return_exceptions=True)
 
     async def _stop_feed(self) -> None:
         """Ask the feed to stop, then cancel a read loop that outlives the ask

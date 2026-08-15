@@ -25,7 +25,10 @@ those components.
 4. Connect the `Exchange` + `ExecutionManager` (WS/HTTP; subscribe to `Signal`/`ExecutionReport`).
    **(Extended by ADR-0044 §7:** the *connect* half this step has always named now exists —
    `Exchange.start()`, declared on the Protocol (the `start()` ADR-0014 already assigns the
-   component). On **paper** it validates the configured leverage against `InstrumentSpec.max_leverage`
+   component). It is the connect half **only**: this step awaits it inline and it must return so the
+   barrier can run at step 5, so an adapter's long-lived loop belongs to `Exchange.run()`, which the
+   TaskGroup below supervises ([#226](https://github.com/MarcosACH/tickwright/issues/226)).
+   On **paper** it validates the configured leverage against `InstrumentSpec.max_leverage`
    and writes nothing; on **live** it validates, reads `clearinghouseState` once, and pushes the
    per-symbol leverage map to the venue via `updateLeverage` — the complete map the composition
    root resolved from the sparse `AppConfig.leverage` and the strategy-declared symbols
@@ -125,9 +128,11 @@ store → exit **0**.
 **(Extended by [#186](https://github.com/MarcosACH/tickwright/issues/186):** the `Exchange` stop is
 **not** where the sentence above puts it. `exchange.stop` sits in `_teardown_steps` behind
 `feed.stop` (ADR-0044 §7) and behind `reconcile.stop`, ahead of the drain — not after the strategies
-stop. Both ends of that slot are load-bearing, and they pull in opposite directions. What an adapter
-owns at teardown is a loop of its own — ADR-0037's paper funding generator — so the release must
-precede the **drain**: a loop still alive during the drain keeps publishing into it and keeps raising
+stop. Both ends of that slot are load-bearing, and they pull in opposite directions. What the slot
+ends is a loop the venue runs — ADR-0037's paper funding generator, since
+[#226](https://github.com/MarcosACH/tickwright/issues/226) supervised as `Exchange.run()` and so
+cancelled by the runner rather than owned by the adapter — and it must precede the **drain**: a loop
+still alive during the drain keeps publishing into it and keeps raising
 its high-water mark, so the cascade the drain is waiting on never quiesces and the bound is spent on
 a shutdown that is generating its own work. But the reconcile cadences **read** the adapter
 (`fetch_order`), and they run until `reconcile.stop` cancels them, so releasing the venue ahead of
@@ -154,7 +159,11 @@ graceful step that raises drives every step ahead of the break a second time. No
 second call as an error. The five that cross a seam are each specified idempotent there —
 `MarketFeed.stop()`, `Exchange.stop()`, `EventBus.drain()`, `EventBus.close()` and `Store.close()`;
 the remaining two are the engine's own (`_stop_cadences`, `StrategyHost.stop`) and answer for it at
-the membership.**)**
+the membership. **Two entries are both**: `feed.stop` and — since
+[#226](https://github.com/MarcosACH/tickwright/issues/226) — `exchange.stop` each wrap a seam call
+*and* the cancellation of a task this runner supervises, so each inherits the property from both
+halves, and neither costs the membership an entry. An adapter's supervised half is not a separate
+teardown seam; it is the same seam's other end.**)**
 
 - `SUBMITTED` orders in flight on the wire are **not** awaited — they stay `SUBMITTED`,
   checkpointed; restart reconciliation heals them (ADR-0008 residual risk).
@@ -184,6 +193,24 @@ room for a missed-propagation bug.
 > off `Clock.sleep_until` — the virtual-time waiter that keeps replay deterministic (ADR-0033).
 > The reverse shutdown cancels them right after the feed stops, before the bus drains. Kafka
 > drains land with the Kafka bus (#20).
+>
+> **Extended by [#226](https://github.com/MarcosACH/tickwright/issues/226): the venue's own
+> long-lived half joins them, as `Exchange.run()`.** The containment rule below is stated in terms
+> of *handler origin*, and that is only half of what decides it: a raw handler's exception reaches
+> this TaskGroup because the **publisher** is a supervised task. ADR-0037's paper funding generator
+> was the one publisher that was not — `PaperExchange.start()` spawned it with a bare `create_task`
+> — so a ledger write the store refused killed it alone, leaving the engine `RUNNING`, accruing
+> nothing for the life of the process, and exiting on whatever the operator eventually asked for.
+> Enrolling it needed a seam member, because step 4's `Exchange.start()` is awaited inline and must
+> return so the barrier can run at step 5; `run()` is that member, task-created here beside the feed
+> (ADR-0044 §7). An adapter with no loop — `HyperliquidExchange` — returns immediately and its task
+> completes, which nothing downstream distinguishes from a loop that is merely idle.
+>
+> **One consequence, accepted:** the generator's resume instant moves from step 4 to TaskGroup-open,
+> i.e. **behind the barrier**. Under a virtual clock this is unobservable. Under a live one,
+> boundaries that elapse *during* the barrier are skipped rather than settled — the same guarantee
+> the feed has, and arguably the more correct reading, since nothing may act on a venue this engine
+> has not finished aligning.
 
 - **OS signals.** `SIGINT`/`SIGTERM` (via `loop.add_signal_handler`) set a stop event → the graceful
   shutdown above → exit **0**. `SIGKILL` is uncatchable → crash-only recovery on next boot,

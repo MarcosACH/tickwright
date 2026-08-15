@@ -17,8 +17,10 @@ provided liquidity, so the maker/taker bit is read off them and never configured
 (ADR-0036). Margin and PnL remain deferred (ADR-0013).
 
 **Funding** is the second thing it produces rather than observes, and the first
-that arrives on no carrier: ``start()`` spawns the boundary generator and
-``stop()`` cancels it (ADR-0037, ADR-0044 §7). The loop lives in ``funding.py``;
+that arrives on no carrier: ``run()`` — the seam's supervised long-lived half —
+*is* the boundary generator, so its life is the engine's ``TaskGroup`` and a
+refused ledger write faults the run rather than killing a task nobody watches
+(ADR-0037, ADR-0044 §7, ADR-0024). The loop lives in ``funding.py``;
 what stays here is the pricing — the last tick and the instrument's rate — while
 the *size* each accrual is computed from is read from the ledger through the
 injected ``account_net``. So this venue **holds no position state at all**,
@@ -27,7 +29,6 @@ nothing, the ``Store`` remains the sole authority for the paper ledger, and
 ``fetch_account_state`` still has no account truth to answer with.
 """
 
-import asyncio
 from collections.abc import Callable, Mapping
 from decimal import Decimal
 
@@ -55,7 +56,7 @@ from tickwright.domain import (
 from .book import RestingBook
 from .config import DEFAULT_ACCOUNT_LABEL
 from .fill_model import Fill, FillModel
-from .funding import HOUR_NS, FundingBasis, cancel, run_funding
+from .funding import HOUR_NS, FundingBasis, run_funding
 
 
 class PaperExchange:
@@ -85,7 +86,6 @@ class PaperExchange:
         # up until it isn't.
         self._account_net = account_net
         self._funding_interval_ns = funding_interval_ns
-        self._funding_task: asyncio.Task[None] | None = None
         # The account's opening cash is the operator's declaration, never the
         # venue's: the paper exchange has nobody to ask, and the engine supplies
         # no collateral of its own (ADR-0042 §1). Required rather than defaulted
@@ -120,46 +120,53 @@ class PaperExchange:
         bus.subscribe(MarketTick, self.on_tick)
 
     async def start(self) -> None:
-        """Nothing to connect — the venue is in-process and its one link, the
-        tick subscription, is wired at construction — but one loop to spawn.
+        """Nothing to connect: the venue is in-process and its one link, the
+        tick subscription, is wired at construction."""
+        return None
+
+    async def run(self) -> None:
+        """Settle funding boundaries for as long as the engine supervises this.
 
         The funding generator is what this venue *runs* rather than what it is
         connected to (ADR-0037): a real venue pushes funding at its own
         boundaries, and paper has nobody to ask, so it settles them itself off
-        the injected clock. Spawned here rather than at construction so that a
-        venue built but never started publishes nothing, and so the loop's life
-        is exactly the seam's declared ``start``/``stop`` pair.
+        the injected clock.
+
+        Awaited **inline** rather than spawned, which is the whole of what this
+        member buys. The loop's one failure mode is a ledger write the store
+        refuses — ``InMemoryBus.publish`` re-raises the handler's
+        ``InvariantViolation`` into its caller, and on this path the caller is
+        this loop — and this venue runs nothing else that would notice. A task
+        this adapter owned could therefore die alone, leaving an engine that
+        ran on accruing nothing; awaited here, the refusal reaches the runner's
+        ``TaskGroup`` and faults the run at the moment it happens, exactly as
+        the fill path's does (ADR-0024 containment, ADR-0043 §4).
+
+        So the loop's life is the runner's supervision rather than this class's
+        bookkeeping, and the cancellation that ends it is the runner's too — the
+        reference that used to live here, and the cancel-and-wait helper behind
+        it, are both gone rather than merely unused.
         """
-        self._funding_task = asyncio.create_task(
-            run_funding(
-                bus=self._bus,
-                clock=self._clock,
-                account_id=self._account_spec.account_id,
-                basis=self._funding_basis,
-                interval_ns=self._funding_interval_ns,
-            )
+        await run_funding(
+            bus=self._bus,
+            clock=self._clock,
+            account_id=self._account_spec.account_id,
+            basis=self._funding_basis,
+            interval_ns=self._funding_interval_ns,
         )
 
     async def stop(self) -> None:
-        """Cancel the funding generator — the one thing this venue holds open.
+        """Nothing to release: this venue is in-process, and the one loop it runs
+        is the engine's to cancel (``run`` above), not this call's.
 
-        This is the teardown ADR-0044 §7 left undeclared "until there is
-        teardown to do". Driven ahead of the bus drain deliberately: a generator
-        that outlived this call would keep publishing into that drain and keep
-        raising its high-water mark, so the cascade would never reach quiescence
-        and a graceful stop would never finish.
-
-        Safe on a venue that never started and safe on a second call, both
-        because the runner's faulted teardown re-walks its whole membership from
-        the top (ADR-0024). A generator that died of a refused ledger write is
-        reported here rather than reaped quietly, so that re-walk is exactly
-        where the reference has to be released **before** the wait rather than
-        after it: kept until ``cancel`` returned, a surfaced failure would leave
-        the dead task in place for the second pass to report all over again,
-        turning one refusal into a fault recorded twice.
+        Empty again, which is what ADR-0044 §7 originally said of it and stopped
+        saying when the generator arrived owning a task. The teardown that
+        section wanted still exists — it is simply the runner's cancellation of
+        the supervised half, in this step's slot, ahead of the bus drain — and a
+        release verb with nothing to release is the honest shape for an adapter
+        that holds no connection.
         """
-        task, self._funding_task = self._funding_task, None
-        await cancel(task)
+        return None
 
     def _funding_basis(self) -> tuple[FundingBasis, ...]:
         """What each held symbol's accrual is computed from, as of now.
