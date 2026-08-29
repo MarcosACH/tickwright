@@ -37,18 +37,24 @@ too: its unit tests run against an in-process fake broker
 ([`tests/_support/kafka_fakes.py`](tests/_support/kafka_fakes.py)), not a real cluster.
 
 Two markers reach for real infrastructure and **auto-skip** when it isn't configured, so the default
-run stays green without them:
+run stays green without them. They differ in CI: `postgres` is hermetic (a pinned container, offline,
+deterministic) and **is** in the gate; `live` reaches a real venue and never can be.
 
 - **`postgres`** — the `PostgresStore` contract
   ([ADR-0019](docs/adr/0019-durable-store-sqlite-default-postgres-second.md)). Auto-skips unless
   `STORE_POSTGRES_DSN` points at a reachable server. Bring one up with `docker compose up -d postgres`,
   then run `STORE_POSTGRES_DSN=postgresql://tickwright:tickwright@localhost:5432/tickwright uv run
-  pytest -m postgres`. `-m "not postgres"` deselects them.
+  pytest -m postgres`. `-m "not postgres"` deselects them. CI runs this tier against a `postgres:17`
+  service on the `ci` job (issue #253) — locally it stays opt-in, so `uv sync && uv run pytest` needs
+  no Docker.
 - **`live`** — places **real orders on Hyperliquid testnet**
   ([ADR-0022](docs/adr/0022-testing-strategy.md)). Auto-skips unless you opt in with
   `TICKWRIGHT_LIVE_TESTNET=1` **and** `TICKWRIGHT_HYPERLIQUID__SIGNING_KEY` holds a funded testnet key
   — the key alone never enrolls the suite, so CI can run everything under a hostile config. Run it
-  manually/nightly with `TICKWRIGHT_LIVE_TESTNET=1 uv run pytest -m live`; **never** part of the CI gate.
+  locally with `TICKWRIGHT_LIVE_TESTNET=1 uv run pytest -m live`. In CI it runs from
+  [`ci-live.yml`](.github/workflows/ci-live.yml) — weekly plus `workflow_dispatch` — and is **never**
+  part of the merge gate: it reaches a system we do not control, and on a public repo its secrets are
+  unavailable to fork PRs, so as a gate it would silently degrade for contributors.
 
 To exercise the real `KafkaBus` end-to-end (rather than its fake-broker unit tests), run the *app* on
 Kafka, not the suite: `docker compose up -d kafka`, then `TICKWRIGHT_BUS=kafka uv run tickwright`.

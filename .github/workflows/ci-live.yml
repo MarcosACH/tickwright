@@ -1,0 +1,105 @@
+# The non-hermetic tier: one real round trip against Hyperliquid **testnet**
+# (ADR-0022, issue #255). Deliberately NOT part of the merge gate.
+#
+# What this covers that `ci` cannot: the PR gate tests our code against a faked
+# Hyperliquid boundary (ADR-0022 confines mocking to that one process edge), so
+# nothing in it can notice the fake drifting from the venue. A schema change, a
+# changed endpoint behavior, a new required field — those are calendar-time
+# risks, invisible to hermetic tests, and this is the only job that sees them.
+#
+# Why it is not a required check, and never should be:
+#   - It reaches a system we do not control, so a red here can mean "testnet is
+#     down" as easily as "you broke something". A gate that cries wolf stops
+#     being read, and an ignored check is worse than no check.
+#   - On a public repo, secrets are not passed to workflows triggered from a
+#     forked PR, so as a gate it would silently degrade for every contributor.
+#
+# Why weekly rather than nightly: venue APIs do not drift daily, and while the
+# project is pre-1.0 and trading no real money a 7-day detection window costs
+# nothing. The scarce resource is attention, not minutes (public repo, free
+# runners) — a 3am red on a week with no commits trains its only reader to
+# ignore it. **Revisit when real money is in play**; that is the trigger to
+# escalate to nightly, not a commit-rate change.
+#
+# Note for quiet periods: GitHub disables scheduled workflows in a public
+# repository after 60 days with no repository activity. That is a feature here,
+# not a hazard — go quiet and the venue run stops on its own.
+#
+# Actions are pinned by commit SHA (supply-chain hardening); the trailing
+# comment records the human-readable version. Bump both together, in step with
+# ci.yml, which pins the same three.
+name: ci-live
+
+on:
+  # Mondays 10:17 UTC = 07:17 in America/Argentina/Buenos_Aires, which holds no
+  # DST, so this lands at the same local time all year. A red greets the start
+  # of a working week rather than rotting over a weekend. The offset minute is
+  # deliberate: scheduled jobs queue worst on the hour.
+  schedule:
+    - cron: "17 10 * * 1"
+  workflow_dispatch:
+
+# Real orders against one real account: never let two runs interleave, and let a
+# run in flight finish rather than cancelling it mid-round-trip with a resting
+# order still on the book.
+concurrency:
+  group: ci-live
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    # The suite takes ~5s. This bounds a venue call that hangs instead of
+    # failing, so a wedged run cannot sit in the queue holding the concurrency
+    # group against next week's.
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install dependencies from lockfile
+        run: uv sync --frozen --dev
+
+      - name: Signing key is present
+        # Turns the one plausible misconfiguration — an unset or cleared secret
+        # — into a legible message instead of a KeyError traceback out of the
+        # test body. Tests emptiness only; the value is never echoed, and GitHub
+        # masks it in logs regardless.
+        env:
+          SIGNING_KEY: ${{ secrets.TICKWRIGHT_HYPERLIQUID__SIGNING_KEY }}
+        run: |
+          if [ -z "$SIGNING_KEY" ]; then
+            echo "::error::Repository secret TICKWRIGHT_HYPERLIQUID__SIGNING_KEY is unset or empty." \
+                 "The live suite needs a funded Hyperliquid *testnet* agent-wallet key (ADR-0022)."
+            exit 1
+          fi
+
+      - name: Live testnet round trip
+        # TICKWRIGHT_LIVE_TESTNET is set literally here, so ADR-0022's run-gate
+        # (tests/_support/live_gate.py) always enrols the suite and this step
+        # cannot pass by silently skipping — the failure mode where a green
+        # check reports on tests that never ran. With the gate open, a missing
+        # key raises rather than skips, and an empty collection is pytest's
+        # exit code 5. Green here means the round trip really happened.
+        #
+        # The key is the agent (API) wallet: trade-only, cannot withdraw,
+        # revocable from the testnet app. The account address is a public master
+        # address, so it is a variable rather than a secret. The suite hardcodes
+        # testnet=True in HyperliquidConfig and cannot reach mainnet.
+        env:
+          TICKWRIGHT_LIVE_TESTNET: "1"
+          TICKWRIGHT_HYPERLIQUID__SIGNING_KEY: ${{ secrets.TICKWRIGHT_HYPERLIQUID__SIGNING_KEY }}
+          TICKWRIGHT_HYPERLIQUID__ACCOUNT_ADDRESS: ${{ vars.TICKWRIGHT_HYPERLIQUID__ACCOUNT_ADDRESS }}
+        run: uv run pytest -m live -v
