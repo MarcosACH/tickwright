@@ -48,7 +48,10 @@ run stays green without them:
   ([ADR-0022](docs/adr/0022-testing-strategy.md)). Auto-skips unless you opt in with
   `TICKWRIGHT_LIVE_TESTNET=1` **and** `TICKWRIGHT_HYPERLIQUID__SIGNING_KEY` holds a funded testnet key
   — the key alone never enrolls the suite, so CI can run everything under a hostile config. Run it
-  manually/nightly with `TICKWRIGHT_LIVE_TESTNET=1 uv run pytest -m live`; **never** part of the CI gate.
+  locally with `TICKWRIGHT_LIVE_TESTNET=1 uv run pytest -m live`. In CI it runs from
+  [`ci-live.yml`](.github/workflows/ci-live.yml) — weekly plus `workflow_dispatch` — and is **never**
+  part of the merge gate: it reaches a system we do not control, and on a public repo its secrets are
+  unavailable to fork PRs, so as a gate it would silently degrade for contributors.
 
 To exercise the real `KafkaBus` end-to-end (rather than its fake-broker unit tests), run the *app* on
 Kafka, not the suite: `docker compose up -d kafka`, then `TICKWRIGHT_BUS=kafka uv run tickwright`.

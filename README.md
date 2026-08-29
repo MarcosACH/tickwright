@@ -177,6 +177,8 @@ The non-default backends are opt-in and need infrastructure: `docker compose up 
 Hyperliquid **testnet** key) isn't configured, so a bare `uv run pytest` stays green; the `KafkaBus`
 adapter runs against an in-process fake broker and needs no infrastructure. See the test-tier
 breakdown in [`CONTRIBUTING.md`](CONTRIBUTING.md) and the variables in [`.env.example`](.env.example).
+The `live` tier is never in the merge gate; it runs on a weekly schedule of its own
+([`ci-live.yml`](.github/workflows/ci-live.yml)), which is what watches for venue drift.
 
 ## License
 
