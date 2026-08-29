@@ -178,6 +178,8 @@ Hyperliquid **testnet** key) isn't configured, so a bare `uv run pytest` stays g
 adapter runs against an in-process fake broker and needs no infrastructure. CI provides the Postgres
 service and runs that tier in the gate; the `live` tier is never part of it. See the test-tier
 breakdown in [`CONTRIBUTING.md`](CONTRIBUTING.md) and the variables in [`.env.example`](.env.example).
+The `live` tier is never in the merge gate; it runs on a weekly schedule of its own
+([`ci-live.yml`](.github/workflows/ci-live.yml)), which is what watches for venue drift.
 
 ## License
 
