@@ -1,0 +1,60 @@
+schema_version: "1.0"
+name: unslop-cuts-planted-tells
+description: >
+  A rewrite request strips the planted AI-vocabulary tells and keeps the two
+  facts the paragraph carries.
+tags: [unslop, skills]
+
+plugins:
+  - .claude/skills/unslop
+
+context:
+  add_dirs: []
+
+execution:
+  # The tells are planted verbatim from the skill's own list: "delve",
+  # "crucial", "testament", "vibrant", "leverage", "utilize", "In order to",
+  # "It is important to note". That is what makes the regex grader below free
+  # and stable rather than a guess about phrasing.
+  #
+  # The ask is deliberately bland ("tighten this up"), naming neither the skill
+  # nor any rule, so the with-arm has to earn its delta.
+  prompt: |
+    Tighten this up for the project README:
+
+    It is important to note that Tickwright's event-driven architecture serves
+    as a testament to modern engineering. In order to utilize the engine, users
+    leverage a vibrant ecosystem of adapters. Let us delve into the crucial
+    details: the engine replays a market feed at 10x speed and recovers from a
+    crash in under 200ms.
+  max_turns: 4
+  timeout_seconds: 300
+  allowed_tools: [Skill]
+
+runs: 3
+
+graders:
+  - name: unslop-skill-fired
+    type: tool_used
+    tool: Skill
+    input_match: unslop
+    arm: with-only
+
+  # Free and exact: every alternative is a word planted in the prompt above and
+  # listed in the skill. Word boundaries keep "delve" from matching inside a
+  # longer word and "utilize" from missing "utilizes".
+  - name: planted-tells-removed
+    type: regex
+    target: last_message
+    pattern: \b(delve|crucial|testament|vibrant|leverage|utiliz)
+    flags: i
+    match: not_contains
+
+  # A rewrite that drops the facts scores well on the regex and is still wrong.
+  - name: facts-survived
+    type: llm
+    criteria: >
+      The rewrite still states both numbers from the original: the 10x replay
+      speed and the sub-200ms crash recovery. It fails if either is dropped,
+      rounded, or turned into a vague claim about being fast.
+    focus: last_message
