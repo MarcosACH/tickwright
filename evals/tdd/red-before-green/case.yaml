@@ -1,0 +1,61 @@
+schema_version: "1.0"
+name: tdd-red-before-green
+description: >
+  A feature request comes back as one failing test at a confirmed seam, not as a
+  batch of tests and not as an implementation.
+tags: [tdd, skills]
+
+# Resolves the with-arm. The repo root carries no plugin manifest, so without
+# this the two ablation arms would run identically.
+plugins:
+  - .claude/skills/tdd
+
+context:
+  # Empty sandbox on purpose. This case grades the guidance the skill gives, not
+  # code it produced; see "What these cases cover" in ../../README.md.
+  add_dirs: []
+
+execution:
+  # Phrased the way a maintainer would actually type it: names a real seam from
+  # the repo's vocabulary, asks for the change, and does NOT say "TDD" or
+  # "test first". Naming the method would tell the model the answer and the
+  # without-arm would score alongside the with-arm, which is the failure mode
+  # this whole tier exists to detect.
+  prompt: |
+    I want the paper exchange to charge a maker rebate rather than a flat fee
+    when a resting order fills. Where do we start?
+  # A plan is a handful of turns. This bounds a run that wanders into the tree
+  # instead of answering.
+  max_turns: 6
+  timeout_seconds: 300
+  allowed_tools: [Skill, Read, Grep, Glob]
+
+runs: 3
+
+graders:
+  # with-only: the without-arm has no skill to fire, so scoring this would just
+  # subtract a constant from that arm. Reported as a plugin-fired indicator.
+  - name: tdd-skill-fired
+    type: tool_used
+    tool: Skill
+    input_match: tdd
+    arm: with-only
+
+  - name: exactly-one-failing-test-first
+    type: llm
+    criteria: >
+      The response proposes writing exactly ONE failing test as the first
+      concrete step, before any implementation. It fails if it proposes several
+      tests up front, if it writes or outlines the implementation first, or if
+      it describes red-green-refactor in the abstract without committing to a
+      single first test.
+    focus: last_message
+
+  - name: seams-confirmed-before-writing
+    type: llm
+    criteria: >
+      The response names the specific seam it would test at and asks the user to
+      confirm that seam before any test is written. Naming a seam without asking
+      does not pass; asking a generic "shall I proceed?" without naming a seam
+      does not pass.
+    focus: last_message

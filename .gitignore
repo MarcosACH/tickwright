@@ -25,6 +25,10 @@ logs/
 # Runtime artifacts (the SQLite saga store the quickstart writes)
 *.db
 
+# Skill-eval run output (scores, transcripts, HTML reports). The cases in
+# evals/**/case.yaml are committed; what a run produced is not.
+evals/results/
+
 # Private working notes — NEVER committed
 docs/private/
 *.private.md
