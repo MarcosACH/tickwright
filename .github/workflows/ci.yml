@@ -4,8 +4,20 @@
 # cannot skip it once "main" branch protection requires the `ci` check.
 #
 # The default paper-exchange + in-memory-bus path needs no external services and
-# no API keys, so this job starts none. (A Kafka-bus job can be added as a
-# separate matrix leg if/when those tests need a broker.)
+# no API keys. One service runs anyway: Postgres, because ADR-0019's parity
+# promise — swapping the store changes durability, never behavior — is asserted
+# by the store contract's `postgres` arm, and that arm auto-skips without a DSN.
+# On a runner it therefore never ran at all (28 tests, issue #253). It is cheap
+# (~1s) and hermetic, so it belongs in the gate. The Kafka path needs no broker:
+# ADR-0022 fakes that client at the process boundary.
+#
+# The non-hermetic `live` suite (ADR-0022) stays out — a real venue in the gate
+# would make red stop meaning "you broke something". It runs on a schedule.
+#
+# Anything added here stays inside the single `ci` job: the required status
+# check in ruleset `protect-main` is the literal context `ci`, and a matrix
+# would rename it (`ci (sqlite)`, `ci (postgres)`) so that context never
+# reports and every PR blocks forever.
 #
 # Actions are pinned by commit SHA (supply-chain hardening); the trailing
 # comment records the human-readable version. Bump both together.
@@ -27,6 +39,25 @@ permissions:
 jobs:
   ci:
     runs-on: ubuntu-latest
+
+    # Mirrors the `postgres` service in docker-compose.yml — same image tag and
+    # same credentials, so CI and local dev exercise one server, not two. The
+    # runner blocks on the health check before the first step runs.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: tickwright
+          POSTGRES_PASSWORD: tickwright
+          POSTGRES_DB: tickwright
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U tickwright -d tickwright"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 20
+
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -53,6 +84,15 @@ jobs:
       - name: Test
         # Coverage source is set in pyproject.toml ([tool.coverage.run] source);
         # the ≥90%-on-core gate lives here so a drop fails the build.
+        #
+        # STORE_POSTGRES_DSN addresses the service above, which enrols the store
+        # contract's `postgres` arm (ADR-0019). It is deliberately set on this
+        # step only, not on the hermeticity re-run below: that step exists to
+        # prove TICKWRIGHT_* precedence, and a second Postgres pass proves
+        # nothing it does not already. A bare `uv run pytest` with no DSN still
+        # auto-skips the arm, so the local zero-setup default is unchanged.
+        env:
+          STORE_POSTGRES_DSN: postgresql://tickwright:tickwright@localhost:5432/tickwright
         run: uv run pytest --cov --cov-report=term-missing --cov-fail-under=90
 
       - name: Suite is hermetic against ambient config
