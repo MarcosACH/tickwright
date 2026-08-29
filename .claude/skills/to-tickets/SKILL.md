@@ -54,13 +54,17 @@ Slices may be 'HITL' or 'AFK'. HITL slices require human interaction, such as an
 - Prefer many thin slices over few thick ones
 </vertical-slice-rules>
 
+**Every PRD ends with an `integrate-and-verify` slice.** The last child, blocked by all its siblings. Its acceptance criteria are the **cross-slice** scenarios no single slice could assert — the end-to-end path through the whole surface, restart recovery across it, and the same scenario driven through each supported backend. Do not restate a sibling's criteria: if one slice already asserts it, it does not belong here.
+
+This exists because slices merge to `main` one at a time and the PRD as a whole is only ever assembled there ([ADR-0050](../../../docs/adr/0050-trunk-based-delivery-and-prd-level-verification.md)). This slice is where the assembled whole gets asserted. It is an ordinary AFK slice on an ordinary branch — `Closes #<N>` and the board work as usual — and it is the reason a PRD needs no integration branch.
+
 **Wide refactors are the exception to vertical slicing.** A **wide refactor** is one mechanical change — rename a field on a shared struct, retype a symbol every layer imports — whose **blast radius** fans across the whole codebase, so a single edit breaks hundreds of call sites at once and no vertical slice can land green. Don't force it into a tracer bullet; sequence it as **expand–contract**:
 
 - **Expand** — add the new form beside the old so nothing breaks (one slice).
 - **Migrate** — move the call sites over in batches sized by blast radius (per package, per module directory), each batch its own slice blocked by the expand, keeping the suite green batch to batch because the old form still exists.
 - **Contract** — delete the old form once no caller remains (one slice, blocked by every migrate batch).
 
-When even a migrate batch can't stay green alone (an invariant spans the old and new forms mid-migration), keep the sequence but let the batches share an integration branch that all block a final integrate-and-verify slice — green is promised only there. This is the sanctioned way to break the vertical-slice policy; use it only when the blast radius genuinely forces it, and say so in the slice bodies.
+When even a migrate batch can't stay green alone (an invariant spans the old and new forms mid-migration), keep the sequence but let the batches share an integration branch that all block a final integrate-and-verify slice — green is promised only there. This is the sanctioned way to break the vertical-slice policy **and the only sanctioned integration branch** ([ADR-0050](../../../docs/adr/0050-trunk-based-delivery-and-prd-level-verification.md)); use it only when the blast radius genuinely forces it, and say so in the slice bodies. Note the cost it carries: GitHub interprets `Closes #<N>` only against the default branch, so those children's issues **must be closed by hand** — the one place the "never close manually" rule does not hold.
 
 ### 4. Quiz the user
 
