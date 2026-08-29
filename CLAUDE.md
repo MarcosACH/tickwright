@@ -51,6 +51,7 @@ See `docs/workflow/labels.md` for the label schema and `docs/agents/issue-tracke
 - Versioning, tags & releases: `docs/workflow/versioning.md`
 - Issue-tracker conventions: `docs/agents/issue-tracker.md`
 - Triage label roles: `docs/agents/triage-labels.md`
+- Skill evals (the tier that tests `.claude/skills/`, not the engine): `evals/README.md`
 
 ## Context Discipline
 
@@ -93,6 +94,10 @@ Run with the project venv via `uv run`:
 - The suite is **hermetic against ambient config**: an outcome must never depend on a developer `.env` or an exported `TICKWRIGHT_*` var. Build the pure `AppConfig`, never `AppSettings` (see *Environment Variables*), and hand any subprocess a `TICKWRIGHT_`-scrubbed environment. CI asserts this by running `tests/app` under a hostile live-venue env.
 - Tests marked `postgres` need a real Postgres (`PostgresStore` contract, ADR-0019); they auto-skip unless `STORE_POSTGRES_DSN` points at a reachable server. Bring one up with `docker compose up -d postgres`, then `STORE_POSTGRES_DSN=postgresql://tickwright:tickwright@localhost:5432/tickwright uv run pytest -m postgres`. `-m "not postgres"` deselects them. **CI runs this tier** — the `ci` job starts a `postgres:17` service and sets the DSN (issue #253), so the ADR-0019 parity promise is gated, not merely available; the local default still auto-skips. **The DSN must address a database dedicated to the suite** — the per-test reset truncates every table in the schema, reading the list from `pg_tables` rather than a transcribed one, so it owns whatever it finds there.
 - Tests marked `live` place real orders on Hyperliquid **testnet** (ADR-0022); they auto-skip unless you opt in with `TICKWRIGHT_LIVE_TESTNET=1` **and** `TICKWRIGHT_HYPERLIQUID__SIGNING_KEY` holds a funded testnet key. The opt-in flag is a dedicated run-gate mapping onto no config field (issue #73), so the key alone never enrols the suite and CI can run the whole thing under a hostile config. Run locally with `TICKWRIGHT_LIVE_TESTNET=1 uv run pytest -m live`; in CI it runs from `.github/workflows/ci-live.yml` — **weekly** (Mondays 10:17 UTC) plus `workflow_dispatch`, on the repo's `TICKWRIGHT_HYPERLIQUID__SIGNING_KEY` secret and `TICKWRIGHT_HYPERLIQUID__ACCOUNT_ADDRESS` variable (issue #255). Never part of the merge gate and never a required check. Weekly is the pre-1.0 setting — the tier catches venue drift, which accrues by calendar rather than by commit; escalate to nightly when real money is in play. Note it never calls `start()`, so ADR-0046's account-mode boot gate is not covered live.
+
+## Skill Evals
+
+A separate tier from `pytest`: it tests the skills in `.claude/skills/`, not the engine. Run with `claude plugin eval .` from the repo root; cases live in `evals/**/case.yaml`, one behavior each, and every case runs a with-skill and a without-skill arm so a case that scores the same in both is exposed as testing the base model rather than the skill. Never a merge gate — scores are noisy and the runner reaches the API. Run it when you edit a skill, and before a release. The runner is early access and not enabled here yet, so the committed cases have not been run. Full conventions, grader reference and cost discipline: `evals/README.md`.
 
 ## Linting & formatting
 

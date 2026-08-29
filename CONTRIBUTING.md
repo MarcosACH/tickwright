@@ -60,6 +60,16 @@ To exercise the real `KafkaBus` end-to-end (rather than its fake-broker unit tes
 Kafka, not the suite: `docker compose up -d kafka`, then `TICKWRIGHT_BUS=kafka uv run tickwright`.
 [`.env.example`](.env.example) is the canonical reference for every backend's variables.
 
+### Skill evals (agent tooling, not the engine)
+
+One more tier sits outside `pytest` entirely: [`evals/`](evals/README.md) tests the skills in
+`.claude/skills/` — that `/tdd` still enforces red-before-green, that `/unslop` still cuts the tells
+— because nothing in `pytest` reads them and a skill can stop working with no failing check.
+Cases run with `claude plugin eval .` from the repo root, each in a with-skill and a without-skill
+arm so the delta shows whether the skill is doing anything. It is **not** a merge gate: scores are
+noisy and the runner reaches the API. Run it when you edit a skill. You only need this if you are
+changing agent tooling; contributing engine code does not.
+
 ### Git hooks (local convenience, not the gate)
 
 With `core.hooksPath` enabled (see setup):
