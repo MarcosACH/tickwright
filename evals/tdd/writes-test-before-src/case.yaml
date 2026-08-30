@@ -1,0 +1,89 @@
+schema_version: "1.0"
+name: tdd-writes-test-before-src
+description: >
+  Given a real fixture tree and write tools, a fee-model change lands as a
+  test write followed by a source edit, not the other way round.
+tags: [tdd, skills]
+
+# This is the "expensive half" flagged in ../../README.md ("What these cases
+# cover, and what they do not"): the first tdd case grades the *plan* in an
+# empty sandbox; this one grades the *edits* against a real tree.
+
+plugins:
+  - .claude/skills/tdd
+
+context:
+  # Mounted at the sandbox root, so paths inside are src/... and tests/...
+  # rather than fixture/src/.... Unverified — these cases have never been
+  # run, and the runner's exact add_dirs mount semantics aren't documented.
+  # If it mounts nested under the directory name instead, the input_match
+  # paths below need a fixture/ prefix.
+  add_dirs: [fixture]
+
+execution:
+  # States the seam, the interface, and the behavior up front — same reason
+  # case ../red-before-green/case.yaml gives for not saying "TDD" or "test
+  # first": naming the *process* would hand the without-arm the ordering for
+  # free and collapse the delta this case exists to measure. What's
+  # pre-answered here is only what the skill's own workflow asks the user to
+  # confirm before writing anything (interface, seam, behavior) — not how to
+  # sequence the edit.
+  prompt: |
+    On the fixture at src/exchange/paper.py, FeeModel.fee_for_fill currently
+    charges a flat fee on every fill. We want a resting order's fill
+    (is_maker=True) to get a 20 bps rebate off the notional instead: return
+    -0.0020 * notional for a maker fill, keep the existing flat fee for a
+    taker fill. The seam is FeeModel.fee_for_fill, tested from
+    tests/test_fee_model.py the same way the existing test does. Implement
+    it.
+  max_turns: 15
+  timeout_seconds: 600
+  allowed_tools: [Skill, Read, Grep, Glob, Write, Edit, Bash]
+
+# Real edits and a real test run cost more per run than the plan-only case;
+# 2 keeps the ablation (4 agent runs total) without dropping it to 1, which
+# would leave no room to notice a run that failed for an unrelated reason.
+runs: 2
+
+graders:
+  - name: tdd-skill-fired
+    type: tool_used
+    tool: Skill
+    input_match: tdd
+    arm: with-only
+
+  # Mechanical, free: does the agent touch the test file before it touches
+  # the source file. Both already exist in the fixture, so a compliant edit
+  # to either is Edit, not Write — this harness's own tool contract refuses
+  # a Write over an unread existing file, so Edit is what a compliant agent
+  # produces on both sides of this ordering, not just the source side.
+  - name: test-written-before-src-edit
+    type: tool_order
+    before:
+      tool: Edit
+      input_match: tests/test_fee_model.py
+    after:
+      tool: Edit
+      input_match: src/exchange/paper.py
+
+  # Weighted down: a signal that the agent actually ran the suite (rather
+  # than just writing files in the right order), not the case's core claim.
+  - name: test-suite-run
+    type: tool_used
+    tool: Bash
+    input_match: pytest
+    min: 1
+    weight: 0.5
+
+  - name: rebate-logic-correct
+    type: llm
+    criteria: >
+      A maker fill (is_maker=True) returns a rebate: a fee strictly less
+      than zero, computed as -0.0020 times the notional. A taker fill
+      (is_maker=False) still returns the pre-existing flat fee unchanged.
+      The new or updated test in tests/test_fee_model.py asserts the maker
+      case through the public fee_for_fill interface, with a literal
+      expected value rather than the same formula the implementation uses.
+      It fails if the maker fee is zero, positive, or computed differently
+      from the stated formula, or if the taker behavior regressed.
+    focus: files

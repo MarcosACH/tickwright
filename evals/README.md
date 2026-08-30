@@ -43,6 +43,7 @@ claude plugin eval .                       # every case, both arms
 claude plugin eval . --case 'tdd-*'        # one case by name glob
 claude plugin eval . --tag tdd             # by tag
 claude plugin eval . --runs 1              # cheap smoke pass
+claude plugin eval . --model <model>       # override the agent under test
 ```
 
 Run it from the repo root. Results land in `evals/results/<timestamp>/` with a self-contained HTML
@@ -57,7 +58,8 @@ as a bug in the case.
 
 Agent runs and LLM graders both cost money, and `runs` defaults to 3 across 2 arms, so one case is
 6 agent runs. Keep `max_turns` low, prefer free graders (`regex`, `tool_used`, `file_exists`) over
-`llm`, and bound a batch with `--max-cost-usd`. The judge model defaults to haiku.
+`llm`, and bound a batch with `--max-cost-usd`. The judge model defaults to haiku, overridable with
+`--judge-model`.
 
 This tier is **not** a merge gate and should not become one. Scores are noisy across runs, the
 runner reaches the API, and a check that goes red for reasons unrelated to the diff trains its
