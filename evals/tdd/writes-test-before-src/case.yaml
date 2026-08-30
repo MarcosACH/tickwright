@@ -32,7 +32,7 @@ execution:
     On the fixture at src/exchange/paper.py, FeeModel.fee_for_fill currently
     charges a flat fee on every fill. We want a resting order's fill
     (is_maker=True) to get a 20 bps rebate off the notional instead: return
-    -0.0002 * notional for a maker fill, keep the existing flat fee for a
+    -0.0020 * notional for a maker fill, keep the existing flat fee for a
     taker fill. The seam is FeeModel.fee_for_fill, tested from
     tests/test_fee_model.py the same way the existing test does. Implement
     it.
@@ -52,15 +52,15 @@ graders:
     input_match: tdd
     arm: with-only
 
-  # Mechanical, free: does the agent create the test before it touches the
-  # source file. The source file already exists, so a compliant edit is
-  # Edit, not Write — an agent that overwrites the whole file with Write
-  # instead would false-negative here; retune after the first real run, per
-  # ../../README.md's "Availability" note on calibration.
+  # Mechanical, free: does the agent touch the test file before it touches
+  # the source file. Both already exist in the fixture, so a compliant edit
+  # to either is Edit, not Write — this harness's own tool contract refuses
+  # a Write over an unread existing file, so Edit is what a compliant agent
+  # produces on both sides of this ordering, not just the source side.
   - name: test-written-before-src-edit
     type: tool_order
     before:
-      tool: Write
+      tool: Edit
       input_match: tests/test_fee_model.py
     after:
       tool: Edit
@@ -79,7 +79,7 @@ graders:
     type: llm
     criteria: >
       A maker fill (is_maker=True) returns a rebate: a fee strictly less
-      than zero, computed as -0.0002 times the notional. A taker fill
+      than zero, computed as -0.0020 times the notional. A taker fill
       (is_maker=False) still returns the pre-existing flat fee unchanged.
       The new or updated test in tests/test_fee_model.py asserts the maker
       case through the public fee_for_fill interface, with a literal
