@@ -36,6 +36,7 @@ from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     Account,
+    AccountSpec,
     ComponentState,
     Exchange,
     FillReport,
@@ -1425,6 +1426,104 @@ def test_the_reverse_shutdown_releases_the_exchange_once_the_cadences_are_cancel
     assert not venue.cadences_still_running, (
         "the venue must not be released while a reconcile cycle can still read it"
     )
+
+
+class _LiveVenueWatchingTheCadences(_LifecycleRecordingVenue):
+    """The lifecycle recorder in the **live** shape, so the account cadence is
+    among the tasks a teardown case watches.
+
+    Paper schedules no account cycle, so the assertions below would hold
+    vacuously against the paper declaration ``VenueDouble`` carries: two
+    order-grain tasks cancelled proves nothing about the third."""
+
+    def __init__(self, timeline: list[str]) -> None:
+        super().__init__(timeline)
+        self.account_reads = 0
+
+    def account_spec(self) -> AccountSpec:
+        return AccountSpec(account_id=LIVE_ACCOUNT_ID, genesis_collateral=None)
+
+    async def fetch_account_state(self) -> VenueAccountState | None:
+        self.account_reads += 1
+        return DERIVED_STATE
+
+
+class _BusWatchingTheCadences(InMemoryBus):
+    """The real bus, recording at the drain which reconcile cadences had already
+    finished. The drain is the observation point ``reconcile.stop``'s position in
+    the teardown is a claim *about*: a cadence still alive here would publish
+    heals into a cascade the runner is trying to quiesce."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.engine: Engine | None = None
+        self.cadences_at_drain: tuple[bool, ...] = ()
+
+    async def drain(self) -> None:
+        assert self.engine is not None, "the test must hand the bus its engine"
+        self.cadences_at_drain = tuple(task.done() for task in self.engine._cadence_tasks)
+        await super().drain()
+
+
+def test_a_graceful_stop_cancels_the_account_cadence_before_the_bus_drains(
+    tmp_path: Path,
+) -> None:
+    """The account cycle is torn down by membership, not by a second sequence
+    (ADR-0024): it went into the one ``_cadence_tasks`` list, so ``reconcile.stop``
+    cancels it with the order-grain two and every one of them is done before the
+    drain begins. All three, because the run is live-shaped — a tuple of three
+    ``True`` is also the assertion that the cadence was scheduled at all."""
+    timeline: list[str] = []
+    venue = _LiveVenueWatchingTheCadences(timeline)
+    bus = _BusWatchingTheCadences()
+
+    async def main() -> int:
+        feed = _TimelineFeed(timeline)
+        engine = Engine(
+            bus=bus,
+            clock=ManualClock(),
+            store=_TimelineStore(tmp_path / "saga.db", timeline),
+            exchange=venue,
+            feed=feed,
+        )
+        bus.engine = engine
+        run = asyncio.create_task(engine.run())
+        await asyncio.wait_for(feed.started.wait(), timeout=5)
+        await asyncio.wait_for(engine.stop(), timeout=5)
+        return await asyncio.wait_for(run, timeout=5)
+
+    assert asyncio.run(main()) == 0
+
+    assert bus.cadences_at_drain == (True, True, True)
+    assert venue.account_reads == 1, "only the barrier's read: no cycle ran during teardown"
+
+
+def test_the_fault_path_cancels_the_account_cadence_before_the_bus_drains(
+    tmp_path: Path,
+) -> None:
+    """The faulted teardown walks the same membership (ADR-0024), so the account
+    cadence is cancelled there too — by the ``TaskGroup``'s own abort, and then
+    re-cancelled harmlessly by ``reconcile.stop``. A cycle surviving *this* path
+    is the one that matters most: the process is already exiting non-zero, and a
+    heal published into a bus nobody will read again is a write with no reader."""
+    timeline: list[str] = []
+    venue = _LiveVenueWatchingTheCadences(timeline)
+    bus = _BusWatchingTheCadences()
+
+    async def faulted_life() -> int:
+        engine = Engine(
+            bus=bus,
+            clock=ManualClock(),
+            store=_TimelineStore(tmp_path / "saga.db", timeline),
+            exchange=venue,
+            feed=_FaultingFeed(timeline),
+        )
+        bus.engine = engine
+        return await engine.run()
+
+    assert asyncio.run(faulted_life()) != 0
+
+    assert bus.cadences_at_drain == (True, True, True)
 
 
 def test_the_fault_path_stops_the_exchange_in_the_same_position_as_a_graceful_stop(
