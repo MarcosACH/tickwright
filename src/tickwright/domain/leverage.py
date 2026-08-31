@@ -56,7 +56,7 @@ the two cannot drift apart by being two literals in two modules.
 """
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class LeverageBook:
     """The **resolved** map: one ``LeverageSpec`` per strategy-traded symbol.
 
@@ -103,7 +103,7 @@ class LeverageBook:
         ``configured`` entry outside ``traded`` is silently dropped here, which
         is unreachable from the composition root.
         """
-        return cls({symbol: configured.get(symbol, DEFAULT_LEVERAGE) for symbol in traded})
+        return cls(entries={symbol: configured.get(symbol, DEFAULT_LEVERAGE) for symbol in traded})
 
     def for_symbol(self, symbol: str) -> LeverageSpec:
         """The margin mode and leverage this run computes ``symbol`` against.

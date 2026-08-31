@@ -1013,7 +1013,7 @@ def test_a_leverage_above_the_instruments_cap_refuses_to_start_on_paper() -> Non
             "ETH": replace(_BTC_SPEC, symbol="ETH", max_leverage=25),
         },
         leverage=LeverageBook(
-            {
+            entries={
                 "BTC": LeverageSpec(mode="cross", leverage=50),
                 "ETH": LeverageSpec(leverage=25),
             }
