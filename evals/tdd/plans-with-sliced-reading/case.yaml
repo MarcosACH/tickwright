@@ -11,10 +11,12 @@ plugins:
   - .claude/skills/tdd
 
 context:
-  # A scaled-down stand-in for a real tree: a module map big enough that
-  # reading it whole is visibly the wrong move, a copy of the repo's real
-  # `doc-slice`, and two source modules — one the first behavior needs and one
-  # only a late behavior does. Mounted at the sandbox root, so paths inside are
+  # A scaled-down stand-in for a real tree: a module map long enough that a
+  # whole read costs most of a cheap-planning budget while the sections a slice
+  # needs cost a quarter of it (the figures are in the map's own header), a copy
+  # of the repo's real `doc-slice`, and two source modules — one the first
+  # behavior needs and one only a late behavior does. Mounted at the sandbox
+  # root, so paths inside are
   # docs/... and src/... (same unverified mount semantics flagged in
   # ../writes-test-before-src/case.yaml).
   add_dirs: [fixture]
@@ -47,16 +49,26 @@ graders:
     input_match: tdd
     arm: with-only
 
-  # The map is read by section, never whole. Free and mechanical: a `Read` of
-  # the map file is exactly the 21.6k-shaped mistake the rule names.
+  # The map is read by section, never whole. Two graders per file, because a
+  # `max: 0` keyed on `Read` alone is evadable: `cat` loads exactly the same
+  # thing through Bash and scores 0 on a Read-keyed grader. That is not a
+  # hypothetical evasion here — the bypass-permissions guidance the skill's
+  # sibling rule overrides is what pushes an agent toward `cat` in the first
+  # place, and reads (unlike writes) are where it is otherwise right to.
   - name: module-map-not-read-whole
     type: tool_used
     tool: Read
     input_match: docs/module-maps/leverage-surface.md
     max: 0
 
+  - name: module-map-not-cated
+    type: tool_used
+    tool: Bash
+    input_match: cat docs/module-maps
+    max: 0
+
   # The positive half: the agent reached for the section tool rather than
-  # skipping the map altogether, which would also score 0 on the grader above.
+  # skipping the map altogether, which would also score 0 on the graders above.
   - name: module-map-sliced
     type: tool_used
     tool: Bash
@@ -68,11 +80,18 @@ graders:
   # up-front load the rule forbids, not early work on a later cycle. Asserted
   # as "not read" rather than as a `tool_order`, because the compliant run may
   # never touch the file at all and a `tool_order` whose `after` never fires
-  # has no defined verdict. Weighted down: the reading rules above are the
-  # case's core claim.
+  # has no defined verdict. Paired against `cat` for the reason above, and the
+  # pair splits one weight: the map rules are the case's core claim.
   - name: venue-source-not-read-up-front
     type: tool_used
     tool: Read
     input_match: src/venues/hyperliquid/universe.py
     max: 0
-    weight: 0.5
+    weight: 0.25
+
+  - name: venue-source-not-cated-up-front
+    type: tool_used
+    tool: Bash
+    input_match: cat src/venues/hyperliquid/universe.py
+    max: 0
+    weight: 0.25

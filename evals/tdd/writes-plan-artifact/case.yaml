@@ -49,7 +49,7 @@ graders:
 
   # Cheap check that the file carries what a resumed session needs rather than
   # being an empty stub: the confirmed seams, and a checklist row per behavior.
-  - name: plan-records-seams-and-behaviors
+  - name: plan-records-seams
     type: regex
     target:
       source: file

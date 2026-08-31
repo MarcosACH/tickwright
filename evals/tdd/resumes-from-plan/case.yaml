@@ -17,6 +17,22 @@ context:
   # why this fixture copy is committed.
   add_dirs: [fixture]
 
+  # `git log` is the plan's reconciliation guard, and it needs a repository the
+  # fixture cannot carry (a nested `.git` is not committable). This gives the
+  # sandbox one commit whose subject matches the plan's ticked behavior, so
+  # reconciliation has something real to check against. The plan's recorded sha
+  # stays synthetic — a content-derived sha cannot be written into a fixture
+  # ahead of the commit — so a reconciling agent finds a subject that matches
+  # and a sha that does not. That is the right shape for "confirm, don't
+  # trust": the discrepancy is what it should surface. It runs only under
+  # `--scaffold`; see the grader note below for what the case degrades to
+  # without it.
+  scaffold_script: |
+    git init -q -b main .
+    git add -A
+    git -c user.email=evals@example.invalid -c user.name=evals commit -q \
+      -m "test(domain): refuse a leverage below 1"
+
 execution:
   # No mention of a plan file: finding it is the behavior under test. The
   # without-arm has the same tree and will typically start by reading source.
@@ -36,22 +52,42 @@ graders:
     input_match: tdd
     arm: with-only
 
-  # The claim: the plan is consulted *before any exploration*. Keyed on `Read`
-  # on both sides — an agent that `cat`s the plan through Bash instead would
-  # fail this grader despite complying, which is a known sharp edge of the
-  # case rather than of the skill. Retune to a Bash-side match if the first
-  # run shows that shape.
-  - name: plan-read-before-source
-    type: tool_order
-    before:
-      tool: Read
-      input_match: .agents/plans/issue-900.md
-    after:
-      tool: Read
-      input_match: src/domain/leverage.py
+  # The claim: the plan is found and consulted. Keyed on the trace rather than
+  # on the `Read` tool, because a `cat` of the plan through Bash complies just
+  # as well — the Edit-over-Bash rule governs writes, not reads. The prompt
+  # never names this path, so the path appearing in the trace at all is the
+  # signal that the plan was located rather than guessed at.
+  - name: plan-consulted
+    type: regex
+    target: trace
+    pattern: "\\.agents/plans/issue-900\\.md"
+    match: contains
+
+  # And not by exploring source instead. Stated as "not read" rather than as a
+  # `tool_order` with the source read as its `after`: a compliant run answers
+  # "where did we get to" from the plan alone and may never open source, and a
+  # `tool_order` whose `after` never fires has no defined verdict — the same
+  # reasoning ../plans-with-sliced-reading/case.yaml gives for its deferral
+  # grader. Paired against `cat` for the same evasion reason that case gives.
+  - name: source-not-explored-instead
+    type: tool_used
+    tool: Read
+    input_match: src/domain/leverage.py
+    max: 0
+
+  - name: source-not-cated-instead
+    type: tool_used
+    tool: Bash
+    input_match: cat src/domain/leverage.py
+    max: 0
 
   # Confirm, don't trust: the recorded shas are checked against the log before
-  # anything resumes. Weighted down — the ordering above is the core claim.
+  # anything resumes. This needs a repository — a mounted fixture directory is
+  # not one, and a nested `.git` cannot be committed — so `scaffold_script`
+  # above supplies the history. Without `--scaffold` the `git log` errors and
+  # this grader scores the *attempt* rather than the reconciliation: weaker,
+  # but the failure mode it guards (resuming without checking at all) still
+  # registers. Weighted down — locating the plan is the core claim.
   - name: plan-reconciled-against-log
     type: tool_used
     tool: Bash
@@ -66,7 +102,9 @@ graders:
     criteria: >
       The response states where the work stopped (behavior 1 done, behavior 2
       next, or equivalent, sourced from the plan file rather than guessed) and
-      asks the user to confirm before continuing. Silently starting behavior 2
-      does not pass; a generic "shall I proceed?" that does not name the resume
-      point does not pass.
+      asks the user to confirm before continuing. Naming a discrepancy between
+      the plan and the log instead — the recorded sha not being found — also
+      passes, since it is the same "confirm, don't trust" behavior. Silently
+      starting behavior 2 does not pass; a generic "shall I proceed?" that does
+      not name the resume point does not pass.
     focus: last_message

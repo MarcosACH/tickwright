@@ -144,6 +144,30 @@ regression when nothing regressed. Assert behavior, not a number.
 - Copy a tool the case needs into the fixture rather than reaching out of the sandbox for it
   (`tdd/plans-with-sliced-reading/fixture/.agents/tools/doc-slice`). It drifts, and a stale copy is
   the cost of a hermetic sandbox.
+- A fixture is a directory, **not a repository** — a nested `.git` is not committable. A case whose
+  behavior needs git history (`tdd/resumes-from-plan` reconciles a plan against `git log`) supplies
+  it with `context.scaffold_script`, and must state what the case degrades to when the run is not
+  given `--scaffold`, since that flag is off by default.
+- A fixture that asserts something about *size* states its own measurements in its header
+  (`tdd/plans-with-sliced-reading/fixture/docs/module-maps/leverage-surface.md`). A comment claiming
+  a file is "large" is unfalsifiable and goes stale the first time someone edits it.
+
+### Grading a read, and grading its absence
+
+A `max: 0` grader keyed on the `Read` tool does not prove a file went unread: `cat` loads the same
+bytes through `Bash` and scores zero on it. Pair every `max: 0` on `Read` with the matching
+`tool_used: Bash, input_match: cat <path>` — `tdd/plans-with-sliced-reading` does this for both the
+module map and the deferred venue module. The evasion is not hypothetical, since the
+bypass-permissions guidance actively pushes reads toward `cat`.
+
+For the mirror-image claim — that a file *was* consulted — grade the **trace**, not the tool:
+`regex` with `target: trace` over the path catches the `Read` and the `cat` alike
+(`tdd/resumes-from-plan`'s `plan-consulted`). Keying that one on `Read` would fail a run that
+complied through `Bash`.
+
+Prefer a pair of `tool_used` graders to a `tool_order` whenever the `after` side is optional. A
+compliant run often stops before reaching it, and a `tool_order` whose `after` never fires has no
+defined verdict.
 
 ### Grading a written artifact
 
