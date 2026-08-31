@@ -22,7 +22,12 @@ from pydantic import SecretStr
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
-from tickwright.domain import InstrumentSpec, VenueAccountModeUnsupported
+from tickwright.domain import (
+    InstrumentSpec,
+    LeverageOutOfBounds,
+    LeverageSpec,
+    VenueAccountModeUnsupported,
+)
 from tickwright.venues.hyperliquid import (
     HyperliquidConfig,
     HyperliquidExchange,
@@ -296,3 +301,49 @@ def test_connecting_makes_the_mode_read_and_no_other_venue_request() -> None:
     asyncio.run(_exchange(post).start())
 
     assert [query["type"] for (_url, query) in post.requests] == ["userAbstraction"]
+
+
+def test_a_leverage_above_the_venue_cap_refuses_to_start_on_live_too() -> None:
+    """The identical bound, refused identically on the other path (ADR-0044 §9).
+
+    The venue does enforce this itself — but only at the instant a position is
+    opened, and only on live, which is exactly why the check cannot be left to
+    it: paper would accept the same impossible value silently and compute a
+    whole margin model off it. One shared ``domain`` check refuses both paths
+    with one message, so the two cannot drift apart.
+
+    The mode gate runs **first** and this runs behind it (ADR-0046 §3): a pooled
+    account invalidates the premise the margin model reasons from, so a leverage
+    complaint computed against a model that does not apply would be noise on top
+    of an error. The healthy ``"disabled"`` mode here is what lets this one be
+    reached at all.
+    """
+    exchange = HyperliquidExchange(
+        config=HyperliquidConfig(
+            testnet=True, symbols=["BTC"], signing_key=SecretStr(TEST_SIGNING_KEY)
+        ),
+        bus=InMemoryBus(),
+        clock=ManualClock(),
+        universe=HyperliquidUniverse(
+            specs={
+                "BTC": InstrumentSpec(
+                    symbol="BTC",
+                    sz_decimals=5,
+                    max_decimals=6,
+                    min_notional=Decimal("10"),
+                    max_sig_figs=5,
+                    max_leverage=40,
+                )
+            },
+            asset_indices={"BTC": 3},
+        ),
+        post=FakeExchangeApi({"userAbstraction": "disabled"}),
+        startup_timeout_seconds=STARTUP_TIMEOUT_SECONDS,
+        leverage={"BTC": LeverageSpec(mode="cross", leverage=50)},
+    )
+
+    with pytest.raises(LeverageOutOfBounds) as refusal:
+        asyncio.run(exchange.start())
+
+    assert "BTC" in str(refusal.value)
+    assert "40" in str(refusal.value)

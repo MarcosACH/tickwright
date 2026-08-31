@@ -18,6 +18,7 @@ from .enums import (
 )
 from .errors import (
     InvariantViolation,
+    LeverageOutOfBounds,
     StartupReconciliationTimeout,
     StoreAccountMismatch,
     VenueAccountModeUnsupported,
@@ -64,7 +65,7 @@ from .instrument import (
     quantize_price,
     quantize_size,
 )
-from .leverage import LeverageSpec, MarginMode
+from .leverage import LeverageSpec, MarginMode, validate_leverage_bounds
 from .order import Order
 from .position import Position, PositionChange, PositionView, account_net_size
 from .protocols import (
@@ -92,6 +93,7 @@ __all__ = [
     "TimeInForce",
     # errors
     "InvariantViolation",
+    "LeverageOutOfBounds",
     "StartupReconciliationTimeout",
     "StoreAccountMismatch",
     "VenueAccountModeUnsupported",
@@ -145,6 +147,7 @@ __all__ = [
     "exact_figure",
     # quantization
     "below_min_notional",
+    "validate_leverage_bounds",
     "quantize_price",
     "quantize_size",
     # boundary economics

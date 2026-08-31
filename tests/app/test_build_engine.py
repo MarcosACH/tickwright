@@ -9,6 +9,7 @@ running it end-to-end.
 """
 
 import asyncio
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -16,7 +17,7 @@ from unittest.mock import MagicMock
 import pytest
 from hyperliquid_fakes import FakeExchangeApi
 from ledgers import GENESIS
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.bus.kafka import KafkaBus
@@ -32,12 +33,15 @@ from tickwright.app.build import (
     build_feed,
     build_guard,
     build_store,
+    resolve_leverage,
 )
 from tickwright.app.config import AppConfig, StrategyConfig
 from tickwright.domain import (
     AggressorSide,
     FillReport,
     InstrumentSpec,
+    LeverageOutOfBounds,
+    LeverageSpec,
     MarketTick,
     OrderState,
     OrderType,
@@ -49,7 +53,13 @@ from tickwright.domain import (
 )
 from tickwright.engine.guard import NoopGuard, RealGuard
 from tickwright.engine.runner import Engine
-from tickwright.venues.hyperliquid import HyperliquidExchange, HyperliquidFeed
+from tickwright.observability.catalog import NamedEvent
+from tickwright.observability.testing import capture_events
+from tickwright.venues.hyperliquid import (
+    HyperliquidConfig,
+    HyperliquidExchange,
+    HyperliquidFeed,
+)
 
 _SPEC = InstrumentSpec(
     symbol="BTC", sz_decimals=3, max_decimals=6, max_sig_figs=5, min_notional=Decimal("10")
@@ -397,3 +407,125 @@ def test_paper_fill_model_selects_the_seeded_stochastic_model_from_config(tmp_pa
     )
     price = _fill_price_from_built_paper(config)
     assert Decimal("42000") < price <= Decimal("42000") * (Decimal(1) + Decimal("0.001"))
+
+
+def _strategy(symbol: str, strategy_id: str = "demo") -> StrategyConfig:
+    return StrategyConfig(
+        kind="single_shot_market",
+        strategy_id=strategy_id,
+        symbol=symbol,
+        side=Side.BUY,
+        quantity=Decimal("0.5"),
+    )
+
+
+def test_a_traded_symbol_absent_from_config_resolves_to_the_safe_default(
+    tmp_path: Path,
+) -> None:
+    """``AppConfig.leverage`` is sparse; what the consumers receive is complete.
+
+    The scope is every symbol the configured strategies declare (ADR-0044 §3),
+    and the strategy-traded symbol nobody configured is settled by which way the
+    two failures point: *not* covering it leaves the model computing at ``1x``
+    while the venue may sit at 20x cross, which understates real risk — the
+    dangerous direction. Covering it with the safest pair makes any post-boot
+    disagreement real drift rather than a config gap.
+
+    ETH is configured and BTC is not, so this fails if the resolution either
+    drops the unconfigured symbol or overwrites the configured one.
+    """
+    config = _config(
+        tmp_path,
+        strategies=[_strategy("BTC", "btc"), _strategy("ETH", "eth")],
+        leverage={"ETH": LeverageSpec(mode="cross", leverage=10)},
+    )
+
+    resolved = resolve_leverage(config)
+
+    assert resolved == {
+        "BTC": LeverageSpec(mode="isolated", leverage=1),
+        "ETH": LeverageSpec(mode="cross", leverage=10),
+    }
+
+
+def test_the_model_and_the_venue_receive_the_identical_resolved_map(tmp_path: Path) -> None:
+    """One resolution, injected twice — the whole point of resolving at the root.
+
+    Asserted from a **single** ``build_engine``, because the claim is about one
+    map reaching two consumers rather than about two consumers each computing
+    something defensible. The model consumer is read directly; the venue
+    consumer is read through the only thing it does with the value in this
+    slice — refusing a boot the ``40x`` cap cannot carry (ADR-0044 §9) — which
+    is what proves the venue got the same ``50x`` the model holds rather than a
+    default it filled in for itself.
+    """
+    config = _config(
+        tmp_path,
+        strategies=[_strategy("BTC")],
+        leverage={"BTC": LeverageSpec(mode="cross", leverage=50)},
+        paper={
+            "instrument_specs": {"BTC": replace(_SPEC, max_leverage=40)},
+            "genesis_collateral": GENESIS,
+        },
+    )
+    engine = build_engine(config)
+
+    assert engine.portfolio.leverage_for("BTC") == LeverageSpec(mode="cross", leverage=50)
+
+    with capture_events() as events:
+        exit_code = asyncio.run(engine.run())
+
+    assert exit_code != 0
+    faults = [event for event in events if event["event"] == NamedEvent.ENGINE_FAULTED]
+    assert len(faults) == 1
+    assert "LeverageOutOfBounds" in faults[0]["error"]
+    assert "BTC" in faults[0]["error"]
+
+
+def test_a_live_run_reads_the_leverage_without_touching_a_paper_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The whole reason ``leverage`` is a top-level field (ADR-0044 §2).
+
+    ADR-0040 §5 originally put the block in ``PaperExchangeConfig``, which
+    cannot stand for a reason independent of any venue write: the consumer is
+    the venue-agnostic margin model, needed on both paths, and no live run may
+    read ``config.paper`` — the hazard ADR-0042 §1 already litigated for genesis
+    collateral, where a ``TICKWRIGHT_PAPER__*`` variable governing a live run is
+    the failure.
+
+    This config authors no paper block at all, and the live adapter still
+    refuses on the configured ``50x`` against the venue's published ``40x``
+    cap — which it could only have read from the venue-agnostic field.
+    """
+    post = FakeExchangeApi(
+        {
+            "meta": {"universe": [{"name": "BTC", "szDecimals": 5, "maxLeverage": 40}]},
+            "userAbstraction": "disabled",
+        }
+    )
+    monkeypatch.setattr("tickwright.venues.hyperliquid.transport.post_json", post)
+    config = AppConfig(
+        exchange="hyperliquid",
+        feed="hyperliquid",
+        hyperliquid=HyperliquidConfig(
+            signing_key=SecretStr(TEST_SIGNING_KEY), symbols=["BTC"], testnet=True
+        ),
+        strategies=[_strategy("BTC")],
+        leverage={"BTC": LeverageSpec(mode="cross", leverage=50)},
+    )
+
+    assert config.paper.genesis_collateral is None  # nothing paper was authored
+
+    exchange = build_exchange(
+        config,
+        bus=InMemoryBus(),
+        clock=LiveClock(),
+        store=SQLiteStore(":memory:"),
+        leverage=resolve_leverage(config),
+    )
+
+    with pytest.raises(LeverageOutOfBounds) as refusal:
+        asyncio.run(exchange.start())
+
+    assert "BTC" in str(refusal.value)

@@ -23,7 +23,7 @@ the Engine never knows a concrete.
 import asyncio
 import signal
 import uuid
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
 
 from tickwright.domain import (
@@ -33,6 +33,7 @@ from tickwright.domain import (
     Exchange,
     ExecutionReport,
     FundingAccrual,
+    LeverageSpec,
     MarketFeed,
     MarkTick,
     Portfolio,
@@ -49,6 +50,7 @@ from .cadence import run_cadence
 from .checkpoint import Checkpointer
 from .execution import ExecutionManager
 from .guard import NoopGuard
+from .portfolio import PortfolioProjection
 from .reconcile import ReconcileConfig, Reconciler
 from .strategy_host import StrategyHost
 
@@ -78,6 +80,7 @@ class Engine:
         feed: MarketFeed,
         guard: PreTradeGuard | None = None,
         config: EngineConfig | None = None,
+        leverage: Mapping[str, LeverageSpec] | None = None,
     ) -> None:
         self._bus = bus
         self._clock = clock
@@ -95,7 +98,9 @@ class Engine:
         # constructible and the fill's write is one transaction by construction
         # (ADR-0043 §4). Which account the ledger opens against is the venue's
         # own declaration, taken off the ``Exchange`` seam.
-        self._checkpointer = Checkpointer(spec=exchange.account_spec(), store=store, clock=clock)
+        self._checkpointer = Checkpointer(
+            spec=exchange.account_spec(), store=store, clock=clock, leverage=leverage
+        )
         self._execution = ExecutionManager(
             bus=bus, exchange=exchange, checkpointer=self._checkpointer, guard=self._guard
         )
@@ -124,6 +129,19 @@ class Engine:
     @property
     def state(self) -> ComponentState:
         return self._state
+
+    @property
+    def portfolio(self) -> PortfolioProjection:
+        """The accounting read-model, lent for reads by everything that is not a
+        strategy — telemetry, the CLI, and the operator surfaces ADR-0041 §8
+        points at the ``engine`` concrete rather than at the scoped seam.
+
+        A strategy gets ``portfolio_for`` below instead: the ``Portfolio``
+        Protocol takes no scope argument precisely because the facade is already
+        bound to one, and handing a strategy this would hand it the reserved
+        unattributed partition the facade exists to keep unreachable.
+        """
+        return self._checkpointer.portfolio
 
     def portfolio_for(self, strategy_id: str) -> Portfolio:
         """The scoped read-facade to hand ``strategy_id``'s constructor.

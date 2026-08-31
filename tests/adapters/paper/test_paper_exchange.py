@@ -31,6 +31,8 @@ from tickwright.domain import (
     Exchange,
     FillReport,
     InstrumentSpec,
+    LeverageOutOfBounds,
+    LeverageSpec,
     MarketTick,
     Netting,
     OrderState,
@@ -981,3 +983,43 @@ def test_every_exchange_member_carries_a_claim_in_the_paper_suite() -> None:
     against a gate that names the omission than against a reviewer who has to
     notice it."""
     assert_every_member_is_claimed(Exchange, _SEAM_CLAIMS, suite=Path(__file__).parent)
+
+
+def test_a_leverage_above_the_instruments_cap_refuses_to_start_on_paper() -> None:
+    """Paper validates the ADR-0044 §9 bound and writes nothing.
+
+    Leaving the check to the venue was rejected: live would fail with a venue
+    error while **paper accepted an impossible leverage silently** and computed
+    margin, liquidation price and effective leverage off it. The strategy then
+    behaves one way in paper and fails at boot on promotion — precisely the
+    paper/live divergence the identical-compute grain exists to prevent. Paper
+    validating without writing is not an inconsistency; it is the
+    venue-agnostic half of the check running where the venue-specific half
+    cannot.
+
+    ``ETH`` sits *exactly* on its cap, so it must clear: the bound is
+    ``1 <= leverage <= max_leverage``, inclusive at both ends, and a refusal
+    naming ETH would be an off-by-one this assertion catches.
+    """
+    exchange = PaperExchange(
+        bus=InMemoryBus(),
+        clock=ManualClock(),
+        fill_model=ImmediateFillModel(),
+        genesis_collateral=GENESIS,
+        account_net=dict,
+        instrument_specs={
+            "BTC": replace(_BTC_SPEC, max_leverage=40),
+            "ETH": replace(_BTC_SPEC, symbol="ETH", max_leverage=25),
+        },
+        leverage={
+            "BTC": LeverageSpec(mode="cross", leverage=50),
+            "ETH": LeverageSpec(leverage=25),
+        },
+    )
+
+    with pytest.raises(LeverageOutOfBounds) as refusal:
+        asyncio.run(exchange.start())
+
+    assert "BTC" in str(refusal.value)
+    assert "40" in str(refusal.value)
+    assert "ETH" not in str(refusal.value)

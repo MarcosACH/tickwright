@@ -111,3 +111,25 @@ class VenueAccountModeUnsupported(InvariantViolation):
     of magnitude low with nothing in the response indicating it. Nothing
     downstream can be compared, so nothing downstream may run.
     """
+
+
+class LeverageOutOfBounds(InvariantViolation):
+    """A configured ``LeverageSpec`` does not satisfy its instrument's bound
+    (ADR-0044 §9): ``1 ≤ leverage ≤ spec.max_leverage``, or the symbol carries
+    no ``InstrumentSpec`` to bound it at all.
+
+    Raised from ``Exchange.start()`` on **both** paths, which is where the check
+    has to live: ``max_leverage`` is on the spec, and the spec is the adapter's
+    to author — from the meta endpoint on live, from ``PaperExchangeConfig`` on
+    paper — so ``start()`` is the earliest moment both paths hold it. That is
+    what splits it from ADR-0044 §3's dead-entry rejection, which *is* an
+    ``AppConfig`` validator because both its inputs are config fields.
+
+    Deliberately not a ``*Mismatch``. Its live-only sibling
+    ``VenueLeverageMismatch`` reports config disagreeing with a value the venue
+    *holds*; this one reports config disagreeing with the instrument's own
+    published limit, which is true before any venue is asked and identically
+    true on a paper run with no venue to ask. Every offending symbol is named
+    with its bound at once, so an operator who over-levered two learns both on
+    the first start.
+    """

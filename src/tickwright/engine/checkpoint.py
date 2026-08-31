@@ -41,11 +41,14 @@ write with no ordering inside it has nothing here to protect. See ``portfolio``
 below, where the rule is stated on the borrow itself.
 """
 
+from collections.abc import Mapping
+
 from tickwright.domain import (
     AccountSpec,
     Clock,
     FundingAccrual,
     InvariantViolation,
+    LeverageSpec,
     Order,
     OrderFillEvent,
     Side,
@@ -59,7 +62,14 @@ from .portfolio import PortfolioProjection
 class Checkpointer:
     """The one writer of the order ``Cache`` and the ``PortfolioProjection``."""
 
-    def __init__(self, *, spec: AccountSpec, store: Store, clock: Clock) -> None:
+    def __init__(
+        self,
+        *,
+        spec: AccountSpec,
+        store: Store,
+        clock: Clock,
+        leverage: Mapping[str, LeverageSpec] | None = None,
+    ) -> None:
         self._store = store
         self._clock = clock
         # Both projections, from the one store above — the identity the fill's
@@ -70,7 +80,9 @@ class Checkpointer:
         # None`` to tell a *declared* opening balance from an *ingested* one
         # (ADR-0043 §10), and an ``Account`` has resolved that away.
         self._cache = Cache(store=store)
-        self._portfolio = PortfolioProjection(spec=spec, store=store, clock=clock)
+        self._portfolio = PortfolioProjection(
+            spec=spec, store=store, clock=clock, leverage=leverage
+        )
 
     @property
     def clock(self) -> Clock:

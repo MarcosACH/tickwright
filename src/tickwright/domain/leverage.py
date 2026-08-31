@@ -11,8 +11,12 @@ live in a venue's config block — a ``TICKWRIGHT_PAPER__*`` value must never
 govern a live run (ADR-0042 §1).
 """
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal
+
+from .errors import LeverageOutOfBounds
+from .instrument import InstrumentSpec
 
 type MarginMode = Literal["cross", "isolated"]
 """How a symbol's collateral is posted: pooled across the account, or ring-fenced
@@ -36,3 +40,36 @@ class LeverageSpec:
 
     mode: MarginMode = "isolated"
     leverage: int = 1
+
+
+def validate_leverage_bounds(
+    leverage: Mapping[str, LeverageSpec], specs: Mapping[str, InstrumentSpec]
+) -> None:
+    """Refuse a resolved map any instrument cannot carry (ADR-0044 §9).
+
+    ``1 ≤ leverage ≤ spec.max_leverage``, inclusive at both ends, for every
+    symbol in the **resolved** map — which is the strategy-traded set, so a
+    symbol with no ``InstrumentSpec`` is a traded symbol nothing bounds and is
+    refused on the same pass rather than skipped.
+
+    One shared implementation because ADR-0044 §9 requires the two paths to
+    refuse *identically*: leaving each adapter its own check is how paper comes
+    to accept a leverage live rejects, and the divergence then surfaces only on
+    promotion. The same argument that put ``below_min_notional`` here.
+
+    Pure and raising, not returning a verdict: a caller has nothing to decide.
+    Every offence is collected before raising, so one start reports them all.
+    """
+    offences: list[str] = []
+    for symbol in sorted(leverage):
+        spec = specs.get(symbol)
+        if spec is None:
+            offences.append(f"{symbol}: no instrument spec to bound its leverage")
+            continue
+        configured = leverage[symbol].leverage
+        if not 1 <= configured <= spec.max_leverage:
+            offences.append(f"{symbol}: leverage {configured} outside 1..{spec.max_leverage}")
+    if offences:
+        raise LeverageOutOfBounds(
+            "configured leverage is not carryable by the instrument — " + "; ".join(offences)
+        )

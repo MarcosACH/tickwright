@@ -16,7 +16,8 @@ from pydantic import SecretStr, ValidationError
 
 from tickwright.adapters.feed import ReplayFeedConfig
 from tickwright.adapters.paper import PaperExchangeConfig
-from tickwright.app.config import AppConfig, AppSettings
+from tickwright.app.config import AppConfig, AppSettings, StrategyConfig
+from tickwright.domain import LeverageSpec, Side
 from tickwright.venues.hyperliquid import HyperliquidConfig
 
 _HOSTILE_ENV_FILE = (
@@ -151,3 +152,41 @@ def test_the_paper_account_label_is_slug_constrained(label: str) -> None:
     a live id's three (ADR-0042 §5)."""
     with pytest.raises(ValidationError):
         PaperExchangeConfig(genesis_collateral=Decimal("1000"), account_label=label)
+
+
+def test_a_leverage_entry_for_an_untraded_symbol_is_rejected_at_load(tmp_path: Path) -> None:
+    """Dead config must not silently misrepresent the book (ADR-0044 §3).
+
+    An entry only takes effect through a strategy that trades its symbol, so one
+    naming a symbol no configured strategy declares is nearly always a typo —
+    and the dangerous kind: the operator believes they set ``5x`` while the
+    symbol they meant trades at the ``1x`` default. ``extra="forbid"`` already
+    establishes that silently-ignored configuration is a bug here rather than a
+    convenience.
+
+    Rejected at *load*, before any component is built, so the composition root's
+    resolution never meets a dead entry and neither path reaches ``start()``
+    carrying one. **Every** offending key is named at once, so an operator who
+    typo'd two symbols learns both on the first run rather than one per run.
+    """
+    (tmp_path / "ticks.jsonl").touch()
+
+    with pytest.raises(ValidationError, match="ETH.*SOL|SOL.*ETH"):
+        AppConfig(
+            replay=ReplayFeedConfig(path=tmp_path / "ticks.jsonl"),
+            paper=PaperExchangeConfig(genesis_collateral=Decimal("100000")),
+            strategies=[
+                StrategyConfig(
+                    kind="single_shot_market",
+                    strategy_id="demo",
+                    symbol="BTC",
+                    side=Side.BUY,
+                    quantity=Decimal("0.5"),
+                )
+            ],
+            leverage={
+                "BTC": LeverageSpec(mode="cross", leverage=5),
+                "ETH": LeverageSpec(leverage=3),
+                "SOL": LeverageSpec(leverage=2),
+            },
+        )
