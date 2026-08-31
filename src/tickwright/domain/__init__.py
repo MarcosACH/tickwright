@@ -64,6 +64,7 @@ from .instrument import (
     quantize_price,
     quantize_size,
 )
+from .leverage import LeverageSpec, MarginMode
 from .order import Order
 from .position import Position, PositionChange, PositionView, account_net_size
 from .protocols import (
@@ -110,6 +111,8 @@ __all__ = [
     "GuardDecision",
     "InstrumentSpec",
     "KillSwitchState",
+    "LeverageSpec",
+    "MarginMode",
     "MarkTick",
     "MarketTick",
     "Order",
