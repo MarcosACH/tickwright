@@ -38,8 +38,11 @@ fi
 # base offsets the reported line numbers when stdin is a slice, not the whole file.
 amend() {
   awk -v base="$1" -v heading="$2" '
-    /^```/ { fence = !fence; next }
-    fence { next }
+    # The fence skip guards openers: a delimiter shown in a code sample must not start a
+    # block. Once inside one it must not apply — a fenced measurement is the evidence the
+    # amendment rests on, and dropping it prints the claim without it.
+    /^```/ { fence = !fence; if (inblock) buf = buf $0 "\n"; next }
+    fence { if (inblock) buf = buf $0 "\n"; next }
     /^#+[[:space:]]/ {
       match($0, /^#+/)
       text = substr($0, RLENGTH + 1)

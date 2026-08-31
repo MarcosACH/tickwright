@@ -20,6 +20,7 @@ Driven through a real shell — the subject is a shell tool's stdout and exit co
 nothing here is mocked (a process boundary).
 """
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -47,8 +48,18 @@ def _run(*args: str) -> subprocess.CompletedProcess[str]:
 
 
 def _blocks(stdout: str) -> list[str]:
-    """Split the emitted blocks on their ``--- <line>  <heading>`` banners."""
-    return [chunk for chunk in stdout.split("--- ") if chunk.strip()]
+    """Split the emitted blocks on their ``--- <line>  <heading>`` banners.
+
+    Anchored to a line start, as the banner is: a block body may itself contain
+    ``--- ``, and splitting on it anywhere would miscount the very thing the corpus
+    balance test counts.
+    """
+    return [chunk for chunk in re.split(r"(?m)^--- ", stdout) if chunk.strip()]
+
+
+def _body(block: str) -> str:
+    """The block's text, with its ``<line>  <heading>`` banner line removed."""
+    return block.split("\n", 1)[1].rstrip("\n")
 
 
 class TestSectionSlicing:
@@ -178,6 +189,47 @@ class TestAmendmentsMechanics:
         assert "| $0 | 40x |" in result.stdout
         assert "After." not in result.stdout
 
+    def test_a_fenced_sample_inside_a_block_survives(self, tmp_path: Path) -> None:
+        """The fence skip guards *openers*; inside a block it would elide the evidence.
+
+        ADR-0040 §4's tier-crossing correction is carried by a fenced measurement, and
+        an amendment printed without it states a conclusion with nothing behind it —
+        the silent drop this flag exists to prevent.
+        """
+        doc = tmp_path / "fenced.md"
+        doc.write_text(
+            "# Title\n\n"
+            "**(Corrected by #152:** the flat rate is falsified above the first band:\n\n"
+            "```\n"
+            "flat 1/(2·40) = 0.0125 -> 150.9207   x\n"
+            "notional × 0.02 − 75  = 166.4731     ok\n"
+            "```\n\n"
+            "which is R3's form.**)**\n\nAfter.\n"
+        )
+
+        result = _run("--amendments", str(doc))
+
+        assert result.returncode == 0, result.stderr
+        assert "notional × 0.02 − 75  = 166.4731     ok" in result.stdout
+        assert result.stdout.count("```") == 2
+        assert "After." not in result.stdout
+
+    def test_an_opener_inside_a_code_fence_starts_no_block(self, tmp_path: Path) -> None:
+        """Why the fence skip exists: a delimiter shown in a sample is not a block."""
+        doc = tmp_path / "sample.md"
+        doc.write_text(
+            "# Title\n\n"
+            "```\n"
+            "doc-slice --amendments <file>   # blocks read **(like this**)**\n"
+            "```\n\n"
+            "Ordinary prose.\n"
+        )
+
+        result = _run("--amendments", str(doc))
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == ""
+
     def test_an_unclosed_block_reports_its_opening_line_and_exits_three(
         self, tmp_path: Path
     ) -> None:
@@ -216,3 +268,18 @@ class TestCorpusBalance:
         assert result.returncode == 0, result.stderr
         assert len(_blocks(result.stdout)) == text.count(_OPENER)
         assert text.count(_OPENER) == text.count(_CLOSER)
+
+    @pytest.mark.parametrize("adr", _ADRS, ids=lambda p: p.stem)
+    def test_every_emitted_block_is_verbatim_from_the_source(self, adr: Path) -> None:
+        """A block is one contiguous range of the file, so nothing may drop out of it.
+
+        Stronger than any per-feature assertion: whatever the printer learns to skip
+        next — fences, comments, tables — a body that is no longer a substring of the
+        source is an elision, and elision is the failure mode this flag exists to avoid.
+        """
+        text = adr.read_text()
+        result = _run("--amendments", str(adr))
+
+        assert result.returncode == 0, result.stderr
+        for block in _blocks(result.stdout):
+            assert _body(block) in text
