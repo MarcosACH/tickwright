@@ -118,14 +118,70 @@ a `regex` over a planted phrase is both free and stable.
 
 ## What these cases cover, and what they do not
 
-The current cases run in an **empty sandbox with no write tools**, so they grade what the skill
-tells the agent to *do*, not code it produced. That is the cheap, stable core of a skill's value:
-a skill is guidance, and guidance that stopped being given is the failure worth catching.
+Cases come in two shapes. The cheap one runs in an **empty sandbox with no write tools** and grades
+what the skill tells the agent to *do* (`tdd/red-before-green`); the expensive one mounts a fixture
+tree, allows `Write`/`Edit`/`Bash`, and grades the edits themselves
+(`tdd/writes-test-before-src`, `tdd/edits-instead-of-bash-writes`). A skill is guidance, and
+guidance that stopped being given is the failure worth catching — but only the second shape can
+catch guidance that is given and then not followed.
 
-It leaves the expensive half uncovered. Proving `/tdd` really writes the failing test first needs a
-real tree and real edits: `context.add_dirs` pointing at a fixture repo, `--allow-tools Write Edit
-Bash`, and a `tool_order` grader asserting the test file is written before any `src/` edit. That is
-the natural next case. It is deliberately not the first one.
+Neither shape measures **token consumption**. The context-budget rules in `/tdd` are graded by
+proxy — which tool was used, whether a doc was sliced or read whole, whether reading was deferred
+past the first test — because a token threshold drifts with the model version and reads as a
+regression when nothing regressed. Assert behavior, not a number.
+
+### Fixture conventions
+
+- A fixture lives at `<case>/fixture/` and is named in `context.add_dirs`, mounted at the sandbox
+  root — so paths in prompts and `input_match` are `src/...`, not `fixture/src/...`. Unverified;
+  see the note in `tdd/writes-test-before-src/case.yaml`.
+- Fixtures carry no packaging. A `conftest.py` putting `src/` on `sys.path` is what stands in for
+  `pip install -e .`.
+- A fixture may carry a path the repo gitignores — `tdd/resumes-from-plan/fixture/.agents/plans/`
+  is committed, because `.gitignore`'s `.agents/plans/` has an interior slash and is therefore
+  anchored to the repo root. Check a new one with `git check-ignore -v <path>` before assuming it
+  survives the commit.
+- Copy a tool the case needs into the fixture rather than reaching out of the sandbox for it
+  (`tdd/plans-with-sliced-reading/fixture/.agents/tools/doc-slice`). It drifts, and a stale copy is
+  the cost of a hermetic sandbox.
+- A fixture is a directory, **not a repository** — a nested `.git` is not committable. A case whose
+  behavior needs git history (`tdd/resumes-from-plan` reconciles a plan against `git log`) supplies
+  it with `context.scaffold_script`, and must state what the case degrades to when the run is not
+  given `--scaffold`, since that flag is off by default.
+- A fixture that asserts something about *size* states its own measurements in its header
+  (`tdd/plans-with-sliced-reading/fixture/docs/module-maps/leverage-surface.md`). A comment claiming
+  a file is "large" is unfalsifiable and goes stale the first time someone edits it. State one unit
+  and the range you actually mean: that map's h3 module sections run 275–2,356 characters, while its
+  h2 wrappers run from 165 up to 15,204, so "a section runs …" without the qualifier is false.
+- A fixture standing in for a `doc-slice` target must not carry a **section name inside its title**.
+  `doc-slice` matches a heading substring and falls back to the first match, so a map titled
+  "Leverage surface" answers `doc-slice … Leverage` with the whole file — through the very tool the
+  case is checking the agent reached for, past a `Read`/`cat` grader pair that sees nothing wrong.
+  Name the file after its subject and the title after something broader.
+
+### Grading a read, and grading its absence
+
+A `max: 0` grader keyed on the `Read` tool does not prove a file went unread: `cat` loads the same
+bytes through `Bash` and scores zero on it. Pair every `max: 0` on `Read` with the matching
+`tool_used: Bash, input_match: cat <path>` — `tdd/plans-with-sliced-reading` does this for both the
+module map and the deferred venue module. The evasion is not hypothetical, since the
+bypass-permissions guidance actively pushes reads toward `cat`.
+
+For the mirror-image claim — that a file *was* consulted — grade the **trace**, not the tool:
+`regex` with `target: trace` over the path catches the `Read` and the `cat` alike
+(`tdd/resumes-from-plan`'s `plan-consulted`). Keying that one on `Read` would fail a run that
+complied through `Bash`.
+
+Prefer a pair of `tool_used` graders to a `tool_order` whenever the `after` side is optional. A
+compliant run often stops before reaching it, and a `tool_order` whose `after` never fires has no
+defined verdict.
+
+### Grading a written artifact
+
+`regex` with `target: {source: file, path: <path>}` reads a file the run produced, so a claim about
+an artifact's *contents* stays free. `file_exists` proves it was written at all. Reach for `llm`
+only where the claim is genuinely about prose — `tdd/writes-plan-artifact` proves the plan exists
+and then greps it, and pays for neither.
 
 ## Adding a case
 

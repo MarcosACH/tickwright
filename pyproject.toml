@@ -60,6 +60,11 @@ check_untyped_defs = true
 warn_unused_ignores = true
 warn_redundant_casts = true
 files = ["src", "tests"]
+# Skill-eval fixtures are throwaway sandbox trees, not repo code, and several
+# carry the same module names on purpose (three `domain/leverage.py`). `files`
+# above already leaves them out; this makes the `mypy .` form agree instead of
+# erroring on the duplicate-module collision.
+exclude = ["^evals/"]
 # `src` maps to the `tickwright` package; `tests/_support` holds top-level test
 # helpers (kafka_fakes, store_backends). With explicit_package_bases on, both
 # must be declared bases so files under them keep their intended module names.

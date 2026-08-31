@@ -29,6 +29,11 @@ logs/
 # evals/**/case.yaml are committed; what a run produced is not.
 evals/results/
 
+# Per-issue /tdd plans (behavior checklist + shas). Run state a session resumes
+# from, not a reviewable artifact — committed, it would fall under the docs-sync
+# policy and drift into a bug. Root-anchored, so eval fixtures may carry one.
+.agents/plans/
+
 # Private working notes — NEVER committed
 docs/private/
 *.private.md

@@ -54,9 +54,79 @@ A **tautological test** recomputes its expected value the way the code does, so 
 
 Expected values must come from an **independent source of truth**: a known-good literal (`Decimal("50000")`), a worked example from the SPEC or an ADR, or a genuinely different computation. For a `hypothesis` property, assert an *invariant* the code doesn't compute the same way (duplicate-delivery convergence, a saga never leaving a legal state) — not the function's own output re-derived. See [tests.md](tests.md).
 
+## Context budget
+
+A `/tdd` run starts somewhere above 12k tokens before its first tool call — resident repo
+instructions, this skill, the harness's own system prompt and tool schemas — and degrades somewhere
+around **120k**. The floor is not zero and no in-thread discipline beats it, so the goal is *staying
+clear of the line while there is still editing to do*, not hitting an arbitrarily low number.
+
+### Read in vertical slices, not horizontally
+
+Loading the whole subsystem before the first red test is
+[horizontal slicing](#anti-pattern-horizontal-slices) applied to **context**, and it fails for the
+same reason horizontal test-writing does: you commit to an understanding before the code has taught
+you which parts mattered. Five tests then five implementations is the same shape as read-everything
+then implement-against-it.
+
+So split the reading in two:
+
+- **Cheap planning, before the first test — target ≈5–7k.** The issue body (`gh issue view <N>`),
+  the module map's **TOC**, the map sections for the modules in scope, and the behavior list.
+  Nothing else.
+- **Per-behavior reading, acquired when its test is written.** The source and the ADR sections a
+  behavior needs are read inside that behavior's red→green cycle, not in advance.
+
+**`doc-slice` the module map — never read it whole.**
+`docs/module-maps/trade-economics-accounting-surface.md` is **86,298 chars ≈ 21.6k tokens**, larger
+than any ADR: one `cat` is three times the entire cheap-planning budget. Its TOC is 1,253 chars
+≈ 0.3k. And **sections are chosen, not swept** — they run 0.6k (`Leverage`) to **3.2k**
+(`PortfolioProjection`, 12,865 chars), so four of the wrong ones blow the budget on their own.
+Pass the **bare module name** as the heading substring: the TOC prints the path inside backticks
+(``PortfolioProjection (`engine/portfolio.py`)``), so a substring copied with the parenthesised path
+but without them matches nothing. The invocation is canonical in
+[CLAUDE.md → Context Discipline](../../../CLAUDE.md); don't restate it here.
+
+What stays up front is the **agreement**, not the code reading: the seams under test and the
+behavior list are still confirmed with the user before anything is written (Planning checklist
+below).
+
+Worked example — issue #190, the leverage config surface: four interacting ADRs across `domain`,
+`app`, both `Exchange` adapters and the engine projection chain. Commit `d9464fc` ("refuse a meta
+entry whose leverage cap cannot be read") is commit 8 of 9 and touches only
+`venues/hyperliquid/universe.py` and its test. That file was needed for one late behavior and
+nothing before it — read during planning, it would have sat resident through every `domain`
+behavior that landed first, for no benefit.
+
+### Use `Edit` for any file you have already read
+
+The rule, its cache-staleness rationale, its coverage of `sed -i`, and the fact that it deliberately
+overrides the harness-injected bypass-permissions guidance are all canonical in
+[CLAUDE.md → Context Discipline](../../../CLAUDE.md). Read it there; don't restate it here.
+
+What is specific to a TDD loop is the **multiplier**. You touch the same handful of files once per
+red→green cycle, so "already read in this session" describes every file you touch after its first
+cycle, and each Bash write buys a re-read on the next one. On the #190 run that compounded to ~10k
+across six files — `build.py`, `instrument.py`, `config.py`, `errors.py`, `universe.py` and
+`domain/__init__.py`. Reserve the heredoc for what a cycle genuinely **creates**: a new test module,
+a new source module.
+
 ## Workflow
 
 ### 1. Planning
+
+**Resume check — before any exploration.** Derive `N` from the issue reference (`/tdd #190`), or
+from `git branch --show-current` on a `ralph/issue-<N>` branch, then look for
+`.agents/plans/issue-<N>.md`. If it exists, **reconcile it rather than trusting it** — a plan goes
+stale when behaviors land, when the base branch moves, and when the ticket gets recut. The recorded
+shas are the cheap guard: one `git log --oneline <base>..HEAD` (~200 tokens) reconciles the file
+against reality. Then state the resume point ("behaviors 1–4 done through `<sha>`, next is 5") and
+**ask before continuing** — same discipline as confirming the base branch below. A confirmed plan
+replaces the exploration, not the confirmation steps.
+
+If `N` is underivable — no issue reference and no `ralph/issue-<N>` branch, which is the shape of an
+untracked one-off fix — there is no plan to find and none to write. Skip the artifact everywhere it
+appears below and plan in-thread; the rest of the budget still applies.
 
 **If invoked with an issue reference (URL or `#N`)**, before exploring code:
 
@@ -72,10 +142,16 @@ Expected values must come from an **independent source of truth**: a known-good 
                               # first `uv run pytest` dies on a missing interpreter — exactly when the red test
                               # is supposed to be failing for its own reason, the worst moment to be wrong about why
     cp ../tickwright/.env .   # untracked too, so it doesn't come across either (skip if the source has none)
+    mkdir -p .agents/plans && cp ../tickwright/.agents/plans/issue-<N>.md .agents/plans/
+                              # the plan is gitignored, so it doesn't come across either (skip on a fresh slice)
     ```
     Place it **outside** the repo (`../tickwright-issue-<N>`); nested, it gets swept into `ruff check .` and pytest collection. This is guidance, not a mandate — `git checkout -b` stays the default, and a worktree costs a full `uv sync` that is not worth it to fix a typo.
 
-When exploring the codebase, use the project's domain glossary so that test names and interface vocabulary match the project's language, and respect ADRs in the area you're touching.
+When exploring the codebase, stay inside the cheap-planning budget above — issue body,
+module-map TOC, the map sections for the modules in scope, behavior list — and leave everything
+else to the behavior that needs it. Use the project's domain glossary so that test names and
+interface vocabulary match the project's language, and respect the ADRs in the area you're
+touching, reading them by section.
 
 Before writing any code:
 
@@ -86,10 +162,38 @@ Before writing any code:
 - [ ] Design interfaces for [testability](interface-design.md)
 - [ ] List the behaviors to test (not implementation steps)
 - [ ] Get user approval on the plan
+- [ ] Write the approved plan to `.agents/plans/issue-<N>.md` (below; skip when `N` is underivable)
 
 Ask: "What should the public interface look like? Which behaviors are most important to test?"
 
 **You can't test everything.** Confirm with the user exactly which behaviors matter most. Focus testing effort on critical paths and complex logic, not every possible edge case.
+
+**Write the approved plan down.** Once the user approves, it goes to `.agents/plans/issue-<N>.md`,
+not only into a conversation turn that compaction reconstructs lossily and `/clear` loses outright.
+Keep it cheap — a header and a table, never restated ADR prose:
+
+```markdown
+# issue-<N>: <title>
+
+base: <branch> | worktree: <path or ->
+seams under test: <the confirmed seams>
+
+| # | done | behavior | files | sha |
+| - | ---- | -------- | ----- | --- |
+| 1 | [x] | refuses a leverage below 1 | domain/leverage.py, tests/domain/test_leverage.py | a1b2c3d |
+| 2 | [ ] | refuses a leverage above the instrument cap | domain/leverage.py, tests/domain/test_leverage.py | |
+```
+
+- **One plan per issue**, and the **behavior list is the session checkpoint**: run behaviors until
+  you near the line, commit, tick, stop, resume next session. The file is ~1k — it is never what
+  costs you; the per-behavior reading is. A slice whose list cannot finish in two sessions is
+  evidence `/to-tickets` cut it too coarse: recut the ticket rather than opening a second plan file.
+  The exception is a slice that is atomic because the vertical-slice policy forces every layer into
+  one PR — there, several sessions on one branch is the answer, which a resumable plan already
+  handles.
+- The path is **gitignored**, alongside `evals/results/` and `docs/private/`: a per-issue plan is
+  run state, not a reviewable artifact. Committed, it would fall under the mandatory docs-sync
+  policy, where a plan that drifts from the shipped code becomes a bug by that policy's own rule.
 
 ### 2. Tracer Bullet
 
@@ -117,6 +221,11 @@ Rules:
 - Only enough code to pass current test
 - Don't anticipate future tests
 - Keep tests focused on observable behavior
+- **Tick the behavior's row in `.agents/plans/issue-<N>.md` and record its commit sha in the same
+  step as the commit** — one row edited per cycle, so the plan stays cheap. It is maintained
+  through Implementation, not written once at the end of Planning: a resumed session that knows
+  the behavior list but not where it stopped re-derives exactly what the artifact exists to
+  prevent. Read that file for what's next rather than scrolling conversation history.
 - Commit subjects follow Conventional Commits — `feat|fix|docs|refactor|test|chore|ci(scope)?: ...` (see `CONTRIBUTING.md`). The `pr-policy` CI check rejects the eventual PR on a single non-conforming subject, so get it right per commit, not at PR time.
 
 ### Feedback cadence

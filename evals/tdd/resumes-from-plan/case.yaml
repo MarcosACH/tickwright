@@ -1,0 +1,110 @@
+schema_version: "1.0"
+name: tdd-resumes-from-plan
+description: >
+  A session resumed on an issue that already has a plan reads that plan before
+  exploring source or docs, and reconciles it against the log rather than
+  trusting it.
+tags: [tdd, skills, context-budget]
+
+plugins:
+  - .claude/skills/tdd
+
+context:
+  # Carries `.agents/plans/issue-900.md` with behavior 1 already ticked with a
+  # sha and behaviors 2-4 open, plus the source and module map a from-scratch
+  # exploration would reach for. The plan path is gitignored at the repo root
+  # only (the pattern has an interior slash, so it is root-anchored), which is
+  # why this fixture copy is committed.
+  add_dirs: [fixture]
+
+  # `git log` is the plan's reconciliation guard, and it needs a repository the
+  # fixture cannot carry (a nested `.git` is not committable). This gives the
+  # sandbox one commit whose subject matches the plan's ticked behavior, so
+  # reconciliation has something real to check against. The plan's recorded sha
+  # stays synthetic — a content-derived sha cannot be written into a fixture
+  # ahead of the commit — so a reconciling agent finds a subject that matches
+  # and a sha that does not. That is the right shape for "confirm, don't
+  # trust": the discrepancy is what it should surface. It runs only under
+  # `--scaffold`; see the grader note below for what the case degrades to
+  # without it.
+  scaffold_script: |
+    git init -q -b main .
+    git add -A
+    git -c user.email=evals@example.invalid -c user.name=evals commit -q \
+      -m "test(domain): refuse a leverage below 1"
+
+execution:
+  # No mention of a plan file: finding it is the behavior under test. The
+  # without-arm has the same tree and will typically start by reading source.
+  prompt: |
+    Picking issue #900 back up — the leverage bound slice. Where did we get to,
+    and what's next?
+  max_turns: 10
+  timeout_seconds: 300
+  allowed_tools: [Skill, Read, Grep, Glob, Bash]
+
+runs: 2
+
+graders:
+  - name: tdd-skill-fired
+    type: tool_used
+    tool: Skill
+    input_match: tdd
+    arm: with-only
+
+  # The claim: the plan is found and consulted. Keyed on the trace rather than
+  # on the `Read` tool, because a `cat` of the plan through Bash complies just
+  # as well — the Edit-over-Bash rule governs writes, not reads. The prompt
+  # never names this path, so the path appearing in the trace at all is the
+  # signal that the plan was located rather than guessed at.
+  - name: plan-consulted
+    type: regex
+    target: trace
+    pattern: "\\.agents/plans/issue-900\\.md"
+    match: contains
+
+  # And not by exploring source instead. Stated as "not read" rather than as a
+  # `tool_order` with the source read as its `after`: a compliant run answers
+  # "where did we get to" from the plan alone and may never open source, and a
+  # `tool_order` whose `after` never fires has no defined verdict — the same
+  # reasoning ../plans-with-sliced-reading/case.yaml gives for its deferral
+  # grader. Paired against `cat` for the same evasion reason that case gives.
+  - name: source-not-explored-instead
+    type: tool_used
+    tool: Read
+    input_match: src/domain/leverage.py
+    max: 0
+
+  - name: source-not-cated-instead
+    type: tool_used
+    tool: Bash
+    input_match: cat src/domain/leverage.py
+    max: 0
+
+  # Confirm, don't trust: the recorded shas are checked against the log before
+  # anything resumes. This needs a repository — a mounted fixture directory is
+  # not one, and a nested `.git` cannot be committed — so `scaffold_script`
+  # above supplies the history. Without `--scaffold` the `git log` errors and
+  # this grader scores the *attempt* rather than the reconciliation: weaker,
+  # but the failure mode it guards (resuming without checking at all) still
+  # registers. Weighted down — locating the plan is the core claim.
+  - name: plan-reconciled-against-log
+    type: tool_used
+    tool: Bash
+    input_match: git log
+    min: 1
+    weight: 0.5
+
+  # The resume point is stated back and confirmation asked for, rather than the
+  # agent silently continuing from a possibly stale file.
+  - name: resume-point-stated-and-confirmed
+    type: llm
+    criteria: >
+      The response states where the work stopped (behavior 1 done, behavior 2
+      next, or equivalent, sourced from the plan file rather than guessed) and
+      asks the user to confirm before continuing. Naming a discrepancy between
+      the plan and the log instead — the recorded sha not being found — also
+      passes, since it is the same "confirm, don't trust" behavior. Silently
+      starting behavior 2 does not pass; a generic "shall I proceed?" that does
+      not name the resume point does not pass.
+    focus: last_message
