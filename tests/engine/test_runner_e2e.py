@@ -515,6 +515,108 @@ def test_a_paper_start_performs_no_venue_account_read_at_the_barrier(
         reopened.close()
 
 
+_NS_PER_SECOND = 1_000_000_000
+
+_DEADLINE_ROWS: list[dict[str, str | int]] = [
+    {
+        "symbol": "BTC",
+        "price": "42000",
+        "size": "3",
+        "aggressor_side": "buy",
+        "trade_id": "a",
+        "ts_event": 1 * _NS_PER_SECOND,
+    },
+    {
+        "symbol": "BTC",
+        "price": "42100",
+        "size": "3",
+        "aggressor_side": "sell",
+        "trade_id": "b",
+        "ts_event": 31 * _NS_PER_SECOND,  # crosses the account cadence's 30s deadline
+    },
+    {
+        "symbol": "BTC",
+        "price": "42200",
+        "size": "3",
+        "aggressor_side": "buy",
+        "trade_id": "c",
+        "ts_event": 40 * _NS_PER_SECOND,  # published behind the crossing
+    },
+]
+
+
+def _run_across_the_ledger_deadline(tmp_path: Path, store: SQLiteStore, venue: Exchange) -> int:
+    """One strategy-less life whose replay drives virtual time past the account
+    cadence's deadline, held open until a tick *behind* the crossing has landed.
+
+    That last tick is the synchronisation point rather than the crossing itself.
+    A ``ManualClock`` sleeper is released by the advance but resumes only at the
+    next loop yield, and the feed's following publish is one — so by the time
+    this returns, a cadence scheduled on this run has had its cycle. Stopping on
+    the crossing tick instead would make the paper arm's *absence* of a venue
+    read a race rather than an assertion.
+    """
+
+    async def one_life() -> int:
+        bus = InMemoryBus()
+        clock = ManualClock()
+        ticks = tmp_path / "deadline-ticks.jsonl"
+        ticks.write_text("\n".join(json.dumps(row) for row in _DEADLINE_ROWS) + "\n")
+        engine = Engine(
+            bus=bus,
+            clock=clock,
+            store=store,
+            exchange=venue,
+            feed=ReplayFeed(path=ticks, bus=bus, clock=clock),
+        )
+        replayed = asyncio.Event()
+
+        async def on_tick(tick: MarketTick) -> None:
+            if tick.trade_id == "c":
+                replayed.set()
+
+        bus.subscribe(MarketTick, on_tick)
+        run = asyncio.create_task(engine.run())
+        await asyncio.wait_for(replayed.wait(), timeout=5)
+        await engine.stop()
+        return await run
+
+    return asyncio.run(one_life())
+
+
+def test_a_live_run_schedules_the_account_cadence(tmp_path: Path) -> None:
+    """The account grain's continuous net is wired on the live path (ADR-0040).
+
+    The venue is asked a second time without a restart and without anything
+    asking it to: the runner scheduled ``reconcile_account`` beside the two
+    order-grain cadences, and replayed time drove it across its deadline. One
+    read per cycle is the whole cycle's venue cost, so the count is also the
+    assertion that nothing polls per symbol.
+    """
+    store = SQLiteStore(tmp_path / "saga.db")
+    venue = _LiveShapedVenue()
+
+    assert _run_across_the_ledger_deadline(tmp_path, store, venue) == 0
+
+    assert venue.account_reads == 2  # the barrier's, then one cadence cycle
+
+
+def test_a_paper_run_schedules_no_account_cadence(tmp_path: Path) -> None:
+    """Paper has no second account to compare against, so there is no cycle to
+    schedule: ``PaperExchange`` "persists nothing and holds no position state"
+    (ADR-0043 §4), and its atomic ledger write stands in for the cross-check.
+
+    Asserted as a refusal, as the barrier's paper case is: the double raises on
+    the account read, so a cadence wired on both paths aborts the ``TaskGroup``
+    and this run exits non-zero instead of stopping gracefully. The real venue
+    would answer ``None`` and merely freeze every cycle forever — the same
+    mistake, made quiet.
+    """
+    store = SQLiteStore(tmp_path / "saga.db")
+
+    assert _run_across_the_ledger_deadline(tmp_path, store, _PaperShapedVenue()) == 0
+
+
 def test_a_live_restart_neither_re_derives_nor_overwrites_the_recorded_genesis(
     tmp_path: Path,
 ) -> None:

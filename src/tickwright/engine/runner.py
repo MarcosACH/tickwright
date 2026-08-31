@@ -121,13 +121,16 @@ class Engine:
         # The account grain's own cycle, and the owner of the barrier's account
         # step below. Built unconditionally, scheduled live-only: constructing it
         # reads nothing and asks the venue nothing, while *running* it is what
-        # paper has no second account to answer.
+        # paper has no second account to answer. Its config is held rather than
+        # passed inline, for the reason the reconcile config above is: the
+        # cadence below is paced off the same interval.
+        self._ledger_reconcile_config = LedgerReconcileConfig()
         self._ledger_reconciliation = LedgerReconciliation(
             exchange=exchange,
             portfolio=self._checkpointer.portfolio,
             clock=clock,
             bus=bus,
-            config=LedgerReconcileConfig(),
+            config=self._ledger_reconcile_config,
         )
         self._host = StrategyHost(
             bus=bus, clock=clock, store=store, tick_staleness_ns=self._config.tick_staleness_ns
@@ -201,6 +204,26 @@ class Engine:
                         )
                     ),
                 ]
+                # The account grain's cycle joins them on the live path alone
+                # (ADR-0040), and the predicate is the same declared-versus-
+                # ingested one the ledger's own startup checks read: a genesis
+                # the operator declared is paper's, and paper has no second
+                # account to cross-check against. A venue-kind flag would be a
+                # second way to ask the same question, free to disagree with it.
+                #
+                # Appended to the one list rather than kept beside it, so the
+                # reverse shutdown cancels it with the others by membership and
+                # a run that scheduled none simply has nothing to cancel.
+                if self._exchange.account_spec().genesis_collateral is None:
+                    self._cadence_tasks.append(
+                        tg.create_task(
+                            run_cadence(
+                                clock=self._clock,
+                                interval_seconds=self._ledger_reconcile_config.interval_seconds,
+                                cycle=self._ledger_reconciliation.reconcile_account,
+                            )
+                        )
+                    )
                 # The venue's own long-lived half (ADR-0037's paper funding
                 # generator, today), supervised beside the cadences rather than
                 # spawned by the adapter: an exception raised in it aborts this
