@@ -301,6 +301,59 @@ def test_a_valuation_the_venue_computes_differently_is_tier_2() -> None:
     ]
 
 
+def _durable_ledger(store: SQLiteStore) -> tuple[object, ...]:
+    """Everything the ledger has made durable, in a form two reads can compare.
+
+    ``Account`` is a mutable identity type with no ``__eq__``, so comparing two
+    reads of it straight would compare object identity and pass through any
+    write — it is read out field by field instead. ``Position`` is a dataclass
+    and compares by value, so the partitions go in whole.
+    """
+    account = store.load_account()
+    assert account is not None, "the ledger was never opened: this case would guard nothing"
+    return (
+        account.account_id,
+        account.genesis_collateral,
+        account.genesis_ts_ns,
+        account.cash,
+        tuple(store.all_positions()),
+    )
+
+
+def test_a_cycle_over_a_diverging_book_changes_no_stored_value() -> None:
+    """The slice's contract where it actually binds: classify, heal nothing.
+
+    Asserted against the **store** rather than against the return value, because
+    the two say different things — a cycle that reported exactly the right
+    divergences and also wrote one of them back would satisfy every case above
+    this one. The heals land on this classification in later slices, so what
+    keeps them honest is a case that reads the durable side.
+
+    The book diverges on every leg the cycle compares — a phantom the venue is
+    flat in, foreign flow the ledger never placed, a fee the venue's figures
+    never charged, and the valuations all of that moves — so no comparison path
+    is skipped before the store is read back.
+
+    The positions table is empty on both reads, and that is a guard rather than a
+    gap: this suite's ``book_fill`` deliberately omits the durable write
+    (asserted at the ``Checkpointer``'s own seam), while the venue *does* report
+    a BTC position the ledger has never held. A cycle that materialised foreign
+    flow would put a row there.
+    """
+    clock = ManualClock(start_ns=1_000)
+    store = SQLiteStore(":memory:")
+    projection = _live_ledger(store, clock)
+    projection.materialise(DERIVED_STATE)
+    book_fill(projection, _fill(quantity="5", price="100", symbol="SOL", fee="0.5"), side=Side.BUY)
+    projection.observe_mark(_mark("90", symbol="SOL"))
+    before = _durable_ledger(store)
+
+    divergences = asyncio.run(_cycle(projection, _ReadOnlyVenue(), clock).reconcile_account())
+
+    assert divergences, "vacuous unless the cycle found something a later slice would heal"
+    assert _durable_ledger(store) == before
+
+
 def test_a_symbol_only_one_side_holds_is_still_compared() -> None:
     """Neither side's symbol set bounds the comparison.
 
