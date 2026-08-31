@@ -1,17 +1,30 @@
 #!/usr/bin/env bash
-# doc-slice — print a markdown section by heading, or list the TOC.
+# doc-slice — print a markdown section by heading, list the TOC, or print only the
+# amendment blocks a section was corrected by.
 #
 # Usage:
-#   doc-slice <file>                     # prints TOC: "<line>  <level>  <heading>"
-#   doc-slice <file> <heading-substr>    # prints the matching section until next same-or-higher heading
+#   doc-slice <file>                                  # prints TOC: "<line>  <level>  <heading>"
+#   doc-slice <file> <heading-substr>                 # prints the matching section until next same-or-higher heading
+#   doc-slice --amendments <file> [<heading-substr>]  # prints only the "**( … **)**" blocks, banner-labelled
 #
 # Heading match is case-insensitive substring on the heading text (after the #s).
 # Multiple matches: prints the first; non-zero exit lists all matches on stderr.
+#
+# --amendments inverts document order for the append-corrected ADR corpus: the blocks
+# carry the current truth, the prose above them is often the retired version. Blocks are
+# keyed on the "**(" … "**)**" delimiter pair, never on opening words (arbitrary prose).
+# Exit 3 = an opener with no closer; see docs/agents/adr-reading.md.
 
 set -euo pipefail
 
+amendments=0
+if [[ ${1:-} == --amendments ]]; then
+  amendments=1
+  shift
+fi
+
 if [[ $# -lt 1 || $# -gt 2 ]]; then
-  sed -n '2,11p' "$0" >&2
+  sed -n '2,16p' "$0" >&2
   exit 2
 fi
 
@@ -21,7 +34,55 @@ if [[ ! -f $file ]]; then
   exit 2
 fi
 
+# Prints the "**( … **)**" blocks of stdin, each under a "--- <line>  <heading>" banner.
+# base offsets the reported line numbers when stdin is a slice, not the whole file.
+amend() {
+  awk -v base="$1" -v heading="$2" '
+    /^```/ { fence = !fence; next }
+    fence { next }
+    /^#+[[:space:]]/ {
+      match($0, /^#+/)
+      text = substr($0, RLENGTH + 1)
+      sub(/^[[:space:]]+/, "", text)
+      heading = text
+    }
+    {
+      rest = $0
+      while (1) {
+        if (!inblock) {
+          p = index(rest, "**(")
+          if (p == 0) break
+          inblock = 1
+          startline = NR + base
+          startheading = heading
+          buf = ""
+          rest = substr(rest, p)
+        }
+        q = index(rest, "**)**")
+        if (q == 0) {
+          buf = buf rest "\n"
+          break
+        }
+        buf = buf substr(rest, 1, q + 4)
+        printf "--- %d  %s\n%s\n", startline, startheading, buf
+        inblock = 0
+        rest = substr(rest, q + 5)
+      }
+    }
+    END {
+      if (inblock) {
+        printf "doc-slice: unclosed amendment block opened at line %d\n", startline > "/dev/stderr"
+        exit 3
+      }
+    }
+  '
+}
+
 if [[ $# -eq 1 ]]; then
+  if [[ $amendments -eq 1 ]]; then
+    amend 0 "" < "$file"
+    exit 0
+  fi
   awk '
     /^```/ { fence = !fence; next }
     !fence && /^#+[[:space:]]/ {
@@ -62,7 +123,7 @@ fi
 
 read -r start_line start_level _ < <(printf '%s\n' "$matches" | head -n1 | awk -F'\t' '{ print $1, $2, $3 }')
 
-awk -v start="$start_line" -v lvl="$start_level" '
+section=$(awk -v start="$start_line" -v lvl="$start_level" '
   /^```/ { fence = !fence }
   NR < start { next }
   NR == start { print; next }
@@ -71,4 +132,10 @@ awk -v start="$start_line" -v lvl="$start_level" '
     if (RLENGTH <= lvl) exit
   }
   { print }
-' "$file"
+' "$file")
+
+if [[ $amendments -eq 1 ]]; then
+  printf '%s\n' "$section" | amend "$((start_line - 1))" ""
+else
+  printf '%s\n' "$section"
+fi
