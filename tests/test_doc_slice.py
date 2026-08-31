@@ -62,6 +62,17 @@ def _body(block: str) -> str:
     return block.split("\n", 1)[1].rstrip("\n")
 
 
+def _mask_code(body: str) -> str:
+    """Replace code spans and fences with an asterisk-free placeholder.
+
+    Masked, never deleted: deleting ``*`SQLiteStore`*`` would join its two italic
+    markers into a phantom ``**`` and report a well-formed block as broken (issue
+    #269). A backtick span carries no emphasis, so its interior must not be counted.
+    """
+    fenced = re.sub(r"(?ms)^```.*?^```", "CODE", body)
+    return re.sub(r"`[^`]*`", "CODE", fenced)
+
+
 class TestSectionSlicing:
     """The pre-existing modes, pinned so ``--amendments`` cannot regress them."""
 
@@ -296,3 +307,21 @@ class TestCorpusBalance:
         assert result.returncode == 0, result.stderr
         for block in _blocks(result.stdout):
             assert _body(block) in text
+
+    @pytest.mark.parametrize("adr", _ADRS, ids=lambda p: p.stem)
+    def test_every_emitted_block_has_even_emphasis_parity(self, adr: Path) -> None:
+        """``**`` runs come out even, so the block renders the emphasis it was written with.
+
+        Delimiter balance — asserted above — does not catch this: an opener that never
+        closes its own bold run leaves the whole block off by one, so the phrases meant
+        to be bold render plain and the connective prose renders bold, with a literal
+        ``**`` leaking past the closer (issue #269, ADR-0040 §5). The rule is the
+        *Shape* bullet of ``docs/agents/adr-reading.md``; this makes it enforced rather
+        than remembered.
+        """
+        result = _run("--amendments", str(adr))
+
+        assert result.returncode == 0, result.stderr
+        for block in _blocks(result.stdout):
+            banner, body = block.split("\n", 1)
+            assert _mask_code(body).count("**") % 2 == 0, f"{adr.name} block at {banner}"
