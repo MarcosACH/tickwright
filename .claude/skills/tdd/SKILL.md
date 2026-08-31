@@ -87,6 +87,14 @@ Pass the **bare module name** as the heading substring: the TOC prints the path 
 but without them matches nothing. The invocation is canonical in
 [CLAUDE.md → Context Discipline](../../../CLAUDE.md); don't restate it here.
 
+**Read an ADR section's amendments before its prose — `doc-slice --amendments`.**
+The corpus is append-corrected, so the closing `**( … **)**` blocks hold the current decision and
+the prose above them is often the version it replaced. Reading in document order is how issue #190
+could have shipped ADR-0040 §5's superseded `PaperExchangeConfig` placement and neither of §4's
+field defaults. The flag, the delimiter rule and that counter-example are canonical in
+[docs/agents/adr-reading.md](../../../docs/agents/adr-reading.md); reach for the full section only
+when the *original reasoning* is what the behavior needs.
+
 What stays up front is the **agreement**, not the code reading: the seams under test and the
 behavior list are still confirmed with the user before anything is written (Planning checklist
 below).
