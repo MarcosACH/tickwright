@@ -1,0 +1,78 @@
+schema_version: "1.0"
+name: tdd-plans-with-sliced-reading
+description: >
+  Planning a multi-module slice slices the module map with doc-slice and defers
+  the source it does not need yet, instead of loading the subsystem up front.
+tags: [tdd, skills, context-budget]
+
+# Resolves the with-arm. The repo root carries no plugin manifest, so without
+# this the two ablation arms would run identically.
+plugins:
+  - .claude/skills/tdd
+
+context:
+  # A scaled-down stand-in for a real tree: a module map big enough that
+  # reading it whole is visibly the wrong move, a copy of the repo's real
+  # `doc-slice`, and two source modules — one the first behavior needs and one
+  # only a late behavior does. Mounted at the sandbox root, so paths inside are
+  # docs/... and src/... (same unverified mount semantics flagged in
+  # ../writes-test-before-src/case.yaml).
+  add_dirs: [fixture]
+
+execution:
+  # Names the slice and its two ends without naming the *method*: saying
+  # "don't read too much" would hand the ordering to the without-arm and
+  # collapse the delta. The prompt deliberately mentions the venue module, so
+  # deferring it is a choice the agent makes rather than an omission it lucks
+  # into.
+  prompt: |
+    We're picking up the leverage-bound slice. It spans src/domain/leverage.py
+    (the shared bound check) and src/venues/hyperliquid/universe.py (where the
+    cap enters from the venue meta endpoint); docs/module-maps/leverage-surface.md
+    is the architecture anchor. First behavior: check_leverage refuses a
+    leverage above the instrument's max_leverage. Plan it and write the first
+    test.
+  max_turns: 12
+  timeout_seconds: 600
+  allowed_tools: [Skill, Read, Grep, Glob, Bash, Write, Edit]
+
+runs: 2
+
+graders:
+  # with-only: the without-arm has no skill to fire, so scoring this would just
+  # subtract a constant from that arm. Reported as a plugin-fired indicator.
+  - name: tdd-skill-fired
+    type: tool_used
+    tool: Skill
+    input_match: tdd
+    arm: with-only
+
+  # The map is read by section, never whole. Free and mechanical: a `Read` of
+  # the map file is exactly the 21.6k-shaped mistake the rule names.
+  - name: module-map-not-read-whole
+    type: tool_used
+    tool: Read
+    input_match: docs/module-maps/leverage-surface.md
+    max: 0
+
+  # The positive half: the agent reached for the section tool rather than
+  # skipping the map altogether, which would also score 0 on the grader above.
+  - name: module-map-sliced
+    type: tool_used
+    tool: Bash
+    input_match: doc-slice
+    min: 1
+
+  # Deferral: the venue module belongs to a late behavior, and `max_turns`
+  # bounds this run to planning plus the first one — so reading it here is the
+  # up-front load the rule forbids, not early work on a later cycle. Asserted
+  # as "not read" rather than as a `tool_order`, because the compliant run may
+  # never touch the file at all and a `tool_order` whose `after` never fires
+  # has no defined verdict. Weighted down: the reading rules above are the
+  # case's core claim.
+  - name: venue-source-not-read-up-front
+    type: tool_used
+    tool: Read
+    input_match: src/venues/hyperliquid/universe.py
+    max: 0
+    weight: 0.5

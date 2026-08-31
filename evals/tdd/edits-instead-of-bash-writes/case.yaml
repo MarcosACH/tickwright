@@ -1,0 +1,63 @@
+schema_version: "1.0"
+name: tdd-edits-instead-of-bash-writes
+description: >
+  Changes to files that already exist in the tree go through Edit, not through a
+  Bash heredoc rewrite or a targeted `sed -i`.
+tags: [tdd, skills, context-budget]
+
+plugins:
+  - .claude/skills/tdd
+
+context:
+  # A source module and its test, both already on disk: every write in a
+  # compliant run is therefore an edit to an already-read file, which is the
+  # exact case the rule covers.
+  add_dirs: [fixture]
+
+execution:
+  # Bash is allowed and a shell rewrite is the obvious shortcut — that is the
+  # point. The prompt says nothing about which tool to use; the skill is what
+  # makes the choice, and the without-arm is free to reach for `sed -i` under
+  # the bypass-permissions guidance this rule overrides.
+  prompt: |
+    In src/domain/leverage.py, check_leverage only refuses a leverage below 1.
+    It also needs to refuse a leverage above spec.max_leverage, with the symbol
+    named in the message. Add it, with a test in tests/domain/test_leverage.py,
+    and run pytest.
+  max_turns: 15
+  timeout_seconds: 600
+  allowed_tools: [Skill, Read, Grep, Glob, Bash, Write, Edit]
+
+runs: 2
+
+graders:
+  - name: tdd-skill-fired
+    type: tool_used
+    tool: Skill
+    input_match: tdd
+    arm: with-only
+
+  - name: source-changed-with-edit
+    type: tool_used
+    tool: Edit
+    input_match: src/domain/leverage.py
+    min: 1
+
+  # Heredoc rewrites. Matched on the delimiter rather than on `<<`, which is
+  # also a shift operator a grep pattern could carry; `EOF` is the convention
+  # every heredoc in this repo's scripts uses, including `python3 - <<'PYEOF'`.
+  - name: no-bash-heredoc-rewrite
+    type: tool_used
+    tool: Bash
+    input_match: EOF
+    max: 0
+
+  # The targeted half of the rule: a one-line `sed -i` stales the harness's
+  # cached copy exactly as much as a whole-file rewrite, so a small diff is not
+  # an exemption. A skill that stated only the heredoc half would pass the
+  # grader above and fail this one.
+  - name: no-bash-sed-rewrite
+    type: tool_used
+    tool: Bash
+    input_match: sed -i
+    max: 0

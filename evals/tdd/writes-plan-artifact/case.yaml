@@ -1,0 +1,68 @@
+schema_version: "1.0"
+name: tdd-writes-plan-artifact
+description: >
+  The confirmed plan lands in .agents/plans/issue-<N>.md — seams and an ordered
+  behavior checklist — rather than existing only as a conversation turn.
+tags: [tdd, skills, context-budget]
+
+plugins:
+  - .claude/skills/tdd
+
+context:
+  # Empty sandbox: the artifact is written from the issue body and the seam
+  # agreement, neither of which needs a tree. The issue text is in the prompt
+  # because `gh` cannot reach the network from the sandbox.
+  add_dirs: []
+
+execution:
+  prompt: |
+    Working issue #900, "leverage bound is checked on both exchange paths":
+
+      check_leverage(setting, spec) in domain/leverage.py must refuse anything
+      outside 1 <= leverage <= spec.max_leverage, naming every offending symbol
+      at once. Both PaperExchange.start() and HyperliquidExchange.start() call
+      it; paper validates and never writes. InstrumentSpec.max_leverage
+      defaults to 1.
+
+    Base off main. The seams are Exchange.start() for both adapters and the
+    domain check itself — those are confirmed, and the behavior order is: the
+    domain bound, then paper's start(), then hyperliquid's start(). Get the
+    plan down before we start writing tests.
+  max_turns: 10
+  timeout_seconds: 300
+  allowed_tools: [Skill, Read, Grep, Glob, Bash, Write, Edit]
+
+runs: 2
+
+graders:
+  - name: tdd-skill-fired
+    type: tool_used
+    tool: Skill
+    input_match: tdd
+    arm: with-only
+
+  # Free, and the whole claim of change 3: the plan is a file, at the derivable
+  # per-issue path, not a turn in the transcript.
+  - name: plan-file-written
+    type: file_exists
+    path: .agents/plans/issue-900.md
+
+  # Cheap check that the file carries what a resumed session needs rather than
+  # being an empty stub: the confirmed seams, and a checklist row per behavior.
+  - name: plan-records-seams-and-behaviors
+    type: regex
+    target:
+      source: file
+      path: .agents/plans/issue-900.md
+    pattern: "seams"
+    flags: "i"
+    match: contains
+
+  - name: plan-has-a-behavior-checklist
+    type: regex
+    target:
+      source: file
+      path: .agents/plans/issue-900.md
+    pattern: "max_leverage|domain bound"
+    flags: "i"
+    match: contains

@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# doc-slice — print a markdown section by heading, or list the TOC.
+#
+# Usage:
+#   doc-slice <file>                     # prints TOC: "<line>  <level>  <heading>"
+#   doc-slice <file> <heading-substr>    # prints the matching section until next same-or-higher heading
+#
+# Heading match is case-insensitive substring on the heading text (after the #s).
+# Multiple matches: prints the first; non-zero exit lists all matches on stderr.
+
+set -euo pipefail
+
+if [[ $# -lt 1 || $# -gt 2 ]]; then
+  sed -n '2,11p' "$0" >&2
+  exit 2
+fi
+
+file=$1
+if [[ ! -f $file ]]; then
+  echo "doc-slice: not a file: $file" >&2
+  exit 2
+fi
+
+if [[ $# -eq 1 ]]; then
+  awk '
+    /^```/ { fence = !fence; next }
+    !fence && /^#+[[:space:]]/ {
+      match($0, /^#+/)
+      level = RLENGTH
+      text = substr($0, RLENGTH + 1)
+      sub(/^[[:space:]]+/, "", text)
+      printf "%5d  %d  %s\n", NR, level, text
+    }
+  ' "$file"
+  exit 0
+fi
+
+needle=$2
+matches=$(awk -v needle="$needle" '
+  /^```/ { fence = !fence; next }
+  !fence && /^#+[[:space:]]/ {
+    match($0, /^#+/)
+    level = RLENGTH
+    text = substr($0, RLENGTH + 1)
+    sub(/^[[:space:]]+/, "", text)
+    if (index(tolower(text), tolower(needle))) {
+      printf "%d\t%d\t%s\n", NR, level, text
+    }
+  }
+' "$file")
+
+if [[ -z $matches ]]; then
+  echo "doc-slice: no heading matches '$needle' in $file" >&2
+  exit 1
+fi
+
+count=$(printf '%s\n' "$matches" | wc -l | tr -d ' ')
+if [[ $count -gt 1 ]]; then
+  echo "doc-slice: $count headings match '$needle'; using first. All matches:" >&2
+  printf '%s\n' "$matches" | awk -F'\t' '{ printf "  line %s  (h%s)  %s\n", $1, $2, $3 }' >&2
+fi
+
+read -r start_line start_level _ < <(printf '%s\n' "$matches" | head -n1 | awk -F'\t' '{ print $1, $2, $3 }')
+
+awk -v start="$start_line" -v lvl="$start_level" '
+  /^```/ { fence = !fence }
+  NR < start { next }
+  NR == start { print; next }
+  !fence && /^#+[[:space:]]/ {
+    match($0, /^#+/)
+    if (RLENGTH <= lvl) exit
+  }
+  { print }
+' "$file"

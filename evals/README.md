@@ -118,14 +118,39 @@ a `regex` over a planted phrase is both free and stable.
 
 ## What these cases cover, and what they do not
 
-The current cases run in an **empty sandbox with no write tools**, so they grade what the skill
-tells the agent to *do*, not code it produced. That is the cheap, stable core of a skill's value:
-a skill is guidance, and guidance that stopped being given is the failure worth catching.
+Cases come in two shapes. The cheap one runs in an **empty sandbox with no write tools** and grades
+what the skill tells the agent to *do* (`tdd/red-before-green`); the expensive one mounts a fixture
+tree, allows `Write`/`Edit`/`Bash`, and grades the edits themselves
+(`tdd/writes-test-before-src`, `tdd/edits-instead-of-bash-writes`). A skill is guidance, and
+guidance that stopped being given is the failure worth catching — but only the second shape can
+catch guidance that is given and then not followed.
 
-It leaves the expensive half uncovered. Proving `/tdd` really writes the failing test first needs a
-real tree and real edits: `context.add_dirs` pointing at a fixture repo, `--allow-tools Write Edit
-Bash`, and a `tool_order` grader asserting the test file is written before any `src/` edit. That is
-the natural next case. It is deliberately not the first one.
+Neither shape measures **token consumption**. The context-budget rules in `/tdd` are graded by
+proxy — which tool was used, whether a doc was sliced or read whole, whether reading was deferred
+past the first test — because a token threshold drifts with the model version and reads as a
+regression when nothing regressed. Assert behavior, not a number.
+
+### Fixture conventions
+
+- A fixture lives at `<case>/fixture/` and is named in `context.add_dirs`, mounted at the sandbox
+  root — so paths in prompts and `input_match` are `src/...`, not `fixture/src/...`. Unverified;
+  see the note in `tdd/writes-test-before-src/case.yaml`.
+- Fixtures carry no packaging. A `conftest.py` putting `src/` on `sys.path` is what stands in for
+  `pip install -e .`.
+- A fixture may carry a path the repo gitignores — `tdd/resumes-from-plan/fixture/.agents/plans/`
+  is committed, because `.gitignore`'s `.agents/plans/` has an interior slash and is therefore
+  anchored to the repo root. Check a new one with `git check-ignore -v <path>` before assuming it
+  survives the commit.
+- Copy a tool the case needs into the fixture rather than reaching out of the sandbox for it
+  (`tdd/plans-with-sliced-reading/fixture/.agents/tools/doc-slice`). It drifts, and a stale copy is
+  the cost of a hermetic sandbox.
+
+### Grading a written artifact
+
+`regex` with `target: {source: file, path: <path>}` reads a file the run produced, so a claim about
+an artifact's *contents* stays free. `file_exists` proves it was written at all. Reach for `llm`
+only where the claim is genuinely about prose — `tdd/writes-plan-artifact` proves the plan exists
+and then greps it, and pays for neither.
 
 ## Adding a case
 
