@@ -190,3 +190,38 @@ def test_a_leverage_entry_for_an_untraded_symbol_is_rejected_at_load(tmp_path: P
                 "SOL": LeverageSpec(leverage=2),
             },
         )
+
+
+def test_the_traded_symbol_set_is_derived_once_for_both_readers(tmp_path: Path) -> None:
+    """Two things ask "what does this process trade" and must not disagree.
+
+    The dead-entry validator rejects a ``leverage`` key *outside* this set while
+    the composition root's ``resolve_leverage`` completes ``leverage`` *over* it
+    — the same set read for opposite purposes, so two comprehensions in two
+    modules is exactly how one comes to admit a key the other drops. It is the
+    strategy-declared set (ADR-0044 §3), deliberately not the feed's
+    subscription list, which may carry context symbols nothing trades.
+
+    Duplicate-free and in declaration order: ``StrategyHost`` refuses two
+    strategies over one symbol, but that fires at registration and this is read
+    at config load, ahead of it.
+    """
+    (tmp_path / "ticks.jsonl").touch()
+
+    config = AppConfig(
+        replay=ReplayFeedConfig(path=tmp_path / "ticks.jsonl"),
+        paper=PaperExchangeConfig(genesis_collateral=Decimal("100000")),
+        hyperliquid=HyperliquidConfig(symbols=["BTC", "ETH", "SOL"]),
+        strategies=[
+            StrategyConfig(
+                kind="single_shot_market",
+                strategy_id=strategy_id,
+                symbol=symbol,
+                side=Side.BUY,
+                quantity=Decimal("0.5"),
+            )
+            for strategy_id, symbol in (("eth", "ETH"), ("btc", "BTC"), ("btc-2", "BTC"))
+        ],
+    )
+
+    assert config.traded_symbols == ("ETH", "BTC")

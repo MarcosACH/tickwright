@@ -119,6 +119,25 @@ class AppConfig(BaseModel):
             )
         return self
 
+    @property
+    def traded_symbols(self) -> tuple[str, ...]:
+        """What this process can place orders on: the strategy-declared symbols.
+
+        Named once because two things ask it and must not answer differently
+        (ADR-0044 §3): the dead-entry validator below, which rejects a
+        ``leverage`` key outside this set, and the composition root's
+        resolution, which completes ``leverage`` *over* it. Two comprehensions
+        in two modules is how those two come to disagree about the set one
+        validates and the other fills.
+
+        Deliberately not the feed's subscription list (which may carry context
+        symbols nothing trades) and not the venue's instrument universe (which
+        says nothing about what is traded). Ordered by declaration and
+        duplicate-free — ``StrategyHost`` refuses two strategies over one
+        symbol, but this is read at config load, ahead of registration.
+        """
+        return tuple(dict.fromkeys(strategy.symbol for strategy in self.strategies))
+
     @model_validator(mode="after")
     def _every_leverage_entry_must_name_a_traded_symbol(self) -> Self:
         """Reject config that cannot take effect (ADR-0044 §3).
@@ -135,8 +154,7 @@ class AppConfig(BaseModel):
         one. Every offending key at once: an operator who typo'd two learns both
         on the first run rather than one per run.
         """
-        traded = {strategy.symbol for strategy in self.strategies}
-        dead = sorted(set(self.leverage) - traded)
+        dead = sorted(set(self.leverage) - set(self.traded_symbols))
         if dead:
             raise ValueError(
                 "leverage names symbols no configured strategy trades: "
