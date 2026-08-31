@@ -69,16 +69,30 @@ Two details the tool depends on:
   more across the corpus). Scanning for closers only while inside a block drops all of them.
 - **The closer is exactly `**)**`.** Four sites closed with a bare `**)` or a `)**` and were
   normalised in #266 (ADR-0035 *Placement*, ADR-0038 *`AccountSpec`* and *Account exclusivity*,
-  ADR-0043 §1); rendering is unchanged either way. All 50 files now balance, and `tests/test_doc_slice.py` asserts that per file over
-  `docs/adr/*.md` as it stands, so a new ADR joins the check by existing.
+  ADR-0043 §1). Two of them needed the opener's bold run closed as well — appending the closer
+  alone left a dangling `**` in the rendered text, which is why the shape below is stated as a
+  pair of rules and not one. All 50 files now balance, and `tests/test_doc_slice.py` asserts that
+  per file over `docs/adr/*.md` as it stands, so a new ADR joins the check by existing.
 
 ## Writing an amendment
 
-Close with `**)**` and nothing else. `doc-slice --amendments` exits **3** naming the opening line
-when a block is left unclosed, which is also what the corpus test fails on. Failing loudly is the
-point: a detector that silently drops a correction is worse than the raw file.
+A block is a delimiter pair living **inside** a bold run, so both halves have to hold:
 
-Amendment text is 16.6 % of the corpus (86,851 of 523,866 characters, 76 blocks running 82 to 3,603
-characters, median 1,022), so on a lightly-corrected section the flag is most of the saving and on a
-heavily-corrected one it is little. ADR-0040 §4 is 77 % amendment by character. There the flag buys
-correctness, not bytes, and that was always the more expensive of the two to get wrong.
+- **Shape.** Open with `**(`, close the opener's own bold run at the end of its header
+  (`**(Amended by ADR-0044 §2:**`), leave the body plain, and close with `**)**` and nothing else.
+- **The `**` runs in the block come out even.** `**(header**)**` is three runs, not four: the first
+  two pair, the third has nothing to close, and the reader gets a literal `**` after the `)`. The
+  short inline note is where this bites, having no header colon to invite the close — fold the
+  clause the note annotates into the block body rather than closing the opener early. That reads
+  better through the flag too, which would otherwise print a block with no content in it.
+
+`doc-slice --amendments` exits **3** naming the opening line when a block is left unclosed, which is
+also what the corpus test fails on. Failing loudly is the point: a detector that silently drops a
+correction is worse than the raw file. Nothing is elided from *inside* a block either — fenced
+samples included, since a fenced measurement is often the evidence the amendment rests on — and
+`tests/test_doc_slice.py` holds every emitted body to being a verbatim substring of its source.
+
+Amendment text is 16.8 % of the corpus (87,768 of 523,871 characters, 76 blocks running 265 to
+3,645 characters, median 945), so on a lightly-corrected section the flag is most of the saving and
+on a heavily-corrected one it is little. ADR-0040 §4 is 76 % amendment by character. There the flag
+buys correctness, not bytes, and that was always the more expensive of the two to get wrong.
