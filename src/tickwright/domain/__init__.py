@@ -5,7 +5,7 @@ This package *defines* the seams every adapter and the engine compile against.
 It is the stable contract of the system; keep it log-free and dependency-free.
 """
 
-from .account import Account, AccountSpec, AccountView
+from .account import Account, AccountSpec, AccountView, venue_cash
 from .economics import fill_fee, funding_amount, funding_boundaries
 from .enums import (
     AggressorSide,
@@ -167,6 +167,7 @@ __all__ = [
     # Tier-2 view assembly (pure, never stored)
     "account_view",
     "position_view",
+    "venue_cash",
     # seam Protocols
     "Clock",
     "EventBus",

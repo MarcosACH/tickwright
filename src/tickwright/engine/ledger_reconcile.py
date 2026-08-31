@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from enum import StrEnum
 
-from tickwright.domain import Clock, EventBus, Exchange, VenueAccountState
+from tickwright.domain import Clock, EventBus, Exchange, VenueAccountState, venue_cash
 from tickwright.observability import NamedEvent, named_event
 
 from .portfolio import PortfolioProjection
@@ -124,9 +124,28 @@ class LedgerReconciliation:
         state = await self._exchange.fetch_account_state()
         if state is None:
             return None
-        divergences = tuple(self._compare_sizes(state))
+        divergences = (*self._compare_sizes(state), *self._compare_cash(state))
         named_event(NamedEvent.ACCOUNT_RECONCILED, divergences=len(divergences))
         return divergences
+
+    def _compare_cash(self, state: VenueAccountState) -> Iterator[Divergence]:
+        """The account grain's Tier-1 leg — one collateral pool, so no symbol.
+
+        The venue publishes no cash field, so its side is **derived**:
+        ``venue_cash`` is the same ``equity − Σ unrealized_pnl`` a live ledger's
+        genesis was opened at (ADR-0042 §6), read from ``domain`` rather than
+        restated here so the two can never disagree.
+        """
+        projected = self._portfolio.account().cash
+        venue = venue_cash(state)
+        if projected != venue:
+            yield Divergence(
+                tier=DivergenceTier.TIER_1,
+                quantity="cash",
+                symbol=None,
+                projected=projected,
+                venue=venue,
+            )
 
     def _compare_sizes(self, state: VenueAccountState) -> Iterator[Divergence]:
         """The Σ-invariant's venue link, per symbol (ADR-0034).

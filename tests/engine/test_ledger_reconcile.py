@@ -16,7 +16,7 @@ import asyncio
 from decimal import Decimal
 
 from ledgers import book_fill
-from venue_doubles import DERIVED_STATE, LIVE_ACCOUNT_ID, LiveVenueDouble
+from venue_doubles import DERIVED_GENESIS, DERIVED_STATE, LIVE_ACCOUNT_ID, LiveVenueDouble
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
@@ -61,7 +61,12 @@ def _live_ledger(store: SQLiteStore, clock: ManualClock) -> PortfolioProjection:
 
 
 def _fill(
-    *, quantity: str, price: str, symbol: str = "BTC", strategy_id: str = "alpha"
+    *,
+    quantity: str,
+    price: str,
+    symbol: str = "BTC",
+    strategy_id: str = "alpha",
+    fee: str = "0",
 ) -> OrderFillEvent:
     return OrderFilled(
         ts_event=1_000,
@@ -74,7 +79,7 @@ def _fill(
         quantity=Decimal(quantity),
         price=Decimal(price),
         cum_qty=Decimal(quantity),
-        fee=Decimal("0"),
+        fee=Decimal(fee),
     )
 
 
@@ -174,6 +179,35 @@ def test_a_net_size_the_venue_does_not_hold_is_tier_1() -> None:
             symbol="BTC",
             projected=Decimal("0.003"),
             venue=Decimal("0.002"),
+        )
+    ]
+
+
+def test_a_cash_line_the_venue_does_not_back_is_tier_1() -> None:
+    """The account grain's Tier-1 leg, against ``equity − Σ unrealized_pnl``.
+
+    The subtraction is the comparison's whole content: the venue's equity already
+    contains its unrealized PnL, so comparing our cash line straight against
+    equity would report a divergence on every account holding a position
+    (ADR-0042 §6). ``symbol`` is ``None`` because there is one collateral pool
+    per process and no symbol owns it (ADR-0038)."""
+    clock = ManualClock(start_ns=1_000)
+    projection = _live_ledger(SQLiteStore(":memory:"), clock)
+    projection.materialise(DERIVED_STATE)
+    # A fee the venue's own figures never charged: the size still agrees, so the
+    # cash leg is the only thing this case can be reading.
+    book_fill(projection, _fill(quantity="0.002", price=_ENTRY, fee="0.5"), side=Side.BUY)
+    projection.observe_mark(_mark(_AGREEING_MARK))
+
+    divergences = asyncio.run(_cycle(projection, _ReadOnlyVenue(), clock).reconcile_account())
+
+    assert _tier_1(divergences) == [
+        Divergence(
+            tier=DivergenceTier.TIER_1,
+            quantity="cash",
+            symbol=None,
+            projected=Decimal("25.4604"),  # the ingested 25.9604 genesis, less the fee
+            venue=DERIVED_GENESIS,
         )
     ]
 
