@@ -87,7 +87,7 @@ A block is a delimiter pair living **inside** a bold run, so both halves have to
   better through the flag too, which would otherwise print a block with no content in it. Parity is
   **enforced**, not remembered: `tests/test_doc_slice.py` counts the `**` runs of every emitted block
   across `docs/adr/*.md`. It counts them with code spans and fences **masked** rather than deleted —
-  deleting `*`SQLiteStore`*` joins its two italic markers into a phantom `**` and condemns a
+  deleting ``*`SQLiteStore`*`` joins its two italic markers into a phantom `**` and condemns a
   well-formed block ([#269](https://github.com/MarcosACH/tickwright/issues/269)).
 
 `doc-slice --amendments` exits **3** naming the opening line when a block is left unclosed, which is
