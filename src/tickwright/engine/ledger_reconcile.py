@@ -124,9 +124,50 @@ class LedgerReconciliation:
         state = await self._exchange.fetch_account_state()
         if state is None:
             return None
-        divergences = (*self._compare_sizes(state), *self._compare_cash(state))
+        divergences = (
+            *self._compare_sizes(state),
+            *self._compare_cash(state),
+            *self._compare_valuations(state),
+        )
         named_event(NamedEvent.ACCOUNT_RECONCILED, divergences=len(divergences))
         return divergences
+
+    def _compare_valuations(self, state: VenueAccountState) -> Iterator[Divergence]:
+        """The computed half: account equity, and per-symbol unrealized PnL.
+
+        Reported **un-banded** in this slice — every disagreement is yielded,
+        however small. The ADR-0040 §6 band and its two suppressions filter this
+        set in the alert slice; classification is what establishes the set.
+
+        An uncomputable number is **not compared** rather than compared as zero.
+        A ``None`` equity or Σ means a held position has no mark, so the ledger
+        is not what the two sides would disagree about (ADR-0041 §6).
+        """
+        equity = self._portfolio.account().equity
+        if equity is not None and equity != state.equity:
+            yield Divergence(
+                tier=DivergenceTier.TIER_2,
+                quantity="equity",
+                symbol=None,
+                projected=equity,
+                venue=state.equity,
+            )
+        venue_pnl = {position.symbol: position.unrealized_pnl for position in state.positions}
+        for symbol, projected in self._portfolio.account_unrealized_pnl().items():
+            # Only symbols the venue reports: one we hold and it does not has
+            # already been caught as a Tier-1 phantom, and a Tier-2 alert on the
+            # valuation of a position that should not exist is noise on top of a
+            # heal (ADR-0040 §6's first suppression, in structural form).
+            if projected is None or symbol not in venue_pnl:
+                continue
+            if projected != venue_pnl[symbol]:
+                yield Divergence(
+                    tier=DivergenceTier.TIER_2,
+                    quantity="unrealized_pnl",
+                    symbol=symbol,
+                    projected=projected,
+                    venue=venue_pnl[symbol],
+                )
 
     def _compare_cash(self, state: VenueAccountState) -> Iterator[Divergence]:
         """The account grain's Tier-1 leg — one collateral pool, so no symbol.

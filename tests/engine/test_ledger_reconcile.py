@@ -137,6 +137,17 @@ def _tier_1(divergences: tuple[Divergence, ...] | None) -> list[Divergence]:
     return [item for item in divergences if item.tier is DivergenceTier.TIER_1]
 
 
+def _tier_2(divergences: tuple[Divergence, ...] | None) -> list[Divergence]:
+    """The Tier-2 verdicts alone, sorted, for a case whose subject is the
+    computed half. Sorted because the two grains are collected independently and
+    their order carries no meaning a case should be pinned to."""
+    assert divergences is not None, "the cycle froze; this case expects a completed comparison"
+    return sorted(
+        (item for item in divergences if item.tier is DivergenceTier.TIER_2),
+        key=lambda item: item.quantity,
+    )
+
+
 def test_a_cycle_agreeing_with_the_venue_reports_no_divergence() -> None:
     """The tracer: one venue read, nothing to classify, and a record saying so.
 
@@ -209,6 +220,41 @@ def test_a_cash_line_the_venue_does_not_back_is_tier_1() -> None:
             projected=Decimal("25.4604"),  # the ingested 25.9604 genesis, less the fee
             venue=DERIVED_GENESIS,
         )
+    ]
+
+
+def test_a_valuation_the_venue_computes_differently_is_tier_2() -> None:
+    """The computed half, on a book whose Tier-1 legs agree exactly.
+
+    A stale mark moves every mark-dependent number and nothing else, so the
+    ledger is *correct* and only its valuation is behind — which is the whole
+    reason this tier alerts rather than heals (ADR-0034). Both grains are
+    compared: the account's equity and the position's own unrealized PnL."""
+    clock = ManualClock(start_ns=1_000)
+    projection = _live_ledger(SQLiteStore(":memory:"), clock)
+    projection.materialise(DERIVED_STATE)
+    book_fill(projection, _fill(quantity="0.002", price=_ENTRY), side=Side.BUY)
+    # $100 behind the venue's own mark, against the $17 skew its figures imply.
+    projection.observe_mark(_mark("64709.0"))
+
+    divergences = asyncio.run(_cycle(projection, _ReadOnlyVenue(), clock).reconcile_account())
+
+    assert _tier_1(divergences) == []
+    assert _tier_2(divergences) == [
+        Divergence(
+            tier=DivergenceTier.TIER_2,
+            quantity="equity",
+            symbol=None,
+            projected=Decimal("25.7604"),  # the 25.9604 cash line, less our own uPnL
+            venue=Decimal("25.9264"),
+        ),
+        Divergence(
+            tier=DivergenceTier.TIER_2,
+            quantity="unrealized_pnl",
+            symbol="BTC",
+            projected=Decimal("-0.2"),  # (64709.0 − 64809.0) × 0.002
+            venue=Decimal("-0.034"),
+        ),
     ]
 
 

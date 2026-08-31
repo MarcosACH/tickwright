@@ -39,6 +39,7 @@ from tickwright.domain import (
     StoreAccountMismatch,
     VenueAccountState,
     account_net_size,
+    account_unrealized_pnl,
     account_view,
     position_view,
 )
@@ -641,6 +642,18 @@ class PortfolioProjection:
         partition the scoped facade exists to keep unreachable.
         """
         return account_net_size(self._positions.values())
+
+    def account_unrealized_pnl(self) -> dict[str, Decimal | None]:
+        """Per-symbol unrealized PnL over *every* partition — ``account_net``'s
+        Tier-2 peer, and on the concrete for the same reason it is.
+
+        ``None`` for a symbol whose Σ needs an absent mark, which the reconcile
+        reads as *not compared* rather than as zero (ADR-0041 §6).
+        """
+        return account_unrealized_pnl(
+            self._positions.values(),
+            {symbol: mark.price for symbol, mark in self._marks.items()},
+        )
 
     def _view(self, position: Position, *, net: dict[str, Decimal]) -> PositionView:
         """Assemble one partition's view against the mark held for its symbol.
