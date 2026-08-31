@@ -34,6 +34,16 @@ class PaperExchangeConfig(BaseModel):
     """
 
     instrument_specs: dict[str, InstrumentSpec] = Field(default_factory=dict)
+    """Paper's instrument universe — what the meta endpoint is on live (ADR-0031).
+
+    Empty by field default and yet **required in practice**: ``start()`` refuses
+    a boot in which a strategy-traded symbol has no spec here (ADR-0044 §9). The
+    demand cannot move up to a field constraint or an ``AppConfig`` validator —
+    which symbols are traded is known at config load, but ``max_leverage`` lives
+    on the spec the *adapter* authors, so the earliest point both paths hold it
+    is ``start()`` itself. Empty stays legal because a run with no strategies is.
+    """
+
     fill_model: Literal["immediate", "stochastic"] = "immediate"
     seed: int = 0
     stochastic: StochasticParams = StochasticParams()

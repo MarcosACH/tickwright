@@ -132,4 +132,10 @@ class LeverageOutOfBounds(InvariantViolation):
     true on a paper run with no venue to ask. Every offending symbol is named
     with its bound at once, so an operator who over-levered two learns both on
     the first start.
+
+    The two conditions are reported as **separate clauses** of that one message,
+    because they send an operator to different places: an out-of-bounds leverage
+    is theirs to lower, while a missing spec is a hole in the exchange's
+    instrument universe that a leverage they may never have configured had
+    nothing to do with.
     """

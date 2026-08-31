@@ -31,6 +31,7 @@ from tickwright.domain import (
     Exchange,
     FillReport,
     InstrumentSpec,
+    LeverageBook,
     LeverageOutOfBounds,
     LeverageSpec,
     MarketTick,
@@ -1011,10 +1012,12 @@ def test_a_leverage_above_the_instruments_cap_refuses_to_start_on_paper() -> Non
             "BTC": replace(_BTC_SPEC, max_leverage=40),
             "ETH": replace(_BTC_SPEC, symbol="ETH", max_leverage=25),
         },
-        leverage={
-            "BTC": LeverageSpec(mode="cross", leverage=50),
-            "ETH": LeverageSpec(leverage=25),
-        },
+        leverage=LeverageBook(
+            {
+                "BTC": LeverageSpec(mode="cross", leverage=50),
+                "ETH": LeverageSpec(leverage=25),
+            }
+        ),
     )
 
     with pytest.raises(LeverageOutOfBounds) as refusal:
@@ -1023,3 +1026,34 @@ def test_a_leverage_above_the_instruments_cap_refuses_to_start_on_paper() -> Non
     assert "BTC" in str(refusal.value)
     assert "40" in str(refusal.value)
     assert "ETH" not in str(refusal.value)
+
+
+def test_a_traded_symbol_with_no_configured_spec_refuses_to_start_on_paper() -> None:
+    """ADR-0044 §9's first clause reaches the boot, not just the unit.
+
+    ``instrument_specs`` is empty by field default, so before the bound existed
+    a paper run could trade a symbol the venue had no spec for — quantizing
+    nowhere, skipping the venue-side min-notional check, and computing margin
+    against a cap nobody published. It now refuses at ``start()``, ahead of the
+    barrier, so no order is placed against an instrument this venue cannot
+    describe.
+
+    The refusal must name the missing **spec**: nothing here configures a
+    leverage at all, so an error blaming the ``1x`` default would send an
+    operator to ``TICKWRIGHT_LEVERAGE`` for a hole in
+    ``TICKWRIGHT_PAPER__INSTRUMENT_SPECS``.
+    """
+    exchange = PaperExchange(
+        bus=InMemoryBus(),
+        clock=ManualClock(),
+        fill_model=ImmediateFillModel(),
+        genesis_collateral=GENESIS,
+        account_net=dict,
+        leverage=LeverageBook.resolve({}, traded=["BTC"]),
+    )
+
+    with pytest.raises(LeverageOutOfBounds) as refusal:
+        asyncio.run(exchange.start())
+
+    assert "BTC" in str(refusal.value)
+    assert "InstrumentSpec" in str(refusal.value)
