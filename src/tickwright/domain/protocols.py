@@ -557,7 +557,12 @@ class Exchange(Protocol):
         the meta endpoint on Hyperliquid); it authors the specs and exposes them
         here so the ``Engine`` can wire them into the venue-agnostic guard at
         startup. A synchronous accessor, not a bus message — it is read once
-        during composition, not a per-order hot path."""
+        during composition, not a per-order hot path.
+
+        **Complete over the traded set**, not best-effort: ``start()`` refuses a
+        boot in which any strategy-traded symbol is missing from this map
+        (ADR-0044 §9 — its leverage would have no ``max_leverage`` to be bounded
+        by). A venue may publish more than is traded, never less."""
         ...
 
 
@@ -583,9 +588,14 @@ class PreTradeGuard(Protocol):
         The guard's specs are **mandatory**: a ``PlaceSignal`` for a symbol it has
         no ``InstrumentSpec`` for is a composition-root wiring bug (ADR-0031) and
         raises ``InvariantViolation`` (fail-fast, ADR-0014) — it cannot quantize
-        without a spec, and must not send an unquantized order. This is the
-        deliberate counterpart to ``Exchange``, whose specs are *optional* venue
-        config (a missing one skips the venue-side min-notional check)."""
+        without a spec, and must not send an unquantized order.
+
+        That refusal is now a **backstop rather than the first line**: ADR-0044
+        §9's leverage bound refuses ``Exchange.start()`` for any *traded* symbol
+        the venue publishes no spec for, which is boot, ahead of the barrier and
+        so ahead of any ``PlaceSignal``. What reaches here is therefore the
+        narrower case the bound cannot see — a signal for a symbol outside the
+        strategy-declared set the book was resolved over."""
         ...
 
     def trip_kill_switch(self, reason: str) -> None:

@@ -44,6 +44,20 @@ class InstrumentSpec:
     longs pay. Defaulted to ``0`` on the same frictionless-spec guarantee — and it
     is the *effective* rate rather than the venue's 8-hourly headline figure, so
     the boundary arithmetic stays the clean ``− signed_size × price × rate``.
+
+    ``max_leverage``/``margin_maint`` are the margin model's two spec-sourced
+    inputs (ADR-0040 §4), additive on the same pattern but **not defaulted
+    alike**. ``max_leverage`` is the venue's leverage cap (``meta.universe[]
+    .maxLeverage`` on Hyperliquid) and bounds the configured ``LeverageSpec`` in
+    ``Exchange.start()`` on both paths (ADR-0044 §9); it defaults to ``1``, not
+    ``0``, because ``0`` makes that ``1 ≤ leverage ≤ max_leverage`` bound
+    unsatisfiable and would fault every paper start on a default-valued spec.
+    ``margin_maint`` is the flat tier-0 maintenance **fraction**
+    (``maintenance = notional × margin_maint``), carried as explicit data rather
+    than derived so the ``domain`` helper stays venue-agnostic instead of
+    learning the venue's "half the initial margin at max leverage" rule — the
+    choice ADR-0036 made for the fee rates. It takes the fee/funding ``0``,
+    being a rate rather than a bound.
     """
 
     symbol: str
@@ -54,6 +68,8 @@ class InstrumentSpec:
     maker_fee: Decimal = Decimal("0")
     taker_fee: Decimal = Decimal("0")
     funding_rate: Decimal = Decimal("0")
+    max_leverage: int = 1
+    margin_maint: Decimal = Decimal("0")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

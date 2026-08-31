@@ -31,6 +31,9 @@ from tickwright.domain import (
     Exchange,
     FillReport,
     InstrumentSpec,
+    LeverageBook,
+    LeverageOutOfBounds,
+    LeverageSpec,
     MarketTick,
     Netting,
     OrderState,
@@ -981,3 +984,76 @@ def test_every_exchange_member_carries_a_claim_in_the_paper_suite() -> None:
     against a gate that names the omission than against a reviewer who has to
     notice it."""
     assert_every_member_is_claimed(Exchange, _SEAM_CLAIMS, suite=Path(__file__).parent)
+
+
+def test_a_leverage_above_the_instruments_cap_refuses_to_start_on_paper() -> None:
+    """Paper validates the ADR-0044 §9 bound and writes nothing.
+
+    Leaving the check to the venue was rejected: live would fail with a venue
+    error while **paper accepted an impossible leverage silently** and computed
+    margin, liquidation price and effective leverage off it. The strategy then
+    behaves one way in paper and fails at boot on promotion — precisely the
+    paper/live divergence the identical-compute grain exists to prevent. Paper
+    validating without writing is not an inconsistency; it is the
+    venue-agnostic half of the check running where the venue-specific half
+    cannot.
+
+    ``ETH`` sits *exactly* on its cap, so it must clear: the bound is
+    ``1 <= leverage <= max_leverage``, inclusive at both ends, and a refusal
+    naming ETH would be an off-by-one this assertion catches.
+    """
+    exchange = PaperExchange(
+        bus=InMemoryBus(),
+        clock=ManualClock(),
+        fill_model=ImmediateFillModel(),
+        genesis_collateral=GENESIS,
+        account_net=dict,
+        instrument_specs={
+            "BTC": replace(_BTC_SPEC, max_leverage=40),
+            "ETH": replace(_BTC_SPEC, symbol="ETH", max_leverage=25),
+        },
+        leverage=LeverageBook(
+            entries={
+                "BTC": LeverageSpec(mode="cross", leverage=50),
+                "ETH": LeverageSpec(leverage=25),
+            }
+        ),
+    )
+
+    with pytest.raises(LeverageOutOfBounds) as refusal:
+        asyncio.run(exchange.start())
+
+    assert "BTC" in str(refusal.value)
+    assert "40" in str(refusal.value)
+    assert "ETH" not in str(refusal.value)
+
+
+def test_a_traded_symbol_with_no_configured_spec_refuses_to_start_on_paper() -> None:
+    """ADR-0044 §9's first clause reaches the boot, not just the unit.
+
+    ``instrument_specs`` is empty by field default, so before the bound existed
+    a paper run could trade a symbol the venue had no spec for — quantizing
+    nowhere, skipping the venue-side min-notional check, and computing margin
+    against a cap nobody published. It now refuses at ``start()``, ahead of the
+    barrier, so no order is placed against an instrument this venue cannot
+    describe.
+
+    The refusal must name the missing **spec**: nothing here configures a
+    leverage at all, so an error blaming the ``1x`` default would send an
+    operator to ``TICKWRIGHT_LEVERAGE`` for a hole in
+    ``TICKWRIGHT_PAPER__INSTRUMENT_SPECS``.
+    """
+    exchange = PaperExchange(
+        bus=InMemoryBus(),
+        clock=ManualClock(),
+        fill_model=ImmediateFillModel(),
+        genesis_collateral=GENESIS,
+        account_net=dict,
+        leverage=LeverageBook.resolve({}, traded=["BTC"]),
+    )
+
+    with pytest.raises(LeverageOutOfBounds) as refusal:
+        asyncio.run(exchange.start())
+
+    assert "BTC" in str(refusal.value)
+    assert "InstrumentSpec" in str(refusal.value)

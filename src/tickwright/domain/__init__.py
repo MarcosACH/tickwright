@@ -18,6 +18,7 @@ from .enums import (
 )
 from .errors import (
     InvariantViolation,
+    LeverageOutOfBounds,
     StartupReconciliationTimeout,
     StoreAccountMismatch,
     VenueAccountModeUnsupported,
@@ -64,6 +65,13 @@ from .instrument import (
     quantize_price,
     quantize_size,
 )
+from .leverage import (
+    DEFAULT_LEVERAGE,
+    EMPTY_LEVERAGE_BOOK,
+    LeverageBook,
+    LeverageSpec,
+    MarginMode,
+)
 from .order import Order
 from .position import Position, PositionChange, PositionView, account_net_size
 from .protocols import (
@@ -91,12 +99,15 @@ __all__ = [
     "TimeInForce",
     # errors
     "InvariantViolation",
+    "LeverageOutOfBounds",
     "StartupReconciliationTimeout",
     "StoreAccountMismatch",
     "VenueAccountModeUnsupported",
     "VenueFactUnsupported",
     "VenueReadUnresolvable",
     # events + value types
+    "DEFAULT_LEVERAGE",
+    "EMPTY_LEVERAGE_BOOK",
     "Account",
     "AccountSpec",
     "AccountView",
@@ -110,6 +121,9 @@ __all__ = [
     "GuardDecision",
     "InstrumentSpec",
     "KillSwitchState",
+    "LeverageBook",
+    "LeverageSpec",
+    "MarginMode",
     "MarkTick",
     "MarketTick",
     "Order",

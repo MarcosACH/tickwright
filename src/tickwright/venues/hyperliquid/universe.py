@@ -60,12 +60,50 @@ async def fetch_instrument_specs(
     asset_indices: dict[str, int] = {}
     for index, entry in enumerate(entries):
         name = str(entry["name"])
+        # The venue's own leverage cap, and the flat tier-0 maintenance rate it
+        # implies (ADR-0040 §4). Defaulted to ``1`` for an entry that publishes
+        # no cap, matching ``InstrumentSpec``'s own default rather than inventing
+        # a permissive one — but only for an entry that publishes *none*: a cap
+        # that is present and non-positive is a value this adapter cannot read,
+        # and is refused below rather than defaulted to the same ``1``, which
+        # would silently invent a bound the venue never published.
+        max_leverage = int(entry.get("maxLeverage", 1))
+        if max_leverage < 1:
+            raise ValueError(
+                f"Hyperliquid meta publishes an unusable leverage cap for {name}: "
+                f"maxLeverage={max_leverage!r} (expected >= 1)"
+            )
         specs[name] = InstrumentSpec(
             symbol=name,
             sz_decimals=int(entry["szDecimals"]),
             max_decimals=_PERP_MAX_DECIMALS,
             min_notional=_MIN_NOTIONAL,
             max_sig_figs=_PERP_MAX_SIG_FIGS,
+            max_leverage=max_leverage,
+            margin_maint=_flat_maintenance_rate(max_leverage),
         )
         asset_indices[name] = index
     return HyperliquidUniverse(specs=specs, asset_indices=asset_indices)
+
+
+def _flat_maintenance_rate(max_leverage: int) -> Decimal:
+    """Hyperliquid's tier-0 maintenance fraction: half the initial margin at the
+    asset's max leverage, i.e. ``1/(2·max_leverage)`` (ADR-0040 §4).
+
+    Computed **here**, in the venue adapter, so the rule stays venue knowledge
+    and ``domain``'s maintenance helper reads a plain ``notional ×
+    margin_maint`` — the same split ADR-0036 made carrying the fee rates
+    explicitly rather than re-deriving a fee tier.
+
+    Flat tier-0 only: exact **below** an asset's first margin-tier band, and
+    under-reporting above it, where ``meta.marginTables`` and the
+    ``notional·mmr − deduction`` form take over. That extension point is
+    deferred to ``InstrumentSpec.margin_table_id`` and deliberately not
+    anticipated here.
+
+    Takes ``max_leverage >= 1``, which its one caller refuses the response to
+    establish: the denominator is why a non-positive cap cannot be carried, so
+    the check belongs where the venue's value is read rather than here, where a
+    second guard would only restate it one frame deeper.
+    """
+    return Decimal(1) / (2 * max_leverage)

@@ -22,7 +22,7 @@ from tickwright.adapters.bus import KafkaBusConfig
 from tickwright.adapters.feed import ReplayFeedConfig
 from tickwright.adapters.paper import PaperExchangeConfig
 from tickwright.adapters.store import PostgresStoreConfig, SQLiteStoreConfig
-from tickwright.domain import Side
+from tickwright.domain import LeverageSpec, Side
 from tickwright.engine.runner import EngineConfig
 from tickwright.venues.hyperliquid import HyperliquidConfig
 
@@ -78,6 +78,19 @@ class AppConfig(BaseModel):
     strategies: list[StrategyConfig] = Field(default_factory=list)
     engine: EngineConfig = EngineConfig()
 
+    leverage: dict[str, LeverageSpec] = Field(default_factory=dict)
+    """Per-symbol leverage & margin mode — venue-agnostic, top-level (ADR-0044 §2).
+
+    A peer of ``strategies`` and ``engine``, deliberately **not** nested under
+    ``paper`` or ``hyperliquid``: its consumer is the venue-agnostic margin
+    model, which needs it on both paths, and no live run may read a paper block
+    (ADR-0042 §1).
+
+    **Sparse.** It carries only the symbols the operator named; the composition
+    root resolves it against the strategy-declared set into the *complete* map
+    both consumers receive, so neither can invent its own reading of an
+    unconfigured symbol."""
+
     @model_validator(mode="after")
     def _the_selected_feed_needs_its_config(self) -> Self:
         if self.feed == "replay" and self.replay is None:
@@ -103,6 +116,49 @@ class AppConfig(BaseModel):
             raise ValueError(
                 "exchange='paper' needs a starting collateral: "
                 "set TICKWRIGHT_PAPER__GENESIS_COLLATERAL"
+            )
+        return self
+
+    @property
+    def traded_symbols(self) -> tuple[str, ...]:
+        """What this process can place orders on: the strategy-declared symbols.
+
+        Named once because two things ask it and must not answer differently
+        (ADR-0044 §3): the dead-entry validator below, which rejects a
+        ``leverage`` key outside this set, and the composition root's
+        resolution, which completes ``leverage`` *over* it. Two comprehensions
+        in two modules is how those two come to disagree about the set one
+        validates and the other fills.
+
+        Deliberately not the feed's subscription list (which may carry context
+        symbols nothing trades) and not the venue's instrument universe (which
+        says nothing about what is traded). Ordered by declaration and
+        duplicate-free — ``StrategyHost`` refuses two strategies over one
+        symbol, but this is read at config load, ahead of registration.
+        """
+        return tuple(dict.fromkeys(strategy.symbol for strategy in self.strategies))
+
+    @model_validator(mode="after")
+    def _every_leverage_entry_must_name_a_traded_symbol(self) -> Self:
+        """Reject config that cannot take effect (ADR-0044 §3).
+
+        An entry reaches the model and the venue only through a strategy that
+        trades its symbol, so one naming a symbol no strategy declares is dead —
+        nearly always a typo, and the dangerous kind, since the operator
+        believes they raised the leverage on a symbol still running at the
+        ``1x`` default. ``extra="forbid"`` above already settles that
+        silently-ignored configuration is a bug here, not a convenience.
+
+        Fires at load, before any component is built, so the root's resolution
+        never meets a dead entry and neither path reaches ``start()`` carrying
+        one. Every offending key at once: an operator who typo'd two learns both
+        on the first run rather than one per run.
+        """
+        dead = sorted(set(self.leverage) - set(self.traded_symbols))
+        if dead:
+            raise ValueError(
+                "leverage names symbols no configured strategy trades: "
+                f"{', '.join(dead)} — set TICKWRIGHT_LEVERAGE to traded symbols only"
             )
         return self
 

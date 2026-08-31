@@ -28,6 +28,7 @@ from tickwright.domain import (
     EventBus,
     Exchange,
     InstrumentSpec,
+    LeverageBook,
     MarketFeed,
     Portfolio,
     PreTradeGuard,
@@ -84,8 +85,21 @@ def build_store(config: AppConfig) -> Store:
             assert_never(unreachable)
 
 
-def build_exchange(config: AppConfig, *, bus: EventBus, clock: Clock, store: Store) -> Exchange:
+def build_exchange(
+    config: AppConfig,
+    *,
+    bus: EventBus,
+    clock: Clock,
+    store: Store,
+    leverage: LeverageBook,
+) -> Exchange:
     """Select the venue.
+
+    ``leverage`` is **required**, unlike the adapters' own defaulted parameter:
+    this is the root's builder, and the one thing it can do that a direct
+    construction cannot is hand the venue the *resolved* book
+    (``resolve_leverage`` below). A default here would let its own public builder skip the resolution
+    and produce a venue configured differently from ``build_engine``'s.
 
     ``store`` is the paper arm's alone, and it is a **read**: the paper venue is
     in-process, so the only durable answer to "how much of this symbol is held"
@@ -115,6 +129,10 @@ def build_exchange(config: AppConfig, *, bus: EventBus, clock: Clock, store: Sto
                 # an hour, so there is nothing to buy by holding a copy and a
                 # drift to own if we did.
                 account_net=lambda: account_net_size(store.all_positions()),
+                # The resolved book, the same object the margin model receives
+                # below — paper validates its bounds in ``start()`` and writes
+                # nothing (ADR-0044 §9).
+                leverage=leverage,
             )
         case "hyperliquid":
             # The venue authors its own specs from the meta endpoint
@@ -133,9 +151,37 @@ def build_exchange(config: AppConfig, *, bus: EventBus, clock: Clock, store: Sto
                 # (ADR-0044 §6, ADR-0046 §3) — handed the engine's, from the
                 # one place that holds both configs.
                 startup_timeout_seconds=config.engine.startup_reconciliation_timeout_seconds,
+                # The same resolved book the paper arm and the margin model get:
+                # live validates the identical bound before pushing anything, so
+                # the two paths cannot disagree about a leverage (ADR-0044 §9).
+                leverage=leverage,
             )
         case unreachable:
             assert_never(unreachable)
+
+
+def resolve_leverage(config: AppConfig) -> LeverageBook:
+    """Resolve the sparse ``AppConfig.leverage`` into the **complete** book both
+    consumers receive (ADR-0044 §2/§3).
+
+    Resolving *here* is load-bearing twice over. It keeps the margin model and
+    the venue reading the same numbers by construction: they cannot disagree
+    about what an unconfigured symbol means, because neither one decides. And
+    this is the only place both inputs are in scope — ``strategies`` and
+    ``leverage`` are peer ``AppConfig`` fields, while an ``Exchange`` knows
+    nothing of strategies, and the two symbol sets an adapter *does* hold are
+    both the wrong ones (``HyperliquidConfig.symbols`` is the feed subscription
+    list, which may carry context symbols nothing trades;
+    ``PaperExchangeConfig.instrument_specs`` is paper's instrument universe,
+    which says nothing about what is traded).
+
+    What the *completion* means — the default an unnamed symbol takes — belongs
+    to ``LeverageBook`` rather than here, so it cannot drift from the fallback
+    the margin model's own read applies. This function is the composition step
+    ADR-0044 §2 names and nothing more: it holds the one input a ``domain`` type
+    may not see, and hands it over.
+    """
+    return LeverageBook.resolve(config.leverage, traded=config.traded_symbols)
 
 
 def build_fill_model(config: PaperExchangeConfig, *, clock: Clock) -> FillModel:
@@ -212,7 +258,12 @@ def build_engine(config: AppConfig) -> Engine:
     bus = build_bus(config)
     clock = build_clock(config)
     store = build_store(config)
-    exchange = build_exchange(config, bus=bus, clock=clock, store=store)
+    # Resolved once, injected twice. Both consumers below take *this* book,
+    # which is what makes "the model and the venue compute off the same input"
+    # structural rather than a convention two call sites have to keep
+    # (ADR-0044 §2).
+    leverage = resolve_leverage(config)
+    exchange = build_exchange(config, bus=bus, clock=clock, store=store, leverage=leverage)
     feed = build_feed(config, bus=bus, clock=clock)
     guard = build_guard(config, specs=exchange.instrument_specs(), store=store, clock=clock)
     engine = Engine(
@@ -223,6 +274,7 @@ def build_engine(config: AppConfig) -> Engine:
         feed=feed,
         guard=guard,
         config=config.engine,
+        leverage=leverage,
     )
     for strategy_config in config.strategies:
         engine.register(

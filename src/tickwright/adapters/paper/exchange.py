@@ -33,12 +33,14 @@ from collections.abc import Callable, Mapping
 from decimal import Decimal
 
 from tickwright.domain import (
+    EMPTY_LEVERAGE_BOOK,
     AccountSpec,
     Clock,
     EventBus,
     FillReport,
     InstrumentSpec,
     InvariantViolation,
+    LeverageBook,
     MarketTick,
     OrderState,
     OrderStatusReport,
@@ -72,6 +74,7 @@ class PaperExchange:
         account_label: str = DEFAULT_ACCOUNT_LABEL,
         account_net: Callable[[], Mapping[str, Decimal]],
         instrument_specs: Mapping[str, InstrumentSpec] | None = None,
+        leverage: LeverageBook = EMPTY_LEVERAGE_BOOK,
         funding_interval_ns: int = HOUR_NS,
     ) -> None:
         self._bus = bus
@@ -99,6 +102,16 @@ class PaperExchange:
         # knowledge, so min-notional a MARKET can only be judged at its fill
         # price is enforced here; the Engine also reads these to wire the guard.
         self._specs = dict(instrument_specs or {})
+        # The **resolved** per-symbol map, complete over the strategy-traded set
+        # (ADR-0044 §2) — the composition root resolves the sparse config against
+        # that set and injects the same map here and into the margin model, so
+        # the two cannot disagree about an unconfigured symbol. Defaulted to
+        # empty rather than required, unlike ``account_net`` and
+        # ``genesis_collateral``: an empty map is not a silent decision about
+        # money, it is a venue with nothing configured to validate, and every
+        # direct construction that does not exercise ``start()``'s bound would
+        # otherwise carry a resolution only the root can do.
+        self._leverage = leverage
         self._latest_tick: dict[str, MarketTick] = {}
         self._fill_counts: dict[str, int] = {}
         # Resting LIMITs and their working remainders. The fill model may
@@ -120,9 +133,21 @@ class PaperExchange:
         bus.subscribe(MarketTick, self.on_tick)
 
     async def start(self) -> None:
-        """Nothing to connect: the venue is in-process and its one link, the
-        tick subscription, is wired at construction."""
-        return None
+        """Nothing to connect — the venue is in-process and its one link, the
+        tick subscription, is wired at construction — but the leverage bound
+        this step hosts on **both** paths (ADR-0044 §9).
+
+        Paper validates and never writes. That is not an inconsistency but the
+        venue-agnostic half of a check whose venue-specific half (the
+        ``updateLeverage`` push) has nothing to act on here: leaving the whole
+        check to the venue would let paper accept an impossible leverage
+        *silently* and compute margin, liquidation price and effective leverage
+        off it, so a strategy would behave one way in paper and fail at boot on
+        promotion — the divergence ADR-0034's identical-compute grain exists to
+        prevent. Refusing here precedes the barrier, so no order is ever placed
+        against a leverage the venue would reject.
+        """
+        self._leverage.validate_against(self._specs)
 
     async def run(self) -> None:
         """Settle funding boundaries for as long as the engine supervises this.
