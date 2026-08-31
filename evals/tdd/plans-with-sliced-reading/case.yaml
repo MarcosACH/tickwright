@@ -13,7 +13,7 @@ plugins:
 context:
   # A scaled-down stand-in for a real tree: a module map long enough that a
   # whole read costs most of a cheap-planning budget while the sections a slice
-  # needs cost a quarter of it (the figures are in the map's own header), a copy
+  # needs cost a sixth of it (the figures are in the map's own header), a copy
   # of the repo's real `doc-slice`, and two source modules — one the first
   # behavior needs and one only a late behavior does. Mounted at the sandbox
   # root, so paths inside are
