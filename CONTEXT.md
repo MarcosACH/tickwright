@@ -632,7 +632,11 @@ A **per-symbol / per-position** input (not an [[AccountSpec]] fact): the integer
 `cross`/`isolated` mode that set a [[Position]]'s [[Margin|margin_used]], carried together as one
 `LeverageSpec` because the venue sets them in one action. **Config-authoritative on both paths** —
 declared venue-agnostically in `AppConfig.leverage` (default **1x / isolated**, the safest pair) and
-live-ingested as a cross-check. The engine **pushes** it to the venue **once, at boot** (ADR-0044):
+live-ingested as a cross-check. What an operator writes is **sparse** and what both consumers receive
+is a **`LeverageBook`** — the same map completed over `AppConfig.traded_symbols`, so an unnamed traded
+symbol carries the default rather than a hole; the composition root does the completing, because it
+is the only scope holding the strategy-declared set. The book also owns §9's bound
+(`1 ≤ leverage ≤ max_leverage`, refused in `Exchange.start()` on both paths). The engine **pushes** it to the venue **once, at boot** (ADR-0044):
 symbols already aligned are skipped, symbols holding no position are written blind, and a
 disagreement on a symbol that *does* hold a position **refuses to start** rather than re-margining a
 live position — after which the venue is left alone for the run, with drift **alerted, never
