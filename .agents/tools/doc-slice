@@ -13,7 +13,10 @@
 # --amendments inverts document order for the append-corrected ADR corpus: the blocks
 # carry the current truth, the prose above them is often the retired version. Blocks are
 # keyed on the "**(" … "**)**" delimiter pair, never on opening words (arbitrary prose).
-# Exit 3 = an opener with no closer; see docs/agents/adr-reading.md.
+# Its domain is the files written to that convention — docs/adr/ and the module maps that
+# adopt it. Elsewhere "**(" is ordinary bold prose closing ")**", which opens a block that
+# never closes, so exit 3 there means the file is outside the domain, not that it is
+# malformed. Exit 3 = an opener with no closer; see docs/agents/adr-reading.md.
 
 set -euo pipefail
 
@@ -24,7 +27,9 @@ if [[ ${1:-} == --amendments ]]; then
 fi
 
 if [[ $# -lt 1 || $# -gt 2 ]]; then
-  sed -n '2,16p' "$0" >&2
+  # To the end of the header comment, not to a transcribed line number: the range that
+  # names one truncates in silence the next time the header grows.
+  sed -n '2,/^$/p' "$0" >&2
   exit 2
 fi
 

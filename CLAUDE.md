@@ -59,7 +59,7 @@ See `docs/workflow/labels.md` for the label schema and `docs/agents/issue-tracke
 - For `CONTEXT.md`, ADRs, `docs/module-maps/*.md`, and `docs/research/*.md`, use `.agents/tools/doc-slice`:
   - `.agents/tools/doc-slice <file>` — list TOC (`line  level  heading`)
   - `.agents/tools/doc-slice <file> <heading-substr>` — print just that section
-  - `.agents/tools/doc-slice --amendments <file> [<heading-substr>]` — print only the `**( … **)**` correction blocks
+  - `.agents/tools/doc-slice --amendments <file> [<heading-substr>]` — print only the `**( … **)**` correction blocks. Scoped to the files written to that convention: `docs/adr/` and the module maps that adopt it. On the others `**(` is ordinary bold prose, so the flag exits 3 — that means out of domain, not malformed.
 - **ADRs are append-corrected: read a section's amendments before its prose, or instead of it.** The blocks carry the current truth and the prose above them is often the retired version, so document order reads the superseded decision. The mechanism, the delimiter rule, and the worked counter-example are canonical in [`docs/agents/adr-reading.md`](docs/agents/adr-reading.md).
 - For large source/test files, use `Read` with `offset`/`limit` targeting the symbol you need.
 - For GitHub issues, use `gh issue view <N>`.

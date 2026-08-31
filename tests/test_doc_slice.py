@@ -249,6 +249,19 @@ class TestAmendmentsMechanics:
         assert result.returncode == 2
         assert "not a file" in result.stderr
 
+    def test_no_arguments_prints_the_whole_usage_header(self) -> None:
+        """Usage ends where the header does, not at a transcribed line number.
+
+        A hardcoded range truncates in silence the moment the header grows, and the
+        part it drops is the tail — where the domain note that answers the misuse is.
+        """
+        result = _run()
+
+        assert result.returncode == 2
+        assert "doc-slice --amendments <file>" in result.stderr
+        assert "outside the domain" in result.stderr
+        assert "set -euo pipefail" not in result.stderr
+
 
 class TestCorpusBalance:
     """Generated from `docs/adr/` as it stands, not transcribed from issue #266.

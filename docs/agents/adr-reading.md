@@ -92,6 +92,14 @@ correction is worse than the raw file. Nothing is elided from *inside* a block e
 samples included, since a fenced measurement is often the evidence the amendment rests on — and
 `tests/test_doc_slice.py` holds every emitted body to being a verbatim substring of its source.
 
+**The flag's domain is the files written to this convention** — `docs/adr/`, and the module maps
+that adopt it (`trade-economics-accounting-surface.md` carries one). Everywhere else `**(` is
+ordinary bold prose closing `)**`: `**(unverified)**` in `docs/research/hyperliquid-perp-fees-funding.md`,
+`**(per the 0.24.0 TypedDict)**` in `hyperliquid-account-position-state.md`. Each opens a block that
+never closes, so the flag exits 3 on those files. That exit means *out of domain*, not malformed —
+read them with `doc-slice <file> <heading>` instead. Widening detection to tolerate the inline form
+would soften the delimiter rule this whole mechanism rests on, which is the more expensive trade.
+
 Amendment text is 16.8 % of the corpus (87,768 of 523,871 characters, 76 blocks running 265 to
 3,645 characters, median 945), so on a lightly-corrected section the flag is most of the saving and
 on a heavily-corrected one it is little. ADR-0040 §4 is 76 % amendment by character. There the flag
