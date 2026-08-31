@@ -28,6 +28,7 @@ from tickwright.domain import (
     OrderFillEvent,
     PlaceOrder,
     Side,
+    VenueAccountState,
     VenueOrderView,
     VenueReadFailure,
 )
@@ -221,6 +222,48 @@ def test_a_cash_line_the_venue_does_not_back_is_tier_1() -> None:
             venue=DERIVED_GENESIS,
         )
     ]
+
+
+class _BlippingVenue(_ReadOnlyVenue):
+    """A venue whose first account read fails and whose second succeeds.
+
+    The outage that must not read as a flat book, followed by the recovery that
+    must not need a restart — one double, because the pair is the behaviour."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._answers: list[VenueAccountState | None] = [None, DERIVED_STATE]
+
+    async def fetch_account_state(self) -> VenueAccountState | None:
+        self.account_reads += 1
+        return self._answers.pop(0)
+
+
+def test_an_unanswered_read_freezes_the_cycle_and_the_next_one_recovers() -> None:
+    """ADR-0011 inv 1 at the account grain: an outage is never a flat book.
+
+    Nothing is classified — a comparison against an absent venue would report
+    the whole book as divergent — and nothing is removed, so the position and
+    the cash line stand untouched for the next cycle to compare. The freeze is
+    **recorded**, because a cycle that heals nothing and says nothing is
+    indistinguishable from a cadence that stopped running.
+
+    The recovery needs no restart: the very next read is compared normally."""
+    clock = ManualClock(start_ns=1_000)
+    venue = _BlippingVenue()
+    reconciliation = _cycle(_agreeing_ledger(SQLiteStore(":memory:"), clock), venue, clock)
+
+    with capture_events() as logs:
+        frozen = asyncio.run(reconciliation.reconcile_account())
+    assert frozen is None
+    assert [str(log["event"]) for log in logs] == ["account.reconcile_frozen"]
+    assert [log["step"] for log in logs] == ["cadence"]
+
+    with capture_events() as logs:
+        recovered = asyncio.run(reconciliation.reconcile_account())
+    assert recovered == ()
+    assert [str(log["event"]) for log in logs] == ["account.reconciled"]
+    assert venue.account_reads == 2
 
 
 def test_a_valuation_the_venue_computes_differently_is_tier_2() -> None:

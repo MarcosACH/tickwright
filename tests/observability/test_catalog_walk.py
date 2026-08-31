@@ -395,6 +395,26 @@ def _drive_account_reconciled() -> None:
     asyncio.run(reconciliation.reconcile_account())
 
 
+def _drive_account_reconcile_frozen() -> None:
+    """The account grain's connectivity guard: the venue answers the account read
+    with nothing, so the cycle heals nothing and says so (ADR-0011 inv 1).
+    ``VenueDouble``'s own ``fetch_account_state`` is that ``None``."""
+    clock = ManualClock()
+    reconciliation = LedgerReconciliation(
+        exchange=_DarkVenue(),
+        portfolio=PortfolioProjection(
+            spec=AccountSpec(account_id=LIVE_ACCOUNT_ID, genesis_collateral=None),
+            store=SQLiteStore(":memory:"),
+            clock=clock,
+        ),
+        clock=clock,
+        bus=InMemoryBus(),
+        config=LedgerReconcileConfig(),
+    )
+
+    assert asyncio.run(reconciliation.reconcile_account()) is None
+
+
 def _drive_denied() -> None:
     store = SQLiteStore(":memory:")
     guard = RealGuard(specs={"BTC": _SPEC}, store=store, clock=ManualClock(start_ns=1_000))
@@ -777,6 +797,7 @@ SCENARIOS: dict[NamedEvent, Callable[[], None]] = {
     NamedEvent.POSITION_CLOSED: _drive_position_changes(closing=True),
     NamedEvent.ACCOUNT_MATERIALISED: _drive_account_materialised,
     NamedEvent.ACCOUNT_RECONCILED: _drive_account_reconciled,
+    NamedEvent.ACCOUNT_RECONCILE_FROZEN: _drive_account_reconcile_frozen,
     NamedEvent.FEED_LAGGED: _drive_feed_lagged,
     NamedEvent.FEED_FRAME_DROPPED: _drive_feed_frame_dropped,
     NamedEvent.ENGINE_BARRIER_CLEARED: _drive_engine_lifecycle,

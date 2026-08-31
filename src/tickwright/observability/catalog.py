@@ -52,6 +52,15 @@ class NamedEvent(StrEnum):
     # tell a healthy cadence from one that silently stopped running — a name that
     # only spoke on divergence would be indistinguishable from a dead cadence.
     ACCOUNT_RECONCILED = "account.reconciled"
+    # A venue account read that yielded no truth, healing nothing (ADR-0011
+    # inv 1). ``step`` says which of the account grain's two readers froze:
+    # ``barrier`` is the startup materialisation, whose ``None`` additionally
+    # faults the process rather than merely skipping a cycle, and ``cadence`` is
+    # the running cross-check, which resumes on the next successful read. One
+    # name for both because the grain and the cause are the same, and an operator
+    # watching it needs the cost told apart by a field rather than by which of
+    # two names happened to appear.
+    ACCOUNT_RECONCILE_FROZEN = "account.reconcile_frozen"
 
     # Live-feed ingress: a conflation drop under backpressure, and a
     # malformed-frame drop that is skipped instead of faulting the engine

@@ -21,7 +21,7 @@ Tier-2 band land on the classification established here.
 from collections.abc import Iterator
 from dataclasses import dataclass
 from decimal import Decimal
-from enum import StrEnum
+from enum import Enum, StrEnum
 
 from tickwright.domain import Clock, EventBus, Exchange, VenueAccountState, venue_cash
 from tickwright.observability import NamedEvent, named_event
@@ -35,6 +35,22 @@ Legitimately zero rather than unknown, and only because the read **succeeded**:
 a successful account read enumerates every position the account holds, so a
 symbol absent from it is one the venue is flat in. The unanswered read never
 reaches here — it is the ``None`` the cycle freezes on (ADR-0011 inv 1)."""
+
+
+class _FreezeStep(Enum):
+    """Which account-grain reader an unanswered venue read froze — the ``step``
+    field on ``account.reconcile_frozen``.
+
+    ``BARRIER`` is the startup materialisation and ``CADENCE`` the running
+    cross-check. A field rather than a second event name, following
+    ``reconcile.frozen``'s ``scope``: the grain and the cause are identical and
+    nothing routes on the difference, but the **cost** differs sharply — the
+    barrier's ``None`` faults the process after its retry budget, the cadence's
+    skips one cycle — and an operator needs that told apart.
+    """
+
+    BARRIER = "barrier"
+    CADENCE = "cadence"
 
 
 class DivergenceTier(StrEnum):
@@ -123,6 +139,7 @@ class LedgerReconciliation:
         """
         state = await self._exchange.fetch_account_state()
         if state is None:
+            self._freeze(_FreezeStep.CADENCE)
             return None
         divergences = (
             *self._compare_sizes(state),
@@ -131,6 +148,16 @@ class LedgerReconciliation:
         )
         named_event(NamedEvent.ACCOUNT_RECONCILED, divergences=len(divergences))
         return divergences
+
+    def _freeze(self, step: _FreezeStep) -> None:
+        """Record the account grain's connectivity guard tripping (ADR-0011 inv 1).
+
+        The record is the whole of what a freeze *does*: nothing is classified,
+        nothing is healed, nothing is removed. Emitted rather than left silent
+        because the alternative — a cycle that touches nothing and says nothing —
+        reads exactly like a cadence that stopped running.
+        """
+        named_event(NamedEvent.ACCOUNT_RECONCILE_FROZEN, step=step.value)
 
     def _compare_valuations(self, state: VenueAccountState) -> Iterator[Divergence]:
         """The computed half: account equity, and per-symbol unrealized PnL.
