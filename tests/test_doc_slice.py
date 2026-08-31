@@ -274,6 +274,56 @@ class TestAmendmentsMechanics:
         assert "set -euo pipefail" not in result.stderr
 
 
+class TestEmphasisParityRule:
+    """The parity rule's two halves, pinned against fixtures so it cannot go vacuous.
+
+    Its corpus application below is pass-shaped — it walks `docs/adr/` and asserts a
+    count — so a masking step that widened toward the whole body would make it vacuous
+    on every file at once with the suite still green. What is pinned here is that the
+    rule *fires* on a real inversion, and that masking is what keeps it from firing on
+    a well-formed block.
+    """
+
+    def test_an_unclosed_opener_run_leaves_the_block_odd(self, tmp_path: Path) -> None:
+        """ADR-0040 §5's shape: the opener never closes its own bold run.
+
+        The delimiter pair is intact, so the tool emits the block and exits 0 — which is
+        exactly why balance missed this and parity has to be asserted separately (#269).
+        """
+        doc = tmp_path / "inverted.md"
+        doc.write_text(
+            "# Title\n\n"
+            "Prose. **(Superseded by ADR-0044, as anticipated: the engine now pushes "
+            "config **once, at boot**, via `Exchange.start()`.**)**\n"
+        )
+
+        result = _run("--amendments", str(doc))
+
+        assert result.returncode == 0, result.stderr
+        (block,) = _blocks(result.stdout)
+        assert _mask_code(_body(block)).count("**") % 2 == 1
+
+    def test_an_italicised_code_span_is_not_a_phantom_run(self, tmp_path: Path) -> None:
+        """Masked, never deleted — the false positive #268 hit, asserted both ways.
+
+        The counterfactual is pinned alongside the rule because a step that quietly
+        stopped masking would still satisfy the inversion case above.
+        """
+        doc = tmp_path / "spanned.md"
+        doc.write_text(
+            "# Title\n\n"
+            "Prose. **(Amended by ADR-0019:** the *`SQLiteStore`* path is the default.**)**\n"
+        )
+
+        result = _run("--amendments", str(doc))
+
+        assert result.returncode == 0, result.stderr
+        (block,) = _blocks(result.stdout)
+        body = _body(block)
+        assert _mask_code(body).count("**") % 2 == 0
+        assert re.sub(r"`[^`]*`", "", body).count("**") % 2 == 1
+
+
 class TestCorpusBalance:
     """Generated from `docs/adr/` as it stands, not transcribed from issue #266.
 
