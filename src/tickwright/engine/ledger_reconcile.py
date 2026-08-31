@@ -18,14 +18,23 @@ This slice **classifies and changes no stored value**: the Tier-1 heals and the
 Tier-2 band land on the classification established here.
 """
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import StrEnum
 
-from tickwright.domain import Clock, EventBus, Exchange
+from tickwright.domain import Clock, EventBus, Exchange, VenueAccountState
 from tickwright.observability import NamedEvent, named_event
 
 from .portfolio import PortfolioProjection
+
+_FLAT = Decimal(0)
+"""What a symbol the venue does not report is held at.
+
+Legitimately zero rather than unknown, and only because the read **succeeded**:
+a successful account read enumerates every position the account holds, so a
+symbol absent from it is one the venue is flat in. The unanswered read never
+reaches here — it is the ``None`` the cycle freezes on (ADR-0011 inv 1)."""
 
 
 class DivergenceTier(StrEnum):
@@ -112,7 +121,37 @@ class LedgerReconciliation:
         and agreed, and collapsing the two would let an outage read as a clean
         book (ADR-0011 inv 1).
         """
-        await self._exchange.fetch_account_state()
-        divergences: tuple[Divergence, ...] = ()
+        state = await self._exchange.fetch_account_state()
+        if state is None:
+            return None
+        divergences = tuple(self._compare_sizes(state))
         named_event(NamedEvent.ACCOUNT_RECONCILED, divergences=len(divergences))
         return divergences
+
+    def _compare_sizes(self, state: VenueAccountState) -> Iterator[Divergence]:
+        """The Σ-invariant's venue link, per symbol (ADR-0034).
+
+        Compared at the **account** grain on both sides: our net folds every
+        partition, the reserved unattributed one included, against the venue's
+        one position per symbol. Per-strategy attribution is never reconciled —
+        the venue has no per-strategy truth to reconcile it against.
+
+        The symbol set is the **union**, and neither side may bound it. Ours
+        alone would miss foreign flow — a position the venue holds that this
+        engine never placed, which is exactly the drift the venue link exists to
+        catch; the venue's alone would miss a phantom our ledger is carrying
+        against a symbol the venue is flat in.
+        """
+        venue_sizes = {position.symbol: position.signed_size for position in state.positions}
+        projected_sizes = self._portfolio.account_net()
+        for symbol in {**projected_sizes, **venue_sizes}:
+            projected = projected_sizes.get(symbol, _FLAT)
+            venue = venue_sizes.get(symbol, _FLAT)
+            if projected != venue:
+                yield Divergence(
+                    tier=DivergenceTier.TIER_1,
+                    quantity="signed_size",
+                    symbol=symbol,
+                    projected=projected,
+                    venue=venue,
+                )

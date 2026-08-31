@@ -31,7 +31,12 @@ from tickwright.domain import (
     VenueOrderView,
     VenueReadFailure,
 )
-from tickwright.engine.ledger_reconcile import LedgerReconcileConfig, LedgerReconciliation
+from tickwright.engine.ledger_reconcile import (
+    Divergence,
+    DivergenceTier,
+    LedgerReconcileConfig,
+    LedgerReconciliation,
+)
 from tickwright.engine.portfolio import PortfolioProjection
 from tickwright.observability.testing import capture_events
 
@@ -55,15 +60,17 @@ def _live_ledger(store: SQLiteStore, clock: ManualClock) -> PortfolioProjection:
     )
 
 
-def _fill(*, quantity: str, price: str, symbol: str = "BTC") -> OrderFillEvent:
+def _fill(
+    *, quantity: str, price: str, symbol: str = "BTC", strategy_id: str = "alpha"
+) -> OrderFillEvent:
     return OrderFilled(
         ts_event=1_000,
         ts_init=1_000,
-        cloid=f"0x{symbol}-{quantity}",
-        strategy_id="alpha",
-        signal_id=f"alpha:{symbol}:1",
+        cloid=f"0x{strategy_id}-{symbol}-{quantity}",
+        strategy_id=strategy_id,
+        signal_id=f"{strategy_id}:{symbol}:1",
         symbol=symbol,
-        trade_id=f"t-{symbol}-{quantity}",
+        trade_id=f"t-{strategy_id}-{symbol}-{quantity}",
         quantity=Decimal(quantity),
         price=Decimal(price),
         cum_qty=Decimal(quantity),
@@ -115,6 +122,16 @@ def _cycle(
     )
 
 
+def _tier_1(divergences: tuple[Divergence, ...] | None) -> list[Divergence]:
+    """The Tier-1 verdicts alone, for a case whose subject is the ledger half.
+
+    A ``None`` here would be a freeze, and letting it read as "no Tier-1
+    divergence" is the collapse the return type exists to prevent — so it fails
+    loudly rather than filtering to an empty list."""
+    assert divergences is not None, "the cycle froze; this case expects a completed comparison"
+    return [item for item in divergences if item.tier is DivergenceTier.TIER_1]
+
+
 def test_a_cycle_agreeing_with_the_venue_reports_no_divergence() -> None:
     """The tracer: one venue read, nothing to classify, and a record saying so.
 
@@ -131,3 +148,64 @@ def test_a_cycle_agreeing_with_the_venue_reports_no_divergence() -> None:
     assert divergences == ()
     assert venue.account_reads == 1
     assert [str(log["event"]) for log in logs] == ["account.reconciled"]
+
+
+def test_a_net_size_the_venue_does_not_hold_is_tier_1() -> None:
+    """The Σ-invariant's venue link: the comparison is the account net over
+    **every** partition against the venue's one position, so two strategies
+    holding the same symbol are one number here (ADR-0034/0041 §4). Split per
+    partition it would disagree with a venue that has no per-strategy truth.
+
+    Only the Tier-1 verdicts are asserted: the same drifted book also moves the
+    computed valuations, which is Tier-2's subject rather than this one's."""
+    clock = ManualClock(start_ns=1_000)
+    projection = _live_ledger(SQLiteStore(":memory:"), clock)
+    projection.materialise(DERIVED_STATE)
+    book_fill(projection, _fill(quantity="0.002", price=_ENTRY), side=Side.BUY)
+    book_fill(projection, _fill(quantity="0.001", price=_ENTRY, strategy_id="beta"), side=Side.BUY)
+    projection.observe_mark(_mark(_AGREEING_MARK))
+
+    divergences = asyncio.run(_cycle(projection, _ReadOnlyVenue(), clock).reconcile_account())
+
+    assert _tier_1(divergences) == [
+        Divergence(
+            tier=DivergenceTier.TIER_1,
+            quantity="signed_size",
+            symbol="BTC",
+            projected=Decimal("0.003"),
+            venue=Decimal("0.002"),
+        )
+    ]
+
+
+def test_a_symbol_only_one_side_holds_is_still_compared() -> None:
+    """Neither side's symbol set bounds the comparison.
+
+    A symbol the ledger holds and the venue does not is a phantom position; one
+    the venue holds and the ledger does not is foreign flow the engine never
+    placed. Both are Tier-1, and a comparison walking only our own book would
+    see the second as nothing at all — which is precisely the drift the venue
+    link exists to catch."""
+    clock = ManualClock(start_ns=1_000)
+    projection = _live_ledger(SQLiteStore(":memory:"), clock)
+    projection.materialise(DERIVED_STATE)
+    book_fill(projection, _fill(quantity="5", price="100", symbol="SOL"), side=Side.BUY)
+
+    divergences = asyncio.run(_cycle(projection, _ReadOnlyVenue(), clock).reconcile_account())
+
+    assert sorted(_tier_1(divergences), key=lambda item: str(item.symbol)) == [
+        Divergence(
+            tier=DivergenceTier.TIER_1,
+            quantity="signed_size",
+            symbol="BTC",  # foreign flow: the venue holds it, the ledger does not
+            projected=Decimal("0"),
+            venue=Decimal("0.002"),
+        ),
+        Divergence(
+            tier=DivergenceTier.TIER_1,
+            quantity="signed_size",
+            symbol="SOL",  # a phantom: the ledger holds it, the venue does not
+            projected=Decimal("5"),
+            venue=Decimal("0"),
+        ),
+    ]

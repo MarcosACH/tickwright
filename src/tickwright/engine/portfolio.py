@@ -608,7 +608,7 @@ class PortfolioProjection:
         position = self._positions.get((strategy_id, symbol))
         if position is None:
             return None
-        return self._view(position, net=self._account_net())
+        return self._view(position, net=self.account_net())
 
     def open_positions(self, *, strategy_id: str | None) -> tuple[PositionView, ...]:
         """Every partition of ``strategy_id`` still holding exposure.
@@ -620,19 +620,25 @@ class PortfolioProjection:
         synchronous so that cannot actually happen today; taking the fold once
         is what keeps it impossible rather than merely unreachable.
         """
-        net = self._account_net()
+        net = self.account_net()
         return tuple(
             self._view(position, net=net)
             for (owner, _symbol), position in self._positions.items()
             if owner == strategy_id and not position.is_flat
         )
 
-    def _account_net(self) -> dict[str, Decimal]:
+    def account_net(self) -> dict[str, Decimal]:
         """The account-net size per symbol, over *every* partition.
 
         The reserved unattributed one included: the venue holds one position per
         symbol, so the position-grain half is computed at that grain or it is
         computed against a book the venue does not have (ADR-0034/0041 §4).
+
+        Public on the concrete and absent from the ``Portfolio`` seam, which is
+        the read-surface asymmetry ADR-0041 §8 draws: this is the Σ-invariant's
+        left-hand side, and the account-grain reconcile compares it against the
+        venue's ``szi``. A strategy must not see it — it sums the unattributed
+        partition the scoped facade exists to keep unreachable.
         """
         return account_net_size(self._positions.values())
 
