@@ -24,6 +24,7 @@ from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.domain import (
     InstrumentSpec,
+    LeverageBook,
     LeverageOutOfBounds,
     LeverageSpec,
     VenueAccountModeUnsupported,
@@ -339,7 +340,7 @@ def test_a_leverage_above_the_venue_cap_refuses_to_start_on_live_too() -> None:
         ),
         post=FakeExchangeApi({"userAbstraction": "disabled"}),
         startup_timeout_seconds=STARTUP_TIMEOUT_SECONDS,
-        leverage={"BTC": LeverageSpec(mode="cross", leverage=50)},
+        leverage=LeverageBook({"BTC": LeverageSpec(mode="cross", leverage=50)}),
     )
 
     with pytest.raises(LeverageOutOfBounds) as refusal:

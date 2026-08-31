@@ -33,13 +33,14 @@ from collections.abc import Callable, Mapping
 from decimal import Decimal
 
 from tickwright.domain import (
+    EMPTY_LEVERAGE_BOOK,
     AccountSpec,
     Clock,
     EventBus,
     FillReport,
     InstrumentSpec,
     InvariantViolation,
-    LeverageSpec,
+    LeverageBook,
     MarketTick,
     OrderState,
     OrderStatusReport,
@@ -52,7 +53,6 @@ from tickwright.domain import (
     VenueReadFailure,
     below_min_notional,
     fill_fee,
-    validate_leverage_bounds,
 )
 
 from .book import RestingBook
@@ -74,7 +74,7 @@ class PaperExchange:
         account_label: str = DEFAULT_ACCOUNT_LABEL,
         account_net: Callable[[], Mapping[str, Decimal]],
         instrument_specs: Mapping[str, InstrumentSpec] | None = None,
-        leverage: Mapping[str, LeverageSpec] | None = None,
+        leverage: LeverageBook = EMPTY_LEVERAGE_BOOK,
         funding_interval_ns: int = HOUR_NS,
     ) -> None:
         self._bus = bus
@@ -111,7 +111,7 @@ class PaperExchange:
         # money, it is a venue with nothing configured to validate, and every
         # direct construction that does not exercise ``start()``'s bound would
         # otherwise carry a resolution only the root can do.
-        self._leverage = dict(leverage or {})
+        self._leverage = leverage
         self._latest_tick: dict[str, MarketTick] = {}
         self._fill_counts: dict[str, int] = {}
         # Resting LIMITs and their working remainders. The fill model may
@@ -147,7 +147,7 @@ class PaperExchange:
         prevent. Refusing here precedes the barrier, so no order is ever placed
         against a leverage the venue would reject.
         """
-        validate_leverage_bounds(self._leverage, self._specs)
+        self._leverage.validate_against(self._specs)
 
     async def run(self) -> None:
         """Settle funding boundaries for as long as the engine supervises this.

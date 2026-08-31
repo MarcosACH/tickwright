@@ -23,17 +23,18 @@ the Engine never knows a concrete.
 import asyncio
 import signal
 import uuid
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 
 from tickwright.domain import (
+    EMPTY_LEVERAGE_BOOK,
     Clock,
     ComponentState,
     EventBus,
     Exchange,
     ExecutionReport,
     FundingAccrual,
-    LeverageSpec,
+    LeverageBook,
     MarketFeed,
     MarkTick,
     Portfolio,
@@ -80,7 +81,7 @@ class Engine:
         feed: MarketFeed,
         guard: PreTradeGuard | None = None,
         config: EngineConfig | None = None,
-        leverage: Mapping[str, LeverageSpec] | None = None,
+        leverage: LeverageBook = EMPTY_LEVERAGE_BOOK,
     ) -> None:
         self._bus = bus
         self._clock = clock

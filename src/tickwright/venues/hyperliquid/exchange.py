@@ -19,12 +19,13 @@ from enum import Enum
 from typing import Any, assert_never
 
 from tickwright.domain import (
+    EMPTY_LEVERAGE_BOOK,
     AccountSpec,
     Clock,
     EventBus,
     FillReport,
     InstrumentSpec,
-    LeverageSpec,
+    LeverageBook,
     MarketTick,
     OrderState,
     OrderStatusReport,
@@ -37,7 +38,6 @@ from tickwright.domain import (
     VenueOrderView,
     VenueReadFailure,
     quantize_price,
-    validate_leverage_bounds,
 )
 from tickwright.observability import NamedEvent, named_event
 
@@ -69,7 +69,7 @@ class HyperliquidExchange:
         clock: Clock,
         universe: HyperliquidUniverse,
         startup_timeout_seconds: float,
-        leverage: Mapping[str, LeverageSpec] | None = None,
+        leverage: LeverageBook = EMPTY_LEVERAGE_BOOK,
         post: PostJson | None = None,
     ) -> None:
         if config.signing_key is None:
@@ -99,7 +99,7 @@ class HyperliquidExchange:
         # the *same* one the margin model holds (ADR-0044 §2) — the composition
         # root resolves it once because an ``Exchange`` knows nothing of
         # strategies and could not resolve it for itself.
-        self._leverage = dict(leverage or {})
+        self._leverage = leverage
         self._wallet = Account.from_key(config.signing_key.get_secret_value())
         # /info queries ask about the account, which is the key's own address
         # unless the key is an API/agent wallet acting for a master account.
@@ -142,7 +142,7 @@ class HyperliquidExchange:
         # Behind the mode gate on purpose: under a pooled mode the margin model
         # this bound protects does not apply, so complaining about a leverage
         # would be noise on top of an error.
-        validate_leverage_bounds(self._leverage, self._universe.specs)
+        self._leverage.validate_against(self._universe.specs)
 
     async def run(self) -> None:
         """Returns at once: this adapter runs no loop of its own.

@@ -65,7 +65,13 @@ from .instrument import (
     quantize_price,
     quantize_size,
 )
-from .leverage import LeverageSpec, MarginMode, validate_leverage_bounds
+from .leverage import (
+    DEFAULT_LEVERAGE,
+    EMPTY_LEVERAGE_BOOK,
+    LeverageBook,
+    LeverageSpec,
+    MarginMode,
+)
 from .order import Order
 from .position import Position, PositionChange, PositionView, account_net_size
 from .protocols import (
@@ -100,6 +106,8 @@ __all__ = [
     "VenueFactUnsupported",
     "VenueReadUnresolvable",
     # events + value types
+    "DEFAULT_LEVERAGE",
+    "EMPTY_LEVERAGE_BOOK",
     "Account",
     "AccountSpec",
     "AccountView",
@@ -113,6 +121,7 @@ __all__ = [
     "GuardDecision",
     "InstrumentSpec",
     "KillSwitchState",
+    "LeverageBook",
     "LeverageSpec",
     "MarginMode",
     "MarkTick",
@@ -147,7 +156,6 @@ __all__ = [
     "exact_figure",
     # quantization
     "below_min_notional",
-    "validate_leverage_bounds",
     "quantize_price",
     "quantize_size",
     # boundary economics

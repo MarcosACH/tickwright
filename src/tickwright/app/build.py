@@ -28,7 +28,7 @@ from tickwright.domain import (
     EventBus,
     Exchange,
     InstrumentSpec,
-    LeverageSpec,
+    LeverageBook,
     MarketFeed,
     Portfolio,
     PreTradeGuard,
@@ -91,9 +91,15 @@ def build_exchange(
     bus: EventBus,
     clock: Clock,
     store: Store,
-    leverage: Mapping[str, LeverageSpec] | None = None,
+    leverage: LeverageBook,
 ) -> Exchange:
     """Select the venue.
+
+    ``leverage`` is **required**, unlike the adapters' own defaulted parameter:
+    this is the root's builder, and the one thing it can do that a direct
+    construction cannot is hand the venue the *resolved* book
+    (``resolve_leverage`` below). A default here would let its own public builder skip the resolution
+    and produce a venue configured differently from ``build_engine``'s.
 
     ``store`` is the paper arm's alone, and it is a **read**: the paper venue is
     in-process, so the only durable answer to "how much of this symbol is held"
@@ -123,7 +129,7 @@ def build_exchange(
                 # an hour, so there is nothing to buy by holding a copy and a
                 # drift to own if we did.
                 account_net=lambda: account_net_size(store.all_positions()),
-                # The resolved map, the same object the margin model receives
+                # The resolved book, the same object the margin model receives
                 # below — paper validates its bounds in ``start()`` and writes
                 # nothing (ADR-0044 §9).
                 leverage=leverage,
@@ -145,7 +151,7 @@ def build_exchange(
                 # (ADR-0044 §6, ADR-0046 §3) — handed the engine's, from the
                 # one place that holds both configs.
                 startup_timeout_seconds=config.engine.startup_reconciliation_timeout_seconds,
-                # The same resolved map the paper arm and the margin model get:
+                # The same resolved book the paper arm and the margin model get:
                 # live validates the identical bound before pushing anything, so
                 # the two paths cannot disagree about a leverage (ADR-0044 §9).
                 leverage=leverage,
@@ -154,14 +160,9 @@ def build_exchange(
             assert_never(unreachable)
 
 
-def resolve_leverage(config: AppConfig) -> dict[str, LeverageSpec]:
-    """Resolve the sparse ``AppConfig.leverage`` into the **complete** map both
+def resolve_leverage(config: AppConfig) -> LeverageBook:
+    """Resolve the sparse ``AppConfig.leverage`` into the **complete** book both
     consumers receive (ADR-0044 §2/§3).
-
-    ``AppConfig.leverage`` carries only the symbols the operator named, while
-    the scope is every symbol the configured strategies declare — so each
-    unconfigured traded symbol takes ADR-0040 §5's safest pair rather than being
-    left for a consumer to interpret.
 
     Resolving *here* is load-bearing twice over. It keeps the margin model and
     the venue reading the same numbers by construction: they cannot disagree
@@ -174,13 +175,13 @@ def resolve_leverage(config: AppConfig) -> dict[str, LeverageSpec]:
     ``PaperExchangeConfig.instrument_specs`` is paper's instrument universe,
     which says nothing about what is traded).
 
-    Config validation has already refused an entry naming an untraded symbol, so
-    this never has to decide what a dead key means.
+    What the *completion* means — the default an unnamed symbol takes — belongs
+    to ``LeverageBook`` rather than here, so it cannot drift from the fallback
+    the margin model's own read applies. This function is the composition step
+    ADR-0044 §2 names and nothing more: it holds the one input a ``domain`` type
+    may not see, and hands it over.
     """
-    return {
-        strategy.symbol: config.leverage.get(strategy.symbol, LeverageSpec())
-        for strategy in config.strategies
-    }
+    return LeverageBook.resolve(config.leverage, traded=config.traded_symbols)
 
 
 def build_fill_model(config: PaperExchangeConfig, *, clock: Clock) -> FillModel:
@@ -257,7 +258,7 @@ def build_engine(config: AppConfig) -> Engine:
     bus = build_bus(config)
     clock = build_clock(config)
     store = build_store(config)
-    # Resolved once, injected twice. Both consumers below take *this* mapping,
+    # Resolved once, injected twice. Both consumers below take *this* book,
     # which is what makes "the model and the venue compute off the same input"
     # structural rather than a convention two call sites have to keep
     # (ADR-0044 §2).

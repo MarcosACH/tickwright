@@ -15,17 +15,18 @@ those reads (ADR-0041 §8). The scoped facade ``for_strategy`` hands out is what
 implements the seam.
 """
 
-from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 
 from tickwright.domain import (
+    EMPTY_LEVERAGE_BOOK,
     Account,
     AccountSpec,
     AccountView,
     Clock,
     FundingAccrual,
     InvariantViolation,
+    LeverageBook,
     LeverageSpec,
     MarkTick,
     OrderFillEvent,
@@ -154,7 +155,7 @@ class PortfolioProjection:
         spec: AccountSpec,
         store: Store,
         clock: Clock,
-        leverage: Mapping[str, LeverageSpec] | None = None,
+        leverage: LeverageBook = EMPTY_LEVERAGE_BOOK,
     ) -> None:
         # The venue's declaration, not just the account opened from it: it is
         # what tells the recovery path whether this run's genesis was *declared*
@@ -180,7 +181,7 @@ class PortfolioProjection:
         # strategy-traded set and identical to the one the ``Exchange`` holds,
         # because the composition root resolved it once and injected it twice.
         # The margin model reads it from here; this slice lands the input alone.
-        self._leverage = dict(leverage or {})
+        self._leverage = leverage
 
     def leverage_for(self, symbol: str) -> LeverageSpec:
         """The margin mode and leverage this run computes ``symbol`` against.
@@ -191,7 +192,7 @@ class PortfolioProjection:
         the map, whatever the caller asks for. A symbol outside the traded set
         has no position to value in the first place.
         """
-        return self._leverage.get(symbol, LeverageSpec())
+        return self._leverage.for_symbol(symbol)
 
     def observe_mark(self, mark: MarkTick) -> None:
         """Take the latest mark for a symbol — the Tier-2 write verb (ADR-0039).

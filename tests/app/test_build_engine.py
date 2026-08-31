@@ -111,11 +111,13 @@ def test_store_discriminant_selects_the_postgres_store(
 
 
 def test_exchange_discriminant_selects_the_paper_exchange(tmp_path: Path) -> None:
+    config = _config(tmp_path, exchange="paper")
     exchange = build_exchange(
-        _config(tmp_path, exchange="paper"),
+        config,
         bus=InMemoryBus(),
         clock=ManualClock(),
         store=SQLiteStore(":memory:"),
+        leverage=resolve_leverage(config),
     )
     assert isinstance(exchange, PaperExchange)
     # The venue owns the specs (ADR-0031): config flowed through to the seam.
@@ -143,7 +145,11 @@ def test_exchange_discriminant_selects_hyperliquid_with_meta_sourced_specs(
         hyperliquid={"signing_key": TEST_SIGNING_KEY, "symbols": ["BTC"], "testnet": True},
     )
     exchange = build_exchange(
-        config, bus=InMemoryBus(), clock=LiveClock(), store=SQLiteStore(":memory:")
+        config,
+        bus=InMemoryBus(),
+        clock=LiveClock(),
+        store=SQLiteStore(":memory:"),
+        leverage=resolve_leverage(config),
     )
 
     assert isinstance(exchange, HyperliquidExchange)
@@ -187,7 +193,13 @@ def test_the_hyperliquid_arm_hands_the_adapter_the_engine_s_startup_budget(
         hyperliquid={"signing_key": TEST_SIGNING_KEY, "symbols": ["BTC"], "testnet": True},
         engine={"startup_reconciliation_timeout_seconds": 300.0},
     )
-    exchange = build_exchange(config, bus=InMemoryBus(), clock=clock, store=SQLiteStore(":memory:"))
+    exchange = build_exchange(
+        config,
+        bus=InMemoryBus(),
+        clock=clock,
+        store=SQLiteStore(":memory:"),
+        leverage=resolve_leverage(config),
+    )
 
     with pytest.raises(VenueAccountModeUnsupported):
         asyncio.run(exchange.start())
@@ -373,7 +385,11 @@ def _btc_market_order() -> PlaceOrder:
 def _fill_price_from_built_paper(config: AppConfig) -> Decimal:
     bus = InMemoryBus()
     exchange = build_exchange(
-        config, bus=bus, clock=ManualClock(start_ns=1_000), store=SQLiteStore(":memory:")
+        config,
+        bus=bus,
+        clock=ManualClock(start_ns=1_000),
+        store=SQLiteStore(":memory:"),
+        leverage=resolve_leverage(config),
     )
     fills: list[FillReport] = []
     bus.subscribe(FillReport, lambda r: _record_fill(fills, r))
@@ -432,7 +448,11 @@ def test_a_traded_symbol_absent_from_config_resolves_to_the_safe_default(
     disagreement real drift rather than a config gap.
 
     ETH is configured and BTC is not, so this fails if the resolution either
-    drops the unconfigured symbol or overwrites the configured one.
+    drops the unconfigured symbol or overwrites the configured one. What the
+    completion *means* is ``LeverageBook``'s and pinned there; what this pins is
+    the input only the composition root holds — that the set completed over is
+    the **strategy-declared** one, not the feed's subscription list and not the
+    venue's instrument universe.
     """
     config = _config(
         tmp_path,
@@ -442,7 +462,7 @@ def test_a_traded_symbol_absent_from_config_resolves_to_the_safe_default(
 
     resolved = resolve_leverage(config)
 
-    assert resolved == {
+    assert resolved.entries == {
         "BTC": LeverageSpec(mode="isolated", leverage=1),
         "ETH": LeverageSpec(mode="cross", leverage=10),
     }

@@ -41,14 +41,13 @@ write with no ordering inside it has nothing here to protect. See ``portfolio``
 below, where the rule is stated on the borrow itself.
 """
 
-from collections.abc import Mapping
-
 from tickwright.domain import (
+    EMPTY_LEVERAGE_BOOK,
     AccountSpec,
     Clock,
     FundingAccrual,
     InvariantViolation,
-    LeverageSpec,
+    LeverageBook,
     Order,
     OrderFillEvent,
     Side,
@@ -68,7 +67,7 @@ class Checkpointer:
         spec: AccountSpec,
         store: Store,
         clock: Clock,
-        leverage: Mapping[str, LeverageSpec] | None = None,
+        leverage: LeverageBook = EMPTY_LEVERAGE_BOOK,
     ) -> None:
         self._store = store
         self._clock = clock
