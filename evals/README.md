@@ -150,7 +150,14 @@ regression when nothing regressed. Assert behavior, not a number.
   given `--scaffold`, since that flag is off by default.
 - A fixture that asserts something about *size* states its own measurements in its header
   (`tdd/plans-with-sliced-reading/fixture/docs/module-maps/leverage-surface.md`). A comment claiming
-  a file is "large" is unfalsifiable and goes stale the first time someone edits it.
+  a file is "large" is unfalsifiable and goes stale the first time someone edits it. State one unit
+  and the range you actually mean: that map's h3 module sections run 275–2,356 characters, while its
+  h2 wrappers run from 165 up to 15,204, so "a section runs …" without the qualifier is false.
+- A fixture standing in for a `doc-slice` target must not carry a **section name inside its title**.
+  `doc-slice` matches a heading substring and falls back to the first match, so a map titled
+  "Leverage surface" answers `doc-slice … Leverage` with the whole file — through the very tool the
+  case is checking the agent reached for, past a `Read`/`cat` grader pair that sees nothing wrong.
+  Name the file after its subject and the title after something broader.
 
 ### Grading a read, and grading its absence
 

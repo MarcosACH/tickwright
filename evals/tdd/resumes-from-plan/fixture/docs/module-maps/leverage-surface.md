@@ -1,10 +1,16 @@
-# Module Map: Leverage surface (perps)
+# Module Map: Perps margin surface
 
 Scaled-down stand-in for a real map in this repo, and long on purpose. The whole
-file is 17,890 characters (~4.5k tokens); its TOC is 1,355 and a section runs
-721 to 2,358. Reading it whole therefore spends most of a cheap-planning budget
-on one file, where the TOC plus the two or three sections a slice actually needs
-costs a quarter of that. That contrast is what the case is watching for.
+file is 18,224 characters (~4.5k tokens); its TOC is 1,351 and a module section
+runs 275 to 2,356. Reading it whole therefore spends most of a cheap-planning
+budget on one file, where the TOC plus the two sections this slice needs —
+`Leverage` 849 and `universe` 719 — is 2,919, about a sixth of it. That contrast
+is what the case is watching for.
+
+The title names no module on purpose. `doc-slice` matches a heading substring and
+falls back to the **first** match, so a title carrying "Leverage" would make
+`doc-slice … Leverage` — the bare-name invocation the skill teaches — print this
+whole file rather than the section, past every grader below.
 
 ## Source
 
