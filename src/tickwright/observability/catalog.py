@@ -46,6 +46,13 @@ class NamedEvent(StrEnum):
     # its number is in the operator's own config, not read from anywhere.
     ACCOUNT_MATERIALISED = "account.materialised"
 
+    # One completed account-grain cross-check (``LedgerReconciliation``,
+    # ADR-0034). Emitted on every cycle, agreeing or not, because "the ledger was
+    # compared against the venue and agreed" is the record an operator needs to
+    # tell a healthy cadence from one that silently stopped running — a name that
+    # only spoke on divergence would be indistinguishable from a dead cadence.
+    ACCOUNT_RECONCILED = "account.reconciled"
+
     # Live-feed ingress: a conflation drop under backpressure, and a
     # malformed-frame drop that is skipped instead of faulting the engine
     # (``HyperliquidFeed``, ADR-0023).
