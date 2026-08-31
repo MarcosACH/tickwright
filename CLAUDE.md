@@ -18,7 +18,7 @@ Pipeline:
 2. `/to-spec` — synthesize the parent PRD issue (**synthesis-only, no interview** — alignment already happened in step 1). The artifact is still a PRD.
 3. `/module-map` — architecture anchor at `docs/module-maps/<slug>.md`.
 4. `/to-tickets` — break the PRD into vertical-slice child tickets, linked as GitHub sub-issues (all in this repo), each declaring its blocking edges. The last child is always an `integrate-and-verify` slice, blocked by all its siblings, asserting the cross-slice scenarios no single slice could (ADR-0050).
-5. `/tdd` per child — red-green-refactor on `ralph/issue-<N>` branch; vertical tracer through `feed → strategy → exchange → engine`.
+5. `/tdd` per child — red-green-refactor on `ralph/issue-<N>` branch; vertical tracer through `feed → strategy → exchange → engine`. The confirmed plan (seams, behavior checklist, shas) is written to the gitignored `.agents/plans/issue-<N>.md` and ticked per cycle, so a compacted or restarted session resumes without re-exploring.
 6. Open one PR per issue with `Closes #<N>` in the body.
 7. `/code-review` — structured BLOCKING/WARN/NIT review; label `ralph:ready` when clean. Merge closes the issue automatically.
 
@@ -61,6 +61,7 @@ See `docs/workflow/labels.md` for the label schema and `docs/agents/issue-tracke
   - `.agents/tools/doc-slice <file> <heading-substr>` — print just that section
 - For large source/test files, use `Read` with `offset`/`limit` targeting the symbol you need.
 - For GitHub issues, use `gh issue view <N>`.
+- **Editing a file you have already read: use `Edit`, not a Bash write.** Any Bash write stales the harness's cached copy — a one-line `sed -i` no less than a whole-file heredoc, diff size is irrelevant — and the next `Edit` warns that the file changed on disk, which pushes you into a full re-read. Reserve heredocs and `sed -i` for creating new files. This deliberately overrides the bypass-permissions guidance the harness injects, which is right for one-shot shell work and wrong for a loop that edits the same handful of files repeatedly.
 
 ## Local Development (macOS)
 
