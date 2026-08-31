@@ -80,9 +80,11 @@ So split the reading in two:
 **`doc-slice` the module map — never read it whole.**
 `docs/module-maps/trade-economics-accounting-surface.md` is **86,298 chars ≈ 21.6k tokens**, larger
 than any ADR: one `cat` is three times the entire cheap-planning budget. Its TOC is 1,253 chars
-≈ 0.3k. And **sections are chosen, not swept** — they run 0.6k (`Leverage (domain/leverage.py)`) to
-**3.2k** (`PortfolioProjection (engine/portfolio.py)`, 12,865 chars), so four of the wrong ones blow
-the budget on their own. The invocation is canonical in
+≈ 0.3k. And **sections are chosen, not swept** — they run 0.6k (`Leverage`) to **3.2k**
+(`PortfolioProjection`, 12,865 chars), so four of the wrong ones blow the budget on their own.
+Pass the **bare module name** as the heading substring: the TOC prints the path inside backticks
+(``PortfolioProjection (`engine/portfolio.py`)``), so a substring copied with the parenthesised path
+but without them matches nothing. The invocation is canonical in
 [CLAUDE.md → Context Discipline](../../../CLAUDE.md); don't restate it here.
 
 What stays up front is the **agreement**, not the code reading: the seams under test and the
@@ -98,22 +100,16 @@ behavior that landed first, for no benefit.
 
 ### Use `Edit` for any file you have already read
 
-**A Bash write silently stales the harness's cached copy of the file.** The cost lands on the
-*next* `Edit`, which applies cleanly but returns *"the file had been modified on disk since you last
-read it … Read it before edits that depend on surrounding content"* — and that prompt is what drives
-you into a full re-`Read`. On the #190 run it cost ~10k across six files. Diff size is irrelevant:
-a one-line `sed -i` stales the cache exactly as much as a whole-file heredoc rewrite, so "but it was
-a small change" is not an exemption.
+The rule, its cache-staleness rationale, its coverage of `sed -i`, and the fact that it deliberately
+overrides the harness-injected bypass-permissions guidance are all canonical in
+[CLAUDE.md → Context Discipline](../../../CLAUDE.md). Read it there; don't restate it here.
 
-- **`Edit`** — any file already read in this session, which in a TDD loop is every file you touch
-  after its first cycle.
-- **Bash writes / heredocs** — creating new files.
-
-This deliberately overrides the **bypass-permissions guidance the harness injects** when that mode
-is active ("do your work through the Bash tool wherever it can accomplish the job … make file
-changes with `sed`, heredocs, or short scripts"). That guidance is right for one-shot shell work and
-wrong for a loop that edits the same handful of files fifteen times. It is harness-injected, not a
-repo file, so this carve-out names it descriptively — there is nothing to edit on the other side.
+What is specific to a TDD loop is the **multiplier**. You touch the same handful of files once per
+red→green cycle, so "already read in this session" describes every file you touch after its first
+cycle, and each Bash write buys a re-read on the next one. On the #190 run that compounded to ~10k
+across six files — `build.py`, `instrument.py`, `config.py`, `errors.py`, `universe.py` and
+`domain/__init__.py`. Reserve the heredoc for what a cycle genuinely **creates**: a new test module,
+a new source module.
 
 ## Workflow
 
@@ -127,6 +123,10 @@ shas are the cheap guard: one `git log --oneline <base>..HEAD` (~200 tokens) rec
 against reality. Then state the resume point ("behaviors 1–4 done through `<sha>`, next is 5") and
 **ask before continuing** — same discipline as confirming the base branch below. A confirmed plan
 replaces the exploration, not the confirmation steps.
+
+If `N` is underivable — no issue reference and no `ralph/issue-<N>` branch, which is the shape of an
+untracked one-off fix — there is no plan to find and none to write. Skip the artifact everywhere it
+appears below and plan in-thread; the rest of the budget still applies.
 
 **If invoked with an issue reference (URL or `#N`)**, before exploring code:
 
@@ -162,7 +162,7 @@ Before writing any code:
 - [ ] Design interfaces for [testability](interface-design.md)
 - [ ] List the behaviors to test (not implementation steps)
 - [ ] Get user approval on the plan
-- [ ] Write the approved plan to `.agents/plans/issue-<N>.md` (below)
+- [ ] Write the approved plan to `.agents/plans/issue-<N>.md` (below; skip when `N` is underivable)
 
 Ask: "What should the public interface look like? Which behaviors are most important to test?"
 
