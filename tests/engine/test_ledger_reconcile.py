@@ -385,3 +385,38 @@ def test_a_symbol_only_one_side_holds_is_still_compared() -> None:
             venue=Decimal("0"),
         ),
     ]
+
+
+# --- The barrier's account step ----------------------------------------------
+#
+# The startup materialisation is this type's *other* account read, and it lives
+# here rather than on the runner for the reason #191 deferred to this slice: the
+# barrier composes two bound methods on two grain owners, and until this module
+# existed the account step had no owner to be a method of.
+
+
+def test_an_unanswered_barrier_read_is_recorded_as_a_freeze() -> None:
+    """The account grain's other freeze, and until now the silent one.
+
+    The barrier's account step used to return a bare ``False`` and emit nothing,
+    so an operator whose startup faulted on the account read got
+    ``engine.faulted`` and no record naming the read that caused it — while the
+    identical freeze one step later was fully recorded (#191 handover, item 2).
+
+    Both carry the one name now, told apart by ``step`` rather than by a second
+    name, because the grain and the cause are identical and nothing routes on the
+    difference. What differs is the **cost**, and that an operator does need told
+    apart: this freeze faults the process once the barrier's retry budget runs
+    out, where the cadence's skips a single cycle.
+    """
+    clock = ManualClock(start_ns=1_000)
+    venue = _ReadOnlyVenue(state=None)
+    reconciliation = _cycle(_live_ledger(SQLiteStore(":memory:"), clock), venue, clock)
+
+    with capture_events() as logs:
+        opened = asyncio.run(reconciliation.materialise_account())
+
+    assert opened is False
+    assert venue.account_reads == 1
+    assert [str(log["event"]) for log in logs] == ["account.reconcile_frozen"]
+    assert [log["step"] for log in logs] == ["barrier"]

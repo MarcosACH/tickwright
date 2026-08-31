@@ -129,6 +129,55 @@ class LedgerReconciliation:
         self._bus = bus
         self._config = config
 
+    async def materialise_account(self) -> bool:
+        """The barrier's live-only first step: create the account row when the
+        store holds none (ADR-0042 §6, ADR-0043 §6).
+
+        A method on this type rather than on the runner, and that is the #191
+        handover's first item: the barrier composes two bound methods on two
+        grain owners, and until this module existed the account step had no owner
+        to be a method of. Its collaborators are exactly this class's — the
+        ``Exchange`` it reads, the ``PortfolioProjection`` it writes through — so
+        the runner is left holding lifecycle ordering and nothing else.
+
+        The predicate is the *row*, not the venue: paper reaches here already
+        opened, seeded inside ``recover()`` from a config value that could not
+        fail on connectivity, and a live restart reaches here opened by an
+        earlier life. So the one state that reads the venue is a live **first**
+        start, and both of the other two skip the read entirely rather than
+        making one they would then discard.
+
+        What that check decides here is only whether a **read is owed**, not
+        whether the write is allowed. ADR-0042 §3's write-once rule is stated on
+        ``materialise`` itself, which refuses an already-open ledger (ADR-0047
+        §1): on live the genesis is *provenance only* — nothing cross-checks it,
+        because there is no configured counterpart — so a second derivation would
+        move a recorded number no later check could ever contradict. The two read
+        the same predicate off the same store, so they cannot disagree about the
+        row.
+
+        ``False`` is a failed venue read, and the barrier retries it inside the
+        one startup budget before faulting. Clearing the barrier on an account
+        the venue never answered for is not an available outcome: that is
+        ADR-0011's freeze-don't-guess applied to the cash line, and what keeps
+        ADR-0041 §6's "``cash`` is never ``None``" true rather than intended.
+
+        The write itself is the projection's rather than a ``Checkpointer``
+        verb, for the same reason paper's genesis seed is: the ``Checkpointer``
+        owns the orderings a caller could silently invert — fold before write
+        before project, ledger before order cache — and opening a ledger is one
+        write to one read-model with no ordering inside it. The ordering that
+        *does* matter here is the barrier's, and it stays with the runner.
+        """
+        if self._portfolio._is_opened():
+            return True
+        state = await self._exchange.fetch_account_state()
+        if state is None:
+            self._freeze(_FreezeStep.BARRIER)
+            return False
+        self._portfolio.materialise(state)
+        return True
+
     async def reconcile_account(self) -> tuple[Divergence, ...] | None:
         """One cycle: read the venue, classify what disagrees, heal nothing.
 
@@ -154,8 +203,10 @@ class LedgerReconciliation:
 
         The record is the whole of what a freeze *does*: nothing is classified,
         nothing is healed, nothing is removed. Emitted rather than left silent
-        because the alternative — a cycle that touches nothing and says nothing —
-        reads exactly like a cadence that stopped running.
+        because the alternative — a step that touches nothing and says nothing —
+        reads exactly like a cadence that stopped running, and at the barrier
+        left an operator with ``engine.faulted`` and no record naming the read
+        that caused it.
         """
         named_event(NamedEvent.ACCOUNT_RECONCILE_FROZEN, step=step.value)
 
