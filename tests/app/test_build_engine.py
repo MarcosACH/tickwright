@@ -286,15 +286,22 @@ def test_build_engine_wires_a_tradable_paper_engine(tmp_path: Path) -> None:
     gracefully; the durable trail is in the configured sqlite file.
     """
     ticks = tmp_path / "ticks.jsonl"
+    # One symbol each: ADR-0034's disjointness rule forbids two strategies over
+    # one symbol on a NET venue, so the two kinds are exercised side by side
+    # rather than stacked.
     ticks.write_text(
         '{"symbol": "BTC", "price": "42000", "size": "3", '
         '"aggressor_side": "buy", "trade_id": "a", "ts_event": 1000}\n'
+        '{"symbol": "ETH", "price": "42000", "size": "3", '
+        '"aggressor_side": "buy", "trade_id": "b", "ts_event": 1001}\n'
     )
     db = tmp_path / "saga.db"
     config = AppConfig(
         replay=ReplayFeedConfig(path=ticks),
         sqlite=SQLiteStoreConfig(path=db),
-        paper=PaperExchangeConfig(instrument_specs={"BTC": _SPEC}, genesis_collateral=GENESIS),
+        paper=PaperExchangeConfig(
+            instrument_specs={"BTC": _SPEC, "ETH": _SPEC}, genesis_collateral=GENESIS
+        ),
         strategies=[
             StrategyConfig(
                 kind="single_shot_market",
@@ -306,7 +313,7 @@ def test_build_engine_wires_a_tradable_paper_engine(tmp_path: Path) -> None:
             StrategyConfig(
                 kind="single_shot_limit",
                 strategy_id="rester",
-                symbol="BTC",
+                symbol="ETH",
                 side=Side.BUY,
                 quantity=Decimal("0.5"),
                 price=Decimal("41000"),
@@ -318,7 +325,7 @@ def test_build_engine_wires_a_tradable_paper_engine(tmp_path: Path) -> None:
 
     wanted = {
         derive_cloid("demo:BTC:1"): OrderState.FILLED,
-        derive_cloid("rester:BTC:1"): OrderState.LIVE,
+        derive_cloid("rester:ETH:1"): OrderState.LIVE,
     }
 
     async def run_until_settled() -> int:
