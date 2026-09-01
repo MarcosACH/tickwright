@@ -6,6 +6,25 @@ the exchange/info endpoints."""
 import asyncio
 import json
 
+from tickwright.adapters.clock import ManualClock
+
+
+class RecordingClock(ManualClock):
+    """A ``ManualClock`` that also records what it was asked to sleep.
+
+    Every backoff assertion in this package reads ``sleeps`` rather than a wall
+    clock, so a retry-pacing test costs no real time. Shared because the pacing
+    it measures is now one loop's (``WsSession``) driven from two suites — the
+    session's own and the feed's."""
+
+    def __init__(self, start_ns: int = 0) -> None:
+        super().__init__(start_ns=start_ns)
+        self.sleeps: list[float] = []
+
+    async def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        await super().sleep(seconds)
+
 
 class FakeExchangeApi:
     """A venue-state ``post`` seam: answers each request by *what it asks*, not

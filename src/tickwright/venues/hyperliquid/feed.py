@@ -23,10 +23,10 @@ from typing import Any
 from tickwright.domain import AggressorSide, Clock, EventBus, MarketTick, MarkTick
 from tickwright.observability import NamedEvent, named_event
 
-from .backoff import Backoff
 from .config import HyperliquidConfig
 from .ingress import ConflatingIngress, MarketData
 from .reading import UNREADABLE, figure
+from .session import WsSession
 from .transport import Connect, WsConnection, open_websocket
 
 _NS_PER_MS = 1_000_000
@@ -49,46 +49,33 @@ class HyperliquidFeed:
         self._config = config
         self._bus = bus
         self._clock = clock
-        self._connect = connect
-        self._connection: WsConnection | None = None
         self._seq_by_symbol: dict[str, int] = {}
-        self._stopping = False
+        self._session = WsSession(
+            config=config,
+            clock=clock,
+            connect=connect,
+            subscribe=self._subscribe,
+            consume=self._consume,
+        )
 
     async def start(self) -> None:
-        backoff = Backoff(
-            initial=self._config.reconnect_initial_backoff_seconds,
-            maximum=self._config.reconnect_max_backoff_seconds,
-        )
-        while not self._stopping:
-            try:
-                connection = await self._connect(self._config.ws_url)
-            except OSError:
-                # Connect refused/unreachable: pace the retry on the injected
-                # clock, doubling up to the cap (virtual under ManualClock).
-                await backoff.sleep_on(self._clock)
-                continue
-            backoff.reset()
-            self._connection = connection
-            await self._subscribe(connection)
-            # A fresh ingress per connection: the reader offers ticks, the drain
-            # publishes them, conflating under backpressure so a slow subscriber
-            # never stalls the socket (ADR-0023). Separate coroutines; either one
-            # failing cancels both. A new buffer means no stale tick survives a
-            # reconnect.
-            ingress = ConflatingIngress(bus=self._bus)
-            async with asyncio.TaskGroup() as tg:
-                tg.create_task(self._read_frames(connection, ingress))
-                tg.create_task(ingress.drain())
-            # Iteration ended: a stop() is final; anything else was the venue
-            # hanging up, so back off once and go resubscribe.
-            if self._stopping:
-                return
-            await backoff.sleep_on(self._clock)
+        await self._session.run()
 
     async def stop(self) -> None:
-        self._stopping = True
-        if self._connection is not None:
-            await self._connection.close()
+        await self._session.stop()
+
+    async def _consume(self, connection: WsConnection) -> None:
+        """Read one connection's frames to the bus, for as long as it lives.
+
+        A fresh ingress per connection: the reader offers ticks, the drain
+        publishes them, conflating under backpressure so a slow subscriber never
+        stalls the socket (ADR-0023). Separate coroutines; either one failing
+        cancels both. A new buffer means no stale tick survives a reconnect.
+        """
+        ingress = ConflatingIngress(bus=self._bus)
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(self._read_frames(connection, ingress))
+            tg.create_task(ingress.drain())
 
     async def _read_frames(self, connection: WsConnection, ingress: ConflatingIngress) -> None:
         try:

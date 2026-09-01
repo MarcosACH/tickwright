@@ -2,8 +2,9 @@
 
 Two loops in this package pace a retry, and keeping the "sleep the current
 delay, then double up to the cap" rule in one value object means they cannot
-skew. The feed's reconnect loop retries from two places (a refused connect, a
-venue hangup) and ``reset``s after a good connection (ADR-0021). The boot
+skew. ``WsSession`` — the reconnect loop both live subscriptions run on —
+retries from two places (a refused connect, a venue hangup) and ``reset``s after
+a good connection (ADR-0021). The boot
 guards' account-mode read retries an unreadable response and never resets:
 it has one bounded window in which to clear or refuse, so there is no "good
 connection" to return to (ADR-0046 §3).

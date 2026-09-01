@@ -354,6 +354,69 @@ def test_a_frame_that_names_no_channel_refuses_on_the_money_socket(frame: str) -
     assert "funding" in message
 
 
+def test_a_dropped_socket_resubscribes_and_the_re_delivered_snapshot_heals_the_gap() -> None:
+    """Why this subscription can afford to lose a socket at all.
+
+    Resubscribing re-delivers the whole snapshot, so the payments that settled
+    while the connection was down arrive with the ones already applied — the
+    watermark drops those and keeps these, which is what makes a reconnect
+    *heal* the gap rather than leave one (ADR-0043 §5.2). The claim was in the
+    module's docstring with nothing driving it: the ingest owns the resubscribe,
+    and the gate behind it is asserted separately by the re-ingest case below.
+    """
+    dropped = FakeWsConnection(
+        [user_fundings_frame(funding(time_ms=FIRST_MS, coin="ETH", usdc="-3"), snapshot=True)],
+        drop_when_drained=True,
+    )
+    recovered = FakeWsConnection(
+        [
+            user_fundings_frame(
+                funding(time_ms=FIRST_MS, coin="ETH", usdc="-3"),
+                funding(time_ms=SECOND_MS, coin="ETH", usdc="-2"),
+                snapshot=True,
+            )
+        ]
+    )
+
+    async def main() -> list[FundingAccrual]:
+        bus = InMemoryBus()
+        clock = ManualClock(start_ns=7)
+        seen: list[FundingAccrual] = []
+        enough = asyncio.Event()
+
+        async def record(accrual: FundingAccrual) -> None:
+            seen.append(accrual)
+            if len(seen) >= 3:
+                enough.set()
+
+        bus.subscribe(FundingAccrual, record)
+        sockets: list[FakeWsConnection] = [dropped, recovered]
+
+        async def connect(url: str) -> FakeWsConnection:
+            return sockets.pop(0)
+
+        exchange = make_exchange(FakeExchangeApi({}), bus=bus, clock=clock, connect=connect)
+        async with asyncio.TaskGroup() as tg:
+            running = tg.create_task(exchange.run())
+            await asyncio.wait_for(enough.wait(), timeout=2)
+            await exchange.stop()
+            await running
+        return seen
+
+    seen = asyncio.run(main())
+
+    # The boundary missed while the socket was down is delivered by the new one,
+    # alongside the re-delivery of the one already applied.
+    assert [a.boundary_ts_ns for a in seen] == [
+        FIRST_MS * _NS_PER_MS,
+        FIRST_MS * _NS_PER_MS,
+        SECOND_MS * _NS_PER_MS,
+    ]
+    # Both sockets were subscribed: a recovered connection nobody subscribed
+    # would sit open and silent, which is the gap this is claiming to close.
+    assert len(dropped.sent) == len(recovered.sent) == 1
+
+
 def test_the_venue_s_own_housekeeping_frames_are_ignored_rather_than_refused() -> None:
     """The other half of the rule, deliberately adjacent to the two above.
 

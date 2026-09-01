@@ -21,9 +21,9 @@ from typing import Any, NoReturn
 
 from tickwright.domain import Clock, EventBus, FundingAccrual, VenueFactUnsupported
 
-from .backoff import Backoff
 from .config import HyperliquidConfig
 from .reading import figure, rendered
+from .session import WsSession
 from .transport import Connect, WsConnection
 
 _NS_PER_MS = 1_000_000
@@ -117,7 +117,7 @@ class FundingIngest:
     `PaperExchange` — a non-terminating loop does not belong in a class whose
     other 800 lines are request-scoped HTTP.
 
-    Reconnect is the feed's loop and for the same reason (ADR-0023), with one
+    Reconnect is the feed's own loop and the same object (`WsSession`), with one
     difference that costs nothing: resubscribing re-delivers the snapshot, so
     every payment missed while the socket was down arrives again. The ledger's
     watermark drops the ones already applied, which makes a reconnect *heal* the
@@ -135,38 +135,23 @@ class FundingIngest:
         address: str,
         connect: Connect,
     ) -> None:
-        self._config = config
         self._bus = bus
         self._clock = clock
         self._account_id = account_id
         self._address = address
-        self._connect = connect
-        self._connection: WsConnection | None = None
-        self._stopping = False
+        self._session = WsSession(
+            config=config,
+            clock=clock,
+            connect=connect,
+            subscribe=self._subscribe,
+            consume=self._read_frames,
+        )
 
     async def run(self) -> None:
-        backoff = Backoff(
-            initial=self._config.reconnect_initial_backoff_seconds,
-            maximum=self._config.reconnect_max_backoff_seconds,
-        )
-        while not self._stopping:
-            try:
-                connection = await self._connect(self._config.ws_url)
-            except OSError:
-                await backoff.sleep_on(self._clock)
-                continue
-            backoff.reset()
-            self._connection = connection
-            await self._subscribe(connection)
-            await self._read_frames(connection)
-            if self._stopping:
-                return
-            await backoff.sleep_on(self._clock)
+        await self._session.run()
 
     async def stop(self) -> None:
-        self._stopping = True
-        if self._connection is not None:
-            await self._connection.close()
+        await self._session.stop()
 
     async def _subscribe(self, connection: WsConnection) -> None:
         """The one authenticated-by-address channel this adapter reads.
