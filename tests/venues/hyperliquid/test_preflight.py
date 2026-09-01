@@ -30,6 +30,8 @@ from tickwright.domain import (
     LeverageSpec,
     VenueAccountModeUnsupported,
 )
+from tickwright.observability import NamedEvent
+from tickwright.observability.testing import capture_events
 from tickwright.venues.hyperliquid import (
     HyperliquidConfig,
     HyperliquidExchange,
@@ -462,6 +464,47 @@ def test_a_traded_symbol_nobody_configured_is_pushed_at_the_safe_default() -> No
     pushed = [payload["action"] for (url, payload) in post.requests if url.endswith("/exchange")]
     assert {"type": "updateLeverage", "asset": 1, "isCross": False, "leverage": 1} in pushed
     assert len(pushed) == 2, "the configured symbol is pushed too, not replaced by the default"
+
+
+def test_a_held_position_the_venue_already_agrees_with_is_left_alone_and_named() -> None:
+    """The skip arm of the three-way split (ADR-0044 §4): aligned → no write.
+
+    Skipping is not an optimisation here, it is the safe branch. The write the
+    account read exists to avoid is a re-margin of a *held* position, and the
+    one symbol where a needless ``updateLeverage`` could move real collateral is
+    exactly the one already carrying risk — so agreement has to be established
+    before the boot writes anything, not asserted afterwards from the response.
+
+    Which is why the skip branch is the sole source of
+    ``EXCHANGE_LEVERAGE_UNCHANGED``. A no-op push and a real change come back as
+    the **identical** ``ok`` envelope (measured in #142, ADR-0044 §6's
+    correction), so the write path cannot tell an operator that nothing moved;
+    only the branch that declined to write knows it. The expected pair is the
+    configured one, and the venue body says the same thing in the venue's own
+    vocabulary (``leverage.{type, value}``) rather than in config's.
+    """
+    post = FakeExchangeApi(
+        {
+            "userAbstraction": "disabled",
+            "clearinghouseState": _state(_held("BTC", mode="cross", leverage=10)),
+            "updateLeverage": OK_ENVELOPE,
+        }
+    )
+    book = LeverageBook(entries={"BTC": LeverageSpec(mode="cross", leverage=10)})
+
+    with capture_events() as logs:
+        asyncio.run(_exchange(post, leverage=book).start())
+
+    assert [request_type(url, payload) for (url, payload) in post.requests] == [
+        "userAbstraction",
+        "clearinghouseState",
+    ], "an aligned held position is never written to"
+    unchanged = [
+        (log["symbol"], log["mode"], log["leverage"])
+        for log in logs
+        if log["event"] == NamedEvent.EXCHANGE_LEVERAGE_UNCHANGED
+    ]
+    assert unchanged == [("BTC", "cross", 10)]
 
 
 def test_a_leverage_above_the_venue_cap_refuses_to_start_on_live_too() -> None:

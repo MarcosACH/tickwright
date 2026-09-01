@@ -33,6 +33,8 @@ from tickwright.domain import (
     FillReport,
     InstrumentSpec,
     InvariantViolation,
+    LeverageBook,
+    LeverageSpec,
     MarketTick,
     Order,
     OrderEvent,
@@ -554,6 +556,52 @@ def _drive_exchange_action_rejected() -> None:
     asyncio.run(go())
 
 
+def _drive_exchange_leverage_unchanged() -> None:
+    """A live boot whose venue already agrees: the leverage push declines to
+    write and names the symbol it left alone (``preflight``, ADR-0044 §7).
+
+    The skip branch is the only path that emits this — a no-op ``updateLeverage``
+    answers with the same ``ok`` envelope a real change does — so the account
+    read has to come back holding a position at exactly the configured pair.
+    ``1x``/isolated is that pair here because ``_SPEC`` publishes no larger cap,
+    and §9's bound runs ahead of the push."""
+
+    async def go() -> None:
+        exchange = HyperliquidExchange(
+            config=HyperliquidConfig(
+                testnet=True,
+                symbols=["BTC"],
+                # Anvil's account #0 — a publicly-known throwaway key.
+                signing_key=SecretStr(
+                    "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+                ),
+            ),
+            bus=InMemoryBus(),
+            clock=ManualClock(),
+            universe=HyperliquidUniverse(specs={"BTC": _SPEC}, asset_indices={"BTC": 0}),
+            startup_timeout_seconds=60.0,
+            post=FakeExchangeApi(
+                {
+                    "userAbstraction": "disabled",
+                    "clearinghouseState": {
+                        "assetPositions": [
+                            {
+                                "position": {
+                                    "coin": "BTC",
+                                    "leverage": {"type": "isolated", "value": 1},
+                                }
+                            }
+                        ]
+                    },
+                }
+            ),
+            leverage=LeverageBook(entries={"BTC": LeverageSpec(mode="isolated", leverage=1)}),
+        )
+        await exchange.start()
+
+    asyncio.run(go())
+
+
 class _IdleFeed:
     """A feed with nothing to say — the lifecycle walk needs the ordered
     startup, not ticks. A ``MarketFeed`` double at the venue boundary."""
@@ -807,6 +855,7 @@ SCENARIOS: dict[NamedEvent, Callable[[], None]] = {
     NamedEvent.ACCOUNT_RECONCILE_FROZEN: _drive_account_reconcile_frozen,
     NamedEvent.EXCHANGE_REQUEST_FAILED: _drive_exchange_request_failed,
     NamedEvent.EXCHANGE_ACTION_REJECTED: _drive_exchange_action_rejected,
+    NamedEvent.EXCHANGE_LEVERAGE_UNCHANGED: _drive_exchange_leverage_unchanged,
 }
 
 

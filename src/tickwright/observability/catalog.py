@@ -123,3 +123,17 @@ class NamedEvent(StrEnum):
     # transport and from a per-order REJECTED. No report; reconcile-by-cloid owns
     # the in-flight order (``HyperliquidExchange``, ADR-0008 rule 2).
     EXCHANGE_ACTION_REJECTED = "exchange.action_rejected"
+    # The boot-time leverage push declining to write: the venue already holds a
+    # position at the configured mode and leverage, so nothing was sent
+    # (``preflight.push_leverage``, ADR-0044 §7). Carries ``symbol``/``mode``/
+    # ``leverage`` — the grain an operator compares against config.
+    #
+    # Named from the **skip** branch and only from it, which is not where a
+    # reader expects to find it. A no-op ``updateLeverage`` returns the identical
+    # ``ok`` envelope a real change does (measured in #142), so the write path
+    # cannot tell the two apart; the branch that declined to write is the one
+    # place "already aligned" is knowable at all. There is deliberately no
+    # counterpart naming a push that *did* land — the push runs once at boot and
+    # never again, so the absence of this name over a symbol in the book is what
+    # says the venue was moved.
+    EXCHANGE_LEVERAGE_UNCHANGED = "exchange.leverage_unchanged"

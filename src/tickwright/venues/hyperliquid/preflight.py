@@ -21,12 +21,28 @@ surface in a module a reader can audit in full.
 """
 
 from collections.abc import Awaitable, Callable, Mapping
-from typing import Any
+from typing import Any, Final, get_args
 
-from tickwright.domain import Clock, LeverageBook, VenueAccountModeUnsupported
+from tickwright.domain import (
+    Clock,
+    LeverageBook,
+    LeverageSpec,
+    MarginMode,
+    VenueAccountModeUnsupported,
+)
+from tickwright.observability import NamedEvent, named_event
 
 from .backoff import Backoff
 from .reading import UNREADABLE
+
+_REPORTED_MARGIN_MODES: Final = frozenset(get_args(MarginMode.__value__))
+"""The two ``leverage.type`` literals, taken from ``domain``'s own alias.
+
+Derived rather than transcribed: config and the venue read must agree on what a
+margin mode *is*, and a hand-copied pair here would be free to fall behind the
+type the comparison is made against. Through ``__value__`` because ``MarginMode``
+is a PEP 695 ``type`` statement — a ``TypeAliasType`` whose ``get_args`` is
+empty, which would make this an allowlist that refuses **every** mode."""
 
 InfoRead = Callable[[dict[str, Any]], Awaitable[object]]
 """One unsigned ``POST /info`` query, as the adapter makes it."""
@@ -203,9 +219,22 @@ async def push_leverage(
         # — so there is no symbol to align and no reason to ask the venue about
         # an account whose answer nothing would read.
         return
-    await info({"type": "clearinghouseState", "user": address})
+    held = _held_leverage(await info({"type": "clearinghouseState", "user": address}))
     for symbol in sorted(book.entries):
         spec = book.for_symbol(symbol)
+        if held.get(symbol) == spec:
+            # The skip arm, and the only place "already aligned" is knowable: a
+            # no-op ``updateLeverage`` answers with the same ``ok`` envelope a
+            # real change does (§6 as corrected by #142), so a write can never
+            # report that nothing moved. Emitted per symbol rather than once per
+            # boot because that is the grain an operator compares against config.
+            named_event(
+                NamedEvent.EXCHANGE_LEVERAGE_UNCHANGED,
+                symbol=symbol,
+                mode=spec.mode,
+                leverage=spec.leverage,
+            )
+            continue
         await send(
             {
                 "type": "updateLeverage",
@@ -214,3 +243,34 @@ async def push_leverage(
                 "leverage": spec.leverage,
             }
         )
+
+
+def _held_leverage(response: object) -> dict[str, LeverageSpec]:
+    """The account's *stored* setting per held symbol, as config's own type.
+
+    A ``LeverageSpec`` rather than a pair, so the comparison above is one
+    equality against the value an operator wrote and cannot drift from it by
+    comparing halves. Symbols the account is flat in are simply absent — the
+    venue reports ``leverage`` for exactly the positions it holds, which is what
+    makes one ``clearinghouseState`` read enough for the whole boot (§4).
+
+    The mode is checked against the two literals the venue reports rather than
+    trusted into ``LeverageSpec``, which is a plain frozen dataclass and would
+    take a third one silently. Silently is the problem: an unrecognised mode
+    compares unequal to every configured spec, so the boot would read a venue
+    contract change as a *disagreement about a held position* — the branch that
+    refuses to start, sending an operator to fix a leverage that was never
+    wrong. Raised as the ``ValueError`` ``reading.UNREADABLE`` already names for
+    exactly this ("a margin mode outside the two the venue reports").
+    """
+    if not isinstance(response, Mapping):
+        raise TypeError(f"non-mapping clearinghouseState response {response!r}")
+    held: dict[str, LeverageSpec] = {}
+    for row in response["assetPositions"]:
+        position = row["position"]
+        setting = position["leverage"]
+        mode = setting["type"]
+        if mode not in _REPORTED_MARGIN_MODES:
+            raise ValueError(f"unknown margin mode {mode!r} in clearinghouseState")
+        held[position["coin"]] = LeverageSpec(mode=mode, leverage=setting["value"])
+    return held
