@@ -25,8 +25,8 @@ from tickwright.venues.hyperliquid import (
     HyperliquidExchange,
     HyperliquidUniverse,
 )
-from tickwright.venues.hyperliquid.feed import Connect
 from tickwright.venues.hyperliquid.funding import accruals
+from tickwright.venues.hyperliquid.transport import Connect
 
 _NS_PER_MS = 1_000_000
 

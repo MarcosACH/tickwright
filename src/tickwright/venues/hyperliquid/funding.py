@@ -23,8 +23,8 @@ from tickwright.domain import Clock, EventBus, FundingAccrual, VenueFactUnsuppor
 
 from .backoff import Backoff
 from .config import HyperliquidConfig
-from .feed import Connect, WsConnection
 from .reading import figure
+from .transport import Connect, WsConnection
 
 _NS_PER_MS = 1_000_000
 

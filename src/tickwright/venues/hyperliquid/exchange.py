@@ -44,11 +44,10 @@ from tickwright.observability import NamedEvent, named_event
 from . import transport
 from .account import account_spec, normalize_account_state
 from .config import HyperliquidConfig
-from .feed import Connect, open_websocket
 from .funding import FundingIngest
 from .preflight import verify_account_mode
 from .reading import UNREADABLE, failed_send, figure, read, unreadable_body
-from .transport import PostJson
+from .transport import Connect, PostJson, open_websocket
 from .universe import HyperliquidUniverse
 
 _NS_PER_MS = 1_000_000
