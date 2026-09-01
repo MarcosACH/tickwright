@@ -10,10 +10,12 @@ adapter, never in ``domain``).
 
 from collections.abc import Mapping
 from decimal import Decimal
-from typing import Any
+from typing import Any, Final, get_args
 
 from tickwright.domain import (
     AccountSpec,
+    LeverageSpec,
+    MarginMode,
     Netting,
     VenueAccountState,
     VenuePositionState,
@@ -21,6 +23,15 @@ from tickwright.domain import (
 
 from .config import HyperliquidConfig
 from .reading import figure
+
+_REPORTED_MARGIN_MODES: Final = frozenset(get_args(MarginMode.__value__))
+"""The two ``leverage.type`` literals, taken from ``domain``'s own alias.
+
+Derived rather than transcribed: config and the venue read must agree on what a
+margin mode *is*, and a hand-copied pair here would be free to fall behind the
+type the comparison is made against. Through ``__value__`` because ``MarginMode``
+is a PEP 695 ``type`` statement — a ``TypeAliasType`` whose ``get_args`` is
+empty, which would make this an allowlist that refuses **every** mode."""
 
 
 def account_spec(config: HyperliquidConfig, *, address: str) -> AccountSpec:
@@ -42,6 +53,47 @@ def account_spec(config: HyperliquidConfig, *, address: str) -> AccountSpec:
         netting=Netting.NET,
         genesis_collateral=None,
     )
+
+
+def held_leverage(response: object) -> dict[str, LeverageSpec]:
+    """The same body's *stored* margin setting per held symbol, as config's type.
+
+    A second read of ``clearinghouseState`` rather than a field on
+    ``VenuePositionState``, and both halves of that are deliberate. It lives
+    **here** because this module is the one place a Hyperliquid field name for
+    these quantities appears, and the boot-time leverage push needs
+    ``assetPositions`` like every other account-grain read does. It is **not** a
+    position-state field because ``VenuePositionState`` models what a position
+    *is worth*, and the push consumes the setting at boot, before any
+    projection exists to carry it; extending the state object is the post-boot
+    drift check's problem, not this read's.
+
+    Returned as ``LeverageSpec`` rather than a pair, so the push's comparison is
+    one equality against the value an operator wrote and cannot drift by
+    comparing halves. Symbols the account is flat in are simply **absent** — the
+    venue reports the setting for exactly the positions it holds, which is what
+    makes one read enough for a whole boot (ADR-0044 §4).
+
+    The mode is checked against the two literals the venue reports rather than
+    trusted into ``LeverageSpec``, which is a plain frozen dataclass and would
+    take a third one silently. Silently is the problem: an unrecognised mode
+    compares unequal to every configured spec, so the boot would read a venue
+    contract change as a *disagreement about a held position* — the branch that
+    refuses to start, sending an operator to fix a leverage that was never
+    wrong. Raised as the ``ValueError`` ``reading.UNREADABLE`` already names for
+    exactly this ("a margin mode outside the two the venue reports").
+    """
+    if not isinstance(response, Mapping):
+        raise TypeError(f"non-mapping clearinghouseState response {response!r}")
+    held: dict[str, LeverageSpec] = {}
+    for row in response["assetPositions"]:
+        position = row["position"]
+        setting = position["leverage"]
+        mode = setting["type"]
+        if mode not in _REPORTED_MARGIN_MODES:
+            raise ValueError(f"unknown margin mode {mode!r} in clearinghouseState")
+        held[position["coin"]] = LeverageSpec(mode=mode, leverage=setting["value"])
+    return held
 
 
 def normalize_account_state(response: object) -> VenueAccountState:
