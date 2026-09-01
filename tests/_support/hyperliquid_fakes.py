@@ -160,3 +160,20 @@ def trade(
     contract changed.
     """
     return {"coin": coin, "side": side, "px": px, "sz": sz, "time": time, "tid": tid}
+
+
+def user_fundings_frame(*fundings: dict, snapshot: bool = False) -> str:
+    """One ``userFundings`` frame, the venue's per-account payment channel.
+
+    ``data`` wraps a **list**: the first message is the historical snapshot
+    (``isSnapshot: true``) and later ones carry the payments on the hour, both
+    under the same ``fundings`` key. The engine reads them identically — a
+    payment is a payment however it was delivered — so the flag is here only
+    because the venue sends it.
+    """
+    return json.dumps(
+        {
+            "channel": "userFundings",
+            "data": {"isSnapshot": snapshot, "user": "0xuser", "fundings": list(fundings)},
+        }
+    )

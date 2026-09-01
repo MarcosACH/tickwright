@@ -44,6 +44,8 @@ from tickwright.observability import NamedEvent, named_event
 from . import transport
 from .account import account_spec, normalize_account_state
 from .config import HyperliquidConfig
+from .feed import Connect, open_websocket
+from .funding import FundingIngest
 from .preflight import verify_account_mode
 from .reading import UNREADABLE, failed_send, figure, read, unreadable_body
 from .transport import PostJson
@@ -71,6 +73,7 @@ class HyperliquidExchange:
         startup_timeout_seconds: float,
         leverage: LeverageBook = EMPTY_LEVERAGE_BOOK,
         post: PostJson | None = None,
+        connect: Connect = open_websocket,
     ) -> None:
         if config.signing_key is None:
             raise ValueError(
@@ -118,6 +121,18 @@ class HyperliquidExchange:
         # The MARKET slippage bound needs the latest traded price, and the tick
         # stream is where prices live (ADR-0027) — subscribe like any consumer.
         bus.subscribe(MarketTick, self.on_tick)
+        # The live half of ADR-0037: the venue pays funding at its own
+        # boundaries and this ingests it. Built here rather than in ``run()`` so
+        # that ``stop()`` has something to close even if the runner never got as
+        # far as starting the loop.
+        self._funding = FundingIngest(
+            config=config,
+            bus=bus,
+            clock=clock,
+            account_id=self._account_spec.account_id,
+            address=self._user_address,
+            connect=connect,
+        )
 
     async def start(self) -> None:
         """Nothing to connect — placement is request-scoped HTTP and the tick
@@ -145,19 +160,32 @@ class HyperliquidExchange:
         self._leverage.validate_against(self._universe.specs)
 
     async def run(self) -> None:
-        """Returns at once: this adapter runs no loop of its own.
+        """Ingest the venue's funding payments for as long as the run lives.
 
-        The venue pushes funding at its own boundaries and this adapter ingests
-        it, so there is nothing here to generate and nothing to supervise — the
-        exact half of ADR-0037 paper has to run for itself. The supervised task
-        the runner creates for this simply completes, which the seam names as a
-        legitimate implementation rather than an omission."""
-        return None
+        The half of ADR-0037 that is live's: the venue pays at its own
+        boundaries and this reads them off `userFundings`, where paper has
+        nobody to ask and generates the same keyed event off its `Clock`. Both
+        reach the projection as one `FundingAccrual` on one bus, so the apply
+        path carries no `if live:`.
+
+        Supervised in the runner's `TaskGroup` for the fault channel, exactly as
+        paper's generator is: this loop's failure mode is a payment the engine
+        cannot represent (`VenueFactUnsupported`), and an ingest the adapter had
+        spawned for itself would die of that alone — the engine running on
+        `RUNNING`, accruing nothing for the rest of the process, which is this
+        ADR's whole economic line failing silently. Supervised, it faults the run
+        at the payment it happened on and exits non-zero.
+        """
+        await self._funding.run()
 
     async def stop(self) -> None:
-        """Nothing to release: this adapter runs no loop of its own — every
-        request it makes is scoped to the call that made it."""
-        return None
+        """Close the funding socket, which is what ends `run()`.
+
+        Everything else this adapter does is scoped to the call that made it:
+        placement, cancellation and every read are request-scoped HTTP, so the
+        subscription is the one thing it holds open.
+        """
+        await self._funding.stop()
 
     async def on_tick(self, tick: MarketTick) -> None:
         self._latest_price[tick.symbol] = tick.price

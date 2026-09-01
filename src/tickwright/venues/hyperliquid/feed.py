@@ -58,7 +58,7 @@ type Connect = Callable[[str], Awaitable[WsConnection]]
 real client; tests inject fakes."""
 
 
-async def _open_websocket(url: str) -> WsConnection:
+async def open_websocket(url: str) -> WsConnection:
     """The real client, adapted to the seam: a failed connect is an ``OSError``
     (handshake refusals included), so the backoff loop owns every failure."""
     import websockets
@@ -106,7 +106,7 @@ class HyperliquidFeed:
         config: HyperliquidConfig,
         bus: EventBus,
         clock: Clock,
-        connect: Connect = _open_websocket,
+        connect: Connect = open_websocket,
     ) -> None:
         self._config = config
         self._bus = bus

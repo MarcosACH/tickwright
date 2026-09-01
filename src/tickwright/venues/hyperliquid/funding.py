@@ -14,12 +14,16 @@ negated. Nothing here may normalise, `abs()`, or flip it — a transformation on
 this path is a flip bug waiting for the first short position.
 """
 
+import json
 from collections.abc import Iterable, Mapping
 from decimal import Decimal
 from typing import Any
 
-from tickwright.domain import FundingAccrual, VenueFactUnsupported
+from tickwright.domain import Clock, EventBus, FundingAccrual, VenueFactUnsupported
 
+from .backoff import Backoff
+from .config import HyperliquidConfig
+from .feed import Connect, WsConnection
 from .reading import figure
 
 _NS_PER_MS = 1_000_000
@@ -101,3 +105,119 @@ def _settled_in_usdc(record: Mapping[str, Any]) -> Decimal:
             "home in the ledger. Retrying cannot change a settled funding row."
         )
     return figure(record["usdc"])
+
+
+class FundingIngest:
+    """The `userFundings` subscription, for as long as the exchange lives.
+
+    A class rather than a bare coroutine because the loop has to be *stopped*
+    from outside it: `Exchange.stop()` is what ends the run, and it ends it by
+    closing the socket the reader is blocked on. It lives here rather than on
+    `HyperliquidExchange` for the reason paper's generator lives outside
+    `PaperExchange` — a non-terminating loop does not belong in a class whose
+    other 800 lines are request-scoped HTTP.
+
+    Reconnect is the feed's loop and for the same reason (ADR-0023), with one
+    difference that costs nothing: resubscribing re-delivers the snapshot, so
+    every payment missed while the socket was down arrives again. The ledger's
+    watermark drops the ones already applied, which makes a reconnect *heal* the
+    gap rather than leave one — the same durable gate that makes live's
+    reconcile re-ingest a no-op (ADR-0043 §5.2).
+    """
+
+    def __init__(
+        self,
+        *,
+        config: HyperliquidConfig,
+        bus: EventBus,
+        clock: Clock,
+        account_id: str,
+        address: str,
+        connect: Connect,
+    ) -> None:
+        self._config = config
+        self._bus = bus
+        self._clock = clock
+        self._account_id = account_id
+        self._address = address
+        self._connect = connect
+        self._connection: WsConnection | None = None
+        self._stopping = False
+
+    async def run(self) -> None:
+        backoff = Backoff(
+            initial=self._config.reconnect_initial_backoff_seconds,
+            maximum=self._config.reconnect_max_backoff_seconds,
+        )
+        while not self._stopping:
+            try:
+                connection = await self._connect(self._config.ws_url)
+            except OSError:
+                await backoff.sleep_on(self._clock)
+                continue
+            backoff.reset()
+            self._connection = connection
+            await self._subscribe(connection)
+            await self._read_frames(connection)
+            if self._stopping:
+                return
+            await backoff.sleep_on(self._clock)
+
+    async def stop(self) -> None:
+        self._stopping = True
+        if self._connection is not None:
+            await self._connection.close()
+
+    async def _subscribe(self, connection: WsConnection) -> None:
+        """The one authenticated-by-address channel this adapter reads.
+
+        Keyed by the *trading* account, which is the signing key's own address
+        only when the key is not an agent wallet acting for a master account —
+        the same address every `/info` query about this account uses.
+        """
+        message = {
+            "method": "subscribe",
+            "subscription": {"type": "userFundings", "user": self._address},
+        }
+        await connection.send(json.dumps(message))
+
+    async def _read_frames(self, connection: WsConnection) -> None:
+        """Publish every payment the venue delivers, batch by batch.
+
+        **No `ConflatingIngress` here, deliberately.** The feed conflates under
+        backpressure because a stale tick is worthless next to a fresh one
+        (ADR-0023); every funding payment is a distinct movement of cash and
+        dropping one loses money. A slow subscriber must therefore back the
+        socket up rather than have its payments collapsed — which it can, because
+        this stream is hourly, not per-trade.
+        """
+        async for frame in connection:
+            for accrual in self._parse(frame):
+                await self._bus.publish(accrual)
+
+    def _parse(self, frame: str) -> tuple[FundingAccrual, ...]:
+        """One frame's payments, or nothing for a frame this does not source.
+
+        The venue's own `subscriptionResponse` and `pong` come down the same
+        socket and are *ignored* rather than dropped — they are not funding and
+        were never expected to be. Anything on the `userFundings` channel is,
+        and a malformed one raises out of here rather than being skipped:
+        `_settled_in_usdc` says why the money path refuses where the tick path
+        drops.
+
+        `isSnapshot` is read past. The first message is the historical snapshot
+        and later ones are the payments on the hour, but a payment is a payment
+        however it was delivered — and the watermark, not this flag, is what
+        decides which have already been applied.
+        """
+        message = json.loads(frame)
+        if not isinstance(message, dict) or message.get("channel") != "userFundings":
+            return ()
+        data = message.get("data")
+        if not isinstance(data, dict):
+            return ()
+        return accruals(
+            data.get("fundings", ()),
+            account_id=self._account_id,
+            ts_init_ns=self._clock.timestamp_ns(),
+        )

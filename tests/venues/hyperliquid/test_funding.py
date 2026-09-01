@@ -8,14 +8,56 @@ make the test agree with the code by construction and leave a sign flip
 invisible, which is the one bug this module exists not to have.
 """
 
+import asyncio
+import json
 from decimal import Decimal
 
 import pytest
+from eth_account import Account
+from hyperliquid_fakes import FakeExchangeApi, FakeWsConnection, user_fundings_frame
+from pydantic import SecretStr
 
-from tickwright.domain import FundingAccrual, VenueFactUnsupported
+from tickwright.adapters.bus import InMemoryBus
+from tickwright.adapters.clock import ManualClock
+from tickwright.domain import FundingAccrual, InstrumentSpec, VenueFactUnsupported
+from tickwright.venues.hyperliquid import (
+    HyperliquidConfig,
+    HyperliquidExchange,
+    HyperliquidUniverse,
+)
+from tickwright.venues.hyperliquid.feed import Connect
 from tickwright.venues.hyperliquid.funding import accruals
 
 _NS_PER_MS = 1_000_000
+
+# Anvil's account #0 — a publicly-known throwaway key, safe in a test file.
+TEST_SIGNING_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+ANVIL_ADDRESS = Account.from_key(TEST_SIGNING_KEY).address
+
+ETH_SPEC = InstrumentSpec(
+    symbol="ETH", sz_decimals=4, max_decimals=6, min_notional=Decimal("10"), max_sig_figs=5
+)
+UNIVERSE = HyperliquidUniverse(specs={"ETH": ETH_SPEC}, asset_indices={"ETH": 1})
+
+
+def make_exchange(
+    post: FakeExchangeApi, *, bus: InMemoryBus, clock: ManualClock, connect: Connect
+) -> HyperliquidExchange:
+    config = HyperliquidConfig(
+        testnet=True,
+        symbols=["ETH"],
+        signing_key=SecretStr(TEST_SIGNING_KEY),
+        slippage_bound=Decimal("0.05"),
+    )
+    return HyperliquidExchange(
+        config=config,
+        bus=bus,
+        clock=clock,
+        universe=UNIVERSE,
+        post=post,
+        connect=connect,
+        startup_timeout_seconds=60.0,
+    )
 
 
 def funding(*, time_ms: int, coin: str, usdc: str, szi: str = "1", rate: str = "0.0000417") -> dict:
@@ -149,3 +191,82 @@ def test_a_refused_record_takes_the_whole_batch_with_it() -> None:
 
     with pytest.raises(VenueFactUnsupported):
         accruals(batch, account_id="hyperliquid-mainnet-0xabc", ts_init_ns=42)
+
+
+def _ingest(frames: list[str], *, until: int) -> tuple[list[FundingAccrual], FakeWsConnection]:
+    """Run the live exchange's funding ingest over ``frames`` until ``until``
+    accruals reach the bus, then stop it.
+
+    The seam is the `Exchange` protocol, not the module function two tests up:
+    what this asserts is that the *adapter* subscribes, decodes and publishes on
+    the same bus variant paper's generator publishes to, so the projection's
+    apply path stays free of any `if live:`.
+    """
+
+    async def main() -> tuple[list[FundingAccrual], FakeWsConnection]:
+        bus = InMemoryBus()
+        clock = ManualClock(start_ns=7)
+        seen: list[FundingAccrual] = []
+        enough = asyncio.Event()
+
+        async def record(accrual: FundingAccrual) -> None:
+            seen.append(accrual)
+            if len(seen) >= until:
+                enough.set()
+
+        bus.subscribe(FundingAccrual, record)
+        connection = FakeWsConnection(frames)
+
+        async def connect(url: str) -> FakeWsConnection:
+            return connection
+
+        exchange = make_exchange(FakeExchangeApi({}), bus=bus, clock=clock, connect=connect)
+        async with asyncio.TaskGroup() as tg:
+            running = tg.create_task(exchange.run())
+            await asyncio.wait_for(enough.wait(), timeout=2)
+            await exchange.stop()
+            await running
+        return seen, connection
+
+    return asyncio.run(main())
+
+
+def test_the_live_adapter_subscribes_to_its_own_account_s_funding_channel() -> None:
+    frames = [user_fundings_frame(funding(time_ms=1681222254710, coin="ETH", usdc="-3"))]
+
+    _, connection = _ingest(frames, until=1)
+
+    (sent,) = connection.sent
+    assert json.loads(sent) == {
+        "method": "subscribe",
+        "subscription": {"type": "userFundings", "user": ANVIL_ADDRESS},
+    }
+
+
+def test_the_live_adapter_publishes_the_venue_s_payments_on_the_bus() -> None:
+    """The `run()` half of ADR-0037's pair: live ingests where paper generates,
+    and both reach the projection as the same event on the same bus."""
+    frames = [
+        user_fundings_frame(
+            funding(time_ms=1681225854710, coin="ETH", usdc="-2"),
+            funding(time_ms=1681222254710, coin="ETH", usdc="-3"),
+            snapshot=True,
+        ),
+        user_fundings_frame(funding(time_ms=1681229454710, coin="ETH", usdc="-1")),
+    ]
+
+    seen, _ = _ingest(frames, until=3)
+
+    # The snapshot's own batch is ordered, and the streamed payment that follows
+    # it is ingested by the identical path — a payment is a payment however the
+    # venue chose to deliver it.
+    assert [a.amount for a in seen] == [Decimal("-3"), Decimal("-2"), Decimal("-1")]
+    assert [a.boundary_ts_ns for a in seen] == [
+        1681222254710 * _NS_PER_MS,
+        1681225854710 * _NS_PER_MS,
+        1681229454710 * _NS_PER_MS,
+    ]
+    assert {a.account_id for a in seen} == {f"hyperliquid-testnet-{ANVIL_ADDRESS}"}
+    # ``ts_init`` is when this process built the object, off the injected clock —
+    # distinct from the venue's settlement instant, which is ``ts_event``.
+    assert {a.ts_init for a in seen} == {7}

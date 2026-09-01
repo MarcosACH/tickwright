@@ -13,7 +13,7 @@ import pytest
 import websockets
 from websockets.exceptions import ConnectionClosedError, WebSocketException
 
-from tickwright.venues.hyperliquid.feed import _open_websocket, _RealWsConnection
+from tickwright.venues.hyperliquid.feed import _RealWsConnection, open_websocket
 
 
 class _StubClientConnection:
@@ -67,4 +67,4 @@ def test_a_failed_handshake_is_an_os_error_for_the_backoff_loop(
 
     monkeypatch.setattr(websockets, "connect", refuse)
     with pytest.raises(OSError):
-        asyncio.run(_open_websocket("wss://api.hyperliquid.xyz/ws"))
+        asyncio.run(open_websocket("wss://api.hyperliquid.xyz/ws"))
