@@ -18,82 +18,21 @@ through the real parse/publish path with no network.
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Awaitable, Callable
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import Any
 
-from tickwright.domain import AggressorSide, Backoff, Clock, EventBus, MarketTick, MarkTick
+from tickwright.domain import AggressorSide, Clock, EventBus, MarketTick, MarkTick
 from tickwright.observability import NamedEvent, named_event
 
 from .config import HyperliquidConfig
 from .ingress import ConflatingIngress, MarketData
 from .reading import UNREADABLE, figure
-
-if TYPE_CHECKING:
-    from websockets.asyncio.client import ClientConnection
+from .session import WsSession
+from .transport import Connect, WsConnection, open_websocket
 
 _NS_PER_MS = 1_000_000
 # A dropped frame/row is echoed into its named event for triage; truncated so a
 # pathological payload can never bloat the logs.
 _MAX_LOGGED_FRAME = 200
-
-
-class WsConnection(Protocol):
-    """The slice of a websocket connection the feed uses (the mockable boundary).
-
-    The contract the reconnect loop stands on: iteration **ends** when the
-    connection dies — however it dies — and never raises for it; ``close()``
-    also ends iteration (that is how ``stop`` unblocks the reader).
-    """
-
-    async def send(self, message: str) -> None: ...
-
-    async def close(self) -> None: ...
-
-    def __aiter__(self) -> AsyncIterator[str]: ...
-
-
-type Connect = Callable[[str], Awaitable[WsConnection]]
-"""Opens a websocket to a URL, raising ``OSError`` on failure. Defaults to the
-real client; tests inject fakes."""
-
-
-async def _open_websocket(url: str) -> WsConnection:
-    """The real client, adapted to the seam: a failed connect is an ``OSError``
-    (handshake refusals included), so the backoff loop owns every failure."""
-    import websockets
-
-    try:
-        return _RealWsConnection(await websockets.connect(url))
-    except websockets.exceptions.WebSocketException as exc:
-        raise ConnectionError(f"hyperliquid websocket connect failed: {exc}") from exc
-
-
-class _RealWsConnection:
-    """Adapts ``websockets``' connection to the ``WsConnection`` contract:
-    ``ConnectionClosed`` becomes the end of iteration, frames are always
-    ``str``. Constructed only after ``websockets`` is imported."""
-
-    def __init__(self, connection: "ClientConnection") -> None:
-        from websockets.exceptions import ConnectionClosed
-
-        self._connection = connection
-        self._closed_exc = ConnectionClosed
-
-    async def send(self, message: str) -> None:
-        await self._connection.send(message)
-
-    async def close(self) -> None:
-        await self._connection.close()
-
-    def __aiter__(self) -> "_RealWsConnection":
-        return self
-
-    async def __anext__(self) -> str:
-        try:
-            message = await self._connection.recv()
-        except self._closed_exc:
-            raise StopAsyncIteration from None
-        return message if isinstance(message, str) else message.decode()
 
 
 class HyperliquidFeed:
@@ -105,51 +44,38 @@ class HyperliquidFeed:
         config: HyperliquidConfig,
         bus: EventBus,
         clock: Clock,
-        connect: Connect = _open_websocket,
+        connect: Connect = open_websocket,
     ) -> None:
         self._config = config
         self._bus = bus
         self._clock = clock
-        self._connect = connect
-        self._connection: WsConnection | None = None
         self._seq_by_symbol: dict[str, int] = {}
-        self._stopping = False
+        self._session = WsSession(
+            config=config,
+            clock=clock,
+            connect=connect,
+            subscribe=self._subscribe,
+            consume=self._consume,
+        )
 
     async def start(self) -> None:
-        backoff = Backoff(
-            initial=self._config.reconnect_initial_backoff_seconds,
-            maximum=self._config.reconnect_max_backoff_seconds,
-        )
-        while not self._stopping:
-            try:
-                connection = await self._connect(self._config.ws_url)
-            except OSError:
-                # Connect refused/unreachable: pace the retry on the injected
-                # clock, doubling up to the cap (virtual under ManualClock).
-                await backoff.sleep_on(self._clock)
-                continue
-            backoff.reset()
-            self._connection = connection
-            await self._subscribe(connection)
-            # A fresh ingress per connection: the reader offers ticks, the drain
-            # publishes them, conflating under backpressure so a slow subscriber
-            # never stalls the socket (ADR-0023). Separate coroutines; either one
-            # failing cancels both. A new buffer means no stale tick survives a
-            # reconnect.
-            ingress = ConflatingIngress(bus=self._bus)
-            async with asyncio.TaskGroup() as tg:
-                tg.create_task(self._read_frames(connection, ingress))
-                tg.create_task(ingress.drain())
-            # Iteration ended: a stop() is final; anything else was the venue
-            # hanging up, so back off once and go resubscribe.
-            if self._stopping:
-                return
-            await backoff.sleep_on(self._clock)
+        await self._session.run()
 
     async def stop(self) -> None:
-        self._stopping = True
-        if self._connection is not None:
-            await self._connection.close()
+        await self._session.stop()
+
+    async def _consume(self, connection: WsConnection) -> None:
+        """Read one connection's frames to the bus, for as long as it lives.
+
+        A fresh ingress per connection: the reader offers ticks, the drain
+        publishes them, conflating under backpressure so a slow subscriber never
+        stalls the socket (ADR-0023). Separate coroutines; either one failing
+        cancels both. A new buffer means no stale tick survives a reconnect.
+        """
+        ingress = ConflatingIngress(bus=self._bus)
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(self._read_frames(connection, ingress))
+            tg.create_task(ingress.drain())
 
     async def _read_frames(self, connection: WsConnection, ingress: ConflatingIngress) -> None:
         try:

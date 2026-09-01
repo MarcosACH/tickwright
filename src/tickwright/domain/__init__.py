@@ -75,8 +75,15 @@ from .leverage import (
     MarginMode,
 )
 from .order import Order
+from .ownership import SymbolOwnership
 from .pacing import Backoff, Deadline
-from .position import Position, PositionChange, PositionView, account_net_size
+from .position import (
+    UNATTRIBUTED,
+    Position,
+    PositionChange,
+    PositionView,
+    account_net_size,
+)
 from .protocols import (
     Clock,
     EventBus,
@@ -113,6 +120,7 @@ __all__ = [
     # events + value types
     "DEFAULT_LEVERAGE",
     "EMPTY_LEVERAGE_BOOK",
+    "UNATTRIBUTED",
     "Account",
     "AccountSpec",
     "AccountView",
@@ -150,6 +158,7 @@ __all__ = [
     "PositionChange",
     "PositionView",
     "Signal",
+    "SymbolOwnership",
     "VenueAccountState",
     "VenueOrderView",
     "VenueReadFailure",

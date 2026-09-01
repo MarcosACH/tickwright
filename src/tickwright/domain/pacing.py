@@ -39,10 +39,12 @@ class Backoff:
     the configured window. Every caller wants that bound, and none of them wants
     to remember it.
 
-    ``reset`` exists for the loops that have something to return to — a feed's
-    reconnect loop resets after a good connection (ADR-0021). A loop with one
-    bounded window to clear in never calls it: there is no "good connection" to
-    go back to, only a budget running out.
+    ``reset`` exists for the loops that have something to return to —
+    ``WsSession``, the reconnect loop both live subscriptions run on, retries
+    from two places (a refused connect, a venue hangup) and resets after a good
+    connection (ADR-0021). A loop with one bounded window to clear in never
+    calls it: there is no "good connection" to go back to, only a budget
+    running out.
     """
 
     def __init__(self, *, initial: float, maximum: float) -> None:

@@ -1,8 +1,8 @@
 """The real-client shim: ``websockets``' behavior normalized to the seam.
 
-The feed's reconnect loop is specified against the ``WsConnection`` contract —
-iteration *ends* when the connection dies, and a failed connect raises
-``OSError``. The real ``websockets`` client instead raises
+The reconnect loops of the feed and the funding ingest are specified against the
+``WsConnection`` contract — iteration *ends* when the connection dies, and a
+failed connect raises ``OSError``. The real ``websockets`` client instead raises
 ``ConnectionClosed`` from ``recv`` and ``WebSocketException`` from ``connect``;
 this suite pins the translation, with the client stubbed at its boundary.
 """
@@ -13,7 +13,7 @@ import pytest
 import websockets
 from websockets.exceptions import ConnectionClosedError, WebSocketException
 
-from tickwright.venues.hyperliquid.feed import _open_websocket, _RealWsConnection
+from tickwright.venues.hyperliquid.transport import _RealWsConnection, open_websocket
 
 
 class _StubClientConnection:
@@ -67,4 +67,4 @@ def test_a_failed_handshake_is_an_os_error_for_the_backoff_loop(
 
     monkeypatch.setattr(websockets, "connect", refuse)
     with pytest.raises(OSError):
-        asyncio.run(_open_websocket("wss://api.hyperliquid.xyz/ws"))
+        asyncio.run(open_websocket("wss://api.hyperliquid.xyz/ws"))

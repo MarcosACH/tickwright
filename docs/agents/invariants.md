@@ -43,10 +43,22 @@ Consumed by `/code-review` (any regression is BLOCKING) and `/python-codebase-ma
    **The boundary of this invariant is permanence.** A failed read and a retry is the answer
    for a read that *may* succeed later — a dead transport, an unreadable body — with the
    per-cloid span below as how that retrying finds out whether waiting helps. A venue fact this
-   engine cannot represent (a fill fee settled in a token other than USDC) is already stored at
-   the venue and reads back identically forever, so it is durable at the *first* read and the
-   span has nothing to discover: answering it that way spends the whole span re-reading it and
-   then faults naming only the cloid, where the refusal itself can name the offending fact.
+   engine cannot represent (a fill fee, or a funding payment, settled in a token other than
+   USDC) is already stored at the venue and reads back identically forever, so it is durable at
+   the *first* read and the span has nothing to discover: answering it that way spends the whole
+   span re-reading it and then faults naming only the cloid, where the refusal itself can name
+   the offending fact.
+   **Permanence is the membership test, not "a fact was understood"** — so a *delivery* off a
+   money channel that could not be read at all qualifies too, and there the **transport**
+   supplies the permanence rather than the immutability of a stored row: a websocket message
+   arrives whole or not at all (RFC 6455 §5.4), so what reaches a parser is always exactly what
+   the venue chose to send and an unreadable one is a contract change, known at the first read.
+   That is a `userFundings` frame whose body is not a batch of payments, and a record inside a
+   well-formed batch that is not a payment — one condition at two depths, both refusing rather
+   than returning nothing, because on a channel where every message is cash "no payments" and
+   "an unknown number of payments" are not the same answer. A frame naming another channel is
+   still ignored; a subscription's consumer is not a `read`, so freezing is not among its
+   outcomes.
    Those refuse as `VenueFactUnsupported`, deliberately outside the
    `UNREADABLE` vocabulary every transient guard catches, and **fault** the engine. One venue
    read, three outcomes, mapped once per venue (`venues/hyperliquid/reading.py`). What a read
@@ -66,7 +78,7 @@ Consumed by `/code-review` (any regression is BLOCKING) and `/python-codebase-ma
    barrier's backoff apart, so a count buys a different amount of waiting under each — and at
    boot would silently overrule `startup_reconciliation_timeout_seconds`. The pass verdict stays
    `False` on either failure, so a startup pass that could not prove an order never clears the
-   barrier (inv 5). (ADR-0011, ADR-0034, ADR-0043 §6, ADR-0048, ADR-0049)
+   barrier (inv 5). (ADR-0011, ADR-0034, ADR-0037 §2, ADR-0043 §6, ADR-0048, ADR-0049)
 4. **Rejections are explicit events.** A placed-but-rejected order surfaces as its taxonomy
    terminal (`DENIED` / `REJECTED` / `FAILED`), propagated as an event — never a silent
    `return None`. (ADR-0010)
@@ -96,7 +108,26 @@ Consumed by `/code-review` (any regression is BLOCKING) and `/python-codebase-ma
    points: an unverified mode is never read as an unchanged one. Live-only; paper has no venue and
    no mode.*
    (ADR-0046, ADR-0034, ADR-0040, ADR-0042, ADR-0043)
-9. **Config wins at boot; the venue wins in flight.** Per-symbol leverage and margin mode are
+9. **Symbol ownership is disjoint.** At most one strategy may declare a symbol — `(strategy,
+   symbol)` disjoint per account, which with one account per process reads as disjoint
+   process-wide. Not a preference but a consequence of `NET` netting: a one-way venue merges two
+   same-symbol strategies into a single real position, so their per-strategy books would stay
+   arithmetically consistent while describing an isolation the venue does not provide, and it is
+   this rule that collapses per-strategy attribution to *exact*. Same-symbol isolation is a
+   separate account, and therefore a separate process. *Enforced at two gates that must not come
+   to disagree about what an overlap is: `AppConfig` refuses a **configured** overlap at load —
+   before `build_engine` opens a store, resolves the leverage book or constructs a live signing
+   exchange — and `StrategyHost.register` refuses a **registered** one, which is the only gate a
+   strategy built without a config meets. Both fold the one `domain` value, `SymbolOwnership`,
+   which holds the symbol→owner index, the collision sort and the refusal wording; the exception
+   type is all they may differ in, pydantic needing a `ValueError` where the registry raises
+   `InvariantViolation`. Each names every offender in one pass. The same two-gate placement holds
+   for the other two cross-strategy identity rules — a duplicate `strategy_id` (ADR-0018) and the
+   reserved `__unattributed__` id (ADR-0043 §2) — earliest where the value exists, last before it
+   keys a ledger row. Unconditional in v1, both shipped adapters being `NET`; a `HEDGE` adapter is
+   the documented extension point that would relax it, and Hyperliquid's positions are `oneWay`.*
+   (ADR-0034, ADR-0038, ADR-0018, ADR-0043)
+10. **Config wins at boot; the venue wins in flight.** Per-symbol leverage and margin mode are
    pushed to the venue **once**, at startup, behind the mode gate of 8 and ahead of the barrier —
    and never again, so an operator who de-risks a position in the venue UI is not silently
    reverted by a later re-push. Scope is every strategy-traded symbol, the defaulted ones

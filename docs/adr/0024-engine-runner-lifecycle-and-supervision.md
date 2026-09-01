@@ -206,6 +206,17 @@ room for a missed-propagation bug.
 > (ADR-0044 §7). An adapter with no loop — `HyperliquidExchange` — returns immediately and its task
 > completes, which nothing downstream distinguishes from a loop that is merely idle.
 >
+> **(No adapter is loopless any more, since
+> [#192](https://github.com/MarcosACH/tickwright/issues/192):** `HyperliquidExchange.run()` now
+> holds the `userFundings` subscription open for the life of the run, so **both** adapters
+> implement the member with a long-lived loop and the example above is retired as an example, not
+> as a rule — a `run()` that returns immediately is still legal and still indistinguishable from an
+> idle loop. What the enrolment buys live is the same fault channel it bought paper, against a
+> different failure: paper's is a ledger write the store refuses, live's is a payment the engine
+> cannot represent (a funding record carrying no `usdc`, ADR-0037 §2). Unsupervised, that would
+> kill the subscription alone and leave the engine `RUNNING` with the funding line frozen at
+> whatever it last read.**)**
+>
 > **One consequence, accepted:** the generator's resume instant moves from step 4 to TaskGroup-open,
 > i.e. **behind the barrier**. Under a virtual clock this is unobservable. Under a live one,
 > boundaries that elapse *during* the barrier are skipped rather than settled — the same guarantee

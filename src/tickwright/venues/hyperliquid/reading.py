@@ -19,9 +19,9 @@ signal to promote something here to a shared home, not before.
 
 from collections.abc import Awaitable, Callable, Mapping
 from decimal import Decimal
-from typing import Any
+from typing import Any, NoReturn
 
-from tickwright.domain import VenueReadFailure, exact_figure
+from tickwright.domain import VenueFactUnsupported, VenueReadFailure, exact_figure
 from tickwright.observability import NamedEvent, named_event
 
 UNREADABLE = (ArithmeticError, KeyError, TypeError, ValueError)
@@ -206,6 +206,34 @@ def rendered(response: object) -> str:
     if len(body) > _RENDER_LIMIT:
         body = f"{body[:_RENDER_LIMIT]}… ({len(body)} chars)"
     return f"{shape}{body}"
+
+
+def refuse_non_usdc(*, reported: str, row: str) -> NoReturn:
+    """Refuse a money figure this venue settled in something other than USDC.
+
+    Two grains reach here and their *detections* have nothing in common, which is
+    why each stays with its own read: a fill carries a `feeToken` to compare,
+    while a funding record carries no discriminator at all — its amount field is
+    *named* `usdc`, so the denomination is the key itself and a payment settled
+    elsewhere arrives with no `usdc` in it. What the two share is everything
+    after that: the same reason there is nowhere to put the figure (ADR-0029
+    leaves USDC implicit in a bare `Decimal`, so accruing it would add one
+    currency to a line of another with nothing recording which), the same
+    exception, and the same sentence to an operator. Saying it twice is how the
+    two drift into disagreeing about a rule neither of them owns.
+
+    `VenueFactUnsupported`, and deliberately not a member of `UNREADABLE`
+    (ADR-0048): a settled venue row never changes, so the condition is known
+    permanent at the first read. The transient verdict exists to find out — by
+    waiting — whether a condition is durable, and there is nothing here to find
+    out. ``reported`` leads with what the venue actually sent, because that is
+    the one thing an operator's first question turns on.
+    """
+    raise VenueFactUnsupported(
+        f"{reported}: this engine's money is a bare Decimal with USDC implicit "
+        f"(ADR-0029), so it has no home in the ledger. Retrying cannot change a "
+        f"settled {row} row."
+    )
 
 
 def figure(reported: object) -> Decimal:

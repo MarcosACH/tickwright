@@ -14,6 +14,7 @@ full ADR-0024 lifecycle.
 from collections.abc import Awaitable, Callable, Iterable
 
 from tickwright.domain import (
+    UNATTRIBUTED,
     Clock,
     Event,
     EventBus,
@@ -23,6 +24,7 @@ from tickwright.domain import (
     SignalId,
     Store,
     Strategy,
+    SymbolOwnership,
 )
 from tickwright.observability import NamedEvent, named_event
 
@@ -49,6 +51,12 @@ class StrategyHost:
         self._tick_staleness_ns = tick_staleness_ns
         self._strategies: dict[str, Strategy] = {}
         self._symbols: dict[str, frozenset[str]] = {}
+        # The inverse of ``_symbols``, which is what the disjointness gate
+        # actually asks: not "what does this strategy trade" but "who already
+        # owns this symbol". A ``domain`` value rather than a dict here because
+        # ``AppConfig`` refuses the same overlap at load and must refuse it in
+        # the same words (ADR-0034; see ``domain/ownership.py``).
+        self._ownership = SymbolOwnership()
 
     def register(self, strategy: Strategy, *, symbols: Iterable[str]) -> None:
         """Add ``strategy`` to the registry with its declared symbol set.
@@ -56,11 +64,35 @@ class StrategyHost:
         A duplicate ``strategy_id`` is a composition-root wiring bug: ids key
         seqs, snapshots, and ``OrderEvent`` routing, so two strategies sharing
         one would silently corrupt each other's state (ADR-0018 — fail fast).
+
+        The reserved ``UNATTRIBUTED`` id is refused for the same reason one step
+        further down: it keys the ledger partition holding flow the engine never
+        placed, so a strategy taking that name would have its book folded into
+        foreign flow rather than into another strategy's (ADR-0043 §2).
+        ``StrategyConfig`` refuses it earlier; a strategy registered without a
+        config only ever meets this one.
+
+        A symbol another registered strategy already owns is refused for a
+        reason that is not about ids at all: on a ``NET`` venue two strategies
+        over one symbol are netted into one real position, so isolating them
+        needs a separate account (ADR-0034). Both the rule and the sentence it
+        refuses with belong to ``SymbolOwnership``, because ``AppConfig``
+        refuses a *configured* overlap at load and the two gates must not come
+        to disagree about what an overlap is.
         """
+        if strategy.strategy_id == UNATTRIBUTED:
+            raise InvariantViolation(
+                f"{UNATTRIBUTED} is the reserved unattributed partition, not a strategy_id"
+            )
         if strategy.strategy_id in self._strategies:
             raise InvariantViolation(f"duplicate strategy_id registered: {strategy.strategy_id}")
+        declared = frozenset(symbols)
+        refusal = self._ownership.refusal(strategy.strategy_id, symbols=declared)
+        if refusal is not None:
+            raise InvariantViolation(refusal)
         self._strategies[strategy.strategy_id] = strategy
-        self._symbols[strategy.strategy_id] = frozenset(symbols)
+        self._symbols[strategy.strategy_id] = declared
+        self._ownership = self._ownership.claim(strategy.strategy_id, symbols=declared)
 
     def start(self) -> None:
         """Recover each strategy — snapshot, then seq, then subscriptions.

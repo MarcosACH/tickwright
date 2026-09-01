@@ -24,16 +24,19 @@ from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import OrderState, derive_cloid
 
 _FILLED_CLOID = derive_cloid("shooter:BTC:1")
-_RESTING_CLOID = derive_cloid("rester:BTC:1")
+_RESTING_CLOID = derive_cloid("rester:ETH:1")
 
+# One symbol per strategy: ADR-0034's disjointness rule forbids two strategies
+# over one symbol on a NET venue, so the two kinds get a symbol each.
 _SPECS = {
-    "BTC": {
-        "symbol": "BTC",
+    symbol: {
+        "symbol": symbol,
         "sz_decimals": 3,
         "max_decimals": 6,
         "max_sig_figs": 5,
         "min_notional": "10",
     }
+    for symbol in ("BTC", "ETH")
 }
 _STRATEGIES = [
     {
@@ -46,7 +49,7 @@ _STRATEGIES = [
     {
         "kind": "single_shot_limit",
         "strategy_id": "rester",
-        "symbol": "BTC",
+        "symbol": "ETH",
         "side": "buy",
         "quantity": "0.5",
         "price": "41000",
@@ -54,13 +57,14 @@ _STRATEGIES = [
 ]
 _TICKS = [
     {
-        "symbol": "BTC",
+        "symbol": symbol,
         "price": "42000",
         "size": "3",
         "aggressor_side": "buy",
-        "trade_id": "a",
-        "ts_event": 1_000,
+        "trade_id": trade_id,
+        "ts_event": ts_event,
     }
+    for symbol, trade_id, ts_event in (("BTC", "a", 1_000), ("ETH", "b", 1_001))
 ]
 
 
@@ -177,6 +181,6 @@ def test_cli_replays_trades_and_exits_zero_on_sigterm(
     reader = SQLiteStore(db)
     try:
         assert reader.get_order(derive_cloid("shooter:BTC:2")) is None
-        assert reader.get_order(derive_cloid("rester:BTC:2")) is None
+        assert reader.get_order(derive_cloid("rester:ETH:2")) is None
     finally:
         reader.close()

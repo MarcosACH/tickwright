@@ -12,7 +12,13 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from hyperliquid_fakes import FakeWsConnection, asset_ctx_frame, trade, trades_frame
+from hyperliquid_fakes import (
+    FakeWsConnection,
+    RecordingClock,
+    asset_ctx_frame,
+    trade,
+    trades_frame,
+)
 from structlog.typing import EventDict
 
 from tickwright.adapters.bus import InMemoryBus
@@ -206,19 +212,6 @@ def test_slow_consumer_gets_only_the_latest_tick_per_symbol_with_one_lagged_per_
     assert len(lagged) == 1
     assert lagged[0]["symbol"] == "BTC"
     assert lagged[0]["dropped_trade_id"] == "2"
-
-
-class RecordingClock(ManualClock):
-    """A ``ManualClock`` that also records what it was asked to sleep — the
-    backoff assertions read this, so no real time ever passes."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.sleeps: list[float] = []
-
-    async def sleep(self, seconds: float) -> None:
-        self.sleeps.append(seconds)
-        await super().sleep(seconds)
 
 
 def test_ws_drop_reconnects_with_backoff_resubscribes_and_resumes() -> None:

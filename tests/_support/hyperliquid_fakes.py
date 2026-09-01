@@ -6,6 +6,8 @@ the exchange/info endpoints."""
 import asyncio
 import json
 
+from tickwright.adapters.clock import ManualClock
+
 TEST_SIGNING_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 """Anvil's account #0 — a publicly-known throwaway key, safe in a test file.
 
@@ -17,6 +19,23 @@ for the POST seam it is used with, and the test tree is a flat namespace
 (``pythonpath = ["tests/_support"]``), so ``from hyperliquid_fakes import
 TEST_SIGNING_KEY`` works from any suite that needs a live-adapter double.
 """
+
+
+class RecordingClock(ManualClock):
+    """A ``ManualClock`` that also records what it was asked to sleep.
+
+    Every backoff assertion in this package reads ``sleeps`` rather than a wall
+    clock, so a retry-pacing test costs no real time. Shared because the pacing
+    it measures is now one loop's (``WsSession``) driven from two suites — the
+    session's own and the feed's."""
+
+    def __init__(self, start_ns: int = 0) -> None:
+        super().__init__(start_ns=start_ns)
+        self.sleeps: list[float] = []
+
+    async def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        await super().sleep(seconds)
 
 
 class FakeExchangeApi:
@@ -172,3 +191,20 @@ def trade(
     contract changed.
     """
     return {"coin": coin, "side": side, "px": px, "sz": sz, "time": time, "tid": tid}
+
+
+def user_fundings_frame(*fundings: dict, snapshot: bool = False) -> str:
+    """One ``userFundings`` frame, the venue's per-account payment channel.
+
+    ``data`` wraps a **list**: the first message is the historical snapshot
+    (``isSnapshot: true``) and later ones carry the payments on the hour, both
+    under the same ``fundings`` key. The engine reads them identically — a
+    payment is a payment however it was delivered — so the flag is here only
+    because the venue sends it.
+    """
+    return json.dumps(
+        {
+            "channel": "userFundings",
+            "data": {"isSnapshot": snapshot, "user": "0xuser", "fundings": list(fundings)},
+        }
+    )

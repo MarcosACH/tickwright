@@ -84,6 +84,23 @@ shared durable store. Its [[signal_id]] seq high-water-mark is recovered from th
 reference impls (engine capability, not a library). See ADR-0006, ADR-0015, ADR-0016, ADR-0018.
 _Avoid_: algo, bot, trader.
 
+**Symbol ownership**:
+Which [[Strategy]] declared which symbol, and the rule that **at most one** may declare each:
+`(strategy, symbol)` disjoint per [[Account]] — process-wide, one account per process (ADR-0038).
+Not a preference but a consequence of `NET` netting: a one-way venue merges two same-symbol
+strategies into a single real [[Position]], so their per-strategy books would stay arithmetically
+consistent while describing an isolation the venue does not provide. Same-symbol isolation is a
+**separate account**, and therefore a separate process. Carried as the `SymbolOwnership` value
+(`domain/ownership.py`), which owns the symbol→owner index and the sentence a violation is refused
+with; **two gates** read it — `AppConfig` refuses a *configured* overlap at load, `StrategyHost`
+a *registered* one — differing only in exception type, since pydantic converts a `ValueError`
+where the registry raises `InvariantViolation`. Unconditional in v1 (both adapters `NET`); a
+`HEDGE` adapter is the documented extension point that would relax it. See ADR-0034, ADR-0038,
+ADR-0018.
+_Avoid_: exclusivity (reserved for ADR-0038's one-process-per-account invariant), symbol
+allocation, sharding, routing (the `StrategyHost` wrapper's per-strategy tick filtering is a
+*delivery* concern and holds whether or not symbols overlap).
+
 **Exchange** *(Protocol)*:
 A **thin boundary adapter** translating venue ↔ our types: `place`/`cancel`/`fetch_*` and
 emitting raw [[ExecutionReport]]s. Owns no saga. A failed `fetch_*` never answers as truth (the
