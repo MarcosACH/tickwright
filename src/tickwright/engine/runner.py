@@ -51,6 +51,7 @@ from .cadence import run_cadence
 from .checkpoint import Checkpointer
 from .execution import ExecutionManager
 from .guard import NoopGuard
+from .ledger_reconcile import LedgerReconciliation
 from .portfolio import PortfolioProjection
 from .reconcile import ReconcileConfig, Reconciler
 from .strategy_host import StrategyHost
@@ -116,6 +117,14 @@ class Engine:
             exchange=exchange,
             cache=self._checkpointer.cache,
             config=self._reconcile_config,
+        )
+        # The account grain's own cycle (ADR-0034), constructed on every path
+        # and *scheduled* on one: it is the live/paper split that is conditional,
+        # not the object, so the predicate lives at the single place the split
+        # is real — the cadence below — rather than turning this attribute
+        # ``None`` and handing every later reader a second thing to unwrap.
+        self._ledger_reconciler = LedgerReconciliation(
+            exchange=exchange, portfolio=self._checkpointer.portfolio
         )
         self._host = StrategyHost(
             bus=bus, clock=clock, store=store, tick_staleness_ns=self._config.tick_staleness_ns
@@ -189,6 +198,29 @@ class Engine:
                         )
                     ),
                 ]
+                # The account grain joins them on the **live path alone**
+                # (ADR-0034): paper has no second account to compare the ledger
+                # against, and `PaperExchange` answers this read `None` by
+                # construction — the fail-closed value — so a cadence scheduled
+                # there would freeze every cycle and report the default path as
+                # an outage. The predicate is the venue's own declaration, the
+                # same `genesis_collateral` nullability the startup checks read
+                # (ADR-0042 §6): declared on paper, ingested on live. It is the
+                # venue kind and not the row, which is what separates it from
+                # the barrier's step one grain up — that one asks whether a
+                # *read is owed* and a live restart answers no, while this asks
+                # whether there is anything to reconcile against at all, and the
+                # answer holds for every cycle of the run.
+                if self._exchange.account_spec().genesis_collateral is None:
+                    self._cadence_tasks.append(
+                        tg.create_task(
+                            run_cadence(
+                                clock=self._clock,
+                                interval_seconds=self._reconcile_config.account_interval_seconds,
+                                cycle=self._ledger_reconciler.reconcile_account,
+                            )
+                        )
+                    )
                 # The venue's own long-lived half (ADR-0037's paper funding
                 # generator, today), supervised beside the cadences rather than
                 # spawned by the adapter: an exception raised in it aborts this
