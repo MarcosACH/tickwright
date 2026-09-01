@@ -65,6 +65,22 @@ class DivergenceTier(StrEnum):
     TIER_2 = "tier_2"
 
 
+class DivergenceQuantity(StrEnum):
+    """Which figure disagreed — the closed set this cycle ever compares.
+
+    A `StrEnum` for the same reason ``tier`` is one rather than the bare `str`
+    a fifth call site could still spell as ``"unrealised_pnl"`` and type-check:
+    the four members are exhaustive over ``_compare_sizes``/``_compare_cash``/
+    ``_compare_valuations``, so a later slice reading this field has a closed
+    set to match against, not a convention to remember.
+    """
+
+    SIGNED_SIZE = "signed_size"
+    CASH = "cash"
+    EQUITY = "equity"
+    UNREALIZED_PNL = "unrealized_pnl"
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Divergence:
     """One disagreement between the ledger and the venue, already classified.
@@ -79,7 +95,7 @@ class Divergence:
     """
 
     tier: DivergenceTier
-    quantity: str
+    quantity: DivergenceQuantity
     symbol: str | None
     projected: Decimal
     venue: Decimal
@@ -225,7 +241,7 @@ class LedgerReconciliation:
         if equity is not None and equity != state.equity:
             yield Divergence(
                 tier=DivergenceTier.TIER_2,
-                quantity="equity",
+                quantity=DivergenceQuantity.EQUITY,
                 symbol=None,
                 projected=equity,
                 venue=state.equity,
@@ -241,7 +257,7 @@ class LedgerReconciliation:
             if projected != venue_pnl[symbol]:
                 yield Divergence(
                     tier=DivergenceTier.TIER_2,
-                    quantity="unrealized_pnl",
+                    quantity=DivergenceQuantity.UNREALIZED_PNL,
                     symbol=symbol,
                     projected=projected,
                     venue=venue_pnl[symbol],
@@ -260,7 +276,7 @@ class LedgerReconciliation:
         if projected != venue:
             yield Divergence(
                 tier=DivergenceTier.TIER_1,
-                quantity="cash",
+                quantity=DivergenceQuantity.CASH,
                 symbol=None,
                 projected=projected,
                 venue=venue,
@@ -288,7 +304,7 @@ class LedgerReconciliation:
             if projected != venue:
                 yield Divergence(
                     tier=DivergenceTier.TIER_1,
-                    quantity="signed_size",
+                    quantity=DivergenceQuantity.SIGNED_SIZE,
                     symbol=symbol,
                     projected=projected,
                     venue=venue,

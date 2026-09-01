@@ -34,6 +34,7 @@ from tickwright.domain import (
 )
 from tickwright.engine.ledger_reconcile import (
     Divergence,
+    DivergenceQuantity,
     DivergenceTier,
     LedgerReconcileConfig,
     LedgerReconciliation,
@@ -187,7 +188,7 @@ def test_a_net_size_the_venue_does_not_hold_is_tier_1() -> None:
     assert _tier_1(divergences) == [
         Divergence(
             tier=DivergenceTier.TIER_1,
-            quantity="signed_size",
+            quantity=DivergenceQuantity.SIGNED_SIZE,
             symbol="BTC",
             projected=Decimal("0.003"),
             venue=Decimal("0.002"),
@@ -216,7 +217,7 @@ def test_a_cash_line_the_venue_does_not_back_is_tier_1() -> None:
     assert _tier_1(divergences) == [
         Divergence(
             tier=DivergenceTier.TIER_1,
-            quantity="cash",
+            quantity=DivergenceQuantity.CASH,
             symbol=None,
             projected=Decimal("25.4604"),  # the ingested 25.9604 genesis, less the fee
             venue=DERIVED_GENESIS,
@@ -286,14 +287,14 @@ def test_a_valuation_the_venue_computes_differently_is_tier_2() -> None:
     assert _tier_2(divergences) == [
         Divergence(
             tier=DivergenceTier.TIER_2,
-            quantity="equity",
+            quantity=DivergenceQuantity.EQUITY,
             symbol=None,
             projected=Decimal("25.7604"),  # the 25.9604 cash line, less our own uPnL
             venue=Decimal("25.9264"),
         ),
         Divergence(
             tier=DivergenceTier.TIER_2,
-            quantity="unrealized_pnl",
+            quantity=DivergenceQuantity.UNREALIZED_PNL,
             symbol="BTC",
             projected=Decimal("-0.2"),  # (64709.0 − 64809.0) × 0.002
             venue=Decimal("-0.034"),
@@ -372,14 +373,14 @@ def test_a_symbol_only_one_side_holds_is_still_compared() -> None:
     assert sorted(_tier_1(divergences), key=lambda item: str(item.symbol)) == [
         Divergence(
             tier=DivergenceTier.TIER_1,
-            quantity="signed_size",
+            quantity=DivergenceQuantity.SIGNED_SIZE,
             symbol="BTC",  # foreign flow: the venue holds it, the ledger does not
             projected=Decimal("0"),
             venue=Decimal("0.002"),
         ),
         Divergence(
             tier=DivergenceTier.TIER_1,
-            quantity="signed_size",
+            quantity=DivergenceQuantity.SIGNED_SIZE,
             symbol="SOL",  # a phantom: the ledger holds it, the venue does not
             projected=Decimal("5"),
             venue=Decimal("0"),
