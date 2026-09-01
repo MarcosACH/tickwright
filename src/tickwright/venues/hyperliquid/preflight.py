@@ -295,7 +295,12 @@ async def push_leverage(
             "leverage": spec.leverage,
         }
         await _until_deadline(
-            partial(send, action),
+            # The envelope is inspected *inside* the retry, so the two ways a
+            # write fails end where they should: an unreadable body raises into
+            # the retry like any other, while the venue's own refusal raises
+            # ``VenueLeveragePushFailed`` — an ``InvariantViolation``, so not
+            # among the transient types caught below — and leaves at once.
+            partial(_write_leverage, send, action, symbol=symbol, spec=spec),
             describing=f"align {symbol} to {_pair(spec)}",
             clock=clock,
             deadline=deadline,
@@ -378,6 +383,45 @@ def _refuse_disagreements(book: LeverageBook, held: Mapping[str, LeverageSpec]) 
 def _pair(spec: LeverageSpec) -> str:
     """One margin setting as the venue's UI shows it — ``cross 20x``."""
     return f"{spec.mode} {spec.leverage}x"
+
+
+async def _write_leverage(
+    send: SignedSend, action: dict[str, Any], *, symbol: str, spec: LeverageSpec
+) -> None:
+    """One signed ``updateLeverage``, refused if the venue refuses it (§6).
+
+    The venue returns its rejection as a **value**, not an exception:
+    ``{"status": "err", "response": "<plain string>"}`` in a 200-OK body. So an
+    adapter that only caught exceptions would read a refused write as a
+    completed one and clear startup against an account it never aligned — which
+    is the single outcome this whole module exists to prevent.
+
+    ``status == "ok"`` is the only success and needs no further reading: a no-op
+    push and a real change return the *identical* envelope (measured in #142,
+    ADR-0044 §6's correction), so there is nothing else the response could be
+    telling us. Anything that is not a legible envelope at all raises into the
+    caller's retry, the way an unreadable read does.
+
+    The venue's sentence is passed through **unclassified**. All three strings
+    §6 recorded — an over-cap leverage, too little collateral to de-lever an
+    isolated position, a mode switch on an open one — fault identically, and
+    each is already the most actionable thing anyone could say to the operator.
+    A taxonomy over them would be a second encoding of a venue fact, free to
+    fall behind the strings it matches on, in exchange for precision nobody acts
+    on.
+    """
+    response = await send(action)
+    if not isinstance(response, Mapping):
+        raise TypeError(f"non-mapping updateLeverage response {response!r}")
+    if response["status"] == "ok":
+        return
+    raise VenueLeveragePushFailed(
+        f"the venue refused to align {symbol} to {_pair(spec)}: "
+        f"{response['response']!r} (ADR-0044 §6). Refusing to start rather than trade "
+        "against an account this process failed to align — a leverage above the "
+        "instrument's cap is config to lower, and the rest are the venue declining to "
+        "re-margin a position it already holds."
+    )
 
 
 async def _read_held_leverage(info: InfoRead, *, address: str) -> dict[str, LeverageSpec]:

@@ -643,6 +643,66 @@ def test_a_write_that_never_lands_retries_and_faults_inside_the_shared_boot_budg
     assert "venue unreachable" in message, "and the underlying failure"
 
 
+@pytest.mark.parametrize(
+    "rejection",
+    [
+        "Invalid leverage value",
+        (
+            "Isolated position does not have sufficient margin available to decrease "
+            "leverage. To decrease leverage, add margin to the position."
+        ),
+        "Cannot switch leverage type with open position.",
+    ],
+)
+def test_a_refused_write_faults_at_once_quoting_the_venue_s_own_string(rejection: str) -> None:
+    """The other half of the taxonomy (ADR-0044 §6 as corrected by #142): the
+    venue returns its refusal as a **value**, not an exception.
+
+    ``{"status": "err", "response": "<plain string>"}`` — a bare string in a
+    200-OK body, so an adapter that only caught exceptions would read a refused
+    write as a completed one and clear startup against an account it never
+    aligned. Inspecting the envelope is the whole point, and ``status == "ok"``
+    is the sole success: a no-op push and a real change return the *identical*
+    ``ok`` envelope, so there is no third outcome to tolerate.
+
+    It faults **at once**, which is the claim the elapsed assertion pins. The
+    transport failures above are transient by assumption and get the budget;
+    a refusal is the venue answering, and re-asking cannot change its mind
+    inside a boot window. Worse, the retry would re-send a *signed write*
+    against a live account once a second — so a refusal reaching the OSError
+    branch is not a slow error, it is a write storm.
+
+    The three strings are the ones ADR-0044 §6 recorded against the real venue,
+    parametrized rather than merged because they arrive on different causes and
+    a regression that special-cased any one of them into a retry — or into
+    ``VenueLeverageMismatch``, whose remedy is a different place entirely —
+    fails on the string it mishandled, by name. The engine deliberately does
+    **not** re-classify them: the venue's own sentence is what the operator can
+    act on, and a taxonomy over it would be a second encoding of a venue fact.
+    """
+    clock = ManualClock(start_ns=0)
+    post = FakeExchangeApi(
+        {
+            "userAbstraction": "disabled",
+            "clearinghouseState": _state(),
+            "updateLeverage": {"status": "err", "response": rejection},
+        }
+    )
+    book = LeverageBook(entries={"BTC": LeverageSpec(mode="cross", leverage=10)})
+
+    with pytest.raises(VenueLeveragePushFailed) as refusal:
+        asyncio.run(_exchange(post, clock=clock, leverage=book).start())
+
+    writes = [
+        1 for (url, payload) in post.requests if request_type(url, payload) == "updateLeverage"
+    ]
+    assert writes == [1], "a refusal is answered, not re-sent — retrying signs a write storm"
+    assert clock.timestamp_ns() == 0, "an answered question consumes no backoff"
+    message = str(refusal.value)
+    assert rejection in message, "the venue's own sentence is what the operator can act on"
+    assert "BTC" in message, "and the symbol left unaligned"
+
+
 def test_a_leverage_above_the_venue_cap_refuses_to_start_on_live_too() -> None:
     """The identical bound, refused identically on the other path (ADR-0044 §9).
 
