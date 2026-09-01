@@ -652,6 +652,44 @@ def test_a_held_position_under_a_re_typed_coin_is_never_read_as_flat() -> None:
     ], "a position the venue reported is never written to on the strength of a key we cannot read"
 
 
+def test_an_account_read_answered_by_something_that_is_not_a_body_writes_nothing() -> None:
+    """The outermost of ``held_leverage``'s checks: not a mapping at all.
+
+    The field checks above it all assume there is a body to read fields *from*.
+    This is the case where there is not, and it matters for the same reason the
+    re-typed ``coin`` does: every symbol in the book reads flat off an empty map,
+    and flat is the branch that writes blind. A read that returned nothing
+    legible would otherwise re-margin the whole configured book against an
+    account whose positions this process never saw.
+
+    So it refuses at the outer edge, as the same unreadable body the field checks
+    raise — retried under the shared boot budget, then ``VenueLeveragePushFailed``
+    with the venue's own body quoted, since an operator debugging a failed boot
+    needs what actually came back.
+    """
+    clock = ManualClock(start_ns=0)
+    post = FakeExchangeApi(
+        {
+            "userAbstraction": "disabled",
+            "clearinghouseState": "ok",
+            "updateLeverage": OK_ENVELOPE,
+        }
+    )
+    book = LeverageBook(entries={"BTC": LeverageSpec(mode="cross", leverage=10)})
+
+    with pytest.raises(VenueLeveragePushFailed) as refusal:
+        asyncio.run(_exchange(post, clock=clock, leverage=book).start())
+
+    assert not isinstance(refusal.value, VenueLeverageMismatch), (
+        "a body that could not be read states no disagreement about anything"
+    )
+    assert "'ok'" in str(refusal.value), "the operator needs the body that was refused"
+    assert "updateLeverage" not in [
+        request_type(url, payload) for (url, payload) in post.requests
+    ], "an unreadable account read leaves every symbol unwritten, not blindly aligned"
+    assert clock.timestamp_ns() > 0, "an unreadable read is retried before it faults"
+
+
 def test_held_positions_the_venue_disagrees_about_refuse_to_start_naming_all_of_them() -> None:
     """The refuse arm of the three-way split (ADR-0044 §5), and the reason the
     account read exists at all.
