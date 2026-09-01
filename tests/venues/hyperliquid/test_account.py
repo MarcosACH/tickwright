@@ -20,7 +20,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from hyperliquid_fakes import FakeExchangeApi
+from hyperliquid_fakes import TEST_SIGNING_KEY, FakeExchangeApi
 from pydantic import SecretStr
 
 from tickwright.adapters.bus import InMemoryBus
@@ -34,9 +34,6 @@ from tickwright.venues.hyperliquid import (
     HyperliquidUniverse,
 )
 
-# Anvil's account #0 — a publicly-known throwaway key, safe in a test file. Its
-# address is a fixed function of the key, so it is an independent expected value.
-TEST_SIGNING_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 WALLET_ADDRESS = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
 
 UNIVERSE = HyperliquidUniverse(

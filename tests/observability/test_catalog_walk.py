@@ -17,7 +17,13 @@ from collections.abc import Callable
 from decimal import Decimal
 
 import pytest
-from hyperliquid_fakes import FakeExchangeApi, FakeWsConnection, trade, trades_frame
+from hyperliquid_fakes import (
+    TEST_SIGNING_KEY,
+    FakeExchangeApi,
+    FakeWsConnection,
+    trade,
+    trades_frame,
+)
 from ledgers import GENESIS, checkpointer
 from pydantic import SecretStr
 from venue_doubles import DERIVED_STATE, LiveVenueDouble, VenueDouble
@@ -493,10 +499,7 @@ def _drive_exchange_request_failed() -> None:
             config=HyperliquidConfig(
                 testnet=True,
                 symbols=["BTC"],
-                # Anvil's account #0 — a publicly-known throwaway key.
-                signing_key=SecretStr(
-                    "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
-                ),
+                signing_key=SecretStr(TEST_SIGNING_KEY),
             ),
             bus=InMemoryBus(),
             clock=ManualClock(),
@@ -530,10 +533,7 @@ def _drive_exchange_action_rejected() -> None:
             config=HyperliquidConfig(
                 testnet=True,
                 symbols=["BTC"],
-                # Anvil's account #0 — a publicly-known throwaway key.
-                signing_key=SecretStr(
-                    "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
-                ),
+                signing_key=SecretStr(TEST_SIGNING_KEY),
             ),
             bus=InMemoryBus(),
             clock=ManualClock(),
@@ -571,10 +571,7 @@ def _drive_exchange_leverage_unchanged() -> None:
             config=HyperliquidConfig(
                 testnet=True,
                 symbols=["BTC"],
-                # Anvil's account #0 — a publicly-known throwaway key.
-                signing_key=SecretStr(
-                    "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
-                ),
+                signing_key=SecretStr(TEST_SIGNING_KEY),
             ),
             bus=InMemoryBus(),
             clock=ManualClock(),

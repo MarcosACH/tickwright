@@ -17,7 +17,7 @@ import asyncio
 from decimal import Decimal
 
 import pytest
-from hyperliquid_fakes import FakeExchangeApi, request_type
+from hyperliquid_fakes import TEST_SIGNING_KEY, FakeExchangeApi, request_type
 from pydantic import SecretStr
 
 from tickwright.adapters.bus import InMemoryBus
@@ -39,9 +39,6 @@ from tickwright.venues.hyperliquid import (
     HyperliquidExchange,
     HyperliquidUniverse,
 )
-
-# Anvil's account #0 — a publicly-known throwaway key, safe in a test file.
-TEST_SIGNING_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 
 UNIVERSE = HyperliquidUniverse(
     specs={
