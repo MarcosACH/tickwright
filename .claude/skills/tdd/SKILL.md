@@ -192,13 +192,10 @@ seams under test: <the confirmed seams>
 | 2 | [ ] | refuses a leverage above the instrument cap | domain/leverage.py, tests/domain/test_leverage.py | |
 ```
 
-- **One plan per issue**, and the **behavior list is the session checkpoint**: run behaviors until
-  you near the line, commit, tick, stop, resume next session. The file is ~1k — it is never what
-  costs you; the per-behavior reading is. A slice whose list cannot finish in two sessions is
-  evidence `/to-tickets` cut it too coarse: recut the ticket rather than opening a second plan file.
-  The exception is a slice that is atomic because the vertical-slice policy forces every layer into
-  one PR — there, several sessions on one branch is the answer, which a resumable plan already
-  handles.
+- **One plan per issue**, and the **behavior list is the session checkpoint**: after each behavior
+  reaches green and is committed, tick its row and ask the user whether to continue. The exception
+  is a slice that is atomic because the vertical-slice policy forces every layer into one PR —
+  there, several sessions on one branch is the answer, which a resumable plan already handles.
 - The path is **gitignored**, alongside `evals/results/` and `docs/private/`: a per-issue plan is
   run state, not a reviewable artifact. Committed, it would fall under the mandatory docs-sync
   policy, where a plan that drifts from the shipped code becomes a bug by that policy's own rule.
@@ -234,6 +231,8 @@ Rules:
   through Implementation, not written once at the end of Planning: a resumed session that knows
   the behavior list but not where it stopped re-derives exactly what the artifact exists to
   prevent. Read that file for what's next rather than scrolling conversation history.
+- **After the commit, ask the user** whether to continue with the next behavior now or resume
+  later — don't chain behaviors automatically.
 - Commit subjects follow Conventional Commits — `feat|fix|docs|refactor|test|chore|ci(scope)?: ...` (see `CONTRIBUTING.md`). The `pr-policy` CI check rejects the eventual PR on a single non-conforming subject, so get it right per commit, not at PR time.
 
 ### Feedback cadence
