@@ -34,7 +34,6 @@ from tickwright.domain import (
     Side,
     TimeInForce,
     VenueAccountState,
-    VenueFactUnsupported,
     VenueOrderView,
     VenueReadFailure,
     quantize_price,
@@ -46,7 +45,7 @@ from .account import account_spec, normalize_account_state
 from .config import HyperliquidConfig
 from .funding import FundingIngest
 from .preflight import verify_account_mode
-from .reading import UNREADABLE, failed_send, figure, read, unreadable_body
+from .reading import UNREADABLE, failed_send, figure, read, refuse_non_usdc, unreadable_body
 from .transport import Connect, PostJson, open_websocket
 from .universe import HyperliquidUniverse
 
@@ -541,7 +540,7 @@ class HyperliquidExchange:
                     # baked in for the same reason, which is why the maker/taker
                     # bit is not carried onto the report: on this path there is
                     # nothing left to select with it.
-                    fee=_settled_in_usdc(entry),
+                    fee=_fee_settled_in_usdc(entry),
                 )
                 for entry in response
                 if entry["oid"] == oid
@@ -861,36 +860,30 @@ def _cancel_adjudication(response: object) -> _CancelAdjudication:
     raise ValueError(f"unrecognized cancel status: {status!r}")
 
 
-def _settled_in_usdc(entry: Mapping[str, Any]) -> Decimal:
+def _fee_settled_in_usdc(entry: Mapping[str, Any]) -> Decimal:
     """One fill's reported fee, refusing a fee settled in any other token.
 
-    Money in this engine is a bare ``Decimal`` with USDC left implicit
-    (ADR-0029), so a fee denominated in another token has nowhere to go: accruing
-    it would add a figure of one currency to a line of another and misstate cash
-    with nothing in the ledger recording which token it came from. The assumption
-    is guarded here rather than carried as a ``fee_currency`` field nothing yet
-    reads — perp fees are USDC-settled today, and spot is out of scope (ADR-0030).
+    The venue gives this grain a discriminator to read — ``feeToken`` — which is
+    what the funding grain's counterpart does not have, so the detection is
+    each one's own and the refusal behind it is shared
+    (``reading.refuse_non_usdc``, which carries the ADR-0029/0048 reasoning for
+    both).
 
-    ``VenueFactUnsupported`` and deliberately **not** a member of ``UNREADABLE``
-    (ADR-0048): every neighbour there describes a body we could not parse, which
-    a re-read may well fix, so they are answered with the named
-    ``VenueReadFailure`` a cycle retries. A settled fill row never changes, so
-    this one is already known permanent at the *first* read, and the unreadable
-    verdict is built to find that out by waiting: answering it that way would
-    skip the order for the whole ``unreadable_grace_seconds`` span, re-reading it
-    to the same refusal, and then fault on the cloid alone — naming strictly less
-    than this refusal already can, since only here is the offending token in
-    hand. It escalates out of the seam instead, faulting the engine as ADR-0036
-    §4 promises (ADR-0049 §4 for why spending the span is the alternative, and
-    ADR-0048 §2's amended note for what the escalation no longer has to prevent).
+    The assumption is guarded here rather than carried as a ``fee_currency``
+    field nothing yet reads — perp fees are USDC-settled today, and spot is out
+    of scope (ADR-0030).
+
+    What is worth keeping *here* is what the alternative verdict would have cost
+    this caller specifically: answered as ``UNREADABLE``, the refusal would skip
+    the order for the whole ``unreadable_grace_seconds`` span, re-read it to the
+    same refusal, and then fault on the cloid alone — naming strictly less than
+    this refusal can, since only here is the offending token in hand (ADR-0036
+    §4, ADR-0049 §4, and ADR-0048 §2's amended note for what the escalation no
+    longer has to prevent).
     """
     token = entry["feeToken"]
     if token != "USDC":
-        raise VenueFactUnsupported(
-            f"fill fee settled in {token!r}, not USDC: this engine's money is a bare "
-            "Decimal with USDC implicit (ADR-0029), so the fee has no home in the "
-            "ledger. Retrying cannot change a settled fill row."
-        )
+        refuse_non_usdc(reported=f"fill fee settled in {token!r}, not USDC", row="fill")
     return figure(entry["fee"])
 
 
