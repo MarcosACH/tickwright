@@ -277,9 +277,10 @@ def test_the_live_adapter_publishes_the_venue_s_payments_on_the_bus() -> None:
 
 LIVE_ACCOUNT = f"hyperliquid-testnet-{ANVIL_ADDRESS}"
 
-# The three boundaries every ledger case below is built from — one hour apart, as
-# the venue settles them, and quoted here once so no case declares them twice.
-FIRST_MS, SECOND_MS, THIRD_MS = 1681222254710, 1681225854710, 1681229454710
+# The boundaries every ledger case below is built from — one hour apart, as the
+# venue settles them, and quoted here once so no case declares them twice.
+FIRST_MS, SECOND_MS = 1681222254710, 1681225854710
+THIRD_MS, FOURTH_MS = 1681229454710, 1681233054710
 
 
 def _ingest_into_ledger(
@@ -407,3 +408,30 @@ def test_a_re_ingested_batch_below_the_watermark_applies_nothing() -> None:
     # dropped all three re-delivered payments on top of it.
     assert replayed.account().cash == Decimal("-6")
     assert store.funding_mark("ETH") == THIRD_MS * _NS_PER_MS
+
+
+def test_a_batch_straddling_the_watermark_applies_exactly_what_is_above_it() -> None:
+    """The realistic reconnect, and the case the other two cannot reach between
+    them.
+
+    A socket that drops mid-run comes back to a snapshot spanning boundaries the
+    ledger already has *and* boundaries it missed while it was down — so the
+    gate's job is not to accept a batch or reject it, but to cut it. Both
+    all-or-nothing cases would still pass a gate that only ever did one of those:
+    an always-drop keeps the re-delivery case green, and an always-apply keeps
+    the out-of-order case green.
+
+    So the arithmetic is the assertion. Two boundaries are already applied at -5;
+    the redelivery brings those two back and adds -1 and -4 above them. -10 is
+    the only reading that means *exactly* the new pair landed — an ungated pass
+    reads -15, and a gate that dropped the whole straddling batch reads -5.
+    """
+    store = SQLiteStore(":memory:")
+    _ingest_into_ledger(_batch((FIRST_MS, "-3"), (SECOND_MS, "-2")), until=2, store=store)
+    assert store.funding_mark("ETH") == SECOND_MS * _NS_PER_MS
+
+    straddling = _batch((FIRST_MS, "-3"), (SECOND_MS, "-2"), (THIRD_MS, "-1"), (FOURTH_MS, "-4"))
+    healed = _ingest_into_ledger(straddling, until=4, store=store)
+
+    assert healed.account().cash == Decimal("-10")
+    assert store.funding_mark("ETH") == FOURTH_MS * _NS_PER_MS
