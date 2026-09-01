@@ -16,6 +16,7 @@ from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
+    UNATTRIBUTED,
     AggressorSide,
     InvariantViolation,
     MarketTick,
@@ -387,3 +388,16 @@ def test_duplicate_strategy_id_registration_fails_fast() -> None:
 
     with pytest.raises(InvariantViolation, match="dup"):
         host.register(RecordingStrategy("dup"), symbols={"ETH"})
+
+
+def test_registering_the_reserved_unattributed_id_fails_fast() -> None:
+    """The last gate before an id keys a ledger row (ADR-0043 §2).
+
+    ``StrategyConfig`` refuses the literal earlier, but a strategy registered
+    without going through a config — a test, an embedding host — never meets
+    that validator, and this is where the id starts partitioning fills.
+    """
+    host = StrategyHost(bus=InMemoryBus(), clock=ManualClock(), store=SQLiteStore(":memory:"))
+
+    with pytest.raises(InvariantViolation, match=UNATTRIBUTED):
+        host.register(RecordingStrategy(UNATTRIBUTED), symbols={"BTC"})

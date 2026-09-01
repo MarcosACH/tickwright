@@ -14,6 +14,7 @@ full ADR-0024 lifecycle.
 from collections.abc import Awaitable, Callable, Iterable
 
 from tickwright.domain import (
+    UNATTRIBUTED,
     Clock,
     Event,
     EventBus,
@@ -56,7 +57,18 @@ class StrategyHost:
         A duplicate ``strategy_id`` is a composition-root wiring bug: ids key
         seqs, snapshots, and ``OrderEvent`` routing, so two strategies sharing
         one would silently corrupt each other's state (ADR-0018 — fail fast).
+
+        The reserved ``UNATTRIBUTED`` id is refused for the same reason one step
+        further down: it keys the ledger partition holding flow the engine never
+        placed, so a strategy taking that name would have its book folded into
+        foreign flow rather than into another strategy's (ADR-0043 §2).
+        ``StrategyConfig`` refuses it earlier; a strategy registered without a
+        config only ever meets this one.
         """
+        if strategy.strategy_id == UNATTRIBUTED:
+            raise InvariantViolation(
+                f"{UNATTRIBUTED} is the reserved unattributed partition, not a strategy_id"
+            )
         if strategy.strategy_id in self._strategies:
             raise InvariantViolation(f"duplicate strategy_id registered: {strategy.strategy_id}")
         self._strategies[strategy.strategy_id] = strategy
