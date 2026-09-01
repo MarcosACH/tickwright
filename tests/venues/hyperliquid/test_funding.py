@@ -19,7 +19,10 @@ from pydantic import SecretStr
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
-from tickwright.domain import FundingAccrual, InstrumentSpec, VenueFactUnsupported
+from tickwright.adapters.store import SQLiteStore
+from tickwright.domain import AccountSpec, FundingAccrual, InstrumentSpec, VenueFactUnsupported
+from tickwright.engine.checkpoint import Checkpointer
+from tickwright.engine.portfolio import PortfolioProjection
 from tickwright.venues.hyperliquid import (
     HyperliquidConfig,
     HyperliquidExchange,
@@ -270,3 +273,106 @@ def test_the_live_adapter_publishes_the_venue_s_payments_on_the_bus() -> None:
     # ``ts_init`` is when this process built the object, off the injected clock —
     # distinct from the venue's settlement instant, which is ``ts_event``.
     assert {a.ts_init for a in seen} == {7}
+
+
+LIVE_ACCOUNT = f"hyperliquid-testnet-{ANVIL_ADDRESS}"
+
+# The three boundaries every ledger case below is built from — one hour apart, as
+# the venue settles them, and quoted here once so no case declares them twice.
+FIRST_MS, SECOND_MS, THIRD_MS = 1681222254710, 1681225854710, 1681229454710
+
+
+def _ingest_into_ledger(
+    frames: list[str], *, until: int, store: SQLiteStore
+) -> PortfolioProjection:
+    """Run the live ingest over ``frames`` into a ledger recovered from ``store``.
+
+    The composition the acceptance criteria are about, and the only place it
+    exists: this module's batch sort meeting the durable watermark that guards
+    the ledger. Neither half can be asserted alone — the sort is correct against
+    a gate it never sees, and the gate is correct against an order it never
+    establishes.
+
+    The subscriber is ``Checkpointer.checkpoint_funding`` because that is what
+    the runner's ``_on_funding_accrual`` calls and all it does; the *wiring* of
+    bus to verb is asserted at the engine's own seam
+    (``tests/engine/test_funding_e2e.py``) rather than restated here.
+
+    The ledger is **recovered** rather than freshly opened, so a second call over
+    the same store is a genuine restart: the watermark the gate reads is then the
+    durable one, and a re-delivery case cannot pass on a value the ingest that
+    wrote it happened to leave in memory.
+
+    ``until`` counts accruals **delivered**, not applied — a batch the gate drops
+    entirely still reaches the bus, so counting applications would hang exactly
+    the case that asserts nothing is applied.
+    """
+
+    async def main() -> PortfolioProjection:
+        bus = InMemoryBus()
+        clock = ManualClock(start_ns=7)
+        # Live declares no genesis: the opening balance is ingested from the
+        # venue at the startup barrier (ADR-0042 §6), so this ledger opens at
+        # zero and the cash line below is funding and nothing else.
+        checkpointer = Checkpointer(
+            spec=AccountSpec(account_id=LIVE_ACCOUNT, genesis_collateral=None),
+            store=store,
+            clock=clock,
+        )
+        checkpointer.portfolio.recover()
+        delivered = 0
+        enough = asyncio.Event()
+
+        async def book(accrual: FundingAccrual) -> None:
+            nonlocal delivered
+            checkpointer.checkpoint_funding(accrual)
+            delivered += 1
+            if delivered >= until:
+                enough.set()
+
+        bus.subscribe(FundingAccrual, book)
+        connection = FakeWsConnection(frames)
+
+        async def connect(url: str) -> FakeWsConnection:
+            return connection
+
+        exchange = make_exchange(FakeExchangeApi({}), bus=bus, clock=clock, connect=connect)
+        async with asyncio.TaskGroup() as tg:
+            running = tg.create_task(exchange.run())
+            await asyncio.wait_for(enough.wait(), timeout=2)
+            await exchange.stop()
+            await running
+        return checkpointer.portfolio
+
+    return asyncio.run(main())
+
+
+def test_an_out_of_order_batch_applies_every_payment_in_it() -> None:
+    """The slice's headline acceptance criterion (issue #192).
+
+    The venue documents no delivery order within a batch, and the watermark is
+    monotonic, so an unsorted delivery is not merely untidy — it is lossy. Fed
+    `t3, t1, t2` the gate would apply `-1`, advance the mark past `t3`, and then
+    drop `-3` and `-2` as already-applied: a cash line reading `-1` against `-6`
+    genuinely paid, on a snapshot the venue delivers once and never repeats.
+
+    So the two numbers below are the whole point of the case. `-6` is the sum of
+    the venue's own three reported amounts; the failure it is placed against
+    reads `-1`.
+    """
+    store = SQLiteStore(":memory:")
+    shuffled = [
+        user_fundings_frame(
+            funding(time_ms=THIRD_MS, coin="ETH", usdc="-1"),
+            funding(time_ms=FIRST_MS, coin="ETH", usdc="-3"),
+            funding(time_ms=SECOND_MS, coin="ETH", usdc="-2"),
+            snapshot=True,
+        )
+    ]
+
+    ledger = _ingest_into_ledger(shuffled, until=3, store=store)
+
+    assert ledger.account().cash == Decimal("-6")
+    # The mark lands on the batch's *latest* boundary, which is only true if the
+    # batch was applied in order — the gate advances it per accrual applied.
+    assert store.funding_mark("ETH") == THIRD_MS * _NS_PER_MS
