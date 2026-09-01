@@ -38,7 +38,24 @@ def accruals(
     counterpart is its epoch-aligned boundary; the two never have to agree,
     since an account is either paper or live and the key only dedupes within one
     account's stream.
+
+    **Sorted by venue time ascending, and that is this function's real content.**
+    The venue documents no delivery order within a batch, while the ledger's
+    watermark is monotonic: fed `t3, t1, t2` it applies `t3`, advances the mark
+    past it, and then drops `t1` and `t2` as already-applied — real payments the
+    account never sees again, because the snapshot is delivered once. Across
+    deliveries the venue's documented behavior supplies that monotonicity
+    (snapshot, then payments on the hour); within one batch nothing does but
+    this line.
+
+    The sort is **stable**, so records sharing a boundary keep the venue's
+    delivery order. That is the common case rather than a corner — every symbol
+    settles on the same hour — and there is nothing better to order them by:
+    they are distinct payments keyed apart by `symbol`, so the gate sees one
+    boundary either way and a tie-break would be inventing a sequence the venue
+    did not report.
     """
+    ordered = sorted(fundings, key=lambda record: int(record["time"]))
     return tuple(
         FundingAccrual(
             ts_event=int(record["time"]) * _NS_PER_MS,
@@ -48,5 +65,5 @@ def accruals(
             boundary_ts_ns=int(record["time"]) * _NS_PER_MS,
             amount=figure(record["usdc"]),
         )
-        for record in fundings
+        for record in ordered
     )
