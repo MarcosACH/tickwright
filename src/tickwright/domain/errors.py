@@ -113,6 +113,32 @@ class VenueAccountModeUnsupported(InvariantViolation):
     """
 
 
+class VenueLeverageMismatch(InvariantViolation):
+    """The venue holds a position at a leverage or margin mode the configured
+    ``LeverageSpec`` disagrees with (ADR-0044 §5).
+
+    The one place config does **not** win at startup. The boot-time push aligns
+    the venue to config for every symbol the account is flat in, because a flat
+    symbol has no risk to re-margin — but a *held* position does, and writing to
+    it would silently move real collateral: an operator who lowered a leverage in
+    the venue UI to de-risk an open position would find the next boot putting it
+    back. The engine cannot tell that apart from a config edit nobody applied, so
+    it refuses rather than guessing which side is stale.
+
+    Names every disagreeing symbol at once, and both pairs for each. The venue
+    twin of ``StoreAccountMismatch``, for its reason: one-per-restart reporting
+    makes a two-symbol drift take two reboots to discover, and the second reboot
+    happens with the market moving. Both pairs because either side may be the
+    wrong one — the remedy is sometimes config and sometimes the venue UI.
+
+    Split from ``LeverageOutOfBounds`` because the two send an operator to
+    different places on different evidence: that one is a configured value no
+    instrument could ever carry, refusable without asking the venue anything,
+    and it runs first for exactly that reason. This one needs the account read
+    and is about a value the venue would happily accept.
+    """
+
+
 class LeverageOutOfBounds(InvariantViolation):
     """A configured ``LeverageSpec`` does not satisfy its instrument's bound
     (ADR-0044 §9): ``1 ≤ leverage ≤ spec.max_leverage``, or the symbol carries

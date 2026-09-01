@@ -29,6 +29,7 @@ from tickwright.domain import (
     LeverageSpec,
     MarginMode,
     VenueAccountModeUnsupported,
+    VenueLeverageMismatch,
 )
 from tickwright.observability import NamedEvent, named_event
 
@@ -220,14 +221,19 @@ async def push_leverage(
         # an account whose answer nothing would read.
         return
     held = _held_leverage(await info({"type": "clearinghouseState", "user": address}))
+    # Every disagreement is found before the first write goes out, which is what
+    # makes the refusal whole: a boot that raises partway through the book would
+    # leave the account half re-margined by the very startup that refused to run.
+    _refuse_disagreements(book, held)
     for symbol in sorted(book.entries):
         spec = book.for_symbol(symbol)
-        if held.get(symbol) == spec:
-            # The skip arm, and the only place "already aligned" is knowable: a
-            # no-op ``updateLeverage`` answers with the same ``ok`` envelope a
-            # real change does (§6 as corrected by #142), so a write can never
-            # report that nothing moved. Emitted per symbol rather than once per
-            # boot because that is the grain an operator compares against config.
+        if symbol in held:
+            # Held and, past the refusal above, necessarily aligned — the skip
+            # arm, and the only place "already aligned" is knowable: a no-op
+            # ``updateLeverage`` answers with the same ``ok`` envelope a real
+            # change does (§6 as corrected by #142), so a write can never report
+            # that nothing moved. Emitted per symbol rather than once per boot
+            # because that is the grain an operator compares against config.
             named_event(
                 NamedEvent.EXCHANGE_LEVERAGE_UNCHANGED,
                 symbol=symbol,
@@ -243,6 +249,42 @@ async def push_leverage(
                 "leverage": spec.leverage,
             }
         )
+
+
+def _refuse_disagreements(book: LeverageBook, held: Mapping[str, LeverageSpec]) -> None:
+    """Refuse the boot if the venue holds a position config disagrees with (§5).
+
+    Only *held* symbols are candidates. A symbol the account is flat in has no
+    risk to re-margin, so config wins there and the push writes it blind; the
+    moment a position exists, the same write would move real collateral, and the
+    engine has no way to tell a stale config from a deliberate de-risk in the
+    venue UI. Refusing is the only branch that cannot be wrong.
+
+    Collected across the whole book before raising, so one restart reports the
+    whole drift — the same argument ``StoreAccountMismatch`` makes one grain up,
+    and the reason this is a pass of its own rather than a check inside the push
+    loop. Both pairs are printed per symbol because the remedy may be on either
+    side, and an error naming only the configured value cannot say which.
+    """
+    disagreeing = [
+        f"{symbol} configured {_pair(book.for_symbol(symbol))}, venue holds {_pair(held[symbol])}"
+        for symbol in sorted(book.entries)
+        if symbol in held and held[symbol] != book.for_symbol(symbol)
+    ]
+    if not disagreeing:
+        return
+    raise VenueLeverageMismatch(
+        "the venue holds positions whose margin settings disagree with config, refusing to "
+        f"start (ADR-0044 §5): {'; '.join(disagreeing)}. Config wins at startup for a symbol "
+        "the account is flat in, never for one already holding a position — writing to a held "
+        "position would re-margin live risk. Either align the venue in its UI or change config "
+        "to match what the venue holds, then restart."
+    )
+
+
+def _pair(spec: LeverageSpec) -> str:
+    """One margin setting as the venue's UI shows it — ``cross 20x``."""
+    return f"{spec.mode} {spec.leverage}x"
 
 
 def _held_leverage(response: object) -> dict[str, LeverageSpec]:

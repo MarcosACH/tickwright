@@ -29,6 +29,7 @@ from tickwright.domain import (
     LeverageOutOfBounds,
     LeverageSpec,
     VenueAccountModeUnsupported,
+    VenueLeverageMismatch,
 )
 from tickwright.observability import NamedEvent
 from tickwright.observability.testing import capture_events
@@ -505,6 +506,58 @@ def test_a_held_position_the_venue_already_agrees_with_is_left_alone_and_named()
         if log["event"] == NamedEvent.EXCHANGE_LEVERAGE_UNCHANGED
     ]
     assert unchanged == [("BTC", "cross", 10)]
+
+
+def test_held_positions_the_venue_disagrees_about_refuse_to_start_naming_all_of_them() -> None:
+    """The refuse arm of the three-way split (ADR-0044 §5), and the reason the
+    account read exists at all.
+
+    Config wins at startup — but not over a position that is already open. The
+    venue would accept the write, and accepting it would silently re-margin
+    live risk: an operator who lowered BTC in the venue UI to de-risk would
+    find the boot quietly putting it back. So a disagreement about a *held*
+    symbol is a refusal, not a push, and the two symbols here disagree in the
+    two different ways one can — a leverage that differs and a mode that does.
+
+    **Every** disagreement is named in one error, the venue twin of
+    ``StoreAccountMismatch``: reporting one per restart makes an operator
+    discover a two-symbol drift by rebooting twice, and the second reboot is the
+    one that happens with the market moving. Both pairs are printed per symbol
+    because either side may be the wrong one — the fix is sometimes config and
+    sometimes the venue UI, and an error naming only what was configured cannot
+    say which.
+
+    Nothing is written on the way to the refusal. The disagreements are
+    collected across the whole book before it raises, so a boot that is going to
+    refuse never leaves half the account re-margined behind it.
+    """
+    post = FakeExchangeApi(
+        {
+            "userAbstraction": "disabled",
+            "clearinghouseState": _state(
+                _held("BTC", mode="cross", leverage=10),
+                _held("ETH", mode="isolated", leverage=5),
+            ),
+            "updateLeverage": OK_ENVELOPE,
+        }
+    )
+    book = LeverageBook(
+        entries={
+            "BTC": LeverageSpec(mode="cross", leverage=20),
+            "ETH": LeverageSpec(mode="cross", leverage=5),
+        }
+    )
+
+    with pytest.raises(VenueLeverageMismatch) as refusal:
+        asyncio.run(_exchange(post, leverage=book).start())
+
+    assert "BTC" in str(refusal.value) and "cross 20x" in str(refusal.value)
+    assert "cross 10x" in str(refusal.value)
+    assert "ETH" in str(refusal.value) and "isolated 5x" in str(refusal.value)
+    assert [request_type(url, payload) for (url, payload) in post.requests] == [
+        "userAbstraction",
+        "clearinghouseState",
+    ], "a boot that refuses re-margins nothing on the way there"
 
 
 def test_a_leverage_above_the_venue_cap_refuses_to_start_on_live_too() -> None:

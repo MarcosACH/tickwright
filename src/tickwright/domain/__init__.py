@@ -23,6 +23,7 @@ from .errors import (
     StoreAccountMismatch,
     VenueAccountModeUnsupported,
     VenueFactUnsupported,
+    VenueLeverageMismatch,
     VenueReadUnresolvable,
 )
 from .events import (
@@ -104,6 +105,7 @@ __all__ = [
     "StoreAccountMismatch",
     "VenueAccountModeUnsupported",
     "VenueFactUnsupported",
+    "VenueLeverageMismatch",
     "VenueReadUnresolvable",
     # events + value types
     "DEFAULT_LEVERAGE",
