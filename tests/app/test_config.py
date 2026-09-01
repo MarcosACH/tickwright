@@ -17,7 +17,7 @@ from pydantic import SecretStr, ValidationError
 from tickwright.adapters.feed import ReplayFeedConfig
 from tickwright.adapters.paper import PaperExchangeConfig
 from tickwright.app.config import AppConfig, AppSettings, StrategyConfig
-from tickwright.domain import LeverageSpec, Side
+from tickwright.domain import UNATTRIBUTED, LeverageSpec, Side
 from tickwright.venues.hyperliquid import HyperliquidConfig
 
 _HOSTILE_ENV_FILE = (
@@ -225,3 +225,23 @@ def test_the_traded_symbol_set_is_derived_once_for_both_readers(tmp_path: Path) 
     )
 
     assert config.traded_symbols == ("ETH", "BTC")
+
+
+def test_a_strategy_may_not_claim_the_reserved_unattributed_id() -> None:
+    """``__unattributed__`` is the ledger's foreign-flow partition, not a name.
+
+    The sentinel is what the store writes where the in-memory partition key is
+    ``None`` (ADR-0043 §2), so a strategy legitimately called that would have
+    its book merged with flow the engine never placed — silently, and on the
+    key every Σ is folded over. Refused at config load, which is the earliest
+    the id exists; ``StrategyHost.register`` refuses it again for the strategies
+    that never come through a config.
+    """
+    with pytest.raises(ValidationError, match=UNATTRIBUTED):
+        StrategyConfig(
+            kind="single_shot_market",
+            strategy_id=UNATTRIBUTED,
+            symbol="BTC",
+            side=Side.BUY,
+            quantity=Decimal("0.5"),
+        )

@@ -20,7 +20,15 @@ from decimal import Decimal
 from types import MappingProxyType
 from typing import Any
 
-from tickwright.domain import Account, Order, OrderState, OrderType, Position, Side
+from tickwright.domain import (
+    UNATTRIBUTED,
+    Account,
+    Order,
+    OrderState,
+    OrderType,
+    Position,
+    Side,
+)
 
 _ZERO = Decimal("0")
 
@@ -163,15 +171,14 @@ def account_values(account: Account, *, ts_ns: int) -> tuple[Any, ...]:
     )
 
 
-# The reserved unattributed partition on disk (ADR-0043 §2). ADR-0038 models it
-# as ``strategy_id: None`` in memory, but the column is ``NOT NULL`` and part of
-# the primary key, so the translation happens here — at the one boundary both
-# backends share. A literal ``NULL`` is *differently* broken on each: SQLite
-# admits duplicate rows under the key and upserts insert rather than update, so
-# the partition would accrete a row per heal with the Σ-invariant quietly
-# counting all of them; Postgres rejects the row outright. The silent breakage
-# is the default path's, which is why this is a sentinel rather than a ``NULL``.
-UNATTRIBUTED = "__unattributed__"
+# ``UNATTRIBUTED`` is the on-disk stand-in for ADR-0038's ``strategy_id: None``,
+# translated here — at the one boundary both backends share. A literal ``NULL``
+# is *differently* broken on each: SQLite admits duplicate rows under the key and
+# upserts insert rather than update, so the partition would accrete a row per
+# heal with the Σ-invariant quietly counting all of them; Postgres rejects the
+# row outright. The silent breakage is the default path's, which is why this is a
+# sentinel rather than a ``NULL`` (ADR-0043 §2). The literal itself is `domain`'s
+# because the validators that reserve it live above this layer.
 
 # The position columns, in write order. The key leads; the money lines follow in
 # the order ADR-0043 §3's DDL lists them.

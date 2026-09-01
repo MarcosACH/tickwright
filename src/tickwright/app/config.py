@@ -22,7 +22,7 @@ from tickwright.adapters.bus import KafkaBusConfig
 from tickwright.adapters.feed import ReplayFeedConfig
 from tickwright.adapters.paper import PaperExchangeConfig
 from tickwright.adapters.store import PostgresStoreConfig, SQLiteStoreConfig
-from tickwright.domain import LeverageSpec, Side
+from tickwright.domain import UNATTRIBUTED, LeverageSpec, Side
 from tickwright.engine.runner import EngineConfig
 from tickwright.venues.hyperliquid import HyperliquidConfig
 
@@ -41,6 +41,17 @@ class StrategyConfig(BaseModel):
     def _limit_needs_a_price(self) -> Self:
         if self.kind == "single_shot_limit" and self.price is None:
             raise ValueError("a single_shot_limit strategy needs a price")
+        return self
+
+    @model_validator(mode="after")
+    def _id_may_not_be_the_reserved_partition(self) -> Self:
+        # ADR-0043 §2: the sentinel is made uncollidable rather than merely
+        # conventional. Refused here and again at ``StrategyHost.register`` —
+        # this is the earliest the id exists, that is the last point before it
+        # keys a ledger row, and a strategy built without a config only meets
+        # the second.
+        if self.strategy_id == UNATTRIBUTED:
+            raise ValueError(f"{UNATTRIBUTED} is the reserved unattributed partition, not an id")
         return self
 
 
