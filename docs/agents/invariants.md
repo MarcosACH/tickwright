@@ -43,10 +43,22 @@ Consumed by `/code-review` (any regression is BLOCKING) and `/python-codebase-ma
    **The boundary of this invariant is permanence.** A failed read and a retry is the answer
    for a read that *may* succeed later — a dead transport, an unreadable body — with the
    per-cloid span below as how that retrying finds out whether waiting helps. A venue fact this
-   engine cannot represent (a fill fee settled in a token other than USDC) is already stored at
-   the venue and reads back identically forever, so it is durable at the *first* read and the
-   span has nothing to discover: answering it that way spends the whole span re-reading it and
-   then faults naming only the cloid, where the refusal itself can name the offending fact.
+   engine cannot represent (a fill fee, or a funding payment, settled in a token other than
+   USDC) is already stored at the venue and reads back identically forever, so it is durable at
+   the *first* read and the span has nothing to discover: answering it that way spends the whole
+   span re-reading it and then faults naming only the cloid, where the refusal itself can name
+   the offending fact.
+   **Permanence is the membership test, not "a fact was understood"** — so a *delivery* off a
+   money channel that could not be read at all qualifies too, and there the **transport**
+   supplies the permanence rather than the immutability of a stored row: a websocket message
+   arrives whole or not at all (RFC 6455 §5.4), so what reaches a parser is always exactly what
+   the venue chose to send and an unreadable one is a contract change, known at the first read.
+   That is a `userFundings` frame whose body is not a batch of payments, and a record inside a
+   well-formed batch that is not a payment — one condition at two depths, both refusing rather
+   than returning nothing, because on a channel where every message is cash "no payments" and
+   "an unknown number of payments" are not the same answer. A frame naming another channel is
+   still ignored; a subscription's consumer is not a `read`, so freezing is not among its
+   outcomes.
    Those refuse as `VenueFactUnsupported`, deliberately outside the
    `UNREADABLE` vocabulary every transient guard catches, and **fault** the engine. One venue
    read, three outcomes, mapped once per venue (`venues/hyperliquid/reading.py`). What a read
@@ -66,7 +78,7 @@ Consumed by `/code-review` (any regression is BLOCKING) and `/python-codebase-ma
    barrier's backoff apart, so a count buys a different amount of waiting under each — and at
    boot would silently overrule `startup_reconciliation_timeout_seconds`. The pass verdict stays
    `False` on either failure, so a startup pass that could not prove an order never clears the
-   barrier (inv 5). (ADR-0011, ADR-0034, ADR-0043 §6, ADR-0048, ADR-0049)
+   barrier (inv 5). (ADR-0011, ADR-0034, ADR-0037 §2, ADR-0043 §6, ADR-0048, ADR-0049)
 4. **Rejections are explicit events.** A placed-but-rejected order surfaces as its taxonomy
    terminal (`DENIED` / `REJECTED` / `FAILED`), propagated as an event — never a silent
    `return None`. (ADR-0010)

@@ -1314,29 +1314,6 @@ def test_the_venue_link_is_released_without_a_start_having_run() -> None:
     assert post.requests == []
 
 
-def test_the_supervised_half_returns_at_once_and_reaches_the_venue_for_nothing() -> None:
-    """A live adapter has no loop to supervise, so ``run()`` completes.
-
-    The member exists for the venue that must **generate** what a real one pushes
-    — paper's funding boundaries (ADR-0037) — and this adapter is the other side
-    of that: the venue emits funding at its own boundaries and this ingests it,
-    so there is nothing to run. The runner still task-creates this, and the task
-    simply finishes; nothing downstream tells that apart from a loop that is
-    merely idle, which is what makes "returns immediately" a legitimate
-    implementation rather than an omission.
-
-    Awaited **directly**, with no timeout and no slots: a body that returns is
-    the claim, and a body that looped would hang this test rather than fail it
-    slowly. The fake routes nothing, so the boot's venue reads are ``start()``'s
-    and this adds none of its own."""
-    post = FakeExchangeApi({})
-    exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
-
-    asyncio.run(exchange.run())
-
-    assert post.requests == []
-
-
 def test_the_released_venue_link_still_answers_a_place_and_a_cancel() -> None:
     """Ahead of the bus drain is not ahead of the last caller. ``stop()`` runs
     before the drain, but the drain dispatches the cascade it is waiting on and
@@ -1428,7 +1405,8 @@ def test_the_venue_hands_out_the_meta_sourced_specs_by_copy() -> None:
 _SEAM_CLAIMS = {
     # test_preflight.py — the module that owns what start() now proves.
     "start": "test_a_pooled_account_mode_refuses_to_start_with_the_operator_s_remediation",
-    "run": "test_the_supervised_half_returns_at_once_and_reaches_the_venue_for_nothing",
+    # test_funding.py — the module that owns what the supervised half now runs.
+    "run": "test_the_live_adapter_publishes_the_venue_s_payments_on_the_bus",
     "stop": "test_the_venue_link_is_released_without_a_start_having_run",
     "place": "test_market_buy_places_an_aggressive_ioc_limit_at_the_bounded_price",
     "cancel": "test_cancel_sends_a_signed_cancel_by_cloid_and_reports_cancelled",

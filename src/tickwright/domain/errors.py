@@ -42,10 +42,20 @@ class StoreAccountMismatch(InvariantViolation):
 
 
 class VenueFactUnsupported(InvariantViolation):
-    """The venue reported a fact this engine has no way to represent, and will
-    report it identically forever (ADR-0048): a fill fee settled in a token
-    other than USDC, against a ledger whose money is a bare ``Decimal`` with
-    USDC left implicit (ADR-0029).
+    """The venue said something this engine cannot act on and will say it
+    identically forever (ADR-0048). Two conditions qualify:
+
+    - a fact reported and understood with nowhere to go — a fill fee or a
+      funding payment settled in a token other than USDC, against a ledger whose
+      money is a bare ``Decimal`` with USDC left implicit (ADR-0029);
+    - a **delivery** on a money channel that could not be read at all, where the
+      transport itself establishes the permanence: a websocket message arrives
+      whole or not at all (RFC 6455 §5.4), so an unreadable one is a contract
+      change rather than a truncation a re-read could fix.
+
+    The second is why the type is not named for the first alone. What both have
+    in common is that no retry reaches a state where they succeed, and that is
+    the whole membership test.
 
     The **permanence** is the whole reason this is a type and not a member of
     the venue's ``UNREADABLE`` vocabulary. Its neighbours there describe a body
@@ -53,8 +63,10 @@ class VenueFactUnsupported(InvariantViolation):
     named ``VenueReadFailure`` the cycle retries — and, when the retrying stops
     helping, a per-cloid span that escalates to ``VenueReadUnresolvable``
     (ADR-0049 §4). That span exists to *find out* whether a condition is durable,
-    by waiting. This one is durable at the first read and known to be: a stored
-    venue row is immutable, so the read fails identically on every later pass.
+    by waiting. This one is durable at the first read and known to be — a stored
+    venue row is immutable, so the read fails identically on every later pass,
+    and a delivered message is what the venue chose to send, so a re-delivery
+    sends the same thing.
     Answered as transient, one such fact would skip its order and re-read it for
     the whole span before faulting — and fault naming only the cloid, where this
     type names the fact, which is the one thing an operator's first question
