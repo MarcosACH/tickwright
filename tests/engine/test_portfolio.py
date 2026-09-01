@@ -17,6 +17,7 @@ from venue_doubles import account_state
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
+    UNATTRIBUTED,
     Account,
     AccountSpec,
     FundingAccrual,
@@ -1257,3 +1258,50 @@ def test_a_live_ledger_recorded_against_another_address_is_still_refused() -> No
     message = str(refusal.value)
     assert "account_id" in message
     assert "genesis_collateral" not in message  # nothing declared to disagree with
+
+
+def test_the_scoped_facade_cannot_reach_the_unattributed_partition() -> None:
+    """Foreign flow counts toward the account and is invisible to a strategy.
+
+    The partition holding flow the engine never placed is keyed ``None``
+    (ADR-0038), and the two halves of that pull in opposite directions: it must
+    be in the account net, because the venue holds one position per symbol and
+    the reconciliation anchor is computed at that grain (ADR-0041 §4), and it
+    must be out of every strategy read, because a strategy that could see it
+    would be attributing someone else's exposure to itself (ADR-0041 §5).
+
+    Reached through a restart rather than a synthetic write, because that is
+    how the partition actually arrives: ``OrderFillEvent.strategy_id`` is
+    ``str``, so nothing can fold an unattributed fill in-process — the row is
+    restored from the store, unfiltered, exactly as ``all_positions`` promises.
+    """
+    store = SQLiteStore(":memory:")
+    opened = _projection("100000", store=store)
+    opened.recover()
+    change = opened.apply_fill(_fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
+    foreign = Position(
+        strategy_id=None, symbol="BTC", signed_size=Decimal("5"), entry_price=Decimal("100")
+    )
+    store.checkpoint_ledger(
+        account=change.account, positions=(change.position, foreign), ts_ns=1_000
+    )
+
+    restarted = _projection("100000", store=store)
+    restarted.recover()
+
+    # The account grain sees all of it — this is the Σ-invariant's left side.
+    assert restarted.account_net() == {"BTC": Decimal("7")}
+    assert restarted.position("BTC", strategy_id=None) is not None
+
+    # The seam a strategy holds sees its own two units and nothing else.
+    scoped: Portfolio = restarted.for_strategy("alpha")
+    alpha = scoped.position("BTC")
+    assert alpha is not None and alpha.size == Decimal("2")
+    assert [view.size for view in scoped.open_positions()] == [Decimal("2")]
+
+    # Unspoofable, not merely filtered: the sentinel is the *disk* encoding of
+    # the ``None`` key (ADR-0043 §2), so a facade bound to the literal itself
+    # reaches nothing — there is no in-memory key equal to it to reach. The
+    # registration gates make that id unobtainable; this is why it would not
+    # help even if one were obtained.
+    assert restarted.for_strategy(UNATTRIBUTED).position("BTC") is None
