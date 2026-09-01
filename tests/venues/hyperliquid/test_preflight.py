@@ -30,6 +30,7 @@ from tickwright.domain import (
     LeverageSpec,
     VenueAccountModeUnsupported,
     VenueLeverageMismatch,
+    VenueLeveragePushFailed,
 )
 from tickwright.observability import NamedEvent
 from tickwright.observability.testing import capture_events
@@ -589,6 +590,57 @@ def test_an_account_mode_the_gate_refuses_never_reaches_the_leverage_push() -> N
         asyncio.run(_exchange(post, leverage=book).start())
 
     assert [request_type(url, payload) for (url, payload) in post.requests] == ["userAbstraction"]
+
+
+def test_a_write_that_never_lands_retries_and_faults_inside_the_shared_boot_budget() -> None:
+    """One budget covers **both** guards (ADR-0044 §6, ADR-0043 §6's precedent).
+
+    The push runs in the same boot window as the mode gate and the barrier, and
+    faces the same transient-blip reality, so it reuses
+    ``startup_reconciliation_timeout`` rather than minting a second timeout. That
+    is a claim about the *whole boot*, not about the push in isolation: a push
+    that started a fresh 60 s window of its own would still retry, still fault,
+    and still look right in every assertion below except the elapsed one — while
+    a boot the operator budgeted a minute for took two.
+
+    So the gate is made to spend most of the budget first (five refused reads,
+    31 s of capped doubling) and the write then fails for good. Under one shared
+    deadline the boot faults at ~62 s; under two it would fault at ~92 s, past
+    the bound asserted here. The clock is virtual, so neither costs the suite
+    anything.
+
+    ``VenueLeveragePushFailed`` rather than ``VenueLeverageMismatch``: this is a
+    write that never landed, not a disagreement about a held position — the same
+    split the mode gate keeps between an unreadable mode and a refused one. The
+    operator needs the symbol left unaligned and the underlying failure, because
+    the account is now in neither the configured state nor a known one.
+    """
+    clock = ManualClock(start_ns=0)
+    post = _FlakyApi(
+        failures=5,
+        then={
+            "userAbstraction": "disabled",
+            "clearinghouseState": _state(),
+            "updateLeverage": ConnectionError("venue unreachable"),
+        },
+        error=TimeoutError("venue timed out"),
+    )
+    book = LeverageBook(entries={"BTC": LeverageSpec(mode="cross", leverage=10)})
+
+    with pytest.raises(VenueLeveragePushFailed) as refusal:
+        asyncio.run(_exchange(post, clock=clock, leverage=book).start())
+
+    writes = [
+        1 for (url, payload) in post.requests if request_type(url, payload) == "updateLeverage"
+    ]
+    assert len(writes) > 1, "a single attempt is not a bounded retry"
+    elapsed_seconds = clock.timestamp_ns() / 1_000_000_000
+    assert STARTUP_TIMEOUT_SECONDS <= elapsed_seconds < STARTUP_TIMEOUT_SECONDS + 30, (
+        "the push shares the gate's deadline; a second budget would fault at ~2x"
+    )
+    message = str(refusal.value)
+    assert "BTC" in message, "the operator needs the symbol left unaligned"
+    assert "venue unreachable" in message, "and the underlying failure"
 
 
 def test_a_leverage_above_the_venue_cap_refuses_to_start_on_live_too() -> None:

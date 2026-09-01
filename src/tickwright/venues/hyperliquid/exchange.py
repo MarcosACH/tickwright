@@ -44,7 +44,7 @@ from tickwright.observability import NamedEvent, named_event
 from . import transport
 from .account import account_spec, normalize_account_state
 from .config import HyperliquidConfig
-from .preflight import push_leverage, verify_account_mode
+from .preflight import BootDeadline, push_leverage, verify_account_mode
 from .reading import UNREADABLE, failed_send, figure, read, unreadable_body
 from .transport import PostJson
 from .universe import HyperliquidUniverse
@@ -130,12 +130,22 @@ class HyperliquidExchange:
         mismatches computed against a margin model that does not apply would be
         noise on top of an error. The leverage push (ADR-0044 §7) lands behind
         it. Both refusals precede the barrier, so neither can let an order out.
+
+        The two share **one** deadline, opened here and spent between them
+        (ADR-0044 §6): they run in the same boot window against the same venue,
+        so a budget each would let a boot the operator sized at one
+        ``startup_reconciliation_timeout`` take two before the barrier gets its
+        own. Whatever the gate spends retrying is gone from what the push has
+        left.
         """
+        deadline = BootDeadline.opening(
+            clock=self._clock, budget_seconds=self._startup_timeout_seconds
+        )
         await verify_account_mode(
             info=self._info,
             address=self._user_address,
             clock=self._clock,
-            timeout_seconds=self._startup_timeout_seconds,
+            deadline=deadline,
         )
         # The same ``domain`` check paper runs, against specs this adapter
         # sourced from the meta endpoint rather than from config (ADR-0044 §9).
@@ -152,6 +162,8 @@ class HyperliquidExchange:
             address=self._user_address,
             book=self._leverage,
             asset_indices=self._universe.asset_indices,
+            clock=self._clock,
+            deadline=deadline,
         )
 
     async def run(self) -> None:

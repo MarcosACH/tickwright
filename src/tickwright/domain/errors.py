@@ -139,6 +139,28 @@ class VenueLeverageMismatch(InvariantViolation):
     """
 
 
+class VenueLeveragePushFailed(InvariantViolation):
+    """The boot-time leverage push could not be completed against the venue
+    (ADR-0044 §6): a call it needed kept failing until the startup budget ran
+    out.
+
+    Split from ``VenueLeverageMismatch`` on the same line the mode gate splits
+    an unreadable mode from a refused one. That one is a *fact the venue told
+    us* — a held position at a setting config disagrees with, which an operator
+    can reconcile by looking at two printed pairs. This one is the absence of an
+    answer: the account is left in neither the configured state nor a known one,
+    and there is nothing to compare because the venue never said anything.
+    Folding them would send an operator to the venue UI to fix a leverage that
+    may well already be right.
+
+    Retried before it is raised, because a boot-time blip is real and the same
+    budget the startup barrier gets already covers it (ADR-0043 §6's precedent:
+    extend the one boot window rather than mint a second timeout). Clearing
+    startup with a venue this process failed to align is not an available
+    outcome — that is the state the push exists to prevent.
+    """
+
+
 class LeverageOutOfBounds(InvariantViolation):
     """A configured ``LeverageSpec`` does not satisfy its instrument's bound
     (ADR-0044 §9): ``1 ≤ leverage ≤ spec.max_leverage``, or the symbol carries

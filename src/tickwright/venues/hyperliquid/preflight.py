@@ -21,6 +21,8 @@ surface in a module a reader can audit in full.
 """
 
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
 from tickwright.domain import (
@@ -29,6 +31,7 @@ from tickwright.domain import (
     LeverageSpec,
     VenueAccountModeUnsupported,
     VenueLeverageMismatch,
+    VenueLeveragePushFailed,
 )
 from tickwright.observability import NamedEvent, named_event
 
@@ -81,8 +84,41 @@ making real time-to-``FAULTED`` up to ~2× the configured window."""
 _NS_PER_SECOND = 1_000_000_000
 
 
+@dataclass(frozen=True)
+class BootDeadline:
+    """The single instant **both** boot guards must clear by (ADR-0044 §6).
+
+    A value rather than two ``timeout_seconds`` arguments, because "one boot
+    budget, never a second timeout" is the decision and passing the budget twice
+    is exactly how it gets spent twice. The gate and the push each retry their
+    own transient failures, but they retry against *this* instant, so a boot an
+    operator budgeted a minute for takes a minute however the failures divide
+    between them — and adding a third guard later cannot quietly make it three.
+
+    ``budget_seconds`` rides along for the refusals alone: an operator reading a
+    crashed boot needs the window that was spent, and an absolute nanosecond
+    instant does not say what it was.
+    """
+
+    at_ns: int
+    budget_seconds: float
+
+    @classmethod
+    def opening(cls, *, clock: Clock, budget_seconds: float) -> "BootDeadline":
+        """The deadline as measured from now, on the injected clock."""
+        return cls(
+            at_ns=clock.timestamp_ns() + int(budget_seconds * _NS_PER_SECOND),
+            budget_seconds=budget_seconds,
+        )
+
+    def spent(self, clock: Clock) -> bool:
+        """Whether the budget is gone — checked *after* a failure, never before
+        an attempt, so every guard gets at least one try however late it runs."""
+        return clock.timestamp_ns() >= self.at_ns
+
+
 async def verify_account_mode(
-    *, info: InfoRead, address: str, clock: Clock, timeout_seconds: float
+    *, info: InfoRead, address: str, clock: Clock, deadline: BootDeadline
 ) -> None:
     """Refuse to start unless ``address`` is in a supported account mode.
 
@@ -99,15 +135,15 @@ async def verify_account_mode(
     because it is the unset state.
 
     An **unreadable** mode may be a boot-time blip, so it is retried with capped
-    backoff until ``timeout_seconds`` is spent and only then refuses. Slept on
-    the injected ``Clock``, so a venue that is down cannot be hammered and
-    virtual time carries the whole window for free under ``ManualClock``.
+    backoff until ``deadline`` is spent and only then refuses — the *shared* boot
+    deadline, which the push behind this guard retries against too. Slept on the
+    injected ``Clock``, so a venue that is down cannot be hammered and virtual
+    time carries the whole window for free under ``ManualClock``.
 
     An **unrecognised literal** is not a failed read and takes no retry: the
     venue answered, and re-asking cannot change a deployment fact inside a boot
     window — it would only delay the remediation the operator needs.
     """
-    deadline_ns = clock.timestamp_ns() + int(timeout_seconds * _NS_PER_SECOND)
     backoff = Backoff(initial=_RETRY_INITIAL_BACKOFF_SECONDS, maximum=_RETRY_MAX_BACKOFF_SECONDS)
     while True:
         try:
@@ -118,11 +154,11 @@ async def verify_account_mode(
         # (``UNREADABLE`` — the venue read vocabulary every other grain of this
         # adapter already catches, rather than a fourth hand-picked tuple).
         except (OSError, *UNREADABLE) as exc:
-            if clock.timestamp_ns() >= deadline_ns:
+            if deadline.spent(clock):
                 raise VenueAccountModeUnsupported(
                     f"could not read the abstraction mode of account {address} within "
-                    f"{timeout_seconds}s ({exc}); refusing to start rather than assume "
-                    f"it is {_accepted()}"
+                    f"{deadline.budget_seconds}s ({exc}); refusing to start rather than "
+                    f"assume it is {_accepted()}"
                 ) from exc
             await backoff.sleep_on(clock)
             continue
@@ -187,6 +223,8 @@ async def push_leverage(
     address: str,
     book: LeverageBook,
     asset_indices: Mapping[str, int],
+    clock: Clock,
+    deadline: BootDeadline,
 ) -> None:
     """Align the venue to config, once, at boot (ADR-0044 §7).
 
@@ -205,13 +243,31 @@ async def push_leverage(
     one ``activeAssetData`` read per symbol (§4): the risky symbols are exactly
     the ones holding a position, and that read reports leverage for exactly
     those.
+
+    Every venue call here is retried against the *same* ``deadline`` the mode
+    gate ahead of it retried against (§6): the push runs in the same boot window
+    and faces the same transient-blip reality, so it reuses the barrier's budget
+    rather than minting a second one. Whatever the gate spent is gone from what
+    the push has left, which is what keeps a boot the operator budgeted a minute
+    for taking a minute. Exhausting it is ``VenueLeveragePushFailed`` — clearing
+    startup against a venue this process failed to align is not an outcome.
     """
     if not book.entries:
         # A run with nothing traded is a legitimate book, not an unresolved one
         # — so there is no symbol to align and no reason to ask the venue about
         # an account whose answer nothing would read.
         return
-    held = held_leverage(await info({"type": "clearinghouseState", "user": address}))
+    held = await _until_deadline(
+        # Read *and* parsed inside the retry, the way the mode gate retries
+        # ``_read_account_mode`` rather than the bare ``info`` call: a body
+        # outside the venue's contract is the same "we are not reading what we
+        # think we are" an unreachable venue is, and both are transient by
+        # assumption at boot.
+        partial(_read_held_leverage, info, address=address),
+        describing=f"read the positions held by account {address}",
+        clock=clock,
+        deadline=deadline,
+    )
     # Every disagreement is found before the first write goes out, which is what
     # makes the refusal whole: a boot that raises partway through the book would
     # leave the account half re-margined by the very startup that refused to run.
@@ -232,14 +288,60 @@ async def push_leverage(
                 leverage=spec.leverage,
             )
             continue
-        await send(
-            {
-                "type": "updateLeverage",
-                "asset": asset_indices[symbol],
-                "isCross": spec.mode == "cross",
-                "leverage": spec.leverage,
-            }
+        action = {
+            "type": "updateLeverage",
+            "asset": asset_indices[symbol],
+            "isCross": spec.mode == "cross",
+            "leverage": spec.leverage,
+        }
+        await _until_deadline(
+            partial(send, action),
+            describing=f"align {symbol} to {_pair(spec)}",
+            clock=clock,
+            deadline=deadline,
         )
+
+
+async def _until_deadline[T](
+    call: Callable[[], Awaitable[T]],
+    *,
+    describing: str,
+    clock: Clock,
+    deadline: BootDeadline,
+) -> T:
+    """Run one venue call, retrying transient failure until ``deadline``.
+
+    The push's half of ADR-0044 §6, and the reason it is a helper rather than a
+    loop per call site: the read and every write share one budget, so they have
+    to share the *rule* for spending it — three hand-written loops would be three
+    chances to check the deadline before the attempt, or to forget the cap.
+
+    The two failures retried are the ones the mode gate retries, for the same
+    reason: the venue was unreachable (``OSError``) or answered with a body
+    outside its contract (``UNREADABLE``). Both are transient by assumption at
+    boot and neither leaves anything guessed behind. A ``VenueLeverageMismatch``
+    is not among them — it is a fact the venue stated, and re-asking cannot
+    change it.
+
+    ``describing`` is the phrase the refusal reads as, so the message names what
+    was being attempted rather than which internal call raised: an operator needs
+    the symbol left unaligned, not a stack position. The deadline is checked
+    **after** the failure, so a call that starts late still gets its one attempt.
+    """
+    backoff = Backoff(initial=_RETRY_INITIAL_BACKOFF_SECONDS, maximum=_RETRY_MAX_BACKOFF_SECONDS)
+    while True:
+        try:
+            return await call()
+        except (OSError, *UNREADABLE) as exc:
+            if deadline.spent(clock):
+                raise VenueLeveragePushFailed(
+                    f"could not {describing} within the {deadline.budget_seconds}s startup "
+                    f"budget ({exc}); refusing to start rather than trade against a venue "
+                    "this process failed to align (ADR-0044 §6). The account is in neither "
+                    "the configured state nor a known one — check the venue is reachable, "
+                    "then restart."
+                ) from exc
+            await backoff.sleep_on(clock)
 
 
 def _refuse_disagreements(book: LeverageBook, held: Mapping[str, LeverageSpec]) -> None:
@@ -276,3 +378,12 @@ def _refuse_disagreements(book: LeverageBook, held: Mapping[str, LeverageSpec]) 
 def _pair(spec: LeverageSpec) -> str:
     """One margin setting as the venue's UI shows it — ``cross 20x``."""
     return f"{spec.mode} {spec.leverage}x"
+
+
+async def _read_held_leverage(info: InfoRead, *, address: str) -> dict[str, LeverageSpec]:
+    """The one unsigned ``clearinghouseState`` read, as held margin settings.
+
+    Normalized by ``account``, the module that owns every Hyperliquid field name
+    for these quantities: the push needs the venue's stored setting, not a second
+    reader of the account body free to drift from the first (ADR-0031)."""
+    return held_leverage(await info({"type": "clearinghouseState", "user": address}))

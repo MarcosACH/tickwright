@@ -24,6 +24,7 @@ from .errors import (
     VenueAccountModeUnsupported,
     VenueFactUnsupported,
     VenueLeverageMismatch,
+    VenueLeveragePushFailed,
     VenueReadUnresolvable,
 )
 from .events import (
@@ -106,6 +107,7 @@ __all__ = [
     "VenueAccountModeUnsupported",
     "VenueFactUnsupported",
     "VenueLeverageMismatch",
+    "VenueLeveragePushFailed",
     "VenueReadUnresolvable",
     # events + value types
     "DEFAULT_LEVERAGE",
