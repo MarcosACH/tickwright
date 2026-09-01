@@ -426,3 +426,31 @@ def test_a_second_strategy_may_not_claim_an_owned_symbol() -> None:
     message = str(raised.value)
     assert "alpha" in message and "beta" in message and "ETH" in message
     assert "SOL" not in message
+
+
+def test_strategies_on_disjoint_symbols_register_and_route_independently() -> None:
+    """The disjointness gate refuses overlap, not multi-strategy hosting.
+
+    The rule is narrow on purpose — one symbol, one owner — so a host running
+    several strategies over a partitioned universe is the *supported* shape, not
+    a tolerated one. Asserted through routing rather than through the absence of
+    a raise: the gate maintains its own symbol-to-owner index beside the
+    per-strategy sets the subscriptions read, and an index that drifted from
+    them would still register these three without complaint.
+    """
+    bus = InMemoryBus()
+    host = StrategyHost(bus=bus, clock=ManualClock(), store=SQLiteStore(":memory:"))
+    alpha = RecordingStrategy("alpha")
+    beta = RecordingStrategy("beta")
+    gamma = RecordingStrategy("gamma")
+    host.register(alpha, symbols={"BTC", "ETH"})
+    host.register(beta, symbols={"SOL"})
+    host.register(gamma, symbols={"DOGE"})
+    host.start()
+
+    for symbol in ("BTC", "ETH", "SOL", "DOGE"):
+        asyncio.run(bus.publish(_tick(symbol)))
+
+    assert sorted(tick.symbol for tick in alpha.ticks) == ["BTC", "ETH"]
+    assert [tick.symbol for tick in beta.ticks] == ["SOL"]
+    assert [tick.symbol for tick in gamma.ticks] == ["DOGE"]
