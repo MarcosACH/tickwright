@@ -506,6 +506,47 @@ def test_a_held_position_the_venue_already_agrees_with_is_left_alone_and_named()
     assert unchanged == [("BTC", "cross", 10)]
 
 
+def test_a_held_position_at_a_mode_the_venue_has_never_reported_is_a_failed_read() -> None:
+    """The branch ``held_leverage``'s refusal exists to prevent, pinned.
+
+    ``LeverageSpec`` is a plain frozen dataclass, so an unrecognised
+    ``leverage.type`` trusted into it would compare unequal to every configured
+    spec — and the boot would read *the venue changing its contract* as a held
+    disagreement, raising ``VenueLeverageMismatch`` and sending an operator to
+    the venue UI to fix a leverage that was never wrong. It is refused at the
+    read instead, which makes it an unreadable body like any other: retried
+    under the shared boot budget, then ``VenueLeveragePushFailed``.
+
+    Asserted as **not** ``VenueLeverageMismatch`` rather than only as the type
+    raised, because the mismatch is the plausible wrong answer here and a type
+    check alone would pass under it if the two errors were ever merged.
+
+    Covers the gate from ``held_leverage``'s side. ``test_account.py`` covers it
+    from ``_isolated_collateral``'s, and since #180's architecture pass both go
+    through one ``reported_margin_mode`` — two readers of one field that used to
+    decide validity separately, one derived from ``MarginMode`` and one not.
+    """
+    post = FakeExchangeApi(
+        {
+            "userAbstraction": "disabled",
+            "clearinghouseState": _state(_held("BTC", mode="portfolioMargin", leverage=10)),
+            "updateLeverage": OK_ENVELOPE,
+        }
+    )
+    book = LeverageBook(entries={"BTC": LeverageSpec(mode="cross", leverage=10)})
+
+    with pytest.raises(VenueLeveragePushFailed) as refusal:
+        asyncio.run(_exchange(post, clock=ManualClock(start_ns=0), leverage=book).start())
+
+    assert not isinstance(refusal.value, VenueLeverageMismatch), (
+        "a venue contract change is not a disagreement about a held position"
+    )
+    assert "portfolioMargin" in str(refusal.value), "the operator needs the body that was refused"
+    assert "updateLeverage" not in [
+        request_type(url, payload) for (url, payload) in post.requests
+    ], "a book that could not be read aligns nothing"
+
+
 def test_held_positions_the_venue_disagrees_about_refuse_to_start_naming_all_of_them() -> None:
     """The refuse arm of the three-way split (ADR-0044 §5), and the reason the
     account read exists at all.
