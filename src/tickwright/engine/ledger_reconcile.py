@@ -298,7 +298,7 @@ class LedgerReconciliation:
         """
         venue_sizes = {position.symbol: position.signed_size for position in state.positions}
         projected_sizes = self._portfolio.account_net()
-        for symbol in {**projected_sizes, **venue_sizes}:
+        for symbol in projected_sizes.keys() | venue_sizes.keys():
             projected = projected_sizes.get(symbol, _FLAT)
             venue = venue_sizes.get(symbol, _FLAT)
             if projected != venue:
