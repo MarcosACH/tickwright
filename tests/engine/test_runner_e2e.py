@@ -1457,6 +1457,103 @@ def test_the_fault_path_stops_the_exchange_in_the_same_position_as_a_graceful_st
     assert timeline == ["exchange.start", "feed.stop", "exchange.stop", "store.close"]
 
 
+class _CadenceProbingLiveVenue(_CadenceWatchingLiveVenue):
+    """A live venue that probes, at the moment the runner releases it, whether
+    an account cycle can still reach it.
+
+    Under a ``ManualClock`` nothing moves virtual time during a teardown, so a
+    case that merely asserted "no further read" would pass against a cadence
+    still parked on its next deadline — alive, and simply never woken. Crossing
+    a deadline *here* is what makes the assertion sensitive: a cadence the
+    sequence had not already cut would answer it, reading an adapter this very
+    sequence is in the middle of tearing down (ADR-0011 inv 1).
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.clock: ManualClock | None = None
+        self.reads_at_release: int | None = None
+
+    async def stop(self) -> None:
+        assert self.clock is not None, "the test must hand the venue its clock"
+        self.reads_at_release = self.account_reads
+        self.clock.advance_to(self.clock.timestamp_ns() + _ACCOUNT_INTERVAL_NS)
+        for _ in range(5):  # every slot a surviving cycle would need to reach it
+            await asyncio.sleep(0)
+        await super().stop()
+
+
+def _live_life_probing_its_teardown(
+    tmp_path: Path, *, fault: bool
+) -> tuple[int, ComponentState, _CadenceProbingLiveVenue]:
+    """One live life ended by ``fault``'s path — a broken feed, or an asked-for
+    stop — with the venue probing the release slot on the way out."""
+    venue = _CadenceProbingLiveVenue()
+
+    async def one_life() -> tuple[int, ComponentState]:
+        bus = InMemoryBus()
+        clock = ManualClock()
+        venue.clock = clock
+        feed: _FaultingFeed | _BlockingFeed = _FaultingFeed() if fault else _BlockingFeed()
+        engine = Engine(
+            bus=bus,
+            clock=clock,
+            store=SQLiteStore(tmp_path / "saga.db"),
+            exchange=venue,
+            feed=feed,
+            config=EngineConfig(
+                reconcile=ReconcileConfig(account_interval_seconds=_ACCOUNT_INTERVAL)
+            ),
+        )
+        run = asyncio.create_task(engine.run())
+        if isinstance(feed, _BlockingFeed):
+            await asyncio.wait_for(feed.started.wait(), timeout=5)
+            # One cycle under supervision first, so the case is about a cadence
+            # that was genuinely running being cut — not one that never started.
+            clock.advance_to(_ACCOUNT_INTERVAL_NS)
+            await asyncio.wait_for(venue.cycled.wait(), timeout=5)
+            await asyncio.wait_for(engine.stop(), timeout=5)
+        return await asyncio.wait_for(run, timeout=5), engine.state
+
+    exit_code, state = asyncio.run(one_life())
+    return exit_code, state, venue
+
+
+def test_a_graceful_stop_silences_the_account_cadence_before_releasing_the_venue(
+    tmp_path: Path,
+) -> None:
+    """``reconcile.stop`` ahead of ``exchange.stop`` covers the account grain
+    too (ADR-0024): the cycle reads the venue, so releasing the adapter under a
+    live one would freeze that cycle against a teardown the runner itself had
+    just performed — an outage indistinguishable from the venue's own."""
+    exit_code, state, venue = _live_life_probing_its_teardown(tmp_path, fault=False)
+
+    assert (exit_code, state) == (0, ComponentState.STOPPED)
+    assert venue.reads_at_release == 2, "the barrier's read, then the one supervised cycle"
+    assert venue.account_reads == venue.reads_at_release, (
+        "the account cadence must be silent by the time the venue is released"
+    )
+
+
+def test_the_fault_path_silences_the_account_cadence_in_the_same_place(
+    tmp_path: Path,
+) -> None:
+    """The faulted teardown differs in failure *policy*, never in membership
+    (ADR-0024), and the account cadence is inside that membership on both
+    paths. What it pins here that the graceful case cannot: the cycle is a task
+    in the runner's own ``TaskGroup``, so an abort cancels it with its siblings
+    — a cadence spawned outside that group would survive the fault and read a
+    venue nobody is supervising any more."""
+    exit_code, state, venue = _live_life_probing_its_teardown(tmp_path, fault=True)
+
+    assert exit_code != 0
+    assert state is ComponentState.FAULTED
+    assert venue.reads_at_release == 1, "the barrier's read alone: the feed broke before a cycle"
+    assert venue.account_reads == venue.reads_at_release, (
+        "a faulted run leaves no cycle behind to read the venue it is releasing"
+    )
+
+
 class _RefusingVenue(_LifecycleRecordingVenue):
     """A venue that refuses to align at connect time — the shape ADR-0044's
     leverage mismatch and ADR-0046's unsupported account mode will take."""
