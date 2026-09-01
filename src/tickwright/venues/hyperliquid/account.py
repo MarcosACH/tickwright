@@ -74,14 +74,30 @@ def held_leverage(response: object) -> dict[str, LeverageSpec]:
     venue reports the setting for exactly the positions it holds, which is what
     makes one read enough for a whole boot (ADR-0044 §4).
 
-    The mode is checked against the two literals the venue reports rather than
-    trusted into ``LeverageSpec``, which is a plain frozen dataclass and would
-    take a third one silently. Silently is the problem: an unrecognised mode
-    compares unequal to every configured spec, so the boot would read a venue
-    contract change as a *disagreement about a held position* — the branch that
-    refuses to start, sending an operator to fix a leverage that was never
-    wrong. Raised as the ``ValueError`` ``reading.UNREADABLE`` already names for
-    exactly this ("a margin mode outside the two the venue reports").
+    **Every field this read touches is checked, and none is coerced** — the
+    three fail differently and all three fail badly. ``LeverageSpec`` is a plain
+    frozen dataclass, so anything trusted into it is trusted silently:
+
+    - an unrecognised **mode** (``reported_margin_mode``) or a re-typed
+      **value** compares unequal to every configured spec, so the boot reads a
+      venue *contract change* as a disagreement about a held position — the
+      branch that refuses to start, sending an operator to fix a leverage that
+      was never wrong;
+    - a re-typed **coin** is worse, because it fails **open**. It keys this map
+      under a value no configured symbol equals, so the symbol the account holds
+      reads *flat*, and flat is the branch that writes blind: a signed
+      ``updateLeverage`` onto live risk, through the exact branch ADR-0044 §5's
+      refusal exists to keep it out of, with nothing downstream ever asking
+      whether the key was legible.
+
+    That last one is why this is stricter than ``_position``, which coerces the
+    same field with ``str()`` and is right to. There a mis-typed coin becomes a
+    symbol nothing matches; here it becomes silence that authorises a write.
+
+    Refused as the ``TypeError``/``ValueError`` pair ``reading.UNREADABLE``
+    already names ("a re-typed figure", "a margin mode outside the two the venue
+    reports"), so the push retries the read and then faults on it rather than
+    reporting a disagreement the venue never stated.
     """
     if not isinstance(response, Mapping):
         raise TypeError(f"non-mapping clearinghouseState response {response!r}")
@@ -89,9 +105,15 @@ def held_leverage(response: object) -> dict[str, LeverageSpec]:
     for row in response["assetPositions"]:
         position = row["position"]
         setting = position["leverage"]
-        held[position["coin"]] = LeverageSpec(
-            mode=reported_margin_mode(setting), leverage=setting["value"]
-        )
+        coin = position["coin"]
+        if not isinstance(coin, str):
+            raise TypeError(f"non-string position coin {coin!r} in clearinghouseState")
+        leverage = setting["value"]
+        # ``bool`` is an ``int`` subclass, and a ``True`` taken for ``1`` would
+        # read a re-typed field as agreement with a configured ``1x``.
+        if not isinstance(leverage, int) or isinstance(leverage, bool):
+            raise TypeError(f"non-integer leverage value {leverage!r} in clearinghouseState")
+        held[coin] = LeverageSpec(mode=reported_margin_mode(setting), leverage=leverage)
     return held
 
 

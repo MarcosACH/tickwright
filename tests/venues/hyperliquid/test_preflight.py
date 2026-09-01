@@ -547,6 +547,111 @@ def test_a_held_position_at_a_mode_the_venue_has_never_reported_is_a_failed_read
     ], "a book that could not be read aligns nothing"
 
 
+def test_a_held_position_whose_leverage_the_venue_re_typed_is_a_failed_read() -> None:
+    """The same refusal as an unrecognised mode, for the other half of the pair.
+
+    ``leverage.type`` and ``leverage.value`` come out of one sub-object and are
+    read to one standard, because they fail the same way. ``LeverageSpec`` is a
+    plain frozen dataclass, so a venue that re-typed ``10`` as ``"10"`` would
+    build a spec comparing unequal to every configured one — and the boot would
+    raise ``VenueLeverageMismatch`` over a setting that is exactly what config
+    asked for, sending an operator to the venue UI to fix a leverage that was
+    never wrong. That is the failure ``reported_margin_mode`` already prevents on
+    the mode half.
+
+    A re-typed field is an unreadable body like any other (``reading.UNREADABLE``
+    names ``TypeError`` for exactly this), so it is retried under the shared boot
+    budget and then faults, having written nothing on the way.
+    """
+    row = _held("BTC", mode="cross", leverage=10)
+    row["position"]["leverage"]["value"] = "10"
+    post = FakeExchangeApi(
+        {
+            "userAbstraction": "disabled",
+            "clearinghouseState": _state(row),
+            "updateLeverage": OK_ENVELOPE,
+        }
+    )
+    book = LeverageBook(entries={"BTC": LeverageSpec(mode="cross", leverage=10)})
+
+    with pytest.raises(VenueLeveragePushFailed) as refusal:
+        asyncio.run(_exchange(post, clock=ManualClock(start_ns=0), leverage=book).start())
+
+    assert not isinstance(refusal.value, VenueLeverageMismatch), (
+        "a re-typed field is not a disagreement about a held position"
+    )
+    assert "updateLeverage" not in [
+        request_type(url, payload) for (url, payload) in post.requests
+    ], "a book that could not be read aligns nothing"
+
+
+def test_a_boolean_leverage_value_is_a_failed_read_and_not_agreement_with_1x() -> None:
+    """The re-typed value that would be read as *agreement* rather than as drift.
+
+    ``bool`` is an ``int`` subclass and ``True == 1``, so a venue reporting the
+    value as a boolean would build a spec comparing **equal** to a configured
+    ``1x`` — the aligned branch, which skips the write and names the symbol
+    unchanged. Every other re-typed field refuses loudly; this one would clear
+    the boot quietly, on a body nobody could read, and ``1x``/isolated is the
+    default an unconfigured symbol takes, so it is the pair most likely to be
+    on the other side of the comparison.
+    """
+    row = _held("BTC", mode="isolated", leverage=1)
+    row["position"]["leverage"]["value"] = True
+    post = FakeExchangeApi(
+        {
+            "userAbstraction": "disabled",
+            "clearinghouseState": _state(row),
+            "updateLeverage": OK_ENVELOPE,
+        }
+    )
+    book = LeverageBook(entries={"BTC": LeverageSpec(mode="isolated", leverage=1)})
+
+    with capture_events() as logs:
+        with pytest.raises(VenueLeveragePushFailed):
+            asyncio.run(_exchange(post, clock=ManualClock(start_ns=0), leverage=book).start())
+
+    assert not [log for log in logs if log["event"] == NamedEvent.EXCHANGE_LEVERAGE_UNCHANGED], (
+        "a body that could not be read is never reported as the venue already agreeing"
+    )
+
+
+def test_a_held_position_under_a_re_typed_coin_is_never_read_as_flat() -> None:
+    """The one field in this read whose absence fails **open**.
+
+    Every other unreadable field refuses, and refusing costs a boot. A ``coin``
+    that is not a string costs nothing and says nothing: it keys the held map
+    under a value no configured symbol equals, so the symbol the account actually
+    holds reads *flat* — and flat is the branch that writes blind. A re-typed key
+    would therefore re-margin a live position through the exact branch ADR-0044
+    §5's refusal exists to keep it out of, silently, because nothing downstream
+    ever asks whether the key was legible.
+
+    So it is refused at the read, where "we are not reading what we think we are"
+    is still knowable. Deliberately stricter than ``_position``, which coerces the
+    same field with ``str()`` and is right to: there a mis-typed coin becomes a
+    symbol nothing matches, while here it becomes silence that authorises a
+    signed write.
+    """
+    row = _held("BTC", mode="cross", leverage=10)
+    row["position"]["coin"] = 3
+    post = FakeExchangeApi(
+        {
+            "userAbstraction": "disabled",
+            "clearinghouseState": _state(row),
+            "updateLeverage": OK_ENVELOPE,
+        }
+    )
+    book = LeverageBook(entries={"BTC": LeverageSpec(mode="cross", leverage=10)})
+
+    with pytest.raises(VenueLeveragePushFailed):
+        asyncio.run(_exchange(post, clock=ManualClock(start_ns=0), leverage=book).start())
+
+    assert "updateLeverage" not in [
+        request_type(url, payload) for (url, payload) in post.requests
+    ], "a position the venue reported is never written to on the strength of a key we cannot read"
+
+
 def test_held_positions_the_venue_disagrees_about_refuse_to_start_naming_all_of_them() -> None:
     """The refuse arm of the three-way split (ADR-0044 §5), and the reason the
     account read exists at all.
