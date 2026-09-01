@@ -17,13 +17,13 @@ this path is a flip bug waiting for the first short position.
 import json
 from collections.abc import Iterable, Mapping
 from decimal import Decimal
-from typing import Any
+from typing import Any, NoReturn
 
 from tickwright.domain import Clock, EventBus, FundingAccrual, VenueFactUnsupported
 
 from .backoff import Backoff
 from .config import HyperliquidConfig
-from .reading import figure
+from .reading import figure, rendered
 from .transport import Connect, WsConnection
 
 _NS_PER_MS = 1_000_000
@@ -196,28 +196,75 @@ class FundingIngest:
                 await self._bus.publish(accrual)
 
     def _parse(self, frame: str) -> tuple[FundingAccrual, ...]:
-        """One frame's payments, or nothing for a frame this does not source.
+        """One frame's payments, for a frame this sources; nothing for one it
+        does not; a refusal for one it cannot tell apart.
 
-        The venue's own `subscriptionResponse` and `pong` come down the same
-        socket and are *ignored* rather than dropped — they are not funding and
-        were never expected to be. Anything on the `userFundings` channel is,
-        and a malformed one raises out of here rather than being skipped:
-        `_settled_in_usdc` says why the money path refuses where the tick path
-        drops.
+        **Two answers, and which frame gets which is the whole rule.** A frame
+        naming a channel that is not this one is *ignored*: the venue's own
+        `subscriptionResponse` and `pong` ride this socket as constant
+        housekeeping, they are not deliveries of payments, and naming them would
+        drown the log in traffic nothing is wrong with. Everything else
+        **refuses** — a frame on `userFundings` whose body is not a batch of
+        payments, and a frame that names no channel at all because it is not a
+        JSON object.
+
+        That second one is where this parts company with `feed.py`, which drops
+        such a frame and names it. The tick stream is lossy by contract
+        (ADR-0023) and another tick is along in a moment; a payment has no next
+        delivery, so a frame we cannot read is an *unknown number of payments*
+        rather than none — and returning `()` books that unknown as zero, which
+        is `_settled_in_usdc`'s silent-zero failure one grain up. The account
+        would under-count real money with nothing recording that it had.
+
+        Nothing here can be healed by waiting either, which is what makes the
+        refusal permanent rather than a freeze (ADR-0048): a websocket message
+        arrives whole or not at all — fragments are the client's to reassemble
+        (RFC 6455 §5.4) and a connection that dies mid-message ends iteration
+        instead — so an unreadable body is the venue's contract having changed,
+        not a truncation a re-read could fix.
 
         `isSnapshot` is read past. The first message is the historical snapshot
         and later ones are the payments on the hour, but a payment is a payment
         however it was delivered — and the watermark, not this flag, is what
         decides which have already been applied.
         """
-        message = json.loads(frame)
-        if not isinstance(message, dict) or message.get("channel") != "userFundings":
+        try:
+            message = json.loads(frame)
+        except json.JSONDecodeError:
+            _refuse_delivery(frame, "is not JSON")
+        if not isinstance(message, dict):
+            _refuse_delivery(message, "is JSON but not an object, so it names no channel")
+        if message.get("channel") != "userFundings":
             return ()
         data = message.get("data")
-        if not isinstance(data, dict):
-            return ()
+        if not isinstance(data, dict) or not isinstance(data.get("fundings"), list):
+            _refuse_delivery(message, "carries no 'fundings' list")
         return accruals(
-            data.get("fundings", ()),
+            data["fundings"],
             account_id=self._account_id,
             ts_init_ns=self._clock.timestamp_ns(),
         )
+
+
+def _refuse_delivery(delivered: object, why: str) -> NoReturn:
+    """Refuse a frame off the funding socket, quoting what actually arrived.
+
+    Quoting is not garnish: an unreadable delivery is how a venue contract
+    change presents, and the key set is what identifies one — so this borrows
+    `reading.rendered`, the same bounded shape-first rendering a failed venue
+    read carries, rather than inventing a second way to say it.
+
+    `VenueFactUnsupported` on the same reasoning as the record-grain refusal
+    below it, and for the same reason it is not a member of `UNREADABLE`
+    (ADR-0048): the condition is already known permanent at the first read, so
+    answering it as something a retry could fix would spend a wait to learn what
+    the frame already showed.
+    """
+    raise VenueFactUnsupported(
+        f"funding delivery {why}: {rendered(delivered)}. Every message on this "
+        "channel is cash, and a body this process cannot read is an unknown "
+        "number of payments rather than none — banking it as zero would "
+        "under-count real money with nothing recording that it had. A websocket "
+        "message arrives whole or not at all (RFC 6455 §5.4), so retrying cannot "
+        "change what this frame says."
+    )

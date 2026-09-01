@@ -277,10 +277,101 @@ def test_the_live_adapter_publishes_the_venue_s_payments_on_the_bus() -> None:
 
 LIVE_ACCOUNT = f"hyperliquid-testnet-{ANVIL_ADDRESS}"
 
-# The boundaries every ledger case below is built from — one hour apart, as the
-# venue settles them, and quoted here once so no case declares them twice.
+# The boundaries every case below is built from — one hour apart, as the venue
+# settles them, and quoted here once so no case declares them twice.
 FIRST_MS, SECOND_MS = 1681222254710, 1681225854710
 THIRD_MS, FOURTH_MS = 1681229454710, 1681233054710
+
+
+def _ingest_refusing(frames: list[str]) -> str:
+    """Drive the live adapter over ``frames`` and return the refusal it raised.
+
+    No stop and no completion event: these frames are the ones that must never
+    reach the bus, so the assertion is that `run()` itself comes back raising.
+    """
+
+    async def main() -> None:
+        bus = InMemoryBus()
+        clock = ManualClock(start_ns=7)
+        connection = FakeWsConnection(frames)
+
+        async def connect(url: str) -> FakeWsConnection:
+            return connection
+
+        exchange = make_exchange(FakeExchangeApi({}), bus=bus, clock=clock, connect=connect)
+        await asyncio.wait_for(exchange.run(), timeout=2)
+
+    with pytest.raises(VenueFactUnsupported) as raised:
+        asyncio.run(main())
+    return str(raised.value)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param([{"time": FIRST_MS, "coin": "ETH", "usdc": "-3"}], id="rest-shaped-list"),
+        pytest.param({"isSnapshot": False, "user": "0xuser"}, id="no-fundings-key"),
+        pytest.param(
+            {"isSnapshot": False, "fundings": {"time": FIRST_MS}}, id="fundings-not-a-list"
+        ),
+    ],
+)
+def test_a_funding_delivery_whose_body_is_unreadable_refuses_rather_than_ingesting_nothing(
+    body: object,
+) -> None:
+    """The frame grain of the refusal the record grain already has.
+
+    A frame on this channel *is* a delivery of payments, so a body this process
+    cannot read as a batch is not "no payments" — it is an unknown number of
+    them, and answering it with an empty tuple books that unknown as zero. The
+    account then under-counts real money with nothing recording that it had,
+    which is the same silent failure `_settled_in_usdc` refuses one grain down
+    and the failure ADR-0037 §2's amendment designs against.
+
+    Nothing here can be healed by waiting, either: a websocket message is
+    delivered whole or not at all (RFC 6455 §5.4 fragmentation, reassembled by
+    the client), so a body that arrives unreadable is the venue's contract having
+    changed rather than a truncation a re-read would fix.
+    """
+    message = _ingest_refusing([json.dumps({"channel": "userFundings", "data": body})])
+
+    assert "userFundings" in message
+
+
+@pytest.mark.parametrize("frame", ['[{"time": 1}]', '"fundings"', "17", "null", "<html>502</html>"])
+def test_a_frame_that_names_no_channel_refuses_on_the_money_socket(frame: str) -> None:
+    """The feed drops these and names them; this socket cannot.
+
+    A frame that is not a JSON object carries no `channel`, so nothing about it
+    says it was *not* the funding delivery this subscription exists to read —
+    and on a channel where every message is cash, "we could not tell" has to
+    fail closed. `feed.py` may drop its unparseable frames because the tick
+    stream is lossy by contract (ADR-0023) and another tick is along in a
+    moment; a payment has no next delivery.
+    """
+    message = _ingest_refusing([frame])
+
+    assert "funding" in message
+
+
+def test_the_venue_s_own_housekeeping_frames_are_ignored_rather_than_refused() -> None:
+    """The other half of the rule, deliberately adjacent to the two above.
+
+    `subscriptionResponse` and `pong` ride the same socket, name a channel that
+    is not this one, and are constant traffic — they were never a delivery of
+    payments, so there is nothing here to fail closed about. Keeping the cases
+    together is what stops the two policies being re-merged later: "ignore" and
+    "refuse" are deliberately different answers to superficially similar frames.
+    """
+    frames = [
+        json.dumps({"channel": "subscriptionResponse", "data": {"method": "subscribe"}}),
+        json.dumps({"channel": "pong"}),
+        user_fundings_frame(funding(time_ms=FIRST_MS, coin="ETH", usdc="-3")),
+    ]
+
+    seen, _ = _ingest(frames, until=1)
+
+    assert [a.amount for a in seen] == [Decimal("-3")]
 
 
 def _ingest_into_ledger(
