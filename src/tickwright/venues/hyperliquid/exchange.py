@@ -44,7 +44,7 @@ from tickwright.observability import NamedEvent, named_event
 from . import transport
 from .account import account_spec, normalize_account_state
 from .config import HyperliquidConfig
-from .preflight import verify_account_mode
+from .preflight import push_leverage, verify_account_mode
 from .reading import UNREADABLE, failed_send, figure, read, unreadable_body
 from .transport import PostJson
 from .universe import HyperliquidUniverse
@@ -143,6 +143,16 @@ class HyperliquidExchange:
         # this bound protects does not apply, so complaining about a leverage
         # would be noise on top of an error.
         self._leverage.validate_against(self._universe.specs)
+        # Ahead of the push on purpose: §6 classifies the venue's own
+        # ``"Invalid leverage value"`` as a config bug §9 should already have
+        # caught, so the bound clears before anything reaches the venue.
+        await push_leverage(
+            info=self._info,
+            send=self._send_action,
+            address=self._user_address,
+            book=self._leverage,
+            asset_indices=self._universe.asset_indices,
+        )
 
     async def run(self) -> None:
         """Returns at once: this adapter runs no loop of its own.

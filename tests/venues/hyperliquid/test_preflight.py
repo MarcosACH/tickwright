@@ -17,12 +17,13 @@ import asyncio
 from decimal import Decimal
 
 import pytest
-from hyperliquid_fakes import FakeExchangeApi
+from hyperliquid_fakes import FakeExchangeApi, request_type
 from pydantic import SecretStr
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.domain import (
+    EMPTY_LEVERAGE_BOOK,
     InstrumentSpec,
     LeverageBook,
     LeverageOutOfBounds,
@@ -41,7 +42,15 @@ TEST_SIGNING_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4
 UNIVERSE = HyperliquidUniverse(
     specs={
         "BTC": InstrumentSpec(
-            symbol="BTC", sz_decimals=5, max_decimals=6, min_notional=Decimal("10"), max_sig_figs=5
+            symbol="BTC",
+            sz_decimals=5,
+            max_decimals=6,
+            min_notional=Decimal("10"),
+            max_sig_figs=5,
+            # The venue's own cap for BTC perps, so the §9 bound these tests run
+            # behind passes on the leverages they configure rather than tripping
+            # on ``InstrumentSpec``'s conservative 1x default.
+            max_leverage=40,
         )
     },
     asset_indices={"BTC": 3},
@@ -50,6 +59,64 @@ UNIVERSE = HyperliquidUniverse(
 STARTUP_TIMEOUT_SECONDS = 60.0
 """The barrier budget the composition root hands the adapter (ADR-0044 §6): the
 mode read is bounded by ``startup_reconciliation_timeout``, never a second one."""
+
+OK_ENVELOPE: dict = {"status": "ok", "response": {"type": "default"}}
+"""What ``updateLeverage`` answers — measured in #142, and the reason the push
+has no no-op branch to write: pushing ``cross/20x`` onto a symbol already at
+``cross/20x`` returns **this same envelope** as a real change, so ``ok`` ⇒
+success is the whole taxonomy (ADR-0044 §6's correction)."""
+
+
+def _state(*positions: dict) -> dict:
+    """A ``clearinghouseState`` body holding ``positions``.
+
+    The envelope figures are the recorded flat snapshot's (``test_account.py``,
+    measured in #142); the push reads only ``assetPositions[].position.{coin,
+    leverage}``, so they are here to keep the body the venue's shape rather than
+    because anything under test looks at them.
+    """
+    return {
+        "assetPositions": list(positions),
+        "crossMaintenanceMarginUsed": "0.0",
+        "crossMarginSummary": {
+            "accountValue": "25.9264",
+            "totalMarginUsed": "0.0",
+            "totalNtlPos": "0.0",
+            "totalRawUsd": "25.9264",
+        },
+        "marginSummary": {
+            "accountValue": "25.9264",
+            "totalMarginUsed": "0.0",
+            "totalNtlPos": "0.0",
+            "totalRawUsd": "25.9264",
+        },
+        "time": 1_730_000_120_000,
+        "withdrawable": "25.9264",
+    }
+
+
+def _held(coin: str, *, mode: str, leverage: int) -> dict:
+    """One ``assetPositions`` row for a coin the account holds.
+
+    Shaped on the recorded cross snapshot; ``leverage.{type, value}`` is the
+    pair the push compares against config, and is the only part a test varies.
+    """
+    return {
+        "type": "oneWay",
+        "position": {
+            "coin": coin,
+            "szi": "0.002",
+            "entryPx": "64809.0",
+            "positionValue": "129.584",
+            "unrealizedPnl": "-0.034",
+            "returnOnEquity": "-0.0026231",
+            "marginUsed": "25.9168",
+            "liquidationPx": None,
+            "maxLeverage": 40,
+            "leverage": {"type": mode, "value": leverage},
+            "cumFunding": {"allTime": "0.0", "sinceOpen": "0.0", "sinceChange": "0.0"},
+        },
+    }
 
 
 class _FlakyApi(FakeExchangeApi):
@@ -81,6 +148,7 @@ def _exchange(
     *,
     clock: ManualClock | None = None,
     account_address: str | None = None,
+    leverage: LeverageBook = EMPTY_LEVERAGE_BOOK,
 ) -> HyperliquidExchange:
     return HyperliquidExchange(
         config=HyperliquidConfig(
@@ -94,6 +162,7 @@ def _exchange(
         universe=UNIVERSE,
         post=post,
         startup_timeout_seconds=STARTUP_TIMEOUT_SECONDS,
+        leverage=leverage,
     )
 
 
@@ -284,24 +353,69 @@ def test_the_gate_classifies_the_trading_account_not_the_agent_wallet() -> None:
     assert query == {"type": "userAbstraction", "user": MASTER_ACCOUNT}
 
 
-def test_connecting_makes_the_mode_read_and_no_other_venue_request() -> None:
+def test_a_run_with_nothing_traded_makes_the_mode_read_and_no_other_venue_request() -> None:
     """``start()`` is ADR-0024 step 4, and the gate opens it (ADR-0046 §3).
 
-    Two claims in one recorded exchange. The mode read **is** the step's first
-    venue traffic — it gates everything after it, because a wrong mode
-    invalidates the premise the leverage push's own check would reason from, so
-    reporting mismatches computed against a margin model that does not apply
-    would be noise on top of an error. And it is so far the step's **only**
-    traffic: the fake routes nothing else, so the leverage push arriving behind
-    it (ADR-0044 §7) must rewrite this test rather than silently survive it.
+    The mode read **is** the step's first venue traffic — it gates everything
+    after it, because a wrong mode invalidates the premise the leverage push's
+    own check reasons from, so reporting mismatches computed against a margin
+    model that does not apply would be noise on top of an error.
 
-    The adapter still holds no connection of its own — every request is scoped
-    to the call that makes it — so this is the whole of what connecting does."""
+    An **empty** book is what makes it the only traffic, and it is a legitimate
+    value rather than an unresolved one: a run with nothing traded has no symbol
+    to align, so there is nothing to read the account for either. The push's own
+    traffic is asserted by the test below, against a book with a symbol in it.
+
+    The adapter holds no connection of its own — every request is scoped to the
+    call that makes it — so this is the whole of what connecting does."""
     post = FakeExchangeApi({"userAbstraction": "default"})
 
     asyncio.run(_exchange(post).start())
 
     assert [query["type"] for (_url, query) in post.requests] == ["userAbstraction"]
+
+
+def test_a_symbol_the_account_is_flat_in_is_written_blind_behind_the_mode_gate() -> None:
+    """The push's ordinary case (ADR-0044 §4): no position, so write.
+
+    **The risky symbols are exactly the ones holding a position**, and a symbol
+    with nothing open has nothing to re-margin and nothing to reject on position
+    grounds — so the write needs no prior knowledge of the venue's stored
+    setting, and the design pays one ``clearinghouseState`` read for the whole
+    boot rather than one ``activeAssetData`` read per symbol (§4's declined
+    option, left a cost trade by #142 rather than an unknown).
+
+    Three claims, and the ordering is the load-bearing one. The mode gate goes
+    first, because the push's own three-way split is computed against a margin
+    model a pooled account invalidates; the account read comes next, being what
+    the split needs; the signed write comes last. The wire is asserted in full —
+    ``asset`` is the venue's index, not the symbol, and ``isCross`` and
+    ``leverage`` are one value in one action, which is why config carries them
+    as one ``LeverageSpec`` (§2).
+    """
+    post = FakeExchangeApi(
+        {
+            "userAbstraction": "disabled",
+            "clearinghouseState": _state(),
+            "updateLeverage": OK_ENVELOPE,
+        }
+    )
+    book = LeverageBook(entries={"BTC": LeverageSpec(mode="cross", leverage=10)})
+
+    asyncio.run(_exchange(post, leverage=book).start())
+
+    assert [request_type(url, payload) for (url, payload) in post.requests] == [
+        "userAbstraction",
+        "clearinghouseState",
+        "updateLeverage",
+    ]
+    (_url, sent) = post.requests[-1]
+    assert sent["action"] == {
+        "type": "updateLeverage",
+        "asset": 3,
+        "isCross": True,
+        "leverage": 10,
+    }
 
 
 def test_a_leverage_above_the_venue_cap_refuses_to_start_on_live_too() -> None:

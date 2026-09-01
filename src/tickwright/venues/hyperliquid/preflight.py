@@ -10,23 +10,34 @@ come back an order of magnitude low with nothing in the response saying so
 (ADR-0046 §1). A wrong mode does not make one number wrong; it makes every
 account-grain number mean something else.
 
-It is the first of the two guards this module is mapped to hold; ADR-0044 §7's
-leverage push lands behind it, gated by it, and is not here yet. Isolated from
-the adapter because both are refusals that must fire before the barrier and
-before any order, and both fail **closed** — which is testable against recorded
-responses only while it is reachable without going near the order path.
+It is the first of the two guards, and ADR-0044 §7's **leverage push** is the
+second: it runs behind the gate and is gated by it, because the push's own
+three-way split is computed against a margin model a pooled account invalidates.
+Isolated from the adapter because both are refusals that must fire before the
+barrier and before any order, and both fail **closed** — which is testable
+against recorded responses only while it is reachable without going near the
+order path. It also keeps the one *signed venue write* in the whole accounting
+surface in a module a reader can audit in full.
 """
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
-from tickwright.domain import Clock, VenueAccountModeUnsupported
+from tickwright.domain import Clock, LeverageBook, VenueAccountModeUnsupported
 
 from .backoff import Backoff
 from .reading import UNREADABLE
 
 InfoRead = Callable[[dict[str, Any]], Awaitable[object]]
 """One unsigned ``POST /info`` query, as the adapter makes it."""
+
+SignedSend = Callable[[dict[str, Any]], Awaitable[object]]
+"""One signed ``POST /exchange`` action, as the adapter sends an order.
+
+The same path the order verbs take, rather than a second signing stack: the
+nonce floor, the mainnet/testnet domain and the resolved trading account are all
+decisions the adapter already makes once, and a write that re-made any of them
+would be free to disagree with the orders it boots alongside."""
 
 SUPPORTED_ACCOUNT_MODES = frozenset({"default", "disabled"})
 """The two ``userAbstraction`` literals that mean Manual/Standard.
@@ -159,3 +170,47 @@ def _remediation(mode: object, *, address: str) -> str:
         'user-signed; an agent wallet cannot): (1) userSetAbstraction("disabled"), '
         "then (2) usdClassTransfer the account's USDC from spot to perps."
     )
+
+
+async def push_leverage(
+    *,
+    info: InfoRead,
+    send: SignedSend,
+    address: str,
+    book: LeverageBook,
+    asset_indices: Mapping[str, int],
+) -> None:
+    """Align the venue to config, once, at boot (ADR-0044 §7).
+
+    Config wins at startup and the venue wins in flight: this runs at ADR-0024
+    step 4, behind the mode gate and ahead of the barrier, and never again. An
+    operator who lowers a leverage in the venue UI to de-risk a live position
+    must not be silently reverted by a later re-push.
+
+    Scope is every symbol in the resolved ``book`` — the strategy-traded set,
+    the defaulted symbols included, and neither the perp universe nor the feed
+    list (§3). Skipping a symbol nobody configured would leave the venue holding
+    whatever leverage it had while the model computes full-notional margin for
+    it, *understating* the position's risk in the one direction that matters.
+
+    One unsigned ``clearinghouseState`` read serves the whole boot rather than
+    one ``activeAssetData`` read per symbol (§4): the risky symbols are exactly
+    the ones holding a position, and that read reports leverage for exactly
+    those.
+    """
+    if not book.entries:
+        # A run with nothing traded is a legitimate book, not an unresolved one
+        # — so there is no symbol to align and no reason to ask the venue about
+        # an account whose answer nothing would read.
+        return
+    await info({"type": "clearinghouseState", "user": address})
+    for symbol in sorted(book.entries):
+        spec = book.for_symbol(symbol)
+        await send(
+            {
+                "type": "updateLeverage",
+                "asset": asset_indices[symbol],
+                "isCross": spec.mode == "cross",
+                "leverage": spec.leverage,
+            }
+        )
