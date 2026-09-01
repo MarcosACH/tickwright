@@ -50,6 +50,12 @@ class StrategyHost:
         self._tick_staleness_ns = tick_staleness_ns
         self._strategies: dict[str, Strategy] = {}
         self._symbols: dict[str, frozenset[str]] = {}
+        # The inverse of ``_symbols``, which is what the disjointness gate
+        # actually asks: not "what does this strategy trade" but "who already
+        # owns this symbol". Derived rather than scanned so a refusal can name
+        # the incumbent, which is the half of the error a reader needs to know
+        # which strategy to move to its own account.
+        self._owners: dict[str, str] = {}
 
     def register(self, strategy: Strategy, *, symbols: Iterable[str]) -> None:
         """Add ``strategy`` to the registry with its declared symbol set.
@@ -71,8 +77,29 @@ class StrategyHost:
             )
         if strategy.strategy_id in self._strategies:
             raise InvariantViolation(f"duplicate strategy_id registered: {strategy.strategy_id}")
+        declared = frozenset(symbols)
+        # ADR-0034: on a NET venue the disjointness rule is a consequence of the
+        # netting semantics, not a taste. Two strategies over one symbol are
+        # netted into a single real position — one's close silently moves the
+        # other's exposure and liquidation is account-wide — so per-strategy
+        # books would stay arithmetically consistent while describing an
+        # isolation the venue does not provide. v1 ships NET only (paper and
+        # Hyperliquid, whose positions are ``oneWay``), so this is unconditional
+        # rather than asked of the ``Exchange``; a HEDGE venue is the documented
+        # extension point that would have to relax it. Named together with their
+        # owners, so a run typo'd across three symbols learns all three at once.
+        taken = {symbol: self._owners[symbol] for symbol in declared if symbol in self._owners}
+        if taken:
+            collisions = ", ".join(
+                f"{symbol} (owned by {owner})" for symbol, owner in sorted(taken.items())
+            )
+            raise InvariantViolation(
+                f"{strategy.strategy_id} declares symbols another strategy already owns: "
+                f"{collisions} — same-symbol isolation needs a separate account"
+            )
         self._strategies[strategy.strategy_id] = strategy
-        self._symbols[strategy.strategy_id] = frozenset(symbols)
+        self._symbols[strategy.strategy_id] = declared
+        self._owners.update(dict.fromkeys(declared, strategy.strategy_id))
 
     def start(self) -> None:
         """Recover each strategy — snapshot, then seq, then subscriptions.

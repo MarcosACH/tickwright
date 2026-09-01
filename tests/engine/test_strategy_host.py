@@ -101,7 +101,7 @@ def test_strategy_receives_only_its_own_order_events() -> None:
     alpha = RecordingStrategy("alpha")
     beta = RecordingStrategy("beta")
     host.register(alpha, symbols={"BTC"})
-    host.register(beta, symbols={"BTC"})
+    host.register(beta, symbols={"ETH"})
     host.start()
 
     asyncio.run(bus.publish(_order_placed("alpha")))
@@ -209,12 +209,16 @@ def test_raising_strategy_emits_strategy_error_and_others_keep_receiving() -> No
     bad = RaisingStrategy("bad", KeyError("third-party bug"))
     good = RecordingStrategy("good")
     host.register(bad, symbols={"BTC"})
-    host.register(good, symbols={"BTC"})
+    host.register(good, symbols={"ETH"})
     host.start()
 
+    # A tick each rather than one shared: ADR-0034's disjointness rule means no
+    # two strategies can declare the same symbol, so "the others keep
+    # receiving" is asserted across the raise rather than within one dispatch.
     tick = _tick("BTC", ts=1_000, trade_id="a")
     with structlog.testing.capture_logs() as logs:
         asyncio.run(bus.publish(tick))
+        asyncio.run(bus.publish(_tick("ETH", ts=1_000, trade_id="a")))
 
     assert [t.trade_id for t in good.ticks] == ["a"]
     errors = [log for log in logs if log["event"] == "strategy.error"]
@@ -360,13 +364,13 @@ def test_start_recovers_next_seq_from_the_saga_high_water() -> None:
     _checkpointed_order(store, "alpha:BTC:1")
     _checkpointed_order(store, "alpha:ETH:3", cancel_signal_id="alpha:ETH:5")
     # Another strategy's records never leak into alpha's high-water.
-    _checkpointed_order(store, "other:BTC:9")
+    _checkpointed_order(store, "other:SOL:9")
 
     host = StrategyHost(bus=InMemoryBus(), clock=ManualClock(), store=store)
     alpha = RecordingStrategy("alpha")
     other = RecordingStrategy("other")
     host.register(alpha, symbols={"BTC", "ETH"})
-    host.register(other, symbols={"BTC"})
+    host.register(other, symbols={"SOL"})
     host.start()
 
     assert alpha.next_seq == 6
@@ -401,3 +405,24 @@ def test_registering_the_reserved_unattributed_id_fails_fast() -> None:
 
     with pytest.raises(InvariantViolation, match=UNATTRIBUTED):
         host.register(RecordingStrategy(UNATTRIBUTED), symbols={"BTC"})
+
+
+def test_a_second_strategy_may_not_claim_an_owned_symbol() -> None:
+    """ADR-0034's disjointness rule, enforced rather than assumed.
+
+    On a ``NET`` venue two same-symbol strategies are netted into one real
+    position: one's close silently changes the other's exposure and liquidation
+    is account-wide, so engine-side per-strategy books would stay arithmetically
+    consistent while describing an isolation the venue does not provide. The
+    error names both strategies and the symbol because the remedy is a separate
+    account, and a reader cannot pick which strategy to move without them.
+    """
+    host = StrategyHost(bus=InMemoryBus(), clock=ManualClock(), store=SQLiteStore(":memory:"))
+    host.register(RecordingStrategy("alpha"), symbols={"BTC", "ETH"})
+
+    with pytest.raises(InvariantViolation) as raised:
+        host.register(RecordingStrategy("beta"), symbols={"ETH", "SOL"})
+
+    message = str(raised.value)
+    assert "alpha" in message and "beta" in message and "ETH" in message
+    assert "SOL" not in message
