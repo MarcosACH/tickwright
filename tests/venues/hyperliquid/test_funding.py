@@ -347,6 +347,16 @@ def _ingest_into_ledger(
     return asyncio.run(main())
 
 
+def _batch(*amounts_by_ms: tuple[int, str], snapshot: bool = True) -> list[str]:
+    """One `userFundings` frame carrying `(boundary_ms, usdc)` payments on ETH."""
+    return [
+        user_fundings_frame(
+            *(funding(time_ms=time_ms, coin="ETH", usdc=usdc) for time_ms, usdc in amounts_by_ms),
+            snapshot=snapshot,
+        )
+    ]
+
+
 def test_an_out_of_order_batch_applies_every_payment_in_it() -> None:
     """The slice's headline acceptance criterion (issue #192).
 
@@ -361,18 +371,39 @@ def test_an_out_of_order_batch_applies_every_payment_in_it() -> None:
     reads `-1`.
     """
     store = SQLiteStore(":memory:")
-    shuffled = [
-        user_fundings_frame(
-            funding(time_ms=THIRD_MS, coin="ETH", usdc="-1"),
-            funding(time_ms=FIRST_MS, coin="ETH", usdc="-3"),
-            funding(time_ms=SECOND_MS, coin="ETH", usdc="-2"),
-            snapshot=True,
-        )
-    ]
+    shuffled = _batch((THIRD_MS, "-1"), (FIRST_MS, "-3"), (SECOND_MS, "-2"))
 
     ledger = _ingest_into_ledger(shuffled, until=3, store=store)
 
     assert ledger.account().cash == Decimal("-6")
     # The mark lands on the batch's *latest* boundary, which is only true if the
     # batch was applied in order — the gate advances it per accrual applied.
+    assert store.funding_mark("ETH") == THIRD_MS * _NS_PER_MS
+
+
+def test_a_re_ingested_batch_below_the_watermark_applies_nothing() -> None:
+    """Reconnect is not a second payment (ADR-0043 §5.2).
+
+    Resubscribing re-delivers the whole snapshot — that is the venue's design and
+    the reason a dropped socket *heals* rather than leaving a gap. The same
+    re-delivery arrives from live's reconcile re-ingest. So the batch below is
+    ingested twice against one store, and the second pass must move nothing: a
+    gate that failed here would double every payment on every reconnect, which is
+    an accounting error that compounds silently for as long as the run lasts.
+
+    The second ledger is **recovered from the store**, not the object the first
+    pass left behind, so what stops it is the durable mark rather than anything
+    remembered in memory. That is the whole point of the watermark being a store
+    read: an in-memory key set dies with the process, and a restart is exactly
+    when a re-delivery arrives.
+    """
+    store = SQLiteStore(":memory:")
+    batch = _batch((THIRD_MS, "-1"), (FIRST_MS, "-3"), (SECOND_MS, "-2"))
+
+    _ingest_into_ledger(batch, until=3, store=store)
+    replayed = _ingest_into_ledger(batch, until=3, store=store)
+
+    # -6, not -12: the restart read the durable cash line back, and the gate
+    # dropped all three re-delivered payments on top of it.
+    assert replayed.account().cash == Decimal("-6")
     assert store.funding_mark("ETH") == THIRD_MS * _NS_PER_MS
