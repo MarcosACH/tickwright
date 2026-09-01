@@ -293,6 +293,12 @@ The slice reached that by first getting it wrong, which is the part worth keepin
 
 The acceptance criteria the sort exists for are asserted where the two halves meet, in `tests/venues/hyperliquid/test_funding.py`: the live adapter driven over a recorded batch into a `Checkpointer` over `SQLiteStore(":memory:")`. Neither half is assertable alone — the sort orders against a gate it never sees, the gate is monotonic against an order it never establishes — and the straddling case is the one that needs both, since an always-drop gate and an always-apply gate each keep one of the all-or-nothing cases green.**)**
 
+**(The deepening review of the same slice moved two things and widened one**, so the block above is right about the policies and stale about where they live. The **reconnect loop is `WsSession`** (`venues/hyperliquid/session.py`), not a loop per adapter: `HyperliquidFeed.start` and `FundingIngest.run` had the same twenty lines twice — connect, pace a refused connect, reset after a good one, resubscribe, read, tell a stop from a hangup, back off — and only the feed's copy was ever driven by a test, leaving the copy that carries money uncovered on the path where a reconnect is what heals the gap. The session takes what varies, a `subscribe` run on every connection and a `consume` that returns when the socket dies, and answers only a failed connect: anything either callback raises passes through to the runner's `TaskGroup`, which is the fault channel the funding refusal has to reach. `tests/venues/hyperliquid/test_session.py` states the contract once and both subscriptions inherit it.
+
+The **frame policy widened to the frame grain**: a `userFundings` frame whose body is not a batch of payments used to return no accruals silently, which is the record grain's silent zero one level up. It now refuses like the record does (ADR-0037 §2's second amendment, ADR-0048 §1's), while a frame naming another channel is still ignored.
+
+And the **USDC-only rule is stated once**, in `reading.refuse_non_usdc`. The two detections differ and stay with their grains — a fill has a `feeToken` to compare, a funding record's denomination is the key's own name — but the reason, the exception and the operator's sentence are shared rather than restated in a second `_settled_in_usdc` of the same name in the same package.**)**
+
 ---
 
 ### strategies (`strategies/single_shot.py`)

@@ -19,6 +19,12 @@ The venue's record also settles how far R2's "the venue already computed it" can
 
 And the refusal **takes the whole batch**, which is the deliberate opposite of the feed's frame policy. `feed.py` drops a malformed row and names it because the tick stream is lossy by contract (ADR-0023) and another tick is along in a moment. A funding payment has no next: the snapshot is delivered once, and banking the readable part of a delivery we did not fully understand would also advance the watermark past the row that was skipped.**)**
 
+**(The same refusal at the frame grain, since [#192](https://github.com/MarcosACH/tickwright/issues/192):** the block above states the rule of a *record* inside a batch, and the ingest first shipped answering an unreadable **batch** the other way — a frame on `userFundings` whose `data` was not an object, or carried no `fundings` list, returned no accruals and named nothing.
+
+That is the same silent zero one grain up. A frame on this channel *is* a delivery of payments, so a body we cannot read is an unknown number of them, and returning none books that unknown as zero — the account under-counts real money with nothing recording that it had, which is exactly what refusing a record with no `usdc` exists to prevent. The two grains now answer alike: a frame naming another channel is ignored (`subscriptionResponse` and `pong` are constant housekeeping and were never a delivery), and everything else refuses, quoting what arrived.
+
+Permanence is what licenses the refusal rather than a freeze, and here the *transport* supplies it: a websocket message arrives whole or not at all (RFC 6455 §5.4), so an unreadable body is the venue's contract having changed and not a truncation a re-read could fix (ADR-0048 §1's amendment).**)**
+
 ## Paper drives off the `Clock` cadence primitive, but with per-boundary catch-up
 
 Paper has no venue to push funding, so it **generates** accruals on a loop built on ADR-0033's `Clock.sleep_until` pure waiter — correct under both the live wall-clock and replay virtual-time. But it deliberately **does not** reuse `run_cadence`'s "reschedule from now, with no catch-up" semantics, and the ADR records why:
