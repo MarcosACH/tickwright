@@ -521,16 +521,19 @@ class PortfolioProjection:
             return
         self._store.checkpoint_ledger(account=self._account, ts_ns=self._clock.timestamp_ns())
 
-    def _is_opened(self) -> bool:
+    def is_opened(self) -> bool:
         """Whether the **durable** ledger holds this account's row yet.
 
-        Off the public interface since the barrier's account step moved to
-        ``LedgerReconciliation`` (#191 handover, item 1): the two readers are now
-        this class's own ``materialise`` and that one in-package collaborator,
-        and nothing outside ``engine`` has a question this answers. A caller that
-        wants to know whether the ledger is open is a caller deciding whether to
-        open it, which is the write verb's own precondition rather than a
-        predicate to be read first (ADR-0047 §1).
+        Public on the concrete and absent from the ``Portfolio`` seam, on the
+        same read-surface asymmetry ``account_net`` below is: ADR-0041 §8 has
+        reconciliation reading "the ``engine`` ``PortfolioProjection`` concrete
+        directly", over a surface the projection "can expose a broader
+        account-wide" version of for exactly those consumers. A strategy has no
+        question this answers — whether a ledger row exists is a startup fact
+        about the store, not a position it could act on — so the seam withholds
+        it while the in-package collaborator reads it by name. Reaching it
+        through an underscore instead would be the same coupling with the
+        sanction removed.
 
         The predicate the startup barrier's live-only materialisation reads
         (ADR-0043 §6, "solely to create the row when absent"), and it is
@@ -576,7 +579,7 @@ class PortfolioProjection:
         catch the overwrite — on live the genesis is *provenance only*, with no
         configured counterpart to compare against, so #188's refusal is
         paper-only by ADR-0043 §10's predicate. The barrier's caller checks
-        ``_is_opened`` too, and the two are not a doubled rule: the caller is
+        ``is_opened`` too, and the two are not a doubled rule: the caller is
         deciding whether it owes the venue a *read*, this is deciding whether it
         may *write*. They cannot disagree — both ask the store the one question,
         and this one is the answer no future caller can inherit its way around.
@@ -588,7 +591,7 @@ class PortfolioProjection:
         declining to overwrite it, would leave that zero standing for the life of
         the ledger with nothing to refuse it.
         """
-        if self._is_opened():
+        if self.is_opened():
             raise InvariantViolation(
                 f"ledger for {self._spec.account_id} is already open: genesis is "
                 "written once and never re-derived (ADR-0042 §3)"

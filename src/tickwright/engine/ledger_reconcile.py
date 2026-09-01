@@ -169,7 +169,7 @@ class LedgerReconciliation:
         write to one read-model with no ordering inside it. The ordering that
         *does* matter here is the barrier's, and it stays with the runner.
         """
-        if self._portfolio._is_opened():
+        if self._portfolio.is_opened():
             return True
         state = await self._exchange.fetch_account_state()
         if state is None:
