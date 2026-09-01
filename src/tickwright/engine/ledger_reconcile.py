@@ -58,6 +58,28 @@ class DivergenceTier(Enum):
     TIER_2 = "tier-2"
 
 
+class DivergenceField(Enum):
+    """Which figure of the account snapshot a disagreement was found on.
+
+    Closed rather than a free string, and for the same reason ``tier`` beside it
+    is: the two slices that consume the classification both **branch** on it —
+    #178 heals a cash line and a size through different synthetic events, and
+    #194 bands a Tier-2 figure against the notional its own mark-sensitivity
+    flows through — so a name is a case label, not a caption. Left as literals
+    across four construction sites here and every branch there, a typo is a case
+    that silently never fires, on a cadence whose whole job is to notice what
+    nothing else would.
+
+    The account grain's two figures carry no symbol; the per-symbol two do
+    (``Divergence.symbol``), which is the other half of what a consumer keys on.
+    """
+
+    CASH = "cash"
+    SIGNED_SIZE = "signed_size"
+    EQUITY = "equity"
+    UNREALIZED_PNL = "unrealized_pnl"
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Divergence:
     """One figure on which the ledger and the venue's snapshot disagree.
@@ -72,7 +94,7 @@ class Divergence:
     """
 
     tier: DivergenceTier
-    field: str
+    field: DivergenceField
     symbol: str | None
     ledger: Decimal
     venue: Decimal
@@ -263,7 +285,7 @@ class LedgerReconciliation:
         return (
             Divergence(
                 tier=DivergenceTier.TIER_1,
-                field="cash",
+                field=DivergenceField.CASH,
                 symbol=None,
                 ledger=cash,
                 venue=venue,
@@ -299,7 +321,7 @@ class LedgerReconciliation:
         return tuple(
             Divergence(
                 tier=DivergenceTier.TIER_1,
-                field="signed_size",
+                field=DivergenceField.SIGNED_SIZE,
                 symbol=symbol,
                 ledger=ledger.get(symbol, _ZERO),
                 venue=venue.get(symbol, _ZERO),
@@ -330,7 +352,7 @@ class LedgerReconciliation:
         return (
             Divergence(
                 tier=DivergenceTier.TIER_2,
-                field="equity",
+                field=DivergenceField.EQUITY,
                 symbol=None,
                 ledger=equity,
                 venue=state.equity,
@@ -373,7 +395,7 @@ class LedgerReconciliation:
         return tuple(
             Divergence(
                 tier=DivergenceTier.TIER_2,
-                field="unrealized_pnl",
+                field=DivergenceField.UNREALIZED_PNL,
                 symbol=position.symbol,
                 ledger=held,
                 venue=position.unrealized_pnl,

@@ -34,6 +34,7 @@ from tickwright.domain import (
 )
 from tickwright.engine.ledger_reconcile import (
     Divergence,
+    DivergenceField,
     DivergenceTier,
     LedgerReconciliation,
 )
@@ -246,21 +247,21 @@ def test_a_symbol_whose_ledger_net_disagrees_with_the_venue_size_diverges_at_tie
     assert divergences == (
         Divergence(
             tier=DivergenceTier.TIER_1,
-            field="signed_size",
+            field=DivergenceField.SIGNED_SIZE,
             symbol="BTC",
             ledger=Decimal("0.002"),
             venue=Decimal("0.003"),
         ),
         Divergence(
             tier=DivergenceTier.TIER_1,
-            field="signed_size",
+            field=DivergenceField.SIGNED_SIZE,
             symbol="ETH",
             ledger=Decimal("1.5"),
             venue=Decimal("0"),
         ),
         Divergence(
             tier=DivergenceTier.TIER_1,
-            field="signed_size",
+            field=DivergenceField.SIGNED_SIZE,
             symbol="SOL",
             ledger=Decimal("0"),
             venue=Decimal("10"),
@@ -298,7 +299,7 @@ def test_a_cash_line_disagreeing_with_the_equity_the_venue_implies_diverges_at_t
     assert divergences == (
         Divergence(
             tier=DivergenceTier.TIER_1,
-            field="cash",
+            field=DivergenceField.CASH,
             symbol=None,
             ledger=Decimal("100000"),
             venue=Decimal("99800"),
@@ -351,14 +352,14 @@ def test_equity_and_per_symbol_unrealized_pnl_are_classified_at_tier_2_unbanded(
     assert divergences == (
         Divergence(
             tier=DivergenceTier.TIER_2,
-            field="equity",
+            field=DivergenceField.EQUITY,
             symbol=None,
             ledger=Decimal("100000.382"),
             venue=Decimal("100000.400"),
         ),
         Divergence(
             tier=DivergenceTier.TIER_2,
-            field="unrealized_pnl",
+            field=DivergenceField.UNREALIZED_PNL,
             symbol="BTC",
             ledger=Decimal("0.382"),
             venue=Decimal("0.400"),
@@ -428,7 +429,7 @@ def test_a_symbol_the_ledger_holds_flat_is_a_size_finding_and_not_a_second_one()
     assert divergences == (
         Divergence(
             tier=DivergenceTier.TIER_1,
-            field="signed_size",
+            field=DivergenceField.SIGNED_SIZE,
             symbol="BTC",
             ledger=Decimal("0"),
             venue=Decimal("0.002"),
@@ -437,7 +438,7 @@ def test_a_symbol_the_ledger_holds_flat_is_a_size_finding_and_not_a_second_one()
         # and the venue's carries the 0.400 the ledger does not know it holds.
         Divergence(
             tier=DivergenceTier.TIER_2,
-            field="equity",
+            field=DivergenceField.EQUITY,
             symbol=None,
             ledger=Decimal("100000"),
             venue=Decimal("100000.400"),
@@ -611,11 +612,11 @@ def test_a_cycle_that_finds_divergence_at_both_tiers_still_changes_no_stored_val
 
     assert divergences is not None
     assert {(d.tier, d.field, d.symbol) for d in divergences} == {
-        (DivergenceTier.TIER_1, "cash", None),
-        (DivergenceTier.TIER_1, "signed_size", "BTC"),
-        (DivergenceTier.TIER_1, "signed_size", "SOL"),
-        (DivergenceTier.TIER_2, "equity", None),
-        (DivergenceTier.TIER_2, "unrealized_pnl", "BTC"),
+        (DivergenceTier.TIER_1, DivergenceField.CASH, None),
+        (DivergenceTier.TIER_1, DivergenceField.SIGNED_SIZE, "BTC"),
+        (DivergenceTier.TIER_1, DivergenceField.SIGNED_SIZE, "SOL"),
+        (DivergenceTier.TIER_2, DivergenceField.EQUITY, None),
+        (DivergenceTier.TIER_2, DivergenceField.UNREALIZED_PNL, "BTC"),
     }
 
     restored = store.load_account()
