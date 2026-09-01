@@ -29,6 +29,8 @@ distinct `cloid`s, and per-symbol ordering (ADR-0003) is unaffected.
 > against a second account (a Hyperliquid sub-account), never two processes sharing one account,
 > which ADR-0038's exclusivity invariant forbids.
 
+**(Landed in [#189](https://github.com/MarcosACH/tickwright/issues/189), as *two* gates rather than the one the caveat above anticipates.** `StrategyHost.register` refuses a second strategy declaring an owned symbol, naming both strategies and every colliding symbol at once — and `AppConfig` refuses a **configured** overlap at load, before `build_engine` opens a store or constructs a venue, so the registry is the gate for the strategies that never come through a config rather than the only gate there is. Both read one `domain` value, `SymbolOwnership` (`domain/ownership.py`), which owns the rule and the sentence it refuses with; the exception type is all the two may differ in, pydantic needing a `ValueError` where the registry raises `InvariantViolation`. The order-level independence this caveat qualifies is unchanged.**)**
+
 ## Scope guard: engine capability, not a strategy library
 
 The deliverable is the **multi-strategy engine**, not a catalog of algorithms. The shipped
