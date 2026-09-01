@@ -20,14 +20,13 @@ import pytest
 from hyperliquid_fakes import FakeExchangeApi, FakeWsConnection, trade, trades_frame
 from ledgers import GENESIS, checkpointer
 from pydantic import SecretStr
-from venue_doubles import LIVE_ACCOUNT_ID, LiveVenueDouble, VenueDouble
+from venue_doubles import LiveVenueDouble, VenueDouble
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
-    AccountSpec,
     AggressorSide,
     Exchange,
     ExecutionReport,
@@ -53,8 +52,6 @@ from tickwright.engine.cache import Cache
 from tickwright.engine.checkpoint import Checkpointer
 from tickwright.engine.execution import ExecutionManager
 from tickwright.engine.guard import RealGuard
-from tickwright.engine.ledger_reconcile import LedgerReconcileConfig, LedgerReconciliation
-from tickwright.engine.portfolio import PortfolioProjection
 from tickwright.engine.reconcile import ReconcileConfig, Reconciler
 from tickwright.engine.runner import Engine
 from tickwright.engine.strategy_host import StrategyHost
@@ -166,15 +163,13 @@ class _ForgetfulVenue(VenueDouble):
 
 class _LiveShapedVenue(LiveVenueDouble):
     """A venue whose genesis is *ingested* rather than declared — so the startup
-    barrier has an account row to create, and reads this venue to do it. The
-    account-grain cycle takes the same shape for the same reason: it is live-only,
-    and its anchor is this venue's account read."""
+    barrier has an account row to create, and reads this venue to do it."""
 
     async def place(self, order: PlaceOrder) -> None:
-        raise AssertionError("the account walks never place")
+        raise AssertionError("the materialisation walk never places")
 
     async def cancel(self, cloid: str) -> None:
-        raise AssertionError("the account walks never cancel")
+        raise AssertionError("the materialisation walk never cancels")
 
     async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
         return VenueOrderView(status=None)
@@ -373,46 +368,6 @@ def _drive_account_materialised() -> None:
         assert await run == 0
 
     asyncio.run(go())
-
-
-def _drive_account_reconciled() -> None:
-    """One account-grain cycle: the ledger is compared against the venue's own
-    account read and the verdict recorded, agreeing or not (ADR-0034). Driven at
-    the cycle itself rather than through the runner, which only schedules it."""
-    clock = ManualClock()
-    reconciliation = LedgerReconciliation(
-        exchange=_LiveShapedVenue(),
-        portfolio=PortfolioProjection(
-            spec=AccountSpec(account_id=LIVE_ACCOUNT_ID, genesis_collateral=None),
-            store=SQLiteStore(":memory:"),
-            clock=clock,
-        ),
-        clock=clock,
-        bus=InMemoryBus(),
-        config=LedgerReconcileConfig(),
-    )
-
-    asyncio.run(reconciliation.reconcile_account())
-
-
-def _drive_account_reconcile_frozen() -> None:
-    """The account grain's connectivity guard: the venue answers the account read
-    with nothing, so the cycle heals nothing and says so (ADR-0011 inv 1).
-    ``VenueDouble``'s own ``fetch_account_state`` is that ``None``."""
-    clock = ManualClock()
-    reconciliation = LedgerReconciliation(
-        exchange=_DarkVenue(),
-        portfolio=PortfolioProjection(
-            spec=AccountSpec(account_id=LIVE_ACCOUNT_ID, genesis_collateral=None),
-            store=SQLiteStore(":memory:"),
-            clock=clock,
-        ),
-        clock=clock,
-        bus=InMemoryBus(),
-        config=LedgerReconcileConfig(),
-    )
-
-    assert asyncio.run(reconciliation.reconcile_account()) is None
 
 
 def _drive_denied() -> None:
@@ -796,8 +751,6 @@ SCENARIOS: dict[NamedEvent, Callable[[], None]] = {
     NamedEvent.POSITION_CHANGED: _drive_position_changed,
     NamedEvent.POSITION_CLOSED: _drive_position_changes(closing=True),
     NamedEvent.ACCOUNT_MATERIALISED: _drive_account_materialised,
-    NamedEvent.ACCOUNT_RECONCILED: _drive_account_reconciled,
-    NamedEvent.ACCOUNT_RECONCILE_FROZEN: _drive_account_reconcile_frozen,
     NamedEvent.FEED_LAGGED: _drive_feed_lagged,
     NamedEvent.FEED_FRAME_DROPPED: _drive_feed_frame_dropped,
     NamedEvent.ENGINE_BARRIER_CLEARED: _drive_engine_lifecycle,

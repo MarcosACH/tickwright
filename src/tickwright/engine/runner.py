@@ -51,7 +51,6 @@ from .cadence import run_cadence
 from .checkpoint import Checkpointer
 from .execution import ExecutionManager
 from .guard import NoopGuard
-from .ledger_reconcile import LedgerReconcileConfig, LedgerReconciliation
 from .portfolio import PortfolioProjection
 from .reconcile import ReconcileConfig, Reconciler
 from .strategy_host import StrategyHost
@@ -117,20 +116,6 @@ class Engine:
             exchange=exchange,
             cache=self._checkpointer.cache,
             config=self._reconcile_config,
-        )
-        # The account grain's own cycle, and the owner of the barrier's account
-        # step below. Built unconditionally, scheduled live-only: constructing it
-        # reads nothing and asks the venue nothing, while *running* it is what
-        # paper has no second account to answer. Its config is held rather than
-        # passed inline, for the reason the reconcile config above is: the
-        # cadence below is paced off the same interval.
-        self._ledger_reconcile_config = LedgerReconcileConfig()
-        self._ledger_reconciliation = LedgerReconciliation(
-            exchange=exchange,
-            portfolio=self._checkpointer.portfolio,
-            clock=clock,
-            bus=bus,
-            config=self._ledger_reconcile_config,
         )
         self._host = StrategyHost(
             bus=bus, clock=clock, store=store, tick_staleness_ns=self._config.tick_staleness_ns
@@ -204,26 +189,6 @@ class Engine:
                         )
                     ),
                 ]
-                # The account grain's cycle joins them on the live path alone
-                # (ADR-0040), and the predicate is the same declared-versus-
-                # ingested one the ledger's own startup checks read: a genesis
-                # the operator declared is paper's, and paper has no second
-                # account to cross-check against. A venue-kind flag would be a
-                # second way to ask the same question, free to disagree with it.
-                #
-                # Appended to the one list rather than kept beside it, so the
-                # reverse shutdown cancels it with the others by membership and
-                # a run that scheduled none simply has nothing to cancel.
-                if self._exchange.account_spec().genesis_collateral is None:
-                    self._cadence_tasks.append(
-                        tg.create_task(
-                            run_cadence(
-                                clock=self._clock,
-                                interval_seconds=self._ledger_reconcile_config.interval_seconds,
-                                cycle=self._ledger_reconciliation.reconcile_account,
-                            )
-                        )
-                    )
                 # The venue's own long-lived half (ADR-0037's paper funding
                 # generator, today), supervised beside the cadences rather than
                 # spawned by the adapter: an exception raised in it aborts this
@@ -348,10 +313,7 @@ class Engine:
         # paper-only. The live row must be materialised, never fallen into.
         await StartupBarrier(
             clock=self._clock,
-            steps=(
-                self._ledger_reconciliation.materialise_account,
-                self._reconciler.reconcile_startup,
-            ),
+            steps=(self._materialise_account, self._reconciler.reconcile_startup),
         ).run(timeout_seconds=self._config.startup_reconciliation_timeout_seconds)
         named_event(NamedEvent.ENGINE_BARRIER_CLEARED)
         # Strategies after the barrier: restore snapshot, resume seq, subscribe.
@@ -389,6 +351,49 @@ class Engine:
         nothing to tell the two deployments apart.
         """
         self._checkpointer.portfolio.observe_mark(mark)
+
+    async def _materialise_account(self) -> bool:
+        """The barrier's live-only first step: create the account row when the
+        store holds none (ADR-0042 §6, ADR-0043 §6).
+
+        The predicate is the *row*, not the venue: paper reaches here already
+        opened, seeded inside ``recover()`` from a config value that could not
+        fail on connectivity, and a live restart reaches here opened by an
+        earlier life. So the one state that reads the venue is a live **first**
+        start, and both of the other two skip the read entirely rather than
+        making one they would then discard.
+
+        What that check decides here is only whether a **read is owed**, not
+        whether the write is allowed. ADR-0042 §3's write-once rule is stated on
+        ``materialise`` itself, which refuses an already-open ledger (ADR-0047
+        §1): on live the genesis is *provenance only* — nothing cross-checks it,
+        because there is no configured counterpart — so a second derivation would
+        move a recorded number no later check could ever contradict, and a rule
+        that lived only in this method would be one the next caller of that verb
+        inherits nothing from. The two read the same predicate off the same
+        store, so they cannot disagree about the row.
+
+        ``False`` is a failed venue read, and the barrier retries it inside the
+        one startup budget before faulting. Clearing the barrier on an account
+        the venue never answered for is not an available outcome: that is
+        ADR-0011's freeze-don't-guess applied to the cash line, and what keeps
+        ADR-0041 §6's "``cash`` is never ``None``" true rather than intended.
+
+        The write itself is the projection's rather than a ``Checkpointer``
+        verb, for the same reason paper's genesis seed is: the ``Checkpointer``
+        owns the orderings a caller could silently invert — fold before write
+        before project, ledger before order cache — and opening a ledger is one
+        write to one read-model with no ordering inside it. The ordering that
+        *does* matter here is the barrier's, and it is right above.
+        """
+        portfolio = self._checkpointer.portfolio
+        if portfolio.is_opened():
+            return True
+        state = await self._exchange.fetch_account_state()
+        if state is None:
+            return False
+        portfolio.materialise(state)
+        return True
 
     def _teardown_steps(self) -> tuple[tuple[str, Callable[[], Awaitable[None] | None]], ...]:
         """The reverse shutdown, described once (ADR-0024).

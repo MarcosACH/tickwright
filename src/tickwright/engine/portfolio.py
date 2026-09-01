@@ -39,7 +39,6 @@ from tickwright.domain import (
     StoreAccountMismatch,
     VenueAccountState,
     account_net_size,
-    account_unrealized_pnl,
     account_view,
     position_view,
 )
@@ -524,17 +523,6 @@ class PortfolioProjection:
     def is_opened(self) -> bool:
         """Whether the **durable** ledger holds this account's row yet.
 
-        Public on the concrete and absent from the ``Portfolio`` seam, on the
-        same read-surface asymmetry ``account_net`` below is: ADR-0041 §8 has
-        reconciliation reading "the ``engine`` ``PortfolioProjection`` concrete
-        directly", over a surface the projection "can expose a broader
-        account-wide" version of for exactly those consumers. A strategy has no
-        question this answers — whether a ledger row exists is a startup fact
-        about the store, not a position it could act on — so the seam withholds
-        it while the in-package collaborator reads it by name. Reaching it
-        through an underscore instead would be the same coupling with the
-        sanction removed.
-
         The predicate the startup barrier's live-only materialisation reads
         (ADR-0043 §6, "solely to create the row when absent"), and it is
         deliberately about the row rather than about which venue this is: paper
@@ -620,7 +608,7 @@ class PortfolioProjection:
         position = self._positions.get((strategy_id, symbol))
         if position is None:
             return None
-        return self._view(position, net=self.account_net())
+        return self._view(position, net=self._account_net())
 
     def open_positions(self, *, strategy_id: str | None) -> tuple[PositionView, ...]:
         """Every partition of ``strategy_id`` still holding exposure.
@@ -632,39 +620,21 @@ class PortfolioProjection:
         synchronous so that cannot actually happen today; taking the fold once
         is what keeps it impossible rather than merely unreachable.
         """
-        net = self.account_net()
+        net = self._account_net()
         return tuple(
             self._view(position, net=net)
             for (owner, _symbol), position in self._positions.items()
             if owner == strategy_id and not position.is_flat
         )
 
-    def account_net(self) -> dict[str, Decimal]:
+    def _account_net(self) -> dict[str, Decimal]:
         """The account-net size per symbol, over *every* partition.
 
         The reserved unattributed one included: the venue holds one position per
         symbol, so the position-grain half is computed at that grain or it is
         computed against a book the venue does not have (ADR-0034/0041 §4).
-
-        Public on the concrete and absent from the ``Portfolio`` seam, which is
-        the read-surface asymmetry ADR-0041 §8 draws: this is the Σ-invariant's
-        left-hand side, and the account-grain reconcile compares it against the
-        venue's ``szi``. A strategy must not see it — it sums the unattributed
-        partition the scoped facade exists to keep unreachable.
         """
         return account_net_size(self._positions.values())
-
-    def account_unrealized_pnl(self) -> dict[str, Decimal | None]:
-        """Per-symbol unrealized PnL over *every* partition — ``account_net``'s
-        Tier-2 peer, and on the concrete for the same reason it is.
-
-        ``None`` for a symbol whose Σ needs an absent mark, which the reconcile
-        reads as *not compared* rather than as zero (ADR-0041 §6).
-        """
-        return account_unrealized_pnl(
-            self._positions.values(),
-            {symbol: mark.price for symbol, mark in self._marks.items()},
-        )
 
     def _view(self, position: Position, *, net: dict[str, Decimal]) -> PositionView:
         """Assemble one partition's view against the mark held for its symbol.
