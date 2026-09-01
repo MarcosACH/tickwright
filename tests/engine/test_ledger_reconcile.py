@@ -99,29 +99,36 @@ def _book_fill(
     price: str,
     symbol: str = "BTC",
     strategy_id: str = "alpha",
+    side: Side = Side.BUY,
+    seq: int = 1,
 ) -> None:
-    """Fold one filled buy into the ledger — the only way a partition exists.
+    """Fold one filled order into the ledger — the only way a partition exists.
 
     A case that wants the cycle to look at a *position* books one rather than
     writing the row itself: what the venue is compared against has to be a book
     the fill path actually produced.
+
+    ``seq`` distinguishes a second fill of the same symbol, which is what a case
+    closing a partition needs: the saga's identifiers are per-order, so a
+    sell reusing the buy's would be the same fill arriving twice rather than the
+    trade that flattened it.
     """
     book_fill(
         projection,
         OrderFilled(
-            ts_event=1_000,
-            ts_init=1_000,
-            cloid=f"0x{strategy_id}-{symbol}",
+            ts_event=1_000 * seq,
+            ts_init=1_000 * seq,
+            cloid=f"0x{strategy_id}-{symbol}-{seq}",
             strategy_id=strategy_id,
-            signal_id=f"{strategy_id}:{symbol}:1",
+            signal_id=f"{strategy_id}:{symbol}:{seq}",
             symbol=symbol,
-            trade_id=f"{symbol}-1",
+            trade_id=f"{symbol}-{seq}",
             quantity=Decimal(quantity),
             price=Decimal(price),
             cum_qty=Decimal(quantity),
             fee=Decimal("0"),
         ),
-        side=Side.BUY,
+        side=side,
     )
 
 
@@ -383,6 +390,60 @@ def test_a_tier_2_figure_the_ledger_cannot_yet_compute_is_not_reported_as_diverg
 
     assert projection.account().equity is None  # no mark yet, so no Σ to compare
     assert asyncio.run(cycle.reconcile_account()) == ()
+
+
+def test_a_symbol_the_ledger_holds_flat_is_a_size_finding_and_not_a_second_one() -> None:
+    """A symbol the ledger carries no exposure in is *not held*, and the two
+    checks have to agree about that or the same disagreement is reported twice.
+
+    Being flat and being absent are one state at Tier-1 — ``_sizes`` ranges over
+    the union of both symbol sets with an absent side reading flat — so a symbol
+    traded back to flat is exactly as unheld as one never traded. Tier-2 owes
+    that the same answer: the venue still reporting exposure there is a missed
+    fill, already named as a ``signed_size`` divergence, and the uPnL gap beside
+    it is that one disagreement restated in another unit. The valuation is not
+    wrong; the book is. Handed both, #194's band would have no honest response
+    to the second but to suppress it.
+
+    The record is the other half. Held-ness read two ways inflates ``tier_2``,
+    which in this slice is the classification's only reader — an operator
+    counting two Tier-2 findings on a book with one problem.
+
+    Reachable on the ordinary book rather than at an edge: a flat partition is
+    what every closed position leaves behind, so any symbol this engine has ever
+    traded and closed lands here the moment the venue disagrees about it.
+    """
+    store = SQLiteStore(":memory:")
+    projection = _ledger(store, equity="100000")
+    _book_fill(projection, quantity="0.002", price="64809")
+    _book_fill(projection, quantity="0.002", price="64809", side=Side.SELL, seq=2)
+    _mark(projection, "BTC", "65009")
+    venue = _held("100000.400", ("BTC", "0.002", "0.400"))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), portfolio=projection)
+
+    assert projection.account_net() == {"BTC": Decimal("0")}  # the record survives the close
+    with capture_events() as logs:
+        divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences == (
+        Divergence(
+            tier=DivergenceTier.TIER_1,
+            field="signed_size",
+            symbol="BTC",
+            ledger=Decimal("0"),
+            venue=Decimal("0.002"),
+        ),
+        # Genuinely the account grain's own: a flat book's equity is its cash,
+        # and the venue's carries the 0.400 the ledger does not know it holds.
+        Divergence(
+            tier=DivergenceTier.TIER_2,
+            field="equity",
+            symbol=None,
+            ledger=Decimal("100000"),
+            venue=Decimal("100000.400"),
+        ),
+    )
+    assert (logs[0]["tier_1"], logs[0]["tier_2"]) == (1, 1)
 
 
 def test_a_completed_cycle_records_what_it_found_at_each_tier() -> None:
