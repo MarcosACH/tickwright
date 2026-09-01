@@ -51,9 +51,17 @@ UNIVERSE = HyperliquidUniverse(
             # behind passes on the leverages they configure rather than tripping
             # on ``InstrumentSpec``'s conservative 1x default.
             max_leverage=40,
-        )
+        ),
+        "ETH": InstrumentSpec(
+            symbol="ETH",
+            sz_decimals=4,
+            max_decimals=6,
+            min_notional=Decimal("10"),
+            max_sig_figs=5,
+            max_leverage=25,
+        ),
     },
-    asset_indices={"BTC": 3},
+    asset_indices={"BTC": 3, "ETH": 1},
 )
 
 STARTUP_TIMEOUT_SECONDS = 60.0
@@ -416,6 +424,44 @@ def test_a_symbol_the_account_is_flat_in_is_written_blind_behind_the_mode_gate()
         "isCross": True,
         "leverage": 10,
     }
+
+
+def test_a_traded_symbol_nobody_configured_is_pushed_at_the_safe_default() -> None:
+    """Scope is every strategy-traded symbol, the **defaulted ones included**
+    (ADR-0044 §3) — not the perp universe, and not the feed list.
+
+    This is the asymmetric one. Pushing a symbol nobody configured costs one
+    write; *not* pushing it leaves the venue holding whatever leverage the
+    account was last set to while the model computes the position's margin at
+    ``1x`` full notional — so the engine would report more collateral behind a
+    levered position than the venue is actually holding, **understating** risk
+    in the one direction that matters. An unconfigured symbol is therefore a
+    complete conservative specification (``1x``/``isolated``, ADR-0040 §5), not
+    a hole to skip.
+
+    ``resolve`` is what makes that true, so the book handed over here is built
+    the way the composition root builds it — sparse config completed over the
+    traded set — rather than written out complete, which would assert the
+    resolution's output against itself. The expected pair is ADR-0040 §5's
+    literal safest combination and the venue's own asset index, neither of them
+    re-derived from the code under test.
+    """
+    post = FakeExchangeApi(
+        {
+            "userAbstraction": "disabled",
+            "clearinghouseState": _state(),
+            "updateLeverage": OK_ENVELOPE,
+        }
+    )
+    book = LeverageBook.resolve(
+        {"BTC": LeverageSpec(mode="cross", leverage=10)}, traded=["BTC", "ETH"]
+    )
+
+    asyncio.run(_exchange(post, leverage=book).start())
+
+    pushed = [payload["action"] for (url, payload) in post.requests if url.endswith("/exchange")]
+    assert {"type": "updateLeverage", "asset": 1, "isCross": False, "leverage": 1} in pushed
+    assert len(pushed) == 2, "the configured symbol is pushed too, not replaced by the default"
 
 
 def test_a_leverage_above_the_venue_cap_refuses_to_start_on_live_too() -> None:
