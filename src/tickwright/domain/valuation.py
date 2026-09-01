@@ -164,4 +164,4 @@ def _equity(
     return total
 
 
-__all__ = ["account_view", "position_view"]
+__all__ = ["account_unrealized_pnl", "account_view", "position_view"]
