@@ -73,6 +73,7 @@ from .leverage import (
     MarginMode,
 )
 from .order import Order
+from .ownership import SymbolOwnership
 from .position import (
     UNATTRIBUTED,
     Position,
@@ -114,6 +115,7 @@ __all__ = [
     # events + value types
     "DEFAULT_LEVERAGE",
     "EMPTY_LEVERAGE_BOOK",
+    "UNATTRIBUTED",
     "Account",
     "AccountSpec",
     "AccountView",
@@ -150,8 +152,8 @@ __all__ = [
     "Position",
     "PositionChange",
     "PositionView",
-    "UNATTRIBUTED",
     "Signal",
+    "SymbolOwnership",
     "VenueAccountState",
     "VenueOrderView",
     "VenueReadFailure",
