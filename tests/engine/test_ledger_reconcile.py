@@ -9,6 +9,7 @@ case asserts what the cycle *concludes* about a book a fill actually moved.
 """
 
 import asyncio
+from collections.abc import Sequence
 from dataclasses import replace
 from decimal import Decimal
 
@@ -18,10 +19,13 @@ from venue_doubles import LIVE_ACCOUNT_ID, LiveVenueDouble, account_state
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
+    Account,
     AccountSpec,
     MarkTick,
+    Order,
     OrderFilled,
     PlaceOrder,
+    Position,
     Side,
     Store,
     VenueAccountState,
@@ -379,3 +383,106 @@ def test_a_tier_2_figure_the_ledger_cannot_yet_compute_is_not_reported_as_diverg
 
     assert projection.account().equity is None  # no mark yet, so no Σ to compare
     assert asyncio.run(cycle.reconcile_account()) == ()
+
+
+class _SealedStore(SQLiteStore):
+    """A real store that refuses every write once ``seal()`` is called.
+
+    Sealed rather than write-counting because an identical-value write is still
+    a write: this slice's claim is that classification is a **read**, and a
+    heal that happened to persist the number already there would slip past any
+    before/after value comparison while being exactly the regression the claim
+    exists to prevent. The seal closes over the *whole* write surface, not
+    ``checkpoint_ledger`` alone, because the cycle holds no ``Store`` of its own
+    — it reaches one only through the projection — so any verb arriving here is
+    a collaborator that grew a writer.
+
+    Armed after setup, since materialising the ledger is itself a durable write
+    and the subject is what the *cycle* does, not what opening one costs.
+    """
+
+    def __init__(self, path: str) -> None:
+        super().__init__(path)
+        self._sealed = False
+
+    def seal(self) -> None:
+        self._sealed = True
+
+    def _refuse(self, verb: str) -> None:
+        if self._sealed:
+            raise AssertionError(f"a classifying cycle wrote to the store via {verb}")
+
+    def checkpoint_ledger(
+        self,
+        *,
+        account: Account,
+        positions: Sequence[Position] = (),
+        order: Order | None = None,
+        funding_mark: tuple[str, int] | None = None,
+        ts_ns: int,
+    ) -> None:
+        self._refuse("checkpoint_ledger")
+        super().checkpoint_ledger(
+            account=account,
+            positions=positions,
+            order=order,
+            funding_mark=funding_mark,
+            ts_ns=ts_ns,
+        )
+
+    def checkpoint(self, order: Order, *, ts_ns: int) -> None:
+        self._refuse("checkpoint")
+        super().checkpoint(order, ts_ns=ts_ns)
+
+    def save_strategy_snapshot(self, strategy_id: str, data: bytes, *, ts_ns: int) -> None:
+        self._refuse("save_strategy_snapshot")
+        super().save_strategy_snapshot(strategy_id, data, ts_ns=ts_ns)
+
+    def save_kill_switch(self, *, tripped: bool, reason: str | None, ts_ns: int) -> None:
+        self._refuse("save_kill_switch")
+        super().save_kill_switch(tripped=tripped, reason=reason, ts_ns=ts_ns)
+
+
+def test_a_cycle_that_finds_divergence_at_both_tiers_still_changes_no_stored_value() -> None:
+    """This slice classifies and heals nothing, and the store is where that has
+    to be asserted: the heals land next, on the same cycle, and the only durable
+    difference between a classification and a heal is a write.
+
+    So the case hands the cycle everything a heal would act on — a size gap, a
+    symbol the ledger has never seen, a cash line adrift, and both Tier-2
+    figures — checks it really did classify all of it, and then asserts the
+    ledger behind it is untouched. A cycle finding nothing would assert nothing.
+
+    The absent SOL row is the sharpest of the three read-backs. The venue is
+    reporting exposure this engine never placed, which is precisely what the
+    next slice persists as an unattributed partition (ADR-0038) — so "no
+    position row appeared" is the assertion that the heal has not quietly
+    arrived early, and it is one no value comparison of *existing* rows would
+    have made.
+    """
+    store = _SealedStore(":memory:")
+    projection = _ledger(store, equity="100000")
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "65000")
+    opened = store.load_account()
+    assert opened is not None
+    venue = _held("90000.500", ("BTC", "0.003", "0.500"), ("SOL", "10", "0"))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), portfolio=projection)
+    store.seal()
+
+    divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences is not None
+    assert {(d.tier, d.field, d.symbol) for d in divergences} == {
+        (DivergenceTier.TIER_1, "cash", None),
+        (DivergenceTier.TIER_1, "signed_size", "BTC"),
+        (DivergenceTier.TIER_1, "signed_size", "SOL"),
+        (DivergenceTier.TIER_2, "equity", None),
+        (DivergenceTier.TIER_2, "unrealized_pnl", "BTC"),
+    }
+
+    restored = store.load_account()
+    assert restored is not None
+    assert restored.cash == opened.cash == Decimal("100000")
+    assert restored.genesis_collateral == opened.genesis_collateral
+    assert store.all_positions() == []
