@@ -20,7 +20,7 @@ import pytest
 from hyperliquid_fakes import FakeExchangeApi, FakeWsConnection, trade, trades_frame
 from ledgers import GENESIS, checkpointer
 from pydantic import SecretStr
-from venue_doubles import LiveVenueDouble, VenueDouble
+from venue_doubles import DERIVED_STATE, LiveVenueDouble, VenueDouble
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
@@ -52,6 +52,8 @@ from tickwright.engine.cache import Cache
 from tickwright.engine.checkpoint import Checkpointer
 from tickwright.engine.execution import ExecutionManager
 from tickwright.engine.guard import RealGuard
+from tickwright.engine.ledger_reconcile import LedgerReconciliation
+from tickwright.engine.portfolio import PortfolioProjection
 from tickwright.engine.reconcile import ReconcileConfig, Reconciler
 from tickwright.engine.runner import Engine
 from tickwright.engine.strategy_host import StrategyHost
@@ -732,6 +734,26 @@ def _drive_feed_frame_dropped() -> None:
     asyncio.run(go())
 
 
+def _drive_account_reconciled() -> None:
+    """One account-grain cycle against a venue snapshot: the ledger is
+    cross-checked and the pass is named (``account.reconciled``, ADR-0034).
+
+    Live-shaped by construction — a ledger whose genesis was ingested from the
+    venue — because paper has no second account for a cycle to compare against
+    and so never schedules one."""
+
+    async def go() -> None:
+        venue = _LiveShapedVenue()
+        projection = PortfolioProjection(
+            spec=venue.account_spec(), store=SQLiteStore(":memory:"), clock=ManualClock()
+        )
+        projection.recover()
+        projection.materialise(DERIVED_STATE)
+        await LedgerReconciliation(exchange=venue, portfolio=projection).reconcile_account()
+
+    asyncio.run(go())
+
+
 # --- The catalog walk --------------------------------------------------------
 
 # Every NamedEvent → a scenario that drives its real path. Several of the saga
@@ -765,6 +787,7 @@ SCENARIOS: dict[NamedEvent, Callable[[], None]] = {
     NamedEvent.RECONCILE_RECENCY_SKIPPED: _drive_recency_skipped,
     NamedEvent.GHOST_RECONCILED: _drive_ghost_reconciled,
     NamedEvent.RECONCILE_FROZEN: _drive_frozen,
+    NamedEvent.ACCOUNT_RECONCILED: _drive_account_reconciled,
     NamedEvent.EXCHANGE_REQUEST_FAILED: _drive_exchange_request_failed,
     NamedEvent.EXCHANGE_ACTION_REJECTED: _drive_exchange_action_rejected,
 }

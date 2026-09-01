@@ -78,6 +78,13 @@ class NamedEvent(StrEnum):
     # is the only thing telling an outage from a venue contract change.
     RECONCILE_FROZEN = "reconcile.frozen"
 
+    # One completed account-grain cycle (``LedgerReconciliation``, ADR-0034).
+    # Emitted on every pass, agreeing or not: the cycle is the *only* evidence
+    # the ledger was cross-checked against the venue at all, and a record that
+    # appeared solely on disagreement could not tell a healthy book from a
+    # cadence that stopped running.
+    ACCOUNT_RECONCILED = "account.reconciled"
+
     # A live-exchange request that yielded no usable answer, on either path and
     # for either reason (``HyperliquidExchange``): a send or read that failed in
     # **transport** — outcome unknown, no report emitted — or a 200-OK body the
