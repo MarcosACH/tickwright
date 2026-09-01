@@ -157,12 +157,20 @@ class LedgerReconciliation:
         again.
 
         The ledger's side is read **once** for the whole cycle, as the venue's
-        is: the account view and the per-symbol uPnL map are each a fold over
-        every partition, so taking them here rather than inside each check both
-        halves the folds and gives the comparison one reading per side. That is
-        the property ``domain.valuation`` states about assembling a view in one
-        call — two fields of one view can never straddle a fill — kept by the
-        cycle rather than left to the checks being synchronous.
+        is: the account view, the account-net sizes and the per-symbol uPnL map
+        are each a fold over every partition, so taking them here rather than
+        inside each check both halves the folds and gives the comparison one
+        reading per side. That is the property ``domain.valuation`` states about
+        assembling a view in one call — two fields of one view can never
+        straddle a fill — kept by the cycle rather than left to the checks being
+        synchronous.
+
+        The net sizes are the reason that matters beyond tidiness: they are the
+        cycle's **one definition of held-ness**, and both grains read it. Tier-1
+        calls a symbol flat and calls it absent the same thing, so Tier-2 must
+        too, or a symbol traded back to flat that the venue still reports is
+        counted as held by one check and unheld by the other — and the single
+        missed fill is reported twice, once as size and once as valuation.
 
         The pass is recorded with **what it found**, not merely that it ran: the
         heal and the alert land in later slices, so until they do this record is
@@ -176,41 +184,59 @@ class LedgerReconciliation:
             self._freeze(_FreezeCaller.CADENCE)
             return None
         view = self._portfolio.account()
+        net = self._portfolio.account_net()
         unrealized = self._portfolio.account_unrealized()
         divergences = (
             self._cash(state, cash=view.cash)
-            + self._sizes(state)
+            + self._sizes(state, ledger=net)
             + self._equity(state, equity=view.equity)
-            + self._unrealized(state, ledger=unrealized)
+            + self._unrealized(state, ledger=unrealized, net=net)
         )
         tiers = [divergence.tier for divergence in divergences]
         named_event(
             NamedEvent.ACCOUNT_RECONCILED,
             tier_1=tiers.count(DivergenceTier.TIER_1),
             tier_2=tiers.count(DivergenceTier.TIER_2),
-            unvalued=self._unvalued(state, view=view, ledger=unrealized),
+            unvalued=self._unvalued(state, view=view, ledger=unrealized, net=net),
         )
         return divergences
 
     @staticmethod
+    def _holds(net: dict[str, Decimal], symbol: str) -> bool:
+        """Whether the ledger carries exposure in ``symbol`` — the cycle's one
+        held-ness predicate, read by both Tier-2 checks.
+
+        Flat and absent are the **same** answer, which is the definition Tier-1
+        already works to: ``_sizes`` ranges over the union of both symbol sets
+        with a missing side reading zero, so a symbol traded back to flat and a
+        symbol never traded are one state there. A closed position leaves its
+        record behind at zero, so reading presence-in-the-map as held instead
+        would make every symbol this engine has ever closed a held one.
+        """
+        return net.get(symbol, _ZERO) != _ZERO
+
+    @classmethod
     def _unvalued(
+        cls,
         state: VenueAccountState,
         *,
         view: AccountView,
         ledger: dict[str, Decimal | None],
+        net: dict[str, Decimal],
     ) -> int:
         """How many Tier-2 figures this pass could not compute at all.
 
         The account's equity, plus one per symbol **both** sides hold whose
-        ledger valuation is waiting on a mark — the same range ``_unrealized``
-        classifies over, since a symbol only one side carries is already a
-        Tier-1 size finding rather than a missing valuation. A symbol absent
-        from the ledger reads as not held, never as unvalued.
+        ledger valuation is waiting on a mark — the same ``_holds`` range
+        ``_unrealized`` classifies over, since a symbol only one side carries is
+        already a Tier-1 size finding rather than a missing valuation. A symbol
+        the ledger holds flat, or does not carry at all, reads as not held and
+        so is never unvalued: nothing was going to value it.
         """
         absent_marks = sum(
             1
             for position in state.positions
-            if position.symbol in ledger and ledger[position.symbol] is None
+            if cls._holds(net, position.symbol) and ledger.get(position.symbol) is None
         )
         return absent_marks + (1 if view.equity is None else 0)
 
@@ -244,7 +270,9 @@ class LedgerReconciliation:
             ),
         )
 
-    def _sizes(self, state: VenueAccountState) -> tuple[Divergence, ...]:
+    def _sizes(
+        self, state: VenueAccountState, *, ledger: dict[str, Decimal]
+    ) -> tuple[Divergence, ...]:
         """Tier-1: the account-net signed size per symbol against the venue's.
 
         Ranged over the **union** of both symbol sets, with an absent side
@@ -261,8 +289,12 @@ class LedgerReconciliation:
         is a missed or duplicated fill rather than noise (ADR-0034). Sorted by
         symbol so a cycle's report is a function of the book and not of dict
         iteration order.
+
+        ``ledger`` is the cycle's one net fold, handed in rather than taken
+        here: it is also what ``_holds`` reads, so the grain that decides a
+        symbol is flat and the grain that decides it is unheld cannot be looking
+        at two folds.
         """
-        ledger = self._portfolio.account_net()
         venue = {position.symbol: position.signed_size for position in state.positions}
         return tuple(
             Divergence(
@@ -306,17 +338,27 @@ class LedgerReconciliation:
         )
 
     def _unrealized(
-        self, state: VenueAccountState, *, ledger: dict[str, Decimal | None]
+        self,
+        state: VenueAccountState,
+        *,
+        ledger: dict[str, Decimal | None],
+        net: dict[str, Decimal],
     ) -> tuple[Divergence, ...]:
         """Tier-2: per-symbol open PnL, at the account grain both sides hold it.
 
-        Ranged over the symbols **both** sides hold, where the Tier-1 checks
-        range over the union — and the asymmetry is the point. A symbol only one
-        side carries has already been reported as a size divergence, and its
-        uPnL gap is that same disagreement restated in another unit rather than
-        a second finding: the valuation is not wrong, the book is. Reporting it
-        twice would hand the alert slice a Tier-2 record whose only honest
-        response is to suppress it.
+        Ranged over the symbols **both** sides hold — ``_holds`` against the
+        venue's own roster — where the Tier-1 checks range over the union, and
+        the asymmetry is the point. A symbol only one side carries has already
+        been reported as a size divergence, and its uPnL gap is that same
+        disagreement restated in another unit rather than a second finding: the
+        valuation is not wrong, the book is. Reporting it twice would hand the
+        alert slice a Tier-2 record whose only honest response is to suppress it.
+
+        Held-ness is the ledger's **net**, never presence in the uPnL map: a
+        closed position leaves its record behind, valuing flat at a real zero
+        (``domain.valuation``'s per-term exemption), so a symbol traded back to
+        flat would otherwise read as held here while reading as absent at Tier-1
+        — one missed fill, reported once as size and once as valuation.
 
         The ledger's side is the Σ over every partition of the symbol, because
         the venue holds one position per symbol and a partition's own slice
@@ -324,9 +366,9 @@ class LedgerReconciliation:
         is skipped for the reason equity's is: a valuation waiting on a mark is
         unknown, not divergent — and counted for the same reason too.
 
-        ``ledger`` is the cycle's one fold over the partitions, handed in rather
-        than taken here so the classification and the ``unvalued`` count read
-        the same map.
+        Both maps are the cycle's one fold each, handed in rather than taken
+        here so the classification, the size check and the ``unvalued`` count
+        all read the same two readings.
         """
         return tuple(
             Divergence(
@@ -337,5 +379,7 @@ class LedgerReconciliation:
                 venue=position.unrealized_pnl,
             )
             for position in sorted(state.positions, key=lambda p: p.symbol)
-            if (held := ledger.get(position.symbol)) is not None and held != position.unrealized_pnl
+            if self._holds(net, position.symbol)
+            and (held := ledger.get(position.symbol)) is not None
+            and held != position.unrealized_pnl
         )
