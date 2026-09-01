@@ -12,6 +12,7 @@ adding an impl widens exactly one ``Literal`` plus one ``match`` arm in
 ``build.py``.
 """
 
+from collections import Counter
 from decimal import Decimal
 from typing import Literal, Self
 
@@ -128,6 +129,32 @@ class AppConfig(BaseModel):
                 "exchange='paper' needs a starting collateral: "
                 "set TICKWRIGHT_PAPER__GENESIS_COLLATERAL"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _no_two_strategies_may_share_one_id(self) -> Self:
+        """ADR-0018's uniqueness gate, refused at load rather than at wiring.
+
+        The third of this model's cross-strategy identity rules and the oldest:
+        ids key seqs, snapshots, ledger partitions and ``OrderEvent`` routing,
+        so two strategies sharing one silently corrupt each other's state.
+        ``StrategyHost.register`` has refused it since it existed and stays the
+        gate for a strategy the composition root never saw — this is the mirror
+        the other two already have, and it is here for the same reason they are:
+        a ``StrategyConfig`` alone cannot see a collision, this is the smallest
+        scope that can, and ``build_engine`` opens the store, resolves the
+        leverage book and constructs the venue before its registration loop.
+
+        Ordered ahead of the disjointness check below because a duplicate id is
+        the more fundamental fault and reads badly through the other's wording:
+        two ``alpha`` entries on one symbol would otherwise be refused as
+        ``alpha`` colliding with ``alpha``. Every duplicated id at once, in
+        declaration order, for the reason each check here reports in full.
+        """
+        counts = Counter(strategy.strategy_id for strategy in self.strategies)
+        duplicates = [strategy_id for strategy_id, count in counts.items() if count > 1]
+        if duplicates:
+            raise ValueError("duplicate strategy_id declared: " + ", ".join(duplicates))
         return self
 
     @model_validator(mode="after")

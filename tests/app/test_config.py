@@ -289,3 +289,46 @@ def test_two_strategies_may_not_declare_one_symbol(tmp_path: Path) -> None:
     assert "beta declares" in message and "BTC (owned by alpha)" in message
     assert "delta declares" in message and "ETH (owned by gamma)" in message
     assert "separate account" in message
+
+
+def test_two_strategies_may_not_share_one_id(tmp_path: Path) -> None:
+    """``StrategyHost``'s oldest fail-fast, mirrored where the ids are all visible.
+
+    A duplicate ``strategy_id`` silently corrupts both strategies: ids key seqs,
+    snapshots, ledger partitions and ``OrderEvent`` routing (ADR-0018). The
+    registry has refused it since it existed, but only at registration — and
+    ``build_engine`` opens the store, resolves leverage and constructs the venue
+    before its registration loop, so the same typo that ADR-0034's disjointness
+    rule now catches at load was still paying for a database file (or a live
+    signing exchange) when the collision was in the id rather than the symbol.
+    A ``StrategyConfig`` cannot see it alone; this is the smallest scope that
+    can.
+
+    Distinct symbols on purpose, so the refusal can only be about the id.
+    """
+    (tmp_path / "ticks.jsonl").touch()
+
+    def _strategy(strategy_id: str, symbol: str) -> StrategyConfig:
+        return StrategyConfig(
+            kind="single_shot_market",
+            strategy_id=strategy_id,
+            symbol=symbol,
+            side=Side.BUY,
+            quantity=Decimal("0.5"),
+        )
+
+    with pytest.raises(ValidationError) as refused:
+        AppConfig(
+            replay=ReplayFeedConfig(path=tmp_path / "ticks.jsonl"),
+            paper=PaperExchangeConfig(genesis_collateral=Decimal("100000")),
+            strategies=[
+                _strategy("alpha", "BTC"),
+                _strategy("alpha", "ETH"),
+                _strategy("beta", "SOL"),
+                _strategy("beta", "DOGE"),
+            ],
+        )
+
+    message = str(refused.value)
+    assert "alpha" in message and "beta" in message
+    assert "duplicate" in message

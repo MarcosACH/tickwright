@@ -22,7 +22,7 @@ in one module over. The same split ``LeverageBook`` already makes between its
 config-load dead-entry check and its ``Exchange.start()`` bound.
 """
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from typing import Self
 
@@ -49,7 +49,7 @@ class SymbolOwnership:
         # sharing the caller's dict leaves that to whoever kept the reference.
         object.__setattr__(self, "owners", dict(self.owners))
 
-    def refusal(self, claimant: str, *, symbols: Iterable[str]) -> str | None:
+    def refusal(self, claimant: str, *, symbols: Collection[str]) -> str | None:
         """The sentence refusing ``claimant``'s declaration, or ``None`` if clear.
 
         A message rather than a verdict because neither caller *decides*
@@ -75,7 +75,7 @@ class SymbolOwnership:
             f"{collisions} — same-symbol isolation needs a separate account"
         )
 
-    def claim(self, claimant: str, *, symbols: Iterable[str]) -> Self:
+    def claim(self, claimant: str, *, symbols: Collection[str]) -> Self:
         """``self`` with every symbol in ``symbols`` recorded to ``claimant``.
 
         Records **unconditionally**, so a caller that skipped ``refusal`` would
@@ -83,5 +83,11 @@ class SymbolOwnership:
         collapsing into one that raises precisely because the exception is the
         caller's to choose; ordering them is the price of that, and both call
         sites pay it on adjacent lines.
+
+        ``Collection`` rather than ``Iterable`` on both verbs is what makes that
+        ordering safe to ask for: the pair reads ``symbols`` twice, so a one-shot
+        iterator would refuse correctly and then claim *nothing*, leaving the
+        gate silently enforcing an empty book. The narrower type admits every
+        real caller and rejects that one before it runs.
         """
         return type(self)(owners={**self.owners, **dict.fromkeys(symbols, claimant)})
