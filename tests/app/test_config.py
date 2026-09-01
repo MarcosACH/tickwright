@@ -332,3 +332,42 @@ def test_two_strategies_may_not_share_one_id(tmp_path: Path) -> None:
     message = str(refused.value)
     assert "alpha" in message and "beta" in message
     assert "duplicate" in message
+
+
+def test_a_duplicate_id_on_one_symbol_is_refused_as_a_duplicate_id(tmp_path: Path) -> None:
+    """The doubly-faulty declaration is reported as the fault that explains it.
+
+    ``[alpha/BTC, alpha/BTC]`` breaks both cross-strategy rules at once, and
+    which one it is refused as is a decision rather than an accident: pydantic
+    runs ``mode="after"`` validators in definition order, so the id check
+    sitting above the disjointness check in ``config.py`` is the whole of the
+    guarantee. Read through the disjointness wording the same config refuses as
+    ``alpha`` colliding with ``alpha`` and prescribes a separate account for it,
+    which is nonsense — there is one strategy, declared twice.
+
+    The negative assertion is what actually pins the ordering; the positive one
+    passes under either order, because a duplicate id is refused either way.
+    Reordering the two validators, or landing a third between them, fails here.
+    """
+    (tmp_path / "ticks.jsonl").touch()
+
+    def _strategy(strategy_id: str, symbol: str) -> StrategyConfig:
+        return StrategyConfig(
+            kind="single_shot_market",
+            strategy_id=strategy_id,
+            symbol=symbol,
+            side=Side.BUY,
+            quantity=Decimal("0.5"),
+        )
+
+    with pytest.raises(ValidationError) as refused:
+        AppConfig(
+            replay=ReplayFeedConfig(path=tmp_path / "ticks.jsonl"),
+            paper=PaperExchangeConfig(genesis_collateral=Decimal("100000")),
+            strategies=[_strategy("alpha", "BTC"), _strategy("alpha", "BTC")],
+        )
+
+    message = str(refused.value)
+    assert "duplicate strategy_id declared: alpha" in message
+    assert "owned by alpha" not in message
+    assert "separate account" not in message
