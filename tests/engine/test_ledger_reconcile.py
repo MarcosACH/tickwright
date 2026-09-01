@@ -486,3 +486,36 @@ def test_a_cycle_that_finds_divergence_at_both_tiers_still_changes_no_stored_val
     assert restored.cash == opened.cash == Decimal("100000")
     assert restored.genesis_collateral == opened.genesis_collateral
     assert store.all_positions() == []
+
+
+def test_a_failed_barrier_read_is_recorded_under_the_grains_own_freeze_name() -> None:
+    """The barrier's account read is the *same grain's* freeze as the cadence's,
+    and it costs strictly more: a frozen cycle loses one pass, while this one
+    exhausts the startup budget and faults the process (``invariants.md`` inv 1).
+    It was nonetheless the silent one — a bare early return, so an operator got
+    ``engine.faulted`` naming nothing, while the cheaper freeze one step later
+    was fully named.
+
+    So it reports ``account.reconcile_frozen``, the name the cadence already
+    uses, rather than a second one: both are the account anchor coming back
+    empty, and an operator reading the trail should not have to learn two
+    vocabularies for one failure to distinguish an outage at boot from an outage
+    an hour in. ``False`` is what the barrier retries on, and the ledger stays
+    unopened — a row created from a read that never answered is the flat book
+    ADR-0011 inv 1 refuses.
+    """
+    store = SQLiteStore(":memory:")
+    projection = PortfolioProjection(
+        spec=AccountSpec(account_id=LIVE_ACCOUNT_ID, genesis_collateral=None),
+        store=store,
+        clock=ManualClock(7),
+    )
+    projection.recover()
+    cycle = LedgerReconciliation(exchange=_AccountVenue(None), portfolio=projection)
+
+    with capture_events() as logs:
+        materialised = asyncio.run(cycle.materialise_account())
+
+    assert materialised is False
+    assert [log["event"] for log in logs] == [NamedEvent.ACCOUNT_RECONCILE_FROZEN.value]
+    assert store.load_account() is None

@@ -332,7 +332,9 @@ class Engine:
         # The hard gate: nothing places until every proof it holds has cleared.
         # The sequence is the ordering rule, and it lives here rather than inside
         # any step — lifecycle ordering is the runner's, and the barrier owns
-        # only the retry-then-fault policy the steps share.
+        # only the retry-then-fault policy the steps share. Both steps are bound
+        # methods on the component owning the grain each one proves, so what the
+        # runner contributes is the tuple's order and nothing else.
         #
         # The account row is materialised **before** the mass-rebuild rather than
         # merely inside the same barrier (ADR-0043 §6): the rebuild emits
@@ -345,7 +347,10 @@ class Engine:
         # paper-only. The live row must be materialised, never fallen into.
         await StartupBarrier(
             clock=self._clock,
-            steps=(self._materialise_account, self._reconciler.reconcile_startup),
+            steps=(
+                self._ledger_reconciler.materialise_account,
+                self._reconciler.reconcile_startup,
+            ),
         ).run(timeout_seconds=self._config.startup_reconciliation_timeout_seconds)
         named_event(NamedEvent.ENGINE_BARRIER_CLEARED)
         # Strategies after the barrier: restore snapshot, resume seq, subscribe.
@@ -383,49 +388,6 @@ class Engine:
         nothing to tell the two deployments apart.
         """
         self._checkpointer.portfolio.observe_mark(mark)
-
-    async def _materialise_account(self) -> bool:
-        """The barrier's live-only first step: create the account row when the
-        store holds none (ADR-0042 §6, ADR-0043 §6).
-
-        The predicate is the *row*, not the venue: paper reaches here already
-        opened, seeded inside ``recover()`` from a config value that could not
-        fail on connectivity, and a live restart reaches here opened by an
-        earlier life. So the one state that reads the venue is a live **first**
-        start, and both of the other two skip the read entirely rather than
-        making one they would then discard.
-
-        What that check decides here is only whether a **read is owed**, not
-        whether the write is allowed. ADR-0042 §3's write-once rule is stated on
-        ``materialise`` itself, which refuses an already-open ledger (ADR-0047
-        §1): on live the genesis is *provenance only* — nothing cross-checks it,
-        because there is no configured counterpart — so a second derivation would
-        move a recorded number no later check could ever contradict, and a rule
-        that lived only in this method would be one the next caller of that verb
-        inherits nothing from. The two read the same predicate off the same
-        store, so they cannot disagree about the row.
-
-        ``False`` is a failed venue read, and the barrier retries it inside the
-        one startup budget before faulting. Clearing the barrier on an account
-        the venue never answered for is not an available outcome: that is
-        ADR-0011's freeze-don't-guess applied to the cash line, and what keeps
-        ADR-0041 §6's "``cash`` is never ``None``" true rather than intended.
-
-        The write itself is the projection's rather than a ``Checkpointer``
-        verb, for the same reason paper's genesis seed is: the ``Checkpointer``
-        owns the orderings a caller could silently invert — fold before write
-        before project, ledger before order cache — and opening a ledger is one
-        write to one read-model with no ordering inside it. The ordering that
-        *does* matter here is the barrier's, and it is right above.
-        """
-        portfolio = self._checkpointer.portfolio
-        if portfolio.is_opened():
-            return True
-        state = await self._exchange.fetch_account_state()
-        if state is None:
-            return False
-        portfolio.materialise(state)
-        return True
 
     def _teardown_steps(self) -> tuple[tuple[str, Callable[[], Awaitable[None] | None]], ...]:
         """The reverse shutdown, described once (ADR-0024).

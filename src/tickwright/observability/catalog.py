@@ -84,11 +84,17 @@ class NamedEvent(StrEnum):
     # appeared solely on disagreement could not tell a healthy book from a
     # cadence that stopped running.
     ACCOUNT_RECONCILED = "account.reconciled"
-    # The same grain's failed read: the account anchor came back empty, so the
-    # cycle healed nothing rather than reading an outage as a flat book
+    # The same grain's failed read: the account anchor came back empty, so
+    # nothing was inferred from it rather than reading an outage as a flat book
     # (ADR-0011 inv 1). Its own name beside the order grain's ``reconcile.frozen``
     # because the grain differs — this one froze a whole account cross-check, not
     # a cloid — and because the two never share a scope field.
+    #
+    # Covers **both** of the account read's callers, deliberately: the cadence,
+    # where a freeze costs one pass, and the startup barrier's materialisation,
+    # where it exhausts the startup budget and faults the process. One anchor
+    # failing one way is one name — an operator telling an outage at boot from
+    # an outage an hour in reads the surrounding trail, not a second vocabulary.
     ACCOUNT_RECONCILE_FROZEN = "account.reconcile_frozen"
 
     # A live-exchange request that yielded no usable answer, on either path and
