@@ -102,11 +102,24 @@ class ReconcileConfig:
     strictly under ``ghost_grace_seconds`` — the protection pre-filter is a brief
     shield that defers the *start* of the grace measurement, so it must not
     outlast the measurement it precedes.
+
+    ``account_interval_seconds`` paces the **account** grain's live-only cycle
+    (ADR-0034). It is here rather than on that cycle's own config because it is
+    a *pacing* knob and pacing is the runner's: the runner resolves one config
+    and drives every continuous cadence off it, so a second home for one
+    interval would leave two of the three somewhere the third is not. What
+    belongs to ``LedgerReconciliation`` is the band it judges with, not the
+    deadline something else wakes it on. Slower than either order cadence by
+    design — the anchor is one account snapshot carrying every symbol, so the
+    cycle's venue cost does not scale with the book — and outside the timing
+    invariant below for the plainer reason that it shares no term with it:
+    nothing at this grain is ever ghosted.
     """
 
     inflight_interval_seconds: float = 5.0
     inflight_max_attempts: int = 3
     open_order_interval_seconds: float = 30.0
+    account_interval_seconds: float = 60.0
     ghost_grace_seconds: float = 90.0
     recent_order_protection_seconds: float = 30.0
     unreadable_grace_seconds: float = 90.0
@@ -116,6 +129,7 @@ class ReconcileConfig:
             "inflight_interval_seconds",
             "inflight_max_attempts",
             "open_order_interval_seconds",
+            "account_interval_seconds",
             "ghost_grace_seconds",
             "recent_order_protection_seconds",
             "unreadable_grace_seconds",

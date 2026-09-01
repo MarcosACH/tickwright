@@ -110,6 +110,31 @@ def account_view(
     return AccountView(cash=account.cash, equity=_equity(account, positions, marks))
 
 
+def account_unrealized_pnl(
+    positions: Iterable[Position], marks: Mapping[str, Decimal]
+) -> dict[str, Decimal | None]:
+    """Per-symbol uPnL at the **account** grain — the Σ over every partition.
+
+    ``PositionView.unrealized_pnl`` is one partition's own slice, and the venue
+    holds one position per symbol, so a cross-check against venue truth needs
+    the symbol's total or it is comparing a fraction against a whole (ADR-0035,
+    ADR-0041 §4). Every partition counts, the reserved unattributed one
+    included: the venue is holding that exposure too.
+
+    The per-term nullability rule is **inherited** from ``_unrealized_pnl``, as
+    ``_equity`` inherits it — one unknown term makes the symbol's total unknown,
+    while a flat partition contributes its real zero and blocks nothing. Spelled
+    afresh here, this grain and the account's would agree only until the first
+    exemption that applies to one of them.
+    """
+    totals: dict[str, Decimal | None] = {}
+    for position in positions:
+        term = _unrealized_pnl(position, marks.get(position.symbol))
+        running = totals.get(position.symbol, _ZERO)
+        totals[position.symbol] = None if term is None or running is None else running + term
+    return totals
+
+
 def _equity(
     account: Account, positions: Iterable[Position], marks: Mapping[str, Decimal]
 ) -> Decimal | None:

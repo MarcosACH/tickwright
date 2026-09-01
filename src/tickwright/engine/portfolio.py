@@ -39,6 +39,7 @@ from tickwright.domain import (
     StoreAccountMismatch,
     VenueAccountState,
     account_net_size,
+    account_unrealized_pnl,
     account_view,
     position_view,
 )
@@ -608,7 +609,7 @@ class PortfolioProjection:
         position = self._positions.get((strategy_id, symbol))
         if position is None:
             return None
-        return self._view(position, net=self._account_net())
+        return self._view(position, net=self.account_net())
 
     def open_positions(self, *, strategy_id: str | None) -> tuple[PositionView, ...]:
         """Every partition of ``strategy_id`` still holding exposure.
@@ -620,21 +621,43 @@ class PortfolioProjection:
         synchronous so that cannot actually happen today; taking the fold once
         is what keeps it impossible rather than merely unreachable.
         """
-        net = self._account_net()
+        net = self.account_net()
         return tuple(
             self._view(position, net=net)
             for (owner, _symbol), position in self._positions.items()
             if owner == strategy_id and not position.is_flat
         )
 
-    def _account_net(self) -> dict[str, Decimal]:
+    def account_net(self) -> dict[str, Decimal]:
         """The account-net size per symbol, over *every* partition.
 
         The reserved unattributed one included: the venue holds one position per
         symbol, so the position-grain half is computed at that grain or it is
         computed against a book the venue does not have (ADR-0034/0041 §4).
+
+        Public because it is **the reconciliation anchor's left-hand side**, not
+        merely this class's own denominator: `Σ(per-strategy) = account net =
+        venue szi` is checked by `LedgerReconciliation`, which reads the concrete
+        rather than the `Portfolio` seam precisely so it can see this (ADR-0041
+        §8). Kept private, that cycle would have to re-fold the partitions from
+        the outside and the invariant would have two definitions to disagree.
         """
         return account_net_size(self._positions.values())
+
+    def account_unrealized(self) -> dict[str, Decimal | None]:
+        """The account-grain uPnL per symbol, against the marks held right now.
+
+        The Tier-2 counterpart to ``account_net`` and public for the same
+        caller: the venue holds one position per symbol, so the reconcile's
+        cross-check needs the symbol's Σ over every partition rather than the
+        per-partition slice a ``PositionView`` carries (ADR-0041 §4/§8).
+        ``None`` for a symbol whose valuation genuinely needs a mark that is
+        absent — never a fabricated zero (ADR-0041 §6).
+        """
+        return account_unrealized_pnl(
+            self._positions.values(),
+            {symbol: mark.price for symbol, mark in self._marks.items()},
+        )
 
     def _view(self, position: Position, *, net: dict[str, Decimal]) -> PositionView:
         """Assemble one partition's view against the mark held for its symbol.

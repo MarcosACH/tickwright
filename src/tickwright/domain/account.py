@@ -19,6 +19,34 @@ from decimal import Decimal
 from .enums import Netting
 from .events import VenueAccountState
 
+_ZERO = Decimal("0")
+
+
+def venue_cash(state: VenueAccountState) -> Decimal:
+    """The cash line a venue snapshot implies — ``equity − Σ unrealized_pnl``.
+
+    The venue reports no cash line of its own, so this is how one is recovered:
+    ADR-0040 §7's ``equity = cash + Σ uPnL`` read backwards. **The subtraction
+    is load-bearing rather than tidy** — the venue's equity already contains
+    open PnL, so anything comparing or copying it into a cash line without
+    removing that term is off by the whole of it on every account holding a
+    position.
+
+    One definition because it has two callers whose disagreement would be
+    invisible: ``Account.ingest`` writes it as the genesis at the startup
+    barrier, and the live reconcile cycle compares the accumulated cash line
+    against it every pass (ADR-0034). Derived two ways, a drift between them
+    would read as a permanent Tier-1 divergence on a ledger that opened
+    perfectly correctly, and the heal would chase a figure no venue holds.
+
+    It lives here rather than in ``valuation.py``, whose forward direction of
+    the same identity it inverts, because ``valuation`` imports this module for
+    ``Account`` and the reverse edge would close a cycle. This is also the
+    module the quantity belongs to on its own terms: what it names is a cash
+    line, which is the one thing ``Account`` accumulates.
+    """
+    return state.equity - sum((position.unrealized_pnl for position in state.positions), _ZERO)
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AccountSpec:
@@ -225,12 +253,14 @@ class Account:
         already knows, contradict ADR-0034's venue-is-authoritative rule for
         Tier-1, and fail-fast on every legitimate deposit.
 
-        ``genesis = equity − Σ unrealized_pnl``, and **the subtraction is
-        load-bearing rather than tidy**: the venue's equity figure already
-        contains unrealized PnL, so writing it straight into the cash line would
-        double-count that PnL the instant ``equity = cash + Σ uPnL``
+        ``genesis = venue_cash(state)``, and **the subtraction that function
+        performs is load-bearing rather than tidy**: the venue's equity figure
+        already contains unrealized PnL, so writing it straight into the cash
+        line would double-count that PnL the instant ``equity = cash + Σ uPnL``
         (ADR-0040 §7) was evaluated — an account opened holding a position would
-        report its uPnL twice from the very first cycle.
+        report its uPnL twice from the very first cycle. The live reconcile
+        cycle compares against that same function, which is why the derivation
+        is shared rather than restated here.
 
         Driven once, at the startup barrier, and only when the store holds no
         account row (ADR-0043 §6): the value is **provenance only** on this path
@@ -238,12 +268,9 @@ class Account:
         check against — so re-deriving it on a later start would silently move a
         line that is supposed to have been written once.
         """
-        genesis = state.equity - sum(
-            (position.unrealized_pnl for position in state.positions), Decimal("0")
-        )
         return cls(
             account_id=spec.account_id,
-            genesis_collateral=genesis,
+            genesis_collateral=venue_cash(state),
             genesis_ts_ns=ts_ns,
         )
 

@@ -12,7 +12,7 @@ import asyncio
 import json
 import os
 import signal
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from decimal import Decimal
 from pathlib import Path
 
@@ -60,6 +60,7 @@ from tickwright.domain import (
     derive_cloid,
 )
 from tickwright.engine.guard import RealGuard
+from tickwright.engine.reconcile import ReconcileConfig
 from tickwright.engine.runner import Engine, EngineConfig
 from tickwright.observability.testing import capture_events
 from tickwright.strategies import SingleShotLimitStrategy, SingleShotMarketStrategy
@@ -624,6 +625,111 @@ def test_a_barrier_fill_lands_on_the_materialised_row_not_a_zero_one(
         assert row.cash == DERIVED_GENESIS
     finally:
         reopened.close()
+
+
+_ACCOUNT_INTERVAL = 60.0
+_ACCOUNT_INTERVAL_NS = int(_ACCOUNT_INTERVAL * 1_000_000_000)
+
+
+class _CadenceWatchingLiveVenue(_LiveShapedVenue):
+    """A live venue that signals the account read the *cadence* makes.
+
+    A first start already reads once, at the barrier, so "the cadence ran" is
+    the **second** read rather than merely a non-zero count.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.cycled = asyncio.Event()
+
+    async def fetch_account_state(self) -> VenueAccountState | None:
+        state = await super().fetch_account_state()
+        if self.account_reads > 1:
+            self.cycled.set()
+        return state
+
+
+def _one_life_past_the_account_deadline(
+    tmp_path: Path, venue: Exchange, *, settle: Callable[[Engine], Awaitable[None]]
+) -> tuple[int, ComponentState]:
+    """One supervised life of a strategy-less engine, driven across an
+    account-cadence deadline on the virtual clock.
+
+    The feed **blocks** rather than replaying, so the only thing moving virtual
+    time is this helper: a cycle that fires here fired because the runner
+    scheduled it, not because a replayed tick swept the deadline on its way
+    past. ``settle`` is how each case waits for its own outcome — the cadence
+    reaching the venue, or a stretch of loop slots proving it never will.
+    """
+
+    async def one_life() -> tuple[int, ComponentState]:
+        bus = InMemoryBus()
+        clock = ManualClock()
+        feed = _BlockingFeed()
+        engine = Engine(
+            bus=bus,
+            clock=clock,
+            store=SQLiteStore(tmp_path / "saga.db"),
+            exchange=venue,
+            feed=feed,
+            config=EngineConfig(
+                reconcile=ReconcileConfig(account_interval_seconds=_ACCOUNT_INTERVAL)
+            ),
+        )
+        run = asyncio.create_task(engine.run())
+        # The cadences are created ahead of the feed in the same TaskGroup, so
+        # a started feed proves every cadence is already parked on its deadline
+        # — advancing before that could cross a deadline nobody was waiting on.
+        await asyncio.wait_for(feed.started.wait(), timeout=5)
+        clock.advance_to(_ACCOUNT_INTERVAL_NS)
+        await settle(engine)
+        await asyncio.wait_for(engine.stop(), timeout=5)
+        return await asyncio.wait_for(run, timeout=5), engine.state
+
+    return asyncio.run(one_life())
+
+
+def test_a_live_run_reconciles_the_account_on_its_own_cadence(tmp_path: Path) -> None:
+    """The account grain gets a cadence of its own on live (ADR-0034).
+
+    Anchored on one ``fetch_account_state`` read per cycle, which is also the
+    only seam the wiring is observable through: the cadence tasks are the
+    runner's, so what a case can see is the venue being read a second time,
+    at a deadline nothing but the cadence was waiting on.
+    """
+    venue = _CadenceWatchingLiveVenue()
+
+    async def settle(engine: Engine) -> None:
+        await asyncio.wait_for(venue.cycled.wait(), timeout=5)
+
+    assert _one_life_past_the_account_deadline(tmp_path, venue, settle=settle) == (
+        0,
+        ComponentState.STOPPED,
+    )
+    assert venue.account_reads == 2, "the barrier's read, then exactly one cycle's"
+
+
+def test_no_paper_run_schedules_the_account_cadence(tmp_path: Path) -> None:
+    """Paper has no second account to reconcile against, so nothing runs there
+    (ADR-0034, ADR-0043 §4) — its atomic ledger write stands in.
+
+    Asserted as a refusal rather than a call count, for the reason the barrier's
+    sibling case gives: ``PaperExchange`` answers ``None`` to this read by
+    construction, the fail-closed value, so a cadence scheduled here would
+    freeze every cycle against a venue that has nothing to say and look like an
+    outage. The double raises instead, which faults the run — the same mistake
+    made loud, and a clean exit is the whole assertion.
+    """
+    venue = _PaperShapedVenue()
+
+    async def settle(engine: Engine) -> None:
+        for _ in range(5):  # every slot a scheduled cycle would need to reach the venue
+            await asyncio.sleep(0)
+
+    assert _one_life_past_the_account_deadline(tmp_path, venue, settle=settle) == (
+        0,
+        ComponentState.STOPPED,
+    )
 
 
 def test_a_fill_leaves_the_order_row_and_the_ledger_in_the_one_store(tmp_path: Path) -> None:
@@ -1349,6 +1455,103 @@ def test_the_fault_path_stops_the_exchange_in_the_same_position_as_a_graceful_st
     assert exit_code != 0
     assert engine.state is ComponentState.FAULTED
     assert timeline == ["exchange.start", "feed.stop", "exchange.stop", "store.close"]
+
+
+class _CadenceProbingLiveVenue(_CadenceWatchingLiveVenue):
+    """A live venue that probes, at the moment the runner releases it, whether
+    an account cycle can still reach it.
+
+    Under a ``ManualClock`` nothing moves virtual time during a teardown, so a
+    case that merely asserted "no further read" would pass against a cadence
+    still parked on its next deadline — alive, and simply never woken. Crossing
+    a deadline *here* is what makes the assertion sensitive: a cadence the
+    sequence had not already cut would answer it, reading an adapter this very
+    sequence is in the middle of tearing down (ADR-0011 inv 1).
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.clock: ManualClock | None = None
+        self.reads_at_release: int | None = None
+
+    async def stop(self) -> None:
+        assert self.clock is not None, "the test must hand the venue its clock"
+        self.reads_at_release = self.account_reads
+        self.clock.advance_to(self.clock.timestamp_ns() + _ACCOUNT_INTERVAL_NS)
+        for _ in range(5):  # every slot a surviving cycle would need to reach it
+            await asyncio.sleep(0)
+        await super().stop()
+
+
+def _live_life_probing_its_teardown(
+    tmp_path: Path, *, fault: bool
+) -> tuple[int, ComponentState, _CadenceProbingLiveVenue]:
+    """One live life ended by ``fault``'s path — a broken feed, or an asked-for
+    stop — with the venue probing the release slot on the way out."""
+    venue = _CadenceProbingLiveVenue()
+
+    async def one_life() -> tuple[int, ComponentState]:
+        bus = InMemoryBus()
+        clock = ManualClock()
+        venue.clock = clock
+        feed: _FaultingFeed | _BlockingFeed = _FaultingFeed() if fault else _BlockingFeed()
+        engine = Engine(
+            bus=bus,
+            clock=clock,
+            store=SQLiteStore(tmp_path / "saga.db"),
+            exchange=venue,
+            feed=feed,
+            config=EngineConfig(
+                reconcile=ReconcileConfig(account_interval_seconds=_ACCOUNT_INTERVAL)
+            ),
+        )
+        run = asyncio.create_task(engine.run())
+        if isinstance(feed, _BlockingFeed):
+            await asyncio.wait_for(feed.started.wait(), timeout=5)
+            # One cycle under supervision first, so the case is about a cadence
+            # that was genuinely running being cut — not one that never started.
+            clock.advance_to(_ACCOUNT_INTERVAL_NS)
+            await asyncio.wait_for(venue.cycled.wait(), timeout=5)
+            await asyncio.wait_for(engine.stop(), timeout=5)
+        return await asyncio.wait_for(run, timeout=5), engine.state
+
+    exit_code, state = asyncio.run(one_life())
+    return exit_code, state, venue
+
+
+def test_a_graceful_stop_silences_the_account_cadence_before_releasing_the_venue(
+    tmp_path: Path,
+) -> None:
+    """``reconcile.stop`` ahead of ``exchange.stop`` covers the account grain
+    too (ADR-0024): the cycle reads the venue, so releasing the adapter under a
+    live one would freeze that cycle against a teardown the runner itself had
+    just performed — an outage indistinguishable from the venue's own."""
+    exit_code, state, venue = _live_life_probing_its_teardown(tmp_path, fault=False)
+
+    assert (exit_code, state) == (0, ComponentState.STOPPED)
+    assert venue.reads_at_release == 2, "the barrier's read, then the one supervised cycle"
+    assert venue.account_reads == venue.reads_at_release, (
+        "the account cadence must be silent by the time the venue is released"
+    )
+
+
+def test_the_fault_path_silences_the_account_cadence_in_the_same_place(
+    tmp_path: Path,
+) -> None:
+    """The faulted teardown differs in failure *policy*, never in membership
+    (ADR-0024), and the account cadence is inside that membership on both
+    paths. What it pins here that the graceful case cannot: the cycle is a task
+    in the runner's own ``TaskGroup``, so an abort cancels it with its siblings
+    — a cadence spawned outside that group would survive the fault and read a
+    venue nobody is supervising any more."""
+    exit_code, state, venue = _live_life_probing_its_teardown(tmp_path, fault=True)
+
+    assert exit_code != 0
+    assert state is ComponentState.FAULTED
+    assert venue.reads_at_release == 1, "the barrier's read alone: the feed broke before a cycle"
+    assert venue.account_reads == venue.reads_at_release, (
+        "a faulted run leaves no cycle behind to read the venue it is releasing"
+    )
 
 
 class _RefusingVenue(_LifecycleRecordingVenue):
