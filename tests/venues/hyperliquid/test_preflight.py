@@ -17,39 +17,115 @@ import asyncio
 from decimal import Decimal
 
 import pytest
-from hyperliquid_fakes import FakeExchangeApi
+from hyperliquid_fakes import TEST_SIGNING_KEY, FakeExchangeApi, request_type
 from pydantic import SecretStr
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.domain import (
+    EMPTY_LEVERAGE_BOOK,
     InstrumentSpec,
     LeverageBook,
     LeverageOutOfBounds,
     LeverageSpec,
     VenueAccountModeUnsupported,
+    VenueLeverageMismatch,
+    VenueLeveragePushFailed,
 )
+from tickwright.observability import NamedEvent
+from tickwright.observability.testing import capture_events
 from tickwright.venues.hyperliquid import (
     HyperliquidConfig,
     HyperliquidExchange,
     HyperliquidUniverse,
 )
 
-# Anvil's account #0 — a publicly-known throwaway key, safe in a test file.
-TEST_SIGNING_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
-
 UNIVERSE = HyperliquidUniverse(
     specs={
         "BTC": InstrumentSpec(
-            symbol="BTC", sz_decimals=5, max_decimals=6, min_notional=Decimal("10"), max_sig_figs=5
-        )
+            symbol="BTC",
+            sz_decimals=5,
+            max_decimals=6,
+            min_notional=Decimal("10"),
+            max_sig_figs=5,
+            # The venue's own cap for BTC perps, so the §9 bound these tests run
+            # behind passes on the leverages they configure rather than tripping
+            # on ``InstrumentSpec``'s conservative 1x default.
+            max_leverage=40,
+        ),
+        "ETH": InstrumentSpec(
+            symbol="ETH",
+            sz_decimals=4,
+            max_decimals=6,
+            min_notional=Decimal("10"),
+            max_sig_figs=5,
+            max_leverage=25,
+        ),
     },
-    asset_indices={"BTC": 3},
+    asset_indices={"BTC": 3, "ETH": 1},
 )
 
 STARTUP_TIMEOUT_SECONDS = 60.0
 """The barrier budget the composition root hands the adapter (ADR-0044 §6): the
 mode read is bounded by ``startup_reconciliation_timeout``, never a second one."""
+
+OK_ENVELOPE: dict = {"status": "ok", "response": {"type": "default"}}
+"""What ``updateLeverage`` answers — measured in #142, and the reason the push
+has no no-op branch to write: pushing ``cross/20x`` onto a symbol already at
+``cross/20x`` returns **this same envelope** as a real change, so ``ok`` ⇒
+success is the whole taxonomy (ADR-0044 §6's correction)."""
+
+
+def _state(*positions: dict) -> dict:
+    """A ``clearinghouseState`` body holding ``positions``.
+
+    The envelope figures are the recorded flat snapshot's (``test_account.py``,
+    measured in #142); the push reads only ``assetPositions[].position.{coin,
+    leverage}``, so they are here to keep the body the venue's shape rather than
+    because anything under test looks at them.
+    """
+    return {
+        "assetPositions": list(positions),
+        "crossMaintenanceMarginUsed": "0.0",
+        "crossMarginSummary": {
+            "accountValue": "25.9264",
+            "totalMarginUsed": "0.0",
+            "totalNtlPos": "0.0",
+            "totalRawUsd": "25.9264",
+        },
+        "marginSummary": {
+            "accountValue": "25.9264",
+            "totalMarginUsed": "0.0",
+            "totalNtlPos": "0.0",
+            "totalRawUsd": "25.9264",
+        },
+        "time": 1_730_000_120_000,
+        "withdrawable": "25.9264",
+    }
+
+
+def _held(coin: str, *, mode: str, leverage: int) -> dict:
+    """One ``assetPositions`` row for a coin the account holds.
+
+    Shaped on the recorded cross snapshot; ``leverage.{type, value}`` is the
+    pair the push compares against config, and is the only part a test varies.
+    """
+    return {
+        "type": "oneWay",
+        "position": {
+            "coin": coin,
+            "szi": "0.002",
+            "entryPx": "64809.0",
+            "positionValue": "129.584",
+            "unrealizedPnl": "-0.034",
+            "returnOnEquity": "-0.0026231",
+            "marginUsed": "25.9168",
+            "liquidationPx": None,
+            "maxLeverage": 40,
+            "leverage": {"type": mode, "value": leverage},
+            "cumFunding": {"allTime": "0.0", "sinceOpen": "0.0", "sinceChange": "0.0"},
+        },
+    }
 
 
 class _FlakyApi(FakeExchangeApi):
@@ -81,6 +157,7 @@ def _exchange(
     *,
     clock: ManualClock | None = None,
     account_address: str | None = None,
+    leverage: LeverageBook = EMPTY_LEVERAGE_BOOK,
 ) -> HyperliquidExchange:
     return HyperliquidExchange(
         config=HyperliquidConfig(
@@ -94,6 +171,7 @@ def _exchange(
         universe=UNIVERSE,
         post=post,
         startup_timeout_seconds=STARTUP_TIMEOUT_SECONDS,
+        leverage=leverage,
     )
 
 
@@ -284,24 +362,595 @@ def test_the_gate_classifies_the_trading_account_not_the_agent_wallet() -> None:
     assert query == {"type": "userAbstraction", "user": MASTER_ACCOUNT}
 
 
-def test_connecting_makes_the_mode_read_and_no_other_venue_request() -> None:
+def test_a_run_with_nothing_traded_makes_the_mode_read_and_no_other_venue_request() -> None:
     """``start()`` is ADR-0024 step 4, and the gate opens it (ADR-0046 §3).
 
-    Two claims in one recorded exchange. The mode read **is** the step's first
-    venue traffic — it gates everything after it, because a wrong mode
-    invalidates the premise the leverage push's own check would reason from, so
-    reporting mismatches computed against a margin model that does not apply
-    would be noise on top of an error. And it is so far the step's **only**
-    traffic: the fake routes nothing else, so the leverage push arriving behind
-    it (ADR-0044 §7) must rewrite this test rather than silently survive it.
+    The mode read **is** the step's first venue traffic — it gates everything
+    after it, because a wrong mode invalidates the premise the leverage push's
+    own check reasons from, so reporting mismatches computed against a margin
+    model that does not apply would be noise on top of an error.
 
-    The adapter still holds no connection of its own — every request is scoped
-    to the call that makes it — so this is the whole of what connecting does."""
+    An **empty** book is what makes it the only traffic, and it is a legitimate
+    value rather than an unresolved one: a run with nothing traded has no symbol
+    to align, so there is nothing to read the account for either. The push's own
+    traffic is asserted by the test below, against a book with a symbol in it.
+
+    The adapter holds no connection of its own — every request is scoped to the
+    call that makes it — so this is the whole of what connecting does."""
     post = FakeExchangeApi({"userAbstraction": "default"})
 
     asyncio.run(_exchange(post).start())
 
     assert [query["type"] for (_url, query) in post.requests] == ["userAbstraction"]
+
+
+def test_a_symbol_the_account_is_flat_in_is_written_blind_behind_the_mode_gate() -> None:
+    """The push's ordinary case (ADR-0044 §4): no position, so write.
+
+    **The risky symbols are exactly the ones holding a position**, and a symbol
+    with nothing open has nothing to re-margin and nothing to reject on position
+    grounds — so the write needs no prior knowledge of the venue's stored
+    setting, and the design pays one ``clearinghouseState`` read for the whole
+    boot rather than one ``activeAssetData`` read per symbol (§4's declined
+    option, left a cost trade by #142 rather than an unknown).
+
+    Three claims, and the ordering is the load-bearing one. The mode gate goes
+    first, because the push's own three-way split is computed against a margin
+    model a pooled account invalidates; the account read comes next, being what
+    the split needs; the signed write comes last. The wire is asserted in full —
+    ``asset`` is the venue's index, not the symbol, and ``isCross`` and
+    ``leverage`` are one value in one action, which is why config carries them
+    as one ``LeverageSpec`` (§2).
+    """
+    post = FakeExchangeApi(
+        {
+            "userAbstraction": "disabled",
+            "clearinghouseState": _state(),
+            "updateLeverage": OK_ENVELOPE,
+        }
+    )
+    book = LeverageBook(entries={"BTC": LeverageSpec(mode="cross", leverage=10)})
+
+    asyncio.run(_exchange(post, leverage=book).start())
+
+    assert [request_type(url, payload) for (url, payload) in post.requests] == [
+        "userAbstraction",
+        "clearinghouseState",
+        "updateLeverage",
+    ]
+    (_url, sent) = post.requests[-1]
+    assert sent["action"] == {
+        "type": "updateLeverage",
+        "asset": 3,
+        "isCross": True,
+        "leverage": 10,
+    }
+
+
+def test_a_traded_symbol_nobody_configured_is_pushed_at_the_safe_default() -> None:
+    """Scope is every strategy-traded symbol, the **defaulted ones included**
+    (ADR-0044 §3) — not the perp universe, and not the feed list.
+
+    This is the asymmetric one. Pushing a symbol nobody configured costs one
+    write; *not* pushing it leaves the venue holding whatever leverage the
+    account was last set to while the model computes the position's margin at
+    ``1x`` full notional — so the engine would report more collateral behind a
+    levered position than the venue is actually holding, **understating** risk
+    in the one direction that matters. An unconfigured symbol is therefore a
+    complete conservative specification (``1x``/``isolated``, ADR-0040 §5), not
+    a hole to skip.
+
+    ``resolve`` is what makes that true, so the book handed over here is built
+    the way the composition root builds it — sparse config completed over the
+    traded set — rather than written out complete, which would assert the
+    resolution's output against itself. The expected pair is ADR-0040 §5's
+    literal safest combination and the venue's own asset index, neither of them
+    re-derived from the code under test.
+    """
+    post = FakeExchangeApi(
+        {
+            "userAbstraction": "disabled",
+            "clearinghouseState": _state(),
+            "updateLeverage": OK_ENVELOPE,
+        }
+    )
+    book = LeverageBook.resolve(
+        {"BTC": LeverageSpec(mode="cross", leverage=10)}, traded=["BTC", "ETH"]
+    )
+
+    asyncio.run(_exchange(post, leverage=book).start())
+
+    pushed = [payload["action"] for (url, payload) in post.requests if url.endswith("/exchange")]
+    assert {"type": "updateLeverage", "asset": 1, "isCross": False, "leverage": 1} in pushed
+    assert len(pushed) == 2, "the configured symbol is pushed too, not replaced by the default"
+
+
+def test_a_held_position_the_venue_already_agrees_with_is_left_alone_and_named() -> None:
+    """The skip arm of the three-way split (ADR-0044 §4): aligned → no write.
+
+    Skipping is not an optimisation here, it is the safe branch. The write the
+    account read exists to avoid is a re-margin of a *held* position, and the
+    one symbol where a needless ``updateLeverage`` could move real collateral is
+    exactly the one already carrying risk — so agreement has to be established
+    before the boot writes anything, not asserted afterwards from the response.
+
+    Which is why the skip branch is the sole source of
+    ``EXCHANGE_LEVERAGE_UNCHANGED``. A no-op push and a real change come back as
+    the **identical** ``ok`` envelope (measured in #142, ADR-0044 §6's
+    correction), so the write path cannot tell an operator that nothing moved;
+    only the branch that declined to write knows it. The expected pair is the
+    configured one, and the venue body says the same thing in the venue's own
+    vocabulary (``leverage.{type, value}``) rather than in config's.
+    """
+    post = FakeExchangeApi(
+        {
+            "userAbstraction": "disabled",
+            "clearinghouseState": _state(_held("BTC", mode="cross", leverage=10)),
+            "updateLeverage": OK_ENVELOPE,
+        }
+    )
+    book = LeverageBook(entries={"BTC": LeverageSpec(mode="cross", leverage=10)})
+
+    with capture_events() as logs:
+        asyncio.run(_exchange(post, leverage=book).start())
+
+    assert [request_type(url, payload) for (url, payload) in post.requests] == [
+        "userAbstraction",
+        "clearinghouseState",
+    ], "an aligned held position is never written to"
+    unchanged = [
+        (log["symbol"], log["mode"], log["leverage"])
+        for log in logs
+        if log["event"] == NamedEvent.EXCHANGE_LEVERAGE_UNCHANGED
+    ]
+    assert unchanged == [("BTC", "cross", 10)]
+
+
+def test_a_held_position_at_a_mode_the_venue_has_never_reported_is_a_failed_read() -> None:
+    """The branch ``held_leverage``'s refusal exists to prevent, pinned.
+
+    ``LeverageSpec`` is a plain frozen dataclass, so an unrecognised
+    ``leverage.type`` trusted into it would compare unequal to every configured
+    spec — and the boot would read *the venue changing its contract* as a held
+    disagreement, raising ``VenueLeverageMismatch`` and sending an operator to
+    the venue UI to fix a leverage that was never wrong. It is refused at the
+    read instead, which makes it an unreadable body like any other: retried
+    under the shared boot budget, then ``VenueLeveragePushFailed``.
+
+    Asserted as **not** ``VenueLeverageMismatch`` rather than only as the type
+    raised, because the mismatch is the plausible wrong answer here and a type
+    check alone would pass under it if the two errors were ever merged.
+
+    Covers the gate from ``held_leverage``'s side. ``test_account.py`` covers it
+    from ``_isolated_collateral``'s, and since #180's architecture pass both go
+    through one ``reported_margin_mode`` — two readers of one field that used to
+    decide validity separately, one derived from ``MarginMode`` and one not.
+    """
+    post = FakeExchangeApi(
+        {
+            "userAbstraction": "disabled",
+            "clearinghouseState": _state(_held("BTC", mode="portfolioMargin", leverage=10)),
+            "updateLeverage": OK_ENVELOPE,
+        }
+    )
+    book = LeverageBook(entries={"BTC": LeverageSpec(mode="cross", leverage=10)})
+
+    with pytest.raises(VenueLeveragePushFailed) as refusal:
+        asyncio.run(_exchange(post, clock=ManualClock(start_ns=0), leverage=book).start())
+
+    assert not isinstance(refusal.value, VenueLeverageMismatch), (
+        "a venue contract change is not a disagreement about a held position"
+    )
+    assert "portfolioMargin" in str(refusal.value), "the operator needs the body that was refused"
+    assert "updateLeverage" not in [
+        request_type(url, payload) for (url, payload) in post.requests
+    ], "a book that could not be read aligns nothing"
+
+
+def test_a_held_position_whose_leverage_the_venue_re_typed_is_a_failed_read() -> None:
+    """The same refusal as an unrecognised mode, for the other half of the pair.
+
+    ``leverage.type`` and ``leverage.value`` come out of one sub-object and are
+    read to one standard, because they fail the same way. ``LeverageSpec`` is a
+    plain frozen dataclass, so a venue that re-typed ``10`` as ``"10"`` would
+    build a spec comparing unequal to every configured one — and the boot would
+    raise ``VenueLeverageMismatch`` over a setting that is exactly what config
+    asked for, sending an operator to the venue UI to fix a leverage that was
+    never wrong. That is the failure ``reported_margin_mode`` already prevents on
+    the mode half.
+
+    A re-typed field is an unreadable body like any other (``reading.UNREADABLE``
+    names ``TypeError`` for exactly this), so it is retried under the shared boot
+    budget and then faults, having written nothing on the way.
+    """
+    row = _held("BTC", mode="cross", leverage=10)
+    row["position"]["leverage"]["value"] = "10"
+    post = FakeExchangeApi(
+        {
+            "userAbstraction": "disabled",
+            "clearinghouseState": _state(row),
+            "updateLeverage": OK_ENVELOPE,
+        }
+    )
+    book = LeverageBook(entries={"BTC": LeverageSpec(mode="cross", leverage=10)})
+
+    with pytest.raises(VenueLeveragePushFailed) as refusal:
+        asyncio.run(_exchange(post, clock=ManualClock(start_ns=0), leverage=book).start())
+
+    assert not isinstance(refusal.value, VenueLeverageMismatch), (
+        "a re-typed field is not a disagreement about a held position"
+    )
+    assert "updateLeverage" not in [
+        request_type(url, payload) for (url, payload) in post.requests
+    ], "a book that could not be read aligns nothing"
+
+
+def test_a_boolean_leverage_value_is_a_failed_read_and_not_agreement_with_1x() -> None:
+    """The re-typed value that would be read as *agreement* rather than as drift.
+
+    ``bool`` is an ``int`` subclass and ``True == 1``, so a venue reporting the
+    value as a boolean would build a spec comparing **equal** to a configured
+    ``1x`` — the aligned branch, which skips the write and names the symbol
+    unchanged. Every other re-typed field refuses loudly; this one would clear
+    the boot quietly, on a body nobody could read, and ``1x``/isolated is the
+    default an unconfigured symbol takes, so it is the pair most likely to be
+    on the other side of the comparison.
+    """
+    row = _held("BTC", mode="isolated", leverage=1)
+    row["position"]["leverage"]["value"] = True
+    post = FakeExchangeApi(
+        {
+            "userAbstraction": "disabled",
+            "clearinghouseState": _state(row),
+            "updateLeverage": OK_ENVELOPE,
+        }
+    )
+    book = LeverageBook(entries={"BTC": LeverageSpec(mode="isolated", leverage=1)})
+
+    with capture_events() as logs:
+        with pytest.raises(VenueLeveragePushFailed):
+            asyncio.run(_exchange(post, clock=ManualClock(start_ns=0), leverage=book).start())
+
+    assert not [log for log in logs if log["event"] == NamedEvent.EXCHANGE_LEVERAGE_UNCHANGED], (
+        "a body that could not be read is never reported as the venue already agreeing"
+    )
+
+
+def test_a_held_position_under_a_re_typed_coin_is_never_read_as_flat() -> None:
+    """The one field in this read whose absence fails **open**.
+
+    Every other unreadable field refuses, and refusing costs a boot. A ``coin``
+    that is not a string costs nothing and says nothing: it keys the held map
+    under a value no configured symbol equals, so the symbol the account actually
+    holds reads *flat* — and flat is the branch that writes blind. A re-typed key
+    would therefore re-margin a live position through the exact branch ADR-0044
+    §5's refusal exists to keep it out of, silently, because nothing downstream
+    ever asks whether the key was legible.
+
+    So it is refused at the read, where "we are not reading what we think we are"
+    is still knowable. Deliberately stricter than ``_position``, which coerces the
+    same field with ``str()`` and is right to: there a mis-typed coin becomes a
+    symbol nothing matches, while here it becomes silence that authorises a
+    signed write.
+    """
+    row = _held("BTC", mode="cross", leverage=10)
+    row["position"]["coin"] = 3
+    post = FakeExchangeApi(
+        {
+            "userAbstraction": "disabled",
+            "clearinghouseState": _state(row),
+            "updateLeverage": OK_ENVELOPE,
+        }
+    )
+    book = LeverageBook(entries={"BTC": LeverageSpec(mode="cross", leverage=10)})
+
+    with pytest.raises(VenueLeveragePushFailed):
+        asyncio.run(_exchange(post, clock=ManualClock(start_ns=0), leverage=book).start())
+
+    assert "updateLeverage" not in [
+        request_type(url, payload) for (url, payload) in post.requests
+    ], "a position the venue reported is never written to on the strength of a key we cannot read"
+
+
+def test_an_account_read_answered_by_something_that_is_not_a_body_writes_nothing() -> None:
+    """The outermost of ``held_leverage``'s checks: not a mapping at all.
+
+    The field checks above it all assume there is a body to read fields *from*.
+    This is the case where there is not, and it matters for the same reason the
+    re-typed ``coin`` does: every symbol in the book reads flat off an empty map,
+    and flat is the branch that writes blind. A read that returned nothing
+    legible would otherwise re-margin the whole configured book against an
+    account whose positions this process never saw.
+
+    So it refuses at the outer edge, as the same unreadable body the field checks
+    raise — retried under the shared boot budget, then ``VenueLeveragePushFailed``
+    with the venue's own body quoted, since an operator debugging a failed boot
+    needs what actually came back.
+    """
+    clock = ManualClock(start_ns=0)
+    post = FakeExchangeApi(
+        {
+            "userAbstraction": "disabled",
+            "clearinghouseState": "ok",
+            "updateLeverage": OK_ENVELOPE,
+        }
+    )
+    book = LeverageBook(entries={"BTC": LeverageSpec(mode="cross", leverage=10)})
+
+    with pytest.raises(VenueLeveragePushFailed) as refusal:
+        asyncio.run(_exchange(post, clock=clock, leverage=book).start())
+
+    assert not isinstance(refusal.value, VenueLeverageMismatch), (
+        "a body that could not be read states no disagreement about anything"
+    )
+    assert "'ok'" in str(refusal.value), "the operator needs the body that was refused"
+    assert "updateLeverage" not in [
+        request_type(url, payload) for (url, payload) in post.requests
+    ], "an unreadable account read leaves every symbol unwritten, not blindly aligned"
+    assert clock.timestamp_ns() > 0, "an unreadable read is retried before it faults"
+
+
+def test_held_positions_the_venue_disagrees_about_refuse_to_start_naming_all_of_them() -> None:
+    """The refuse arm of the three-way split (ADR-0044 §5), and the reason the
+    account read exists at all.
+
+    Config wins at startup — but not over a position that is already open. The
+    venue would accept the write, and accepting it would silently re-margin
+    live risk: an operator who lowered BTC in the venue UI to de-risk would
+    find the boot quietly putting it back. So a disagreement about a *held*
+    symbol is a refusal, not a push, and the two symbols here disagree in the
+    two different ways one can — a leverage that differs and a mode that does.
+
+    **Every** disagreement is named in one error, the venue twin of
+    ``StoreAccountMismatch``: reporting one per restart makes an operator
+    discover a two-symbol drift by rebooting twice, and the second reboot is the
+    one that happens with the market moving. Both pairs are printed per symbol
+    because either side may be the wrong one — the fix is sometimes config and
+    sometimes the venue UI, and an error naming only what was configured cannot
+    say which.
+
+    Nothing is written on the way to the refusal. The disagreements are
+    collected across the whole book before it raises, so a boot that is going to
+    refuse never leaves half the account re-margined behind it.
+    """
+    post = FakeExchangeApi(
+        {
+            "userAbstraction": "disabled",
+            "clearinghouseState": _state(
+                _held("BTC", mode="cross", leverage=10),
+                _held("ETH", mode="isolated", leverage=5),
+            ),
+            "updateLeverage": OK_ENVELOPE,
+        }
+    )
+    book = LeverageBook(
+        entries={
+            "BTC": LeverageSpec(mode="cross", leverage=20),
+            "ETH": LeverageSpec(mode="cross", leverage=5),
+        }
+    )
+
+    with pytest.raises(VenueLeverageMismatch) as refusal:
+        asyncio.run(_exchange(post, leverage=book).start())
+
+    assert "BTC" in str(refusal.value) and "cross 20x" in str(refusal.value)
+    assert "cross 10x" in str(refusal.value)
+    assert "ETH" in str(refusal.value) and "isolated 5x" in str(refusal.value)
+    assert [request_type(url, payload) for (url, payload) in post.requests] == [
+        "userAbstraction",
+        "clearinghouseState",
+    ], "a boot that refuses re-margins nothing on the way there"
+
+
+def test_an_account_mode_the_gate_refuses_never_reaches_the_leverage_push() -> None:
+    """The gate is **ahead of** the push and gates it (ADR-0046 §3, ADR-0024
+    step 4) — asserted here as the absence of a signed write.
+
+    Distinct from the gate's own tests, which run an empty book and so have no
+    write to suppress: the book here holds a symbol the account is flat in, which
+    is precisely the case the push writes **blind**. So this fails the moment the
+    two guards are reordered, which the gate's tests would not notice.
+
+    Why the ordering is load-bearing in this direction: under a pooled mode the
+    perps clearinghouse is a sub-ledger, so the three-way split would be computed
+    against positions that are not the account's — and the branch that writes is
+    the one that acts on a *missing* position. A pooled account reads flat in the
+    exact place a blind write is issued, so a push that ran first would re-margin
+    symbols on the strength of a read that never described them.
+    """
+    post = FakeExchangeApi(
+        {
+            "userAbstraction": "unifiedAccount",
+            "clearinghouseState": _state(),
+            "updateLeverage": OK_ENVELOPE,
+        }
+    )
+    book = LeverageBook(entries={"BTC": LeverageSpec(mode="cross", leverage=10)})
+
+    with pytest.raises(VenueAccountModeUnsupported):
+        asyncio.run(_exchange(post, leverage=book).start())
+
+    assert [request_type(url, payload) for (url, payload) in post.requests] == ["userAbstraction"]
+
+
+def test_a_write_that_never_lands_retries_and_faults_inside_the_shared_boot_budget() -> None:
+    """One budget covers **both** guards (ADR-0044 §6, ADR-0043 §6's precedent).
+
+    The push runs in the same boot window as the mode gate and the barrier, and
+    faces the same transient-blip reality, so it reuses
+    ``startup_reconciliation_timeout`` rather than minting a second timeout. That
+    is a claim about the *whole boot*, not about the push in isolation: a push
+    that started a fresh 60 s window of its own would still retry, still fault,
+    and still look right in every assertion below except the elapsed one — while
+    a boot the operator budgeted a minute for took two.
+
+    So the gate is made to spend most of the budget first (five refused reads,
+    31 s of capped doubling) and the write then fails for good. Under one shared
+    deadline the boot faults at ~62 s; under two it would fault at ~92 s, past
+    the bound asserted here. The clock is virtual, so neither costs the suite
+    anything.
+
+    ``VenueLeveragePushFailed`` rather than ``VenueLeverageMismatch``: this is a
+    write that never landed, not a disagreement about a held position — the same
+    split the mode gate keeps between an unreadable mode and a refused one. The
+    operator needs the symbol left unaligned and the underlying failure, because
+    the account is now in neither the configured state nor a known one.
+    """
+    clock = ManualClock(start_ns=0)
+    post = _FlakyApi(
+        failures=5,
+        then={
+            "userAbstraction": "disabled",
+            "clearinghouseState": _state(),
+            "updateLeverage": ConnectionError("venue unreachable"),
+        },
+        error=TimeoutError("venue timed out"),
+    )
+    book = LeverageBook(entries={"BTC": LeverageSpec(mode="cross", leverage=10)})
+
+    with pytest.raises(VenueLeveragePushFailed) as refusal:
+        asyncio.run(_exchange(post, clock=clock, leverage=book).start())
+
+    writes = [
+        1 for (url, payload) in post.requests if request_type(url, payload) == "updateLeverage"
+    ]
+    assert len(writes) > 1, "a single attempt is not a bounded retry"
+    elapsed_seconds = clock.timestamp_ns() / 1_000_000_000
+    assert STARTUP_TIMEOUT_SECONDS <= elapsed_seconds < STARTUP_TIMEOUT_SECONDS + 30, (
+        "the push shares the gate's deadline; a second budget would fault at ~2x"
+    )
+    message = str(refusal.value)
+    assert "BTC" in message, "the operator needs the symbol left unaligned"
+    assert "venue unreachable" in message, "and the underlying failure"
+
+
+@pytest.mark.parametrize(
+    "rejection",
+    [
+        "Invalid leverage value",
+        (
+            "Isolated position does not have sufficient margin available to decrease "
+            "leverage. To decrease leverage, add margin to the position."
+        ),
+        "Cannot switch leverage type with open position.",
+    ],
+)
+def test_a_refused_write_faults_at_once_quoting_the_venue_s_own_string(rejection: str) -> None:
+    """The other half of the taxonomy (ADR-0044 §6 as corrected by #142): the
+    venue returns its refusal as a **value**, not an exception.
+
+    ``{"status": "err", "response": "<plain string>"}`` — a bare string in a
+    200-OK body, so an adapter that only caught exceptions would read a refused
+    write as a completed one and clear startup against an account it never
+    aligned. Inspecting the envelope is the whole point, and ``status == "ok"``
+    is the sole success: a no-op push and a real change return the *identical*
+    ``ok`` envelope, so there is no third outcome to tolerate.
+
+    It faults **at once**, which is the claim the elapsed assertion pins. The
+    transport failures above are transient by assumption and get the budget;
+    a refusal is the venue answering, and re-asking cannot change its mind
+    inside a boot window. Worse, the retry would re-send a *signed write*
+    against a live account once a second — so a refusal reaching the OSError
+    branch is not a slow error, it is a write storm.
+
+    The three strings are the ones ADR-0044 §6 recorded against the real venue,
+    parametrized rather than merged because they arrive on different causes and
+    a regression that special-cased any one of them into a retry — or into
+    ``VenueLeverageMismatch``, whose remedy is a different place entirely —
+    fails on the string it mishandled, by name. The engine deliberately does
+    **not** re-classify them: the venue's own sentence is what the operator can
+    act on, and a taxonomy over it would be a second encoding of a venue fact.
+    """
+    clock = ManualClock(start_ns=0)
+    post = FakeExchangeApi(
+        {
+            "userAbstraction": "disabled",
+            "clearinghouseState": _state(),
+            "updateLeverage": {"status": "err", "response": rejection},
+        }
+    )
+    book = LeverageBook(entries={"BTC": LeverageSpec(mode="cross", leverage=10)})
+
+    with pytest.raises(VenueLeveragePushFailed) as refusal:
+        asyncio.run(_exchange(post, clock=clock, leverage=book).start())
+
+    writes = [
+        1 for (url, payload) in post.requests if request_type(url, payload) == "updateLeverage"
+    ]
+    assert writes == [1], "a refusal is answered, not re-sent — retrying signs a write storm"
+    assert clock.timestamp_ns() == 0, "an answered question consumes no backoff"
+    message = str(refusal.value)
+    assert rejection in message, "the venue's own sentence is what the operator can act on"
+    assert "BTC" in message, "and the symbol left unaligned"
+
+
+def test_a_refusal_the_venue_sent_without_its_sentence_still_faults_at_once() -> None:
+    """A stated ``err`` is answered, whatever else the envelope carries.
+
+    ``status`` is the verdict, and the taxonomy is two-valued over it alone
+    (ADR-0044 §6). The sentence in ``response`` is what makes the refusal
+    actionable, but *reading* it must not be able to undo the verdict already
+    read: subscripting a key that is not there raises ``KeyError``, which is in
+    ``reading.UNREADABLE``, so a refusal missing its sentence would be caught by
+    the retry as though it were an unreadable body — and the signed write re-sent
+    once per backoff for the whole boot budget. That is the write storm the test
+    above forbids, reached through the message construction rather than through
+    the verdict, and the retry would be re-asking a question the venue has
+    already answered.
+    """
+    clock = ManualClock(start_ns=0)
+    post = FakeExchangeApi(
+        {
+            "userAbstraction": "disabled",
+            "clearinghouseState": _state(),
+            "updateLeverage": {"status": "err"},
+        }
+    )
+    book = LeverageBook(entries={"BTC": LeverageSpec(mode="cross", leverage=10)})
+
+    with pytest.raises(VenueLeveragePushFailed) as refusal:
+        asyncio.run(_exchange(post, clock=clock, leverage=book).start())
+
+    writes = [
+        1 for (url, payload) in post.requests if request_type(url, payload) == "updateLeverage"
+    ]
+    assert writes == [1], "a refusal is answered, not re-sent — retrying signs a write storm"
+    assert clock.timestamp_ns() == 0, "an answered question consumes no backoff"
+    assert "BTC" in str(refusal.value), "the operator still needs the symbol left unaligned"
+
+
+def test_a_write_answered_by_something_that_is_not_an_envelope_is_retried_then_faults() -> None:
+    """The third shape a write can come back as: not an adjudication at all.
+
+    ``ok`` is the sole success and ``err`` faults at once — but a body that is
+    not a mapping is neither, because the venue did not adjudicate anything we
+    can read. That is the same "we are not reading what we think we are" an
+    unreadable *read* is, so it takes the same branch: retried under the shared
+    boot budget, then ``VenueLeveragePushFailed``.
+
+    The guard is explicit rather than left to ``response["status"]`` raising on
+    its own, and the message is why. Subscripting a string raises a ``TypeError``
+    about string indices, which names neither the endpoint nor the body; an
+    operator reading a failed boot needs what the venue actually sent.
+    """
+    clock = ManualClock(start_ns=0)
+    post = FakeExchangeApi(
+        {
+            "userAbstraction": "disabled",
+            "clearinghouseState": _state(),
+            "updateLeverage": "ok",
+        }
+    )
+    book = LeverageBook(entries={"BTC": LeverageSpec(mode="cross", leverage=10)})
+
+    with pytest.raises(VenueLeveragePushFailed) as refusal:
+        asyncio.run(_exchange(post, clock=clock, leverage=book).start())
+
+    writes = [
+        1 for (url, payload) in post.requests if request_type(url, payload) == "updateLeverage"
+    ]
+    assert len(writes) > 1, "an unreadable answer is a transient failure, not an adjudication"
+    assert "BTC" in str(refusal.value), "the operator needs the symbol left unaligned"
 
 
 def test_a_leverage_above_the_venue_cap_refuses_to_start_on_live_too() -> None:

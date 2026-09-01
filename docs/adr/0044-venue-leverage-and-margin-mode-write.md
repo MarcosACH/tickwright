@@ -342,6 +342,32 @@ compute margin, liquidation price and effective leverage off it. §9's check run
 **both** paths, not at config load — `max_leverage` lives on the adapter-authored `InstrumentSpec`,
 which is why it cannot be an `AppConfig` validator like §3's.**)**
 
+**(Settled in [#180](https://github.com/MarcosACH/tickwright/issues/180)**, which implemented the
+push and made the three choices the corrections above left open.
+
+*`EXCHANGE_LEVERAGE_UNCHANGED` is re-sourced, not dropped* — emitted from the **skip** branch, per
+symbol, which is the only place "already aligned" is knowable once the write cannot tell a no-op
+from a change. Not from `activeAssetData`: §4's correction confirmed that route viable and this
+slice still declined it, because the pre-read the push already makes for §5's held-disagreement
+check answers the same question for the whole book in one request. There is deliberately **no**
+counterpart naming a push that landed — the push runs once and never again, so the absence of this
+name over a symbol in the book is what says the venue was moved.
+
+*A rate limit is a transport failure, not an `err` to classify.* This section lists rate-limiting
+under the envelope taxonomy, but the venue returns it as an HTTP error, so it arrives as the
+`OSError` the retry branch already catches. The taxonomy is therefore exactly two-valued as the
+correction states — `ok` ⇒ success, `err` ⇒ fault — and "a rate-limit rejection is transient and
+retried" is satisfied one layer down.
+
+*Two errors, not one.* `VenueLeverageMismatch` is §5's held disagreement — a fact the venue stated,
+never retried. A call that never landed inside the budget is `VenueLeveragePushFailed` instead, on
+the same line ADR-0046 §3 splits an unreadable mode from a refused one: nothing to compare, because
+the venue never answered, and an operator sent to the venue UI would be fixing a leverage that may
+already be right. The `err` envelope raises the same `VenueLeveragePushFailed` at once, quoting the
+venue's sentence **unclassified** — all three strings tabled above are already the most actionable
+thing anyone could say, and a taxonomy over them would be a second encoding of a venue fact, free to
+fall behind the strings it matches on.**)**
+
 ## 7. The seam: `Exchange.start()`, at ADR-0024 step 4
 
 The `Exchange` Protocol gains **`async def start(self) -> None`**, called by

@@ -10,10 +10,12 @@ adapter, never in ``domain``).
 
 from collections.abc import Mapping
 from decimal import Decimal
-from typing import Any
+from typing import Any, Final, assert_never, cast, get_args
 
 from tickwright.domain import (
     AccountSpec,
+    LeverageSpec,
+    MarginMode,
     Netting,
     VenueAccountState,
     VenuePositionState,
@@ -21,6 +23,15 @@ from tickwright.domain import (
 
 from .config import HyperliquidConfig
 from .reading import figure
+
+_REPORTED_MARGIN_MODES: Final = frozenset(get_args(MarginMode.__value__))
+"""The two ``leverage.type`` literals, taken from ``domain``'s own alias.
+
+Derived rather than transcribed: config and the venue read must agree on what a
+margin mode *is*, and a hand-copied pair here would be free to fall behind the
+type the comparison is made against. Through ``__value__`` because ``MarginMode``
+is a PEP 695 ``type`` statement — a ``TypeAliasType`` whose ``get_args`` is
+empty, which would make this an allowlist that refuses **every** mode."""
 
 
 def account_spec(config: HyperliquidConfig, *, address: str) -> AccountSpec:
@@ -42,6 +53,97 @@ def account_spec(config: HyperliquidConfig, *, address: str) -> AccountSpec:
         netting=Netting.NET,
         genesis_collateral=None,
     )
+
+
+def held_leverage(response: object) -> dict[str, LeverageSpec]:
+    """The same body's *stored* margin setting per held symbol, as config's type.
+
+    A second read of ``clearinghouseState`` rather than a field on
+    ``VenuePositionState``, and both halves of that are deliberate. It lives
+    **here** because this module is the one place a Hyperliquid field name for
+    these quantities appears, and the boot-time leverage push needs
+    ``assetPositions`` like every other account-grain read does. It is **not** a
+    position-state field because ``VenuePositionState`` models what a position
+    *is worth*, and the push consumes the setting at boot, before any
+    projection exists to carry it; extending the state object is the post-boot
+    drift check's problem, not this read's.
+
+    Returned as ``LeverageSpec`` rather than a pair, so the push's comparison is
+    one equality against the value an operator wrote and cannot drift by
+    comparing halves. Symbols the account is flat in are simply **absent** — the
+    venue reports the setting for exactly the positions it holds, which is what
+    makes one read enough for a whole boot (ADR-0044 §4).
+
+    **Every field this read touches is checked, and none is coerced** — the
+    three fail differently and all three fail badly. ``LeverageSpec`` is a plain
+    frozen dataclass, so anything trusted into it is trusted silently:
+
+    - an unrecognised **mode** (``reported_margin_mode``) or a re-typed
+      **value** compares unequal to every configured spec, so the boot reads a
+      venue *contract change* as a disagreement about a held position — the
+      branch that refuses to start, sending an operator to fix a leverage that
+      was never wrong;
+    - a re-typed **coin** is worse, because it fails **open**. It keys this map
+      under a value no configured symbol equals, so the symbol the account holds
+      reads *flat*, and flat is the branch that writes blind: a signed
+      ``updateLeverage`` onto live risk, through the exact branch ADR-0044 §5's
+      refusal exists to keep it out of, with nothing downstream ever asking
+      whether the key was legible.
+
+    That last one is why this is stricter than ``_position``, which coerces the
+    same field with ``str()`` and is right to. There a mis-typed coin becomes a
+    symbol nothing matches; here it becomes silence that authorises a write.
+
+    Refused as the ``TypeError``/``ValueError`` pair ``reading.UNREADABLE``
+    already names ("a re-typed figure", "a margin mode outside the two the venue
+    reports"), so the push retries the read and then faults on it rather than
+    reporting a disagreement the venue never stated.
+    """
+    if not isinstance(response, Mapping):
+        raise TypeError(f"non-mapping clearinghouseState response {response!r}")
+    held: dict[str, LeverageSpec] = {}
+    for row in response["assetPositions"]:
+        position = row["position"]
+        setting = position["leverage"]
+        coin = position["coin"]
+        if not isinstance(coin, str):
+            raise TypeError(f"non-string position coin {coin!r} in clearinghouseState")
+        leverage = setting["value"]
+        # ``bool`` is an ``int`` subclass, and a ``True`` taken for ``1`` would
+        # read a re-typed field as agreement with a configured ``1x``.
+        if not isinstance(leverage, int) or isinstance(leverage, bool):
+            raise TypeError(f"non-integer leverage value {leverage!r} in clearinghouseState")
+        held[coin] = LeverageSpec(mode=reported_margin_mode(setting), leverage=leverage)
+    return held
+
+
+def reported_margin_mode(setting: Mapping[str, Any]) -> MarginMode:
+    """One ``leverage`` sub-object's ``type``, as ``domain``'s own literal.
+
+    The single gate on what this venue is allowed to call a margin mode, read by
+    both consumers of the field in this module. Two checks would be two answers:
+    the allowlist here is *derived* from ``MarginMode`` while a hand-written
+    ``match`` is not, so a third literal added to the alias would widen one and
+    not the other, and the two functions reading one field would disagree about
+    whether the body was legible.
+
+    Refusing is the only branch that cannot be wrong, and it is the same refusal
+    for both callers. ``held_leverage`` must not trust an unrecognised mode into
+    ``LeverageSpec`` — a plain frozen dataclass would take it silently, and it
+    would then compare unequal to every configured spec, so the boot would read
+    a venue contract change as a *held disagreement* and send an operator to fix
+    a leverage that was never wrong. ``_isolated_collateral`` must not answer one
+    as cross — its ``None`` is the positive claim *this position is backed by the
+    account pool*, and nothing downstream can tell that apart from a measured
+    cross read.
+
+    Raised as the ``ValueError`` ``reading.UNREADABLE`` already names for exactly
+    this case ("a margin mode outside the two the venue reports").
+    """
+    mode = setting["type"]
+    if mode not in _REPORTED_MARGIN_MODES:
+        raise ValueError(f"unrecognized margin mode {mode!r} in clearinghouseState")
+    return cast(MarginMode, mode)
 
 
 def normalize_account_state(response: object) -> VenueAccountState:
@@ -161,10 +263,23 @@ def _isolated_collateral(
     free margin by the whole bucket; freezing instead is inv 1 at the one grain
     where this module could otherwise degrade quietly (ADR-0044 pins the pair
     ``cross``/``isolated``).
+
+    The refusal is ``reported_margin_mode``'s rather than one written here, which
+    makes the match below exhaustive over ``MarginMode`` and the ``assert_never``
+    a **type error** rather than a runtime one: a third literal added to the
+    alias stops this file compiling, at the one branch that would otherwise have
+    to guess what it means.
     """
-    match leverage["type"]:
+    mode = reported_margin_mode(leverage)
+    match mode:
         case "cross":
             return None
         case "isolated":
             return margin_used - unrealized_pnl
-    raise ValueError(f"unrecognized margin mode {leverage['type']!r}")
+    # Reached only if ``MarginMode`` grows a literal this match does not answer,
+    # and then not at runtime: ``mode`` is narrowed to the unhandled literal
+    # here, so the call is a *type* error. Bound to a name rather than written
+    # ``assert_never(leverage["type"])`` — that expression is ``Any``, which
+    # ``assert_never`` accepts unconditionally, and the guard would silently
+    # check nothing (verified by adding a third literal and watching mypy pass).
+    assert_never(mode)

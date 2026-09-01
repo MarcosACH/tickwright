@@ -23,6 +23,8 @@ from .errors import (
     StoreAccountMismatch,
     VenueAccountModeUnsupported,
     VenueFactUnsupported,
+    VenueLeverageMismatch,
+    VenueLeveragePushFailed,
     VenueReadUnresolvable,
 )
 from .events import (
@@ -74,6 +76,7 @@ from .leverage import (
 )
 from .order import Order
 from .ownership import SymbolOwnership
+from .pacing import Backoff, Deadline
 from .position import (
     UNATTRIBUTED,
     Position,
@@ -111,6 +114,8 @@ __all__ = [
     "StoreAccountMismatch",
     "VenueAccountModeUnsupported",
     "VenueFactUnsupported",
+    "VenueLeverageMismatch",
+    "VenueLeveragePushFailed",
     "VenueReadUnresolvable",
     # events + value types
     "DEFAULT_LEVERAGE",
@@ -180,6 +185,9 @@ __all__ = [
     "account_unrealized_pnl",
     "account_view",
     "position_view",
+    # retry pacing
+    "Backoff",
+    "Deadline",
     # seam Protocols
     "Clock",
     "EventBus",

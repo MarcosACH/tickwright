@@ -8,6 +8,18 @@ import json
 
 from tickwright.adapters.clock import ManualClock
 
+TEST_SIGNING_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+"""Anvil's account #0 — a publicly-known throwaway key, safe in a test file.
+
+Named once because it is a constant rather than a fixture: no test varies it,
+and its address is a fixed function of it, which several tests rely on as an
+*independent* expected value — a second literal that drifted would quietly stop
+being that. It lives beside the fakes because every caller already reaches here
+for the POST seam it is used with, and the test tree is a flat namespace
+(``pythonpath = ["tests/_support"]``), so ``from hyperliquid_fakes import
+TEST_SIGNING_KEY`` works from any suite that needs a live-adapter double.
+"""
+
 
 class RecordingClock(ManualClock):
     """A ``ManualClock`` that also records what it was asked to sleep.

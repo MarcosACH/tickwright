@@ -26,9 +26,8 @@ whose contract had changed.
 
 from collections.abc import Awaitable, Callable
 
-from tickwright.domain import Clock
+from tickwright.domain import Backoff, Clock
 
-from .backoff import Backoff
 from .config import HyperliquidConfig
 from .transport import Connect, WsConnection
 

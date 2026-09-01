@@ -15,7 +15,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-from hyperliquid_fakes import FakeExchangeApi
+from hyperliquid_fakes import TEST_SIGNING_KEY, FakeExchangeApi
 from ledgers import GENESIS
 from pydantic import SecretStr, ValidationError
 
@@ -122,10 +122,6 @@ def test_exchange_discriminant_selects_the_paper_exchange(tmp_path: Path) -> Non
     assert isinstance(exchange, PaperExchange)
     # The venue owns the specs (ADR-0031): config flowed through to the seam.
     assert exchange.instrument_specs() == {"BTC": _SPEC}
-
-
-# Anvil's account #0 — a publicly-known throwaway key, safe in a test file.
-TEST_SIGNING_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 
 
 def test_exchange_discriminant_selects_hyperliquid_with_meta_sourced_specs(

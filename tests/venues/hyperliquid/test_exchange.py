@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 from eth_account import Account
 from hyperliquid.utils.signing import recover_agent_or_user_from_l1_action
-from hyperliquid_fakes import FakeExchangeApi, request_type, resting_response
+from hyperliquid_fakes import TEST_SIGNING_KEY, FakeExchangeApi, request_type, resting_response
 from pydantic import SecretStr
 from seam_claims import assert_every_member_is_claimed
 
@@ -46,8 +46,6 @@ from tickwright.venues.hyperliquid import (
     HyperliquidUniverse,
 )
 
-# Anvil's account #0 — a publicly-known throwaway key, safe in a test file.
-TEST_SIGNING_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 CLOID = "0x" + "ab" * 16
 
 BTC_SPEC = InstrumentSpec(

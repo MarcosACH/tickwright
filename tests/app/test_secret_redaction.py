@@ -12,12 +12,10 @@ from io import StringIO
 from pathlib import Path
 
 import structlog
+from hyperliquid_fakes import TEST_SIGNING_KEY
 
 from tickwright.app.config import AppConfig
 from tickwright.observability.logging import configure_logging
-
-# Anvil's account #0 — a publicly-known throwaway key, safe in a test file.
-TEST_SIGNING_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 
 
 def _config(tmp_path: Path, **overrides: object) -> AppConfig:

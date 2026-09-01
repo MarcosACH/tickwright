@@ -22,6 +22,7 @@ from tickwright.domain import (
     EMPTY_LEVERAGE_BOOK,
     AccountSpec,
     Clock,
+    Deadline,
     EventBus,
     FillReport,
     InstrumentSpec,
@@ -44,7 +45,7 @@ from . import transport
 from .account import account_spec, normalize_account_state
 from .config import HyperliquidConfig
 from .funding import FundingIngest
-from .preflight import verify_account_mode
+from .preflight import push_leverage, verify_account_mode
 from .reading import UNREADABLE, failed_send, figure, read, refuse_non_usdc, unreadable_body
 from .transport import Connect, PostJson, open_websocket
 from .universe import HyperliquidUniverse
@@ -143,12 +144,20 @@ class HyperliquidExchange:
         mismatches computed against a margin model that does not apply would be
         noise on top of an error. The leverage push (ADR-0044 §7) lands behind
         it. Both refusals precede the barrier, so neither can let an order out.
+
+        The two share **one** deadline, opened here and spent between them
+        (ADR-0044 §6): they run in the same boot window against the same venue,
+        so a budget each would let a boot the operator sized at one
+        ``startup_reconciliation_timeout`` take two before the barrier gets its
+        own. Whatever the gate spends retrying is gone from what the push has
+        left.
         """
+        deadline = Deadline.opening(clock=self._clock, budget_seconds=self._startup_timeout_seconds)
         await verify_account_mode(
             info=self._info,
             address=self._user_address,
             clock=self._clock,
-            timeout_seconds=self._startup_timeout_seconds,
+            deadline=deadline,
         )
         # The same ``domain`` check paper runs, against specs this adapter
         # sourced from the meta endpoint rather than from config (ADR-0044 §9).
@@ -156,6 +165,18 @@ class HyperliquidExchange:
         # this bound protects does not apply, so complaining about a leverage
         # would be noise on top of an error.
         self._leverage.validate_against(self._universe.specs)
+        # Ahead of the push on purpose: §6 classifies the venue's own
+        # ``"Invalid leverage value"`` as a config bug §9 should already have
+        # caught, so the bound clears before anything reaches the venue.
+        await push_leverage(
+            info=self._info,
+            send=self._send_action,
+            address=self._user_address,
+            book=self._leverage,
+            asset_indices=self._universe.asset_indices,
+            clock=self._clock,
+            deadline=deadline,
+        )
 
     async def run(self) -> None:
         """Ingest the venue's funding payments for as long as the run lives.
