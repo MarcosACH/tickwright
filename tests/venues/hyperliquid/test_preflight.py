@@ -560,6 +560,37 @@ def test_held_positions_the_venue_disagrees_about_refuse_to_start_naming_all_of_
     ], "a boot that refuses re-margins nothing on the way there"
 
 
+def test_an_account_mode_the_gate_refuses_never_reaches_the_leverage_push() -> None:
+    """The gate is **ahead of** the push and gates it (ADR-0046 §3, ADR-0024
+    step 4) — asserted here as the absence of a signed write.
+
+    Distinct from the gate's own tests, which run an empty book and so have no
+    write to suppress: the book here holds a symbol the account is flat in, which
+    is precisely the case the push writes **blind**. So this fails the moment the
+    two guards are reordered, which the gate's tests would not notice.
+
+    Why the ordering is load-bearing in this direction: under a pooled mode the
+    perps clearinghouse is a sub-ledger, so the three-way split would be computed
+    against positions that are not the account's — and the branch that writes is
+    the one that acts on a *missing* position. A pooled account reads flat in the
+    exact place a blind write is issued, so a push that ran first would re-margin
+    symbols on the strength of a read that never described them.
+    """
+    post = FakeExchangeApi(
+        {
+            "userAbstraction": "unifiedAccount",
+            "clearinghouseState": _state(),
+            "updateLeverage": OK_ENVELOPE,
+        }
+    )
+    book = LeverageBook(entries={"BTC": LeverageSpec(mode="cross", leverage=10)})
+
+    with pytest.raises(VenueAccountModeUnsupported):
+        asyncio.run(_exchange(post, leverage=book).start())
+
+    assert [request_type(url, payload) for (url, payload) in post.requests] == ["userAbstraction"]
+
+
 def test_a_leverage_above_the_venue_cap_refuses_to_start_on_live_too() -> None:
     """The identical bound, refused identically on the other path (ADR-0044 §9).
 
