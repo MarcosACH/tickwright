@@ -17,7 +17,7 @@ from pydantic import SecretStr, ValidationError
 from tickwright.adapters.feed import ReplayFeedConfig
 from tickwright.adapters.paper import PaperExchangeConfig
 from tickwright.app.config import AppConfig, AppSettings, StrategyConfig
-from tickwright.domain import LeverageSpec, Side
+from tickwright.domain import UNATTRIBUTED, LeverageSpec, Side
 from tickwright.venues.hyperliquid import HyperliquidConfig
 
 _HOSTILE_ENV_FILE = (
@@ -202,9 +202,9 @@ def test_the_traded_symbol_set_is_derived_once_for_both_readers(tmp_path: Path) 
     strategy-declared set (ADR-0044 §3), deliberately not the feed's
     subscription list, which may carry context symbols nothing trades.
 
-    Duplicate-free and in declaration order: ``StrategyHost`` refuses two
-    strategies over one symbol, but that fires at registration and this is read
-    at config load, ahead of it.
+    In declaration order, and over distinct symbols because the model refuses
+    anything else: ADR-0034's disjointness rule is a load-time validator, so a
+    duplicate is unreachable here rather than deduped here.
     """
     (tmp_path / "ticks.jsonl").touch()
 
@@ -220,8 +220,154 @@ def test_the_traded_symbol_set_is_derived_once_for_both_readers(tmp_path: Path) 
                 side=Side.BUY,
                 quantity=Decimal("0.5"),
             )
-            for strategy_id, symbol in (("eth", "ETH"), ("btc", "BTC"), ("btc-2", "BTC"))
+            for strategy_id, symbol in (("eth", "ETH"), ("btc", "BTC"), ("sol", "SOL"))
         ],
     )
 
-    assert config.traded_symbols == ("ETH", "BTC")
+    assert config.traded_symbols == ("ETH", "BTC", "SOL")
+
+
+def test_a_strategy_may_not_claim_the_reserved_unattributed_id() -> None:
+    """``__unattributed__`` is the ledger's foreign-flow partition, not a name.
+
+    The sentinel is what the store writes where the in-memory partition key is
+    ``None`` (ADR-0043 §2), so a strategy legitimately called that would have
+    its book merged with flow the engine never placed — silently, and on the
+    key every Σ is folded over. Refused at config load, which is the earliest
+    the id exists; ``StrategyHost.register`` refuses it again for the strategies
+    that never come through a config.
+    """
+    with pytest.raises(ValidationError, match=UNATTRIBUTED):
+        StrategyConfig(
+            kind="single_shot_market",
+            strategy_id=UNATTRIBUTED,
+            symbol="BTC",
+            side=Side.BUY,
+            quantity=Decimal("0.5"),
+        )
+
+
+def test_two_strategies_may_not_declare_one_symbol(tmp_path: Path) -> None:
+    """ADR-0034's disjointness rule, refused before anything is built.
+
+    ``StrategyHost.register`` is where the rule is enforced for a strategy the
+    composition root never saw, but a *configured* overlap is visible here — and
+    ``build_engine`` opens the store, resolves leverage and constructs the venue
+    before it reaches the registration loop, so leaving it to the host means a
+    typo'd `TICKWRIGHT_STRATEGIES` creates a database file (or a live signing
+    exchange) on its way to being refused. The same two-gate placement the
+    reserved ``__unattributed__`` id already has: earliest where the value
+    exists, last before it keys a ledger row.
+
+    Every offender at once, like the leverage dead-entry check one validator
+    over: an operator who overlapped two pairs learns both on this run.
+    """
+    (tmp_path / "ticks.jsonl").touch()
+
+    def _strategy(strategy_id: str, symbol: str) -> StrategyConfig:
+        return StrategyConfig(
+            kind="single_shot_market",
+            strategy_id=strategy_id,
+            symbol=symbol,
+            side=Side.BUY,
+            quantity=Decimal("0.5"),
+        )
+
+    with pytest.raises(ValidationError) as refused:
+        AppConfig(
+            replay=ReplayFeedConfig(path=tmp_path / "ticks.jsonl"),
+            paper=PaperExchangeConfig(genesis_collateral=Decimal("100000")),
+            strategies=[
+                _strategy("alpha", "BTC"),
+                _strategy("beta", "BTC"),
+                _strategy("gamma", "ETH"),
+                _strategy("delta", "ETH"),
+            ],
+        )
+
+    message = str(refused.value)
+    assert "beta declares" in message and "BTC (owned by alpha)" in message
+    assert "delta declares" in message and "ETH (owned by gamma)" in message
+    assert "separate account" in message
+
+
+def test_two_strategies_may_not_share_one_id(tmp_path: Path) -> None:
+    """``StrategyHost``'s oldest fail-fast, mirrored where the ids are all visible.
+
+    A duplicate ``strategy_id`` silently corrupts both strategies: ids key seqs,
+    snapshots, ledger partitions and ``OrderEvent`` routing (ADR-0018). The
+    registry has refused it since it existed, but only at registration — and
+    ``build_engine`` opens the store, resolves leverage and constructs the venue
+    before its registration loop, so the same typo that ADR-0034's disjointness
+    rule now catches at load was still paying for a database file (or a live
+    signing exchange) when the collision was in the id rather than the symbol.
+    A ``StrategyConfig`` cannot see it alone; this is the smallest scope that
+    can.
+
+    Distinct symbols on purpose, so the refusal can only be about the id.
+    """
+    (tmp_path / "ticks.jsonl").touch()
+
+    def _strategy(strategy_id: str, symbol: str) -> StrategyConfig:
+        return StrategyConfig(
+            kind="single_shot_market",
+            strategy_id=strategy_id,
+            symbol=symbol,
+            side=Side.BUY,
+            quantity=Decimal("0.5"),
+        )
+
+    with pytest.raises(ValidationError) as refused:
+        AppConfig(
+            replay=ReplayFeedConfig(path=tmp_path / "ticks.jsonl"),
+            paper=PaperExchangeConfig(genesis_collateral=Decimal("100000")),
+            strategies=[
+                _strategy("alpha", "BTC"),
+                _strategy("alpha", "ETH"),
+                _strategy("beta", "SOL"),
+                _strategy("beta", "DOGE"),
+            ],
+        )
+
+    message = str(refused.value)
+    assert "alpha" in message and "beta" in message
+    assert "duplicate" in message
+
+
+def test_a_duplicate_id_on_one_symbol_is_refused_as_a_duplicate_id(tmp_path: Path) -> None:
+    """The doubly-faulty declaration is reported as the fault that explains it.
+
+    ``[alpha/BTC, alpha/BTC]`` breaks both cross-strategy rules at once, and
+    which one it is refused as is a decision rather than an accident: pydantic
+    runs ``mode="after"`` validators in definition order, so the id check
+    sitting above the disjointness check in ``config.py`` is the whole of the
+    guarantee. Read through the disjointness wording the same config refuses as
+    ``alpha`` colliding with ``alpha`` and prescribes a separate account for it,
+    which is nonsense — there is one strategy, declared twice.
+
+    The negative assertion is what actually pins the ordering; the positive one
+    passes under either order, because a duplicate id is refused either way.
+    Reordering the two validators, or landing a third between them, fails here.
+    """
+    (tmp_path / "ticks.jsonl").touch()
+
+    def _strategy(strategy_id: str, symbol: str) -> StrategyConfig:
+        return StrategyConfig(
+            kind="single_shot_market",
+            strategy_id=strategy_id,
+            symbol=symbol,
+            side=Side.BUY,
+            quantity=Decimal("0.5"),
+        )
+
+    with pytest.raises(ValidationError) as refused:
+        AppConfig(
+            replay=ReplayFeedConfig(path=tmp_path / "ticks.jsonl"),
+            paper=PaperExchangeConfig(genesis_collateral=Decimal("100000")),
+            strategies=[_strategy("alpha", "BTC"), _strategy("alpha", "BTC")],
+        )
+
+    message = str(refused.value)
+    assert "duplicate strategy_id declared: alpha" in message
+    assert "owned by alpha" not in message
+    assert "separate account" not in message

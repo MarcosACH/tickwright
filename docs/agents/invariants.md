@@ -96,3 +96,22 @@ Consumed by `/code-review` (any regression is BLOCKING) and `/python-codebase-ma
    points: an unverified mode is never read as an unchanged one. Live-only; paper has no venue and
    no mode.*
    (ADR-0046, ADR-0034, ADR-0040, ADR-0042, ADR-0043)
+9. **Symbol ownership is disjoint.** At most one strategy may declare a symbol — `(strategy,
+   symbol)` disjoint per account, which with one account per process reads as disjoint
+   process-wide. Not a preference but a consequence of `NET` netting: a one-way venue merges two
+   same-symbol strategies into a single real position, so their per-strategy books would stay
+   arithmetically consistent while describing an isolation the venue does not provide, and it is
+   this rule that collapses per-strategy attribution to *exact*. Same-symbol isolation is a
+   separate account, and therefore a separate process. *Enforced at two gates that must not come
+   to disagree about what an overlap is: `AppConfig` refuses a **configured** overlap at load —
+   before `build_engine` opens a store, resolves the leverage book or constructs a live signing
+   exchange — and `StrategyHost.register` refuses a **registered** one, which is the only gate a
+   strategy built without a config meets. Both fold the one `domain` value, `SymbolOwnership`,
+   which holds the symbol→owner index, the collision sort and the refusal wording; the exception
+   type is all they may differ in, pydantic needing a `ValueError` where the registry raises
+   `InvariantViolation`. Each names every offender in one pass. The same two-gate placement holds
+   for the other two cross-strategy identity rules — a duplicate `strategy_id` (ADR-0018) and the
+   reserved `__unattributed__` id (ADR-0043 §2) — earliest where the value exists, last before it
+   keys a ledger row. Unconditional in v1, both shipped adapters being `NET`; a `HEDGE` adapter is
+   the documented extension point that would relax it, and Hyperliquid's positions are `oneWay`.*
+   (ADR-0034, ADR-0038, ADR-0018, ADR-0043)

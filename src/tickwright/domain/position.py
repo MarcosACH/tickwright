@@ -22,6 +22,18 @@ from .events import OrderFillEvent
 
 _ZERO = Decimal("0")
 
+# The reserved name of the unattributed partition (ADR-0043 §2). ADR-0038 models
+# the partition as ``strategy_id: None`` in memory; the store column is
+# ``NOT NULL`` and part of the primary key, so this literal is what stands in its
+# place on disk. It lives here rather than at that boundary because the three
+# things that must agree about it do not share a layer: the adapter *writes* it,
+# and ``StrategyConfig`` and ``StrategyHost.register`` *refuse* it, so a second
+# copy in ``app`` or ``engine`` is a copy that can drift from the disk format it
+# is protecting. Reserved exactly, not by grammar — a strategy called
+# ``__unattributed__`` would merge its book with flow the engine never placed,
+# and nothing narrower than the collision itself needs forbidding.
+UNATTRIBUTED = "__unattributed__"
+
 
 class PositionChange(StrEnum):
     """What a fill did to a position — the aggregate's own classification.
