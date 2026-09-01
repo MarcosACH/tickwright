@@ -213,6 +213,19 @@ async def push_leverage(
     the ones holding a position, and that read reports leverage for exactly
     those.
 
+    On a **live first start** that read is the boot's second-to-last, and the
+    barrier's ``materialise_account`` step makes the same ``clearinghouseState``
+    query moments later (ADR-0043 §6). Two round-trips to one endpoint is an
+    accepted cost, not an oversight: it happens only in the one state
+    ``PortfolioProjection.is_opened()`` is ``False`` — a live account whose
+    ledger row does not exist yet — and never on a restart. Handing this
+    response forward instead would put a venue snapshot in an adapter's keeping
+    across the seam, and the barrier *re-drives its steps from the top*, so the
+    cached copy would be re-served on a retry as though it were fresh. That is
+    exactly the stale-truth failure ``fetch_account_state``'s "``None`` means no
+    venue truth" contract exists to prevent, and it would be bought here for one
+    saved request on one boot in the life of an account.
+
     Every venue call here is retried against the *same* ``deadline`` the mode
     gate ahead of it retried against (§6): the push runs in the same boot window
     and faces the same transient-blip reality, so it reuses the barrier's budget
