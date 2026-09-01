@@ -96,3 +96,18 @@ Consumed by `/code-review` (any regression is BLOCKING) and `/python-codebase-ma
    points: an unverified mode is never read as an unchanged one. Live-only; paper has no venue and
    no mode.*
    (ADR-0046, ADR-0034, ADR-0040, ADR-0042, ADR-0043)
+9. **Config wins at boot; the venue wins in flight.** Per-symbol leverage and margin mode are
+   pushed to the venue **once**, at startup, behind the mode gate of 8 and ahead of the barrier —
+   and never again, so an operator who de-risks a position in the venue UI is not silently
+   reverted by a later re-push. Scope is every strategy-traded symbol, the defaulted ones
+   included: skipping an unconfigured symbol leaves the venue levered while the model computes
+   full-notional margin, *understating* risk. *One account read splits the book three ways —
+   aligned skips (the only place "already aligned" is knowable, since a no-op write returns the
+   identical `ok` envelope), flat is written blind, and a **held** position config disagrees with
+   refuses to start, naming every disagreeing symbol and both pairs at once. The refusal is
+   collected across the whole book before the first write, so a boot that refuses never leaves the
+   account half re-margined. Every field the read splits on is checked and none coerced: a
+   re-typed one must not become a disagreement the venue never stated, and must never read as flat
+   — flat is the branch that writes. Live-only; paper validates the same bound and writes
+   nothing.*
+   (ADR-0044, ADR-0046, ADR-0040, ADR-0031)
