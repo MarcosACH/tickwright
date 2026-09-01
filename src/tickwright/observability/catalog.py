@@ -84,6 +84,12 @@ class NamedEvent(StrEnum):
     # appeared solely on disagreement could not tell a healthy book from a
     # cadence that stopped running.
     ACCOUNT_RECONCILED = "account.reconciled"
+    # The same grain's failed read: the account anchor came back empty, so the
+    # cycle healed nothing rather than reading an outage as a flat book
+    # (ADR-0011 inv 1). Its own name beside the order grain's ``reconcile.frozen``
+    # because the grain differs — this one froze a whole account cross-check, not
+    # a cloid — and because the two never share a scope field.
+    ACCOUNT_RECONCILE_FROZEN = "account.reconcile_frozen"
 
     # A live-exchange request that yielded no usable answer, on either path and
     # for either reason (``HyperliquidExchange``): a send or read that failed in

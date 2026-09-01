@@ -754,6 +754,22 @@ def _drive_account_reconciled() -> None:
     asyncio.run(go())
 
 
+def _drive_account_reconcile_frozen() -> None:
+    """The account cycle's anchor read fails: the cycle freezes, heals nothing
+    and says so (``account.reconcile_frozen``, ADR-0011 inv 1) — the record an
+    operator needs to tell a cross-check that stopped from a book that agreed."""
+
+    async def go() -> None:
+        venue = _LiveShapedVenue(state=None)
+        projection = PortfolioProjection(
+            spec=venue.account_spec(), store=SQLiteStore(":memory:"), clock=ManualClock()
+        )
+        projection.recover()
+        await LedgerReconciliation(exchange=venue, portfolio=projection).reconcile_account()
+
+    asyncio.run(go())
+
+
 # --- The catalog walk --------------------------------------------------------
 
 # Every NamedEvent → a scenario that drives its real path. Several of the saga
@@ -788,6 +804,7 @@ SCENARIOS: dict[NamedEvent, Callable[[], None]] = {
     NamedEvent.GHOST_RECONCILED: _drive_ghost_reconciled,
     NamedEvent.RECONCILE_FROZEN: _drive_frozen,
     NamedEvent.ACCOUNT_RECONCILED: _drive_account_reconciled,
+    NamedEvent.ACCOUNT_RECONCILE_FROZEN: _drive_account_reconcile_frozen,
     NamedEvent.EXCHANGE_REQUEST_FAILED: _drive_exchange_request_failed,
     NamedEvent.EXCHANGE_ACTION_REJECTED: _drive_exchange_action_rejected,
 }

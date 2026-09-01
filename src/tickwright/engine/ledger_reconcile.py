@@ -25,13 +25,23 @@ class LedgerReconciliation:
         self._exchange = exchange
         self._portfolio = portfolio
 
-    async def reconcile_account(self) -> tuple[()]:
+    async def reconcile_account(self) -> tuple[()] | None:
         """One cycle: read the venue account once, classify what disagrees.
 
         The single ``fetch_account_state`` read is the anchor and the whole
         cycle's venue cost (ADR-0034) — the account snapshot carries every
         symbol, so nothing here polls per symbol.
+
+        ``None`` is a **frozen** cycle: the read failed, so there is nothing to
+        reconcile against and nothing may be inferred from its absence — least
+        of all a flat book (ADR-0011 inv 1). An empty tuple is the opposite
+        answer, a book that agreed, and the two are deliberately not collapsed
+        into one. The freeze costs this cycle alone; the next deadline reads
+        again.
         """
-        await self._exchange.fetch_account_state()
+        state = await self._exchange.fetch_account_state()
+        if state is None:
+            named_event(NamedEvent.ACCOUNT_RECONCILE_FROZEN)
+            return None
         named_event(NamedEvent.ACCOUNT_RECONCILED)
         return ()

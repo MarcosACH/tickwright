@@ -11,14 +11,18 @@ case asserts what the cycle *concludes* about a book a fill actually moved.
 import asyncio
 from decimal import Decimal
 
+from ledgers import book_fill
 from venue_doubles import LIVE_ACCOUNT_ID, LiveVenueDouble, account_state
 
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     AccountSpec,
+    OrderFilled,
     PlaceOrder,
+    Side,
     Store,
+    VenueAccountState,
     VenueOrderView,
     VenueReadFailure,
 )
@@ -35,7 +39,20 @@ class _AccountVenue(LiveVenueDouble):
     meaning: the account cycle is anchored on one account snapshot, so a cloid
     read or an order action reaching the seam is the specification being broken,
     not a case needing another stub.
+
+    ``answers`` is consumed one per cycle and the last one repeats, so a case
+    can put a **failed** read in front of a good one and assert the cadence
+    recovers at its next deadline rather than staying frozen — a distinction a
+    double answering one fixed value could not express.
     """
+
+    def __init__(self, *answers: VenueAccountState | None) -> None:
+        super().__init__(state=answers[0])
+        self._answers = list(answers)
+
+    async def fetch_account_state(self) -> VenueAccountState | None:
+        self.account_reads += 1
+        return self._answers.pop(0) if len(self._answers) > 1 else self._answers[0]
 
     async def place(self, order: PlaceOrder) -> None:
         raise AssertionError("the account cycle places nothing")
@@ -65,6 +82,39 @@ def _ledger(store: Store, *, equity: str) -> PortfolioProjection:
     return projection
 
 
+def _book_fill(
+    projection: PortfolioProjection,
+    *,
+    quantity: str,
+    price: str,
+    symbol: str = "BTC",
+    strategy_id: str = "alpha",
+) -> None:
+    """Fold one filled buy into the ledger — the only way a partition exists.
+
+    A case that wants the cycle to look at a *position* books one rather than
+    writing the row itself: what the venue is compared against has to be a book
+    the fill path actually produced.
+    """
+    book_fill(
+        projection,
+        OrderFilled(
+            ts_event=1_000,
+            ts_init=1_000,
+            cloid=f"0x{strategy_id}-{symbol}",
+            strategy_id=strategy_id,
+            signal_id=f"{strategy_id}:{symbol}:1",
+            symbol=symbol,
+            trade_id=f"{symbol}-1",
+            quantity=Decimal(quantity),
+            price=Decimal(price),
+            cum_qty=Decimal(quantity),
+            fee=Decimal("0"),
+        ),
+        side=Side.BUY,
+    )
+
+
 def test_a_cycle_whose_snapshot_matches_the_ledger_reports_no_divergence() -> None:
     """The agreeing pass, and the anchor it rests on: **one** account read is the
     whole cycle's venue cost (ADR-0034), so the read count is also the assertion
@@ -75,7 +125,7 @@ def test_a_cycle_whose_snapshot_matches_the_ledger_reports_no_divergence() -> No
     """
     store = SQLiteStore(":memory:")
     projection = _ledger(store, equity="100000")
-    venue = _AccountVenue(state=account_state("100000"))
+    venue = _AccountVenue(account_state("100000"))
     cycle = LedgerReconciliation(exchange=venue, portfolio=projection)
 
     with capture_events() as logs:
@@ -85,3 +135,34 @@ def test_a_cycle_whose_snapshot_matches_the_ledger_reports_no_divergence() -> No
     assert venue.account_reads == 1
     assert [log["event"] for log in logs] == [NamedEvent.ACCOUNT_RECONCILED.value]
     assert projection.account().cash == Decimal("100000")
+
+
+def test_a_failed_account_read_freezes_the_cycle_and_leaves_the_book_alone() -> None:
+    """The anchor failed, so there is nothing to reconcile *against* — and the
+    one answer that must never be inferred from it is a flat book (ADR-0011
+    inv 1). ``None`` is that freeze, distinct from the empty tuple above.
+
+    A frozen cycle is also not a stuck one: the next deadline reads again, and
+    a venue that has come back reconciles normally. The freeze costs one cycle,
+    which is exactly why it is recorded under its own name rather than left as
+    the silent early return an operator would have to infer from the gap in
+    ``account.reconciled``.
+    """
+    store = SQLiteStore(":memory:")
+    projection = _ledger(store, equity="100000")
+    _book_fill(projection, quantity="0.002", price="64809")
+    held = projection.open_positions(strategy_id="alpha")
+    cash = projection.account().cash
+    venue = _AccountVenue(None, account_state("100000"))
+    cycle = LedgerReconciliation(exchange=venue, portfolio=projection)
+
+    with capture_events() as logs:
+        frozen = asyncio.run(cycle.reconcile_account())
+
+    assert frozen is None
+    assert [log["event"] for log in logs] == [NamedEvent.ACCOUNT_RECONCILE_FROZEN.value]
+    assert projection.open_positions(strategy_id="alpha") == held
+    assert projection.account().cash == cash
+
+    assert asyncio.run(cycle.reconcile_account()) is not None  # the venue came back
+    assert venue.account_reads == 2
