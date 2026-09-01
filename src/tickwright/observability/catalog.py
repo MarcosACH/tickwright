@@ -46,6 +46,22 @@ class NamedEvent(StrEnum):
     # its number is in the operator's own config, not read from anywhere.
     ACCOUNT_MATERIALISED = "account.materialised"
 
+    # One completed account-grain cross-check (``LedgerReconciliation``,
+    # ADR-0034). Emitted on every cycle, agreeing or not, because "the ledger was
+    # compared against the venue and agreed" is the record an operator needs to
+    # tell a healthy cadence from one that silently stopped running — a name that
+    # only spoke on divergence would be indistinguishable from a dead cadence.
+    ACCOUNT_RECONCILED = "account.reconciled"
+    # A venue account read that yielded no truth, healing nothing (ADR-0011
+    # inv 1). ``step`` says which of the account grain's two readers froze:
+    # ``barrier`` is the startup materialisation, whose ``None`` additionally
+    # faults the process rather than merely skipping a cycle, and ``cadence`` is
+    # the running cross-check, which resumes on the next successful read. One
+    # name for both because the grain and the cause are the same, and an operator
+    # watching it needs the cost told apart by a field rather than by which of
+    # two names happened to appear.
+    ACCOUNT_RECONCILE_FROZEN = "account.reconcile_frozen"
+
     # Live-feed ingress: a conflation drop under backpressure, and a
     # malformed-frame drop that is skipped instead of faulting the engine
     # (``HyperliquidFeed``, ADR-0023).

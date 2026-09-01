@@ -38,6 +38,26 @@ class AccountSpec:
     genesis_collateral: Decimal | None = None
 
 
+def venue_cash(state: VenueAccountState) -> Decimal:
+    """The cash line a venue account read implies: ``equity − Σ unrealized_pnl``.
+
+    **The subtraction is load-bearing rather than tidy**: the venue's equity
+    figure already contains unrealized PnL, so reading it straight as cash would
+    double-count that PnL the instant ``equity = cash + Σ uPnL`` (ADR-0040 §7)
+    was evaluated.
+
+    One definition for the two paths that need it, which is the point of its
+    being a function: ``Account.ingest`` reads it once at the startup barrier to
+    open a live ledger's genesis (ADR-0042 §6), and the account-grain reconcile
+    reads it every cycle as the Tier-1 cash comparison's right-hand side. Written
+    twice they could drift, and the ledger opened at one number would then be
+    healed towards another.
+    """
+    return state.equity - sum(
+        (position.unrealized_pnl for position in state.positions), Decimal("0")
+    )
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AccountView:
     """The frozen account-wide pool snapshot the ``Portfolio`` seam returns.
@@ -225,12 +245,10 @@ class Account:
         already knows, contradict ADR-0034's venue-is-authoritative rule for
         Tier-1, and fail-fast on every legitimate deposit.
 
-        ``genesis = equity − Σ unrealized_pnl``, and **the subtraction is
-        load-bearing rather than tidy**: the venue's equity figure already
-        contains unrealized PnL, so writing it straight into the cash line would
-        double-count that PnL the instant ``equity = cash + Σ uPnL``
-        (ADR-0040 §7) was evaluated — an account opened holding a position would
-        report its uPnL twice from the very first cycle.
+        The genesis is ``venue_cash(state)`` above — the same derivation the
+        account-grain reconcile compares our cash line against every cycle, which
+        is why it is a function rather than an expression here: a ledger opened at
+        one number and healed towards another is what two copies would buy.
 
         Driven once, at the startup barrier, and only when the store holds no
         account row (ADR-0043 §6): the value is **provenance only** on this path
@@ -238,12 +256,9 @@ class Account:
         check against — so re-deriving it on a later start would silently move a
         line that is supposed to have been written once.
         """
-        genesis = state.equity - sum(
-            (position.unrealized_pnl for position in state.positions), Decimal("0")
-        )
         return cls(
             account_id=spec.account_id,
-            genesis_collateral=genesis,
+            genesis_collateral=venue_cash(state),
             genesis_ts_ns=ts_ns,
         )
 

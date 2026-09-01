@@ -34,8 +34,9 @@ out for the ``Reconciler``'s worklist, the manager's saga lookups and the scoped
 facade a strategy holds.
 
 A lent projection is therefore written through in two places — the barrier's
-account materialisation and the Tier-2 mark cache, both from ``runner.py`` — and
-that is the rule above read in the other direction rather than a hole in it:
+account materialisation, from ``ledger_reconcile.py``, and the Tier-2 mark
+cache, from ``runner.py`` — and that is the rule above read in the other
+direction rather than a hole in it:
 this type owns the movements whose **ordering** a caller could invert, and a
 write with no ordering inside it has nothing here to protect. See ``portfolio``
 below, where the rule is stated on the borrow itself.
@@ -108,8 +109,9 @@ class Checkpointer:
         """The accounting read-model, lent for reads, for the scoped
         ``Portfolio`` facade the composition root injects into a strategy, and —
         for the borrows that *write* — for the startup barrier's account
-        materialisation and for taking a ``MarkTick`` into the Tier-2 latest-value
-        cache (both ``runner.py``).
+        materialisation (``ledger_reconcile.py``, the grain's owner since
+        [#193](https://github.com/MarcosACH/tickwright/issues/193)) and for
+        taking a ``MarkTick`` into the Tier-2 latest-value cache (``runner.py``).
 
         Those writes stay off this type's verbs by a rule rather than by
         exception, so a third can be placed without re-deciding: **what these

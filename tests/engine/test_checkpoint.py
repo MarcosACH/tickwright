@@ -130,7 +130,7 @@ def test_a_fill_moves_the_one_store_and_both_read_models_together() -> None:
     assert position.size == Decimal("0.5")
 
 
-def test_a_fill_opens_the_durable_ledger_and_the_projection_says_so() -> None:
+def test_a_fill_opens_the_durable_ledger_when_neither_opener_has() -> None:
     """A fill's write is a **third** way the account row comes into being, beside
     paper's genesis seed and live's materialisation — ``account`` is required on
     ``checkpoint_ledger`` because every mutation moves cash (ADR-0043 §9).
@@ -150,14 +150,13 @@ def test_a_fill_opens_the_durable_ledger_and_the_projection_says_so() -> None:
     store = SQLiteStore(":memory:")
     checkpointer = _checkpointer(store, spec=LIVE_SPEC)
     checkpointer.recover()
-    assert checkpointer.portfolio.is_opened() is False  # live seeds nothing
+    assert store.load_account() is None  # live seeds nothing
     order = _submitted_order()
     event = _fill(order, trade_id="f1", quantity="0.5")
 
     checkpointer.checkpoint_fill(order, event, side=order.side)
 
     assert store.load_account() is not None
-    assert checkpointer.portfolio.is_opened() is True
 
 
 def test_an_accrual_makes_the_funding_line_and_its_mark_durable_together() -> None:

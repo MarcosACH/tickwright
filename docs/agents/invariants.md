@@ -33,7 +33,11 @@ Consumed by `/code-review` (any regression is BLOCKING) and `/python-codebase-ma
    costs more than a frozen cycle: the live-only account materialisation retries inside the one
    startup budget and then **faults** the process, because clearing the barrier with no account
    row is the state that step exists to prevent — freeze-don't-guess applied to the cash line,
-   and what keeps ADR-0041 §6's "`cash` is never `None`" true rather than merely intended.*
+   and what keeps ADR-0041 §6's "`cash` is never `None`" true rather than merely intended. Both
+   freezes at this grain are **recorded**, under one name with a `step` field
+   (`account.reconcile_frozen`, `barrier` | `cadence`): a step that touches nothing and says
+   nothing reads exactly like a cadence that stopped running, and at the barrier left an operator
+   with `engine.faulted` and no record naming the read that caused it.*
    **The boundary of this invariant is permanence.** A failed read and a retry is the answer
    for a read that *may* succeed later — a dead transport, an unreadable body — with the
    per-cloid span below as how that retrying finds out whether waiting helps. A venue fact this

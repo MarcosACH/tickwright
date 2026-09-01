@@ -62,6 +62,35 @@ def position_view(
     )
 
 
+def account_unrealized_pnl(
+    positions: Iterable[Position], marks: Mapping[str, Decimal]
+) -> dict[str, Decimal | None]:
+    """Per-symbol unrealized PnL summed over **every** partition — the Tier-2
+    peer of ``account_net_size``, and the account-grain reconcile's left-hand
+    side against the venue's own per-position figure.
+
+    Computed at the account grain because that is the grain the venue reports
+    at: it holds one position per symbol and knows nothing of partitions, so a
+    per-strategy comparison would have no right-hand side (ADR-0034/0041 §4).
+
+    ``None`` for a symbol whose Σ needs a mark it does not have, per-**term** as
+    everywhere else here: a partition traded flat contributes its real zero and
+    never blocks the sum, so a symbol reads ``None`` only when something actually
+    held is unpriced. A caller comparing against a venue must treat that as *not
+    compared* rather than as zero — the divergence would be explained by the
+    missing mark, not by the ledger.
+    """
+    totals: dict[str, Decimal | None] = {}
+    for position in positions:
+        # ``get``'s default covers the first partition of a symbol; a stored
+        # ``None`` from an earlier one is returned as-is and poisons the rest of
+        # the fold, which is the per-term rule at the Σ level.
+        running = totals.get(position.symbol, _ZERO)
+        own = _unrealized_pnl(position, marks.get(position.symbol))
+        totals[position.symbol] = None if running is None or own is None else running + own
+    return totals
+
+
 def _notional(account_net: Decimal, mark: Decimal | None) -> Decimal | None:
     """The symbol's exposure at position grain — ``|account net| × mark``.
 
@@ -135,4 +164,4 @@ def _equity(
     return total
 
 
-__all__ = ["account_view", "position_view"]
+__all__ = ["account_unrealized_pnl", "account_view", "position_view"]
