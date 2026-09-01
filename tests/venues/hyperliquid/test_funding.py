@@ -10,7 +10,9 @@ invisible, which is the one bug this module exists not to have.
 
 from decimal import Decimal
 
-from tickwright.domain import FundingAccrual
+import pytest
+
+from tickwright.domain import FundingAccrual, VenueFactUnsupported
 from tickwright.venues.hyperliquid.funding import accruals
 
 _NS_PER_MS = 1_000_000
@@ -95,3 +97,55 @@ def test_payments_settling_on_one_boundary_keep_the_venue_s_delivery_order() -> 
     emitted = accruals(same_boundary, account_id="hyperliquid-mainnet-0xabc", ts_init_ns=42)
 
     assert [a.symbol for a in emitted] == ["SOL", "ETH", "BTC"]
+
+
+def test_a_payment_not_denominated_in_usdc_raises_rather_than_accruing() -> None:
+    """ADR-0029's assumption, guarded where the venue lets it be guarded.
+
+    A funding record carries no currency discriminator the way a fill carries
+    `feeToken` — the amount field is *named* `usdc`, so the denomination is the
+    key itself. A payment settled in anything else therefore does not arrive as
+    a `usdc` this suite could set to another token; it arrives as a record with
+    no `usdc` at all.
+
+    The failure that matters is the silent one: `.get("usdc", 0)` would accrue a
+    zero, and a zero is indistinguishable from a boundary that genuinely owed
+    nothing — the account would under-count real money with nothing recording
+    that it had. So this refuses, naming the keys the record did carry, which is
+    the one thing telling an operator what the venue actually sent.
+    """
+    settled_elsewhere = {
+        "time": 1681222254710,
+        "coin": "ETH",
+        "hype": "-3.625312",
+        "szi": "49.1477",
+        "fundingRate": "0.0000417",
+    }
+
+    with pytest.raises(VenueFactUnsupported) as raised:
+        accruals([settled_elsewhere], account_id="hyperliquid-mainnet-0xabc", ts_init_ns=42)
+
+    message = str(raised.value)
+    assert "ETH" in message
+    assert "hype" in message
+
+
+def test_a_refused_record_takes_the_whole_batch_with_it() -> None:
+    """Funding is money, so this module's frame policy is the *opposite* of the
+    feed's.
+
+    `feed.py` drops a malformed row and names it, because the tick stream is
+    lossy by contract (ADR-0023) and the next trade is along in a moment. A
+    funding payment has no next: the snapshot is delivered once, and a dropped
+    row is cash the ledger never learns about. Refusing the batch escalates out
+    of the seam and faults the run (ADR-0036 §4) rather than banking the readable
+    part of a delivery we did not fully understand — which would also advance the
+    watermark past the row that was skipped.
+    """
+    batch = [
+        funding(time_ms=1681222254710, coin="ETH", usdc="-3.625312"),
+        {"time": 1681225854710, "coin": "BTC", "szi": "1", "fundingRate": "0.0000417"},
+    ]
+
+    with pytest.raises(VenueFactUnsupported):
+        accruals(batch, account_id="hyperliquid-mainnet-0xabc", ts_init_ns=42)

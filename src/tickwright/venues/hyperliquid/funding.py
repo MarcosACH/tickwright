@@ -15,9 +15,10 @@ this path is a flip bug waiting for the first short position.
 """
 
 from collections.abc import Iterable, Mapping
+from decimal import Decimal
 from typing import Any
 
-from tickwright.domain import FundingAccrual
+from tickwright.domain import FundingAccrual, VenueFactUnsupported
 
 from .reading import figure
 
@@ -63,7 +64,40 @@ def accruals(
             account_id=account_id,
             symbol=record["coin"],
             boundary_ts_ns=int(record["time"]) * _NS_PER_MS,
-            amount=figure(record["usdc"]),
+            amount=_settled_in_usdc(record),
         )
         for record in ordered
     )
+
+
+def _settled_in_usdc(record: Mapping[str, Any]) -> Decimal:
+    """One payment's amount, refusing a payment denominated in anything else.
+
+    A funding record carries no currency discriminator the way a fill carries
+    `feeToken`: the amount field is *named* `usdc`, so the denomination is the
+    key itself and a payment settled in another token arrives as a record with
+    no `usdc` at all. This engine's money is a bare `Decimal` with USDC left
+    implicit (ADR-0029), so such a payment has nowhere to go — accruing it would
+    add a figure of one currency to a line of another with nothing in the ledger
+    recording which token it came from.
+
+    The failure worth guarding is the quiet one. Defaulting the read to `0` would
+    accrue a zero, and a zero is indistinguishable from a boundary that genuinely
+    owed nothing, so the account would under-count real money with no trace that
+    it had. The refusal names the keys the record *did* carry, which is the one
+    thing that tells an operator what the venue actually sent.
+
+    `VenueFactUnsupported`, on the same reasoning as the fill fee's guard of the
+    same assumption: a settled funding row never changes, so this is known
+    permanent at the first read and escalates out of the seam rather than
+    entering `UNREADABLE`, whose whole purpose is to find out — by waiting —
+    whether a condition is durable (ADR-0048).
+    """
+    if "usdc" not in record:
+        raise VenueFactUnsupported(
+            f"funding payment on {record.get('coin')!r} reports no 'usdc' amount "
+            f"(keys: {sorted(record)}): this engine's money is a bare Decimal with "
+            "USDC implicit (ADR-0029), so a payment settled in another token has no "
+            "home in the ledger. Retrying cannot change a settled funding row."
+        )
+    return figure(record["usdc"])
