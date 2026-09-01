@@ -173,8 +173,8 @@ def test_a_failed_account_read_freezes_the_cycle_and_leaves_the_book_alone() -> 
     assert venue.account_reads == 2
 
 
-def _held(equity: str, *positions: tuple[str, str]) -> VenueAccountState:
-    """A venue snapshot holding an explicit ``(symbol, signed_size)`` per entry.
+def _held(equity: str, *positions: tuple[str, str, str]) -> VenueAccountState:
+    """A venue snapshot holding an explicit ``(symbol, signed_size, uPnL)`` per entry.
 
     ``account_state`` answers the recorded BTC snapshot, which is the right
     shape for a materialisation and the wrong one for a *divergence*: a
@@ -189,8 +189,13 @@ def _held(equity: str, *positions: tuple[str, str]) -> VenueAccountState:
         free_margin=Decimal("0.0096"),
         cross_maintenance_margin=Decimal("1.6198"),
         positions=tuple(
-            replace(recorded, symbol=symbol, signed_size=Decimal(size))
-            for symbol, size in positions
+            replace(
+                recorded,
+                symbol=symbol,
+                signed_size=Decimal(size),
+                unrealized_pnl=Decimal(unrealized),
+            )
+            for symbol, size, unrealized in positions
         ),
     )
 
@@ -218,9 +223,9 @@ def test_a_symbol_whose_ledger_net_disagrees_with_the_venue_size_diverges_at_tie
     _book_fill(projection, quantity="100", price="0.4", symbol="DOGE")
     venue = _held(
         "100000",
-        ("BTC", "0.003"),  # a fill the ledger missed
-        ("DOGE", "100"),  # agrees
-        ("SOL", "10"),  # flow the engine never placed
+        ("BTC", "0.003", "0"),  # a fill the ledger missed
+        ("DOGE", "100", "0"),  # agrees
+        ("SOL", "10", "0"),  # flow the engine never placed
     )  # ETH: held by the ledger, flat at the venue
     cycle = LedgerReconciliation(exchange=_AccountVenue(venue), portfolio=projection)
 
@@ -247,5 +252,43 @@ def test_a_symbol_whose_ledger_net_disagrees_with_the_venue_size_diverges_at_tie
             symbol="SOL",
             ledger=Decimal("0"),
             venue=Decimal("10"),
+        ),
+    )
+
+
+def test_a_cash_line_disagreeing_with_the_equity_the_venue_implies_diverges_at_tier_1() -> None:
+    """Cash is Tier-1 and the venue reports no cash line, so the comparison is
+    against the one its snapshot *implies*: ``equity − Σ unrealized_pnl``.
+
+    The subtraction is the whole point. Equity already contains unrealized PnL
+    (ADR-0040 §7's ``equity = cash + Σ uPnL``), so comparing the ledger's cash
+    against the venue's equity directly would read a divergence of exactly the
+    open uPnL on every account holding a position — a permanent false positive
+    that the next slice's heal would then chase, moving a correct cash line
+    toward a figure no venue holds.
+
+    Here the venue's 100300 equity carries 500 of open profit, so the cash
+    behind it is 99800 against the ledger's 100000: a real 200 gap, and one the
+    un-subtracted comparison would have reported as 300.
+
+    The position sizes agree, so the cycle's only finding is the account-grain
+    line — cash carries no symbol, because the account has one collateral pool
+    and nothing to attribute it to.
+    """
+    store = SQLiteStore(":memory:")
+    projection = _ledger(store, equity="100000")
+    _book_fill(projection, quantity="0.002", price="64809")
+    venue = _held("100300", ("BTC", "0.002", "500"))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), portfolio=projection)
+
+    divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences == (
+        Divergence(
+            tier=DivergenceTier.TIER_1,
+            field="cash",
+            symbol=None,
+            ledger=Decimal("100000"),
+            venue=Decimal("99800"),
         ),
     )

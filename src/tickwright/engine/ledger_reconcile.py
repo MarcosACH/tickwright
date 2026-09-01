@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
 
-from tickwright.domain import Exchange, VenueAccountState
+from tickwright.domain import Exchange, VenueAccountState, venue_cash
 from tickwright.observability import NamedEvent, named_event
 
 from .portfolio import PortfolioProjection
@@ -85,9 +85,37 @@ class LedgerReconciliation:
         if state is None:
             named_event(NamedEvent.ACCOUNT_RECONCILE_FROZEN)
             return None
-        divergences = self._sizes(state)
+        divergences = self._cash(state) + self._sizes(state)
         named_event(NamedEvent.ACCOUNT_RECONCILED)
         return divergences
+
+    def _cash(self, state: VenueAccountState) -> tuple[Divergence, ...]:
+        """Tier-1: the accumulated cash line against the one the snapshot implies.
+
+        The venue publishes no cash line, so the comparison is against
+        ``venue_cash(state)`` — ADR-0040 §7's ``equity = cash + Σ uPnL`` read
+        backwards, and the *same* function the genesis was ingested through, so
+        the line an account opened at and the line it is checked against can
+        never be two derivations.
+
+        Account grain, so the record carries no symbol: the account has one
+        collateral pool and open PnL is not attributable to it. Ahead of the
+        per-symbol findings because that is the order the two are read in — the
+        pool first, then what it is backing.
+        """
+        ledger = self._portfolio.account().cash
+        venue = venue_cash(state)
+        if ledger == venue:
+            return ()
+        return (
+            Divergence(
+                tier=DivergenceTier.TIER_1,
+                field="cash",
+                symbol=None,
+                ledger=ledger,
+                venue=venue,
+            ),
+        )
 
     def _sizes(self, state: VenueAccountState) -> tuple[Divergence, ...]:
         """Tier-1: the account-net signed size per symbol against the venue's.
