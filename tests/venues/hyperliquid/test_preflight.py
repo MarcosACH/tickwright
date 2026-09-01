@@ -846,6 +846,75 @@ def test_a_refused_write_faults_at_once_quoting_the_venue_s_own_string(rejection
     assert "BTC" in message, "and the symbol left unaligned"
 
 
+def test_a_refusal_the_venue_sent_without_its_sentence_still_faults_at_once() -> None:
+    """A stated ``err`` is answered, whatever else the envelope carries.
+
+    ``status`` is the verdict, and the taxonomy is two-valued over it alone
+    (ADR-0044 §6). The sentence in ``response`` is what makes the refusal
+    actionable, but *reading* it must not be able to undo the verdict already
+    read: subscripting a key that is not there raises ``KeyError``, which is in
+    ``reading.UNREADABLE``, so a refusal missing its sentence would be caught by
+    the retry as though it were an unreadable body — and the signed write re-sent
+    once per backoff for the whole boot budget. That is the write storm the test
+    above forbids, reached through the message construction rather than through
+    the verdict, and the retry would be re-asking a question the venue has
+    already answered.
+    """
+    clock = ManualClock(start_ns=0)
+    post = FakeExchangeApi(
+        {
+            "userAbstraction": "disabled",
+            "clearinghouseState": _state(),
+            "updateLeverage": {"status": "err"},
+        }
+    )
+    book = LeverageBook(entries={"BTC": LeverageSpec(mode="cross", leverage=10)})
+
+    with pytest.raises(VenueLeveragePushFailed) as refusal:
+        asyncio.run(_exchange(post, clock=clock, leverage=book).start())
+
+    writes = [
+        1 for (url, payload) in post.requests if request_type(url, payload) == "updateLeverage"
+    ]
+    assert writes == [1], "a refusal is answered, not re-sent — retrying signs a write storm"
+    assert clock.timestamp_ns() == 0, "an answered question consumes no backoff"
+    assert "BTC" in str(refusal.value), "the operator still needs the symbol left unaligned"
+
+
+def test_a_write_answered_by_something_that_is_not_an_envelope_is_retried_then_faults() -> None:
+    """The third shape a write can come back as: not an adjudication at all.
+
+    ``ok`` is the sole success and ``err`` faults at once — but a body that is
+    not a mapping is neither, because the venue did not adjudicate anything we
+    can read. That is the same "we are not reading what we think we are" an
+    unreadable *read* is, so it takes the same branch: retried under the shared
+    boot budget, then ``VenueLeveragePushFailed``.
+
+    The guard is explicit rather than left to ``response["status"]`` raising on
+    its own, and the message is why. Subscripting a string raises a ``TypeError``
+    about string indices, which names neither the endpoint nor the body; an
+    operator reading a failed boot needs what the venue actually sent.
+    """
+    clock = ManualClock(start_ns=0)
+    post = FakeExchangeApi(
+        {
+            "userAbstraction": "disabled",
+            "clearinghouseState": _state(),
+            "updateLeverage": "ok",
+        }
+    )
+    book = LeverageBook(entries={"BTC": LeverageSpec(mode="cross", leverage=10)})
+
+    with pytest.raises(VenueLeveragePushFailed) as refusal:
+        asyncio.run(_exchange(post, clock=clock, leverage=book).start())
+
+    writes = [
+        1 for (url, payload) in post.requests if request_type(url, payload) == "updateLeverage"
+    ]
+    assert len(writes) > 1, "an unreadable answer is a transient failure, not an adjudication"
+    assert "BTC" in str(refusal.value), "the operator needs the symbol left unaligned"
+
+
 def test_a_leverage_above_the_venue_cap_refuses_to_start_on_live_too() -> None:
     """The identical bound, refused identically on the other path (ADR-0044 §9).
 

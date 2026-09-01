@@ -406,6 +406,15 @@ async def _write_leverage(
     A taxonomy over them would be a second encoding of a venue fact, free to
     fall behind the strings it matches on, in exchange for precision nobody acts
     on.
+
+    Read with ``get`` and not subscripted, which is the one place the difference
+    matters. ``status`` is the verdict and the sentence only reports it, so
+    *reading* the sentence must not be able to undo a verdict already read: a
+    ``KeyError`` here is in ``UNREADABLE``, so an ``err`` that arrived without
+    its ``response`` field would be caught by the caller's retry as though the
+    venue had never answered — re-sending a **signed write** once per backoff
+    for the whole boot budget, to re-ask a question the venue has already said
+    no to.
     """
     response = await send(action)
     if not isinstance(response, Mapping):
@@ -414,7 +423,7 @@ async def _write_leverage(
         return
     raise VenueLeveragePushFailed(
         f"the venue refused to align {symbol} to {_pair(spec)}: "
-        f"{response['response']!r} (ADR-0044 §6). Refusing to start rather than trade "
+        f"{response.get('response')!r} (ADR-0044 §6). Refusing to start rather than trade "
         "against an account this process failed to align — a leverage above the "
         "instrument's cap is config to lower, and the rest are the venue declining to "
         "re-margin a position it already holds."
