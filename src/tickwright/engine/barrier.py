@@ -22,9 +22,7 @@ repeat — a step that has already cleared is expected to find nothing left to d
 
 from collections.abc import Awaitable, Callable
 
-from tickwright.domain import Clock, StartupReconciliationTimeout
-
-_NS_PER_SECOND = 1_000_000_000
+from tickwright.domain import Backoff, Clock, Deadline, StartupReconciliationTimeout
 
 BarrierStep = Callable[[], Awaitable[bool]]
 """One proof the gate holds: ``True`` cleared, ``False`` froze (never guessed)."""
@@ -59,21 +57,29 @@ class StartupBarrier:
         the whole of what the gate is for: a venue that will not answer stops the
         engine rather than being read as an empty book or an unopened ledger.
 
-        The backoff is capped at ``max_backoff_seconds`` so an uncapped doubling
-        cannot carry the clock far past the deadline: without the cap a large
+        The pacing is ``domain``'s ``Backoff`` and the window is its
+        ``Deadline`` — the same two values the venue adapters' boot guards run
+        on, rather than the arithmetic this method used to write for itself. The
+        cap that ``Backoff`` carries is what keeps an uncapped doubling from
+        carrying the clock far past the deadline: without it a large
         ``timeout_seconds`` would fault nearly a whole backoff interval late,
         making real time-to-``FAULTED`` up to ~2× the configured window.
+
+        What this loop keeps is the part no other caller shares: **a freeze is a
+        ``False`` return, not an exception**. That is ADR-0011 inv 1 in the step
+        contract, and it is why the shared primitives stop at pacing and a
+        window — hoisting the loop itself would have to name what counts as a
+        retryable failure, which is different for every caller.
         """
-        deadline_ns = self._clock.timestamp_ns() + int(timeout_seconds * _NS_PER_SECOND)
-        backoff_seconds = initial_backoff_seconds
+        deadline = Deadline.opening(clock=self._clock, budget_seconds=timeout_seconds)
+        backoff = Backoff(initial=initial_backoff_seconds, maximum=max_backoff_seconds)
         while not await self._attempt():
-            if self._clock.timestamp_ns() >= deadline_ns:
+            if deadline.spent(self._clock):
                 raise StartupReconciliationTimeout(
                     f"venue unreachable for {timeout_seconds}s during startup "
                     "reconciliation; refusing to start on unverified state"
                 )
-            await self._clock.sleep(backoff_seconds)
-            backoff_seconds = min(backoff_seconds * 2, max_backoff_seconds)
+            await backoff.sleep_on(self._clock)
 
     async def _attempt(self) -> bool:
         """One pass over the steps, in order, stopping at the first freeze.

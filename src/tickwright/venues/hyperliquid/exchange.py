@@ -22,6 +22,7 @@ from tickwright.domain import (
     EMPTY_LEVERAGE_BOOK,
     AccountSpec,
     Clock,
+    Deadline,
     EventBus,
     FillReport,
     InstrumentSpec,
@@ -44,7 +45,7 @@ from tickwright.observability import NamedEvent, named_event
 from . import transport
 from .account import account_spec, normalize_account_state
 from .config import HyperliquidConfig
-from .preflight import BootDeadline, push_leverage, verify_account_mode
+from .preflight import push_leverage, verify_account_mode
 from .reading import UNREADABLE, failed_send, figure, read, unreadable_body
 from .transport import PostJson
 from .universe import HyperliquidUniverse
@@ -138,9 +139,7 @@ class HyperliquidExchange:
         own. Whatever the gate spends retrying is gone from what the push has
         left.
         """
-        deadline = BootDeadline.opening(
-            clock=self._clock, budget_seconds=self._startup_timeout_seconds
-        )
+        deadline = Deadline.opening(clock=self._clock, budget_seconds=self._startup_timeout_seconds)
         await verify_account_mode(
             info=self._info,
             address=self._user_address,

@@ -21,12 +21,14 @@ surface in a module a reader can audit in full.
 """
 
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
 from functools import partial
 from typing import Any
 
 from tickwright.domain import (
+    Backoff,
     Clock,
+    Deadline,
+    InvariantViolation,
     LeverageBook,
     LeverageSpec,
     VenueAccountModeUnsupported,
@@ -36,7 +38,6 @@ from tickwright.domain import (
 from tickwright.observability import NamedEvent, named_event
 
 from .account import held_leverage
-from .backoff import Backoff
 from .reading import UNREADABLE
 
 InfoRead = Callable[[dict[str, Any]], Awaitable[object]]
@@ -69,56 +70,19 @@ _RETRY_INITIAL_BACKOFF_SECONDS = 1.0
 _RETRY_MAX_BACKOFF_SECONDS = 30.0
 """``StartupBarrier.run``'s own pacing, matched deliberately.
 
-The *values* are matched; the doubling itself is the package's own ``Backoff``,
-the one home this venue keeps that rule in so its retry loops cannot skew. What
-this read cannot share is the barrier's copy: it has to clear before the
-barrier's own venue reads run, and ``venues`` may not import ``engine``
-(ADR-0032). So the deadline arithmetic below is written twice — here and in
-``engine/barrier.py`` — under the same budget the barrier is given (ADR-0044 §6:
-one boot-time budget, never a second timeout).
+Only the *values* are matched now. The doubling, the cap and the deadline
+arithmetic are ``domain``'s ``Backoff`` and ``Deadline``, which the barrier runs
+on too — these guards have to clear before the barrier's own venue reads run and
+``venues`` may not import ``engine`` (ADR-0032), but ``domain`` is a package both
+may import, so the rule is shared even though the loop is not.
 
-The cap is what keeps an uncapped doubling from carrying the clock far past the
-deadline: without it a large budget would refuse nearly a whole interval late,
-making real time-to-``FAULTED`` up to ~2× the configured window."""
-
-_NS_PER_SECOND = 1_000_000_000
-
-
-@dataclass(frozen=True)
-class BootDeadline:
-    """The single instant **both** boot guards must clear by (ADR-0044 §6).
-
-    A value rather than two ``timeout_seconds`` arguments, because "one boot
-    budget, never a second timeout" is the decision and passing the budget twice
-    is exactly how it gets spent twice. The gate and the push each retry their
-    own transient failures, but they retry against *this* instant, so a boot an
-    operator budgeted a minute for takes a minute however the failures divide
-    between them — and adding a third guard later cannot quietly make it three.
-
-    ``budget_seconds`` rides along for the refusals alone: an operator reading a
-    crashed boot needs the window that was spent, and an absolute nanosecond
-    instant does not say what it was.
-    """
-
-    at_ns: int
-    budget_seconds: float
-
-    @classmethod
-    def opening(cls, *, clock: Clock, budget_seconds: float) -> "BootDeadline":
-        """The deadline as measured from now, on the injected clock."""
-        return cls(
-            at_ns=clock.timestamp_ns() + int(budget_seconds * _NS_PER_SECOND),
-            budget_seconds=budget_seconds,
-        )
-
-    def spent(self, clock: Clock) -> bool:
-        """Whether the budget is gone — checked *after* a failure, never before
-        an attempt, so every guard gets at least one try however late it runs."""
-        return clock.timestamp_ns() >= self.at_ns
+What stays here is the budget's *ownership*: ADR-0044 §6 gives the boot one
+window, and these two guards spend the barrier's own number rather than minting a
+second timeout."""
 
 
 async def verify_account_mode(
-    *, info: InfoRead, address: str, clock: Clock, deadline: BootDeadline
+    *, info: InfoRead, address: str, clock: Clock, deadline: Deadline
 ) -> None:
     """Refuse to start unless ``address`` is in a supported account mode.
 
@@ -142,29 +106,34 @@ async def verify_account_mode(
 
     An **unrecognised literal** is not a failed read and takes no retry: the
     venue answered, and re-asking cannot change a deployment fact inside a boot
-    window — it would only delay the remediation the operator needs.
+    window — it would only delay the remediation the operator needs. Which is
+    what puts the allowlist **outside** the retried call below: only the read is
+    repeatable, and a verdict on a mode the venue stated is not.
     """
-    backoff = Backoff(initial=_RETRY_INITIAL_BACKOFF_SECONDS, maximum=_RETRY_MAX_BACKOFF_SECONDS)
-    while True:
-        try:
-            mode = await _read_account_mode(info, address=address)
-        # The two ways a boot read comes back empty, answered identically
-        # because at boot they cost the same thing: the venue was unreachable
-        # (``OSError``), or it answered with a body that is not a mode
-        # (``UNREADABLE`` — the venue read vocabulary every other grain of this
-        # adapter already catches, rather than a fourth hand-picked tuple).
-        except (OSError, *UNREADABLE) as exc:
-            if deadline.spent(clock):
-                raise VenueAccountModeUnsupported(
-                    f"could not read the abstraction mode of account {address} within "
-                    f"{deadline.budget_seconds}s ({exc}); refusing to start rather than "
-                    f"assume it is {_accepted()}"
-                ) from exc
-            await backoff.sleep_on(clock)
-            continue
-        if mode in SUPPORTED_ACCOUNT_MODES:
-            return
-        raise VenueAccountModeUnsupported(_remediation(mode, address=address))
+    mode = await _until_deadline(
+        partial(_read_account_mode, info, address=address),
+        on_exhausted=partial(_unreadable_mode, address=address),
+        clock=clock,
+        deadline=deadline,
+    )
+    if mode in SUPPORTED_ACCOUNT_MODES:
+        return
+    raise VenueAccountModeUnsupported(_remediation(mode, address=address))
+
+
+def _unreadable_mode(exc: BaseException, deadline: Deadline, *, address: str) -> InvariantViolation:
+    """The gate's own refusal when the budget went without an answer.
+
+    A refusal of its own rather than the push's ``VenueLeveragePushFailed``,
+    because the two send an operator somewhere different: nothing was written
+    here, and the account is in whatever mode it always was — what is missing is
+    our ability to read it.
+    """
+    return VenueAccountModeUnsupported(
+        f"could not read the abstraction mode of account {address} within "
+        f"{deadline.budget_seconds}s ({exc}); refusing to start rather than "
+        f"assume it is {_accepted()}"
+    )
 
 
 async def _read_account_mode(info: InfoRead, *, address: str) -> str:
@@ -224,7 +193,7 @@ async def push_leverage(
     book: LeverageBook,
     asset_indices: Mapping[str, int],
     clock: Clock,
-    deadline: BootDeadline,
+    deadline: Deadline,
 ) -> None:
     """Align the venue to config, once, at boot (ADR-0044 §7).
 
@@ -264,7 +233,9 @@ async def push_leverage(
         # think we are" an unreachable venue is, and both are transient by
         # assumption at boot.
         partial(_read_held_leverage, info, address=address),
-        describing=f"read the positions held by account {address}",
+        on_exhausted=partial(
+            _push_failed, describing=f"read the positions held by account {address}"
+        ),
         clock=clock,
         deadline=deadline,
     )
@@ -301,7 +272,7 @@ async def push_leverage(
             # ``VenueLeveragePushFailed`` — an ``InvariantViolation``, so not
             # among the transient types caught below — and leaves at once.
             partial(_write_leverage, send, action, symbol=symbol, spec=spec),
-            describing=f"align {symbol} to {_pair(spec)}",
+            on_exhausted=partial(_push_failed, describing=f"align {symbol} to {_pair(spec)}"),
             clock=clock,
             deadline=deadline,
         )
@@ -310,28 +281,31 @@ async def push_leverage(
 async def _until_deadline[T](
     call: Callable[[], Awaitable[T]],
     *,
-    describing: str,
+    on_exhausted: Callable[[BaseException, Deadline], InvariantViolation],
     clock: Clock,
-    deadline: BootDeadline,
+    deadline: Deadline,
 ) -> T:
     """Run one venue call, retrying transient failure until ``deadline``.
 
-    The push's half of ADR-0044 §6, and the reason it is a helper rather than a
-    loop per call site: the read and every write share one budget, so they have
-    to share the *rule* for spending it — three hand-written loops would be three
-    chances to check the deadline before the attempt, or to forget the cap.
+    ADR-0044 §6's retry rule for **both** boot guards, and the reason it is a
+    helper rather than a loop per call site: the mode read, the account read and
+    every write share one budget, so they have to share the *rule* for spending
+    it — four hand-written loops would be four chances to check the deadline
+    before the attempt, or to forget the cap.
 
-    The two failures retried are the ones the mode gate retries, for the same
-    reason: the venue was unreachable (``OSError``) or answered with a body
-    outside its contract (``UNREADABLE``). Both are transient by assumption at
-    boot and neither leaves anything guessed behind. A ``VenueLeverageMismatch``
-    is not among them — it is a fact the venue stated, and re-asking cannot
-    change it.
+    The two failures retried are the same two everywhere: the venue was
+    unreachable (``OSError``) or answered with a body outside its contract
+    (``UNREADABLE`` — the venue read vocabulary every other grain of this adapter
+    already catches, rather than a hand-picked tuple per loop). Both are
+    transient by assumption at boot and neither leaves anything guessed behind. A
+    ``VenueLeverageMismatch`` is not among them — it is a fact the venue stated,
+    and re-asking cannot change it.
 
-    ``describing`` is the phrase the refusal reads as, so the message names what
-    was being attempted rather than which internal call raised: an operator needs
-    the symbol left unaligned, not a stack position. The deadline is checked
-    **after** the failure, so a call that starts late still gets its one attempt.
+    What the guards do **not** share is the refusal, so ``on_exhausted`` builds
+    it. A gate that never wrote anything and a push that may have written half
+    the book send an operator to different places, and an error that averaged the
+    two would be actionable for neither. The deadline is checked **after** the
+    failure, so a call that starts late still gets its one attempt.
     """
     backoff = Backoff(initial=_RETRY_INITIAL_BACKOFF_SECONDS, maximum=_RETRY_MAX_BACKOFF_SECONDS)
     while True:
@@ -339,14 +313,24 @@ async def _until_deadline[T](
             return await call()
         except (OSError, *UNREADABLE) as exc:
             if deadline.spent(clock):
-                raise VenueLeveragePushFailed(
-                    f"could not {describing} within the {deadline.budget_seconds}s startup "
-                    f"budget ({exc}); refusing to start rather than trade against a venue "
-                    "this process failed to align (ADR-0044 §6). The account is in neither "
-                    "the configured state nor a known one — check the venue is reachable, "
-                    "then restart."
-                ) from exc
+                raise on_exhausted(exc, deadline) from exc
             await backoff.sleep_on(clock)
+
+
+def _push_failed(exc: BaseException, deadline: Deadline, *, describing: str) -> InvariantViolation:
+    """The push's refusal when the budget went without a landed call.
+
+    ``describing`` is the phrase the message reads as, so it names what was being
+    attempted rather than which internal call raised: an operator needs the
+    symbol left unaligned, not a stack position.
+    """
+    return VenueLeveragePushFailed(
+        f"could not {describing} within the {deadline.budget_seconds}s startup "
+        f"budget ({exc}); refusing to start rather than trade against a venue "
+        "this process failed to align (ADR-0044 §6). The account is in neither "
+        "the configured state nor a known one — check the venue is reachable, "
+        "then restart."
+    )
 
 
 def _refuse_disagreements(book: LeverageBook, held: Mapping[str, LeverageSpec]) -> None:

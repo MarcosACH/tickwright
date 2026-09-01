@@ -75,6 +75,7 @@ from .leverage import (
     MarginMode,
 )
 from .order import Order
+from .pacing import Backoff, Deadline
 from .position import Position, PositionChange, PositionView, account_net_size
 from .protocols import (
     Clock,
@@ -175,6 +176,9 @@ __all__ = [
     "account_unrealized_pnl",
     "account_view",
     "position_view",
+    # retry pacing
+    "Backoff",
+    "Deadline",
     # seam Protocols
     "Clock",
     "EventBus",

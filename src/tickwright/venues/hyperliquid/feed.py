@@ -21,10 +21,9 @@ import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import TYPE_CHECKING, Any, Protocol
 
-from tickwright.domain import AggressorSide, Clock, EventBus, MarketTick, MarkTick
+from tickwright.domain import AggressorSide, Backoff, Clock, EventBus, MarketTick, MarkTick
 from tickwright.observability import NamedEvent, named_event
 
-from .backoff import Backoff
 from .config import HyperliquidConfig
 from .ingress import ConflatingIngress, MarketData
 from .reading import UNREADABLE, figure
