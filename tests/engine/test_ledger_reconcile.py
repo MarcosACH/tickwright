@@ -19,6 +19,7 @@ from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     AccountSpec,
+    MarkTick,
     OrderFilled,
     PlaceOrder,
     Side,
@@ -292,3 +293,89 @@ def test_a_cash_line_disagreeing_with_the_equity_the_venue_implies_diverges_at_t
             venue=Decimal("99800"),
         ),
     )
+
+
+def _mark(projection: PortfolioProjection, symbol: str, price: str) -> None:
+    """Feed the projection the Tier-2 valuation input (ADR-0039).
+
+    A Tier-2 case has to go through this rather than assert on a figure it
+    passed in: uPnL and equity are *recomputed on every read* from the cached
+    mark, so a case that never observed one is asserting on the ``None`` the
+    absence produces, not on a valuation.
+    """
+    projection.observe_mark(
+        MarkTick(ts_event=2_000, ts_init=2_000, symbol=symbol, price=Decimal(price))
+    )
+
+
+def test_equity_and_per_symbol_unrealized_pnl_are_classified_at_tier_2_unbanded() -> None:
+    """Tier-2 is recomputed on every read and never stored, so it cannot drift
+    into future state — which is why it is classified but never healed
+    (ADR-0034). It will also never be exact: the venue's mark is a robust median
+    we do not replicate bit-for-bit.
+
+    Un-banded here on purpose. The band is ADR-0040 §6's and lands with the
+    alert slice; what this cycle owes it is a classified pair to apply a
+    tolerance *to*, so a 0.018 gap that a band would certainly absorb is
+    reported rather than silently dropped. Reporting it is the honest default:
+    a divergence suppressed before any band exists is one no band was ever
+    asked about.
+
+    The ledger's own numbers are the fill's arithmetic, independent of the
+    venue's: a 0.002 long entered at 64809 and marked at 65000 is worth
+    ``0.002 × 191 = 0.382``, and equity is that on top of the 100000 cash line.
+    The venue's snapshot agrees on size and on the implied cash line, so the
+    Tier-1 halves are silent and the two Tier-2 figures are the whole finding —
+    account grain first, as the cash line is.
+    """
+    store = SQLiteStore(":memory:")
+    projection = _ledger(store, equity="100000")
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "65000")
+    venue = _held("100000.400", ("BTC", "0.002", "0.400"))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), portfolio=projection)
+
+    divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences == (
+        Divergence(
+            tier=DivergenceTier.TIER_2,
+            field="equity",
+            symbol=None,
+            ledger=Decimal("100000.382"),
+            venue=Decimal("100000.400"),
+        ),
+        Divergence(
+            tier=DivergenceTier.TIER_2,
+            field="unrealized_pnl",
+            symbol="BTC",
+            ledger=Decimal("0.382"),
+            venue=Decimal("0.400"),
+        ),
+    )
+
+
+def test_a_tier_2_figure_the_ledger_cannot_yet_compute_is_not_reported_as_divergent() -> None:
+    """The recovery window, and the one Tier-2 answer that must not be a
+    divergence: no mark has arrived for a symbol the book holds, so uPnL and the
+    equity Σ that contains it read ``None`` — uncomputable, not wrong (ADR-0041
+    §6).
+
+    Reported as disagreements they would alert on *our* missing input while
+    naming the venue's figures as the fault, and they would fire on every start
+    before the first mark lands — the noisiest possible false positive, on the
+    one cadence an operator has to keep trusting.
+
+    Tier-1 is unaffected and that is the asymmetry worth pinning: cash and size
+    never need a mark, so the same cycle still cross-checks the accumulated
+    ledger in full. A missing valuation input narrows the check; it does not
+    freeze it, which is what the failed *anchor* read does.
+    """
+    store = SQLiteStore(":memory:")
+    projection = _ledger(store, equity="100000")
+    _book_fill(projection, quantity="0.002", price="64809")
+    venue = _held("100000.400", ("BTC", "0.002", "0.400"))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), portfolio=projection)
+
+    assert projection.account().equity is None  # no mark yet, so no Σ to compare
+    assert asyncio.run(cycle.reconcile_account()) == ()

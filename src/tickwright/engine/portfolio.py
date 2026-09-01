@@ -39,6 +39,7 @@ from tickwright.domain import (
     StoreAccountMismatch,
     VenueAccountState,
     account_net_size,
+    account_unrealized_pnl,
     account_view,
     position_view,
 )
@@ -642,6 +643,21 @@ class PortfolioProjection:
         the outside and the invariant would have two definitions to disagree.
         """
         return account_net_size(self._positions.values())
+
+    def account_unrealized(self) -> dict[str, Decimal | None]:
+        """The account-grain uPnL per symbol, against the marks held right now.
+
+        The Tier-2 counterpart to ``account_net`` and public for the same
+        caller: the venue holds one position per symbol, so the reconcile's
+        cross-check needs the symbol's Σ over every partition rather than the
+        per-partition slice a ``PositionView`` carries (ADR-0041 §4/§8).
+        ``None`` for a symbol whose valuation genuinely needs a mark that is
+        absent — never a fabricated zero (ADR-0041 §6).
+        """
+        return account_unrealized_pnl(
+            self._positions.values(),
+            {symbol: mark.price for symbol, mark in self._marks.items()},
+        )
 
     def _view(self, position: Position, *, net: dict[str, Decimal]) -> PositionView:
         """Assemble one partition's view against the mark held for its symbol.
