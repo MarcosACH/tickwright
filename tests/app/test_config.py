@@ -202,9 +202,9 @@ def test_the_traded_symbol_set_is_derived_once_for_both_readers(tmp_path: Path) 
     strategy-declared set (ADR-0044 §3), deliberately not the feed's
     subscription list, which may carry context symbols nothing trades.
 
-    Duplicate-free and in declaration order: ``StrategyHost`` refuses two
-    strategies over one symbol, but that fires at registration and this is read
-    at config load, ahead of it.
+    In declaration order, and over distinct symbols because the model refuses
+    anything else: ADR-0034's disjointness rule is a load-time validator, so a
+    duplicate is unreachable here rather than deduped here.
     """
     (tmp_path / "ticks.jsonl").touch()
 
@@ -220,11 +220,11 @@ def test_the_traded_symbol_set_is_derived_once_for_both_readers(tmp_path: Path) 
                 side=Side.BUY,
                 quantity=Decimal("0.5"),
             )
-            for strategy_id, symbol in (("eth", "ETH"), ("btc", "BTC"), ("btc-2", "BTC"))
+            for strategy_id, symbol in (("eth", "ETH"), ("btc", "BTC"), ("sol", "SOL"))
         ],
     )
 
-    assert config.traded_symbols == ("ETH", "BTC")
+    assert config.traded_symbols == ("ETH", "BTC", "SOL")
 
 
 def test_a_strategy_may_not_claim_the_reserved_unattributed_id() -> None:
@@ -245,3 +245,47 @@ def test_a_strategy_may_not_claim_the_reserved_unattributed_id() -> None:
             side=Side.BUY,
             quantity=Decimal("0.5"),
         )
+
+
+def test_two_strategies_may_not_declare_one_symbol(tmp_path: Path) -> None:
+    """ADR-0034's disjointness rule, refused before anything is built.
+
+    ``StrategyHost.register`` is where the rule is enforced for a strategy the
+    composition root never saw, but a *configured* overlap is visible here — and
+    ``build_engine`` opens the store, resolves leverage and constructs the venue
+    before it reaches the registration loop, so leaving it to the host means a
+    typo'd `TICKWRIGHT_STRATEGIES` creates a database file (or a live signing
+    exchange) on its way to being refused. The same two-gate placement the
+    reserved ``__unattributed__`` id already has: earliest where the value
+    exists, last before it keys a ledger row.
+
+    Every offender at once, like the leverage dead-entry check one validator
+    over: an operator who overlapped two pairs learns both on this run.
+    """
+    (tmp_path / "ticks.jsonl").touch()
+
+    def _strategy(strategy_id: str, symbol: str) -> StrategyConfig:
+        return StrategyConfig(
+            kind="single_shot_market",
+            strategy_id=strategy_id,
+            symbol=symbol,
+            side=Side.BUY,
+            quantity=Decimal("0.5"),
+        )
+
+    with pytest.raises(ValidationError) as refused:
+        AppConfig(
+            replay=ReplayFeedConfig(path=tmp_path / "ticks.jsonl"),
+            paper=PaperExchangeConfig(genesis_collateral=Decimal("100000")),
+            strategies=[
+                _strategy("alpha", "BTC"),
+                _strategy("beta", "BTC"),
+                _strategy("gamma", "ETH"),
+                _strategy("delta", "ETH"),
+            ],
+        )
+
+    message = str(refused.value)
+    assert "beta declares" in message and "BTC (owned by alpha)" in message
+    assert "delta declares" in message and "ETH (owned by gamma)" in message
+    assert "separate account" in message

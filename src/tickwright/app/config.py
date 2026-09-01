@@ -22,7 +22,7 @@ from tickwright.adapters.bus import KafkaBusConfig
 from tickwright.adapters.feed import ReplayFeedConfig
 from tickwright.adapters.paper import PaperExchangeConfig
 from tickwright.adapters.store import PostgresStoreConfig, SQLiteStoreConfig
-from tickwright.domain import UNATTRIBUTED, LeverageSpec, Side
+from tickwright.domain import UNATTRIBUTED, LeverageSpec, Side, SymbolOwnership
 from tickwright.engine.runner import EngineConfig
 from tickwright.venues.hyperliquid import HyperliquidConfig
 
@@ -130,6 +130,40 @@ class AppConfig(BaseModel):
             )
         return self
 
+    @model_validator(mode="after")
+    def _no_two_strategies_may_declare_one_symbol(self) -> Self:
+        """ADR-0034's disjointness rule, refused at load rather than at wiring.
+
+        ``StrategyHost.register`` is the gate for a strategy the composition
+        root never saw, and stays it. But a *configured* overlap is visible
+        right here, and ``build_engine`` opens the store, resolves the leverage
+        book and constructs the venue before it reaches the registration loop —
+        so leaving this to the host alone means a typo'd ``TICKWRIGHT_STRATEGIES``
+        creates a database file, or a live signing exchange, on its way to being
+        refused. Two gates for one rule, the placement the reserved
+        ``__unattributed__`` id already has: earliest where the value exists,
+        last before it keys a ledger row.
+
+        Every offending declaration at once, like the dead-entry check below.
+        The book keeps folding past a refusal rather than stopping at the first,
+        so each offender is measured against the strategies that legitimately
+        own their symbols and never against another offender.
+
+        The rule and its wording are ``SymbolOwnership``'s, not this
+        validator's: the exception type is all the two gates may differ in.
+        """
+        ownership = SymbolOwnership()
+        refusals: list[str] = []
+        for strategy in self.strategies:
+            refusal = ownership.refusal(strategy.strategy_id, symbols=(strategy.symbol,))
+            if refusal is None:
+                ownership = ownership.claim(strategy.strategy_id, symbols=(strategy.symbol,))
+            else:
+                refusals.append(refusal)
+        if refusals:
+            raise ValueError("\n".join(refusals))
+        return self
+
     @property
     def traded_symbols(self) -> tuple[str, ...]:
         """What this process can place orders on: the strategy-declared symbols.
@@ -143,9 +177,10 @@ class AppConfig(BaseModel):
 
         Deliberately not the feed's subscription list (which may carry context
         symbols nothing trades) and not the venue's instrument universe (which
-        says nothing about what is traded). Ordered by declaration and
-        duplicate-free — ``StrategyHost`` refuses two strategies over one
-        symbol, but this is read at config load, ahead of registration.
+        says nothing about what is traded). Ordered by declaration, and
+        duplicate-free by the validator above rather than by this comprehension:
+        the dedupe is unreachable from a valid config and stays only so that the
+        set is well-defined for a model built field-by-field mid-validation.
         """
         return tuple(dict.fromkeys(strategy.symbol for strategy in self.strategies))
 
