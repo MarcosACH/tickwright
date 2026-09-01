@@ -1057,3 +1057,45 @@ def test_a_traded_symbol_with_no_configured_spec_refuses_to_start_on_paper() -> 
 
     assert "BTC" in str(refusal.value)
     assert "InstrumentSpec" in str(refusal.value)
+
+
+def test_the_paper_venue_writes_nothing_to_a_venue_at_boot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0044's boot-time ``updateLeverage`` push is the live half of a check
+    whose venue-agnostic half paper already runs (#180). Paper **validates and
+    never writes** — there is no venue to align, and a paper run must place no
+    signed call on any wire, least of all one carrying a leverage the operator
+    only ever configured for the in-process book.
+
+    Driven with the inputs that *do* make the live path write: a configured
+    ``50x`` cross on ``BTC``, which is neither the ``1x``/``isolated`` default
+    nor a setting any venue could already be holding. Live pushes it; paper
+    must reach the end of ``start()`` having touched nothing.
+
+    Watched at the process boundary rather than at our own seam, because that is
+    the claim: ``aiohttp`` is the only way bytes leave this process for the venue
+    (``venues/hyperliquid/transport.py``), and no session can be opened without
+    constructing one. A ban on the constructor therefore catches a write routed
+    around ``post_json`` as readily as one through it — including a future one
+    added to a shared step both venues run."""
+    import aiohttp
+
+    def _forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError("the paper venue opened an HTTP session to a venue")
+
+    monkeypatch.setattr(aiohttp.ClientSession, "__init__", _forbidden)
+
+    exchange = PaperExchange(
+        bus=InMemoryBus(),
+        clock=ManualClock(),
+        fill_model=ImmediateFillModel(),
+        genesis_collateral=GENESIS,
+        account_net=dict,
+        instrument_specs={"BTC": replace(_BTC_SPEC, max_leverage=50)},
+        leverage=LeverageBook(entries={"BTC": LeverageSpec(mode="cross", leverage=50)}),
+    )
+
+    asyncio.run(exchange.start())
+
+    assert exchange.account_spec().account_id == "paper-default"
