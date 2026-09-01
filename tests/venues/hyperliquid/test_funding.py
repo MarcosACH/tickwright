@@ -354,6 +354,52 @@ def test_a_frame_that_names_no_channel_refuses_on_the_money_socket(frame: str) -
     assert "funding" in message
 
 
+@pytest.mark.parametrize(
+    ("record", "named"),
+    [
+        pytest.param({"coin": "ETH", "usdc": "-3"}, "'time'", id="no-time"),
+        pytest.param({"time": FIRST_MS, "usdc": "-3"}, "'coin'", id="no-coin"),
+        pytest.param(
+            {"time": "an hour ago", "coin": "ETH", "usdc": "-3"},
+            "an hour ago",
+            id="time-not-a-number",
+        ),
+        pytest.param({"time": FIRST_MS, "coin": "ETH", "usdc": -3.0}, "-3.0", id="amount-re-typed"),
+        pytest.param("-3 USDC on ETH", "string indices", id="not-a-record-at-all"),
+    ],
+)
+def test_a_payment_this_process_cannot_read_refuses_like_the_body_around_it(
+    record: object, named: str
+) -> None:
+    """The record grain of the same rule the two tests above state, closing the
+    gap between them.
+
+    A `fundings` list whose *elements* are not payments is a body that is not a
+    batch of payments — the frame-grain refusal's own words — so it must answer
+    the same way, and until now it did not: the shape check stopped at `list`
+    and the read below it leaked whatever the record happened to raise. That
+    fails closed either way, because nothing on this path catches `UNREADABLE`
+    and the runner's `TaskGroup` faults the run (ADR-0024). What it loses is the
+    diagnostic: a bare `KeyError('time')` names no channel and quotes no body,
+    where every other grain of this venue answers an unreadable body by leading
+    with what arrived (`reading.unreadable_body`). An operator meeting a venue
+    contract change on the money socket gets the least useful sentence of the
+    three.
+
+    So the refusal names the channel and carries the underlying exception, which
+    is the thing that says *which field* the venue stopped sending. `figure`'s
+    re-typed-number guard is in this set on purpose: a JSON number lost digits
+    and scale in `json.loads` before any parse of ours saw it (ADR-0011 inv 1),
+    so it is unreadable for the same reason a missing field is.
+    """
+    frame = json.dumps({"channel": "userFundings", "data": {"fundings": [record]}})
+
+    message = _ingest_refusing([frame])
+
+    assert "userFundings" in message
+    assert named in message
+
+
 def test_a_dropped_socket_resubscribes_and_the_re_delivered_snapshot_heals_the_gap() -> None:
     """Why this subscription can afford to lose a socket at all.
 

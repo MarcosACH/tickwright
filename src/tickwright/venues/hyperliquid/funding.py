@@ -22,7 +22,7 @@ from typing import Any, NoReturn
 from tickwright.domain import Clock, EventBus, FundingAccrual, VenueFactUnsupported
 
 from .config import HyperliquidConfig
-from .reading import figure, refuse_non_usdc, rendered
+from .reading import UNREADABLE, figure, refuse_non_usdc, rendered
 from .session import WsSession
 from .transport import Connect, WsConnection
 
@@ -59,19 +59,35 @@ def accruals(
     they are distinct payments keyed apart by `symbol`, so the gate sees one
     boundary either way and a tie-break would be inventing a sequence the venue
     did not report.
+
+    **A record this cannot read refuses, and takes the batch with it.** The
+    `fundings` list is the frame guard's last shape check, so its *elements* are
+    unchecked until here — and a record missing `time` or `coin`, or carrying a
+    figure that is not one, is the same "body that is not a batch of payments"
+    the frame grain refuses, one level down. Left to leak, it still fails closed
+    (nothing on this path catches `UNREADABLE`, so the runner's `TaskGroup`
+    faults the run) but names nothing: a bare `KeyError('time')` where every
+    other grain of this venue leads with the body it could not read.
     """
-    ordered = sorted(fundings, key=lambda record: int(record["time"]))
-    return tuple(
-        FundingAccrual(
-            ts_event=int(record["time"]) * _NS_PER_MS,
-            ts_init=ts_init_ns,
-            account_id=account_id,
-            symbol=record["coin"],
-            boundary_ts_ns=int(record["time"]) * _NS_PER_MS,
-            amount=_payment_settled_in_usdc(record),
+    batch = list(fundings)
+    try:
+        ordered = sorted(batch, key=lambda record: int(record["time"]))
+        return tuple(
+            FundingAccrual(
+                ts_event=int(record["time"]) * _NS_PER_MS,
+                ts_init=ts_init_ns,
+                account_id=account_id,
+                symbol=record["coin"],
+                boundary_ts_ns=int(record["time"]) * _NS_PER_MS,
+                amount=_payment_settled_in_usdc(record),
+            )
+            for record in ordered
         )
-        for record in ordered
-    )
+    except UNREADABLE as exc:
+        # Not `VenueFactUnsupported`, which is deliberately outside `UNREADABLE`
+        # (ADR-0048) — a record settled in another token keeps its own sharper
+        # refusal and passes straight through this guard.
+        _refuse_delivery(batch, f"carries a payment this process cannot read ({exc!r})", cause=exc)
 
 
 def _payment_settled_in_usdc(record: Mapping[str, Any]) -> Decimal:
@@ -209,8 +225,8 @@ class FundingIngest:
         """
         try:
             message = json.loads(frame)
-        except json.JSONDecodeError:
-            _refuse_delivery(frame, "is not JSON")
+        except json.JSONDecodeError as exc:
+            _refuse_delivery(frame, "is not JSON", cause=exc)
         if not isinstance(message, dict):
             _refuse_delivery(message, "is JSON but not an object, so it names no channel")
         if message.get("channel") != "userFundings":
@@ -225,25 +241,35 @@ class FundingIngest:
         )
 
 
-def _refuse_delivery(delivered: object, why: str) -> NoReturn:
-    """Refuse a frame off the funding socket, quoting what actually arrived.
+def _refuse_delivery(delivered: object, why: str, *, cause: Exception | None = None) -> NoReturn:
+    """Refuse a delivery off the funding socket, quoting what actually arrived.
 
     Quoting is not garnish: an unreadable delivery is how a venue contract
     change presents, and the key set is what identifies one — so this borrows
     `reading.rendered`, the same bounded shape-first rendering a failed venue
-    read carries, rather than inventing a second way to say it.
+    read carries, rather than inventing a second way to say it. The channel is
+    named for the same reason: this exception is what an operator meets first,
+    and it is the only thing telling them which of the two sockets this run
+    holds open stopped making sense.
+
+    **Both grains of the delivery come through here** — the frame that is not a
+    batch of payments, and the record inside a well-formed batch that is not a
+    payment — because they are one condition read at two depths and an operator
+    acts on them identically. `cause` carries the exception the record grain
+    stopped on, which is what names the field the venue stopped sending; the
+    frame grain has one only when a parse raised.
 
     `VenueFactUnsupported` on the same reasoning as the record-grain refusal
-    below it, and for the same reason it is not a member of `UNREADABLE`
+    above it, and for the same reason it is not a member of `UNREADABLE`
     (ADR-0048): the condition is already known permanent at the first read, so
     answering it as something a retry could fix would spend a wait to learn what
     the frame already showed.
     """
     raise VenueFactUnsupported(
-        f"funding delivery {why}: {rendered(delivered)}. Every message on this "
-        "channel is cash, and a body this process cannot read is an unknown "
-        "number of payments rather than none — banking it as zero would "
-        "under-count real money with nothing recording that it had. A websocket "
-        "message arrives whole or not at all (RFC 6455 §5.4), so retrying cannot "
-        "change what this frame says."
-    )
+        f"funding delivery on 'userFundings' {why}: {rendered(delivered)}. Every "
+        "message on this channel is cash, and a body this process cannot read is "
+        "an unknown number of payments rather than none — banking it as zero "
+        "would under-count real money with nothing recording that it had. A "
+        "websocket message arrives whole or not at all (RFC 6455 §5.4), so "
+        "retrying cannot change what this frame says."
+    ) from cause
