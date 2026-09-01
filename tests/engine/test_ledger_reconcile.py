@@ -9,6 +9,7 @@ case asserts what the cycle *concludes* about a book a fill actually moved.
 """
 
 import asyncio
+from dataclasses import replace
 from decimal import Decimal
 
 from ledgers import book_fill
@@ -26,7 +27,11 @@ from tickwright.domain import (
     VenueOrderView,
     VenueReadFailure,
 )
-from tickwright.engine.ledger_reconcile import LedgerReconciliation
+from tickwright.engine.ledger_reconcile import (
+    Divergence,
+    DivergenceTier,
+    LedgerReconciliation,
+)
 from tickwright.engine.portfolio import PortfolioProjection
 from tickwright.observability import NamedEvent
 from tickwright.observability.testing import capture_events
@@ -166,3 +171,81 @@ def test_a_failed_account_read_freezes_the_cycle_and_leaves_the_book_alone() -> 
 
     assert asyncio.run(cycle.reconcile_account()) is not None  # the venue came back
     assert venue.account_reads == 2
+
+
+def _held(equity: str, *positions: tuple[str, str]) -> VenueAccountState:
+    """A venue snapshot holding an explicit ``(symbol, signed_size)`` per entry.
+
+    ``account_state`` answers the recorded BTC snapshot, which is the right
+    shape for a materialisation and the wrong one for a *divergence*: a
+    disagreement is a claim about which symbols each side holds and at what
+    size, so the sizes have to be the case's own. Everything not compared stays
+    the recorded snapshot's figures — what the cycle is handed is still a shape
+    the venue could have returned.
+    """
+    recorded = account_state(equity, "-0.034").positions[0]
+    return VenueAccountState(
+        equity=Decimal(equity),
+        free_margin=Decimal("0.0096"),
+        cross_maintenance_margin=Decimal("1.6198"),
+        positions=tuple(
+            replace(recorded, symbol=symbol, signed_size=Decimal(size))
+            for symbol, size in positions
+        ),
+    )
+
+
+def test_a_symbol_whose_ledger_net_disagrees_with_the_venue_size_diverges_at_tier_1() -> None:
+    """Signed size is Tier-1 — accumulated, so zero economic tolerance: any gap
+    is a missed or duplicated fill, never noise (ADR-0034).
+
+    The comparison ranges over the **union** of both symbol sets, and the three
+    ways a symbol lands in it are the whole behavior. A symbol both sides hold
+    at different sizes is the obvious one. A symbol only the *ledger* holds is a
+    venue that has it flat — comparing only what the venue returned would drop
+    the position silently, which is a book we believe we hold and do not. A
+    symbol only the *venue* holds is foreign flow the engine never placed
+    (ADR-0038's unattributed partition) — comparing only what the ledger knows
+    about would never see it at all.
+
+    A symbol both sides agree on is in the union too and yields nothing: what
+    the cycle reports is the disagreements, not the roster.
+    """
+    store = SQLiteStore(":memory:")
+    projection = _ledger(store, equity="100000")
+    _book_fill(projection, quantity="0.002", price="64809")
+    _book_fill(projection, quantity="1.5", price="3000", symbol="ETH")
+    _book_fill(projection, quantity="100", price="0.4", symbol="DOGE")
+    venue = _held(
+        "100000",
+        ("BTC", "0.003"),  # a fill the ledger missed
+        ("DOGE", "100"),  # agrees
+        ("SOL", "10"),  # flow the engine never placed
+    )  # ETH: held by the ledger, flat at the venue
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), portfolio=projection)
+
+    divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences == (
+        Divergence(
+            tier=DivergenceTier.TIER_1,
+            field="signed_size",
+            symbol="BTC",
+            ledger=Decimal("0.002"),
+            venue=Decimal("0.003"),
+        ),
+        Divergence(
+            tier=DivergenceTier.TIER_1,
+            field="signed_size",
+            symbol="ETH",
+            ledger=Decimal("1.5"),
+            venue=Decimal("0"),
+        ),
+        Divergence(
+            tier=DivergenceTier.TIER_1,
+            field="signed_size",
+            symbol="SOL",
+            ledger=Decimal("0"),
+            venue=Decimal("10"),
+        ),
+    )
