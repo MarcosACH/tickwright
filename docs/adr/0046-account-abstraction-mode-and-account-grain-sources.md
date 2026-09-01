@@ -390,6 +390,28 @@ takes the **retry** rather than the allowlist's refusal. The distinction is load
 error text as much as in the control flow: printing the remediation there would send an operator to
 re-set a mode that was never in question.**)**
 
+**(Amended by [#180](https://github.com/MarcosACH/tickwright/issues/180)** — the block above names
+the point at which a single boot deadline becomes worth making, and ADR-0044 §7's push reached it.
+Two of its statements are now retired.
+
+*The boot spends two windows, not three, and the signature did not change.* The block reasons that a
+shared deadline "would have to be passed *into* `Exchange.start()`". It does not: the two guards are
+both **inside** `start()`, so the adapter opens one `Deadline` off the budget it was handed and
+spends it across the mode gate and the push. Whatever the gate spends retrying is gone from what the
+push has left. A boot therefore still spends at most two windows — `start()`'s and the barrier's,
+exactly as this block describes — and adding a third guard behind these cannot quietly make it
+three. `Exchange.start()`'s contract in `domain/protocols.py` is unchanged and still correct: what
+crosses that seam is the configured **number**, and one wall-clock window per side of it.
+
+*The pacing is no longer the venue package's own.* "The 1 s/30 s doubling is the venue package's own
+`Backoff` … so only the deadline arithmetic is written twice — here and in `StartupBarrier.run`, on
+opposite sides of the layer rule" was true and is not. Both are `domain` values now
+(`domain/pacing.py`: `Backoff`, `Deadline`), which is the one package `engine` and every adapter may
+both import, so the layer rule never required the duplication — only a shared home below both sides
+of it. The *loops* still differ and deliberately so: a barrier step reports a freeze as a `False`
+return while these guards catch a venue-specific transient tuple, and hoisting a loop over both
+would carry the venue's read vocabulary into `domain` against ADR-0031.**)**
+
 ## 4. Re-verification in flight: divergence-triggered, freeze on change
 
 **Decision: read the mode at boot, and re-read it before applying any Tier-1 **account cash** heal.
