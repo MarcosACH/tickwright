@@ -385,6 +385,82 @@ def test_a_tier_2_figure_the_ledger_cannot_yet_compute_is_not_reported_as_diverg
     assert asyncio.run(cycle.reconcile_account()) == ()
 
 
+def test_a_completed_cycle_records_what_it_found_at_each_tier() -> None:
+    """The pass is named, and the name alone is not the finding.
+
+    The classification this cycle performs reaches its heal and its alert in
+    later slices; it reaches an **operator** only here, through the record. A
+    bare ``account.reconciled`` reads identically over a book that agreed and a
+    book disagreeing at both tiers, which is the same defect the order grain's
+    freeze already answers by carrying its scope: without the field an operator
+    watching the event "cannot tell a pass that stopped dead from a pass that
+    reconciled everything except one order" (``Reconciler._freeze``). Its two
+    sibling records, ``inflight.reconciled`` and ``ghost.reconciled``, both name
+    their resolution for the same reason.
+
+    The counts are per tier because the tier is the whole of what classification
+    decides — a Tier-1 finding is an accumulated gap that will be healed and a
+    Tier-2 one is a valuation that will only ever be alerted on, so an operator
+    reading a pass needs the split rather than a total.
+    """
+    store = SQLiteStore(":memory:")
+    projection = _ledger(store, equity="100000")
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "65000")
+    venue = _held("100000.900", ("BTC", "0.003", "0.400"))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), portfolio=projection)
+
+    with capture_events() as logs:
+        divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences is not None
+    tiers = [divergence.tier for divergence in divergences]
+    assert tiers.count(DivergenceTier.TIER_1) == 2  # the cash line and the size
+    assert tiers.count(DivergenceTier.TIER_2) == 2  # equity and the symbol's uPnL
+    assert [log["event"] for log in logs] == [NamedEvent.ACCOUNT_RECONCILED.value]
+    assert (logs[0]["tier_1"], logs[0]["tier_2"], logs[0]["unvalued"]) == (2, 2, 0)
+
+
+def test_a_pass_that_could_not_value_the_book_is_not_recorded_as_one_that_agreed() -> None:
+    """The uncomputable Tier-2 above is right to classify nothing and wrong to
+    say nothing.
+
+    Dropping the figure is the honest classification — a valuation waiting on a
+    mark is unknown, not divergent (ADR-0041 §6) — but it leaves the *record*
+    of that pass identical to the record of a book that was fully cross-checked
+    and agreed. An operator would read a run whose Tier-2 half never ran once as
+    a run whose Tier-2 half agreed every time, which is inferring agreement from
+    absence on the one cadence ADR-0011 inv 1 exists to keep honest.
+
+    Reachable well past the first mark, too: marks are in-memory and never
+    persisted, and the feed subscription is its own config list — so a restart
+    still holding a position in a symbol the feed no longer carries leaves that
+    symbol permanently unvalued, with every pass reporting a clean book.
+
+    ``unvalued`` is a count rather than a suppression: this slice classifies and
+    the band that would act on it is #194's, so what the cycle owes is that the
+    two passes are told apart.
+    """
+    store = SQLiteStore(":memory:")
+    projection = _ledger(store, equity="100000")
+    _book_fill(projection, quantity="0.002", price="64809")
+    venue = _held("100000.400", ("BTC", "0.002", "0.400"))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), portfolio=projection)
+
+    with capture_events() as unvalued_logs:
+        assert asyncio.run(cycle.reconcile_account()) == ()
+
+    # 0.002 long entered at 64809 and marked at 65009 is worth the venue's own
+    # 0.400, so the second pass genuinely agrees where the first could not look.
+    _mark(projection, "BTC", "65009")
+    with capture_events() as agreed_logs:
+        assert asyncio.run(cycle.reconcile_account()) == ()
+
+    assert unvalued_logs[0]["unvalued"] == 2  # the account's equity and BTC's uPnL
+    assert agreed_logs[0]["unvalued"] == 0
+    assert unvalued_logs != agreed_logs
+
+
 class _SealedStore(SQLiteStore):
     """A real store that refuses every write once ``seal()`` is called.
 
@@ -519,3 +595,40 @@ def test_a_failed_barrier_read_is_recorded_under_the_grains_own_freeze_name() ->
     assert materialised is False
     assert [log["event"] for log in logs] == [NamedEvent.ACCOUNT_RECONCILE_FROZEN.value]
     assert store.load_account() is None
+
+
+def test_each_account_freeze_names_the_caller_whose_cost_it_carries() -> None:
+    """One name, two costs — so the name carries a ``scope``.
+
+    The two callers of the account anchor fail identically and are answered
+    identically: nothing is inferred from the missing read. What differs is the
+    price. The cadence's freeze loses one pass and the next deadline reads
+    again; the barrier's exhausts the startup budget and faults the process
+    (``invariants.md`` inv 1). Told apart only by "the surrounding trail", an
+    operator has to reconstruct which one they are looking at from what else
+    happened to be logged nearby.
+
+    A field rather than a second event name, because the catalog is closed
+    (ADR-0020/0045) and nothing *routes* on the difference — which is exactly
+    the call ``reconcile.frozen`` already makes for its own two scopes.
+    """
+    store = SQLiteStore(":memory:")
+    projection = _ledger(store, equity="100000")
+    cycle = LedgerReconciliation(exchange=_AccountVenue(None), portfolio=projection)
+
+    with capture_events() as cadence_logs:
+        assert asyncio.run(cycle.reconcile_account()) is None
+
+    unopened = PortfolioProjection(
+        spec=AccountSpec(account_id=LIVE_ACCOUNT_ID, genesis_collateral=None),
+        store=SQLiteStore(":memory:"),
+        clock=ManualClock(7),
+    )
+    unopened.recover()
+    barrier = LedgerReconciliation(exchange=_AccountVenue(None), portfolio=unopened)
+
+    with capture_events() as barrier_logs:
+        assert asyncio.run(barrier.materialise_account()) is False
+
+    assert cadence_logs[0]["scope"] == "cadence"
+    assert barrier_logs[0]["scope"] == "barrier"

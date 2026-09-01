@@ -83,6 +83,14 @@ class NamedEvent(StrEnum):
     # the ledger was cross-checked against the venue at all, and a record that
     # appeared solely on disagreement could not tell a healthy book from a
     # cadence that stopped running.
+    #
+    # Carries what the pass *found* — ``tier_1``/``tier_2`` counts, as its two
+    # order-grain siblings carry their ``resolution`` — because the heal and the
+    # alert that will act on the classification land in later slices, so until
+    # then this record is the only thing reading it. ``unvalued`` is the third
+    # outcome those counts would hide: a Tier-2 figure whose mark is absent is
+    # dropped rather than reported (ADR-0041 §6), which is correct and would
+    # otherwise make a pass that never looked identical to one that agreed.
     ACCOUNT_RECONCILED = "account.reconciled"
     # The same grain's failed read: the account anchor came back empty, so
     # nothing was inferred from it rather than reading an outage as a flat book
@@ -94,7 +102,10 @@ class NamedEvent(StrEnum):
     # where a freeze costs one pass, and the startup barrier's materialisation,
     # where it exhausts the startup budget and faults the process. One anchor
     # failing one way is one name — an operator telling an outage at boot from
-    # an outage an hour in reads the surrounding trail, not a second vocabulary.
+    # an outage an hour in reads the ``scope`` field (``barrier``/``cadence``),
+    # not a second vocabulary. That is the same call ``reconcile.frozen`` makes
+    # one grain up: the catalog is closed and nothing routes on the difference,
+    # but the cost differs by the whole run, so plenty reads it.
     ACCOUNT_RECONCILE_FROZEN = "account.reconcile_frozen"
 
     # A live-exchange request that yielded no usable answer, on either path and

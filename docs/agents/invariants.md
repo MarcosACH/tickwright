@@ -36,7 +36,10 @@ Consumed by `/code-review` (any regression is BLOCKING) and `/python-codebase-ma
    and what keeps ADR-0041 §6's "`cash` is never `None`" true rather than merely intended.
    Both freezes at that grain are **recorded under one name**, `account.reconcile_frozen`
    (#193): the costlier one was the silent one until then, leaving an operator with
-   `engine.faulted` naming nothing while the cheaper freeze a step later was fully named.*
+   `engine.faulted` naming nothing while the cheaper freeze a step later was fully named.
+   One name, but a `scope` field of `barrier` or `cadence` — the difference is the whole
+   run against one pass, and a reader should not have to reconstruct which from whatever
+   else happened to be logged nearby.*
    **The boundary of this invariant is permanence.** A failed read and a retry is the answer
    for a read that *may* succeed later — a dead transport, an unreadable body — with the
    per-cloid span below as how that retrying finds out whether waiting helps. A venue fact this

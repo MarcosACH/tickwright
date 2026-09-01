@@ -16,12 +16,30 @@ from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
 
-from tickwright.domain import Exchange, VenueAccountState, venue_cash
+from tickwright.domain import AccountView, Exchange, VenueAccountState, venue_cash
 from tickwright.observability import NamedEvent, named_event
 
 from .portfolio import PortfolioProjection
 
 _ZERO = Decimal("0")
+
+
+class _FreezeCaller(Enum):
+    """Which of the account anchor's two readers a failed read froze — the
+    ``scope`` field on ``account.reconcile_frozen``.
+
+    One name covers both because one anchor failing one way is one failure, and
+    a second event name would make an operator learn two vocabularies for it.
+    What the two do not share is the **cost**: ``CADENCE`` loses this pass and
+    the next deadline reads again, while ``BARRIER`` spends the startup budget
+    and then faults the process (``invariants.md`` inv 1). A field rather than a
+    second name is the call ``reconcile.frozen`` already makes for its own two
+    scopes — the catalog is closed (ADR-0020/0045) and nothing routes on the
+    difference, but plenty reads it.
+    """
+
+    BARRIER = "barrier"
+    CADENCE = "cadence"
 
 
 class DivergenceTier(Enum):
@@ -114,10 +132,15 @@ class LedgerReconciliation:
             return True
         state = await self._exchange.fetch_account_state()
         if state is None:
-            named_event(NamedEvent.ACCOUNT_RECONCILE_FROZEN)
+            self._freeze(_FreezeCaller.BARRIER)
             return False
         self._portfolio.materialise(state)
         return True
+
+    @staticmethod
+    def _freeze(caller: _FreezeCaller) -> None:
+        """The account anchor came back empty: record it and infer nothing."""
+        named_event(NamedEvent.ACCOUNT_RECONCILE_FROZEN, scope=caller.value)
 
     async def reconcile_account(self) -> tuple[Divergence, ...] | None:
         """One cycle: read the venue account once, classify what disagrees.
@@ -132,18 +155,66 @@ class LedgerReconciliation:
         answer, a book that agreed, and the two are deliberately not collapsed
         into one. The freeze costs this cycle alone; the next deadline reads
         again.
+
+        The ledger's side is read **once** for the whole cycle, as the venue's
+        is: the account view and the per-symbol uPnL map are each a fold over
+        every partition, so taking them here rather than inside each check both
+        halves the folds and gives the comparison one reading per side. That is
+        the property ``domain.valuation`` states about assembling a view in one
+        call — two fields of one view can never straddle a fill — kept by the
+        cycle rather than left to the checks being synchronous.
+
+        The pass is recorded with **what it found**, not merely that it ran: the
+        heal and the alert land in later slices, so until they do this record is
+        the classification's only reader. ``unvalued`` is the third outcome the
+        counts would otherwise hide — a Tier-2 figure the ledger cannot compute
+        is dropped rather than reported (ADR-0041 §6), which is correct and
+        leaves a pass that never looked indistinguishable from one that agreed.
         """
         state = await self._exchange.fetch_account_state()
         if state is None:
-            named_event(NamedEvent.ACCOUNT_RECONCILE_FROZEN)
+            self._freeze(_FreezeCaller.CADENCE)
             return None
+        view = self._portfolio.account()
+        unrealized = self._portfolio.account_unrealized()
         divergences = (
-            self._cash(state) + self._sizes(state) + self._equity(state) + self._unrealized(state)
+            self._cash(state, cash=view.cash)
+            + self._sizes(state)
+            + self._equity(state, equity=view.equity)
+            + self._unrealized(state, ledger=unrealized)
         )
-        named_event(NamedEvent.ACCOUNT_RECONCILED)
+        tiers = [divergence.tier for divergence in divergences]
+        named_event(
+            NamedEvent.ACCOUNT_RECONCILED,
+            tier_1=tiers.count(DivergenceTier.TIER_1),
+            tier_2=tiers.count(DivergenceTier.TIER_2),
+            unvalued=self._unvalued(state, view=view, ledger=unrealized),
+        )
         return divergences
 
-    def _cash(self, state: VenueAccountState) -> tuple[Divergence, ...]:
+    @staticmethod
+    def _unvalued(
+        state: VenueAccountState,
+        *,
+        view: AccountView,
+        ledger: dict[str, Decimal | None],
+    ) -> int:
+        """How many Tier-2 figures this pass could not compute at all.
+
+        The account's equity, plus one per symbol **both** sides hold whose
+        ledger valuation is waiting on a mark — the same range ``_unrealized``
+        classifies over, since a symbol only one side carries is already a
+        Tier-1 size finding rather than a missing valuation. A symbol absent
+        from the ledger reads as not held, never as unvalued.
+        """
+        absent_marks = sum(
+            1
+            for position in state.positions
+            if position.symbol in ledger and ledger[position.symbol] is None
+        )
+        return absent_marks + (1 if view.equity is None else 0)
+
+    def _cash(self, state: VenueAccountState, *, cash: Decimal) -> tuple[Divergence, ...]:
         """Tier-1: the accumulated cash line against the one the snapshot implies.
 
         The venue publishes no cash line, so the comparison is against
@@ -156,75 +227,21 @@ class LedgerReconciliation:
         collateral pool and open PnL is not attributable to it. Ahead of the
         per-symbol findings because that is the order the two are read in — the
         pool first, then what it is backing.
+
+        ``cash`` is handed in off the cycle's one account view rather than read
+        here, so this check and ``_equity`` compare against the same reading.
         """
-        ledger = self._portfolio.account().cash
         venue = venue_cash(state)
-        if ledger == venue:
+        if cash == venue:
             return ()
         return (
             Divergence(
                 tier=DivergenceTier.TIER_1,
                 field="cash",
                 symbol=None,
-                ledger=ledger,
+                ledger=cash,
                 venue=venue,
             ),
-        )
-
-    def _equity(self, state: VenueAccountState) -> tuple[Divergence, ...]:
-        """Tier-2: the recomputed account equity against the venue's own.
-
-        Un-banded, deliberately. ADR-0040 §6's tolerance lands with the alert
-        slice, and what this cycle owes it is a classified pair to apply a
-        tolerance *to* — a difference dropped here is one no band was ever
-        asked about.
-
-        A ``None`` equity is **not a divergence**: it means one held symbol has
-        no mark, so the Σ is uncomputable rather than wrong (ADR-0041 §6), and
-        reporting the absence as a disagreement would alert on our own missing
-        input while claiming the venue's number is at fault.
-        """
-        ledger = self._portfolio.account().equity
-        if ledger is None or ledger == state.equity:
-            return ()
-        return (
-            Divergence(
-                tier=DivergenceTier.TIER_2,
-                field="equity",
-                symbol=None,
-                ledger=ledger,
-                venue=state.equity,
-            ),
-        )
-
-    def _unrealized(self, state: VenueAccountState) -> tuple[Divergence, ...]:
-        """Tier-2: per-symbol open PnL, at the account grain both sides hold it.
-
-        Ranged over the symbols **both** sides hold, where the Tier-1 checks
-        range over the union — and the asymmetry is the point. A symbol only one
-        side carries has already been reported as a size divergence, and its
-        uPnL gap is that same disagreement restated in another unit rather than
-        a second finding: the valuation is not wrong, the book is. Reporting it
-        twice would hand the alert slice a Tier-2 record whose only honest
-        response is to suppress it.
-
-        The ledger's side is the Σ over every partition of the symbol, because
-        the venue holds one position per symbol and a partition's own slice
-        would be a fraction compared against a whole (ADR-0041 §4). ``None``
-        is skipped for the reason equity's is: a valuation waiting on a mark is
-        unknown, not divergent.
-        """
-        ledger = self._portfolio.account_unrealized()
-        return tuple(
-            Divergence(
-                tier=DivergenceTier.TIER_2,
-                field="unrealized_pnl",
-                symbol=position.symbol,
-                ledger=held,
-                venue=position.unrealized_pnl,
-            )
-            for position in sorted(state.positions, key=lambda p: p.symbol)
-            if (held := ledger.get(position.symbol)) is not None and held != position.unrealized_pnl
         )
 
     def _sizes(self, state: VenueAccountState) -> tuple[Divergence, ...]:
@@ -257,4 +274,68 @@ class LedgerReconciliation:
             )
             for symbol in sorted(ledger.keys() | venue.keys())
             if ledger.get(symbol, _ZERO) != venue.get(symbol, _ZERO)
+        )
+
+    def _equity(
+        self, state: VenueAccountState, *, equity: Decimal | None
+    ) -> tuple[Divergence, ...]:
+        """Tier-2: the recomputed account equity against the venue's own.
+
+        Un-banded, deliberately. ADR-0040 §6's tolerance lands with the alert
+        slice, and what this cycle owes it is a classified pair to apply a
+        tolerance *to* — a difference dropped here is one no band was ever
+        asked about.
+
+        A ``None`` equity is **not a divergence**: it means one held symbol has
+        no mark, so the Σ is uncomputable rather than wrong (ADR-0041 §6), and
+        reporting the absence as a disagreement would alert on our own missing
+        input while claiming the venue's number is at fault. Dropped from the
+        findings, it is still counted on the cycle's record (``_unvalued``), so
+        the pass that could not look is not read as the pass that agreed.
+        """
+        if equity is None or equity == state.equity:
+            return ()
+        return (
+            Divergence(
+                tier=DivergenceTier.TIER_2,
+                field="equity",
+                symbol=None,
+                ledger=equity,
+                venue=state.equity,
+            ),
+        )
+
+    def _unrealized(
+        self, state: VenueAccountState, *, ledger: dict[str, Decimal | None]
+    ) -> tuple[Divergence, ...]:
+        """Tier-2: per-symbol open PnL, at the account grain both sides hold it.
+
+        Ranged over the symbols **both** sides hold, where the Tier-1 checks
+        range over the union — and the asymmetry is the point. A symbol only one
+        side carries has already been reported as a size divergence, and its
+        uPnL gap is that same disagreement restated in another unit rather than
+        a second finding: the valuation is not wrong, the book is. Reporting it
+        twice would hand the alert slice a Tier-2 record whose only honest
+        response is to suppress it.
+
+        The ledger's side is the Σ over every partition of the symbol, because
+        the venue holds one position per symbol and a partition's own slice
+        would be a fraction compared against a whole (ADR-0041 §4). ``None``
+        is skipped for the reason equity's is: a valuation waiting on a mark is
+        unknown, not divergent — and counted for the same reason too.
+
+        ``ledger`` is the cycle's one fold over the partitions, handed in rather
+        than taken here so the classification and the ``unvalued`` count read
+        the same map.
+        """
+        return tuple(
+            Divergence(
+                tier=DivergenceTier.TIER_2,
+                field="unrealized_pnl",
+                symbol=position.symbol,
+                ledger=held,
+                venue=position.unrealized_pnl,
+            )
+            for position in sorted(state.positions, key=lambda p: p.symbol)
+            if (held := ledger.get(position.symbol)) is not None and held != position.unrealized_pnl
         )
