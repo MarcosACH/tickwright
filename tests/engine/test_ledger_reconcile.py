@@ -1111,3 +1111,44 @@ def test_a_heal_that_reduces_the_net_shorts_the_residual_rather_than_closing_a_s
     assert residual.size == Decimal("-0.0015")
     assert residual.entry_price == Decimal("64809")  # the venue's own, off the snapshot
     assert ledger.account_net() == {"BTC": Decimal("0.0005")}
+
+
+def test_a_failed_read_never_un_heals_the_book_it_cannot_see() -> None:
+    """A frozen cycle heals nothing and **removes** nothing, and the second half
+    is the one that needs a heal in front of it to state at all.
+
+    The book here holds ten SOL for one reason: a previous pass healed it there
+    because the venue said so. Absence of the venue is not the venue saying the
+    opposite (ADR-0011 inv 1) — so a read that fails must leave that partition
+    exactly where the heal put it, rather than treating "not reported" as
+    "reported flat" and shorting it back to zero. That inversion is available to
+    anything that reconciles off the snapshot's symbol set without checking
+    whether there *was* a snapshot, and it is the expensive direction: a spurious
+    close writes a position the account never held, where a missed heal only
+    waits a cadence interval.
+
+    Asserted against a sealed store, on ``_size_heals``'s rule above: the freeze
+    is an early return ahead of the checkpoint, so the claim is that the whole
+    write surface stays untouched rather than that the numbers happen to match.
+    The record says only that the pass froze — nothing was found, because
+    nothing was compared, and nothing moved.
+    """
+    store = _SealedStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    ledger = keeper.portfolio
+    venue = _AccountVenue(_held("100000", ("SOL", "10", "0")), None)
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+
+    asyncio.run(cycle.reconcile_account())  # the pass that put the residual there
+    healed = ledger.position("SOL", strategy_id=None)
+    store.seal()
+
+    with capture_events() as logs:
+        frozen = asyncio.run(cycle.reconcile_account())
+
+    assert frozen is None
+    assert [log["event"] for log in logs] == [NamedEvent.ACCOUNT_RECONCILE_FROZEN.value]
+    assert ledger.position("SOL", strategy_id=None) == healed
+    assert ledger.account_net() == {"SOL": Decimal("10")}
+    assert ledger.account().cash == Decimal("100000")
+    assert {position.symbol for position in store.all_positions()} == {"SOL"}
