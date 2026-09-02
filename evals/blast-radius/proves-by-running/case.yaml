@@ -1,0 +1,74 @@
+schema_version: "1.0"
+name: blast-radius-proves-by-running
+description: >
+  The fact the change is safe because of gets settled by running the real code,
+  and the writeup reports what the run showed rather than what the diff reads
+  like.
+tags: [blast-radius, skills]
+
+plugins:
+  - .claude/skills/blast-radius
+
+context:
+  # A three-file tree whose safety question is decidable in one command and
+  # invisible to grep. `quantize` snaps to the *exponent* of its quantum, so the
+  # new rounding reproduces the old grid for every power-of-ten tick and breaks
+  # the one tick that is not: BTC's 0.5 becomes a 0.1 grid, and 100.27 rounds to
+  # 100.3 instead of 100.5. Both are prices; only one is on the grid the venue
+  # accepts. Reading the diff makes the change look like a precision fix.
+  add_dirs: [fixture]
+
+execution:
+  # The diff is in the prompt because a fixture is a directory, not a
+  # repository, so there is no `git show` to reach for. The tick values are
+  # deliberately absent from the prompt and live only in
+  # src/domain/specs.py — that is what makes the `0.5` grader below evidence of
+  # having gone and looked rather than an echo.
+  prompt: |
+    /blast-radius
+
+    About to ship this. It's a precision fix, floats were drifting on the
+    division. What could it break?
+
+        --- a/src/domain/rounding.py
+        +++ b/src/domain/rounding.py
+        @@
+         def round_to_tick(price: float, tick: float) -> float:
+             """Round `price` onto the `tick` grid."""
+        -    return round(price / tick) * tick
+        +    return float(Decimal(str(price)).quantize(Decimal(str(tick)), rounding=ROUND_HALF_EVEN))
+  max_turns: 15
+  timeout_seconds: 600
+  # Write is here so the proof can be a script rather than a one-liner. Bash and
+  # Write both need the operator grant `--allow-tools` on top of this list.
+  allowed_tools: [Skill, Read, Grep, Glob, Bash, Write, Edit]
+
+runs: 2
+
+graders:
+  - name: blast-radius-skill-fired
+    type: tool_used
+    tool: Skill
+    input_match: blast-radius
+    arm: with-only
+
+  # The headline rule: don't hand back the writeup, run the code. Matching on
+  # `python` catches both shapes the skill sanctions, a `python -c` one-liner
+  # and a written script, and does not care which. A run that only reads and
+  # greps scores zero here, which is the whole ablation.
+  - name: proof-was-executed
+    type: tool_used
+    tool: Bash
+    input_match: python
+    min: 1
+
+  # A proof that runs and is then not believed is worth nothing, so the answer
+  # has to carry what the run showed. 0.5 appears nowhere in the prompt; it is
+  # in specs.py only. Expect to tighten this after the first run — a writeup can
+  # name the tick without stating that its grid is gone, and if that shows up in
+  # practice this grader should move to the rounded price it produces.
+  - name: broken-tick-named
+    type: regex
+    target: last_message
+    pattern: \b0\.5\b
+    match: contains
