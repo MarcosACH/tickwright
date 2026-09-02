@@ -381,7 +381,35 @@ class PortfolioProjection:
             # ``event.fee`` here instead would bypass that gatekeeper and charge
             # a redelivered fill again. ``Account`` owns the sign (ADR-0042 §4).
             self._account.accrue_fee(position.fees - fees_before, event_id=event.event_id)
+        self._lock_isolated_collateral(position, changes)
         return LedgerChange(account=self._account, position=position, changes=changes)
+
+    def _lock_isolated_collateral(
+        self, position: Position, changes: tuple[PositionChange, ...]
+    ) -> None:
+        """Move an isolated position's own margin in, once, at open (ADR-0040 §1).
+
+        Paper does not model ``updateIsolatedMargin``, so the bucket is whatever
+        the open put in it — ``notional / leverage`` at the entry the fold just
+        booked — and nothing later moves it. That is why this reads ``OPENED``
+        rather than running on every fill: an add on the same side reports
+        ``CHANGED``, and recomputing there would silently top the bucket up.
+
+        A Tier-1 write, not a valuation: the number lands on the ledger row the
+        caller is about to persist, so a restart restores it rather than
+        deriving it again from a leverage the run may since have been
+        reconfigured with.
+        """
+        if PositionChange.OPENED not in changes:
+            return
+        leverage = self.leverage_for(position.symbol)
+        if leverage.mode != "isolated":
+            # Cross posts no bucket of its own — its margin comes out of the
+            # account pool, which is the whole difference between the modes.
+            return
+        position.isolated_collateral = (
+            abs(position.signed_size) * position.entry_price / leverage.leverage
+        )
 
     def apply_funding(self, accrual: FundingAccrual) -> FundingChange | None:
         """Fold one settled boundary into the funding line and the cash line.

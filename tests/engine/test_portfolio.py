@@ -17,11 +17,14 @@ from venue_doubles import account_state
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
+    EMPTY_LEVERAGE_BOOK,
     UNATTRIBUTED,
     Account,
     AccountSpec,
     FundingAccrual,
     InvariantViolation,
+    LeverageBook,
+    LeverageSpec,
     MarkTick,
     Order,
     OrderFilled,
@@ -102,11 +105,18 @@ def _accrual(
 
 
 def _projection(
-    genesis: str | None = "100000", *, store: Store | None = None
+    genesis: str | None = "100000",
+    *,
+    store: Store | None = None,
+    leverage: LeverageBook = EMPTY_LEVERAGE_BOOK,
 ) -> PortfolioProjection:
     """A ledger on a paper-shaped account, unless ``genesis`` is ``None`` — which
     is the *live* shape, where the opening value is ingested from the venue
-    rather than declared (ADR-0042 §6) and is the predicate recovery reads."""
+    rather than declared (ADR-0042 §6) and is the predicate recovery reads.
+
+    ``leverage`` is the resolved book the composition root injects; the default
+    empty one takes ADR-0040 §5's safest pair for every symbol, which is what a
+    case with no margin opinion of its own wants."""
     spec = AccountSpec(
         # Two segments on paper against live's three (ADR-0038/0042 §5), so a
         # row written by one shape is never confusable with the other's.
@@ -117,6 +127,7 @@ def _projection(
         spec=spec,
         store=store if store is not None else SQLiteStore(":memory:"),
         clock=ManualClock(7),
+        leverage=leverage,
     )
 
 
@@ -404,6 +415,30 @@ def test_no_tier_two_value_reaches_the_durable_ledger() -> None:
     assert recovered is not None
     assert recovered.mark_ts is None
     assert recovered.unrealized_pnl is None
+
+
+def test_paper_locks_an_isolated_positions_collateral_at_the_notional_it_opened_on() -> None:
+    """Paper's isolated bucket is the margin moved in **at open** (ADR-0040 §1).
+
+    A 0.5 BTC open at 42 000 is 21 000 of notional, and at 10x isolated the
+    venue would move 21 000 / 10 = **2 100** into the position's own bucket. The
+    figure is worked from the fill, not from the reported number: the collateral
+    is a Tier-1 line (ADR-0040's tier table — "open-margin on paper"), so it is
+    the *ledger row* that must carry it and not a valuation recomputed on read.
+
+    Paper alone writes it. On live the same field is **ingested** from the venue
+    (`marginUsed − unrealizedPnl`, ADR-0043 §3), and computing one here would
+    fabricate a number the venue is the authority for — the asymmetry ADR-0034
+    forbids crossing.
+    """
+    projection = _projection(
+        leverage=LeverageBook(entries={"BTC": LeverageSpec(mode="isolated", leverage=10)})
+    )
+    change = projection.apply_fill(
+        _fill(trade_id="f1", quantity="0.5", price="42000"), side=Side.BUY
+    )
+
+    assert change.position.isolated_collateral == Decimal("2100")
 
 
 def test_a_position_the_projection_has_no_mark_for_reports_no_instant() -> None:
