@@ -465,6 +465,63 @@ def test_live_leaves_an_isolated_collateral_the_venue_is_the_authority_for_alone
     assert change.position.isolated_collateral == Decimal("0")
 
 
+def test_a_restart_restores_the_locked_collateral_rather_than_recomputing_it() -> None:
+    """The bucket is durable Tier-1, so a second life reads it back unchanged.
+
+    The second projection is opened on a **different** leverage — 5x against the
+    10x the position was opened at — which is what makes this a restore rather
+    than a recomputation: recomputing would answer 21 000 / 5 = 4 200, and the
+    number that survives is the 2 100 the open actually moved in. Config wins at
+    startup and the position keeps what it was margined with, exactly as
+    ADR-0044 §5's measured venue behaviour has it: a leverage change never
+    re-margins an open position.
+    """
+    store = SQLiteStore(":memory:")
+    opened = _projection(
+        store=store,
+        leverage=LeverageBook(entries={"BTC": LeverageSpec(mode="isolated", leverage=10)}),
+    )
+    opened.recover()
+    change = opened.apply_fill(_fill(trade_id="f1", quantity="0.5", price="42000"), side=Side.BUY)
+    store.checkpoint_ledger(account=change.account, positions=(change.position,), ts_ns=1_000)
+    opened.project(change)
+
+    restarted = _projection(
+        store=store,
+        leverage=LeverageBook(entries={"BTC": LeverageSpec(mode="isolated", leverage=5)}),
+    )
+    restarted.recover()
+    # Marked at the entry, so the unrealized term of ``isolated_collateral +
+    # unrealized_pnl`` is exactly zero and ``margin_used`` reads the restored
+    # bucket alone — the seam a strategy actually holds, not the row behind it.
+    restarted.observe_mark(_mark(price="42000", ts_event=9_000))
+
+    recovered = restarted.for_strategy("alpha").position("BTC")
+    assert recovered is not None
+    assert recovered.margin_used == Decimal("2100")
+
+
+def test_adding_to_an_isolated_position_does_not_top_its_bucket_up() -> None:
+    """The bucket is fixed at the open and no later fill moves it (ADR-0040 §1).
+
+    A second 0.5 at 44 000 doubles the size and lifts the mean entry to 43 000,
+    so a recomputation would answer 1.0 × 43 000 / 10 = 4 300. The collateral
+    that stands is the 2 100 the open moved in — paper models no top-up, so the
+    add is booked into the position without one.
+    """
+    projection = _projection(
+        leverage=LeverageBook(entries={"BTC": LeverageSpec(mode="isolated", leverage=10)})
+    )
+    book_fill(projection, _fill(trade_id="f1", quantity="0.5", price="42000"), side=Side.BUY)
+
+    change = projection.apply_fill(
+        _fill(trade_id="f2", quantity="0.5", price="44000"), side=Side.BUY
+    )
+
+    assert change.position.entry_price == Decimal("43000")  # the add did land
+    assert change.position.isolated_collateral == Decimal("2100")
+
+
 def test_a_position_the_projection_has_no_mark_for_reports_no_instant() -> None:
     """``mark_ts is None`` ⟺ the mark is absent — the one signal a reader has for
     telling "never valued" from "valued a while ago" (ADR-0041 §6)."""
