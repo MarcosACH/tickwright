@@ -103,8 +103,15 @@ def _maintenance_margin(notional: Decimal | None, *, spec: InstrumentSpec | None
     A symbol with no spec has no rate, so the answer is unknown rather than
     frictionless: a fabricated ``0`` would report a position as needing no
     maintenance at all, which is the same unknown-as-worthless mistake the mark
-    rule refuses.
+    rule refuses. But the rate is a **term**, and ADR-0041 §6's rule is
+    per-term: a zero notional is zero maintenance at every rate, so the missing
+    spec stops mattering exactly where the missing mark does. That case is not
+    hypothetical — the unattributed partition is where both go missing at once,
+    since a symbol outside our configured universe is also one no ``MarkTick``
+    subscription covers.
     """
+    if notional == _ZERO:
+        return _ZERO
     if notional is None or spec is None:
         return None
     return notional * spec.margin_maint

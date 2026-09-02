@@ -278,3 +278,74 @@ def test_maintenance_margin_stays_flat_above_the_first_tier_band() -> None:
 
     assert view.notional == Decimal("12073.655")
     assert view.maintenance_margin == Decimal("150.9206875")
+
+
+def test_a_flat_account_net_reads_a_real_zero_maintenance_with_no_mark_and_no_spec() -> None:
+    """The per-term rule reaches the *rate* term too, not just the mark.
+
+    ``notional × margin_maint`` is zero whenever the notional is, whatever the
+    rate — so a symbol the account nets flat in needs no ``InstrumentSpec`` to
+    answer, and the reserved unattributed partition holding a symbol outside our
+    universe is exactly where both terms go missing at once (ADR-0041 §6).
+    Answering ``None`` here would withhold a number that is not in doubt.
+    """
+    position = _position(quantity="2", price="100", side=Side.BUY)
+
+    view = position_view(
+        position, account_net=Decimal("0"), mark=None, mark_ts=None, leverage=CROSS_10X, spec=None
+    )
+
+    assert view.notional == Decimal("0")
+    assert view.maintenance_margin == Decimal("0")
+
+
+def test_the_per_term_rule_holds_in_both_margin_modes() -> None:
+    """Cross and isolated compute ``margin_used`` from different terms, so the
+    nullability rule has to be re-checked on each rather than inherited from
+    whichever mode was written first (ADR-0041 §6).
+
+    Both directions, on both modes: a genuinely closed position reads real
+    zeros with no mark ever seen, and a held one reads ``None`` — cross because
+    ``notional`` needs the mark, isolated because ``unrealized_pnl`` does.
+    """
+    closed = _position(quantity="2", price="100", side=Side.BUY)
+    closed.apply(
+        OrderFilled(
+            ts_event=2_000,
+            ts_init=2_000,
+            cloid="0xf2",
+            strategy_id="alpha",
+            signal_id="alpha:BTC:2",
+            symbol="BTC",
+            trade_id="f2",
+            quantity=Decimal("2"),
+            price=Decimal("150"),
+            cum_qty=Decimal("2"),
+            fee=Decimal("0"),
+        ),
+        side=Side.SELL,
+    )
+    held = _position(quantity="2", price="100", side=Side.BUY)
+
+    for mode in (CROSS_10X, ISOLATED_1X):
+        flat_view = position_view(
+            closed,
+            account_net=Decimal("0"),
+            mark=None,
+            mark_ts=None,
+            leverage=mode,
+            spec=BTC_40X,
+        )
+        held_view = position_view(
+            held,
+            account_net=Decimal("2"),
+            mark=None,
+            mark_ts=None,
+            leverage=mode,
+            spec=BTC_40X,
+        )
+
+        assert flat_view.margin_used == Decimal("0"), mode
+        assert flat_view.maintenance_margin == Decimal("0"), mode
+        assert held_view.margin_used is None, mode
+        assert held_view.maintenance_margin is None, mode
