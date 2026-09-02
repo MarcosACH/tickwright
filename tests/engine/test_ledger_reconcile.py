@@ -737,6 +737,50 @@ def test_a_cycle_that_finds_only_tier_2_divergence_changes_no_stored_value() -> 
     assert store.all_positions() == stored
 
 
+def test_a_size_finding_the_cycle_cannot_price_heals_nothing_and_writes_nothing() -> None:
+    """A heal the cycle cannot compute is not attempted at half strength: it
+    emits no synthetic fill, and a pass whose every finding is unhealable writes
+    nothing at all.
+
+    The reachable shape of "a heal of zero is not a fact worth putting on the
+    path". ``clearinghouseState`` omits the entry price of a position the venue
+    does not carry, and ADR-0034's synthetic needs a price to book against — so
+    the ledger's own ETH, flat at the venue, is a Tier-1 finding with no price
+    behind it. Booking it at an invented one would put a real number on
+    ``entry_price`` that no later cycle re-examines, where an unhealed symbol
+    simply diverges again at the next deadline and stays visible.
+
+    **Still reported**, which is the half that makes the other half safe: the
+    cycle declines to correct the book, not to notice. Silence here would be a
+    position we believe we hold and do not, disappearing from the findings
+    because it could not be priced.
+
+    Asserted against a store that refuses a write outright, on the same argument
+    the Tier-2 case makes below: an empty heal that re-stamped the account row
+    would be indistinguishable from a correction by anything but the number, and
+    a before/after comparison could not tell the two apart.
+    """
+    store = _SealedStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    _book_fill(keeper.portfolio, quantity="1.5", price="3000", symbol="ETH")
+    cycle = LedgerReconciliation(exchange=_AccountVenue(_held("100000")), checkpointer=keeper)
+    store.seal()
+
+    divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences == (
+        Divergence(
+            tier=DivergenceTier.TIER_1,
+            field=DivergenceField.SIGNED_SIZE,
+            symbol="ETH",
+            ledger=Decimal("1.5"),
+            venue=Decimal("0"),
+        ),
+    )
+    assert keeper.portfolio.position("ETH", strategy_id=None) is None
+    assert keeper.portfolio.account_net() == {"ETH": Decimal("1.5")}
+
+
 def test_a_failed_barrier_read_is_recorded_under_the_grains_own_freeze_name() -> None:
     """The barrier's account read is the *same grain's* freeze as the cadence's,
     and it costs strictly more: a frozen cycle loses one pass, while this one

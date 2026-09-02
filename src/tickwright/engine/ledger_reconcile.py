@@ -261,6 +261,16 @@ class LedgerReconciliation:
         Classification runs before this, off the cycle's one fold, so a heal can
         never feed the comparison that produced it — the Tier-2 findings on this
         pass are about the book the cycle *found*, not the one it left behind.
+
+        The zero-delta arm is **unreachable from this pass's own input** and kept
+        anyway: ``_sizes`` reports on exact inequality, so a size finding it
+        emitted always has a gap. What it guards is the producer side of the rule
+        — a heal of zero is not a fact worth putting on the path, and the
+        alternative to refusing it here is a well-formed synthetic that
+        ``Position.apply``'s magnitude precondition faults the run over after the
+        saga has already moved. That makes it structurally untestable through
+        this seam, which is why the suite pins the priceless finding above
+        instead: same claim, reachable input.
         """
         ts_ns = self._checkpointer.clock.timestamp_ns()
         prices = {position.symbol: position.entry_price for position in state.positions}
