@@ -109,6 +109,35 @@ class Divergence:
     venue: Decimal
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _SizeHeal:
+    """A Tier-1 size finding and the synthetic fill built to close it.
+
+    The pair is carried from the moment it exists rather than rebuilt at the
+    announcement, because the two are only relatable by the predicate that
+    produced them: ``_size_heals`` decides which findings heal, and anything
+    downstream re-deriving that decision is a second statement of it that can
+    drift. The announcement needs both halves — the ``event_id`` off the
+    synthetic, and the ledger/venue pair off the finding, since a fill carries
+    only its delta and the pair is what an operator reads.
+    """
+
+    divergence: Divergence
+    fill: ReconciliationFill
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _CashHeal:
+    """The Tier-1 cash finding and the correction built to close it.
+
+    ``_SizeHeal``'s account-grain sibling, and there is at most one per pass:
+    the account has one collateral pool (ADR-0041 §2).
+    """
+
+    divergence: Divergence
+    correction: CashCorrection
+
+
 def _healed(divergence: Divergence, *, event_id: str) -> None:
     """Record the correction that closed ``divergence``, under the key it was
     applied with.
@@ -257,10 +286,13 @@ class LedgerReconciliation:
         # correction beside it are one retryable unit rather than two the clock
         # could separate.
         heal_ts_ns = self._checkpointer.clock.timestamp_ns()
-        fills = self._size_heals(state, divergences, ts_ns=heal_ts_ns)
-        correction = self._cash_heal(divergences, ts_ns=heal_ts_ns)
-        booked = self._checkpointer.checkpoint_heal(fills, cash=correction)
-        self._record_heals(divergences, fills=fills, cash=correction, booked=booked)
+        heals = self._size_heals(state, divergences, ts_ns=heal_ts_ns)
+        cash = self._cash_heal(divergences, ts_ns=heal_ts_ns)
+        booked = self._checkpointer.checkpoint_heal(
+            tuple(heal.fill for heal in heals),
+            cash=None if cash is None else cash.correction,
+        )
+        self._record_heals(heals, cash=cash, booked=booked)
         tiers = [divergence.tier for divergence in divergences]
         named_event(
             NamedEvent.ACCOUNT_RECONCILED,
@@ -272,10 +304,9 @@ class LedgerReconciliation:
 
     @staticmethod
     def _record_heals(
-        divergences: tuple[Divergence, ...],
+        heals: tuple[_SizeHeal, ...],
         *,
-        fills: tuple[ReconciliationFill, ...],
-        cash: CashCorrection | None,
+        cash: _CashHeal | None,
         booked: HealChange | None,
     ) -> None:
         """One ``account.healed`` per correction this pass actually booked.
@@ -291,38 +322,33 @@ class LedgerReconciliation:
         decline to build a fill; whether the fill it built moved anything is
         ``Position.apply``'s answer, and on a retried pass it is no — the key is
         the cycle's stamp, so the second run of one pass mints the first's
-        ``event_id`` and is deduped as a redelivery. So each synthetic is paired
-        with the ``LedgerChange`` it produced, positionally, since ``apply_heal``
-        folds them in order and drops none, and one carrying no ``changes``
-        speaks no more than an unpriced finding does. The cash correction needs
-        no such pairing: it is an assignment against a line the same pass found
-        unequal, so it always moved.
+        ``event_id`` and is deduped as a redelivery. ``apply_heal`` reports that
+        verdict as the set of keys it kept, so this reads a membership rather
+        than pairing its own input against the fold's output by position. The
+        cash correction is not in it and needs no such check: it is an
+        assignment against a line the same pass found unequal, so it always
+        moved.
 
         The figures come back off the ``Divergence`` the synthetic was built
         from rather than off the synthetic itself, because a fill carries only
         its delta and the pair is what an operator reads: the same reason the
-        finding carries both sides instead of their difference. Paired by
-        ``(field, symbol)``, which is unique within a tier — ``_sizes`` emits at
-        most one finding per symbol and the account has one collateral pool.
+        finding carries both sides instead of their difference. The pair arrives
+        already made (``_SizeHeal``, ``_CashHeal``) — a heal is announced against
+        the finding it was built to close, not against one matched back to it
+        here.
 
         Emitted **after** the checkpoint, so nothing is announced that the
         transaction could still refuse to keep.
         """
-        found = {
-            (divergence.field, divergence.symbol): divergence
-            for divergence in divergences
-            if divergence.tier is DivergenceTier.TIER_1
-        }
-        applied = () if booked is None else booked.fills
-        for fill, change in zip(fills, applied, strict=True):
-            if not change.changes:
-                continue
-            _healed(found[(DivergenceField.SIGNED_SIZE, fill.symbol)], event_id=fill.event_id)
+        kept = frozenset[str]() if booked is None else booked.applied
+        for heal in heals:
+            if heal.fill.event_id in kept:
+                _healed(heal.divergence, event_id=heal.fill.event_id)
         if cash is not None:
-            _healed(found[(DivergenceField.CASH, None)], event_id=cash.event_id)
+            _healed(cash.divergence, event_id=cash.correction.event_id)
 
     @staticmethod
-    def _cash_heal(divergences: tuple[Divergence, ...], *, ts_ns: int) -> CashCorrection | None:
+    def _cash_heal(divergences: tuple[Divergence, ...], *, ts_ns: int) -> _CashHeal | None:
         """This pass's Tier-1 cash finding as the correction that closes it.
 
         The target is the divergence's own venue side, so the figure the cycle
@@ -346,14 +372,23 @@ class LedgerReconciliation:
         ]
         if not found:
             return None
-        (correction,) = found
-        return CashCorrection(target=correction.venue, ts_ns=ts_ns)
+        (divergence,) = found
+        return _CashHeal(
+            divergence=divergence,
+            correction=CashCorrection(target=divergence.venue, ts_ns=ts_ns),
+        )
 
     @staticmethod
     def _size_heals(
         state: VenueAccountState, divergences: tuple[Divergence, ...], *, ts_ns: int
-    ) -> tuple[ReconciliationFill, ...]:
+    ) -> tuple[_SizeHeal, ...]:
         """Turn this pass's Tier-1 size findings into the fills that correct them.
+
+        Each fill goes back **paired with the finding it closes** (``_SizeHeal``)
+        rather than alone. This is the one place that decides which findings heal
+        at all, and the announcement needs both halves; returning the fills bare
+        would leave the pairing to be reconstructed downstream off a second
+        statement of this predicate.
 
         The delta is ``venue − ledger`` and the venue is authoritative
         (ADR-0034), so the fill moves the ledger *to* the snapshot rather than
@@ -389,12 +424,15 @@ class LedgerReconciliation:
         """
         prices = {position.symbol: position.entry_price for position in state.positions}
         return tuple(
-            ReconciliationFill(
-                symbol=divergence.symbol,
-                side=Side.BUY if delta > _ZERO else Side.SELL,
-                quantity=abs(delta),
-                price=price,
-                ts_ns=ts_ns,
+            _SizeHeal(
+                divergence=divergence,
+                fill=ReconciliationFill(
+                    symbol=divergence.symbol,
+                    side=Side.BUY if delta > _ZERO else Side.SELL,
+                    quantity=abs(delta),
+                    price=price,
+                    ts_ns=ts_ns,
+                ),
             )
             for divergence in divergences
             if divergence.tier is DivergenceTier.TIER_1

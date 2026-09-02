@@ -143,6 +143,15 @@ class HealChange:
     idempotent ``apply()`` path" true at the write end as well as the fold end
     (ADR-0034). ``account`` is the one pool they all moved, carried once.
 
+    ``applied`` is the ``event_id`` of every synthetic the fold **kept**, and it
+    is the answer to the only question a caller still has after the write: a
+    synthetic ``Position.apply`` deduped away moved nothing, and announcing it
+    would answer an operator's "why did the ledger move" with a move that never
+    happened. Reported rather than left to be inferred — the alternative is a
+    caller pairing its own input against ``fills`` positionally, which is a
+    length invariant this method holds and no caller can check. Absent from the
+    set is the whole of what "deduped" means here.
+
     There is deliberately **no ``funding_mark``**. A funding correction is not a
     column this heal may write: it re-enters as a keyed ``FundingAccrual``
     through ``apply_funding``, whose write is the only one allowed to advance the
@@ -153,6 +162,7 @@ class HealChange:
 
     account: Account
     fills: tuple[LedgerChange, ...]
+    applied: frozenset[str]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -275,16 +285,29 @@ class PortfolioProjection:
         The direction is read off each fill rather than taken as a parameter,
         which is the one place this verb and ``apply_fill`` differ: a heal has no
         saga for the side to ride on (``ReconciliationFill``).
+
+        **Which synthetics the fold kept is reported, not left to be inferred**
+        (``HealChange.applied``). The loop below is a loop rather than the
+        comprehension it could be precisely so the synthetic and the change it
+        produced are in scope together: that pairing is what a caller would
+        otherwise have to reconstruct positionally against a length only this
+        method guarantees.
         """
         if not fills and cash is None:
             return None
-        change = HealChange(
-            account=self._account,
-            fills=tuple(self.apply_fill(fill, side=fill.side) for fill in fills),
-        )
+        folded: list[LedgerChange] = []
+        applied: set[str] = set()
+        for fill in fills:
+            change = self.apply_fill(fill, side=fill.side)
+            folded.append(change)
+            if change.changes:
+                # Unique within a pass: the key is ``reconcile:{symbol}:{ts_ns}``
+                # and the cycle emits at most one size finding per symbol, so a
+                # set loses nothing a list would have kept.
+                applied.add(fill.event_id)
         if cash is not None:
             self._account.correct_cash(cash.target, event_id=cash.event_id)
-        return change
+        return HealChange(account=self._account, fills=tuple(folded), applied=frozenset(applied))
 
     def apply_fill(self, event: OrderFillEvent | ReconciliationFill, *, side: Side) -> LedgerChange:
         """Fold a fill into its partition and the cash line — the single write
