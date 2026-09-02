@@ -27,10 +27,20 @@ from tickwright.domain import (
 
 CROSS_10X = LeverageSpec(mode="cross", leverage=10)
 ISOLATED_1X = LeverageSpec(mode="isolated", leverage=1)
+ISOLATED_5X = LeverageSpec(mode="isolated", leverage=5)
 
 
-def _position(*, quantity: str, price: str, side: Side, symbol: str = "BTC") -> Position:
-    position = Position(strategy_id="alpha", symbol=symbol)
+def _position(
+    *,
+    quantity: str,
+    price: str,
+    side: Side,
+    symbol: str = "BTC",
+    isolated_collateral: str = "0",
+) -> Position:
+    position = Position(
+        strategy_id="alpha", symbol=symbol, isolated_collateral=Decimal(isolated_collateral)
+    )
     position.apply(
         OrderFilled(
             ts_event=1_000,
@@ -168,3 +178,39 @@ def test_a_cross_position_posts_its_notional_divided_by_the_configured_leverage(
 
     assert view.notional == Decimal("30000")
     assert view.margin_used == Decimal("3000")
+
+
+def test_an_isolated_position_posts_its_locked_collateral_plus_unrealized_pnl() -> None:
+    """Isolated ``margin_used`` is ``isolated_collateral + unrealized_pnl`` and
+    **moves with the mark** (ADR-0040 §3, corrected by #142) — a different rule
+    from cross's ``notional / leverage``, not a re-parameterisation of it: the
+    configured leverage is not a term, because a bucket's collateral is fixed at
+    open and a later leverage change never re-margins it.
+
+    The two expectations are the venue's own ``marginUsed`` for the #142 testnet
+    position, read off ``clearinghouseState`` at two marks two dollars apart:
+    ``25.860067`` at 64796 and ``25.856067`` at 64794, against a locked
+    ``25.898067`` behind ``+0.002`` entered at 64815. They are transcribed
+    literals, not this formula run twice.
+    """
+    position = _position(
+        quantity="0.002", price="64815", side=Side.BUY, isolated_collateral="25.898067"
+    )
+
+    at_64796 = position_view(
+        position,
+        account_net=Decimal("0.002"),
+        mark=Decimal("64796"),
+        mark_ts=9_000,
+        leverage=ISOLATED_5X,
+    )
+    at_64794 = position_view(
+        position,
+        account_net=Decimal("0.002"),
+        mark=Decimal("64794"),
+        mark_ts=9_003,
+        leverage=ISOLATED_5X,
+    )
+
+    assert at_64796.margin_used == Decimal("25.860067")
+    assert at_64794.margin_used == Decimal("25.856067")

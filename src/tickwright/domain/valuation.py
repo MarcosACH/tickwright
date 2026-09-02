@@ -56,6 +56,7 @@ def position_view(
     action (ADR-0044 §2). It is the margin model's only operator-authored input.
     """
     notional = _notional(account_net, mark)
+    unrealized_pnl = _unrealized_pnl(position, mark)
     return PositionView(
         symbol=position.symbol,
         size=position.signed_size,
@@ -63,23 +64,50 @@ def position_view(
         realized_pnl=position.realized_pnl,
         fees=position.fees,
         funding=position.funding,
-        unrealized_pnl=_unrealized_pnl(position, mark),
+        unrealized_pnl=unrealized_pnl,
         notional=notional,
-        margin_used=_margin_used(notional, leverage=leverage),
+        margin_used=_margin_used(
+            notional,
+            leverage=leverage,
+            isolated_collateral=position.isolated_collateral,
+            unrealized_pnl=unrealized_pnl,
+        ),
         mark_ts=mark_ts,
     )
 
 
-def _margin_used(notional: Decimal | None, *, leverage: LeverageSpec) -> Decimal | None:
+def _margin_used(
+    notional: Decimal | None,
+    *,
+    leverage: LeverageSpec,
+    isolated_collateral: Decimal,
+    unrealized_pnl: Decimal | None,
+) -> Decimal | None:
     """The collateral posted behind the position, by the mode's own rule.
 
-    Cross draws ``notional / leverage`` from the shared account pool. The
-    division is the whole amount: there is no per-venue haircut on the initial
-    fraction, so ADR-0040 §4 declines a ``margin_init`` field rather than carry
-    a constant ``1.0``. Nullability is inherited from ``notional`` — a term that
-    needs the mark makes the amount need it too, and a flat account-net's real
-    ``0`` passes straight through.
+    The two modes are **different rules, not one rule parameterised** (ADR-0040
+    §3, as corrected by #142):
+
+    - **Cross** draws ``notional / leverage`` from the shared account pool. The
+      division is the whole amount: there is no per-venue haircut on the initial
+      fraction, so ADR-0040 §4 declines a ``margin_init`` field rather than
+      carry a constant ``1.0``.
+    - **Isolated** reports its locked bucket marked to market —
+      ``isolated_collateral + unrealized_pnl``. The configured leverage is *not*
+      a term here: the bucket is sized at open and a later leverage change never
+      re-margins a held position, so reading the setting back would report a
+      number the venue has stopped holding.
+
+    Nullability is inherited from whichever terms the mode actually uses, which
+    is why the branch takes both and not a pre-selected one: cross inherits from
+    ``notional`` and isolated from ``unrealized_pnl``, and the two come apart
+    under offsetting partitions — a flat account-net gives cross its real ``0``
+    at a mark the still-open own slice needs and does not have.
     """
+    if leverage.mode == "isolated":
+        if unrealized_pnl is None:
+            return None
+        return isolated_collateral + unrealized_pnl
     if notional is None:
         return None
     return notional / leverage.leverage
