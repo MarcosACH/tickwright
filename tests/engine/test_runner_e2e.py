@@ -337,6 +337,197 @@ def test_the_engine_subscribes_the_mark_so_tier_two_is_readable_through_the_faca
     assert view.unrealized_pnl == Decimal("50")
 
 
+def _flat_ticks(path: Path, *, prices: dict[str, str], rounds: int) -> Path:
+    """``rounds`` passes over ``prices``, every symbol at one unchanging price.
+
+    A frozen mark is what makes the margin figures below readable straight off
+    the file: every fill lands at its symbol's price and every position carries
+    zero unrealized PnL, so free margin is the cash line less the collateral the
+    opens locked away, and nothing else moves it. The passes repeat because a
+    strategy that waits for a *condition* rather than for its first tick needs
+    the symbol quoted again after the condition arrives.
+    """
+    rows = [
+        {
+            "symbol": symbol,
+            "price": price,
+            "size": "10",
+            "aggressor_side": "buy",
+            "trade_id": f"{symbol}-{i}",
+            "ts_event": 1_000 * (i * len(prices) + n + 1),
+        }
+        for i in range(rounds)
+        for n, (symbol, price) in enumerate(prices.items())
+    ]
+    path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+    return path
+
+
+class _MarginBlindStrategy:
+    """Places its one order only once the account is *already* underwater.
+
+    The reader ADR-0040 §7's "reported when negative, with no rejection and no
+    liquidation" is a promise to. It refuses to trade while free margin is
+    positive or unknown, so the order it does place is provably placed against a
+    negative one — which an ordinary strategy firing on its first tick could
+    never demonstrate, having traded before the account had anything to be
+    underwater about. It trades a symbol of its own because free margin is an
+    account-wide fact and same-symbol ownership is refused (ADR-0034): the
+    breach it reads is one another strategy's position opened.
+    """
+
+    def __init__(
+        self,
+        *,
+        bus: InMemoryBus,
+        clock: ManualClock,
+        portfolio: Portfolio,
+        quantity: Decimal,
+    ) -> None:
+        self.strategy_id = "blind"
+        self._bus = bus
+        self._clock = clock
+        self._portfolio = portfolio
+        self._quantity = quantity
+        self._seq = 1
+        self.free_margin_at_placement: Decimal | None = None
+        self.fills: list[OrderFilled] = []
+        self.denials: list[OrderDenied] = []
+        self.filled = asyncio.Event()
+
+    async def on_tick(self, tick: MarketTick) -> None:
+        if self.free_margin_at_placement is not None:
+            return
+        free = self._portfolio.account().free_margin
+        if free is None or free >= 0:
+            return
+        self.free_margin_at_placement = free
+        now = self._clock.timestamp_ns()
+        await self._bus.publish(
+            PlaceSignal(
+                ts_event=now,
+                ts_init=now,
+                strategy_id=self.strategy_id,
+                symbol=tick.symbol,
+                seq=self._seq,
+                side=Side.BUY,
+                quantity=self._quantity,
+                order_type=OrderType.MARKET,
+                time_in_force=TimeInForce.IOC,
+                price=None,
+                post_only=False,
+            )
+        )
+
+    async def on_order_event(self, event: OrderEvent) -> None:
+        if isinstance(event, OrderFilled):
+            self.fills.append(event)
+            self.filled.set()
+        elif isinstance(event, OrderDenied):
+            self.denials.append(event)
+
+    def set_next_seq(self, next_seq: int) -> None:
+        self._seq = next_seq
+
+    def snapshot(self) -> bytes:
+        return b""
+
+    def restore(self, data: bytes) -> None:
+        return None
+
+
+def test_a_negative_free_margin_is_reported_and_stops_nothing(tmp_path: Path) -> None:
+    """ADR-0040 §7's deliberate departure, asserted where it could actually bite.
+
+    Paper reports a breach it does not enforce: the account goes underwater, and
+    the run carries on placing, filling and holding exactly as it would have
+    while solvent. That is the honest "you would have been rejected or
+    liquidated on live" signal — a simulator that refused the order instead
+    would report a solvency the operator does not have.
+
+    Worked off the file and the venue's declared opening balance, never
+    recomputed the way the code does. Both marks are frozen, so every position
+    carries zero unrealized PnL and equity is the cash line: the overweight
+    strategy's 3 BTC lock ``3 × 42 000 = 126 000`` of isolated collateral
+    against a ``GENESIS`` of 100 000, leaving **−26 000**. The blind strategy's
+    0.1 ETH then locks another ``0.1 × 2 000 = 200`` on top, for a final
+    **−26 200**.
+
+    The negative figure buys no consequence anywhere: the second order is filled
+    rather than denied, both legs are still open at full size, and the store
+    holds the two orders that were placed and no third one closing them out.
+    """
+    ticks = _flat_ticks(tmp_path / "ticks.jsonl", prices={"BTC": "42000", "ETH": "2000"}, rounds=4)
+    db = tmp_path / "saga.db"
+
+    async def one_life() -> tuple[int, Engine, _MarginBlindStrategy]:
+        bus = InMemoryBus()
+        clock = ManualClock()
+        engine = Engine(
+            bus=bus,
+            clock=clock,
+            store=SQLiteStore(db),
+            exchange=PaperExchange(
+                bus=bus,
+                clock=clock,
+                fill_model=ImmediateFillModel(),
+                genesis_collateral=GENESIS,
+                account_net=dict,
+            ),
+            feed=ReplayFeed(path=ticks, bus=bus, clock=clock),
+        )
+        overweight = SingleShotMarketStrategy(
+            strategy_id="overweight",
+            bus=bus,
+            clock=clock,
+            portfolio=engine.portfolio_for("overweight"),
+            side=Side.BUY,
+            quantity=Decimal("3"),
+        )
+        blind = _MarginBlindStrategy(
+            bus=bus,
+            clock=clock,
+            portfolio=engine.portfolio_for("blind"),
+            quantity=Decimal("0.1"),
+        )
+        engine.register(overweight, symbols={"BTC"})
+        engine.register(blind, symbols={"ETH"})
+
+        run = asyncio.create_task(engine.run())
+        await asyncio.wait_for(blind.filled.wait(), timeout=5)
+        await engine.stop()
+        return await run, engine, blind
+
+    exit_code, engine, blind = asyncio.run(one_life())
+
+    assert exit_code == 0
+    # It traded *because* the account was underwater, by the file's own numbers.
+    assert blind.free_margin_at_placement == Decimal("-26000")
+    # And the breach denied it nothing: one fill, no denial.
+    assert [f.quantity for f in blind.fills] == [Decimal("0.1")]
+    assert blind.denials == []
+    # The account is deeper underwater afterwards and says so plainly.
+    assert engine.portfolio_for("blind").account().free_margin == Decimal("-26200")
+    # Nothing was liquidated: both legs are still open at the size they opened.
+    overweight_view = engine.portfolio_for("overweight").position("BTC")
+    blind_view = engine.portfolio_for("blind").position("ETH")
+    assert overweight_view is not None and overweight_view.size == Decimal("3")
+    assert blind_view is not None and blind_view.size == Decimal("0.1")
+
+    # No closing order was ever written either — the durable trail holds the two
+    # orders the strategies placed and nothing the engine placed on their behalf.
+    reopened = SQLiteStore(db)
+    try:
+        orders = reopened.all_orders()
+        assert {(o.strategy_id, o.symbol, o.side, o.state) for o in orders} == {
+            ("overweight", "BTC", Side.BUY, OrderState.FILLED),
+            ("blind", "ETH", Side.BUY, OrderState.FILLED),
+        }
+        assert len(orders) == 2
+    finally:
+        reopened.close()
+
+
 _LIVE_CLOID = "0xlive"
 _NO_RECORD = VenueOrderView(status=None)
 
