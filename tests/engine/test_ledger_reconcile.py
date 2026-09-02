@@ -1473,3 +1473,84 @@ def test_the_cached_liquidation_price_stays_frozen_until_the_next_cycle() -> Non
     # The book really did move under it — the entry is no longer the first fill's.
     assert moved.entry_price == Decimal("62404.5")
     assert moved.liquidation_price == _BTC_LIQUIDATION
+
+
+def test_a_position_the_venue_prices_at_nothing_reads_none_rather_than_the_formula() -> None:
+    """``liquidationPx`` absent is the venue *answering*, and the answer is that
+    this position has no liquidation price (ADR-0040 §3).
+
+    It is the majority case rather than a corner — 12 of 17 cross longs across
+    the 22 mainnet accounts #142 sampled (ADR-0046 §6) — so the branch this
+    pins is the one live spends most of its time on. The formula is answering
+    with a real number here (the assertion before the cycle), and once the read
+    lands it must stop: falling back to it would report a price for a position
+    the venue says has none, which is the fabricated Tier-2 value ADR-0034's
+    freeze-never-substitute rule exists to refuse.
+
+    The same account and snapshot as the cache case above, so the only thing
+    differing is the field under test.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="25.9144", leverage=_BTC_CROSS_5X, specs={"BTC": _BTC_SPEC})
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "64815")
+    venue = _AccountVenue(_priced(account_state("25.9264", "0.012"), None))
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+
+    before = projection.position("BTC", strategy_id="alpha")
+    assert before is not None
+    assert before.liquidation_price is not None  # the formula is live and answering
+
+    assert asyncio.run(cycle.reconcile_account()) == ()
+
+    after = projection.position("BTC", strategy_id="alpha")
+    assert after is not None
+    assert after.liquidation_price is None
+
+
+def test_a_position_opened_since_the_read_reads_none_rather_than_the_formula() -> None:
+    """A symbol the snapshot never mentioned is *also* an absent venue price.
+
+    Once a read has landed the projection is on the read-through branch for the
+    whole book, not only for the symbols that cycle happened to carry — so an
+    ETH position opened between deadlines reads ``None`` until the next pull
+    prices it, rather than being quietly handed back to the formula. The
+    alternative reports two different quantities under one name depending on
+    whether a symbol made it into the last snapshot.
+
+    ETH is given both margin-model inputs and a mark, so the formula had every
+    input it needs and its silence here is the read-through's doing: the sibling
+    Tier-2 figures assert exactly that, reading real numbers off the same view.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(
+        store,
+        equity="25.9144",
+        leverage=LeverageBook(
+            entries={
+                "BTC": LeverageSpec(mode="cross", leverage=5),
+                "ETH": LeverageSpec(mode="cross", leverage=5),
+            }
+        ),
+        specs={"BTC": _BTC_SPEC, "ETH": replace(_BTC_SPEC, symbol="ETH")},
+    )
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "64815")
+    venue = _AccountVenue(_priced(account_state("25.9264", "0.012"), _BTC_LIQUIDATION))
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+    asyncio.run(cycle.reconcile_account())
+
+    _book_fill(projection, quantity="1.5", price="3000", symbol="ETH", seq=2)
+    _mark(projection, "ETH", "3000")
+
+    eth = projection.position("ETH", strategy_id="alpha")
+    assert eth is not None
+    # Every input the formula reads is present — it is the read-through that silenced it.
+    assert eth.maintenance_margin == Decimal("56.25")
+    assert eth.margin_used is not None
+    assert eth.liquidation_price is None
+    btc = projection.position("BTC", strategy_id="alpha")
+    assert btc is not None
+    assert btc.liquidation_price == _BTC_LIQUIDATION  # the read did land
