@@ -1039,3 +1039,48 @@ def test_stochastic_partials_drive_the_saga_from_live_to_filled() -> None:
         OrderState.PARTIALLY_FILLED,
         OrderState.FILLED,
     ]
+
+
+def test_a_fill_the_ledger_would_refuse_never_moves_the_saga_first() -> None:
+    """The fill path crosses two aggregates, and the saga is the one it reaches
+    first — so the saga is where a bookable fill has to be judged, not only at
+    the ledger it ends up in.
+
+    ``Order.record_fill`` accumulates ``cum_qty``, picks the terminal from it and
+    burns the ``trade_id``; ``Position.apply`` refuses a non-positive quantity
+    (#208, ADR-0047). Run in that order, a bad quantity advances the saga and
+    only then faults, which spends the one thing the refusal was supposed to
+    protect: the venue's own ``trade_id``. The trade comes back corrected — or
+    simply comes back — and the saga now reads it as a redelivery of a fill it
+    never booked, so the quantity is silently dropped rather than accounted.
+
+    ADR-0047 §3 refuses defence in depth, and this is not that: the rule is
+    stated twice because the path crosses **two aggregates**, each of which is
+    independently corrupted without it, which is the case that ADR's Consequences
+    leave open to this issue. ``Position.apply`` keeps its own because the
+    reconciler's synthetics reach it with no saga in front of them at all.
+
+    Contained today only because the process faults either way. That containment
+    is not the behavior — a restart replaying an unburned saga is.
+    """
+    wiring = _wiring(SQLiteStore(":memory:"))
+    cloid = derive_cloid("trivial:BTC:1")
+
+    async def scenario() -> None:
+        with pytest.raises(ValueError):
+            await wiring.bus.publish(_market_signal())  # no tick cached: the send crashes
+        await wiring.bus.publish(_fill_report(cloid, trade_id="f1", quantity="0.2"))
+        with pytest.raises(InvariantViolation):
+            await wiring.bus.publish(_fill_report(cloid, trade_id="f2", quantity="0"))
+        # The venue's real f2, arriving after the malformed one carried its id.
+        await wiring.bus.publish(_fill_report(cloid, trade_id="f2", quantity="0.3"))
+
+    asyncio.run(scenario())
+
+    order = wiring.cache.get_order(cloid)
+    assert order is not None
+    assert order.state is OrderState.FILLED
+    assert order.cum_qty == Decimal("0.5")
+    position = wiring.portfolio.position("BTC", strategy_id="trivial")
+    assert position is not None
+    assert position.size == Decimal("0.5")

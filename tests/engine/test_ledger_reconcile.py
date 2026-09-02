@@ -1,15 +1,16 @@
-"""``LedgerReconciliation`` — the account-grain cycle that classifies and heals
-nothing (issue #193).
+"""``LedgerReconciliation`` — the account-grain cycle that classifies what
+disagrees with the venue (issue #193) and heals the Tier-1 half (issue #178).
 
 Exercised through its public verbs against a **live**-shaped ledger over an
 in-memory store and a venue double answering recorded account snapshots. The
 venue is doubled because it is a process boundary (ADR-0022) and it is the only
 thing doubled here: the ledger, its store and its clock are the real ones, so a
-case asserts what the cycle *concludes* about a book a fill actually moved.
+case asserts what the cycle *concludes* about a book a fill actually moved — and,
+now that it writes, what it leaves behind in the store a real fill wrote to.
 """
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from decimal import Decimal
 
@@ -21,6 +22,7 @@ from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     Account,
     AccountSpec,
+    FundingAccrual,
     MarkTick,
     Order,
     OrderFilled,
@@ -32,6 +34,7 @@ from tickwright.domain import (
     VenueOrderView,
     VenueReadFailure,
 )
+from tickwright.engine.checkpoint import Checkpointer
 from tickwright.engine.ledger_reconcile import (
     Divergence,
     DivergenceField,
@@ -75,22 +78,55 @@ class _AccountVenue(LiveVenueDouble):
         raise AssertionError("the account cycle is anchored on the account snapshot, not a cloid")
 
 
-def _ledger(store: Store, *, equity: str) -> PortfolioProjection:
+class _SlowAccountVenue(_AccountVenue):
+    """An account read with a **round trip inside it** — the shape a real one has.
+
+    ``_AccountVenue`` answers from memory, so its ``await`` never actually
+    suspends and the cycle runs as though the snapshot and the ledger fold were
+    one instant. A live read is a POST: the loop runs whatever else is ready
+    while it is in flight, and the fill handler is one of those things. This
+    double is the difference, and it is the difference alone — the body it
+    returns was serialised *before* ``during`` ran, exactly as a venue's is.
+    """
+
+    def __init__(self, *answers: VenueAccountState | None, during: Callable[[], None]) -> None:
+        super().__init__(*answers)
+        self._during = during
+
+    async def fetch_account_state(self) -> VenueAccountState | None:
+        state = await super().fetch_account_state()
+        await asyncio.sleep(0)  # the wire: the loop is free to run the fill handler
+        self._during()
+        await asyncio.sleep(0)
+        return state
+
+
+def _ledger(store: Store, *, equity: str, clock: ManualClock | None = None) -> Checkpointer:
     """A live ledger already materialised, the state every cycle finds it in.
 
     Live is the only shape that has a cycle at all — paper has no second account
     to compare against — so the genesis is ``None`` (ingested, ADR-0042 §6) and
     the opening cash line is the venue's own, taken from a snapshot holding no
     position so that ``equity`` *is* the cash a case declares.
+
+    A ``Checkpointer`` rather than the bare projection, because the cycle now
+    *writes*: a heal is checkpointed on the same atomic path a fill is, so the
+    thing the cycle is constructed with has to be the type that owns that write.
+    Reach the read-model through ``.portfolio`` where a case asserts on it.
+
+    ``clock`` is the case's own only where it runs **two** cycles, since a heal's
+    key is stamped with the cycle's ``ts_ns``: on a clock that never moves, the
+    second pass mints the first pass's ``event_id`` and is deduped away as a
+    redelivery. Held still by default, which is what a single-cycle case wants.
     """
-    projection = PortfolioProjection(
+    keeper = Checkpointer(
         spec=AccountSpec(account_id=LIVE_ACCOUNT_ID, genesis_collateral=None),
         store=store,
-        clock=ManualClock(7),
+        clock=ManualClock(7) if clock is None else clock,
     )
-    projection.recover()
-    projection.materialise(account_state(equity))
-    return projection
+    keeper.recover()
+    keeper.portfolio.materialise(account_state(equity))
+    return keeper
 
 
 def _book_fill(
@@ -142,9 +178,10 @@ def test_a_cycle_whose_snapshot_matches_the_ledger_reports_no_divergence() -> No
     answer as the freeze below: an outage is never a flat book (ADR-0011 inv 1).
     """
     store = SQLiteStore(":memory:")
-    projection = _ledger(store, equity="100000")
+    keeper = _ledger(store, equity="100000")
+    projection = keeper.portfolio
     venue = _AccountVenue(account_state("100000"))
-    cycle = LedgerReconciliation(exchange=venue, portfolio=projection)
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
 
     with capture_events() as logs:
         divergences = asyncio.run(cycle.reconcile_account())
@@ -167,12 +204,13 @@ def test_a_failed_account_read_freezes_the_cycle_and_leaves_the_book_alone() -> 
     ``account.reconciled``.
     """
     store = SQLiteStore(":memory:")
-    projection = _ledger(store, equity="100000")
+    keeper = _ledger(store, equity="100000")
+    projection = keeper.portfolio
     _book_fill(projection, quantity="0.002", price="64809")
     held = projection.open_positions(strategy_id="alpha")
     cash = projection.account().cash
     venue = _AccountVenue(None, account_state("100000"))
-    cycle = LedgerReconciliation(exchange=venue, portfolio=projection)
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
 
     with capture_events() as logs:
         frozen = asyncio.run(cycle.reconcile_account())
@@ -184,6 +222,20 @@ def test_a_failed_account_read_freezes_the_cycle_and_leaves_the_book_alone() -> 
 
     assert asyncio.run(cycle.reconcile_account()) is not None  # the venue came back
     assert venue.account_reads == 2
+
+
+def _recorded(logs: Sequence[Mapping[str, object]]) -> Mapping[str, object]:
+    """The one ``account.reconciled`` record in ``logs``, whatever else the pass
+    emitted.
+
+    Selected rather than indexed, because a healing cycle is no longer the only
+    thing that speaks: a Tier-1 heal announces its ``position.*`` changes on the
+    way past, exactly as the fill path does. A case asserting on the *pass's own
+    summary* should say so rather than depend on it being the only record, which
+    is a coupling to the state of the book the case happens to build.
+    """
+    (record,) = [log for log in logs if log["event"] == NamedEvent.ACCOUNT_RECONCILED.value]
+    return record
 
 
 def _held(equity: str, *positions: tuple[str, str, str]) -> VenueAccountState:
@@ -230,7 +282,8 @@ def test_a_symbol_whose_ledger_net_disagrees_with_the_venue_size_diverges_at_tie
     the cycle reports is the disagreements, not the roster.
     """
     store = SQLiteStore(":memory:")
-    projection = _ledger(store, equity="100000")
+    keeper = _ledger(store, equity="100000")
+    projection = keeper.portfolio
     _book_fill(projection, quantity="0.002", price="64809")
     _book_fill(projection, quantity="1.5", price="3000", symbol="ETH")
     _book_fill(projection, quantity="100", price="0.4", symbol="DOGE")
@@ -240,7 +293,7 @@ def test_a_symbol_whose_ledger_net_disagrees_with_the_venue_size_diverges_at_tie
         ("DOGE", "100", "0"),  # agrees
         ("SOL", "10", "0"),  # flow the engine never placed
     )  # ETH: held by the ledger, flat at the venue
-    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), portfolio=projection)
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
 
     divergences = asyncio.run(cycle.reconcile_account())
 
@@ -269,6 +322,92 @@ def test_a_symbol_whose_ledger_net_disagrees_with_the_venue_size_diverges_at_tie
     )
 
 
+def test_a_size_divergence_heals_through_a_fill_into_the_unattributed_partition() -> None:
+    """The Tier-1 heal, and the two halves of it that are one behavior.
+
+    **It heals through a synthetic fill**, on the same idempotent ``apply()``
+    path a venue-pushed one takes (ADR-0034), never a write to ``signed_size``.
+    That is what leaves a "why did it move" record and what keeps every derived
+    number consistent with the fill that produced it — the healed partition has
+    an entry price and a cost basis, so the equity it contributes to is
+    computable rather than a size floating free of a price.
+
+    **It lands in the reserved unattributed partition**, never a strategy's:
+    the venue has no per-strategy truth, so attributing foreign flow to whoever
+    owns the symbol would both corrupt that strategy's PnL and let its
+    close-my-position logic act on exposure it never opened (ADR-0038). The
+    account net is the only thing reconciled, and the residual is what makes
+    ADR-0034's Σ-invariant hold by construction.
+
+    The venue holds SOL the ledger has never seen — foreign flow, the case
+    where the two halves are separable at all: a heal that reached for the
+    symbol's owning strategy would have none to find.
+
+    The partition roster is read off the **store** rather than a strategy's view,
+    because "never a strategy's" is a claim about every partition and a view
+    scoped to one owner cannot make it: an implementation that filed the residual
+    under some other id would leave the owner asked about empty and pass. The
+    roster names the one partition that exists, so there is nowhere for it to
+    hide.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    venue = _AccountVenue(_held("100000", ("SOL", "10", "0")))
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+
+    asyncio.run(cycle.reconcile_account())
+
+    ledger = keeper.portfolio
+    assert ledger.account_net() == {"SOL": Decimal("10")}
+    healed = ledger.position("SOL", strategy_id=None)
+    assert healed is not None
+    assert healed.size == Decimal("10")
+    assert healed.entry_price == Decimal("64809")  # the venue's own, off the snapshot
+    assert [(p.strategy_id, p.symbol) for p in store.all_positions()] == [(None, "SOL")]
+
+
+def test_a_heal_is_durable_and_comes_back_on_the_restart_a_fill_comes_back_on() -> None:
+    """A heal is checkpointed on the same atomic path a fill is (ADR-0034), so
+    the restart that recovers the fill recovers the heal beside it.
+
+    The in-memory read model agreeing with the venue is only half the correction.
+    A heal that moved the projection and not the store leaves a restart reading a
+    book that never healed — flat where the venue holds ten SOL — and the next
+    cycle re-deriving the same divergence forever, which is the one failure the
+    Σ-invariant holding *in the healing process* cannot rule out.
+
+    Read back off the store rather than off the projection that healed, and then
+    through a **second** ledger recovered from it with no venue read and no
+    materialisation behind it: what the next process starts from is the rows, so
+    the rows are what the claim has to be about. The healed partition arrives
+    with the price it was booked at, since a size recovered without its basis is
+    the free-floating number the synthetic fill exists to avoid.
+
+    The store's own contract is asserted at ``test_checkpoint``'s seam; what is
+    new here is that the *cycle* reaches it.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    venue = _AccountVenue(_held("100000", ("SOL", "10", "0")))
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+
+    asyncio.run(cycle.reconcile_account())
+
+    assert [
+        (position.strategy_id, position.symbol, position.signed_size, position.entry_price)
+        for position in store.all_positions()
+    ] == [(None, "SOL", Decimal("10"), Decimal("64809"))]
+
+    restarted = Checkpointer(
+        spec=AccountSpec(account_id=LIVE_ACCOUNT_ID, genesis_collateral=None),
+        store=store,
+        clock=ManualClock(7),
+    )
+    restarted.recover()
+    assert restarted.portfolio.account_net() == {"SOL": Decimal("10")}
+    assert restarted.portfolio.account().cash == keeper.portfolio.account().cash
+
+
 def test_a_cash_line_disagreeing_with_the_equity_the_venue_implies_diverges_at_tier_1() -> None:
     """Cash is Tier-1 and the venue reports no cash line, so the comparison is
     against the one its snapshot *implies*: ``equity − Σ unrealized_pnl``.
@@ -289,10 +428,11 @@ def test_a_cash_line_disagreeing_with_the_equity_the_venue_implies_diverges_at_t
     and nothing to attribute it to.
     """
     store = SQLiteStore(":memory:")
-    projection = _ledger(store, equity="100000")
+    keeper = _ledger(store, equity="100000")
+    projection = keeper.portfolio
     _book_fill(projection, quantity="0.002", price="64809")
     venue = _held("100300", ("BTC", "0.002", "500"))
-    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), portfolio=projection)
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
 
     divergences = asyncio.run(cycle.reconcile_account())
 
@@ -305,6 +445,183 @@ def test_a_cash_line_disagreeing_with_the_equity_the_venue_implies_diverges_at_t
             venue=Decimal("99800"),
         ),
     )
+
+
+def test_a_cash_divergence_heals_the_line_to_the_one_the_venue_implies() -> None:
+    """The Tier-1 cash heal: the line is corrected **to** venue truth, not
+    nudged toward it, and the correction is durable on the same transaction the
+    size heals ride (ADR-0034).
+
+    A **target, not a delta**, which is the whole shape of the verb. The venue
+    publishes no cash line, so what the ledger is corrected to is the one its
+    snapshot implies — ``equity − Σ uPnL``, the same derivation the genesis was
+    ingested through — and a target absorbs whatever else moved the line in the
+    same fold rather than stacking on top of it.
+
+    **Genesis does not move.** The opening declaration is written once and is
+    the account's identity, never recomputed from the line that has accrued away
+    from it (ADR-0042 §3); a heal that touched it would erase the distance the
+    ledger has travelled and make every later cash divergence read against the
+    wrong origin. ADR-0042 §4's four accruing inputs are untouched too — this is
+    a correction, not a fifth input.
+
+    The venue reports a cash line 500 above the ledger's on an account holding
+    nothing, which is the shape an operator's mid-run deposit arrives in: a
+    known-benign alert that still heals, because the venue is authoritative.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    cycle = LedgerReconciliation(exchange=_AccountVenue(_held("100500")), checkpointer=keeper)
+
+    asyncio.run(cycle.reconcile_account())
+
+    assert keeper.portfolio.account().cash == Decimal("100500")
+    restored = store.load_account()
+    assert restored is not None
+    assert restored.cash == Decimal("100500")
+    assert restored.genesis_collateral == Decimal("100000")
+
+
+def test_a_cash_heal_absorbs_the_pnl_the_same_passs_size_heal_realized() -> None:
+    """The cash correction is folded **after** the size heals, and the ordering
+    is the whole subject: a heal that closes into a partition realizes PnL onto
+    the very line the same pass is correcting.
+
+    Two cycles, because a *closing* heal needs a partition to close into and the
+    only thing that can open an unattributed one is an earlier heal. The first
+    books ten SOL at the venue's entry price. The second finds four, sells six at
+    a higher price, and realizes 6 × 191 = 1146 on the way past.
+
+    Corrected first, that 1146 would land on top of the venue's figure and the
+    ledger would close the pass 1146 above a line it had just been told was
+    right — reported next cycle as a fresh divergence that is nothing but this
+    heal's own arithmetic, healed again, forever. Corrected last, the assignment
+    absorbs it: the pass ends at exactly what the venue implies, which is why the
+    verb takes a target and not a delta.
+
+    So the number asserted is the venue's own and not the sum of anything: it is
+    the same figure under both orderings only if the size heal realizes nothing,
+    which is the case this one is built to avoid.
+    """
+    store = SQLiteStore(":memory:")
+    clock = ManualClock(7)
+    keeper = _ledger(store, equity="100000", clock=clock)
+    opened = _held("100000", ("SOL", "10", "0"))
+    closing = _held("101000", ("SOL", "4", "0"))
+    closing = replace(
+        closing, positions=(replace(closing.positions[0], entry_price=Decimal("65000")),)
+    )
+    cycle = LedgerReconciliation(exchange=_AccountVenue(opened, closing), checkpointer=keeper)
+
+    asyncio.run(cycle.reconcile_account())  # opens the unattributed partition at 64809
+    assert keeper.portfolio.account().cash == Decimal("100000")
+
+    clock.advance_to(8)
+    asyncio.run(cycle.reconcile_account())
+
+    healed = keeper.portfolio.position("SOL", strategy_id=None)
+    assert healed is not None
+    assert healed.size == Decimal("4")
+    assert healed.realized_pnl == Decimal("1146")
+    assert keeper.portfolio.account().cash == Decimal("101000")
+
+
+def test_each_heal_records_the_pair_it_moved_between_and_the_key_it_moved_under() -> None:
+    """Every heal leaves a "why did it move" record (ADR-0034), one per heal and
+    not one per pass.
+
+    ``account.reconciled`` already counts what the cycle *found*, and a count is
+    the wrong artifact for a ledger that has just been moved: an operator asking
+    why a cash line jumped 500 overnight needs the figure it came from, the
+    figure it went to, and the symbol — a tally of "one Tier-1 finding" answers
+    none of those. So both sides ride the record, as they ride ``Divergence``,
+    and for the same reason: a delta alone cannot tell a missed fill from a
+    duplicated one.
+
+    The **key** is on it because that is what makes the record auditable past
+    this process. It is the ``event_id`` the synthetic was actually applied
+    under, so an operator reading a healed partition in the store can join it to
+    the pass that booked it, and a redelivery of the same heal is identifiable
+    as the one that was deduped rather than a second correction.
+
+    Both halves of one pass speak, because both moved the book: the size heal
+    names its symbol and the cash correction carries none — the account has one
+    collateral pool (ADR-0041 §2). One stamp is behind both keys, which is the
+    cycle's own, so the pair reads as one retryable unit.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    venue = _AccountVenue(_held("100500", ("SOL", "10", "0")))
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+
+    with capture_events() as logs:
+        asyncio.run(cycle.reconcile_account())
+
+    assert [
+        (log["field"], log["symbol"], log["ledger"], log["venue"], log["event_id"])
+        for log in logs
+        if log["event"] == NamedEvent.ACCOUNT_HEALED.value
+    ] == [
+        ("signed_size", "SOL", "0", "10", "reconcile:SOL:7"),
+        ("cash", None, "100000", "100500", "reconcile:cash:7"),
+    ]
+
+
+def test_a_heal_leaves_the_funding_mark_where_it_found_it_and_a_correction_re_enters() -> None:
+    """A funding correction is **not** a column the heal may write: it re-enters
+    as a keyed ``FundingAccrual``, whose write is the only one allowed to
+    advance the watermark it is guarded by (ADR-0043 §5.2/§9).
+
+    The heal's write is the one that could break that rule, because it moves the
+    same two things an accrual does — a partition's line and the account's cash —
+    on a transaction the mark does not ride. Given a funding leg, it would move
+    the funding line while the mark stayed put, and the next boundary the venue
+    reports would then be *admitted* by a mark that never saw the correction and
+    applied on top of it. That is §5.2's double-count reached through the one
+    door the watermark does not cover, and the ledger has no later pass that
+    finds it: funding is cumulative and no cycle re-derives it.
+
+    So the claim is a pair. The heal books ten SOL the engine never placed and
+    leaves the symbol's mark exactly as it found it — absent, the "never accrued"
+    state that still admits any boundary — with the healed partition's funding
+    line at zero. The correction that follows goes through the accrual path, and
+    *there* the mark advances, in the same write as the line it guards.
+
+    It accrues onto the **healed** partition, which is the case with no other
+    owner: foreign flow is real exposure the venue charges funding on, and the
+    unattributed partition is the only thing holding it (ADR-0038).
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    cycle = LedgerReconciliation(
+        exchange=_AccountVenue(_held("100000", ("SOL", "10", "0"))), checkpointer=keeper
+    )
+
+    asyncio.run(cycle.reconcile_account())
+
+    healed = keeper.portfolio.position("SOL", strategy_id=None)
+    assert healed is not None
+    assert healed.size == Decimal("10")
+    assert healed.funding == Decimal("0")
+    assert store.funding_mark("SOL") is None  # the heal advanced nothing
+    assert keeper.portfolio.account().cash == Decimal("100000")
+
+    keeper.checkpoint_funding(
+        FundingAccrual(
+            ts_event=3_600,
+            ts_init=3_600,
+            account_id=LIVE_ACCOUNT_ID,
+            symbol="SOL",
+            boundary_ts_ns=3_600,
+            amount=Decimal("-12"),
+        )
+    )
+
+    accrued = keeper.portfolio.position("SOL", strategy_id=None)
+    assert accrued is not None
+    assert accrued.funding == Decimal("-12")
+    assert keeper.portfolio.account().cash == Decimal("99988")
+    assert store.funding_mark("SOL") == 3_600
 
 
 def _mark(projection: PortfolioProjection, symbol: str, price: str) -> None:
@@ -341,11 +658,12 @@ def test_equity_and_per_symbol_unrealized_pnl_are_classified_at_tier_2_unbanded(
     account grain first, as the cash line is.
     """
     store = SQLiteStore(":memory:")
-    projection = _ledger(store, equity="100000")
+    keeper = _ledger(store, equity="100000")
+    projection = keeper.portfolio
     _book_fill(projection, quantity="0.002", price="64809")
     _mark(projection, "BTC", "65000")
     venue = _held("100000.400", ("BTC", "0.002", "0.400"))
-    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), portfolio=projection)
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
 
     divergences = asyncio.run(cycle.reconcile_account())
 
@@ -384,10 +702,11 @@ def test_a_tier_2_figure_the_ledger_cannot_yet_compute_is_not_reported_as_diverg
     freeze it, which is what the failed *anchor* read does.
     """
     store = SQLiteStore(":memory:")
-    projection = _ledger(store, equity="100000")
+    keeper = _ledger(store, equity="100000")
+    projection = keeper.portfolio
     _book_fill(projection, quantity="0.002", price="64809")
     venue = _held("100000.400", ("BTC", "0.002", "0.400"))
-    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), portfolio=projection)
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
 
     assert projection.account().equity is None  # no mark yet, so no Σ to compare
     assert asyncio.run(cycle.reconcile_account()) == ()
@@ -415,12 +734,13 @@ def test_a_symbol_the_ledger_holds_flat_is_a_size_finding_and_not_a_second_one()
     traded and closed lands here the moment the venue disagrees about it.
     """
     store = SQLiteStore(":memory:")
-    projection = _ledger(store, equity="100000")
+    keeper = _ledger(store, equity="100000")
+    projection = keeper.portfolio
     _book_fill(projection, quantity="0.002", price="64809")
     _book_fill(projection, quantity="0.002", price="64809", side=Side.SELL, seq=2)
     _mark(projection, "BTC", "65009")
     venue = _held("100000.400", ("BTC", "0.002", "0.400"))
-    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), portfolio=projection)
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
 
     assert projection.account_net() == {"BTC": Decimal("0")}  # the record survives the close
     with capture_events() as logs:
@@ -444,7 +764,8 @@ def test_a_symbol_the_ledger_holds_flat_is_a_size_finding_and_not_a_second_one()
             venue=Decimal("100000.400"),
         ),
     )
-    assert (logs[0]["tier_1"], logs[0]["tier_2"]) == (1, 1)
+    record = _recorded(logs)
+    assert (record["tier_1"], record["tier_2"]) == (1, 1)
 
 
 def test_a_completed_cycle_records_what_it_found_at_each_tier() -> None:
@@ -466,11 +787,12 @@ def test_a_completed_cycle_records_what_it_found_at_each_tier() -> None:
     reading a pass needs the split rather than a total.
     """
     store = SQLiteStore(":memory:")
-    projection = _ledger(store, equity="100000")
+    keeper = _ledger(store, equity="100000")
+    projection = keeper.portfolio
     _book_fill(projection, quantity="0.002", price="64809")
     _mark(projection, "BTC", "65000")
     venue = _held("100000.900", ("BTC", "0.003", "0.400"))
-    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), portfolio=projection)
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
 
     with capture_events() as logs:
         divergences = asyncio.run(cycle.reconcile_account())
@@ -479,8 +801,8 @@ def test_a_completed_cycle_records_what_it_found_at_each_tier() -> None:
     tiers = [divergence.tier for divergence in divergences]
     assert tiers.count(DivergenceTier.TIER_1) == 2  # the cash line and the size
     assert tiers.count(DivergenceTier.TIER_2) == 2  # equity and the symbol's uPnL
-    assert [log["event"] for log in logs] == [NamedEvent.ACCOUNT_RECONCILED.value]
-    assert (logs[0]["tier_1"], logs[0]["tier_2"], logs[0]["unvalued"]) == (2, 2, 0)
+    record = _recorded(logs)
+    assert (record["tier_1"], record["tier_2"], record["unvalued"]) == (2, 2, 0)
 
 
 def test_a_pass_that_could_not_value_the_book_is_not_recorded_as_one_that_agreed() -> None:
@@ -504,10 +826,11 @@ def test_a_pass_that_could_not_value_the_book_is_not_recorded_as_one_that_agreed
     two passes are told apart.
     """
     store = SQLiteStore(":memory:")
-    projection = _ledger(store, equity="100000")
+    keeper = _ledger(store, equity="100000")
+    projection = keeper.portfolio
     _book_fill(projection, quantity="0.002", price="64809")
     venue = _held("100000.400", ("BTC", "0.002", "0.400"))
-    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), portfolio=projection)
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
 
     with capture_events() as unvalued_logs:
         assert asyncio.run(cycle.reconcile_account()) == ()
@@ -518,8 +841,8 @@ def test_a_pass_that_could_not_value_the_book_is_not_recorded_as_one_that_agreed
     with capture_events() as agreed_logs:
         assert asyncio.run(cycle.reconcile_account()) == ()
 
-    assert unvalued_logs[0]["unvalued"] == 2  # the account's equity and BTC's uPnL
-    assert agreed_logs[0]["unvalued"] == 0
+    assert _recorded(unvalued_logs)["unvalued"] == 2  # the account's equity and BTC's uPnL
+    assert _recorded(agreed_logs)["unvalued"] == 0
     assert unvalued_logs != agreed_logs
 
 
@@ -527,13 +850,13 @@ class _SealedStore(SQLiteStore):
     """A real store that refuses every write once ``seal()`` is called.
 
     Sealed rather than write-counting because an identical-value write is still
-    a write: this slice's claim is that classification is a **read**, and a
-    heal that happened to persist the number already there would slip past any
-    before/after value comparison while being exactly the regression the claim
-    exists to prevent. The seal closes over the *whole* write surface, not
-    ``checkpoint_ledger`` alone, because the cycle holds no ``Store`` of its own
-    — it reaches one only through the projection — so any verb arriving here is
-    a collaborator that grew a writer.
+    a write: the claim below is that a pass with nothing to heal is a **read**,
+    and a write that happened to persist the number already there would slip
+    past any before/after value comparison while being exactly the regression
+    the claim exists to prevent. The seal closes over the *whole* write surface,
+    not ``checkpoint_ledger`` alone, because the cycle reaches a ``Store`` only
+    through its collaborators, so any verb arriving here is one of them growing
+    a writer.
 
     Armed after setup, since materialising the ledger is itself a durable write
     and the subject is what the *cycle* does, not what opening one costs.
@@ -581,40 +904,41 @@ class _SealedStore(SQLiteStore):
         super().save_kill_switch(tripped=tripped, reason=reason, ts_ns=ts_ns)
 
 
-def test_a_cycle_that_finds_divergence_at_both_tiers_still_changes_no_stored_value() -> None:
-    """This slice classifies and heals nothing, and the store is where that has
-    to be asserted: the heals land next, on the same cycle, and the only durable
-    difference between a classification and a heal is a write.
+def test_a_cycle_that_finds_only_tier_2_divergence_changes_no_stored_value() -> None:
+    """Tier-2 is **alerted on and never healed** (ADR-0034), and the store is
+    where that has to be asserted: the only durable difference between an alert
+    and a heal is a write.
 
-    So the case hands the cycle everything a heal would act on — a size gap, a
-    symbol the ledger has never seen, a cash line adrift, and both Tier-2
-    figures — checks it really did classify all of it, and then asserts the
-    ledger behind it is untouched. A cycle finding nothing would assert nothing.
+    The distinction is easy to lose now that the same cycle does both. A pass
+    that classified a valuation gap and then wrote *anything* would be healing
+    toward a number the venue computes from a mark we deliberately do not
+    replicate bit-for-bit — persisting rounding noise into Tier-1 state, which
+    is precisely the accumulation the two-tier split exists to keep it out of.
 
-    The absent SOL row is the sharpest of the three read-backs. The venue is
-    reporting exposure this engine never placed, which is precisely what the
-    next slice persists as an unattributed partition (ADR-0038) — so "no
-    position row appeared" is the assertion that the heal has not quietly
-    arrived early, and it is one no value comparison of *existing* rows would
-    have made.
+    So the venue agrees on every Tier-1 figure and disagrees on both Tier-2
+    ones: same size, same implied cash, a different open PnL and therefore a
+    different equity. The book is left untouched — the account row at the cash
+    it opened at, and the one position row still the strategy's own — against a
+    store that refuses a write outright rather than being compared afterwards.
     """
     store = _SealedStore(":memory:")
-    projection = _ledger(store, equity="100000")
+    keeper = _ledger(store, equity="100000")
+    projection = keeper.portfolio
     _book_fill(projection, quantity="0.002", price="64809")
     _mark(projection, "BTC", "65000")
     opened = store.load_account()
+    stored = store.all_positions()
     assert opened is not None
-    venue = _held("90000.500", ("BTC", "0.003", "0.500"), ("SOL", "10", "0"))
-    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), portfolio=projection)
+    # Equity 100000.500 against an unrealized 0.500 implies the ledger's own
+    # cash exactly, so nothing at Tier-1 disagrees while both Tier-2 figures do.
+    venue = _held("100000.500", ("BTC", "0.002", "0.500"))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
     store.seal()
 
     divergences = asyncio.run(cycle.reconcile_account())
 
     assert divergences is not None
     assert {(d.tier, d.field, d.symbol) for d in divergences} == {
-        (DivergenceTier.TIER_1, DivergenceField.CASH, None),
-        (DivergenceTier.TIER_1, DivergenceField.SIGNED_SIZE, "BTC"),
-        (DivergenceTier.TIER_1, DivergenceField.SIGNED_SIZE, "SOL"),
         (DivergenceTier.TIER_2, DivergenceField.EQUITY, None),
         (DivergenceTier.TIER_2, DivergenceField.UNREALIZED_PNL, "BTC"),
     }
@@ -623,7 +947,51 @@ def test_a_cycle_that_finds_divergence_at_both_tiers_still_changes_no_stored_val
     assert restored is not None
     assert restored.cash == opened.cash == Decimal("100000")
     assert restored.genesis_collateral == opened.genesis_collateral
-    assert store.all_positions() == []
+    assert store.all_positions() == stored
+
+
+def test_a_size_finding_the_cycle_cannot_price_heals_nothing_and_writes_nothing() -> None:
+    """A heal the cycle cannot compute is not attempted at half strength: it
+    emits no synthetic fill, and a pass whose every finding is unhealable writes
+    nothing at all.
+
+    The reachable shape of "a heal of zero is not a fact worth putting on the
+    path". ``clearinghouseState`` omits the entry price of a position the venue
+    does not carry, and ADR-0034's synthetic needs a price to book against — so
+    the ledger's own ETH, flat at the venue, is a Tier-1 finding with no price
+    behind it. Booking it at an invented one would put a real number on
+    ``entry_price`` that no later cycle re-examines, where an unhealed symbol
+    simply diverges again at the next deadline and stays visible.
+
+    **Still reported**, which is the half that makes the other half safe: the
+    cycle declines to correct the book, not to notice. Silence here would be a
+    position we believe we hold and do not, disappearing from the findings
+    because it could not be priced.
+
+    Asserted against a store that refuses a write outright, on the same argument
+    the Tier-2 case makes below: an empty heal that re-stamped the account row
+    would be indistinguishable from a correction by anything but the number, and
+    a before/after comparison could not tell the two apart.
+    """
+    store = _SealedStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    _book_fill(keeper.portfolio, quantity="1.5", price="3000", symbol="ETH")
+    cycle = LedgerReconciliation(exchange=_AccountVenue(_held("100000")), checkpointer=keeper)
+    store.seal()
+
+    divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences == (
+        Divergence(
+            tier=DivergenceTier.TIER_1,
+            field=DivergenceField.SIGNED_SIZE,
+            symbol="ETH",
+            ledger=Decimal("1.5"),
+            venue=Decimal("0"),
+        ),
+    )
+    assert keeper.portfolio.position("ETH", strategy_id=None) is None
+    assert keeper.portfolio.account_net() == {"ETH": Decimal("1.5")}
 
 
 def test_a_failed_barrier_read_is_recorded_under_the_grains_own_freeze_name() -> None:
@@ -643,13 +1011,13 @@ def test_a_failed_barrier_read_is_recorded_under_the_grains_own_freeze_name() ->
     ADR-0011 inv 1 refuses.
     """
     store = SQLiteStore(":memory:")
-    projection = PortfolioProjection(
+    keeper = Checkpointer(
         spec=AccountSpec(account_id=LIVE_ACCOUNT_ID, genesis_collateral=None),
         store=store,
         clock=ManualClock(7),
     )
-    projection.recover()
-    cycle = LedgerReconciliation(exchange=_AccountVenue(None), portfolio=projection)
+    keeper.recover()
+    cycle = LedgerReconciliation(exchange=_AccountVenue(None), checkpointer=keeper)
 
     with capture_events() as logs:
         materialised = asyncio.run(cycle.materialise_account())
@@ -675,22 +1043,307 @@ def test_each_account_freeze_names_the_caller_whose_cost_it_carries() -> None:
     the call ``reconcile.frozen`` already makes for its own two scopes.
     """
     store = SQLiteStore(":memory:")
-    projection = _ledger(store, equity="100000")
-    cycle = LedgerReconciliation(exchange=_AccountVenue(None), portfolio=projection)
+    keeper = _ledger(store, equity="100000")
+    cycle = LedgerReconciliation(exchange=_AccountVenue(None), checkpointer=keeper)
 
     with capture_events() as cadence_logs:
         assert asyncio.run(cycle.reconcile_account()) is None
 
-    unopened = PortfolioProjection(
+    unopened = Checkpointer(
         spec=AccountSpec(account_id=LIVE_ACCOUNT_ID, genesis_collateral=None),
         store=SQLiteStore(":memory:"),
         clock=ManualClock(7),
     )
     unopened.recover()
-    barrier = LedgerReconciliation(exchange=_AccountVenue(None), portfolio=unopened)
+    barrier = LedgerReconciliation(exchange=_AccountVenue(None), checkpointer=unopened)
 
     with capture_events() as barrier_logs:
         assert asyncio.run(barrier.materialise_account()) is False
 
     assert cadence_logs[0]["scope"] == "cadence"
     assert barrier_logs[0]["scope"] == "barrier"
+
+
+def test_a_retried_cycle_books_its_heal_once_and_announces_it_once() -> None:
+    """A heal's key is the **cycle's** stamp, so one pass corrects a symbol once
+    however many times that pass runs (``ReconciliationFill``).
+
+    Content-keying is the alternative that looks more idempotent and is the
+    trap: the same drift recurring a month later would collapse onto the first
+    heal's id and never be booked at all. Stamping the cycle collapses the
+    *retried* pass — the case idempotency is actually for — and still books a
+    genuinely new divergence at the next deadline, which is a later stamp.
+
+    The second pass here is handed a venue that has moved further, which is what
+    makes the collapse visible at all: a re-read of the *same* snapshot finds a
+    book that already agrees and would be a no-op whether the key deduped or
+    not. Reported, then, but not applied — the finding rides the pass's own
+    record where an operator can see it, and the next deadline heals it under a
+    key of its own.
+
+    **And nothing is announced, and nothing is written.** ``account.healed``
+    answers "why did the ledger move", so a deduped synthetic must not emit one:
+    it is the same rule that keeps a finding the cycle declined to price off the
+    record, arriving through the one door the producer-side check does not cover
+    — the synthetic here is well-formed, and it is the aggregate that refuses it.
+    The store is the other half of that claim and the one a value comparison
+    cannot make: a pass that re-stamped the account row with the figure already
+    there would be indistinguishable from a correction by anything but the
+    number, so the second pass runs against a store that refuses a write
+    outright. Sealed after the first pass, since that one heals for real and its
+    write is the state this case starts from.
+    """
+    store = _SealedStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    venue = _AccountVenue(_held("100000", ("SOL", "10", "0")), _held("100000", ("SOL", "12", "0")))
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+
+    asyncio.run(cycle.reconcile_account())
+    store.seal()
+    with capture_events() as logs:
+        divergences = asyncio.run(cycle.reconcile_account())
+
+    ledger = keeper.portfolio
+    assert ledger.account_net() == {"SOL": Decimal("10")}  # the first pass's heal, not twice over
+    healed = ledger.position("SOL", strategy_id=None)
+    assert healed is not None
+    assert healed.size == Decimal("10")
+    assert [(d.field, d.ledger, d.venue) for d in divergences or ()] == [
+        (DivergenceField.SIGNED_SIZE, Decimal("10"), Decimal("12"))
+    ]
+    assert [log for log in logs if log["event"] == NamedEvent.ACCOUNT_HEALED.value] == []
+
+
+def test_a_heal_that_reduces_the_net_shorts_the_residual_rather_than_closing_a_strategy() -> None:
+    """The residual is the **whole** correction and it lands in the unattributed
+    partition — even when the ledger's own book is what is too large.
+
+    The reducing direction is where "leave the strategies alone" stops being
+    free. A venue holding less than the ledger has an obvious wrong answer
+    sitting right there: sell the owning strategy down until the net agrees.
+    That trades a size the strategy never traded, so it books realized PnL into
+    that strategy's line and leaves its close-my-position logic acting on
+    exposure it no longer has — the corruption ADR-0038 reserves the ``None``
+    partition to prevent, arriving from the side where the arithmetic *would*
+    have worked.
+
+    So the heal shorts the residual into ``None`` instead, and the strategy's
+    partition comes out bit-for-bit as the fill path left it: same size, same
+    entry price, same realized line. Only the account net moves, which is the
+    only grain the venue has an opinion about (ADR-0034).
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    ledger = keeper.portfolio
+    _book_fill(ledger, quantity="0.002", price="64809")
+    held = ledger.position("BTC", strategy_id="alpha")
+    venue = _AccountVenue(_held("100000", ("BTC", "0.0005", "0")))
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+
+    asyncio.run(cycle.reconcile_account())
+
+    assert ledger.position("BTC", strategy_id="alpha") == held
+    residual = ledger.position("BTC", strategy_id=None)
+    assert residual is not None
+    assert residual.size == Decimal("-0.0015")
+    assert residual.entry_price == Decimal("64809")  # the venue's own, off the snapshot
+    assert ledger.account_net() == {"BTC": Decimal("0.0005")}
+
+
+def test_a_failed_read_never_un_heals_the_book_it_cannot_see() -> None:
+    """A frozen cycle heals nothing and **removes** nothing, and the second half
+    is the one that needs a heal in front of it to state at all.
+
+    The book here holds ten SOL for one reason: a previous pass healed it there
+    because the venue said so. Absence of the venue is not the venue saying the
+    opposite (ADR-0011 inv 1) — so a read that fails must leave that partition
+    exactly where the heal put it, rather than treating "not reported" as
+    "reported flat" and shorting it back to zero. That inversion is available to
+    anything that reconciles off the snapshot's symbol set without checking
+    whether there *was* a snapshot, and it is the expensive direction: a spurious
+    close writes a position the account never held, where a missed heal only
+    waits a cadence interval.
+
+    Asserted against a sealed store, on ``_size_heals``'s rule above: the freeze
+    is an early return ahead of the checkpoint, so the claim is that the whole
+    write surface stays untouched rather than that the numbers happen to match.
+    The record says only that the pass froze — nothing was found, because
+    nothing was compared, and nothing moved.
+    """
+    store = _SealedStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    ledger = keeper.portfolio
+    venue = _AccountVenue(_held("100000", ("SOL", "10", "0")), None)
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+
+    asyncio.run(cycle.reconcile_account())  # the pass that put the residual there
+    healed = ledger.position("SOL", strategy_id=None)
+    store.seal()
+
+    with capture_events() as logs:
+        frozen = asyncio.run(cycle.reconcile_account())
+
+    assert frozen is None
+    assert [log["event"] for log in logs] == [NamedEvent.ACCOUNT_RECONCILE_FROZEN.value]
+    assert ledger.position("SOL", strategy_id=None) == healed
+    assert ledger.account_net() == {"SOL": Decimal("10")}
+    assert ledger.account().cash == Decimal("100000")
+    assert {position.symbol for position in store.all_positions()} == {"SOL"}
+
+
+def test_a_pass_compares_one_fold_so_its_own_cash_heal_is_never_a_tier_2_finding() -> None:
+    """One cycle compares against **one** reading of the ledger, taken before
+    anything it does can move the book.
+
+    The two grains share inputs: ``equity`` is ``cash + Σ uPnL``, so the cash
+    line Tier-1 heals is a term in the equity Tier-2 checks. Take the account
+    view twice — once for the cash comparison and once for the equity one — and
+    the heal in between makes the second reading a different book, so the cycle
+    reports the venue as disagreeing by exactly the amount the cycle itself just
+    moved. That is an alert about our own arithmetic, and it arrives through the
+    one door ADR-0040 §6's suppression does not cover, because there is no
+    Tier-1 *equity* finding for it to be suppressed against.
+
+    The book here is built so the two answers differ. The ledger's mark is stale
+    against the venue's, so the ledger's uPnL is 0.382 where the venue's is
+    100.382 — a real Tier-2 disagreement — while the cash line is 100 too high
+    by exactly the compensating amount. Equity therefore **agrees** on the fold
+    the cycle found, and would disagree by 100 on the fold its own heal leaves
+    behind. An equity finding on this pass is the bug, and its absence is the
+    assertion.
+
+    Not a rule the checks are asked to keep individually: ``reconcile_account``
+    hoists the view, the net and the uPnL map above every heal, which is the
+    same thing ``domain.valuation`` does within a single view — every field from
+    one read, so two of them can never straddle a write.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    ledger = keeper.portfolio
+    _book_fill(ledger, quantity="0.002", price="64809")
+    _mark(ledger, "BTC", "65000")
+    venue = _AccountVenue(_held("100000.382", ("BTC", "0.002", "100.382")))
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+
+    divergences = asyncio.run(cycle.reconcile_account())
+
+    assert [(d.field, d.ledger, d.venue) for d in divergences or ()] == [
+        (DivergenceField.CASH, Decimal("100000"), Decimal("99900")),
+        (DivergenceField.UNREALIZED_PNL, Decimal("0.382"), Decimal("100.382")),
+    ]
+    assert ledger.account().cash == Decimal("99900")  # the heal landed
+    assert ledger.account().equity == Decimal("99900.382")  # and moved equity, after the fact
+
+
+def test_a_healed_fill_and_the_venues_later_delivery_of_it_converge_on_one_application() -> None:
+    """The venue's own fill arriving *after* the heal that stood in for it, and
+    the account net ending where one application leaves it.
+
+    The two cannot be deduped against each other, and the reason is structural
+    rather than an omission: ``clearinghouseState`` reports **positions, never
+    trades**, so the heal cannot know the ``trade_id`` the real fill will carry
+    and its key cannot collide with ``{cloid}:fill:{trade_id}``. Keying them
+    together would mean inventing an id for a trade the cycle never saw.
+
+    So convergence is arithmetic rather than dedup, and it costs one cadence
+    interval. The heal books the size into the unattributed partition; the
+    venue's delivery books the same size into the strategy that placed it,
+    leaving the ledger reading **double** until the next deadline; that pass
+    finds the account net one size too large and heals the residual back out.
+    The end state is the one that matters and all three parts of it are the
+    claim: the account net is the venue's, the strategy owns the exposure it
+    actually placed, and the unattributed partition is flat again — the heal
+    withdrew, rather than leaving a permanent phantom beside the real fill.
+
+    The over-read in the middle is asserted rather than glossed. It is the
+    honest cost of the design and the thing an operator will see on a dashboard,
+    so a change that quietly made it permanent should fail here.
+    """
+    store = SQLiteStore(":memory:")
+    clock = ManualClock(7)
+    keeper = _ledger(store, equity="100000", clock=clock)
+    ledger = keeper.portfolio
+    venue = _AccountVenue(_held("100000", ("BTC", "0.002", "0")))
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+
+    asyncio.run(cycle.reconcile_account())  # the heal stands in for a fill not yet delivered
+    assert ledger.account_net() == {"BTC": Decimal("0.002")}
+
+    # The venue delivers the trade the heal inferred, down the ordinary fill path.
+    _book_fill(ledger, quantity="0.002", price="64809")
+    assert ledger.account_net() == {"BTC": Decimal("0.004")}  # the over-read, for one interval
+
+    clock.advance_to(8)  # the next deadline: a new pass, so a new heal key
+    asyncio.run(cycle.reconcile_account())
+
+    assert ledger.account_net() == {"BTC": Decimal("0.002")}
+    held = ledger.position("BTC", strategy_id="alpha")
+    assert held is not None
+    assert held.size == Decimal("0.002")  # attribution is the strategy's, not the heal's
+    residual = ledger.position("BTC", strategy_id=None)
+    assert residual is not None
+    assert residual.size == Decimal("0")  # the heal withdrew rather than lingering
+    assert ledger.account().cash == Decimal("100000")  # closed at its own entry: nothing realized
+
+
+def test_a_fill_landing_inside_the_account_read_is_healed_away_as_foreign_flow() -> None:
+    """The snapshot is older than the fold it is compared against, and the cycle
+    corrects the engine's own fill out of the account net.
+
+    ``reconcile_account`` awaits the venue read and takes its three ledger folds
+    *after* it returns. Everything after that await is synchronous, so no fill
+    can interleave with the heal — but one can interleave with the **read**, and
+    that is the gap. A live account read is a POST; a fill delivered while it is
+    in flight is in the ledger and cannot be in the body already serialised. The
+    cycle then reads the ledger as ahead of the venue and books the difference
+    out, which is the exact inverse of the case it was built for.
+
+    The reducing direction is what makes it reachable rather than theoretical:
+    ``_size_heals`` needs the venue's entry price, and the venue supplies one
+    precisely because it still carries the symbol. A fill that *opens* a
+    partition is safe by accident — the snapshot omits a symbol it does not hold,
+    so there is no price and no heal.
+
+    What is asserted is the current behavior, not the desired one. Attribution
+    survives (the correction lands in the unattributed partition, so the
+    strategy's own book still reads the size it placed), and the damage is
+    confined to the account grain, where the net now tracks a snapshot that
+    predates the trade. The next pass reads a current snapshot and heals it back,
+    so the ledger oscillates by the size of whatever landed in the window rather
+    than drifting — but it churns the unattributed partition durably each way.
+    A fix belongs at the comparison, not the heal: the snapshot carries its own
+    venue timestamp, and a symbol whose ledger moved after it has not been
+    compared against anything.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    ledger = keeper.portfolio
+    _book_fill(ledger, quantity="0.002", price="64809")
+
+    def a_fill_lands() -> None:
+        _book_fill(ledger, quantity="0.001", price="64810", seq=2)
+
+    venue = _SlowAccountVenue(_held("100000", ("BTC", "0.002", "0")), during=a_fill_lands)
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+
+    divergences = asyncio.run(cycle.reconcile_account())
+
+    # The ledger is ahead because it saw the fill first, and the pass reports it
+    # as the venue holding less — indistinguishable, here, from real foreign flow.
+    assert [(d.field, d.symbol, d.ledger, d.venue) for d in divergences or ()] == [
+        (DivergenceField.SIGNED_SIZE, "BTC", Decimal("0.003"), Decimal("0.002"))
+    ]
+    held = ledger.position("BTC", strategy_id="alpha")
+    assert held is not None
+    assert held.size == Decimal("0.003")  # attribution is untouched: both fills are the strategy's
+    residual = ledger.position("BTC", strategy_id=None)
+    assert residual is not None
+    assert residual.size == Decimal("-0.001")  # the second fill, corrected back out
+    assert ledger.account_net() == {"BTC": Decimal("0.002")}  # a net the venue no longer holds
+    # The correction is durable, which is what makes this more than a bad read:
+    # the row survives the restart the strategy's own partition would heal on.
+    # Only the heal's row is here because ``_book_fill`` folds the projection
+    # directly, the checkpoint being the cycle's rather than the fill path's.
+    assert [(p.strategy_id, p.symbol, p.signed_size) for p in store.all_positions()] == [
+        (None, "BTC", Decimal("-0.001"))
+    ]

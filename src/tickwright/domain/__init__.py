@@ -29,6 +29,7 @@ from .errors import (
 )
 from .events import (
     CancelSignal,
+    CashCorrection,
     Event,
     ExecutionReport,
     FillReport,
@@ -49,6 +50,7 @@ from .events import (
     OrderSubmitted,
     PlaceOrder,
     PlaceSignal,
+    ReconciliationFill,
     Signal,
     VenueAccountState,
     VenueOrderView,
@@ -126,6 +128,7 @@ __all__ = [
     "AccountView",
     "Approved",
     "CancelSignal",
+    "CashCorrection",
     "Denied",
     "Event",
     "ExecutionReport",
@@ -157,6 +160,7 @@ __all__ = [
     "Position",
     "PositionChange",
     "PositionView",
+    "ReconciliationFill",
     "Signal",
     "SymbolOwnership",
     "VenueAccountState",

@@ -61,7 +61,6 @@ from tickwright.engine.checkpoint import Checkpointer
 from tickwright.engine.execution import ExecutionManager
 from tickwright.engine.guard import RealGuard
 from tickwright.engine.ledger_reconcile import LedgerReconciliation
-from tickwright.engine.portfolio import PortfolioProjection
 from tickwright.engine.reconcile import ReconcileConfig, Reconciler
 from tickwright.engine.runner import Engine
 from tickwright.engine.strategy_host import StrategyHost
@@ -781,7 +780,13 @@ def _drive_feed_frame_dropped() -> None:
 
 def _drive_account_reconciled() -> None:
     """One account-grain cycle against a venue snapshot: the ledger is
-    cross-checked and the pass is named (``account.reconciled``, ADR-0034).
+    cross-checked, the pass is named (``account.reconciled``, ADR-0034), and the
+    Tier-1 gap it finds is healed and named too (``account.healed``).
+
+    Both names fall out of the one cycle because the snapshot carries a position
+    the ledger has never seen — materialisation opens a cash line and no book —
+    so this pass is a real divergence rather than a staged one, and the heal it
+    books is the record's own path.
 
     Live-shaped by construction — a ledger whose genesis was ingested from the
     venue — because paper has no second account for a cycle to compare against
@@ -789,12 +794,12 @@ def _drive_account_reconciled() -> None:
 
     async def go() -> None:
         venue = _LiveShapedVenue()
-        projection = PortfolioProjection(
+        keeper = Checkpointer(
             spec=venue.account_spec(), store=SQLiteStore(":memory:"), clock=ManualClock()
         )
-        projection.recover()
-        projection.materialise(DERIVED_STATE)
-        await LedgerReconciliation(exchange=venue, portfolio=projection).reconcile_account()
+        keeper.recover()
+        keeper.portfolio.materialise(DERIVED_STATE)
+        await LedgerReconciliation(exchange=venue, checkpointer=keeper).reconcile_account()
 
     asyncio.run(go())
 
@@ -806,11 +811,11 @@ def _drive_account_reconcile_frozen() -> None:
 
     async def go() -> None:
         venue = _LiveShapedVenue(state=None)
-        projection = PortfolioProjection(
+        keeper = Checkpointer(
             spec=venue.account_spec(), store=SQLiteStore(":memory:"), clock=ManualClock()
         )
-        projection.recover()
-        await LedgerReconciliation(exchange=venue, portfolio=projection).reconcile_account()
+        keeper.recover()
+        await LedgerReconciliation(exchange=venue, checkpointer=keeper).reconcile_account()
 
     asyncio.run(go())
 
@@ -849,6 +854,7 @@ SCENARIOS: dict[NamedEvent, Callable[[], None]] = {
     NamedEvent.GHOST_RECONCILED: _drive_ghost_reconciled,
     NamedEvent.RECONCILE_FROZEN: _drive_frozen,
     NamedEvent.ACCOUNT_RECONCILED: _drive_account_reconciled,
+    NamedEvent.ACCOUNT_HEALED: _drive_account_reconciled,
     NamedEvent.ACCOUNT_RECONCILE_FROZEN: _drive_account_reconcile_frozen,
     NamedEvent.EXCHANGE_REQUEST_FAILED: _drive_exchange_request_failed,
     NamedEvent.EXCHANGE_ACTION_REJECTED: _drive_exchange_action_rejected,

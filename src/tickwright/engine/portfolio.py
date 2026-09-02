@@ -15,6 +15,7 @@ those reads (ADR-0041 §8). The scoped facade ``for_strategy`` hands out is what
 implements the seam.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -23,6 +24,7 @@ from tickwright.domain import (
     Account,
     AccountSpec,
     AccountView,
+    CashCorrection,
     Clock,
     FundingAccrual,
     InvariantViolation,
@@ -34,6 +36,7 @@ from tickwright.domain import (
     Position,
     PositionChange,
     PositionView,
+    ReconciliationFill,
     Side,
     Store,
     StoreAccountMismatch,
@@ -123,6 +126,46 @@ class LedgerChange:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class HealChange:
+    """One reconcile cycle's whole Tier-1 heal: folded in memory, not yet durable.
+
+    ``LedgerChange``'s other sibling, and it is the *cycle* that is the unit
+    rather than the individual heal. A pass can find several symbols adrift at
+    once, and correcting some of them is a worse book than correcting none: the
+    account net would then match the venue on the symbols that got through and
+    not on the rest, with nothing recording which half landed. One transaction
+    for the pass makes a crash mid-heal leave the ledger exactly where the cycle
+    found it, and the next deadline reads the same divergence again.
+
+    ``fills`` are ``LedgerChange``es because a heal fill's effect on the ledger
+    *is* a fill's effect — the same fold, the same partition filing, the same
+    ``position.*`` announcements. Reusing the type is what keeps "the same
+    idempotent ``apply()`` path" true at the write end as well as the fold end
+    (ADR-0034). ``account`` is the one pool they all moved, carried once.
+
+    ``applied`` is the ``event_id`` of every synthetic the fold **kept**, and it
+    is the answer to the only question a caller still has after the write: a
+    synthetic ``Position.apply`` deduped away moved nothing, and announcing it
+    would answer an operator's "why did the ledger move" with a move that never
+    happened. Reported rather than left to be inferred — the alternative is a
+    caller pairing its own input against ``fills`` positionally, which is a
+    length invariant this method holds and no caller can check. Absent from the
+    set is the whole of what "deduped" means here.
+
+    There is deliberately **no ``funding_mark``**. A funding correction is not a
+    column this heal may write: it re-enters as a keyed ``FundingAccrual``
+    through ``apply_funding``, whose write is the only one allowed to advance the
+    watermark it is guarded by (ADR-0043 §5.2/§9). Given a field here, the heal
+    could move the funding line while the mark stayed put, which is that
+    section's double-count reached through the one door it does not cover.
+    """
+
+    account: Account
+    fills: tuple[LedgerChange, ...]
+    applied: frozenset[str]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class FundingChange:
     """One accrual's effect on the ledger: folded in memory, not yet durable.
 
@@ -209,7 +252,75 @@ class PortfolioProjection:
         """
         self._marks[mark.symbol] = mark
 
-    def apply_fill(self, event: OrderFillEvent, *, side: Side) -> LedgerChange:
+    def apply_heal(
+        self,
+        fills: Sequence[ReconciliationFill],
+        *,
+        cash: CashCorrection | None = None,
+    ) -> HealChange | None:
+        """Fold one cycle's Tier-1 heals — the account grain's write verb.
+
+        Every fill goes through ``apply_fill`` below, which is the whole point:
+        ADR-0034 heals *through* a synthetic event on the same idempotent path a
+        venue-pushed fill takes, never a write to ``signed_size``. So a heal
+        inherits the dedup, the misroute check and the magnitude precondition
+        from the one gatekeeper that states them, and the healed partition ends
+        up with an entry price and a cost basis rather than a size floating free
+        of a price.
+
+        **The cash correction is folded last, and the order is the reason it can
+        be an assignment.** A size heal that closes into a partition realizes
+        PnL, which accrues onto the cash line on its way past; correcting first
+        would leave that realized leg stacked on top of the venue's figure, and
+        the next cycle would report the heal's own arithmetic as a fresh
+        divergence. Applied after, the target absorbs whatever the fills did
+        (``Account.correct_cash``).
+
+        ``None`` when the fold moved nothing, as ``apply_funding``'s ``None`` is
+        a dropped accrual: a cycle that corrected nothing must write *nothing*,
+        or the pass would re-stamp the account row and be distinguishable from a
+        real correction only by reading the number.
+
+        **The verdict is the fold's, not the input's**, which is why the check
+        sits after the loop and asks ``applied`` rather than ``fills``. A pass
+        handed no synthetics at all is the easy half and falls out of the same
+        test; the one that needs it is a pass whose synthetics were all *deduped
+        away*, which is what a retried cycle is — the key is the cycle's stamp,
+        so the second run mints the first's ``event_id`` and ``Position.apply``
+        refuses every one of them. Judged on the input, that pass writes; judged
+        on ``applied``, it is the no-op it actually was. Returning there is safe
+        because a refused fill mutates neither aggregate: ``Position.apply``
+        dedups ahead of every write, and ``apply_fill`` accrues only behind
+        ``changes``.
+
+        The direction is read off each fill rather than taken as a parameter,
+        which is the one place this verb and ``apply_fill`` differ: a heal has no
+        saga for the side to ride on (``ReconciliationFill``).
+
+        **Which synthetics the fold kept is reported, not left to be inferred**
+        (``HealChange.applied``). The loop below is a loop rather than the
+        comprehension it could be precisely so the synthetic and the change it
+        produced are in scope together: that pairing is what a caller would
+        otherwise have to reconstruct positionally against a length only this
+        method guarantees.
+        """
+        folded: list[LedgerChange] = []
+        applied: set[str] = set()
+        for fill in fills:
+            change = self.apply_fill(fill, side=fill.side)
+            folded.append(change)
+            if change.changes:
+                # Unique within a pass: the key is ``reconcile:{symbol}:{ts_ns}``
+                # and the cycle emits at most one size finding per symbol, so a
+                # set loses nothing a list would have kept.
+                applied.add(fill.event_id)
+        if not applied and cash is None:
+            return None
+        if cash is not None:
+            self._account.correct_cash(cash.target, event_id=cash.event_id)
+        return HealChange(account=self._account, fills=tuple(folded), applied=frozenset(applied))
+
+    def apply_fill(self, event: OrderFillEvent | ReconciliationFill, *, side: Side) -> LedgerChange:
         """Fold a fill into its partition and the cash line — the single write
         verb of the Tier-1 path.
 
@@ -393,6 +504,21 @@ class PortfolioProjection:
                 size=str(position.signed_size),
                 funding=str(position.funding),
             )
+
+    def project_heal(self, change: HealChange) -> None:
+        """File the healed partitions and announce what the heal did, once the
+        caller's write has landed.
+
+        Nothing of its own beyond the loop: a heal fill's announcement is a
+        fill's announcement, so ``project`` below is the whole implementation.
+        A second set of names for the same facts would leave an operator
+        matching ``position.opened`` against a heal-only twin to answer "what do
+        I hold", and the catalog is closed against exactly that (ADR-0045 §1).
+        What says a move was a heal is the record the cycle emits beside it, not
+        a duplicate position vocabulary.
+        """
+        for fill in change.fills:
+            self.project(fill)
 
     def project(self, change: LedgerChange) -> None:
         """File ``change``'s partition and announce what the fill did.

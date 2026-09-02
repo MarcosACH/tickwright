@@ -21,6 +21,7 @@ construction (ADR-0025):
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
+from typing import ClassVar
 
 from .enums import AggressorSide, OrderState, OrderType, Side, TimeInForce
 from .ids import SignalId
@@ -460,6 +461,97 @@ class OrderFailed(OrderEvent):
     @property
     def state(self) -> OrderState:
         return OrderState.FAILED
+
+
+# --- The account grain's synthetic heal (not an event) ----------------------
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ReconciliationFill:
+    """One Tier-1 size heal: the fill the account cycle books to close a gap
+    between the ledger's net and the venue's (ADR-0034).
+
+    **Not a bus event**, deliberately, and the distinction is ADR-0045 §1's: the
+    catalog that closes is the *bus* catalog, and this never reaches the bus.
+    The account cycle folds it straight into the projection and checkpoints it,
+    exactly as ``LedgerChange`` travels — publishing it would put a fact on a
+    second channel with no subscriber to read it. It is an ``OrderFillEvent``'s
+    peer only where ``Position.apply`` consumes them, which is the whole of what
+    "the same idempotent ``apply()`` path" means.
+
+    It is also **not an order**, which is why it shares no base class with one.
+    There is no cloid, no signal and no saga behind it: ``clearinghouseState``
+    reports positions, never trades, so what the cycle knows is that the account
+    holds a size it cannot account for — not which order put it there.
+
+    Two of the differences that follow are the type's whole shape:
+
+    * **``strategy_id`` is fixed at ``None``** — the reserved unattributed
+      partition (ADR-0038) — and it is a ``ClassVar`` so no caller can supply
+      another. The venue has no per-strategy truth, so attributing foreign flow
+      to whichever strategy owns the symbol would corrupt that strategy's PnL
+      *and* let its close-my-position logic act on exposure it never opened.
+      Making it unconstructable is what turns "per-strategy attribution is never
+      reconciled" from a rule a producer honours into one it cannot break.
+    * **``side`` is a field**, where ``OrderFillEvent`` deliberately makes it
+      ride the saga. That rule exists because an order carries the direction and
+      the fill carries the trade; here there is no order, so the direction has
+      nowhere else to ride and the quantity stays a magnitude.
+
+    ``fee`` is likewise fixed at zero: the venue's own fees are already inside
+    the cash line this heal is correcting *toward*, so charging one here would
+    debit them a second time.
+
+    ``event_id`` is stamped with the cycle's own ``ts_ns`` rather than derived
+    from the divergence's figures. Content-keying looks more idempotent and is
+    the trap: the same drift recurring a month later would collapse onto the
+    first heal's id and never be booked at all. Stamping the cycle instead
+    collapses a *retried* cycle — the case idempotency is actually for — and
+    still books a genuinely new divergence.
+    """
+
+    symbol: str
+    side: Side
+    quantity: Decimal
+    price: Decimal
+    ts_ns: int
+
+    strategy_id: ClassVar[None] = None
+    fee: ClassVar[Decimal] = Decimal("0")
+
+    @property
+    def event_id(self) -> str:
+        return f"reconcile:{self.symbol}:{self.ts_ns}"
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CashCorrection:
+    """One Tier-1 cash heal: the figure the account cycle corrects the collateral
+    line **to** (ADR-0034, ADR-0042 §4's standing exception).
+
+    ``ReconciliationFill``'s sibling at the account grain, and it is not a fill
+    because there is nothing to book: the venue publishes no cash line, so what a
+    cycle knows is the balance its snapshot *implies* — never a movement that
+    produced it. Modelling it as a signed adjustment would invent a
+    ``CashAdjustment`` event ADR-0042 §4 explicitly rejects, and would have to be
+    computed against a cash line the same cycle's size heals are still moving.
+
+    So it carries a **target**, and the whole idempotency argument follows from
+    that: re-applying it assigns the same figure again. The ``event_id`` is
+    provenance rather than a key, stamped with the cycle's ``ts_ns`` for
+    ``ReconciliationFill``'s reason — a content key would collapse the same drift
+    recurring later onto the first heal's id and never correct it.
+
+    Account grain, so there is no symbol on it: the account has one collateral
+    pool, and open PnL is not attributable to it (ADR-0041 §2).
+    """
+
+    target: Decimal
+    ts_ns: int
+
+    @property
+    def event_id(self) -> str:
+        return f"reconcile:cash:{self.ts_ns}"
 
 
 # --- Venue truth for one cloid (a query result, not an event) ---------------

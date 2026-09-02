@@ -41,21 +41,25 @@ write with no ordering inside it has nothing here to protect. See ``portfolio``
 below, where the rule is stated on the borrow itself.
 """
 
+from collections.abc import Sequence
+
 from tickwright.domain import (
     EMPTY_LEVERAGE_BOOK,
     AccountSpec,
+    CashCorrection,
     Clock,
     FundingAccrual,
     InvariantViolation,
     LeverageBook,
     Order,
     OrderFillEvent,
+    ReconciliationFill,
     Side,
     Store,
 )
 
 from .cache import Cache
-from .portfolio import PortfolioProjection
+from .portfolio import HealChange, PortfolioProjection
 
 
 class Checkpointer:
@@ -208,6 +212,76 @@ class Checkpointer:
             ) from exc
         self._cache.project(order, ts_ns=ts_ns)
         self._portfolio.project(change)
+
+    def checkpoint_heal(
+        self,
+        fills: Sequence[ReconciliationFill],
+        *,
+        cash: CashCorrection | None = None,
+    ) -> HealChange | None:
+        """Make one reconcile cycle's Tier-1 heal durable — fold, write, project.
+
+        The same three steps in the same order as ``checkpoint_fill``, and for
+        the same reason: the write takes the *folded* state as its input, so the
+        fold cannot precede it and the projections must not. What differs is the
+        absent order row — a heal has no cloid behind it, because
+        ``clearinghouseState`` reports positions and never the trades that made
+        them — so ``order`` stays ``None`` and the ledger's three aggregates go
+        alone.
+
+        **One transaction for the whole cycle**, not one per symbol. A pass that
+        healed BTC and then failed on SOL would leave the account matching the
+        venue on one symbol and not the other, with nothing durable recording
+        which half landed; ADR-0034's cycle is meant to be repeatable from
+        whatever it finds, and it only is if a refused heal leaves the book
+        exactly as it was.
+
+        **Both halves of the heal ride that one transaction**, which is why the
+        cash correction arrives here rather than through a verb of its own: a
+        cycle's size heals and its cash correction are one answer to one
+        snapshot, and split across two writes either ordering leaves a durable
+        state the venue never held — a corrected line against uncorrected
+        positions, or the reverse. The fold that puts them in order is the
+        projection's (``apply_heal``); what this owns is that they land together.
+
+        A heal that **moved nothing** writes nothing at all, on
+        ``checkpoint_funding``'s rule below: a pass over an agreeing book has no
+        state to persist, and re-stamping the account row would make it
+        indistinguishable from a correction by anything but the number. That is
+        ``apply_heal``'s judgement rather than this method's, and it is made on
+        the fold rather than on the synthetics — a retried pass arrives here with
+        a full complement of fills the aggregate deduped away, and is as empty as
+        one that found nothing.
+
+        **Returns the fold it kept**, where its siblings return nothing, because
+        a heal is the one path whose caller still has something to say after the
+        write: the synthetic it handed in may have been deduped away by
+        ``Position.apply``, and the change is where that shows — a fill the
+        aggregate refused carries no ``changes``. The caller announces off this
+        rather than off what it asked for (``LedgerReconciliation._record_heals``).
+        """
+        change = self._portfolio.apply_heal(fills, cash=cash)
+        if change is None:
+            return None
+        try:
+            self._store.checkpoint_ledger(
+                account=change.account,
+                positions=tuple(fill.position for fill in change.fills),
+                ts_ns=self._clock.timestamp_ns(),
+            )
+        except InvariantViolation as exc:
+            # Only the seam's own failure type is relabelled, as its siblings do:
+            # anything else crossing it is a bug below the store, not a failed
+            # write.
+            # Named by what the pass was correcting, both halves: a cash-only
+            # heal carries no symbol, and reporting it as a failure for the
+            # empty string would hide which correction was lost.
+            healed = [fill.symbol for fill in fills] + ([] if cash is None else ["cash"])
+            raise InvariantViolation(
+                f"ledger heal checkpoint write failed for {', '.join(healed)}"
+            ) from exc
+        self._portfolio.project_heal(change)
+        return change
 
     def checkpoint_funding(self, accrual: FundingAccrual) -> None:
         """Make one settled funding boundary durable — gate, then one transaction.

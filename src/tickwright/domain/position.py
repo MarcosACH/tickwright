@@ -18,7 +18,7 @@ from enum import StrEnum
 
 from .enums import Side
 from .errors import InvariantViolation
-from .events import OrderFillEvent
+from .events import OrderFillEvent, ReconciliationFill
 
 _ZERO = Decimal("0")
 
@@ -187,7 +187,9 @@ class Position:
         """
         return self.signed_size * (mark - self.entry_price)
 
-    def apply(self, event: OrderFillEvent, *, side: Side) -> tuple[PositionChange, ...]:
+    def apply(
+        self, event: OrderFillEvent | ReconciliationFill, *, side: Side
+    ) -> tuple[PositionChange, ...]:
         """Fold ``event`` into this partition; idempotent and checked.
 
         A bookable fill belongs to this partition and moves a positive quantity;
@@ -195,10 +197,21 @@ class Position:
         lets every producer — venue ingress, reconciler synthetics, replay —
         inherit the precondition instead of each honouring it unstated.
 
+        **Two fill shapes, and this is the seam they are peers at** (ADR-0034's
+        "the same idempotent ``apply()`` path"). A ``ReconciliationFill`` has no
+        order behind it, so it shares no base class with one — what it shares is
+        exactly the surface read below: a partition, a magnitude, a price and a
+        dedup key. A union of the two concretes rather than a Protocol over
+        them, on the map's two-implementations bar: a third producer is what
+        would make the abstraction earn its name.
+
         ``side`` rides the saga rather than the event: ``OrderFillEvent`` carries
         the trade (quantity, price, ids) and the ``Order`` carries the direction,
         so the ``ExecutionManager`` — which holds both — supplies it. Quantity is
         therefore a magnitude: a negative one would invert the saga's direction.
+        A ``ReconciliationFill`` has no saga for the direction to ride, so it
+        carries its own and its caller reads it off there; the parameter stays
+        the one way this verb learns a direction either way.
 
         Returns the changes this fill made, or ``()`` for a redelivered fill the
         ledger already reflects, so a caller can suppress a duplicate
