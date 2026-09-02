@@ -131,11 +131,20 @@ def _effective_leverage(
     ``5.0119`` to ``2.8260`` behind an unchanged position. Under an
     account-equity denominator the ratio would not have moved at all.
 
-    Nullability is inherited term by term like the rest, with one addition that
-    is not about the mark: a **zero** denominator has no ratio to report, and
-    that is a reachable state rather than a defensive branch — a closed isolated
-    position has its collateral released, leaving ``0 + 0`` behind a flat
-    notional (ADR-0041 §3). ``0/0`` is not ``0``; nothing is levered there.
+    Nullability is inherited term by term like the rest, plus one case that is
+    not about the mark at all: a **non-positive** denominator has no ratio to
+    report, and it is the only Tier-2 ``None`` a fresh mark cannot cure
+    (ADR-0041 §6). Zero is reached by a closed isolated position, whose
+    collateral is released, leaving ``0 + 0`` behind a flat notional (§3) —
+    ``0/0`` is not ``0``; nothing is levered there. Negative is reached by
+    ordinary trading, because nothing here rejects an order or liquidates a
+    position (ADR-0040 §7), so equity and an isolated bucket alike keep running
+    past zero. Returning the division there would report a *negative* leverage,
+    which reads as de-levered and is the opposite of what has happened.
+
+    The rest of the view stays real on the same inputs: a wiped account still has
+    a notional, an unrealized PnL and margins. This field is ``None`` because the
+    ratio is undefined, never because a term was missing.
     """
     if notional is None:
         return None
@@ -147,7 +156,7 @@ def _effective_leverage(
         if account_equity is None:
             return None
         denominator = account_equity
-    if denominator == _ZERO:
+    if denominator <= _ZERO:
         return None
     return notional / denominator
 

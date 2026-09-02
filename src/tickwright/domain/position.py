@@ -145,7 +145,13 @@ class PositionView:
     whole-account ``equity``. Only the position-grain denominator makes the
     defining behaviour hold — adding isolated margin visibly de-levers the
     position, where an account-equity denominator would leave the ratio
-    untouched (#142)."""
+    untouched (#142).
+
+    ``None`` on a **non-positive denominator** as well as on the missing terms
+    every field here shares — the one Tier-2 ``None`` a fresh mark cannot cure
+    (ADR-0041 §6). Nothing rejects an order or liquidates a position, so equity
+    runs past zero on ordinary trading, and the ratio is undefined there rather
+    than negative."""
     mark_ts: int | None
     """The observation instant of the mark this view was valued at, ``None`` when
     the projection holds none for the symbol (ADR-0041 §6).

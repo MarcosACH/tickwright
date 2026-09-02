@@ -496,3 +496,81 @@ def test_effective_leverage_divides_notional_by_each_modes_own_backing() -> None
 
     assert cross.notional == Decimal("30000")
     assert cross.effective_leverage == Decimal("2.5")
+
+
+def test_effective_leverage_reads_none_on_a_non_positive_denominator() -> None:
+    """The one Tier-2 ``None`` a fresh mark cannot cure (ADR-0041 §6).
+
+    Every other nullable field here is missing an *input*; this one is undefined
+    even with every input present, because a backing equity of zero or less has
+    no ratio to it. And the state is reached by ordinary trading rather than by
+    accident: paper reports a negative free margin without rejecting an order or
+    liquidating anything (ADR-0040 §7), so an account really does keep running
+    past the point where its equity — or an isolated bucket's — goes through
+    zero. A negative ratio would read as *de-levered*, the opposite of the truth.
+
+    The rest of the view stays real there, which is what makes this a property of
+    the ratio rather than of the position: a wiped account still has a notional,
+    an unrealized PnL and margins, and every one of them is a number.
+
+    Zero is the same answer as negative in the **denominator** and the opposite
+    one in the numerator (ADR-0041 §3): a flat cross position on a solvent
+    account reads a real ``0`` — no exposure over real equity — while a flat
+    isolated one reads ``None``, its collateral having been released with the
+    position.
+    """
+    wiped_cross = position_view(
+        _position(quantity="0.5", price="58000", side=Side.BUY),
+        account_net=Decimal("0.5"),
+        account_unrealized_pnl=Decimal("1000"),
+        account_equity=Decimal("-500"),  # past zero, still trading (ADR-0040 §7)
+        mark=Decimal("60000"),
+        mark_ts=9_000,
+        leverage=CROSS_10X,
+        spec=BTC_40X,
+    )
+
+    assert wiped_cross.effective_leverage is None
+    assert wiped_cross.notional == Decimal("30000")
+    assert wiped_cross.unrealized_pnl == Decimal("1000")
+    assert wiped_cross.margin_used == Decimal("3000")
+    assert wiped_cross.maintenance_margin == Decimal("375")  # 30000 x 1/80
+
+    wiped_bucket = position_view(
+        _position(quantity="0.002", price="64815", side=Side.BUY, isolated_collateral="25.898067"),
+        account_net=Decimal("0.002"),
+        account_unrealized_pnl=Decimal("-30"),  # more than the bucket holds
+        account_equity=Decimal("100000"),
+        mark=Decimal("64794"),
+        mark_ts=9_000,
+        leverage=ISOLATED_5X,
+        spec=BTC_40X,
+    )
+
+    assert wiped_bucket.effective_leverage is None
+    assert wiped_bucket.margin_used == Decimal("-4.101933")  # 25.898067 - 30, reported as-is
+    assert wiped_bucket.notional == Decimal("129.588")
+
+    flat_cross = position_view(
+        _position(quantity="2", price="100", side=Side.BUY),
+        account_net=Decimal("0"),
+        account_unrealized_pnl=Decimal("0"),
+        account_equity=Decimal("100000"),
+        mark=Decimal("150"),
+        mark_ts=9_000,
+        leverage=CROSS_10X,
+        spec=BTC_40X,
+    )
+    flat_isolated = position_view(
+        _position(quantity="2", price="100", side=Side.BUY),
+        account_net=Decimal("0"),
+        account_unrealized_pnl=Decimal("0"),
+        account_equity=Decimal("100000"),
+        mark=Decimal("150"),
+        mark_ts=9_000,
+        leverage=ISOLATED_1X,  # collateral released with the position
+        spec=BTC_40X,
+    )
+
+    assert flat_cross.effective_leverage == Decimal("0")
+    assert flat_isolated.effective_leverage is None
