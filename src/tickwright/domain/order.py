@@ -221,7 +221,23 @@ class Order:
         is its authority (ADR-0036), and unlike ``cum_qty`` there is nothing for
         the saga to accumulate: the fee accrues on the ledger's own line, per
         trade. Riding the same dedup is what keeps it from being charged twice.
+
+        **A bookable fill moves a positive quantity**, stated here as well as on
+        ``Position.apply`` — not defence in depth, which ADR-0047 §3 refuses, but
+        that ADR's open case: the fill path crosses two aggregates and this is
+        the one it reaches first, so each states the rule its own operation
+        cannot proceed without. A non-positive quantity corrupts this side
+        independently — it accumulates into ``cum_qty``, which selects the
+        terminal, and it *spends the venue's ``trade_id``*. Refusing only at the
+        ledger leaves that id burned against a fill nobody booked, so the trade
+        coming back — corrected, or merely redelivered — dedups as an echo and is
+        dropped. Refused ahead of every mutation, the id stays unspent and the
+        real fill still books.
         """
+        if quantity <= Decimal("0"):
+            raise InvariantViolation(
+                f"fill {trade_id} for order {self.cloid} has non-positive quantity {quantity}"
+            )
         cum_qty = self.cum_qty + quantity
         event_type = OrderFilled if cum_qty >= self.quantity else OrderPartiallyFilled
         event = event_type(
