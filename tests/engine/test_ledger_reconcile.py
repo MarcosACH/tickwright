@@ -330,6 +330,48 @@ def test_a_size_divergence_heals_through_a_fill_into_the_unattributed_partition(
     assert ledger.open_positions(strategy_id="alpha") == ()
 
 
+def test_a_heal_is_durable_and_comes_back_on_the_restart_a_fill_comes_back_on() -> None:
+    """A heal is checkpointed on the same atomic path a fill is (ADR-0034), so
+    the restart that recovers the fill recovers the heal beside it.
+
+    The in-memory read model agreeing with the venue is only half the correction.
+    A heal that moved the projection and not the store leaves a restart reading a
+    book that never healed — flat where the venue holds ten SOL — and the next
+    cycle re-deriving the same divergence forever, which is the one failure the
+    Σ-invariant holding *in the healing process* cannot rule out.
+
+    Read back off the store rather than off the projection that healed, and then
+    through a **second** ledger recovered from it with no venue read and no
+    materialisation behind it: what the next process starts from is the rows, so
+    the rows are what the claim has to be about. The healed partition arrives
+    with the price it was booked at, since a size recovered without its basis is
+    the free-floating number the synthetic fill exists to avoid.
+
+    The store's own contract is asserted at ``test_checkpoint``'s seam; what is
+    new here is that the *cycle* reaches it.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    venue = _AccountVenue(_held("100000", ("SOL", "10", "0")))
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+
+    asyncio.run(cycle.reconcile_account())
+
+    assert [
+        (position.strategy_id, position.symbol, position.signed_size, position.entry_price)
+        for position in store.all_positions()
+    ] == [(None, "SOL", Decimal("10"), Decimal("64809"))]
+
+    restarted = Checkpointer(
+        spec=AccountSpec(account_id=LIVE_ACCOUNT_ID, genesis_collateral=None),
+        store=store,
+        clock=ManualClock(7),
+    )
+    restarted.recover()
+    assert restarted.portfolio.account_net() == {"SOL": Decimal("10")}
+    assert restarted.portfolio.account().cash == keeper.portfolio.account().cash
+
+
 def test_a_cash_line_disagreeing_with_the_equity_the_venue_implies_diverges_at_tier_1() -> None:
     """Cash is Tier-1 and the venue reports no cash line, so the comparison is
     against the one its snapshot *implies*: ``equity − Σ unrealized_pnl``.
