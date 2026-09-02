@@ -1196,3 +1196,54 @@ def test_a_pass_compares_one_fold_so_its_own_cash_heal_is_never_a_tier_2_finding
     ]
     assert ledger.account().cash == Decimal("99900")  # the heal landed
     assert ledger.account().equity == Decimal("99900.382")  # and moved equity, after the fact
+
+
+def test_a_healed_fill_and_the_venues_later_delivery_of_it_converge_on_one_application() -> None:
+    """The venue's own fill arriving *after* the heal that stood in for it, and
+    the account net ending where one application leaves it.
+
+    The two cannot be deduped against each other, and the reason is structural
+    rather than an omission: ``clearinghouseState`` reports **positions, never
+    trades**, so the heal cannot know the ``trade_id`` the real fill will carry
+    and its key cannot collide with ``{cloid}:fill:{trade_id}``. Keying them
+    together would mean inventing an id for a trade the cycle never saw.
+
+    So convergence is arithmetic rather than dedup, and it costs one cadence
+    interval. The heal books the size into the unattributed partition; the
+    venue's delivery books the same size into the strategy that placed it,
+    leaving the ledger reading **double** until the next deadline; that pass
+    finds the account net one size too large and heals the residual back out.
+    The end state is the one that matters and all three parts of it are the
+    claim: the account net is the venue's, the strategy owns the exposure it
+    actually placed, and the unattributed partition is flat again — the heal
+    withdrew, rather than leaving a permanent phantom beside the real fill.
+
+    The over-read in the middle is asserted rather than glossed. It is the
+    honest cost of the design and the thing an operator will see on a dashboard,
+    so a change that quietly made it permanent should fail here.
+    """
+    store = SQLiteStore(":memory:")
+    clock = ManualClock(7)
+    keeper = _ledger(store, equity="100000", clock=clock)
+    ledger = keeper.portfolio
+    venue = _AccountVenue(_held("100000", ("BTC", "0.002", "0")))
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+
+    asyncio.run(cycle.reconcile_account())  # the heal stands in for a fill not yet delivered
+    assert ledger.account_net() == {"BTC": Decimal("0.002")}
+
+    # The venue delivers the trade the heal inferred, down the ordinary fill path.
+    _book_fill(ledger, quantity="0.002", price="64809")
+    assert ledger.account_net() == {"BTC": Decimal("0.004")}  # the over-read, for one interval
+
+    clock.advance_to(8)  # the next deadline: a new pass, so a new heal key
+    asyncio.run(cycle.reconcile_account())
+
+    assert ledger.account_net() == {"BTC": Decimal("0.002")}
+    held = ledger.position("BTC", strategy_id="alpha")
+    assert held is not None
+    assert held.size == Decimal("0.002")  # attribution is the strategy's, not the heal's
+    residual = ledger.position("BTC", strategy_id=None)
+    assert residual is not None
+    assert residual.size == Decimal("0")  # the heal withdrew rather than lingering
+    assert ledger.account().cash == Decimal("100000")  # closed at its own entry: nothing realized
