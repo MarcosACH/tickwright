@@ -10,7 +10,7 @@ now that it writes, what it leaves behind in the store a real fill wrote to.
 """
 
 import asyncio
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from decimal import Decimal
 
@@ -76,6 +76,29 @@ class _AccountVenue(LiveVenueDouble):
 
     async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
         raise AssertionError("the account cycle is anchored on the account snapshot, not a cloid")
+
+
+class _SlowAccountVenue(_AccountVenue):
+    """An account read with a **round trip inside it** — the shape a real one has.
+
+    ``_AccountVenue`` answers from memory, so its ``await`` never actually
+    suspends and the cycle runs as though the snapshot and the ledger fold were
+    one instant. A live read is a POST: the loop runs whatever else is ready
+    while it is in flight, and the fill handler is one of those things. This
+    double is the difference, and it is the difference alone — the body it
+    returns was serialised *before* ``during`` ran, exactly as a venue's is.
+    """
+
+    def __init__(self, *answers: VenueAccountState | None, during: Callable[[], None]) -> None:
+        super().__init__(*answers)
+        self._during = during
+
+    async def fetch_account_state(self) -> VenueAccountState | None:
+        state = await super().fetch_account_state()
+        await asyncio.sleep(0)  # the wire: the loop is free to run the fill handler
+        self._during()
+        await asyncio.sleep(0)
+        return state
 
 
 def _ledger(store: Store, *, equity: str, clock: ManualClock | None = None) -> Checkpointer:
@@ -1261,3 +1284,66 @@ def test_a_healed_fill_and_the_venues_later_delivery_of_it_converge_on_one_appli
     assert residual is not None
     assert residual.size == Decimal("0")  # the heal withdrew rather than lingering
     assert ledger.account().cash == Decimal("100000")  # closed at its own entry: nothing realized
+
+
+def test_a_fill_landing_inside_the_account_read_is_healed_away_as_foreign_flow() -> None:
+    """The snapshot is older than the fold it is compared against, and the cycle
+    corrects the engine's own fill out of the account net.
+
+    ``reconcile_account`` awaits the venue read and takes its three ledger folds
+    *after* it returns. Everything after that await is synchronous, so no fill
+    can interleave with the heal — but one can interleave with the **read**, and
+    that is the gap. A live account read is a POST; a fill delivered while it is
+    in flight is in the ledger and cannot be in the body already serialised. The
+    cycle then reads the ledger as ahead of the venue and books the difference
+    out, which is the exact inverse of the case it was built for.
+
+    The reducing direction is what makes it reachable rather than theoretical:
+    ``_size_heals`` needs the venue's entry price, and the venue supplies one
+    precisely because it still carries the symbol. A fill that *opens* a
+    partition is safe by accident — the snapshot omits a symbol it does not hold,
+    so there is no price and no heal.
+
+    What is asserted is the current behavior, not the desired one. Attribution
+    survives (the correction lands in the unattributed partition, so the
+    strategy's own book still reads the size it placed), and the damage is
+    confined to the account grain, where the net now tracks a snapshot that
+    predates the trade. The next pass reads a current snapshot and heals it back,
+    so the ledger oscillates by the size of whatever landed in the window rather
+    than drifting — but it churns the unattributed partition durably each way.
+    A fix belongs at the comparison, not the heal: the snapshot carries its own
+    venue timestamp, and a symbol whose ledger moved after it has not been
+    compared against anything.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    ledger = keeper.portfolio
+    _book_fill(ledger, quantity="0.002", price="64809")
+
+    def a_fill_lands() -> None:
+        _book_fill(ledger, quantity="0.001", price="64810", seq=2)
+
+    venue = _SlowAccountVenue(_held("100000", ("BTC", "0.002", "0")), during=a_fill_lands)
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+
+    divergences = asyncio.run(cycle.reconcile_account())
+
+    # The ledger is ahead because it saw the fill first, and the pass reports it
+    # as the venue holding less — indistinguishable, here, from real foreign flow.
+    assert [(d.field, d.symbol, d.ledger, d.venue) for d in divergences or ()] == [
+        (DivergenceField.SIGNED_SIZE, "BTC", Decimal("0.003"), Decimal("0.002"))
+    ]
+    held = ledger.position("BTC", strategy_id="alpha")
+    assert held is not None
+    assert held.size == Decimal("0.003")  # attribution is untouched: both fills are the strategy's
+    residual = ledger.position("BTC", strategy_id=None)
+    assert residual is not None
+    assert residual.size == Decimal("-0.001")  # the second fill, corrected back out
+    assert ledger.account_net() == {"BTC": Decimal("0.002")}  # a net the venue no longer holds
+    # The correction is durable, which is what makes this more than a bad read:
+    # the row survives the restart the strategy's own partition would heal on.
+    # Only the heal's row is here because ``_book_fill`` folds the projection
+    # directly, the checkpoint being the cycle's rather than the fill path's.
+    assert [(p.strategy_id, p.symbol, p.signed_size) for p in store.all_positions()] == [
+        (None, "BTC", Decimal("-0.001"))
+    ]

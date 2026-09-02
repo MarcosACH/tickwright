@@ -35,6 +35,7 @@ from tickwright.domain import (
     derive_cloid,
     quantize_price,
     quantize_size,
+    venue_cash,
 )
 from tickwright.venues.hyperliquid import (
     HyperliquidConfig,
@@ -232,5 +233,74 @@ def test_the_boot_pushes_configured_leverage_to_testnet() -> None:
             await _boot(before).start()
 
         assert await _venue_leverage(config, address=address) == before
+
+    asyncio.run(main())
+
+
+def test_the_cash_line_the_venue_implies_is_invariant_under_a_moving_mark() -> None:
+    """ADR-0034's Tier-1 cash comparison, measured against the real venue.
+
+    The heal compares an accumulated ``cash`` line against ``venue_cash`` —
+    ``accountValue − Σ unrealizedPnl`` (``domain/account.py``) — on **exact**
+    equality, and corrects the line to the venue's figure whenever they differ.
+    The mark term is supposed to cancel in that subtraction: a mark tick moves
+    ``accountValue`` and ``unrealizedPnl`` by the same amount, so the collateral
+    it implies should not move at all.
+
+    That cancellation is an arithmetic claim about two independently rounded
+    decimal strings, and no recorded body can settle it — a fixture answers
+    whatever precision it was written with. Two real reads over one unchanged
+    position can: if ``venue_cash`` drifts between them, the cycle finds a
+    Tier-1 cash divergence with no cash movement behind it, and ADR-0034 says
+    heal, so the run books a durable correction on every cadence deadline and
+    the ``account.healed`` audit trail fills with the venue's rounding.
+
+    Needs a held position, since a flat account has no unrealized leg to cancel
+    and the identity is trivially true. Skipped rather than opened: taking a real
+    testnet position to run an assertion is not this suite's business, the same
+    line ``test_the_boot_pushes_configured_leverage_to_testnet`` draws.
+
+    Skipped too when the mark did not move between the reads — the two figures
+    then agree for the uninteresting reason, and reporting that as a pass would
+    claim evidence the run does not have.
+    """
+
+    async def main() -> None:
+        config = HyperliquidConfig(
+            testnet=True,
+            symbols=[SYMBOL],
+            signing_key=SecretStr(os.environ[SIGNING_KEY_ENV]),
+            account_address=os.environ.get(ACCOUNT_ADDRESS_ENV),
+        )
+        universe = await fetch_instrument_specs(config)
+        exchange = HyperliquidExchange(
+            config=config,
+            bus=InMemoryBus(),
+            clock=LiveClock(),
+            universe=universe,
+            startup_timeout_seconds=60.0,
+        )
+
+        first = await exchange.fetch_account_state()
+        assert first is not None, "the account read failed; nothing to measure"
+        if not first.positions:
+            pytest.skip("the testnet account holds no position; the cash identity is trivial")
+
+        # Long enough for the mark to move on a real venue, short enough to stay
+        # a test. The position is the account's own and this suite trades none.
+        await asyncio.sleep(15)
+
+        second = await exchange.fetch_account_state()
+        assert second is not None, "the second account read failed; nothing to measure"
+        assert {p.symbol: p.signed_size for p in first.positions} == {
+            p.symbol: p.signed_size for p in second.positions
+        }, "the account traded between the reads; the identity is not what moved"
+        if first.equity == second.equity:
+            pytest.skip("the mark did not move between the reads; nothing was cancelled")
+
+        assert venue_cash(first) == venue_cash(second), (
+            f"venue_cash drifted by {venue_cash(second) - venue_cash(first)} on a mark tick "
+            f"alone: every reconcile cycle will book a Tier-1 cash heal (ADR-0034)"
+        )
 
     asyncio.run(main())
