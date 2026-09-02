@@ -129,6 +129,19 @@ class PositionView:
     ``notional`` is, and also when no ``InstrumentSpec`` is known for the
     symbol — an unattributed position in a symbol outside our universe has no
     rate to apply, which is a missing term like any other (ADR-0041 §6)."""
+    liquidation_price: Decimal | None
+    """The mark at which the backing is exhausted and the position is closed out
+    (ADR-0040 §3).
+
+    The one recomputed valuation that is **read through the venue on live** and
+    computed only on paper: re-deriving it needs the maintenance-margin tier
+    fixed point, it is safety-relevant, and the venue already publishes it as one
+    field. So the two paths agree by the venue's number rather than by the same
+    arithmetic, which is why this field alone sits outside the divergence band.
+
+    ``None`` on a flat account-net position — the formula divides by size and a
+    flat position has no side (ADR-0041 §3) — and on the missing terms every
+    field here shares."""
     effective_leverage: Decimal | None
     """The **realized** exposure-to-equity ratio, ``notional`` over whatever
     backs the position (ADR-0041 §4.1).

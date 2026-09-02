@@ -23,6 +23,7 @@ from .leverage import LeverageSpec
 from .position import Position, PositionView
 
 _ZERO = Decimal("0")
+_ONE = Decimal("1")
 
 
 def position_view(
@@ -83,6 +84,13 @@ def position_view(
     """
     notional = _notional(account_net, mark)
     unrealized_pnl = _unrealized_pnl(position, mark)
+    backing = _backing_equity(
+        leverage=leverage,
+        isolated_collateral=position.isolated_collateral,
+        account_unrealized_pnl=account_unrealized_pnl,
+        account_equity=account_equity,
+    )
+    maintenance_margin = _maintenance_margin(notional, spec=spec)
     return PositionView(
         symbol=position.symbol,
         size=position.signed_size,
@@ -94,39 +102,100 @@ def position_view(
         notional=notional,
         leverage=leverage.leverage,
         margin_mode=leverage.mode,
-        margin_used=_margin_used(
-            notional,
-            leverage=leverage,
-            isolated_collateral=position.isolated_collateral,
-            unrealized_pnl=account_unrealized_pnl,
+        margin_used=_margin_used(notional, leverage=leverage, backing=backing),
+        maintenance_margin=maintenance_margin,
+        liquidation_price=_liquidation_price(
+            account_net=account_net,
+            mark=mark,
+            backing=backing,
+            maintenance_margin=maintenance_margin,
+            spec=spec,
         ),
-        maintenance_margin=_maintenance_margin(notional, spec=spec),
-        effective_leverage=_effective_leverage(
-            notional,
-            leverage=leverage,
-            isolated_collateral=position.isolated_collateral,
-            account_unrealized_pnl=account_unrealized_pnl,
-            account_equity=account_equity,
-        ),
+        effective_leverage=_effective_leverage(notional, backing=backing),
         mark_ts=mark_ts,
     )
 
 
-def _effective_leverage(
-    notional: Decimal | None,
+def _backing_equity(
     *,
     leverage: LeverageSpec,
     isolated_collateral: Decimal,
     account_unrealized_pnl: Decimal | None,
     account_equity: Decimal | None,
 ) -> Decimal | None:
+    """What actually stands behind the position, by the mode's own rule.
+
+    One quantity feeding three: it is isolated ``margin_used`` outright, it is
+    the denominator ``effective_leverage`` divides by, and it is the term
+    ``liquidation_price`` subtracts maintenance from. Those three are all the
+    same question — *what is there to lose before the position is closed out* —
+    and the whole mode split lives here rather than three times over.
+
+    Isolated is the position's own locked bucket marked to market,
+    ``isolated_collateral + unrealized_pnl`` at account-net grain (ADR-0041
+    §4.1): the venue holds one bucket per position, and its balance is what a
+    move eats into. Cross has no bucket — it draws on the shared pool — so its
+    backing is whole-account ``equity`` (ADR-0038: one pool per process).
+
+    The uPnL term is the symbol's account-net Σ and never one strategy's slice,
+    for the same reason: the bucket backs the whole venue position.
+    """
+    if leverage.mode == "isolated":
+        if account_unrealized_pnl is None:
+            return None
+        return isolated_collateral + account_unrealized_pnl
+    return account_equity
+
+
+def _liquidation_price(
+    *,
+    account_net: Decimal,
+    mark: Decimal | None,
+    backing: Decimal | None,
+    maintenance_margin: Decimal | None,
+    spec: InstrumentSpec | None,
+) -> Decimal | None:
+    """``mark − side · margin_available / size / (1 − l · side)`` (ADR-0040 §3).
+
+    The paper branch only: on live this is read through from the venue, because
+    re-deriving it needs the maintenance-margin tier fixed point — the tier
+    depends on the position's value *at the price being solved for* — and the
+    venue publishes the answer as one field. What is computed here is the
+    flat-tier-0 case, exact below the first band (§4).
+
+    ``margin_available`` is ``backing − maintenance_margin``: what the position
+    can lose before it owes more than it has. ``size`` is ``|account net|`` and
+    ``price`` is the **mark**, both settled against the venue by #142. The
+    ``side`` factor is what puts a short's price *above* the mark, since a short
+    is liquidated by a rally.
+
+    The result is **invariant to the mark** — the mark cancels between the
+    subtraction and the uPnL inside ``backing`` — which is the property that
+    makes it a level rather than a reading, and #142 confirmed it against the
+    venue across two marks.
+
+    ``None`` on a flat account-net: the division is by ``size``, and a flat
+    position has no ``side`` to signed-divide with either, so there is no price
+    rather than an infinite one (ADR-0041 §3). That is also what live reports
+    for a position the venue no longer holds, so the two paths stay identical
+    instead of paper inventing a value.
+    """
+    if account_net == _ZERO:
+        return None
+    if mark is None or backing is None or maintenance_margin is None or spec is None:
+        return None
+    side = _ONE if account_net > _ZERO else -_ONE
+    margin_available = backing - maintenance_margin
+    return mark - side * margin_available / abs(account_net) / (_ONE - spec.margin_maint * side)
+
+
+def _effective_leverage(notional: Decimal | None, *, backing: Decimal | None) -> Decimal | None:
     """``notional`` over the position's backing equity (ADR-0041 §4.1).
 
-    The denominator is the decision. Isolated divides by the position's **own**
-    bucket marked to market — the same ``isolated_collateral + unrealized_pnl``
-    ``margin_used`` reports, at account-net grain — and cross by whole-account
-    ``equity``. ADR-0040 §2 originally fixed account equity for both; #142
-    settled it against the venue by moving one input nothing else moved, an
+    The denominator is the decision, and it is ``_backing_equity``'s: isolated
+    divides by the position's own bucket marked to market, cross by
+    whole-account equity. ADR-0040 §2 originally fixed account equity for both;
+    #142 settled it against the venue by moving one input nothing else moved, an
     ``updateIsolatedMargin`` top-up of +20 USDC that drove the ratio from
     ``5.0119`` to ``2.8260`` behind an unchanged position. Under an
     account-equity denominator the ratio would not have moved at all.
@@ -146,19 +215,9 @@ def _effective_leverage(
     a notional, an unrealized PnL and margins. This field is ``None`` because the
     ratio is undefined, never because a term was missing.
     """
-    if notional is None:
+    if notional is None or backing is None or backing <= _ZERO:
         return None
-    if leverage.mode == "isolated":
-        if account_unrealized_pnl is None:
-            return None
-        denominator = isolated_collateral + account_unrealized_pnl
-    else:
-        if account_equity is None:
-            return None
-        denominator = account_equity
-    if denominator <= _ZERO:
-        return None
-    return notional / denominator
+    return notional / backing
 
 
 def _maintenance_margin(notional: Decimal | None, *, spec: InstrumentSpec | None) -> Decimal | None:
@@ -194,11 +253,7 @@ def _maintenance_margin(notional: Decimal | None, *, spec: InstrumentSpec | None
 
 
 def _margin_used(
-    notional: Decimal | None,
-    *,
-    leverage: LeverageSpec,
-    isolated_collateral: Decimal,
-    unrealized_pnl: Decimal | None,
+    notional: Decimal | None, *, leverage: LeverageSpec, backing: Decimal | None
 ) -> Decimal | None:
     """The collateral posted behind the position, by the mode's own rule.
 
@@ -209,26 +264,24 @@ def _margin_used(
       division is the whole amount: there is no per-venue haircut on the initial
       fraction, so ADR-0040 §4 declines a ``margin_init`` field rather than
       carry a constant ``1.0``.
-    - **Isolated** reports its locked bucket marked to market —
-      ``isolated_collateral + unrealized_pnl``. The configured leverage is *not*
-      a term here: the bucket is sized at open and a later leverage change never
-      re-margins a held position, so reading the setting back would report a
-      number the venue has stopped holding.
+    - **Isolated** reports its locked bucket marked to market — which is exactly
+      ``_backing_equity``, so this returns it unchanged. The configured leverage
+      is *not* a term: the bucket is sized at open and a later leverage change
+      never re-margins a held position, so reading the setting back would report
+      a number the venue has stopped holding.
 
-    Both terms are **position-grain** (ADR-0041 §4.1): ``unrealized_pnl`` is the
-    symbol's account-net total, never one strategy's slice, because the bucket
-    the venue holds backs the whole position.
+    Both terms are **position-grain** (ADR-0041 §4.1): the uPnL inside the
+    isolated branch is the symbol's account-net total, never one strategy's
+    slice, because the bucket the venue holds backs the whole position.
 
     Nullability is inherited from whichever terms the mode actually uses, which
-    is why the branch takes both and not a pre-selected one: cross inherits from
-    ``notional`` and isolated from ``unrealized_pnl``, and the two come apart
-    under offsetting partitions — a flat account-net gives cross its real ``0``
-    at a mark the still-open legs behind it need and do not have.
+    is why this takes both and not a pre-selected one: cross inherits from
+    ``notional`` and isolated from ``backing``, and the two come apart under
+    offsetting partitions — a flat account-net gives cross its real ``0`` at a
+    mark the still-open legs behind it need and do not have.
     """
     if leverage.mode == "isolated":
-        if unrealized_pnl is None:
-            return None
-        return isolated_collateral + unrealized_pnl
+        return backing
     if notional is None:
         return None
     return notional / leverage.leverage

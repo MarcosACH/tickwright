@@ -574,3 +574,97 @@ def test_effective_leverage_reads_none_on_a_non_positive_denominator() -> None:
 
     assert flat_cross.effective_leverage == Decimal("0")
     assert flat_isolated.effective_leverage is None
+
+
+def test_the_paper_isolated_liquidation_price_is_computed_off_the_marked_bucket() -> None:
+    """``liq = mark − side · margin_available / size / (1 − l · side)`` (ADR-0040
+    §3), where isolated's ``margin_available`` is
+    ``(isolated_collateral + unrealized_pnl) − maintenance_margin``.
+
+    The unrealized-PnL term is the half #142 had to correct: reading the bucket
+    as static collateral alone put the price 21.27 units low. Both expectations
+    are the venue's own ``liquidationPx`` for that testnet position, transcribed
+    — ``52522.4977`` behind ``25.898067`` of collateral, and ``42395.9154`` after
+    an ``updateIsolatedMargin`` top-up of +20 moved it out of the way.
+
+    The third read is the same position at a mark two dollars away, and it is not
+    a fourth measurement but an **invariant**: the formula's mark terms cancel,
+    so a moving mark must leave the price exactly where it was. That is an
+    independent check on the arithmetic — a formula that reproduced the two
+    literals but drifted with the mark would be wrong in a way the literals alone
+    cannot see (#142 confirmed the invariance against the venue).
+    """
+    held = _position(
+        quantity="0.002", price="64815", side=Side.BUY, isolated_collateral="25.898067"
+    )
+    topped_up = _position(
+        quantity="0.002", price="64815", side=Side.BUY, isolated_collateral="45.898067"
+    )
+
+    def at(position: Position, mark: str, account_unrealized_pnl: str) -> PositionView:
+        return position_view(
+            position,
+            account_net=Decimal("0.002"),
+            account_unrealized_pnl=Decimal(account_unrealized_pnl),
+            account_equity=Decimal("100000"),
+            mark=Decimal(mark),
+            mark_ts=9_000,
+            leverage=ISOLATED_5X,
+            spec=BTC_40X,
+        )
+
+    before = at(held, "64794", "-0.042")  # 0.002 x (64794 - 64815)
+    after = at(topped_up, "64794", "-0.042")
+    two_dollars_away = at(held, "64796", "-0.038")  # 0.002 x (64796 - 64815)
+
+    assert before.liquidation_price is not None
+    assert before.liquidation_price.quantize(Decimal("0.0001")) == Decimal("52522.4977")
+    assert after.liquidation_price is not None
+    assert after.liquidation_price.quantize(Decimal("0.0001")) == Decimal("42395.9154")
+    assert two_dollars_away.liquidation_price == before.liquidation_price
+
+
+def test_the_paper_cross_liquidation_price_is_computed_off_account_equity() -> None:
+    """Cross's ``margin_available`` is ``equity − maintenance_margin`` (ADR-0040
+    §3) — the shared pool, not a per-position bucket.
+
+    Both expectations are derived from the **defining condition** rather than
+    from the formula under test: liquidation is where the account's equity, moved
+    to the liquidation price, has fallen to the maintenance margin owed there.
+    For ``+0.5`` at a mark of 60000 on 12000 of equity, at rate ``1/80``:
+
+        12000 + 0.5·(P − 60000) = 0.5·P·0.0125   ->   0.49375·P = 18000
+                                                 ->   P = 36455.6962
+
+    and for the mirrored short, whose price sits **above** the mark, since a
+    short is liquidated by a rally (ADR-0046 §6):
+
+        12000 − 0.5·(P − 60000) = 0.5·P·0.0125   ->   0.50625·P = 42000
+                                                 ->   P = 82962.9630
+
+    A flat account-net has no price at all: the formula divides by size, and a
+    flat position has no side to divide with (ADR-0041 §3).
+    """
+
+    def at(side: Side, account_net: str, account_unrealized_pnl: str) -> PositionView:
+        return position_view(
+            _position(quantity="0.5", price="58000", side=side),
+            account_net=Decimal(account_net),
+            account_unrealized_pnl=Decimal(account_unrealized_pnl),
+            account_equity=Decimal("12000"),
+            mark=Decimal("60000"),
+            mark_ts=9_000,
+            leverage=CROSS_10X,
+            spec=BTC_40X,
+        )
+
+    long = at(Side.BUY, "0.5", "1000")  # 0.5 x (60000 - 58000)
+    short = at(Side.SELL, "-0.5", "-1000")
+    flat = at(Side.BUY, "0", "0")
+
+    assert long.liquidation_price is not None
+    assert long.liquidation_price.quantize(Decimal("0.0001")) == Decimal("36455.6962")
+    assert short.liquidation_price is not None
+    assert short.liquidation_price.quantize(Decimal("0.0001")) == Decimal("82962.9630")
+    assert short.liquidation_price > Decimal("60000")
+    assert flat.liquidation_price is None
