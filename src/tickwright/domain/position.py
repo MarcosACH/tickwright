@@ -140,8 +140,9 @@ class PositionView:
     arithmetic, which is why this field alone sits outside the divergence band.
 
     ``None`` on a flat account-net position — the formula divides by size and a
-    flat position has no side (ADR-0041 §3) — and on the missing terms every
-    field here shares."""
+    flat position has no side (ADR-0041 §3) — on the missing terms every field
+    here shares, and when the computed price comes out **non-positive**, which
+    is the venue's own answer and the majority case for a long (ADR-0046 §6)."""
     effective_leverage: Decimal | None
     """The **realized** exposure-to-equity ratio, ``notional`` over whatever
     backs the position (ADR-0041 §4.1).

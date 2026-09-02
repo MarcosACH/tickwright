@@ -668,3 +668,58 @@ def test_the_paper_cross_liquidation_price_is_computed_off_account_equity() -> N
     assert short.liquidation_price.quantize(Decimal("0.0001")) == Decimal("82962.9630")
     assert short.liquidation_price > Decimal("60000")
     assert flat.liquidation_price is None
+
+
+def test_a_computed_liquidation_price_at_or_below_zero_reads_none() -> None:
+    """The venue reports ``null`` when the price would be non-positive, and paper
+    must not answer a negative number where live answers nothing (ADR-0046 §6).
+
+    This is the **majority** case for a long rather than a corner — 12 of 17
+    cross longs across 22 mainnet accounts read ``null`` — so the two paths
+    would disagree on most of the book, which is exactly the compute asymmetry
+    ADR-0034's shared grain forbids. It is structurally unreachable for a short,
+    whose price sits above the mark.
+
+    The threshold is **zero**, not the venue's minimum tick: zero is the real
+    boundary, where a long's collateral is exhausted, and clamping at a tick
+    would invent a liquidation price for a position that has none. Both
+    expectations below come from the defining condition — equity moved to ``P``
+    equals the maintenance owed there — never from the formula under test:
+
+        equity = 30000:    30000 + 0.5·(P − 60000) = 0.5·P·0.0125
+                           ->  0.49375·P = 0        ->  P = 0        -> None
+        equity = 29999.9:  ->  0.49375·P = 0.1      ->  P = 0.2025   -> reported
+
+    A tenth of a dollar of equity separates them, and the second price is a fifth
+    of BTC's own $1 mark quantum — still a number, because the position really
+    does have a level at which it is closed out.
+    """
+
+    def at(equity: str, *, side: Side = Side.BUY, account_net: str = "0.5") -> PositionView:
+        return position_view(
+            _position(quantity="0.5", price="58000", side=side),
+            account_net=Decimal(account_net),
+            account_unrealized_pnl=Decimal("1000"),
+            account_equity=Decimal(equity),
+            mark=Decimal("60000"),
+            mark_ts=9_000,
+            leverage=CROSS_10X,
+            spec=BTC_40X,
+        )
+
+    well_collateralized = at("101000")
+
+    assert well_collateralized.liquidation_price is None
+    assert well_collateralized.notional == Decimal("30000")
+    assert well_collateralized.margin_used == Decimal("3000")
+    assert well_collateralized.maintenance_margin == Decimal("375")
+
+    assert at("30000").liquidation_price is None
+
+    just_above = at("29999.9").liquidation_price
+    assert just_above is not None
+    assert just_above.quantize(Decimal("0.0001")) == Decimal("0.2025")
+
+    short = at("101000", side=Side.SELL, account_net="-0.5")
+    assert short.liquidation_price is not None
+    assert short.liquidation_price > Decimal("60000")

@@ -179,6 +179,15 @@ def _liquidation_price(
     rather than an infinite one (ADR-0041 §3). That is also what live reports
     for a position the venue no longer holds, so the two paths stay identical
     instead of paper inventing a value.
+
+    ``None`` again when the result comes out **non-positive**, which is what the
+    venue does and is the *majority* case for a long — 12 of 17 cross longs
+    across 22 mainnet accounts (ADR-0046 §6) — reachable as soon as collateral
+    is large relative to notional, and structurally impossible for a short.
+    Without it paper would report a negative price on most of the book where
+    live reports nothing. The threshold is **zero**, not the venue's minimum
+    tick: zero is where a long's collateral is actually exhausted, and clamping
+    at a tick would invent a level for a position that has none.
     """
     if account_net == _ZERO:
         return None
@@ -186,7 +195,8 @@ def _liquidation_price(
         return None
     side = _ONE if account_net > _ZERO else -_ONE
     margin_available = backing - maintenance_margin
-    return mark - side * margin_available / abs(account_net) / (_ONE - spec.margin_maint * side)
+    price = mark - side * margin_available / abs(account_net) / (_ONE - spec.margin_maint * side)
+    return price if price > _ZERO else None
 
 
 def _effective_leverage(notional: Decimal | None, *, backing: Decimal | None) -> Decimal | None:
