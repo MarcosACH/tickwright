@@ -1075,3 +1075,39 @@ def test_a_retried_cycle_books_its_heal_once_and_announces_it_once() -> None:
         (DivergenceField.SIGNED_SIZE, Decimal("10"), Decimal("12"))
     ]
     assert [log for log in logs if log["event"] == NamedEvent.ACCOUNT_HEALED.value] == []
+
+
+def test_a_heal_that_reduces_the_net_shorts_the_residual_rather_than_closing_a_strategy() -> None:
+    """The residual is the **whole** correction and it lands in the unattributed
+    partition — even when the ledger's own book is what is too large.
+
+    The reducing direction is where "leave the strategies alone" stops being
+    free. A venue holding less than the ledger has an obvious wrong answer
+    sitting right there: sell the owning strategy down until the net agrees.
+    That trades a size the strategy never traded, so it books realized PnL into
+    that strategy's line and leaves its close-my-position logic acting on
+    exposure it no longer has — the corruption ADR-0038 reserves the ``None``
+    partition to prevent, arriving from the side where the arithmetic *would*
+    have worked.
+
+    So the heal shorts the residual into ``None`` instead, and the strategy's
+    partition comes out bit-for-bit as the fill path left it: same size, same
+    entry price, same realized line. Only the account net moves, which is the
+    only grain the venue has an opinion about (ADR-0034).
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    ledger = keeper.portfolio
+    _book_fill(ledger, quantity="0.002", price="64809")
+    held = ledger.position("BTC", strategy_id="alpha")
+    venue = _AccountVenue(_held("100000", ("BTC", "0.0005", "0")))
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+
+    asyncio.run(cycle.reconcile_account())
+
+    assert ledger.position("BTC", strategy_id="alpha") == held
+    residual = ledger.position("BTC", strategy_id=None)
+    assert residual is not None
+    assert residual.size == Decimal("-0.0015")
+    assert residual.entry_price == Decimal("64809")  # the venue's own, off the snapshot
+    assert ledger.account_net() == {"BTC": Decimal("0.0005")}
