@@ -107,6 +107,26 @@ class NamedEvent(StrEnum):
     # one grain up: the catalog is closed and nothing routes on the difference,
     # but the cost differs by the whole run, so plenty reads it.
     ACCOUNT_RECONCILE_FROZEN = "account.reconcile_frozen"
+    # One Tier-1 heal the cycle actually booked — the "why did it move" record
+    # ADR-0034 requires of every correction, emitted once per heal rather than
+    # once per pass because the pass's own record counts findings and a count
+    # cannot answer what a moved ledger moved *between*.
+    #
+    # Carries both sides (``ledger``/``venue``) for ``Divergence``'s reason: a
+    # delta alone tells a missed fill from a duplicated one in neither
+    # direction. ``symbol`` is ``None`` on the cash correction, which is held at
+    # the account grain (ADR-0041 §2), and ``field`` distinguishes the two.
+    #
+    # ``event_id`` is the key the synthetic was applied under, not a fresh id
+    # for the record: it is what joins a healed partition in the store back to
+    # the pass that booked it, and what identifies a redelivered heal as the one
+    # that was deduped rather than a second correction.
+    #
+    # A finding the cycle could not heal emits nothing here — it stays a
+    # Divergence on the pass's own count — because a record of a heal that never
+    # landed is worse than the silence: it would close the audit question it
+    # exists to answer with the wrong answer.
+    ACCOUNT_HEALED = "account.healed"
 
     # A live-exchange request that yielded no usable answer, on either path and
     # for either reason (``HyperliquidExchange``): a send or read that failed in

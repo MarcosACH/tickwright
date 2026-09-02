@@ -108,6 +108,24 @@ class Divergence:
     venue: Decimal
 
 
+def _healed(divergence: Divergence, *, event_id: str) -> None:
+    """Record the correction that closed ``divergence``, under the key it was
+    applied with.
+
+    Decimals are stringified for the reason every other record's are: a figure
+    an operator greps for has to render identically wherever the line lands,
+    and a ``Decimal`` is at the renderer's mercy on the way out.
+    """
+    named_event(
+        NamedEvent.ACCOUNT_HEALED,
+        field=divergence.field.value,
+        symbol=divergence.symbol,
+        ledger=str(divergence.ledger),
+        venue=str(divergence.venue),
+        event_id=event_id,
+    )
+
+
 class LedgerReconciliation:
     """The cross-check between the ledger and the venue's own account truth."""
 
@@ -234,10 +252,10 @@ class LedgerReconciliation:
         # correction beside it are one retryable unit rather than two the clock
         # could separate.
         heal_ts_ns = self._checkpointer.clock.timestamp_ns()
-        self._checkpointer.checkpoint_heal(
-            self._size_heals(state, divergences, ts_ns=heal_ts_ns),
-            cash=self._cash_heal(divergences, ts_ns=heal_ts_ns),
-        )
+        fills = self._size_heals(state, divergences, ts_ns=heal_ts_ns)
+        correction = self._cash_heal(divergences, ts_ns=heal_ts_ns)
+        self._checkpointer.checkpoint_heal(fills, cash=correction)
+        self._record_heals(divergences, fills=fills, cash=correction)
         tiers = [divergence.tier for divergence in divergences]
         named_event(
             NamedEvent.ACCOUNT_RECONCILED,
@@ -246,6 +264,41 @@ class LedgerReconciliation:
             unvalued=self._unvalued(state, view=view, ledger=unrealized, net=net),
         )
         return divergences
+
+    @staticmethod
+    def _record_heals(
+        divergences: tuple[Divergence, ...],
+        *,
+        fills: tuple[ReconciliationFill, ...],
+        cash: CashCorrection | None,
+    ) -> None:
+        """One ``account.healed`` per correction this pass actually booked.
+
+        Driven off the **synthetics**, never off the findings: a Tier-1
+        divergence the cycle declined to heal — a size it could not price — is
+        reported on the pass's own record and has moved nothing, so a record
+        here would answer an operator's "why did the ledger move" with a move
+        that never happened.
+
+        The figures come back off the ``Divergence`` the synthetic was built
+        from rather than off the synthetic itself, because a fill carries only
+        its delta and the pair is what an operator reads: the same reason the
+        finding carries both sides instead of their difference. Paired by
+        ``(field, symbol)``, which is unique within a tier — ``_sizes`` emits at
+        most one finding per symbol and the account has one collateral pool.
+
+        Emitted **after** the checkpoint, so nothing is announced that the
+        transaction could still refuse to keep.
+        """
+        found = {
+            (divergence.field, divergence.symbol): divergence
+            for divergence in divergences
+            if divergence.tier is DivergenceTier.TIER_1
+        }
+        for fill in fills:
+            _healed(found[(DivergenceField.SIGNED_SIZE, fill.symbol)], event_id=fill.event_id)
+        if cash is not None:
+            _healed(found[(DivergenceField.CASH, None)], event_id=cash.event_id)
 
     @staticmethod
     def _cash_heal(divergences: tuple[Divergence, ...], *, ts_ns: int) -> CashCorrection | None:

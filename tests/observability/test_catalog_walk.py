@@ -780,7 +780,13 @@ def _drive_feed_frame_dropped() -> None:
 
 def _drive_account_reconciled() -> None:
     """One account-grain cycle against a venue snapshot: the ledger is
-    cross-checked and the pass is named (``account.reconciled``, ADR-0034).
+    cross-checked, the pass is named (``account.reconciled``, ADR-0034), and the
+    Tier-1 gap it finds is healed and named too (``account.healed``).
+
+    Both names fall out of the one cycle because the snapshot carries a position
+    the ledger has never seen — materialisation opens a cash line and no book —
+    so this pass is a real divergence rather than a staged one, and the heal it
+    books is the record's own path.
 
     Live-shaped by construction — a ledger whose genesis was ingested from the
     venue — because paper has no second account for a cycle to compare against
@@ -848,6 +854,7 @@ SCENARIOS: dict[NamedEvent, Callable[[], None]] = {
     NamedEvent.GHOST_RECONCILED: _drive_ghost_reconciled,
     NamedEvent.RECONCILE_FROZEN: _drive_frozen,
     NamedEvent.ACCOUNT_RECONCILED: _drive_account_reconciled,
+    NamedEvent.ACCOUNT_HEALED: _drive_account_reconciled,
     NamedEvent.ACCOUNT_RECONCILE_FROZEN: _drive_account_reconcile_frozen,
     NamedEvent.EXCHANGE_REQUEST_FAILED: _drive_exchange_request_failed,
     NamedEvent.EXCHANGE_ACTION_REJECTED: _drive_exchange_action_rejected,

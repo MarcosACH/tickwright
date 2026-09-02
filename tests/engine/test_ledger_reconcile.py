@@ -495,6 +495,47 @@ def test_a_cash_heal_absorbs_the_pnl_the_same_passs_size_heal_realized() -> None
     assert keeper.portfolio.account().cash == Decimal("101000")
 
 
+def test_each_heal_records_the_pair_it_moved_between_and_the_key_it_moved_under() -> None:
+    """Every heal leaves a "why did it move" record (ADR-0034), one per heal and
+    not one per pass.
+
+    ``account.reconciled`` already counts what the cycle *found*, and a count is
+    the wrong artifact for a ledger that has just been moved: an operator asking
+    why a cash line jumped 500 overnight needs the figure it came from, the
+    figure it went to, and the symbol — a tally of "one Tier-1 finding" answers
+    none of those. So both sides ride the record, as they ride ``Divergence``,
+    and for the same reason: a delta alone cannot tell a missed fill from a
+    duplicated one.
+
+    The **key** is on it because that is what makes the record auditable past
+    this process. It is the ``event_id`` the synthetic was actually applied
+    under, so an operator reading a healed partition in the store can join it to
+    the pass that booked it, and a redelivery of the same heal is identifiable
+    as the one that was deduped rather than a second correction.
+
+    Both halves of one pass speak, because both moved the book: the size heal
+    names its symbol and the cash correction carries none — the account has one
+    collateral pool (ADR-0041 §2). One stamp is behind both keys, which is the
+    cycle's own, so the pair reads as one retryable unit.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    venue = _AccountVenue(_held("100500", ("SOL", "10", "0")))
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+
+    with capture_events() as logs:
+        asyncio.run(cycle.reconcile_account())
+
+    assert [
+        (log["field"], log["symbol"], log["ledger"], log["venue"], log["event_id"])
+        for log in logs
+        if log["event"] == NamedEvent.ACCOUNT_HEALED.value
+    ] == [
+        ("signed_size", "SOL", "0", "10", "reconcile:SOL:7"),
+        ("cash", None, "100000", "100500", "reconcile:cash:7"),
+    ]
+
+
 def _mark(projection: PortfolioProjection, symbol: str, price: str) -> None:
     """Feed the projection the Tier-2 valuation input (ADR-0039).
 
