@@ -219,7 +219,11 @@ class LedgerReconciliation:
         reading per side. That is the property ``domain.valuation`` states about
         assembling a view in one call — two fields of one view can never
         straddle a fill — kept by the cycle rather than left to the checks being
-        synchronous.
+        synchronous. Which is now load-bearing rather than tidy: the heal below
+        moves the cash line, and ``equity`` is ``cash + Σ uPnL``, so a view taken
+        again after it would report the venue as disagreeing by exactly the
+        amount this cycle just moved — an alert about our own arithmetic, and one
+        no Tier-1 equity finding exists to suppress it against.
 
         The net sizes are the reason that matters beyond tidiness: they are the
         cycle's **one definition of held-ness**, and both grains read it. Tier-1

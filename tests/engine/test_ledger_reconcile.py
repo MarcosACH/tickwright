@@ -1152,3 +1152,47 @@ def test_a_failed_read_never_un_heals_the_book_it_cannot_see() -> None:
     assert ledger.account_net() == {"SOL": Decimal("10")}
     assert ledger.account().cash == Decimal("100000")
     assert {position.symbol for position in store.all_positions()} == {"SOL"}
+
+
+def test_a_pass_compares_one_fold_so_its_own_cash_heal_is_never_a_tier_2_finding() -> None:
+    """One cycle compares against **one** reading of the ledger, taken before
+    anything it does can move the book.
+
+    The two grains share inputs: ``equity`` is ``cash + Σ uPnL``, so the cash
+    line Tier-1 heals is a term in the equity Tier-2 checks. Take the account
+    view twice — once for the cash comparison and once for the equity one — and
+    the heal in between makes the second reading a different book, so the cycle
+    reports the venue as disagreeing by exactly the amount the cycle itself just
+    moved. That is an alert about our own arithmetic, and it arrives through the
+    one door ADR-0040 §6's suppression does not cover, because there is no
+    Tier-1 *equity* finding for it to be suppressed against.
+
+    The book here is built so the two answers differ. The ledger's mark is stale
+    against the venue's, so the ledger's uPnL is 0.382 where the venue's is
+    100.382 — a real Tier-2 disagreement — while the cash line is 100 too high
+    by exactly the compensating amount. Equity therefore **agrees** on the fold
+    the cycle found, and would disagree by 100 on the fold its own heal leaves
+    behind. An equity finding on this pass is the bug, and its absence is the
+    assertion.
+
+    Not a rule the checks are asked to keep individually: ``reconcile_account``
+    hoists the view, the net and the uPnL map above every heal, which is the
+    same thing ``domain.valuation`` does within a single view — every field from
+    one read, so two of them can never straddle a write.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    ledger = keeper.portfolio
+    _book_fill(ledger, quantity="0.002", price="64809")
+    _mark(ledger, "BTC", "65000")
+    venue = _AccountVenue(_held("100000.382", ("BTC", "0.002", "100.382")))
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+
+    divergences = asyncio.run(cycle.reconcile_account())
+
+    assert [(d.field, d.ledger, d.venue) for d in divergences or ()] == [
+        (DivergenceField.CASH, Decimal("100000"), Decimal("99900")),
+        (DivergenceField.UNREALIZED_PNL, Decimal("0.382"), Decimal("100.382")),
+    ]
+    assert ledger.account().cash == Decimal("99900")  # the heal landed
+    assert ledger.account().equity == Decimal("99900.382")  # and moved equity, after the fact
