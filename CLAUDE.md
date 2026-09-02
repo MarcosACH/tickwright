@@ -22,7 +22,7 @@ Pipeline:
 6. Open one PR per issue with `Closes #<N>` in the body.
 7. `/code-review` — structured BLOCKING/WARN/NIT review; label `ralph:ready` when clean. Merge closes the issue automatically.
 
-Auxiliary skills (used as needed, not part of the linear pipeline): `/wayfinder` — chart a huge, foggy effort as a map of decision tickets on the tracker before it's spec-able; `/research` — delegate primary-source investigation to a background agent, cited Markdown under `docs/research/`; `/prototype` — throwaway logic prototype to pressure-test a state model before committing.
+Auxiliary skills (used as needed, not part of the linear pipeline): `/wayfinder` — chart a huge, foggy effort as a map of decision tickets on the tracker before it's spec-able; `/research` — delegate primary-source investigation to a background agent, cited Markdown under `docs/research/`; `/prototype` — throwaway logic prototype to pressure-test a state model before committing; `/blast-radius` — what a change breaks *somewhere else*, before it ships, with the one fact it's safe because of proven by running code rather than written up (not a merge gate; `/code-review` is); `/how` — how a subsystem works, and where a new thing belongs; `/why` — the motivation behind code that already exists, cited; `/unslop` — cut AI tells from any writing, always applies.
 
 See `docs/workflow/labels.md` for the label schema and `docs/agents/issue-tracker.md` for gh CLI / project-board conventions.
 
