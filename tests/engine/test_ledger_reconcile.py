@@ -22,6 +22,7 @@ from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     Account,
     AccountSpec,
+    FundingAccrual,
     MarkTick,
     Order,
     OrderFilled,
@@ -534,6 +535,63 @@ def test_each_heal_records_the_pair_it_moved_between_and_the_key_it_moved_under(
         ("signed_size", "SOL", "0", "10", "reconcile:SOL:7"),
         ("cash", None, "100000", "100500", "reconcile:cash:7"),
     ]
+
+
+def test_a_heal_leaves_the_funding_mark_where_it_found_it_and_a_correction_re_enters() -> None:
+    """A funding correction is **not** a column the heal may write: it re-enters
+    as a keyed ``FundingAccrual``, whose write is the only one allowed to
+    advance the watermark it is guarded by (ADR-0043 §5.2/§9).
+
+    The heal's write is the one that could break that rule, because it moves the
+    same two things an accrual does — a partition's line and the account's cash —
+    on a transaction the mark does not ride. Given a funding leg, it would move
+    the funding line while the mark stayed put, and the next boundary the venue
+    reports would then be *admitted* by a mark that never saw the correction and
+    applied on top of it. That is §5.2's double-count reached through the one
+    door the watermark does not cover, and the ledger has no later pass that
+    finds it: funding is cumulative and no cycle re-derives it.
+
+    So the claim is a pair. The heal books ten SOL the engine never placed and
+    leaves the symbol's mark exactly as it found it — absent, the "never accrued"
+    state that still admits any boundary — with the healed partition's funding
+    line at zero. The correction that follows goes through the accrual path, and
+    *there* the mark advances, in the same write as the line it guards.
+
+    It accrues onto the **healed** partition, which is the case with no other
+    owner: foreign flow is real exposure the venue charges funding on, and the
+    unattributed partition is the only thing holding it (ADR-0038).
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    cycle = LedgerReconciliation(
+        exchange=_AccountVenue(_held("100000", ("SOL", "10", "0"))), checkpointer=keeper
+    )
+
+    asyncio.run(cycle.reconcile_account())
+
+    healed = keeper.portfolio.position("SOL", strategy_id=None)
+    assert healed is not None
+    assert healed.size == Decimal("10")
+    assert healed.funding == Decimal("0")
+    assert store.funding_mark("SOL") is None  # the heal advanced nothing
+    assert keeper.portfolio.account().cash == Decimal("100000")
+
+    keeper.checkpoint_funding(
+        FundingAccrual(
+            ts_event=3_600,
+            ts_init=3_600,
+            account_id=LIVE_ACCOUNT_ID,
+            symbol="SOL",
+            boundary_ts_ns=3_600,
+            amount=Decimal("-12"),
+        )
+    )
+
+    accrued = keeper.portfolio.position("SOL", strategy_id=None)
+    assert accrued is not None
+    assert accrued.funding == Decimal("-12")
+    assert keeper.portfolio.account().cash == Decimal("99988")
+    assert store.funding_mark("SOL") == 3_600
 
 
 def _mark(projection: PortfolioProjection, symbol: str, price: str) -> None:
