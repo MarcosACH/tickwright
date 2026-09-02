@@ -176,6 +176,7 @@ def test_funding_accrues_on_its_own_line_and_never_into_price_or_pnl() -> None:
         position,
         account_net=position.signed_size,
         account_unrealized_pnl=None,
+        account_equity=None,
         mark=None,
         mark_ts=None,
         leverage=DEFAULT_LEVERAGE,

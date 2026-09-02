@@ -735,7 +735,12 @@ class PortfolioProjection:
         position = self._positions.get((strategy_id, symbol))
         if position is None:
             return None
-        return self._view(position, net=self.account_net(), upnl=self.account_unrealized())
+        return self._view(
+            position,
+            net=self.account_net(),
+            upnl=self.account_unrealized(),
+            equity=self.account().equity,
+        )
 
     def open_positions(self, *, strategy_id: str | None) -> tuple[PositionView, ...]:
         """Every partition of ``strategy_id`` still holding exposure.
@@ -750,8 +755,9 @@ class PortfolioProjection:
         """
         net = self.account_net()
         upnl = self.account_unrealized()
+        equity = self.account().equity
         return tuple(
-            self._view(position, net=net, upnl=upnl)
+            self._view(position, net=net, upnl=upnl, equity=equity)
             for (owner, _symbol), position in self._positions.items()
             if owner == strategy_id and not position.is_flat
         )
@@ -793,6 +799,7 @@ class PortfolioProjection:
         *,
         net: dict[str, Decimal],
         upnl: dict[str, Decimal | None],
+        equity: Decimal | None,
     ) -> PositionView:
         """Assemble one partition's view against the mark held for its symbol.
 
@@ -804,12 +811,20 @@ class PortfolioProjection:
         **same** ``self._positions``/``self._marks`` snapshot as the mark — so
         the position-grain half of the view cannot straddle a fill the own-slice
         half is on the other side of (ADR-0041 §1).
+
+        ``equity`` is the one input the caller must supply, because it is a fold
+        over every position rather than a lookup: taken here it would be
+        quadratic in the book, and — the reason that matters — two views in one
+        returned tuple could be divided by two different equities. It is the same
+        number ``account()`` reports, so a cross position's ratio and the account
+        line it is read beside agree by construction.
         """
         mark = self._marks.get(position.symbol)
         return position_view(
             position,
             account_net=net.get(position.symbol, _ZERO),
             account_unrealized_pnl=upnl.get(position.symbol),
+            account_equity=equity,
             mark=mark.price if mark is not None else None,
             mark_ts=mark.ts_event if mark is not None else None,
             leverage=self.leverage_for(position.symbol),

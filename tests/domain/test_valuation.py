@@ -21,6 +21,7 @@ from tickwright.domain import (
     LeverageSpec,
     OrderFilled,
     Position,
+    PositionView,
     Side,
     account_view,
     position_view,
@@ -84,6 +85,7 @@ def test_a_held_position_with_no_mark_reads_unknown_rather_than_worthless() -> N
         position,
         account_net=Decimal("2"),
         account_unrealized_pnl=None,
+        account_equity=None,
         mark=None,
         mark_ts=None,
         leverage=CROSS_10X,
@@ -126,6 +128,7 @@ def test_a_flat_position_with_no_mark_still_reads_real_zeros() -> None:
         position,
         account_net=Decimal("0"),
         account_unrealized_pnl=None,
+        account_equity=None,
         mark=None,
         mark_ts=None,
         leverage=CROSS_10X,
@@ -149,6 +152,7 @@ def test_the_two_terms_take_their_zero_from_different_facts() -> None:
         position,
         account_net=Decimal("0"),
         account_unrealized_pnl=None,
+        account_equity=None,
         mark=None,
         mark_ts=None,
         leverage=CROSS_10X,
@@ -200,6 +204,7 @@ def test_a_cross_position_posts_its_notional_divided_by_the_configured_leverage(
         position,
         account_net=Decimal("0.5"),
         account_unrealized_pnl=Decimal("1000"),  # 0.5 x (60000 - 58000), one partition
+        account_equity=Decimal("101000"),
         mark=Decimal("60000"),
         mark_ts=9_000,
         leverage=CROSS_10X,
@@ -231,6 +236,7 @@ def test_an_isolated_position_posts_its_locked_collateral_plus_unrealized_pnl() 
         position,
         account_net=Decimal("0.002"),
         account_unrealized_pnl=Decimal("-0.038"),  # 0.002 x (64796 - 64815)
+        account_equity=Decimal("99999.962"),
         mark=Decimal("64796"),
         mark_ts=9_000,
         leverage=ISOLATED_5X,
@@ -240,6 +246,7 @@ def test_an_isolated_position_posts_its_locked_collateral_plus_unrealized_pnl() 
         position,
         account_net=Decimal("0.002"),
         account_unrealized_pnl=Decimal("-0.042"),  # 0.002 x (64794 - 64815)
+        account_equity=Decimal("99999.958"),
         mark=Decimal("64794"),
         mark_ts=9_003,
         leverage=ISOLATED_5X,
@@ -265,6 +272,7 @@ def test_maintenance_margin_is_the_flat_tier_zero_rate_on_notional() -> None:
         position,
         account_net=Decimal("0.09"),
         account_unrealized_pnl=Decimal("113.49"),  # 0.09 x (65261 - 64000)
+        account_equity=Decimal("100113.49"),
         mark=Decimal("65261"),
         mark_ts=9_000,
         leverage=CROSS_10X,
@@ -293,6 +301,7 @@ def test_maintenance_margin_stays_flat_above_the_first_tier_band() -> None:
         position,
         account_net=Decimal("0.185"),
         account_unrealized_pnl=Decimal("233.655"),  # 0.185 x (65263 - 64000)
+        account_equity=Decimal("100233.655"),
         mark=Decimal("65263"),
         mark_ts=9_000,
         leverage=CROSS_10X,
@@ -318,6 +327,7 @@ def test_a_flat_account_net_reads_a_real_zero_maintenance_with_no_mark_and_no_sp
         position,
         account_net=Decimal("0"),
         account_unrealized_pnl=None,
+        account_equity=None,
         mark=None,
         mark_ts=None,
         leverage=CROSS_10X,
@@ -361,6 +371,7 @@ def test_the_per_term_rule_holds_in_both_margin_modes() -> None:
             closed,
             account_net=Decimal("0"),
             account_unrealized_pnl=Decimal("0"),
+            account_equity=Decimal("100000"),
             mark=None,
             mark_ts=None,
             leverage=mode,
@@ -370,6 +381,7 @@ def test_the_per_term_rule_holds_in_both_margin_modes() -> None:
             held,
             account_net=Decimal("2"),
             account_unrealized_pnl=None,
+            account_equity=None,
             mark=None,
             mark_ts=None,
             leverage=mode,
@@ -411,6 +423,7 @@ def test_the_view_reports_position_grain_economics_beside_the_own_slice() -> Non
         position,
         account_net=Decimal("0.003"),
         account_unrealized_pnl=Decimal("0.758"),
+        account_equity=Decimal("100000.758"),
         mark=Decimal("64796"),
         mark_ts=9_000,
         leverage=ISOLATED_5X,
@@ -421,3 +434,65 @@ def test_the_view_reports_position_grain_economics_beside_the_own_slice() -> Non
     assert view.margin_used == Decimal("26.656067")
     assert view.leverage == 5
     assert view.margin_mode == "isolated"
+
+
+def test_effective_leverage_divides_notional_by_each_modes_own_backing() -> None:
+    """The realized exposure ratio, whose denominator splits by mode (ADR-0041
+    §4.1): the position's own bucket marked to market for isolated, whole-account
+    equity for cross.
+
+    The isolated arm is #142's ``updateIsolatedMargin`` top-up, the measurement
+    that adjudicated the modelling choice — a +20 USDC deposit behind an
+    unchanged ``+0.002`` at mark 64794 drove the venue's ratio from ``5.0119``
+    to ``2.8260``. Both are transcribed from the ADR-0041 §4.1 amendment, and the
+    account equity is held **fixed** across the pair on purpose: under an
+    account-equity denominator the top-up would leave the ratio untouched, so the
+    move is what discriminates the two candidate denominators rather than merely
+    agreeing with one.
+
+    The cross arm is worked by hand instead: ``30000`` of notional against
+    ``12000`` of account equity is ``2.5``, an account-grain denominator that
+    the position's own ``isolated_collateral`` plays no part in.
+    """
+    held = _position(
+        quantity="0.002", price="64815", side=Side.BUY, isolated_collateral="25.898067"
+    )
+    topped_up = _position(
+        quantity="0.002", price="64815", side=Side.BUY, isolated_collateral="45.898067"
+    )
+
+    def at_64794(position: Position) -> PositionView:
+        return position_view(
+            position,
+            account_net=Decimal("0.002"),
+            account_unrealized_pnl=Decimal("-0.042"),  # 0.002 x (64794 - 64815)
+            account_equity=Decimal("1000"),
+            mark=Decimal("64794"),
+            mark_ts=9_000,
+            leverage=ISOLATED_5X,
+            spec=BTC_40X,
+        )
+
+    before = at_64794(held)
+    after = at_64794(topped_up)
+
+    assert before.notional == Decimal("129.588")
+    assert before.effective_leverage is not None
+    assert before.effective_leverage.quantize(Decimal("0.0001")) == Decimal("5.0119")
+    assert after.effective_leverage is not None
+    assert after.effective_leverage.quantize(Decimal("0.0001")) == Decimal("2.8260")
+    assert after.effective_leverage < before.effective_leverage
+
+    cross = position_view(
+        _position(quantity="0.5", price="58000", side=Side.BUY),
+        account_net=Decimal("0.5"),
+        account_unrealized_pnl=Decimal("1000"),
+        account_equity=Decimal("12000"),
+        mark=Decimal("60000"),
+        mark_ts=9_000,
+        leverage=CROSS_10X,
+        spec=BTC_40X,
+    )
+
+    assert cross.notional == Decimal("30000")
+    assert cross.effective_leverage == Decimal("2.5")

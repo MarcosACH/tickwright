@@ -129,6 +129,23 @@ class PositionView:
     ``notional`` is, and also when no ``InstrumentSpec`` is known for the
     symbol — an unattributed position in a symbol outside our universe has no
     rate to apply, which is a missing term like any other (ADR-0041 §6)."""
+    effective_leverage: Decimal | None
+    """The **realized** exposure-to-equity ratio, ``notional`` over whatever
+    backs the position (ADR-0041 §4.1).
+
+    Distinct from ``leverage`` beside it: that is the nominal cap the operator
+    set, this is what the position is actually running at, and the two agree
+    only at the instant of open. Convention-only — the venue defines no such
+    term and publishes no field for it, so it sits outside the divergence alert
+    band (ADR-0040 §6).
+
+    The denominator splits by mode, and that split is the whole content of the
+    field: isolated divides by the position's own bucket marked to market
+    (``isolated_collateral + unrealized_pnl``, account-net grain), cross by
+    whole-account ``equity``. Only the position-grain denominator makes the
+    defining behaviour hold — adding isolated margin visibly de-levers the
+    position, where an account-equity denominator would leave the ratio
+    untouched (#142)."""
     mark_ts: int | None
     """The observation instant of the mark this view was valued at, ``None`` when
     the projection holds none for the symbol (ADR-0041 §6).

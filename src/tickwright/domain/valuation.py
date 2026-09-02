@@ -30,6 +30,7 @@ def position_view(
     *,
     account_net: Decimal,
     account_unrealized_pnl: Decimal | None,
+    account_equity: Decimal | None,
     mark: Decimal | None,
     mark_ts: int | None,
     leverage: LeverageSpec,
@@ -45,6 +46,14 @@ def position_view(
     input rather than the ``unrealized_pnl`` this function computes, because
     those two are the same number only until foreign flow appears in the symbol
     (§5), and the view is required to carry both grains at once.
+
+    ``account_equity`` is the whole pool's ``cash + Σ uPnL`` — cross
+    ``effective_leverage``'s denominator, and the one input here that no
+    ``(position, mark)`` pair can supply, since it sums over *every* position the
+    account holds. It is passed in rather than recomputed so that a view and the
+    ``AccountView`` beside it are read off one snapshot instead of two, and it is
+    ``Decimal | None`` on the same per-term rule as everything else: an unmarked
+    position anywhere in the book makes it unknown.
 
     ``mark`` is the latest mark the
     projection holds for this symbol and ``mark_ts`` its observation instant,
@@ -92,8 +101,55 @@ def position_view(
             unrealized_pnl=account_unrealized_pnl,
         ),
         maintenance_margin=_maintenance_margin(notional, spec=spec),
+        effective_leverage=_effective_leverage(
+            notional,
+            leverage=leverage,
+            isolated_collateral=position.isolated_collateral,
+            account_unrealized_pnl=account_unrealized_pnl,
+            account_equity=account_equity,
+        ),
         mark_ts=mark_ts,
     )
+
+
+def _effective_leverage(
+    notional: Decimal | None,
+    *,
+    leverage: LeverageSpec,
+    isolated_collateral: Decimal,
+    account_unrealized_pnl: Decimal | None,
+    account_equity: Decimal | None,
+) -> Decimal | None:
+    """``notional`` over the position's backing equity (ADR-0041 §4.1).
+
+    The denominator is the decision. Isolated divides by the position's **own**
+    bucket marked to market — the same ``isolated_collateral + unrealized_pnl``
+    ``margin_used`` reports, at account-net grain — and cross by whole-account
+    ``equity``. ADR-0040 §2 originally fixed account equity for both; #142
+    settled it against the venue by moving one input nothing else moved, an
+    ``updateIsolatedMargin`` top-up of +20 USDC that drove the ratio from
+    ``5.0119`` to ``2.8260`` behind an unchanged position. Under an
+    account-equity denominator the ratio would not have moved at all.
+
+    Nullability is inherited term by term like the rest, with one addition that
+    is not about the mark: a **zero** denominator has no ratio to report, and
+    that is a reachable state rather than a defensive branch — a closed isolated
+    position has its collateral released, leaving ``0 + 0`` behind a flat
+    notional (ADR-0041 §3). ``0/0`` is not ``0``; nothing is levered there.
+    """
+    if notional is None:
+        return None
+    if leverage.mode == "isolated":
+        if account_unrealized_pnl is None:
+            return None
+        denominator = isolated_collateral + account_unrealized_pnl
+    else:
+        if account_equity is None:
+            return None
+        denominator = account_equity
+    if denominator == _ZERO:
+        return None
+    return notional / denominator
 
 
 def _maintenance_margin(notional: Decimal | None, *, spec: InstrumentSpec | None) -> Decimal | None:
