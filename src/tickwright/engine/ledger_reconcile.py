@@ -364,6 +364,17 @@ class LedgerReconciliation:
         — and the search says so rather than assuming it: a second would mean
         ``_cash`` had grown a grain, and silently healing to whichever came first
         is the failure mode a ``next`` hides.
+
+        The one-element unpack is that statement and is **deliberately not** an
+        ``InvariantViolation``, on the idiom ``exchange.py``'s adjudicators
+        already use: a raise here would be a branch no input through this seam
+        can reach, since ``_cash`` compares one ledger figure against one venue
+        figure and can only ever emit one finding. The two would fault the run
+        identically anyway — the cadence catches nothing, so either aborts the
+        ``TaskGroup`` — and what a bare unpack costs by comparison is a line of
+        diagnosis, against an untestable line of code and a hole in this
+        module's coverage. If ``_cash`` ever does grow a grain, the rule to
+        restate is this one, not the exception type.
         """
         found = [
             divergence
