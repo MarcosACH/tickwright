@@ -1032,3 +1032,46 @@ def test_each_account_freeze_names_the_caller_whose_cost_it_carries() -> None:
 
     assert cadence_logs[0]["scope"] == "cadence"
     assert barrier_logs[0]["scope"] == "barrier"
+
+
+def test_a_retried_cycle_books_its_heal_once_and_announces_it_once() -> None:
+    """A heal's key is the **cycle's** stamp, so one pass corrects a symbol once
+    however many times that pass runs (``ReconciliationFill``).
+
+    Content-keying is the alternative that looks more idempotent and is the
+    trap: the same drift recurring a month later would collapse onto the first
+    heal's id and never be booked at all. Stamping the cycle collapses the
+    *retried* pass — the case idempotency is actually for — and still books a
+    genuinely new divergence at the next deadline, which is a later stamp.
+
+    The second pass here is handed a venue that has moved further, which is what
+    makes the collapse visible at all: a re-read of the *same* snapshot finds a
+    book that already agrees and would be a no-op whether the key deduped or
+    not. Reported, then, but not applied — the finding rides the pass's own
+    record where an operator can see it, and the next deadline heals it under a
+    key of its own.
+
+    **And nothing is announced.** ``account.healed`` answers "why did the ledger
+    move", so a deduped synthetic must not emit one: it is the same rule that
+    keeps a finding the cycle declined to price off the record, arriving through
+    the one door the producer-side check does not cover — the synthetic here is
+    well-formed, and it is the aggregate that refuses it.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    venue = _AccountVenue(_held("100000", ("SOL", "10", "0")), _held("100000", ("SOL", "12", "0")))
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+
+    asyncio.run(cycle.reconcile_account())
+    with capture_events() as logs:
+        divergences = asyncio.run(cycle.reconcile_account())
+
+    ledger = keeper.portfolio
+    assert ledger.account_net() == {"SOL": Decimal("10")}  # the first pass's heal, not twice over
+    healed = ledger.position("SOL", strategy_id=None)
+    assert healed is not None
+    assert healed.size == Decimal("10")
+    assert [(d.field, d.ledger, d.venue) for d in divergences or ()] == [
+        (DivergenceField.SIGNED_SIZE, Decimal("10"), Decimal("12"))
+    ]
+    assert [log for log in logs if log["event"] == NamedEvent.ACCOUNT_HEALED.value] == []

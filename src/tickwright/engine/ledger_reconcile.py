@@ -28,6 +28,7 @@ from tickwright.domain import (
 from tickwright.observability import NamedEvent, named_event
 
 from .checkpoint import Checkpointer
+from .portfolio import HealChange
 
 _ZERO = Decimal("0")
 
@@ -254,8 +255,8 @@ class LedgerReconciliation:
         heal_ts_ns = self._checkpointer.clock.timestamp_ns()
         fills = self._size_heals(state, divergences, ts_ns=heal_ts_ns)
         correction = self._cash_heal(divergences, ts_ns=heal_ts_ns)
-        self._checkpointer.checkpoint_heal(fills, cash=correction)
-        self._record_heals(divergences, fills=fills, cash=correction)
+        booked = self._checkpointer.checkpoint_heal(fills, cash=correction)
+        self._record_heals(divergences, fills=fills, cash=correction, booked=booked)
         tiers = [divergence.tier for divergence in divergences]
         named_event(
             NamedEvent.ACCOUNT_RECONCILED,
@@ -271,14 +272,27 @@ class LedgerReconciliation:
         *,
         fills: tuple[ReconciliationFill, ...],
         cash: CashCorrection | None,
+        booked: HealChange | None,
     ) -> None:
         """One ``account.healed`` per correction this pass actually booked.
 
-        Driven off the **synthetics**, never off the findings: a Tier-1
-        divergence the cycle declined to heal — a size it could not price — is
-        reported on the pass's own record and has moved nothing, so a record
-        here would answer an operator's "why did the ledger move" with a move
-        that never happened.
+        Driven off what the **fold kept**, never off the findings and never off
+        the synthetics alone: a Tier-1 divergence the cycle declined to heal — a
+        size it could not price — is reported on the pass's own record and has
+        moved nothing, so a record here would answer an operator's "why did the
+        ledger move" with a move that never happened.
+
+        A synthetic the aggregate *refused* is the same claim reached through the
+        one door the producer-side checks do not cover. ``_size_heals`` can only
+        decline to build a fill; whether the fill it built moved anything is
+        ``Position.apply``'s answer, and on a retried pass it is no — the key is
+        the cycle's stamp, so the second run of one pass mints the first's
+        ``event_id`` and is deduped as a redelivery. So each synthetic is paired
+        with the ``LedgerChange`` it produced, positionally, since ``apply_heal``
+        folds them in order and drops none, and one carrying no ``changes``
+        speaks no more than an unpriced finding does. The cash correction needs
+        no such pairing: it is an assignment against a line the same pass found
+        unequal, so it always moved.
 
         The figures come back off the ``Divergence`` the synthetic was built
         from rather than off the synthetic itself, because a fill carries only
@@ -295,7 +309,10 @@ class LedgerReconciliation:
             for divergence in divergences
             if divergence.tier is DivergenceTier.TIER_1
         }
-        for fill in fills:
+        applied = () if booked is None else booked.fills
+        for fill, change in zip(fills, applied, strict=True):
+            if not change.changes:
+                continue
             _healed(found[(DivergenceField.SIGNED_SIZE, fill.symbol)], event_id=fill.event_id)
         if cash is not None:
             _healed(found[(DivergenceField.CASH, None)], event_id=cash.event_id)

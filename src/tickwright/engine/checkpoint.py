@@ -59,7 +59,7 @@ from tickwright.domain import (
 )
 
 from .cache import Cache
-from .portfolio import PortfolioProjection
+from .portfolio import HealChange, PortfolioProjection
 
 
 class Checkpointer:
@@ -218,7 +218,7 @@ class Checkpointer:
         fills: Sequence[ReconciliationFill],
         *,
         cash: CashCorrection | None = None,
-    ) -> None:
+    ) -> HealChange | None:
         """Make one reconcile cycle's Tier-1 heal durable — fold, write, project.
 
         The same three steps in the same order as ``checkpoint_fill``, and for
@@ -248,10 +248,17 @@ class Checkpointer:
         below: a pass over an agreeing book has no state to persist, and
         re-stamping the account row would make it indistinguishable from a
         correction by anything but the number.
+
+        **Returns the fold it kept**, where its siblings return nothing, because
+        a heal is the one path whose caller still has something to say after the
+        write: the synthetic it handed in may have been deduped away by
+        ``Position.apply``, and the change is where that shows — a fill the
+        aggregate refused carries no ``changes``. The caller announces off this
+        rather than off what it asked for (``LedgerReconciliation._record_heals``).
         """
         change = self._portfolio.apply_heal(fills, cash=cash)
         if change is None:
-            return
+            return None
         try:
             self._store.checkpoint_ledger(
                 account=change.account,
@@ -270,6 +277,7 @@ class Checkpointer:
                 f"ledger heal checkpoint write failed for {', '.join(healed)}"
             ) from exc
         self._portfolio.project_heal(change)
+        return change
 
     def checkpoint_funding(self, accrual: FundingAccrual) -> None:
         """Make one settled funding boundary durable — gate, then one transaction.
