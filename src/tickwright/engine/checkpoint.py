@@ -41,7 +41,7 @@ write with no ordering inside it has nothing here to protect. See ``portfolio``
 below, where the rule is stated on the borrow itself.
 """
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from tickwright.domain import (
     EMPTY_LEVERAGE_BOOK,
@@ -49,6 +49,7 @@ from tickwright.domain import (
     CashCorrection,
     Clock,
     FundingAccrual,
+    InstrumentSpec,
     InvariantViolation,
     LeverageBook,
     Order,
@@ -72,6 +73,7 @@ class Checkpointer:
         store: Store,
         clock: Clock,
         leverage: LeverageBook = EMPTY_LEVERAGE_BOOK,
+        specs: Mapping[str, InstrumentSpec] | None = None,
     ) -> None:
         self._store = store
         self._clock = clock
@@ -82,9 +84,13 @@ class Checkpointer:
         # ``Account`` opened from it: recovery reads ``genesis_collateral is not
         # None`` to tell a *declared* opening balance from an *ingested* one
         # (ADR-0043 §10), and an ``Account`` has resolved that away.
+        #
+        # ``specs`` travels the same route for the same reason: it is the second
+        # of the margin model's two venue-sourced inputs (ADR-0040 §4), and this
+        # constructor is where the venue's declarations are already arriving.
         self._cache = Cache(store=store)
         self._portfolio = PortfolioProjection(
-            spec=spec, store=store, clock=clock, leverage=leverage
+            spec=spec, store=store, clock=clock, leverage=leverage, specs=specs
         )
 
     @property

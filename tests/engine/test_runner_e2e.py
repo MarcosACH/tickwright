@@ -91,13 +91,17 @@ def _write_ticks(path: Path) -> Path:
 
 
 async def _run_to_fill_then_stop(
-    ticks: Path, db: Path
+    ticks: Path, db: Path, *, instrument_specs: dict[str, InstrumentSpec] | None = None
 ) -> tuple[int, Engine, SingleShotMarketStrategy]:
     """One supervised life: full real wiring, run until the fill, stop gracefully.
 
     The strategy comes back with the engine because its ``Portfolio`` facade is
     the engine's own (#213) — what it read is the other end of what the engine
     wrote, and a caller asserting the pair needs both.
+
+    ``instrument_specs`` is the venue's own universe, handed to the *exchange*
+    and never to the engine: what a case passing it asserts is that the engine
+    sourced it off the seam, exactly as it sources ``account_spec()``.
     """
     bus = InMemoryBus()
     clock = ManualClock()
@@ -107,6 +111,7 @@ async def _run_to_fill_then_stop(
         clock=clock,
         fill_model=ImmediateFillModel(),
         genesis_collateral=GENESIS,
+        instrument_specs=instrument_specs or {},
         account_net=dict,
     )
     feed = ReplayFeed(path=ticks, bus=bus, clock=clock)
@@ -166,6 +171,46 @@ def test_the_engine_lends_a_strategy_a_facade_onto_its_own_ledger(tmp_path: Path
     )
 
     assert engine.portfolio_for("trivial").account().cash == GENESIS
+
+
+def test_the_engine_values_a_position_against_the_venues_own_instrument_spec(
+    tmp_path: Path,
+) -> None:
+    """The margin model's second venue-sourced input, wired the way the first is.
+
+    Nothing here hands the engine a spec: the universe is declared on the
+    ``PaperExchange`` and the engine sources it off ``instrument_specs()``, the
+    exact peer of the ``account_spec()`` the case above pins. So a strategy
+    reading its own ``Portfolio`` gets a maintenance figure computed against the
+    venue's rate rather than the ``None`` an engine with no universe reports.
+
+    ``margin_maint`` is the testnet-measured tier-0 rate the ADR-0041 §4.1
+    amendment records (#152: 5873.49 notional against 73.418625 maintenance).
+    The notional is the file's: the strategy fills 0.5 @ 42 000 and the last row
+    marks at 42 100, so the leg is worth 0.5 × 42 100 = 21 050 and the venue's
+    rate on it is 21 050 × 0.0125 = **263.125** — a figure derived from the
+    replayed rows, not from the code's own arithmetic.
+    """
+    ticks = _write_ticks(tmp_path / "ticks.jsonl")
+    spec = InstrumentSpec(
+        symbol="BTC",
+        sz_decimals=3,
+        max_decimals=6,
+        min_notional=Decimal("0"),
+        margin_maint=Decimal("0.0125"),
+    )
+
+    _, engine, _ = asyncio.run(
+        _run_to_fill_then_stop(ticks, tmp_path / "saga.db", instrument_specs={"BTC": spec})
+    )
+
+    view = engine.portfolio_for("trivial").position("BTC")
+    assert view is not None
+    assert view.notional == Decimal("21050")
+    assert view.maintenance_margin == Decimal("263.125")
+    # And the account line the strategy reads beside it totals the same rate
+    # over the whole book, off the same universe.
+    assert engine.portfolio_for("trivial").account().total_maintenance_margin == Decimal("263.125")
 
 
 def test_run_replays_trades_and_exits_zero_on_graceful_stop(tmp_path: Path) -> None:

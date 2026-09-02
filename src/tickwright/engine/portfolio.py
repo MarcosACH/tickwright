@@ -15,7 +15,7 @@ those reads (ADR-0041 §8). The scoped facade ``for_strategy`` hands out is what
 implements the seam.
 """
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -27,6 +27,7 @@ from tickwright.domain import (
     CashCorrection,
     Clock,
     FundingAccrual,
+    InstrumentSpec,
     InvariantViolation,
     LeverageBook,
     LeverageSpec,
@@ -200,6 +201,7 @@ class PortfolioProjection:
         store: Store,
         clock: Clock,
         leverage: LeverageBook = EMPTY_LEVERAGE_BOOK,
+        specs: Mapping[str, InstrumentSpec] | None = None,
     ) -> None:
         # The venue's declaration, not just the account opened from it: it is
         # what tells the recovery path whether this run's genesis was *declared*
@@ -226,6 +228,18 @@ class PortfolioProjection:
         # because the composition root resolved it once and injected it twice.
         # The margin model reads it from here; this slice lands the input alone.
         self._leverage = leverage
+        # The margin model's other venue-sourced input (ADR-0040 §4), taken off
+        # ``Exchange.instrument_specs()`` by the same runner that took the
+        # ``AccountSpec`` above — the adapter is the one component that knows
+        # the venue, and this projection may not learn it. Copied, so a venue's
+        # own universe is never mutated through a reader of it.
+        #
+        # A symbol absent from it values to ``None`` rather than to a zero rate:
+        # an unknown maintenance requirement is unknown, not frictionless. The
+        # default empty map is therefore a *valuation* default and not a wiring
+        # one — every production path passes the venue's, and a suite whose
+        # subject is not the margin model omits it and reads the ``None``.
+        self._specs = dict(specs) if specs is not None else {}
 
     def leverage_for(self, symbol: str) -> LeverageSpec:
         """The margin mode and leverage this run computes ``symbol`` against.
@@ -828,10 +842,7 @@ class PortfolioProjection:
             mark=mark.price if mark is not None else None,
             mark_ts=mark.ts_event if mark is not None else None,
             leverage=self.leverage_for(position.symbol),
-            # The projection holds no instrument universe yet; #176's engine
-            # slice sources it from ``exchange.instrument_specs()``. Until then
-            # ``maintenance_margin`` reads ``None`` — unknown, not frictionless.
-            spec=None,
+            spec=self._specs.get(position.symbol),
         )
 
     def account(self) -> AccountView:
@@ -846,11 +857,7 @@ class PortfolioProjection:
             positions=self._positions.values(),
             marks={symbol: mark.price for symbol, mark in self._marks.items()},
             leverage=self._leverage,
-            # The projection holds no instrument universe yet; #176's engine
-            # slice sources it from ``exchange.instrument_specs()``. Until then
-            # ``total_maintenance_margin`` reads ``None`` on a held book —
-            # unknown, not frictionless.
-            specs={},
+            specs=self._specs,
         )
 
     def for_strategy(self, strategy_id: str) -> Portfolio:
