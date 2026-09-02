@@ -20,9 +20,13 @@ from venue_doubles import LIVE_ACCOUNT_ID, LiveVenueDouble, account_state
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
+    EMPTY_LEVERAGE_BOOK,
     Account,
     AccountSpec,
     FundingAccrual,
+    InstrumentSpec,
+    LeverageBook,
+    LeverageSpec,
     MarkTick,
     Order,
     OrderFilled,
@@ -101,7 +105,14 @@ class _SlowAccountVenue(_AccountVenue):
         return state
 
 
-def _ledger(store: Store, *, equity: str, clock: ManualClock | None = None) -> Checkpointer:
+def _ledger(
+    store: Store,
+    *,
+    equity: str,
+    clock: ManualClock | None = None,
+    leverage: LeverageBook = EMPTY_LEVERAGE_BOOK,
+    specs: Mapping[str, InstrumentSpec] | None = None,
+) -> Checkpointer:
     """A live ledger already materialised, the state every cycle finds it in.
 
     Live is the only shape that has a cycle at all — paper has no second account
@@ -118,11 +129,18 @@ def _ledger(store: Store, *, equity: str, clock: ManualClock | None = None) -> C
     key is stamped with the cycle's ``ts_ns``: on a clock that never moves, the
     second pass mints the first pass's ``event_id`` and is deduped away as a
     redelivery. Held still by default, which is what a single-cycle case wants.
+
+    ``leverage`` and ``specs`` are the margin model's two inputs, defaulted away
+    because most cases here are about the Tier-1 comparison and value nothing.
+    A case that asserts on a Tier-2 *number* passes both, since without them the
+    figure it wants is legitimately ``None``.
     """
     keeper = Checkpointer(
         spec=AccountSpec(account_id=LIVE_ACCOUNT_ID, genesis_collateral=None),
         store=store,
         clock=ManualClock(7) if clock is None else clock,
+        leverage=leverage,
+        specs=specs,
     )
     keeper.recover()
     keeper.portfolio.materialise(account_state(equity))
@@ -1347,3 +1365,111 @@ def test_a_fill_landing_inside_the_account_read_is_healed_away_as_foreign_flow()
     assert [(p.strategy_id, p.symbol, p.signed_size) for p in store.all_positions()] == [
         (None, "BTC", Decimal("-0.001"))
     ]
+
+
+_BTC_LIQUIDATION = Decimal("52522.4977")
+"""The venue's own ``clearinghouseState.liquidationPx``, as measured by #142 and
+recorded in ADR-0040 §3 — the number live must read through rather than solve for."""
+
+_BTC_SPEC = InstrumentSpec(
+    symbol="BTC",
+    sz_decimals=3,
+    max_decimals=6,
+    min_notional=Decimal("0"),
+    margin_maint=Decimal("0.0125"),
+)
+"""The tier-0 maintenance rate #152 measured, so the computed branch has a real
+answer to be *displaced by* rather than the ``None`` a specless projection gives."""
+
+_BTC_CROSS_5X = LeverageBook(entries={"BTC": LeverageSpec(mode="cross", leverage=5)})
+"""**Cross**, so the computed branch has real backing to solve against.
+
+Isolated would not, on a *live* ledger: the locked bucket is the venue's to post
+(ADR-0040 §3) and nothing here has posted one, so the formula would divide a
+backing of nothing but unrealized PnL and answer with a price above the mark for
+a long. Cross backs against account equity, which a materialised live ledger
+holds — so what the venue's number displaces below is a credible price and not
+an artefact."""
+
+
+def _priced(state: VenueAccountState, price: Decimal | None) -> VenueAccountState:
+    """The same snapshot with ``price`` on every position it carries.
+
+    Built by replacement rather than by a second fixture so that the only thing
+    differing from the recorded snapshot is the field under test.
+    """
+    return replace(
+        state,
+        positions=tuple(replace(p, liquidation_price=price) for p in state.positions),
+    )
+
+
+def test_a_cycle_caches_the_venues_liquidation_price_and_the_read_passes_it_through() -> None:
+    """ADR-0040 §3's one read-through valuation, on the channel the ADR names for
+    it: the reconcile pull, which ADR-0039 kept alive for exactly this.
+
+    Live may not re-derive this number — the maintenance tier it needs is a
+    fixed point, the tier depending on the position's value *at the price being
+    solved for* — so the venue's own field is authoritative and our formula must
+    step aside for it. That is a claim about which of two real numbers is
+    reported, which is why the ledger here is given both margin-model inputs:
+    the formula is answering (the assertion before the cycle proves it), and it
+    is answering something else.
+
+    The account is #142's own — 0.002 BTC long from 64809 against an equity of
+    25.9264 — so the computed price lands a few units from the venue's and the
+    two are genuinely rival answers to one question rather than a real number
+    against a placeholder. The snapshot agrees with the ledger on every Tier-1
+    line, so the cycle heals nothing and the only thing it leaves behind is the
+    cache under test.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="25.9144", leverage=_BTC_CROSS_5X, specs={"BTC": _BTC_SPEC})
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "64815")
+    venue = _AccountVenue(_priced(account_state("25.9264", "0.012"), _BTC_LIQUIDATION))
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+
+    before = projection.position("BTC", strategy_id="alpha")
+    assert before is not None
+    # The formula is live and answering — with a number that is not the venue's.
+    assert before.liquidation_price is not None
+    assert before.liquidation_price != _BTC_LIQUIDATION
+
+    divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences == ()
+    after = projection.position("BTC", strategy_id="alpha")
+    assert after is not None
+    assert after.liquidation_price == _BTC_LIQUIDATION
+
+
+def test_the_cached_liquidation_price_stays_frozen_until_the_next_cycle() -> None:
+    """**Stale-frozen between reconciles** (ADR-0040 §3), which is the cost the
+    read-through accepts: the number is only as fresh as the cadence.
+
+    The freeze is asserted against a book that *moved* — a second fill at a
+    different price shifts the entry, and with it every input the formula reads
+    — so a read that answered with the formula again would visibly change here.
+    It does not: the venue's number stands until a cycle replaces it, and the
+    alternative (falling back to a computed price the moment anything moves)
+    would report two different quantities under one name depending on how long
+    ago the last read landed.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="25.9144", leverage=_BTC_CROSS_5X, specs={"BTC": _BTC_SPEC})
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "64815")
+    venue = _AccountVenue(_priced(account_state("25.9264", "0.012"), _BTC_LIQUIDATION))
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+    asyncio.run(cycle.reconcile_account())
+
+    _book_fill(projection, quantity="0.002", price="60000", seq=2)
+
+    moved = projection.position("BTC", strategy_id="alpha")
+    assert moved is not None
+    # The book really did move under it — the entry is no longer the first fill's.
+    assert moved.entry_price == Decimal("62404.5")
+    assert moved.liquidation_price == _BTC_LIQUIDATION

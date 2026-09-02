@@ -13,6 +13,7 @@ import pytest
 from tickwright.domain import (
     DEFAULT_LEVERAGE,
     InvariantViolation,
+    LiquidationSource,
     OrderFilled,
     OrderFillEvent,
     Position,
@@ -181,6 +182,7 @@ def test_funding_accrues_on_its_own_line_and_never_into_price_or_pnl() -> None:
         mark_ts=None,
         leverage=DEFAULT_LEVERAGE,
         spec=None,
+        liquidation=LiquidationSource.computed(),
     )
     assert view.funding == Decimal("-0.3")
 

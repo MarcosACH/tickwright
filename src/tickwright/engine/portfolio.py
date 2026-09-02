@@ -31,6 +31,7 @@ from tickwright.domain import (
     InvariantViolation,
     LeverageBook,
     LeverageSpec,
+    LiquidationSource,
     MarkTick,
     OrderFillEvent,
     Portfolio,
@@ -240,6 +241,14 @@ class PortfolioProjection:
         # one — every production path passes the venue's, and a suite whose
         # subject is not the margin model omits it and reads the ``None``.
         self._specs = dict(specs) if specs is not None else {}
+        # The one Tier-2 figure live does not compute (ADR-0040 §3), cached off
+        # the reconcile pull and **stale-frozen between cycles**. ``None`` is
+        # not an empty map: it is "no venue read has ever landed", the state
+        # paper stays in forever and live leaves at its first cycle. The
+        # distinction is the whole switch — an empty map after a read means the
+        # venue holds nothing, which is an answer, where never having read is
+        # not one.
+        self._venue_liquidation: dict[str, Decimal | None] | None = None
 
     def leverage_for(self, symbol: str) -> LeverageSpec:
         """The margin mode and leverage this run computes ``symbol`` against.
@@ -265,6 +274,31 @@ class PortfolioProjection:
         this half of the projection being bus-fed where Tier-1's is not.
         """
         self._marks[mark.symbol] = mark
+
+    def observe_venue_liquidation(self, state: VenueAccountState) -> None:
+        """Take the venue's own liquidation prices — Tier-2's other write verb.
+
+        ``observe_mark``'s sibling and its opposite in one respect: a mark is an
+        input the formula is *run on*, and this is the answer that replaces the
+        formula (ADR-0040 §3). What they share is everything else — last-value
+        wins, no history, and **no store write**, because a restart must
+        recompute or re-read a valuation rather than recover one (ADR-0043 §3).
+
+        The whole snapshot rather than a map, because the extraction is the same
+        knowledge ``materialise`` already trusts this projection with, and a
+        caller building the map would be a second place that decides which venue
+        field the price came from.
+
+        A successful read **replaces** the map wholesale rather than merging into
+        it: the snapshot carries every position the account holds, so a symbol
+        missing from it is one the venue is not holding — an answer, and one a
+        merge would overwrite with the previous cycle's price for a position that
+        has since been closed. A *failed* read never reaches here at all, which
+        is what leaves the previous cycle's prices standing (ADR-0011 inv 1).
+        """
+        self._venue_liquidation = {
+            position.symbol: position.liquidation_price for position in state.positions
+        }
 
     def apply_heal(
         self,
@@ -880,7 +914,21 @@ class PortfolioProjection:
             mark_ts=mark.ts_event if mark is not None else None,
             leverage=self.leverage_for(position.symbol),
             spec=self._specs.get(position.symbol),
+            liquidation=self._liquidation_source(position.symbol),
         )
+
+    def _liquidation_source(self, symbol: str) -> LiquidationSource:
+        """Whether this symbol's liquidation price is the venue's or ours.
+
+        The switch is "has a venue account read ever landed", not "which venue
+        is this": paper never calls ``observe_venue_liquidation``, so it stays
+        on the computed branch without the projection being told which adapter
+        it is behind — the same dependency direction the ``AccountSpec`` and the
+        instrument universe arrive on.
+        """
+        if self._venue_liquidation is None:
+            return LiquidationSource.computed()
+        return LiquidationSource.reported(self._venue_liquidation.get(symbol))
 
     def account(self) -> AccountView:
         """The account-wide pool — one collateral bucket, never scoped.

@@ -98,7 +98,7 @@ from .protocols import (
     Store,
     Strategy,
 )
-from .valuation import account_unrealized_pnl, account_view, position_view
+from .valuation import LiquidationSource, account_unrealized_pnl, account_view, position_view
 
 __all__ = [
     # enums
@@ -186,6 +186,7 @@ __all__ = [
     # anchor read it from one place
     "venue_cash",
     # Tier-2 view assembly (pure, never stored)
+    "LiquidationSource",
     "account_unrealized_pnl",
     "account_view",
     "position_view",

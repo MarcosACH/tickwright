@@ -15,7 +15,9 @@ fields of one view can never straddle a fill (ADR-0041 §1).
 """
 
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from decimal import Decimal
+from typing import Self
 
 from .account import Account, AccountView
 from .instrument import InstrumentSpec
@@ -24,6 +26,43 @@ from .position import Position, PositionView, account_net_size
 
 _ZERO = Decimal("0")
 _ONE = Decimal("1")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class LiquidationSource:
+    """Where a position's liquidation price comes from: our formula, or the venue's.
+
+    Liquidation price is the one recomputed *valuation* that live reads through
+    instead of solving (ADR-0040 §3) — re-deriving it needs the maintenance
+    tier's fixed point, the tier depending on the position's value *at the price
+    being solved for* — so this is the input that says which of the two is
+    speaking.
+
+    **Two facts, not one nullable number.** ``reported(None)`` is the venue
+    saying this position *has* no liquidation price, which is the majority case
+    for a long rather than a corner (ADR-0046 §6), and ``computed()`` is nobody
+    having said anything, which paper answers by solving the formula. A bare
+    ``Decimal | None`` would be one value, and the only reading of that value is
+    "fall back to the formula" — on live precisely the fabricated number
+    ADR-0034's freeze-never-substitute rule exists to refuse.
+    """
+
+    _price: Decimal | None
+    _reported: bool
+
+    @classmethod
+    def computed(cls) -> Self:
+        """No venue read stands behind this position; the formula's answer holds."""
+        return cls(_price=None, _reported=False)
+
+    @classmethod
+    def reported(cls, price: Decimal | None) -> Self:
+        """The venue's own field, read through verbatim — ``None`` included."""
+        return cls(_price=price, _reported=True)
+
+    def resolve(self, computed: Decimal | None) -> Decimal | None:
+        """The venue's number wherever one was read, else the formula's."""
+        return self._price if self._reported else computed
 
 
 def position_view(
@@ -36,6 +75,7 @@ def position_view(
     mark_ts: int | None,
     leverage: LeverageSpec,
     spec: InstrumentSpec | None,
+    liquidation: LiquidationSource,
 ) -> PositionView:
     """One partition's frozen snapshot, Tier-1 and Tier-2 in one read.
 
@@ -81,6 +121,12 @@ def position_view(
     the reserved unattributed partition can hold a symbol outside our
     configured universe, and no spec exists for it — while a *default* would
     hand that same silence to a caller who never considered the case.
+
+    ``liquidation`` is the one field's compute/read-through switch (ADR-0040
+    §3). Required and undefaulted like the rest, and for the sharpest version of
+    the same reason: ``computed()`` is the *right* answer on paper and a
+    forbidden one on live, so a default would make the live path's correctness
+    depend on a caller remembering to override it.
     """
     notional = _notional(account_net, mark)
     unrealized_pnl = _unrealized_pnl(position, mark)
@@ -104,12 +150,14 @@ def position_view(
         margin_mode=leverage.mode,
         margin_used=_margin_used(notional, leverage=leverage, backing=backing),
         maintenance_margin=maintenance_margin,
-        liquidation_price=_liquidation_price(
-            account_net=account_net,
-            mark=mark,
-            backing=backing,
-            maintenance_margin=maintenance_margin,
-            spec=spec,
+        liquidation_price=liquidation.resolve(
+            _liquidation_price(
+                account_net=account_net,
+                mark=mark,
+                backing=backing,
+                maintenance_margin=maintenance_margin,
+                spec=spec,
+            )
         ),
         effective_leverage=_effective_leverage(notional, backing=backing),
         mark_ts=mark_ts,

@@ -272,6 +272,14 @@ class LedgerReconciliation:
         if state is None:
             self._freeze(_FreezeCaller.CADENCE)
             return None
+        # The pull is also the channel ADR-0039 kept alive for the one Tier-2
+        # figure live reads through instead of computing (ADR-0040 §3), so the
+        # snapshot is handed to the projection before anything is compared
+        # against it — a cycle that classified first would leave the cadence's
+        # own reader one pass behind the read it just made. It is not a
+        # divergence input: we report the venue's own number, so there is
+        # nothing here to diverge against.
+        self._portfolio.observe_venue_liquidation(state)
         view = self._portfolio.account()
         net = self._portfolio.account_net()
         unrealized = self._portfolio.account_unrealized()
