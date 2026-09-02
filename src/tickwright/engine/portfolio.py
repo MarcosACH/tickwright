@@ -799,6 +799,10 @@ class PortfolioProjection:
             mark=mark.price if mark is not None else None,
             mark_ts=mark.ts_event if mark is not None else None,
             leverage=self.leverage_for(position.symbol),
+            # The projection holds no instrument universe yet; #176's engine
+            # slice sources it from ``exchange.instrument_specs()``. Until then
+            # ``maintenance_margin`` reads ``None`` — unknown, not frictionless.
+            spec=None,
         )
 
     def account(self) -> AccountView:

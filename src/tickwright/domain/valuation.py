@@ -18,6 +18,7 @@ from collections.abc import Iterable, Mapping
 from decimal import Decimal
 
 from .account import Account, AccountView
+from .instrument import InstrumentSpec
 from .leverage import LeverageSpec
 from .position import Position, PositionView
 
@@ -31,6 +32,7 @@ def position_view(
     mark: Decimal | None,
     mark_ts: int | None,
     leverage: LeverageSpec,
+    spec: InstrumentSpec | None,
 ) -> PositionView:
     """One partition's frozen snapshot, Tier-1 and Tier-2 in one read.
 
@@ -54,6 +56,12 @@ def position_view(
     ``leverage`` is the resolved ``(mode, leverage)`` pair for the symbol — one
     value rather than two, because the venue action that sets it is one signed
     action (ADR-0044 §2). It is the margin model's only operator-authored input.
+
+    ``spec`` carries the venue-authored side of the margin model. It is
+    nullable and undefaulted for opposite reasons: ``None`` is reachable —
+    the reserved unattributed partition can hold a symbol outside our
+    configured universe, and no spec exists for it — while a *default* would
+    hand that same silence to a caller who never considered the case.
     """
     notional = _notional(account_net, mark)
     unrealized_pnl = _unrealized_pnl(position, mark)
@@ -72,8 +80,34 @@ def position_view(
             isolated_collateral=position.isolated_collateral,
             unrealized_pnl=unrealized_pnl,
         ),
+        maintenance_margin=_maintenance_margin(notional, spec=spec),
         mark_ts=mark_ts,
     )
+
+
+def _maintenance_margin(notional: Decimal | None, *, spec: InstrumentSpec | None) -> Decimal | None:
+    """``notional × margin_maint`` at the flat tier-0 rate (ADR-0040 §4).
+
+    The rate is read off the spec rather than derived from ``max_leverage``, so
+    this stays venue-agnostic instead of encoding Hyperliquid's "half the
+    initial margin at max leverage" convention (the choice ADR-0036 made for
+    the fee rates).
+
+    Deliberately **flat**: above the venue's first margin-tier band the true
+    rate steps up and carries a continuity deduction, and reproducing that is
+    ADR-0040 §4's named extension point, not this function's job. Until it is
+    taken, a tier-crossing position under-reports here — measured at 9.3 % on
+    #152's crossing — and the gap is left to trip ADR-0040 §6's divergence
+    alert. Absorbing it silently is the one outcome the deferral rules out.
+
+    A symbol with no spec has no rate, so the answer is unknown rather than
+    frictionless: a fabricated ``0`` would report a position as needing no
+    maintenance at all, which is the same unknown-as-worthless mistake the mark
+    rule refuses.
+    """
+    if notional is None or spec is None:
+        return None
+    return notional * spec.margin_maint
 
 
 def _margin_used(

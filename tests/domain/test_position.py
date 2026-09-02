@@ -178,6 +178,7 @@ def test_funding_accrues_on_its_own_line_and_never_into_price_or_pnl() -> None:
         mark=None,
         mark_ts=None,
         leverage=DEFAULT_LEVERAGE,
+        spec=None,
     )
     assert view.funding == Decimal("-0.3")
 

@@ -99,6 +99,16 @@ class PositionView:
     Cross posts ``notional / leverage`` out of the shared pool. Tier-2 in both
     modes and therefore ``None`` on an absent mark whose terms need it — cross
     because ``notional`` does (#142)."""
+    maintenance_margin: Decimal | None
+    """The collateral that must remain behind the position before liquidation:
+    ``notional × margin_maint`` at the flat tier-0 rate (ADR-0040 §4).
+
+    Flat by decision, not by approximation: above the venue's first margin tier
+    this knowingly under-reports, and that divergence is left to trip the §6
+    alert rather than absorbed by a tier table nothing yet reads. ``None`` when
+    ``notional`` is, and also when no ``InstrumentSpec`` is known for the
+    symbol — an unattributed position in a symbol outside our universe has no
+    rate to apply, which is a missing term like any other (ADR-0041 §6)."""
     mark_ts: int | None
     """The observation instant of the mark this view was valued at, ``None`` when
     the projection holds none for the symbol (ADR-0041 §6).

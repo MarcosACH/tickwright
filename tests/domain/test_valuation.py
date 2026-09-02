@@ -17,6 +17,7 @@ from decimal import Decimal
 
 from tickwright.domain import (
     Account,
+    InstrumentSpec,
     LeverageSpec,
     OrderFilled,
     Position,
@@ -28,6 +29,15 @@ from tickwright.domain import (
 CROSS_10X = LeverageSpec(mode="cross", leverage=10)
 ISOLATED_1X = LeverageSpec(mode="isolated", leverage=1)
 ISOLATED_5X = LeverageSpec(mode="isolated", leverage=5)
+
+BTC_40X = InstrumentSpec(
+    symbol="BTC",
+    sz_decimals=5,
+    max_decimals=6,
+    min_notional=Decimal("10"),
+    max_leverage=40,
+    margin_maint=Decimal("0.0125"),  # 1/(2 x 40), the venue's tier-0 rate
+)
 
 
 def _position(
@@ -71,7 +81,7 @@ def test_a_held_position_with_no_mark_reads_unknown_rather_than_worthless() -> N
     position = _position(quantity="2", price="100", side=Side.BUY)
 
     view = position_view(
-        position, account_net=Decimal("2"), mark=None, mark_ts=None, leverage=CROSS_10X
+        position, account_net=Decimal("2"), mark=None, mark_ts=None, leverage=CROSS_10X, spec=None
     )
 
     assert view.unrealized_pnl is None
@@ -107,7 +117,7 @@ def test_a_flat_position_with_no_mark_still_reads_real_zeros() -> None:
     )
 
     view = position_view(
-        position, account_net=Decimal("0"), mark=None, mark_ts=None, leverage=CROSS_10X
+        position, account_net=Decimal("0"), mark=None, mark_ts=None, leverage=CROSS_10X, spec=None
     )
 
     assert view.unrealized_pnl == Decimal("0")
@@ -124,7 +134,7 @@ def test_the_two_terms_take_their_zero_from_different_facts() -> None:
     position = _position(quantity="2", price="100", side=Side.BUY)
 
     view = position_view(
-        position, account_net=Decimal("0"), mark=None, mark_ts=None, leverage=CROSS_10X
+        position, account_net=Decimal("0"), mark=None, mark_ts=None, leverage=CROSS_10X, spec=None
     )
 
     assert view.notional == Decimal("0")
@@ -174,6 +184,7 @@ def test_a_cross_position_posts_its_notional_divided_by_the_configured_leverage(
         mark=Decimal("60000"),
         mark_ts=9_000,
         leverage=CROSS_10X,
+        spec=BTC_40X,
     )
 
     assert view.notional == Decimal("30000")
@@ -203,6 +214,7 @@ def test_an_isolated_position_posts_its_locked_collateral_plus_unrealized_pnl() 
         mark=Decimal("64796"),
         mark_ts=9_000,
         leverage=ISOLATED_5X,
+        spec=BTC_40X,
     )
     at_64794 = position_view(
         position,
@@ -210,7 +222,59 @@ def test_an_isolated_position_posts_its_locked_collateral_plus_unrealized_pnl() 
         mark=Decimal("64794"),
         mark_ts=9_003,
         leverage=ISOLATED_5X,
+        spec=BTC_40X,
     )
 
     assert at_64796.margin_used == Decimal("25.860067")
     assert at_64794.margin_used == Decimal("25.856067")
+
+
+def test_maintenance_margin_is_the_flat_tier_zero_rate_on_notional() -> None:
+    """``notional × margin_maint``, the rate carried as spec data rather than
+    derived, so ``domain`` never learns the venue's "half the initial margin at
+    max leverage" rule (ADR-0040 §4).
+
+    The pair is #152's re-verification below testnet BTC's first margin-tier
+    band, where the flat rate *is* the venue's own: notional ``5873.49``
+    reported maintenance ``73.418625`` at exactly ``1/80``. Both transcribed.
+    """
+    position = _position(quantity="0.09", price="64000", side=Side.BUY)
+
+    view = position_view(
+        position,
+        account_net=Decimal("0.09"),
+        mark=Decimal("65261"),
+        mark_ts=9_000,
+        leverage=CROSS_10X,
+        spec=BTC_40X,
+    )
+
+    assert view.notional == Decimal("5873.49")
+    assert view.maintenance_margin == Decimal("73.418625")
+
+
+def test_maintenance_margin_stays_flat_above_the_first_tier_band() -> None:
+    """Tier-0 is applied **flat**, and above the first band that is knowingly
+    not the venue's number — ADR-0040 §4 defers the tier table and lets the
+    divergence trip §6's alert rather than absorbing it.
+
+    #152's measured crossing: a 0.185 BTC testnet long at notional
+    ``12073.655`` sits in the ``$10k``–``$50k`` band, where the venue reports
+    ``166.4731`` from ``notional × 0.02 − 75``. We report the flat
+    ``150.9206875`` and under-report by ``15.55``, on purpose. A change here
+    that starts reproducing ``166.4731`` is a tier implementation, and it must
+    arrive with the alert band re-reasoned rather than as a silent fix.
+    """
+    position = _position(quantity="0.185", price="64000", side=Side.BUY)
+
+    view = position_view(
+        position,
+        account_net=Decimal("0.185"),
+        mark=Decimal("65263"),
+        mark_ts=9_000,
+        leverage=CROSS_10X,
+        spec=BTC_40X,
+    )
+
+    assert view.notional == Decimal("12073.655")
+    assert view.maintenance_margin == Decimal("150.9206875")
