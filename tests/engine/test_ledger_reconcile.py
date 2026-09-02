@@ -77,7 +77,7 @@ class _AccountVenue(LiveVenueDouble):
         raise AssertionError("the account cycle is anchored on the account snapshot, not a cloid")
 
 
-def _ledger(store: Store, *, equity: str) -> Checkpointer:
+def _ledger(store: Store, *, equity: str, clock: ManualClock | None = None) -> Checkpointer:
     """A live ledger already materialised, the state every cycle finds it in.
 
     Live is the only shape that has a cycle at all — paper has no second account
@@ -89,11 +89,16 @@ def _ledger(store: Store, *, equity: str) -> Checkpointer:
     *writes*: a heal is checkpointed on the same atomic path a fill is, so the
     thing the cycle is constructed with has to be the type that owns that write.
     Reach the read-model through ``.portfolio`` where a case asserts on it.
+
+    ``clock`` is the case's own only where it runs **two** cycles, since a heal's
+    key is stamped with the cycle's ``ts_ns``: on a clock that never moves, the
+    second pass mints the first pass's ``event_id`` and is deduped away as a
+    redelivery. Held still by default, which is what a single-cycle case wants.
     """
     keeper = Checkpointer(
         spec=AccountSpec(account_id=LIVE_ACCOUNT_ID, genesis_collateral=None),
         store=store,
-        clock=ManualClock(7),
+        clock=ManualClock(7) if clock is None else clock,
     )
     keeper.recover()
     keeper.portfolio.materialise(account_state(equity))
@@ -444,6 +449,50 @@ def test_a_cash_divergence_heals_the_line_to_the_one_the_venue_implies() -> None
     assert restored is not None
     assert restored.cash == Decimal("100500")
     assert restored.genesis_collateral == Decimal("100000")
+
+
+def test_a_cash_heal_absorbs_the_pnl_the_same_passs_size_heal_realized() -> None:
+    """The cash correction is folded **after** the size heals, and the ordering
+    is the whole subject: a heal that closes into a partition realizes PnL onto
+    the very line the same pass is correcting.
+
+    Two cycles, because a *closing* heal needs a partition to close into and the
+    only thing that can open an unattributed one is an earlier heal. The first
+    books ten SOL at the venue's entry price. The second finds four, sells six at
+    a higher price, and realizes 6 × 191 = 1146 on the way past.
+
+    Corrected first, that 1146 would land on top of the venue's figure and the
+    ledger would close the pass 1146 above a line it had just been told was
+    right — reported next cycle as a fresh divergence that is nothing but this
+    heal's own arithmetic, healed again, forever. Corrected last, the assignment
+    absorbs it: the pass ends at exactly what the venue implies, which is why the
+    verb takes a target and not a delta.
+
+    So the number asserted is the venue's own and not the sum of anything: it is
+    the same figure under both orderings only if the size heal realizes nothing,
+    which is the case this one is built to avoid.
+    """
+    store = SQLiteStore(":memory:")
+    clock = ManualClock(7)
+    keeper = _ledger(store, equity="100000", clock=clock)
+    opened = _held("100000", ("SOL", "10", "0"))
+    closing = _held("101000", ("SOL", "4", "0"))
+    closing = replace(
+        closing, positions=(replace(closing.positions[0], entry_price=Decimal("65000")),)
+    )
+    cycle = LedgerReconciliation(exchange=_AccountVenue(opened, closing), checkpointer=keeper)
+
+    asyncio.run(cycle.reconcile_account())  # opens the unattributed partition at 64809
+    assert keeper.portfolio.account().cash == Decimal("100000")
+
+    clock.advance_to(8)
+    asyncio.run(cycle.reconcile_account())
+
+    healed = keeper.portfolio.position("SOL", strategy_id=None)
+    assert healed is not None
+    assert healed.size == Decimal("4")
+    assert healed.realized_pnl == Decimal("1146")
+    assert keeper.portfolio.account().cash == Decimal("101000")
 
 
 def _mark(projection: PortfolioProjection, symbol: str, price: str) -> None:
