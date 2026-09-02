@@ -17,12 +17,16 @@ from decimal import Decimal
 
 from tickwright.domain import (
     Account,
+    LeverageSpec,
     OrderFilled,
     Position,
     Side,
     account_view,
     position_view,
 )
+
+CROSS_10X = LeverageSpec(mode="cross", leverage=10)
+ISOLATED_1X = LeverageSpec(mode="isolated", leverage=1)
 
 
 def _position(*, quantity: str, price: str, side: Side, symbol: str = "BTC") -> Position:
@@ -56,7 +60,9 @@ def test_a_held_position_with_no_mark_reads_unknown_rather_than_worthless() -> N
     nothing, which is a number a strategy can act on and is false."""
     position = _position(quantity="2", price="100", side=Side.BUY)
 
-    view = position_view(position, account_net=Decimal("2"), mark=None, mark_ts=None)
+    view = position_view(
+        position, account_net=Decimal("2"), mark=None, mark_ts=None, leverage=CROSS_10X
+    )
 
     assert view.unrealized_pnl is None
     assert view.notional is None
@@ -90,7 +96,9 @@ def test_a_flat_position_with_no_mark_still_reads_real_zeros() -> None:
         side=Side.SELL,
     )
 
-    view = position_view(position, account_net=Decimal("0"), mark=None, mark_ts=None)
+    view = position_view(
+        position, account_net=Decimal("0"), mark=None, mark_ts=None, leverage=CROSS_10X
+    )
 
     assert view.unrealized_pnl == Decimal("0")
     assert view.notional == Decimal("0")
@@ -105,7 +113,9 @@ def test_the_two_terms_take_their_zero_from_different_facts() -> None:
     """
     position = _position(quantity="2", price="100", side=Side.BUY)
 
-    view = position_view(position, account_net=Decimal("0"), mark=None, mark_ts=None)
+    view = position_view(
+        position, account_net=Decimal("0"), mark=None, mark_ts=None, leverage=CROSS_10X
+    )
 
     assert view.notional == Decimal("0")
     assert view.unrealized_pnl is None
@@ -135,3 +145,26 @@ def test_account_equity_needs_no_mark_when_every_partition_is_flat() -> None:
     view = account_view(_account("1000"), positions=(flat,), marks={})
 
     assert view.equity == Decimal("1000")
+
+
+def test_a_cross_position_posts_its_notional_divided_by_the_configured_leverage() -> None:
+    """Cross ``margin_used`` is ``notional / leverage`` (ADR-0040 §2), off the
+    **account-net** exposure rather than this partition's own slice: the venue
+    holds one position per symbol and one collateral bucket behind it.
+
+    Worked by hand: ``|0.5| x 60000 = 30000`` of notional at ``10x`` posts
+    ``3000``. There is no venue-side haircut on the initial fraction, so the
+    amount is the division directly (ADR-0040 §4, "No ``margin_init`` field").
+    """
+    position = _position(quantity="0.5", price="58000", side=Side.BUY)
+
+    view = position_view(
+        position,
+        account_net=Decimal("0.5"),
+        mark=Decimal("60000"),
+        mark_ts=9_000,
+        leverage=CROSS_10X,
+    )
+
+    assert view.notional == Decimal("30000")
+    assert view.margin_used == Decimal("3000")

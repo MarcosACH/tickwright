@@ -11,6 +11,7 @@ from decimal import Decimal
 import pytest
 
 from tickwright.domain import (
+    DEFAULT_LEVERAGE,
     InvariantViolation,
     OrderFilled,
     OrderFillEvent,
@@ -171,7 +172,13 @@ def test_funding_accrues_on_its_own_line_and_never_into_price_or_pnl() -> None:
     assert position.fees == Decimal("0")
     # And it reaches the seam's snapshot on its own line, assembled off the
     # aggregate rather than by it (ADR-0035).
-    view = position_view(position, account_net=position.signed_size, mark=None, mark_ts=None)
+    view = position_view(
+        position,
+        account_net=position.signed_size,
+        mark=None,
+        mark_ts=None,
+        leverage=DEFAULT_LEVERAGE,
+    )
     assert view.funding == Decimal("-0.3")
 
 

@@ -93,6 +93,12 @@ class PositionView:
     so two strategies long the same symbol read one notional. A magnitude, since
     exposure has no direction. ``None`` on an absent mark unless the account nets
     flat, where ``|0| × mark`` is zero at every mark."""
+    margin_used: Decimal | None
+    """The collateral this position has posted, at position grain (ADR-0040 §2).
+
+    Cross posts ``notional / leverage`` out of the shared pool. Tier-2 in both
+    modes and therefore ``None`` on an absent mark whose terms need it — cross
+    because ``notional`` does (#142)."""
     mark_ts: int | None
     """The observation instant of the mark this view was valued at, ``None`` when
     the projection holds none for the symbol (ADR-0041 §6).

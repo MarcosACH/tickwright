@@ -798,6 +798,7 @@ class PortfolioProjection:
             account_net=net.get(position.symbol, _ZERO),
             mark=mark.price if mark is not None else None,
             mark_ts=mark.ts_event if mark is not None else None,
+            leverage=self.leverage_for(position.symbol),
         )
 
     def account(self) -> AccountView:

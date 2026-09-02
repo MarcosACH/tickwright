@@ -18,6 +18,7 @@ from collections.abc import Iterable, Mapping
 from decimal import Decimal
 
 from .account import Account, AccountView
+from .leverage import LeverageSpec
 from .position import Position, PositionView
 
 _ZERO = Decimal("0")
@@ -29,6 +30,7 @@ def position_view(
     account_net: Decimal,
     mark: Decimal | None,
     mark_ts: int | None,
+    leverage: LeverageSpec,
 ) -> PositionView:
     """One partition's frozen snapshot, Tier-1 and Tier-2 in one read.
 
@@ -48,7 +50,12 @@ def position_view(
     Nullability is **per-term, not per-field** (ADR-0041 §6): a Tier-2 field
     reads ``None`` only when the mark is absent *and its own terms need it*, so
     a flat slice still reads a real ``0``.
+
+    ``leverage`` is the resolved ``(mode, leverage)`` pair for the symbol — one
+    value rather than two, because the venue action that sets it is one signed
+    action (ADR-0044 §2). It is the margin model's only operator-authored input.
     """
+    notional = _notional(account_net, mark)
     return PositionView(
         symbol=position.symbol,
         size=position.signed_size,
@@ -57,9 +64,25 @@ def position_view(
         fees=position.fees,
         funding=position.funding,
         unrealized_pnl=_unrealized_pnl(position, mark),
-        notional=_notional(account_net, mark),
+        notional=notional,
+        margin_used=_margin_used(notional, leverage=leverage),
         mark_ts=mark_ts,
     )
+
+
+def _margin_used(notional: Decimal | None, *, leverage: LeverageSpec) -> Decimal | None:
+    """The collateral posted behind the position, by the mode's own rule.
+
+    Cross draws ``notional / leverage`` from the shared account pool. The
+    division is the whole amount: there is no per-venue haircut on the initial
+    fraction, so ADR-0040 §4 declines a ``margin_init`` field rather than carry
+    a constant ``1.0``. Nullability is inherited from ``notional`` — a term that
+    needs the mark makes the amount need it too, and a flat account-net's real
+    ``0`` passes straight through.
+    """
+    if notional is None:
+        return None
+    return notional / leverage.leverage
 
 
 def _notional(account_net: Decimal, mark: Decimal | None) -> Decimal | None:
