@@ -19,8 +19,8 @@ from decimal import Decimal
 
 from .account import Account, AccountView
 from .instrument import InstrumentSpec
-from .leverage import LeverageSpec
-from .position import Position, PositionView
+from .leverage import LeverageBook, LeverageSpec
+from .position import Position, PositionView, account_net_size
 
 _ZERO = Decimal("0")
 _ONE = Decimal("1")
@@ -330,6 +330,8 @@ def account_view(
     *,
     positions: Iterable[Position],
     marks: Mapping[str, Decimal],
+    leverage: LeverageBook,
+    specs: Mapping[str, InstrumentSpec],
 ) -> AccountView:
     """The account-wide pool's frozen snapshot — one collateral bucket.
 
@@ -341,8 +343,87 @@ def account_view(
 
     ``marks`` carries only the symbols a mark has been seen for; a symbol absent
     from it is what makes the Σ unknown.
+
+    The Σs range over **symbols, not partitions**, which is the one structural
+    thing this function does beyond adding up. Every position-grain quantity is
+    computed off the symbol's account-net size, so folding it once per partition
+    would double-count the ones that are magnitudes: two strategies holding
+    offsetting legs net to a book with no exposure, where a per-partition fold
+    reports collateral against a position the venue does not have (ADR-0035).
+    The account-net fold is therefore taken first and the arithmetic run once per
+    symbol, through the **same** private helpers ``position_view`` uses — so a
+    total can never disagree with the views it is read beside.
+
+    ``leverage`` is the resolved book rather than one spec, and ``specs`` the
+    instrument universe, because this ranges over symbols where ``position_view``
+    is handed one. A symbol with no spec contributes an unknown maintenance
+    term, on the same per-term rule as an unmarked one.
     """
-    return AccountView(cash=account.cash, equity=_equity(account, positions, marks))
+    held = tuple(positions)
+    equity = _equity(account, held, marks)
+    net = account_net_size(held)
+    upnl = account_unrealized_pnl(held, marks)
+    collateral = _isolated_collateral(held)
+    total_notional: Decimal | None = _ZERO
+    total_margin_used: Decimal | None = _ZERO
+    total_maintenance_margin: Decimal | None = _ZERO
+    for symbol, size in net.items():
+        symbol_leverage = leverage.for_symbol(symbol)
+        notional = _notional(size, marks.get(symbol))
+        backing = _backing_equity(
+            leverage=symbol_leverage,
+            isolated_collateral=collateral.get(symbol, _ZERO),
+            account_unrealized_pnl=upnl.get(symbol),
+            account_equity=equity,
+        )
+        total_notional = _total(total_notional, notional)
+        total_margin_used = _total(
+            total_margin_used, _margin_used(notional, leverage=symbol_leverage, backing=backing)
+        )
+        total_maintenance_margin = _total(
+            total_maintenance_margin, _maintenance_margin(notional, spec=specs.get(symbol))
+        )
+    return AccountView(
+        cash=account.cash,
+        equity=equity,
+        total_margin_used=total_margin_used,
+        total_maintenance_margin=total_maintenance_margin,
+        free_margin=_total(equity, _negated(total_margin_used)),
+        effective_leverage=_effective_leverage(total_notional, backing=equity),
+    )
+
+
+def _isolated_collateral(positions: Iterable[Position]) -> dict[str, Decimal]:
+    """The locked bucket behind each symbol — Σ over the partitions of it.
+
+    The venue holds **one** bucket per position and knows nothing of our
+    partitions, so the bucket is what our slices of it add up to. Summed here
+    rather than read off any one partition for the same reason the net size is:
+    no single partition holds the venue's number.
+    """
+    buckets: dict[str, Decimal] = {}
+    for position in positions:
+        buckets[position.symbol] = (
+            buckets.get(position.symbol, _ZERO) + position.isolated_collateral
+        )
+    return buckets
+
+
+def _total(running: Decimal | None, term: Decimal | None) -> Decimal | None:
+    """One unknown term makes the whole Σ unknown (ADR-0041 §6).
+
+    A partial sum reported as a total is the same unknown-as-worthless mistake
+    the per-position rule refuses, one grain up — and worse here, because
+    nothing in the number says which symbol was left out of it.
+    """
+    if running is None or term is None:
+        return None
+    return running + term
+
+
+def _negated(term: Decimal | None) -> Decimal | None:
+    """``−term``, propagating the unknown — so ``free_margin`` is one Σ rule."""
+    return None if term is None else -term
 
 
 def account_unrealized_pnl(

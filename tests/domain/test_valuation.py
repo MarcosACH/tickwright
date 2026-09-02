@@ -18,6 +18,7 @@ from decimal import Decimal
 from tickwright.domain import (
     Account,
     InstrumentSpec,
+    LeverageBook,
     LeverageSpec,
     OrderFilled,
     Position,
@@ -27,6 +28,7 @@ from tickwright.domain import (
     position_view,
 )
 
+CROSS_1X = LeverageSpec(mode="cross", leverage=1)
 CROSS_10X = LeverageSpec(mode="cross", leverage=10)
 ISOLATED_1X = LeverageSpec(mode="isolated", leverage=1)
 ISOLATED_5X = LeverageSpec(mode="isolated", leverage=5)
@@ -38,6 +40,16 @@ BTC_40X = InstrumentSpec(
     min_notional=Decimal("10"),
     max_leverage=40,
     margin_maint=Decimal("0.0125"),  # 1/(2 x 40), the venue's tier-0 rate
+)
+
+
+ETH_25X = InstrumentSpec(
+    symbol="ETH",
+    sz_decimals=4,
+    max_decimals=6,
+    min_notional=Decimal("10"),
+    max_leverage=25,
+    margin_maint=Decimal("0.02"),  # 1/(2 x 25)
 )
 
 
@@ -184,7 +196,9 @@ def test_account_equity_needs_no_mark_when_every_partition_is_flat() -> None:
         side=Side.SELL,
     )
 
-    view = account_view(_account("1000"), positions=(flat,), marks={})
+    view = account_view(
+        _account("1000"), positions=(flat,), marks={}, leverage=LeverageBook(), specs={}
+    )
 
     assert view.equity == Decimal("1000")
 
@@ -723,3 +737,126 @@ def test_a_computed_liquidation_price_at_or_below_zero_reads_none() -> None:
     short = at("101000", side=Side.SELL, account_net="-0.5")
     assert short.liquidation_price is not None
     assert short.liquidation_price > Decimal("60000")
+
+
+def test_the_account_totals_sum_the_position_grain_numbers() -> None:
+    """``AccountView``'s four Tier-2 aggregates (ADR-0041 §4): the two Σs, the
+    free margin they leave, and the account's own realized leverage.
+
+    Worked by hand over two symbols in the two modes, so neither rule is the
+    only one exercised. On 100000 of cash:
+
+        BTC  cross 10x   +0.5 @ 58000, mark 60000
+                         uPnL 1000, notional 30000
+                         margin_used 30000/10 = 3000, maint 30000/80 = 375
+        ETH  isolated 5x +10 @ 3000, mark 3200, bucket 6000
+                         uPnL 2000, notional 32000
+                         margin_used 6000 + 2000 = 8000, maint 32000/50 = 640
+
+        equity      100000 + 1000 + 2000 = 103000
+        Σ margin    3000 + 8000          =  11000
+        Σ maint     375 + 640            =   1015
+        free        103000 − 11000       =  92000
+        leverage    62000 / 103000       = 0.6019
+
+    ``free_margin`` subtracts the Σ of *margin used*, not of maintenance: it is
+    the pool an account has left to open against, and isolated buckets are
+    locked out of it by being inside that Σ (ADR-0040 §7).
+    """
+    btc = _position(quantity="0.5", price="58000", side=Side.BUY, symbol="BTC")
+    eth = _position(
+        quantity="10", price="3000", side=Side.BUY, symbol="ETH", isolated_collateral="6000"
+    )
+
+    view = account_view(
+        _account("100000"),
+        positions=(btc, eth),
+        marks={"BTC": Decimal("60000"), "ETH": Decimal("3200")},
+        leverage=LeverageBook(entries={"BTC": CROSS_10X, "ETH": ISOLATED_5X}),
+        specs={"BTC": BTC_40X, "ETH": ETH_25X},
+    )
+
+    assert view.cash == Decimal("100000")
+    assert view.equity == Decimal("103000")
+    assert view.total_margin_used == Decimal("11000")
+    assert view.total_maintenance_margin == Decimal("1015")
+    assert view.free_margin == Decimal("92000")
+    assert view.effective_leverage is not None
+    assert view.effective_leverage.quantize(Decimal("0.0001")) == Decimal("0.6019")
+
+
+def test_the_account_totals_range_over_symbols_rather_than_partitions() -> None:
+    """The Σs are over the **venue's** positions — one per symbol — not over our
+    partitions of them (ADR-0035, ADR-0041 §4).
+
+    Two strategies holding offsetting legs is where the two readings come apart,
+    because ``notional`` takes a magnitude: the account holds nothing in BTC, so
+    its exposure and the collateral behind it are genuinely zero, while a
+    per-partition Σ would report ``2 x 110 + 2 x 110 = 440`` of notional and
+    ``44`` of margin against a position the venue does not have.
+
+    Each partition's own uPnL is still real and still counts, because that one
+    *is* attributable: ``2 x (110 − 100) = +20`` for the long leg and
+    ``−2 x (110 − 120) = +20`` for the short, so the account is up 40 on a book
+    with no exposure.
+    """
+    long_leg = _position(quantity="2", price="100", side=Side.BUY)
+    short_leg = Position(strategy_id="beta", symbol="BTC")
+    short_leg.apply(
+        OrderFilled(
+            ts_event=1_000,
+            ts_init=1_000,
+            cloid="0xf9",
+            strategy_id="beta",
+            signal_id="beta:BTC:1",
+            symbol="BTC",
+            trade_id="f9",
+            quantity=Decimal("2"),
+            price=Decimal("120"),
+            cum_qty=Decimal("2"),
+            fee=Decimal("0"),
+        ),
+        side=Side.SELL,
+    )
+
+    view = account_view(
+        _account("100000"),
+        positions=(long_leg, short_leg),
+        marks={"BTC": Decimal("110")},
+        leverage=LeverageBook(entries={"BTC": CROSS_10X}),
+        specs={"BTC": BTC_40X},
+    )
+
+    assert view.equity == Decimal("100040")
+    assert view.total_margin_used == Decimal("0")
+    assert view.total_maintenance_margin == Decimal("0")
+    assert view.free_margin == Decimal("100040")
+    assert view.effective_leverage == Decimal("0")
+
+
+def test_free_margin_is_reported_when_negative() -> None:
+    """A negative free margin is a **valid state, not a divergence** (ADR-0040
+    §7), and reporting it is this surface's whole contribution: nothing here
+    rejects the order that caused it and nothing liquidates the position.
+
+    That is a deliberate departure from a typical simulator, which refuses the
+    margin-breaching order. Ours lets it through and says so — the honest "you
+    would have been rejected or liquidated on live" signal.
+
+    On 1000 of cash, ``+0.5`` at 58000 marked to 60000 at **1x** posts the whole
+    notional: equity ``1000 + 1000 = 2000`` against ``30000`` of margin used
+    leaves ``−28000``. Not clamped at zero, which would report a solvent
+    account, and not raised, which would make the report the enforcement.
+    """
+    view = account_view(
+        _account("1000"),
+        positions=(_position(quantity="0.5", price="58000", side=Side.BUY),),
+        marks={"BTC": Decimal("60000")},
+        leverage=LeverageBook(entries={"BTC": CROSS_1X}),
+        specs={"BTC": BTC_40X},
+    )
+
+    assert view.equity == Decimal("2000")
+    assert view.total_margin_used == Decimal("30000")
+    assert view.free_margin == Decimal("-28000")
+    assert view.effective_leverage == Decimal("15")

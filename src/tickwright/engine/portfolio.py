@@ -845,6 +845,12 @@ class PortfolioProjection:
             self._account,
             positions=self._positions.values(),
             marks={symbol: mark.price for symbol, mark in self._marks.items()},
+            leverage=self._leverage,
+            # The projection holds no instrument universe yet; #176's engine
+            # slice sources it from ``exchange.instrument_specs()``. Until then
+            # ``total_maintenance_margin`` reads ``None`` on a held book —
+            # unknown, not frictionless.
+            specs={},
         )
 
     def for_strategy(self, strategy_id: str) -> Portfolio:
