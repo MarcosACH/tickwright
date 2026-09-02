@@ -41,6 +41,8 @@ write with no ordering inside it has nothing here to protect. See ``portfolio``
 below, where the rule is stated on the borrow itself.
 """
 
+from collections.abc import Sequence
+
 from tickwright.domain import (
     EMPTY_LEVERAGE_BOOK,
     AccountSpec,
@@ -50,6 +52,7 @@ from tickwright.domain import (
     LeverageBook,
     Order,
     OrderFillEvent,
+    ReconciliationFill,
     Side,
     Store,
 )
@@ -208,6 +211,48 @@ class Checkpointer:
             ) from exc
         self._cache.project(order, ts_ns=ts_ns)
         self._portfolio.project(change)
+
+    def checkpoint_heal(self, fills: Sequence[ReconciliationFill]) -> None:
+        """Make one reconcile cycle's Tier-1 heal durable — fold, write, project.
+
+        The same three steps in the same order as ``checkpoint_fill``, and for
+        the same reason: the write takes the *folded* state as its input, so the
+        fold cannot precede it and the projections must not. What differs is the
+        absent order row — a heal has no cloid behind it, because
+        ``clearinghouseState`` reports positions and never the trades that made
+        them — so ``order`` stays ``None`` and the ledger's three aggregates go
+        alone.
+
+        **One transaction for the whole cycle**, not one per symbol. A pass that
+        healed BTC and then failed on SOL would leave the account matching the
+        venue on one symbol and not the other, with nothing durable recording
+        which half landed; ADR-0034's cycle is meant to be repeatable from
+        whatever it finds, and it only is if a refused heal leaves the book
+        exactly as it was.
+
+        An empty heal writes nothing at all, on ``checkpoint_funding``'s rule
+        below: a pass over an agreeing book has no state to persist, and
+        re-stamping the account row would make it indistinguishable from a
+        correction by anything but the number.
+        """
+        change = self._portfolio.apply_heal(fills)
+        if change is None:
+            return
+        try:
+            self._store.checkpoint_ledger(
+                account=change.account,
+                positions=tuple(fill.position for fill in change.fills),
+                ts_ns=self._clock.timestamp_ns(),
+            )
+        except InvariantViolation as exc:
+            # Only the seam's own failure type is relabelled, as its siblings do:
+            # anything else crossing it is a bug below the store, not a failed
+            # write.
+            raise InvariantViolation(
+                "ledger heal checkpoint write failed for "
+                f"{', '.join(fill.symbol for fill in fills)}"
+            ) from exc
+        self._portfolio.project_heal(change)
 
     def checkpoint_funding(self, accrual: FundingAccrual) -> None:
         """Make one settled funding boundary durable — gate, then one transaction.

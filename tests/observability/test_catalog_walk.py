@@ -61,7 +61,6 @@ from tickwright.engine.checkpoint import Checkpointer
 from tickwright.engine.execution import ExecutionManager
 from tickwright.engine.guard import RealGuard
 from tickwright.engine.ledger_reconcile import LedgerReconciliation
-from tickwright.engine.portfolio import PortfolioProjection
 from tickwright.engine.reconcile import ReconcileConfig, Reconciler
 from tickwright.engine.runner import Engine
 from tickwright.engine.strategy_host import StrategyHost
@@ -789,12 +788,12 @@ def _drive_account_reconciled() -> None:
 
     async def go() -> None:
         venue = _LiveShapedVenue()
-        projection = PortfolioProjection(
+        keeper = Checkpointer(
             spec=venue.account_spec(), store=SQLiteStore(":memory:"), clock=ManualClock()
         )
-        projection.recover()
-        projection.materialise(DERIVED_STATE)
-        await LedgerReconciliation(exchange=venue, portfolio=projection).reconcile_account()
+        keeper.recover()
+        keeper.portfolio.materialise(DERIVED_STATE)
+        await LedgerReconciliation(exchange=venue, checkpointer=keeper).reconcile_account()
 
     asyncio.run(go())
 
@@ -806,11 +805,11 @@ def _drive_account_reconcile_frozen() -> None:
 
     async def go() -> None:
         venue = _LiveShapedVenue(state=None)
-        projection = PortfolioProjection(
+        keeper = Checkpointer(
             spec=venue.account_spec(), store=SQLiteStore(":memory:"), clock=ManualClock()
         )
-        projection.recover()
-        await LedgerReconciliation(exchange=venue, portfolio=projection).reconcile_account()
+        keeper.recover()
+        await LedgerReconciliation(exchange=venue, checkpointer=keeper).reconcile_account()
 
     asyncio.run(go())
 

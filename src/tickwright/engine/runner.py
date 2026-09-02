@@ -124,7 +124,7 @@ class Engine:
         # is real — the cadence below — rather than turning this attribute
         # ``None`` and handing every later reader a second thing to unwrap.
         self._ledger_reconciler = LedgerReconciliation(
-            exchange=exchange, portfolio=self._checkpointer.portfolio
+            exchange=exchange, checkpointer=self._checkpointer
         )
         self._host = StrategyHost(
             bus=bus, clock=clock, store=store, tick_staleness_ns=self._config.tick_staleness_ns

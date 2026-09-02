@@ -16,10 +16,17 @@ from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
 
-from tickwright.domain import AccountView, Exchange, VenueAccountState, venue_cash
+from tickwright.domain import (
+    AccountView,
+    Exchange,
+    ReconciliationFill,
+    Side,
+    VenueAccountState,
+    venue_cash,
+)
 from tickwright.observability import NamedEvent, named_event
 
-from .portfolio import PortfolioProjection
+from .checkpoint import Checkpointer
 
 _ZERO = Decimal("0")
 
@@ -103,9 +110,16 @@ class Divergence:
 class LedgerReconciliation:
     """The cross-check between the ledger and the venue's own account truth."""
 
-    def __init__(self, *, exchange: Exchange, portfolio: PortfolioProjection) -> None:
+    def __init__(self, *, exchange: Exchange, checkpointer: Checkpointer) -> None:
         self._exchange = exchange
-        self._portfolio = portfolio
+        # The ``Checkpointer`` rather than the projection it lends, because this
+        # cycle **writes**: a Tier-1 heal is one fold, one durable write and one
+        # projection, in that order and with no yield between them — the exact
+        # ordering ADR-0043 §4 gives that type to own. Taking the read-model
+        # alone and reaching for a ``Store`` beside it would be the second store
+        # parameter the ``Checkpointer`` exists to make unwireable.
+        self._checkpointer = checkpointer
+        self._portfolio = checkpointer.portfolio
 
     async def materialise_account(self) -> bool:
         """The startup barrier's live-only first step: create the account row
@@ -214,6 +228,7 @@ class LedgerReconciliation:
             + self._equity(state, equity=view.equity)
             + self._unrealized(state, ledger=unrealized, net=net)
         )
+        self._checkpointer.checkpoint_heal(self._size_heals(state, divergences))
         tiers = [divergence.tier for divergence in divergences]
         named_event(
             NamedEvent.ACCOUNT_RECONCILED,
@@ -222,6 +237,48 @@ class LedgerReconciliation:
             unvalued=self._unvalued(state, view=view, ledger=unrealized, net=net),
         )
         return divergences
+
+    def _size_heals(
+        self, state: VenueAccountState, divergences: tuple[Divergence, ...]
+    ) -> tuple[ReconciliationFill, ...]:
+        """Turn this pass's Tier-1 size findings into the fills that correct them.
+
+        The delta is ``venue − ledger`` and the venue is authoritative
+        (ADR-0034), so the fill moves the ledger *to* the snapshot rather than
+        by some fraction of the way. Its magnitude and side come apart because
+        ``Position`` keeps a magnitude and takes a direction; a short heal is a
+        sell of the absolute gap.
+
+        **The price is the venue's own entry price**, and a symbol that has none
+        is not healed this pass. ADR-0034's synthetic needs a price to book
+        against, and there is no honest substitute for one: a size booked at an
+        invented price would put a real number on ``entry_price`` and make every
+        valuation derived from it wrong in a way no later cycle re-examines,
+        where an unhealed symbol simply diverges again at the next deadline and
+        stays visible as a finding. The venue omits the field on a position it
+        does not carry, so this is also what a *closing* heal falls under.
+
+        Classification runs before this, off the cycle's one fold, so a heal can
+        never feed the comparison that produced it — the Tier-2 findings on this
+        pass are about the book the cycle *found*, not the one it left behind.
+        """
+        ts_ns = self._checkpointer.clock.timestamp_ns()
+        prices = {position.symbol: position.entry_price for position in state.positions}
+        return tuple(
+            ReconciliationFill(
+                symbol=divergence.symbol,
+                side=Side.BUY if delta > _ZERO else Side.SELL,
+                quantity=abs(delta),
+                price=price,
+                ts_ns=ts_ns,
+            )
+            for divergence in divergences
+            if divergence.tier is DivergenceTier.TIER_1
+            and divergence.field is DivergenceField.SIGNED_SIZE
+            and divergence.symbol is not None
+            and (price := prices.get(divergence.symbol)) is not None
+            and (delta := divergence.venue - divergence.ledger) != _ZERO
+        )
 
     @staticmethod
     def _holds(net: dict[str, Decimal], symbol: str) -> bool:
