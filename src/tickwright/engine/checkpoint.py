@@ -244,10 +244,14 @@ class Checkpointer:
         positions, or the reverse. The fold that puts them in order is the
         projection's (``apply_heal``); what this owns is that they land together.
 
-        An empty heal writes nothing at all, on ``checkpoint_funding``'s rule
-        below: a pass over an agreeing book has no state to persist, and
-        re-stamping the account row would make it indistinguishable from a
-        correction by anything but the number.
+        A heal that **moved nothing** writes nothing at all, on
+        ``checkpoint_funding``'s rule below: a pass over an agreeing book has no
+        state to persist, and re-stamping the account row would make it
+        indistinguishable from a correction by anything but the number. That is
+        ``apply_heal``'s judgement rather than this method's, and it is made on
+        the fold rather than on the synthetics — a retried pass arrives here with
+        a full complement of fills the aggregate deduped away, and is as empty as
+        one that found nothing.
 
         **Returns the fold it kept**, where its siblings return nothing, because
         a heal is the one path whose caller still has something to say after the

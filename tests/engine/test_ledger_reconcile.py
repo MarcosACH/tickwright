@@ -1051,18 +1051,25 @@ def test_a_retried_cycle_books_its_heal_once_and_announces_it_once() -> None:
     record where an operator can see it, and the next deadline heals it under a
     key of its own.
 
-    **And nothing is announced.** ``account.healed`` answers "why did the ledger
-    move", so a deduped synthetic must not emit one: it is the same rule that
-    keeps a finding the cycle declined to price off the record, arriving through
-    the one door the producer-side check does not cover — the synthetic here is
-    well-formed, and it is the aggregate that refuses it.
+    **And nothing is announced, and nothing is written.** ``account.healed``
+    answers "why did the ledger move", so a deduped synthetic must not emit one:
+    it is the same rule that keeps a finding the cycle declined to price off the
+    record, arriving through the one door the producer-side check does not cover
+    — the synthetic here is well-formed, and it is the aggregate that refuses it.
+    The store is the other half of that claim and the one a value comparison
+    cannot make: a pass that re-stamped the account row with the figure already
+    there would be indistinguishable from a correction by anything but the
+    number, so the second pass runs against a store that refuses a write
+    outright. Sealed after the first pass, since that one heals for real and its
+    write is the state this case starts from.
     """
-    store = SQLiteStore(":memory:")
+    store = _SealedStore(":memory:")
     keeper = _ledger(store, equity="100000")
     venue = _AccountVenue(_held("100000", ("SOL", "10", "0")), _held("100000", ("SOL", "12", "0")))
     cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
 
     asyncio.run(cycle.reconcile_account())
+    store.seal()
     with capture_events() as logs:
         divergences = asyncio.run(cycle.reconcile_account())
 

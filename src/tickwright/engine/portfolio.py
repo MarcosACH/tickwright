@@ -276,11 +276,22 @@ class PortfolioProjection:
         divergence. Applied after, the target absorbs whatever the fills did
         (``Account.correct_cash``).
 
-        ``None`` when there is nothing of either kind, as ``apply_funding``'s
-        ``None`` is a dropped accrual: a cycle that found nothing to correct must
-        write *nothing*, or a pass over an agreeing book would re-stamp the
-        account row and be distinguishable from a real correction only by reading
-        the number.
+        ``None`` when the fold moved nothing, as ``apply_funding``'s ``None`` is
+        a dropped accrual: a cycle that corrected nothing must write *nothing*,
+        or the pass would re-stamp the account row and be distinguishable from a
+        real correction only by reading the number.
+
+        **The verdict is the fold's, not the input's**, which is why the check
+        sits after the loop and asks ``applied`` rather than ``fills``. A pass
+        handed no synthetics at all is the easy half and falls out of the same
+        test; the one that needs it is a pass whose synthetics were all *deduped
+        away*, which is what a retried cycle is — the key is the cycle's stamp,
+        so the second run mints the first's ``event_id`` and ``Position.apply``
+        refuses every one of them. Judged on the input, that pass writes; judged
+        on ``applied``, it is the no-op it actually was. Returning there is safe
+        because a refused fill mutates neither aggregate: ``Position.apply``
+        dedups ahead of every write, and ``apply_fill`` accrues only behind
+        ``changes``.
 
         The direction is read off each fill rather than taken as a parameter,
         which is the one place this verb and ``apply_fill`` differ: a heal has no
@@ -293,8 +304,6 @@ class PortfolioProjection:
         otherwise have to reconstruct positionally against a length only this
         method guarantees.
         """
-        if not fills and cash is None:
-            return None
         folded: list[LedgerChange] = []
         applied: set[str] = set()
         for fill in fills:
@@ -305,6 +314,8 @@ class PortfolioProjection:
                 # and the cycle emits at most one size finding per symbol, so a
                 # set loses nothing a list would have kept.
                 applied.add(fill.event_id)
+        if not applied and cash is None:
+            return None
         if cash is not None:
             self._account.correct_cash(cash.target, event_id=cash.event_id)
         return HealChange(account=self._account, fills=tuple(folded), applied=frozenset(applied))
