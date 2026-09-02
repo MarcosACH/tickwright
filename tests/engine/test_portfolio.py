@@ -441,6 +441,30 @@ def test_paper_locks_an_isolated_positions_collateral_at_the_notional_it_opened_
     assert change.position.isolated_collateral == Decimal("2100")
 
 
+def test_live_leaves_an_isolated_collateral_the_venue_is_the_authority_for_alone() -> None:
+    """The same open on a live-shaped ledger writes **no** collateral of its own.
+
+    `genesis_collateral is None` is the declared-versus-ingested predicate the
+    recovery path already turns on (ADR-0043 §10), and it answers this question
+    too: paper *declares* the margin it moved in, live *ingests* what the venue
+    moved (`marginUsed − unrealizedPnl`, ADR-0043 §3). Computing one here would
+    put a number on the ledger the venue never posted — and it would be wrong
+    at the first `updateIsolatedMargin` top-up, which live models and paper
+    does not.
+
+    Identical inputs to the case above, so the only thing that differs is which
+    side of that predicate the account sits on.
+    """
+    projection = _projection(
+        None, leverage=LeverageBook(entries={"BTC": LeverageSpec(mode="isolated", leverage=10)})
+    )
+    change = projection.apply_fill(
+        _fill(trade_id="f1", quantity="0.5", price="42000"), side=Side.BUY
+    )
+
+    assert change.position.isolated_collateral == Decimal("0")
+
+
 def test_a_position_the_projection_has_no_mark_for_reports_no_instant() -> None:
     """``mark_ts is None`` ⟺ the mark is absent — the one signal a reader has for
     telling "never valued" from "valued a while ago" (ADR-0041 §6)."""

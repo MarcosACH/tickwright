@@ -402,6 +402,15 @@ class PortfolioProjection:
         """
         if PositionChange.OPENED not in changes:
             return
+        if self._spec.genesis_collateral is None:
+            # The declared-versus-ingested predicate, the same one recovery's
+            # genesis seed turns on (ADR-0043 §10): paper *declares* the margin
+            # it moved in, live *ingests* what the venue moved (``marginUsed −
+            # unrealizedPnl``, ADR-0043 §3). Computing one here would put a
+            # number on the ledger the venue never posted, and would be wrong
+            # from the first ``updateIsolatedMargin`` top-up — which live has
+            # and paper does not model (ADR-0040 §1).
+            return
         leverage = self.leverage_for(position.symbol)
         if leverage.mode != "isolated":
             # Cross posts no bucket of its own — its margin comes out of the
