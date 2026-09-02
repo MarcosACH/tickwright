@@ -735,21 +735,23 @@ class PortfolioProjection:
         position = self._positions.get((strategy_id, symbol))
         if position is None:
             return None
-        return self._view(position, net=self.account_net())
+        return self._view(position, net=self.account_net(), upnl=self.account_unrealized())
 
     def open_positions(self, *, strategy_id: str | None) -> tuple[PositionView, ...]:
         """Every partition of ``strategy_id`` still holding exposure.
 
-        One fold for the whole call, deliberately: the net is an aggregation over
-        every partition, so folding it per view would be quadratic in the book —
-        and, worse, would let two views in one returned tuple be computed
-        against two different folds if a fill landed between them. The reads are
-        synchronous so that cannot actually happen today; taking the fold once
-        is what keeps it impossible rather than merely unreachable.
+        One fold for the whole call, deliberately — **both** folds: the net and
+        the account-net uPnL are each an aggregation over every partition, so
+        folding either per view would be quadratic in the book — and, worse,
+        would let two views in one returned tuple be computed against two
+        different folds if a fill landed between them. The reads are synchronous
+        so that cannot actually happen today; taking the folds once is what
+        keeps it impossible rather than merely unreachable.
         """
         net = self.account_net()
+        upnl = self.account_unrealized()
         return tuple(
-            self._view(position, net=net)
+            self._view(position, net=net, upnl=upnl)
             for (owner, _symbol), position in self._positions.items()
             if owner == strategy_id and not position.is_flat
         )
@@ -785,17 +787,29 @@ class PortfolioProjection:
             {symbol: mark.price for symbol, mark in self._marks.items()},
         )
 
-    def _view(self, position: Position, *, net: dict[str, Decimal]) -> PositionView:
+    def _view(
+        self,
+        position: Position,
+        *,
+        net: dict[str, Decimal],
+        upnl: dict[str, Decimal | None],
+    ) -> PositionView:
         """Assemble one partition's view against the mark held for its symbol.
 
         The mark is resolved here, from the private cache, rather than passed in
         by the caller: pushing mark-sourcing onto every reader is exactly what
         the single always-available read path exists to prevent (ADR-0034/0039).
+
+        The account-net uPnL is resolved here for the same reason, and off the
+        **same** ``self._positions``/``self._marks`` snapshot as the mark — so
+        the position-grain half of the view cannot straddle a fill the own-slice
+        half is on the other side of (ADR-0041 §1).
         """
         mark = self._marks.get(position.symbol)
         return position_view(
             position,
             account_net=net.get(position.symbol, _ZERO),
+            account_unrealized_pnl=upnl.get(position.symbol),
             mark=mark.price if mark is not None else None,
             mark_ts=mark.ts_event if mark is not None else None,
             leverage=self.leverage_for(position.symbol),

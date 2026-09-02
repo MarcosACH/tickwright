@@ -175,6 +175,7 @@ def test_funding_accrues_on_its_own_line_and_never_into_price_or_pnl() -> None:
     view = position_view(
         position,
         account_net=position.signed_size,
+        account_unrealized_pnl=None,
         mark=None,
         mark_ts=None,
         leverage=DEFAULT_LEVERAGE,

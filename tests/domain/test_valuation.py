@@ -81,7 +81,13 @@ def test_a_held_position_with_no_mark_reads_unknown_rather_than_worthless() -> N
     position = _position(quantity="2", price="100", side=Side.BUY)
 
     view = position_view(
-        position, account_net=Decimal("2"), mark=None, mark_ts=None, leverage=CROSS_10X, spec=None
+        position,
+        account_net=Decimal("2"),
+        account_unrealized_pnl=None,
+        mark=None,
+        mark_ts=None,
+        leverage=CROSS_10X,
+        spec=None,
     )
 
     assert view.unrealized_pnl is None
@@ -117,7 +123,13 @@ def test_a_flat_position_with_no_mark_still_reads_real_zeros() -> None:
     )
 
     view = position_view(
-        position, account_net=Decimal("0"), mark=None, mark_ts=None, leverage=CROSS_10X, spec=None
+        position,
+        account_net=Decimal("0"),
+        account_unrealized_pnl=None,
+        mark=None,
+        mark_ts=None,
+        leverage=CROSS_10X,
+        spec=None,
     )
 
     assert view.unrealized_pnl == Decimal("0")
@@ -134,7 +146,13 @@ def test_the_two_terms_take_their_zero_from_different_facts() -> None:
     position = _position(quantity="2", price="100", side=Side.BUY)
 
     view = position_view(
-        position, account_net=Decimal("0"), mark=None, mark_ts=None, leverage=CROSS_10X, spec=None
+        position,
+        account_net=Decimal("0"),
+        account_unrealized_pnl=None,
+        mark=None,
+        mark_ts=None,
+        leverage=CROSS_10X,
+        spec=None,
     )
 
     assert view.notional == Decimal("0")
@@ -181,6 +199,7 @@ def test_a_cross_position_posts_its_notional_divided_by_the_configured_leverage(
     view = position_view(
         position,
         account_net=Decimal("0.5"),
+        account_unrealized_pnl=Decimal("1000"),  # 0.5 x (60000 - 58000), one partition
         mark=Decimal("60000"),
         mark_ts=9_000,
         leverage=CROSS_10X,
@@ -211,6 +230,7 @@ def test_an_isolated_position_posts_its_locked_collateral_plus_unrealized_pnl() 
     at_64796 = position_view(
         position,
         account_net=Decimal("0.002"),
+        account_unrealized_pnl=Decimal("-0.038"),  # 0.002 x (64796 - 64815)
         mark=Decimal("64796"),
         mark_ts=9_000,
         leverage=ISOLATED_5X,
@@ -219,6 +239,7 @@ def test_an_isolated_position_posts_its_locked_collateral_plus_unrealized_pnl() 
     at_64794 = position_view(
         position,
         account_net=Decimal("0.002"),
+        account_unrealized_pnl=Decimal("-0.042"),  # 0.002 x (64794 - 64815)
         mark=Decimal("64794"),
         mark_ts=9_003,
         leverage=ISOLATED_5X,
@@ -243,6 +264,7 @@ def test_maintenance_margin_is_the_flat_tier_zero_rate_on_notional() -> None:
     view = position_view(
         position,
         account_net=Decimal("0.09"),
+        account_unrealized_pnl=Decimal("113.49"),  # 0.09 x (65261 - 64000)
         mark=Decimal("65261"),
         mark_ts=9_000,
         leverage=CROSS_10X,
@@ -270,6 +292,7 @@ def test_maintenance_margin_stays_flat_above_the_first_tier_band() -> None:
     view = position_view(
         position,
         account_net=Decimal("0.185"),
+        account_unrealized_pnl=Decimal("233.655"),  # 0.185 x (65263 - 64000)
         mark=Decimal("65263"),
         mark_ts=9_000,
         leverage=CROSS_10X,
@@ -292,7 +315,13 @@ def test_a_flat_account_net_reads_a_real_zero_maintenance_with_no_mark_and_no_sp
     position = _position(quantity="2", price="100", side=Side.BUY)
 
     view = position_view(
-        position, account_net=Decimal("0"), mark=None, mark_ts=None, leverage=CROSS_10X, spec=None
+        position,
+        account_net=Decimal("0"),
+        account_unrealized_pnl=None,
+        mark=None,
+        mark_ts=None,
+        leverage=CROSS_10X,
+        spec=None,
     )
 
     assert view.notional == Decimal("0")
@@ -331,6 +360,7 @@ def test_the_per_term_rule_holds_in_both_margin_modes() -> None:
         flat_view = position_view(
             closed,
             account_net=Decimal("0"),
+            account_unrealized_pnl=Decimal("0"),
             mark=None,
             mark_ts=None,
             leverage=mode,
@@ -339,6 +369,7 @@ def test_the_per_term_rule_holds_in_both_margin_modes() -> None:
         held_view = position_view(
             held,
             account_net=Decimal("2"),
+            account_unrealized_pnl=None,
             mark=None,
             mark_ts=None,
             leverage=mode,
@@ -349,3 +380,44 @@ def test_the_per_term_rule_holds_in_both_margin_modes() -> None:
         assert flat_view.maintenance_margin == Decimal("0"), mode
         assert held_view.margin_used is None, mode
         assert held_view.maintenance_margin is None, mode
+
+
+def test_the_view_reports_position_grain_economics_beside_the_own_slice() -> None:
+    """ADR-0041 §4's two grains in one view, and the fields that carry each.
+
+    ``unrealized_pnl`` is the **own slice** — the fills this strategy placed.
+    ``margin_used``, ``notional``, ``leverage`` and ``margin_mode`` describe the
+    **whole venue position**: one collateral bucket, one ``liquidationPx``, keyed
+    per position and never per strategy. Isolated ``margin_used`` therefore takes
+    its uPnL term at account-net grain, not from the field beside it.
+
+    Foreign flow is where the two come apart in v1 (§5). This strategy holds
+    ``+0.002`` entered at 64815; the reserved unattributed partition holds a
+    further ``+0.001`` entered at 64000, so the account nets ``+0.003``. Worked
+    by hand at mark 64796, the two legs separately:
+
+        own slice   0.002 x (64796 - 64815) = -0.038
+        foreign     0.001 x (64796 - 64000) = +0.796
+        account net                            +0.758
+
+    so the bucket reports ``25.898067 + 0.758 = 26.656067`` while the strategy's
+    own line still reads ``-0.038``.
+    """
+    position = _position(
+        quantity="0.002", price="64815", side=Side.BUY, isolated_collateral="25.898067"
+    )
+
+    view = position_view(
+        position,
+        account_net=Decimal("0.003"),
+        account_unrealized_pnl=Decimal("0.758"),
+        mark=Decimal("64796"),
+        mark_ts=9_000,
+        leverage=ISOLATED_5X,
+        spec=BTC_40X,
+    )
+
+    assert view.unrealized_pnl == Decimal("-0.038")
+    assert view.margin_used == Decimal("26.656067")
+    assert view.leverage == 5
+    assert view.margin_mode == "isolated"

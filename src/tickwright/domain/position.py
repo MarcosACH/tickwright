@@ -19,6 +19,7 @@ from enum import StrEnum
 from .enums import Side
 from .errors import InvariantViolation
 from .events import OrderFillEvent, ReconciliationFill
+from .leverage import MarginMode
 
 _ZERO = Decimal("0")
 
@@ -93,12 +94,31 @@ class PositionView:
     so two strategies long the same symbol read one notional. A magnitude, since
     exposure has no direction. ``None`` on an absent mark unless the account nets
     flat, where ``|0| × mark`` is zero at every mark."""
+    leverage: int
+    """The **set nominal cap** for the symbol, the integer that fixes the
+    initial-margin fraction ``1/leverage`` (ADR-0041 §4.1).
+
+    Position-grain and operator-authored: it is the configured value the engine
+    pushed to the venue at boot (ADR-0044 §4), not a realized ratio — that is
+    ``effective_leverage``. Reported beside the amounts it produced so a reader
+    can tell a small ``margin_used`` at high leverage from a small position."""
+    margin_mode: MarginMode
+    """Which of the two margin rules produced this view's amounts (ADR-0040 §1).
+
+    Carried rather than inferred: ``margin_used`` is ``notional / leverage``
+    under cross and ``isolated_collateral + unrealized_pnl`` under isolated, and
+    the two are different rules rather than one parameterised, so a reader
+    comparing amounts across symbols needs to know which it is holding."""
     margin_used: Decimal | None
     """The collateral this position has posted, at position grain (ADR-0040 §2).
 
-    Cross posts ``notional / leverage`` out of the shared pool. Tier-2 in both
-    modes and therefore ``None`` on an absent mark whose terms need it — cross
-    because ``notional`` does (#142)."""
+    Cross posts ``notional / leverage`` out of the shared pool. Isolated reports
+    its locked bucket marked to market, ``isolated_collateral + unrealized_pnl``
+    — where the uPnL term is the symbol's **account-net** total, not the
+    own-slice field beside it (ADR-0041 §4): the venue holds one bucket per
+    position, so under foreign flow the bucket's mark-to-market is not this
+    strategy's. Tier-2 in both modes and therefore ``None`` on an absent mark
+    whose terms need it — cross because ``notional`` does (#142)."""
     maintenance_margin: Decimal | None
     """The collateral that must remain behind the position before liquidation:
     ``notional × margin_maint`` at the flat tier-0 rate (ADR-0040 §4).

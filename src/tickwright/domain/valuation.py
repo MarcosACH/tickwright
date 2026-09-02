@@ -29,6 +29,7 @@ def position_view(
     position: Position,
     *,
     account_net: Decimal,
+    account_unrealized_pnl: Decimal | None,
     mark: Decimal | None,
     mark_ts: int | None,
     leverage: LeverageSpec,
@@ -37,7 +38,15 @@ def position_view(
     """One partition's frozen snapshot, Tier-1 and Tier-2 in one read.
 
     ``account_net`` is the symbol's size summed over **every** partition, the
-    grain the position-grain half is computed at; ``mark`` is the latest mark the
+    grain the position-grain half is computed at, and ``account_unrealized_pnl``
+    is that same Σ one tier up — the whole venue position's mark-to-market,
+    which isolated ``margin_used`` needs because the venue holds one collateral
+    bucket per position and not one per strategy (ADR-0041 §4). It is a separate
+    input rather than the ``unrealized_pnl`` this function computes, because
+    those two are the same number only until foreign flow appears in the symbol
+    (§5), and the view is required to carry both grains at once.
+
+    ``mark`` is the latest mark the
     projection holds for this symbol and ``mark_ts`` its observation instant,
     both ``None`` when it holds none. Every input is explicit and required —
     there is no defaulting, because each default would be a wrong answer a caller
@@ -74,11 +83,13 @@ def position_view(
         funding=position.funding,
         unrealized_pnl=unrealized_pnl,
         notional=notional,
+        leverage=leverage.leverage,
+        margin_mode=leverage.mode,
         margin_used=_margin_used(
             notional,
             leverage=leverage,
             isolated_collateral=position.isolated_collateral,
-            unrealized_pnl=unrealized_pnl,
+            unrealized_pnl=account_unrealized_pnl,
         ),
         maintenance_margin=_maintenance_margin(notional, spec=spec),
         mark_ts=mark_ts,
@@ -139,11 +150,15 @@ def _margin_used(
       re-margins a held position, so reading the setting back would report a
       number the venue has stopped holding.
 
+    Both terms are **position-grain** (ADR-0041 §4.1): ``unrealized_pnl`` is the
+    symbol's account-net total, never one strategy's slice, because the bucket
+    the venue holds backs the whole position.
+
     Nullability is inherited from whichever terms the mode actually uses, which
     is why the branch takes both and not a pre-selected one: cross inherits from
     ``notional`` and isolated from ``unrealized_pnl``, and the two come apart
     under offsetting partitions — a flat account-net gives cross its real ``0``
-    at a mark the still-open own slice needs and does not have.
+    at a mark the still-open legs behind it need and do not have.
     """
     if leverage.mode == "isolated":
         if unrealized_pnl is None:
