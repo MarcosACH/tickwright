@@ -199,16 +199,19 @@ def test_a_tier_1_divergence_heals_to_the_venues_own_figures_through_the_real_ad
     assert healed.size == Decimal("0.002")
     assert healed.entry_price == Decimal("64809.0")
     assert ledger.account().cash == Decimal("25.9604")
-    assert ledger.open_positions(strategy_id="alpha") == ()
 
-    # The record, and the durable half behind it.
+    # The record, and the durable half behind it. The roster is asserted whole
+    # rather than indexed into: the unattributed partition being *the* one the
+    # pass created is what says the heal reached for no strategy, and a lookup
+    # by key would pass just as well beside one it had.
     assert [
         (log["field"], log["symbol"], log["event_id"])
         for log in logs
         if log["event"] == NamedEvent.ACCOUNT_HEALED.value
     ] == [("signed_size", "BTC", "reconcile:BTC:7"), ("cash", None, "reconcile:cash:7")]
-    stored = {(p.strategy_id, p.symbol): p for p in store.all_positions()}
-    assert stored[(None, "BTC")].signed_size == Decimal("0.002")
+    assert [(p.strategy_id, p.symbol, p.signed_size) for p in store.all_positions()] == [
+        (None, "BTC", Decimal("0.002"))
+    ]
     restored = store.load_account()
     assert restored is not None
     assert restored.account_id == opening.account_spec().account_id

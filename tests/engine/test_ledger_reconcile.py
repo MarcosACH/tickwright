@@ -319,6 +319,13 @@ def test_a_size_divergence_heals_through_a_fill_into_the_unattributed_partition(
     The venue holds SOL the ledger has never seen — foreign flow, the case
     where the two halves are separable at all: a heal that reached for the
     symbol's owning strategy would have none to find.
+
+    The partition roster is read off the **store** rather than a strategy's view,
+    because "never a strategy's" is a claim about every partition and a view
+    scoped to one owner cannot make it: an implementation that filed the residual
+    under some other id would leave the owner asked about empty and pass. The
+    roster names the one partition that exists, so there is nowhere for it to
+    hide.
     """
     store = SQLiteStore(":memory:")
     keeper = _ledger(store, equity="100000")
@@ -333,7 +340,7 @@ def test_a_size_divergence_heals_through_a_fill_into_the_unattributed_partition(
     assert healed is not None
     assert healed.size == Decimal("10")
     assert healed.entry_price == Decimal("64809")  # the venue's own, off the snapshot
-    assert ledger.open_positions(strategy_id="alpha") == ()
+    assert [(p.strategy_id, p.symbol) for p in store.all_positions()] == [(None, "SOL")]
 
 
 def test_a_heal_is_durable_and_comes_back_on_the_restart_a_fill_comes_back_on() -> None:
