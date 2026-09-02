@@ -1554,3 +1554,100 @@ def test_a_position_opened_since_the_read_reads_none_rather_than_the_formula() -
     btc = projection.position("BTC", strategy_id="alpha")
     assert btc is not None
     assert btc.liquidation_price == _BTC_LIQUIDATION  # the read did land
+
+
+_BTC_ISOLATED_5X = LeverageBook(entries={"BTC": LeverageSpec(mode="isolated", leverage=5)})
+"""**Isolated**, the mode whose ``margin_used`` is the locked bucket rather than
+a division: ``isolated_collateral + unrealized_pnl`` (ADR-0040 §3, as corrected
+by #142). It is the only mode for which the ingest below has anything to carry."""
+
+_BTC_BUCKET = Decimal("25.898067")
+"""The locked collateral #142 measured on a funded isolated position, recovered
+by the adapter as ``marginUsed − unrealizedPnl`` (ADR-0043 §3)."""
+
+
+def _isolated(state: VenueAccountState, collateral: Decimal | None) -> VenueAccountState:
+    """The same snapshot with ``collateral`` on every position it carries.
+
+    ``None`` is not an absent value here: it is the venue saying the position is
+    **cross** and backed by the account pool, which is the claim the adapter's
+    own ``_isolated_collateral`` refuses to guess at.
+    """
+    return replace(
+        state,
+        positions=tuple(replace(p, isolated_collateral=collateral) for p in state.positions),
+    )
+
+
+def test_a_cycle_ingests_the_venues_locked_collateral_onto_the_partition() -> None:
+    """The bucket is the **venue's** to post on live, so it has to be read from
+    the venue (ADR-0043 §3: "the reconcile still re-ingests it").
+
+    Live never computes this number — ``_lock_isolated_collateral`` declines on
+    the declared-versus-ingested predicate — so before the cycle the ledger's
+    bucket is the ``0`` the dataclass opened at, and isolated ``margin_used``,
+    which is ``isolated_collateral + unrealized_pnl``, reports the bare
+    unrealized PnL wearing the bucket's name. That is not a small error: it is
+    the position's mark-to-market where a reader expects its collateral.
+
+    The snapshot agrees with the ledger on every Tier-1 line, so the cycle heals
+    nothing and the ingest is the only thing it leaves behind.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="25.9144", leverage=_BTC_ISOLATED_5X, specs={"BTC": _BTC_SPEC})
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "64815")
+    venue = _AccountVenue(_isolated(account_state("25.9264", "0.012"), _BTC_BUCKET))
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+
+    before = projection.position("BTC", strategy_id="alpha")
+    assert before is not None
+    # The uPnL alone, because nothing has posted a bucket: the degraded read.
+    assert before.margin_used == Decimal("0.012")
+    # And the denominator it is, which is where the damage is legible — a 5x
+    # position reporting five figures of leverage, on a book that is fine.
+    assert before.effective_leverage == Decimal("10802.5")
+
+    divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences == ()
+    after = projection.position("BTC", strategy_id="alpha")
+    assert after is not None
+    assert after.margin_used == _BTC_BUCKET + Decimal("0.012")
+    # The position is levered at what the operator set it to, give or take the
+    # unrealized leg — which is the whole claim `effective_leverage` makes.
+    assert after.effective_leverage is not None
+    assert round(after.effective_leverage, 2) == Decimal("5.00")
+
+
+def test_the_ingested_collateral_lands_in_the_cycles_own_transaction() -> None:
+    """The bucket is **Tier-1 and durable** (ADR-0043 §3), which is the whole
+    reason it cannot ride the memory-only cache the liquidation price does: the
+    recovery window (§6) reads the ledger before the first reconcile of the next
+    life, so a bucket that lived only in memory would read `0` there and report
+    an isolated position's `margin_used` as its bare unrealized PnL again.
+
+    It lands in the *cycle's* transaction rather than one of its own, because a
+    pass's corrections are one answer to one snapshot: split across two writes,
+    a crash between them leaves a durable state the venue never held.
+
+    `_book_fill` folds the projection directly, so the store holds nothing until
+    a checkpoint runs — which makes the row below the cycle's write and not the
+    fill's.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="25.9144", leverage=_BTC_ISOLATED_5X, specs={"BTC": _BTC_SPEC})
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "64815")
+    venue = _AccountVenue(_isolated(account_state("25.9264", "0.012"), _BTC_BUCKET))
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+
+    assert store.all_positions() == []
+
+    asyncio.run(cycle.reconcile_account())
+
+    assert [(p.symbol, p.isolated_collateral) for p in store.all_positions()] == [
+        ("BTC", _BTC_BUCKET)
+    ]

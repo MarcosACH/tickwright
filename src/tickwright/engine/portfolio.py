@@ -165,6 +165,21 @@ class HealChange:
     account: Account
     fills: tuple[LedgerChange, ...]
     applied: frozenset[str]
+    collateral: tuple[Position, ...] = ()
+    """The partitions whose locked bucket this cycle re-ingested (ADR-0043 §3).
+
+    Carried apart from ``fills`` because it is a different kind of move: a fill
+    is folded through ``Position.apply`` and announces itself, while this is an
+    **assignment** against a Tier-1 field the venue is the sole author of on
+    live — the same shape as the cash correction, one grain down. A partition
+    can be in both tuples, and the write dedupes rather than the fold: the
+    object is the same one either way, advanced in place.
+
+    Non-empty is enough on its own to make a cycle worth writing, which is why
+    it is on the change rather than left to the caller to notice: a pass that
+    found every size and the cash line in agreement can still have a bucket to
+    persist, and judged on ``applied`` alone it would return ``None`` and drop
+    the ingest until the next deadline found it again."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -305,6 +320,7 @@ class PortfolioProjection:
         fills: Sequence[ReconciliationFill],
         *,
         cash: CashCorrection | None = None,
+        collateral: Mapping[str, Decimal | None] | None = None,
     ) -> HealChange | None:
         """Fold one cycle's Tier-1 heals — the account grain's write verb.
 
@@ -324,10 +340,38 @@ class PortfolioProjection:
         divergence. Applied after, the target absorbs whatever the fills did
         (``Account.correct_cash``).
 
+        **``collateral`` is an ingest rather than a heal, and it rides here for
+        the reason the cash correction does** (ADR-0043 §3). On live the locked
+        bucket is the venue's to post — ``updateIsolatedMargin`` is an action
+        this engine does not model, and ``_lock_isolated_collateral`` declines
+        on the declared-versus-ingested predicate — so there are not two numbers
+        to compare and nothing to classify as a divergence. What there is, is
+        one Tier-1 field the venue authored, arriving on the same snapshot the
+        sizes and the cash line arrive on. Splitting it into a write of its own
+        would be a second transaction per cycle that a crash could separate from
+        the first, leaving a durable state the venue never held — exactly what
+        ``Checkpointer.checkpoint_heal`` keeps one transaction to prevent. That
+        the move is an assignment rather than a synthetic fill does not put it
+        outside this verb: so is ``Account.correct_cash`` below.
+
+        It is folded **after the fills and before the cash line**. After,
+        because a size heal can open a partition that then has a bucket to
+        take; before is merely where the cash line's own "last" rule leaves it.
+
+        ``None`` is *no snapshot*, which is the paper answer and the only
+        answer paper ever gives — the cadence is live-only (ADR-0034), so the
+        default is what a caller with nothing to ingest passes rather than a
+        mode this verb chooses. A **mapping** replaces wholesale: it carries
+        every position the venue holds, so a symbol of ours absent from it is
+        the venue holding none, which releases the bucket rather than leaving
+        the previous cycle's number standing on a position since closed.
+
         ``None`` when the fold moved nothing, as ``apply_funding``'s ``None`` is
         a dropped accrual: a cycle that corrected nothing must write *nothing*,
         or the pass would re-stamp the account row and be distinguishable from a
-        real correction only by reading the number.
+        real correction only by reading the number. An ingest counts as a move
+        on its own — the bucket is durable state, and a pass that agreed on
+        every size and the cash line can still be the pass that learned it.
 
         **The verdict is the fold's, not the input's**, which is why the check
         sits after the loop and asks ``applied`` rather than ``fills``. A pass
@@ -362,11 +406,96 @@ class PortfolioProjection:
                 # and the cycle emits at most one size finding per symbol, so a
                 # set loses nothing a list would have kept.
                 applied.add(fill.event_id)
-        if not applied and cash is None:
+        ingested = () if collateral is None else self._ingest_collateral(collateral)
+        if not applied and cash is None and not ingested:
             return None
         if cash is not None:
             self._account.correct_cash(cash.target, event_id=cash.event_id)
-        return HealChange(account=self._account, fills=tuple(folded), applied=frozenset(applied))
+        return HealChange(
+            account=self._account,
+            fills=tuple(folded),
+            applied=frozenset(applied),
+            collateral=ingested,
+        )
+
+    def _ingest_collateral(self, venue: Mapping[str, Decimal | None]) -> tuple[Position, ...]:
+        """Take the venue's locked buckets onto the partitions holding them.
+
+        Iterates **our** partitions rather than the venue's map, which is what
+        makes an absent symbol mean something: the snapshot carries every
+        position the venue holds, so a symbol of ours it does not mention is one
+        the venue is backing from the pool or not holding at all, and either way
+        the bucket is released. Driving off the map instead would leave a closed
+        position's collateral standing until something else happened to it.
+
+        A venue ``None`` is the same release, and it is a *positive* claim
+        rather than a gap — the adapter refuses to guess a mode, so ``None``
+        here is "cross, backed by the account pool" (ADR-0043 §3). Our own
+        in-memory field is a plain ``Decimal``, so both cases land on ``0``,
+        which is the value the store's nullable column already restores a
+        cross-margined row to.
+
+        Returns only the partitions it actually **moved**, so an unchanged book
+        writes nothing: the bucket holds still between ``updateIsolatedMargin``
+        calls, and it is mark-invariant by construction (``marginUsed −
+        unrealizedPnl``), so the steady state is a cycle with nothing to ingest.
+        Reporting every partition instead would re-stamp every position row on
+        every deadline, which is the same indistinguishable-from-a-correction
+        write ``apply_funding``'s ``None`` refuses one grain up.
+        """
+        by_symbol: dict[str, list[Position]] = {}
+        for position in self._positions.values():
+            by_symbol.setdefault(position.symbol, []).append(position)
+        moved: list[Position] = []
+        for symbol, partitions in by_symbol.items():
+            bucket = venue.get(symbol)
+            across = tuple(partitions)
+            # ``strict``: one share per partition is ``_share``'s own invariant,
+            # and a silent truncation here would leave a partition holding the
+            # previous cycle's bucket while the Σ still looked right.
+            for position, share in zip(
+                across, self._share(_ZERO if bucket is None else bucket, across=across), strict=True
+            ):
+                if position.isolated_collateral != share:
+                    position.isolated_collateral = share
+                    moved.append(position)
+        return tuple(moved)
+
+    @staticmethod
+    def _share(bucket: Decimal, *, across: tuple[Position, ...]) -> tuple[Decimal, ...]:
+        """Divide one symbol's venue bucket across the partitions holding it.
+
+        Pro-rata by **magnitude**, which is where this parts company with
+        ``_split`` above: funding is signed because a short partition against a
+        longer one genuinely receives out of a payment, while a share of
+        collateral cannot be negative — the bucket backs the whole venue
+        position, and each partition's claim on it is the exposure it
+        contributes regardless of direction. Offsetting legs therefore each hold
+        a positive share of a bucket the venue posted against their net.
+
+        **The last partition takes the residue**, so the shares sum to the
+        venue's number exactly. That is not tidiness: ``valuation.py`` reads the
+        bucket back as the Σ over the partitions, so a rounded split would make
+        the reported ``margin_used`` disagree with the venue's ``marginUsed`` by
+        a drift that ADR-0040 §6's band would eventually alert on — a divergence
+        manufactured by our own division. ``Decimal`` is inexact at any
+        precision, and the single-partition case divides not at all.
+
+        A book with no exposure in the symbol takes ``0`` throughout rather than
+        dividing: every partition is flat, so there is no weight to scale by and
+        no position for the venue to have posted a bucket against.
+        """
+        exposure = sum((abs(position.signed_size) for position in across), _ZERO)
+        if exposure == _ZERO:
+            return tuple(_ZERO for _ in across)
+        shares = []
+        allocated = _ZERO
+        for position in across[:-1]:
+            share = bucket * abs(position.signed_size) / exposure
+            shares.append(share)
+            allocated += share
+        shares.append(bucket - allocated)
+        return tuple(shares)
 
     def apply_fill(self, event: OrderFillEvent | ReconciliationFill, *, side: Side) -> LedgerChange:
         """Fold a fill into its partition and the cash line — the single write

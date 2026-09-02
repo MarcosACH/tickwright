@@ -1421,3 +1421,97 @@ def test_the_scoped_facade_cannot_reach_the_unattributed_partition() -> None:
     # registration gates make that id unobtainable; this is why it would not
     # help even if one were obtained.
     assert restarted.for_strategy(UNATTRIBUTED).position("BTC") is None
+
+
+_ISOLATED_10X = LeverageBook(entries={"BTC": LeverageSpec(mode="isolated", leverage=10)})
+
+
+def _live_isolated() -> PortfolioProjection:
+    """A live ledger in the mode whose collateral the venue authors."""
+    return _projection(None, leverage=_ISOLATED_10X)
+
+
+def test_the_venues_bucket_splits_across_partitions_and_sums_to_it_exactly() -> None:
+    """The venue holds **one** bucket per symbol and knows nothing of our
+    partitions (ADR-0035), so an ingest has to divide it — and `valuation.py`
+    reads it back as the Σ over those partitions, which is what makes the
+    residue rule load-bearing rather than tidy.
+
+    Pro-rata by **magnitude**, not by signed size as funding is: a partition's
+    claim on the collateral behind a position is the exposure it contributes,
+    and a share of a bucket cannot be negative.
+
+    The quantities are chosen to divide inexactly (`1/3` of the bucket), so a
+    quotient-only split would leave the Σ short and manufacture a divergence
+    against the venue's own `marginUsed` out of our own rounding.
+    """
+    projection = _live_isolated()
+    book_fill(projection, _fill(trade_id="f1", quantity="1", price="42000"), side=Side.BUY)
+    book_fill(
+        projection,
+        _fill(trade_id="f2", quantity="2", price="42000", strategy_id="beta"),
+        side=Side.BUY,
+    )
+    bucket = Decimal("12600.01")
+
+    change = projection.apply_heal((), collateral={"BTC": bucket})
+
+    assert change is not None
+    buckets = {p.strategy_id: p.isolated_collateral for p in change.collateral}
+    assert sum(buckets.values()) == bucket  # exact, by the residue
+    assert buckets["alpha"] == bucket / 3  # its own 1-of-3 share, unrounded
+    assert buckets["beta"] == bucket - bucket / 3
+
+
+def test_a_venue_cross_position_releases_the_bucket_it_has_no_claim_on() -> None:
+    """`isolated_collateral is None` on the snapshot is not a gap — the adapter
+    refuses to guess a margin mode, so it is the positive claim *this position
+    is backed by the account pool* (ADR-0043 §3).
+
+    Released to `0` rather than left standing: a bucket that survived the switch
+    would report collateral locked behind a position the venue is margining out
+    of the shared pool, and inflate `margin_used` by the whole of it.
+    """
+    projection = _live_isolated()
+    book_fill(projection, _fill(trade_id="f1", quantity="1", price="42000"), side=Side.BUY)
+    projection.apply_heal((), collateral={"BTC": Decimal("4200")})
+
+    change = projection.apply_heal((), collateral={"BTC": None})
+
+    assert change is not None
+    assert [p.isolated_collateral for p in change.collateral] == [Decimal("0")]
+
+
+def test_a_symbol_the_snapshot_does_not_mention_releases_its_bucket() -> None:
+    """The snapshot carries every position the venue holds, so a symbol absent
+    from it is one the venue is **not** holding — an answer, not a silence.
+
+    The same wholesale-replacement rule `observe_venue_liquidation` keeps for the
+    read-through price beside it: a merge would leave the previous cycle's number
+    standing on a position that has since been closed.
+    """
+    projection = _live_isolated()
+    book_fill(projection, _fill(trade_id="f1", quantity="1", price="42000"), side=Side.BUY)
+    projection.apply_heal((), collateral={"BTC": Decimal("4200")})
+
+    change = projection.apply_heal((), collateral={})
+
+    assert change is not None
+    assert [p.isolated_collateral for p in change.collateral] == [Decimal("0")]
+
+
+def test_a_cycle_with_nothing_new_to_ingest_writes_nothing() -> None:
+    """The bucket is mark-invariant by construction (`marginUsed − unrealizedPnl`)
+    and moves only on an `updateIsolatedMargin` or a fill, so the steady state is
+    a cadence with nothing to ingest.
+
+    `None` there for the same reason `apply_funding` returns it on a dropped
+    accrual: a pass that moved nothing must write nothing, or every deadline
+    re-stamps every position row and a real correction is distinguishable from a
+    no-op only by reading the number.
+    """
+    projection = _live_isolated()
+    book_fill(projection, _fill(trade_id="f1", quantity="1", price="42000"), side=Side.BUY)
+    assert projection.apply_heal((), collateral={"BTC": Decimal("4200")}) is not None
+
+    assert projection.apply_heal((), collateral={"BTC": Decimal("4200")}) is None
