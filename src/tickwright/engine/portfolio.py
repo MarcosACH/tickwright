@@ -24,6 +24,7 @@ from tickwright.domain import (
     Account,
     AccountSpec,
     AccountView,
+    CashCorrection,
     Clock,
     FundingAccrual,
     InvariantViolation,
@@ -241,8 +242,13 @@ class PortfolioProjection:
         """
         self._marks[mark.symbol] = mark
 
-    def apply_heal(self, fills: Sequence[ReconciliationFill]) -> HealChange | None:
-        """Fold one cycle's Tier-1 size heals — the account grain's write verb.
+    def apply_heal(
+        self,
+        fills: Sequence[ReconciliationFill],
+        *,
+        cash: CashCorrection | None = None,
+    ) -> HealChange | None:
+        """Fold one cycle's Tier-1 heals — the account grain's write verb.
 
         Every fill goes through ``apply_fill`` below, which is the whole point:
         ADR-0034 heals *through* a synthetic event on the same idempotent path a
@@ -252,21 +258,33 @@ class PortfolioProjection:
         up with an entry price and a cost basis rather than a size floating free
         of a price.
 
-        ``None`` for an empty heal, as ``apply_funding``'s ``None`` is a dropped
-        accrual: a cycle that found nothing to correct must write *nothing*, or
-        a pass over an agreeing book would re-stamp the account row and be
-        distinguishable from a real correction only by reading the number.
+        **The cash correction is folded last, and the order is the reason it can
+        be an assignment.** A size heal that closes into a partition realizes
+        PnL, which accrues onto the cash line on its way past; correcting first
+        would leave that realized leg stacked on top of the venue's figure, and
+        the next cycle would report the heal's own arithmetic as a fresh
+        divergence. Applied after, the target absorbs whatever the fills did
+        (``Account.correct_cash``).
+
+        ``None`` when there is nothing of either kind, as ``apply_funding``'s
+        ``None`` is a dropped accrual: a cycle that found nothing to correct must
+        write *nothing*, or a pass over an agreeing book would re-stamp the
+        account row and be distinguishable from a real correction only by reading
+        the number.
 
         The direction is read off each fill rather than taken as a parameter,
         which is the one place this verb and ``apply_fill`` differ: a heal has no
         saga for the side to ride on (``ReconciliationFill``).
         """
-        if not fills:
+        if not fills and cash is None:
             return None
-        return HealChange(
+        change = HealChange(
             account=self._account,
             fills=tuple(self.apply_fill(fill, side=fill.side) for fill in fills),
         )
+        if cash is not None:
+            self._account.correct_cash(cash.target, event_id=cash.event_id)
+        return change
 
     def apply_fill(self, event: OrderFillEvent | ReconciliationFill, *, side: Side) -> LedgerChange:
         """Fold a fill into its partition and the cash line — the single write

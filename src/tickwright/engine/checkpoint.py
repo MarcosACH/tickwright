@@ -46,6 +46,7 @@ from collections.abc import Sequence
 from tickwright.domain import (
     EMPTY_LEVERAGE_BOOK,
     AccountSpec,
+    CashCorrection,
     Clock,
     FundingAccrual,
     InvariantViolation,
@@ -212,7 +213,12 @@ class Checkpointer:
         self._cache.project(order, ts_ns=ts_ns)
         self._portfolio.project(change)
 
-    def checkpoint_heal(self, fills: Sequence[ReconciliationFill]) -> None:
+    def checkpoint_heal(
+        self,
+        fills: Sequence[ReconciliationFill],
+        *,
+        cash: CashCorrection | None = None,
+    ) -> None:
         """Make one reconcile cycle's Tier-1 heal durable — fold, write, project.
 
         The same three steps in the same order as ``checkpoint_fill``, and for
@@ -230,12 +236,20 @@ class Checkpointer:
         whatever it finds, and it only is if a refused heal leaves the book
         exactly as it was.
 
+        **Both halves of the heal ride that one transaction**, which is why the
+        cash correction arrives here rather than through a verb of its own: a
+        cycle's size heals and its cash correction are one answer to one
+        snapshot, and split across two writes either ordering leaves a durable
+        state the venue never held — a corrected line against uncorrected
+        positions, or the reverse. The fold that puts them in order is the
+        projection's (``apply_heal``); what this owns is that they land together.
+
         An empty heal writes nothing at all, on ``checkpoint_funding``'s rule
         below: a pass over an agreeing book has no state to persist, and
         re-stamping the account row would make it indistinguishable from a
         correction by anything but the number.
         """
-        change = self._portfolio.apply_heal(fills)
+        change = self._portfolio.apply_heal(fills, cash=cash)
         if change is None:
             return
         try:
@@ -248,9 +262,12 @@ class Checkpointer:
             # Only the seam's own failure type is relabelled, as its siblings do:
             # anything else crossing it is a bug below the store, not a failed
             # write.
+            # Named by what the pass was correcting, both halves: a cash-only
+            # heal carries no symbol, and reporting it as a failure for the
+            # empty string would hide which correction was lost.
+            healed = [fill.symbol for fill in fills] + ([] if cash is None else ["cash"])
             raise InvariantViolation(
-                "ledger heal checkpoint write failed for "
-                f"{', '.join(fill.symbol for fill in fills)}"
+                f"ledger heal checkpoint write failed for {', '.join(healed)}"
             ) from exc
         self._portfolio.project_heal(change)
 

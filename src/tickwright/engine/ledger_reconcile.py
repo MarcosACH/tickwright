@@ -18,6 +18,7 @@ from enum import Enum
 
 from tickwright.domain import (
     AccountView,
+    CashCorrection,
     Exchange,
     ReconciliationFill,
     Side,
@@ -228,7 +229,15 @@ class LedgerReconciliation:
             + self._equity(state, equity=view.equity)
             + self._unrealized(state, ledger=unrealized, net=net)
         )
-        self._checkpointer.checkpoint_heal(self._size_heals(state, divergences))
+        # One stamp for the pass, spent on both halves of its heal: the
+        # deterministic key is the *cycle's*, so a size heal and the cash
+        # correction beside it are one retryable unit rather than two the clock
+        # could separate.
+        heal_ts_ns = self._checkpointer.clock.timestamp_ns()
+        self._checkpointer.checkpoint_heal(
+            self._size_heals(state, divergences, ts_ns=heal_ts_ns),
+            cash=self._cash_heal(divergences, ts_ns=heal_ts_ns),
+        )
         tiers = [divergence.tier for divergence in divergences]
         named_event(
             NamedEvent.ACCOUNT_RECONCILED,
@@ -238,8 +247,37 @@ class LedgerReconciliation:
         )
         return divergences
 
+    @staticmethod
+    def _cash_heal(divergences: tuple[Divergence, ...], *, ts_ns: int) -> CashCorrection | None:
+        """This pass's Tier-1 cash finding as the correction that closes it.
+
+        The target is the divergence's own venue side, so the figure the cycle
+        heals to is the figure it classified against — read again here, it could
+        be a second derivation of ``venue_cash`` off the same snapshot, and the
+        two disagreeing would heal toward a number the pass never reported.
+
+        ``None`` when the line agrees, which is what keeps an agreeing pass a
+        read: ``_cash`` reports on exact inequality, so a finding here always has
+        a real gap behind it.
+
+        There is at most one — the account has one collateral pool (ADR-0041 §2)
+        — and the search says so rather than assuming it: a second would mean
+        ``_cash`` had grown a grain, and silently healing to whichever came first
+        is the failure mode a ``next`` hides.
+        """
+        found = [
+            divergence
+            for divergence in divergences
+            if divergence.tier is DivergenceTier.TIER_1 and divergence.field is DivergenceField.CASH
+        ]
+        if not found:
+            return None
+        (correction,) = found
+        return CashCorrection(target=correction.venue, ts_ns=ts_ns)
+
+    @staticmethod
     def _size_heals(
-        self, state: VenueAccountState, divergences: tuple[Divergence, ...]
+        state: VenueAccountState, divergences: tuple[Divergence, ...], *, ts_ns: int
     ) -> tuple[ReconciliationFill, ...]:
         """Turn this pass's Tier-1 size findings into the fills that correct them.
 
@@ -271,8 +309,10 @@ class LedgerReconciliation:
         saga has already moved. That makes it structurally untestable through
         this seam, which is why the suite pins the priceless finding above
         instead: same claim, reachable input.
+
+        ``ts_ns`` is the cycle's, handed in beside the cash correction's rather
+        than read here: both halves of one pass's heal are keyed on one stamp.
         """
-        ts_ns = self._checkpointer.clock.timestamp_ns()
         prices = {position.symbol: position.entry_price for position in state.positions}
         return tuple(
             ReconciliationFill(

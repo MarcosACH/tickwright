@@ -411,6 +411,41 @@ def test_a_cash_line_disagreeing_with_the_equity_the_venue_implies_diverges_at_t
     )
 
 
+def test_a_cash_divergence_heals_the_line_to_the_one_the_venue_implies() -> None:
+    """The Tier-1 cash heal: the line is corrected **to** venue truth, not
+    nudged toward it, and the correction is durable on the same transaction the
+    size heals ride (ADR-0034).
+
+    A **target, not a delta**, which is the whole shape of the verb. The venue
+    publishes no cash line, so what the ledger is corrected to is the one its
+    snapshot implies — ``equity − Σ uPnL``, the same derivation the genesis was
+    ingested through — and a target absorbs whatever else moved the line in the
+    same fold rather than stacking on top of it.
+
+    **Genesis does not move.** The opening declaration is written once and is
+    the account's identity, never recomputed from the line that has accrued away
+    from it (ADR-0042 §3); a heal that touched it would erase the distance the
+    ledger has travelled and make every later cash divergence read against the
+    wrong origin. ADR-0042 §4's four accruing inputs are untouched too — this is
+    a correction, not a fifth input.
+
+    The venue reports a cash line 500 above the ledger's on an account holding
+    nothing, which is the shape an operator's mid-run deposit arrives in: a
+    known-benign alert that still heals, because the venue is authoritative.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    cycle = LedgerReconciliation(exchange=_AccountVenue(_held("100500")), checkpointer=keeper)
+
+    asyncio.run(cycle.reconcile_account())
+
+    assert keeper.portfolio.account().cash == Decimal("100500")
+    restored = store.load_account()
+    assert restored is not None
+    assert restored.cash == Decimal("100500")
+    assert restored.genesis_collateral == Decimal("100000")
+
+
 def _mark(projection: PortfolioProjection, symbol: str, price: str) -> None:
     """Feed the projection the Tier-2 valuation input (ADR-0039).
 

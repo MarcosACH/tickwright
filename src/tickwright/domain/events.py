@@ -524,6 +524,36 @@ class ReconciliationFill:
         return f"reconcile:{self.symbol}:{self.ts_ns}"
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CashCorrection:
+    """One Tier-1 cash heal: the figure the account cycle corrects the collateral
+    line **to** (ADR-0034, ADR-0042 §4's standing exception).
+
+    ``ReconciliationFill``'s sibling at the account grain, and it is not a fill
+    because there is nothing to book: the venue publishes no cash line, so what a
+    cycle knows is the balance its snapshot *implies* — never a movement that
+    produced it. Modelling it as a signed adjustment would invent a
+    ``CashAdjustment`` event ADR-0042 §4 explicitly rejects, and would have to be
+    computed against a cash line the same cycle's size heals are still moving.
+
+    So it carries a **target**, and the whole idempotency argument follows from
+    that: re-applying it assigns the same figure again. The ``event_id`` is
+    provenance rather than a key, stamped with the cycle's ``ts_ns`` for
+    ``ReconciliationFill``'s reason — a content key would collapse the same drift
+    recurring later onto the first heal's id and never correct it.
+
+    Account grain, so there is no symbol on it: the account has one collateral
+    pool, and open PnL is not attributable to it (ADR-0041 §2).
+    """
+
+    target: Decimal
+    ts_ns: int
+
+    @property
+    def event_id(self) -> str:
+        return f"reconcile:cash:{self.ts_ns}"
+
+
 # --- Venue truth for one cloid (a query result, not an event) ---------------
 
 

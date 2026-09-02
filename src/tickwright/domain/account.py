@@ -190,6 +190,36 @@ class Account:
         """
         self._cash += funding
 
+    def correct_cash(self, target: Decimal, *, event_id: str) -> None:
+        """Set the cash line to venue truth — the standing **correction**, and
+        the one writer here that is not one of the four accruing inputs
+        (ADR-0042 §4, ADR-0034).
+
+        **A target, not a delta**, and that is the method's whole subject. The
+        heal exists precisely because the four inputs failed to reproduce the
+        venue's number, so a delta would have to be computed against a reading of
+        this line taken *before* the same cycle's size heals moved it — and a
+        size heal that closes into a partition realizes PnL, which accrues here
+        on the way past. Assigning absorbs that by construction: whatever the
+        fold did to the line in between, the line ends at the figure the venue
+        implies. A delta would double-count the realized leg or, computed after,
+        chase it.
+
+        Genesis is deliberately untouched. The opening declaration is the
+        account's identity and is written once (ADR-0042 §3): moving it to keep
+        ``cash − genesis`` looking like the engine's own accruals would erase the
+        record that a correction happened at all, which is the auditability the
+        heal exists for.
+
+        Unconditional and keyed by nothing, as the accruals are. The gatekeeper
+        is the cycle: it emits one correction per pass, having compared against
+        one fold. ``event_id`` is provenance — *which fact* moved the line — and
+        applying the same one twice is a re-assignment to the same target rather
+        than a second effect, so idempotency is a property of the verb here
+        rather than of a key.
+        """
+        self._cash = target
+
     @classmethod
     def restore(
         cls,

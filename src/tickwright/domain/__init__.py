@@ -29,6 +29,7 @@ from .errors import (
 )
 from .events import (
     CancelSignal,
+    CashCorrection,
     Event,
     ExecutionReport,
     FillReport,
@@ -127,6 +128,7 @@ __all__ = [
     "AccountView",
     "Approved",
     "CancelSignal",
+    "CashCorrection",
     "Denied",
     "Event",
     "ExecutionReport",
