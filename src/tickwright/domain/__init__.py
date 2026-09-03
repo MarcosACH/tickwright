@@ -28,6 +28,7 @@ from .errors import (
     VenueReadUnresolvable,
 )
 from .events import (
+    AccountModeVerdict,
     CancelSignal,
     CashCorrection,
     Event,
@@ -87,11 +88,13 @@ from .position import (
     account_net_size,
 )
 from .protocols import (
+    AccountAnchor,
     Clock,
     EventBus,
     Exchange,
     Handler,
     MarketFeed,
+    OrderAnchor,
     Portfolio,
     PreTradeGuard,
     ReplayClock,
@@ -124,6 +127,7 @@ __all__ = [
     "EMPTY_LEVERAGE_BOOK",
     "UNATTRIBUTED",
     "Account",
+    "AccountModeVerdict",
     "AccountSpec",
     "AccountView",
     "Approved",
@@ -193,12 +197,14 @@ __all__ = [
     # retry pacing
     "Backoff",
     "Deadline",
-    # seam Protocols
+    # seam Protocols — ``Exchange`` composes the two anchors beside it
+    "AccountAnchor",
     "Clock",
     "EventBus",
     "Exchange",
     "Handler",
     "MarketFeed",
+    "OrderAnchor",
     "Portfolio",
     "PreTradeGuard",
     "ReplayClock",

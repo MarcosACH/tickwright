@@ -26,13 +26,14 @@ from hyperliquid_fakes import (
 )
 from ledgers import GENESIS, checkpointer
 from pydantic import SecretStr
-from venue_doubles import DERIVED_STATE, LiveVenueDouble, VenueDouble
+from venue_doubles import DERIVED_STATE, LiveVenueDouble, VenueDouble, account_state
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
+    AccountModeVerdict,
     AggressorSide,
     Exchange,
     ExecutionReport,
@@ -804,6 +805,37 @@ def _drive_account_reconciled() -> None:
     asyncio.run(go())
 
 
+def _drive_account_mode_unverified() -> None:
+    """The same cycle, against a venue whose account abstraction mode no longer
+    verifies: the Tier-1 cash heal is refused and the refusal is named
+    (``account.mode_unverified``, ADR-0046 §4).
+
+    The pass still finds its divergence and still records itself — this is a
+    freeze of the account-grain cross-check, not a fault — so the name arrives
+    off the same healthy cycle rather than a broken one.
+
+    The venue's equity is moved off the one the ledger was materialised from,
+    because the guard runs *only* where there is a cash heal to make: a snapshot
+    agreeing on cash reaches no mode read at all, which is the affordability
+    ADR-0046 §4 is built on and would leave this scenario silently driving
+    nothing."""
+
+    class _SwitchedVenue(_LiveShapedVenue):
+        async def verify_account_mode(self) -> AccountModeVerdict:
+            return AccountModeVerdict.CHANGED
+
+    async def go() -> None:
+        venue = _SwitchedVenue(state=account_state("30.0", "-0.034"))
+        keeper = Checkpointer(
+            spec=venue.account_spec(), store=SQLiteStore(":memory:"), clock=ManualClock()
+        )
+        keeper.recover()
+        keeper.portfolio.materialise(DERIVED_STATE)
+        await LedgerReconciliation(exchange=venue, checkpointer=keeper).reconcile_account()
+
+    asyncio.run(go())
+
+
 def _drive_account_reconcile_frozen() -> None:
     """The account cycle's anchor read fails: the cycle freezes, heals nothing
     and says so (``account.reconcile_frozen``, ADR-0011 inv 1) — the record an
@@ -855,6 +887,7 @@ SCENARIOS: dict[NamedEvent, Callable[[], None]] = {
     NamedEvent.RECONCILE_FROZEN: _drive_frozen,
     NamedEvent.ACCOUNT_RECONCILED: _drive_account_reconciled,
     NamedEvent.ACCOUNT_HEALED: _drive_account_reconciled,
+    NamedEvent.ACCOUNT_MODE_UNVERIFIED: _drive_account_mode_unverified,
     NamedEvent.ACCOUNT_RECONCILE_FROZEN: _drive_account_reconcile_frozen,
     NamedEvent.EXCHANGE_REQUEST_FAILED: _drive_exchange_request_failed,
     NamedEvent.EXCHANGE_ACTION_REJECTED: _drive_exchange_action_rejected,

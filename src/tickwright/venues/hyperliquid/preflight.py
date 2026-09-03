@@ -25,6 +25,7 @@ from functools import partial
 from typing import Any
 
 from tickwright.domain import (
+    AccountModeVerdict,
     Backoff,
     Clock,
     Deadline,
@@ -34,11 +35,12 @@ from tickwright.domain import (
     VenueAccountModeUnsupported,
     VenueLeverageMismatch,
     VenueLeveragePushFailed,
+    VenueReadFailure,
 )
 from tickwright.observability import NamedEvent, named_event
 
 from .account import held_leverage
-from .reading import UNREADABLE
+from .reading import UNREADABLE, read
 
 InfoRead = Callable[[dict[str, Any]], Awaitable[object]]
 """One unsigned ``POST /info`` query, as the adapter makes it."""
@@ -50,6 +52,11 @@ The same path the order verbs take, rather than a second signing stack: the
 nonce floor, the mainnet/testnet domain and the resolved trading account are all
 decisions the adapter already makes once, and a write that re-made any of them
 would be free to disagree with the orders it boots alongside."""
+
+_MODE_REQUEST = "userAbstraction"
+"""The venue's name for the mode read, and the ``request`` a failed one is named
+under (``exchange.request_failed``) — one string, so the wire and the record
+cannot disagree about which read stopped."""
 
 SUPPORTED_ACCOUNT_MODES = frozenset({"default", "disabled"})
 """The two ``userAbstraction`` literals that mean Manual/Standard.
@@ -121,6 +128,61 @@ async def verify_account_mode(
     raise VenueAccountModeUnsupported(_remediation(mode, address=address))
 
 
+async def reverify_account_mode(*, info: InfoRead, address: str) -> AccountModeVerdict:
+    """The same question in flight, answered as a **verdict** (ADR-0046 §4).
+
+    Beside the gate rather than inside the engine because the allowlist is venue
+    knowledge and stays in the venue (ADR-0031), while the caller is
+    engine-internal and ``engine`` may not import ``venues`` (ADR-0032). So one
+    module owns what the literals mean on both paths, and what crosses the
+    ``Exchange`` seam is the answer rather than the vocabulary.
+
+    Three differences from the boot gate, all of them the same difference — at
+    boot nothing is correct yet, in flight the local ledger still is:
+
+    - It **returns** where the gate raises. An unsupported mode here freezes the
+      account-grain cross-check and costs a heal; at boot it costs the process.
+    - It takes **no deadline and no retry**. The boot budget is a startup
+      concept and there is no in-flight equivalent to borrow; a failed read
+      costs this pass and the next cadence deadline asks again, which is the
+      retry, spread over the cadence instead of over a window.
+    - An unreadable answer is a **verdict of its own** rather than an error, so
+      the record can say which of the two happened. It is still the same
+      branch at the caller: an unverified mode is not evidence of an unchanged
+      one, so both refuse the heal.
+
+    What it does **not** differ in is what counts as a failed read, which is why
+    this goes through ``reading.read`` where the gate hand-rolls its retry:
+    ``read`` owns the taxonomy every in-flight read of this adapter already
+    inherits — a dead transport is ``SEND_FAILED``, a body outside the contract
+    is ``UNREADABLE_BODY``, and **both are named** ``exchange.request_failed``
+    before they are answered. The caller's ``account.mode_unverified`` says a
+    heal stopped; this says why the venue could not be read, and quotes the body
+    when there was one. A contract change presents here as the same failure on
+    every heal-bearing cycle, so the operator holding only the verdict would have
+    the one diagnosable half of it withheld.
+
+    The two failures it answers are therefore the two the boot gate *retries*
+    (``OSError`` and ``UNREADABLE``) rather than everything an exception can be.
+    A wider catch would buy nothing: ``fetch_account_state`` is the very read
+    this one guards, on the same cycle in the same supervised task, and it lets
+    anything outside that taxonomy escape — so a bug below the seam already
+    faults the run one line earlier, and swallowing it here would only make it
+    read as a venue outage forever.
+    """
+    mode = await read(
+        request=_MODE_REQUEST,
+        query=_mode_query(address),
+        send=info,
+        normalize=_as_mode,
+    )
+    if isinstance(mode, VenueReadFailure):
+        return AccountModeVerdict.UNREADABLE
+    if mode in SUPPORTED_ACCOUNT_MODES:
+        return AccountModeVerdict.VERIFIED
+    return AccountModeVerdict.CHANGED
+
+
 def _unreadable_mode(exc: BaseException, deadline: Deadline, *, address: str) -> InvariantViolation:
     """The gate's own refusal when the budget went without an answer.
 
@@ -139,22 +201,41 @@ def _unreadable_mode(exc: BaseException, deadline: Deadline, *, address: str) ->
 async def _read_account_mode(info: InfoRead, *, address: str) -> str:
     """The one unsigned ``userAbstraction`` read, as a mode literal.
 
-    A body that is not a string is not a mode — it is the venue changing its
-    contract — so it raises into the caller's retry rather than reaching the
-    allowlist. The distinction is load-bearing in the message as much as in the
-    control flow: the allowlist's refusal prints a remediation, and printing one
-    here would send an operator to re-set a mode that was never the problem.
-
-    Raised as the ``TypeError`` ``reading.UNREADABLE`` already names, and for
-    the reason ``figure`` refuses a re-typed number: a body of the wrong type is
-    the same "we are not reading what we think we are" a missing field is. This
-    grain has no figure to parse, but it has the same contract to lose.
+    The **gate's** form of the read, raising where ``reverify_account_mode``'s
+    ``reading.read`` returns: this one is driven inside a retry loop, so a
+    failure has to reach ``_until_deadline`` as an exception for the budget to be
+    spent on it. Both spend the same two pieces below — the query and the shape
+    check — which is what keeps one module owning the read as well as the
+    allowlist.
 
     Asked about the **trading** account rather than the signing key's own
     address: with an agent wallet those differ, and the mode is a property of
     the account whose numbers the ledger is bound to.
     """
-    response = await info({"type": "userAbstraction", "user": address})
+    return _as_mode(await info(_mode_query(address)))
+
+
+def _mode_query(address: str) -> dict[str, Any]:
+    """The one query both paths send, written once so they cannot drift apart."""
+    return {"type": _MODE_REQUEST, "user": address}
+
+
+def _as_mode(response: object) -> str:
+    """The response body as a mode literal, or the failure that it is not one.
+
+    A body that is not a string is not a mode — it is the venue changing its
+    contract — so it raises rather than reaching the allowlist. The distinction
+    is load-bearing in the message as much as in the control flow: the
+    allowlist's refusal prints a remediation, and printing one here would send an
+    operator to re-set a mode that was never the problem.
+
+    Raised as the ``TypeError`` ``reading.UNREADABLE`` already names, and for
+    the reason ``figure`` refuses a re-typed number: a body of the wrong type is
+    the same "we are not reading what we think we are" a missing field is. This
+    grain has no figure to parse, but it has the same contract to lose. Which is
+    also what lets it be a ``normalize`` in flight and a raiser at boot with no
+    second copy: each caller's guard already answers that exception its own way.
+    """
     if not isinstance(response, str):
         raise TypeError(f"non-string userAbstraction response {response!r}")
     return response

@@ -42,10 +42,10 @@ from tickwright.domain import (
     CancelSignal,
     Denied,
     EventBus,
-    Exchange,
     ExecutionReport,
     FillReport,
     Order,
+    OrderAnchor,
     OrderCancelled,
     OrderDenied,
     OrderEvent,
@@ -94,11 +94,14 @@ class ExecutionManager:
         self,
         *,
         bus: EventBus,
-        exchange: Exchange,
+        exchange: OrderAnchor,
         checkpointer: Checkpointer,
         guard: PreTradeGuard | None = None,
     ) -> None:
         self._bus = bus
+        # The **cloid** anchor and not the whole ``Exchange``: this manager
+        # sends and never reads the account, so the seam it declares is the
+        # grain it drives (ADR-0034's two anchors, ``domain/protocols.py``).
         self._exchange = exchange
         # Both read-models, the store behind them and the clock that stamps
         # them, as one collaborator rather than four a caller had to keep

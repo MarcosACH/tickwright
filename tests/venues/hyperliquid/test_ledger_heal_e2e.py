@@ -128,7 +128,12 @@ def _exchange(snapshot: dict) -> tuple[HyperliquidExchange, FakeExchangeApi]:
     a second adapter rather than scripting one, which is also the more honest
     shape: two reads a cadence interval apart are two states of one account.
     """
-    post = FakeExchangeApi({"clearinghouseState": snapshot})
+    # ``userAbstraction`` is routed because a **cash heal** re-reads the mode
+    # before it writes (ADR-0046 §4), so a body the adapter cannot get is a
+    # refused heal rather than a missing fixture — the freeze reaching this
+    # suite as a silently unmoved cash line is precisely what it would look
+    # like. ``"disabled"`` is what the prescribed remediation produces.
+    post = FakeExchangeApi({"clearinghouseState": snapshot, "userAbstraction": "disabled"})
     return (
         HyperliquidExchange(
             config=HyperliquidConfig(
@@ -217,4 +222,11 @@ def test_a_tier_1_divergence_heals_to_the_venues_own_figures_through_the_real_ad
     assert restored.account_id == opening.account_spec().account_id
     assert restored.cash == Decimal("25.9604")
 
-    assert [payload["type"] for _, payload in post.requests] == ["clearinghouseState"]
+    # The mode read is second and there is one of it: it is the guard on the
+    # write, so it follows the anchor it guards and is asked only because this
+    # pass found a cash line to heal (ADR-0046 §4 buys its affordability that
+    # way — ``userAbstraction`` is weight 20 against the anchor's 2).
+    assert [payload["type"] for _, payload in post.requests] == [
+        "clearinghouseState",
+        "userAbstraction",
+    ]

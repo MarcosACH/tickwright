@@ -17,9 +17,10 @@ from decimal import Decimal
 from enum import Enum
 
 from tickwright.domain import (
+    AccountAnchor,
+    AccountModeVerdict,
     AccountView,
     CashCorrection,
-    Exchange,
     ReconciliationFill,
     Side,
     VenueAccountState,
@@ -159,7 +160,11 @@ def _healed(divergence: Divergence, *, event_id: str) -> None:
 class LedgerReconciliation:
     """The cross-check between the ledger and the venue's own account truth."""
 
-    def __init__(self, *, exchange: Exchange, checkpointer: Checkpointer) -> None:
+    def __init__(self, *, exchange: AccountAnchor, checkpointer: Checkpointer) -> None:
+        # The **account** anchor and not the whole ``Exchange``: one snapshot
+        # read and the mode guard on it are the only venue members this cycle
+        # touches, so the constructor states that it cannot place an order —
+        # a claim the class docstring used to have to make in prose.
         self._exchange = exchange
         # The ``Checkpointer`` rather than the projection it lends, because this
         # cycle **writes**: a Tier-1 heal is one fold, one durable write and one
@@ -254,6 +259,11 @@ class LedgerReconciliation:
         amount this cycle just moved — an alert about our own arithmetic, and one
         no Tier-1 equity finding exists to suppress it against.
 
+        One thing does come between that reading and the write, and only on a
+        pass with a cash gap to close: the mode guard's venue read. What a
+        concurrent fill costs there, and why the answer is the next deadline
+        rather than a second reading, is ``_mode_verified`` below.
+
         The net sizes are the reason that matters beyond tidiness: they are the
         cycle's **one definition of held-ness**, and both grains read it. Tier-1
         calls a symbol flat and calls it absent the same thing, so Tier-2 must
@@ -296,6 +306,8 @@ class LedgerReconciliation:
         heal_ts_ns = self._checkpointer.clock.timestamp_ns()
         heals = self._size_heals(state, divergences, ts_ns=heal_ts_ns)
         cash = self._cash_heal(divergences, ts_ns=heal_ts_ns)
+        if cash is not None and not await self._mode_verified():
+            cash = None
         booked = self._checkpointer.checkpoint_heal(
             tuple(heal.fill for heal in heals),
             cash=None if cash is None else cash.correction,
@@ -318,6 +330,57 @@ class LedgerReconciliation:
             unvalued=self._unvalued(state, view=view, ledger=unrealized, net=net),
         )
         return divergences
+
+    async def _mode_verified(self) -> bool:
+        """Whether the venue still reports a mode this cycle may heal cash
+        toward (ADR-0046 §4), recording the refusal when it does not.
+
+        Asked **only when there is a cash heal to make**, which is the whole of
+        why this check is affordable: ``userAbstraction`` is weight 20 against
+        the anchor read's 2, so a per-cycle guard would spend ten times on the
+        watchman what it spends on the thing watched, forever, to catch an event
+        that takes a deliberate master-wallet action. On the divergence path it
+        costs nothing in steady state and sits on the code path that does the
+        damage rather than on a timer hoping to reach it first. A mode switch
+        that produces no cash divergence is empty as a concern — the switch *is*
+        a re-pooling of balances.
+
+        Both non-verified verdicts take this branch, because an unverified mode
+        is not evidence of an unchanged one: proceeding would heal on exactly
+        the assumption the guard exists to stop the engine making. They differ
+        only on the record, which is where an operator reads them.
+
+        A **freeze and not a fault**, and the caller's shape says so — the cash
+        correction is dropped and the pass runs on. Our fills are still our
+        fills and every Tier-2 number is computed from ``(position, mark)``
+        rather than from the venue, so what has become invalid is the
+        cross-check and the heal, not the ledger.
+
+        This is also the cycle's **one yield point between classifying and
+        writing**, and it is worth naming because the caller's own docstring
+        reasons about a ledger side read once for the pass. The cadence runs
+        beside the saga in the runner's ``TaskGroup``, so a fill can be
+        checkpointed while this read is in flight, and the correction booked
+        after it was computed against the book as it was before: the cash line is
+        an assignment to a target, so that fill's cash effect is overwritten and
+        the size heals are deltas against a net that has since moved.
+
+        Accepted rather than closed, on ADR-0034's own terms: the ledger
+        over-reads for **one cadence interval** and heals back, because the next
+        snapshot carries the fill and the exact cash comparison finds the gap it
+        left. Closing it is not available at this grain anyway — the venue
+        snapshot predates the await too, so re-reading the ledger side would heal
+        toward the same figure against a book the venue has not seen, and the
+        only sound response to "a fill landed" is the pass this one already is:
+        one the next deadline repeats. The window is a round-trip on a path that
+        only runs when something diverged, and it costs nothing on the far commoner
+        pass that finds no cash gap and never opens it.
+        """
+        verdict = await self._exchange.verify_account_mode()
+        if verdict is AccountModeVerdict.VERIFIED:
+            return True
+        named_event(NamedEvent.ACCOUNT_MODE_UNVERIFIED, reason=verdict.value)
+        return False
 
     @staticmethod
     def _record_heals(

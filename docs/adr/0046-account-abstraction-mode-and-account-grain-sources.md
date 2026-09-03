@@ -464,6 +464,51 @@ the numbers can no longer be compared at all — the cross-check has stopped, no
 therefore **not** a `*_DIVERGENCE`, and its name says so. ADR-0045 §2's catalog note is updated to
 list it beside the other two.
 
+**(Shipped in [#195](https://github.com/MarcosACH/tickwright/issues/195), with the freeze narrower
+than "freeze the account-grain reconcile" reads.** This section's decision holds unchanged; two
+things it left to a slice are now fixed, and one word in it is easy to over-read.
+
+**The verdict crosses the `Exchange` seam; the literals do not.** The re-read reaches the engine as
+a new seam member, `async verify_account_mode() -> AccountModeVerdict`, rather than the cycle
+calling the boot gate this ADR shares its allowlist with: the caller is engine-internal and `engine`
+may not import `venues` (ADR-0032), while `userAbstraction`'s accepted literals are venue knowledge
+that may not move to `domain` (ADR-0031). What that buys is exactly what "reuses the boot gate's
+read" was after — one module owning the mode on both paths — with the venue answering and the engine
+deciding. The verdict is three-valued (`VERIFIED` / `CHANGED` / `UNREADABLE`) where the control flow
+needs two, because this section's own requirement is that the alert says *which*: the last two are
+one branch and two records. Live answers off one unsigned read with **no retry** — the boot budget
+is a startup concept and the cadence is the in-flight retry — and paper answers `VERIFIED`
+permanently, having no abstraction mode to be in.
+
+**"Freeze the account-grain reconcile" means the heal, not the classification.** What is refused is
+the cash correction; the pass still reads the anchor, still classifies both tiers, still returns its
+findings and still records `account.reconciled`. That is deliberate and it is not the freeze
+`fetch_account_state() -> None` performs, which returns nothing because there was no snapshot to
+compare against: here the snapshot is real and only its *account-grain meaning* is in doubt, so
+discarding the position-grain findings computed from it would throw away good work — and the size
+heal, which a pooled mode does not touch, keeps booking on the same transaction the cash correction
+was dropped from. The consequence for whoever lands the alert bands
+([#194](https://github.com/MarcosACH/tickwright/issues/194)) is that account-grain findings **are
+still counted while frozen**, so suppressing the alerts that would otherwise fire off a snapshot
+this section has just declared unreliable is that slice's job, not this one's.
+
+**Two costs of the placement, both accepted and neither free.** First, the re-read is the cycle's
+one **yield point between classifying and writing**: the cadence runs beside the saga in the
+runner's `TaskGroup`, so a fill checkpointed while the mode read is in flight has its cash effect
+overwritten by a correction computed before it — the cash line is healed by assignment to a target,
+not by a delta. That is ADR-0034's own one-cadence over-read reached from a new direction, and it
+converges the same way: the next snapshot carries the fill, the exact cash comparison finds the gap,
+and the pass after heals it. Re-reading the ledger side after the verdict would not close it — the
+venue snapshot predates the await too, so the recomputed target is the same figure against a book
+the venue has not seen — and the sound response to "a fill landed" is the pass this already is, one
+the next deadline repeats. Second, a *failed* re-read is a failed **venue read** and is named as
+one: it goes through the adapter's shared read vocabulary (`venues/hyperliquid/reading.py`), so a
+dead transport and a body outside the contract both emit `EXCHANGE_REQUEST_FAILED` with the body
+quoted, beneath the caller's `ACCOUNT_MODE_UNVERIFIED`. The two records answer different questions —
+*why the venue could not be read* against *what the engine stopped doing* — and a contract change
+presents as the first one repeating on every heal-bearing cycle, which is the only form of it an
+operator can act on.**)**
+
 ## 5. ADR-0040 §6's alert band: the relative term scales by notional
 
 **Decision: `alert iff |computed − venue| > max(atol, rtol × reference)`, where `reference` is the

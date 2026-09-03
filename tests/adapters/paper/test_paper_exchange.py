@@ -26,6 +26,7 @@ from tickwright.adapters.paper import (
     StochasticParams,
 )
 from tickwright.domain import (
+    AccountModeVerdict,
     AggressorSide,
     Event,
     Exchange,
@@ -777,6 +778,39 @@ def test_the_paper_venue_reports_no_account_truth_even_on_a_healthy_read() -> No
     assert healthy is None
 
 
+def test_the_paper_venue_has_no_account_mode_to_verify_and_never_withholds_one() -> None:
+    """``VERIFIED`` **always**, and for the opposite reason its neighbour above
+    answers ``None`` always.
+
+    The account-mode guard exists because a live venue's ``accountValue`` means
+    something different under a pooled abstraction mode (ADR-0046 §1), and this
+    venue has no abstraction mode, no ``accountValue`` and no cash heal for one
+    to corrupt. So the honest answer is *nothing to verify*, not *nothing
+    verified* — and it is fail-closed rather than fail-open only because there
+    is nothing behind it to open: the read this guard protects already answers
+    ``None`` here, so a paper cadence heals nothing whatever the mode says.
+
+    Withholding the verdict would be the mistake, and a quiet one: the check
+    runs behind a Tier-1 cash finding, which paper can never produce, so a paper
+    venue refusing here would be indistinguishable from one that was never asked
+    — right up until the seam was wired somewhere that does ask.
+    """
+    exchange, bus, clock, fills, _statuses = _specced_harness()
+
+    async def scenario() -> tuple[AccountModeVerdict, AccountModeVerdict]:
+        cold = await exchange.verify_account_mode()
+        clock.advance_to(1_000)
+        await bus.publish(_tick("100"))
+        await exchange.place(_market_order(qty="0.2"))
+        return cold, await exchange.verify_account_mode()
+
+    cold, exercised = asyncio.run(scenario())
+
+    assert len(fills) == 1
+    assert cold is AccountModeVerdict.VERIFIED
+    assert exercised is AccountModeVerdict.VERIFIED
+
+
 def test_the_paper_venue_declares_a_two_segment_account_id_and_its_genesis() -> None:
     """``paper-<label>`` stays unambiguously two segments against a live venue's
     three (ADR-0042 §5), and the operator's declared collateral rides the spec."""
@@ -969,6 +1003,7 @@ _SEAM_CLAIMS = {
     "cancel": "test_cancel_removes_a_resting_order_and_reports_cancelled",
     "fetch_order": "test_fetch_order_reports_a_resting_limit_as_live",
     "fetch_account_state": "test_the_paper_venue_reports_no_account_truth_even_on_a_healthy_read",
+    "verify_account_mode": "test_the_paper_venue_has_no_account_mode_to_verify_and_never_withholds_one",
     "account_spec": "test_the_paper_venue_declares_a_two_segment_account_id_and_its_genesis",
     "instrument_specs": "test_instrument_specs_exposes_the_configured_specs",
 }

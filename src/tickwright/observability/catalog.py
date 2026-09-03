@@ -127,6 +127,29 @@ class NamedEvent(StrEnum):
     # landed is worse than the silence: it would close the audit question it
     # exists to answer with the wrong answer.
     ACCOUNT_HEALED = "account.healed"
+    # The cash heal the cycle refused because the venue's account abstraction
+    # mode could no longer be verified (ADR-0046 §4). The account grain's
+    # cross-check has stopped; the position grain and the local ledger carry on.
+    #
+    # Deliberately **not** a ``*_DIVERGENCE``. Its two neighbours report a
+    # number disagreeing with the venue; this one reports that the two numbers
+    # can no longer be compared at all, which is a different thing to page on —
+    # a divergence asks which side is wrong, this asks nobody anything until an
+    # operator puts the account back.
+    #
+    # ``reason`` carries ``changed`` against ``unreadable``, the one distinction
+    # the control flow does *not* make: both fail closed, because an unverified
+    # mode is not evidence of an unchanged one. It exists for the operator, who
+    # is sent to the venue UI by one and to the network by the other.
+    #
+    # The ``unreadable`` half arrives **beneath** an ``EXCHANGE_REQUEST_FAILED``
+    # naming the ``userAbstraction`` read that failed, since a mode the adapter
+    # could not read is a failed venue read like any other. Two records rather
+    # than one because they answer different questions: that one says why the
+    # venue could not be read and quotes the body, this one says what the engine
+    # stopped doing about it. A ``changed`` mode has no such pair — the venue
+    # answered, and the answer was a mode we refuse.
+    ACCOUNT_MODE_UNVERIFIED = "account.mode_unverified"
 
     # A live-exchange request that yielded no usable answer, on either path and
     # for either reason (``HyperliquidExchange``): a send or read that failed in

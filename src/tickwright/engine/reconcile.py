@@ -33,8 +33,8 @@ from enum import Enum
 from tickwright.domain import (
     Clock,
     EventBus,
-    Exchange,
     Order,
+    OrderAnchor,
     OrderState,
     OrderStatusReport,
     VenueOrderView,
@@ -161,12 +161,15 @@ class Reconciler:
         *,
         bus: EventBus,
         clock: Clock,
-        exchange: Exchange,
+        exchange: OrderAnchor,
         cache: Cache,
         config: ReconcileConfig,
     ) -> None:
         self._bus = bus
         self._clock = clock
+        # The **cloid** anchor and not the whole ``Exchange``: this cycle reads
+        # back what the manager sent, on the same grain and the same key, and
+        # the account is a different anchor with its own cycle (ADR-0034).
         self._exchange = exchange
         self._cache = cache
         # Required, not defaulted: the Engine resolves the one ReconcileConfig

@@ -15,13 +15,14 @@ from dataclasses import replace
 from decimal import Decimal
 
 from ledgers import book_fill
-from venue_doubles import LIVE_ACCOUNT_ID, LiveVenueDouble, account_state
+from venue_doubles import LIVE_ACCOUNT_ID, account_state
 
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     EMPTY_LEVERAGE_BOOK,
     Account,
+    AccountModeVerdict,
     AccountSpec,
     FundingAccrual,
     InstrumentSpec,
@@ -30,13 +31,10 @@ from tickwright.domain import (
     MarkTick,
     Order,
     OrderFilled,
-    PlaceOrder,
     Position,
     Side,
     Store,
     VenueAccountState,
-    VenueOrderView,
-    VenueReadFailure,
 )
 from tickwright.engine.checkpoint import Checkpointer
 from tickwright.engine.ledger_reconcile import (
@@ -50,36 +48,50 @@ from tickwright.observability import NamedEvent
 from tickwright.observability.testing import capture_events
 
 
-class _AccountVenue(LiveVenueDouble):
-    """A live venue that answers the account read and nothing else.
+class _AccountVenue:
+    """A venue that answers the **account anchor** and holds nothing else.
 
-    The three members ``VenueDouble`` deliberately withholds carry this suite's
-    meaning: the account cycle is anchored on one account snapshot, so a cloid
-    read or an order action reaching the seam is the specification being broken,
-    not a case needing another stub.
+    Two members and no base class, because two members is the whole seam this
+    cycle is constructed against (``domain.AccountAnchor``). It used to extend
+    ``LiveVenueDouble`` and stub ``place``/``cancel``/``fetch_order`` as
+    assertion-raisers, and those raisers were the suite's way of saying that a
+    cloid read or an order action reaching the seam is the specification being
+    broken. The split says it one layer up instead: the cycle cannot ask for
+    them, so a case cannot fail that way and mypy refuses the cycle that tries.
+    A runtime assertion traded for a type is the whole point of the narrowing,
+    and what is left here is only what a case actually varies.
 
     ``answers`` is consumed one per cycle and the last one repeats, so a case
     can put a **failed** read in front of a good one and assert the cadence
     recovers at its next deadline rather than staying frozen — a distinction a
     double answering one fixed value could not express.
+
+    ``mode`` is the venue's verdict on its own abstraction mode, fixed for the
+    double's life where ``answers`` varies per cycle: a mode switch is a
+    deliberate master-wallet action, so a case that wants one models it by
+    handing the cycle a venue already switched. Both counters are public because
+    "was the venue asked at all" is the assertion for two cases — a restart that
+    owes no account read, and the pass that had no heal to make (ADR-0046 §4
+    buys its steady-state cost by not asking).
     """
 
-    def __init__(self, *answers: VenueAccountState | None) -> None:
-        super().__init__(state=answers[0])
+    def __init__(
+        self,
+        *answers: VenueAccountState | None,
+        mode: AccountModeVerdict = AccountModeVerdict.VERIFIED,
+    ) -> None:
         self._answers = list(answers)
+        self._mode = mode
+        self.account_reads = 0
+        self.mode_reads = 0
 
     async def fetch_account_state(self) -> VenueAccountState | None:
         self.account_reads += 1
         return self._answers.pop(0) if len(self._answers) > 1 else self._answers[0]
 
-    async def place(self, order: PlaceOrder) -> None:
-        raise AssertionError("the account cycle places nothing")
-
-    async def cancel(self, cloid: str) -> None:
-        raise AssertionError("the account cycle cancels nothing")
-
-    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
-        raise AssertionError("the account cycle is anchored on the account snapshot, not a cloid")
+    async def verify_account_mode(self) -> AccountModeVerdict:
+        self.mode_reads += 1
+        return self._mode
 
 
 class _SlowAccountVenue(_AccountVenue):
@@ -498,6 +510,120 @@ def test_a_cash_divergence_heals_the_line_to_the_one_the_venue_implies() -> None
     assert restored is not None
     assert restored.cash == Decimal("100500")
     assert restored.genesis_collateral == Decimal("100000")
+
+
+def test_a_cash_heal_is_refused_when_the_mode_the_venue_reports_has_changed() -> None:
+    """The heal above is the one thing a mid-run mode switch must not be allowed
+    to perform (ADR-0046 §4).
+
+    Under a pooled abstraction mode the perps clearinghouse reports only the
+    collateral posted into perps, so ``equity − Σ uPnL`` reads an order of
+    magnitude low with nothing in the response saying so — and ADR-0034 heals
+    Tier-1 *toward* the venue, so the cycle would write that smaller figure into
+    ``cash`` and ADR-0043 would persist it. The boot gate cannot close this: it
+    ran once, and the switch is a deliberate master-wallet action taken since.
+
+    So the mode is re-read before the heal and the heal is **refused** on
+    anything but a verified answer. What is asserted here is the refusal in the
+    two places it has to hold — the read-model and the store — and that the pass
+    said **why** it stopped: an operator watching a cash line that stops healing
+    with no record would be reading a silence.
+
+    A **freeze and not a fault**: the read succeeded, so the pass still returns
+    its classification rather than the ``None`` a failed anchor gives, and the
+    engine keeps trading on a local ledger that is still correct.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    venue = _AccountVenue(_held("100500"), mode=AccountModeVerdict.CHANGED)
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+
+    with capture_events() as logs:
+        divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences is not None
+    assert keeper.portfolio.account().cash == Decimal("100000")
+    restored = store.load_account()
+    assert restored is not None
+    assert restored.cash == Decimal("100000")
+    (unverified,) = [
+        log for log in logs if log["event"] == NamedEvent.ACCOUNT_MODE_UNVERIFIED.value
+    ]
+    assert unverified["reason"] == "changed"
+    assert not [log for log in logs if log["event"] == NamedEvent.ACCOUNT_HEALED.value]
+
+
+def test_a_mode_the_venue_cannot_report_refuses_the_heal_the_same_way_a_changed_one_does() -> None:
+    """A read that fails is not evidence the mode is unchanged, so it takes the
+    branch above rather than the healthy one (ADR-0046 §4).
+
+    This is §3's boot rule in flight: never assume standard on error. The
+    failure modes an unreadable answer covers — a timeout, an ``err`` envelope,
+    a payload carrying no mode at all — are exactly the ones a switched account
+    would also be reachable through, and the engine has no way to tell them
+    apart from the outside. Guessing costs an operator the same wrong ``cash``
+    line a genuine switch would.
+
+    What differs from a changed mode is the **record**, and that is why the
+    verdict carries three values where the control flow needs two: an operator
+    told only "unverified" cannot tell an account somebody re-pooled from a
+    venue that stopped answering, and those two want different actions.
+
+    The mode is read **once**. There is no in-cycle retry because the cadence is
+    the retry — the next deadline re-reads, and a heal deferred by one interval
+    on an account whose ledger is still correct costs nothing, where a retry
+    loop would spend a weight-20 request per attempt on the path that already
+    only runs when something diverged.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    venue = _AccountVenue(_held("100500"), mode=AccountModeVerdict.UNREADABLE)
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+
+    with capture_events() as logs:
+        divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences is not None
+    assert keeper.portfolio.account().cash == Decimal("100000")
+    restored = store.load_account()
+    assert restored is not None
+    assert restored.cash == Decimal("100000")
+    (unverified,) = [
+        log for log in logs if log["event"] == NamedEvent.ACCOUNT_MODE_UNVERIFIED.value
+    ]
+    assert unverified["reason"] == "unreadable"
+    assert venue.mode_reads == 1
+
+
+def test_a_pass_with_no_cash_heal_to_make_never_asks_the_venue_for_its_mode() -> None:
+    """The guard sits on the cash heal, not on the cycle, and that placement is
+    what makes it affordable (ADR-0046 §4).
+
+    ``userAbstraction`` is weight 20 against the anchor read's 2, so a per-cycle
+    re-read would spend ten times as much on the watchman as on the thing
+    watched, on every deadline forever, to catch an event that takes a
+    deliberate master-wallet action. Asked only where the damage happens, it
+    costs nothing in steady state — and a mode switch that produces no cash
+    divergence is empty as a concern, since the switch *is* a re-pooling of
+    balances and would show up as one.
+
+    A **healing** pass is what proves the placement rather than an idle one: the
+    cycle here writes a synthetic fill for foreign SOL flow and still asks the
+    venue nothing, so what is pinned is that the gate hangs off the cash
+    correction specifically and not off "the pass changed something".
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    venue = _AccountVenue(_held("100000", ("SOL", "10", "0")))
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+
+    with capture_events() as logs:
+        asyncio.run(cycle.reconcile_account())
+
+    assert venue.mode_reads == 0
+    assert venue.account_reads == 1
+    assert keeper.portfolio.account_net() == {"SOL": Decimal("10")}
+    assert not [log for log in logs if log["event"] == NamedEvent.ACCOUNT_MODE_UNVERIFIED.value]
 
 
 def test_a_cash_heal_absorbs_the_pnl_the_same_passs_size_heal_realized() -> None:
@@ -1010,6 +1136,83 @@ def test_a_size_finding_the_cycle_cannot_price_heals_nothing_and_writes_nothing(
     )
     assert keeper.portfolio.position("ETH", strategy_id=None) is None
     assert keeper.portfolio.account_net() == {"ETH": Decimal("1.5")}
+
+
+def test_a_mode_frozen_pass_writes_nothing_and_leaves_the_book_readable() -> None:
+    """The refused heal above, asserted where a heal is *durable*: a freeze that
+    dropped the correction from the projection and still stamped the account row
+    would persist the pooled figure the guard exists to keep off disk
+    (ADR-0043 persists what the cycle books, ADR-0046 §4).
+
+    Sealed rather than compared, on ``_SealedStore``'s own rule: the refusal is
+    that the pass is a **read**, and a write re-persisting the number already
+    there would pass any before/after comparison while being the regression the
+    claim is about.
+
+    And a freeze is **not a fault**, which is the second half here. Our fills
+    are still our fills and every Tier-2 figure is computed from
+    ``(position, mark)`` rather than from the venue, so what stopped is the
+    cross-check and not the ledger: the book stays readable through ``Portfolio``
+    at the grain a strategy asks it at — its own partition, the account net and
+    the cash line — and the engine keeps trading on it.
+    """
+    store = _SealedStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    held = projection.open_positions(strategy_id="alpha")
+    venue = _AccountVenue(_held("100500", ("BTC", "0.002", "0")), mode=AccountModeVerdict.CHANGED)
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+    store.seal()
+
+    with capture_events() as logs:
+        divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences is not None
+    (unverified,) = [
+        log for log in logs if log["event"] == NamedEvent.ACCOUNT_MODE_UNVERIFIED.value
+    ]
+    assert unverified["reason"] == "changed"
+    assert projection.open_positions(strategy_id="alpha") == held
+    assert projection.account_net() == {"BTC": Decimal("0.002")}
+    assert projection.account().cash == Decimal("100000")
+
+
+def test_a_frozen_cash_grain_leaves_the_same_passs_size_heal_booking() -> None:
+    """The freeze is scoped to the **account grain**, and one pass finding both
+    kinds of divergence is where that scope is visible (ADR-0046 §4).
+
+    A pooled abstraction mode misreports the collateral pool — that is what
+    ``accountValue`` sums over — and says nothing about which positions the
+    account holds: ``clearinghouseState`` reports the same signed sizes either
+    way. So the position grain has no reason to stop, and stopping it would cost
+    the engine the one heal that keeps ADR-0034's Σ-invariant true while the
+    cash line waits for an operator.
+
+    Both halves ride one transaction (``checkpoint_heal``), which is why this is
+    asserted on the store rather than the projection alone: dropping the cash
+    correction must leave the size heal's write intact rather than take the
+    whole transaction down with it. The venue holds SOL the ledger has never
+    seen *and* implies a cash line 500 above the ledger's — foreign flow beside
+    a divergent pool, which is exactly the shape a re-pooling would produce.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    venue = _AccountVenue(_held("100500", ("SOL", "10", "0")), mode=AccountModeVerdict.CHANGED)
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+
+    with capture_events() as logs:
+        asyncio.run(cycle.reconcile_account())
+
+    assert keeper.portfolio.account_net() == {"SOL": Decimal("10")}
+    assert [(p.strategy_id, p.symbol, p.signed_size) for p in store.all_positions()] == [
+        (None, "SOL", Decimal("10"))
+    ]
+    restored = store.load_account()
+    assert restored is not None
+    assert restored.cash == keeper.portfolio.account().cash == Decimal("100000")
+    healed = [log for log in logs if log["event"] == NamedEvent.ACCOUNT_HEALED.value]
+    assert [log["field"] for log in healed] == [DivergenceField.SIGNED_SIZE.value]
 
 
 def test_a_failed_barrier_read_is_recorded_under_the_grains_own_freeze_name() -> None:

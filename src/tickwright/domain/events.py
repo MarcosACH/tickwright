@@ -671,6 +671,37 @@ class VenueAccountState:
     positions: tuple[VenuePositionState, ...] = ()
 
 
+class AccountModeVerdict(Enum):
+    """Whether the venue still reports the account in a mode whose account-grain
+    numbers this engine may heal toward (``Exchange.verify_account_mode``).
+
+    The verdict and not the mode: which literals a venue accepts is venue
+    knowledge and stays in the adapter (ADR-0031), while what the caller has to
+    decide is whether the snapshot it just read still means what it meant at
+    boot (ADR-0046 §4).
+
+    Three values rather than a ``bool``, because the alert has to say **why** it
+    stopped: an operator told only that the mode is unverified cannot tell an
+    account somebody switched from one the engine could not reach.
+
+    - ``VERIFIED`` — the venue answered with a mode the adapter accepts.
+    - ``CHANGED`` — the venue answered with one it does not. In flight this is
+      always a change, since boot refused to start on anything else.
+    - ``UNREADABLE`` — the read failed, timed out, or came back a shape that is
+      not a mode at all.
+
+    The last two are one branch at every caller and stay two values here for the
+    record alone: an unverified mode is not evidence that it is unchanged, so
+    the guard fails closed on both (ADR-0046 §4's in-flight twin of §3's "never
+    assume standard on error"). Collapsing them into a single ``UNVERIFIED``
+    would cost nothing in control flow and lose the one thing an operator reads.
+    """
+
+    VERIFIED = "verified"
+    CHANGED = "changed"
+    UNREADABLE = "unreadable"
+
+
 # --- Venue-neutral order request (not an event) -----------------------------
 
 

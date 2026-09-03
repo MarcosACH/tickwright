@@ -120,6 +120,11 @@ async def read[T](
       Neither has a retry above it, so each owns its own refusal: the mode gate
       builds the retry loop it needs and then raises, ``universe.py`` raises
       outright. Both fault the startup barrier rather than freezing it.
+    - The **same mode read in flight** (``preflight.reverify_account_mode``, ADR-0046
+      §4) is the default half of that rule reached from the other side: the
+      accounting cadence retries it, so it comes here and answers a
+      ``VenueReadFailure`` as its ``UNREADABLE`` verdict. One read, two policies,
+      chosen by what is above each caller rather than by the endpoint.
 
     Two policies, and the line between them is the retry, which is why a future
     in-flight read inherits this one by default and a new pre-barrier read does

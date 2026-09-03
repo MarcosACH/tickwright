@@ -7,6 +7,15 @@ on doubles carry behaviour; the rest are there to typecheck, and every widening
 of ``Exchange`` (four more land with the trade-economics surface) writes another
 round of them into files whose subject is not the venue at all.
 
+Since the seam split into its two anchors (``domain.OrderAnchor`` /
+``domain.AccountAnchor``), that cost is paid **only by a case whose subject is
+the whole venue** — a runner driving a lifecycle, a link standing in front of a
+real adapter. A suite whose subject is one grain doubles that grain and stops:
+the account cycle's own double is two members and no base class
+(``tests/engine/test_ledger_reconcile.py``). These bases are for the rest, and
+they are the reason the widening above is still worth holding in one place
+rather than the reason the ceremony exists.
+
 These two bases hold that ceremony once, and they hold it differently because a
 double either invents the seam's answers or borrows a real venue's.
 ``VenueDouble`` deliberately does **not** hold ``place``/``cancel``/
@@ -34,6 +43,7 @@ from decimal import Decimal
 from ledgers import GENESIS
 
 from tickwright.domain import (
+    AccountModeVerdict,
     AccountSpec,
     Exchange,
     InstrumentSpec,
@@ -104,6 +114,12 @@ class VenueDouble:
         # overrides this, which is the seam's meaning arriving in the suite that
         # asserts it rather than being inherited from here.
         return None
+
+    async def verify_account_mode(self) -> AccountModeVerdict:
+        # The paper venue's permanent answer again: nothing to verify, rather
+        # than nothing verified. A double asserting on the guard says so by
+        # overriding this — the refusal is a case's meaning, not ceremony.
+        return AccountModeVerdict.VERIFIED
 
     def account_spec(self) -> AccountSpec:
         return AccountSpec(account_id="paper-default", genesis_collateral=GENESIS)
@@ -186,6 +202,9 @@ class VenueLink:
 
     async def fetch_account_state(self) -> VenueAccountState | None:
         return await self._venue.fetch_account_state()
+
+    async def verify_account_mode(self) -> AccountModeVerdict:
+        return await self._venue.verify_account_mode()
 
     def account_spec(self) -> AccountSpec:
         return self._venue.account_spec()
