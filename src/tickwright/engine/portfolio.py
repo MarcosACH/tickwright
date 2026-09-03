@@ -972,29 +972,42 @@ class PortfolioProjection:
         position = self._positions.get((strategy_id, symbol))
         if position is None:
             return None
+        account = self.account()
         return self._view(
             position,
             net=self.account_net(),
             upnl=self.account_unrealized(),
-            equity=self.account().equity,
+            equity=account.equity,
+            maintenance=account.total_maintenance_margin,
         )
 
     def open_positions(self, *, strategy_id: str | None) -> tuple[PositionView, ...]:
         """Every partition of ``strategy_id`` still holding exposure.
 
-        One fold for the whole call, deliberately — **both** folds: the net and
-        the account-net uPnL are each an aggregation over every partition, so
-        folding either per view would be quadratic in the book — and, worse,
-        would let two views in one returned tuple be computed against two
-        different folds if a fill landed between them. The reads are synchronous
-        so that cannot actually happen today; taking the folds once is what
-        keeps it impossible rather than merely unreachable.
+        One fold for the whole call, deliberately — **every** fold: the net, the
+        account-net uPnL and the account view's own two Σs are each an
+        aggregation over every partition, so folding any of them per view would
+        be quadratic in the book — and, worse, would let two views in one
+        returned tuple be computed against two different folds if a fill landed
+        between them. The reads are synchronous so that cannot actually happen
+        today; taking the folds once is what keeps it impossible rather than
+        merely unreachable.
+
+        The equity and the maintenance Σ come off **one** ``AccountView`` rather
+        than two calls, which is the same rule one grain down: they are two terms
+        of one threshold, and two calls could straddle a fill.
         """
         net = self.account_net()
         upnl = self.account_unrealized()
-        equity = self.account().equity
+        account = self.account()
         return tuple(
-            self._view(position, net=net, upnl=upnl, equity=equity)
+            self._view(
+                position,
+                net=net,
+                upnl=upnl,
+                equity=account.equity,
+                maintenance=account.total_maintenance_margin,
+            )
             for (owner, _symbol), position in self._positions.items()
             if owner == strategy_id and not position.is_flat
         )
@@ -1037,6 +1050,7 @@ class PortfolioProjection:
         net: dict[str, Decimal],
         upnl: dict[str, Decimal | None],
         equity: Decimal | None,
+        maintenance: Decimal | None,
     ) -> PositionView:
         """Assemble one partition's view against the mark held for its symbol.
 
@@ -1047,21 +1061,22 @@ class PortfolioProjection:
         compute/read-through switch arrive the same way and for the same reason
         — all four are lookups this object already holds.
 
-        ``net``, ``upnl`` and ``equity`` are the three the caller must supply,
-        because each is a **fold over every position** rather than a lookup:
-        taken here they would be quadratic in the book, and — the reason that
-        matters — two views in one returned tuple could be built against two
-        different folds. The caller owes all three off **one**
+        ``net``, ``upnl``, ``equity`` and ``maintenance`` are the four the caller
+        must supply, because each is a **fold over every position** rather than a
+        lookup: taken here they would be quadratic in the book, and — the reason
+        that matters — two views in one returned tuple could be built against two
+        different folds. The caller owes all four off **one**
         ``self._positions``/``self._marks`` snapshot, the same one the mark above
         is read from, so the position-grain half of the view cannot straddle a
         fill the own-slice half is on the other side of (ADR-0041 §1).
-        ``equity`` is additionally the number ``account()`` reports, so a cross
-        position's ratio and the account line it is read beside agree by
-        construction.
+        ``equity`` and ``maintenance`` are additionally the two numbers
+        ``account()`` reports, and owed off **one** of its views: they are the two
+        terms of the cross liquidation threshold, so a cross position's level and
+        the account line it is read beside agree by construction.
 
         That last part is a **convention the signature cannot enforce**: nothing
         here can tell a caller's stale fold from a fresh one, which is why the
-        three are named together rather than defaulted one at a time.
+        four are named together rather than defaulted one at a time.
         """
         mark = self._marks.get(position.symbol)
         return position_view(
@@ -1069,6 +1084,7 @@ class PortfolioProjection:
             account_net=net.get(position.symbol, _ZERO),
             account_unrealized_pnl=upnl.get(position.symbol),
             account_equity=equity,
+            account_maintenance_margin=maintenance,
             mark=mark.price if mark is not None else None,
             mark_ts=mark.ts_event if mark is not None else None,
             leverage=self.leverage_for(position.symbol),

@@ -99,6 +99,7 @@ def test_a_held_position_with_no_mark_reads_unknown_rather_than_worthless() -> N
         account_net=Decimal("2"),
         account_unrealized_pnl=None,
         account_equity=None,
+        account_maintenance_margin=None,
         mark=None,
         mark_ts=None,
         leverage=CROSS_10X,
@@ -143,6 +144,7 @@ def test_a_flat_position_with_no_mark_still_reads_real_zeros() -> None:
         account_net=Decimal("0"),
         account_unrealized_pnl=None,
         account_equity=None,
+        account_maintenance_margin=None,
         mark=None,
         mark_ts=None,
         leverage=CROSS_10X,
@@ -168,6 +170,7 @@ def test_the_two_terms_take_their_zero_from_different_facts() -> None:
         account_net=Decimal("0"),
         account_unrealized_pnl=None,
         account_equity=None,
+        account_maintenance_margin=None,
         mark=None,
         mark_ts=None,
         leverage=CROSS_10X,
@@ -223,6 +226,7 @@ def test_a_cross_position_posts_its_notional_divided_by_the_configured_leverage(
         account_net=Decimal("0.5"),
         account_unrealized_pnl=Decimal("1000"),  # 0.5 x (60000 - 58000), one partition
         account_equity=Decimal("101000"),
+        account_maintenance_margin=Decimal("375"),  # the book is this position: 30000 x 1/80
         mark=Decimal("60000"),
         mark_ts=9_000,
         leverage=CROSS_10X,
@@ -256,6 +260,7 @@ def test_an_isolated_position_posts_its_locked_collateral_plus_unrealized_pnl() 
         account_net=Decimal("0.002"),
         account_unrealized_pnl=Decimal("-0.038"),  # 0.002 x (64796 - 64815)
         account_equity=Decimal("99999.962"),
+        account_maintenance_margin=None,  # isolated measures against its own bucket
         mark=Decimal("64796"),
         mark_ts=9_000,
         leverage=ISOLATED_5X,
@@ -267,6 +272,7 @@ def test_an_isolated_position_posts_its_locked_collateral_plus_unrealized_pnl() 
         account_net=Decimal("0.002"),
         account_unrealized_pnl=Decimal("-0.042"),  # 0.002 x (64794 - 64815)
         account_equity=Decimal("99999.958"),
+        account_maintenance_margin=None,  # isolated measures against its own bucket
         mark=Decimal("64794"),
         mark_ts=9_003,
         leverage=ISOLATED_5X,
@@ -294,6 +300,7 @@ def test_maintenance_margin_is_the_flat_tier_zero_rate_on_notional() -> None:
         account_net=Decimal("0.09"),
         account_unrealized_pnl=Decimal("113.49"),  # 0.09 x (65261 - 64000)
         account_equity=Decimal("100113.49"),
+        account_maintenance_margin=Decimal("73.418625"),  # the book is this position
         mark=Decimal("65261"),
         mark_ts=9_000,
         leverage=CROSS_10X,
@@ -324,6 +331,7 @@ def test_maintenance_margin_stays_flat_above_the_first_tier_band() -> None:
         account_net=Decimal("0.185"),
         account_unrealized_pnl=Decimal("233.655"),  # 0.185 x (65263 - 64000)
         account_equity=Decimal("100233.655"),
+        account_maintenance_margin=Decimal("150.9206875"),  # the book is this position
         mark=Decimal("65263"),
         mark_ts=9_000,
         leverage=CROSS_10X,
@@ -351,6 +359,7 @@ def test_a_flat_account_net_reads_a_real_zero_maintenance_with_no_mark_and_no_sp
         account_net=Decimal("0"),
         account_unrealized_pnl=None,
         account_equity=None,
+        account_maintenance_margin=None,
         mark=None,
         mark_ts=None,
         leverage=CROSS_10X,
@@ -396,6 +405,7 @@ def test_the_per_term_rule_holds_in_both_margin_modes() -> None:
             account_net=Decimal("0"),
             account_unrealized_pnl=Decimal("0"),
             account_equity=Decimal("100000"),
+            account_maintenance_margin=Decimal("0"),  # a flat book owes nothing
             mark=None,
             mark_ts=None,
             leverage=mode,
@@ -407,6 +417,7 @@ def test_the_per_term_rule_holds_in_both_margin_modes() -> None:
             account_net=Decimal("2"),
             account_unrealized_pnl=None,
             account_equity=None,
+            account_maintenance_margin=None,
             mark=None,
             mark_ts=None,
             leverage=mode,
@@ -450,6 +461,7 @@ def test_the_view_reports_position_grain_economics_beside_the_own_slice() -> Non
         account_net=Decimal("0.003"),
         account_unrealized_pnl=Decimal("0.758"),
         account_equity=Decimal("100000.758"),
+        account_maintenance_margin=None,  # isolated measures against its own bucket
         mark=Decimal("64796"),
         mark_ts=9_000,
         leverage=ISOLATED_5X,
@@ -494,6 +506,7 @@ def test_effective_leverage_divides_notional_by_each_modes_own_backing() -> None
             account_net=Decimal("0.002"),
             account_unrealized_pnl=Decimal("-0.042"),  # 0.002 x (64794 - 64815)
             account_equity=Decimal("1000"),
+            account_maintenance_margin=None,  # isolated measures against its own bucket
             mark=Decimal("64794"),
             mark_ts=9_000,
             leverage=ISOLATED_5X,
@@ -516,6 +529,7 @@ def test_effective_leverage_divides_notional_by_each_modes_own_backing() -> None
         account_net=Decimal("0.5"),
         account_unrealized_pnl=Decimal("1000"),
         account_equity=Decimal("12000"),
+        account_maintenance_margin=Decimal("375"),  # the book is this position
         mark=Decimal("60000"),
         mark_ts=9_000,
         leverage=CROSS_10X,
@@ -553,6 +567,7 @@ def test_effective_leverage_reads_none_on_a_non_positive_denominator() -> None:
         account_net=Decimal("0.5"),
         account_unrealized_pnl=Decimal("1000"),
         account_equity=Decimal("-500"),  # past zero, still trading (ADR-0040 §7)
+        account_maintenance_margin=Decimal("375"),  # the book is this position
         mark=Decimal("60000"),
         mark_ts=9_000,
         leverage=CROSS_10X,
@@ -571,6 +586,7 @@ def test_effective_leverage_reads_none_on_a_non_positive_denominator() -> None:
         account_net=Decimal("0.002"),
         account_unrealized_pnl=Decimal("-30"),  # more than the bucket holds
         account_equity=Decimal("100000"),
+        account_maintenance_margin=None,  # isolated measures against its own bucket
         mark=Decimal("64794"),
         mark_ts=9_000,
         leverage=ISOLATED_5X,
@@ -587,6 +603,7 @@ def test_effective_leverage_reads_none_on_a_non_positive_denominator() -> None:
         account_net=Decimal("0"),
         account_unrealized_pnl=Decimal("0"),
         account_equity=Decimal("100000"),
+        account_maintenance_margin=Decimal("0"),  # a flat book owes nothing
         mark=Decimal("150"),
         mark_ts=9_000,
         leverage=CROSS_10X,
@@ -598,6 +615,7 @@ def test_effective_leverage_reads_none_on_a_non_positive_denominator() -> None:
         account_net=Decimal("0"),
         account_unrealized_pnl=Decimal("0"),
         account_equity=Decimal("100000"),
+        account_maintenance_margin=Decimal("0"),  # a flat book owes nothing
         mark=Decimal("150"),
         mark_ts=9_000,
         leverage=ISOLATED_1X,  # collateral released with the position
@@ -640,6 +658,7 @@ def test_the_paper_isolated_liquidation_price_is_computed_off_the_marked_bucket(
             account_net=Decimal("0.002"),
             account_unrealized_pnl=Decimal(account_unrealized_pnl),
             account_equity=Decimal("100000"),
+            account_maintenance_margin=None,  # isolated measures against its own bucket
             mark=Decimal(mark),
             mark_ts=9_000,
             leverage=ISOLATED_5X,
@@ -686,6 +705,7 @@ def test_the_paper_cross_liquidation_price_is_computed_off_account_equity() -> N
             account_net=Decimal(account_net),
             account_unrealized_pnl=Decimal(account_unrealized_pnl),
             account_equity=Decimal("12000"),
+            account_maintenance_margin=Decimal("375"),  # the book is this position
             mark=Decimal("60000"),
             mark_ts=9_000,
             leverage=CROSS_10X,
@@ -703,6 +723,115 @@ def test_the_paper_cross_liquidation_price_is_computed_off_account_equity() -> N
     assert short.liquidation_price.quantize(Decimal("0.0001")) == Decimal("82962.9630")
     assert short.liquidation_price > Decimal("60000")
     assert flat.liquidation_price is None
+
+
+def test_each_mode_measures_its_backing_against_the_maintenance_owed_on_it() -> None:
+    """``margin_available`` subtracts the maintenance owed **on the pool the
+    backing is drawn from**, so the two terms are read at one grain (ADR-0040 §3).
+
+    Cross draws on the whole account, and the account is closed out when its
+    equity falls to the maintenance owed by the whole cross book — not by the one
+    position being valued. On a second symbol the difference is real money, and
+    subtracting only the position's own maintenance puts the level *further* from
+    the mark than the venue would, understating the risk of the book that
+    actually exists. Isolated is the other half of the same rule and is
+    unaffected: its backing is its own ring-fenced bucket, so the maintenance
+    measured against it is its own.
+
+    Both prices come from the defining condition — the backing, moved to ``P``,
+    equals the maintenance owed there — never from the formula under test. The
+    book is 0.5 BTC at a mark of 60 000 (maintenance ``30000 × 0.0125 = 375``)
+    beside 10 ETH at 2 000 (``20000 × 0.02 = 400``), for **775** owed across it:
+
+        cross, on 12 000 of equity, with the ETH leg held at its mark:
+
+            12000 + 0.5·(P − 60000) = 0.5·P·0.0125 + 400
+                                    ->  0.49375·P = 18400  ->  P = 37265.8228
+
+        isolated, on a bucket of 3 000 — the account's other 400 is owed
+        against a pool this position cannot be closed out by:
+
+            3000 + 0.5·(P − 58000) = 0.5·P·0.0125
+                                    ->  0.49375·P = 26000  ->  P = 52658.2278
+    """
+
+    def at(leverage: LeverageSpec, *, isolated_collateral: str = "0") -> PositionView:
+        return position_view(
+            _position(
+                quantity="0.5",
+                price="58000",
+                side=Side.BUY,
+                isolated_collateral=isolated_collateral,
+            ),
+            account_net=Decimal("0.5"),
+            account_unrealized_pnl=Decimal("1000"),
+            account_equity=Decimal("12000"),
+            account_maintenance_margin=Decimal("775"),  # this symbol's 375 plus ETH's 400
+            mark=Decimal("60000"),
+            mark_ts=9_000,
+            leverage=leverage,
+            spec=BTC_40X,
+            liquidation=LiquidationSource.computed(),
+        )
+
+    cross = at(CROSS_10X)
+    isolated = at(ISOLATED_5X, isolated_collateral="3000")
+
+    assert cross.liquidation_price is not None
+    assert cross.liquidation_price.quantize(Decimal("0.0001")) == Decimal("37265.8228")
+    assert isolated.liquidation_price is not None
+    assert isolated.liquidation_price.quantize(Decimal("0.0001")) == Decimal("52658.2278")
+    # The reported maintenance stays the position's own on both paths: what the
+    # account grain changes is the threshold the cross price solves against.
+    assert cross.maintenance_margin == isolated.maintenance_margin == Decimal("375")
+
+
+def test_a_cross_liquidation_price_is_unknown_when_the_books_maintenance_is() -> None:
+    """A term the cross threshold needs and does not have reads ``None``, on the
+    same per-term rule as the mark (ADR-0041 §6).
+
+    The account Σ is unknown as soon as *any* symbol in the book is unmarked or
+    has no ``InstrumentSpec`` — the unattributed partition being where both go
+    missing at once — and a cross position cannot be told where it is closed out
+    without knowing what the whole pool owes. Reported as unknown rather than
+    solved against a partial Σ, which is the same unknown-as-worthless mistake
+    one grain down.
+
+    Isolated is unaffected on the same inputs, which is what makes this a
+    property of the cross threshold rather than of the view: its bucket answers
+    for itself.
+    """
+
+    def at(leverage: LeverageSpec, *, isolated_collateral: str = "0") -> PositionView:
+        return position_view(
+            _position(
+                quantity="0.5",
+                price="58000",
+                side=Side.BUY,
+                isolated_collateral=isolated_collateral,
+            ),
+            account_net=Decimal("0.5"),
+            account_unrealized_pnl=Decimal("1000"),
+            account_equity=Decimal("12000"),
+            account_maintenance_margin=None,  # some other symbol has no mark
+            mark=Decimal("60000"),
+            mark_ts=9_000,
+            leverage=leverage,
+            spec=BTC_40X,
+            liquidation=LiquidationSource.computed(),
+        )
+
+    cross = at(CROSS_10X)
+    isolated = at(ISOLATED_5X, isolated_collateral="3000")
+
+    assert cross.liquidation_price is None
+    assert isolated.liquidation_price is not None
+    # Nothing else on the cross view is dimmed by it: the missing term is the
+    # threshold's alone.
+    assert cross.notional == Decimal("30000")
+    assert cross.margin_used == Decimal("3000")
+    assert cross.maintenance_margin == Decimal("375")
+    assert cross.effective_leverage == Decimal("2.5")
 
 
 def test_a_computed_liquidation_price_at_or_below_zero_reads_none() -> None:
@@ -736,6 +865,7 @@ def test_a_computed_liquidation_price_at_or_below_zero_reads_none() -> None:
             account_net=Decimal(account_net),
             account_unrealized_pnl=Decimal("1000"),
             account_equity=Decimal(equity),
+            account_maintenance_margin=Decimal("375"),  # the book is this position
             mark=Decimal("60000"),
             mark_ts=9_000,
             leverage=CROSS_10X,

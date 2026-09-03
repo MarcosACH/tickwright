@@ -71,6 +71,7 @@ def position_view(
     account_net: Decimal,
     account_unrealized_pnl: Decimal | None,
     account_equity: Decimal | None,
+    account_maintenance_margin: Decimal | None,
     mark: Decimal | None,
     mark_ts: int | None,
     leverage: LeverageSpec,
@@ -95,6 +96,17 @@ def position_view(
     ``AccountView`` beside it are read off one snapshot instead of two, and it is
     ``Decimal | None`` on the same per-term rule as everything else: an unmarked
     position anywhere in the book makes it unknown.
+
+    ``account_maintenance_margin`` is the Σ one grain up from this view's own
+    ``maintenance_margin``, and it is here for one term: the **cross**
+    liquidation threshold. A cross position is closed out when the pool's equity
+    falls to what the whole book owes against that pool, not to what this one
+    position owes, so the number paired with ``account_equity`` has to be read at
+    the same grain — the pairing ``_liquidation_maintenance`` makes. Nullable for
+    the reason its Σ is: one unmarked or unspecced symbol anywhere makes the
+    whole threshold unknown, and a cross price solved against a partial Σ is the
+    unknown-as-worthless mistake one grain down. The **isolated** branch never
+    reads it: a ring-fenced bucket answers for itself.
 
     ``mark`` is the latest mark the
     projection holds for this symbol and ``mark_ts`` its observation instant,
@@ -155,7 +167,11 @@ def position_view(
                 account_net=account_net,
                 mark=mark,
                 backing=backing,
-                maintenance_margin=maintenance_margin,
+                maintenance=_liquidation_maintenance(
+                    leverage=leverage,
+                    maintenance_margin=maintenance_margin,
+                    account_maintenance_margin=account_maintenance_margin,
+                ),
                 spec=spec,
             )
         ),
@@ -195,12 +211,48 @@ def _backing_collateral(
     return account_equity
 
 
+def _liquidation_maintenance(
+    *,
+    leverage: LeverageSpec,
+    maintenance_margin: Decimal | None,
+    account_maintenance_margin: Decimal | None,
+) -> Decimal | None:
+    """The maintenance owed **on the pool the backing is drawn from** (§3).
+
+    ``_backing_collateral``'s other half, and the reason it is a function rather
+    than an argument: the two terms of ``margin_available`` are subtracted from
+    each other, so they have to be read at one grain or the difference is not a
+    quantity at all. Isolated's backing is its own ring-fenced bucket, so the
+    maintenance measured against it is its own; cross's backing is the whole
+    account's equity, so what closes it out is what the whole book owes against
+    that pool — the position being valued is one term of the Σ, never the whole
+    of it.
+
+    ADR-0040 §3 writes cross's term as an unqualified "maintenance", and the two
+    readings differ by real money as soon as the account holds a second symbol:
+    subtracting only this position's puts the level *further* from the mark than
+    the venue would, understating the risk of the book that actually exists.
+
+    **The mixed-book residual is knowingly left standing.** Our ``equity``
+    already sums the uPnL of isolated positions and carries their buckets inside
+    ``cash``, so on a book holding both modes the cross pool is overstated on one
+    side and the Σ here over-subtracts the isolated legs' maintenance on the
+    other. Both errors are conservative — they move the level *toward* the mark —
+    and separating them means modelling the cross sub-pool, which no ADR fixes
+    and neither #142 nor #152 measured. It is left for ADR-0040 §6's band to see
+    rather than absorbed by arithmetic nobody has checked against a venue.
+    """
+    if leverage.mode == "isolated":
+        return maintenance_margin
+    return account_maintenance_margin
+
+
 def _liquidation_price(
     *,
     account_net: Decimal,
     mark: Decimal | None,
     backing: Decimal | None,
-    maintenance_margin: Decimal | None,
+    maintenance: Decimal | None,
     spec: InstrumentSpec | None,
 ) -> Decimal | None:
     """``mark − side · margin_available / size / (1 − l · side)`` (ADR-0040 §3).
@@ -211,11 +263,13 @@ def _liquidation_price(
     venue publishes the answer as one field. What is computed here is the
     flat-tier-0 case, exact below the first band (§4).
 
-    ``margin_available`` is ``backing − maintenance_margin``: what the position
-    can lose before it owes more than it has. ``size`` is ``|account net|`` and
-    ``price`` is the **mark**, both settled against the venue by #142. The
-    ``side`` factor is what puts a short's price *above* the mark, since a short
-    is liquidated by a rally.
+    ``margin_available`` is ``backing − maintenance``: what the position can lose
+    before it owes more than it has, both terms read at the one grain
+    ``_liquidation_maintenance`` pairs them at — its own bucket against its own
+    maintenance under isolated, the account's equity against the whole book's
+    under cross. ``size`` is ``|account net|`` and ``price`` is the **mark**, both
+    settled against the venue by #142. The ``side`` factor is what puts a short's
+    price *above* the mark, since a short is liquidated by a rally.
 
     The result is **invariant to the mark** — the mark cancels between the
     subtraction and the uPnL inside ``backing`` — which is the property that
@@ -239,10 +293,10 @@ def _liquidation_price(
     """
     if account_net == _ZERO:
         return None
-    if mark is None or backing is None or maintenance_margin is None or spec is None:
+    if mark is None or backing is None or maintenance is None or spec is None:
         return None
     side = _ONE if account_net > _ZERO else -_ONE
-    margin_available = backing - maintenance_margin
+    margin_available = backing - maintenance
     price = mark - side * margin_available / abs(account_net) / (_ONE - spec.margin_maint * side)
     return price if price > _ZERO else None
 
