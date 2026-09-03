@@ -297,10 +297,20 @@ class Checkpointer:
             # Only the seam's own failure type is relabelled, as its siblings do:
             # anything else crossing it is a bug below the store, not a failed
             # write.
-            # Named by what the pass was correcting, both halves: a cash-only
-            # heal carries no symbol, and reporting it as a failure for the
-            # empty string would hide which correction was lost.
-            healed = [fill.symbol for fill in fills] + ([] if cash is None else ["cash"])
+            # Named by what the pass was correcting, all three parts: a
+            # cash-only heal carries no symbol and a collateral-only one carries
+            # no fill, and reporting either as a failure for the empty string
+            # would hide which correction was lost. The ingest's symbols come
+            # off the fold rather than off the argument, so a cycle that found
+            # every bucket unchanged names only what it actually meant to write,
+            # and a symbol in both parts is named once — the rows were deduped
+            # for the write and the label says the same thing the write did.
+            sized = [fill.symbol for fill in fills]
+            healed = (
+                sized
+                + ([] if cash is None else ["cash"])
+                + sorted({position.symbol for position in change.collateral} - set(sized))
+            )
             raise InvariantViolation(
                 f"ledger heal checkpoint write failed for {', '.join(healed)}"
             ) from exc

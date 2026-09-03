@@ -373,6 +373,62 @@ def test_a_refused_funding_write_is_relabelled_with_the_boundary_it_lost() -> No
     assert "disk is full" in str(exc.value.__cause__)
 
 
+class _HealRefusingStore(SQLiteStore):
+    """The real store, refusing exactly the heal write and nothing before it.
+
+    A heal is the ledger write that carries positions with no order and no
+    funding mark, which is what distinguishes it from the fill that has to land
+    first for there to be a partition to ingest a bucket onto.
+    """
+
+    def checkpoint_ledger(
+        self,
+        *,
+        account: Account,
+        positions: Sequence[Position] = (),
+        order: Order | None = None,
+        funding_mark: tuple[str, int] | None = None,
+        ts_ns: int,
+    ) -> None:
+        if order is None and funding_mark is None and positions:
+            raise InvariantViolation("disk is full")
+        super().checkpoint_ledger(
+            account=account,
+            positions=positions,
+            order=order,
+            funding_mark=funding_mark,
+            ts_ns=ts_ns,
+        )
+
+
+def test_a_refused_collateral_only_heal_names_the_symbols_whose_buckets_it_lost() -> None:
+    """A cycle can be worth writing on the ingest alone, so the label has to
+    carry it.
+
+    The failure message names what the pass was correcting, and until the
+    collateral ingest there were only two things it could be correcting — sizes
+    and the cash line. A cadence that agreed on both and still had a bucket to
+    persist is now an ordinary cycle (`apply_heal` returns a change on a
+    non-empty ingest), and reporting its loss under the empty string would hide
+    which correction went missing — the same defect the cash-only case is
+    already labelled against.
+    """
+    store = _HealRefusingStore(":memory:")
+    checkpointer = _checkpointer(store, spec=LIVE_SPEC)
+    checkpointer.recover()
+    order = _submitted_order()
+    checkpointer.checkpoint_fill(
+        order, _fill(order, trade_id="f1", quantity="0.5"), side=order.side
+    )
+
+    with pytest.raises(InvariantViolation, match="ledger heal checkpoint write failed") as exc:
+        checkpointer.checkpoint_heal((), collateral={"BTC": Decimal("4200")})
+
+    assert "BTC" in str(exc.value)
+    assert isinstance(exc.value.__cause__, InvariantViolation)
+    assert "disk is full" in str(exc.value.__cause__)
+
+
 def test_a_non_fill_transition_writes_the_order_row_and_no_ledger_row() -> None:
     """A fill is the only transition that moves the ledger, so every other one
     takes the narrow ``Store.checkpoint`` (ADR-0043 §4).
