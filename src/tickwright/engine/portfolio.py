@@ -565,7 +565,7 @@ class PortfolioProjection:
         """
         if PositionChange.OPENED not in changes:
             return
-        if self._spec.genesis_collateral is None:
+        if not self._spec.declares_genesis:
             # The declared-versus-ingested predicate, the same one recovery's
             # genesis seed turns on (ADR-0043 §10): paper *declares* the margin
             # it moved in, live *ingests* what the venue moved (``marginUsed −
@@ -816,7 +816,7 @@ class PortfolioProjection:
             # store that predates the ledger — the barrier materialises the row
             # and positions heal from venue truth. Paper has no venue to heal
             # from, so the same state is the §8 upgrade hazard.
-            if declared is not None and self._store.has_orders():
+            if self._spec.declares_genesis and self._store.has_orders():
                 raise StoreAccountMismatch(
                     "this paper store holds order history but no ledger: its "
                     "positions, fees and funding cannot be reconstructed from "
@@ -836,7 +836,7 @@ class PortfolioProjection:
         # at the barrier — would differ from its declared ``None`` on every start,
         # so a check meant to catch a swapped account would brick the path it was
         # never meant to police.
-        if declared is not None and stored.genesis_collateral != declared:
+        if self._spec.declares_genesis and stored.genesis_collateral != declared:
             disagreements.append(
                 ("genesis_collateral", str(stored.genesis_collateral), str(declared))
             )
@@ -846,9 +846,9 @@ class PortfolioProjection:
     def _seed_genesis(self) -> None:
         """Open the durable ledger at the genesis the venue *declared* (ADR-0043 §6).
 
-        Gated on ``genesis_collateral is not None`` — the predicate that says the
-        opening balance was declared rather than ingested, which is the same fact
-        as "this path has no venue to heal from" (ADR-0043 §10). On live the
+        Gated on ``declares_genesis`` — the predicate that says the opening
+        balance was declared rather than ingested, which is the same fact as
+        "this path has no venue to heal from" (ADR-0043 §10). On live the
         number is ``accountValue − Σ unrealized_pnl`` read at the startup barrier,
         which has not run yet, so seeding here would persist a genesis of zero as
         though someone had chosen it and leave the barrier correcting a row it was
@@ -857,7 +857,7 @@ class PortfolioProjection:
         The in-memory account already opened at exactly this value, so the write
         makes the ledger durable rather than changing it.
         """
-        if self._spec.genesis_collateral is None:
+        if not self._spec.declares_genesis:
             return
         self._store.checkpoint_ledger(account=self._account, ts_ns=self._clock.timestamp_ns())
 

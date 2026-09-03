@@ -130,7 +130,7 @@ def position_view(
     """
     notional = _notional(account_net, mark)
     unrealized_pnl = _unrealized_pnl(position, mark)
-    backing = _backing_equity(
+    backing = _backing_collateral(
         leverage=leverage,
         isolated_collateral=position.isolated_collateral,
         account_unrealized_pnl=account_unrealized_pnl,
@@ -164,7 +164,7 @@ def position_view(
     )
 
 
-def _backing_equity(
+def _backing_collateral(
     *,
     leverage: LeverageSpec,
     isolated_collateral: Decimal,
@@ -248,9 +248,9 @@ def _liquidation_price(
 
 
 def _effective_leverage(notional: Decimal | None, *, backing: Decimal | None) -> Decimal | None:
-    """``notional`` over the position's backing equity (ADR-0041 §4.1).
+    """``notional`` over the position's backing collateral (ADR-0041 §4.1).
 
-    The denominator is the decision, and it is ``_backing_equity``'s: isolated
+    The denominator is the decision, and it is ``_backing_collateral``'s: isolated
     divides by the position's own bucket marked to market, cross by
     whole-account equity. ADR-0040 §2 originally fixed account equity for both;
     #142 settled it against the venue by moving one input nothing else moved, an
@@ -323,7 +323,7 @@ def _margin_used(
       fraction, so ADR-0040 §4 declines a ``margin_init`` field rather than
       carry a constant ``1.0``.
     - **Isolated** reports its locked bucket marked to market — which is exactly
-      ``_backing_equity``, so this returns it unchanged. The configured leverage
+      ``_backing_collateral``, so this returns it unchanged. The configured leverage
       is *not* a term: the bucket is sized at open and a later leverage change
       never re-margins a held position, so reading the setting back would report
       a number the venue has stopped holding.
@@ -411,14 +411,14 @@ def account_view(
     equity = _equity(account, held, marks)
     net = account_net_size(held)
     upnl = account_unrealized_pnl(held, marks)
-    collateral = _isolated_collateral(held)
+    collateral = _isolated_collateral_by_symbol(held)
     total_notional: Decimal | None = _ZERO
     total_margin_used: Decimal | None = _ZERO
     total_maintenance_margin: Decimal | None = _ZERO
     for symbol, size in net.items():
         symbol_leverage = leverage.for_symbol(symbol)
         notional = _notional(size, marks.get(symbol))
-        backing = _backing_equity(
+        backing = _backing_collateral(
             leverage=symbol_leverage,
             isolated_collateral=collateral.get(symbol, _ZERO),
             account_unrealized_pnl=upnl.get(symbol),
@@ -441,7 +441,7 @@ def account_view(
     )
 
 
-def _isolated_collateral(positions: Iterable[Position]) -> dict[str, Decimal]:
+def _isolated_collateral_by_symbol(positions: Iterable[Position]) -> dict[str, Decimal]:
     """The locked bucket behind each symbol — Σ over the partitions of it.
 
     The venue holds **one** bucket per position and knows nothing of our

@@ -215,14 +215,14 @@ class Engine:
                 # construction — the fail-closed value — so a cadence scheduled
                 # there would freeze every cycle and report the default path as
                 # an outage. The predicate is the venue's own declaration, the
-                # same `genesis_collateral` nullability the startup checks read
-                # (ADR-0042 §6): declared on paper, ingested on live. It is the
+                # same `declares_genesis` the startup checks read (ADR-0042 §6):
+                # declared on paper, ingested on live. It is the
                 # venue kind and not the row, which is what separates it from
                 # the barrier's step one grain up — that one asks whether a
                 # *read is owed* and a live restart answers no, while this asks
                 # whether there is anything to reconcile against at all, and the
                 # answer holds for every cycle of the run.
-                if self._exchange.account_spec().genesis_collateral is None:
+                if not self._exchange.account_spec().declares_genesis:
                     self._cadence_tasks.append(
                         tg.create_task(
                             run_cadence(

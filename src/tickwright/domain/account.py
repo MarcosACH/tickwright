@@ -58,12 +58,33 @@ class AccountSpec:
     venue-native identifier on a live one. ``genesis_collateral`` is the
     operator's declared opening cash on paper and ``None`` on live, where the
     number is ingested from the venue instead (ADR-0042 §6); that nullability
-    is the predicate the startup checks read, not an optional setting.
+    is the predicate the startup checks read, not an optional setting — read it
+    through ``declares_genesis`` rather than spelling the comparison.
     """
 
     account_id: str
     netting: Netting = Netting.NET
     genesis_collateral: Decimal | None = None
+
+    @property
+    def declares_genesis(self) -> bool:
+        """Whether the opening balance was **declared** rather than ingested.
+
+        ADR-0043 §10's one predicate, named here because it is a fact about
+        which venue is running and not a null check: paper's operator declares
+        the account's opening cash, live ingests it from the venue as
+        ``accountValue − Σ unrealized_pnl`` at the startup barrier and has no
+        counterpart to declare (ADR-0042 §6).
+
+        It lives on the spec because the spec is the declaration. Four callers
+        branch on it — the genesis seed, the store-disagreement refusals, the
+        isolated-collateral lock and the live-only ledger cadence — each having
+        re-derived the same boolean from a ``Decimal | None``, so the fact was
+        spelled five times and named nowhere. A caller that needs the *value*
+        still reads ``genesis_collateral``; this answers only the question the
+        value's absence poses.
+        """
+        return self.genesis_collateral is not None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

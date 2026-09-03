@@ -531,7 +531,7 @@ def test_effective_leverage_reads_none_on_a_non_positive_denominator() -> None:
     """The one Tier-2 ``None`` a fresh mark cannot cure (ADR-0041 §6).
 
     Every other nullable field here is missing an *input*; this one is undefined
-    even with every input present, because a backing equity of zero or less has
+    even with every input present, because a backing collateral of zero or less has
     no ratio to it. And the state is reached by ordinary trading rather than by
     accident: paper reports a negative free margin without rejecting an order or
     liquidating anything (ADR-0040 §7), so an account really does keep running
