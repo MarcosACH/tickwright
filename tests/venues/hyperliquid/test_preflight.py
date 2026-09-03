@@ -241,12 +241,20 @@ def test_an_in_flight_mode_the_gate_would_have_refused_is_a_verdict_not_a_refusa
     Reached across the ``Exchange`` seam, which is not incidental: the caller is
     engine-internal and ``engine`` may not import ``venues``, so the venue keeps
     the literals and hands back a verdict.
+
+    Nothing is named at the venue layer, and that is the line between this
+    verdict and ``UNREADABLE`` below: a pooled mode is a **usable answer** to the
+    question asked, so filing it as a failed read would put a venue outage's name
+    on an operator's own deliberate change. The freeze it causes is named by the
+    caller, which is the layer that knows a heal was refused.
     """
     post = FakeExchangeApi({"userAbstraction": mode})
 
-    verdict = asyncio.run(_exchange(post).verify_account_mode())
+    with capture_events() as logs:
+        verdict = asyncio.run(_exchange(post).verify_account_mode())
 
     assert verdict is AccountModeVerdict.CHANGED
+    assert not [log for log in logs if log["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED.value]
 
 
 @pytest.mark.parametrize("mode", ["default", "disabled"])
@@ -279,13 +287,25 @@ def test_an_in_flight_read_that_fails_is_unreadable_on_the_first_attempt() -> No
     task on a run whose ledger is still correct: an exception escaping here
     would fault the engine, which is exactly the outcome the freeze exists
     instead of.
+
+    Answered rather than swallowed, though, and the record is the second half of
+    the assertion. ``exchange.request_failed`` is this adapter's one name for a
+    live request that yielded no usable answer, and the caller's own
+    ``account.mode_unverified`` cannot stand in for it: that one says the heal
+    stopped, this one says **why the venue could not be read**, quoting the
+    error. Without it an operator watching a cash line freeze on every cadence
+    has nothing to act on but the word ``unreadable``.
     """
     post = FakeExchangeApi({"userAbstraction": ConnectionError("venue unreachable")})
 
-    verdict = asyncio.run(_exchange(post).verify_account_mode())
+    with capture_events() as logs:
+        verdict = asyncio.run(_exchange(post).verify_account_mode())
 
     assert verdict is AccountModeVerdict.UNREADABLE
     assert len(post.requests) == 1
+    (failed,) = [log for log in logs if log["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED.value]
+    assert failed["request"] == "userAbstraction"
+    assert "venue unreachable" in failed["error"]
 
 
 def test_an_in_flight_mode_that_is_not_a_string_is_unreadable_rather_than_changed() -> None:
@@ -297,12 +317,22 @@ def test_an_in_flight_mode_that_is_not_a_string_is_unreadable_rather_than_change
     switch they never made; ``UNREADABLE`` says the mode could not be
     established, which is what actually happened. Same distinction the boot
     gate's own read makes by raising rather than printing a remediation.
+
+    And the body it could not read rides the record, because this is how a venue
+    contract change presents: it repeats on every heal-bearing cycle for as long
+    as the contract stays broken, and an operator holding only ``unreadable``
+    cannot tell a re-shaped response from a dead socket — the two the record
+    exists to separate.
     """
     post = FakeExchangeApi({"userAbstraction": {"mode": "disabled"}})
 
-    verdict = asyncio.run(_exchange(post).verify_account_mode())
+    with capture_events() as logs:
+        verdict = asyncio.run(_exchange(post).verify_account_mode())
 
     assert verdict is AccountModeVerdict.UNREADABLE
+    (failed,) = [log for log in logs if log["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED.value]
+    assert failed["request"] == "userAbstraction"
+    assert "'mode': 'disabled'" in failed["error"]
 
 
 def test_a_mode_that_cannot_be_read_refuses_to_start_once_the_budget_is_spent() -> None:

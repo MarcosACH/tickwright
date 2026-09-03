@@ -141,6 +141,14 @@ class NamedEvent(StrEnum):
     # the control flow does *not* make: both fail closed, because an unverified
     # mode is not evidence of an unchanged one. It exists for the operator, who
     # is sent to the venue UI by one and to the network by the other.
+    #
+    # The ``unreadable`` half arrives **beneath** an ``EXCHANGE_REQUEST_FAILED``
+    # naming the ``userAbstraction`` read that failed, since a mode the adapter
+    # could not read is a failed venue read like any other. Two records rather
+    # than one because they answer different questions: that one says why the
+    # venue could not be read and quotes the body, this one says what the engine
+    # stopped doing about it. A ``changed`` mode has no such pair — the venue
+    # answered, and the answer was a mode we refuse.
     ACCOUNT_MODE_UNVERIFIED = "account.mode_unverified"
 
     # A live-exchange request that yielded no usable answer, on either path and

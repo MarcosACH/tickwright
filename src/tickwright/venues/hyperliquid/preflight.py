@@ -35,11 +35,12 @@ from tickwright.domain import (
     VenueAccountModeUnsupported,
     VenueLeverageMismatch,
     VenueLeveragePushFailed,
+    VenueReadFailure,
 )
 from tickwright.observability import NamedEvent, named_event
 
 from .account import held_leverage
-from .reading import UNREADABLE
+from .reading import UNREADABLE, read
 
 InfoRead = Callable[[dict[str, Any]], Awaitable[object]]
 """One unsigned ``POST /info`` query, as the adapter makes it."""
@@ -51,6 +52,11 @@ The same path the order verbs take, rather than a second signing stack: the
 nonce floor, the mainnet/testnet domain and the resolved trading account are all
 decisions the adapter already makes once, and a write that re-made any of them
 would be free to disagree with the orders it boots alongside."""
+
+_MODE_REQUEST = "userAbstraction"
+"""The venue's name for the mode read, and the ``request`` a failed one is named
+under (``exchange.request_failed``) — one string, so the wire and the record
+cannot disagree about which read stopped."""
 
 SUPPORTED_ACCOUNT_MODES = frozenset({"default", "disabled"})
 """The two ``userAbstraction`` literals that mean Manual/Standard.
@@ -145,16 +151,32 @@ async def reverify_account_mode(*, info: InfoRead, address: str) -> AccountModeV
       branch at the caller: an unverified mode is not evidence of an unchanged
       one, so both refuse the heal.
 
-    Every failure the read can produce is caught, deliberately widely: this
-    guard runs on a cadence inside a supervised task, and an exception escaping
-    it would take down a run whose ledger is still perfectly good — the fault
-    the whole section exists to avoid. There is nothing an operator loses by it,
-    since the alternative outcome to ``UNREADABLE`` is not a better answer but
-    a dead engine.
+    What it does **not** differ in is what counts as a failed read, which is why
+    this goes through ``reading.read`` where the gate hand-rolls its retry:
+    ``read`` owns the taxonomy every in-flight read of this adapter already
+    inherits — a dead transport is ``SEND_FAILED``, a body outside the contract
+    is ``UNREADABLE_BODY``, and **both are named** ``exchange.request_failed``
+    before they are answered. The caller's ``account.mode_unverified`` says a
+    heal stopped; this says why the venue could not be read, and quotes the body
+    when there was one. A contract change presents here as the same failure on
+    every heal-bearing cycle, so the operator holding only the verdict would have
+    the one diagnosable half of it withheld.
+
+    The two failures it answers are therefore the two the boot gate *retries*
+    (``OSError`` and ``UNREADABLE``) rather than everything an exception can be.
+    A wider catch would buy nothing: ``fetch_account_state`` is the very read
+    this one guards, on the same cycle in the same supervised task, and it lets
+    anything outside that taxonomy escape — so a bug below the seam already
+    faults the run one line earlier, and swallowing it here would only make it
+    read as a venue outage forever.
     """
-    try:
-        mode = await _read_account_mode(info, address=address)
-    except Exception:
+    mode = await read(
+        request=_MODE_REQUEST,
+        query=_mode_query(address),
+        send=info,
+        normalize=_as_mode,
+    )
+    if isinstance(mode, VenueReadFailure):
         return AccountModeVerdict.UNREADABLE
     if mode in SUPPORTED_ACCOUNT_MODES:
         return AccountModeVerdict.VERIFIED
@@ -179,22 +201,41 @@ def _unreadable_mode(exc: BaseException, deadline: Deadline, *, address: str) ->
 async def _read_account_mode(info: InfoRead, *, address: str) -> str:
     """The one unsigned ``userAbstraction`` read, as a mode literal.
 
-    A body that is not a string is not a mode — it is the venue changing its
-    contract — so it raises into the caller's retry rather than reaching the
-    allowlist. The distinction is load-bearing in the message as much as in the
-    control flow: the allowlist's refusal prints a remediation, and printing one
-    here would send an operator to re-set a mode that was never the problem.
-
-    Raised as the ``TypeError`` ``reading.UNREADABLE`` already names, and for
-    the reason ``figure`` refuses a re-typed number: a body of the wrong type is
-    the same "we are not reading what we think we are" a missing field is. This
-    grain has no figure to parse, but it has the same contract to lose.
+    The **gate's** form of the read, raising where ``reverify_account_mode``'s
+    ``reading.read`` returns: this one is driven inside a retry loop, so a
+    failure has to reach ``_until_deadline`` as an exception for the budget to be
+    spent on it. Both spend the same two pieces below — the query and the shape
+    check — which is what keeps one module owning the read as well as the
+    allowlist.
 
     Asked about the **trading** account rather than the signing key's own
     address: with an agent wallet those differ, and the mode is a property of
     the account whose numbers the ledger is bound to.
     """
-    response = await info({"type": "userAbstraction", "user": address})
+    return _as_mode(await info(_mode_query(address)))
+
+
+def _mode_query(address: str) -> dict[str, Any]:
+    """The one query both paths send, written once so they cannot drift apart."""
+    return {"type": _MODE_REQUEST, "user": address}
+
+
+def _as_mode(response: object) -> str:
+    """The response body as a mode literal, or the failure that it is not one.
+
+    A body that is not a string is not a mode — it is the venue changing its
+    contract — so it raises rather than reaching the allowlist. The distinction
+    is load-bearing in the message as much as in the control flow: the
+    allowlist's refusal prints a remediation, and printing one here would send an
+    operator to re-set a mode that was never the problem.
+
+    Raised as the ``TypeError`` ``reading.UNREADABLE`` already names, and for
+    the reason ``figure`` refuses a re-typed number: a body of the wrong type is
+    the same "we are not reading what we think we are" a missing field is. This
+    grain has no figure to parse, but it has the same contract to lose. Which is
+    also what lets it be a ``normalize`` in flight and a raiser at boot with no
+    second copy: each caller's guard already answers that exception its own way.
+    """
     if not isinstance(response, str):
         raise TypeError(f"non-string userAbstraction response {response!r}")
     return response
