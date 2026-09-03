@@ -371,11 +371,156 @@ class Store(Protocol):
 
 
 @runtime_checkable
-class Exchange(Protocol):
+class OrderAnchor(Protocol):
+    """The venue seen **by cloid** — the seam the order grain reads (ADR-0011).
+
+    One of the two halves ``Exchange`` composes, and the split is by *anchor*
+    rather than by shape: ADR-0034 runs two reconciliation cycles on two
+    anchors, and each one's collaborators differ. Everything here is keyed by
+    the ``cloid`` the engine minted (ADR-0006) — a placement carries it, a
+    cancel and a read take it — so a caller of this seam needs to know what a
+    ``cloid`` is and needs to know nothing about an account.
+
+    Declared separately because two engine components read it and **neither
+    reads anything else on the seam**: the ``ExecutionManager`` places and
+    cancels, the ``Reconciler`` reads back. Both are constructed against this
+    rather than the composite, so what each must know is what it uses, and a
+    double standing in for the venue in their suites implements three members
+    rather than ten.
+
+    Commands and a query together, against the instinct to split them: the
+    reconciler exists precisely because a placement's outcome is learned by
+    reading it back, so the send and the read-back are one anchor's two halves
+    and a caller holding one without the other could not close the loop.
+    """
+
+    async def place(self, order: PlaceOrder) -> None:
+        """Place ``order`` at the venue; emit the resulting raw ``ExecutionReport``(s)."""
+        ...
+
+    async def cancel(self, cloid: str) -> None:
+        """Cancel the order identified by ``cloid``; emit the resulting raw
+        ``ExecutionReport``. A cancel of an unknown/already-gone order is a
+        benign no-op (ADR-0026)."""
+        ...
+
+    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
+        """Venue truth for ``cloid`` — the reconciler's query-shaped direct read
+        (ADR-0004), never a bus message. A successful read always returns a
+        view, even an empty one; a read that *failed* returns a
+        ``VenueReadFailure`` and never a view, which is ADR-0011 inv 1 in the
+        return type.
+
+        The failure carries **which way** it failed, and this is the one read
+        with a caller that acts on the difference: the reconciler drives a
+        worklist, so it must know whether the venue answered at all before
+        deciding whether one order's failure should cost the orders behind it
+        (ADR-0049). ``AccountAnchor.fetch_account_state`` reads a single grain
+        and collapses the two."""
+        ...
+
+
+@runtime_checkable
+class AccountAnchor(Protocol):
+    """The venue seen **by account** — the seam the account grain reads
+    (ADR-0034), and the peer of ``OrderAnchor`` one grain up.
+
+    The name is the cycle's own: ``LedgerReconciliation`` calls
+    ``fetch_account_state`` *the anchor*, because one snapshot carries every
+    symbol and is the whole of a cycle's venue cost. ``verify_account_mode`` is
+    on it rather than beside it for the same reason it exists — it says whether
+    that snapshot's account-grain figures still mean what they meant at boot
+    (ADR-0046 §4), so it is a property of this anchor and of nothing else.
+
+    **One caller**, and that is the point rather than a weakness: the cycle is
+    live-only (paper has no second account to compare against), and this is the
+    only seam it holds. Separating it is what lets that be visible — the class
+    that writes a venue number to disk declares the two members it reads and no
+    ability to place an order, which is a claim its constructor now makes and
+    its docstring used to have to.
+
+    Both members are answered by **both** adapters even so. The account cycle is
+    constructed on every path and scheduled on one (``engine/runner.py``), so
+    paper implements this seam and answers it permanently — ``None`` and
+    ``VERIFIED`` — rather than being withheld from it. A seam an adapter may
+    fail to satisfy would push the live/paper split into the runner as an
+    unwrappable ``None``, which is the shape that decision already rejected.
+    """
+
+    async def fetch_account_state(self) -> VenueAccountState | None:
+        """Venue truth for the account — the reconcile's account-grain pull, the
+        exact peer of ``OrderAnchor.fetch_order`` one grain down (ADR-0004): a
+        query-shaped direct read, never a bus message.
+
+        ``None`` means **no venue truth to compare against**, never "flat"
+        (ADR-0011 inv 1 in the return type). The reconcile freezes on it and
+        heals nothing — anything else would let an unanswered read pass for an
+        empty book and correct a restored ledger down to it, which is the
+        fabricated flat ADR-0034 forbids.
+
+        The two paths reach that ``None`` differently and the contract is the
+        same either way. On live it is a **failed read** — an outage, a timeout,
+        or a response the adapter cannot parse. On paper it is the **permanent
+        answer**: that venue holds resting orders, fill reports and the latest
+        tick, and no position, cash or equity state at all, so it has no account
+        truth to report rather than none to report *yet*.
+        """
+        ...
+
+    async def verify_account_mode(self) -> AccountModeVerdict:
+        """Whether the account is still in a mode whose ``fetch_account_state``
+        numbers may be healed toward (ADR-0046 §4).
+
+        The **second** query-shaped read on this anchor, and the account cycle's
+        guard on the one path that writes a venue number to disk: ADR-0034 heals
+        Tier-1 *toward* the venue, so a mode switched since boot would write the
+        perps sub-ledger's smaller ``accountValue`` into ``cash`` and ADR-0043
+        would persist it.
+
+        A member rather than the engine reading the venue's gate directly, and
+        that is a layering fact rather than a preference: the caller is
+        engine-internal and ``engine`` may not import ``venues`` (ADR-0032),
+        while the accepted literals are venue knowledge that may not move to
+        ``domain`` (ADR-0031). So the venue answers the **verdict** and keeps
+        the vocabulary — one module owning the mode on both the boot path and
+        this one.
+
+        Called **only when there is a cash heal to make** (ADR-0046 §4 rejects a
+        per-cycle read on request weight: ``userAbstraction`` is weight 20
+        against ``clearinghouseState``'s 2), so an implementation may treat this
+        as rare rather than a hot path. That rule is the one clause of this
+        seam the type cannot carry, which is why it is stated at the caller too.
+
+        The two paths differ in whether there is anything to verify. On live it
+        is one unsigned read against the allowlist the boot gate refuses on, and
+        it never retries: there is no boot budget in flight, and the next
+        cadence deadline asks again. On paper it is a **permanent**
+        ``VERIFIED`` — that venue has no account abstraction to be in the wrong
+        mode, and no venue number for a heal to move toward, so there is nothing
+        to check rather than nothing to check *yet*.
+        """
+        ...
+
+
+@runtime_checkable
+class Exchange(OrderAnchor, AccountAnchor, Protocol):
     """A thin venue boundary adapter (ADR-0015): translate and emit raw facts.
 
     Owns no saga. ``place`` emits ``ExecutionReport``s on the bus rather than
     returning them, so the ``ExecutionManager`` drives the FSM off venue facts.
+
+    **Composed of its two anchors**, and what it adds is the venue's own: the
+    lifecycle and the two static declarations. An adapter satisfies this whole
+    seam — there are two of them and each is a whole venue — but the engine
+    components below the runner are constructed against the anchor each reads,
+    so no component is obliged to know a grain it never touches. The runner
+    holds the composite because it is the one thing that hands the anchors out.
+
+    Nothing here is a third anchor: a member that answers *by cloid* belongs on
+    ``OrderAnchor`` and one that answers *for the account* on ``AccountAnchor``,
+    and only what answers for the **venue** — its life, its identity, its
+    instruments — is declared here. That is the rule a member added later has to
+    be placed against, and ``tests/domain/test_protocols.py`` is where it holds.
 
     Lifecycle rides the seam because the runner drives it in its ordered
     sequence (ADR-0024): ``start`` at step 4, ``run`` supervised for the life of
@@ -493,84 +638,6 @@ class Exchange(Protocol):
         that raises *behind* this one faults the run, and the best-effort pass
         re-walks the membership from the top — so the runner may drive this
         twice in one shutdown. The second call must be a no-op, not a failure.
-        """
-        ...
-
-    async def place(self, order: PlaceOrder) -> None:
-        """Place ``order`` at the venue; emit the resulting raw ``ExecutionReport``(s)."""
-        ...
-
-    async def cancel(self, cloid: str) -> None:
-        """Cancel the order identified by ``cloid``; emit the resulting raw
-        ``ExecutionReport``. A cancel of an unknown/already-gone order is a
-        benign no-op (ADR-0026)."""
-        ...
-
-    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
-        """Venue truth for ``cloid`` — the reconciler's query-shaped direct read
-        (ADR-0004), never a bus message. A successful read always returns a
-        view, even an empty one; a read that *failed* returns a
-        ``VenueReadFailure`` and never a view, which is ADR-0011 inv 1 in the
-        return type.
-
-        The failure carries **which way** it failed, and this is the one read
-        with a caller that acts on the difference: the reconciler drives a
-        worklist, so it must know whether the venue answered at all before
-        deciding whether one order's failure should cost the orders behind it
-        (ADR-0049). ``fetch_account_state`` below reads a single grain and
-        collapses the two."""
-        ...
-
-    async def fetch_account_state(self) -> VenueAccountState | None:
-        """Venue truth for the account — the reconcile's account-grain pull, the
-        exact peer of ``fetch_order`` one grain up (ADR-0004): a query-shaped
-        direct read, never a bus message.
-
-        ``None`` means **no venue truth to compare against**, never "flat"
-        (ADR-0011 inv 1 in the return type). The reconcile freezes on it and
-        heals nothing — anything else would let an unanswered read pass for an
-        empty book and correct a restored ledger down to it, which is the
-        fabricated flat ADR-0034 forbids.
-
-        The two paths reach that ``None`` differently and the contract is the
-        same either way. On live it is a **failed read** — an outage, a timeout,
-        or a response the adapter cannot parse. On paper it is the **permanent
-        answer**: that venue holds resting orders, fill reports and the latest
-        tick, and no position, cash or equity state at all, so it has no account
-        truth to report rather than none to report *yet*.
-        """
-        ...
-
-    async def verify_account_mode(self) -> AccountModeVerdict:
-        """Whether the account is still in a mode whose ``fetch_account_state``
-        numbers may be healed toward (ADR-0046 §4).
-
-        The **second** query-shaped read on this seam, and the account cycle's
-        guard on the one path that writes a venue number to disk: ADR-0034 heals
-        Tier-1 *toward* the venue, so a mode switched since boot would write the
-        perps sub-ledger's smaller ``accountValue`` into ``cash`` and ADR-0043
-        would persist it.
-
-        A member rather than the engine reading the venue's gate directly, and
-        that is a layering fact rather than a preference: the caller is
-        engine-internal and ``engine`` may not import ``venues`` (ADR-0032),
-        while the accepted literals are venue knowledge that may not move to
-        ``domain`` (ADR-0031). So the venue answers the **verdict** and keeps
-        the vocabulary — one module owning the mode on both the boot path and
-        this one.
-
-        Called **only when there is a cash heal to make** (ADR-0046 §4 rejects a
-        per-cycle read on request weight: ``userAbstraction`` is weight 20
-        against ``clearinghouseState``'s 2), so an implementation may treat this
-        as rare rather than a hot path.
-
-        The two paths differ in whether there is anything to verify. On live it
-        is one unsigned read against the allowlist the boot gate refuses on, and
-        it never retries: there is no boot budget in flight, and the next
-        cadence deadline asks again. On paper it is a **permanent**
-        ``VERIFIED`` — that venue has no account abstraction to be in the wrong
-        mode, and no venue number for a heal to move toward, so there is nothing
-        to check rather than nothing to check *yet*.
         """
         ...
 

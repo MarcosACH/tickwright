@@ -15,7 +15,7 @@ from dataclasses import replace
 from decimal import Decimal
 
 from ledgers import book_fill
-from venue_doubles import LIVE_ACCOUNT_ID, LiveVenueDouble, account_state
+from venue_doubles import LIVE_ACCOUNT_ID, account_state
 
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.store import SQLiteStore
@@ -31,13 +31,10 @@ from tickwright.domain import (
     MarkTick,
     Order,
     OrderFilled,
-    PlaceOrder,
     Position,
     Side,
     Store,
     VenueAccountState,
-    VenueOrderView,
-    VenueReadFailure,
 )
 from tickwright.engine.checkpoint import Checkpointer
 from tickwright.engine.ledger_reconcile import (
@@ -51,13 +48,18 @@ from tickwright.observability import NamedEvent
 from tickwright.observability.testing import capture_events
 
 
-class _AccountVenue(LiveVenueDouble):
-    """A live venue that answers the account read and nothing else.
+class _AccountVenue:
+    """A venue that answers the **account anchor** and holds nothing else.
 
-    The three members ``VenueDouble`` deliberately withholds carry this suite's
-    meaning: the account cycle is anchored on one account snapshot, so a cloid
-    read or an order action reaching the seam is the specification being broken,
-    not a case needing another stub.
+    Two members and no base class, because two members is the whole seam this
+    cycle is constructed against (``domain.AccountAnchor``). It used to extend
+    ``LiveVenueDouble`` and stub ``place``/``cancel``/``fetch_order`` as
+    assertion-raisers, and those raisers were the suite's way of saying that a
+    cloid read or an order action reaching the seam is the specification being
+    broken. The split says it one layer up instead: the cycle cannot ask for
+    them, so a case cannot fail that way and mypy refuses the cycle that tries.
+    A runtime assertion traded for a type is the whole point of the narrowing,
+    and what is left here is only what a case actually varies.
 
     ``answers`` is consumed one per cycle and the last one repeats, so a case
     can put a **failed** read in front of a good one and assert the cadence
@@ -67,9 +69,10 @@ class _AccountVenue(LiveVenueDouble):
     ``mode`` is the venue's verdict on its own abstraction mode, fixed for the
     double's life where ``answers`` varies per cycle: a mode switch is a
     deliberate master-wallet action, so a case that wants one models it by
-    handing the cycle a venue already switched. ``mode_reads`` is public because
-    "was the venue asked at all" is the assertion for the pass that had no heal
-    to make (ADR-0046 §4 buys its steady-state cost by not asking).
+    handing the cycle a venue already switched. Both counters are public because
+    "was the venue asked at all" is the assertion for two cases — a restart that
+    owes no account read, and the pass that had no heal to make (ADR-0046 §4
+    buys its steady-state cost by not asking).
     """
 
     def __init__(
@@ -77,9 +80,9 @@ class _AccountVenue(LiveVenueDouble):
         *answers: VenueAccountState | None,
         mode: AccountModeVerdict = AccountModeVerdict.VERIFIED,
     ) -> None:
-        super().__init__(state=answers[0])
         self._answers = list(answers)
         self._mode = mode
+        self.account_reads = 0
         self.mode_reads = 0
 
     async def fetch_account_state(self) -> VenueAccountState | None:
@@ -89,15 +92,6 @@ class _AccountVenue(LiveVenueDouble):
     async def verify_account_mode(self) -> AccountModeVerdict:
         self.mode_reads += 1
         return self._mode
-
-    async def place(self, order: PlaceOrder) -> None:
-        raise AssertionError("the account cycle places nothing")
-
-    async def cancel(self, cloid: str) -> None:
-        raise AssertionError("the account cycle cancels nothing")
-
-    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
-        raise AssertionError("the account cycle is anchored on the account snapshot, not a cloid")
 
 
 class _SlowAccountVenue(_AccountVenue):

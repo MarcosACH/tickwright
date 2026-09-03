@@ -17,10 +17,10 @@ from decimal import Decimal
 from enum import Enum
 
 from tickwright.domain import (
+    AccountAnchor,
     AccountModeVerdict,
     AccountView,
     CashCorrection,
-    Exchange,
     ReconciliationFill,
     Side,
     VenueAccountState,
@@ -160,7 +160,11 @@ def _healed(divergence: Divergence, *, event_id: str) -> None:
 class LedgerReconciliation:
     """The cross-check between the ledger and the venue's own account truth."""
 
-    def __init__(self, *, exchange: Exchange, checkpointer: Checkpointer) -> None:
+    def __init__(self, *, exchange: AccountAnchor, checkpointer: Checkpointer) -> None:
+        # The **account** anchor and not the whole ``Exchange``: one snapshot
+        # read and the mode guard on it are the only venue members this cycle
+        # touches, so the constructor states that it cannot place an order —
+        # a claim the class docstring used to have to make in prose.
         self._exchange = exchange
         # The ``Checkpointer`` rather than the projection it lends, because this
         # cycle **writes**: a Tier-1 heal is one fold, one durable write and one
