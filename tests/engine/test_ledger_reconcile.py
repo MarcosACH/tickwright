@@ -559,6 +559,48 @@ def test_a_cash_heal_is_refused_when_the_mode_the_venue_reports_has_changed() ->
     assert not [log for log in logs if log["event"] == NamedEvent.ACCOUNT_HEALED.value]
 
 
+def test_a_mode_the_venue_cannot_report_refuses_the_heal_the_same_way_a_changed_one_does() -> None:
+    """A read that fails is not evidence the mode is unchanged, so it takes the
+    branch above rather than the healthy one (ADR-0046 §4).
+
+    This is §3's boot rule in flight: never assume standard on error. The
+    failure modes an unreadable answer covers — a timeout, an ``err`` envelope,
+    a payload carrying no mode at all — are exactly the ones a switched account
+    would also be reachable through, and the engine has no way to tell them
+    apart from the outside. Guessing costs an operator the same wrong ``cash``
+    line a genuine switch would.
+
+    What differs from a changed mode is the **record**, and that is why the
+    verdict carries three values where the control flow needs two: an operator
+    told only "unverified" cannot tell an account somebody re-pooled from a
+    venue that stopped answering, and those two want different actions.
+
+    The mode is read **once**. There is no in-cycle retry because the cadence is
+    the retry — the next deadline re-reads, and a heal deferred by one interval
+    on an account whose ledger is still correct costs nothing, where a retry
+    loop would spend a weight-20 request per attempt on the path that already
+    only runs when something diverged.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    venue = _AccountVenue(_held("100500"), mode=AccountModeVerdict.UNREADABLE)
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+
+    with capture_events() as logs:
+        divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences is not None
+    assert keeper.portfolio.account().cash == Decimal("100000")
+    restored = store.load_account()
+    assert restored is not None
+    assert restored.cash == Decimal("100000")
+    (unverified,) = [
+        log for log in logs if log["event"] == NamedEvent.ACCOUNT_MODE_UNVERIFIED.value
+    ]
+    assert unverified["reason"] == "unreadable"
+    assert venue.mode_reads == 1
+
+
 def test_a_cash_heal_absorbs_the_pnl_the_same_passs_size_heal_realized() -> None:
     """The cash correction is folded **after** the size heals, and the ordering
     is the whole subject: a heal that closes into a partition realizes PnL onto
