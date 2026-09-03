@@ -239,8 +239,16 @@ def _liquidation_maintenance(
     side and the Σ here over-subtracts the isolated legs' maintenance on the
     other. Both errors are conservative — they move the level *toward* the mark —
     and separating them means modelling the cross sub-pool, which no ADR fixes
-    and neither #142 nor #152 measured. It is left for ADR-0040 §6's band to see
-    rather than absorbed by arithmetic nobody has checked against a venue.
+    and neither #142 nor #152 measured, both having sat on single-mode books.
+
+    **Nothing watches it, and saying so is the point.** ADR-0040 §6's divergence
+    band does not cover ``liquidation_price`` and cannot: on live the number is
+    read through from the venue, so there is no computed counterpart to compare
+    — and this residual is paper-only arithmetic the live path never performs,
+    so even a band covering the field would have nothing on the other side of
+    it. It is an unwatched approximation, bounded by the isolated legs'
+    maintenance and wrong in the safe direction, recorded as an accepted error
+    on ADR-0040 §3 rather than left to arithmetic nobody has checked.
     """
     if leverage.mode == "isolated":
         return maintenance_margin
