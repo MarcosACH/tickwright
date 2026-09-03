@@ -522,6 +522,65 @@ def test_adding_to_an_isolated_position_does_not_top_its_bucket_up() -> None:
     assert change.position.isolated_collateral == Decimal("2100")
 
 
+def test_closing_an_isolated_position_releases_the_bucket_it_locked() -> None:
+    """The margin moved in at open comes back out at the close (ADR-0040 §1).
+
+    Paper is the path this has to be written on: live's bucket is released by
+    the reconcile ingest, which drops a symbol the venue no longer holds, and
+    that cadence never runs here (ADR-0034). A bucket left standing on a flat
+    partition is therefore permanent, and it is not inert — `margin_used` for
+    isolated is `isolated_collateral + unrealized_pnl`, so the whole of it keeps
+    reporting through `total_margin_used` and comes back off `free_margin`
+    (ADR-0040 §2) on an account that holds nothing, for the rest of the run and
+    every restart after it, the field being durable Tier-1.
+
+    Worked off the file: 0.5 BTC at 42 000 is 21 000 of notional, so 10x
+    isolated locks 2 100 against a `GENESIS` of 100 000; closing at the entry
+    realizes nothing, so the account is back to exactly its opening cash with
+    nothing posted against it.
+    """
+    projection = _projection(
+        leverage=LeverageBook(entries={"BTC": LeverageSpec(mode="isolated", leverage=10)})
+    )
+    book_fill(projection, _fill(trade_id="f1", quantity="0.5", price="42000"), side=Side.BUY)
+    projection.observe_mark(_mark(price="42000", ts_event=9_000))
+    assert projection.account().total_margin_used == Decimal("2100")
+
+    change = projection.apply_fill(
+        _fill(trade_id="f2", quantity="0.5", price="42000"), side=Side.SELL
+    )
+
+    assert change.position.isolated_collateral == Decimal("0")
+    account = projection.account()
+    assert account.total_margin_used == Decimal("0")
+    assert account.free_margin == account.equity == Decimal("100000")
+
+
+def test_a_flip_through_zero_re_locks_the_bucket_at_the_residual_it_opened() -> None:
+    """A close that opens a fresh position in the same fill releases *and* locks.
+
+    `_book` announces a flip as `(CLOSED, OPENED)`, and the residual is a new
+    position at the fill price — so the bucket owed is the new leg's, never the
+    old one's and never nothing. 1.5 sold against a long of 0.5 leaves a short
+    of 1.0 at 44 000, which at 10x isolated is 44 000 / 10 = **4 400**.
+
+    The case exists because the release is expressed on `CLOSED`: read alone,
+    that would strip the bucket from a partition that is holding exposure again
+    by the end of the same fold.
+    """
+    projection = _projection(
+        leverage=LeverageBook(entries={"BTC": LeverageSpec(mode="isolated", leverage=10)})
+    )
+    book_fill(projection, _fill(trade_id="f1", quantity="0.5", price="42000"), side=Side.BUY)
+
+    change = projection.apply_fill(
+        _fill(trade_id="f2", quantity="1.5", price="44000"), side=Side.SELL
+    )
+
+    assert change.position.signed_size == Decimal("-1.0")
+    assert change.position.isolated_collateral == Decimal("4400")
+
+
 def test_a_position_the_projection_has_no_mark_for_reports_no_instant() -> None:
     """``mark_ts is None`` ⟺ the mark is absent — the one signal a reader has for
     telling "never valued" from "valued a while ago" (ADR-0041 §6)."""

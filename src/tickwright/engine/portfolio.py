@@ -550,20 +550,37 @@ class PortfolioProjection:
     def _lock_isolated_collateral(
         self, position: Position, changes: tuple[PositionChange, ...]
     ) -> None:
-        """Move an isolated position's own margin in, once, at open (ADR-0040 §1).
+        """Move an isolated position's own margin in at open and back out at close.
 
         Paper does not model ``updateIsolatedMargin``, so the bucket is whatever
         the open put in it — ``notional / leverage`` at the entry the fold just
-        booked — and nothing later moves it. That is why this reads ``OPENED``
-        rather than running on every fill: an add on the same side reports
-        ``CHANGED``, and recomputing there would silently top the bucket up.
+        booked — and nothing between the two ends moves it (ADR-0040 §1). That is
+        why this reads the two regime changes rather than running on every fill:
+        an add on the same side reports ``CHANGED``, and recomputing there would
+        silently top the bucket up.
+
+        **The close is the half paper has to write itself.** Live's release is
+        the reconcile ingest dropping a symbol the venue no longer holds, and
+        that cadence never runs here (ADR-0034), so a bucket left standing on a
+        flat partition is permanent — and not inert, since isolated
+        ``margin_used`` is ``isolated_collateral + unrealized_pnl``: the whole of
+        it would keep reporting through ``total_margin_used`` and coming off
+        ``free_margin`` for an account holding nothing.
+
+        The two are written as release-then-lock rather than as exclusive
+        branches, because a flip through zero announces ``(CLOSED, OPENED)`` and
+        owes the **residual's** bucket: the old leg's number is wrong and no
+        number at all is wrong too. Release also runs whatever the mode says,
+        where the lock does not — a symbol reconfigured to cross between two
+        lives still has to give back the bucket its isolated life locked, and
+        cross posts none of its own.
 
         A Tier-1 write, not a valuation: the number lands on the ledger row the
         caller is about to persist, so a restart restores it rather than
         deriving it again from a leverage the run may since have been
         reconfigured with.
         """
-        if PositionChange.OPENED not in changes:
+        if not changes:
             return
         if not self._spec.declares_genesis:
             # The declared-versus-ingested predicate, the same one recovery's
@@ -572,7 +589,13 @@ class PortfolioProjection:
             # unrealizedPnl``, ADR-0043 §3). Computing one here would put a
             # number on the ledger the venue never posted, and would be wrong
             # from the first ``updateIsolatedMargin`` top-up — which live has
-            # and paper does not model (ADR-0040 §1).
+            # and paper does not model (ADR-0040 §1). The release below is
+            # declined on the same predicate and for the same reason: the venue
+            # authors both ends of the field, and the ingest performs both.
+            return
+        if PositionChange.CLOSED in changes:
+            position.isolated_collateral = _ZERO
+        if PositionChange.OPENED not in changes:
             return
         leverage = self.leverage_for(position.symbol)
         if leverage.mode != "isolated":
