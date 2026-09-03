@@ -1184,6 +1184,43 @@ def test_a_mode_frozen_pass_writes_nothing_and_leaves_the_book_readable() -> Non
     assert projection.account().cash == Decimal("100000")
 
 
+def test_a_frozen_cash_grain_leaves_the_same_passs_size_heal_booking() -> None:
+    """The freeze is scoped to the **account grain**, and one pass finding both
+    kinds of divergence is where that scope is visible (ADR-0046 §4).
+
+    A pooled abstraction mode misreports the collateral pool — that is what
+    ``accountValue`` sums over — and says nothing about which positions the
+    account holds: ``clearinghouseState`` reports the same signed sizes either
+    way. So the position grain has no reason to stop, and stopping it would cost
+    the engine the one heal that keeps ADR-0034's Σ-invariant true while the
+    cash line waits for an operator.
+
+    Both halves ride one transaction (``checkpoint_heal``), which is why this is
+    asserted on the store rather than the projection alone: dropping the cash
+    correction must leave the size heal's write intact rather than take the
+    whole transaction down with it. The venue holds SOL the ledger has never
+    seen *and* implies a cash line 500 above the ledger's — foreign flow beside
+    a divergent pool, which is exactly the shape a re-pooling would produce.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    venue = _AccountVenue(_held("100500", ("SOL", "10", "0")), mode=AccountModeVerdict.CHANGED)
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+
+    with capture_events() as logs:
+        asyncio.run(cycle.reconcile_account())
+
+    assert keeper.portfolio.account_net() == {"SOL": Decimal("10")}
+    assert [(p.strategy_id, p.symbol, p.signed_size) for p in store.all_positions()] == [
+        (None, "SOL", Decimal("10"))
+    ]
+    restored = store.load_account()
+    assert restored is not None
+    assert restored.cash == keeper.portfolio.account().cash == Decimal("100000")
+    healed = [log for log in logs if log["event"] == NamedEvent.ACCOUNT_HEALED.value]
+    assert [log["field"] for log in healed] == [DivergenceField.SIGNED_SIZE.value]
+
+
 def test_a_failed_barrier_read_is_recorded_under_the_grains_own_freeze_name() -> None:
     """The barrier's account read is the *same grain's* freeze as the cadence's,
     and it costs strictly more: a frozen cycle loses one pass, while this one
