@@ -22,6 +22,7 @@ from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     EMPTY_LEVERAGE_BOOK,
     Account,
+    AccountModeVerdict,
     AccountSpec,
     FundingAccrual,
     InstrumentSpec,
@@ -62,15 +63,32 @@ class _AccountVenue(LiveVenueDouble):
     can put a **failed** read in front of a good one and assert the cadence
     recovers at its next deadline rather than staying frozen — a distinction a
     double answering one fixed value could not express.
+
+    ``mode`` is the venue's verdict on its own abstraction mode, fixed for the
+    double's life where ``answers`` varies per cycle: a mode switch is a
+    deliberate master-wallet action, so a case that wants one models it by
+    handing the cycle a venue already switched. ``mode_reads`` is public because
+    "was the venue asked at all" is the assertion for the pass that had no heal
+    to make (ADR-0046 §4 buys its steady-state cost by not asking).
     """
 
-    def __init__(self, *answers: VenueAccountState | None) -> None:
+    def __init__(
+        self,
+        *answers: VenueAccountState | None,
+        mode: AccountModeVerdict = AccountModeVerdict.VERIFIED,
+    ) -> None:
         super().__init__(state=answers[0])
         self._answers = list(answers)
+        self._mode = mode
+        self.mode_reads = 0
 
     async def fetch_account_state(self) -> VenueAccountState | None:
         self.account_reads += 1
         return self._answers.pop(0) if len(self._answers) > 1 else self._answers[0]
+
+    async def verify_account_mode(self) -> AccountModeVerdict:
+        self.mode_reads += 1
+        return self._mode
 
     async def place(self, order: PlaceOrder) -> None:
         raise AssertionError("the account cycle places nothing")
@@ -498,6 +516,47 @@ def test_a_cash_divergence_heals_the_line_to_the_one_the_venue_implies() -> None
     assert restored is not None
     assert restored.cash == Decimal("100500")
     assert restored.genesis_collateral == Decimal("100000")
+
+
+def test_a_cash_heal_is_refused_when_the_mode_the_venue_reports_has_changed() -> None:
+    """The heal above is the one thing a mid-run mode switch must not be allowed
+    to perform (ADR-0046 §4).
+
+    Under a pooled abstraction mode the perps clearinghouse reports only the
+    collateral posted into perps, so ``equity − Σ uPnL`` reads an order of
+    magnitude low with nothing in the response saying so — and ADR-0034 heals
+    Tier-1 *toward* the venue, so the cycle would write that smaller figure into
+    ``cash`` and ADR-0043 would persist it. The boot gate cannot close this: it
+    ran once, and the switch is a deliberate master-wallet action taken since.
+
+    So the mode is re-read before the heal and the heal is **refused** on
+    anything but a verified answer. What is asserted here is the refusal in the
+    two places it has to hold — the read-model and the store — and that the pass
+    said **why** it stopped: an operator watching a cash line that stops healing
+    with no record would be reading a silence.
+
+    A **freeze and not a fault**: the read succeeded, so the pass still returns
+    its classification rather than the ``None`` a failed anchor gives, and the
+    engine keeps trading on a local ledger that is still correct.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    venue = _AccountVenue(_held("100500"), mode=AccountModeVerdict.CHANGED)
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+
+    with capture_events() as logs:
+        divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences is not None
+    assert keeper.portfolio.account().cash == Decimal("100000")
+    restored = store.load_account()
+    assert restored is not None
+    assert restored.cash == Decimal("100000")
+    (unverified,) = [
+        log for log in logs if log["event"] == NamedEvent.ACCOUNT_MODE_UNVERIFIED.value
+    ]
+    assert unverified["reason"] == "changed"
+    assert not [log for log in logs if log["event"] == NamedEvent.ACCOUNT_HEALED.value]
 
 
 def test_a_cash_heal_absorbs_the_pnl_the_same_passs_size_heal_realized() -> None:

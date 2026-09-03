@@ -20,6 +20,7 @@ from typing import Any, assert_never
 
 from tickwright.domain import (
     EMPTY_LEVERAGE_BOOK,
+    AccountModeVerdict,
     AccountSpec,
     Clock,
     Deadline,
@@ -45,7 +46,7 @@ from . import transport
 from .account import account_spec, normalize_account_state
 from .config import HyperliquidConfig
 from .funding import FundingIngest
-from .preflight import push_leverage, verify_account_mode
+from .preflight import push_leverage, reverify_account_mode, verify_account_mode
 from .reading import UNREADABLE, failed_send, figure, read, refuse_non_usdc, unreadable_body
 from .transport import Connect, PostJson, open_websocket
 from .universe import HyperliquidUniverse
@@ -474,6 +475,19 @@ class HyperliquidExchange:
         # them (ADR-0049). Its caller — the ``StartupBarrier`` — retries the
         # whole sequence either way.
         return None if isinstance(state, VenueReadFailure) else state
+
+    async def verify_account_mode(self) -> AccountModeVerdict:
+        """The boot gate's question, asked again before a cash heal writes a
+        venue number to disk (ADR-0046 §4).
+
+        Delegated to the same module the gate lives in, so the allowlist and the
+        ``userAbstraction`` read have one owner across both paths; what differs
+        is only the terminal state, and that difference is stated there.
+
+        No ``Deadline`` is opened: the budget ``start()`` spends is a startup
+        concept, and in flight the retry is the cadence itself.
+        """
+        return await reverify_account_mode(info=self._info, address=self._user_address)
 
     async def _order_status(
         self, cloid: str, *, normalize: "Callable[[object], _OrderDecode]"

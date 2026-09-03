@@ -14,6 +14,7 @@ from typing import Protocol, runtime_checkable
 from .account import Account, AccountSpec, AccountView
 from .enums import OrderState
 from .events import (
+    AccountModeVerdict,
     Event,
     MarketTick,
     OrderEvent,
@@ -537,6 +538,39 @@ class Exchange(Protocol):
         answer**: that venue holds resting orders, fill reports and the latest
         tick, and no position, cash or equity state at all, so it has no account
         truth to report rather than none to report *yet*.
+        """
+        ...
+
+    async def verify_account_mode(self) -> AccountModeVerdict:
+        """Whether the account is still in a mode whose ``fetch_account_state``
+        numbers may be healed toward (ADR-0046 §4).
+
+        The **second** query-shaped read on this seam, and the account cycle's
+        guard on the one path that writes a venue number to disk: ADR-0034 heals
+        Tier-1 *toward* the venue, so a mode switched since boot would write the
+        perps sub-ledger's smaller ``accountValue`` into ``cash`` and ADR-0043
+        would persist it.
+
+        A member rather than the engine reading the venue's gate directly, and
+        that is a layering fact rather than a preference: the caller is
+        engine-internal and ``engine`` may not import ``venues`` (ADR-0032),
+        while the accepted literals are venue knowledge that may not move to
+        ``domain`` (ADR-0031). So the venue answers the **verdict** and keeps
+        the vocabulary — one module owning the mode on both the boot path and
+        this one.
+
+        Called **only when there is a cash heal to make** (ADR-0046 §4 rejects a
+        per-cycle read on request weight: ``userAbstraction`` is weight 20
+        against ``clearinghouseState``'s 2), so an implementation may treat this
+        as rare rather than a hot path.
+
+        The two paths differ in whether there is anything to verify. On live it
+        is one unsigned read against the allowlist the boot gate refuses on, and
+        it never retries: there is no boot budget in flight, and the next
+        cadence deadline asks again. On paper it is a **permanent**
+        ``VERIFIED`` — that venue has no account abstraction to be in the wrong
+        mode, and no venue number for a heal to move toward, so there is nothing
+        to check rather than nothing to check *yet*.
         """
         ...
 

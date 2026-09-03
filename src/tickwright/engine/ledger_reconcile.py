@@ -17,6 +17,7 @@ from decimal import Decimal
 from enum import Enum
 
 from tickwright.domain import (
+    AccountModeVerdict,
     AccountView,
     CashCorrection,
     Exchange,
@@ -296,6 +297,8 @@ class LedgerReconciliation:
         heal_ts_ns = self._checkpointer.clock.timestamp_ns()
         heals = self._size_heals(state, divergences, ts_ns=heal_ts_ns)
         cash = self._cash_heal(divergences, ts_ns=heal_ts_ns)
+        if cash is not None and not await self._mode_verified():
+            cash = None
         booked = self._checkpointer.checkpoint_heal(
             tuple(heal.fill for heal in heals),
             cash=None if cash is None else cash.correction,
@@ -318,6 +321,37 @@ class LedgerReconciliation:
             unvalued=self._unvalued(state, view=view, ledger=unrealized, net=net),
         )
         return divergences
+
+    async def _mode_verified(self) -> bool:
+        """Whether the venue still reports a mode this cycle may heal cash
+        toward (ADR-0046 §4), recording the refusal when it does not.
+
+        Asked **only when there is a cash heal to make**, which is the whole of
+        why this check is affordable: ``userAbstraction`` is weight 20 against
+        the anchor read's 2, so a per-cycle guard would spend ten times on the
+        watchman what it spends on the thing watched, forever, to catch an event
+        that takes a deliberate master-wallet action. On the divergence path it
+        costs nothing in steady state and sits on the code path that does the
+        damage rather than on a timer hoping to reach it first. A mode switch
+        that produces no cash divergence is empty as a concern — the switch *is*
+        a re-pooling of balances.
+
+        Both non-verified verdicts take this branch, because an unverified mode
+        is not evidence of an unchanged one: proceeding would heal on exactly
+        the assumption the guard exists to stop the engine making. They differ
+        only on the record, which is where an operator reads them.
+
+        A **freeze and not a fault**, and the caller's shape says so — the cash
+        correction is dropped and the pass runs on. Our fills are still our
+        fills and every Tier-2 number is computed from ``(position, mark)``
+        rather than from the venue, so what has become invalid is the
+        cross-check and the heal, not the ledger.
+        """
+        verdict = await self._exchange.verify_account_mode()
+        if verdict is AccountModeVerdict.VERIFIED:
+            return True
+        named_event(NamedEvent.ACCOUNT_MODE_UNVERIFIED, reason=verdict.value)
+        return False
 
     @staticmethod
     def _record_heals(

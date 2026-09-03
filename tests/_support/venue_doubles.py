@@ -34,6 +34,7 @@ from decimal import Decimal
 from ledgers import GENESIS
 
 from tickwright.domain import (
+    AccountModeVerdict,
     AccountSpec,
     Exchange,
     InstrumentSpec,
@@ -104,6 +105,12 @@ class VenueDouble:
         # overrides this, which is the seam's meaning arriving in the suite that
         # asserts it rather than being inherited from here.
         return None
+
+    async def verify_account_mode(self) -> AccountModeVerdict:
+        # The paper venue's permanent answer again: nothing to verify, rather
+        # than nothing verified. A double asserting on the guard says so by
+        # overriding this — the refusal is a case's meaning, not ceremony.
+        return AccountModeVerdict.VERIFIED
 
     def account_spec(self) -> AccountSpec:
         return AccountSpec(account_id="paper-default", genesis_collateral=GENESIS)
@@ -186,6 +193,9 @@ class VenueLink:
 
     async def fetch_account_state(self) -> VenueAccountState | None:
         return await self._venue.fetch_account_state()
+
+    async def verify_account_mode(self) -> AccountModeVerdict:
+        return await self._venue.verify_account_mode()
 
     def account_spec(self) -> AccountSpec:
         return self._venue.account_spec()

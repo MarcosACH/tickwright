@@ -24,6 +24,7 @@ from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.domain import (
     EMPTY_LEVERAGE_BOOK,
+    AccountModeVerdict,
     InstrumentSpec,
     LeverageBook,
     LeverageOutOfBounds,
@@ -221,6 +222,87 @@ def test_both_manual_standard_literals_start_normally(mode: str) -> None:
     exchange = _exchange(FakeExchangeApi({"userAbstraction": mode}))
 
     asyncio.run(exchange.start())  # no refusal is the assertion
+
+
+@pytest.mark.parametrize("mode", ["unifiedAccount", "portfolioMargin"])
+def test_an_in_flight_mode_the_gate_would_have_refused_is_a_verdict_not_a_refusal(
+    mode: str,
+) -> None:
+    """The same allowlist, asked again in flight, answers instead of raising
+    (ADR-0046 §4).
+
+    At boot there is nothing correct to fall back to, so an unsupported mode
+    faults. An hour in there is: our fills are still our fills and the local
+    ledger is still right, so the same literal is a **freeze** — the cash heal
+    is refused and the run continues. That difference is the whole reason this
+    is a second entry point rather than the gate called twice, and asserting it
+    here is what stops a later tidy-up collapsing the two.
+
+    Reached across the ``Exchange`` seam, which is not incidental: the caller is
+    engine-internal and ``engine`` may not import ``venues``, so the venue keeps
+    the literals and hands back a verdict.
+    """
+    post = FakeExchangeApi({"userAbstraction": mode})
+
+    verdict = asyncio.run(_exchange(post).verify_account_mode())
+
+    assert verdict is AccountModeVerdict.CHANGED
+
+
+@pytest.mark.parametrize("mode", ["default", "disabled"])
+def test_an_in_flight_re_read_clears_on_the_same_two_literals_the_gate_accepts(mode: str) -> None:
+    """One allowlist, two callers (ADR-0046 §4's "reuses the boot gate's
+    allowlist and read").
+
+    The parametrization is the point rather than thoroughness: a second copy of
+    the accepted set would be free to drift from the boot gate's, and the shape
+    that drift takes is an engine that starts on ``"disabled"`` and then freezes
+    its own cash heal forever against an account nobody touched.
+    """
+    post = FakeExchangeApi({"userAbstraction": mode})
+
+    verdict = asyncio.run(_exchange(post).verify_account_mode())
+
+    assert verdict is AccountModeVerdict.VERIFIED
+
+
+def test_an_in_flight_read_that_fails_is_unreadable_on_the_first_attempt() -> None:
+    """No retry in flight, and the count is the assertion (ADR-0046 §4).
+
+    The boot gate retries because a startup budget exists to be spent and there
+    is no correct state to fall back to. Neither holds here: the cadence's next
+    deadline *is* the retry, and a guard that looped inside one pass would hold
+    the cycle open against a venue that is already not answering — the cost the
+    §4 read is affordable by not paying.
+
+    Unreadable rather than a raised error, because this runs inside a supervised
+    task on a run whose ledger is still correct: an exception escaping here
+    would fault the engine, which is exactly the outcome the freeze exists
+    instead of.
+    """
+    post = FakeExchangeApi({"userAbstraction": ConnectionError("venue unreachable")})
+
+    verdict = asyncio.run(_exchange(post).verify_account_mode())
+
+    assert verdict is AccountModeVerdict.UNREADABLE
+    assert len(post.requests) == 1
+
+
+def test_an_in_flight_mode_that_is_not_a_string_is_unreadable_rather_than_changed() -> None:
+    """A body of the wrong type is the venue changing its contract, not an
+    operator changing their account.
+
+    Both verdicts refuse the heal, so nothing about the freeze turns on this —
+    the record does. ``CHANGED`` sends an operator to the venue UI to undo a
+    switch they never made; ``UNREADABLE`` says the mode could not be
+    established, which is what actually happened. Same distinction the boot
+    gate's own read makes by raising rather than printing a remediation.
+    """
+    post = FakeExchangeApi({"userAbstraction": {"mode": "disabled"}})
+
+    verdict = asyncio.run(_exchange(post).verify_account_mode())
+
+    assert verdict is AccountModeVerdict.UNREADABLE
 
 
 def test_a_mode_that_cannot_be_read_refuses_to_start_once_the_budget_is_spent() -> None:

@@ -25,6 +25,7 @@ from functools import partial
 from typing import Any
 
 from tickwright.domain import (
+    AccountModeVerdict,
     Backoff,
     Clock,
     Deadline,
@@ -119,6 +120,45 @@ async def verify_account_mode(
     if mode in SUPPORTED_ACCOUNT_MODES:
         return
     raise VenueAccountModeUnsupported(_remediation(mode, address=address))
+
+
+async def reverify_account_mode(*, info: InfoRead, address: str) -> AccountModeVerdict:
+    """The same question in flight, answered as a **verdict** (ADR-0046 §4).
+
+    Beside the gate rather than inside the engine because the allowlist is venue
+    knowledge and stays in the venue (ADR-0031), while the caller is
+    engine-internal and ``engine`` may not import ``venues`` (ADR-0032). So one
+    module owns what the literals mean on both paths, and what crosses the
+    ``Exchange`` seam is the answer rather than the vocabulary.
+
+    Three differences from the boot gate, all of them the same difference — at
+    boot nothing is correct yet, in flight the local ledger still is:
+
+    - It **returns** where the gate raises. An unsupported mode here freezes the
+      account-grain cross-check and costs a heal; at boot it costs the process.
+    - It takes **no deadline and no retry**. The boot budget is a startup
+      concept and there is no in-flight equivalent to borrow; a failed read
+      costs this pass and the next cadence deadline asks again, which is the
+      retry, spread over the cadence instead of over a window.
+    - An unreadable answer is a **verdict of its own** rather than an error, so
+      the record can say which of the two happened. It is still the same
+      branch at the caller: an unverified mode is not evidence of an unchanged
+      one, so both refuse the heal.
+
+    Every failure the read can produce is caught, deliberately widely: this
+    guard runs on a cadence inside a supervised task, and an exception escaping
+    it would take down a run whose ledger is still perfectly good — the fault
+    the whole section exists to avoid. There is nothing an operator loses by it,
+    since the alternative outcome to ``UNREADABLE`` is not a better answer but
+    a dead engine.
+    """
+    try:
+        mode = await _read_account_mode(info, address=address)
+    except Exception:
+        return AccountModeVerdict.UNREADABLE
+    if mode in SUPPORTED_ACCOUNT_MODES:
+        return AccountModeVerdict.VERIFIED
+    return AccountModeVerdict.CHANGED
 
 
 def _unreadable_mode(exc: BaseException, deadline: Deadline, *, address: str) -> InvariantViolation:
