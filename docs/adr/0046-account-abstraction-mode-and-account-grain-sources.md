@@ -490,7 +490,18 @@ heal, which a pooled mode does not touch, keeps booking on the same transaction 
 was dropped from. The consequence for whoever lands the alert bands
 ([#194](https://github.com/MarcosACH/tickwright/issues/194)) is that account-grain findings **are
 still counted while frozen**, so suppressing the alerts that would otherwise fire off a snapshot
-this section has just declared unreliable is that slice's job, not this one's.**)**
+this section has just declared unreliable is that slice's job, not this one's.
+
+**One cost of the placement, accepted and not free.** The re-read is the cycle's
+one **yield point between classifying and writing**: the cadence runs beside the saga in the
+runner's `TaskGroup`, so a fill checkpointed while the mode read is in flight has its cash effect
+overwritten by a correction computed before it — the cash line is healed by assignment to a target,
+not by a delta. That is ADR-0034's own one-cadence over-read reached from a new direction, and it
+converges the same way: the next snapshot carries the fill, the exact cash comparison finds the gap,
+and the pass after heals it. Re-reading the ledger side after the verdict would not close it — the
+venue snapshot predates the await too, so the recomputed target is the same figure against a book
+the venue has not seen — and the sound response to "a fill landed" is the pass this already is, one
+the next deadline repeats.**)**
 
 ## 5. ADR-0040 §6's alert band: the relative term scales by notional
 

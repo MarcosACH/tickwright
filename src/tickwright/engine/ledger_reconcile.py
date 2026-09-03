@@ -259,6 +259,11 @@ class LedgerReconciliation:
         amount this cycle just moved — an alert about our own arithmetic, and one
         no Tier-1 equity finding exists to suppress it against.
 
+        One thing does come between that reading and the write, and only on a
+        pass with a cash gap to close: the mode guard's venue read. What a
+        concurrent fill costs there, and why the answer is the next deadline
+        rather than a second reading, is ``_mode_verified`` below.
+
         The net sizes are the reason that matters beyond tidiness: they are the
         cycle's **one definition of held-ness**, and both grains read it. Tier-1
         calls a symbol flat and calls it absent the same thing, so Tier-2 must
@@ -350,6 +355,26 @@ class LedgerReconciliation:
         fills and every Tier-2 number is computed from ``(position, mark)``
         rather than from the venue, so what has become invalid is the
         cross-check and the heal, not the ledger.
+
+        This is also the cycle's **one yield point between classifying and
+        writing**, and it is worth naming because the caller's own docstring
+        reasons about a ledger side read once for the pass. The cadence runs
+        beside the saga in the runner's ``TaskGroup``, so a fill can be
+        checkpointed while this read is in flight, and the correction booked
+        after it was computed against the book as it was before: the cash line is
+        an assignment to a target, so that fill's cash effect is overwritten and
+        the size heals are deltas against a net that has since moved.
+
+        Accepted rather than closed, on ADR-0034's own terms: the ledger
+        over-reads for **one cadence interval** and heals back, because the next
+        snapshot carries the fill and the exact cash comparison finds the gap it
+        left. Closing it is not available at this grain anyway — the venue
+        snapshot predates the await too, so re-reading the ledger side would heal
+        toward the same figure against a book the venue has not seen, and the
+        only sound response to "a fill landed" is the pass this one already is:
+        one the next deadline repeats. The window is a round-trip on a path that
+        only runs when something diverged, and it costs nothing on the far commoner
+        pass that finds no cash gap and never opens it.
         """
         verdict = await self._exchange.verify_account_mode()
         if verdict is AccountModeVerdict.VERIFIED:
