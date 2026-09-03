@@ -601,6 +601,37 @@ def test_a_mode_the_venue_cannot_report_refuses_the_heal_the_same_way_a_changed_
     assert venue.mode_reads == 1
 
 
+def test_a_pass_with_no_cash_heal_to_make_never_asks_the_venue_for_its_mode() -> None:
+    """The guard sits on the cash heal, not on the cycle, and that placement is
+    what makes it affordable (ADR-0046 §4).
+
+    ``userAbstraction`` is weight 20 against the anchor read's 2, so a per-cycle
+    re-read would spend ten times as much on the watchman as on the thing
+    watched, on every deadline forever, to catch an event that takes a
+    deliberate master-wallet action. Asked only where the damage happens, it
+    costs nothing in steady state — and a mode switch that produces no cash
+    divergence is empty as a concern, since the switch *is* a re-pooling of
+    balances and would show up as one.
+
+    A **healing** pass is what proves the placement rather than an idle one: the
+    cycle here writes a synthetic fill for foreign SOL flow and still asks the
+    venue nothing, so what is pinned is that the gate hangs off the cash
+    correction specifically and not off "the pass changed something".
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    venue = _AccountVenue(_held("100000", ("SOL", "10", "0")))
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+
+    with capture_events() as logs:
+        asyncio.run(cycle.reconcile_account())
+
+    assert venue.mode_reads == 0
+    assert venue.account_reads == 1
+    assert keeper.portfolio.account_net() == {"SOL": Decimal("10")}
+    assert not [log for log in logs if log["event"] == NamedEvent.ACCOUNT_MODE_UNVERIFIED.value]
+
+
 def test_a_cash_heal_absorbs_the_pnl_the_same_passs_size_heal_realized() -> None:
     """The cash correction is folded **after** the size heals, and the ordering
     is the whole subject: a heal that closes into a partition realizes PnL onto
