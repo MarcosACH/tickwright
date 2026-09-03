@@ -107,10 +107,34 @@ emitting raw [[ExecutionReport]]s. Owns no saga. A failed `fetch_*` never answer
 [[Connectivity guard]]), and the grain decides how: `fetch_order` returns a [[Failed read]] —
 never a view — because the reconciler behind it drives a worklist and acts on *which way* the
 read failed; `fetch_account_state` reads one grain with nothing behind it to spare and collapses
-both to `None`. Impls: [[Paper exchange|PaperExchange]], `HyperliquidExchange`; the seam
+both to `None`. **Composed of its two anchors** — [[Order anchor|OrderAnchor]] and
+[[Account anchor|AccountAnchor]] — plus what answers for the venue itself: the lifecycle
+(`start`/`run`/`stop`) and the two static declarations (`account_spec`, `instrument_specs`). An
+*adapter* satisfies the whole seam; a *caller* below the runner is constructed against the anchor
+it reads. Impls: [[Paper exchange|PaperExchange]], `HyperliquidExchange`; the seam
 **accepts N** — each real venue is a self-contained [[Venue adapter]] (two ship only to prove the
-seam). See ADR-0011, ADR-0015, ADR-0031.
+seam). See ADR-0011, ADR-0015, ADR-0031, ADR-0034.
 _Avoid_: broker, venue client, gateway (fine informally).
+
+**Order anchor** / `OrderAnchor` *(Protocol)*:
+The half of [[Exchange]] keyed by [[Client order id|cloid]] — `place`, `cancel`, `fetch_order` —
+and the seam the order grain is constructed against: the [[ExecutionManager]] sends on it, the
+[[Reconciliation|Reconciler]] reads back on it, and neither touches the account. Commands and a
+query together rather than split again, because a placement's outcome is *learned by reading it
+back*: one anchor, two halves of one loop. See ADR-0011, ADR-0015, ADR-0034.
+_Avoid_: order API, order client (the anchor is what makes it one seam, not the verb shapes).
+
+**Account anchor** / `AccountAnchor` *(Protocol)*:
+[[Order anchor]]'s peer one grain up: the half of [[Exchange]] keyed by the **account** —
+`fetch_account_state` (the snapshot every cycle of [[Ledger reconciliation]] is anchored on) and
+`verify_account_mode` (whether that snapshot's account-grain figures still mean what they meant at
+boot, [[Account abstraction mode]]). The mode guard sits *on* the anchor rather than beside it
+because it is a statement about this snapshot and nothing else. Its one caller is live-only, but
+**both adapters answer it** — the cycle is constructed on every path and scheduled on one, so
+paper answers permanently (`None` and `VERIFIED`) rather than being withheld from the seam. See
+ADR-0034, ADR-0043, ADR-0046.
+_Avoid_: account API, balance client; **[[Reconciliation]]**'s anchor unqualified (that one is the
+cloid).
 
 **Venue adapter**:
 The self-contained per-venue module that packages a venue's [[MarketFeed]] + [[Exchange]] +
@@ -758,6 +782,10 @@ funded), seed capital.
 - Both read-models are built and written by one **Checkpointer**, which the **Engine** constructs
   from the one **Store** it was given; the **ExecutionManager** takes that single collaborator
   rather than a store, a cache and a projection it would have to keep pointed at one another.
+- The **Engine** is the only holder of the whole **Exchange**, because it is the only thing that
+  hands the seam out: the **ExecutionManager** and the **Reconciler** are constructed against the
+  [[Order anchor]], **LedgerReconciliation** against the [[Account anchor]]. One adapter satisfies
+  all three — the split is about what a *caller* must know, never about what a venue must provide.
 
 ## Flagged ambiguities
 

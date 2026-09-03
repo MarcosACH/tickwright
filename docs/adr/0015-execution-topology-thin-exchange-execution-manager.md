@@ -17,6 +17,38 @@ owns no order state, and the write happens once, before the barrier, on a path n
 The venue-extensibility model (process-per-venue, adapter self-containment, instrument-spec
 wiring) is specified in ADR-0031; package topology and the composition root in ADR-0032.
 
+**(Amended by [#195](https://github.com/MarcosACH/tickwright/issues/195)'s
+`/improve-codebase-architecture` review: `Exchange` is now composed of its two anchors, and
+"thin" is a claim about the adapter that has to be one about the caller too.** The seam reached
+ten members, and its four engine consumers used **disjoint** subsets of them — the
+`ExecutionManager` `place`/`cancel`, the `Reconciler` `fetch_order`, `LedgerReconciliation`
+`fetch_account_state`/`verify_account_mode`, the runner the lifecycle and the two declarations.
+Every one of them depended on all ten, so each widening obliged every caller and every double to
+learn a grain it never read; `verify_account_mode` was the sixth such widening and the one that
+made the cost legible, since three of its four implementations are a constant.
+
+The split is **by anchor**, which is this repo's own division and not a new one: ADR-0034 runs two
+reconciliation cycles on two anchors, and the members partition along them exactly. `OrderAnchor`
+is the venue keyed by **cloid** — `place`, `cancel`, `fetch_order` — and `AccountAnchor` is the
+venue keyed by the **account** — `fetch_account_state`, `verify_account_mode`. What is left on
+`Exchange` is what answers for the venue itself: `start`/`run`/`stop` and the two static
+declarations. Commands sit with a query on `OrderAnchor` deliberately — a placement's outcome is
+learned by reading it back, so a caller holding one without the other could not close the loop —
+and the lifecycle is *not* made a third anchor, because no caller narrows to it: the runner holds
+the composite either way, being the one thing that hands the anchors out.
+
+**Nothing about an adapter changes, and that is the point.** Both adapters satisfy the whole seam
+structurally, as before; `isinstance(adapter, Exchange)` and the per-adapter seam-claims gates walk
+all ten members unchanged, since `get_protocol_members` includes inherited ones. What changed is
+what a *caller* declares. The narrowing is not merely notation: the account cycle's own double went
+from a subclass of the shared ceremony base with three assertion-raising stubs to two members and
+no base at all, which converts "the account cycle places nothing" from a runtime assertion into a
+type error. `tests/domain/test_protocols.py` pins the partition, so a member added later lands on
+the anchor its callers read rather than drifting back onto the composite one method at a time.
+
+This does not thicken or thin the adapter in the sense this ADR means, and it does not touch the
+saga's single owner below.**)**
+
 Uniform bus coupling:
 
 ```
