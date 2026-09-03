@@ -6,7 +6,7 @@ from decimal import Decimal
 import pytest
 from venue_doubles import account_state
 
-from tickwright.domain import Account, AccountSpec, Netting, account_view
+from tickwright.domain import Account, AccountSpec, LeverageBook, Netting, account_view
 
 
 def _account(genesis: str = "100000") -> Account:
@@ -23,7 +23,9 @@ def test_an_account_opens_with_its_cash_line_at_the_genesis_collateral() -> None
     # And it reaches the seam's snapshot, assembled off the aggregate rather
     # than by it: every Tier-2 Σ on that view ranges over positions an
     # ``Account`` knows nothing about (ADR-0035).
-    assert account_view(account, positions=(), marks={}).cash == Decimal("250000")
+    assert account_view(
+        account, positions=(), marks={}, leverage=LeverageBook(), specs={}
+    ).cash == Decimal("250000")
 
 
 def test_realized_pnl_accrues_to_the_cash_line() -> None:
@@ -122,6 +124,22 @@ def test_a_live_spec_declaring_no_genesis_opens_the_ledger_at_zero() -> None:
     assert account.account_id == "hyperliquid-testnet-0xabc"
     assert account.genesis_collateral == Decimal("0")
     assert account.cash == Decimal("0")
+
+
+def test_a_spec_names_the_declared_versus_ingested_predicate() -> None:
+    """ADR-0043 §10's predicate is a fact about which venue is running, so the
+    spec that carries the declaration answers it rather than four callers each
+    re-deriving a boolean from a ``Decimal | None``.
+
+    Both polarities are asserted because both are read: the genesis seed and the
+    store's disagreement refusals turn on the declared side, while the isolated
+    lock and the live-only ledger cadence turn on the ingested one.
+    """
+    paper = AccountSpec(account_id="paper-default", genesis_collateral=Decimal("250000"))
+    live = AccountSpec(account_id="hyperliquid-testnet-0xabc", genesis_collateral=None)
+
+    assert paper.declares_genesis is True
+    assert live.declares_genesis is False
 
 
 def test_a_live_ledger_ingests_its_genesis_net_of_unrealized_pnl() -> None:

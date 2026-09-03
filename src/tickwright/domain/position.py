@@ -19,6 +19,7 @@ from enum import StrEnum
 from .enums import Side
 from .errors import InvariantViolation
 from .events import OrderFillEvent, ReconciliationFill
+from .leverage import MarginMode
 
 _ZERO = Decimal("0")
 
@@ -93,6 +94,78 @@ class PositionView:
     so two strategies long the same symbol read one notional. A magnitude, since
     exposure has no direction. ``None`` on an absent mark unless the account nets
     flat, where ``|0| × mark`` is zero at every mark."""
+    leverage: int
+    """The **set nominal cap** for the symbol, the integer that fixes the
+    initial-margin fraction ``1/leverage`` (ADR-0041 §4.1).
+
+    Position-grain and operator-authored: it is the configured value the engine
+    pushed to the venue at boot (ADR-0044 §4), not a realized ratio — that is
+    ``effective_leverage``. Reported beside the amounts it produced so a reader
+    can tell a small ``margin_used`` at high leverage from a small position."""
+    margin_mode: MarginMode
+    """Which of the two margin rules produced this view's amounts (ADR-0040 §1).
+
+    Carried rather than inferred: ``margin_used`` is ``notional / leverage``
+    under cross and ``isolated_collateral + unrealized_pnl`` under isolated, and
+    the two are different rules rather than one parameterised, so a reader
+    comparing amounts across symbols needs to know which it is holding."""
+    margin_used: Decimal | None
+    """The collateral this position has posted, at position grain (ADR-0040 §2).
+
+    Cross posts ``notional / leverage`` out of the shared pool. Isolated reports
+    its locked bucket marked to market, ``isolated_collateral + unrealized_pnl``
+    — where the uPnL term is the symbol's **account-net** total, not the
+    own-slice field beside it (ADR-0041 §4): the venue holds one bucket per
+    position, so under foreign flow the bucket's mark-to-market is not this
+    strategy's. Tier-2 in both modes and therefore ``None`` on an absent mark
+    whose terms need it — cross because ``notional`` does (#142)."""
+    maintenance_margin: Decimal | None
+    """The collateral that must remain behind the position before liquidation:
+    ``notional × margin_maint`` at the flat tier-0 rate (ADR-0040 §4).
+
+    Flat by decision, not by approximation: above the venue's first margin tier
+    this knowingly under-reports, and that divergence is left to trip the §6
+    alert rather than absorbed by a tier table nothing yet reads. ``None`` when
+    ``notional`` is, and also when no ``InstrumentSpec`` is known for the
+    symbol — an unattributed position in a symbol outside our universe has no
+    rate to apply, which is a missing term like any other (ADR-0041 §6)."""
+    liquidation_price: Decimal | None
+    """The mark at which the backing is exhausted and the position is closed out
+    (ADR-0040 §3).
+
+    The one recomputed valuation that is **read through the venue on live** and
+    computed only on paper: re-deriving it needs the maintenance-margin tier
+    fixed point, it is safety-relevant, and the venue already publishes it as one
+    field. So the two paths agree by the venue's number rather than by the same
+    arithmetic, which is why this field alone sits outside the divergence band.
+
+    ``None`` on a flat account-net position — the formula divides by size and a
+    flat position has no side (ADR-0041 §3) — on the missing terms every field
+    here shares, and when the computed price comes out **non-positive**, which
+    is the venue's own answer and the majority case for a long (ADR-0046 §6)."""
+    effective_leverage: Decimal | None
+    """The **realized** exposure-to-equity ratio, ``notional`` over whatever
+    backs the position (ADR-0041 §4.1).
+
+    Distinct from ``leverage`` beside it: that is the nominal cap the operator
+    set, this is what the position is actually running at, and the two agree
+    only at the instant of open. Convention-only — the venue defines no such
+    term and publishes no field for it, so it sits outside the divergence alert
+    band (ADR-0040 §6).
+
+    The denominator splits by mode, and that split is the whole content of the
+    field: isolated divides by the position's own bucket marked to market
+    (``isolated_collateral + unrealized_pnl``, account-net grain), cross by
+    whole-account ``equity``. Only the position-grain denominator makes the
+    defining behaviour hold — adding isolated margin visibly de-levers the
+    position, where an account-equity denominator would leave the ratio
+    untouched (#142).
+
+    ``None`` on a **non-positive denominator** as well as on the missing terms
+    every field here shares — the one Tier-2 ``None`` a fresh mark cannot cure
+    (ADR-0041 §6). Nothing rejects an order or liquidates a position, so equity
+    runs past zero on ordinary trading, and the ratio is undefined there rather
+    than negative."""
     mark_ts: int | None
     """The observation instant of the mark this view was valued at, ``None`` when
     the projection holds none for the symbol (ADR-0041 §6).

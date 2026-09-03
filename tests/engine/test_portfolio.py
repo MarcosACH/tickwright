@@ -17,11 +17,14 @@ from venue_doubles import account_state
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
+    EMPTY_LEVERAGE_BOOK,
     UNATTRIBUTED,
     Account,
     AccountSpec,
     FundingAccrual,
     InvariantViolation,
+    LeverageBook,
+    LeverageSpec,
     MarkTick,
     Order,
     OrderFilled,
@@ -102,11 +105,18 @@ def _accrual(
 
 
 def _projection(
-    genesis: str | None = "100000", *, store: Store | None = None
+    genesis: str | None = "100000",
+    *,
+    store: Store | None = None,
+    leverage: LeverageBook = EMPTY_LEVERAGE_BOOK,
 ) -> PortfolioProjection:
     """A ledger on a paper-shaped account, unless ``genesis`` is ``None`` — which
     is the *live* shape, where the opening value is ingested from the venue
-    rather than declared (ADR-0042 §6) and is the predicate recovery reads."""
+    rather than declared (ADR-0042 §6) and is the predicate recovery reads.
+
+    ``leverage`` is the resolved book the composition root injects; the default
+    empty one takes ADR-0040 §5's safest pair for every symbol, which is what a
+    case with no margin opinion of its own wants."""
     spec = AccountSpec(
         # Two segments on paper against live's three (ADR-0038/0042 §5), so a
         # row written by one shape is never confusable with the other's.
@@ -117,6 +127,7 @@ def _projection(
         spec=spec,
         store=store if store is not None else SQLiteStore(":memory:"),
         clock=ManualClock(7),
+        leverage=leverage,
     )
 
 
@@ -404,6 +415,170 @@ def test_no_tier_two_value_reaches_the_durable_ledger() -> None:
     assert recovered is not None
     assert recovered.mark_ts is None
     assert recovered.unrealized_pnl is None
+
+
+def test_paper_locks_an_isolated_positions_collateral_at_the_notional_it_opened_on() -> None:
+    """Paper's isolated bucket is the margin moved in **at open** (ADR-0040 §1).
+
+    A 0.5 BTC open at 42 000 is 21 000 of notional, and at 10x isolated the
+    venue would move 21 000 / 10 = **2 100** into the position's own bucket. The
+    figure is worked from the fill, not from the reported number: the collateral
+    is a Tier-1 line (ADR-0040's tier table — "open-margin on paper"), so it is
+    the *ledger row* that must carry it and not a valuation recomputed on read.
+
+    Paper alone writes it. On live the same field is **ingested** from the venue
+    (`marginUsed − unrealizedPnl`, ADR-0043 §3), and computing one here would
+    fabricate a number the venue is the authority for — the asymmetry ADR-0034
+    forbids crossing.
+    """
+    projection = _projection(
+        leverage=LeverageBook(entries={"BTC": LeverageSpec(mode="isolated", leverage=10)})
+    )
+    change = projection.apply_fill(
+        _fill(trade_id="f1", quantity="0.5", price="42000"), side=Side.BUY
+    )
+
+    assert change.position.isolated_collateral == Decimal("2100")
+
+
+def test_live_leaves_an_isolated_collateral_the_venue_is_the_authority_for_alone() -> None:
+    """The same open on a live-shaped ledger writes **no** collateral of its own.
+
+    `genesis_collateral is None` is the declared-versus-ingested predicate the
+    recovery path already turns on (ADR-0043 §10), and it answers this question
+    too: paper *declares* the margin it moved in, live *ingests* what the venue
+    moved (`marginUsed − unrealizedPnl`, ADR-0043 §3). Computing one here would
+    put a number on the ledger the venue never posted — and it would be wrong
+    at the first `updateIsolatedMargin` top-up, which live models and paper
+    does not.
+
+    Identical inputs to the case above, so the only thing that differs is which
+    side of that predicate the account sits on.
+    """
+    projection = _projection(
+        None, leverage=LeverageBook(entries={"BTC": LeverageSpec(mode="isolated", leverage=10)})
+    )
+    change = projection.apply_fill(
+        _fill(trade_id="f1", quantity="0.5", price="42000"), side=Side.BUY
+    )
+
+    assert change.position.isolated_collateral == Decimal("0")
+
+
+def test_a_restart_restores_the_locked_collateral_rather_than_recomputing_it() -> None:
+    """The bucket is durable Tier-1, so a second life reads it back unchanged.
+
+    The second projection is opened on a **different** leverage — 5x against the
+    10x the position was opened at — which is what makes this a restore rather
+    than a recomputation: recomputing would answer 21 000 / 5 = 4 200, and the
+    number that survives is the 2 100 the open actually moved in. Config wins at
+    startup and the position keeps what it was margined with, exactly as
+    ADR-0044 §5's measured venue behaviour has it: a leverage change never
+    re-margins an open position.
+    """
+    store = SQLiteStore(":memory:")
+    opened = _projection(
+        store=store,
+        leverage=LeverageBook(entries={"BTC": LeverageSpec(mode="isolated", leverage=10)}),
+    )
+    opened.recover()
+    change = opened.apply_fill(_fill(trade_id="f1", quantity="0.5", price="42000"), side=Side.BUY)
+    store.checkpoint_ledger(account=change.account, positions=(change.position,), ts_ns=1_000)
+    opened.project(change)
+
+    restarted = _projection(
+        store=store,
+        leverage=LeverageBook(entries={"BTC": LeverageSpec(mode="isolated", leverage=5)}),
+    )
+    restarted.recover()
+    # Marked at the entry, so the unrealized term of ``isolated_collateral +
+    # unrealized_pnl`` is exactly zero and ``margin_used`` reads the restored
+    # bucket alone — the seam a strategy actually holds, not the row behind it.
+    restarted.observe_mark(_mark(price="42000", ts_event=9_000))
+
+    recovered = restarted.for_strategy("alpha").position("BTC")
+    assert recovered is not None
+    assert recovered.margin_used == Decimal("2100")
+
+
+def test_adding_to_an_isolated_position_does_not_top_its_bucket_up() -> None:
+    """The bucket is fixed at the open and no later fill moves it (ADR-0040 §1).
+
+    A second 0.5 at 44 000 doubles the size and lifts the mean entry to 43 000,
+    so a recomputation would answer 1.0 × 43 000 / 10 = 4 300. The collateral
+    that stands is the 2 100 the open moved in — paper models no top-up, so the
+    add is booked into the position without one.
+    """
+    projection = _projection(
+        leverage=LeverageBook(entries={"BTC": LeverageSpec(mode="isolated", leverage=10)})
+    )
+    book_fill(projection, _fill(trade_id="f1", quantity="0.5", price="42000"), side=Side.BUY)
+
+    change = projection.apply_fill(
+        _fill(trade_id="f2", quantity="0.5", price="44000"), side=Side.BUY
+    )
+
+    assert change.position.entry_price == Decimal("43000")  # the add did land
+    assert change.position.isolated_collateral == Decimal("2100")
+
+
+def test_closing_an_isolated_position_releases_the_bucket_it_locked() -> None:
+    """The margin moved in at open comes back out at the close (ADR-0040 §1).
+
+    Paper is the path this has to be written on: live's bucket is released by
+    the reconcile ingest, which drops a symbol the venue no longer holds, and
+    that cadence never runs here (ADR-0034). A bucket left standing on a flat
+    partition is therefore permanent, and it is not inert — `margin_used` for
+    isolated is `isolated_collateral + unrealized_pnl`, so the whole of it keeps
+    reporting through `total_margin_used` and comes back off `free_margin`
+    (ADR-0040 §2) on an account that holds nothing, for the rest of the run and
+    every restart after it, the field being durable Tier-1.
+
+    Worked off the file: 0.5 BTC at 42 000 is 21 000 of notional, so 10x
+    isolated locks 2 100 against a `GENESIS` of 100 000; closing at the entry
+    realizes nothing, so the account is back to exactly its opening cash with
+    nothing posted against it.
+    """
+    projection = _projection(
+        leverage=LeverageBook(entries={"BTC": LeverageSpec(mode="isolated", leverage=10)})
+    )
+    book_fill(projection, _fill(trade_id="f1", quantity="0.5", price="42000"), side=Side.BUY)
+    projection.observe_mark(_mark(price="42000", ts_event=9_000))
+    assert projection.account().total_margin_used == Decimal("2100")
+
+    change = projection.apply_fill(
+        _fill(trade_id="f2", quantity="0.5", price="42000"), side=Side.SELL
+    )
+
+    assert change.position.isolated_collateral == Decimal("0")
+    account = projection.account()
+    assert account.total_margin_used == Decimal("0")
+    assert account.free_margin == account.equity == Decimal("100000")
+
+
+def test_a_flip_through_zero_re_locks_the_bucket_at_the_residual_it_opened() -> None:
+    """A close that opens a fresh position in the same fill releases *and* locks.
+
+    `_book` announces a flip as `(CLOSED, OPENED)`, and the residual is a new
+    position at the fill price — so the bucket owed is the new leg's, never the
+    old one's and never nothing. 1.5 sold against a long of 0.5 leaves a short
+    of 1.0 at 44 000, which at 10x isolated is 44 000 / 10 = **4 400**.
+
+    The case exists because the release is expressed on `CLOSED`: read alone,
+    that would strip the bucket from a partition that is holding exposure again
+    by the end of the same fold.
+    """
+    projection = _projection(
+        leverage=LeverageBook(entries={"BTC": LeverageSpec(mode="isolated", leverage=10)})
+    )
+    book_fill(projection, _fill(trade_id="f1", quantity="0.5", price="42000"), side=Side.BUY)
+
+    change = projection.apply_fill(
+        _fill(trade_id="f2", quantity="1.5", price="44000"), side=Side.SELL
+    )
+
+    assert change.position.signed_size == Decimal("-1.0")
+    assert change.position.isolated_collateral == Decimal("4400")
 
 
 def test_a_position_the_projection_has_no_mark_for_reports_no_instant() -> None:
@@ -1305,3 +1480,97 @@ def test_the_scoped_facade_cannot_reach_the_unattributed_partition() -> None:
     # registration gates make that id unobtainable; this is why it would not
     # help even if one were obtained.
     assert restarted.for_strategy(UNATTRIBUTED).position("BTC") is None
+
+
+_ISOLATED_10X = LeverageBook(entries={"BTC": LeverageSpec(mode="isolated", leverage=10)})
+
+
+def _live_isolated() -> PortfolioProjection:
+    """A live ledger in the mode whose collateral the venue authors."""
+    return _projection(None, leverage=_ISOLATED_10X)
+
+
+def test_the_venues_bucket_splits_across_partitions_and_sums_to_it_exactly() -> None:
+    """The venue holds **one** bucket per symbol and knows nothing of our
+    partitions (ADR-0035), so an ingest has to divide it — and `valuation.py`
+    reads it back as the Σ over those partitions, which is what makes the
+    residue rule load-bearing rather than tidy.
+
+    Pro-rata by **magnitude**, not by signed size as funding is: a partition's
+    claim on the collateral behind a position is the exposure it contributes,
+    and a share of a bucket cannot be negative.
+
+    The quantities are chosen to divide inexactly (`1/3` of the bucket), so a
+    quotient-only split would leave the Σ short and manufacture a divergence
+    against the venue's own `marginUsed` out of our own rounding.
+    """
+    projection = _live_isolated()
+    book_fill(projection, _fill(trade_id="f1", quantity="1", price="42000"), side=Side.BUY)
+    book_fill(
+        projection,
+        _fill(trade_id="f2", quantity="2", price="42000", strategy_id="beta"),
+        side=Side.BUY,
+    )
+    bucket = Decimal("12600.01")
+
+    change = projection.apply_heal((), collateral={"BTC": bucket})
+
+    assert change is not None
+    buckets = {p.strategy_id: p.isolated_collateral for p in change.collateral}
+    assert sum(buckets.values()) == bucket  # exact, by the residue
+    assert buckets["alpha"] == bucket / 3  # its own 1-of-3 share, unrounded
+    assert buckets["beta"] == bucket - bucket / 3
+
+
+def test_a_venue_cross_position_releases_the_bucket_it_has_no_claim_on() -> None:
+    """`isolated_collateral is None` on the snapshot is not a gap — the adapter
+    refuses to guess a margin mode, so it is the positive claim *this position
+    is backed by the account pool* (ADR-0043 §3).
+
+    Released to `0` rather than left standing: a bucket that survived the switch
+    would report collateral locked behind a position the venue is margining out
+    of the shared pool, and inflate `margin_used` by the whole of it.
+    """
+    projection = _live_isolated()
+    book_fill(projection, _fill(trade_id="f1", quantity="1", price="42000"), side=Side.BUY)
+    projection.apply_heal((), collateral={"BTC": Decimal("4200")})
+
+    change = projection.apply_heal((), collateral={"BTC": None})
+
+    assert change is not None
+    assert [p.isolated_collateral for p in change.collateral] == [Decimal("0")]
+
+
+def test_a_symbol_the_snapshot_does_not_mention_releases_its_bucket() -> None:
+    """The snapshot carries every position the venue holds, so a symbol absent
+    from it is one the venue is **not** holding — an answer, not a silence.
+
+    The same wholesale-replacement rule `observe_venue_liquidation` keeps for the
+    read-through price beside it: a merge would leave the previous cycle's number
+    standing on a position that has since been closed.
+    """
+    projection = _live_isolated()
+    book_fill(projection, _fill(trade_id="f1", quantity="1", price="42000"), side=Side.BUY)
+    projection.apply_heal((), collateral={"BTC": Decimal("4200")})
+
+    change = projection.apply_heal((), collateral={})
+
+    assert change is not None
+    assert [p.isolated_collateral for p in change.collateral] == [Decimal("0")]
+
+
+def test_a_cycle_with_nothing_new_to_ingest_writes_nothing() -> None:
+    """The bucket is mark-invariant by construction (`marginUsed − unrealizedPnl`)
+    and moves only on an `updateIsolatedMargin` or a fill, so the steady state is
+    a cadence with nothing to ingest.
+
+    `None` there for the same reason `apply_funding` returns it on a dropped
+    accrual: a pass that moved nothing must write nothing, or every deadline
+    re-stamps every position row and a real correction is distinguishable from a
+    no-op only by reading the number.
+    """
+    projection = _live_isolated()
+    book_fill(projection, _fill(trade_id="f1", quantity="1", price="42000"), side=Side.BUY)
+    assert projection.apply_heal((), collateral={"BTC": Decimal("4200")}) is not None
+
+    assert projection.apply_heal((), collateral={"BTC": Decimal("4200")}) is None

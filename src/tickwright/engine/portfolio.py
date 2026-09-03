@@ -15,7 +15,7 @@ those reads (ADR-0041 §8). The scoped facade ``for_strategy`` hands out is what
 implements the seam.
 """
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -27,9 +27,11 @@ from tickwright.domain import (
     CashCorrection,
     Clock,
     FundingAccrual,
+    InstrumentSpec,
     InvariantViolation,
     LeverageBook,
     LeverageSpec,
+    LiquidationSource,
     MarkTick,
     OrderFillEvent,
     Portfolio,
@@ -163,6 +165,21 @@ class HealChange:
     account: Account
     fills: tuple[LedgerChange, ...]
     applied: frozenset[str]
+    collateral: tuple[Position, ...] = ()
+    """The partitions whose locked bucket this cycle re-ingested (ADR-0043 §3).
+
+    Carried apart from ``fills`` because it is a different kind of move: a fill
+    is folded through ``Position.apply`` and announces itself, while this is an
+    **assignment** against a Tier-1 field the venue is the sole author of on
+    live — the same shape as the cash correction, one grain down. A partition
+    can be in both tuples, and the write dedupes rather than the fold: the
+    object is the same one either way, advanced in place.
+
+    Non-empty is enough on its own to make a cycle worth writing, which is why
+    it is on the change rather than left to the caller to notice: a pass that
+    found every size and the cash line in agreement can still have a bucket to
+    persist, and judged on ``applied`` alone it would return ``None`` and drop
+    the ingest until the next deadline found it again."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -200,6 +217,7 @@ class PortfolioProjection:
         store: Store,
         clock: Clock,
         leverage: LeverageBook = EMPTY_LEVERAGE_BOOK,
+        specs: Mapping[str, InstrumentSpec] | None = None,
     ) -> None:
         # The venue's declaration, not just the account opened from it: it is
         # what tells the recovery path whether this run's genesis was *declared*
@@ -226,6 +244,26 @@ class PortfolioProjection:
         # because the composition root resolved it once and injected it twice.
         # The margin model reads it from here; this slice lands the input alone.
         self._leverage = leverage
+        # The margin model's other venue-sourced input (ADR-0040 §4), taken off
+        # ``Exchange.instrument_specs()`` by the same runner that took the
+        # ``AccountSpec`` above — the adapter is the one component that knows
+        # the venue, and this projection may not learn it. Copied, so a venue's
+        # own universe is never mutated through a reader of it.
+        #
+        # A symbol absent from it values to ``None`` rather than to a zero rate:
+        # an unknown maintenance requirement is unknown, not frictionless. The
+        # default empty map is therefore a *valuation* default and not a wiring
+        # one — every production path passes the venue's, and a suite whose
+        # subject is not the margin model omits it and reads the ``None``.
+        self._specs = dict(specs) if specs is not None else {}
+        # The one Tier-2 figure live does not compute (ADR-0040 §3), cached off
+        # the reconcile pull and **stale-frozen between cycles**. ``None`` is
+        # not an empty map: it is "no venue read has ever landed", the state
+        # paper stays in forever and live leaves at its first cycle. The
+        # distinction is the whole switch — an empty map after a read means the
+        # venue holds nothing, which is an answer, where never having read is
+        # not one.
+        self._venue_liquidation: dict[str, Decimal | None] | None = None
 
     def leverage_for(self, symbol: str) -> LeverageSpec:
         """The margin mode and leverage this run computes ``symbol`` against.
@@ -252,11 +290,37 @@ class PortfolioProjection:
         """
         self._marks[mark.symbol] = mark
 
+    def observe_venue_liquidation(self, state: VenueAccountState) -> None:
+        """Take the venue's own liquidation prices — Tier-2's other write verb.
+
+        ``observe_mark``'s sibling and its opposite in one respect: a mark is an
+        input the formula is *run on*, and this is the answer that replaces the
+        formula (ADR-0040 §3). What they share is everything else — last-value
+        wins, no history, and **no store write**, because a restart must
+        recompute or re-read a valuation rather than recover one (ADR-0043 §3).
+
+        The whole snapshot rather than a map, because the extraction is the same
+        knowledge ``materialise`` already trusts this projection with, and a
+        caller building the map would be a second place that decides which venue
+        field the price came from.
+
+        A successful read **replaces** the map wholesale rather than merging into
+        it: the snapshot carries every position the account holds, so a symbol
+        missing from it is one the venue is not holding — an answer, and one a
+        merge would overwrite with the previous cycle's price for a position that
+        has since been closed. A *failed* read never reaches here at all, which
+        is what leaves the previous cycle's prices standing (ADR-0011 inv 1).
+        """
+        self._venue_liquidation = {
+            position.symbol: position.liquidation_price for position in state.positions
+        }
+
     def apply_heal(
         self,
         fills: Sequence[ReconciliationFill],
         *,
         cash: CashCorrection | None = None,
+        collateral: Mapping[str, Decimal | None] | None = None,
     ) -> HealChange | None:
         """Fold one cycle's Tier-1 heals — the account grain's write verb.
 
@@ -276,10 +340,38 @@ class PortfolioProjection:
         divergence. Applied after, the target absorbs whatever the fills did
         (``Account.correct_cash``).
 
+        **``collateral`` is an ingest rather than a heal, and it rides here for
+        the reason the cash correction does** (ADR-0043 §3). On live the locked
+        bucket is the venue's to post — ``updateIsolatedMargin`` is an action
+        this engine does not model, and ``_lock_isolated_collateral`` declines
+        on the declared-versus-ingested predicate — so there are not two numbers
+        to compare and nothing to classify as a divergence. What there is, is
+        one Tier-1 field the venue authored, arriving on the same snapshot the
+        sizes and the cash line arrive on. Splitting it into a write of its own
+        would be a second transaction per cycle that a crash could separate from
+        the first, leaving a durable state the venue never held — exactly what
+        ``Checkpointer.checkpoint_heal`` keeps one transaction to prevent. That
+        the move is an assignment rather than a synthetic fill does not put it
+        outside this verb: so is ``Account.correct_cash`` below.
+
+        It is folded **after the fills and before the cash line**. After,
+        because a size heal can open a partition that then has a bucket to
+        take; before is merely where the cash line's own "last" rule leaves it.
+
+        ``None`` is *no snapshot*, which is the paper answer and the only
+        answer paper ever gives — the cadence is live-only (ADR-0034), so the
+        default is what a caller with nothing to ingest passes rather than a
+        mode this verb chooses. A **mapping** replaces wholesale: it carries
+        every position the venue holds, so a symbol of ours absent from it is
+        the venue holding none, which releases the bucket rather than leaving
+        the previous cycle's number standing on a position since closed.
+
         ``None`` when the fold moved nothing, as ``apply_funding``'s ``None`` is
         a dropped accrual: a cycle that corrected nothing must write *nothing*,
         or the pass would re-stamp the account row and be distinguishable from a
-        real correction only by reading the number.
+        real correction only by reading the number. An ingest counts as a move
+        on its own — the bucket is durable state, and a pass that agreed on
+        every size and the cash line can still be the pass that learned it.
 
         **The verdict is the fold's, not the input's**, which is why the check
         sits after the loop and asks ``applied`` rather than ``fills``. A pass
@@ -314,11 +406,96 @@ class PortfolioProjection:
                 # and the cycle emits at most one size finding per symbol, so a
                 # set loses nothing a list would have kept.
                 applied.add(fill.event_id)
-        if not applied and cash is None:
+        ingested = () if collateral is None else self._ingest_collateral(collateral)
+        if not applied and cash is None and not ingested:
             return None
         if cash is not None:
             self._account.correct_cash(cash.target, event_id=cash.event_id)
-        return HealChange(account=self._account, fills=tuple(folded), applied=frozenset(applied))
+        return HealChange(
+            account=self._account,
+            fills=tuple(folded),
+            applied=frozenset(applied),
+            collateral=ingested,
+        )
+
+    def _ingest_collateral(self, venue: Mapping[str, Decimal | None]) -> tuple[Position, ...]:
+        """Take the venue's locked buckets onto the partitions holding them.
+
+        Iterates **our** partitions rather than the venue's map, which is what
+        makes an absent symbol mean something: the snapshot carries every
+        position the venue holds, so a symbol of ours it does not mention is one
+        the venue is backing from the pool or not holding at all, and either way
+        the bucket is released. Driving off the map instead would leave a closed
+        position's collateral standing until something else happened to it.
+
+        A venue ``None`` is the same release, and it is a *positive* claim
+        rather than a gap — the adapter refuses to guess a mode, so ``None``
+        here is "cross, backed by the account pool" (ADR-0043 §3). Our own
+        in-memory field is a plain ``Decimal``, so both cases land on ``0``,
+        which is the value the store's nullable column already restores a
+        cross-margined row to.
+
+        Returns only the partitions it actually **moved**, so an unchanged book
+        writes nothing: the bucket holds still between ``updateIsolatedMargin``
+        calls, and it is mark-invariant by construction (``marginUsed −
+        unrealizedPnl``), so the steady state is a cycle with nothing to ingest.
+        Reporting every partition instead would re-stamp every position row on
+        every deadline, which is the same indistinguishable-from-a-correction
+        write ``apply_funding``'s ``None`` refuses one grain up.
+        """
+        by_symbol: dict[str, list[Position]] = {}
+        for position in self._positions.values():
+            by_symbol.setdefault(position.symbol, []).append(position)
+        moved: list[Position] = []
+        for symbol, partitions in by_symbol.items():
+            bucket = venue.get(symbol)
+            across = tuple(partitions)
+            # ``strict``: one share per partition is ``_share``'s own invariant,
+            # and a silent truncation here would leave a partition holding the
+            # previous cycle's bucket while the Σ still looked right.
+            for position, share in zip(
+                across, self._share(_ZERO if bucket is None else bucket, across=across), strict=True
+            ):
+                if position.isolated_collateral != share:
+                    position.isolated_collateral = share
+                    moved.append(position)
+        return tuple(moved)
+
+    @staticmethod
+    def _share(bucket: Decimal, *, across: tuple[Position, ...]) -> tuple[Decimal, ...]:
+        """Divide one symbol's venue bucket across the partitions holding it.
+
+        Pro-rata by **magnitude**, which is where this parts company with
+        ``_split`` above: funding is signed because a short partition against a
+        longer one genuinely receives out of a payment, while a share of
+        collateral cannot be negative — the bucket backs the whole venue
+        position, and each partition's claim on it is the exposure it
+        contributes regardless of direction. Offsetting legs therefore each hold
+        a positive share of a bucket the venue posted against their net.
+
+        **The last partition takes the residue**, so the shares sum to the
+        venue's number exactly. That is not tidiness: ``valuation.py`` reads the
+        bucket back as the Σ over the partitions, so a rounded split would make
+        the reported ``margin_used`` disagree with the venue's ``marginUsed`` by
+        a drift that ADR-0040 §6's band would eventually alert on — a divergence
+        manufactured by our own division. ``Decimal`` is inexact at any
+        precision, and the single-partition case divides not at all.
+
+        A book with no exposure in the symbol takes ``0`` throughout rather than
+        dividing: every partition is flat, so there is no weight to scale by and
+        no position for the venue to have posted a bucket against.
+        """
+        exposure = sum((abs(position.signed_size) for position in across), _ZERO)
+        if exposure == _ZERO:
+            return tuple(_ZERO for _ in across)
+        shares = []
+        allocated = _ZERO
+        for position in across[:-1]:
+            share = bucket * abs(position.signed_size) / exposure
+            shares.append(share)
+            allocated += share
+        shares.append(bucket - allocated)
+        return tuple(shares)
 
     def apply_fill(self, event: OrderFillEvent | ReconciliationFill, *, side: Side) -> LedgerChange:
         """Fold a fill into its partition and the cash line — the single write
@@ -367,7 +544,67 @@ class PortfolioProjection:
             # ``event.fee`` here instead would bypass that gatekeeper and charge
             # a redelivered fill again. ``Account`` owns the sign (ADR-0042 §4).
             self._account.accrue_fee(position.fees - fees_before, event_id=event.event_id)
+        self._lock_isolated_collateral(position, changes)
         return LedgerChange(account=self._account, position=position, changes=changes)
+
+    def _lock_isolated_collateral(
+        self, position: Position, changes: tuple[PositionChange, ...]
+    ) -> None:
+        """Move an isolated position's own margin in at open and back out at close.
+
+        Paper does not model ``updateIsolatedMargin``, so the bucket is whatever
+        the open put in it — ``notional / leverage`` at the entry the fold just
+        booked — and nothing between the two ends moves it (ADR-0040 §1). That is
+        why this reads the two regime changes rather than running on every fill:
+        an add on the same side reports ``CHANGED``, and recomputing there would
+        silently top the bucket up.
+
+        **The close is the half paper has to write itself.** Live's release is
+        the reconcile ingest dropping a symbol the venue no longer holds, and
+        that cadence never runs here (ADR-0034), so a bucket left standing on a
+        flat partition is permanent — and not inert, since isolated
+        ``margin_used`` is ``isolated_collateral + unrealized_pnl``: the whole of
+        it would keep reporting through ``total_margin_used`` and coming off
+        ``free_margin`` for an account holding nothing.
+
+        The two are written as release-then-lock rather than as exclusive
+        branches, because a flip through zero announces ``(CLOSED, OPENED)`` and
+        owes the **residual's** bucket: the old leg's number is wrong and no
+        number at all is wrong too. Release also runs whatever the mode says,
+        where the lock does not — a symbol reconfigured to cross between two
+        lives still has to give back the bucket its isolated life locked, and
+        cross posts none of its own.
+
+        A Tier-1 write, not a valuation: the number lands on the ledger row the
+        caller is about to persist, so a restart restores it rather than
+        deriving it again from a leverage the run may since have been
+        reconfigured with.
+        """
+        if not changes:
+            return
+        if not self._spec.declares_genesis:
+            # The declared-versus-ingested predicate, the same one recovery's
+            # genesis seed turns on (ADR-0043 §10): paper *declares* the margin
+            # it moved in, live *ingests* what the venue moved (``marginUsed −
+            # unrealizedPnl``, ADR-0043 §3). Computing one here would put a
+            # number on the ledger the venue never posted, and would be wrong
+            # from the first ``updateIsolatedMargin`` top-up — which live has
+            # and paper does not model (ADR-0040 §1). The release below is
+            # declined on the same predicate and for the same reason: the venue
+            # authors both ends of the field, and the ingest performs both.
+            return
+        if PositionChange.CLOSED in changes:
+            position.isolated_collateral = _ZERO
+        if PositionChange.OPENED not in changes:
+            return
+        leverage = self.leverage_for(position.symbol)
+        if leverage.mode != "isolated":
+            # Cross posts no bucket of its own — its margin comes out of the
+            # account pool, which is the whole difference between the modes.
+            return
+        position.isolated_collateral = (
+            abs(position.signed_size) * position.entry_price / leverage.leverage
+        )
 
     def apply_funding(self, accrual: FundingAccrual) -> FundingChange | None:
         """Fold one settled boundary into the funding line and the cash line.
@@ -602,7 +839,7 @@ class PortfolioProjection:
             # store that predates the ledger — the barrier materialises the row
             # and positions heal from venue truth. Paper has no venue to heal
             # from, so the same state is the §8 upgrade hazard.
-            if declared is not None and self._store.has_orders():
+            if self._spec.declares_genesis and self._store.has_orders():
                 raise StoreAccountMismatch(
                     "this paper store holds order history but no ledger: its "
                     "positions, fees and funding cannot be reconstructed from "
@@ -622,7 +859,7 @@ class PortfolioProjection:
         # at the barrier — would differ from its declared ``None`` on every start,
         # so a check meant to catch a swapped account would brick the path it was
         # never meant to police.
-        if declared is not None and stored.genesis_collateral != declared:
+        if self._spec.declares_genesis and stored.genesis_collateral != declared:
             disagreements.append(
                 ("genesis_collateral", str(stored.genesis_collateral), str(declared))
             )
@@ -632,9 +869,9 @@ class PortfolioProjection:
     def _seed_genesis(self) -> None:
         """Open the durable ledger at the genesis the venue *declared* (ADR-0043 §6).
 
-        Gated on ``genesis_collateral is not None`` — the predicate that says the
-        opening balance was declared rather than ingested, which is the same fact
-        as "this path has no venue to heal from" (ADR-0043 §10). On live the
+        Gated on ``declares_genesis`` — the predicate that says the opening
+        balance was declared rather than ingested, which is the same fact as
+        "this path has no venue to heal from" (ADR-0043 §10). On live the
         number is ``accountValue − Σ unrealized_pnl`` read at the startup barrier,
         which has not run yet, so seeding here would persist a genesis of zero as
         though someone had chosen it and leave the barrier correcting a row it was
@@ -643,7 +880,7 @@ class PortfolioProjection:
         The in-memory account already opened at exactly this value, so the write
         makes the ledger durable rather than changing it.
         """
-        if self._spec.genesis_collateral is None:
+        if not self._spec.declares_genesis:
             return
         self._store.checkpoint_ledger(account=self._account, ts_ns=self._clock.timestamp_ns())
 
@@ -735,21 +972,42 @@ class PortfolioProjection:
         position = self._positions.get((strategy_id, symbol))
         if position is None:
             return None
-        return self._view(position, net=self.account_net())
+        account = self.account()
+        return self._view(
+            position,
+            net=self.account_net(),
+            upnl=self.account_unrealized(),
+            equity=account.equity,
+            maintenance=account.total_maintenance_margin,
+        )
 
     def open_positions(self, *, strategy_id: str | None) -> tuple[PositionView, ...]:
         """Every partition of ``strategy_id`` still holding exposure.
 
-        One fold for the whole call, deliberately: the net is an aggregation over
-        every partition, so folding it per view would be quadratic in the book —
-        and, worse, would let two views in one returned tuple be computed
-        against two different folds if a fill landed between them. The reads are
-        synchronous so that cannot actually happen today; taking the fold once
-        is what keeps it impossible rather than merely unreachable.
+        One fold for the whole call, deliberately — **every** fold: the net, the
+        account-net uPnL and the account view's own two Σs are each an
+        aggregation over every partition, so folding any of them per view would
+        be quadratic in the book — and, worse, would let two views in one
+        returned tuple be computed against two different folds if a fill landed
+        between them. The reads are synchronous so that cannot actually happen
+        today; taking the folds once is what keeps it impossible rather than
+        merely unreachable.
+
+        The equity and the maintenance Σ come off **one** ``AccountView`` rather
+        than two calls, which is the same rule one grain down: they are two terms
+        of one threshold, and two calls could straddle a fill.
         """
         net = self.account_net()
+        upnl = self.account_unrealized()
+        account = self.account()
         return tuple(
-            self._view(position, net=net)
+            self._view(
+                position,
+                net=net,
+                upnl=upnl,
+                equity=account.equity,
+                maintenance=account.total_maintenance_margin,
+            )
             for (owner, _symbol), position in self._positions.items()
             if owner == strategy_id and not position.is_flat
         )
@@ -785,20 +1043,67 @@ class PortfolioProjection:
             {symbol: mark.price for symbol, mark in self._marks.items()},
         )
 
-    def _view(self, position: Position, *, net: dict[str, Decimal]) -> PositionView:
+    def _view(
+        self,
+        position: Position,
+        *,
+        net: dict[str, Decimal],
+        upnl: dict[str, Decimal | None],
+        equity: Decimal | None,
+        maintenance: Decimal | None,
+    ) -> PositionView:
         """Assemble one partition's view against the mark held for its symbol.
 
         The mark is resolved here, from the private cache, rather than passed in
         by the caller: pushing mark-sourcing onto every reader is exactly what
         the single always-available read path exists to prevent (ADR-0034/0039).
+        The configured leverage, the instrument spec and the liquidation
+        compute/read-through switch arrive the same way and for the same reason
+        — all four are lookups this object already holds.
+
+        ``net``, ``upnl``, ``equity`` and ``maintenance`` are the four the caller
+        must supply, because each is a **fold over every position** rather than a
+        lookup: taken here they would be quadratic in the book, and — the reason
+        that matters — two views in one returned tuple could be built against two
+        different folds. The caller owes all four off **one**
+        ``self._positions``/``self._marks`` snapshot, the same one the mark above
+        is read from, so the position-grain half of the view cannot straddle a
+        fill the own-slice half is on the other side of (ADR-0041 §1).
+        ``equity`` and ``maintenance`` are additionally the two numbers
+        ``account()`` reports, and owed off **one** of its views: they are the two
+        terms of the cross liquidation threshold, so a cross position's level and
+        the account line it is read beside agree by construction.
+
+        That last part is a **convention the signature cannot enforce**: nothing
+        here can tell a caller's stale fold from a fresh one, which is why the
+        four are named together rather than defaulted one at a time.
         """
         mark = self._marks.get(position.symbol)
         return position_view(
             position,
             account_net=net.get(position.symbol, _ZERO),
+            account_unrealized_pnl=upnl.get(position.symbol),
+            account_equity=equity,
+            account_maintenance_margin=maintenance,
             mark=mark.price if mark is not None else None,
             mark_ts=mark.ts_event if mark is not None else None,
+            leverage=self.leverage_for(position.symbol),
+            spec=self._specs.get(position.symbol),
+            liquidation=self._liquidation_source(position.symbol),
         )
+
+    def _liquidation_source(self, symbol: str) -> LiquidationSource:
+        """Whether this symbol's liquidation price is the venue's or ours.
+
+        The switch is "has a venue account read ever landed", not "which venue
+        is this": paper never calls ``observe_venue_liquidation``, so it stays
+        on the computed branch without the projection being told which adapter
+        it is behind — the same dependency direction the ``AccountSpec`` and the
+        instrument universe arrive on.
+        """
+        if self._venue_liquidation is None:
+            return LiquidationSource.computed()
+        return LiquidationSource.reported(self._venue_liquidation.get(symbol))
 
     def account(self) -> AccountView:
         """The account-wide pool — one collateral bucket, never scoped.
@@ -811,6 +1116,8 @@ class PortfolioProjection:
             self._account,
             positions=self._positions.values(),
             marks={symbol: mark.price for symbol, mark in self._marks.items()},
+            leverage=self._leverage,
+            specs=self._specs,
         )
 
     def for_strategy(self, strategy_id: str) -> Portfolio:

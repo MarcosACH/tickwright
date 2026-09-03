@@ -58,12 +58,33 @@ class AccountSpec:
     venue-native identifier on a live one. ``genesis_collateral`` is the
     operator's declared opening cash on paper and ``None`` on live, where the
     number is ingested from the venue instead (ADR-0042 §6); that nullability
-    is the predicate the startup checks read, not an optional setting.
+    is the predicate the startup checks read, not an optional setting — read it
+    through ``declares_genesis`` rather than spelling the comparison.
     """
 
     account_id: str
     netting: Netting = Netting.NET
     genesis_collateral: Decimal | None = None
+
+    @property
+    def declares_genesis(self) -> bool:
+        """Whether the opening balance was **declared** rather than ingested.
+
+        ADR-0043 §10's one predicate, named here because it is a fact about
+        which venue is running and not a null check: paper's operator declares
+        the account's opening cash, live ingests it from the venue as
+        ``accountValue − Σ unrealized_pnl`` at the startup barrier and has no
+        counterpart to declare (ADR-0042 §6).
+
+        It lives on the spec because the spec is the declaration. Four callers
+        branch on it — the genesis seed, the store-disagreement refusals, the
+        isolated-collateral lock and the live-only ledger cadence — each having
+        re-derived the same boolean from a ``Decimal | None``, so the fact was
+        spelled five times and named nowhere. A caller that needs the *value*
+        still reads ``genesis_collateral``; this answers only the question the
+        value's absence poses.
+        """
+        return self.genesis_collateral is not None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -92,6 +113,43 @@ class AccountView:
     uncomputable for every strategy, because equity is an account-wide fact and
     a partial sum of it is a different quantity wearing its name (ADR-0041 §6).
     An account holding nothing has no such term and reads its cash line."""
+    total_margin_used: Decimal | None
+    """Σ ``margin_used`` over every position the account holds (ADR-0041 §4).
+
+    Over the **venue's** positions, one per symbol, never over our partitions of
+    them: ``margin_used`` is computed off the symbol's account-net size, so two
+    strategies holding offsetting legs back nothing and post nothing, where a
+    per-partition Σ would report collateral against a position the venue does
+    not have (ADR-0035).
+
+    Isolated buckets are **inside** this Σ, which is what locks them out of
+    ``free_margin`` below (ADR-0040 §7)."""
+    total_maintenance_margin: Decimal | None
+    """Σ ``maintenance_margin`` over every position — the floor the whole account
+    must stay above (ADR-0041 §4).
+
+    Reported over **all** positions, cross and isolated alike, even though the
+    venue's own figure to cross-check against covers the cross subset only
+    (ADR-0046 §2.1). The report is the honest number; the narrowing belongs to
+    the comparison, not here."""
+    free_margin: Decimal | None
+    """``equity − total_margin_used`` — the pool left to open against.
+
+    **Reported when negative, with no rejection and no liquidation** (ADR-0040
+    §7). A negative value is a valid state rather than a divergence, and letting
+    it through is a deliberate departure from a simulator that would refuse the
+    margin-breaching order: it is the honest "you would have been rejected or
+    liquidated on live" signal, which clamping at zero would replace with a
+    report of solvency."""
+    effective_leverage: Decimal | None
+    """``total_notional / equity`` — the whole account's realized leverage
+    (ADR-0041 §4).
+
+    ``total_notional`` is not itself a field: it exists only to be divided, and
+    a per-symbol exposure is already on each ``PositionView``.
+
+    ``None`` on a non-positive equity as well as on the missing terms the Σs
+    share — the one Tier-2 ``None`` a fresh mark cannot cure (ADR-0041 §6)."""
 
 
 class Account:

@@ -41,7 +41,8 @@ write with no ordering inside it has nothing here to protect. See ``portfolio``
 below, where the rule is stated on the borrow itself.
 """
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from decimal import Decimal
 
 from tickwright.domain import (
     EMPTY_LEVERAGE_BOOK,
@@ -49,6 +50,7 @@ from tickwright.domain import (
     CashCorrection,
     Clock,
     FundingAccrual,
+    InstrumentSpec,
     InvariantViolation,
     LeverageBook,
     Order,
@@ -72,6 +74,7 @@ class Checkpointer:
         store: Store,
         clock: Clock,
         leverage: LeverageBook = EMPTY_LEVERAGE_BOOK,
+        specs: Mapping[str, InstrumentSpec] | None = None,
     ) -> None:
         self._store = store
         self._clock = clock
@@ -82,9 +85,13 @@ class Checkpointer:
         # ``Account`` opened from it: recovery reads ``genesis_collateral is not
         # None`` to tell a *declared* opening balance from an *ingested* one
         # (ADR-0043 §10), and an ``Account`` has resolved that away.
+        #
+        # ``specs`` travels the same route for the same reason: it is the second
+        # of the margin model's two venue-sourced inputs (ADR-0040 §4), and this
+        # constructor is where the venue's declarations are already arriving.
         self._cache = Cache(store=store)
         self._portfolio = PortfolioProjection(
-            spec=spec, store=store, clock=clock, leverage=leverage
+            spec=spec, store=store, clock=clock, leverage=leverage, specs=specs
         )
 
     @property
@@ -218,6 +225,7 @@ class Checkpointer:
         fills: Sequence[ReconciliationFill],
         *,
         cash: CashCorrection | None = None,
+        collateral: Mapping[str, Decimal | None] | None = None,
     ) -> HealChange | None:
         """Make one reconcile cycle's Tier-1 heal durable — fold, write, project.
 
@@ -236,13 +244,22 @@ class Checkpointer:
         whatever it finds, and it only is if a refused heal leaves the book
         exactly as it was.
 
-        **Both halves of the heal ride that one transaction**, which is why the
-        cash correction arrives here rather than through a verb of its own: a
-        cycle's size heals and its cash correction are one answer to one
-        snapshot, and split across two writes either ordering leaves a durable
-        state the venue never held — a corrected line against uncorrected
-        positions, or the reverse. The fold that puts them in order is the
-        projection's (``apply_heal``); what this owns is that they land together.
+        **Every part of the cycle's answer rides that one transaction**, which
+        is why the cash correction arrives here rather than through a verb of
+        its own: a cycle's size heals and its cash correction are one answer to
+        one snapshot, and split across two writes either ordering leaves a
+        durable state the venue never held — a corrected line against
+        uncorrected positions, or the reverse. The fold that puts them in order
+        is the projection's (``apply_heal``); what this owns is that they land
+        together. ``collateral`` is the third part and joins on the same terms:
+        it is not a heal but a re-ingest of a Tier-1 field the venue authors on
+        live (ADR-0043 §3), and it arrives on the very snapshot the other two
+        were read from.
+
+        The rows written are the **union** of what the fills moved and what the
+        ingest moved, deduped by partition: one symbol can be in both, and the
+        object is the same one either way — advanced in place by the fold — so
+        a repeated row would be the same write twice rather than a conflict.
 
         A heal that **moved nothing** writes nothing at all, on
         ``checkpoint_funding``'s rule below: a pass over an agreeing book has no
@@ -260,23 +277,40 @@ class Checkpointer:
         aggregate refused carries no ``changes``. The caller announces off this
         rather than off what it asked for (``LedgerReconciliation._record_heals``).
         """
-        change = self._portfolio.apply_heal(fills, cash=cash)
+        change = self._portfolio.apply_heal(fills, cash=cash, collateral=collateral)
         if change is None:
             return None
+        # Keyed rather than concatenated, so a symbol both healed and re-ingested
+        # is written once. ``dict`` keeps insertion order, so the fills' rows
+        # still lead and the write order is the fold's.
+        rows = {
+            (position.strategy_id, position.symbol): position
+            for position in [fill.position for fill in change.fills] + list(change.collateral)
+        }
         try:
             self._store.checkpoint_ledger(
                 account=change.account,
-                positions=tuple(fill.position for fill in change.fills),
+                positions=tuple(rows.values()),
                 ts_ns=self._clock.timestamp_ns(),
             )
         except InvariantViolation as exc:
             # Only the seam's own failure type is relabelled, as its siblings do:
             # anything else crossing it is a bug below the store, not a failed
             # write.
-            # Named by what the pass was correcting, both halves: a cash-only
-            # heal carries no symbol, and reporting it as a failure for the
-            # empty string would hide which correction was lost.
-            healed = [fill.symbol for fill in fills] + ([] if cash is None else ["cash"])
+            # Named by what the pass was correcting, all three parts: a
+            # cash-only heal carries no symbol and a collateral-only one carries
+            # no fill, and reporting either as a failure for the empty string
+            # would hide which correction was lost. The ingest's symbols come
+            # off the fold rather than off the argument, so a cycle that found
+            # every bucket unchanged names only what it actually meant to write,
+            # and a symbol in both parts is named once — the rows were deduped
+            # for the write and the label says the same thing the write did.
+            sized = [fill.symbol for fill in fills]
+            healed = (
+                sized
+                + ([] if cash is None else ["cash"])
+                + sorted({position.symbol for position in change.collateral} - set(sized))
+            )
             raise InvariantViolation(
                 f"ledger heal checkpoint write failed for {', '.join(healed)}"
             ) from exc

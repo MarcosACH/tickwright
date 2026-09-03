@@ -99,9 +99,20 @@ class Engine:
         # so an Engine whose order cache and ledger write different stores is not
         # constructible and the fill's write is one transaction by construction
         # (ADR-0043 §4). Which account the ledger opens against is the venue's
-        # own declaration, taken off the ``Exchange`` seam.
+        # own declaration, taken off the ``Exchange`` seam — and so is the
+        # instrument universe the margin model values against, the exact peer
+        # accessor beside it (ADR-0040 §4). Both are read here rather than
+        # injected by the composition root, because the runner already holds the
+        # ``Exchange`` and a second path for either would be a second thing that
+        # could point the ledger at a venue the orders do not go to. The guard
+        # takes its copy of the same universe from the root (ADR-0031), which is
+        # the one placement where both sides are concrete.
         self._checkpointer = Checkpointer(
-            spec=exchange.account_spec(), store=store, clock=clock, leverage=leverage
+            spec=exchange.account_spec(),
+            store=store,
+            clock=clock,
+            leverage=leverage,
+            specs=exchange.instrument_specs(),
         )
         self._execution = ExecutionManager(
             bus=bus, exchange=exchange, checkpointer=self._checkpointer, guard=self._guard
@@ -204,14 +215,14 @@ class Engine:
                 # construction — the fail-closed value — so a cadence scheduled
                 # there would freeze every cycle and report the default path as
                 # an outage. The predicate is the venue's own declaration, the
-                # same `genesis_collateral` nullability the startup checks read
-                # (ADR-0042 §6): declared on paper, ingested on live. It is the
+                # same `declares_genesis` the startup checks read (ADR-0042 §6):
+                # declared on paper, ingested on live. It is the
                 # venue kind and not the row, which is what separates it from
                 # the barrier's step one grain up — that one asks whether a
                 # *read is owed* and a live restart answers no, while this asks
                 # whether there is anything to reconcile against at all, and the
                 # answer holds for every cycle of the run.
-                if self._exchange.account_spec().genesis_collateral is None:
+                if not self._exchange.account_spec().declares_genesis:
                     self._cadence_tasks.append(
                         tg.create_task(
                             run_cadence(

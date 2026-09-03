@@ -272,6 +272,14 @@ class LedgerReconciliation:
         if state is None:
             self._freeze(_FreezeCaller.CADENCE)
             return None
+        # The pull is also the channel ADR-0039 kept alive for the one Tier-2
+        # figure live reads through instead of computing (ADR-0040 §3), so the
+        # snapshot is handed to the projection before anything is compared
+        # against it — a cycle that classified first would leave the cadence's
+        # own reader one pass behind the read it just made. It is not a
+        # divergence input: we report the venue's own number, so there is
+        # nothing here to diverge against.
+        self._portfolio.observe_venue_liquidation(state)
         view = self._portfolio.account()
         net = self._portfolio.account_net()
         unrealized = self._portfolio.account_unrealized()
@@ -291,6 +299,15 @@ class LedgerReconciliation:
         booked = self._checkpointer.checkpoint_heal(
             tuple(heal.fill for heal in heals),
             cash=None if cash is None else cash.correction,
+            # The locked buckets ride the same snapshot and the same transaction
+            # (ADR-0043 §3). Not a divergence input: live never computes this
+            # number — the venue posts it, and ``updateIsolatedMargin`` is an
+            # action this engine does not model — so there is one figure rather
+            # than two, and nothing to compare. What the band eventually watches
+            # is the ``margin_used`` computed *from* it (ADR-0040 §6).
+            collateral={
+                position.symbol: position.isolated_collateral for position in state.positions
+            },
         )
         self._record_heals(heals, cash=cash, booked=booked)
         tiers = [divergence.tier for divergence in divergences]
