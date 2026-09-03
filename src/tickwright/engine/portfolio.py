@@ -1020,18 +1020,25 @@ class PortfolioProjection:
         The mark is resolved here, from the private cache, rather than passed in
         by the caller: pushing mark-sourcing onto every reader is exactly what
         the single always-available read path exists to prevent (ADR-0034/0039).
+        The configured leverage, the instrument spec and the liquidation
+        compute/read-through switch arrive the same way and for the same reason
+        — all four are lookups this object already holds.
 
-        The account-net uPnL is resolved here for the same reason, and off the
-        **same** ``self._positions``/``self._marks`` snapshot as the mark — so
-        the position-grain half of the view cannot straddle a fill the own-slice
-        half is on the other side of (ADR-0041 §1).
+        ``net``, ``upnl`` and ``equity`` are the three the caller must supply,
+        because each is a **fold over every position** rather than a lookup:
+        taken here they would be quadratic in the book, and — the reason that
+        matters — two views in one returned tuple could be built against two
+        different folds. The caller owes all three off **one**
+        ``self._positions``/``self._marks`` snapshot, the same one the mark above
+        is read from, so the position-grain half of the view cannot straddle a
+        fill the own-slice half is on the other side of (ADR-0041 §1).
+        ``equity`` is additionally the number ``account()`` reports, so a cross
+        position's ratio and the account line it is read beside agree by
+        construction.
 
-        ``equity`` is the one input the caller must supply, because it is a fold
-        over every position rather than a lookup: taken here it would be
-        quadratic in the book, and — the reason that matters — two views in one
-        returned tuple could be divided by two different equities. It is the same
-        number ``account()`` reports, so a cross position's ratio and the account
-        line it is read beside agree by construction.
+        That last part is a **convention the signature cannot enforce**: nothing
+        here can tell a caller's stale fold from a fresh one, which is why the
+        three are named together rather than defaulted one at a time.
         """
         mark = self._marks.get(position.symbol)
         return position_view(
