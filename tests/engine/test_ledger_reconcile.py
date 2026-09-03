@@ -1144,6 +1144,46 @@ def test_a_size_finding_the_cycle_cannot_price_heals_nothing_and_writes_nothing(
     assert keeper.portfolio.account_net() == {"ETH": Decimal("1.5")}
 
 
+def test_a_mode_frozen_pass_writes_nothing_and_leaves_the_book_readable() -> None:
+    """The refused heal above, asserted where a heal is *durable*: a freeze that
+    dropped the correction from the projection and still stamped the account row
+    would persist the pooled figure the guard exists to keep off disk
+    (ADR-0043 persists what the cycle books, ADR-0046 §4).
+
+    Sealed rather than compared, on ``_SealedStore``'s own rule: the refusal is
+    that the pass is a **read**, and a write re-persisting the number already
+    there would pass any before/after comparison while being the regression the
+    claim is about.
+
+    And a freeze is **not a fault**, which is the second half here. Our fills
+    are still our fills and every Tier-2 figure is computed from
+    ``(position, mark)`` rather than from the venue, so what stopped is the
+    cross-check and not the ledger: the book stays readable through ``Portfolio``
+    at the grain a strategy asks it at — its own partition, the account net and
+    the cash line — and the engine keeps trading on it.
+    """
+    store = _SealedStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    held = projection.open_positions(strategy_id="alpha")
+    venue = _AccountVenue(_held("100500", ("BTC", "0.002", "0")), mode=AccountModeVerdict.CHANGED)
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+    store.seal()
+
+    with capture_events() as logs:
+        divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences is not None
+    (unverified,) = [
+        log for log in logs if log["event"] == NamedEvent.ACCOUNT_MODE_UNVERIFIED.value
+    ]
+    assert unverified["reason"] == "changed"
+    assert projection.open_positions(strategy_id="alpha") == held
+    assert projection.account_net() == {"BTC": Decimal("0.002")}
+    assert projection.account().cash == Decimal("100000")
+
+
 def test_a_failed_barrier_read_is_recorded_under_the_grains_own_freeze_name() -> None:
     """The barrier's account read is the *same grain's* freeze as the cadence's,
     and it costs strictly more: a frozen cycle loses one pass, while this one
