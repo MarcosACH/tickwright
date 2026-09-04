@@ -2062,3 +2062,56 @@ def test_free_margin_is_classified_at_tier_2_against_the_venues_own_figure() -> 
             "venue": "99000",
         }
     ]
+
+
+def test_a_near_zero_free_margin_in_a_levered_book_is_not_alerted_on() -> None:
+    """The band's relative term scales by the **notional** the figure's
+    mark-sensitivity flows through, never by the figure being compared
+    (ADR-0046 §5).
+
+    Free margin is the quantity that makes the difference load-bearing: it goes
+    through zero on a fully-deployed account, so a band scaled by the compared
+    value collapses onto ``atol`` exactly where the book is largest, and every
+    healthy cycle on a levered account alerts. Scaling by equity — #142's
+    proposal — is the same defect one step milder: at leverage ``L`` equity is
+    roughly ``notional / L``, so the band comes out ``L`` times too tight on
+    precisely the leveraged positions this surface exists to model.
+
+    The book is deployed to the last dollar: a 20 BTC long entered and marked at
+    50000 is 1000000 of notional against a 100000 cash line, and at cross 10x
+    its margin is ``1000000 / 10 = 100000`` — the whole of equity, leaving a
+    free margin of exactly ``0``. The venue publishes ``0.5``. That gap is 50x
+    the rounding floor and would alert on any self-scaled band, and it is 1/2000
+    of ``rtol x 1000000`` on the notional-scaled one, which is the band a real
+    mark skew is measured against.
+
+    Marked at entry so the pass has one finding: uPnL is a real zero on both
+    sides, so ``venue_cash`` lands back on the cash line and equity, size and
+    uPnL all agree. The divergence is still **classified** — the band gates the
+    alert and never the finding — which the case pins beside the silence.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(
+        store,
+        equity="100000",
+        leverage=LeverageBook(entries={"BTC": LeverageSpec(mode="cross", leverage=10)}),
+    )
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="20", price="50000")
+    _mark(projection, "BTC", "50000")
+    venue = _held("100000", ("BTC", "20", "0"), free_margin="0.5")
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences == (
+        Divergence(
+            tier=DivergenceTier.TIER_2,
+            field=DivergenceField.FREE_MARGIN,
+            symbol=None,
+            ledger=Decimal("0"),
+            venue=Decimal("0.5"),
+        ),
+    )
+    assert _alerts(logs) == []

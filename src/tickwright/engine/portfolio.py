@@ -44,6 +44,7 @@ from tickwright.domain import (
     StoreAccountMismatch,
     VenueAccountState,
     account_net_size,
+    account_notional,
     account_unrealized_pnl,
     account_view,
     position_view,
@@ -1039,6 +1040,25 @@ class PortfolioProjection:
         absent — never a fabricated zero (ADR-0041 §6).
         """
         return account_unrealized_pnl(
+            self._positions.values(),
+            {symbol: mark.price for symbol, mark in self._marks.items()},
+        )
+
+    def account_notional(self) -> dict[str, Decimal | None]:
+        """The account-grain notional per symbol, against the marks held now.
+
+        The third fold the reconcile cycle takes per pass, beside ``account_net``
+        and ``account_unrealized``, and public for the same caller: it is the
+        reference ADR-0046 §5 scales the Tier-2 alert band by — the notional a
+        quantity's mark error actually flows through — per symbol for a
+        position's uPnL and Σ-over-symbols for the account grain's figures.
+
+        Not readable off ``AccountView``: ``effective_leverage`` is the only
+        field the notional reaches, and it reaches it divided by the backing
+        collateral. ``None`` where a held symbol is waiting on a mark, on the
+        per-term rule the whole surface inherits.
+        """
+        return account_notional(
             self._positions.values(),
             {symbol: mark.price for symbol, mark in self._marks.items()},
         )

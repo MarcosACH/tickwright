@@ -12,6 +12,7 @@ one would be the second internal projection ADR-0035 rejects, agreeing only ever
 with itself. What paper has in its place is the atomic ledger write.
 """
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
@@ -138,9 +139,41 @@ class ValuationBand:
     which two sides disagreeing is arithmetic rather than a finding.
     """
 
-    def covers(self, divergence: Divergence) -> bool:
-        """Whether the band absorbs ``divergence``, leaving it unalerted."""
-        return abs(divergence.ledger - divergence.venue) <= self.atol
+    rtol: Decimal = Decimal("0.001")
+    """The working term, scaled by the **notional** reference (ADR-0046 §5).
+
+    Every formula in this surface reproduces the venue exactly when fed the
+    venue's own mark (#142), so what the band absorbs is **mark skew and nothing
+    else** — one relative error ``ε`` from which each quantity's own error
+    follows, and each follows it through a notional. Hence a relative term at
+    all, and hence a reference that is a notional rather than the quantity being
+    compared.
+
+    ``0.001`` against #142's measured 3 s p99 skew of ``1.4e-04`` is about 7x
+    headroom on the self-scaled quantities and about 3.6x on ``free_margin``,
+    which is the tightest case at ``(1 + 1/L)·ε·Σnotional``. Deliberately not
+    widened to give the worst quantity the same margin as the best: that buys
+    ``free_margin`` headroom by blinding every figure beside it.
+    """
+
+    def covers(self, divergence: Divergence, *, reference: Decimal | None) -> bool:
+        """Whether the band absorbs ``divergence``, leaving it unalerted.
+
+        ``reference`` is the notional the divergent quantity's mark-sensitivity
+        flows through — the position's for a per-symbol uPnL, the book's total
+        for an account-grain figure (ADR-0046 §5). It is emphatically **not**
+        either side of the comparison: ``free_margin`` passes through zero on a
+        fully-deployed account, so a self-scaled band collapses onto ``atol``
+        exactly where the book is largest and the skew it must absorb is worst.
+
+        A ``None`` reference is a book whose notional is waiting on a mark, and
+        it falls back to ``atol`` alone — the conservative direction, since a
+        narrower band alerts rather than stays quiet, and a Tier-2 figure this
+        cycle could compute against a notional it could not is already the
+        shape a later behavior suppresses on its own terms.
+        """
+        floor = self.atol if reference is None else max(self.atol, self.rtol * abs(reference))
+        return abs(divergence.ledger - divergence.venue) <= floor
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -206,6 +239,30 @@ def _diverged(divergence: Divergence) -> None:
         ledger=str(divergence.ledger),
         venue=str(divergence.venue),
     )
+
+
+def _reference(divergence: Divergence, notional: Mapping[str, Decimal | None]) -> Decimal | None:
+    """The notional ADR-0046 §5 scales the band's relative term by.
+
+    One rule with two grains, and the grain is the divergence's own: a per-symbol
+    figure carries a ``symbol`` and errs by that position's notional, while an
+    account-grain figure carries none and errs by at most the book's total —
+    ``equity`` and ``free_margin`` are both Σs over every position's valuation,
+    so a skew reaches them through every notional at once.
+
+    The Σ propagates the unknown the way ``domain.valuation`` does: one symbol
+    waiting on a mark makes the *total* unknown, because a partial Σ used as a
+    reference is a band silently narrowed by whichever symbol was left out —
+    and narrowed most on the largest book, which is the one it least suits.
+    """
+    if divergence.symbol is not None:
+        return notional.get(divergence.symbol)
+    total = _ZERO
+    for term in notional.values():
+        if term is None:
+            return None
+        total += term
+    return total
 
 
 class LedgerReconciliation:
@@ -345,6 +402,7 @@ class LedgerReconciliation:
         view = self._portfolio.account()
         net = self._portfolio.account_net()
         unrealized = self._portfolio.account_unrealized()
+        notional = self._portfolio.account_notional()
         divergences = (
             self._cash(state, cash=view.cash)
             + self._sizes(state, ledger=net)
@@ -378,7 +436,9 @@ class LedgerReconciliation:
         # Ahead of the pass's own summary, as the heal records are: the summary
         # counts, and a count is read against the lines that produced it.
         for divergence in divergences:
-            if divergence.tier is DivergenceTier.TIER_2 and not self._band.covers(divergence):
+            if divergence.tier is DivergenceTier.TIER_2 and not self._band.covers(
+                divergence, reference=_reference(divergence, notional)
+            ):
                 _diverged(divergence)
         tiers = [divergence.tier for divergence in divergences]
         named_event(
