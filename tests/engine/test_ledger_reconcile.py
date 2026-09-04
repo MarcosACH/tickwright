@@ -2183,3 +2183,51 @@ def test_a_tier_1_size_finding_suppresses_that_symbols_tier_2_alert() -> None:
     assert _alerts(logs) == [
         {"field": "unrealized_pnl", "symbol": "ETH", "ledger": "100", "venue": "50"}
     ]
+
+
+def test_a_cash_finding_the_mode_gate_refused_still_suppresses_the_account_grain() -> None:
+    """The account half of ADR-0040 §6's first suppression, on the pass that
+    makes the wording load-bearing (ADR-0046 §4).
+
+    The rule reads the cycle's **findings**, never the heal it managed to book,
+    and this is the pass where the two answers differ. A mid-run mode switch
+    refuses the cash heal and freezes the account grain, while §4's amendment
+    keeps *counting* the finding — so a suppression keyed on what was booked
+    would fall silent on Tier-1 and shout on Tier-2, alerting an equity against
+    the very snapshot the same pass has just declared unreliable. Under a pooled
+    abstraction mode that snapshot reads an order of magnitude low, so the alert
+    it would raise is guaranteed and meaningless.
+
+    Scoped to the account grain, which the per-symbol figure beside it pins. The
+    book: a 0.002 BTC long entered at 64809 and marked at 65000 is worth 0.382
+    against a venue pricing it at 50.382, on a venue equity of 100051.382. The
+    cash line that equity implies is ``100051.382 − 50.382 = 100001`` against
+    our 100000 — the Tier-1 finding — and equity (100000.382 against 100051.382)
+    and free margin (100000 against 100001) both disagree in its shadow. Each of
+    the three Tier-2 gaps is far outside a band built on 130 of notional; only
+    BTC's, which no Tier-1 finding explains, is alerted.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "65000")
+    venue = _AccountVenue(
+        _held("100051.382", ("BTC", "0.002", "50.382")), mode=AccountModeVerdict.CHANGED
+    )
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+
+    with capture_events() as logs:
+        divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences is not None
+    assert [(divergence.tier, divergence.field) for divergence in divergences] == [
+        (DivergenceTier.TIER_1, DivergenceField.CASH),
+        (DivergenceTier.TIER_2, DivergenceField.EQUITY),
+        (DivergenceTier.TIER_2, DivergenceField.FREE_MARGIN),
+        (DivergenceTier.TIER_2, DivergenceField.UNREALIZED_PNL),
+    ]
+    assert [log["event"] for log in logs if log["event"] == NamedEvent.ACCOUNT_HEALED.value] == []
+    assert _alerts(logs) == [
+        {"field": "unrealized_pnl", "symbol": "BTC", "ledger": "0.382", "venue": "50.382"}
+    ]
