@@ -241,6 +241,27 @@ def _diverged(divergence: Divergence) -> None:
     )
 
 
+def _tier_1_grains(divergences: tuple[Divergence, ...]) -> frozenset[str | None]:
+    """The grains a Tier-1 finding already explains this cycle (ADR-0040 §6).
+
+    A ``Divergence.symbol`` **is** the grain — a symbol for the per-symbol
+    checks, ``None`` for the account's own pool — so "for that symbol/account"
+    is one set membership rather than two rules that could disagree. A Tier-2
+    figure landing on a grain in here is the same missed fill restated in
+    dollars: Tier-1 alerts and heals it, so the second report is noise an
+    operator cannot act on, and it is loudest exactly when the ledger is worst.
+
+    Read off the **findings** rather than the heal plan, which matters for the
+    account grain: ADR-0046 §4 refuses a cash heal on an unverifiable account
+    mode while still counting the finding, and a snapshot that cycle has
+    declared unreliable is the last one to alert an equity against. Keyed on the
+    plan, that pass would fall silent on Tier-1 and shout on Tier-2.
+    """
+    return frozenset(
+        divergence.symbol for divergence in divergences if divergence.tier is DivergenceTier.TIER_1
+    )
+
+
 def _reference(divergence: Divergence, notional: Mapping[str, Decimal | None]) -> Decimal | None:
     """The notional ADR-0046 §5 scales the band's relative term by.
 
@@ -435,9 +456,12 @@ class LedgerReconciliation:
         self._record_heals(heals, cash=cash, booked=booked)
         # Ahead of the pass's own summary, as the heal records are: the summary
         # counts, and a count is read against the lines that produced it.
+        explained = _tier_1_grains(divergences)
         for divergence in divergences:
-            if divergence.tier is DivergenceTier.TIER_2 and not self._band.covers(
-                divergence, reference=_reference(divergence, notional)
+            if (
+                divergence.tier is DivergenceTier.TIER_2
+                and divergence.symbol not in explained
+                and not self._band.covers(divergence, reference=_reference(divergence, notional))
             ):
                 _diverged(divergence)
         tiers = [divergence.tier for divergence in divergences]

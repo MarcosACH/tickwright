@@ -2115,3 +2115,71 @@ def test_a_near_zero_free_margin_in_a_levered_book_is_not_alerted_on() -> None:
         ),
     )
     assert _alerts(logs) == []
+
+
+def test_a_tier_1_size_finding_suppresses_that_symbols_tier_2_alert() -> None:
+    """ADR-0040 §6's first suppression: a valuation computed on a book the cycle
+    has just found wrong is not a second finding.
+
+    The healed ledger is the root cause. A symbol whose size disagrees has a
+    uPnL that disagrees *because* of it, so alerting on both reports one missed
+    fill twice — once in contracts and once in dollars — and the dollar half is
+    the one an operator cannot act on. Tier-1 already alerts and heals, so
+    nothing is lost by the silence.
+
+    Scoped to the symbol, which is why this case holds two of them. A blanket
+    "any Tier-1 finding silences Tier-2" would pass an assertion that only looked
+    for the absence, while quietly deafening the account to every other symbol on
+    the book for the rest of the cycle.
+
+    The book: a 0.002 BTC long entered at 64809 and marked at 65000 is worth
+    ``0.002 x 191 = 0.382`` against a venue holding **0.003** and pricing it at
+    50.382; a 1 ETH long entered at 3000 and marked at 3100 is worth 100 against
+    a venue agreeing on the size and pricing it at 50. The two Tier-2 gaps are
+    equal and opposite by construction, so ``Σ uPnL`` agrees, and with it the
+    cash line the venue's equity implies, the equity itself and the free margin —
+    leaving the account grain silent for its own reasons rather than by a
+    suppression this case is not testing.
+
+    Both gaps are 50 against bands of 0.13 (BTC's 130 of notional) and 3.10
+    (ETH's 3100), so each would alert on its own. Only ETH's does.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _book_fill(projection, quantity="1", price="3000", symbol="ETH", seq=2)
+    _mark(projection, "BTC", "65000")
+    _mark(projection, "ETH", "3100")
+    venue = _held("100100.382", ("BTC", "0.003", "50.382"), ("ETH", "1", "50"))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences == (
+        Divergence(
+            tier=DivergenceTier.TIER_1,
+            field=DivergenceField.SIGNED_SIZE,
+            symbol="BTC",
+            ledger=Decimal("0.002"),
+            venue=Decimal("0.003"),
+        ),
+        Divergence(
+            tier=DivergenceTier.TIER_2,
+            field=DivergenceField.UNREALIZED_PNL,
+            symbol="BTC",
+            ledger=Decimal("0.382"),
+            venue=Decimal("50.382"),
+        ),
+        Divergence(
+            tier=DivergenceTier.TIER_2,
+            field=DivergenceField.UNREALIZED_PNL,
+            symbol="ETH",
+            ledger=Decimal("100"),
+            venue=Decimal("50"),
+        ),
+    )
+    assert _alerts(logs) == [
+        {"field": "unrealized_pnl", "symbol": "ETH", "ledger": "100", "venue": "50"}
+    ]
