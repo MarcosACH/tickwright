@@ -1063,6 +1063,27 @@ class PortfolioProjection:
             {symbol: mark.price for symbol, mark in self._marks.items()},
         )
 
+    def mark_observed(self) -> dict[str, int]:
+        """When each cached mark was stamped — the **age** input, not a price.
+
+        ADR-0039 keeps a mark's ``ts`` for exactly one reader. It deliberately
+        declined a max-age on the *read* path, where a valuation is served at
+        whatever mark is cached and the caller has no clock to judge it with,
+        and made the reconcile cycle the staleness safety net instead. That
+        cycle holds a clock, so this is what it judges against.
+
+        ``ts_event`` and not ``ts_init``: on the live channel that carries this
+        surface they are one number, the engine's own receipt time (ADR-0039),
+        so the pair cannot disagree here — and ``ts_event`` is the one the ADR
+        names, which is the field a future feed with a real venue stamp should
+        be measured on rather than on when we happened to unpack it.
+
+        Symbols only, no positions: a mark is cached per symbol whether anything
+        is held in it, and which of them matter is the caller's held-ness
+        question rather than this fold's.
+        """
+        return {symbol: mark.ts_event for symbol, mark in self._marks.items()}
+
     def _view(
         self,
         position: Position,

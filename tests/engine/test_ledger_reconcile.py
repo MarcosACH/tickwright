@@ -13,6 +13,7 @@ import asyncio
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from decimal import Decimal
+from typing import Final
 
 from ledgers import book_fill
 from venue_doubles import LIVE_ACCOUNT_ID, account_state
@@ -781,6 +782,13 @@ def test_a_heal_leaves_the_funding_mark_where_it_found_it_and_a_correction_re_en
     assert store.funding_mark("SOL") == 3_600
 
 
+_MARK_TS_NS: Final = 2_000
+"""When every ``_mark`` below is stamped, named because the staleness cases
+measure a clock **against** it rather than merely feeding it in."""
+
+_NS_PER_SECOND: Final = 1_000_000_000
+
+
 def _mark(projection: PortfolioProjection, symbol: str, price: str) -> None:
     """Feed the projection the Tier-2 valuation input (ADR-0039).
 
@@ -790,7 +798,7 @@ def _mark(projection: PortfolioProjection, symbol: str, price: str) -> None:
     absence produces, not on a valuation.
     """
     projection.observe_mark(
-        MarkTick(ts_event=2_000, ts_init=2_000, symbol=symbol, price=Decimal(price))
+        MarkTick(ts_event=_MARK_TS_NS, ts_init=_MARK_TS_NS, symbol=symbol, price=Decimal(price))
     )
 
 
@@ -2231,3 +2239,52 @@ def test_a_cash_finding_the_mode_gate_refused_still_suppresses_the_account_grain
     assert _alerts(logs) == [
         {"field": "unrealized_pnl", "symbol": "BTC", "ledger": "0.382", "venue": "50.382"}
     ]
+
+
+def test_a_stale_mark_suppresses_the_alert_and_is_counted_on_the_record() -> None:
+    """ADR-0040 §6's second suppression, and the record that keeps it from being
+    a silence.
+
+    A divergence explained by staleness is not a bug: the figure is recomputed
+    from ``(position, mark)`` on every read, so a mark that stopped arriving
+    makes our side old rather than wrong, and the venue's instantaneous one is
+    what it is measured against. Alerting there reports our own frozen input as
+    the venue's disagreement.
+
+    Suppressed and **counted**, which is the whole difference between this and
+    doing nothing. ADR-0039 declined a max-age on the *read* path — a valuation
+    is served at whatever mark is cached, and a reader has no clock to judge it
+    with — and made this cycle the staleness safety net instead. A cycle that
+    quietly dropped the finding would forfeit that job: an operator would read
+    the same silence from a healthy book and from a mark stream that died an
+    hour ago. ``suppressed`` on ``account.reconciled`` is the difference, beside
+    ``unvalued`` and for the same reason.
+
+    Both grains fall to one stale symbol, because both are Σs the stale term
+    reaches: BTC's own uPnL, and the equity computed from it. The book is
+    behavior 1's — a 0.002 long entered at 64809 and marked at 65000 against a
+    venue pricing it at 1.000 — which alerts on both figures at a fresh mark;
+    the only thing this case changes is a clock 90 seconds past the mark's
+    stamp, against the 60-second horizon #142 measured skew over. Beyond it
+    there is no evidence a band could be built from, so the figure is not banded
+    wider, it is not alerted at all.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000", clock=ManualClock(_MARK_TS_NS + 90 * _NS_PER_SECOND))
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "65000")
+    venue = _held("100001.000", ("BTC", "0.002", "1.000"))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences is not None
+    assert [divergence.field for divergence in divergences] == [
+        DivergenceField.EQUITY,
+        DivergenceField.UNREALIZED_PNL,
+    ]
+    assert _alerts(logs) == []
+    record = _recorded(logs)
+    assert (record["tier_2"], record["suppressed"], record["unvalued"]) == (2, 2, 0)

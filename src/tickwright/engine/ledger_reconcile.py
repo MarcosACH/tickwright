@@ -33,6 +33,7 @@ from .checkpoint import Checkpointer
 from .portfolio import HealChange
 
 _ZERO = Decimal("0")
+_NS_PER_SECOND = 1_000_000_000
 
 
 class _FreezeCaller(Enum):
@@ -156,6 +157,25 @@ class ValuationBand:
     ``free_margin`` headroom by blinding every figure beside it.
     """
 
+    mark_max_age_seconds: float = 60.0
+    """Beyond this, a figure is not banded wider — it is not alerted at all.
+
+    The horizon rather than a third tolerance, and it belongs on the band
+    because it is the band's own domain of validity: ``rtol`` is sized on #142's
+    measured skew, which was measured **over 60 seconds** (60 s max ``3.9e-04``,
+    still inside ``rtol``). Past it there is no evidence a band could be built
+    from, so the honest response is to stop claiming one applies.
+
+    An explicit term rather than a multiple of ``reconcile.account_interval_seconds``,
+    which is the runner's pacing: deriving it there would make a slower cadence
+    silently tolerate an older mark, coupling how often we look to how stale a
+    price may be — two decisions with no reason to move together.
+    """
+
+    def stale(self, *, age_ns: int) -> bool:
+        """Whether a mark that old puts its figures past the band's evidence."""
+        return age_ns > int(self.mark_max_age_seconds * _NS_PER_SECOND)
+
     def covers(self, divergence: Divergence, *, reference: Decimal | None) -> bool:
         """Whether the band absorbs ``divergence``, leaving it unalerted.
 
@@ -260,6 +280,28 @@ def _tier_1_grains(divergences: tuple[Divergence, ...]) -> frozenset[str | None]
     return frozenset(
         divergence.symbol for divergence in divergences if divergence.tier is DivergenceTier.TIER_1
     )
+
+
+def _stale_grains(
+    observed: Mapping[str, int], *, held: Mapping[str, Decimal], now_ns: int, band: ValuationBand
+) -> frozenset[str | None]:
+    """The grains whose valuation rests on a mark too old to band (ADR-0040 §6).
+
+    Ranged over **held** symbols, on the cycle's own held-ness rule: a stale
+    mark for a symbol carrying no exposure values nothing, and counting it would
+    let a symbol closed hours ago silence the book it is no longer part of.
+
+    The account grain goes stale the moment **any** held symbol does, which is
+    the asymmetry worth stating: ``equity`` and ``free_margin`` are Σs over
+    every position's valuation, so one frozen term is enough to make the total
+    old — and a Σ is stale on its worst term, never its average.
+    """
+    stale = {
+        symbol
+        for symbol, ts_ns in observed.items()
+        if held.get(symbol, _ZERO) != _ZERO and band.stale(age_ns=now_ns - ts_ns)
+    }
+    return frozenset(stale) | (frozenset({None}) if stale else frozenset())
 
 
 def _reference(divergence: Divergence, notional: Mapping[str, Decimal | None]) -> Decimal | None:
@@ -424,6 +466,16 @@ class LedgerReconciliation:
         net = self._portfolio.account_net()
         unrealized = self._portfolio.account_unrealized()
         notional = self._portfolio.account_notional()
+        # Judged against the same reading the figures were computed from, and so
+        # taken here rather than beside the alert loop: the heal below moves the
+        # clock's own pass forward, and a mark's age is a fact about the snapshot
+        # this comparison was made on.
+        stale = _stale_grains(
+            self._portfolio.mark_observed(),
+            held=net,
+            now_ns=self._checkpointer.clock.timestamp_ns(),
+            band=self._band,
+        )
         divergences = (
             self._cash(state, cash=view.cash)
             + self._sizes(state, ledger=net)
@@ -457,19 +509,30 @@ class LedgerReconciliation:
         # Ahead of the pass's own summary, as the heal records are: the summary
         # counts, and a count is read against the lines that produced it.
         explained = _tier_1_grains(divergences)
+        suppressed = 0
         for divergence in divergences:
             if (
-                divergence.tier is DivergenceTier.TIER_2
-                and divergence.symbol not in explained
-                and not self._band.covers(divergence, reference=_reference(divergence, notional))
+                divergence.tier is not DivergenceTier.TIER_2
+                or divergence.symbol in explained
+                or self._band.covers(divergence, reference=_reference(divergence, notional))
             ):
-                _diverged(divergence)
+                continue
+            # Staleness is asked **after** the band, so the count means "would
+            # have woken someone": a gap the band absorbs was never going to
+            # alert, and counting it would report a frozen mark stream on every
+            # healthy cycle — the same noise the band exists to prevent, moved
+            # into the record.
+            if divergence.symbol in stale:
+                suppressed += 1
+                continue
+            _diverged(divergence)
         tiers = [divergence.tier for divergence in divergences]
         named_event(
             NamedEvent.ACCOUNT_RECONCILED,
             tier_1=tiers.count(DivergenceTier.TIER_1),
             tier_2=tiers.count(DivergenceTier.TIER_2),
             unvalued=self._unvalued(state, view=view, ledger=unrealized, net=net),
+            suppressed=suppressed,
         )
         return divergences
 
