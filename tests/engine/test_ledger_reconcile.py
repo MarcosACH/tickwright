@@ -1854,3 +1854,77 @@ def test_the_ingested_collateral_lands_in_the_cycles_own_transaction() -> None:
     assert [(p.symbol, p.isolated_collateral) for p in store.all_positions()] == [
         ("BTC", _BTC_BUCKET)
     ]
+
+
+def _alerts(logs: Sequence[Mapping[str, object]]) -> list[Mapping[str, object]]:
+    """Every ``valuation.divergence`` in ``logs``, as the four fields it is
+    *about*, in the order the pass raised them.
+
+    A list rather than the single-record unpacking ``_recorded`` does, because
+    one mark skew moves every quantity it flows through: an account whose uPnL
+    has drifted has an equity that has drifted with it, so a case that finds one
+    alert and a case that finds two are both ordinary books.
+
+    Projected down to the payload because the rendering furniture every record
+    carries — the level, the run id — belongs to the observability suite's
+    contract rather than to this cycle's, and a case here asserting on it would
+    fail on a change to that one.
+    """
+    return [
+        {key: log[key] for key in ("field", "symbol", "ledger", "venue")}
+        for log in logs
+        if log["event"] == NamedEvent.VALUATION_DIVERGENCE.value
+    ]
+
+
+def test_a_tier_2_divergence_outside_the_band_is_alerted_with_both_sides() -> None:
+    """The alert, and the pair it carries (ADR-0040 §6).
+
+    Alert-only is the whole of Tier-2's response: the figure is recomputed from
+    ``(position, mark)`` on every read and never stored, so there is nothing to
+    heal — a stale mark is not a wrong ledger. What an operator gets instead is
+    the same shape ``account.healed`` carries, both sides and never their
+    difference, for the same reason: a delta cannot tell a mark this engine has
+    not seen yet from a position it has mis-valued.
+
+    The book is the fill's own arithmetic: a 0.002 long entered at 64809 and
+    marked at 65000 is worth ``0.002 × 191 = 0.382``, on a 100000 cash line.
+    The venue's snapshot is built to disagree on the valuation *only* — its
+    equity carries its own uPnL exactly, so ``venue_cash`` lands back on 100000
+    and the Tier-1 halves stay silent. That matters beyond tidiness here: a cash
+    finding would suppress these very alerts (ADR-0040 §6's first rule), so a
+    case that let one through would be asserting on a path it had disabled.
+
+    Both figures alert because one mark skew moves both — equity *is*
+    ``cash + Σ uPnL`` — and the account grain comes first, as the cash line does.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "65000")
+    venue = _held("100001.000", ("BTC", "0.002", "1.000"))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences is not None
+    assert [divergence.field for divergence in divergences] == [
+        DivergenceField.EQUITY,
+        DivergenceField.UNREALIZED_PNL,
+    ]
+    assert _alerts(logs) == [
+        {
+            "field": "equity",
+            "symbol": None,
+            "ledger": "100000.382",
+            "venue": "100001.000",
+        },
+        {
+            "field": "unrealized_pnl",
+            "symbol": "BTC",
+            "ledger": "0.382",
+            "venue": "1.000",
+        },
+    ]

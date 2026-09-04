@@ -157,6 +157,24 @@ def _healed(divergence: Divergence, *, event_id: str) -> None:
     )
 
 
+def _diverged(divergence: Divergence) -> None:
+    """Alert on a Tier-2 figure the venue disagrees with (ADR-0040 §6).
+
+    The same shape ``_healed`` records, minus the ``event_id`` it has nothing to
+    carry: Tier-2 is recomputed on every read and never stored, so there is no
+    key it was applied under because nothing was applied. That absence *is* the
+    tier — an alert here and a heal there are the two responses ADR-0034 splits
+    the surface into, and they are deliberately one vocabulary otherwise.
+    """
+    named_event(
+        NamedEvent.VALUATION_DIVERGENCE,
+        field=divergence.field.value,
+        symbol=divergence.symbol,
+        ledger=str(divergence.ledger),
+        venue=str(divergence.venue),
+    )
+
+
 class LedgerReconciliation:
     """The cross-check between the ledger and the venue's own account truth."""
 
@@ -322,6 +340,11 @@ class LedgerReconciliation:
             },
         )
         self._record_heals(heals, cash=cash, booked=booked)
+        # Ahead of the pass's own summary, as the heal records are: the summary
+        # counts, and a count is read against the lines that produced it.
+        for divergence in divergences:
+            if divergence.tier is DivergenceTier.TIER_2:
+                _diverged(divergence)
         tiers = [divergence.tier for divergence in divergences]
         named_event(
             NamedEvent.ACCOUNT_RECONCILED,

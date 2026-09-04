@@ -150,6 +150,19 @@ class NamedEvent(StrEnum):
     # stopped doing about it. A ``changed`` mode has no such pair — the venue
     # answered, and the answer was a mode we refuse.
     ACCOUNT_MODE_UNVERIFIED = "account.mode_unverified"
+    # A Tier-2 figure the cycle recomputed and the venue's own number disagreed
+    # with by more than the band allows (ADR-0040 §6). **Alert-only, always**:
+    # Tier-2 is recomputed from ``(position, mark)`` on every read and never
+    # stored, so there is nothing here to heal — a stale mark is not a wrong
+    # ledger, and a correction would be one applied to a number that will be
+    # thrown away and derived again on the next read.
+    #
+    # Carries ``field``/``symbol``/``ledger``/``venue``, the shape
+    # ``account.healed`` carries and for the same reason: a delta cannot tell a
+    # mark the engine has not seen yet from a position it has mis-valued. It
+    # deliberately does **not** carry the band it broke — the band is config an
+    # operator already has, while the pair is the only thing the pass knows.
+    VALUATION_DIVERGENCE = "valuation.divergence"
 
     # A live-exchange request that yielded no usable answer, on either path and
     # for either reason (``HyperliquidExchange``): a send or read that failed in
