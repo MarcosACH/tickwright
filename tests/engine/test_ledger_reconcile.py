@@ -1928,3 +1928,43 @@ def test_a_tier_2_divergence_outside_the_band_is_alerted_with_both_sides() -> No
             "venue": "1.000",
         },
     ]
+
+
+def test_a_tier_2_divergence_inside_the_band_is_not_alerted() -> None:
+    """The band is a gate on the *alert*, not on the classification (ADR-0040 §6).
+
+    The venue's mark is a robust median this engine does not replicate
+    bit-for-bit, so a Tier-2 figure will never agree exactly and an unbanded
+    alert would fire on every healthy cycle — which is the failure mode that
+    makes an alert channel worth ignoring. What clears the band is absorbed
+    silently.
+
+    The same book behavior 1 alerts on, moved inside the tolerance: a 0.002 long
+    entered at 64809 and marked at 65000 is worth ``0.002 x 191 = 0.382``, and
+    the venue is built to report 0.385 — a 0.003 gap, under the 0.01 rounding
+    floor. Its equity carries its own uPnL exactly, so ``venue_cash`` lands back
+    on 100000 and neither Tier-1 half speaks; a cash finding would suppress
+    these alerts by a different rule and the case would prove nothing.
+
+    Both figures are still **classified**, and the case asserts that rather than
+    only the silence: a band that dropped the pair at classification would pass
+    an alert assertion identically while leaving the cycle's own record claiming
+    the pass agreed, and leaving the heal path with nothing to read.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "65000")
+    venue = _held("100000.385", ("BTC", "0.002", "0.385"))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences is not None
+    assert [divergence.field for divergence in divergences] == [
+        DivergenceField.EQUITY,
+        DivergenceField.UNREALIZED_PNL,
+    ]
+    assert _alerts(logs) == []

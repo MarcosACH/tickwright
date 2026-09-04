@@ -111,6 +111,38 @@ class Divergence:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class ValuationBand:
+    """The tolerance a Tier-2 disagreement clears before it is alerted on
+    (ADR-0040 §6).
+
+    A gate on the **alert** and never on the classification: a figure inside the
+    band is still a pair the cycle found and recorded, it is simply not one an
+    operator is woken for. Putting it at classification instead would leave the
+    pass's own summary claiming agreement on a book it had measured a gap in.
+
+    Tier-2 has a band at all — where Tier-1 carries zero economic tolerance —
+    because the venue's mark is a robust median this engine does not replicate
+    bit-for-bit (ADR-0034). The two sides therefore never agree exactly, and an
+    unbanded alert fires on every healthy cycle, which is how an alert channel
+    becomes one nobody reads.
+    """
+
+    atol: Decimal = Decimal("0.01")
+    """The rounding floor, in quote currency, and *only* that (ADR-0046 §5).
+
+    It is not the band's working term: what a real skew moves scales with the
+    notional the figure's mark-sensitivity flows through, and the relative term
+    carrying that reference lands with it. ``atol`` is what remains when the
+    reference is small enough that nothing else does — the last cent, below
+    which two sides disagreeing is arithmetic rather than a finding.
+    """
+
+    def covers(self, divergence: Divergence) -> bool:
+        """Whether the band absorbs ``divergence``, leaving it unalerted."""
+        return abs(divergence.ledger - divergence.venue) <= self.atol
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class _SizeHeal:
     """A Tier-1 size finding and the synthetic fill built to close it.
 
@@ -192,6 +224,7 @@ class LedgerReconciliation:
         # parameter the ``Checkpointer`` exists to make unwireable.
         self._checkpointer = checkpointer
         self._portfolio = checkpointer.portfolio
+        self._band = ValuationBand()
 
     async def materialise_account(self) -> bool:
         """The startup barrier's live-only first step: create the account row
@@ -343,7 +376,7 @@ class LedgerReconciliation:
         # Ahead of the pass's own summary, as the heal records are: the summary
         # counts, and a count is read against the lines that produced it.
         for divergence in divergences:
-            if divergence.tier is DivergenceTier.TIER_2:
+            if divergence.tier is DivergenceTier.TIER_2 and not self._band.covers(divergence):
                 _diverged(divergence)
         tiers = [divergence.tier for divergence in divergences]
         named_event(
