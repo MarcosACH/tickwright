@@ -268,7 +268,9 @@ def _recorded(logs: Sequence[Mapping[str, object]]) -> Mapping[str, object]:
     return record
 
 
-def _held(equity: str, *positions: tuple[str, str, str]) -> VenueAccountState:
+def _held(
+    equity: str, *positions: tuple[str, str, str], free_margin: str | None = None
+) -> VenueAccountState:
     """A venue snapshot holding an explicit ``(symbol, signed_size, uPnL)`` per entry.
 
     ``account_state`` answers the recorded BTC snapshot, which is the right
@@ -277,11 +279,22 @@ def _held(equity: str, *positions: tuple[str, str, str]) -> VenueAccountState:
     size, so the sizes have to be the case's own. Everything not compared stays
     the recorded snapshot's figures — what the cycle is handed is still a shape
     the venue could have returned.
+
+    ``free_margin`` defaults to the figure this snapshot's *own* numbers imply
+    rather than to the recorded one, now that the cycle compares it: at the
+    default isolated 1x an account's margin is its positions' buckets marked to
+    market, so ``equity − Σ uPnL`` is what a venue holding these positions would
+    publish. Left at the recorded ``0.0096`` it would instead make every case
+    that marks a book diverge on a field it says nothing about. A case that
+    wants the disagreement passes its own.
     """
     recorded = account_state(equity, "-0.034").positions[0]
+    implied = Decimal(equity) - sum(
+        (Decimal(unrealized) for _, _, unrealized in positions), start=Decimal("0")
+    )
     return VenueAccountState(
         equity=Decimal(equity),
-        free_margin=Decimal("0.0096"),
+        free_margin=implied if free_margin is None else Decimal(free_margin),
         cross_maintenance_margin=Decimal("1.6198"),
         positions=tuple(
             replace(
@@ -944,9 +957,13 @@ def test_a_completed_cycle_records_what_it_found_at_each_tier() -> None:
     assert divergences is not None
     tiers = [divergence.tier for divergence in divergences]
     assert tiers.count(DivergenceTier.TIER_1) == 2  # the cash line and the size
-    assert tiers.count(DivergenceTier.TIER_2) == 2  # equity and the symbol's uPnL
+    # Equity, free margin and the symbol's uPnL. The first two are the cash gap
+    # restated in the units they are computed in — both carry the cash line as a
+    # term — which is why ADR-0040 §6's first suppression exists. It suppresses
+    # the *alert*; the pass still found three, and the record says what it found.
+    assert tiers.count(DivergenceTier.TIER_2) == 3
     record = _recorded(logs)
-    assert (record["tier_1"], record["tier_2"], record["unvalued"]) == (2, 2, 0)
+    assert (record["tier_1"], record["tier_2"], record["unvalued"]) == (2, 3, 0)
 
 
 def test_a_pass_that_could_not_value_the_book_is_not_recorded_as_one_that_agreed() -> None:
@@ -1450,6 +1467,10 @@ def test_a_pass_compares_one_fold_so_its_own_cash_heal_is_never_a_tier_2_finding
 
     assert [(d.field, d.ledger, d.venue) for d in divergences or ()] == [
         (DivergenceField.CASH, Decimal("100000"), Decimal("99900")),
+        # The cash gap restated: free margin is ``cash − Σ buckets``, so the 100
+        # the cash line is out by lands here too. Equity is the one that would
+        # have to be re-derived to disagree, and it is the assertion.
+        (DivergenceField.FREE_MARGIN, Decimal("100000"), Decimal("99900")),
         (DivergenceField.UNREALIZED_PNL, Decimal("0.382"), Decimal("100.382")),
     ]
     assert ledger.account().cash == Decimal("99900")  # the heal landed
@@ -1594,6 +1615,17 @@ a long. Cross backs against account equity, which a materialised live ledger
 holds — so what the venue's number displaces below is a credible price and not
 an artefact."""
 
+_BTC_5X_FREE = "0.0004"
+"""The free margin a venue holding #142's account at this leverage publishes.
+
+``account_state``'s default assumes the default isolated 1x, where an account
+posts its positions' own buckets; these cases run the ledger at cross 5x, where
+it posts ``notional / 5`` instead — ``0.002 × 64815 / 5 = 25.926`` against an
+equity of ``25.9264``. Passed rather than left to the default so the snapshot is
+one *this* account could have returned: a fixture disagreeing on a field the
+case says nothing about would leave every one of them carrying a free-margin
+finding."""
+
 
 def _priced(state: VenueAccountState, price: Decimal | None) -> VenueAccountState:
     """The same snapshot with ``price`` on every position it carries.
@@ -1631,7 +1663,9 @@ def test_a_cycle_caches_the_venues_liquidation_price_and_the_read_passes_it_thro
     projection = keeper.portfolio
     _book_fill(projection, quantity="0.002", price="64809")
     _mark(projection, "BTC", "64815")
-    venue = _AccountVenue(_priced(account_state("25.9264", "0.012"), _BTC_LIQUIDATION))
+    venue = _AccountVenue(
+        _priced(account_state("25.9264", "0.012", free_margin=_BTC_5X_FREE), _BTC_LIQUIDATION)
+    )
     cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
 
     before = projection.position("BTC", strategy_id="alpha")
@@ -1665,7 +1699,9 @@ def test_the_cached_liquidation_price_stays_frozen_until_the_next_cycle() -> Non
     projection = keeper.portfolio
     _book_fill(projection, quantity="0.002", price="64809")
     _mark(projection, "BTC", "64815")
-    venue = _AccountVenue(_priced(account_state("25.9264", "0.012"), _BTC_LIQUIDATION))
+    venue = _AccountVenue(
+        _priced(account_state("25.9264", "0.012", free_margin=_BTC_5X_FREE), _BTC_LIQUIDATION)
+    )
     cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
     asyncio.run(cycle.reconcile_account())
 
@@ -1698,7 +1734,9 @@ def test_a_position_the_venue_prices_at_nothing_reads_none_rather_than_the_formu
     projection = keeper.portfolio
     _book_fill(projection, quantity="0.002", price="64809")
     _mark(projection, "BTC", "64815")
-    venue = _AccountVenue(_priced(account_state("25.9264", "0.012"), None))
+    venue = _AccountVenue(
+        _priced(account_state("25.9264", "0.012", free_margin=_BTC_5X_FREE), None)
+    )
     cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
 
     before = projection.position("BTC", strategy_id="alpha")
@@ -1741,7 +1779,9 @@ def test_a_position_opened_since_the_read_reads_none_rather_than_the_formula() -
     projection = keeper.portfolio
     _book_fill(projection, quantity="0.002", price="64809")
     _mark(projection, "BTC", "64815")
-    venue = _AccountVenue(_priced(account_state("25.9264", "0.012"), _BTC_LIQUIDATION))
+    venue = _AccountVenue(
+        _priced(account_state("25.9264", "0.012", free_margin=_BTC_5X_FREE), _BTC_LIQUIDATION)
+    )
     cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
     asyncio.run(cycle.reconcile_account())
 
@@ -1968,3 +2008,57 @@ def test_a_tier_2_divergence_inside_the_band_is_not_alerted() -> None:
         DivergenceField.UNREALIZED_PNL,
     ]
     assert _alerts(logs) == []
+
+
+def test_free_margin_is_classified_at_tier_2_against_the_venues_own_figure() -> None:
+    """The third account-grain Tier-2 figure, and the one an operator sizes
+    against (ADR-0040 §6).
+
+    Mark-dependent through both its terms — ``equity − total_margin_used``, and
+    at the default isolated 1x the margin term is the locked bucket marked to
+    market — so it belongs to the tier that is recomputed and alerted rather
+    than the one that is healed. The venue publishes its own, which is what
+    makes it comparable at all: ``effective_leverage`` beside it has no venue
+    field and is therefore reported and never cross-checked.
+
+    Deliberately **not** compared against the venue's ``withdrawable``, which
+    additionally deducts margin reserved by resting orders — the normal state of
+    a running engine, and a gap no band absorbs (ADR-0046 §2). The adapter's
+    figure is the cross pair's difference.
+
+    The book is built so free margin is the pass's *only* finding: a 0.002 long
+    entered at 64809 and marked at 65000 carries ``0.002 x 191 = 0.382`` of
+    uPnL, which the venue's snapshot reports exactly and which its equity
+    carries exactly, so cash, size, equity and uPnL all agree. The ledger's free
+    margin is then ``100000.382 − 0.382 = 100000`` — the bucket behind an
+    isolated position is its own uPnL and nothing else, since a fill locks no
+    collateral until a cycle ingests one — against a venue reporting 99000.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "65000")
+    venue = _held("100000.382", ("BTC", "0.002", "0.382"), free_margin="99000")
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences == (
+        Divergence(
+            tier=DivergenceTier.TIER_2,
+            field=DivergenceField.FREE_MARGIN,
+            symbol=None,
+            ledger=Decimal("100000.000"),
+            venue=Decimal("99000"),
+        ),
+    )
+    assert _alerts(logs) == [
+        {
+            "field": "free_margin",
+            "symbol": None,
+            "ledger": "100000.000",
+            "venue": "99000",
+        }
+    ]

@@ -55,20 +55,37 @@ from tickwright.domain import (
 )
 
 
-def account_state(equity: str, *unrealized: str) -> VenueAccountState:
+def account_state(
+    equity: str, *unrealized: str, free_margin: str | None = None
+) -> VenueAccountState:
     """A successful venue account read holding one position per ``unrealized``.
 
     The figures are the recorded cross snapshot's (issue #142 §2, reproduced in
     full in ``tests/venues/hyperliquid/test_account.py``): a funded testnet
     account holding 0.002 BTC long at 5x, ``accountValue`` 25.9264 against an
-    unrealized −0.034. Only ``equity`` and the unrealized legs carry meaning for
-    a caller — they are what ADR-0042 §6's genesis formula reads — but the rest
-    are a real venue's own numbers, so what a suite hands the seam is a shape
-    the venue could have returned rather than one invented to fit.
+    unrealized −0.034. Only ``equity``, the unrealized legs and ``free_margin``
+    carry meaning for a caller — the first two are what ADR-0042 §6's genesis
+    formula reads and the third is now cross-checked (ADR-0040 §6) — but the
+    rest are a real venue's own numbers, so what a suite hands the seam is a
+    shape the venue could have returned rather than one invented to fit.
+
+    ``free_margin`` is derived from ``equity`` and the legs rather than kept at
+    the recorded ``0.0096``, which was coherent with *that* account's 5x cross
+    margin and with nothing a suite builds beside it. A ledger valued at the
+    default isolated 1x posts each position's own bucket, so its free margin is
+    ``cash − Σ buckets`` — and against a snapshot holding no locked collateral
+    that is the venue's ``equity − Σ uPnL``. Recorded, the constant made every
+    case that marks a book diverge on a field it says nothing about. A case
+    whose ledger runs at some *other* leverage passes the figure that account
+    would publish, since the default's premise is the default's leverage.
     """
     return VenueAccountState(
         equity=Decimal(equity),
-        free_margin=Decimal("0.0096"),
+        free_margin=(
+            Decimal(equity) - sum((Decimal(pnl) for pnl in unrealized), Decimal("0"))
+            if free_margin is None
+            else Decimal(free_margin)
+        ),
         cross_maintenance_margin=Decimal("1.6198"),
         positions=tuple(
             VenuePositionState(

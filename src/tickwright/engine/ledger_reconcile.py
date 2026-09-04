@@ -87,6 +87,7 @@ class DivergenceField(Enum):
     CASH = "cash"
     SIGNED_SIZE = "signed_size"
     EQUITY = "equity"
+    FREE_MARGIN = "free_margin"
     UNREALIZED_PNL = "unrealized_pnl"
 
 
@@ -348,6 +349,7 @@ class LedgerReconciliation:
             self._cash(state, cash=view.cash)
             + self._sizes(state, ledger=net)
             + self._equity(state, equity=view.equity)
+            + self._free_margin(state, free_margin=view.free_margin)
             + self._unrealized(state, ledger=unrealized, net=net)
         )
         # One stamp for the pass, spent on both halves of its heal: the
@@ -722,6 +724,41 @@ class LedgerReconciliation:
                 symbol=None,
                 ledger=equity,
                 venue=state.equity,
+            ),
+        )
+
+    @staticmethod
+    def _free_margin(
+        state: VenueAccountState, *, free_margin: Decimal | None
+    ) -> tuple[Divergence, ...]:
+        """Tier-2: the pool left to open against, ours against the venue's own.
+
+        Mark-dependent through both its terms — ``equity − total_margin_used``,
+        and at the default isolated 1x the margin term is each locked bucket
+        marked to market — so it is recomputed on every read and alerted on
+        rather than healed, like the two account-grain figures beside it.
+
+        Compared at all because the venue publishes it: ``effective_leverage``
+        is the account-grain figure with no venue counterpart, so it is reported
+        and never cross-checked. What the venue's side is *not* is
+        ``withdrawable``, which additionally deducts margin reserved by resting
+        orders — the normal state of a running engine, and a gap no band absorbs
+        (ADR-0046 §2). The adapter hands over the cross pair's difference, and
+        that pair needs no narrowing to the cross subset the way maintenance
+        margin does: each half drops the same isolated term and it cancels.
+
+        A ``None`` is dropped on the same rule ``_equity`` states: a pool whose
+        margin term is waiting on a mark is unknown, not disputed.
+        """
+        if free_margin is None or free_margin == state.free_margin:
+            return ()
+        return (
+            Divergence(
+                tier=DivergenceTier.TIER_2,
+                field=DivergenceField.FREE_MARGIN,
+                symbol=None,
+                ledger=free_margin,
+                venue=state.free_margin,
             ),
         )
 
