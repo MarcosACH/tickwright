@@ -18,7 +18,9 @@ from typing import Final
 from ledgers import book_fill
 from venue_doubles import LIVE_ACCOUNT_ID, account_state, implied_free_margin
 
+from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
+from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     EMPTY_LEVERAGE_BOOK,
@@ -2015,6 +2017,48 @@ def test_a_cycle_that_finds_only_leverage_drift_writes_nothing_and_cannot_re_pus
     assert restored is not None
     assert restored.cash == opened.cash == Decimal("100000")
     assert store.all_positions() == stored
+
+
+def test_a_paper_run_checks_no_leverage_because_it_has_no_venue_to_check() -> None:
+    """The check is live-only, and on paper it is not skipped by a flag — there
+    is nothing to compare against.
+
+    ``PaperExchange`` satisfies ``AccountAnchor`` and answers it permanently
+    with ``None``: that venue holds no second account, so the cycle freezes at
+    the read and never reaches a classification, let alone a leverage pair. A
+    branch on the run mode would say the same thing worse, putting a live/paper
+    conditional inside the cycle for a case its ``None`` contract already covers.
+
+    The config here is deliberately **not** the default pair, so the silence is
+    a real outcome rather than an accident of the two sides matching: at ``5x``
+    cross there is a disagreement available for any check that ran.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = Checkpointer(
+        spec=AccountSpec(account_id="paper-default", genesis_collateral=Decimal("100000")),
+        store=store,
+        clock=ManualClock(7),
+        leverage=_BTC_CROSS_5X,
+    )
+    keeper.recover()
+    _book_fill(keeper.portfolio, quantity="0.002", price="64809")
+    venue = PaperExchange(
+        bus=InMemoryBus(),
+        clock=ManualClock(7),
+        fill_model=ImmediateFillModel(),
+        genesis_collateral=Decimal("100000"),
+        account_net=dict,
+    )
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+
+    with capture_events() as logs:
+        divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences is None  # frozen at the read: no venue truth, no pass
+    assert _drifted(logs) == []
+    # And the silence is not the config's doing: the run really is on a pair a
+    # check would have had something to say about.
+    assert keeper.portfolio.leverage_for("BTC") == LeverageSpec(mode="cross", leverage=5)
 
 
 def _isolated(state: VenueAccountState, collateral: Decimal | None) -> VenueAccountState:
