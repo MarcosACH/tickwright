@@ -37,7 +37,7 @@ Doubling here is legitimate under ADR-0022 — a venue is a process boundary, th
 one place a double is allowed.
 """
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from decimal import Decimal
 
 from ledgers import GENESIS
@@ -55,6 +55,35 @@ from tickwright.domain import (
 )
 
 
+def implied_free_margin(equity: str, unrealized: Iterable[str], *, declared: str | None) -> Decimal:
+    """The free margin a venue holding these positions would publish.
+
+    ``equity − Σ uPnL``, and it is the *ledger's* default margin mode that makes
+    it so: at isolated 1x an account's margin is its positions' own buckets
+    marked to market, so ``free_margin = equity − total_margin_used`` collapses
+    to the venue's equity less the open PnL already inside it.
+
+    A recorded constant in its place is coherent with the account it was
+    recorded from and with nothing a suite builds beside it — the snapshot's
+    ``0.0096`` belongs to a 5x cross book — which made every case that marks a
+    book diverge on a field it says nothing about, now that ADR-0040 §6 compares
+    this figure at Tier-2.
+
+    One derivation because two fixtures need it, the recorded snapshot and the
+    explicit roster. Spelled twice they would agree until the first case that
+    varied one of them, and a cycle reading a divergence off the difference
+    would be reporting the fixtures disagreeing rather than the book.
+
+    ``declared`` takes precedence and is the escape hatch: a case whose ledger
+    runs at some *other* leverage, or that wants the disagreement, passes the
+    figure that account would publish — the default's premise is the default's
+    leverage.
+    """
+    if declared is not None:
+        return Decimal(declared)
+    return Decimal(equity) - sum((Decimal(pnl) for pnl in unrealized), Decimal("0"))
+
+
 def account_state(
     equity: str, *unrealized: str, free_margin: str | None = None
 ) -> VenueAccountState:
@@ -70,22 +99,12 @@ def account_state(
     shape the venue could have returned rather than one invented to fit.
 
     ``free_margin`` is derived from ``equity`` and the legs rather than kept at
-    the recorded ``0.0096``, which was coherent with *that* account's 5x cross
-    margin and with nothing a suite builds beside it. A ledger valued at the
-    default isolated 1x posts each position's own bucket, so its free margin is
-    ``cash − Σ buckets`` — and against a snapshot holding no locked collateral
-    that is the venue's ``equity − Σ uPnL``. Recorded, the constant made every
-    case that marks a book diverge on a field it says nothing about. A case
-    whose ledger runs at some *other* leverage passes the figure that account
-    would publish, since the default's premise is the default's leverage.
+    the recorded constant, on the premise ``implied_free_margin`` states and a
+    case that wants some other figure overrides.
     """
     return VenueAccountState(
         equity=Decimal(equity),
-        free_margin=(
-            Decimal(equity) - sum((Decimal(pnl) for pnl in unrealized), Decimal("0"))
-            if free_margin is None
-            else Decimal(free_margin)
-        ),
+        free_margin=implied_free_margin(equity, unrealized, declared=free_margin),
         cross_maintenance_margin=Decimal("1.6198"),
         positions=tuple(
             VenuePositionState(

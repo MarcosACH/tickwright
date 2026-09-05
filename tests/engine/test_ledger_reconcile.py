@@ -16,7 +16,7 @@ from decimal import Decimal
 from typing import Final
 
 from ledgers import book_fill
-from venue_doubles import LIVE_ACCOUNT_ID, account_state
+from venue_doubles import LIVE_ACCOUNT_ID, account_state, implied_free_margin
 
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.store import SQLiteStore
@@ -282,21 +282,17 @@ def _held(
     the recorded snapshot's figures — what the cycle is handed is still a shape
     the venue could have returned.
 
-    ``free_margin`` defaults to the figure this snapshot's *own* numbers imply
-    rather than to the recorded one, now that the cycle compares it: at the
-    default isolated 1x an account's margin is its positions' buckets marked to
-    market, so ``equity − Σ uPnL`` is what a venue holding these positions would
-    publish. Left at the recorded ``0.0096`` it would instead make every case
-    that marks a book diverge on a field it says nothing about. A case that
-    wants the disagreement passes its own.
+    ``free_margin`` defaults to what this snapshot's *own* numbers imply, off
+    the same ``implied_free_margin`` the recorded fixture derives its with — the
+    roster differs between the two, the premise does not. A case that wants the
+    disagreement passes its own.
     """
     recorded = account_state(equity, "-0.034").positions[0]
-    implied = Decimal(equity) - sum(
-        (Decimal(unrealized) for _, _, unrealized in positions), start=Decimal("0")
-    )
     return VenueAccountState(
         equity=Decimal(equity),
-        free_margin=implied if free_margin is None else Decimal(free_margin),
+        free_margin=implied_free_margin(
+            equity, (unrealized for _, _, unrealized in positions), declared=free_margin
+        ),
         cross_maintenance_margin=Decimal("1.6198"),
         positions=tuple(
             replace(
