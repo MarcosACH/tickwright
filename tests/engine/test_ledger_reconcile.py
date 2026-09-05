@@ -1880,6 +1880,37 @@ def test_a_venue_leverage_that_no_longer_matches_config_is_alerted_with_both_pai
     ]
 
 
+def test_a_venue_margin_mode_that_no_longer_matches_config_is_alerted_on_its_own() -> None:
+    """The comparison is on the **pair**, so a mode-only edit is drift too.
+
+    The two settings ride one signed ``updateLeverage`` action and are one value
+    here for that reason (ADR-0044 §2), so a check that watched the multiplier
+    alone would read this venue as aligned — and it is not: at ``5x`` the switch
+    from isolated to cross moves the position off its own locked bucket onto the
+    account pool, so a loss on it now draws down every other position's margin.
+    That is the change an operator is least likely to have made on purpose and
+    the one a number-only comparison is blindest to.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000", leverage=_BTC_ISOLATED_5X)
+    _book_fill(keeper.portfolio, quantity="0.002", price="64809")
+    venue = _levered(_held("100000", ("BTC", "0.002", "0")), LeverageSpec(mode="cross", leverage=5))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        asyncio.run(cycle.reconcile_account())
+
+    assert _drifted(logs) == [
+        {
+            "symbol": "BTC",
+            "configured_mode": "isolated",
+            "configured_leverage": 5,
+            "venue_mode": "cross",
+            "venue_leverage": 5,
+        }
+    ]
+
+
 def _isolated(state: VenueAccountState, collateral: Decimal | None) -> VenueAccountState:
     """The same snapshot with ``collateral`` on every position it carries.
 
