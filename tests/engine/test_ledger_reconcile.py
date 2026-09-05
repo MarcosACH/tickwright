@@ -1816,6 +1816,70 @@ _BTC_BUCKET = Decimal("25.898067")
 by the adapter as ``marginUsed − unrealizedPnl`` (ADR-0043 §3)."""
 
 
+def _drifted(logs: Sequence[Mapping[str, object]]) -> list[Mapping[str, object]]:
+    """Every ``leverage.divergence`` in ``logs``, as the pairs it is about.
+
+    A list, like ``_alerts``: the check ranges over every held symbol, and an
+    operator who re-margined a book in the venue UI moved more than one of them.
+    """
+    return [
+        {
+            key: log[key]
+            for key in (
+                "symbol",
+                "configured_mode",
+                "configured_leverage",
+                "venue_mode",
+                "venue_leverage",
+            )
+        }
+        for log in logs
+        if log["event"] == NamedEvent.LEVERAGE_DIVERGENCE.value
+    ]
+
+
+def _levered(state: VenueAccountState, spec: LeverageSpec) -> VenueAccountState:
+    """The same snapshot with ``spec`` as the venue's stored setting on every
+    position it carries — an operator having re-margined the book in the UI."""
+    return replace(state, positions=tuple(replace(p, leverage=spec) for p in state.positions))
+
+
+def test_a_venue_leverage_that_no_longer_matches_config_is_alerted_with_both_pairs() -> None:
+    """Post-boot drift: a direct exact-match check against config, never a band
+    and never a re-push (ADR-0044 §10).
+
+    The indirect route is blind here, which is why the check exists at all: a
+    leverage change never re-margins an open position, so neither term of the
+    venue's ``margin_used`` moves with the *setting* and a drift in it is
+    invisible in every computed figure the band already watches.
+
+    Config is the run's default pair — ``1x``/``isolated``, what the boot push
+    put on the venue — and the snapshot comes back at ``5x``/``cross``, the
+    shape of a hand-edit in the venue UI. Both sides ride the record for the
+    reason ``account.healed`` carries both: the operator who made the change is
+    being told which of the two settings the engine will keep computing against,
+    and a record naming only the venue's leaves that unanswered.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    _book_fill(keeper.portfolio, quantity="0.002", price="64809")
+    venue = _levered(_held("100000", ("BTC", "0.002", "0")), LeverageSpec(mode="cross", leverage=5))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        asyncio.run(cycle.reconcile_account())
+
+    assert _drifted(logs) == [
+        {
+            "symbol": "BTC",
+            "configured_mode": "isolated",
+            "configured_leverage": 1,
+            "venue_mode": "cross",
+            "venue_leverage": 5,
+        }
+    ]
+
+
 def _isolated(state: VenueAccountState, collateral: Decimal | None) -> VenueAccountState:
     """The same snapshot with ``collateral`` on every position it carries.
 

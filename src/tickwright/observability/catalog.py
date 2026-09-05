@@ -170,6 +170,27 @@ class NamedEvent(StrEnum):
     # deliberately does **not** carry the band it broke — the band is config an
     # operator already has, while the pair is the only thing the pass knows.
     VALUATION_DIVERGENCE = "valuation.divergence"
+    # The venue's stored leverage or margin mode for a held symbol no longer
+    # equal to the pair config asked for (ADR-0044 §10). Its neighbour above
+    # reports a *computed* number drifting inside a tolerance; this reports a
+    # discrete **operator setting**, so the comparison is an exact match and
+    # there is no band — a pair has nothing to measure a tolerance in.
+    #
+    # **Alert-only, and specifically never a re-push.** An operator who lowers a
+    # leverage in the venue UI to de-risk a live position is making a decision
+    # about live risk with more context than a config file has; an engine that
+    # re-imposed the boot-time value would undo that silently, and at the moment
+    # it matters most. Config wins at startup, the venue wins in flight.
+    #
+    # Carries ``symbol`` plus **both** pairs, spelled out —
+    # ``configured_mode``/``configured_leverage`` against
+    # ``venue_mode``/``venue_leverage``. Configured rather than "ledger",
+    # because the engine's side of this comparison is what an operator wrote and
+    # not a figure the ledger accumulated, which is the one place this record's
+    # vocabulary parts from its two neighbours'. Both sides ride it for the
+    # reason they do: the operator who made the change is being told which of
+    # the two settings the margin model keeps computing against.
+    LEVERAGE_DIVERGENCE = "leverage.divergence"
 
     # A live-exchange request that yielded no usable answer, on either path and
     # for either reason (``HyperliquidExchange``): a send or read that failed in
