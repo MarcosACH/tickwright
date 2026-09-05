@@ -42,6 +42,7 @@ from venue_doubles import LIVE_ACCOUNT_ID, LiveVenueDouble, account_state
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
+    DEFAULT_LEVERAGE,
     AccountSpec,
     Order,
     OrderState,
@@ -265,6 +266,7 @@ def _venue_state(sizes: dict[str, Decimal]) -> VenueAccountState:
                 margin_used=Decimal(0),
                 isolated_collateral=None,
                 liquidation_price=None,
+                leverage=DEFAULT_LEVERAGE,
             )
             for symbol, size in sorted(sizes.items())
         ),

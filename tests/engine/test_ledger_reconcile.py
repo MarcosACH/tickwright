@@ -18,11 +18,15 @@ from typing import Final
 from ledgers import book_fill
 from venue_doubles import LIVE_ACCOUNT_ID, account_state, implied_free_margin
 
+from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
+from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
+    DEFAULT_LEVERAGE,
     EMPTY_LEVERAGE_BOOK,
     Account,
+    AccountAnchor,
     AccountModeVerdict,
     AccountSpec,
     FundingAccrual,
@@ -1814,6 +1818,329 @@ by #142). It is the only mode for which the ingest below has anything to carry."
 _BTC_BUCKET = Decimal("25.898067")
 """The locked collateral #142 measured on a funded isolated position, recovered
 by the adapter as ``marginUsed − unrealizedPnl`` (ADR-0043 §3)."""
+
+
+_BTC_DEFAULT = LeverageBook(entries={"BTC": DEFAULT_LEVERAGE})
+"""BTC **declared** at the pair an unconfigured traded symbol resolves to.
+
+Not ``EMPTY_LEVERAGE_BOOK``, and the difference is the whole of what ``declared``
+reports: both books answer ``leverage_for("BTC")`` with the same
+``1x``/``isolated``, one because the resolution filled it in over a symbol a
+strategy trades and one because the read missed a book that carries nothing. A
+drift case meaning the first must not be written on the second, or it asserts the
+fallback while claiming to describe a run."""
+
+
+def _drifted(logs: Sequence[Mapping[str, object]]) -> list[Mapping[str, object]]:
+    """Every ``leverage.divergence`` in ``logs``, as the pairs it is about.
+
+    A list, like ``_alerts``: the check ranges over every held symbol, and an
+    operator who re-margined a book in the venue UI moved more than one of them.
+    """
+    return [
+        {
+            key: log[key]
+            for key in (
+                "symbol",
+                "configured_mode",
+                "configured_leverage",
+                "declared",
+                "venue_mode",
+                "venue_leverage",
+            )
+        }
+        for log in logs
+        if log["event"] == NamedEvent.LEVERAGE_DIVERGENCE.value
+    ]
+
+
+def _levered(
+    state: VenueAccountState, spec: LeverageSpec, *, symbol: str | None = None
+) -> VenueAccountState:
+    """The same snapshot with ``spec`` as the venue's stored setting — an
+    operator having re-margined the book in the UI.
+
+    Every position by default. ``symbol`` narrows it to one, which is what a
+    case about the *other* symbols needs: an operator edits a book one position
+    at a time, so a snapshot where the whole roster moved together cannot show
+    that the untouched rows stayed quiet.
+    """
+    return replace(
+        state,
+        positions=tuple(
+            replace(p, leverage=spec) if symbol is None or p.symbol == symbol else p
+            for p in state.positions
+        ),
+    )
+
+
+def test_a_venue_leverage_that_no_longer_matches_config_is_alerted_with_both_pairs() -> None:
+    """Post-boot drift: a direct exact-match check against config, never a band
+    and never a re-push (ADR-0044 §10).
+
+    The indirect route is blind here, which is why the check exists at all: a
+    leverage change never re-margins an open position, so neither term of the
+    venue's ``margin_used`` moves with the *setting* and a drift in it is
+    invisible in every computed figure the band already watches.
+
+    Config is the run's default pair — ``1x``/``isolated``, what the boot push
+    put on the venue — and the snapshot comes back at ``5x``/``cross``, the
+    shape of a hand-edit in the venue UI. Both sides ride the record for the
+    reason ``account.healed`` carries both: the operator who made the change is
+    being told which of the two settings the engine will keep computing against,
+    and a record naming only the venue's leaves that unanswered.
+
+    ``declared`` is ``True`` here because BTC is in the run's resolved book: the
+    pair on our side is one the boot push actually put on the venue, so the
+    disagreement is between two settings that were both meant to apply.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000", leverage=_BTC_DEFAULT)
+    _book_fill(keeper.portfolio, quantity="0.002", price="64809")
+    venue = _levered(_held("100000", ("BTC", "0.002", "0")), LeverageSpec(mode="cross", leverage=5))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        asyncio.run(cycle.reconcile_account())
+
+    assert _drifted(logs) == [
+        {
+            "symbol": "BTC",
+            "configured_mode": "isolated",
+            "configured_leverage": 1,
+            "declared": True,
+            "venue_mode": "cross",
+            "venue_leverage": 5,
+        }
+    ]
+
+
+def test_a_venue_margin_mode_that_no_longer_matches_config_is_alerted_on_its_own() -> None:
+    """The comparison is on the **pair**, so a mode-only edit is drift too.
+
+    The two settings ride one signed ``updateLeverage`` action and are one value
+    here for that reason (ADR-0044 §2), so a check that watched the multiplier
+    alone would read this venue as aligned — and it is not: at ``5x`` the switch
+    from isolated to cross moves the position off its own locked bucket onto the
+    account pool, so a loss on it now draws down every other position's margin.
+    That is the change an operator is least likely to have made on purpose and
+    the one a number-only comparison is blindest to.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000", leverage=_BTC_ISOLATED_5X)
+    _book_fill(keeper.portfolio, quantity="0.002", price="64809")
+    venue = _levered(_held("100000", ("BTC", "0.002", "0")), LeverageSpec(mode="cross", leverage=5))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        asyncio.run(cycle.reconcile_account())
+
+    assert _drifted(logs) == [
+        {
+            "symbol": "BTC",
+            "configured_mode": "isolated",
+            "configured_leverage": 5,
+            "declared": True,
+            "venue_mode": "cross",
+            "venue_leverage": 5,
+        }
+    ]
+
+
+def test_a_symbol_still_carrying_the_configured_pair_is_not_alerted() -> None:
+    """The check is per symbol, and silence is the aligned symbol's outcome.
+
+    Both rows come back at the run's default pair — ``1x``/``isolated``, what
+    the boot push put on the venue — and only ETH is then re-margined, the shape
+    of an operator de-risking one position rather than the book. BTC is the
+    assertion: an account that drifted somewhere must not be reported as having
+    drifted everywhere, or the record stops naming which position an operator
+    has to go look at.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(
+        store,
+        equity="100000",
+        leverage=LeverageBook(entries={"BTC": DEFAULT_LEVERAGE, "ETH": DEFAULT_LEVERAGE}),
+    )
+    _book_fill(keeper.portfolio, quantity="0.002", price="64809")
+    _book_fill(keeper.portfolio, quantity="1.5", price="3000", symbol="ETH", seq=2)
+    venue = _levered(
+        _held("100000", ("BTC", "0.002", "0"), ("ETH", "1.5", "0")),
+        LeverageSpec(mode="cross", leverage=5),
+        symbol="ETH",
+    )
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        asyncio.run(cycle.reconcile_account())
+
+    assert _drifted(logs) == [
+        {
+            "symbol": "ETH",
+            "configured_mode": "isolated",
+            "configured_leverage": 1,
+            "declared": True,
+            "venue_mode": "cross",
+            "venue_leverage": 5,
+        }
+    ]
+
+
+def test_a_venue_symbol_outside_the_book_is_alerted_as_undeclared_rather_than_as_config() -> None:
+    """The engine's side of this comparison is not always something an operator
+    wrote, and the record has to say which.
+
+    The check ranges over the **venue's** rows (ADR-0044 §10), so it reaches a
+    symbol no configured strategy trades — a position left over from an earlier
+    run, or one opened by hand in the venue UI. ``leverage_for`` answers those
+    with ``DEFAULT_LEVERAGE``, because a read may never be more permissive than
+    the book, and that answer is *not* a fabrication: the Tier-1 size finding
+    beside this one heals the row into the ledger, and ``domain.valuation``
+    then computes its margin at exactly that fallback pair. So the disagreement
+    is real and alerting is right — silence here would hide a position the model
+    values at ``1x`` isolated while the venue holds it at ``20x`` cross.
+
+    What would be wrong is the *word*. ``configured_mode``/``configured_leverage``
+    read as a pair an operator chose, and for this symbol nobody chose one; an
+    operator told "your config says 1x" would go looking through a config that
+    never mentions SOL. ``declared`` is the one bit that separates the two, and
+    it changes the advice: a declared drift is two settings that were both meant
+    to apply and one of them moved, an undeclared one is a position this run
+    does not trade and never pushed a leverage for.
+
+    BTC is in the same snapshot and stays silent, so the flag is attributable to
+    the symbol rather than to the pass.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000", leverage=_BTC_DEFAULT)
+    _book_fill(keeper.portfolio, quantity="0.002", price="64809")
+    venue = _levered(
+        _held("100000", ("BTC", "0.002", "0"), ("SOL", "40", "0")),
+        LeverageSpec(mode="cross", leverage=20),
+        symbol="SOL",
+    )
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        divergences = asyncio.run(cycle.reconcile_account())
+
+    assert _drifted(logs) == [
+        {
+            "symbol": "SOL",
+            "configured_mode": "isolated",
+            "configured_leverage": 1,
+            "declared": False,
+            "venue_mode": "cross",
+            "venue_leverage": 20,
+        }
+    ]
+    # The companion finding ADR-0044 §10 leans on when it declines to narrow the
+    # range to the book: the symbol is already reported as a size disagreement,
+    # and it is that heal which puts the position under the fallback pair.
+    assert divergences is not None
+    assert ("SOL", DivergenceField.SIGNED_SIZE) in {
+        (divergence.symbol, divergence.field) for divergence in divergences
+    }
+
+
+def test_a_cycle_that_finds_only_leverage_drift_writes_nothing_and_cannot_re_push() -> None:
+    """Drift is **reported and never corrected** (ADR-0044 §10): an operator who
+    lowered a leverage in the venue UI to de-risk a live position must not be
+    silently reverted, and neither side of the disagreement is written down.
+
+    Two writes to refuse, one per side. Toward the **store**, config is not
+    truth to be persisted: the map is already the run's own input, so a cycle
+    that wrote anything here would be recording a venue setting it does not use
+    or re-deriving a figure from a leverage it just learned had changed. Toward
+    the **venue**, a re-push is the revert itself.
+
+    The venue agrees on every figure it is compared on, so the drift is the
+    pass's only finding and the untouched store is attributable to it alone.
+
+    The refusal to re-push is asserted as the **shape of the seam** rather than
+    as an uncalled method: the cycle is constructed against ``AccountAnchor``,
+    whose members are a snapshot read and a mode verdict, so there is no write
+    to leave uncalled and a case cannot fail by forgetting to check. Pinning the
+    member set is what keeps that true — a later ``update_leverage`` added here
+    for a caller elsewhere would hand this cycle the revert it must not have.
+    """
+    assert {name for name in dir(AccountAnchor) if not name.startswith("_")} == {
+        "fetch_account_state",
+        "verify_account_mode",
+    }
+
+    store = _SealedStore(":memory:")
+    keeper = _ledger(store, equity="100000", leverage=_BTC_DEFAULT)
+    _book_fill(keeper.portfolio, quantity="0.002", price="64809")
+    opened = store.load_account()
+    stored = store.all_positions()
+    assert opened is not None
+    venue = _levered(_held("100000", ("BTC", "0.002", "0")), LeverageSpec(mode="cross", leverage=5))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+    store.seal()
+
+    with capture_events() as logs:
+        divergences = asyncio.run(cycle.reconcile_account())
+
+    assert _drifted(logs) == [
+        {
+            "symbol": "BTC",
+            "configured_mode": "isolated",
+            "configured_leverage": 1,
+            "declared": True,
+            "venue_mode": "cross",
+            "venue_leverage": 5,
+        }
+    ]
+    assert divergences == ()  # the drift is not one, and nothing else disagreed
+
+    restored = store.load_account()
+    assert restored is not None
+    assert restored.cash == opened.cash == Decimal("100000")
+    assert store.all_positions() == stored
+
+
+def test_a_paper_run_checks_no_leverage_because_it_has_no_venue_to_check() -> None:
+    """The check is live-only, and on paper it is not skipped by a flag — there
+    is nothing to compare against.
+
+    ``PaperExchange`` satisfies ``AccountAnchor`` and answers it permanently
+    with ``None``: that venue holds no second account, so the cycle freezes at
+    the read and never reaches a classification, let alone a leverage pair. A
+    branch on the run mode would say the same thing worse, putting a live/paper
+    conditional inside the cycle for a case its ``None`` contract already covers.
+
+    The config here is deliberately **not** the default pair, so the silence is
+    a real outcome rather than an accident of the two sides matching: at ``5x``
+    cross there is a disagreement available for any check that ran.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = Checkpointer(
+        spec=AccountSpec(account_id="paper-default", genesis_collateral=Decimal("100000")),
+        store=store,
+        clock=ManualClock(7),
+        leverage=_BTC_CROSS_5X,
+    )
+    keeper.recover()
+    _book_fill(keeper.portfolio, quantity="0.002", price="64809")
+    venue = PaperExchange(
+        bus=InMemoryBus(),
+        clock=ManualClock(7),
+        fill_model=ImmediateFillModel(),
+        genesis_collateral=Decimal("100000"),
+        account_net=dict,
+    )
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+
+    with capture_events() as logs:
+        divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences is None  # frozen at the read: no venue truth, no pass
+    assert _drifted(logs) == []
+    # And the silence is not the config's doing: the run really is on a pair a
+    # check would have had something to say about.
+    assert keeper.portfolio.leverage_for("BTC") == LeverageSpec(mode="cross", leverage=5)
 
 
 def _isolated(state: VenueAccountState, collateral: Decimal | None) -> VenueAccountState:

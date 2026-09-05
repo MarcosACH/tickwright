@@ -556,6 +556,7 @@ class LedgerReconciliation:
                 suppressed += 1
                 continue
             _diverged(divergence)
+        self._leverage_drift(state)
         tiers = [divergence.tier for divergence in divergences]
         named_event(
             NamedEvent.ACCOUNT_RECONCILED,
@@ -565,6 +566,59 @@ class LedgerReconciliation:
             suppressed=suppressed,
         )
         return divergences
+
+    def _leverage_drift(self, state: VenueAccountState) -> None:
+        """Alert on a held symbol whose venue setting no longer matches config
+        (ADR-0044 §10), and change nothing.
+
+        Neither a tier nor a band. It is not a ``Divergence`` because every
+        member of that type is a **number** the two sides computed and this is a
+        discrete pair an operator wrote: routed through the tuple it would take
+        a tolerance that has nothing to measure, a heal that must never happen,
+        and a place in the tier counts, where it would report the money line as
+        disagreeing over a setting the money line is not affected by until the
+        next position opens.
+
+        The check is free and could not be bought more cheaply anywhere else:
+        the setting rides the anchor snapshot the cycle already reads, so a
+        cadence that skipped it would still have had the answer in hand.
+
+        Ranged over the **venue's** rows rather than the cycle's net fold, which
+        is the one place this check parts from Tier-2's held-ness predicate. The
+        subject here is a setting the venue stores against a position the venue
+        holds, and it is stored for exactly those; a symbol our ledger reads flat
+        and the venue does not is a book we are already reporting a Tier-1 size
+        finding on, and its leverage is live risk either way.
+
+        That range reaches past the resolved book, which is why ``declared``
+        rides the record. ``leverage_for`` answers a symbol no strategy trades
+        with the safe fallback, and the answer is honest — the Tier-1 heal
+        beside this one books that row into the ledger and ``valuation`` margins
+        it at exactly that pair, so the disagreement is real and worth alerting.
+        What would not be honest is the *name*: ``configured_*`` reads as a pair
+        an operator chose, and for such a symbol nobody chose one. The bit
+        separates the two pieces of advice — a declared drift is two settings
+        that were both meant to apply, an undeclared one is a position this run
+        never pushed a leverage for and does not trade.
+
+        Never a write, and the seam says so rather than the code: this class is
+        constructed against ``AccountAnchor``, whose two members are the snapshot
+        read and the mode verdict, so there is no ``update_leverage`` here to
+        call by accident. The refusal to re-push is structural.
+        """
+        for position in state.positions:
+            configured = self._portfolio.leverage_for(position.symbol)
+            if position.leverage == configured:
+                continue
+            named_event(
+                NamedEvent.LEVERAGE_DIVERGENCE,
+                symbol=position.symbol,
+                configured_mode=configured.mode,
+                configured_leverage=configured.leverage,
+                declared=self._portfolio.declares_leverage(position.symbol),
+                venue_mode=position.leverage.mode,
+                venue_leverage=position.leverage.leverage,
+            )
 
     async def _mode_verified(self) -> bool:
         """Whether the venue still reports a mode this cycle may heal cash

@@ -14,6 +14,7 @@ engine's observable surface.
 
 import asyncio
 from collections.abc import Callable
+from dataclasses import replace
 from decimal import Decimal
 
 import pytest
@@ -874,6 +875,35 @@ def _drive_valuation_divergence() -> None:
     asyncio.run(go())
 
 
+def _drive_leverage_divergence() -> None:
+    """The same account cycle, against a venue holding the position at a pair
+    config never asked for: the drift is alerted and nothing is written back
+    (``leverage.divergence``, ADR-0044 §10).
+
+    The snapshot is the healthy one with its **setting** moved and every figure
+    left alone, which is the whole point of the check — a leverage change never
+    re-margins an open position, so a body that also moved ``marginUsed`` would
+    be driving this name off a divergence some other tier would have caught."""
+
+    async def go() -> None:
+        drifted = replace(
+            DERIVED_STATE,
+            positions=tuple(
+                replace(position, leverage=LeverageSpec(mode="cross", leverage=5))
+                for position in DERIVED_STATE.positions
+            ),
+        )
+        venue = _LiveShapedVenue(state=drifted)
+        keeper = Checkpointer(
+            spec=venue.account_spec(), store=SQLiteStore(":memory:"), clock=ManualClock()
+        )
+        keeper.recover()
+        keeper.portfolio.materialise(DERIVED_STATE)
+        await LedgerReconciliation(exchange=venue, checkpointer=keeper).reconcile_account()
+
+    asyncio.run(go())
+
+
 # --- The catalog walk --------------------------------------------------------
 
 # Every NamedEvent → a scenario that drives its real path. Several of the saga
@@ -911,6 +941,7 @@ SCENARIOS: dict[NamedEvent, Callable[[], None]] = {
     NamedEvent.ACCOUNT_HEALED: _drive_account_reconciled,
     NamedEvent.ACCOUNT_MODE_UNVERIFIED: _drive_account_mode_unverified,
     NamedEvent.VALUATION_DIVERGENCE: _drive_valuation_divergence,
+    NamedEvent.LEVERAGE_DIVERGENCE: _drive_leverage_divergence,
     NamedEvent.ACCOUNT_RECONCILE_FROZEN: _drive_account_reconcile_frozen,
     NamedEvent.EXCHANGE_REQUEST_FAILED: _drive_exchange_request_failed,
     NamedEvent.EXCHANGE_ACTION_REJECTED: _drive_exchange_action_rejected,

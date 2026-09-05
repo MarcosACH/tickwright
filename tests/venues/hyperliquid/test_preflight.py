@@ -634,9 +634,12 @@ def test_a_held_position_at_a_mode_the_venue_has_never_reported_is_a_failed_read
     check alone would pass under it if the two errors were ever merged.
 
     Covers the gate from ``held_leverage``'s side. ``test_account.py`` covers it
-    from ``_isolated_collateral``'s, and since #180's architecture pass both go
-    through one ``reported_margin_mode`` — two readers of one field that used to
-    decide validity separately, one derived from ``MarginMode`` and one not.
+    from ``normalize_account_state``'s, and since #180's architecture pass both
+    go through one ``reported_margin_mode`` — two readers of one field that used
+    to decide validity separately, one derived from ``MarginMode`` and one not.
+    Since #196's architecture pass they reach it through one
+    ``reported_leverage``, so the field itself has a single reader and
+    ``_isolated_collateral`` is handed the mode already narrowed.
     """
     post = FakeExchangeApi(
         {
