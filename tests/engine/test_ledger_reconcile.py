@@ -13,9 +13,10 @@ import asyncio
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from decimal import Decimal
+from typing import Final
 
 from ledgers import book_fill
-from venue_doubles import LIVE_ACCOUNT_ID, account_state
+from venue_doubles import LIVE_ACCOUNT_ID, account_state, implied_free_margin
 
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.store import SQLiteStore
@@ -42,6 +43,7 @@ from tickwright.engine.ledger_reconcile import (
     DivergenceField,
     DivergenceTier,
     LedgerReconciliation,
+    ValuationBand,
 )
 from tickwright.engine.portfolio import PortfolioProjection
 from tickwright.observability import NamedEvent
@@ -268,7 +270,9 @@ def _recorded(logs: Sequence[Mapping[str, object]]) -> Mapping[str, object]:
     return record
 
 
-def _held(equity: str, *positions: tuple[str, str, str]) -> VenueAccountState:
+def _held(
+    equity: str, *positions: tuple[str, str, str], free_margin: str | None = None
+) -> VenueAccountState:
     """A venue snapshot holding an explicit ``(symbol, signed_size, uPnL)`` per entry.
 
     ``account_state`` answers the recorded BTC snapshot, which is the right
@@ -277,11 +281,18 @@ def _held(equity: str, *positions: tuple[str, str, str]) -> VenueAccountState:
     size, so the sizes have to be the case's own. Everything not compared stays
     the recorded snapshot's figures — what the cycle is handed is still a shape
     the venue could have returned.
+
+    ``free_margin`` defaults to what this snapshot's *own* numbers imply, off
+    the same ``implied_free_margin`` the recorded fixture derives its with — the
+    roster differs between the two, the premise does not. A case that wants the
+    disagreement passes its own.
     """
     recorded = account_state(equity, "-0.034").positions[0]
     return VenueAccountState(
         equity=Decimal(equity),
-        free_margin=Decimal("0.0096"),
+        free_margin=implied_free_margin(
+            equity, (unrealized for _, _, unrealized in positions), declared=free_margin
+        ),
         cross_maintenance_margin=Decimal("1.6198"),
         positions=tuple(
             replace(
@@ -768,6 +779,13 @@ def test_a_heal_leaves_the_funding_mark_where_it_found_it_and_a_correction_re_en
     assert store.funding_mark("SOL") == 3_600
 
 
+_MARK_TS_NS: Final = 2_000
+"""When every ``_mark`` below is stamped, named because the staleness cases
+measure a clock **against** it rather than merely feeding it in."""
+
+_NS_PER_SECOND: Final = 1_000_000_000
+
+
 def _mark(projection: PortfolioProjection, symbol: str, price: str) -> None:
     """Feed the projection the Tier-2 valuation input (ADR-0039).
 
@@ -777,7 +795,7 @@ def _mark(projection: PortfolioProjection, symbol: str, price: str) -> None:
     absence produces, not on a valuation.
     """
     projection.observe_mark(
-        MarkTick(ts_event=2_000, ts_init=2_000, symbol=symbol, price=Decimal(price))
+        MarkTick(ts_event=_MARK_TS_NS, ts_init=_MARK_TS_NS, symbol=symbol, price=Decimal(price))
     )
 
 
@@ -944,9 +962,13 @@ def test_a_completed_cycle_records_what_it_found_at_each_tier() -> None:
     assert divergences is not None
     tiers = [divergence.tier for divergence in divergences]
     assert tiers.count(DivergenceTier.TIER_1) == 2  # the cash line and the size
-    assert tiers.count(DivergenceTier.TIER_2) == 2  # equity and the symbol's uPnL
+    # Equity, free margin and the symbol's uPnL. The first two are the cash gap
+    # restated in the units they are computed in — both carry the cash line as a
+    # term — which is why ADR-0040 §6's first suppression exists. It suppresses
+    # the *alert*; the pass still found three, and the record says what it found.
+    assert tiers.count(DivergenceTier.TIER_2) == 3
     record = _recorded(logs)
-    assert (record["tier_1"], record["tier_2"], record["unvalued"]) == (2, 2, 0)
+    assert (record["tier_1"], record["tier_2"], record["unvalued"]) == (2, 3, 0)
 
 
 def test_a_pass_that_could_not_value_the_book_is_not_recorded_as_one_that_agreed() -> None:
@@ -985,7 +1007,9 @@ def test_a_pass_that_could_not_value_the_book_is_not_recorded_as_one_that_agreed
     with capture_events() as agreed_logs:
         assert asyncio.run(cycle.reconcile_account()) == ()
 
-    assert _recorded(unvalued_logs)["unvalued"] == 2  # the account's equity and BTC's uPnL
+    # The account's two figures — equity and the free margin computed from it —
+    # and BTC's uPnL.
+    assert _recorded(unvalued_logs)["unvalued"] == 3
     assert _recorded(agreed_logs)["unvalued"] == 0
     assert unvalued_logs != agreed_logs
 
@@ -1450,6 +1474,10 @@ def test_a_pass_compares_one_fold_so_its_own_cash_heal_is_never_a_tier_2_finding
 
     assert [(d.field, d.ledger, d.venue) for d in divergences or ()] == [
         (DivergenceField.CASH, Decimal("100000"), Decimal("99900")),
+        # The cash gap restated: free margin is ``cash − Σ buckets``, so the 100
+        # the cash line is out by lands here too. Equity is the one that would
+        # have to be re-derived to disagree, and it is the assertion.
+        (DivergenceField.FREE_MARGIN, Decimal("100000"), Decimal("99900")),
         (DivergenceField.UNREALIZED_PNL, Decimal("0.382"), Decimal("100.382")),
     ]
     assert ledger.account().cash == Decimal("99900")  # the heal landed
@@ -1594,6 +1622,17 @@ a long. Cross backs against account equity, which a materialised live ledger
 holds — so what the venue's number displaces below is a credible price and not
 an artefact."""
 
+_BTC_5X_FREE = "0.0004"
+"""The free margin a venue holding #142's account at this leverage publishes.
+
+``account_state``'s default assumes the default isolated 1x, where an account
+posts its positions' own buckets; these cases run the ledger at cross 5x, where
+it posts ``notional / 5`` instead — ``0.002 × 64815 / 5 = 25.926`` against an
+equity of ``25.9264``. Passed rather than left to the default so the snapshot is
+one *this* account could have returned: a fixture disagreeing on a field the
+case says nothing about would leave every one of them carrying a free-margin
+finding."""
+
 
 def _priced(state: VenueAccountState, price: Decimal | None) -> VenueAccountState:
     """The same snapshot with ``price`` on every position it carries.
@@ -1631,7 +1670,9 @@ def test_a_cycle_caches_the_venues_liquidation_price_and_the_read_passes_it_thro
     projection = keeper.portfolio
     _book_fill(projection, quantity="0.002", price="64809")
     _mark(projection, "BTC", "64815")
-    venue = _AccountVenue(_priced(account_state("25.9264", "0.012"), _BTC_LIQUIDATION))
+    venue = _AccountVenue(
+        _priced(account_state("25.9264", "0.012", free_margin=_BTC_5X_FREE), _BTC_LIQUIDATION)
+    )
     cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
 
     before = projection.position("BTC", strategy_id="alpha")
@@ -1665,7 +1706,9 @@ def test_the_cached_liquidation_price_stays_frozen_until_the_next_cycle() -> Non
     projection = keeper.portfolio
     _book_fill(projection, quantity="0.002", price="64809")
     _mark(projection, "BTC", "64815")
-    venue = _AccountVenue(_priced(account_state("25.9264", "0.012"), _BTC_LIQUIDATION))
+    venue = _AccountVenue(
+        _priced(account_state("25.9264", "0.012", free_margin=_BTC_5X_FREE), _BTC_LIQUIDATION)
+    )
     cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
     asyncio.run(cycle.reconcile_account())
 
@@ -1698,7 +1741,9 @@ def test_a_position_the_venue_prices_at_nothing_reads_none_rather_than_the_formu
     projection = keeper.portfolio
     _book_fill(projection, quantity="0.002", price="64809")
     _mark(projection, "BTC", "64815")
-    venue = _AccountVenue(_priced(account_state("25.9264", "0.012"), None))
+    venue = _AccountVenue(
+        _priced(account_state("25.9264", "0.012", free_margin=_BTC_5X_FREE), None)
+    )
     cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
 
     before = projection.position("BTC", strategy_id="alpha")
@@ -1741,7 +1786,9 @@ def test_a_position_opened_since_the_read_reads_none_rather_than_the_formula() -
     projection = keeper.portfolio
     _book_fill(projection, quantity="0.002", price="64809")
     _mark(projection, "BTC", "64815")
-    venue = _AccountVenue(_priced(account_state("25.9264", "0.012"), _BTC_LIQUIDATION))
+    venue = _AccountVenue(
+        _priced(account_state("25.9264", "0.012", free_margin=_BTC_5X_FREE), _BTC_LIQUIDATION)
+    )
     cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
     asyncio.run(cycle.reconcile_account())
 
@@ -1854,3 +1901,526 @@ def test_the_ingested_collateral_lands_in_the_cycles_own_transaction() -> None:
     assert [(p.symbol, p.isolated_collateral) for p in store.all_positions()] == [
         ("BTC", _BTC_BUCKET)
     ]
+
+
+def _alerts(logs: Sequence[Mapping[str, object]]) -> list[Mapping[str, object]]:
+    """Every ``valuation.divergence`` in ``logs``, as the four fields it is
+    *about*, in the order the pass raised them.
+
+    A list rather than the single-record unpacking ``_recorded`` does, because
+    one mark skew moves every quantity it flows through: an account whose uPnL
+    has drifted has an equity that has drifted with it, so a case that finds one
+    alert and a case that finds two are both ordinary books.
+
+    Projected down to the payload because the rendering furniture every record
+    carries — the level, the run id — belongs to the observability suite's
+    contract rather than to this cycle's, and a case here asserting on it would
+    fail on a change to that one.
+    """
+    return [
+        {key: log[key] for key in ("field", "symbol", "ledger", "venue")}
+        for log in logs
+        if log["event"] == NamedEvent.VALUATION_DIVERGENCE.value
+    ]
+
+
+def test_a_tier_2_divergence_outside_the_band_is_alerted_with_both_sides() -> None:
+    """The alert, and the pair it carries (ADR-0040 §6).
+
+    Alert-only is the whole of Tier-2's response: the figure is recomputed from
+    ``(position, mark)`` on every read and never stored, so there is nothing to
+    heal — a stale mark is not a wrong ledger. What an operator gets instead is
+    the same shape ``account.healed`` carries, both sides and never their
+    difference, for the same reason: a delta cannot tell a mark this engine has
+    not seen yet from a position it has mis-valued.
+
+    The book is the fill's own arithmetic: a 0.002 long entered at 64809 and
+    marked at 65000 is worth ``0.002 × 191 = 0.382``, on a 100000 cash line.
+    The venue's snapshot is built to disagree on the valuation *only* — its
+    equity carries its own uPnL exactly, so ``venue_cash`` lands back on 100000
+    and the Tier-1 halves stay silent. That matters beyond tidiness here: a cash
+    finding would suppress these very alerts (ADR-0040 §6's first rule), so a
+    case that let one through would be asserting on a path it had disabled.
+
+    Both figures alert because one mark skew moves both — equity *is*
+    ``cash + Σ uPnL`` — and the account grain comes first, as the cash line does.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "65000")
+    venue = _held("100001.000", ("BTC", "0.002", "1.000"))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences is not None
+    assert [divergence.field for divergence in divergences] == [
+        DivergenceField.EQUITY,
+        DivergenceField.UNREALIZED_PNL,
+    ]
+    assert _alerts(logs) == [
+        {
+            "field": "equity",
+            "symbol": None,
+            "ledger": "100000.382",
+            "venue": "100001.000",
+        },
+        {
+            "field": "unrealized_pnl",
+            "symbol": "BTC",
+            "ledger": "0.382",
+            "venue": "1.000",
+        },
+    ]
+
+
+def test_a_tier_2_divergence_inside_the_band_is_not_alerted() -> None:
+    """The band is a gate on the *alert*, not on the classification (ADR-0040 §6).
+
+    The venue's mark is a robust median this engine does not replicate
+    bit-for-bit, so a Tier-2 figure will never agree exactly and an unbanded
+    alert would fire on every healthy cycle — which is the failure mode that
+    makes an alert channel worth ignoring. What clears the band is absorbed
+    silently.
+
+    The same book behavior 1 alerts on, moved inside the tolerance: a 0.002 long
+    entered at 64809 and marked at 65000 is worth ``0.002 x 191 = 0.382``, and
+    the venue is built to report 0.385 — a 0.003 gap, under the 0.01 rounding
+    floor. Its equity carries its own uPnL exactly, so ``venue_cash`` lands back
+    on 100000 and neither Tier-1 half speaks; a cash finding would suppress
+    these alerts by a different rule and the case would prove nothing.
+
+    Both figures are still **classified**, and the case asserts that rather than
+    only the silence: a band that dropped the pair at classification would pass
+    an alert assertion identically while leaving the cycle's own record claiming
+    the pass agreed, and leaving the heal path with nothing to read.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "65000")
+    venue = _held("100000.385", ("BTC", "0.002", "0.385"))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences is not None
+    assert [divergence.field for divergence in divergences] == [
+        DivergenceField.EQUITY,
+        DivergenceField.UNREALIZED_PNL,
+    ]
+    assert _alerts(logs) == []
+
+
+def test_free_margin_is_classified_at_tier_2_against_the_venues_own_figure() -> None:
+    """The third account-grain Tier-2 figure, and the one an operator sizes
+    against (ADR-0040 §6).
+
+    Mark-dependent through both its terms — ``equity − total_margin_used``, and
+    at the default isolated 1x the margin term is the locked bucket marked to
+    market — so it belongs to the tier that is recomputed and alerted rather
+    than the one that is healed. The venue publishes its own, which is what
+    makes it comparable at all: ``effective_leverage`` beside it has no venue
+    field and is therefore reported and never cross-checked.
+
+    Deliberately **not** compared against the venue's ``withdrawable``, which
+    additionally deducts margin reserved by resting orders — the normal state of
+    a running engine, and a gap no band absorbs (ADR-0046 §2). The adapter's
+    figure is the cross pair's difference.
+
+    The book is built so free margin is the pass's *only* finding: a 0.002 long
+    entered at 64809 and marked at 65000 carries ``0.002 x 191 = 0.382`` of
+    uPnL, which the venue's snapshot reports exactly and which its equity
+    carries exactly, so cash, size, equity and uPnL all agree. The ledger's free
+    margin is then ``100000.382 − 0.382 = 100000`` — the bucket behind an
+    isolated position is its own uPnL and nothing else, since a fill locks no
+    collateral until a cycle ingests one — against a venue reporting 99000.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "65000")
+    venue = _held("100000.382", ("BTC", "0.002", "0.382"), free_margin="99000")
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences == (
+        Divergence(
+            tier=DivergenceTier.TIER_2,
+            field=DivergenceField.FREE_MARGIN,
+            symbol=None,
+            ledger=Decimal("100000.000"),
+            venue=Decimal("99000"),
+        ),
+    )
+    assert _alerts(logs) == [
+        {
+            "field": "free_margin",
+            "symbol": None,
+            "ledger": "100000.000",
+            "venue": "99000",
+        }
+    ]
+
+
+def test_a_near_zero_free_margin_in_a_levered_book_is_not_alerted_on() -> None:
+    """The band's relative term scales by the **notional** the figure's
+    mark-sensitivity flows through, never by the figure being compared
+    (ADR-0046 §5).
+
+    Free margin is the quantity that makes the difference load-bearing: it goes
+    through zero on a fully-deployed account, so a band scaled by the compared
+    value collapses onto ``atol`` exactly where the book is largest, and every
+    healthy cycle on a levered account alerts. Scaling by equity — #142's
+    proposal — is the same defect one step milder: at leverage ``L`` equity is
+    roughly ``notional / L``, so the band comes out ``L`` times too tight on
+    precisely the leveraged positions this surface exists to model.
+
+    The book is deployed to the last dollar: a 20 BTC long entered and marked at
+    50000 is 1000000 of notional against a 100000 cash line, and at cross 10x
+    its margin is ``1000000 / 10 = 100000`` — the whole of equity, leaving a
+    free margin of exactly ``0``. The venue publishes ``0.5``. That gap is 50x
+    the rounding floor and would alert on any self-scaled band, and it is 1/2000
+    of ``rtol x 1000000`` on the notional-scaled one, which is the band a real
+    mark skew is measured against.
+
+    Marked at entry so the pass has one finding: uPnL is a real zero on both
+    sides, so ``venue_cash`` lands back on the cash line and equity, size and
+    uPnL all agree. The divergence is still **classified** — the band gates the
+    alert and never the finding — which the case pins beside the silence.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(
+        store,
+        equity="100000",
+        leverage=LeverageBook(entries={"BTC": LeverageSpec(mode="cross", leverage=10)}),
+    )
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="20", price="50000")
+    _mark(projection, "BTC", "50000")
+    venue = _held("100000", ("BTC", "20", "0"), free_margin="0.5")
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences == (
+        Divergence(
+            tier=DivergenceTier.TIER_2,
+            field=DivergenceField.FREE_MARGIN,
+            symbol=None,
+            ledger=Decimal("0"),
+            venue=Decimal("0.5"),
+        ),
+    )
+    assert _alerts(logs) == []
+
+
+def test_a_tier_1_size_finding_suppresses_that_symbols_tier_2_alert() -> None:
+    """ADR-0040 §6's first suppression: a valuation computed on a book the cycle
+    has just found wrong is not a second finding.
+
+    The healed ledger is the root cause. A symbol whose size disagrees has a
+    uPnL that disagrees *because* of it, so alerting on both reports one missed
+    fill twice — once in contracts and once in dollars — and the dollar half is
+    the one an operator cannot act on. Tier-1 already alerts and heals, so
+    nothing is lost by the silence.
+
+    Scoped to the symbol, which is why this case holds two of them. A blanket
+    "any Tier-1 finding silences Tier-2" would pass an assertion that only looked
+    for the absence, while quietly deafening the account to every other symbol on
+    the book for the rest of the cycle.
+
+    The book: a 0.002 BTC long entered at 64809 and marked at 65000 is worth
+    ``0.002 x 191 = 0.382`` against a venue holding **0.003** and pricing it at
+    50.382; a 1 ETH long entered at 3000 and marked at 3100 is worth 100 against
+    a venue agreeing on the size and pricing it at 50. The two Tier-2 gaps are
+    equal and opposite by construction, so ``Σ uPnL`` agrees, and with it the
+    cash line the venue's equity implies, the equity itself and the free margin —
+    leaving the account grain silent for its own reasons rather than by a
+    suppression this case is not testing.
+
+    Both gaps are 50 against bands of 0.13 (BTC's 130 of notional) and 3.10
+    (ETH's 3100), so each would alert on its own. Only ETH's does.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _book_fill(projection, quantity="1", price="3000", symbol="ETH", seq=2)
+    _mark(projection, "BTC", "65000")
+    _mark(projection, "ETH", "3100")
+    venue = _held("100100.382", ("BTC", "0.003", "50.382"), ("ETH", "1", "50"))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences == (
+        Divergence(
+            tier=DivergenceTier.TIER_1,
+            field=DivergenceField.SIGNED_SIZE,
+            symbol="BTC",
+            ledger=Decimal("0.002"),
+            venue=Decimal("0.003"),
+        ),
+        Divergence(
+            tier=DivergenceTier.TIER_2,
+            field=DivergenceField.UNREALIZED_PNL,
+            symbol="BTC",
+            ledger=Decimal("0.382"),
+            venue=Decimal("50.382"),
+        ),
+        Divergence(
+            tier=DivergenceTier.TIER_2,
+            field=DivergenceField.UNREALIZED_PNL,
+            symbol="ETH",
+            ledger=Decimal("100"),
+            venue=Decimal("50"),
+        ),
+    )
+    assert _alerts(logs) == [
+        {"field": "unrealized_pnl", "symbol": "ETH", "ledger": "100", "venue": "50"}
+    ]
+
+
+def test_a_cash_finding_the_mode_gate_refused_still_suppresses_the_account_grain() -> None:
+    """The account half of ADR-0040 §6's first suppression, on the pass that
+    makes the wording load-bearing (ADR-0046 §4).
+
+    The rule reads the cycle's **findings**, never the heal it managed to book,
+    and this is the pass where the two answers differ. A mid-run mode switch
+    refuses the cash heal and freezes the account grain, while §4's amendment
+    keeps *counting* the finding — so a suppression keyed on what was booked
+    would fall silent on Tier-1 and shout on Tier-2, alerting an equity against
+    the very snapshot the same pass has just declared unreliable. Under a pooled
+    abstraction mode that snapshot reads an order of magnitude low, so the alert
+    it would raise is guaranteed and meaningless.
+
+    Scoped to the account grain, which the per-symbol figure beside it pins. The
+    book: a 0.002 BTC long entered at 64809 and marked at 65000 is worth 0.382
+    against a venue pricing it at 50.382, on a venue equity of 100051.382. The
+    cash line that equity implies is ``100051.382 − 50.382 = 100001`` against
+    our 100000 — the Tier-1 finding — and equity (100000.382 against 100051.382)
+    and free margin (100000 against 100001) both disagree in its shadow. Each of
+    the three Tier-2 gaps is far outside a band built on 130 of notional; only
+    BTC's, which no Tier-1 finding explains, is alerted.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "65000")
+    venue = _AccountVenue(
+        _held("100051.382", ("BTC", "0.002", "50.382")), mode=AccountModeVerdict.CHANGED
+    )
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+
+    with capture_events() as logs:
+        divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences is not None
+    assert [(divergence.tier, divergence.field) for divergence in divergences] == [
+        (DivergenceTier.TIER_1, DivergenceField.CASH),
+        (DivergenceTier.TIER_2, DivergenceField.EQUITY),
+        (DivergenceTier.TIER_2, DivergenceField.FREE_MARGIN),
+        (DivergenceTier.TIER_2, DivergenceField.UNREALIZED_PNL),
+    ]
+    assert [log["event"] for log in logs if log["event"] == NamedEvent.ACCOUNT_HEALED.value] == []
+    assert _alerts(logs) == [
+        {"field": "unrealized_pnl", "symbol": "BTC", "ledger": "0.382", "venue": "50.382"}
+    ]
+
+
+def test_a_stale_mark_suppresses_the_alert_and_is_counted_on_the_record() -> None:
+    """ADR-0040 §6's second suppression, and the record that keeps it from being
+    a silence.
+
+    A divergence explained by staleness is not a bug: the figure is recomputed
+    from ``(position, mark)`` on every read, so a mark that stopped arriving
+    makes our side old rather than wrong, and the venue's instantaneous one is
+    what it is measured against. Alerting there reports our own frozen input as
+    the venue's disagreement.
+
+    Suppressed and **counted**, which is the whole difference between this and
+    doing nothing. ADR-0039 declined a max-age on the *read* path — a valuation
+    is served at whatever mark is cached, and a reader has no clock to judge it
+    with — and made this cycle the staleness safety net instead. A cycle that
+    quietly dropped the finding would forfeit that job: an operator would read
+    the same silence from a healthy book and from a mark stream that died an
+    hour ago. ``suppressed`` on ``account.reconciled`` is the difference, beside
+    ``unvalued`` and for the same reason.
+
+    Both grains fall to one stale symbol, because both are Σs the stale term
+    reaches: BTC's own uPnL, and the equity computed from it. The book is
+    behavior 1's — a 0.002 long entered at 64809 and marked at 65000 against a
+    venue pricing it at 1.000 — which alerts on both figures at a fresh mark;
+    the only thing this case changes is a clock 90 seconds past the mark's
+    stamp, against the 60-second horizon #142 measured skew over. Beyond it
+    there is no evidence a band could be built from, so the figure is not banded
+    wider, it is not alerted at all.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000", clock=ManualClock(_MARK_TS_NS + 90 * _NS_PER_SECOND))
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "65000")
+    venue = _held("100001.000", ("BTC", "0.002", "1.000"))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences is not None
+    assert [divergence.field for divergence in divergences] == [
+        DivergenceField.EQUITY,
+        DivergenceField.UNREALIZED_PNL,
+    ]
+    assert _alerts(logs) == []
+    record = _recorded(logs)
+    assert (record["tier_2"], record["suppressed"], record["unvalued"]) == (2, 2, 0)
+
+
+def test_an_absent_mark_alerts_nothing_and_lands_on_unvalued_rather_than_suppressed() -> None:
+    """The other half of ADR-0040 §6's mark criterion, and the reason it is a
+    second case rather than the stale one with a smaller number.
+
+    A mark that never arrived and a mark that stopped arriving both end in
+    silence, but they fail in different places. Absent fails at
+    **classification**: ``_equity`` and ``_unrealized`` drop a figure they
+    cannot compute, because a valuation waiting on a mark is unknown rather than
+    divergent (ADR-0041 §6), so nothing ever reaches the band for the
+    suppression above to act on. Stale fails at the **band**: the figure is
+    real, computable and outside the tolerance, and this slice declines to alert
+    on it.
+
+    Which makes ``suppressed`` the assertion that carries the case. Read alone,
+    ``_alerts(logs) == []`` here is vacuous — it would hold against a cycle that
+    had no suppression rule at all — so what is pinned is that the two silences
+    are **told apart on the record**: this pass reports ``unvalued=3,
+    suppressed=0`` where behavior 7's identical book reports ``unvalued=0,
+    suppressed=2``. An operator reading the cadence can therefore distinguish a
+    book that was never valued from one whose valuation went stale, which is the
+    whole of what ADR-0011 inv 1 asks of a count.
+
+    **Three** where the stale pass suppresses two, and the extra one is
+    ``free_margin``: a figure the band never sees is not a figure the count may
+    skip. Stale reaches the band, so it is counted where the classification put
+    it — two divergences, two suppressions. Absent is dropped at classification,
+    where the account grain drops *both* its figures, equity and the free margin
+    computed from it. The two counts range over different sets by construction
+    and each is read off its own.
+
+    Deliberately the same venue and the same fill as the stale case — a 0.002
+    long entered at 64809 against a snapshot pricing it at 1.000 — so the only
+    variable is the mark this case never feeds. Tier-1 stays silent on it: the
+    snapshot's equity carries its own uPnL exactly, so ``venue_cash`` lands back
+    on the 100000 cash line and the sizes agree, leaving the three dropped
+    Tier-2 figures as the whole of what the pass had to say.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    venue = _held("100001.000", ("BTC", "0.002", "1.000"))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        assert asyncio.run(cycle.reconcile_account()) == ()
+
+    assert _alerts(logs) == []
+    record = _recorded(logs)
+    assert (record["tier_2"], record["suppressed"], record["unvalued"]) == (0, 0, 3)
+
+
+def test_an_alerted_tier_2_divergence_still_changes_no_stored_value() -> None:
+    """The no-write claim carried across the band, where it is newly losable.
+
+    The pass above makes it against a gap the band absorbs, which is now the
+    quiet half: a cycle that raises nothing has nothing it could be tempted to
+    persist. This one makes it against a gap that **alerts** — the state where
+    the cycle has produced an operator-facing finding and has, for the first
+    time, a plausible reason to write: a last-alerted stamp, a de-duplication
+    marker, or the venue's figure booked as the correction the record has just
+    named. Any of those turns Tier-2 into a heal by the only measure ADR-0034
+    draws the line on, and none would move a number a before/after comparison
+    is watching — which is why the store is sealed rather than diffed.
+
+    The alert count is asserted first and is load-bearing: without it the case
+    passes on a cycle whose band absorbed everything, which is the neighbouring
+    behavior and not this one. Behavior 1's book, for exactly that reason — a
+    0.002 long entered at 64809 and marked at 65000 against a snapshot pricing
+    it at 1.000, whose implied cash lands back on 100000 so both Tier-1 halves
+    stay silent and the alerts are not suppressed by a finding that explains
+    them.
+    """
+    store = _SealedStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "65000")
+    opened = store.load_account()
+    stored = store.all_positions()
+    assert opened is not None
+    venue = _held("100001.000", ("BTC", "0.002", "1.000"))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+    store.seal()
+
+    with capture_events() as logs:
+        divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences is not None
+    assert [alert["field"] for alert in _alerts(logs)] == ["equity", "unrealized_pnl"]
+
+    restored = store.load_account()
+    assert restored is not None
+    assert restored.cash == opened.cash == Decimal("100000")
+    assert store.all_positions() == stored
+
+
+def test_a_widened_band_is_the_one_the_cycle_judges_with() -> None:
+    """The band is an **injected** tolerance, not a constant compiled into the
+    classifier.
+
+    An operator's reason to move it is the deployment's own: the term that does
+    the work is relative to notional, so what counts as skew on a venue is a
+    property of that venue's mark cadence and of the book's size, and a run that
+    alerts every cycle is as useless as one that never does. What must not
+    change with it is the classification — this pass finds the same two Tier-2
+    figures a default band finds, and reports neither.
+
+    Behavior 1's book, moved only by the band: a 0.618 gap on a 130 notional is
+    outside the default ``0.001`` relative term (0.13) and inside a ``0.01`` one
+    (1.30). Asserting the divergences beside the silence is what keeps the case
+    honest — a cycle that had simply stopped classifying would also raise no
+    alert.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "65000")
+    venue = _held("100001.000", ("BTC", "0.002", "1.000"))
+    cycle = LedgerReconciliation(
+        exchange=_AccountVenue(venue),
+        checkpointer=keeper,
+        band=ValuationBand(rtol=Decimal("0.01")),
+    )
+
+    with capture_events() as logs:
+        divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences is not None
+    assert [divergence.field for divergence in divergences] == [
+        DivergenceField.EQUITY,
+        DivergenceField.UNREALIZED_PNL,
+    ]
+    assert _alerts(logs) == []

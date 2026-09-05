@@ -196,6 +196,19 @@ def test_a_tier_1_divergence_heals_to_the_venues_own_figures_through_the_real_ad
             Decimal("0"),
             Decimal("0.002"),
         ),
+        # The same missed fill a third time, in the unit free margin is computed
+        # in: a ledger holding no position posts no margin behind one, so its
+        # free margin is its whole cash line, against a venue that has 25.9168
+        # of it locked up. Off the wire like the two above — the venue's side is
+        # ``crossMarginSummary``'s own pair of fields, differenced by the
+        # adapter (ADR-0046 §2).
+        (
+            DivergenceTier.TIER_2,
+            DivergenceField.FREE_MARGIN,
+            None,
+            Decimal("25.9264"),
+            Decimal("0.0096"),
+        ),
     ]
 
     ledger = keeper.portfolio

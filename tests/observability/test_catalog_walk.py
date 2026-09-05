@@ -852,6 +852,28 @@ def _drive_account_reconcile_frozen() -> None:
     asyncio.run(go())
 
 
+def _drive_valuation_divergence() -> None:
+    """The same account cycle, against a snapshot whose *valuation* disagrees:
+    the recomputed equity is outside the band and the gap is alerted rather than
+    healed (``valuation.divergence``, ADR-0040 §6).
+
+    The venue's equity and its unrealized leg are moved **together**, so that
+    ``venue_cash`` lands back on the line the ledger was materialised at. That
+    is what keeps the scenario driving the path it names: a cash gap is Tier-1,
+    and a Tier-1 finding at the account grain suppresses exactly this alert."""
+
+    async def go() -> None:
+        venue = _LiveShapedVenue(state=account_state("26.9264", "0.966"))
+        keeper = Checkpointer(
+            spec=venue.account_spec(), store=SQLiteStore(":memory:"), clock=ManualClock()
+        )
+        keeper.recover()
+        keeper.portfolio.materialise(DERIVED_STATE)
+        await LedgerReconciliation(exchange=venue, checkpointer=keeper).reconcile_account()
+
+    asyncio.run(go())
+
+
 # --- The catalog walk --------------------------------------------------------
 
 # Every NamedEvent → a scenario that drives its real path. Several of the saga
@@ -888,6 +910,7 @@ SCENARIOS: dict[NamedEvent, Callable[[], None]] = {
     NamedEvent.ACCOUNT_RECONCILED: _drive_account_reconciled,
     NamedEvent.ACCOUNT_HEALED: _drive_account_reconciled,
     NamedEvent.ACCOUNT_MODE_UNVERIFIED: _drive_account_mode_unverified,
+    NamedEvent.VALUATION_DIVERGENCE: _drive_valuation_divergence,
     NamedEvent.ACCOUNT_RECONCILE_FROZEN: _drive_account_reconcile_frozen,
     NamedEvent.EXCHANGE_REQUEST_FAILED: _drive_exchange_request_failed,
     NamedEvent.EXCHANGE_ACTION_REJECTED: _drive_exchange_action_rejected,

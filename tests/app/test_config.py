@@ -18,6 +18,7 @@ from tickwright.adapters.feed import ReplayFeedConfig
 from tickwright.adapters.paper import PaperExchangeConfig
 from tickwright.app.config import AppConfig, AppSettings, StrategyConfig
 from tickwright.domain import UNATTRIBUTED, LeverageSpec, Side
+from tickwright.engine.ledger_reconcile import ValuationBand
 from tickwright.venues.hyperliquid import HyperliquidConfig
 
 _HOSTILE_ENV_FILE = (
@@ -371,3 +372,45 @@ def test_a_duplicate_id_on_one_symbol_is_refused_as_a_duplicate_id(tmp_path: Pat
     assert "duplicate strategy_id declared: alpha" in message
     assert "owned by alpha" not in message
     assert "separate account" not in message
+
+
+def test_the_alert_band_is_operator_settable_and_defaults_to_the_documented_terms(
+    tmp_path: Path,
+) -> None:
+    """The Tier-2 alert band's three terms reach the engine from config
+    (ADR-0040 §6), and what an unconfigured run gets is the documented pair
+    plus its horizon.
+
+    Settable because the terms are a property of the deployment rather than of
+    the code: ``rtol`` is sized on one venue's measured mark skew (#142) and
+    scales with the book it is applied to, so an operator whose alert channel
+    fires every cycle has to be able to move it without a release.
+
+    The defaults are asserted as literals rather than read off the class, which
+    is the point of pinning them here: they are a *shipped promise* — 1 cent of
+    rounding floor, 0.1% of notional, and a 60-second horizon past which a
+    figure is not banded wider but dropped from the alert entirely — and a
+    silent change to any of the three changes which cycles wake an operator.
+
+    Nested by dict rather than by constructor, because that is the shape the
+    env skin produces: ``TICKWRIGHT_ENGINE__BAND__RTOL`` arrives as a string in
+    a nested mapping, and a case that handed in a built ``ValuationBand`` would
+    assert on a path no operator uses.
+    """
+    (tmp_path / "ticks.jsonl").touch()
+    replay = ReplayFeedConfig(path=tmp_path / "ticks.jsonl")
+    paper = PaperExchangeConfig(genesis_collateral=Decimal("100000"))
+
+    assert AppConfig(replay=replay, paper=paper).engine.band == ValuationBand(
+        atol=Decimal("0.01"), rtol=Decimal("0.001"), mark_max_age_seconds=60.0
+    )
+
+    tuned = AppConfig(
+        replay=replay,
+        paper=paper,
+        engine={"band": {"atol": "0.05", "rtol": "0.002", "mark_max_age_seconds": 30.0}},  # type: ignore[arg-type]
+    )
+
+    assert tuned.engine.band == ValuationBand(
+        atol=Decimal("0.05"), rtol=Decimal("0.002"), mark_max_age_seconds=30.0
+    )

@@ -561,6 +561,34 @@ def account_unrealized_pnl(
     return totals
 
 
+def account_notional(
+    positions: Iterable[Position], marks: Mapping[str, Decimal]
+) -> dict[str, Decimal | None]:
+    """Per-symbol notional at the **account** grain — ``|account net| × mark``.
+
+    Folded over the account-net size rather than per partition, for the reason
+    ``account_view`` folds its own totals that way: two strategies holding
+    offsetting legs are one flat position to the venue, and a per-partition Σ
+    would report exposure against a book nobody holds (ADR-0035, ADR-0041 §4).
+
+    Public, and it is the alert band that made it so: ADR-0046 §5 scales the
+    band's relative term by *the notional a quantity's mark-sensitivity flows
+    through*, per symbol for a position's uPnL and Σ-over-symbols for the
+    account grain's figures. That reference is not on ``AccountView`` — the view
+    reports ``effective_leverage``, which has already divided the notional away —
+    so a caller left to re-derive it would fold the book a second time and get
+    the chance to fold it differently.
+
+    ``None`` for a symbol genuinely waiting on a mark, on the same per-term rule
+    every quantity here inherits: a flat account-net is a real zero at every
+    mark, and a held one without a mark is unknown rather than zero.
+    """
+    return {
+        symbol: _notional(size, marks.get(symbol))
+        for symbol, size in account_net_size(positions).items()
+    }
+
+
 def _equity(
     account: Account, positions: Iterable[Position], marks: Mapping[str, Decimal]
 ) -> Decimal | None:

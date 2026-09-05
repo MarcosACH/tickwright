@@ -37,7 +37,7 @@ Doubling here is legitimate under ADR-0022 — a venue is a process boundary, th
 one place a double is allowed.
 """
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from decimal import Decimal
 
 from ledgers import GENESIS
@@ -55,20 +55,56 @@ from tickwright.domain import (
 )
 
 
-def account_state(equity: str, *unrealized: str) -> VenueAccountState:
+def implied_free_margin(equity: str, unrealized: Iterable[str], *, declared: str | None) -> Decimal:
+    """The free margin a venue holding these positions would publish.
+
+    ``equity − Σ uPnL``, and it is the *ledger's* default margin mode that makes
+    it so: at isolated 1x an account's margin is its positions' own buckets
+    marked to market, so ``free_margin = equity − total_margin_used`` collapses
+    to the venue's equity less the open PnL already inside it.
+
+    A recorded constant in its place is coherent with the account it was
+    recorded from and with nothing a suite builds beside it — the snapshot's
+    ``0.0096`` belongs to a 5x cross book — which made every case that marks a
+    book diverge on a field it says nothing about, now that ADR-0040 §6 compares
+    this figure at Tier-2.
+
+    One derivation because two fixtures need it, the recorded snapshot and the
+    explicit roster. Spelled twice they would agree until the first case that
+    varied one of them, and a cycle reading a divergence off the difference
+    would be reporting the fixtures disagreeing rather than the book.
+
+    ``declared`` takes precedence and is the escape hatch: a case whose ledger
+    runs at some *other* leverage, or that wants the disagreement, passes the
+    figure that account would publish — the default's premise is the default's
+    leverage.
+    """
+    if declared is not None:
+        return Decimal(declared)
+    return Decimal(equity) - sum((Decimal(pnl) for pnl in unrealized), Decimal("0"))
+
+
+def account_state(
+    equity: str, *unrealized: str, free_margin: str | None = None
+) -> VenueAccountState:
     """A successful venue account read holding one position per ``unrealized``.
 
     The figures are the recorded cross snapshot's (issue #142 §2, reproduced in
     full in ``tests/venues/hyperliquid/test_account.py``): a funded testnet
     account holding 0.002 BTC long at 5x, ``accountValue`` 25.9264 against an
-    unrealized −0.034. Only ``equity`` and the unrealized legs carry meaning for
-    a caller — they are what ADR-0042 §6's genesis formula reads — but the rest
-    are a real venue's own numbers, so what a suite hands the seam is a shape
-    the venue could have returned rather than one invented to fit.
+    unrealized −0.034. Only ``equity``, the unrealized legs and ``free_margin``
+    carry meaning for a caller — the first two are what ADR-0042 §6's genesis
+    formula reads and the third is now cross-checked (ADR-0040 §6) — but the
+    rest are a real venue's own numbers, so what a suite hands the seam is a
+    shape the venue could have returned rather than one invented to fit.
+
+    ``free_margin`` is derived from ``equity`` and the legs rather than kept at
+    the recorded constant, on the premise ``implied_free_margin`` states and a
+    case that wants some other figure overrides.
     """
     return VenueAccountState(
         equity=Decimal(equity),
-        free_margin=Decimal("0.0096"),
+        free_margin=implied_free_margin(equity, unrealized, declared=free_margin),
         cross_maintenance_margin=Decimal("1.6198"),
         positions=tuple(
             VenuePositionState(
