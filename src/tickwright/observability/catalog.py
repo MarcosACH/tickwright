@@ -91,6 +91,13 @@ class NamedEvent(StrEnum):
     # outcome those counts would hide: a Tier-2 figure whose mark is absent is
     # dropped rather than reported (ADR-0041 §6), which is correct and would
     # otherwise make a pass that never looked identical to one that agreed.
+    # ``suppressed`` is the fourth, and the other half of that pair: a figure
+    # that *was* computed, cleared the band, and was withheld anyway because the
+    # mark behind it was too old to band (ADR-0040 §6). The two range over
+    # different sets — dropped before the band against withheld after it — which
+    # is what lets an operator tell a book that was never valued from one whose
+    # mark stream froze. Either count alone reads as the silence a healthy book
+    # also produces.
     ACCOUNT_RECONCILED = "account.reconciled"
     # The same grain's failed read: the account anchor came back empty, so
     # nothing was inferred from it rather than reading an outage as a flat book
