@@ -23,6 +23,7 @@ from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     EMPTY_LEVERAGE_BOOK,
     Account,
+    AccountAnchor,
     AccountModeVerdict,
     AccountSpec,
     FundingAccrual,
@@ -1958,6 +1959,62 @@ def test_a_symbol_still_carrying_the_configured_pair_is_not_alerted() -> None:
             "venue_leverage": 5,
         }
     ]
+
+
+def test_a_cycle_that_finds_only_leverage_drift_writes_nothing_and_cannot_re_push() -> None:
+    """Drift is **reported and never corrected** (ADR-0044 §10): an operator who
+    lowered a leverage in the venue UI to de-risk a live position must not be
+    silently reverted, and neither side of the disagreement is written down.
+
+    Two writes to refuse, one per side. Toward the **store**, config is not
+    truth to be persisted: the map is already the run's own input, so a cycle
+    that wrote anything here would be recording a venue setting it does not use
+    or re-deriving a figure from a leverage it just learned had changed. Toward
+    the **venue**, a re-push is the revert itself.
+
+    The venue agrees on every figure it is compared on, so the drift is the
+    pass's only finding and the untouched store is attributable to it alone.
+
+    The refusal to re-push is asserted as the **shape of the seam** rather than
+    as an uncalled method: the cycle is constructed against ``AccountAnchor``,
+    whose members are a snapshot read and a mode verdict, so there is no write
+    to leave uncalled and a case cannot fail by forgetting to check. Pinning the
+    member set is what keeps that true — a later ``update_leverage`` added here
+    for a caller elsewhere would hand this cycle the revert it must not have.
+    """
+    assert {name for name in dir(AccountAnchor) if not name.startswith("_")} == {
+        "fetch_account_state",
+        "verify_account_mode",
+    }
+
+    store = _SealedStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    _book_fill(keeper.portfolio, quantity="0.002", price="64809")
+    opened = store.load_account()
+    stored = store.all_positions()
+    assert opened is not None
+    venue = _levered(_held("100000", ("BTC", "0.002", "0")), LeverageSpec(mode="cross", leverage=5))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+    store.seal()
+
+    with capture_events() as logs:
+        divergences = asyncio.run(cycle.reconcile_account())
+
+    assert _drifted(logs) == [
+        {
+            "symbol": "BTC",
+            "configured_mode": "isolated",
+            "configured_leverage": 1,
+            "venue_mode": "cross",
+            "venue_leverage": 5,
+        }
+    ]
+    assert divergences == ()  # the drift is not one, and nothing else disagreed
+
+    restored = store.load_account()
+    assert restored is not None
+    assert restored.cash == opened.cash == Decimal("100000")
+    assert store.all_positions() == stored
 
 
 def _isolated(state: VenueAccountState, collateral: Decimal | None) -> VenueAccountState:
