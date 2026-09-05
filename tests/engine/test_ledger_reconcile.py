@@ -1007,7 +1007,9 @@ def test_a_pass_that_could_not_value_the_book_is_not_recorded_as_one_that_agreed
     with capture_events() as agreed_logs:
         assert asyncio.run(cycle.reconcile_account()) == ()
 
-    assert _recorded(unvalued_logs)["unvalued"] == 2  # the account's equity and BTC's uPnL
+    # The account's two figures — equity and the free margin computed from it —
+    # and BTC's uPnL.
+    assert _recorded(unvalued_logs)["unvalued"] == 3
     assert _recorded(agreed_logs)["unvalued"] == 0
     assert unvalued_logs != agreed_logs
 
@@ -2303,18 +2305,26 @@ def test_an_absent_mark_alerts_nothing_and_lands_on_unvalued_rather_than_suppres
     Which makes ``suppressed`` the assertion that carries the case. Read alone,
     ``_alerts(logs) == []`` here is vacuous — it would hold against a cycle that
     had no suppression rule at all — so what is pinned is that the two silences
-    are **told apart on the record**: this pass reports ``unvalued=2,
+    are **told apart on the record**: this pass reports ``unvalued=3,
     suppressed=0`` where behavior 7's identical book reports ``unvalued=0,
     suppressed=2``. An operator reading the cadence can therefore distinguish a
     book that was never valued from one whose valuation went stale, which is the
     whole of what ADR-0011 inv 1 asks of a count.
 
+    **Three** where the stale pass suppresses two, and the extra one is
+    ``free_margin``: a figure the band never sees is not a figure the count may
+    skip. Stale reaches the band, so it is counted where the classification put
+    it — two divergences, two suppressions. Absent is dropped at classification,
+    where the account grain drops *both* its figures, equity and the free margin
+    computed from it. The two counts range over different sets by construction
+    and each is read off its own.
+
     Deliberately the same venue and the same fill as the stale case — a 0.002
     long entered at 64809 against a snapshot pricing it at 1.000 — so the only
     variable is the mark this case never feeds. Tier-1 stays silent on it: the
     snapshot's equity carries its own uPnL exactly, so ``venue_cash`` lands back
-    on the 100000 cash line and the sizes agree, leaving the two dropped Tier-2
-    figures as the whole of what the pass had to say.
+    on the 100000 cash line and the sizes agree, leaving the three dropped
+    Tier-2 figures as the whole of what the pass had to say.
     """
     store = SQLiteStore(":memory:")
     keeper = _ledger(store, equity="100000")
@@ -2328,7 +2338,7 @@ def test_an_absent_mark_alerts_nothing_and_lands_on_unvalued_rather_than_suppres
 
     assert _alerts(logs) == []
     record = _recorded(logs)
-    assert (record["tier_2"], record["suppressed"], record["unvalued"]) == (0, 0, 2)
+    assert (record["tier_2"], record["suppressed"], record["unvalued"]) == (0, 0, 3)
 
 
 def test_an_alerted_tier_2_divergence_still_changes_no_stored_value() -> None:

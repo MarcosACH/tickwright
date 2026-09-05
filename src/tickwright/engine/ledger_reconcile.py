@@ -188,9 +188,15 @@ class ValuationBand:
 
         A ``None`` reference is a book whose notional is waiting on a mark, and
         it falls back to ``atol`` alone — the conservative direction, since a
-        narrower band alerts rather than stays quiet, and a Tier-2 figure this
-        cycle could compute against a notional it could not is already the
-        shape a later behavior suppresses on its own terms.
+        narrower band alerts rather than stays quiet.
+
+        **No caller reaches that arm today**, and it is worth saying so here
+        rather than leaving a reader to believe a live path depends on it: the
+        three fields this cycle compares all need the very mark their notional
+        needs, so a reference this method cannot compute belongs to a figure the
+        classification already dropped (see ``_reference``). It is kept as the
+        conservative default for the fields #291 adds, which are folded per
+        symbol and need not fail together with the reference the way these do.
         """
         floor = self.atol if reference is None else max(self.atol, self.rtol * abs(reference))
         return abs(divergence.ledger - divergence.venue) <= floor
@@ -317,6 +323,20 @@ def _reference(divergence: Divergence, notional: Mapping[str, Decimal | None]) -
     waiting on a mark makes the *total* unknown, because a partial Σ used as a
     reference is a band silently narrowed by whichever symbol was left out —
     and narrowed most on the largest book, which is the one it least suits.
+
+    **Unreachable through the three fields this cycle compares**, and stated
+    because it is a guard rather than a path: the mark whose absence makes a
+    notional unknown is the same one ``equity``, ``free_margin`` and a
+    position's ``unrealized_pnl`` are computed from, so a divergence that
+    survives classification always has its reference. Per symbol that is
+    ``_unrealized``'s own range — a held symbol whose ledger valuation is not
+    ``None`` has a mark, hence a notional — and at the account grain the Σ goes
+    unknown only when some held symbol lacks a mark, which drops both
+    account-grain figures before the band is asked. It is kept, rather than
+    narrowed to a total that cannot be ``None``, for #291's ``notional``,
+    ``margin_used`` and ``maintenance_margin``: ``maintenance_margin``'s
+    reference is the cross-subset Σ (ADR-0046 §2.1), which an absent
+    ``InstrumentSpec`` can make unknown with every mark in place.
     """
     if divergence.symbol is not None:
         return notional.get(divergence.symbol)
@@ -773,19 +793,34 @@ class LedgerReconciliation:
     ) -> int:
         """How many Tier-2 figures this pass could not compute at all.
 
-        The account's equity, plus one per symbol **both** sides hold whose
-        ledger valuation is waiting on a mark — the same ``_holds`` range
-        ``_unrealized`` classifies over, since a symbol only one side carries is
-        already a Tier-1 size finding rather than a missing valuation. A symbol
-        the ledger holds flat, or does not carry at all, reads as not held and
-        so is never unvalued: nothing was going to value it.
+        The account grain's **two** figures, plus one per symbol **both** sides
+        hold whose ledger valuation is waiting on a mark — the same ``_holds``
+        range ``_unrealized`` classifies over, since a symbol only one side
+        carries is already a Tier-1 size finding rather than a missing
+        valuation. A symbol the ledger holds flat, or does not carry at all,
+        reads as not held and so is never unvalued: nothing was going to value
+        it.
+
+        Counted **one per figure the classification dropped**, which is why
+        ``free_margin`` is asked for separately rather than read off ``equity``
+        beside it. The two go unknown together today — a free margin is
+        ``equity − total_margin_used``, and the missing mark that makes the
+        margin term unknown is the one that makes equity unknown — but that is
+        an equivalence between two derivations, not a rule either of them
+        states. Read off equity alone, the count would answer for a figure it
+        does not measure, and would fall a figure short the moment the two stop
+        failing together. The count's whole job is to say how many figures went
+        unlooked-at (ADR-0011 inv 1), so it ranges over the same members
+        ``_equity`` and ``_free_margin`` drop, on the same predicate they drop
+        on.
         """
         absent_marks = sum(
             1
             for position in state.positions
             if cls._holds(net, position.symbol) and ledger.get(position.symbol) is None
         )
-        return absent_marks + (1 if view.equity is None else 0)
+        account_grain = sum(1 for figure in (view.equity, view.free_margin) if figure is None)
+        return absent_marks + account_grain
 
     def _cash(self, state: VenueAccountState, *, cash: Decimal) -> tuple[Divergence, ...]:
         """Tier-1: the accumulated cash line against the one the snapshot implies.
