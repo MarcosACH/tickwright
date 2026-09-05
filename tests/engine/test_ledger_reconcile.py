@@ -43,6 +43,7 @@ from tickwright.engine.ledger_reconcile import (
     DivergenceField,
     DivergenceTier,
     LedgerReconciliation,
+    ValuationBand,
 )
 from tickwright.engine.portfolio import PortfolioProjection
 from tickwright.observability import NamedEvent
@@ -2377,3 +2378,43 @@ def test_an_alerted_tier_2_divergence_still_changes_no_stored_value() -> None:
     assert restored is not None
     assert restored.cash == opened.cash == Decimal("100000")
     assert store.all_positions() == stored
+
+
+def test_a_widened_band_is_the_one_the_cycle_judges_with() -> None:
+    """The band is an **injected** tolerance, not a constant compiled into the
+    classifier.
+
+    An operator's reason to move it is the deployment's own: the term that does
+    the work is relative to notional, so what counts as skew on a venue is a
+    property of that venue's mark cadence and of the book's size, and a run that
+    alerts every cycle is as useless as one that never does. What must not
+    change with it is the classification — this pass finds the same two Tier-2
+    figures a default band finds, and reports neither.
+
+    Behavior 1's book, moved only by the band: a 0.618 gap on a 130 notional is
+    outside the default ``0.001`` relative term (0.13) and inside a ``0.01`` one
+    (1.30). Asserting the divergences beside the silence is what keeps the case
+    honest — a cycle that had simply stopped classifying would also raise no
+    alert.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "65000")
+    venue = _held("100001.000", ("BTC", "0.002", "1.000"))
+    cycle = LedgerReconciliation(
+        exchange=_AccountVenue(venue),
+        checkpointer=keeper,
+        band=ValuationBand(rtol=Decimal("0.01")),
+    )
+
+    with capture_events() as logs:
+        divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences is not None
+    assert [divergence.field for divergence in divergences] == [
+        DivergenceField.EQUITY,
+        DivergenceField.UNREALIZED_PNL,
+    ]
+    assert _alerts(logs) == []

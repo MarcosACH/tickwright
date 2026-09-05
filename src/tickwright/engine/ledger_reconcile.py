@@ -331,7 +331,13 @@ def _reference(divergence: Divergence, notional: Mapping[str, Decimal | None]) -
 class LedgerReconciliation:
     """The cross-check between the ledger and the venue's own account truth."""
 
-    def __init__(self, *, exchange: AccountAnchor, checkpointer: Checkpointer) -> None:
+    def __init__(
+        self,
+        *,
+        exchange: AccountAnchor,
+        checkpointer: Checkpointer,
+        band: ValuationBand | None = None,
+    ) -> None:
         # The **account** anchor and not the whole ``Exchange``: one snapshot
         # read and the mode guard on it are the only venue members this cycle
         # touches, so the constructor states that it cannot place an order —
@@ -345,7 +351,11 @@ class LedgerReconciliation:
         # parameter the ``Checkpointer`` exists to make unwireable.
         self._checkpointer = checkpointer
         self._portfolio = checkpointer.portfolio
-        self._band = ValuationBand()
+        # Defaulted here rather than demanded, on the same terms as the runner's
+        # own optional configs: every case that is not *about* the tolerance
+        # gets the documented one, and the composition root passes the
+        # operator's when there is one (``EngineConfig.band``).
+        self._band = band if band is not None else ValuationBand()
 
     async def materialise_account(self) -> bool:
         """The startup barrier's live-only first step: create the account row
