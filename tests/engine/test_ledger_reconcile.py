@@ -1838,10 +1838,24 @@ def _drifted(logs: Sequence[Mapping[str, object]]) -> list[Mapping[str, object]]
     ]
 
 
-def _levered(state: VenueAccountState, spec: LeverageSpec) -> VenueAccountState:
-    """The same snapshot with ``spec`` as the venue's stored setting on every
-    position it carries — an operator having re-margined the book in the UI."""
-    return replace(state, positions=tuple(replace(p, leverage=spec) for p in state.positions))
+def _levered(
+    state: VenueAccountState, spec: LeverageSpec, *, symbol: str | None = None
+) -> VenueAccountState:
+    """The same snapshot with ``spec`` as the venue's stored setting — an
+    operator having re-margined the book in the UI.
+
+    Every position by default. ``symbol`` narrows it to one, which is what a
+    case about the *other* symbols needs: an operator edits a book one position
+    at a time, so a snapshot where the whole roster moved together cannot show
+    that the untouched rows stayed quiet.
+    """
+    return replace(
+        state,
+        positions=tuple(
+            replace(p, leverage=spec) if symbol is None or p.symbol == symbol else p
+            for p in state.positions
+        ),
+    )
 
 
 def test_a_venue_leverage_that_no_longer_matches_config_is_alerted_with_both_pairs() -> None:
@@ -1905,6 +1919,41 @@ def test_a_venue_margin_mode_that_no_longer_matches_config_is_alerted_on_its_own
             "symbol": "BTC",
             "configured_mode": "isolated",
             "configured_leverage": 5,
+            "venue_mode": "cross",
+            "venue_leverage": 5,
+        }
+    ]
+
+
+def test_a_symbol_still_carrying_the_configured_pair_is_not_alerted() -> None:
+    """The check is per symbol, and silence is the aligned symbol's outcome.
+
+    Both rows come back at the run's default pair — ``1x``/``isolated``, what
+    the boot push put on the venue — and only ETH is then re-margined, the shape
+    of an operator de-risking one position rather than the book. BTC is the
+    assertion: an account that drifted somewhere must not be reported as having
+    drifted everywhere, or the record stops naming which position an operator
+    has to go look at.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    _book_fill(keeper.portfolio, quantity="0.002", price="64809")
+    _book_fill(keeper.portfolio, quantity="1.5", price="3000", symbol="ETH", seq=2)
+    venue = _levered(
+        _held("100000", ("BTC", "0.002", "0"), ("ETH", "1.5", "0")),
+        LeverageSpec(mode="cross", leverage=5),
+        symbol="ETH",
+    )
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        asyncio.run(cycle.reconcile_account())
+
+    assert _drifted(logs) == [
+        {
+            "symbol": "ETH",
+            "configured_mode": "isolated",
+            "configured_leverage": 1,
             "venue_mode": "cross",
             "venue_leverage": 5,
         }
