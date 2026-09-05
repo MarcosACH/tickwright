@@ -554,6 +554,39 @@ running engine mid-position, and this map's ceiling is report-only: the engine r
 disagreement and keeps trading, exactly as it reports a negative free margin without acting on it
 (ADR-0040 §7).
 
+**(Landed in [#196](https://github.com/MarcosACH/tickwright/issues/196), which fixed five things this
+section states an outcome for without stating a shape.**
+
+The venue side is a **required field on `VenuePositionState`**, not a second `clearinghouseState`
+read. The setting and the figures travel on one snapshot and only the figures move with the mark, so
+carrying it costs nothing; §4's `held_leverage` stays a separate read even so, because the boot push
+runs before any projection exists and wants the setting per held symbol without the full
+normalization refusing the whole body over an account-grain figure it never reads. The field has
+**no default**: a fabricated `1x`/`isolated` would let a snapshot claim a setting no venue was read
+for, and against the commonest config that fabrication reads as *agreement*. The two readers share
+their strictness through one `reported_leverage`, not through a returned shape.
+
+"Every held symbol" resolves to the **venue's** position rows rather than the cycle's net fold,
+which is the one place this check parts from the Tier-2 comparisons beside it. The subject is a
+setting the venue stores against a position the venue holds, and it is stored for exactly those. A
+symbol our ledger reads flat and the venue does not is already reported as a Tier-1 size finding,
+and its leverage is live risk either way.
+
+The finding is **not a `Divergence`** and is absent from `account.reconciled`'s tier counts. Every
+member of that type is a number the two sides computed; this is a discrete pair an operator wrote.
+Routed through the tuple it would take a tolerance with nothing to measure, a heal that must never
+happen, and a place in the counts, where it would report the money line as disagreeing over a
+setting the money line is unaffected by until the next position opens.
+
+Config is read through `PortfolioProjection.leverage_for`, so the cycle gains **no collaborator** for
+this — the resolved map is already behind a member it holds (ADR-0040 §5 as wired in #190).
+
+And the refusal to re-push is **structural rather than observed**: `LedgerReconciliation` is
+constructed against `domain.AccountAnchor`, whose two members are the snapshot read and the mode
+verdict, so there is no venue write here to leave uncalled and mypy refuses the cycle that grows one.
+The test pins the anchor's member set for that reason, an `updateLeverage` added there for a caller
+elsewhere being the one way this could quietly acquire the revert.**)**
+
 ## Consequences
 
 - **Additive across the board.** `Exchange` gains `start()` (paper's is a validation-only no-op);
