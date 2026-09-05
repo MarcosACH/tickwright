@@ -58,15 +58,18 @@ def account_spec(config: HyperliquidConfig, *, address: str) -> AccountSpec:
 def held_leverage(response: object) -> dict[str, LeverageSpec]:
     """The same body's *stored* margin setting per held symbol, as config's type.
 
-    A second read of ``clearinghouseState`` rather than a field on
-    ``VenuePositionState``, and both halves of that are deliberate. It lives
-    **here** because this module is the one place a Hyperliquid field name for
-    these quantities appears, and the boot-time leverage push needs
-    ``assetPositions`` like every other account-grain read does. It is **not** a
-    position-state field because ``VenuePositionState`` models what a position
-    *is worth*, and the push consumes the setting at boot, before any
-    projection exists to carry it; extending the state object is the post-boot
-    drift check's problem, not this read's.
+    A second read of ``clearinghouseState`` rather than a use of the field
+    ``VenuePositionState.leverage`` now carries, and that is deliberate. It
+    lives **here** because this module is the one place a Hyperliquid field name
+    for these quantities appears, and the boot-time leverage push needs
+    ``assetPositions`` like every other account-grain read does. It stays its own
+    read because the push runs at **boot**, ahead of the startup barrier and of
+    any projection: what it wants is the setting per held symbol and nothing
+    else, where the full normalization would additionally demand the three
+    account-grain summaries be legible and refuse the whole body over a figure
+    the push does not read. The two share their strictness through
+    ``reported_leverage`` rather than through the shape they return, which is the
+    part that would actually have drifted.
 
     Returned as ``LeverageSpec`` rather than a pair, so the push's comparison is
     one equality against the value an operator wrote and cannot drift by
@@ -108,13 +111,28 @@ def held_leverage(response: object) -> dict[str, LeverageSpec]:
         coin = position["coin"]
         if not isinstance(coin, str):
             raise TypeError(f"non-string position coin {coin!r} in clearinghouseState")
-        leverage = setting["value"]
-        # ``bool`` is an ``int`` subclass, and a ``True`` taken for ``1`` would
-        # read a re-typed field as agreement with a configured ``1x``.
-        if not isinstance(leverage, int) or isinstance(leverage, bool):
-            raise TypeError(f"non-integer leverage value {leverage!r} in clearinghouseState")
-        held[coin] = LeverageSpec(mode=reported_margin_mode(setting), leverage=leverage)
+        held[coin] = reported_leverage(setting)
     return held
+
+
+def reported_leverage(setting: Mapping[str, Any]) -> LeverageSpec:
+    """One ``leverage`` sub-object as the pair an operator configures.
+
+    The second field of that sub-object, on the same terms as
+    ``reported_margin_mode`` above and extracted for the same reason: two
+    consumers read the setting now — the boot-time push through
+    ``held_leverage``, and ``_position`` carrying it onto ``VenuePositionState``
+    for the post-boot drift check — and a strictness rule spelled at one of them
+    is a rule the other silently lacks. Both comparisons are an equality against
+    a configured ``LeverageSpec``, so both fail the same way on a re-typed value:
+    unequal to everything, reported as a disagreement the venue never stated.
+    """
+    leverage = setting["value"]
+    # ``bool`` is an ``int`` subclass, and a ``True`` taken for ``1`` would
+    # read a re-typed field as agreement with a configured ``1x``.
+    if not isinstance(leverage, int) or isinstance(leverage, bool):
+        raise TypeError(f"non-integer leverage value {leverage!r} in clearinghouseState")
+    return LeverageSpec(mode=reported_margin_mode(setting), leverage=leverage)
 
 
 def reported_margin_mode(setting: Mapping[str, Any]) -> MarginMode:
@@ -238,6 +256,7 @@ def _position(reported: Mapping[str, Any]) -> VenuePositionState:
             reported["leverage"], margin_used=margin_used, unrealized_pnl=unrealized_pnl
         ),
         liquidation_price=None if liquidation_price is None else figure(liquidation_price),
+        leverage=reported_leverage(reported["leverage"]),
     )
 
 

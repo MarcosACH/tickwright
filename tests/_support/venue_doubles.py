@@ -43,6 +43,7 @@ from decimal import Decimal
 from ledgers import GENESIS
 
 from tickwright.domain import (
+    DEFAULT_LEVERAGE,
     AccountModeVerdict,
     AccountSpec,
     Exchange,
@@ -116,6 +117,14 @@ def account_state(
                 margin_used=Decimal("25.9168"),
                 isolated_collateral=None,
                 liquidation_price=None,
+                # The **ledger's** default pair rather than the recorded body's
+                # ``cross 5``, on the same premise ``implied_free_margin``
+                # states: this fixture's account is one a suite builds at
+                # isolated 1x, and a venue setting that disagreed with it would
+                # put a standing ``LEVERAGE_DIVERGENCE`` under every case here
+                # that says nothing about leverage (ADR-0044 §10). A case about
+                # drift overrides it.
+                leverage=DEFAULT_LEVERAGE,
             )
             for pnl in unrealized
         ),

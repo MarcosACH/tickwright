@@ -25,7 +25,7 @@ from pydantic import SecretStr
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
-from tickwright.domain import InstrumentSpec, Netting, VenueAccountState
+from tickwright.domain import InstrumentSpec, LeverageSpec, Netting, VenueAccountState
 from tickwright.observability import NamedEvent
 from tickwright.observability.testing import capture_events
 from tickwright.venues.hyperliquid import (
@@ -512,6 +512,28 @@ def test_a_mixed_book_keeps_both_rows_in_venue_order_with_each_mode_read_as_its_
     assert cross.margin_used == Decimal("21668.4")
     assert isolated.isolated_collateral == Decimal("37431.247752")
     assert isolated.margin_used == Decimal("30589.794971")
+
+
+def test_each_row_carries_the_leverage_pair_the_venue_holds_it_at() -> None:
+    """The setting itself crosses the boundary, not merely its consequences.
+
+    ``isolated_collateral`` already says which *mode* a row is in, so the mode is
+    recoverable downstream; the **number** is not recoverable from anything on the
+    row. ``margin_used`` cannot stand in for it — a leverage change never
+    re-margins an open position (ADR-0044 §10), so the figure keeps whatever
+    leverage the position opened at and says nothing about the setting the venue
+    holds now. Without this field the post-boot drift check has nothing to compare.
+
+    Read off the mixed body because it is the one that carries two different
+    values as well as two modes: `cross 5` against `isolated 2`, so a normalizer
+    that hardcoded either half is visibly wrong within one read.
+    """
+    state = _fetch_state(MIXED_SNAPSHOT)
+
+    assert state is not None
+    cross, isolated = state.positions
+    assert cross.leverage == LeverageSpec(mode="cross", leverage=5)
+    assert isolated.leverage == LeverageSpec(mode="isolated", leverage=2)
 
 
 def test_a_short_keeps_the_direction_the_venue_reports_it_with() -> None:

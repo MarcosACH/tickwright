@@ -25,6 +25,7 @@ from typing import ClassVar
 
 from .enums import AggressorSide, OrderState, OrderType, Side, TimeInForce
 from .ids import SignalId
+from .leverage import LeverageSpec
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -632,6 +633,17 @@ class VenuePositionState:
     which happens once collateral is large relative to notional and is
     structurally impossible for a short (ADR-0046 §6). Nothing may substitute a
     value for it — a frozen absence beats a fabricated price (ADR-0034).
+
+    ``leverage`` is the venue's **stored setting** for the symbol, not a figure
+    derived from the position: the two travel together on the snapshot but only
+    one of them moves with the mark. It is what the post-boot drift check
+    compares against config (ADR-0044 §10), and it is carried here rather than
+    recovered downstream because nothing else on the row implies it — a leverage
+    change never re-margins an open position, so ``margin_used`` keeps whatever
+    leverage the position opened at. It has **no default**, on this class's own
+    terms: a defaulted pair would let a snapshot claim a setting no venue was
+    read for, and against the commonest config that fabrication reads as
+    agreement.
     """
 
     symbol: str
@@ -642,6 +654,7 @@ class VenuePositionState:
     margin_used: Decimal
     isolated_collateral: Decimal | None
     liquidation_price: Decimal | None
+    leverage: LeverageSpec
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
