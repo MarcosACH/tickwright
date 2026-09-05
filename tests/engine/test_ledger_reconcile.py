@@ -2332,3 +2332,48 @@ def test_an_absent_mark_alerts_nothing_and_lands_on_unvalued_rather_than_suppres
     assert _alerts(logs) == []
     record = _recorded(logs)
     assert (record["tier_2"], record["suppressed"], record["unvalued"]) == (0, 0, 2)
+
+
+def test_an_alerted_tier_2_divergence_still_changes_no_stored_value() -> None:
+    """The no-write claim carried across the band, where it is newly losable.
+
+    The pass above makes it against a gap the band absorbs, which is now the
+    quiet half: a cycle that raises nothing has nothing it could be tempted to
+    persist. This one makes it against a gap that **alerts** — the state where
+    the cycle has produced an operator-facing finding and has, for the first
+    time, a plausible reason to write: a last-alerted stamp, a de-duplication
+    marker, or the venue's figure booked as the correction the record has just
+    named. Any of those turns Tier-2 into a heal by the only measure ADR-0034
+    draws the line on, and none would move a number a before/after comparison
+    is watching — which is why the store is sealed rather than diffed.
+
+    The alert count is asserted first and is load-bearing: without it the case
+    passes on a cycle whose band absorbed everything, which is the neighbouring
+    behavior and not this one. Behavior 1's book, for exactly that reason — a
+    0.002 long entered at 64809 and marked at 65000 against a snapshot pricing
+    it at 1.000, whose implied cash lands back on 100000 so both Tier-1 halves
+    stay silent and the alerts are not suppressed by a finding that explains
+    them.
+    """
+    store = _SealedStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "65000")
+    opened = store.load_account()
+    stored = store.all_positions()
+    assert opened is not None
+    venue = _held("100001.000", ("BTC", "0.002", "1.000"))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+    store.seal()
+
+    with capture_events() as logs:
+        divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences is not None
+    assert [alert["field"] for alert in _alerts(logs)] == ["equity", "unrealized_pnl"]
+
+    restored = store.load_account()
+    assert restored is not None
+    assert restored.cash == opened.cash == Decimal("100000")
+    assert store.all_positions() == stored
