@@ -2288,3 +2288,47 @@ def test_a_stale_mark_suppresses_the_alert_and_is_counted_on_the_record() -> Non
     assert _alerts(logs) == []
     record = _recorded(logs)
     assert (record["tier_2"], record["suppressed"], record["unvalued"]) == (2, 2, 0)
+
+
+def test_an_absent_mark_alerts_nothing_and_lands_on_unvalued_rather_than_suppressed() -> None:
+    """The other half of ADR-0040 §6's mark criterion, and the reason it is a
+    second case rather than the stale one with a smaller number.
+
+    A mark that never arrived and a mark that stopped arriving both end in
+    silence, but they fail in different places. Absent fails at
+    **classification**: ``_equity`` and ``_unrealized`` drop a figure they
+    cannot compute, because a valuation waiting on a mark is unknown rather than
+    divergent (ADR-0041 §6), so nothing ever reaches the band for the
+    suppression above to act on. Stale fails at the **band**: the figure is
+    real, computable and outside the tolerance, and this slice declines to alert
+    on it.
+
+    Which makes ``suppressed`` the assertion that carries the case. Read alone,
+    ``_alerts(logs) == []`` here is vacuous — it would hold against a cycle that
+    had no suppression rule at all — so what is pinned is that the two silences
+    are **told apart on the record**: this pass reports ``unvalued=2,
+    suppressed=0`` where behavior 7's identical book reports ``unvalued=0,
+    suppressed=2``. An operator reading the cadence can therefore distinguish a
+    book that was never valued from one whose valuation went stale, which is the
+    whole of what ADR-0011 inv 1 asks of a count.
+
+    Deliberately the same venue and the same fill as the stale case — a 0.002
+    long entered at 64809 against a snapshot pricing it at 1.000 — so the only
+    variable is the mark this case never feeds. Tier-1 stays silent on it: the
+    snapshot's equity carries its own uPnL exactly, so ``venue_cash`` lands back
+    on the 100000 cash line and the sizes agree, leaving the two dropped Tier-2
+    figures as the whole of what the pass had to say.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    venue = _held("100001.000", ("BTC", "0.002", "1.000"))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        assert asyncio.run(cycle.reconcile_account()) == ()
+
+    assert _alerts(logs) == []
+    record = _recorded(logs)
+    assert (record["tier_2"], record["suppressed"], record["unvalued"]) == (0, 0, 2)
