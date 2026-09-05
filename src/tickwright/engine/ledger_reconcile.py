@@ -590,6 +590,17 @@ class LedgerReconciliation:
         and the venue does not is a book we are already reporting a Tier-1 size
         finding on, and its leverage is live risk either way.
 
+        That range reaches past the resolved book, which is why ``declared``
+        rides the record. ``leverage_for`` answers a symbol no strategy trades
+        with the safe fallback, and the answer is honest — the Tier-1 heal
+        beside this one books that row into the ledger and ``valuation`` margins
+        it at exactly that pair, so the disagreement is real and worth alerting.
+        What would not be honest is the *name*: ``configured_*`` reads as a pair
+        an operator chose, and for such a symbol nobody chose one. The bit
+        separates the two pieces of advice — a declared drift is two settings
+        that were both meant to apply, an undeclared one is a position this run
+        never pushed a leverage for and does not trade.
+
         Never a write, and the seam says so rather than the code: this class is
         constructed against ``AccountAnchor``, whose two members are the snapshot
         read and the mode verdict, so there is no ``update_leverage`` here to
@@ -604,6 +615,7 @@ class LedgerReconciliation:
                 symbol=position.symbol,
                 configured_mode=configured.mode,
                 configured_leverage=configured.leverage,
+                declared=self._portfolio.declares_leverage(position.symbol),
                 venue_mode=position.leverage.mode,
                 venue_leverage=position.leverage.leverage,
             )

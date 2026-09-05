@@ -190,6 +190,15 @@ class NamedEvent(StrEnum):
     # vocabulary parts from its two neighbours'. Both sides ride it for the
     # reason they do: the operator who made the change is being told which of
     # the two settings the margin model keeps computing against.
+    #
+    # Plus one bit, ``declared``, which is the caveat on that word. The check
+    # ranges over the venue's rows, so it reaches a symbol the resolved book
+    # never named — a leftover position, or one opened by hand — where the
+    # engine's side is the safe fallback rather than a choice. Still alerted,
+    # because the fallback is what the margin model really computes that row
+    # against once the Tier-1 heal books it in; but ``declared=false`` is
+    # different advice, and an operator sent to reconcile a config that does not
+    # mention the symbol is being sent to the wrong file.
     LEVERAGE_DIVERGENCE = "leverage.divergence"
 
     # A live-exchange request that yielded no usable answer, on either path and

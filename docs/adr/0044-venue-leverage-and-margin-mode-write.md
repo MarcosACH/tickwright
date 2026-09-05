@@ -572,6 +572,21 @@ setting the venue stores against a position the venue holds, and it is stored fo
 symbol our ledger reads flat and the venue does not is already reported as a Tier-1 size finding,
 and its leverage is live risk either way.
 
+That range reaches past the **resolved book**, which is what the record's `declared` bit is for.
+`leverage_for` answers a symbol no configured strategy trades with `DEFAULT_LEVERAGE`, so a leftover
+or hand-opened position is compared against `1x`/`isolated`. Alerting it is right and the fallback is
+not a fabrication: the Tier-1 size heal beside this finding books that row into the ledger, and
+ADR-0040 §5's margin model then values it at exactly that pair — silence would hide a position the
+engine computes at `1x` isolated while the venue holds it at `20x` cross. What would be wrong is the
+*word*: `configured_mode`/`configured_leverage` read as a pair an operator chose, and for such a
+symbol nobody chose one. So the alert carries one bit saying which, because the two are different
+instructions — a declared drift is two settings that were both meant to apply and one of them moved,
+an undeclared one is a position this run does not trade and never pushed a leverage for, and an
+operator sent to reconcile a config that does not name the symbol is sent to the wrong file. The
+distinction is `LeverageBook.declares`, deliberately a separate read rather than a widened
+`for_symbol` return: no margin figure may ever branch on it, or a symbol configured to the default
+would be worth a different amount than one that merely missed the book.
+
 The finding is **not a `Divergence`** and is absent from `account.reconciled`'s tier counts. Every
 member of that type is a number the two sides computed; this is a discrete pair an operator wrote.
 Routed through the tuple it would take a tolerance with nothing to measure, a heal that must never

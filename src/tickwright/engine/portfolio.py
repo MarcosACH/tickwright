@@ -273,9 +273,24 @@ class PortfolioProjection:
         does not carry, which is the same answer the resolution itself gives an
         unconfigured traded symbol — so a read can never be more permissive than
         the map, whatever the caller asks for. A symbol outside the traded set
-        has no position to value in the first place.
+        reaches this projection only through a reconcile heal, and is then
+        margined at the fallback like any other row; ``declares_leverage`` is
+        how a caller that reports on the pair tells the two apart.
         """
         return self._leverage.for_symbol(symbol)
+
+    def declares_leverage(self, symbol: str) -> bool:
+        """Whether the resolved book carries an entry for ``symbol``.
+
+        The provenance of ``leverage_for``'s answer rather than a second reading
+        of it, for the one caller that reports the pair to an operator instead
+        of computing with it (ADR-0044 §10). Nothing in the valuation path may
+        ask: the fallback is a complete specification, and a margin figure that
+        branched on where its leverage came from would make an unconfigured
+        symbol worth a different amount than a symbol configured to the same
+        pair.
+        """
+        return self._leverage.declares(symbol)
 
     def observe_mark(self, mark: MarkTick) -> None:
         """Take the latest mark for a symbol — the Tier-2 write verb (ADR-0039).
