@@ -310,7 +310,6 @@ class Reconciler:
         non-terminal, past its protection window, *and* continuously absent
         across the grace window is ghost-resolved."""
         if view.status is not None:
-            self._ghost_gate.record_present(order.cloid)
             await self._adopt(order, view)
             return
         await self._heal_fills(view)
@@ -426,6 +425,22 @@ class Reconciler:
             # blind resend (ADR-0008 rule 2). Recreating is the strategy's call.
             await self._bus.publish(self._failed_verdict(order))
             return
+
+        if view.status is not None:
+            # Presence, and every phase reads it here — so the grace clock is
+            # reset here rather than in each caller. The startup pass arms the
+            # window from the branch above; without this it could never *dis*arm
+            # it, since the barrier re-drives the whole rebuild on any freeze and
+            # a record that came back in the meantime would be read and thrown
+            # away. The window would then measure from the first attempt across
+            # an intervening presence, which is not continuous absence at all.
+            #
+            # Keyed on the status and not on ``has_record``: a view carrying
+            # fills alone is what the venue answers *after* the record is gone,
+            # and the cadence arms on it (``_resolve_open_order``). Resetting on
+            # it would be the one reading that makes boot more willing to forget
+            # an absence than the running engine is.
+            self._ghost_gate.record_present(order.cloid)
 
         if order.state is OrderState.PENDING:
             # The venue has a record, so the send provably left the box: walk

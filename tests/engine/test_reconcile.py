@@ -601,6 +601,18 @@ def _live_saga(cloid: str) -> Order:
     return saga
 
 
+def _live_report(cloid: str) -> OrderStatusReport:
+    """The venue's LIVE record for a cloid, carrying the identity ``_live_saga``
+    already applied — so replaying it dedups instead of re-announcing the fact."""
+    return OrderStatusReport(
+        ts_event=600,
+        ts_init=600,
+        cloid=cloid,
+        symbol="BTC",
+        status=OrderState.LIVE,
+    )
+
+
 def test_a_record_returning_after_boot_restarts_the_window_it_armed() -> None:
     clock = ManualClock(start_ns=0)
     store = SQLiteStore(":memory:")
@@ -727,3 +739,89 @@ def test_a_boot_that_redrives_past_the_grace_window_ghosts_on_the_startup_pass()
     other = store.get_order("0xdef")
     assert other is not None
     assert other.state is OrderState.LIVE
+
+
+class _RecordReturnsMidBootVenue(_DarkVenue):
+    """A boot long enough to see ``0xabc`` come back and go again.
+
+    ``0xdef``'s body stays unreadable, so the pass reports ``False`` and the
+    barrier re-drives the whole rebuild (ADR-0049) — which is what gives boot
+    more than one look at ``0xabc``. That order's record is missing, then
+    *present* across the middle of the retry, then missing again: a read node
+    catching up and the order later genuinely vanishing, told apart only by the
+    presence in between.
+    """
+
+    def __init__(self, clock: ManualClock, *, present_ns: range, readable_from_ns: int) -> None:
+        super().__init__()
+        self._clock = clock
+        self._present_ns = present_ns
+        self._readable_from_ns = readable_from_ns
+
+    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
+        self.reads += 1
+        now_ns = self._clock.timestamp_ns()
+        if cloid == "0xdef":
+            if now_ns < self._readable_from_ns:
+                return VenueReadFailure.UNREADABLE_BODY
+            return VenueOrderView(status=_live_report(cloid))
+        if now_ns in self._present_ns:
+            return VenueOrderView(status=_live_report(cloid))
+        return VenueOrderView(status=None)
+
+
+def test_a_record_a_redriven_boot_finds_restarts_the_window_boot_armed() -> None:
+    clock = ManualClock(start_ns=0)
+    store = SQLiteStore(":memory:")
+    store.checkpoint(_live_saga("0xabc"), ts_ns=500)
+    store.checkpoint(_live_saga("0xdef"), ts_ns=500)
+    # The barrier's attempts land at 0, 1, 3, 7, 15, 31, 61 and 121s (a 1s
+    # backoff doubling to the 30s cap). ``0xabc`` is absent at every one of
+    # them except 31s, and ``0xdef`` keeps the rebuild re-driving until 121s.
+    venue = _RecordReturnsMidBootVenue(
+        clock,
+        present_ns=range(16 * 1_000_000_000, 60 * 1_000_000_000),
+        readable_from_ns=121 * 1_000_000_000,
+    )
+
+    bus = InMemoryBus()
+    checks = checkpointer(store, clock=clock)
+    cache = checks.cache
+    cache.rebuild()
+    manager = ExecutionManager(bus=bus, exchange=venue, checkpointer=checks)
+    bus.subscribe(Signal, manager.on_signal)
+    bus.subscribe(ExecutionReport, manager.on_execution_report)
+    events: list[OrderEvent] = []
+    bus.subscribe(OrderEvent, lambda ev: _record(events, ev))
+    reconciler = Reconciler(
+        bus=bus,
+        clock=clock,
+        exchange=venue,
+        cache=cache,
+        config=ReconcileConfig(ghost_grace_seconds=90.0, unreadable_grace_seconds=600.0),
+    )
+
+    async def scenario() -> None:
+        with capture_events() as logs:
+            await _barrier(clock, reconciler).run(timeout_seconds=300.0)
+
+        # The barrier cleared at 121s — 121s after boot armed the window, and
+        # past the 90s the previous behavior would have ghosted on. It must not
+        # have: the record was *there* at 31s, and only continuous absence may
+        # ghost. Boot observing presence has to restart the window boot armed,
+        # exactly as the cadence's own reading does.
+        assert "ghost.reconciled" not in [log["event"] for log in logs]
+        recovered = store.get_order("0xabc")
+        assert recovered is not None
+        assert recovered.state is OrderState.LIVE
+
+        # And the restarted run is a measurement, not an amnesty: one window
+        # past the 61s the order went absent again, it is gone for good.
+        await clock.sleep(91.0)
+        assert await reconciler.reconcile_open_orders() is True
+        gone = store.get_order("0xabc")
+        assert gone is not None
+        assert gone.state is OrderState.REJECTED
+
+    asyncio.run(scenario())
+    assert [type(ev) for ev in events] == [OrderRejected]
