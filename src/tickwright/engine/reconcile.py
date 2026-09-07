@@ -463,8 +463,14 @@ class Reconciler:
             # is either a saga those fills finished, which is terminal and has
             # nothing to ghost, or that absence. Boot arms on it identically or
             # it is still answering one absence shape faster than the cadence.
+            # Both outcomes are the cadence's pair: arm on the absence, and let
+            # a saga the fills finished release the clock, so a run armed by an
+            # earlier look this boot — the barrier re-drives, so there can be
+            # one — is never left behind a cloid nothing will evaluate again.
             if order.state in _OPEN_ORDER_STATES:
                 await self._judge_ghost(order)
+            else:
+                self._ghost_gate.record_present(order.cloid)
             return
         if not (view.status.status is OrderState.LIVE and view.fills):
             # A LIVE record alongside fills is stale by definition — the venue
