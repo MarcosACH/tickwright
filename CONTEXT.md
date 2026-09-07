@@ -314,11 +314,14 @@ are found. A ghost is an *order* the reconciler removes — distinct from a dupl
 _Avoid_: orphan, stale order, dead order.
 
 **Recent-order protection window**:
-The second clause of ADR-0011 invariant 3: the slow [[Ghost]] cycle skips ghost evaluation for a
-resting order whose last saga event is fresher than the window (default ~30s) — the grace clock
-never arms — so a just-acked order the venue's open-orders snapshot has not yet propagated is
-never raced onto the ghost path. The fill-history cross-check still runs inside the window, so a
-recent order that filled heals immediately. See ADR-0011.
+The second clause of ADR-0011 invariant 3: ghost evaluation is skipped for a resting order whose
+last saga event is fresher than the window (default ~30s) — the grace clock never arms — so a
+just-acked order the venue's open-orders snapshot has not yet propagated is never raced onto the
+ghost path. The fill-history cross-check still runs inside the window, so a recent order that
+filled heals immediately. Phase-neutral, like the grace window it fronts: every phase that reads
+an absence goes through the same [[Ghost gate]], the startup mass-rebuild included. Inert at boot
+all the same — `Cache.rebuild()` clears event recency, so a recovered saga has none to be fresh
+by and the grace window is boot's only guard. See ADR-0011 (invariant 3, as amended).
 _Avoid_: cooldown, debounce (those undersell the race-the-venue guard).
 
 **Ghost gate**:
