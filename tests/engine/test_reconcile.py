@@ -652,3 +652,78 @@ def test_a_record_returning_after_boot_restarts_the_window_it_armed() -> None:
 
     asyncio.run(scenario())
     assert [type(ev) for ev in events] == [OrderRejected]
+
+
+class _OneGarbledBodyVenue(_DarkVenue):
+    """Every read is answered, but ``0xdef``'s body is garbled until
+    ``readable_from_ns``. The pass carries on past it and reports ``False``
+    (ADR-0049), so the barrier re-drives the whole rebuild meanwhile — and
+    ``0xabc`` is read again on every one of those attempts."""
+
+    def __init__(self, clock: ManualClock, *, readable_from_ns: int) -> None:
+        super().__init__()
+        self._clock = clock
+        self._readable_from_ns = readable_from_ns
+
+    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
+        self.reads += 1
+        if cloid != "0xdef":
+            return VenueOrderView(status=None)
+        if self._clock.timestamp_ns() < self._readable_from_ns:
+            return VenueReadFailure.UNREADABLE_BODY
+        return VenueOrderView(
+            status=OrderStatusReport(
+                ts_event=600,
+                ts_init=600,
+                cloid=cloid,
+                symbol="BTC",
+                status=OrderState.LIVE,
+            )
+        )
+
+
+def test_a_boot_that_redrives_past_the_grace_window_ghosts_on_the_startup_pass() -> None:
+    clock = ManualClock(start_ns=0)
+    store = SQLiteStore(":memory:")
+    store.checkpoint(_live_saga("0xabc"), ts_ns=500)
+    store.checkpoint(_live_saga("0xdef"), ts_ns=500)
+    # One order's body stays unreadable for 91s of backoff — past the ghost
+    # window, and well inside its own span, so it never escalates.
+    venue = _OneGarbledBodyVenue(clock, readable_from_ns=91 * 1_000_000_000)
+
+    bus = InMemoryBus()
+    checks = checkpointer(store, clock=clock)
+    cache = checks.cache
+    cache.rebuild()
+    manager = ExecutionManager(bus=bus, exchange=venue, checkpointer=checks)
+    bus.subscribe(Signal, manager.on_signal)
+    bus.subscribe(ExecutionReport, manager.on_execution_report)
+    events: list[OrderEvent] = []
+    bus.subscribe(OrderEvent, lambda ev: _record(events, ev))
+    reconciler = Reconciler(
+        bus=bus,
+        clock=clock,
+        exchange=venue,
+        cache=cache,
+        config=ReconcileConfig(ghost_grace_seconds=90.0, unreadable_grace_seconds=600.0),
+    )
+
+    with capture_events() as logs:
+        asyncio.run(_barrier(clock, reconciler).run(timeout_seconds=300.0))
+
+    # Deferring at boot is not an exemption from ghosting: a boot that spends
+    # longer than the grace window retrying has measured the same continuous
+    # absence the cadence would have, and reaches the same verdict — on the
+    # startup pass itself, before anything is allowed to place.
+    ghosts = [log for log in logs if log["event"] == "ghost.reconciled"]
+    assert len(ghosts) == 1
+    assert ghosts[0]["cycle"] == "startup"
+    assert ghosts[0]["resolution"] == "rejected"
+
+    recovered = store.get_order("0xabc")
+    assert recovered is not None
+    assert recovered.state is OrderState.REJECTED
+    # The order whose body was merely unreadable was never resolved to anything.
+    other = store.get_order("0xdef")
+    assert other is not None
+    assert other.state is OrderState.LIVE
