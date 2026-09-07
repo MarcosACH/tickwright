@@ -29,6 +29,7 @@ from tickwright.domain import (
     OrderFailed,
     OrderFilled,
     OrderLive,
+    OrderRejected,
     OrderState,
     OrderType,
     PlaceOrder,
@@ -232,6 +233,42 @@ def test_a_recovered_live_saga_absent_at_boot_is_not_ghosted_on_one_read() -> No
     assert recovered.state is OrderState.LIVE
     assert events == []
     assert "ghost.reconciled" not in [log["event"] for log in logs]
+
+
+def test_the_startup_absence_arms_the_grace_clock_from_the_boot_instant() -> None:
+    clock = ManualClock(start_ns=2_000)
+    store = SQLiteStore(":memory:")
+    exchange, _ = _surviving_venue(clock)
+
+    store.checkpoint(_saga("0xabc", OrderState.LIVE), ts_ns=500)
+    _, _, reconciler, events = _second_life(store, exchange, clock)
+
+    async def scenario() -> None:
+        assert await reconciler.reconcile_startup() is True
+
+        # One grace window after boot, on the *first* continuous cycle since —
+        # so the window can only have elapsed if the startup absence armed the
+        # clock. A boot that merely declined to ghost would leave this read
+        # starting the measurement rather than ending it, and the order would
+        # still be LIVE here. Deferring the verdict is a delay, not a reprieve.
+        await clock.sleep(ReconcileConfig().ghost_grace_seconds)
+        with capture_events() as logs:
+            assert await reconciler.reconcile_open_orders() is True
+
+        ghosts = [log for log in logs if log["event"] == "ghost.reconciled"]
+        assert len(ghosts) == 1
+        assert ghosts[0]["resolution"] == "rejected"
+
+    asyncio.run(scenario())
+
+    # The taxonomy the startup pass used to reach in one read (ADR-0010/0011):
+    # REJECTED from LIVE, only now on the evidence inv 3 actually asks for.
+    recovered = store.get_order("0xabc")
+    assert recovered is not None
+    assert recovered.state is OrderState.REJECTED
+    rejected = [ev for ev in events if isinstance(ev, OrderRejected)]
+    assert len(rejected) == 1
+    assert rejected[0].reconciliation is True
 
 
 def test_recovered_saga_heals_the_fill_it_missed_while_dead() -> None:
