@@ -23,6 +23,7 @@ from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     AggressorSide,
     ExecutionReport,
+    FillReport,
     MarketTick,
     Order,
     OrderEvent,
@@ -825,3 +826,142 @@ def test_a_record_a_redriven_boot_finds_restarts_the_window_boot_armed() -> None
 
     asyncio.run(scenario())
     assert [type(ev) for ev in events] == [OrderRejected]
+
+
+class _FillsWithoutARecordVenue(_DarkVenue):
+    """The venue's answer *after* a record is gone: no order row, the fill
+    history still there (ADR-0011 inv 4 is why the read carries both). A
+    partially-filled order cancelled while we were dead reads exactly like this
+    — an absence, and the open-order cadence arms its grace clock on it."""
+
+    def __init__(self, fill: FillReport) -> None:
+        super().__init__()
+        self._fill = fill
+
+    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
+        self.reads += 1
+        return VenueOrderView(status=None, fills=(self._fill,))
+
+
+def _partially_filled_saga(fill: FillReport) -> Order:
+    """A resting saga that *applied* the fill the venue still reports, so the
+    heal dedups by ``event_id`` — leaving the absence, and nothing else, for the
+    gate to rule on."""
+    saga = _saga(fill.cloid, OrderState.LIVE)
+    assert (
+        saga.record_fill(
+            trade_id=fill.trade_id,
+            quantity=fill.quantity,
+            price=fill.price,
+            ts_event=fill.ts_event,
+            ts_init=fill.ts_event,
+        )
+        is not None
+    )
+    return saga
+
+
+def test_a_boot_reading_fills_without_a_record_arms_the_window_too() -> None:
+    clock = ManualClock(start_ns=0)
+    store = SQLiteStore(":memory:")
+    fill = FillReport(
+        ts_event=600,
+        ts_init=600,
+        cloid="0xabc",
+        symbol="BTC",
+        trade_id="t1",
+        quantity=Decimal("0.2"),
+        price=Decimal("41000"),
+    )
+    store.checkpoint(_partially_filled_saga(fill), ts_ns=500)
+    venue = _FillsWithoutARecordVenue(fill)
+
+    bus = InMemoryBus()
+    checks = checkpointer(store, clock=clock)
+    cache = checks.cache
+    cache.rebuild()
+    manager = ExecutionManager(bus=bus, exchange=venue, checkpointer=checks)
+    bus.subscribe(Signal, manager.on_signal)
+    bus.subscribe(ExecutionReport, manager.on_execution_report)
+    events: list[OrderEvent] = []
+    bus.subscribe(OrderEvent, lambda ev: _record(events, ev))
+    reconciler = Reconciler(
+        bus=bus, clock=clock, exchange=venue, cache=cache, config=ReconcileConfig()
+    )
+
+    async def scenario() -> None:
+        # Fills without a record is an absent read too — ``has_record`` is true
+        # of it, but the venue has no order there, and that is the reading the
+        # gate rules on. Boot defers, as it does on any absence.
+        with capture_events() as logs:
+            assert await reconciler.reconcile_startup() is True
+        assert "ghost.reconciled" not in [log["event"] for log in logs]
+        resting = store.get_order("0xabc")
+        assert resting is not None
+        assert resting.state is OrderState.PARTIALLY_FILLED
+
+        # One grace window after boot, on the *first* continuous cycle since: it
+        # can only have elapsed if boot armed the clock on this shape too.
+        await clock.sleep(ReconcileConfig().ghost_grace_seconds)
+        with capture_events() as logs:
+            assert await reconciler.reconcile_open_orders() is True
+        ghosts = [log for log in logs if log["event"] == "ghost.reconciled"]
+        assert len(ghosts) == 1
+        assert ghosts[0]["resolution"] == "cancelled"
+
+    asyncio.run(scenario())
+
+    # CANCELLED, not REJECTED: the executed quantity provably happened and
+    # stands, and only the remainder is terminated (ADR-0010/0011 resolutions).
+    gone = store.get_order("0xabc")
+    assert gone is not None
+    assert gone.state is OrderState.CANCELLED
+    assert gone.cum_qty == Decimal("0.2")
+    # The heal deduped throughout: the venue's fill was already the saga's.
+    assert not [ev for ev in events if isinstance(ev, OrderFilled)]
+
+
+def test_a_boot_reading_the_fills_that_finished_the_order_never_reaches_the_gate() -> None:
+    clock = ManualClock(start_ns=0)
+    store = SQLiteStore(":memory:")
+    # The same record-less view, but the fills complete the order: the venue has
+    # nothing left to report because it *filled*, not because it vanished.
+    fill = FillReport(
+        ts_event=600,
+        ts_init=600,
+        cloid="0xabc",
+        symbol="BTC",
+        trade_id="t1",
+        quantity=Decimal("0.5"),
+        price=Decimal("41000"),
+    )
+    store.checkpoint(_saga("0xabc", OrderState.LIVE), ts_ns=500)
+    venue = _FillsWithoutARecordVenue(fill)
+
+    bus = InMemoryBus()
+    checks = checkpointer(store, clock=clock)
+    cache = checks.cache
+    cache.rebuild()
+    manager = ExecutionManager(bus=bus, exchange=venue, checkpointer=checks)
+    bus.subscribe(Signal, manager.on_signal)
+    bus.subscribe(ExecutionReport, manager.on_execution_report)
+    events: list[OrderEvent] = []
+    bus.subscribe(OrderEvent, lambda ev: _record(events, ev))
+    reconciler = Reconciler(
+        bus=bus, clock=clock, exchange=venue, cache=cache, config=ReconcileConfig()
+    )
+
+    with capture_events() as logs:
+        assert asyncio.run(reconciler.reconcile_startup()) is True
+
+    # Executed truth heals immediately and terminally — no grace wait, and no
+    # gate reading at all: there is no absence left to arm on once the fills
+    # have finished the saga (ADR-0011 inv 2/4).
+    recovered = store.get_order("0xabc")
+    assert recovered is not None
+    assert recovered.state is OrderState.FILLED
+    assert recovered.cum_qty == Decimal("0.5")
+    assert "ghost.reconciled" not in [log["event"] for log in logs]
+    filled = [ev for ev in events if isinstance(ev, OrderFilled)]
+    assert len(filled) == 1
+    assert filled[0].reconciliation is True

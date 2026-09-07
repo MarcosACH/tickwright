@@ -454,7 +454,19 @@ class Reconciler:
         # first: a terminal status (CANCELLED after a partial fill) is only
         # legal once the fills it followed are applied.
         await self._heal_fills(view)
-        if view.status is not None and not (view.status.status is OrderState.LIVE and view.fills):
+        if view.status is None:
+            # Fills and no order row. ``has_record`` is true of this view, but
+            # what the *gate* rules on is an absent order, and there is one
+            # here — the shape a partially-filled order cancelled while we were
+            # dead reads as, and the same one ``_resolve_open_order`` arms its
+            # clock on. The heal above was inv 4's cross-check, so what is left
+            # is either a saga those fills finished, which is terminal and has
+            # nothing to ghost, or that absence. Boot arms on it identically or
+            # it is still answering one absence shape faster than the cadence.
+            if order.state in _OPEN_ORDER_STATES:
+                await self._judge_ghost(order)
+            return
+        if not (view.status.status is OrderState.LIVE and view.fills):
             # A LIVE record alongside fills is stale by definition — the venue
             # reported it working before it executed; the fills are the truth.
             await self._bus.publish(replace(view.status, reconciliation=True))
