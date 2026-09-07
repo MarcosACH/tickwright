@@ -98,7 +98,7 @@ def _export_hostile_config(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TICKWRIGHT_HYPERLIQUID__SIGNING_KEY", "0xdeadbeef")
 
 
-def _spawn(cwd: Path, log: str) -> subprocess.Popen[bytes]:
+def _spawn(cwd: Path, log: Path) -> subprocess.Popen[bytes]:
     """The CLI under test, configured only by the ``.env`` in ``cwd``.
 
     The child inherits the shell otherwise, and exported ``TICKWRIGHT_*`` vars
@@ -111,15 +111,19 @@ def _spawn(cwd: Path, log: str) -> subprocess.Popen[bytes]:
     restart that correctly resolves nothing writes nothing to the store, so
     there is no durable state to poll and the only signal that boot finished is
     the child saying so.
+
+    Nothing reads stdout, so it goes to ``DEVNULL`` rather than a pipe: an
+    undrained ``PIPE`` would deadlock ``_terminate``'s ``wait()`` the day the
+    CLI prints anything there, and logging factories onto stderr regardless.
     """
     # Closed as soon as the child has its own duplicate of the descriptor —
     # the parent holding it open buys nothing and leaks a handle per life.
-    with (cwd / log).open("wb") as sink:
+    with log.open("wb") as sink:
         return subprocess.Popen(
             [sys.executable, "-m", "tickwright.app"],
             cwd=cwd,
             env={k: v for k, v in os.environ.items() if not k.startswith("TICKWRIGHT_")},
-            stdout=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
             stderr=sink,
         )
 
@@ -170,7 +174,7 @@ def test_cli_replays_trades_and_exits_zero_on_sigterm(
     first_log = tmp_path / "first.log"
     second_log = tmp_path / "second.log"
 
-    with _spawn(tmp_path, first_log.name) as process:
+    with _spawn(tmp_path, first_log) as process:
         try:
             # First life: the market shot fills, the low limit rests LIVE.
             _await_states(db, {_FILLED_CLOID: OrderState.FILLED, _RESTING_CLOID: OrderState.LIVE})
@@ -196,7 +200,7 @@ def test_cli_replays_trades_and_exits_zero_on_sigterm(
     # boot any more than it is in flight (ADR-0011 inv 3, as amended by #243).
     # The barrier arms the grace window and clears; the order is left exactly
     # as recovered, and the restored strategies stay quiet (no re-placement).
-    with _spawn(tmp_path, second_log.name) as second:
+    with _spawn(tmp_path, second_log) as second:
         try:
             _await_event(second_log, "engine.barrier_cleared")
         except BaseException:
