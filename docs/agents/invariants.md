@@ -142,3 +142,22 @@ Consumed by `/code-review` (any regression is BLOCKING) and `/python-codebase-ma
    — flat is the branch that writes. Live-only; paper validates the same bound and writes
    nothing.*
    (ADR-0044, ADR-0046, ADR-0040, ADR-0031)
+11. **No terminal "gone" resolution on a single read — in any phase, boot included.** An order is
+   ghost-resolved only after **continuous absence across the grace window** plus the fill-history
+   cross-check. The window is not a property of the cadence that happens to be running: the
+   startup mass rebuild puts an absent resting order to the same `GhostGate` the open-order cycle
+   does, so there is one place a "gone" verdict may be reached and one clock behind it. *Boot is
+   where this matters most and where the engine has least to work with. A restart moments after a
+   placement ack can read a venue whose record has not reached the read node, and the
+   recent-order protection window that exists for exactly that race is structurally unavailable
+   there — `Cache.rebuild()` clears event recency, so every recovered saga reads `None` and the
+   pre-filter has nothing to protect with. Grace is boot's only guard, which is the reason it may
+   not be skipped there rather than a detail of the rebuild. Boot therefore **arms** the window
+   and reports the pass successful: a read that succeeded has proved what the barrier asks of it,
+   and deferring a verdict is not failing to prove one — freezing instead would spend the whole
+   window and then fault startup over one absent order. The window runs from the boot instant, so
+   a boot re-driven across it ghosts on the startup pass itself and a returning record resets it.
+   The cost of getting this wrong is asymmetric: a genuinely resting order resolved `REJECTED` is
+   abandoned with real exposure behind it, against a slower first ghost. Unchanged, and a
+   different resolution: a `PENDING`/`SUBMITTED` saga the venue positively has no record of
+   resolves `FAILED`.* (ADR-0011 inv 3, ADR-0010)

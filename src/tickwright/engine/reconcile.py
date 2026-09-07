@@ -8,7 +8,17 @@ against the account materialisation that precedes it (``barrier.py``).
 *Continuous*: two cycles thereafter — a fast in-flight check resolving
 ``SUBMITTED`` orders that never acked, and a slower open-order/ghost reconcile
 in which only continuous absence across the grace window (with a fill-history
-cross-check on every read) resolves a resting order terminally. Each heal is a
+cross-check on every read) resolves a resting order terminally.
+
+**The grace window is not a runtime-only rule** (ADR-0011 inv 3, as amended):
+startup puts an absent resting order to the same ``GhostGate``, so boot *arms*
+the window rather than concluding on it. Boot has the least standing to call an
+order gone — a restart moments after a placement ack reads a venue whose record
+has not propagated — and it has the least to work with, since ``Cache.rebuild``
+clears event recency and leaves grace as its only guard. The pass still reports
+success: the read succeeded, only the verdict is deferred, and freezing instead
+would spend the whole window and then fault startup over one absent order. Each
+heal is a
 ``reconciliation``-flagged synthetic replica of a raw venue fact, published on
 the bus and routed through the ``ExecutionManager`` — the one saga writer — so
 dedup by ``event_id`` and ``trade_id`` makes every pass idempotent: re-running
