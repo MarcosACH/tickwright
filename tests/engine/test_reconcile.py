@@ -31,6 +31,7 @@ from tickwright.domain import (
     OrderLive,
     OrderRejected,
     OrderState,
+    OrderStatusReport,
     OrderType,
     PlaceOrder,
     Side,
@@ -557,3 +558,97 @@ def test_on_the_paper_path_the_barrier_always_clears() -> None:
     recovered = store.get_order("0xabc")
     assert recovered is not None
     assert recovered.state is OrderState.LIVE
+
+
+class _FlakyRecordVenue(_DarkVenue):
+    """A venue whose record for a cloid comes and goes; ``present`` is what the
+    next read answers with. The absence is a *read node* that has not caught up,
+    which is exactly the condition boot cannot distinguish from a real vanish."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.present = False
+
+    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
+        self.reads += 1
+        if not self.present:
+            return VenueOrderView(status=None)
+        return VenueOrderView(
+            status=OrderStatusReport(
+                ts_event=600,
+                ts_init=600,
+                cloid=cloid,
+                symbol="BTC",
+                status=OrderState.LIVE,
+            )
+        )
+
+
+def _live_saga(cloid: str) -> Order:
+    """A resting saga that *applied* its LIVE ack, so a venue record replaying
+    the same fact dedups by ``event_id`` instead of re-announcing it."""
+    saga = _saga(cloid, OrderState.SUBMITTED)
+    saga.apply(
+        OrderLive(
+            ts_event=600,
+            ts_init=600,
+            cloid=cloid,
+            strategy_id="trivial",
+            signal_id="trivial:BTC:1",
+            symbol="BTC",
+        )
+    )
+    return saga
+
+
+def test_a_record_returning_after_boot_restarts_the_window_it_armed() -> None:
+    clock = ManualClock(start_ns=0)
+    store = SQLiteStore(":memory:")
+    store.checkpoint(_live_saga("0xabc"), ts_ns=500)
+    venue = _FlakyRecordVenue()
+
+    bus = InMemoryBus()
+    checks = checkpointer(store, clock=clock)
+    cache = checks.cache
+    cache.rebuild()
+    manager = ExecutionManager(bus=bus, exchange=venue, checkpointer=checks)
+    bus.subscribe(Signal, manager.on_signal)
+    bus.subscribe(ExecutionReport, manager.on_execution_report)
+    events: list[OrderEvent] = []
+    bus.subscribe(OrderEvent, lambda ev: _record(events, ev))
+    reconciler = Reconciler(
+        bus=bus, clock=clock, exchange=venue, cache=cache, config=ReconcileConfig()
+    )
+
+    async def scenario() -> None:
+        # Boot reads an absence and arms the window (behavior above).
+        assert await reconciler.reconcile_startup() is True
+
+        # The read node catches up well inside it: the order was resting all
+        # along. Presence resets, so boot's arming is a measurement that later
+        # evidence can restart — not a countdown already running.
+        venue.present = True
+        await clock.sleep(50.0)
+        assert await reconciler.reconcile_open_orders() is True
+
+        # Absent again, now 100s after boot — past the 90s window boot armed.
+        # It must not ghost: this is a *new* run, 0s old.
+        venue.present = False
+        await clock.sleep(50.0)
+        with capture_events() as logs:
+            assert await reconciler.reconcile_open_orders() is True
+        order = store.get_order("0xabc")
+        assert order is not None
+        assert order.state is OrderState.LIVE
+        assert "ghost.reconciled" not in [log["event"] for log in logs]
+
+        # And the restarted run still measures: one window past the *reset*,
+        # not past boot, the order is gone for good.
+        await clock.sleep(91.0)
+        assert await reconciler.reconcile_open_orders() is True
+        order = store.get_order("0xabc")
+        assert order is not None
+        assert order.state is OrderState.REJECTED
+
+    asyncio.run(scenario())
+    assert [type(ev) for ev in events] == [OrderRejected]
