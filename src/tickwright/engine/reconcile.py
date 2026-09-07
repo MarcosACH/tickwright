@@ -307,6 +307,21 @@ class Reconciler:
         if order.is_terminal:
             self._ghost_gate.record_present(order.cloid)
             return
+        await self._judge_ghost(order)
+
+    async def _judge_ghost(self, order: Order) -> None:
+        """Put one absent, non-terminal reading of ``order`` to the gate, and act
+        on its verdict — ADR-0011 inv 3, from **every** phase that reads an
+        absence.
+
+        This is the one place a "gone" conclusion may be drawn, which is the
+        point: the startup pass and the open-order cadence ask the same question
+        of the same per-cloid gate, so boot cannot answer it more aggressively
+        than the running engine does. Boot instead *arms* the grace clock — the
+        window is then measured from the boot instant rather than from the first
+        cadence tick, and a boot that re-drives long enough for it to elapse
+        ghosts on the startup pass itself.
+        """
         verdict = self._ghost_gate.evaluate(
             order.cloid,
             now_ns=self._clock.timestamp_ns(),
@@ -382,11 +397,19 @@ class Reconciler:
         """Align one saga with the venue's view of its cloid."""
         if not view.has_record:
             if order.state in _OPEN_ORDER_STATES:
-                # The venue once ACKed this order as working, so an empty read
-                # means it is *gone*, not un-sent: the ghost taxonomy applies —
-                # REJECTED from LIVE, CANCELLED with fills preserved or after a
-                # requested cancel — never FAILED (ADR-0010/0011 resolutions).
-                await self._resolve_ghost(order)
+                # The venue once ACKed this order as working, so if it is absent
+                # it is *gone*, not un-sent: the ghost taxonomy applies — REJECTED
+                # from LIVE, CANCELLED with fills preserved or after a requested
+                # cancel — never FAILED (ADR-0010/0011 resolutions). **Which
+                # taxonomy** is settled here; **whether it is gone at all** is the
+                # gate's, on one absent read no differently at boot than in
+                # flight. Only startup reaches this branch — the two continuous
+                # cycles call ``_adopt`` on a record they already have — so this
+                # is exactly where boot used to conclude on a single read what
+                # the cadence waits a grace window to conclude, and where a
+                # restart moments after a placement ack could abandon a resting
+                # order the read node simply had not propagated yet.
+                await self._judge_ghost(order)
                 return
             # A successful read with no status and no fills is positive proof
             # the order never landed: resolve FAILED (ADR-0010/0011) — never a

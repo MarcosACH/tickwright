@@ -209,11 +209,13 @@ def test_recovered_pending_intent_the_venue_never_saw_resolves_failed() -> None:
     assert isinstance(view, VenueOrderView) and not view.has_record
 
 
-def test_recovered_live_saga_the_venue_lost_ghost_resolves_rejected_not_failed() -> None:
+def test_a_recovered_live_saga_absent_at_boot_is_not_ghosted_on_one_read() -> None:
     clock = ManualClock(start_ns=2_000)
     store = SQLiteStore(":memory:")
-    # The venue outlived our crash but lost this once-ACKed order (a paper
-    # restart, an expiry, a venue-side purge): gone is not the same as un-sent.
+    # The venue outlived our crash and has no record of this once-ACKed order.
+    # That reads the same whether the order is genuinely gone or the read node
+    # simply has not propagated it yet, and boot is where the second is most
+    # likely — so one absent read is not proof (ADR-0011 inv 3).
     exchange, _ = _surviving_venue(clock)
 
     store.checkpoint(_saga("0xabc", OrderState.LIVE), ts_ns=500)
@@ -222,14 +224,14 @@ def test_recovered_live_saga_the_venue_lost_ghost_resolves_rejected_not_failed()
     with capture_events() as logs:
         assert asyncio.run(reconciler.reconcile_startup()) is True
 
-    # The ghost taxonomy applies (ADR-0010/0011 resolutions): REJECTED from
-    # LIVE — FAILED would claim the send never landed, which the earlier ACK
-    # disproves, and the FSM rightly forbids LIVE → FAILED.
+    # Nothing terminal: the saga is left exactly as recovered, for the grace
+    # window to rule on. Boot may not answer "is this order gone?" more
+    # aggressively than the running engine does.
     recovered = store.get_order("0xabc")
     assert recovered is not None
-    assert recovered.state is OrderState.REJECTED
-    assert not any(isinstance(ev, OrderFailed) for ev in events)
-    assert "ghost.reconciled" in [log["event"] for log in logs]
+    assert recovered.state is OrderState.LIVE
+    assert events == []
+    assert "ghost.reconciled" not in [log["event"] for log in logs]
 
 
 def test_recovered_saga_heals_the_fill_it_missed_while_dead() -> None:
