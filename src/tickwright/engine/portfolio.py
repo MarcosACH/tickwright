@@ -208,6 +208,77 @@ class FundingChange:
     funding_mark: tuple[str, int]
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class LedgerReading:
+    """The ledger's whole side of one reconcile pass, folded once.
+
+    The account cadence compares one reading against one reading. Its venue side
+    already had a name — the ``VenueAccountState`` the anchor returns — and this
+    is the name the ledger's side did not have: before it, the cycle took five
+    consecutive accessor calls and threaded their results field-by-field through
+    eight classification sites, with "one fold per side per pass" restated in
+    prose at each of them and enforced nowhere.
+
+    Every member is a fold over **every** partition, so taking them once is what
+    halves the folds *and* what makes a second reading structurally unavailable
+    later in the pass — the property ``domain.valuation`` states about assembling
+    a view in one call, one grain up. That is load-bearing rather than tidy on
+    two counts: the pass **writes**, so a view taken again after the heal reports
+    the venue as disagreeing by exactly the amount the cycle just moved, and the
+    mode guard puts a real ``await`` between the classification and that write
+    (ADR-0046 §4), so "the reads are synchronous" stopped being an argument.
+
+    Deliberately **not** carrying the leverage book. ``leverage_for`` reads
+    configuration resolved at startup, so no fill can move it and there is no
+    pass-coherence question for it to be part of; folding it in would make this
+    type mean "everything the cycle reads" rather than "the ledger's side, as of
+    one instant", and the drift check would then look like a fold it is not
+    (ADR-0044 §10).
+
+    A *reading* rather than a snapshot or a view: ``AccountView`` and
+    ``PositionView`` are the ``Portfolio`` seam's words for what a strategy is
+    handed (``CONTEXT.md``), and this is the engine concrete's wider surface,
+    read by one caller for one comparison.
+
+    The four folds are ``Mapping`` and not ``dict``, because ``frozen`` is
+    shallow: it stops a member being rebound and says nothing about the map it
+    points at, so the type that exists to hold a pass's figures still would not
+    hold them. Read-only is the whole of what every reader wants — the
+    classifiers ``get`` and iterate and nothing more — and it is the annotation
+    the helpers this replaced already carried before the fields absorbed them.
+    """
+
+    account: AccountView
+    net: Mapping[str, Decimal]
+    """The account-net signed size per symbol, over every partition."""
+    unrealized: Mapping[str, Decimal | None]
+    """Per-symbol open PnL against the marks held at the reading."""
+    notional: Mapping[str, Decimal | None]
+    """Per-symbol notional — the reference ADR-0046 §5 scales the band by."""
+    mark_observed: Mapping[str, int]
+    """When each cached mark was stamped: the age input, never a price."""
+
+    def holds(self, symbol: str) -> bool:
+        """Whether the ledger carries exposure in ``symbol`` — the cycle's one
+        held-ness predicate, and the reason it lives here rather than beside its
+        readers.
+
+        Flat and absent are the **same** answer, which is the definition Tier-1
+        already works to: the size check ranges over the union of both symbol
+        sets with a missing side reading zero, so a symbol traded back to flat
+        and a symbol never traded are one state there. A closed position leaves
+        its record behind at zero, so reading presence-in-the-map as held instead
+        would make every symbol this engine has ever closed a held one.
+
+        On the type that owns ``net`` because it had two spellings otherwise: a
+        method on the cycle's class that a module-level helper could not reach,
+        and the same expression written out again inside that helper. One
+        definition in two places is what the class docstring claiming "the
+        cycle's one definition of held-ness" was actually describing.
+        """
+        return self.net.get(symbol, _ZERO) != _ZERO
+
+
 class PortfolioProjection:
     """The one owner of "what do I hold, and what has it earned"."""
 
@@ -992,7 +1063,7 @@ class PortfolioProjection:
         return self._view(
             position,
             net=self.account_net(),
-            upnl=self.account_unrealized(),
+            upnl=self._account_unrealized(),
             equity=account.equity,
             maintenance=account.total_maintenance_margin,
         )
@@ -1014,7 +1085,7 @@ class PortfolioProjection:
         of one threshold, and two calls could straddle a fill.
         """
         net = self.account_net()
-        upnl = self.account_unrealized()
+        upnl = self._account_unrealized()
         account = self.account()
         return tuple(
             self._view(
@@ -1026,6 +1097,35 @@ class PortfolioProjection:
             )
             for (owner, _symbol), position in self._positions.items()
             if owner == strategy_id and not position.is_flat
+        )
+
+    def ledger_reading(self) -> LedgerReading:
+        """The ledger's whole side of one reconcile pass, folded in one call.
+
+        The one read the account cadence takes, and the reason three of the
+        folds below it are private: each had exactly one caller and a docstring
+        saying so, and every accessor the comparison grew wanted a fourth. The
+        surface the cycle asks for is a reading, so a compared field is added to
+        this type rather than to this class.
+
+        Assembled here rather than by the caller because that is what makes a
+        second reading unavailable later in the pass instead of merely
+        unwritten — the property ``domain.valuation`` states about assembling a
+        view in one call, one grain up. It is load-bearing: the pass heals the
+        cash line and ``equity`` is ``cash + Σ uPnL``, so a term re-read
+        afterwards reports the venue as disagreeing by exactly the amount the
+        cycle just moved (ADR-0034).
+
+        ``observe_venue_liquidation`` is deliberately **not** folded in. It is a
+        write, and one that must precede this read; hiding it inside a read verb
+        would make the ordering invisible at the call site that depends on it.
+        """
+        return LedgerReading(
+            account=self.account(),
+            net=self.account_net(),
+            unrealized=self._account_unrealized(),
+            notional=self._account_notional(),
+            mark_observed=self._mark_observed(),
         )
 
     def account_net(self) -> dict[str, Decimal]:
@@ -1044,29 +1144,32 @@ class PortfolioProjection:
         """
         return account_net_size(self._positions.values())
 
-    def account_unrealized(self) -> dict[str, Decimal | None]:
+    def _account_unrealized(self) -> dict[str, Decimal | None]:
         """The account-grain uPnL per symbol, against the marks held right now.
 
-        The Tier-2 counterpart to ``account_net`` and public for the same
-        caller: the venue holds one position per symbol, so the reconcile's
-        cross-check needs the symbol's Σ over every partition rather than the
-        per-partition slice a ``PositionView`` carries (ADR-0041 §4/§8).
-        ``None`` for a symbol whose valuation genuinely needs a mark that is
-        absent — never a fabricated zero (ADR-0041 §6).
+        The Tier-2 counterpart to ``account_net``: the venue holds one position
+        per symbol, so the reconcile's cross-check needs the symbol's Σ over
+        every partition rather than the per-partition slice a ``PositionView``
+        carries (ADR-0041 §4/§8). ``None`` for a symbol whose valuation
+        genuinely needs a mark that is absent — never a fabricated zero
+        (ADR-0041 §6).
+
+        Private where ``account_net`` is not: this reaches the cycle as a member
+        of ``ledger_reading``, and nothing outside asks for the fold alone.
         """
         return account_unrealized_pnl(
             self._positions.values(),
             {symbol: mark.price for symbol, mark in self._marks.items()},
         )
 
-    def account_notional(self) -> dict[str, Decimal | None]:
+    def _account_notional(self) -> dict[str, Decimal | None]:
         """The account-grain notional per symbol, against the marks held now.
 
-        The third fold the reconcile cycle takes per pass, beside ``account_net``
-        and ``account_unrealized``, and public for the same caller: it is the
-        reference ADR-0046 §5 scales the Tier-2 alert band by — the notional a
-        quantity's mark error actually flows through — per symbol for a
-        position's uPnL and Σ-over-symbols for the account grain's figures.
+        The third fold of ``ledger_reading``, beside ``account_net`` and
+        ``_account_unrealized``: it is the reference ADR-0046 §5 scales the
+        Tier-2 alert band by — the notional a quantity's mark error actually
+        flows through — per symbol for a position's uPnL and Σ-over-symbols for
+        the account grain's figures.
 
         Not readable off ``AccountView``: ``effective_leverage`` is the only
         field the notional reaches, and it reaches it divided by the backing
@@ -1078,7 +1181,7 @@ class PortfolioProjection:
             {symbol: mark.price for symbol, mark in self._marks.items()},
         )
 
-    def mark_observed(self) -> dict[str, int]:
+    def _mark_observed(self) -> dict[str, int]:
         """When each cached mark was stamped — the **age** input, not a price.
 
         ADR-0039 keeps a mark's ``ts`` for exactly one reader. It deliberately
