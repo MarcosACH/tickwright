@@ -73,7 +73,7 @@ def test_mocked_frames_reach_a_paper_fill_through_the_whole_pipeline() -> None:
 
         bus.subscribe(OrderEvent, see_fill)
 
-        run = asyncio.create_task(feed.start())
+        run = asyncio.create_task(feed.run())
         await asyncio.wait_for(filled.wait(), timeout=2)
         await feed.stop()
         await asyncio.wait_for(run, timeout=2)

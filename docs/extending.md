@@ -95,7 +95,7 @@ auth, quirk translation — and importing no other adapter. It provides both a `
 `Exchange`, and sources its own `InstrumentSpec`s. Study
 [`venues/hyperliquid/`](../src/tickwright/venues/hyperliquid/) as the reference.
 
-- [ ] Create `src/tickwright/venues/<venue>/` with a `MarketFeed` adapter (`start`/`stop`, publishes
+- [ ] Create `src/tickwright/venues/<venue>/` with a `MarketFeed` adapter (`start`/`run`/`stop`, publishes
   `MarketTick`s **and `MarkTick`s** — the obligation and its consequence are stated on the
   [`MarketFeed` Protocol](../src/tickwright/domain/protocols.py) itself, and made executable by the
   shared feed contract in the TDD bullet below), an `Exchange` adapter (`start`/`run`/`stop` plus
@@ -121,7 +121,9 @@ auth, quirk translation — and importing no other adapter. It provides both a `
   `start()`, so it **must not hang**: a wedged boot has no bound and no operator escape (the task
   that watches SIGINT is not created until the start sequence returns, so SIGKILL is the only way
   out). Put a timeout on any blocking venue call you make here.
-  `run()` is the **supervised long-lived half** — the peer of `MarketFeed.start()`, one seam over.
+  `run()` is the **supervised long-lived half** — the peer of `MarketFeed.run()`, one seam over,
+  and since [#227](https://github.com/MarcosACH/tickwright/issues/227) the two seams take the same
+  three members meaning the same three things, so this whole bullet reads across both.
   Anything of yours that loops for the life of the run goes here and nowhere else: the runner
   task-creates it inside its `TaskGroup`, so a failure in it aborts the group and faults the engine
   **at the moment it happens**. A loop you spawn for yourself in `start()` has no fault channel at

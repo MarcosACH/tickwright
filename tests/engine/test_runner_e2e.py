@@ -1145,6 +1145,9 @@ class _HangingFeed:
     async def start(self) -> None:
         return None
 
+    async def run(self) -> None:
+        return None
+
     async def stop(self) -> None:
         await asyncio.Event().wait()
 
@@ -1158,6 +1161,9 @@ class _BlockingFeed:
         self.started = asyncio.Event()
 
     async def start(self) -> None:
+        return None
+
+    async def run(self) -> None:
         self.started.set()
         await asyncio.Event().wait()
 
@@ -1400,6 +1406,9 @@ class _FaultingFeed:
         self._timeline = timeline if timeline is not None else []
 
     async def start(self) -> None:
+        return None
+
+    async def run(self) -> None:
         raise InvariantViolation("the read loop broke an engine assumption")
 
     async def stop(self) -> None:

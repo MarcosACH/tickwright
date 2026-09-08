@@ -135,7 +135,33 @@ class MarketFeed(Protocol):
     """
 
     async def start(self) -> None:
-        """Begin producing ticks. ``ReplayFeed`` runs to end-of-file."""
+        """Reach the venue and return — never the producing loop itself.
+
+        The runner awaits this inline at ADR-0024 step 7, immediately ahead of
+        creating ``run()``'s task, so it **must return**: it is the one instant
+        at which an unreachable feed can fail the boot. A ``start()`` that was
+        the loop folded a refused first connect into an infinite backoff inside
+        the supervised task, and the engine reached ``RUNNING`` with a feed that
+        had never connected and nothing anywhere saying so.
+
+        Returning at once is a legitimate implementation rather than an
+        omission, and ``ReplayFeed`` is it: a file has nothing to reach. Put a
+        timeout on any blocking venue call made here — the runner neither
+        retries nor bounds this call.
+        """
+        ...
+
+    async def run(self) -> None:
+        """Produce ticks until stopped: the supervised long-lived half.
+
+        The peer of ``Exchange.run()``, one seam over, and supervised the same
+        way — the runner task-creates it in its ``TaskGroup``, so a failure here
+        aborts the group and faults the engine at the moment it happens. A loop
+        spawned for yourself in ``start()`` would have no fault channel at all.
+
+        Ending on its own ends the task, not the run: ``ReplayFeed`` returns at
+        end-of-file and the engine keeps going until told to stop.
+        """
         ...
 
     async def stop(self) -> None:

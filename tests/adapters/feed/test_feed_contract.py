@@ -33,6 +33,9 @@ class TradesOnlyFeed:
         self._symbols = symbols
 
     async def start(self) -> None:
+        """Nothing to reach: the stub's venue is a for-loop."""
+
+    async def run(self) -> None:
         for seq, symbol in enumerate(self._symbols):
             await self._bus.publish(
                 MarketTick(
@@ -66,7 +69,7 @@ def test_a_feed_that_never_publishes_a_mark_fails_the_contract() -> None:
 
     assert isinstance(feed, MarketFeed)
 
-    asyncio.run(feed.start())
+    asyncio.run(feed.run())
 
     with pytest.raises(AssertionError, match=r"\['BTC', 'ETH'\]"):
         assert_every_traded_symbol_is_marked(transcript, feed="TradesOnlyFeed")

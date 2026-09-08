@@ -81,7 +81,7 @@ def _run_feed[E: (MarketTick, MarkTick)](
             clock=clock,
             connect=connect,
         )
-        run = asyncio.create_task(feed.start())
+        run = asyncio.create_task(feed.run())
         await asyncio.wait_for(enough.wait(), timeout=2)
         await feed.stop()
         await asyncio.wait_for(run, timeout=2)
@@ -190,7 +190,7 @@ def test_slow_consumer_gets_only_the_latest_tick_per_symbol_with_one_lagged_per_
             connect=connect,
         )
         with capture_events() as logs:
-            run = asyncio.create_task(feed.start())
+            run = asyncio.create_task(feed.run())
             await asyncio.wait_for(first_delivered.wait(), timeout=2)
             # The publish is stuck in the slow consumer; the reader must still
             # drain the socket to the end before we let the consumer go.
@@ -265,7 +265,7 @@ def test_a_publish_that_raises_tears_the_socket_reader_down_with_it() -> None:
             config=HyperliquidConfig(symbols=["BTC"]), bus=bus, clock=ManualClock(), connect=connect
         )
         with pytest.raises(ExceptionGroup) as raised:
-            await asyncio.wait_for(feed.start(), timeout=2)
+            await asyncio.wait_for(feed.run(), timeout=2)
 
         # The subscriber's fault alone: the reader's cancellation is the group's
         # own doing and is not reported as a second failure.
@@ -314,7 +314,7 @@ def test_ws_drop_reconnects_with_backoff_resubscribes_and_resumes() -> None:
         feed = HyperliquidFeed(
             config=HyperliquidConfig(symbols=["BTC"]), bus=bus, clock=clock, connect=connect
         )
-        run = asyncio.create_task(feed.start())
+        run = asyncio.create_task(feed.run())
         await asyncio.wait_for(resumed.wait(), timeout=2)
         await feed.stop()
         await asyncio.wait_for(run, timeout=2)
@@ -353,7 +353,7 @@ def test_stop_does_not_trigger_a_reconnect() -> None:
         feed = HyperliquidFeed(
             config=HyperliquidConfig(symbols=["BTC"]), bus=bus, clock=ManualClock(), connect=connect
         )
-        run = asyncio.create_task(feed.start())
+        run = asyncio.create_task(feed.run())
         await asyncio.wait_for(got_one.wait(), timeout=2)
         await feed.stop()
         await asyncio.wait_for(run, timeout=2)
@@ -467,6 +467,56 @@ def test_a_mark_frame_we_cannot_read_is_dropped_and_named_not_faulted(data: obje
     assert [record["event"] for record in logs] == ["feed.frame_dropped"]
 
 
+def test_the_live_feed_connects_in_start_and_leaves_the_loop_to_run() -> None:
+    """The lifecycle half of the seam, now shaped like ``Exchange``'s (#226).
+
+    ``start()`` opens and subscribes the socket and **returns**; ``run()`` is the
+    long-lived half the runner supervises. The bound on ``start()`` is the
+    assertion rather than a guard against a slow test: a ``start()`` that *is*
+    the loop never returns at all, which is precisely the defect — there was no
+    instant at which the runner could fail a boot on an unreachable feed, so an
+    engine could reach ``RUNNING`` with a feed that had never connected.
+
+    Nothing is read off the socket until ``run()``, so ADR-0024's ordering is
+    untouched: the connect is the last thing before the supervised task, not a
+    socket left buffering across the barrier.
+    """
+
+    async def main() -> None:
+        bus = InMemoryBus()
+        transcript = record_market_data(bus)
+        connection = FakeWsConnection([trades_frame(trade("BTC", "43000", 1))])
+        connects = 0
+
+        async def connect(url: str) -> FakeWsConnection:
+            nonlocal connects
+            connects += 1
+            return connection
+
+        feed = HyperliquidFeed(
+            config=HyperliquidConfig(symbols=["BTC"]),
+            bus=bus,
+            clock=ManualClock(),
+            connect=connect,
+        )
+
+        await asyncio.wait_for(feed.start(), timeout=2)
+
+        assert connects == 1
+        assert connection.sent, "start() must subscribe the socket it opened"
+        assert transcript.ticks == [], "start() must not consume — that is run()'s"
+
+        run = asyncio.create_task(feed.run())
+        await asyncio.wait_for(connection.drained.wait(), timeout=2)
+        await feed.stop()
+        await asyncio.wait_for(run, timeout=2)
+
+        assert [t.symbol for t in transcript.ticks] == ["BTC"]
+        assert connects == 1, "run() must consume the socket start() opened, not open a second"
+
+    asyncio.run(main())
+
+
 def _drive_contract(
     frames: list[str], *, symbols: list[str], expected: int
 ) -> MarketDataTranscript:
@@ -508,7 +558,7 @@ def _drive_contract(
             clock=ManualClock(start_ns=4_000),
             connect=connect,
         )
-        run = asyncio.create_task(feed.start())
+        run = asyncio.create_task(feed.run())
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(enough.wait(), timeout=2)
         await feed.stop()
@@ -629,7 +679,7 @@ def test_a_non_finite_tick_figure_is_dropped_not_ticked(figure: str) -> None:
             config=HyperliquidConfig(symbols=["BTC"]), bus=bus, clock=clock, connect=connect
         )
         with capture_events() as logs:
-            run = asyncio.create_task(feed.start())
+            run = asyncio.create_task(feed.run())
             await asyncio.wait_for(enough.wait(), timeout=2)
             await feed.stop()
             await asyncio.wait_for(run, timeout=2)
@@ -687,7 +737,7 @@ def test_a_re_typed_tick_figure_is_dropped_not_coerced(figure: object) -> None:
             config=HyperliquidConfig(symbols=["BTC"]), bus=bus, clock=clock, connect=connect
         )
         with capture_events() as logs:
-            run = asyncio.create_task(feed.start())
+            run = asyncio.create_task(feed.run())
             await asyncio.wait_for(enough.wait(), timeout=2)
             await feed.stop()
             await asyncio.wait_for(run, timeout=2)
@@ -733,7 +783,7 @@ def test_malformed_frames_are_skipped_and_named_while_good_frames_keep_flowing()
             config=HyperliquidConfig(symbols=["BTC"]), bus=bus, clock=clock, connect=connect
         )
         with capture_events() as logs:
-            run = asyncio.create_task(feed.start())
+            run = asyncio.create_task(feed.run())
             await asyncio.wait_for(enough.wait(), timeout=2)
             await feed.stop()
             await asyncio.wait_for(run, timeout=2)

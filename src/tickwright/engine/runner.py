@@ -257,8 +257,19 @@ class Engine:
                 # possible after the barrier cleared, so nothing places before
                 # reconciliation completes. Replay end-of-file ends the task but
                 # not the run — like the CLI, the engine stops only when told to.
+                # Reach the venue inline first (ADR-0024 step 7). This is the
+                # instant the feed seam previously had nowhere to put: a
+                # ``start()`` that *was* the loop folded a refused first connect
+                # into an infinite backoff inside the supervised task, so the
+                # engine reached RUNNING with a feed that had never connected
+                # and nothing said so. Raising here aborts the group like any
+                # other boot refusal. It sits immediately ahead of the task, not
+                # earlier beside ``Exchange.start()``, because nothing is read
+                # off the socket until ``run()`` and connecting at step 4 would
+                # leave it buffering across the whole barrier.
+                await self._feed.start()
                 named_event(NamedEvent.ENGINE_FEED_STARTED)
-                self._feed_task = tg.create_task(self._feed.start())
+                self._feed_task = tg.create_task(self._feed.run())
                 tg.create_task(self._stop_when_requested())
         except Exception as exc:
             # The first raw-handler exception aborted the TaskGroup and
