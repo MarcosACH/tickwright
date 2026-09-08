@@ -461,8 +461,11 @@ def account_view(
     offsetting legs net to a book with no exposure, where a per-partition fold
     reports collateral against a position the venue does not have (ADR-0035).
     The account-net fold is therefore taken first and the arithmetic run once per
-    symbol, through the **same** private helpers ``position_view`` uses — so a
-    total can never disagree with the views it is read beside.
+    symbol, through the **same** helpers ``position_view`` uses — so a total can
+    never disagree with the views it is read beside. Two of the three Σs are now
+    literally sums over the public per-symbol folds the reconcile cadence reads
+    (``account_notional``, ``account_margin_used``), which is the strong form of
+    that promise: the mode split is not written twice and cannot come apart.
 
     ``leverage`` is the resolved book rather than one spec, and ``specs`` the
     instrument universe, because this ranges over symbols where ``position_view``
@@ -471,25 +474,14 @@ def account_view(
     """
     held = tuple(positions)
     equity = _equity(account, held, marks)
-    net = account_net_size(held)
-    upnl = account_unrealized_pnl(held, marks)
-    collateral = _isolated_collateral_by_symbol(held)
+    notionals = account_notional(held, marks)
+    posted = account_margin_used(held, marks, leverage=leverage)
     total_notional: Decimal | None = _ZERO
     total_margin_used: Decimal | None = _ZERO
     total_maintenance_margin: Decimal | None = _ZERO
-    for symbol, size in net.items():
-        symbol_leverage = leverage.for_symbol(symbol)
-        notional = _notional(size, marks.get(symbol))
-        backing = _backing_collateral(
-            leverage=symbol_leverage,
-            isolated_collateral=collateral.get(symbol, _ZERO),
-            account_unrealized_pnl=upnl.get(symbol),
-            account_equity=equity,
-        )
+    for symbol, notional in notionals.items():
         total_notional = _total(total_notional, notional)
-        total_margin_used = _total(
-            total_margin_used, _margin_used(notional, leverage=symbol_leverage, backing=backing)
-        )
+        total_margin_used = _total(total_margin_used, posted.get(symbol))
         total_maintenance_margin = _total(
             total_maintenance_margin, _maintenance_margin(notional, spec=specs.get(symbol))
         )
@@ -587,6 +579,48 @@ def account_notional(
         symbol: _notional(size, marks.get(symbol))
         for symbol, size in account_net_size(positions).items()
     }
+
+
+def account_margin_used(
+    positions: Iterable[Position], marks: Mapping[str, Decimal], *, leverage: LeverageBook
+) -> dict[str, Decimal | None]:
+    """Per-symbol ``margin_used`` at the **account** grain, by each mode's rule.
+
+    ``account_notional``'s sibling, public for the same caller and on the same
+    argument: ADR-0040 §6 compares this figure per symbol, the venue publishes
+    one per position, and ``AccountView`` carries only the Σ — which has already
+    added the symbols together and cannot be taken apart again (ADR-0041 §4/§8).
+
+    Folded over the symbol's account-net size, so two strategies holding
+    offsetting legs post collateral against the position the venue has rather
+    than against each leg (ADR-0035). Both the arithmetic and the mode split are
+    ``_margin_used``'s and ``_backing_collateral``'s, unchanged, so a symbol read
+    here can never disagree with the ``PositionView`` it is read beside.
+
+    ``account_equity`` is passed as ``None`` deliberately, and it is not a
+    missing input: it is cross's *backing*, which is what ``effective_leverage``
+    and ``liquidation_price`` divide and subtract against, while cross's margin
+    is ``notional / leverage`` and never touches it (ADR-0040 §3). Threading the
+    real equity through would read as a term this figure depends on, and the
+    fold would then need an account it has no other use for.
+    """
+    held = tuple(positions)
+    upnl = account_unrealized_pnl(held, marks)
+    collateral = _isolated_collateral_by_symbol(held)
+    posted: dict[str, Decimal | None] = {}
+    for symbol, size in account_net_size(held).items():
+        symbol_leverage = leverage.for_symbol(symbol)
+        posted[symbol] = _margin_used(
+            _notional(size, marks.get(symbol)),
+            leverage=symbol_leverage,
+            backing=_backing_collateral(
+                leverage=symbol_leverage,
+                isolated_collateral=collateral.get(symbol, _ZERO),
+                account_unrealized_pnl=upnl.get(symbol),
+                account_equity=None,
+            ),
+        )
+    return posted
 
 
 def _equity(
