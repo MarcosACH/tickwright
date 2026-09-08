@@ -117,6 +117,17 @@ class FakeWsConnection:
         self._closed = asyncio.Event()
         self._drop_when_drained = drop_when_drained
 
+    @property
+    def closed(self) -> bool:
+        """Whether ``close()`` was reached — a release is only observable here.
+
+        The ``_closed`` event exists for ``__anext__`` to park on, which makes a
+        closed socket indistinguishable from an idle one to a *reader*. A caller
+        asserting that something was released has no reader to ask, so it reads
+        this instead.
+        """
+        return self._closed.is_set()
+
     async def send(self, message: str) -> None:
         self.sent.append(message)
 

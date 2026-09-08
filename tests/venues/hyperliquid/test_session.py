@@ -181,6 +181,100 @@ def test_stopping_a_session_that_never_connected_is_safe() -> None:
     asyncio.run(main())
 
 
+def test_a_session_that_started_but_never_ran_still_closes_its_socket() -> None:
+    """``start()``'s own promise (#227): the socket it opens is subscribed and
+    left idle for ``run()``, and a caller that never runs still gets it released.
+
+    Reached for real on the fault path. ``start()`` is awaited inline at ADR-0024
+    step 7, immediately *before* the supervised task is created, so a boot that
+    faults in between — another step raising, a signal — walks the teardown with
+    a subscribed socket nobody ever consumed. Nothing else in the run would close
+    it, and a live deployment leaks a venue connection per faulted boot.
+
+    The complement of ``test_stopping_a_session_that_never_connected_is_safe``
+    above: that one asserts there is nothing to close, this one that there is and
+    it is closed.
+    """
+    connection = FakeWsConnection([])
+    driver = _Driver()
+    connect, asked = _connector([connection])
+
+    async def main() -> None:
+        session = WsSession(
+            config=CONFIG,
+            clock=RecordingClock(),
+            connect=connect,  # type: ignore[arg-type]
+            subscribe=driver.subscribe,
+            consume=driver.consume,
+        )
+        await session.start()
+        await session.stop()
+
+    asyncio.run(main())
+
+    assert len(asked) == 1
+    assert driver.subscribed == [connection]  # start() subscribes what it opens
+    assert connection.sent == ["subscribe"]
+    assert driver.consumed == [], "start() must not read the socket — that is run()'s half"
+    assert connection.closed, "a socket opened by start() and never run must still be released"
+
+
+def test_a_reconnect_never_reuses_the_socket_the_boot_handed_over() -> None:
+    """The handoff slot is *taken*, not read (#227).
+
+    ``run()`` consumes the connection ``start()`` opened rather than opening a
+    second — that much the feed's suite pins one level up. What only this seam
+    can show is the clearing behind it: if the slot were merely read, the first
+    hangup would hand the loop back the socket that had just died, and the
+    session would re-consume a dead connection forever while looking healthy.
+
+    Both halves are visible in one run because ``subscribe`` is what a reconnect
+    is worthless without: the boot socket is subscribed by ``start()`` and never
+    again, and the replacement is subscribed by ``run()``. A slot that was not
+    cleared would show one connect, one subscribe, and the same connection
+    consumed twice.
+
+    ``consume`` returning is how this driver spells a hangup, so no frame needs
+    to be recorded to reach the reconnect; stopping from inside the second one
+    ends the loop at a known point rather than on a timeout.
+    """
+    first = FakeWsConnection([])
+    second = FakeWsConnection([])
+    clock = RecordingClock()
+    connect, asked = _connector([first, second])
+    subscribed: list[FakeWsConnection] = []
+    consumed: list[FakeWsConnection] = []
+
+    async def subscribe(connection: WsConnection) -> None:
+        assert isinstance(connection, FakeWsConnection)
+        subscribed.append(connection)
+
+    async def consume(connection: WsConnection) -> None:
+        assert isinstance(connection, FakeWsConnection)
+        consumed.append(connection)
+        if len(consumed) == 2:
+            await session.stop()
+
+    session = WsSession(
+        config=CONFIG,
+        clock=clock,
+        connect=connect,  # type: ignore[arg-type]
+        subscribe=subscribe,
+        consume=consume,
+    )
+
+    async def main() -> None:
+        await session.start()
+        await asyncio.wait_for(session.run(), timeout=2)
+
+    asyncio.run(main())
+
+    assert consumed == [first, second], "the dead boot socket must not be consumed twice"
+    assert subscribed == [first, second], "start() subscribed the first, run() the replacement"
+    assert len(asked) == 2, "the reconnect must open its own socket"
+    assert clock.sleeps == [1.0]  # one hangup, paced once — virtual time only
+
+
 def test_a_consumer_that_raises_faults_the_run_rather_than_reconnecting() -> None:
     """The fault channel both adapters are supervised for (ADR-0024/0037).
 

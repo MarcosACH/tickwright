@@ -115,10 +115,53 @@ class ReplayClock(Clock, Protocol):
 
 @runtime_checkable
 class MarketFeed(Protocol):
-    """Produces ``MarketTick`` events for configured symbols (ADR-0015)."""
+    """Produces ``MarketTick`` **and ``MarkTick``** events for configured symbols
+    (ADR-0015/0039).
+
+    Two streams, and the second is an obligation rather than an option: a symbol
+    this feed trades is a symbol it must also mark. The mark is market data and
+    enters here — never off a reconcile pull — so a feed publishing trades alone
+    leaves ``PortfolioProjection`` with no valuation input at all, and every
+    ``unrealized_pnl``, ``notional`` and ``equity`` for those symbols reads
+    ``None`` forever with nothing raised anywhere to say so.
+
+    *How* a mark is arrived at is the adapter's own and differs per deployment by
+    design (ADR-0039): ``ReplayFeed`` derives the last-trade proxy, and
+    ``HyperliquidFeed`` reads the venue's ``ctx.markPx``. Only the obligation is
+    shared — and it is executable rather than prose, stated once in
+    ``tests/_support/feed_contract.py`` and answered by both adapter suites,
+    because a feed that omitted the mark would otherwise satisfy this Protocol,
+    type-check, run, and pass a suite of its own.
+    """
 
     async def start(self) -> None:
-        """Begin producing ticks. ``ReplayFeed`` runs to end-of-file."""
+        """Reach the venue and return — never the producing loop itself.
+
+        The runner awaits this inline at ADR-0024 step 7, immediately ahead of
+        creating ``run()``'s task, so it **must return**: it is the one instant
+        at which an unreachable feed can fail the boot. A ``start()`` that was
+        the loop folded a refused first connect into an infinite backoff inside
+        the supervised task, and the engine reached ``RUNNING`` with a feed that
+        had never connected and nothing anywhere saying so.
+
+        Returning at once is a legitimate implementation rather than an
+        omission, and ``ReplayFeed`` is it: a file has nothing to reach. Put a
+        timeout on any blocking venue call made here — the runner neither
+        retries nor bounds this call.
+        """
+        ...
+
+    async def run(self) -> None:
+        """Produce ticks until stopped: the supervised long-lived half.
+
+        The peer of ``Exchange.run()``, one seam over, and supervised the same
+        way — the runner task-creates it in its ``TaskGroup``, so a failure here
+        aborts the group and faults the engine at the moment it happens. A loop
+        spawned for yourself in ``start()`` would have no fault channel at all.
+
+        Ending on its own ends the task, not the run: ``ReplayFeed`` returns at
+        end-of-file and the engine keeps going until told to stop.
+        """
         ...
 
     async def stop(self) -> None:
@@ -574,7 +617,12 @@ class Exchange(OrderAnchor, AccountAnchor, Protocol):
 
     async def run(self) -> None:
         """The adapter's supervised long-lived half — the peer of
-        ``MarketFeed.start()``, one seam over (ADR-0024).
+        ``MarketFeed.run()``, one seam over (ADR-0024).
+
+        It named ``MarketFeed.start()`` until #227, which was right while the
+        feed's ``start()`` *was* its loop: the two seams now take the same three
+        members meaning the same three things, so each member's peer is the one
+        that shares its name.
 
         ``start()`` cannot be this. The runner awaits it inline at step 4 and it
         must **return** so the barrier can run at step 5, so a loop that lived

@@ -59,6 +59,9 @@ class HyperliquidFeed:
         )
 
     async def start(self) -> None:
+        await self._session.start()
+
+    async def run(self) -> None:
         await self._session.run()
 
     async def stop(self) -> None:

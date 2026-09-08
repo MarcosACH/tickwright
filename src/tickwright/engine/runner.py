@@ -257,8 +257,11 @@ class Engine:
                 # possible after the barrier cleared, so nothing places before
                 # reconciliation completes. Replay end-of-file ends the task but
                 # not the run — like the CLI, the engine stops only when told to.
+                # The connect is inline and the loop is supervised, for the
+                # reasons ADR-0024 step 7's amendment states in full.
+                await self._feed.start()
                 named_event(NamedEvent.ENGINE_FEED_STARTED)
-                self._feed_task = tg.create_task(self._feed.start())
+                self._feed_task = tg.create_task(self._feed.run())
                 tg.create_task(self._stop_when_requested())
         except Exception as exc:
             # The first raw-handler exception aborted the TaskGroup and
