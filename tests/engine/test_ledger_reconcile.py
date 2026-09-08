@@ -2745,6 +2745,94 @@ def test_account_maintenance_margin_is_compared_against_the_venues_cross_scoped_
     ]
 
 
+_ETH_SPEC = InstrumentSpec(
+    symbol="ETH",
+    sz_decimals=4,
+    max_decimals=6,
+    min_notional=Decimal("0"),
+    margin_maint=Decimal("0.0125"),
+)
+"""A second instrument carrying the same rate as ``_BTC_SPEC``.
+
+Given a rate rather than left specless so that the case below excludes its
+symbol on the **mode** the narrowing is about, not on a maintenance term that
+was ``None`` anyway: a subset test whose out-of-subset leg could not have been
+summed proves nothing about the subset."""
+
+
+def test_a_large_isolated_book_does_not_widen_the_cross_subsets_maintenance_band() -> None:
+    """``maintenance_margin`` is the one row of ADR-0046 §5's table whose
+    reported and compared quantities differ, and the reference follows the
+    **compared** one.
+
+    §2.1 narrows the comparison to the cross subset because the venue's
+    ``crossMaintenanceMarginUsed`` omits isolated positions. Left at the band's
+    account-grain default — the Σ over every notional — the divisor would still
+    be the whole book, so the band widens by ``Σ_all / Σ_cross``: unbounded, and
+    largest on exactly the accounts that hold a big isolated leg beside a small
+    cross one. That is the primary shape in practice, and it suppresses the
+    tier-crossing signal ADR-0040 §4 says the alert exists to raise.
+
+    So the book here is deliberately lopsided: 0.002 BTC **cross 5x** marked at
+    65000 is 130.000 of exposure, against 100 ETH **isolated** at 3000 worth
+    300000 — a roster where the cross subset is 0.04 % of the notional. The
+    ledger's cross maintenance is ``130.000 × 0.0125 = 1.6250000`` and the venue
+    publishes 1.600, a gap of 0.025. Against the cross-subset reference the band
+    is ``max(0.01, 0.001 × 1.6250000) = 0.01`` and the gap speaks; against the
+    whole book's notional it is ``0.001 × 300130 = 300.13`` and a divergence
+    over fifteen times the figure itself would stay silent.
+
+    The ETH leg carries a rate of its own, so its 3750 of maintenance is a term
+    the ledger *could* have summed and does not — the subset is the config's
+    margin mode, not whichever symbol happened to be priceable. Every other
+    figure is built to agree: the snapshot's equity carries its own uPnL exactly
+    so ``venue_cash`` lands back on 100000, the ETH leg is entered at its own
+    mark so it is flat on both sides, and the free margin is the cross pair's
+    difference at this run's leverage.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(
+        store,
+        equity="100000",
+        leverage=LeverageBook(entries={"BTC": _CROSS_5X, "ETH": DEFAULT_LEVERAGE}),
+        specs={"BTC": _BTC_SPEC, "ETH": _ETH_SPEC},
+    )
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _book_fill(projection, quantity="100", price="3000", symbol="ETH")
+    _mark(projection, "BTC", "65000")
+    _mark(projection, "ETH", "3000")
+    venue = _levered(
+        _held(
+            "100000.382",
+            ("BTC", "0.002", "0.382"),
+            ("ETH", "100", "0"),
+            entry={"ETH": "3000"},
+            free_margin="99974.382",
+            maintenance="1.600",
+        ),
+        _CROSS_5X,
+        symbol="BTC",
+    )
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences is not None
+    assert [(d.field, d.symbol, d.ledger, d.venue) for d in divergences] == [
+        (DivergenceField.MAINTENANCE_MARGIN, None, Decimal("1.6250000"), Decimal("1.600"))
+    ]
+    assert _alerts(logs) == [
+        {
+            "field": "maintenance_margin",
+            "symbol": None,
+            "ledger": "1.6250000",
+            "venue": "1.600",
+        }
+    ]
+
+
 def test_free_margin_is_classified_at_tier_2_against_the_venues_own_figure() -> None:
     """The third account-grain Tier-2 figure, and the one an operator sizes
     against (ADR-0040 §6).

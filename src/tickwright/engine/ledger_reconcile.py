@@ -345,6 +345,18 @@ def _reference(
     ``L`` times too *narrow* on every isolated book, and narrowest at the
     leverage an operator reached for to hold a larger position.
 
+    ``maintenance_margin`` is the second exception and, again, the same rule:
+    it is the one field whose reported and compared quantities differ, and the
+    reference follows the **compared** one. ADR-0046 §2.1 narrows the comparison
+    to the cross subset because the venue's field omits isolated positions, so
+    the reference is that subset's Σ and not the book's — recomputed here rather
+    than read off ``divergence.ledger``, which would make the band a function of
+    the number under test. Left at the account-grain default the band widens by
+    ``Σ_all / Σ_cross``, which is unbounded and largest on an account holding a
+    big isolated leg beside a small cross one — the primary shape in practice,
+    and exactly where the tier-crossing signal ADR-0040 §4 exists for is worth
+    the most.
+
     The Σ propagates the unknown the way ``domain.valuation`` does: one symbol
     waiting on a mark makes the *total* unknown, because a partial Σ used as a
     reference is a band silently narrowed by whichever symbol was left out —
@@ -372,6 +384,8 @@ def _reference(
         if leverage.mode == "isolated":
             return notional
         return notional / leverage.leverage
+    if divergence.field is DivergenceField.MAINTENANCE_MARGIN:
+        return _cross_maintenance(reading, leverage_for)
     total = _ZERO
     for term in reading.notional.values():
         if term is None:
