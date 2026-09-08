@@ -7,11 +7,17 @@ path hermetically.
 """
 
 import asyncio
+import contextlib
 import json
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from feed_contract import (
+    MarketDataTranscript,
+    assert_every_traded_symbol_is_marked,
+    record_market_data,
+)
 from hyperliquid_fakes import (
     FakeWsConnection,
     RecordingClock,
@@ -459,6 +465,84 @@ def test_a_mark_frame_we_cannot_read_is_dropped_and_named_not_faulted(data: obje
 
     assert [m.price for m in seen] == [Decimal("100")]
     assert [record["event"] for record in logs] == ["feed.frame_dropped"]
+
+
+def _drive_contract(
+    frames: list[str], *, symbols: list[str], expected: int
+) -> MarketDataTranscript:
+    """Run the feed over ``frames`` until both streams have landed, then stop.
+
+    ``_run_feed`` above waits on a count of **one** event type, which cannot
+    express this: the obligation relates the two streams, so a driver that
+    stopped at the last trade would race the mark behind it and a driver that
+    stopped at the last mark would race the trade.
+
+    ``expected`` is the total across both streams, and a timeout waiting for it
+    is **suppressed rather than raised**. That is the load-bearing line. The
+    wait is an optimisation — it ends the run as soon as the venue's frames are
+    through instead of parking for the full timeout — but a feed that published
+    no mark would never reach the count, and failing here would report a
+    ``TimeoutError`` from a test helper for what is a contract violation with a
+    sentence of its own. Falling through hands the verdict to the contract.
+    """
+
+    async def main() -> MarketDataTranscript:
+        bus = InMemoryBus()
+        transcript = record_market_data(bus)
+        enough = asyncio.Event()
+
+        async def count(_event: MarketTick | MarkTick) -> None:
+            if len(transcript.ticks) + len(transcript.marks) >= expected:
+                enough.set()
+
+        bus.subscribe(MarketTick, count)
+        bus.subscribe(MarkTick, count)
+        connection = FakeWsConnection(frames)
+
+        async def connect(url: str) -> FakeWsConnection:
+            return connection
+
+        feed = HyperliquidFeed(
+            config=HyperliquidConfig(symbols=symbols),
+            bus=bus,
+            clock=ManualClock(start_ns=4_000),
+            connect=connect,
+        )
+        run = asyncio.create_task(feed.start())
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(enough.wait(), timeout=2)
+        await feed.stop()
+        await asyncio.wait_for(run, timeout=2)
+        return transcript
+
+    return asyncio.run(main())
+
+
+def test_the_live_feed_marks_every_symbol_it_trades() -> None:
+    """The shared ``MarketFeed`` obligation (``tests/_support/feed_contract.py``),
+    driven over recorded frames from the socket this adapter opens.
+
+    Word for word the assertion ``ReplayFeed`` answers, which is the point: two
+    adapters that reach the mark by entirely different routes — a proxy derived
+    from the trade price, versus ``ctx.markPx`` off a second subscribed channel
+    — owe the engine the same thing, and a third venue learns the obligation
+    from a contract rather than from prose in a checklist.
+
+    The frames interleave the two channels per symbol because that is what the
+    venue does; nothing here asserts an order between them, since the streams
+    are independent and only the live adapter's own tests above pin how each is
+    read.
+    """
+    frames = [
+        trades_frame(trade("BTC", "43000", 1)),
+        asset_ctx_frame("BTC", "43251.0"),
+        trades_frame(trade("ETH", "2200", 2)),
+        asset_ctx_frame("ETH", "2205.0"),
+    ]
+
+    transcript = _drive_contract(frames, symbols=["BTC", "ETH"], expected=4)
+
+    assert_every_traded_symbol_is_marked(transcript, feed="HyperliquidFeed")
 
 
 def test_non_trades_frames_are_ignored_silently() -> None:
