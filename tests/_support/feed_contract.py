@@ -84,7 +84,21 @@ def assert_every_traded_symbol_is_marked(transcript: MarketDataTranscript, *, fe
 
     Every unmarked symbol at once, sorted: an operator adding a venue wants the
     whole omission, not the alphabetically first one per run.
+
+    An empty transcript is refused before any of that. "Every traded symbol is
+    marked" is trivially true of a run that traded nothing, so a driver wired up
+    wrong — subscribed after the feed ran, stopped before the first frame,
+    pointed at an empty fixture — would prove the obligation by proving nothing,
+    and would do it green. No such guard on the marks: a live venue really does
+    publish ``activeAssetCtx`` for a symbol that has not traded, so a mark-only
+    transcript is a fact about the venue, while a trade-less one is only ever a
+    fact about the driver.
     """
+    assert transcript.ticks, (
+        f"{feed} published no trades at all, so this run says nothing about the mark "
+        f"obligation — drive the feed until at least one MarketTick reaches the bus, "
+        f"and subscribe (record_market_data) before driving it, not after"
+    )
     traded = {tick.symbol for tick in transcript.ticks}
     marked = {mark.symbol for mark in transcript.marks}
     unmarked = traded - marked

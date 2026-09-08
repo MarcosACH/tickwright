@@ -70,3 +70,25 @@ def test_a_feed_that_never_publishes_a_mark_fails_the_contract() -> None:
 
     with pytest.raises(AssertionError, match=r"\['BTC', 'ETH'\]"):
         assert_every_traded_symbol_is_marked(transcript, feed="TradesOnlyFeed")
+
+
+def test_a_run_that_produced_no_trades_at_all_cannot_satisfy_the_contract() -> None:
+    """The second vacuity, and the one that will actually bite a venue author.
+
+    "Every traded symbol is marked" is trivially true of a run that traded
+    nothing, so a driver wired up wrong — subscribed after the feed ran, stopped
+    before the first frame, pointed at an empty fixture — proves the obligation
+    by proving nothing, and does it *green*. The contract refuses an empty
+    transcript for the same reason it refuses a mark-less one: it is evidence or
+    it is noise.
+
+    Not symmetric with marks, which are left to the assertion proper: a live
+    venue really does publish ``activeAssetCtx`` for a symbol that has not
+    traded, so a mark-only transcript is a fact about the venue, while a
+    trade-less one is only ever a fact about the driver.
+    """
+    bus = InMemoryBus()
+    transcript = record_market_data(bus)
+
+    with pytest.raises(AssertionError, match="no trades"):
+        assert_every_traded_symbol_is_marked(transcript, feed="TradesOnlyFeed")
