@@ -3173,6 +3173,66 @@ def test_a_stale_mark_suppresses_the_alert_and_is_counted_on_the_record() -> Non
     assert (record["tier_2"], record["suppressed"], record["unvalued"]) == (4, 4, 0)
 
 
+def test_a_stale_mark_suppresses_the_maintenance_finding_through_the_account_grain() -> None:
+    """The staleness rule reaches ``maintenance_margin`` without naming it, and
+    this pins that rather than trusting it.
+
+    ``_stale_grains`` returns the stale symbols **plus the ``None`` grain** the
+    moment any of them is stale, and a maintenance finding carries
+    ``symbol=None`` because maintenance is owed against the one collateral pool.
+    So the suppression is structural: the figure falls to the same grain
+    ``equity`` and ``free_margin`` do, and nothing had to be extended to cover
+    it. Left unpinned, that is a claim only the implementation makes, and one a
+    later slice could break by giving the figure a symbol.
+
+    It needs a fixture of its own because the staleness family below cannot
+    reach it. Those books configure no ``InstrumentSpec`` and sit at the
+    isolated default, so ``_cross_maintenance`` never returns a number there and
+    no maintenance finding is classified at all — the figure would be suppressed
+    by not existing. This is behavior 8's cross book, which does produce one,
+    with the only change a clock 90 seconds past the mark's stamp.
+
+    So the pass classifies its 1.6250000 against 1.400 exactly as it did at a
+    fresh mark, records it on ``tier_2``, and alerts nobody: our own frozen mark
+    against the venue's instantaneous one makes the figure old rather than
+    wrong. Counted on ``suppressed`` rather than dropped, which is the whole
+    difference from silence — and ``unvalued`` stays 0, since every term was
+    computable.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(
+        store,
+        equity="100000",
+        leverage=_BTC_CROSS_5X,
+        specs={"BTC": _BTC_SPEC},
+        clock=ManualClock(_MARK_TS_NS + 90 * _NS_PER_SECOND),
+    )
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "65000")
+    venue = _levered(
+        _held(
+            "100000.382",
+            ("BTC", "0.002", "0.382"),
+            free_margin="99974.382",
+            maintenance="1.400",
+        ),
+        _CROSS_5X,
+    )
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences is not None
+    assert [(d.field, d.symbol) for d in divergences] == [
+        (DivergenceField.MAINTENANCE_MARGIN, None)
+    ]
+    assert _alerts(logs) == []
+    record = _recorded(logs)
+    assert (record["tier_2"], record["suppressed"], record["unvalued"]) == (1, 1, 0)
+
+
 def test_an_absent_mark_alerts_nothing_and_lands_on_unvalued_rather_than_suppressed() -> None:
     """The other half of ADR-0040 §6's mark criterion, and the reason it is a
     second case rather than the stale one with a smaller number.
