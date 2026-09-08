@@ -940,6 +940,60 @@ def test_a_symbol_the_ledger_holds_flat_is_a_size_finding_and_not_a_second_one()
     assert (record["tier_1"], record["tier_2"]) == (1, 1)
 
 
+def test_a_pass_compares_against_the_reading_it_healed_from() -> None:
+    """One reading per side per pass, and this is the book that punishes a second
+    one.
+
+    The ledger is flat and the venue holds 10 SOL entered at 64809, so the pass
+    finds one thing — a size gap — and heals it by booking that position into the
+    unattributed partition. Nothing else disagrees: with the venue carrying no
+    open PnL, the cash line the snapshot implies is the 100,000 the ledger
+    already holds, and a flat book's equity is its cash.
+
+    The heal changes that, immediately and by construction. The ledger now holds
+    10 SOL against a mark of 65,000, so its equity is 101,910 — 1,910 above the
+    snapshot this pass was comparing against, which is precisely the position the
+    pass just booked, valued at a mark the venue's own figure predates. Read
+    again after the write, the cycle would report that as the venue disagreeing
+    with us, and this is the shape where nothing catches it: a Tier-2 finding is
+    suppressed on a grain Tier-1 already explains, the gap is on the **account**
+    grain, and this pass has no account-grain finding — no cash divergence, since
+    the cash line was right. The alert would go out.
+
+    So the assertion is a silence with the counterfactual measured beside it: the
+    pass says one thing, and the post-heal read the pass declined to take is
+    asserted directly, as the number that alert would have carried. Without that
+    second assertion the silence is vacuous — it would hold on a cycle that never
+    compared anything.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    projection = keeper.portfolio
+    _mark(projection, "SOL", "65000")
+    venue = _held("100000", ("SOL", "10", "0"))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences == (
+        Divergence(
+            tier=DivergenceTier.TIER_1,
+            field=DivergenceField.SIGNED_SIZE,
+            symbol="SOL",
+            ledger=Decimal("0"),
+            venue=Decimal("10"),
+        ),
+    )
+    assert _alerts(logs) == []
+    record = _recorded(logs)
+    assert (record["tier_1"], record["tier_2"], record["suppressed"]) == (1, 0, 0)
+    # The counterfactual, taken after the pass: what a second reading would have
+    # found is a real 1,910 gap, and every digit of it is this pass's own heal.
+    assert projection.account_net() == {"SOL": Decimal("10")}
+    assert projection.account().equity == Decimal("101910")
+
+
 def test_a_completed_cycle_records_what_it_found_at_each_tier() -> None:
     """The pass is named, and the name alone is not the finding.
 
