@@ -118,9 +118,13 @@ auth, quirk translation — and importing no other adapter. It provides both a `
   barrier reads an already-aligned venue. Retry a transient venue blip inside the
   `startup_reconciliation_timeout` budget yourself; the runner does not retry the call, so raising
   spends the last of it. That budget is **yours to enforce** — the runner neither retries nor bounds
-  `start()`, so it **must not hang**: a wedged boot has no bound and no operator escape (the task
-  that watches SIGINT is not created until the start sequence returns, so SIGKILL is the only way
-  out). Put a timeout on any blocking venue call you make here.
+  `start()`, so it **must not hang**: a wedged boot has no bound and no operator escape. The task
+  that watches SIGINT is created only *after* the last inline `start()` — the exchange's at step 4
+  and the feed's at step 7 are both ahead of it — so for either of them SIGKILL is the only way out.
+  Put a timeout on any blocking venue call you make here; the shipped websocket transport bounds its
+  own handshake with `WS_OPEN_TIMEOUT_SECONDS` rather than inheriting the client's default, and
+  giving the boot one shared budget instead of a per-call ceiling is
+  [#301](https://github.com/MarcosACH/tickwright/issues/301).
   `run()` is the **supervised long-lived half** — the peer of `MarketFeed.run()`, one seam over,
   and since [#227](https://github.com/MarcosACH/tickwright/issues/227) the two seams take the same
   three members meaning the same three things, so this whole bullet reads across both.

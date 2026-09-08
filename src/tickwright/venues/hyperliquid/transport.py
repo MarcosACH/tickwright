@@ -59,13 +59,33 @@ type Connect = Callable[[str], Awaitable[WsConnection]]
 real client; tests inject fakes."""
 
 
+WS_OPEN_TIMEOUT_SECONDS = 10.0
+"""How long a handshake may take before it becomes the ``OSError`` every caller keys on.
+
+Stated here rather than left to ``websockets`` for the reason ``post_json`` states
+its own ``ClientTimeout``: the number belongs to this repo, and a dependency bump
+must not be able to move it. The value matches the client's long-standing default,
+so this pins today's behaviour rather than changing it.
+
+The bound matters most where the reconnect loop is *not* underneath it.
+``MarketFeed.start()`` and ``Exchange.start()`` are awaited inline during the boot
+(ADR-0024 steps 4 and 7) and neither is retried nor bounded by the runner, and the
+task that watches SIGINT is not created until after the last of them — so a
+handshake that never completes wedges a boot with SIGKILL as the only way out.
+This is a ceiling, not a budget: spending the boot's own `Deadline` here, the way
+ADR-0044 §6 does for the exchange's two venue guards, is
+[#301](https://github.com/MarcosACH/tickwright/issues/301).
+"""
+
+
 async def open_websocket(url: str) -> WsConnection:
     """The real client, adapted to the seam: a failed connect is an ``OSError``
     (handshake refusals included), so the backoff loop owns every failure."""
     import websockets
 
     try:
-        return _RealWsConnection(await websockets.connect(url))
+        connection = await websockets.connect(url, open_timeout=WS_OPEN_TIMEOUT_SECONDS)
+        return _RealWsConnection(connection)
     except websockets.exceptions.WebSocketException as exc:
         raise ConnectionError(f"hyperliquid websocket connect failed: {exc}") from exc
 
