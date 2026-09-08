@@ -208,6 +208,70 @@ class FundingChange:
     funding_mark: tuple[str, int]
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class LedgerReading:
+    """The ledger's whole side of one reconcile pass, folded once.
+
+    The account cadence compares one reading against one reading. Its venue side
+    already had a name — the ``VenueAccountState`` the anchor returns — and this
+    is the name the ledger's side did not have: before it, the cycle took five
+    consecutive accessor calls and threaded their results field-by-field through
+    eight classification sites, with "one fold per side per pass" restated in
+    prose at each of them and enforced nowhere.
+
+    Every member is a fold over **every** partition, so taking them once is what
+    halves the folds *and* what makes a second reading structurally unavailable
+    later in the pass — the property ``domain.valuation`` states about assembling
+    a view in one call, one grain up. That is load-bearing rather than tidy on
+    two counts: the pass **writes**, so a view taken again after the heal reports
+    the venue as disagreeing by exactly the amount the cycle just moved, and the
+    mode guard puts a real ``await`` between the classification and that write
+    (ADR-0046 §4), so "the reads are synchronous" stopped being an argument.
+
+    Deliberately **not** carrying the leverage book. ``leverage_for`` reads
+    configuration resolved at startup, so no fill can move it and there is no
+    pass-coherence question for it to be part of; folding it in would make this
+    type mean "everything the cycle reads" rather than "the ledger's side, as of
+    one instant", and the drift check would then look like a fold it is not
+    (ADR-0044 §10).
+
+    A *reading* rather than a snapshot or a view: ``AccountView`` and
+    ``PositionView`` are the ``Portfolio`` seam's words for what a strategy is
+    handed (``CONTEXT.md``), and this is the engine concrete's wider surface,
+    read by one caller for one comparison.
+    """
+
+    account: AccountView
+    net: dict[str, Decimal]
+    """The account-net signed size per symbol, over every partition."""
+    unrealized: dict[str, Decimal | None]
+    """Per-symbol open PnL against the marks held at the reading."""
+    notional: dict[str, Decimal | None]
+    """Per-symbol notional — the reference ADR-0046 §5 scales the band by."""
+    mark_observed: dict[str, int]
+    """When each cached mark was stamped: the age input, never a price."""
+
+    def holds(self, symbol: str) -> bool:
+        """Whether the ledger carries exposure in ``symbol`` — the cycle's one
+        held-ness predicate, and the reason it lives here rather than beside its
+        readers.
+
+        Flat and absent are the **same** answer, which is the definition Tier-1
+        already works to: the size check ranges over the union of both symbol
+        sets with a missing side reading zero, so a symbol traded back to flat
+        and a symbol never traded are one state there. A closed position leaves
+        its record behind at zero, so reading presence-in-the-map as held instead
+        would make every symbol this engine has ever closed a held one.
+
+        On the type that owns ``net`` because it had two spellings otherwise: a
+        method on the cycle's class that a module-level helper could not reach,
+        and the same expression written out again inside that helper. One
+        definition in two places is what the class docstring claiming "the
+        cycle's one definition of held-ness" was actually describing.
+        """
+        return self.net.get(symbol, _ZERO) != _ZERO
+
+
 class PortfolioProjection:
     """The one owner of "what do I hold, and what has it earned"."""
 
