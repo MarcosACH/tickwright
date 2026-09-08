@@ -128,3 +128,78 @@ def test_classifies_both_tiers_off_one_hand_built_reading() -> None:
     assert findings.alerts == (findings.divergences[1],)  # the uPnL is Tier-1's to explain
     assert findings.suppressed == 0
     assert findings.unvalued == 0
+
+
+def test_a_per_symbol_figure_whose_notional_is_unknown_bands_on_atol_alone() -> None:
+    """The band's ``reference=None`` arm, and it falls the **narrow** way.
+
+    ``rtol`` scales by the notional a figure's mark-sensitivity flows through
+    (ADR-0046 §5), so with no notional there is no relative term to compute and
+    the floor is ``atol`` — the last cent — rather than a tolerance guessed off
+    the compared value. Narrow is the conservative direction here: a band that
+    cannot be justified alerts instead of staying quiet, which is the opposite
+    of every other unknown on this surface, where a figure that cannot be
+    computed is dropped. The difference is that a *dropped* figure is counted on
+    ``unvalued`` and an unjustified *silence* is counted nowhere.
+
+    One book classified twice, with the notional as the only variable, because
+    the assertion is about which floor was used and a single run cannot show
+    that: BTC's uPnL is 5 under the venue's, which ``atol`` of 0.01 leaves
+    alerted and ``rtol`` against a notional of 60,000 — a floor of 60 — absorbs
+    outright.
+
+    Unreachable through the cadence, which is why it is here: the mark whose
+    absence makes a notional unknown is the one the uPnL beside it is computed
+    from, so a real projection produces both or neither. This reading holds a
+    valuation without its notional deliberately, for the fields #291 adds, which
+    are folded per symbol and need not fail together.
+
+    The account grain is set to agree outright, so the pass has exactly one
+    finding and nothing else can account for the alert.
+    """
+    state = _venue(
+        equity="110000",
+        free_margin="50000",
+        positions=(_position("BTC", signed_size="0.5", notional="60000", unrealized_pnl="10000"),),
+    )
+    account = AccountView(
+        cash=Decimal("100000"),
+        equity=Decimal("110000"),
+        total_margin_used=Decimal("60000"),
+        total_maintenance_margin=Decimal("0"),
+        free_margin=Decimal("50000"),
+        effective_leverage=None,
+    )
+    unpriced = LedgerReading(
+        account=account,
+        net={"BTC": Decimal("0.5")},
+        unrealized={"BTC": Decimal("9995")},
+        notional={"BTC": None},
+        mark_observed={"BTC": _NOW_NS},
+    )
+
+    findings = ReconcileFindings.classify(state, unpriced, band=ValuationBand(), now_ns=_NOW_NS)
+
+    gap = Divergence(
+        tier=DivergenceTier.TIER_2,
+        field=DivergenceField.UNREALIZED_PNL,
+        symbol="BTC",
+        ledger=Decimal("9995"),
+        venue=Decimal("10000"),
+    )
+    assert findings.divergences == (gap,)
+    assert findings.alerts == (gap,)
+    assert (findings.suppressed, findings.unvalued) == (0, 0)
+
+    priced = LedgerReading(
+        account=account,
+        net={"BTC": Decimal("0.5")},
+        unrealized={"BTC": Decimal("9995")},
+        notional={"BTC": Decimal("60000")},
+        mark_observed={"BTC": _NOW_NS},
+    )
+
+    banded = ReconcileFindings.classify(state, priced, band=ValuationBand(), now_ns=_NOW_NS)
+
+    assert banded.divergences == (gap,)  # measured either way — the band gates the alert only
+    assert banded.alerts == ()

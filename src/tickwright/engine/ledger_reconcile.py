@@ -188,13 +188,16 @@ class ValuationBand:
         it falls back to ``atol`` alone — the conservative direction, since a
         narrower band alerts rather than stays quiet.
 
-        **No caller reaches that arm today**, and it is worth saying so here
+        **No cadence reaches that arm today**, and it is worth saying so here
         rather than leaving a reader to believe a live path depends on it: the
         three fields this cycle compares all need the very mark their notional
         needs, so a reference this method cannot compute belongs to a figure the
         classification already dropped (see ``_reference``). It is kept as the
         conservative default for the fields #291 adds, which are folded per
         symbol and need not fail together with the reference the way these do.
+        Unreached is not untested: ``ReconcileFindings.classify`` takes the
+        reading as an argument, so ``tests/engine/test_reconcile_findings.py``
+        pins the fallback on a reading built by hand.
         """
         floor = self.atol if reference is None else max(self.atol, self.rtol * abs(reference))
         return abs(divergence.ledger - divergence.venue) <= floor
