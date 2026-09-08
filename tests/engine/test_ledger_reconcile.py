@@ -790,16 +790,22 @@ measure a clock **against** it rather than merely feeding it in."""
 _NS_PER_SECOND: Final = 1_000_000_000
 
 
-def _mark(projection: PortfolioProjection, symbol: str, price: str) -> None:
+def _mark(
+    projection: PortfolioProjection, symbol: str, price: str, *, ts_ns: int = _MARK_TS_NS
+) -> None:
     """Feed the projection the Tier-2 valuation input (ADR-0039).
 
     A Tier-2 case has to go through this rather than assert on a figure it
     passed in: uPnL and equity are *recomputed on every read* from the cached
     mark, so a case that never observed one is asserting on the ``None`` the
     absence produces, not on a valuation.
+
+    ``ts_ns`` is the case's own only where it needs two marks of **different**
+    ages in one book — a staleness rule that ranges over symbols is only tested
+    by a book where the range matters.
     """
     projection.observe_mark(
-        MarkTick(ts_event=_MARK_TS_NS, ts_init=_MARK_TS_NS, symbol=symbol, price=Decimal(price))
+        MarkTick(ts_event=ts_ns, ts_init=ts_ns, symbol=symbol, price=Decimal(price))
     )
 
 
@@ -2666,6 +2672,60 @@ def test_an_absent_mark_alerts_nothing_and_lands_on_unvalued_rather_than_suppres
     assert _alerts(logs) == []
     record = _recorded(logs)
     assert (record["tier_2"], record["suppressed"], record["unvalued"]) == (0, 0, 3)
+
+
+def test_a_stale_mark_for_a_symbol_traded_back_to_flat_silences_nothing() -> None:
+    """The staleness range is **held** symbols, on the same predicate Tier-2's
+    uPnL check reads — and this is the book that tells the two definitions apart.
+
+    A closed position leaves its record behind at zero, and its mark keeps
+    ageing after the exposure is gone. Read as held on *presence* rather than on
+    net, that dead symbol goes stale on schedule and the account grain goes with
+    it — ``equity`` and ``free_margin`` are Σs stale on their worst term — so a
+    symbol the engine closed hours ago silences the book it is no longer part
+    of. Every alert on it, indefinitely: nothing ever refreshes a mark for a
+    symbol no strategy is trading.
+
+    Two marks of different ages is what makes the case discriminating. ETH was
+    bought and sold back to flat and its mark is 90 seconds old, past the
+    60-second horizon; BTC is genuinely held and its mark was stamped at the
+    clock this pass reads, so BTC alone can never explain a suppression. What is
+    pinned is that both alerts still fire and ``suppressed`` is zero — a pass
+    that suppresses here is reporting a dead symbol's staleness as the live
+    book's.
+
+    The figures are the stale case's, deliberately: a 0.002 BTC long entered at
+    64809 and marked at 65000 against a venue pricing it at 1.000. ETH closed at
+    its entry, so it realizes nothing, values flat at a real zero and moves
+    neither side's arithmetic — its whole contribution is a record with a stale
+    mark on it.
+    """
+    store = SQLiteStore(":memory:")
+    now_ns = _MARK_TS_NS + 90 * _NS_PER_SECOND
+    keeper = _ledger(store, equity="100000", clock=ManualClock(now_ns))
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="1", price="3000", symbol="ETH")
+    _book_fill(projection, quantity="1", price="3000", symbol="ETH", side=Side.SELL, seq=2)
+    _mark(projection, "ETH", "3000")
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "65000", ts_ns=now_ns)
+    venue = _held("100001.000", ("BTC", "0.002", "1.000"))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences is not None
+    assert [divergence.field for divergence in divergences] == [
+        DivergenceField.EQUITY,
+        DivergenceField.UNREALIZED_PNL,
+    ]
+    assert _alerts(logs) == [
+        {"field": "equity", "symbol": None, "ledger": "100000.382", "venue": "100001.000"},
+        {"field": "unrealized_pnl", "symbol": "BTC", "ledger": "0.382", "venue": "1.000"},
+    ]
+    record = _recorded(logs)
+    assert (record["tier_2"], record["suppressed"], record["unvalued"]) == (2, 0, 0)
 
 
 def test_an_alerted_tier_2_divergence_still_changes_no_stored_value() -> None:
