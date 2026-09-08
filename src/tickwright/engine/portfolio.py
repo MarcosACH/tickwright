@@ -239,16 +239,23 @@ class LedgerReading:
     ``PositionView`` are the ``Portfolio`` seam's words for what a strategy is
     handed (``CONTEXT.md``), and this is the engine concrete's wider surface,
     read by one caller for one comparison.
+
+    The four folds are ``Mapping`` and not ``dict``, because ``frozen`` is
+    shallow: it stops a member being rebound and says nothing about the map it
+    points at, so the type that exists to hold a pass's figures still would not
+    hold them. Read-only is the whole of what every reader wants — the
+    classifiers ``get`` and iterate and nothing more — and it is the annotation
+    the helpers this replaced already carried before the fields absorbed them.
     """
 
     account: AccountView
-    net: dict[str, Decimal]
+    net: Mapping[str, Decimal]
     """The account-net signed size per symbol, over every partition."""
-    unrealized: dict[str, Decimal | None]
+    unrealized: Mapping[str, Decimal | None]
     """Per-symbol open PnL against the marks held at the reading."""
-    notional: dict[str, Decimal | None]
+    notional: Mapping[str, Decimal | None]
     """Per-symbol notional — the reference ADR-0046 §5 scales the band by."""
-    mark_observed: dict[str, int]
+    mark_observed: Mapping[str, int]
     """When each cached mark was stamped: the age input, never a price."""
 
     def holds(self, symbol: str) -> bool:
