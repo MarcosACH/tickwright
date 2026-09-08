@@ -143,8 +143,30 @@ def implied_free_margin(equity: str, unrealized: Iterable[str], *, declared: str
     return Decimal(equity) - sum((Decimal(pnl) for pnl in unrealized), Decimal("0"))
 
 
+CROSSLESS_MAINTENANCE = Decimal("0")
+"""``crossMaintenanceMarginUsed`` on a book holding no cross position.
+
+The venue's field is **cross-scoped** and an isolated leg contributes nothing to
+it (ADR-0046 §2.1, measured: an account of one isolated position publishes
+``0.0``), and both fixtures below build their rows at the ledger's default
+isolated 1x — so this, and not the recorded snapshot's figure, is what a venue
+holding them returns.
+
+The recorded ``1.6198`` it replaces is the *cross 5x* account it was measured
+from, and it is the fourth constant of this family to go stale the moment its
+field was compared, after ``free_margin``, ``notional`` and ``margin_used``.
+Unlike those three there is nothing here to derive it from: maintenance is
+``notional × margin_maint`` and the rate lives on an ``InstrumentSpec`` no venue
+snapshot carries. So a case running a **cross** book declares the figure its own
+account would publish — which ``_levered`` cannot do for it, for the same
+reason."""
+
+
 def account_state(
-    equity: str, *unrealized: str, free_margin: str | None = None
+    equity: str,
+    *unrealized: str,
+    free_margin: str | None = None,
+    maintenance: str | None = None,
 ) -> VenueAccountState:
     """A successful venue account read holding one position per ``unrealized``.
 
@@ -162,11 +184,17 @@ def account_state(
     ``implied_free_margin`` and ``implied_notional`` state; the first takes a
     case's own figure where it wants the disagreement, the second is the
     snapshot's own arithmetic and takes nothing.
+
+    ``maintenance`` is the third that had to move off its recorded constant, on
+    ``CROSSLESS_MAINTENANCE``'s premise: this fixture's rows are isolated, and
+    the venue's field counts only cross ones.
     """
     return VenueAccountState(
         equity=Decimal(equity),
         free_margin=implied_free_margin(equity, unrealized, declared=free_margin),
-        cross_maintenance_margin=Decimal("1.6198"),
+        cross_maintenance_margin=(
+            CROSSLESS_MAINTENANCE if maintenance is None else Decimal(maintenance)
+        ),
         positions=tuple(
             margined(
                 VenuePositionState(

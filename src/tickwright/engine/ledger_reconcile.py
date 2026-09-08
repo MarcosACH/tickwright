@@ -93,6 +93,7 @@ class DivergenceField(Enum):
     UNREALIZED_PNL = "unrealized_pnl"
     NOTIONAL = "notional"
     MARGIN_USED = "margin_used"
+    MAINTENANCE_MARGIN = "maintenance_margin"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -506,6 +507,80 @@ def _free_margin(state: VenueAccountState, reading: LedgerReading) -> tuple[Dive
     )
 
 
+def _cross_maintenance(
+    reading: LedgerReading, leverage_for: Callable[[str], LeverageSpec]
+) -> Decimal | None:
+    """The ledger's maintenance Σ over its **cross** held symbols, or ``None``.
+
+    The one figure whose two sides are scoped differently, and the narrowing is
+    ours to do: the venue's ``crossMaintenanceMarginUsed`` counts cross
+    positions and silently omits isolated ones (ADR-0046 §2.1), while ADR-0040
+    §2's account row is a Σ over every position. A total handed over whole
+    cannot be narrowed to a subset afterwards, which is why the reading carries
+    the terms and this adds them up.
+
+    Cross-ness is the run's **config**, read through ``leverage_for`` rather than
+    off the snapshot's rows, for the reason the reference beside it is: the Σ
+    being built is the *ledger's*, and a ledger's own book is the one it was
+    told to keep. A venue that disagrees is already a ``LEVERAGE_DIVERGENCE``
+    (ADR-0044 §10), and taking the venue's mode here would silently move a
+    symbol in or out of our subset on the strength of the very setting that
+    check exists to report.
+
+    Ranged over ``holds`` for the reason every Tier-2 range is: a symbol the
+    ledger reads flat owes maintenance on nothing, and a rate that has gone
+    missing beneath it is not an unknown Σ. ``None`` propagates from any term
+    that is left — a partial Σ compared against the venue's whole one is a
+    divergence about arithmetic rather than about the book, and the missing term
+    is an absent ``InstrumentSpec`` as often as an absent mark, so this figure
+    can go unknown with every mark in place.
+    """
+    total = _ZERO
+    for symbol, term in reading.maintenance_margin.items():
+        if not reading.holds(symbol) or leverage_for(symbol).mode != "cross":
+            continue
+        if term is None:
+            return None
+        total += term
+    return total
+
+
+def _maintenance_margin(
+    state: VenueAccountState,
+    reading: LedgerReading,
+    leverage_for: Callable[[str], LeverageSpec],
+) -> tuple[Divergence, ...]:
+    """Tier-2: the cross subset's maintenance, against the venue's own field.
+
+    Compared at all because it is the number ADR-0040 §4's tier-crossing alert
+    is computed off, and because the venue publishes one — narrowly. The cost
+    ADR-0046 §2.1 states rather than hides is that **isolated maintenance has no
+    venue cross-check at all**: the venue publishes neither a per-position
+    maintenance field nor an isolated total, so that half is computed-only.
+
+    The *reported* figure is untouched and stays Σ-over-all, which is the honest
+    account-wide maintenance a strategy reads. Only the comparison narrows.
+
+    Account grain, so the record carries no symbol — maintenance is owed against
+    the one collateral pool — and it lands with the equity and free-margin
+    findings ahead of the per-symbol ones, in the order the account's own lines
+    are read. A ``None`` is dropped on the rule ``_equity`` states: a Σ waiting
+    on a rate or a mark is unknown, not disputed.
+    """
+    maintenance = _cross_maintenance(reading, leverage_for)
+    if maintenance is None or maintenance == state.cross_maintenance_margin:
+        return ()
+    return (
+        Divergence(
+            tier=DivergenceTier.TIER_2,
+            field=DivergenceField.MAINTENANCE_MARGIN,
+            symbol=None,
+            ledger=maintenance,
+            venue=state.cross_maintenance_margin,
+        ),
+    )
+
+
 def _unrealized(state: VenueAccountState, reading: LedgerReading) -> tuple[Divergence, ...]:
     """Tier-2: per-symbol open PnL, at the account grain both sides hold it.
 
@@ -719,6 +794,7 @@ class ReconcileFindings:
             + _sizes(state, reading)
             + _equity(state, reading)
             + _free_margin(state, reading)
+            + _maintenance_margin(state, reading, leverage_for)
             + _unrealized(state, reading)
             + _notional(state, reading)
             + _margin_used(state, reading)

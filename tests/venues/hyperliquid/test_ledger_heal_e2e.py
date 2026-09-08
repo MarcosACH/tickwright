@@ -209,6 +209,20 @@ def test_a_tier_1_divergence_heals_to_the_venues_own_figures_through_the_real_ad
             Decimal("25.9264"),
             Decimal("0.0096"),
         ),
+        # And a fourth time, in the unit a margin call is computed in. The
+        # ledger's side is a Σ over a cross subset it holds nothing in, so it is
+        # a real zero rather than an unknown — this pass genuinely owes
+        # maintenance on nothing. The venue's is ``crossMaintenanceMarginUsed``
+        # straight off the wire, the one figure of the six whose two sides are
+        # scoped differently (ADR-0046 §2.1) and the only one here that needed
+        # no adapter arithmetic at all.
+        (
+            DivergenceTier.TIER_2,
+            DivergenceField.MAINTENANCE_MARGIN,
+            None,
+            Decimal("0"),
+            Decimal("1.6198"),
+        ),
     ]
 
     ledger = keeper.portfolio

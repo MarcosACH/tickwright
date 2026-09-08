@@ -17,6 +17,7 @@ from typing import Final
 
 from ledgers import book_fill
 from venue_doubles import (
+    CROSSLESS_MAINTENANCE,
     LIVE_ACCOUNT_ID,
     RECORDED_ENTRY_PRICE,
     account_state,
@@ -287,6 +288,7 @@ def _held(
     *positions: tuple[str, str, str],
     free_margin: str | None = None,
     entry: Mapping[str, str] | None = None,
+    maintenance: str | None = None,
 ) -> VenueAccountState:
     """A venue snapshot holding an explicit ``(symbol, signed_size, uPnL)`` per entry.
 
@@ -312,6 +314,12 @@ def _held(
     hands the cycle an exposure two orders of magnitude out and a divergence
     about nothing. It is the knob rather than the notional itself, so the two
     venue fields cannot be made to contradict each other.
+
+    ``maintenance`` defaults to ``CROSSLESS_MAINTENANCE`` on that fixture's own
+    premise — these rows are isolated 1x until a case ``_levered`` them, and the
+    venue's field counts only cross ones — and a case running a cross book
+    declares what its account would publish, there being no rate here to derive
+    it from.
     """
     recorded = account_state(equity, "-0.034").positions[0]
     entered = entry if entry is not None else {}
@@ -320,7 +328,9 @@ def _held(
         free_margin=implied_free_margin(
             equity, (unrealized for _, _, unrealized in positions), declared=free_margin
         ),
-        cross_maintenance_margin=Decimal("1.6198"),
+        cross_maintenance_margin=(
+            CROSSLESS_MAINTENANCE if maintenance is None else Decimal(maintenance)
+        ),
         positions=tuple(
             margined(
                 replace(
@@ -1767,6 +1777,17 @@ one *this* account could have returned: a fixture disagreeing on a field the
 case says nothing about would leave every one of them carrying a free-margin
 finding."""
 
+_BTC_5X_MAINTENANCE = "1.6203750"
+"""The ``crossMaintenanceMarginUsed`` a venue holding that same account publishes.
+
+``CROSSLESS_MAINTENANCE`` is the default because both fixtures build their rows
+isolated, and these cases ``_levered`` theirs to cross — which puts the position
+inside the venue's cross-scoped field for the first time. The figure is this
+book's own exposure at #152's tier-0 rate, ``0.002 × 64815 × 0.0125``, and it is
+passed for the same reason ``_BTC_5X_FREE`` is: the subject here is the
+liquidation price, and a snapshot disagreeing on maintenance would leave each of
+these cases carrying a Tier-2 finding about something else."""
+
 
 def _priced(state: VenueAccountState, price: Decimal | None) -> VenueAccountState:
     """The same snapshot with ``price`` on every position it carries.
@@ -1806,7 +1827,12 @@ def test_a_cycle_caches_the_venues_liquidation_price_and_the_read_passes_it_thro
     _mark(projection, "BTC", "64815")
     venue = _AccountVenue(
         _levered(
-            _priced(account_state("25.9264", "0.012", free_margin=_BTC_5X_FREE), _BTC_LIQUIDATION),
+            _priced(
+                account_state(
+                    "25.9264", "0.012", free_margin=_BTC_5X_FREE, maintenance=_BTC_5X_MAINTENANCE
+                ),
+                _BTC_LIQUIDATION,
+            ),
             _CROSS_5X,
         )
     )
@@ -1845,7 +1871,12 @@ def test_the_cached_liquidation_price_stays_frozen_until_the_next_cycle() -> Non
     _mark(projection, "BTC", "64815")
     venue = _AccountVenue(
         _levered(
-            _priced(account_state("25.9264", "0.012", free_margin=_BTC_5X_FREE), _BTC_LIQUIDATION),
+            _priced(
+                account_state(
+                    "25.9264", "0.012", free_margin=_BTC_5X_FREE, maintenance=_BTC_5X_MAINTENANCE
+                ),
+                _BTC_LIQUIDATION,
+            ),
             _CROSS_5X,
         )
     )
@@ -1883,7 +1914,13 @@ def test_a_position_the_venue_prices_at_nothing_reads_none_rather_than_the_formu
     _mark(projection, "BTC", "64815")
     venue = _AccountVenue(
         _levered(
-            _priced(account_state("25.9264", "0.012", free_margin=_BTC_5X_FREE), None), _CROSS_5X
+            _priced(
+                account_state(
+                    "25.9264", "0.012", free_margin=_BTC_5X_FREE, maintenance=_BTC_5X_MAINTENANCE
+                ),
+                None,
+            ),
+            _CROSS_5X,
         )
     )
     cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
@@ -1930,7 +1967,12 @@ def test_a_position_opened_since_the_read_reads_none_rather_than_the_formula() -
     _mark(projection, "BTC", "64815")
     venue = _AccountVenue(
         _levered(
-            _priced(account_state("25.9264", "0.012", free_margin=_BTC_5X_FREE), _BTC_LIQUIDATION),
+            _priced(
+                account_state(
+                    "25.9264", "0.012", free_margin=_BTC_5X_FREE, maintenance=_BTC_5X_MAINTENANCE
+                ),
+                _BTC_LIQUIDATION,
+            ),
             _CROSS_5X,
         )
     )
@@ -2640,6 +2682,67 @@ def test_an_isolated_margin_is_banded_by_the_positions_notional_not_the_cross_di
         DivergenceField.MARGIN_USED,
     ]
     assert _alerts(logs) == []
+
+
+def test_account_maintenance_margin_is_compared_against_the_venues_cross_scoped_field() -> None:
+    """The sixth and last of ADR-0040 §6's banded quantities, and the one whose
+    two sides are scoped differently (ADR-0046 §2.1).
+
+    The venue publishes ``crossMaintenanceMarginUsed``, which counts cross
+    positions and silently omits isolated ones — while ADR-0040 §2's account row
+    is a Σ over every position. So the *comparison* narrows to the cross subset
+    and the **reported** figure stays Σ-over-all: dropping the field from the
+    band instead would discard the signal on exactly the positions the venue
+    does publish a number for, and comparing the reported Σ would fire an
+    unbounded gap on every account holding an isolated leg — the primary mode in
+    practice, and not the mark skew the band was sized for.
+
+    Account grain, so the record carries no symbol, and it sits with the equity
+    and free-margin findings ahead of the per-symbol ones. Alerted and never
+    healed, with the rest of the tier.
+
+    A cross-only book here, so the subset *is* the whole roster and the case is
+    about the comparison existing at all rather than about its scope. The 0.002
+    long marked at 65000 is worth 130.000, and #152's tier-0 rate puts the
+    ledger's maintenance at ``130.000 × 0.0125 = 1.625000``; the venue is built
+    to publish 1.400, a gap of 0.225 that the band's ``0.001 × 130.000`` does
+    not absorb. Every other figure is built to agree — the snapshot's equity
+    carries its own uPnL exactly, so ``venue_cash`` lands back on 100000 and no
+    Tier-1 finding is there to suppress the alert.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000", leverage=_BTC_CROSS_5X, specs={"BTC": _BTC_SPEC})
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "65000")
+    venue = _levered(
+        # Free margin is the cross pair's difference at this run's own leverage:
+        # 100000.382 of equity less the 130.000 / 5 the position posts.
+        _held(
+            "100000.382",
+            ("BTC", "0.002", "0.382"),
+            free_margin="99974.382",
+            maintenance="1.400",
+        ),
+        _CROSS_5X,
+    )
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences is not None
+    assert [(d.field, d.symbol, d.ledger, d.venue) for d in divergences] == [
+        (DivergenceField.MAINTENANCE_MARGIN, None, Decimal("1.6250000"), Decimal("1.400"))
+    ]
+    assert _alerts(logs) == [
+        {
+            "field": "maintenance_margin",
+            "symbol": None,
+            "ledger": "1.6250000",
+            "venue": "1.400",
+        }
+    ]
 
 
 def test_free_margin_is_classified_at_tier_2_against_the_venues_own_figure() -> None:
