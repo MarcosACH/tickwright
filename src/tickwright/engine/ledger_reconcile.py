@@ -12,6 +12,7 @@ one would be the second internal projection ADR-0035 rejects, agreeing only ever
 with itself. What paper has in its place is the atomic ledger write.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
@@ -20,6 +21,7 @@ from tickwright.domain import (
     AccountAnchor,
     AccountModeVerdict,
     CashCorrection,
+    LeverageSpec,
     ReconciliationFill,
     Side,
     VenueAccountState,
@@ -90,6 +92,7 @@ class DivergenceField(Enum):
     FREE_MARGIN = "free_margin"
     UNREALIZED_PNL = "unrealized_pnl"
     NOTIONAL = "notional"
+    MARGIN_USED = "margin_used"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -315,7 +318,11 @@ def _stale_grains(
     return frozenset(stale) | (frozenset({None}) if stale else frozenset())
 
 
-def _reference(divergence: Divergence, reading: LedgerReading) -> Decimal | None:
+def _reference(
+    divergence: Divergence,
+    reading: LedgerReading,
+    leverage_for: Callable[[str], LeverageSpec],
+) -> Decimal | None:
     """The notional ADR-0046 §5 scales the band's relative term by.
 
     One rule with two grains, and the grain is the divergence's own: a per-symbol
@@ -323,6 +330,13 @@ def _reference(divergence: Divergence, reading: LedgerReading) -> Decimal | None
     account-grain figure carries none and errs by at most the book's total —
     ``equity`` and ``free_margin`` are both Σs over every position's valuation,
     so a skew reaches them through every notional at once.
+
+    ``margin_used`` is the exception, and it is the same rule rather than a
+    second one: the quantity is *self-scaling* (ADR-0046 §5), so its reference
+    is the notional a skew reaches **it** through, which for a cross position is
+    the ``notional / L`` it posts and not the exposure above it. Referenced
+    against the exposure the band would be ``L`` times too wide, and widest at
+    the leverage where a margin gap is worth the most.
 
     The Σ propagates the unknown the way ``domain.valuation`` does: one symbol
     waiting on a mark makes the *total* unknown, because a partial Σ used as a
@@ -344,7 +358,10 @@ def _reference(divergence: Divergence, reading: LedgerReading) -> Decimal | None
     ``InstrumentSpec`` can make unknown with every mark in place.
     """
     if divergence.symbol is not None:
-        return reading.notional.get(divergence.symbol)
+        notional = reading.notional.get(divergence.symbol)
+        if notional is None or divergence.field is not DivergenceField.MARGIN_USED:
+            return notional
+        return notional / leverage_for(divergence.symbol).leverage
     total = _ZERO
     for term in reading.notional.values():
         if term is None:
@@ -552,6 +569,39 @@ def _notional(state: VenueAccountState, reading: LedgerReading) -> tuple[Diverge
     )
 
 
+def _margin_used(state: VenueAccountState, reading: LedgerReading) -> tuple[Divergence, ...]:
+    """Tier-2: per-symbol posted margin, against the venue's own ``marginUsed``.
+
+    ``_notional``'s range and rules — both rosters intersected on the ledger's
+    net, ``None`` skipped and counted — and per symbol because that is the grain
+    the venue publishes the figure at (ADR-0041 §4): a Σ has already added the
+    positions together, and the comparison would then be against a total the
+    response never returned.
+
+    Compared at all because this is the figure a margin call is computed off:
+    every quantity an operator would act on — free margin, effective leverage,
+    the distance to liquidation — is this number or a fold over it, so a ledger
+    that has it wrong is one whose account view is wrong everywhere at once
+    while agreeing on every position it holds.
+
+    Alerted and never healed, with the rest of the tier.
+    """
+    ledger = reading.margin_used
+    return tuple(
+        Divergence(
+            tier=DivergenceTier.TIER_2,
+            field=DivergenceField.MARGIN_USED,
+            symbol=position.symbol,
+            ledger=held,
+            venue=position.margin_used,
+        )
+        for position in sorted(state.positions, key=lambda p: p.symbol)
+        if reading.holds(position.symbol)
+        and (held := ledger.get(position.symbol)) is not None
+        and held != position.margin_used
+    )
+
+
 def _unvalued(state: VenueAccountState, reading: LedgerReading) -> int:
     """How many Tier-2 figures this pass could not compute at all.
 
@@ -634,6 +684,7 @@ class ReconcileFindings:
         *,
         band: ValuationBand,
         now_ns: int,
+        leverage_for: Callable[[str], LeverageSpec],
     ) -> "ReconcileFindings":
         """Compare one reading against one snapshot and decide what to say.
 
@@ -646,6 +697,13 @@ class ReconcileFindings:
         age is a fact about the snapshot this comparison was made on — read
         later, beside the alerts, it would be measured against a clock the pass's
         own heal has already moved forward.
+
+        ``leverage_for`` is an argument and not a member of the reading, because
+        the reading is *folds* — figures this pass computed off marks and fills —
+        while a leverage is the run's own config, which no cadence derives and no
+        band may be widened by having forgotten. It is asked per symbol rather
+        than handed as a book, so the classification cannot range over entries
+        the venue never returned.
         """
         divergences = (
             _cash(state, reading)
@@ -654,6 +712,7 @@ class ReconcileFindings:
             + _free_margin(state, reading)
             + _unrealized(state, reading)
             + _notional(state, reading)
+            + _margin_used(state, reading)
         )
         explained = _tier_1_grains(divergences)
         stale = _stale_grains(reading, now_ns=now_ns, band=band)
@@ -663,7 +722,7 @@ class ReconcileFindings:
             if (
                 divergence.tier is not DivergenceTier.TIER_2
                 or divergence.symbol in explained
-                or band.covers(divergence, reference=_reference(divergence, reading))
+                or band.covers(divergence, reference=_reference(divergence, reading, leverage_for))
             ):
                 continue
             # Staleness is asked **after** the band, so the count means "would
@@ -834,6 +893,11 @@ class LedgerReconciliation:
             # compared against: taken beside the alerts instead, it would be
             # measured against a clock this pass's own heal has moved forward.
             now_ns=self._checkpointer.clock.timestamp_ns(),
+            # The run's own resolved book, read through the projection that
+            # already holds it (ADR-0044 §7) — the band's divisor for a cross
+            # margin, and the config half of it, so it comes from where config
+            # lives rather than from the snapshot being compared.
+            leverage_for=self._portfolio.leverage_for,
         )
         divergences = findings.divergences
         # One stamp for the pass, spent on both halves of its heal: the

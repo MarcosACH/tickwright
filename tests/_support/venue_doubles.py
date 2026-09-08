@@ -38,6 +38,7 @@ one place a double is allowed.
 """
 
 from collections.abc import Iterable, Mapping
+from dataclasses import replace
 from decimal import Decimal
 
 from ledgers import GENESIS
@@ -54,6 +55,8 @@ from tickwright.domain import (
     VenuePositionState,
     VenueReadFailure,
 )
+
+_ZERO = Decimal("0")
 
 RECORDED_ENTRY_PRICE = Decimal("64809.0")
 """The recorded snapshot's own entry price, and the default every derived leg
@@ -84,6 +87,31 @@ def implied_notional(signed_size: Decimal, entry_price: Decimal, unrealized: Dec
     """
     exposure = abs(signed_size) * entry_price
     return exposure + unrealized if signed_size > 0 else exposure - unrealized
+
+
+def margined(position: VenuePositionState) -> VenuePositionState:
+    """``position`` with the ``marginUsed`` a venue holding it would publish.
+
+    Each mode's own identity, read off the row's own fields (ADR-0040 §3): a
+    cross position posts ``positionValue / L`` out of the account pool, and an
+    isolated one posts the bucket it locked, marked to market — its ``collateral
+    + uPnL``. The two differ at every mark but the entry, so a fixture answering
+    one of them for both is a snapshot no venue returns.
+
+    Applied by every constructor and every mutator that moves one of those
+    inputs, rather than once at construction, because a leverage or a bucket set
+    afterwards changes the figure: ``margin_used`` is the third field of this
+    family (after ``free_margin`` and ``notional``) whose recorded constant went
+    stale the moment ADR-0040 §6 compared it, and it is the first that a *later*
+    replacement can invalidate.
+    """
+    if position.leverage.mode == "cross":
+        return replace(position, margin_used=position.notional / position.leverage.leverage)
+    bucket = position.isolated_collateral
+    return replace(
+        position,
+        margin_used=(_ZERO if bucket is None else bucket) + position.unrealized_pnl,
+    )
 
 
 def implied_free_margin(equity: str, unrealized: Iterable[str], *, declared: str | None) -> Decimal:
@@ -140,23 +168,29 @@ def account_state(
         free_margin=implied_free_margin(equity, unrealized, declared=free_margin),
         cross_maintenance_margin=Decimal("1.6198"),
         positions=tuple(
-            VenuePositionState(
-                symbol="BTC",
-                signed_size=Decimal("0.002"),
-                entry_price=RECORDED_ENTRY_PRICE,
-                notional=implied_notional(Decimal("0.002"), RECORDED_ENTRY_PRICE, Decimal(pnl)),
-                unrealized_pnl=Decimal(pnl),
-                margin_used=Decimal("25.9168"),
-                isolated_collateral=None,
-                liquidation_price=None,
-                # The **ledger's** default pair rather than the recorded body's
-                # ``cross 5``, on the same premise ``implied_free_margin``
-                # states: this fixture's account is one a suite builds at
-                # isolated 1x, and a venue setting that disagreed with it would
-                # put a standing ``LEVERAGE_DIVERGENCE`` under every case here
-                # that says nothing about leverage (ADR-0044 §10). A case about
-                # drift overrides it.
-                leverage=DEFAULT_LEVERAGE,
+            margined(
+                VenuePositionState(
+                    symbol="BTC",
+                    signed_size=Decimal("0.002"),
+                    entry_price=RECORDED_ENTRY_PRICE,
+                    notional=implied_notional(Decimal("0.002"), RECORDED_ENTRY_PRICE, Decimal(pnl)),
+                    unrealized_pnl=Decimal(pnl),
+                    # Overwritten by ``margined`` — the recorded 25.9168 is
+                    # ``positionValue / 5`` on the snapshot's own cross book,
+                    # which is not the book a suite builds beside it.
+                    margin_used=_ZERO,
+                    isolated_collateral=None,
+                    liquidation_price=None,
+                    # The **ledger's** default pair rather than the recorded
+                    # body's ``cross 5``, on the same premise
+                    # ``implied_free_margin`` states: this fixture's account is
+                    # one a suite builds at isolated 1x, and a venue setting
+                    # that disagreed with it would put a standing
+                    # ``LEVERAGE_DIVERGENCE`` under every case here that says
+                    # nothing about leverage (ADR-0044 §10). A case about drift
+                    # overrides it.
+                    leverage=DEFAULT_LEVERAGE,
+                )
             )
             for pnl in unrealized
         ),
