@@ -214,6 +214,63 @@ def test_slow_consumer_gets_only_the_latest_tick_per_symbol_with_one_lagged_per_
     assert lagged[0]["dropped_trade_id"] == "2"
 
 
+def test_a_publish_that_raises_tears_the_socket_reader_down_with_it() -> None:
+    """The fault twin of the stall above: a *slow* subscriber must not stop the
+    reader draining the socket, and a *failing* one must stop it at once.
+
+    The two coroutines behind one connection are paired in a ``TaskGroup`` for
+    exactly this — a reader that outlived its publisher would keep pulling
+    frames, conflating them into a buffer nothing drains again, and hold the
+    socket open on an engine that is already faulting. So the fault leaves the
+    group instead of being swallowed by it: ``WsSession`` answers only a refused
+    *connect*, which is what makes the runner's supervising ``TaskGroup`` the
+    fault channel for everything a consumer raises (ADR-0024).
+
+    Distinct from ``test_session.py``'s consumer-raises case, which drives a
+    stand-in ``consume`` and pins the session's no-reconnect policy. This one
+    pins the pairing the real ``consume`` is built from, and nothing else
+    reaches it: the parse path never raises (a bad frame is a named drop), so a
+    failing publish is the only way this group is ever asked to abort.
+    """
+
+    class Boom(Exception):
+        """A subscriber's fault, from the far side of ``bus.publish``."""
+
+    async def main() -> FakeWsConnection:
+        bus = InMemoryBus()
+
+        async def explode(tick: MarketTick) -> None:
+            raise Boom
+
+        bus.subscribe(MarketTick, explode)
+        # More frames than the reader can have read: the first tick faults the
+        # publisher, so a reader still standing would consume the rest and set
+        # ``drained``. ``drop_when_drained`` keeps that failure a failed
+        # assertion rather than a hang on a socket nobody closes.
+        connection = FakeWsConnection(
+            [trades_frame(trade("BTC", "100", tid)) for tid in (1, 2, 3)],
+            drop_when_drained=True,
+        )
+
+        async def connect(url: str) -> FakeWsConnection:
+            return connection
+
+        feed = HyperliquidFeed(
+            config=HyperliquidConfig(symbols=["BTC"]), bus=bus, clock=ManualClock(), connect=connect
+        )
+        with pytest.raises(ExceptionGroup) as raised:
+            await asyncio.wait_for(feed.start(), timeout=2)
+
+        # The subscriber's fault alone: the reader's cancellation is the group's
+        # own doing and is not reported as a second failure.
+        assert [type(error) for error in raised.value.exceptions] == [Boom]
+        return connection
+
+    connection = asyncio.run(main())
+
+    assert not connection.drained.is_set()  # torn down mid-socket, not run to the end
+
+
 def test_ws_drop_reconnects_with_backoff_resubscribes_and_resumes() -> None:
     """The venue hangs up after one tick, the next connect attempt is refused,
     the one after succeeds: the feed sleeps the doubling backoff on the injected
