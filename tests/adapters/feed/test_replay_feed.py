@@ -12,6 +12,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from feed_contract import assert_every_traded_symbol_is_marked, record_market_data
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
@@ -178,6 +179,36 @@ def test_replay_never_conflates_the_marks_it_derives(tmp_path: Path) -> None:
     # marks at one instant apart, so the derived stream is as replayable as the
     # trades it came from.
     assert [m.event_id for m in marks] == ["BTC:1000:0", "BTC:2000:1", "BTC:3000:2"]
+
+
+def test_replay_marks_every_symbol_it_trades(tmp_path: Path) -> None:
+    """The shared ``MarketFeed`` obligation (``tests/_support/feed_contract.py``),
+    driven over the finite file this adapter reads.
+
+    The assertions above already state *how* replay derives its mark — the
+    last-trade proxy, one per row, never conflated. This one states the thing
+    the live adapter states too, in the same words, so the obligation is one
+    sentence with two subjects rather than two suites that happen to agree.
+
+    Multi-symbol on purpose: the omission this catches is per-symbol, and a
+    single-symbol file cannot tell "marks everything it trades" from "marks the
+    one symbol anybody tested".
+    """
+    path = _write_jsonl(
+        tmp_path / "ticks.jsonl",
+        [
+            _row("BTC", "100", 1_000, "a"),
+            _row("ETH", "50", 1_500, "x"),
+            _row("SOL", "20", 2_000, "s"),
+            _row("BTC", "101", 2_500, "b"),
+        ],
+    )
+    bus = InMemoryBus()
+    transcript = record_market_data(bus)
+
+    asyncio.run(ReplayFeed(path=path, bus=bus, clock=ManualClock()).start())
+
+    assert_every_traded_symbol_is_marked(transcript, feed="ReplayFeed")
 
 
 def test_replay_advances_the_clock_to_each_tick_ts_event(tmp_path: Path) -> None:
