@@ -415,6 +415,32 @@ def test_non_trades_frames_are_ignored() -> None:
     assert [t.trade_id for t in seen] == ["1"]
 
 
+@pytest.mark.parametrize("frame", ["[1,2]", '"hello"', "42", "null"])
+def test_a_frame_that_is_json_but_not_an_object_is_dropped_and_named(frame: str) -> None:
+    """A frame the feed cannot read is named however it is malformed — deliberately
+    the *opposite* answer to the unsourced-channel frames pinned directly above.
+
+    The two look alike and are not: a ``subscriptionResponse`` is the venue
+    working, constant housekeeping traffic that would drown the log if named,
+    while a bare list or a naked ``null`` is the venue breaking its own contract.
+    Filing the second under the first's silence is what makes a total feed loss
+    indistinguishable from a quiet market — no named event, no exception, no
+    reconnect, while every Tier-2 valuation decays to ``None`` (ADR-0039) and
+    nothing fills. ADR-0023 makes the stream lossy by contract; ADR-0020's
+    catalog is what keeps the loss observable, so it is dropped, never silently.
+
+    Parametrized over all four non-object JSON kinds because ``null`` in
+    particular reads as an absence rather than a corruption, and is the one most
+    likely to be special-cased back into silence.
+    """
+    frames = [frame, trades_frame(trade("BTC", "100", 1))]
+    with capture_events() as logs:
+        seen, _ = _drive(frames, symbols=["BTC"], until_ticks=1)
+
+    assert [t.trade_id for t in seen] == ["1"]  # the good frame after it still ticks
+    assert [record["event"] for record in logs] == ["feed.frame_dropped"]
+
+
 @pytest.mark.parametrize("figure", ["NaN", "Infinity", "-Infinity"])
 def test_a_non_finite_tick_figure_is_dropped_not_ticked(figure: str) -> None:
     """``Decimal("NaN")``/``Decimal("Infinity")`` are *valid* constructions, so a

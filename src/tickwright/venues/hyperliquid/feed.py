@@ -122,6 +122,10 @@ class HyperliquidFeed:
             self._drop_frame(frame)
             return []
         if not isinstance(message, dict):
+            # Malformed, not housekeeping: a frame that is valid JSON but not an
+            # object is the venue breaking its own contract, so it answers like
+            # the garbage above and not like the unsourced channels below.
+            self._drop_frame(frame)
             return []
         if message.get("channel") == "activeAssetCtx":
             return self._parse_mark(frame, message.get("data"))
