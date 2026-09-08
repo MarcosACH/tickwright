@@ -617,7 +617,12 @@ class Exchange(OrderAnchor, AccountAnchor, Protocol):
 
     async def run(self) -> None:
         """The adapter's supervised long-lived half — the peer of
-        ``MarketFeed.start()``, one seam over (ADR-0024).
+        ``MarketFeed.run()``, one seam over (ADR-0024).
+
+        It named ``MarketFeed.start()`` until #227, which was right while the
+        feed's ``start()`` *was* its loop: the two seams now take the same three
+        members meaning the same three things, so each member's peer is the one
+        that shares its name.
 
         ``start()`` cannot be this. The runner awaits it inline at step 4 and it
         must **return** so the barrier can run at step 5, so a loop that lived
