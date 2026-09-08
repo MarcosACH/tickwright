@@ -96,9 +96,9 @@ auth, quirk translation — and importing no other adapter. It provides both a `
 [`venues/hyperliquid/`](../src/tickwright/venues/hyperliquid/) as the reference.
 
 - [ ] Create `src/tickwright/venues/<venue>/` with a `MarketFeed` adapter (`start`/`stop`, publishes
-  `MarketTick`s **and `MarkTick`s** — the mark is market data and enters here, never off a reconcile
-  pull, so a feed that omits it leaves every Tier-2 valuation reading `None`, ADR-0039), an
-  `Exchange` adapter (`start`/`run`/`stop` plus
+  `MarketTick`s **and `MarkTick`s** — the obligation and its consequence are stated on the
+  [`MarketFeed` Protocol](../src/tickwright/domain/protocols.py) itself, and made executable by the
+  shared feed contract in the TDD bullet below), an `Exchange` adapter (`start`/`run`/`stop` plus
   `place`/`cancel`/`fetch_order`/`fetch_account_state`/`account_spec`/`instrument_specs`), spec
   sourcing, and a `<Venue>Config`.
 - [ ] Honor the `Exchange` contracts: a failed read is **never venue truth** (never `[]`, never a
@@ -153,6 +153,14 @@ auth, quirk translation — and importing no other adapter. It provides both a `
   feed drives virtual time (a live feed uses `LiveClock`).
 - [ ] Confirm the import boundary: `uv run lint-imports` must pass — the package imports `domain` and
   `observability` only, never `engine` or another adapter.
+- [ ] Drive your `MarketFeed` half through the **shared feed contract**
+  ([`tests/_support/feed_contract.py`](../tests/_support/feed_contract.py)): subscribe with
+  `record_market_data(bus)`, drive your feed however your feed is driven — a file, recorded frames,
+  whatever your transport needs — and hand the transcript to `assert_every_traded_symbol_is_marked`,
+  as both shipped adapters do. The driving is yours because the two shipped feeds share no lifecycle
+  worth parametrizing (one reads a finite file and returns, the other opens a socket and does not);
+  the obligation is not yours to restate. Assert *how* you source the mark in your own suite —
+  provenance is one per deployment by design (ADR-0039) and deliberately outside the contract.
 - [ ] TDD the adapters at their own seam, and give the `Exchange` half a **claim per member**:
   `assert isinstance(exchange, Exchange)`, plus a `_SEAM_CLAIMS` map — member → the test that says
   what that member does on *your* venue — handed to `assert_every_member_is_claimed`

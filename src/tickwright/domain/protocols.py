@@ -115,7 +115,24 @@ class ReplayClock(Clock, Protocol):
 
 @runtime_checkable
 class MarketFeed(Protocol):
-    """Produces ``MarketTick`` events for configured symbols (ADR-0015)."""
+    """Produces ``MarketTick`` **and ``MarkTick``** events for configured symbols
+    (ADR-0015/0039).
+
+    Two streams, and the second is an obligation rather than an option: a symbol
+    this feed trades is a symbol it must also mark. The mark is market data and
+    enters here — never off a reconcile pull — so a feed publishing trades alone
+    leaves ``PortfolioProjection`` with no valuation input at all, and every
+    ``unrealized_pnl``, ``notional`` and ``equity`` for those symbols reads
+    ``None`` forever with nothing raised anywhere to say so.
+
+    *How* a mark is arrived at is the adapter's own and differs per deployment by
+    design (ADR-0039): ``ReplayFeed`` derives the last-trade proxy, and
+    ``HyperliquidFeed`` reads the venue's ``ctx.markPx``. Only the obligation is
+    shared — and it is executable rather than prose, stated once in
+    ``tests/_support/feed_contract.py`` and answered by both adapter suites,
+    because a feed that omitted the mark would otherwise satisfy this Protocol,
+    type-check, run, and pass a suite of its own.
+    """
 
     async def start(self) -> None:
         """Begin producing ticks. ``ReplayFeed`` runs to end-of-file."""
