@@ -462,10 +462,10 @@ def account_view(
     reports collateral against a position the venue does not have (ADR-0035).
     The account-net fold is therefore taken first and the arithmetic run once per
     symbol, through the **same** helpers ``position_view`` uses — so a total can
-    never disagree with the views it is read beside. Two of the three Σs are now
-    literally sums over the public per-symbol folds the reconcile cadence reads
-    (``account_notional``, ``account_margin_used``), which is the strong form of
-    that promise: the mode split is not written twice and cannot come apart.
+    never disagree with the views it is read beside. All three Σs are now
+    literally sums over the public per-symbol folds the reconcile cadence reads,
+    which is the strong form of that promise: the mode split and the maintenance
+    rate are not written twice and cannot come apart.
 
     ``leverage`` is the resolved book rather than one spec, and ``specs`` the
     instrument universe, because this ranges over symbols where ``position_view``
@@ -474,17 +474,9 @@ def account_view(
     """
     held = tuple(positions)
     equity = _equity(account, held, marks)
-    notionals = account_notional(held, marks)
-    posted = account_margin_used(held, marks, leverage=leverage)
-    total_notional: Decimal | None = _ZERO
-    total_margin_used: Decimal | None = _ZERO
-    total_maintenance_margin: Decimal | None = _ZERO
-    for symbol, notional in notionals.items():
-        total_notional = _total(total_notional, notional)
-        total_margin_used = _total(total_margin_used, posted.get(symbol))
-        total_maintenance_margin = _total(
-            total_maintenance_margin, _maintenance_margin(notional, spec=specs.get(symbol))
-        )
+    total_notional = _summed(account_notional(held, marks))
+    total_margin_used = _summed(account_margin_used(held, marks, leverage=leverage))
+    total_maintenance_margin = _summed(account_maintenance_margin(held, marks, specs=specs))
     return AccountView(
         cash=account.cash,
         equity=equity,
@@ -509,6 +501,21 @@ def _isolated_collateral_by_symbol(positions: Iterable[Position]) -> dict[str, D
             buckets.get(position.symbol, _ZERO) + position.isolated_collateral
         )
     return buckets
+
+
+def _summed(terms: Mapping[str, Decimal | None]) -> Decimal | None:
+    """A per-symbol fold added up under ``_total``'s rule, one unknown poisoning
+    the whole (ADR-0041 §6).
+
+    The account grain's Σs are literally sums over the per-symbol folds the
+    reconcile cadence reads, rather than a second traversal that computes the
+    same terms again — so ``AccountView`` cannot report a total the cadence
+    would disagree with symbol by symbol.
+    """
+    total: Decimal | None = _ZERO
+    for term in terms.values():
+        total = _total(total, term)
+    return total
 
 
 def _total(running: Decimal | None, term: Decimal | None) -> Decimal | None:
@@ -621,6 +628,38 @@ def account_margin_used(
             ),
         )
     return posted
+
+
+def account_maintenance_margin(
+    positions: Iterable[Position],
+    marks: Mapping[str, Decimal],
+    *,
+    specs: Mapping[str, InstrumentSpec],
+) -> dict[str, Decimal | None]:
+    """Per-symbol maintenance margin at the **account** grain (ADR-0040 §4).
+
+    The third of the folds the reconcile cadence reads, and the one with no mode
+    term: maintenance is owed on the exposure whichever pool backs it, so this
+    takes the instrument universe where ``account_margin_used`` takes the
+    leverage book.
+
+    Per symbol rather than as the Σ ``AccountView`` publishes, and here that is
+    load-bearing beyond the grain argument the two folds beside it make. ADR-0046
+    §2.1 narrows the *comparison* to the **cross subset** while the reported
+    figure stays Σ-over-all, because the venue's ``crossMaintenanceMarginUsed``
+    excludes isolated positions and nothing in the response says so. A total
+    handed over whole cannot be narrowed to a subset afterwards, so the cadence
+    needs the terms.
+
+    ``None`` for a symbol whose rate or whose mark is missing, on the per-term
+    rule the arithmetic already carries: a flat account-net is zero at every
+    rate and every price, which is exactly the reserved unattributed partition,
+    where the two go missing together.
+    """
+    return {
+        symbol: _maintenance_margin(notional, spec=specs.get(symbol))
+        for symbol, notional in account_notional(positions, marks).items()
+    }
 
 
 def _equity(

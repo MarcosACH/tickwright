@@ -25,6 +25,7 @@ from tickwright.domain import (
     Position,
     PositionView,
     Side,
+    account_maintenance_margin,
     account_margin_used,
     account_view,
     position_view,
@@ -52,6 +53,16 @@ ETH_25X = InstrumentSpec(
     min_notional=Decimal("10"),
     max_leverage=25,
     margin_maint=Decimal("0.02"),  # 1/(2 x 25)
+)
+
+
+SOL_20X = InstrumentSpec(
+    symbol="SOL",
+    sz_decimals=2,
+    max_decimals=6,
+    min_notional=Decimal("10"),
+    max_leverage=20,
+    margin_maint=Decimal("0.025"),  # 1/(2 x 20)
 )
 
 
@@ -1107,3 +1118,63 @@ def test_the_account_grain_margin_used_fold_ranges_over_symbols_not_partitions()
     )
 
     assert margin == {"BTC": Decimal("0"), "ETH": Decimal("3840")}
+
+
+def test_the_account_grain_maintenance_margin_fold_rates_each_symbols_notional() -> None:
+    """``account_maintenance_margin``: ``notional × margin_maint`` per symbol, at
+    the flat tier-0 rate (ADR-0040 §4).
+
+    The third account-grain fold, and the one with **no mode term** — maintenance
+    is owed on the exposure whichever pool backs it, so unlike ``margin_used``
+    beside it this takes the instrument universe and not the leverage book. It is
+    folded per symbol for the reconcile cadence, which compares only the **cross
+    subset** against the venue's ``crossMaintenanceMarginUsed`` while the
+    reported figure stays Σ-over-all (ADR-0046 §2.1): a Σ handed over whole
+    cannot be narrowed to a subset afterwards.
+
+        BTC  +0.5 @ 58000, mark 60000  notional 30000, rate 0.0125 -> 375
+        ETH  +10  @ 3000,  mark 3200   notional 32000, rate 0.02   -> 640
+
+    The two unknowns are separate arms because they arrive through separate
+    terms, and only one of them is about marks: SOL has a rate and no price,
+    DOGE has a price and no rate. A symbol outside the configured universe is
+    the second case in practice — the reserved unattributed partition, where a
+    fabricated ``0`` would report a position as needing no maintenance at all.
+    """
+    btc = _position(quantity="0.5", price="58000", side=Side.BUY, symbol="BTC")
+    eth = _position(quantity="10", price="3000", side=Side.BUY, symbol="ETH")
+    sol = _position(quantity="100", price="20", side=Side.BUY, symbol="SOL")
+    doge = _position(quantity="5000", price="0.1", side=Side.BUY, symbol="DOGE")
+
+    maintenance = account_maintenance_margin(
+        (btc, eth, sol, doge),
+        {"BTC": Decimal("60000"), "ETH": Decimal("3200"), "DOGE": Decimal("0.12")},
+        specs={"BTC": BTC_40X, "ETH": ETH_25X, "SOL": SOL_20X},
+    )
+
+    assert maintenance == {
+        "BTC": Decimal("375"),
+        "ETH": Decimal("640"),
+        "SOL": None,
+        "DOGE": None,
+    }
+
+
+def test_a_flat_account_net_owes_a_real_zero_maintenance_with_neither_mark_nor_spec() -> None:
+    """ADR-0041 §6's rule is per **term**, and a flat account-net is where both
+    of this fold's terms are exempt at once: ``|0| × mark`` is zero at every
+    price and ``0 × rate`` is zero at every rate, so the answer is a real ``0``
+    rather than the unknown either missing input would otherwise make it.
+
+    Not hypothetical, and the reason it is worth its own case: the unattributed
+    partition is where the mark and the spec go missing **together** — a symbol
+    outside our configured universe is also one no ``MarkTick`` subscription
+    covers — so a fold that required either would report the whole book unknown
+    the moment a position it never traded was healed in and closed again.
+    """
+    long_leg = _position(quantity="2", price="100", side=Side.BUY, symbol="BTC")
+    short_leg = _position(quantity="2", price="120", side=Side.SELL, symbol="BTC")
+
+    maintenance = account_maintenance_margin((long_leg, short_leg), {}, specs={})
+
+    assert maintenance == {"BTC": Decimal("0")}

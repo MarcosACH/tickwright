@@ -103,6 +103,7 @@ from .protocols import (
 )
 from .valuation import (
     LiquidationSource,
+    account_maintenance_margin,
     account_margin_used,
     account_notional,
     account_unrealized_pnl,
@@ -199,6 +200,7 @@ __all__ = [
     "venue_cash",
     # Tier-2 view assembly (pure, never stored)
     "LiquidationSource",
+    "account_maintenance_margin",
     "account_margin_used",
     "account_unrealized_pnl",
     "account_view",
