@@ -711,10 +711,17 @@ def _unvalued(state: VenueAccountState, reading: LedgerReading) -> int:
     unvalued: nothing was going to value it.
 
     Per **figure** and not per symbol, which is the same rule the account grain
-    below is counted by and the reason one unmarked symbol now costs more than
-    one: its uPnL and its notional are two comparisons the pass did not make,
-    and a count of symbols would report a book with two figures missing and a
-    book with five as equally unlooked-at (ADR-0011 inv 1).
+    below is counted by and the reason one unmarked symbol now costs three: its
+    uPnL, its exposure and the margin posted against it are three comparisons
+    the pass did not make, and a count of symbols would report a book with three
+    figures missing and a book with nine as equally unlooked-at (ADR-0011 inv 1).
+
+    ``margin_used`` is counted on the predicate it is *dropped* on and not on
+    the mark behind it, which is the same reason ``free_margin`` is asked for
+    separately below: at isolated 1x with no bucket ingested the figure is the
+    uPnL over again, so the two go unknown together — an equivalence between two
+    derivations rather than a rule either states, and one the cross arm does not
+    share.
 
     Counted **one per figure the classification dropped**, which is why
     ``free_margin`` is asked for separately rather than read off ``equity``
@@ -736,6 +743,7 @@ def _unvalued(state: VenueAccountState, reading: LedgerReading) -> int:
         for figure in (
             reading.unrealized.get(position.symbol),
             reading.notional.get(position.symbol),
+            reading.margin_used.get(position.symbol),
         )
         if figure is None
     )

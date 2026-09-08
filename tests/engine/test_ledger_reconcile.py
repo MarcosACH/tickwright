@@ -1133,9 +1133,10 @@ def test_a_pass_that_could_not_value_the_book_is_not_recorded_as_one_that_agreed
         assert asyncio.run(cycle.reconcile_account()) == ()
 
     # The account's two figures — equity and the free margin computed from it —
-    # and both of BTC's, its uPnL and its notional: the count is per figure the
-    # pass could not compare, not per symbol it could not value.
-    assert _recorded(unvalued_logs)["unvalued"] == 4
+    # and all three of BTC's, its uPnL, its exposure and the margin posted
+    # against it: the count is per figure the pass could not compare, not per
+    # symbol it could not value.
+    assert _recorded(unvalued_logs)["unvalued"] == 5
     assert _recorded(agreed_logs)["unvalued"] == 0
     assert unvalued_logs != agreed_logs
 
@@ -3174,28 +3175,35 @@ def test_an_absent_mark_alerts_nothing_and_lands_on_unvalued_rather_than_suppres
     Which makes ``suppressed`` the assertion that carries the case. Read alone,
     ``_alerts(logs) == []`` here is vacuous — it would hold against a cycle that
     had no suppression rule at all — so what is pinned is that the two silences
-    are **told apart on the record**: this pass reports ``unvalued=4,
+    are **told apart on the record**: this pass reports ``unvalued=5,
     suppressed=0`` where behavior 7's identical book reports ``unvalued=0,
     suppressed=4``. An operator reading the cadence can therefore distinguish a
     book that was never valued from one whose valuation went stale, which is the
     whole of what ADR-0011 inv 1 asks of a count.
 
-    **Four** either way here, and the two fours range over different sets: a
-    figure the band never sees is not a figure the count may skip. Stale reaches
-    the band, so it is counted where the classification put it — four
-    divergences, four suppressions, the symbol's uPnL, notional and posted margin
-    beside the account's equity. Absent is dropped at
-    classification, where the account grain drops *both* its figures, equity and
-    the free margin computed from it, beside the symbol's own uPnL and notional.
-    The two counts range over different sets by construction and each is read off
-    its own.
+    **Five against four**, and the gap is the point rather than an untidiness:
+    the two counts range over different sets, because a figure the band never
+    sees is not a figure the count may skip. Stale reaches the band, so it is
+    counted where the classification put it — four divergences, four
+    suppressions, the symbol's uPnL, notional and posted margin beside the
+    account's equity. Absent is dropped at classification, which is one figure
+    further back: the same three per-symbol figures, and the account grain drops
+    *both* of its own, equity and the free margin computed from it. Free margin
+    is the whole of the difference — a figure that goes unknown without ever
+    having been a divergence, so nothing was ever there to suppress.
+
+    The per-symbol three is what makes ``unvalued`` a count of **figures** and
+    not of symbols (ADR-0011 inv 1): one unmarked position now costs three,
+    because its valuation, its exposure and the margin posted against it are
+    three comparisons this pass did not make, and a book with three figures
+    missing is not as unlooked-at as a book with six.
 
     Deliberately the same venue and the same fill as the stale case — a 0.002
     long entered at 64809 against a snapshot pricing it at 1.000 — so the only
     variable is the mark this case never feeds. Tier-1 stays silent on it: the
     snapshot's equity carries its own uPnL exactly, so ``venue_cash`` lands back
-    on the 100000 cash line and the sizes agree, leaving the four dropped
-    Tier-2 figures as the whole of what the pass had to say.
+    on the 100000 cash line and the sizes agree, leaving the dropped Tier-2
+    figures as the whole of what the pass had to say.
     """
     store = SQLiteStore(":memory:")
     keeper = _ledger(store, equity="100000")
@@ -3209,7 +3217,7 @@ def test_an_absent_mark_alerts_nothing_and_lands_on_unvalued_rather_than_suppres
 
     assert _alerts(logs) == []
     record = _recorded(logs)
-    assert (record["tier_2"], record["suppressed"], record["unvalued"]) == (0, 0, 4)
+    assert (record["tier_2"], record["suppressed"], record["unvalued"]) == (0, 0, 5)
 
 
 def test_a_stale_mark_for_a_symbol_traded_back_to_flat_silences_nothing() -> None:
