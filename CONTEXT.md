@@ -263,6 +263,21 @@ ADR-0034, ADR-0040, ADR-0046, ADR-0044.
 _Avoid_: portfolio sync, PnL refresh; **[[Reconciliation]]** unqualified (that one is the order
 saga's, on a different anchor with a different freeze grain).
 
+**Ledger reading** (`LedgerReading`):
+The ledger's **whole side of one [[Ledger reconciliation]] pass**, folded in one call — the name the
+comparison's venue side always had as its account snapshot and its own side did not. Carries the
+[[AccountView]] plus the three account-grain folds the cycle compares through (net size,
+unrealized PnL, notional) and each mark's **stamp**, never its price; and it owns the cycle's one
+**held-ness** predicate, `holds(symbol)`, which reads the **net** so that flat and absent are one
+state at both tiers. Deliberately **not** the leverage book: that is configuration resolved at
+startup, which no fill can move, so it is not part of one-fold-per-pass. Taken once is the point —
+the pass *writes*, and equity is `cash + Σ uPnL`, so a second reading after the heal reports the
+venue as disagreeing by exactly the amount the cycle just moved. A **reading**, not a snapshot or a
+view: those are the [[Portfolio]] seam's words for what a strategy is handed, and this is the engine
+concrete's wider surface, read by one caller for one comparison. See ADR-0034, ADR-0041 §8.
+_Avoid_: portfolio snapshot / account view (those are the [[PositionView]]/[[AccountView]] the seam
+hands a strategy), ledger state, bundle.
+
 **Connectivity guard** (never-`[]`):
 The invariant that a failed venue read returns a [[Failed read]] — never a view, never `[]`; on
 one, [[Reconciliation]] **freezes** and removes nothing. An outage must never be misread as "all
@@ -598,7 +613,8 @@ the accounting sibling of the [[Cache]]. Its **Tier-1** ledger is applied **sync
 fill-apply path** (not a fill-bus subscriber); its **Tier-2** mark is fed by **subscribing to
 [[MarkTick]]** into a private latest-value map (a non-accumulated cache, ADR-0039). Reconciled
 against venue truth on live, rebuilt from the [[Store]] on restart. See ADR-0035, ADR-0034, ADR-0039.
-_Avoid_: cache (that's the order read-model), ledger (reserved), portfolio tracker.
+_Avoid_: cache (that's the order read-model), ledger (reserved — the projection is never *a* ledger,
+though one pass's read of its side is a [[Ledger reading]]), portfolio tracker.
 
 **Realized PnL** & **Unrealized PnL**:
 The two halves of a [[Position]]'s trade profit — **realized** is booked when a fill reduces or
