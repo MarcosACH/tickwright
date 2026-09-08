@@ -11,6 +11,7 @@ A reading is built here by hand for exactly that reason. It is the same freedom
 a recorded venue body already has, pointed at the other side of the comparison.
 """
 
+from dataclasses import replace
 from decimal import Decimal
 
 from tickwright.domain import (
@@ -202,4 +203,76 @@ def test_a_per_symbol_figure_whose_notional_is_unknown_bands_on_atol_alone() -> 
     banded = ReconcileFindings.classify(state, priced, band=ValuationBand(), now_ns=_NOW_NS)
 
     assert banded.divergences == (gap,)  # measured either way — the band gates the alert only
+    assert banded.alerts == ()
+
+
+def test_one_unpriced_symbol_makes_the_account_grains_reference_unknown() -> None:
+    """The Σ propagates the unknown, and the alternative is worse than it looks.
+
+    An account-grain figure errs by at most the book's **total** notional — a
+    skew reaches ``equity`` and ``free_margin`` through every position at once —
+    so with one symbol's notional missing the total is not a smaller total, it
+    is unknown. Summing the known terms instead would band the account by the
+    fraction of the book that happened to be priced, and narrow it most on the
+    largest book, which is the one it least suits: an operator would be woken by
+    a gap that is ordinary skew, on the account where skew is biggest.
+
+    Two symbols, and ETH is the unpriced one: the book's free margin is 5 under
+    the venue's, which the unknown reference leaves alerted at ``atol`` and the
+    complete Σ of 100,000 — a floor of 100 — absorbs. The same book with ETH's
+    notional supplied is the second run, so the reference is the only variable.
+
+    Note which way that falls. BTC's 60,000 alone would give a floor of 60 and
+    absorb the gap too, so the honest ``None`` is the **noisier** answer here,
+    not the quieter one — the case is not "unknown means silence" but "a band we
+    cannot justify is not claimed".
+
+    Hand-built for the same reason as the per-symbol case above: a projection
+    computes a notional and a uPnL from one mark, so a book where ETH is valued
+    but unpriced is not one a cadence can produce.
+    """
+    state = _venue(
+        equity="112000",
+        free_margin="50000",
+        positions=(
+            _position("BTC", signed_size="0.5", notional="60000", unrealized_pnl="10000"),
+            _position("ETH", signed_size="10", notional="40000", unrealized_pnl="2000"),
+        ),
+    )
+    account = AccountView(
+        cash=Decimal("100000"),
+        equity=Decimal("112000"),
+        total_margin_used=Decimal("100000"),
+        total_maintenance_margin=Decimal("0"),
+        free_margin=Decimal("49995"),
+        effective_leverage=None,
+    )
+    unpriced = LedgerReading(
+        account=account,
+        net={"BTC": Decimal("0.5"), "ETH": Decimal("10")},
+        unrealized={"BTC": Decimal("10000"), "ETH": Decimal("2000")},
+        notional={"BTC": Decimal("60000"), "ETH": None},
+        mark_observed={"BTC": _NOW_NS, "ETH": _NOW_NS},
+    )
+
+    findings = ReconcileFindings.classify(state, unpriced, band=ValuationBand(), now_ns=_NOW_NS)
+
+    gap = Divergence(
+        tier=DivergenceTier.TIER_2,
+        field=DivergenceField.FREE_MARGIN,
+        symbol=None,
+        ledger=Decimal("49995"),
+        venue=Decimal("50000"),
+    )
+    assert findings.divergences == (gap,)
+    assert findings.alerts == (gap,)
+    assert (findings.suppressed, findings.unvalued) == (0, 0)
+
+    # ``replace`` rather than a second literal, so the reference is the only
+    # variable structurally and not merely by inspection of two blocks.
+    priced = replace(unpriced, notional={"BTC": Decimal("60000"), "ETH": Decimal("40000")})
+
+    banded = ReconcileFindings.classify(state, priced, band=ValuationBand(), now_ns=_NOW_NS)
+
+    assert banded.divergences == (gap,)
     assert banded.alerts == ()
