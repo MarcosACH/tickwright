@@ -333,10 +333,16 @@ def _reference(
 
     ``margin_used`` is the exception, and it is the same rule rather than a
     second one: the quantity is *self-scaling* (ADR-0046 §5), so its reference
-    is the notional a skew reaches **it** through, which for a cross position is
-    the ``notional / L`` it posts and not the exposure above it. Referenced
-    against the exposure the band would be ``L`` times too wide, and widest at
-    the leverage where a margin gap is worth the most.
+    is the notional a skew reaches **it** through — which the margin mode
+    decides, because the two modes post by different rules. Cross posts
+    ``notional / L`` out of the shared pool and is referenced against that, not
+    the exposure above it: referenced against the exposure the band would be
+    ``L`` times too wide, and widest at the leverage where a margin gap is worth
+    the most. Isolated posts a locked bucket marked to market — ``collateral +
+    uPnL``, which no leverage divides — so the skew arrives at full exposure and
+    the reference is the position's own notional. Divided anyway, the band is
+    ``L`` times too *narrow* on every isolated book, and narrowest at the
+    leverage an operator reached for to hold a larger position.
 
     The Σ propagates the unknown the way ``domain.valuation`` does: one symbol
     waiting on a mark makes the *total* unknown, because a partial Σ used as a
@@ -361,7 +367,10 @@ def _reference(
         notional = reading.notional.get(divergence.symbol)
         if notional is None or divergence.field is not DivergenceField.MARGIN_USED:
             return notional
-        return notional / leverage_for(divergence.symbol).leverage
+        leverage = leverage_for(divergence.symbol)
+        if leverage.mode == "isolated":
+            return notional
+        return notional / leverage.leverage
     total = _ZERO
     for term in reading.notional.values():
         if term is None:

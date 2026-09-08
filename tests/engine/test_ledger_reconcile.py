@@ -1956,6 +1956,14 @@ _BTC_ISOLATED_5X = LeverageBook(entries={"BTC": LeverageSpec(mode="isolated", le
 a division: ``isolated_collateral + unrealized_pnl`` (ADR-0040 §3, as corrected
 by #142). It is the only mode for which the ingest below has anything to carry."""
 
+_ISOLATED_5X = LeverageSpec(mode="isolated", leverage=5)
+"""``_BTC_ISOLATED_5X``'s pair, as the venue's own stored setting.
+
+The mode whose ``margin_used`` the leverage does *not* divide, held at a leverage
+that is not 1 so the two candidate band references come apart: at isolated 1x
+``notional`` and ``notional / L`` are the same number and a case run there cannot
+tell which one it was banded by."""
+
 _BTC_BUCKET = Decimal("25.898067")
 """The locked collateral #142 measured on a funded isolated position, recovered
 by the adapter as ``marginUsed − unrealizedPnl`` (ADR-0043 §3)."""
@@ -2570,6 +2578,61 @@ def test_a_tier_2_divergence_inside_the_band_is_not_alerted() -> None:
         divergences = asyncio.run(cycle.reconcile_account())
 
     assert divergences is not None
+    assert [divergence.field for divergence in divergences] == [
+        DivergenceField.EQUITY,
+        DivergenceField.UNREALIZED_PNL,
+        DivergenceField.NOTIONAL,
+        DivergenceField.MARGIN_USED,
+    ]
+    assert _alerts(logs) == []
+
+
+def test_an_isolated_margin_is_banded_by_the_positions_notional_not_the_cross_divisor() -> None:
+    """The second of ``margin_used``'s two references, and the mode split is the
+    whole of it (ADR-0046 §5).
+
+    A cross position posts ``notional / L`` out of the shared pool, so that is
+    the notional a mark skew reaches its margin through. An **isolated** one
+    posts a locked bucket marked to market — ``isolated_collateral + uPnL``,
+    which no leverage divides — so the skew arrives at full exposure and the
+    reference is the position's own ``notional``. Dividing it anyway makes the
+    band ``L`` times too narrow on every isolated book, and narrowest at the
+    leverage an operator reached for to hold a *larger* position: the alert
+    channel then fires on the healthy cycles of exactly the accounts most able
+    to generate them.
+
+    Run at isolated **5x**, which is what makes the case discriminating: at the
+    default 1x the two candidate references are the same number and the pass
+    would be green under either rule.
+
+    The book is the band cases' own — a 0.002 long entered at 64809 and marked
+    at 65000, worth ``0.002 × 191 = 0.382`` on a 100000 cash line — with the
+    venue built to sit 0.05 away on every mark-sensitive figure at once, which
+    at this mode is one number appearing four times: the posted margin *is* the
+    uPnL again, no bucket having been ingested, and the exposure and the equity
+    carry the same 0.05. That gap is deliberately **between** the two references'
+    bands: ``0.001 × 130.000 = 0.130`` absorbs it and ``0.001 × 26.000 = 0.026``
+    does not, so a margin banded by the cross divisor is the only figure of the
+    four that speaks.
+
+    The venue's equity carries its own uPnL exactly, so ``venue_cash`` lands
+    back on 100000 and neither Tier-1 half speaks — a cash finding would
+    suppress these alerts by a different rule and the case would prove nothing.
+    Its stored setting is the run's own, so nothing here is a leverage drift.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000", leverage=_BTC_ISOLATED_5X)
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "65000")
+    venue = _levered(_held("100000.432", ("BTC", "0.002", "0.432")), _ISOLATED_5X)
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences is not None
+    # Still classified, all four: the band gates the alert and not the record.
     assert [divergence.field for divergence in divergences] == [
         DivergenceField.EQUITY,
         DivergenceField.UNREALIZED_PNL,
