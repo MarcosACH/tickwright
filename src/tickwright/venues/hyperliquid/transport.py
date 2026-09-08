@@ -67,14 +67,21 @@ its own ``ClientTimeout``: the number belongs to this repo, and a dependency bum
 must not be able to move it. The value matches the client's long-standing default,
 so this pins today's behaviour rather than changing it.
 
-The bound matters most where the reconnect loop is *not* underneath it.
-``MarketFeed.start()`` and ``Exchange.start()`` are awaited inline during the boot
-(ADR-0024 steps 4 and 7) and neither is retried nor bounded by the runner, and the
-task that watches SIGINT is not created until after the last of them — so a
-handshake that never completes wedges a boot with SIGKILL as the only way out.
-This is a ceiling, not a budget: spending the boot's own `Deadline` here, the way
-ADR-0044 §6 does for the exchange's two venue guards, is
-[#301](https://github.com/MarcosACH/tickwright/issues/301).
+A per-call transport bound, deliberately a module constant and **not** injected
+config. The exchange's ``startup_timeout_seconds`` is a *retry budget spent across
+boot guards* (ADR-0044 §6), which is a different thing from a ceiling on one call;
+conflating them would give this a knob whose value nothing could reason about.
+
+It matters most where the reconnect loop is *not* underneath it. ``MarketFeed.start()``
+and ``Exchange.start()`` are awaited inline during the boot (ADR-0024 steps 4 and 7),
+neither is retried nor bounded by the runner, and the task that watches SIGINT is not
+created until after the last of them — so a handshake that never completes wedges a
+boot with SIGKILL as the only way out.
+
+The timeout surfaces as ``TimeoutError``, which is an ``OSError`` only because Python
+3.11 aliased it — the same load-bearing coincidence ``post_json``'s translation rests
+on, asserted for neither transport yet
+([#237](https://github.com/MarcosACH/tickwright/issues/237)).
 """
 
 
