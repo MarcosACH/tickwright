@@ -404,3 +404,56 @@ def test_one_unpriced_symbol_makes_the_account_grains_reference_unknown() -> Non
 
     assert banded.divergences == (gap,)
     assert banded.alerts == ()
+
+
+def test_a_maintenance_sigma_the_pass_could_not_compute_is_counted_unvalued() -> None:
+    """``unvalued``'s one member that can go unknown with every mark in place.
+
+    ``_cross_maintenance`` is ``None`` when any cross-held symbol's rate is
+    missing, and a rate is missing because no ``InstrumentSpec`` for the symbol
+    reached this run — not because a mark did. So this is the only Tier-2 figure
+    whose drop the mark-keyed arm of the count could never see, and the reason
+    it is asked for separately rather than inferred from the marks beside it.
+
+    Counted because the count's whole job is to say how many figures went
+    unlooked-at (ADR-0011 inv 1), and a maintenance Σ dropped in silence is the
+    exact failure it exists to prevent: a live run whose universe lost a symbol's
+    rate would report a clean book on every pass, forever, while never once
+    comparing the number ADR-0040 §4's tier-crossing alert is computed off.
+
+    The book agrees on everything else — one BTC leg, a fresh mark, and every
+    per-symbol figure matching the venue — so the pass's only outcome is the
+    count. ``_cross(1)`` and not the isolated default, because
+    ``_cross_maintenance`` skips isolated symbols and would reach its zero
+    rather than the unknown this case is about.
+    """
+    state = _venue(
+        equity="110000",
+        free_margin="50000",
+        positions=(_position("BTC", signed_size="0.5", notional="60000", unrealized_pnl="10000"),),
+    )
+    reading = LedgerReading(
+        account=AccountView(
+            cash=Decimal("100000"),
+            equity=Decimal("110000"),
+            total_margin_used=Decimal("60000"),
+            total_maintenance_margin=None,
+            free_margin=Decimal("50000"),
+            effective_leverage=None,
+        ),
+        net={"BTC": Decimal("0.5")},
+        unrealized={"BTC": Decimal("10000")},
+        notional={"BTC": Decimal("60000")},
+        margin_used={"BTC": Decimal("0")},
+        # The absent-spec shape: a rate that never arrived, beside a mark that did.
+        maintenance_margin={"BTC": None},
+        mark_observed={"BTC": _NOW_NS},
+    )
+
+    findings = ReconcileFindings.classify(
+        state, reading, band=ValuationBand(), now_ns=_NOW_NS, leverage_for=_cross(1)
+    )
+
+    assert findings.divergences == ()
+    assert findings.alerts == ()
+    assert (findings.suppressed, findings.unvalued) == (0, 1)

@@ -700,10 +700,14 @@ def _margin_used(state: VenueAccountState, reading: LedgerReading) -> tuple[Dive
     )
 
 
-def _unvalued(state: VenueAccountState, reading: LedgerReading) -> int:
+def _unvalued(
+    state: VenueAccountState,
+    reading: LedgerReading,
+    leverage_for: Callable[[str], LeverageSpec],
+) -> int:
     """How many Tier-2 figures this pass could not compute at all.
 
-    The account grain's **two** figures, plus every per-symbol figure that is
+    The account grain's **three** figures, plus every per-symbol figure that is
     waiting on a mark on a symbol **both** sides hold — the same ``holds``
     range the classifiers use, since a symbol only one side carries is already
     a Tier-1 size finding rather than a missing valuation. A symbol the ledger
@@ -722,6 +726,15 @@ def _unvalued(state: VenueAccountState, reading: LedgerReading) -> int:
     uPnL over again, so the two go unknown together — an equivalence between two
     derivations rather than a rule either states, and one the cross arm does not
     share.
+
+    ``maintenance_margin`` is asked for by **recomputing the Σ**, not read off
+    ``reading.account.total_maintenance_margin`` beside the other two account
+    figures, because those are two different quantities: the reported total is
+    Σ-over-all and what this pass compared is the cross subset (ADR-0046 §2.1),
+    so the reported one can be a number while the compared one is unknown. It is
+    also the only member here that goes unknown with **every mark in place** —
+    the missing term is an absent ``InstrumentSpec`` as often as an absent mark
+    — which is exactly why the mark-keyed arm above could never stand in for it.
 
     Counted **one per figure the classification dropped**, which is why
     ``free_margin`` is asked for separately rather than read off ``equity``
@@ -748,7 +761,15 @@ def _unvalued(state: VenueAccountState, reading: LedgerReading) -> int:
         if figure is None
     )
     account = reading.account
-    account_grain = sum(1 for figure in (account.equity, account.free_margin) if figure is None)
+    account_grain = sum(
+        1
+        for figure in (
+            account.equity,
+            account.free_margin,
+            _cross_maintenance(reading, leverage_for),
+        )
+        if figure is None
+    )
     return absent_marks + account_grain
 
 
@@ -845,7 +866,7 @@ class ReconcileFindings:
             divergences=divergences,
             alerts=tuple(alerts),
             suppressed=suppressed,
-            unvalued=_unvalued(state, reading),
+            unvalued=_unvalued(state, reading, leverage_for),
         )
 
 
