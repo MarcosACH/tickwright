@@ -461,15 +461,27 @@ def test_a_mark_frame_we_cannot_read_is_dropped_and_named_not_faulted(data: obje
     assert [record["event"] for record in logs] == ["feed.frame_dropped"]
 
 
-def test_non_trades_frames_are_ignored() -> None:
+def test_non_trades_frames_are_ignored_silently() -> None:
+    """The venue's housekeeping traffic is skipped and says nothing about it —
+    the *silence* is the assertion, not a side effect of one.
+
+    A ``subscriptionResponse`` or a ``pong`` is the venue working, and it arrives
+    for as long as the socket lives; naming one would drown every real drop in
+    the same log. That is the opposite answer to the malformed frames below, and
+    the two are only kept apart by both being pinned: without the empty-log line
+    here, a change that named housekeeping passes this case and the one below it
+    alike, and the distinction the pair exists to hold survives in prose only.
+    """
     frames = [
         json.dumps({"channel": "subscriptionResponse", "data": {"method": "subscribe"}}),
         json.dumps({"channel": "pong"}),
         trades_frame(trade("BTC", "100", 1)),
     ]
-    seen, _ = _drive(frames, symbols=["BTC"], until_ticks=1)
+    with capture_events() as logs:
+        seen, _ = _drive(frames, symbols=["BTC"], until_ticks=1)
 
     assert [t.trade_id for t in seen] == ["1"]
+    assert [record["event"] for record in logs] == []
 
 
 @pytest.mark.parametrize("frame", ["[1,2]", '"hello"', "42", "null"])
