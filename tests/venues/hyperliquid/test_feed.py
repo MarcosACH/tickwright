@@ -517,6 +517,51 @@ def test_the_live_feed_connects_in_start_and_leaves_the_loop_to_run() -> None:
     asyncio.run(main())
 
 
+def test_a_first_connect_the_venue_refuses_faults_the_boot_rather_than_backing_off() -> None:
+    """The point of the triple, stated as the failure it buys (#227).
+
+    A refused connect is a *reconnect's* business inside ``run()``, where pacing
+    it and going round again is exactly right — an outage mid-run must not
+    become a retry storm, and must not end the engine. At boot it is the
+    opposite fact: nothing has arrived yet, nothing can, and the operator wants
+    to know now. So ``start()`` refuses rather than paces, and the runner's
+    inline ``await`` at ADR-0024 step 7 turns that into a faulted boot.
+
+    Two independent witnesses that the boot did not enter the reconnect loop,
+    neither of which is a timeout: **one** connect was attempted, and virtual
+    time never moved. ``Backoff.sleep_on`` advances a ``ManualClock``, so a
+    ``start()`` that paced even one retry would leave the clock past zero.
+    """
+
+    async def main() -> None:
+        clock = ManualClock()
+        connects = 0
+
+        async def connect(url: str) -> FakeWsConnection:
+            nonlocal connects
+            connects += 1
+            raise ConnectionRefusedError("connection refused")
+
+        feed = HyperliquidFeed(
+            config=HyperliquidConfig(symbols=["BTC"]),
+            bus=InMemoryBus(),
+            clock=clock,
+            connect=connect,
+        )
+
+        with pytest.raises(ConnectionRefusedError):
+            await feed.start()
+
+        assert connects == 1, "start() must refuse the first connect, not retry it"
+        assert clock.timestamp_ns() == 0, "a paced retry would have moved virtual time"
+
+        # The boot's own cleanup still runs on the fault path (`_stop_feed`), and
+        # a session that never opened a socket has nothing to close.
+        await feed.stop()
+
+    asyncio.run(main())
+
+
 def _drive_contract(
     frames: list[str], *, symbols: list[str], expected: int
 ) -> MarketDataTranscript:

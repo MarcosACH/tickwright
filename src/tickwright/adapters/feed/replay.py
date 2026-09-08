@@ -81,7 +81,7 @@ class ReplayFeed:
             await self._bus.publish(tick)
 
     async def stop(self) -> None:  # noqa: B027 - replay has no live resources to release.
-        """No-op: a replay drains at ``start`` and holds nothing open."""
+        """No-op: a replay drains at ``run`` and holds nothing open."""
 
     def _read_rows(self) -> Iterator[_TickRow]:
         with self._path.open("r", encoding="utf-8") as handle:
