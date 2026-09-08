@@ -46,6 +46,7 @@ from tickwright.domain import (
     Side,
     Store,
     VenueAccountState,
+    VenuePositionState,
 )
 from tickwright.engine.checkpoint import Checkpointer
 from tickwright.engine.ledger_reconcile import (
@@ -2245,17 +2246,76 @@ def test_a_paper_run_checks_no_leverage_because_it_has_no_venue_to_check() -> No
     assert keeper.portfolio.leverage_for("BTC") == LeverageSpec(mode="cross", leverage=5)
 
 
-def _isolated(state: VenueAccountState, collateral: Decimal | None) -> VenueAccountState:
-    """The same snapshot with ``collateral`` on every position it carries.
+def _isolated(
+    state: VenueAccountState, collateral: Decimal | None, *, margin_used: str | None = None
+) -> VenueAccountState:
+    """The same snapshot with ``collateral`` on every position it carries, and
+    the ``margin_used`` that bucket backs.
 
     ``None`` is not an absent value here: it is the venue saying the position is
     **cross** and backed by the account pool, which is the claim the adapter's
-    own ``_isolated_collateral`` refuses to guess at.
+    own ``_isolated_collateral`` refuses to guess at. A cross row keeps the
+    recorded figure, which is the one its own mode implies.
+
+    The derivation is ``implied_free_margin``'s lesson on a second field: a
+    constant is coherent with the account it was recorded from and with nothing
+    a suite builds beside it, so the moment ADR-0040 §6 compares the figure the
+    constant is a divergence about the fixture rather than about the book.
+
+    ``margin_used`` takes precedence and is the escape hatch, the one
+    ``implied_free_margin`` holds for its own field: a case whose subject is the
+    disagreement passes the figure it wants compared.
     """
+
+    def margin_of(position: VenuePositionState) -> Decimal:
+        if margin_used is not None:
+            return Decimal(margin_used)
+        if collateral is None:
+            return position.margin_used
+        return collateral + position.unrealized_pnl
+
     return replace(
         state,
-        positions=tuple(replace(p, isolated_collateral=collateral) for p in state.positions),
+        positions=tuple(
+            replace(p, isolated_collateral=collateral, margin_used=margin_of(p))
+            for p in state.positions
+        ),
     )
+
+
+def test_the_isolated_snapshot_carries_the_margin_a_venue_would_have_published() -> None:
+    """An isolated position's ``marginUsed`` is its own bucket marked to market
+    — ``isolated_collateral + unrealized_pnl`` (ADR-0040 §3) — and a fixture
+    that posts a bucket has to move the figure that bucket backs.
+
+    The recorded ``25.9168`` this replaces is the *cross* arithmetic of the
+    snapshot it came from, ``positionValue / 5``, and it survives here only
+    because nothing compared it. Compared, it is a snapshot no venue could have
+    returned: the same row claims a bucket of ``25.898067`` and a margin that
+    ignores it.
+
+    The band would absorb the gap, but the band gates the alert and not the
+    classification, so the incoherence would still be counted as a Tier-2
+    divergence under every case here whose subject is the collateral ingest.
+    """
+    state = _isolated(account_state("25.9264", "0.012"), _BTC_BUCKET)
+
+    assert [p.margin_used for p in state.positions] == [Decimal("25.910067")]
+
+
+def test_a_case_that_wants_the_isolated_margin_disagreement_declares_it() -> None:
+    """The derivation is the default and not the only answer, on
+    ``implied_free_margin``'s own asymmetry: a margin the venue disagrees on is
+    a snapshot it could have returned — a stale bucket, a fee charged against it
+    between the two reads — so a case whose subject *is* that disagreement says
+    so rather than reaching for a second fixture.
+
+    ``implied_notional`` takes no such hatch because an exposure contradicting
+    the size and entry published beside it is not a snapshot any venue returns.
+    """
+    state = _isolated(account_state("25.9264", "0.012"), _BTC_BUCKET, margin_used="30")
+
+    assert [p.margin_used for p in state.positions] == [Decimal("30")]
 
 
 def test_a_cycle_ingests_the_venues_locked_collateral_onto_the_partition() -> None:
