@@ -55,6 +55,36 @@ from tickwright.domain import (
     VenueReadFailure,
 )
 
+RECORDED_ENTRY_PRICE = Decimal("64809.0")
+"""The recorded snapshot's own entry price, and the default every derived leg
+is priced from — named because a roster the case chose the sizes of has to be
+able to say it entered somewhere else."""
+
+
+def implied_notional(signed_size: Decimal, entry_price: Decimal, unrealized: Decimal) -> Decimal:
+    """The ``positionValue`` a venue holding this position would publish.
+
+    ``|szi| × mark``, with the mark the position's own numbers imply: a long
+    entered at ``entry`` and carrying ``uPnL`` is marked at ``entry + uPnL/szi``,
+    so the exposure is ``|szi| × entry`` plus the open PnL — less it on a short,
+    where the same profit means a mark that has fallen.
+
+    The recorded constant it replaces is the arithmetic of the snapshot it came
+    from and of nothing a suite builds beside it: 129.584 is 0.002 BTC at 64809
+    carrying −0.034, which every case that marks its book differently then
+    contradicts. Inert until #291 compared the field; compared, it is a
+    ``NOTIONAL`` divergence in every case that says nothing about exposure —
+    ``implied_free_margin``'s lesson on the field the band is scaled by.
+
+    No ``declared`` escape hatch beside that one's, and the asymmetry is the
+    point: a free margin the venue disagrees on is a snapshot it could have
+    returned, while a ``positionValue`` that contradicts the size, entry and
+    uPnL published beside it is not. A case that wants an exposure disagreement
+    moves the leg's ``entry_price`` or its uPnL and gets one that adds up.
+    """
+    exposure = abs(signed_size) * entry_price
+    return exposure + unrealized if signed_size > 0 else exposure - unrealized
+
 
 def implied_free_margin(equity: str, unrealized: Iterable[str], *, declared: str | None) -> Decimal:
     """The free margin a venue holding these positions would publish.
@@ -99,9 +129,11 @@ def account_state(
     rest are a real venue's own numbers, so what a suite hands the seam is a
     shape the venue could have returned rather than one invented to fit.
 
-    ``free_margin`` is derived from ``equity`` and the legs rather than kept at
-    the recorded constant, on the premise ``implied_free_margin`` states and a
-    case that wants some other figure overrides.
+    ``free_margin`` and each leg's ``notional`` are derived from ``equity`` and
+    the legs rather than kept at their recorded constants, on the premises
+    ``implied_free_margin`` and ``implied_notional`` state; the first takes a
+    case's own figure where it wants the disagreement, the second is the
+    snapshot's own arithmetic and takes nothing.
     """
     return VenueAccountState(
         equity=Decimal(equity),
@@ -111,8 +143,8 @@ def account_state(
             VenuePositionState(
                 symbol="BTC",
                 signed_size=Decimal("0.002"),
-                entry_price=Decimal("64809.0"),
-                notional=Decimal("129.584"),
+                entry_price=RECORDED_ENTRY_PRICE,
+                notional=implied_notional(Decimal("0.002"), RECORDED_ENTRY_PRICE, Decimal(pnl)),
                 unrealized_pnl=Decimal(pnl),
                 margin_used=Decimal("25.9168"),
                 isolated_collateral=None,

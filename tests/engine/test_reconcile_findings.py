@@ -196,7 +196,10 @@ def test_a_per_symbol_figure_whose_notional_is_unknown_bands_on_atol_alone() -> 
     )
     assert findings.divergences == (gap,)
     assert findings.alerts == (gap,)
-    assert (findings.suppressed, findings.unvalued) == (0, 0)
+    # The unknown notional is itself a figure this pass could not compare, so it
+    # is counted as one — the reference being missing and the *figure* being
+    # missing are the same absence read by two rules.
+    assert (findings.suppressed, findings.unvalued) == (0, 1)
 
     priced = LedgerReading(
         account=account,
@@ -276,7 +279,9 @@ def test_one_unpriced_symbol_makes_the_account_grains_reference_unknown() -> Non
     )
     assert findings.divergences == (gap,)
     assert findings.alerts == (gap,)
-    assert (findings.suppressed, findings.unvalued) == (0, 0)
+    # ETH's own notional is a figure the pass could not compare either, counted
+    # once beside the account-grain reference it also makes unknown.
+    assert (findings.suppressed, findings.unvalued) == (0, 1)
 
     # ``replace`` rather than a second literal, so the reference is the only
     # variable structurally and not merely by inspection of two blocks.

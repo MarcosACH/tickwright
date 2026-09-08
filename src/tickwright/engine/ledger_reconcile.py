@@ -80,7 +80,7 @@ class DivergenceField(Enum):
     that silently never fires, on a cadence whose whole job is to notice what
     nothing else would.
 
-    The account grain's two figures carry no symbol; the per-symbol two do
+    The account grain's figures carry no symbol; the per-symbol ones do
     (``Divergence.symbol``), which is the other half of what a consumer keys on.
     """
 
@@ -89,6 +89,7 @@ class DivergenceField(Enum):
     EQUITY = "equity"
     FREE_MARGIN = "free_margin"
     UNREALIZED_PNL = "unrealized_pnl"
+    NOTIONAL = "notional"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -518,16 +519,54 @@ def _unrealized(state: VenueAccountState, reading: LedgerReading) -> tuple[Diver
     )
 
 
+def _notional(state: VenueAccountState, reading: LedgerReading) -> tuple[Divergence, ...]:
+    """Tier-2: per-symbol ``positionValue``, the venue's own exposure figure.
+
+    ``_unrealized``'s range and rules exactly — both sides' rosters intersected
+    on the ledger's net, ``None`` skipped and counted rather than compared —
+    because the two are read off the same mark and a symbol only one side holds
+    is a Tier-1 size finding either way.
+
+    Compared at all because it is the band's **own input**: ADR-0046 §5 scales
+    every Tier-2 tolerance on this grain by the notional, so a drifted notional
+    is a drifted tolerance for every figure beside it. Unchecked, it would be
+    the one number the cycle both depends on and never looks at — and the band
+    it sets would widen exactly when the book it is measuring is worst.
+
+    Alerted and never healed, like the rest of the tier: a mark this engine has
+    not seen yet is not a wrong ledger (ADR-0034).
+    """
+    ledger = reading.notional
+    return tuple(
+        Divergence(
+            tier=DivergenceTier.TIER_2,
+            field=DivergenceField.NOTIONAL,
+            symbol=position.symbol,
+            ledger=held,
+            venue=position.notional,
+        )
+        for position in sorted(state.positions, key=lambda p: p.symbol)
+        if reading.holds(position.symbol)
+        and (held := ledger.get(position.symbol)) is not None
+        and held != position.notional
+    )
+
+
 def _unvalued(state: VenueAccountState, reading: LedgerReading) -> int:
     """How many Tier-2 figures this pass could not compute at all.
 
-    The account grain's **two** figures, plus one per symbol **both** sides
-    hold whose ledger valuation is waiting on a mark — the same ``holds``
-    range ``_unrealized`` classifies over, since a symbol only one side
-    carries is already a Tier-1 size finding rather than a missing
-    valuation. A symbol the ledger holds flat, or does not carry at all,
-    reads as not held and so is never unvalued: nothing was going to value
-    it.
+    The account grain's **two** figures, plus every per-symbol figure that is
+    waiting on a mark on a symbol **both** sides hold — the same ``holds``
+    range the classifiers use, since a symbol only one side carries is already
+    a Tier-1 size finding rather than a missing valuation. A symbol the ledger
+    holds flat, or does not carry at all, reads as not held and so is never
+    unvalued: nothing was going to value it.
+
+    Per **figure** and not per symbol, which is the same rule the account grain
+    below is counted by and the reason one unmarked symbol now costs more than
+    one: its uPnL and its notional are two comparisons the pass did not make,
+    and a count of symbols would report a book with two figures missing and a
+    book with five as equally unlooked-at (ADR-0011 inv 1).
 
     Counted **one per figure the classification dropped**, which is why
     ``free_margin`` is asked for separately rather than read off ``equity``
@@ -545,7 +584,12 @@ def _unvalued(state: VenueAccountState, reading: LedgerReading) -> int:
     absent_marks = sum(
         1
         for position in state.positions
-        if reading.holds(position.symbol) and reading.unrealized.get(position.symbol) is None
+        if reading.holds(position.symbol)
+        for figure in (
+            reading.unrealized.get(position.symbol),
+            reading.notional.get(position.symbol),
+        )
+        if figure is None
     )
     account = reading.account
     account_grain = sum(1 for figure in (account.equity, account.free_margin) if figure is None)
@@ -609,6 +653,7 @@ class ReconcileFindings:
             + _equity(state, reading)
             + _free_margin(state, reading)
             + _unrealized(state, reading)
+            + _notional(state, reading)
         )
         explained = _tier_1_grains(divergences)
         stale = _stale_grains(reading, now_ns=now_ns, band=band)
