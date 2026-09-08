@@ -970,6 +970,114 @@ def test_a_restart_rebuilt_cache_dedups_a_redelivered_place_signal() -> None:
     assert store.history(cloid) == history_before
 
 
+def test_a_resolved_terminal_keeps_the_oid_the_venues_ack_recorded() -> None:
+    """A reconciler verdict carries no ``venue_oid``, so the saga's own is the
+    only one there is (ADR-0010/0011).
+
+    ``Reconciler._verdict`` mints its synthetic ``OrderStatusReport`` without the
+    field, and it defaults ``None`` — so the id on the published terminal is the
+    one the venue's ack put on the saga and the envelope declined to overwrite.
+    Losing it would be silent: the event publishes either way, and an operator
+    reading the audit trail for a ghost-resolved order would simply find nothing
+    to look the order up by at the venue.
+
+    The ``LIVE`` saga is put back rather than driven, because no venue in this
+    suite can produce the state: ``PaperExchange`` supplies no oid at all, and a
+    second ``LIVE`` report carrying one dedups on ``{cloid}:LIVE`` before
+    ``Order.apply`` reaches the assignment. This is the shape a restart leaves —
+    a durable acked order rebuilt into the cache, then resolved by a cycle that
+    found it gone.
+
+    Verified discriminating: against an envelope that takes the report's
+    ``venue_oid`` unconditionally the assertion fails on ``None``.
+    """
+    wiring = _wiring(SQLiteStore(":memory:"))
+    cloid = derive_cloid("trivial:BTC:1")
+    acked = Order.restore(
+        cloid=cloid,
+        strategy_id="trivial",
+        signal_id="trivial:BTC:1",
+        symbol="BTC",
+        side=Side.BUY,
+        quantity=Decimal("0.5"),
+        order_type=OrderType.LIMIT,
+        state=OrderState.LIVE,
+        cum_qty=Decimal("0"),
+        venue_oid="0x7f3a",
+        reason=None,
+        cancel_requested=False,
+        cancel_requested_ts=None,
+        cancel_signal_id=None,
+        # The three the saga already reflects, and deliberately not the terminal
+        # below — a dedup set carrying it would make this case pass by silence.
+        applied_event_ids=(f"{cloid}:PENDING", f"{cloid}:SUBMITTED", f"{cloid}:LIVE"),
+    )
+    wiring.checkpointer.checkpoint(acked)
+
+    async def scenario() -> None:
+        # Byte for byte what ``Reconciler._resolve_ghost`` publishes for an order
+        # that vanished from the venue: provenance-flagged, reason-carrying, and
+        # no venue oid.
+        await wiring.bus.publish(
+            OrderStatusReport(
+                ts_event=2_000,
+                ts_init=2_000,
+                cloid=cloid,
+                symbol="BTC",
+                status=OrderState.REJECTED,
+                reason="reconciliation: ghost: vanished from the venue",
+                reconciliation=True,
+            )
+        )
+
+    asyncio.run(scenario())
+
+    rejected = [ev for ev in wiring.order_events if isinstance(ev, OrderRejected)]
+    assert len(rejected) == 1
+    assert rejected[0].venue_oid == "0x7f3a"
+    # Provenance rides the same envelope, and it is the field that says an
+    # operator is reading a reconciler's verdict rather than a venue push.
+    assert rejected[0].reconciliation is True
+    assert rejected[0].reason == "reconciliation: ghost: vanished from the venue"
+
+
+def test_a_status_carrying_a_fresher_oid_puts_it_on_the_published_event() -> None:
+    """The other arm of the same rule, and the pair is what makes either mean
+    something: the saga starts with no oid, so the id on the terminal can only
+    have come from the report.
+
+    ``PaperExchange`` is an in-process venue and mints no oids — which is why the
+    ``LIVE`` beside it carries ``None`` and the assertion is not vacuous. The
+    ``CANCELLED`` is the shape a real venue's cancel-ack arrives in.
+
+    Verified discriminating: against an envelope that always reads the order's
+    own the terminal comes back ``None``.
+    """
+    bus, _, _, order_events = _harness()
+    cloid = derive_cloid("trivial:BTC:1")
+
+    async def scenario() -> None:
+        await bus.publish(_tick("42000"))
+        await bus.publish(_limit_signal("41000"))  # rests LIVE, with no oid
+        await bus.publish(
+            OrderStatusReport(
+                ts_event=2_000,
+                ts_init=2_000,
+                cloid=cloid,
+                symbol="BTC",
+                status=OrderState.CANCELLED,
+                venue_oid="0x9f21",
+            )
+        )
+
+    asyncio.run(scenario())
+
+    live = [ev for ev in order_events if isinstance(ev, OrderLive)]
+    cancelled = [ev for ev in order_events if isinstance(ev, OrderCancelled)]
+    assert len(live) == 1 and live[0].venue_oid is None
+    assert len(cancelled) == 1 and cancelled[0].venue_oid == "0x9f21"
+
+
 def _stochastic_harness(
     fill_model: object,
 ) -> tuple[InMemoryBus, ManualClock, SQLiteStore, list[OrderEvent]]:
