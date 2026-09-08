@@ -98,6 +98,10 @@ def test_classifies_both_tiers_off_one_hand_built_reading() -> None:
         net={"BTC": Decimal("0.4")},
         unrealized={"BTC": Decimal("8000")},
         notional={"BTC": Decimal("60000")},
+        # Agreeing outright with the venue double's own zeros, so the three
+        # findings this case is about stay the only ones in the pass.
+        margin_used={"BTC": Decimal("0")},
+        maintenance_margin={"BTC": Decimal("0")},
         mark_observed={"BTC": _NOW_NS},
     )
 
@@ -176,6 +180,8 @@ def test_a_per_symbol_figure_whose_notional_is_unknown_bands_on_atol_alone() -> 
         net={"BTC": Decimal("0.5")},
         unrealized={"BTC": Decimal("9995")},
         notional={"BTC": None},
+        margin_used={"BTC": Decimal("0")},
+        maintenance_margin={"BTC": Decimal("0")},
         mark_observed={"BTC": _NOW_NS},
     )
 
@@ -197,6 +203,8 @@ def test_a_per_symbol_figure_whose_notional_is_unknown_bands_on_atol_alone() -> 
         net={"BTC": Decimal("0.5")},
         unrealized={"BTC": Decimal("9995")},
         notional={"BTC": Decimal("60000")},
+        margin_used={"BTC": Decimal("0")},
+        maintenance_margin={"BTC": Decimal("0")},
         mark_observed={"BTC": _NOW_NS},
     )
 
@@ -252,6 +260,8 @@ def test_one_unpriced_symbol_makes_the_account_grains_reference_unknown() -> Non
         net={"BTC": Decimal("0.5"), "ETH": Decimal("10")},
         unrealized={"BTC": Decimal("10000"), "ETH": Decimal("2000")},
         notional={"BTC": Decimal("60000"), "ETH": None},
+        margin_used={"BTC": Decimal("0"), "ETH": Decimal("0")},
+        maintenance_margin={"BTC": Decimal("0"), "ETH": Decimal("0")},
         mark_observed={"BTC": _NOW_NS, "ETH": _NOW_NS},
     )
 

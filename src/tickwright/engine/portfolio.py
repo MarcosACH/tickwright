@@ -43,6 +43,8 @@ from tickwright.domain import (
     Store,
     StoreAccountMismatch,
     VenueAccountState,
+    account_maintenance_margin,
+    account_margin_used,
     account_net_size,
     account_notional,
     account_unrealized_pnl,
@@ -240,7 +242,7 @@ class LedgerReading:
     handed (``CONTEXT.md``), and this is the engine concrete's wider surface,
     read by one caller for one comparison.
 
-    The four folds are ``Mapping`` and not ``dict``, because ``frozen`` is
+    The folds are ``Mapping`` and not ``dict``, because ``frozen`` is
     shallow: it stops a member being rebound and says nothing about the map it
     points at, so the type that exists to hold a pass's figures still would not
     hold them. Read-only is the whole of what every reader wants — the
@@ -255,6 +257,20 @@ class LedgerReading:
     """Per-symbol open PnL against the marks held at the reading."""
     notional: Mapping[str, Decimal | None]
     """Per-symbol notional — the reference ADR-0046 §5 scales the band by."""
+    margin_used: Mapping[str, Decimal | None]
+    """Per-symbol posted margin, by each mode's rule (ADR-0040 §3).
+
+    Per symbol and not the ``AccountView``'s Σ, which the venue's own response
+    cannot be compared against: it publishes one ``marginUsed`` per position, and
+    a total has already added them together (ADR-0041 §4/§8)."""
+    maintenance_margin: Mapping[str, Decimal | None]
+    """Per-symbol maintenance margin (ADR-0040 §4).
+
+    Per symbol for the grain reason above **and** for a narrowing one: ADR-0046
+    §2.1 compares the account's figure over the **cross subset** only, because
+    the venue's ``crossMaintenanceMarginUsed`` excludes isolated positions and
+    says nothing about doing so. A Σ handed over whole cannot be narrowed
+    afterwards."""
     mark_observed: Mapping[str, int]
     """When each cached mark was stamped: the age input, never a price."""
 
@@ -1125,6 +1141,8 @@ class PortfolioProjection:
             net=self.account_net(),
             unrealized=self._account_unrealized(),
             notional=self._account_notional(),
+            margin_used=self._account_margin_used(),
+            maintenance_margin=self._account_maintenance_margin(),
             mark_observed=self._mark_observed(),
         )
 
@@ -1144,6 +1162,17 @@ class PortfolioProjection:
         """
         return account_net_size(self._positions.values())
 
+    def _mark_prices(self) -> dict[str, Decimal]:
+        """The price half of the mark cache, as every fold below wants it.
+
+        ``_mark_observed``'s counterpart: one cache, read for its two halves by
+        readers that never want both. Written out at each of the five call sites
+        it had, the valuation folds and the account view would each hold their
+        own claim about which field values a position — and the one that drifted
+        would value the book against a different mark than the reading beside it.
+        """
+        return {symbol: mark.price for symbol, mark in self._marks.items()}
+
     def _account_unrealized(self) -> dict[str, Decimal | None]:
         """The account-grain uPnL per symbol, against the marks held right now.
 
@@ -1159,7 +1188,7 @@ class PortfolioProjection:
         """
         return account_unrealized_pnl(
             self._positions.values(),
-            {symbol: mark.price for symbol, mark in self._marks.items()},
+            self._mark_prices(),
         )
 
     def _account_notional(self) -> dict[str, Decimal | None]:
@@ -1178,7 +1207,41 @@ class PortfolioProjection:
         """
         return account_notional(
             self._positions.values(),
-            {symbol: mark.price for symbol, mark in self._marks.items()},
+            self._mark_prices(),
+        )
+
+    def _account_margin_used(self) -> dict[str, Decimal | None]:
+        """The account-grain posted margin per symbol, by each mode's rule.
+
+        The fourth fold of ``ledger_reading``, and the one that reads the
+        resolved leverage book: cross posts ``notional / leverage`` out of the
+        account pool and isolated posts its locked bucket marked to market
+        (ADR-0040 §3). Both branches are ``domain.valuation``'s, so a symbol
+        compared here can never disagree with the ``PositionView`` a strategy
+        reads for it.
+
+        Private for ``_account_notional``'s reason: it reaches the cycle as a
+        member of the reading, and nothing outside asks for the fold alone.
+        """
+        return account_margin_used(
+            self._positions.values(),
+            self._mark_prices(),
+            leverage=self._leverage,
+        )
+
+    def _account_maintenance_margin(self) -> dict[str, Decimal | None]:
+        """The account-grain maintenance margin per symbol (ADR-0040 §4).
+
+        The fold with no mode term — maintenance is owed on the exposure
+        whichever pool backs it — so this takes the instrument universe where
+        ``_account_margin_used`` takes the leverage book. A symbol whose spec
+        this run never received is ``None`` and not zero: an unknown rate is not
+        a rate of nothing (ADR-0041 §6).
+        """
+        return account_maintenance_margin(
+            self._positions.values(),
+            self._mark_prices(),
+            specs=self._specs,
         )
 
     def _mark_observed(self) -> dict[str, int]:
@@ -1274,7 +1337,7 @@ class PortfolioProjection:
         return account_view(
             self._account,
             positions=self._positions.values(),
-            marks={symbol: mark.price for symbol, mark in self._marks.items()},
+            marks=self._mark_prices(),
             leverage=self._leverage,
             specs=self._specs,
         )
