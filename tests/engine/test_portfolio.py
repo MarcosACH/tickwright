@@ -331,6 +331,43 @@ def test_an_account_holding_nothing_reads_its_equity_as_its_cash() -> None:
     assert account.equity == Decimal("100000")
 
 
+def test_the_reconcile_cycles_ledger_side_comes_off_one_read() -> None:
+    """The cadence asks the projection **once** and gets every term it compares.
+
+    Not tidiness: the pass writes, and ``equity`` is ``cash + Σ uPnL``, so a
+    term read again after the heal reports the venue as disagreeing by exactly
+    the amount this cycle just moved (ADR-0034). One read is what makes the
+    second one structurally unavailable rather than merely not written.
+
+    Alpha is long 2 BTC and beta long 3, so the account nets +5 against a mark
+    of 110: uPnL 5 × (110 − 100) = 50, notional |5| × 110 = 550. Beta also holds
+    1 ETH with no mark at all, which is the per-term ``None`` — and the reason
+    the account's own equity is unknown while its Tier-1 cash line is not.
+    """
+    projection = _projection("100000")
+    book_fill(projection, _fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
+    book_fill(
+        projection,
+        _fill(trade_id="f2", quantity="3", price="100", strategy_id="beta"),
+        side=Side.BUY,
+    )
+    book_fill(
+        projection,
+        _fill(trade_id="f3", quantity="1", price="3000", symbol="ETH", strategy_id="beta"),
+        side=Side.BUY,
+    )
+    projection.observe_mark(_mark(price="110", ts_event=9_000))
+
+    reading = projection.ledger_reading()
+
+    assert reading.net == {"BTC": Decimal("5"), "ETH": Decimal("1")}
+    assert reading.unrealized == {"BTC": Decimal("50"), "ETH": None}
+    assert reading.notional == {"BTC": Decimal("550"), "ETH": None}
+    assert reading.mark_observed == {"BTC": 9_000}
+    assert reading.account.cash == Decimal("100000")
+    assert reading.account.equity is None
+
+
 def test_a_stale_mark_freezes_at_its_last_value_and_is_never_rejected_on_read() -> None:
     """Staleness is **exposed, not decided** (ADR-0039, ADR-0041 §6).
 

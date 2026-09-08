@@ -735,13 +735,13 @@ class LedgerReconciliation:
         into one. The freeze costs this cycle alone; the next deadline reads
         again.
 
-        The ledger's side is one ``LedgerReading``, taken once, as the venue's is
-        one snapshot. Every member of it is a fold over every partition, so
-        taking them together both halves the folds and gives the comparison one
-        reading per side — the property ``domain.valuation`` states about
-        assembling a view in one call, kept by a named type rather than by the
-        checks happening to be consecutive. Which is load-bearing rather than
-        tidy: the heal below moves the cash line, and ``equity`` is
+        The ledger's side is one ``LedgerReading``, taken in one call, as the
+        venue's is one snapshot. Every member of it is a fold over every
+        partition, so taking them together both halves the folds and gives the
+        comparison one reading per side — the property ``domain.valuation``
+        states about assembling a view in one call, kept by a named type rather
+        than by the checks happening to be consecutive. Which is load-bearing
+        rather than tidy: the heal below moves the cash line, and ``equity`` is
         ``cash + Σ uPnL``, so a reading taken again after it would report the
         venue as disagreeing by exactly the amount this cycle just moved — an
         alert about our own arithmetic, and one no Tier-1 equity finding exists
@@ -776,13 +776,7 @@ class LedgerReconciliation:
         # divergence input: we report the venue's own number, so there is
         # nothing here to diverge against.
         self._portfolio.observe_venue_liquidation(state)
-        reading = LedgerReading(
-            account=self._portfolio.account(),
-            net=self._portfolio.account_net(),
-            unrealized=self._portfolio.account_unrealized(),
-            notional=self._portfolio.account_notional(),
-            mark_observed=self._portfolio.mark_observed(),
-        )
+        reading = self._portfolio.ledger_reading()
         findings = ReconcileFindings.classify(
             state,
             reading,
