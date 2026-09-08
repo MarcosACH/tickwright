@@ -13,11 +13,12 @@ from pathlib import Path
 
 import pytest
 from feed_contract import assert_every_traded_symbol_is_marked, record_market_data
+from seam_claims import assert_every_member_is_claimed
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.feed import ReplayFeed
-from tickwright.domain import Event, MarketTick, MarkTick
+from tickwright.domain import Event, MarketFeed, MarketTick, MarkTick
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> Path:
@@ -280,3 +281,74 @@ def test_replay_assigns_per_symbol_source_sequence(tmp_path: Path) -> None:
     assert by_symbol["BTC"] == [0, 1]
     assert by_symbol["ETH"] == [0]
     assert seen[0].event_id == "BTC:1000:0"
+
+
+def test_replay_releases_nothing_and_never_interrupts_a_drain(tmp_path: Path) -> None:
+    """The third member's claim on the adapter with nothing to release (#227).
+
+    ``MarketFeed.stop`` promises idempotence and safety on a feed that never
+    started, which a file-backed replay meets by holding nothing at all — asked
+    twice, before any run, it does not raise.
+
+    The second half is the one worth pinning, because it is a *difference* from
+    the live adapter rather than an emptiness: replay's ``stop()`` is **not** a
+    cooperative signal. A stopped ``WsSession`` refuses to reconnect and closes
+    the socket its reader is blocked on; a stopped replay arms nothing, so a
+    later ``run()`` drains the whole file regardless. That is not an oversight
+    to fix here — it is why ``Engine._stop_feed`` cancels the supervised task
+    rather than trusting the ask, and a replay that quietly grew a stop flag
+    would make the runner's cancel look redundant while the two disagreed about
+    which rows were delivered.
+    """
+    path = _write_jsonl(
+        tmp_path / "ticks.jsonl",
+        [_row("BTC", "100", 1_000, "a"), _row("BTC", "101", 2_000, "b")],
+    )
+
+    async def main() -> None:
+        bus = InMemoryBus()
+        transcript = record_market_data(bus)
+        feed = ReplayFeed(path=path, bus=bus, clock=ManualClock())
+
+        await feed.stop()
+        await feed.stop()
+
+        await feed.run()
+        assert [t.price for t in transcript.ticks] == [Decimal("100"), Decimal("101")], (
+            "replay holds no live resource, so a stop cannot arm one — the runner cancels"
+        )
+
+    asyncio.run(main())
+
+
+def test_the_replay_feed_satisfies_the_market_feed_seam(tmp_path: Path) -> None:
+    """Conformance asserted at the adapter, as both ``Exchange`` adapters assert
+    theirs. ``MarketFeed`` is ``runtime_checkable``, so this is a member-presence
+    check: a member added to the Protocol fails here for whichever adapter was
+    left behind, with nobody maintaining a transcribed list of the seam. The half
+    it cannot see — a member every adapter implements but no test asserts — is
+    what ``_SEAM_CLAIMS`` below covers."""
+    feed = ReplayFeed(path=tmp_path / "ticks.jsonl", bus=InMemoryBus(), clock=ManualClock())
+
+    assert isinstance(feed, MarketFeed)
+
+
+# Which test claims each ``MarketFeed`` member for *this* adapter. Not a second
+# copy of the seam: the gate below asserts it against the Protocol itself, so a
+# new member cannot arrive without someone naming what asserts it here.
+_SEAM_CLAIMS = {
+    "start": "test_replay_holds_its_rows_until_run",
+    "run": "test_replay_publishes_every_tick_in_file_order",
+    "stop": "test_replay_releases_nothing_and_never_interrupts_a_drain",
+}
+
+
+def test_every_market_feed_member_carries_a_claim_in_the_replay_suite() -> None:
+    """The completeness gate the ``isinstance`` check above cannot be (#227).
+
+    The seam just grew from two members to three, which is exactly the arrival
+    this gate exists for: every adapter had to implement ``run()`` for the engine
+    to boot at all, so conformance went green the moment it existed, while what
+    each member *does* on this adapter was nobody's to notice. The live suite
+    answers the same gate in its own idiom."""
+    assert_every_member_is_claimed(MarketFeed, _SEAM_CLAIMS, suite=Path(__file__).parent)

@@ -25,11 +25,12 @@ from hyperliquid_fakes import (
     trade,
     trades_frame,
 )
+from seam_claims import assert_every_member_is_claimed
 from structlog.typing import EventDict
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
-from tickwright.domain import AggressorSide, MarketTick, MarkTick
+from tickwright.domain import AggressorSide, MarketFeed, MarketTick, MarkTick
 from tickwright.observability.testing import capture_events
 from tickwright.venues.hyperliquid import HyperliquidConfig, HyperliquidFeed
 
@@ -843,3 +844,38 @@ def test_malformed_frames_are_skipped_and_named_while_good_frames_keep_flowing()
     # a figure that is not a number drops at row grain like any other, so the
     # good trade batched with it is unaffected.
     assert len(dropped) == 5
+
+
+def test_the_live_feed_satisfies_the_market_feed_seam() -> None:
+    """Conformance asserted at the adapter, as the replay suite asserts its own
+    and both ``Exchange`` adapters assert theirs. ``MarketFeed`` is
+    ``runtime_checkable``, so this is a member-presence check; the half it cannot
+    see — a member implemented but unasserted — is ``_SEAM_CLAIMS``' below."""
+    feed = HyperliquidFeed(
+        config=HyperliquidConfig(symbols=["BTC"]), bus=InMemoryBus(), clock=ManualClock()
+    )
+
+    assert isinstance(feed, MarketFeed)
+
+
+# Which test claims each ``MarketFeed`` member for *this* adapter. Not a second
+# copy of the seam: the gate below asserts it against the Protocol itself, so a
+# new member cannot arrive without someone naming what asserts it here.
+_SEAM_CLAIMS = {
+    "start": "test_the_live_feed_connects_in_start_and_leaves_the_loop_to_run",
+    "run": "test_ws_drop_reconnects_with_backoff_resubscribes_and_resumes",
+    "stop": "test_stop_does_not_trigger_a_reconnect",
+}
+
+
+def test_every_market_feed_member_carries_a_claim_in_the_live_suite() -> None:
+    """The completeness gate the ``isinstance`` check above cannot be (#227).
+
+    Deliberately the same three members answered by a different three tests than
+    the replay suite names: the seam is one obligation and the adapters meet it
+    in their own idioms, which is why the claim is declared per suite rather than
+    driven from one shared map the way ``Store``'s identical-behaviour gate is.
+    ``run`` is claimed by the reconnect test rather than by any of the parsing
+    ones above it — those exercise the loop incidentally, while that one asserts
+    what makes it the long-lived half: it survives its sockets."""
+    assert_every_member_is_claimed(MarketFeed, _SEAM_CLAIMS, suite=Path(__file__).parent)
