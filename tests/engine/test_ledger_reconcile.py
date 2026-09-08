@@ -3068,22 +3068,35 @@ def test_a_cash_finding_the_mode_gate_refused_still_suppresses_the_account_grain
     abstraction mode that snapshot reads an order of magnitude low, so the alert
     it would raise is guaranteed and meaningless.
 
-    Scoped to the account grain, which the per-symbol figure beside it pins. The
-    book: a 0.002 BTC long entered at 64809 and marked at 65000 is worth 0.382
-    against a venue pricing it at 50.382, on a venue equity of 100051.382. The
-    cash line that equity implies is ``100051.382 − 50.382 = 100001`` against
-    our 100000 — the Tier-1 finding — and equity (100000.382 against 100051.382)
-    and free margin (100000 against 100001) both disagree in its shadow. Each of
-    the four Tier-2 gaps is far outside a band built on 130 of notional; only
-    BTC's two per-symbol figures, which no Tier-1 finding explains, are alerted.
+    Scoped to the account grain, and it is scoped to **all three** of that
+    grain's figures: the suppression is keyed on ``Divergence.symbol``, so
+    ``maintenance_margin`` inherits it by carrying ``None`` rather than by being
+    named, and that is the thing worth pinning. A maintenance figure whose
+    comparison narrows to the cross subset (ADR-0046 §2.1) could plausibly have
+    been recorded against the symbols it was summed over; recorded that way it
+    would shout here, against the same snapshot the pass has just refused to
+    heal from.
+
+    So the run is at cross 5x with #152's tier-0 rate, which is what puts a
+    maintenance finding on the grain at all — at the fixtures' default isolated
+    1x the venue's cross-scoped field and our cross subset are both empty and
+    agree at zero. The book: a 0.002 BTC long entered at 64809 and marked at
+    65000 is worth 0.382 against a venue pricing it at 50.382, on a venue equity
+    of 100051.382. The cash line that equity implies is ``100051.382 − 50.382 =
+    100001`` against our 100000 — the Tier-1 finding — and equity (100000.382
+    against 100051.382), free margin (99974.382 against 100001) and maintenance
+    (``130.000 × 0.0125 = 1.6250000`` against 1.400) all disagree in its shadow.
+    Every Tier-2 gap here is far outside its own band; only BTC's three
+    per-symbol figures, which no Tier-1 finding explains, are alerted.
     """
     store = SQLiteStore(":memory:")
-    keeper = _ledger(store, equity="100000")
+    keeper = _ledger(store, equity="100000", leverage=_BTC_CROSS_5X, specs={"BTC": _BTC_SPEC})
     projection = keeper.portfolio
     _book_fill(projection, quantity="0.002", price="64809")
     _mark(projection, "BTC", "65000")
     venue = _AccountVenue(
-        _held("100051.382", ("BTC", "0.002", "50.382")), mode=AccountModeVerdict.CHANGED
+        _levered(_held("100051.382", ("BTC", "0.002", "50.382"), maintenance="1.400"), _CROSS_5X),
+        mode=AccountModeVerdict.CHANGED,
     )
     cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
 
@@ -3095,6 +3108,7 @@ def test_a_cash_finding_the_mode_gate_refused_still_suppresses_the_account_grain
         (DivergenceTier.TIER_1, DivergenceField.CASH),
         (DivergenceTier.TIER_2, DivergenceField.EQUITY),
         (DivergenceTier.TIER_2, DivergenceField.FREE_MARGIN),
+        (DivergenceTier.TIER_2, DivergenceField.MAINTENANCE_MARGIN),
         (DivergenceTier.TIER_2, DivergenceField.UNREALIZED_PNL),
         (DivergenceTier.TIER_2, DivergenceField.NOTIONAL),
         (DivergenceTier.TIER_2, DivergenceField.MARGIN_USED),
@@ -3103,7 +3117,7 @@ def test_a_cash_finding_the_mode_gate_refused_still_suppresses_the_account_grain
     assert _alerts(logs) == [
         {"field": "unrealized_pnl", "symbol": "BTC", "ledger": "0.382", "venue": "50.382"},
         {"field": "notional", "symbol": "BTC", "ledger": "130.000", "venue": "180.0000"},
-        {"field": "margin_used", "symbol": "BTC", "ledger": "0.382", "venue": "50.382"},
+        {"field": "margin_used", "symbol": "BTC", "ledger": "26.000", "venue": "36.0000"},
     ]
 
 
