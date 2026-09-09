@@ -24,7 +24,7 @@ import os
 import subprocess
 import sys
 
-from _shell import command_name, segments
+from _shell import command_name, segments, unwrap
 
 # `sed` edits in place under any of these. The `-i.bak` form takes its suffix attached,
 # so the flag is matched by prefix rather than by equality.
@@ -50,10 +50,16 @@ def _write_targets(segment: list[str]) -> list[str]:
     """
     targets: list[str] = []
 
-    if command_name(segment) == "sed" and any(tok.startswith(_SED_IN_PLACE) for tok in segment[1:]):
+    # Off the unwrapped remainder, so `sudo sed -i` is still a `sed -i`, while the `-i`
+    # of `sudo -i sed 's/x/y/' f` — a login shell running a plain `sed` — is not read as
+    # one. A wrapper changes who writes the file, not whether the cached copy goes stale.
+    unwrapped = unwrap(segment)
+    if command_name(segment) == "sed" and any(
+        tok.startswith(_SED_IN_PLACE) for tok in unwrapped[1:]
+    ):
         # `sed -i '' 's/x/y/' file` puts the target last, but the flag forms differ per
         # platform and the script itself may be several arguments. Offer them all.
-        targets.extend(segment)
+        targets.extend(unwrapped)
 
     for i, tok in enumerate(segment):
         if tok in _WRITE_REDIRECTS and i + 1 < len(segment):

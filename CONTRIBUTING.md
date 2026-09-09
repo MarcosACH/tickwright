@@ -91,9 +91,9 @@ on stdin and exits `0` to allow or `2` to block, with the reason on stderr going
 
 | Guard | Refuses | Stays allowed |
 | ----- | ------- | ------------- |
-| `no-tracked-writes` | `sed -i`, a `>`/`>>` redirect or `tee` aimed at a **git-tracked** file | creating a new file; `2>&1`; anything outside the repo |
-| `no-excluded-reads` | `cat`/`head`/`grep`/… of a path `git check-ignore` matches | `.agents/plans/`; a program in the **executable position**, so `.venv/bin/ruff` still runs |
-| `no-global-installs` | `pip install`, `uv pip install --system`, `uv tool install`, `pipx`, `brew`, `npm -g` | `uv add`/`uv sync`/`uvx`/`uv tool run`; `uv pip install` without `--system` |
+| `no-tracked-writes` | `sed -i`, a `>`/`>>` redirect or `tee` aimed at a **git-tracked** file | creating a new file; `2>&1`; a heredoc **body** that quotes a write; anything outside the repo |
+| `no-excluded-reads` | `cat`/`head`/`grep`/… of a path `git check-ignore` matches | `.agents/plans/`; a program in the **executable position**, so `.venv/bin/ruff` still runs; a grep **pattern** that merely spells an ignored path |
+| `no-global-installs` | `pip install`, `uv pip install --system`, `uv tool install`, `pipx`, `brew`, `npm -g` — and the same behind `sudo` | `uv add`/`uv sync`/`uvx`/`uv tool run`; `uv pip install` without `--system` |
 
 Three properties are deliberate:
 
@@ -104,7 +104,9 @@ Three properties are deliberate:
   also covers whatever gets ignored next.
 - **They fail open.** A command the lexer cannot parse is allowed through. A guard that misfires on
   input it does not understand is one an agent learns to route around, which costs more than the
-  call it wrongly blocked.
+  call it wrongly blocked. That licence covers a *parse*, never a token the guard read in the wrong
+  position — a wrapper (`sudo pip install`), a grep pattern, or a heredoc body all lex perfectly,
+  so `_shell.py` resolves each one rather than shrugging at it.
 
 Same standing as the git hooks: **local convenience, not the gate.** They are Claude Code-specific,
 so a contributor using another tool — or none — gets nothing from them, and CI stays the floor for

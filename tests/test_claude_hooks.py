@@ -106,6 +106,9 @@ class TestNoTrackedWrites:
             "echo 'x = 2' >> src/tracked.py",
             "echo 'x = 2' | tee src/tracked.py",
             "echo 'x = 2' | tee -a src/tracked.py",
+            # A wrapper is not the program. `sudo` in front changes who writes the file,
+            # not whether the harness's copy of it goes stale.
+            "sudo sed -i '' 's/x/y/' src/tracked.py",
         ],
     )
     def test_a_write_at_a_tracked_path_is_refused(self, repo: Path, command: str) -> None:
@@ -132,6 +135,19 @@ class TestNoTrackedWrites:
             # `sed` and an `-i` and refuses a command that writes nothing.
             "grep -i 'x' src/tracked.py | sed 's/a/b/'",
             "grep -i 'x' src/tracked.py\nsed 's/a/b/' /tmp/scratch.txt",
+            # A heredoc *body* is data, not commands. Writing a new file whose content
+            # quotes a shell example must not be read as running that example — the
+            # refusal would name a file the command never opens, and the natural cases
+            # are this repo's own: a doc, or a test whose fixtures are shell commands.
+            "cat <<'DOC' > /tmp/notes.md\necho hi > src/tracked.py\nDOC",
+            "cat <<'DOC' > src/brand_new.md\nsed -i '' 's/a/b/' src/tracked.py\nDOC",
+            # A newline *inside a quoted argument* is data as well. A multi-line commit
+            # message or a `--body` that quotes a shell example is one command, and only
+            # the newlines outside the quotes end anything. The example has to sit on an
+            # interior line to be worth asserting: the opening and closing lines carry an
+            # unbalanced quote, so the lexer already refuses them and the guard fails open
+            # for the wrong reason.
+            'git commit -m "fix: the write guard\n\necho x > src/tracked.py\n\nis allowed now"',
         ],
     )
     def test_a_write_that_stales_nothing_is_allowed(self, repo: Path, command: str) -> None:
@@ -180,6 +196,9 @@ class TestNoExcludedReads:
             # Secrets are ignored for a stronger reason than context budget, and the one
             # rule covers both.
             "cat .env",
+            "sudo cat .env",
+            # The pattern came from `-e`, so every non-flag argument left is a path.
+            "grep -e 'noise' logs/run.log",
         ],
     )
     def test_a_read_of_an_excluded_path_is_refused(self, repo: Path, command: str) -> None:
@@ -199,6 +218,14 @@ class TestNoExcludedReads:
             # Repo source is the normal case and must stay cheap.
             "cat src/tracked.py",
             "grep -rn 'x' src/",
+            # A grep *pattern* is not a path. `.env` and `logs/run.log` are strings this
+            # repo's code and docs name constantly, and searching tracked source for one
+            # opens nothing ignored — `check-ignore` answers on the string alone.
+            "grep -rn '.env' src/",
+            "grep -rn 'logs/run.log' src/tracked.py",
+            # A newline inside a quoted argument does not end a command, so a message
+            # whose second line opens with a reader's name is prose, not a read.
+            'git commit -m "docs: note the guard\n\ncat logs/run.log\n\nis how it surfaced"',
             # An ignored path in the *executable* position is a program being run, not a
             # file being read — and running the venv binaries directly is what keeps a
             # PostToolUse hook fast enough to exist.
@@ -271,6 +298,16 @@ class TestNoGlobalInstalls:
             "npm install -g typescript",
             "npm i -g typescript",
             "npm install --global typescript",
+            # A wrapper is not the program, and this is the form that does the most
+            # damage: root, into the system Python. Every branch above is one `sudo`
+            # away from doing nothing at all.
+            "sudo pip install httpx",
+            "sudo -H pip3 install httpx",
+            "sudo -u root pip install httpx",
+            "sudo python3 -m pip install httpx",
+            "sudo npm install -g typescript",
+            "sudo brew install jq",
+            "env PIP_NO_INPUT=1 pip install httpx",
         ],
     )
     def test_an_install_outside_the_project_venv_is_refused(self, repo: Path, command: str) -> None:
@@ -298,6 +335,12 @@ class TestNoGlobalInstalls:
             "pip --version",
             "brew list",
             "uv pip list --system",
+            # A wrapper with no install behind it is not the subject either.
+            "sudo -v",
+            "sudo launchctl list",
+            # A newline inside a quoted argument does not end a command, so writing
+            # *about* an install is not performing one.
+            'git commit -m "docs: the guard\n\npip install httpx\n\nis what it refuses"',
         ],
     )
     def test_an_install_into_the_project_is_allowed(self, repo: Path, command: str) -> None:

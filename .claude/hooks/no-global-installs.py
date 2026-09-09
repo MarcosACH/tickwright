@@ -21,7 +21,7 @@ The line is *where it lands*, not which tool spelled it:
 import json
 import sys
 
-from _shell import command_name, segments
+from _shell import command_name, segments, unwrap
 
 _SANCTIONED = "uv add <pkg> (or `uv sync` to install what the lockfile already names)"
 
@@ -30,38 +30,28 @@ _SANCTIONED = "uv add <pkg> (or `uv sync` to install what the lockfile already n
 _VENV_MARKERS = ("venv/", "virtualenv/")
 
 
-def _program(segment: list[str]) -> str:
-    """The segment's program token, whole — path included, unlike `command_name`.
-
-    The path is the evidence: `.venv/bin/pip install` and `pip install` differ in nothing
-    else, and only one of them is the rule's subject.
-    """
-    for tok in segment:
-        if "=" in tok and not tok.startswith("=") and "/" not in tok.split("=", 1)[0]:
-            continue  # VAR=value prefix
-        return tok
-    return ""
-
-
 def _in_venv(program: str) -> bool:
     return any(marker in program for marker in _VENV_MARKERS)
 
 
-def _rest(segment: list[str]) -> list[str]:
-    """The segment after its program token, flags included.
-
-    Flags are kept because this guard decides *on* them — `--system` and `-g` are the
-    whole question — so `_shell.arguments`, which drops them, is the wrong reading here.
-    """
-    program = _program(segment)
-    return segment[segment.index(program) + 1 :] if program in segment else []
-
-
 def _refusal(segment: list[str]) -> str | None:
-    """Why this segment installs outside the project venv, or None if it does not."""
+    """Why this segment installs outside the project venv, or None if it does not.
+
+    Read off `unwrap`, so a wrapper is peeled before the decision: `sudo pip install` is
+    a `pip install`, and it is the form that does the most damage — a root install into
+    the system Python, which no check in this repository can see afterwards.
+    """
+    unwrapped = unwrap(segment)
+    if not unwrapped:
+        return None
+
+    # The program token whole, path included: `.venv/bin/pip install` and `pip install`
+    # differ in nothing else, and only one of them is the rule's subject. Flags are kept
+    # in `rest` because this guard decides *on* them — `--system` and `-g` are the whole
+    # question — while `args` is the non-flag reading the subcommand tests want.
+    program = unwrapped[0]
     name = command_name(segment)
-    program = _program(segment)
-    rest = _rest(segment)
+    rest = unwrapped[1:]
     args = [tok for tok in rest if not tok.startswith("-")]
 
     if name in ("pip", "pip3") and "install" in args and not _in_venv(program):

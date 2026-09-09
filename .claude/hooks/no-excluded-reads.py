@@ -28,7 +28,7 @@ import os
 import subprocess
 import sys
 
-from _shell import arguments, command_name, segments
+from _shell import command_name, segments, unwrap
 
 # Commands whose arguments are files they pull into the context window. Narrow on
 # purpose: the guard acts only where it is sure a read is what is being asked for, so an
@@ -61,6 +61,15 @@ _READERS = frozenset(
 # for the directory itself — the sibling `.agents/plans-old` must not inherit the pass.
 _READABLE_IGNORED = (".agents/plans",)
 
+# Readers whose first non-flag argument is a *pattern*, not a path. Offering it as a
+# candidate hands `check-ignore` a string that never named a file, and `.env` is a string
+# this repo's code and docs name constantly — `grep -rn '.env' src/` opens nothing
+# ignored, so refusing it is the misfire that teaches an agent to route around the guard.
+_PATTERN_FIRST = frozenset({"grep", "egrep", "fgrep", "rg", "ag", "ack"})
+
+# Once the pattern rides one of these, every non-flag argument left is a path again.
+_PATTERN_FLAGS = frozenset({"-e", "--regexp", "-f", "--file"})
+
 
 def _repo_root(cwd: str) -> str | None:
     """The repo `cwd` sits in, or None when it is not in one — asked once per event."""
@@ -88,6 +97,44 @@ def _readable(relative: str) -> bool:
     return any(
         relative == entry or relative.startswith(entry + os.sep) for entry in _READABLE_IGNORED
     )
+
+
+def _read_candidates(segment: list[str]) -> list[str]:
+    """The paths this one segment would open, or none at all if it is not a read.
+
+    Still over-collects — a `--include` glob lands here beside the tree it filters — and
+    that is affordable, because a candidate only becomes a refusal once `check-ignore`
+    matches it. A grep pattern is the one token where it is not: the pattern is written
+    to *name* things, so it matches an ignored path by design rather than by accident.
+    """
+    name = command_name(segment)
+    if name not in _READERS:
+        return []
+
+    # Only within the grep family: `-f` there names a file of patterns, and to `tail` it
+    # means follow and consumes nothing. Reading the flag set command-wide would eat the
+    # path out of `tail -f logs/run.log`.
+    searching = name in _PATTERN_FIRST
+
+    paths: list[str] = []
+    pattern_from_flag = False
+    skip_value = False
+    for tok in unwrap(segment)[1:]:
+        if skip_value:
+            skip_value = False
+            continue
+        if tok.startswith("-"):
+            if searching and tok in _PATTERN_FLAGS:
+                pattern_from_flag = True
+                skip_value = True
+            elif searching and tok.split("=", 1)[0] in _PATTERN_FLAGS:
+                pattern_from_flag = True  # the `--regexp=x` form carries its own value
+            continue
+        paths.append(tok)
+
+    if searching and not pattern_from_flag and paths:
+        return paths[1:]
+    return paths
 
 
 def _excluded(cwd: str, candidates: list[str]) -> list[str]:
@@ -125,8 +172,7 @@ def main() -> int:
 
     candidates: list[str] = []
     for segment in segments(command):
-        if command_name(segment) in _READERS:
-            candidates.extend(arguments(segment))
+        candidates.extend(_read_candidates(segment))
 
     excluded = _excluded(cwd, candidates)
     if not excluded:
