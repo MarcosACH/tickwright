@@ -1,14 +1,16 @@
 """The ``.claude/hooks`` guards: rules enforced at the tool call, not asked for in prose.
 
-Three ``PreToolUse`` hooks on ``Bash``. Each reads the event JSON on stdin and answers
-with an exit code — ``0`` allows the call, ``2`` blocks it and hands the text on stderr
-back to the agent as the reason. That contract is the whole subject here, so nothing is
-mocked: the hooks are run as real processes, the way Claude Code runs them.
+Four ``PreToolUse`` hooks — three on ``Bash``, one on ``Read`` and ``Bash`` both. Each
+reads the event JSON on stdin and answers with an exit code — ``0`` allows the call, ``2``
+blocks it and hands the text on stderr back to the agent as the reason. That contract is
+the whole subject here, so nothing is mocked: the hooks are run as real processes, the way
+Claude Code runs them.
 
-Two of the three decide by asking ``git`` about the path (tracked? ignored?), so the
-fixture is a real scratch repo rather than a stubbed answer — the same shape and the same
-reason as ``tests/test_githooks.py``. Global and system git config are pinned to
-``/dev/null`` so a developer's own settings cannot reach an outcome.
+Three of the four decide by asking a real tool about the path — ``git`` (tracked?
+ignored?) or ``doc-slice`` (what are its sections?) — so the fixtures are real scratch
+repos rather than stubbed answers, the same shape and the same reason as
+``tests/test_githooks.py``. Global and system git config are pinned to ``/dev/null`` so a
+developer's own settings cannot reach an outcome.
 
 The hooks are held to the stdlib alone and to ``/usr/bin/env python3``: they run before
 ``uv sync`` has necessarily happened on a fresh clone, and the project venv is not
@@ -615,26 +617,63 @@ class TestWiring:
     """
 
     @staticmethod
-    def _bash_hook_commands() -> list[str]:
+    def _wiring() -> list[tuple[str, str]]:
+        """Every ``PreToolUse`` hook as ``(matcher, command)``."""
         settings = json.loads((_HOOKS.parent / "settings.json").read_text())
         return [
-            hook["command"]
+            (entry.get("matcher", ""), hook["command"])
             for entry in settings["hooks"]["PreToolUse"]
-            if entry.get("matcher") == "Bash"
             for hook in entry["hooks"]
         ]
 
     @pytest.mark.parametrize(
-        "hook", ["no-tracked-writes.py", "no-excluded-reads.py", "no-global-installs.py"]
+        ("hook", "tools"),
+        [
+            ("no-tracked-writes.py", ["Bash"]),
+            ("no-excluded-reads.py", ["Bash"]),
+            ("no-global-installs.py", ["Bash"]),
+            ("no-unsliced-doc-reads.py", ["Read", "Bash"]),
+        ],
     )
-    def test_every_guard_is_wired_to_pretooluse_bash(self, hook: str) -> None:
-        assert any(command.endswith(hook) for command in self._bash_hook_commands())
+    def test_every_guard_is_wired_to_every_tool_it_judges(
+        self, hook: str, tools: list[str]
+    ) -> None:
+        """The tool list is the second half of the claim. ``no-unsliced-doc-reads``
+        decides on both a ``Read`` and a ``Bash`` event, and a matcher naming only one of
+        them would leave the guard passing every test above while the ``cat`` door stayed
+        open in the loop it was written for."""
+        matchers = [matcher for matcher, command in self._wiring() if command.endswith(hook)]
+        assert matchers, f"{hook} is wired to nothing"
+        for tool in tools:
+            assert any(tool in matcher.split("|") for matcher in matchers), (hook, tool)
 
     def test_every_wired_path_exists_and_runs(self) -> None:
         """``${CLAUDE_PROJECT_DIR}`` is what keeps the wiring correct from a subdirectory
         or a worktree; a relative path would resolve against whatever cwd the call had."""
-        for command in self._bash_hook_commands():
+        for _, command in self._wiring():
             assert command.startswith("${CLAUDE_PROJECT_DIR}/")
             path = _HOOKS.parent.parent / command.removeprefix("${CLAUDE_PROJECT_DIR}/")
             assert path.is_file(), command
             assert os.access(path, os.X_OK), command
+
+    def test_every_corpus_glob_matches_a_real_file(self) -> None:
+        """``no-unsliced-doc-reads`` is the one guard whose subject is a hand-written
+        list rather than a question put to git, so it is the one that can be silently
+        disarmed by a rename. Renaming ``docs/module-maps/`` would leave every other test
+        in this file green and the maps unguarded; this is what goes red instead."""
+        root = _HOOKS.parent.parent
+        source = (_HOOKS / "no-unsliced-doc-reads.py").read_text()
+        corpus = source.split("_CORPUS = (", 1)[1].split(")", 1)[0]
+        globs = [line.strip().strip('",') for line in corpus.splitlines() if '"' in line]
+
+        assert len(globs) == 4, globs
+        for glob in globs:
+            assert list(root.glob(glob)), glob
+
+    def test_doc_slice_is_where_the_guard_looks_for_it(self) -> None:
+        """The guard falls open when the tool is missing, since a refusal with no index
+        to offer is an obstacle rather than a guard. That makes a moved ``doc-slice`` a
+        silent disarming too."""
+        tool = _HOOKS.parent.parent / ".agents" / "tools" / "doc-slice"
+        assert tool.is_file()
+        assert os.access(tool, os.X_OK)

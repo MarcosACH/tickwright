@@ -36,6 +36,16 @@
             "statusMessage": "Checking the install target..."
           }
         ]
+      },
+      {
+        "matcher": "Read|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/no-unsliced-doc-reads.py",
+            "statusMessage": "Checking the read span..."
+          }
+        ]
       }
     ]
   }
