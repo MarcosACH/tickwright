@@ -15,9 +15,14 @@ which sections were ever corrected: 986 characters for ADR-0040's 17 blocks, aga
 file. `doc-slice <file> <heading>` still prints the whole section when the original reasoning is
 what you need. `/why` wants the full history; `/tdd` and `/code-review` want the resolved state.
 
-This is the mechanism the reading rules in [`CLAUDE.md` → Context Discipline](../../CLAUDE.md) and
-[`.claude/skills/tdd/SKILL.md`](../../.claude/skills/tdd/SKILL.md) point at. Decided in
-[#266](https://github.com/MarcosACH/tickwright/issues/266).
+**The reading order is delivered, not remembered.**
+[`.claude/hooks/no-unsliced-doc-reads.py`](../../.claude/hooks/no-unsliced-doc-reads.py) refuses a
+whole read of this corpus and answers with the file's table of contents, marking each section `(+N)`
+for the amendment blocks it carries. The corrected sections therefore arrive named, before anything
+has been read, and that index is the same `grep '^---'` count described above. What is left in this
+file is what a *reader* still has to know and what an *author* has to do — both of which a guard
+cannot supply. Decided in [#266](https://github.com/MarcosACH/tickwright/issues/266); enforced from
+[#309](https://github.com/MarcosACH/tickwright/issues/309).
 
 ## Why the inversion, and not a stop-reading rule
 
