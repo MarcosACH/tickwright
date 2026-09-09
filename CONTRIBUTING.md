@@ -85,15 +85,22 @@ can't be skipped with `--no-verify`.
 ### Agent-loop guards (Claude Code hooks)
 
 Git hooks fire at commit time. An agent breaks a rule *mid-loop*, dozens of tool calls earlier, and
-by the time a commit exists the cost is already paid. `.claude/hooks/` closes that window: three
-`PreToolUse` guards on `Bash`, wired in the committed `.claude/settings.json`. Each reads the event
-on stdin and exits `0` to allow or `2` to block, with the reason on stderr going back to the agent.
+by the time a commit exists the cost is already paid. `.claude/hooks/` closes that window: four
+`PreToolUse` guards, wired in the committed `.claude/settings.json`. Each reads the event on stdin
+and exits `0` to allow or `2` to block, with the reason on stderr going back to the agent.
 
-| Guard | Refuses | Stays allowed |
-| ----- | ------- | ------------- |
-| `no-tracked-writes` | `sed -i`, a `>`/`>>` redirect or `tee` aimed at a **git-tracked** file | creating a new file; `2>&1`; anything outside the repo |
-| `no-excluded-reads` | `cat`/`head`/`grep`/… of a path `git check-ignore` matches | `.agents/plans/`; a program in the **executable position**, so `.venv/bin/ruff` still runs |
-| `no-global-installs` | `pip install`, `uv pip install --system`, `uv tool install`, `pipx`, `brew`, `npm -g` | `uv add`/`uv sync`/`uvx`/`uv tool run`; `uv pip install` without `--system` |
+| Guard | Binds | Refuses | Stays allowed |
+| ----- | ----- | ------- | ------------- |
+| `no-tracked-writes` | `Bash` | `sed -i`, a `>`/`>>` redirect or `tee` aimed at a **git-tracked** file | creating a new file; `2>&1`; anything outside the repo |
+| `no-excluded-reads` | `Bash` | `cat`/`head`/`grep`/… of a path `git check-ignore` matches | `.agents/plans/`; a program in the **executable position**, so `.venv/bin/ruff` still runs |
+| `no-global-installs` | `Bash` | `pip install`, `uv pip install --system`, `uv tool install`, `pipx`, `brew`, `npm -g` | `uv add`/`uv sync`/`uvx`/`uv tool run`; `uv pip install` without `--system` |
+| `no-unsliced-doc-reads` | `Read`, `Bash` | a whole read of `CONTEXT.md`, an ADR, a module map or a research note — by `Read`, or by `cat`/`less`/`nl`/… | `head`/`tail`/`sed -n`/`grep`, which are already the slice; `doc-slice`; a `Read` with an explicit `offset`/`limit` |
+
+The last one is the only guard that **answers** rather than just refusing: the block reason carries
+the file's own index — the `doc-slice` table of contents, with each section marked `(+N)` for the
+amendment blocks it carries, or for `CONTEXT.md` its terms and their line numbers. That matters
+because the rule it replaces lost on economics rather than on clarity: complying cost two tool calls
+and ignoring it cost one, so the wrong path was the cheap one. Answering makes them equal.
 
 Three properties are deliberate:
 
@@ -101,7 +108,10 @@ Three properties are deliberate:
   people's* agents. One in `settings.local.json` would be the tribal knowledge it replaced.
 - **Derived, not listed.** Both path guards ask `git`. Copying `.gitignore`'s globs into a hook
   would be two lists that must agree — the drift this project calls a bug — and the derived form
-  also covers whatever gets ignored next.
+  also covers whatever gets ignored next. `no-unsliced-doc-reads` is the exception, because "long
+  enough to be worth slicing" is editorial and git has no predicate for it; what stands in is a test
+  asserting every glob still matches a real file, so a renamed directory fails loudly rather than
+  disarming the guard in silence.
 - **They fail open.** A command the lexer cannot parse is allowed through. A guard that misfires on
   input it does not understand is one an agent learns to route around, which costs more than the
   call it wrongly blocked.
@@ -109,7 +119,7 @@ Three properties are deliberate:
 Same standing as the git hooks: **local convenience, not the gate.** They are Claude Code-specific,
 so a contributor using another tool — or none — gets nothing from them, and CI stays the floor for
 everyone. They are ordinary stdlib Python with no network access; read them before you trust them.
-`tests/test_claude_hooks.py` fences all three, and asserts the wiring too: a guard nothing runs is a
+`tests/test_claude_hooks.py` fences all four, and asserts the wiring too: a guard nothing runs is a
 guard that does not exist. Hook config is read when a session starts, so restart Claude Code after
 changing one.
 
