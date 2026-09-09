@@ -215,6 +215,25 @@ class TestNoExcludedReads:
     def test_another_tool_is_not_this_hooks_business(self, repo: Path) -> None:
         assert run_hook("no-excluded-reads.py", "cat .env", repo, tool="Read").returncode == ALLOW
 
+    def test_a_newline_ends_a_command_as_surely_as_a_pipe(self, repo: Path) -> None:
+        """A multi-line script is many commands, and the lexer drops newlines as ordinary
+        whitespace — so without an explicit split, line two's program reads as an argument
+        to line one's. This guard found it in its own repo on the first live call: a
+        `tail -1` ending one line swallowed the `.venv/bin/pytest` opening the next.
+        """
+        assert (
+            run_hook(
+                "no-excluded-reads.py", "echo a | tail -1\n.venv/bin/pytest -q", repo
+            ).returncode
+            == ALLOW
+        )
+
+    def test_a_read_on_a_later_line_is_still_a_read(self, repo: Path) -> None:
+        """The other half of the same fix: splitting on newlines must not lose the lines."""
+        assert (
+            run_hook("no-excluded-reads.py", "echo a\ncat logs/run.log", repo).returncode == BLOCK
+        )
+
     def test_the_hook_is_executable(self) -> None:
         assert os.access(_HOOKS / "no-excluded-reads.py", os.X_OK)
 
@@ -275,6 +294,13 @@ class TestNoGlobalInstalls:
     def test_the_reason_names_the_sanctioned_command(self, repo: Path) -> None:
         result = run_hook("no-global-installs.py", "pip install httpx", repo)
         assert "uv add" in result.stderr
+
+    def test_an_install_on_a_later_line_is_still_an_install(self, repo: Path) -> None:
+        """Same newline bug as the read guard, and worse here: this one fails *open*, so
+        a multi-line script would have carried a global install straight through."""
+        assert (
+            run_hook("no-global-installs.py", "echo a\npip install httpx", repo).returncode == BLOCK
+        )
 
     def test_the_hook_is_executable(self) -> None:
         assert os.access(_HOOKS / "no-global-installs.py", os.X_OK)

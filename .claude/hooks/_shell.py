@@ -34,25 +34,34 @@ def tokens(command: str) -> list[str]:
         return []
 
 
-def segments(toks: list[str]) -> list[list[str]]:
-    """The command split into pipeline/list segments, empties dropped.
+def segments(command: str) -> list[list[str]]:
+    """The command split into individual commands, empties dropped.
 
     `echo x | cat secret` is two segments, so `cat` is in the executable position of the
     second and `secret` is its argument. Without the split, everything after the first
-    command reads as an argument and the executable-position exemption swallows the rest
-    of the line.
+    command reads as an argument and the executable-position exemption swallows the rest.
+
+    **A newline ends a command as surely as a pipe does**, and the lexer cannot say so:
+    `whitespace_split` discards newlines like any other space. So the split happens per
+    line first, and the operators divide what is left. The guards found this the hard way
+    on their first live call — a `tail -1` ending one line swallowed the program opening
+    the next, and the read guard refused a command that read nothing.
+
+    Taking the raw string rather than a token list is what makes that possible; a caller
+    holding tokens has already lost the line breaks.
     """
     out: list[list[str]] = []
-    current: list[str] = []
-    for tok in toks:
-        if tok in _SEPARATORS:
-            if current:
-                out.append(current)
-            current = []
-        else:
-            current.append(tok)
-    if current:
-        out.append(current)
+    for line in command.splitlines():
+        current: list[str] = []
+        for tok in tokens(line):
+            if tok in _SEPARATORS:
+                if current:
+                    out.append(current)
+                current = []
+            else:
+                current.append(tok)
+        if current:
+            out.append(current)
     return out
 
 

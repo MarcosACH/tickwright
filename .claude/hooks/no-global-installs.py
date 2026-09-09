@@ -21,7 +21,7 @@ The line is *where it lands*, not which tool spelled it:
 import json
 import sys
 
-from _shell import command_name, segments, tokens
+from _shell import command_name, segments
 
 _SANCTIONED = "uv add <pkg> (or `uv sync` to install what the lockfile already names)"
 
@@ -100,9 +100,7 @@ def main() -> int:
         return 0
 
     command = event.get("tool_input", {}).get("command", "")
-    reasons = [
-        reason for segment in segments(tokens(command)) if (reason := _refusal(segment)) is not None
-    ]
+    reasons = [reason for segment in segments(command) if (reason := _refusal(segment)) is not None]
     if not reasons:
         return 0
 

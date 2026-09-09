@@ -28,7 +28,7 @@ import os
 import subprocess
 import sys
 
-from _shell import arguments, command_name, segments, tokens
+from _shell import arguments, command_name, segments
 
 # Commands whose arguments are files they pull into the context window. Narrow on
 # purpose: the guard acts only where it is sure a read is what is being asked for, so an
@@ -110,7 +110,7 @@ def main() -> int:
     cwd = event.get("cwd") or os.getcwd()
 
     candidates: list[str] = []
-    for segment in segments(tokens(command)):
+    for segment in segments(command):
         if command_name(segment) in _READERS:
             candidates.extend(arguments(segment))
 
