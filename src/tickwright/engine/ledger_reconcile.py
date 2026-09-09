@@ -194,12 +194,22 @@ class ValuationBand:
         narrower band alerts rather than stays quiet.
 
         **No cadence reaches that arm today**, and it is worth saying so here
-        rather than leaving a reader to believe a live path depends on it: the
-        three fields this cycle compares all need the very mark their notional
-        needs, so a reference this method cannot compute belongs to a figure the
-        classification already dropped (see ``_reference``). It is kept as the
-        conservative default for the fields #291 adds, which are folded per
-        symbol and need not fail together with the reference the way these do.
+        rather than leaving a reader to believe a live path depends on it: a
+        reference this method cannot compute belongs to a figure the
+        classification already dropped (see ``_reference``).
+
+        This paragraph used to expect the three fields #291 adds to break that,
+        being folded per symbol and so free to fail apart from the reference.
+        They do not, and each closes it differently. ``notional``'s reference is
+        the figure itself. A cross ``margin_used`` is ``notional / L`` and an
+        isolated one inherits from the uPnL computed off the same absent mark,
+        so both go unknown exactly when the notional does — and the one shape
+        where they come apart, an account-net flat over offsetting legs, is not
+        ``holds`` and never reaches a classifier. Account ``maintenance_margin``
+        closes it from the other end: ``_maintenance_margin`` drops the finding
+        when the cross-subset Σ is ``None``, so ``_reference`` only ever
+        recomputes a Σ already proven to exist.
+
         Unreached is not untested: ``ReconcileFindings.classify`` takes the
         reading as an argument, so ``tests/engine/test_reconcile_findings.py``
         pins the fallback on a reading built by hand.

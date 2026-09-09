@@ -181,9 +181,11 @@ def test_a_per_symbol_figure_whose_notional_is_unknown_bands_on_atol_alone() -> 
 
     Unreachable through the cadence, which is why it is here: the mark whose
     absence makes a notional unknown is the one the uPnL beside it is computed
-    from, so a real projection produces both or neither. This reading holds a
-    valuation without its notional deliberately, for the fields #291 adds, which
-    are folded per symbol and need not fail together.
+    from, so a real projection produces both or neither. It stayed unreachable
+    through #291 — every field that slice added goes unknown on the predicate
+    that makes the notional unknown, or is dropped before the band sees it
+    (``ValuationBand.covers``) — so this reading holds a valuation without its
+    notional deliberately, and is the only place the arm can be driven at all.
 
     The account grain is set to agree outright, so the pass has exactly one
     finding and nothing else can account for the alert.
