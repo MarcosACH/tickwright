@@ -59,7 +59,10 @@ python_version = "3.13"
 check_untyped_defs = true
 warn_unused_ignores = true
 warn_redundant_casts = true
-files = ["src", "tests"]
+# `.claude/hooks` is agent tooling rather than engine code, but it is Python that
+# blocks tool calls, so a type error there is a guard that fails open. `ruff` already
+# reaches it under a bare `.`; this makes `mypy .` agree.
+files = ["src", "tests", ".claude/hooks"]
 # Skill-eval fixtures are throwaway sandbox trees, not repo code, and several
 # carry the same module names on purpose (three `domain/leverage.py`). `files`
 # above already leaves them out; this makes the `mypy .` form agree instead of
