@@ -93,7 +93,7 @@ on stdin and exits `0` to allow or `2` to block, with the reason on stderr going
 | ----- | ------- | ------------- |
 | `no-tracked-writes` | `sed -i`, a redirect in any shape that names a file (`>`, `>>`, `>\|`, `&>`, `&>>`, `>& file`) or `tee` aimed at a **git-tracked** file | creating a new file; `2>&1` and `>&2`, which name a descriptor; `tee` as a grep **pattern**; a heredoc **body** that quotes a write; anything outside the repo |
 | `no-excluded-reads` | `cat`/`head`/`grep`/… of a path `git check-ignore` matches | `.agents/plans/`; a program in the **executable position**, so `.venv/bin/ruff` still runs; a grep **pattern** that merely spells an ignored path |
-| `no-global-installs` | `pip install`, `uv pip install --system`, `uv tool install`, `pipx`, `brew`, `npm -g` — and the same behind `sudo` | `uv add`/`uv sync`/`uvx`/`uv tool run`; `uv pip install` without `--system` |
+| `no-global-installs` | `pip install`, `uv pip install --system`, `uv tool install`, `pipx`, `brew`, `npm -g` — and the same behind a `sudo` or inside a loop body | `uv add`/`uv sync`/`uvx`/`uv tool run`; `uv pip install` without `--system` |
 
 Three properties are deliberate:
 
@@ -105,11 +105,13 @@ Three properties are deliberate:
 - **They fail open.** A command the lexer cannot parse is allowed through. A guard that misfires on
   input it does not understand is one an agent learns to route around, which costs more than the
   call it wrongly blocked. That licence covers a *parse*, never a token the guard read in the wrong
-  position — a wrapper (`sudo pip install`), a grep pattern, a `tee` being searched for rather than
-  run, or a heredoc body all lex perfectly, so `_shell.py` and the executable-position test resolve
-  each one rather than shrugging at it. The inverse holds too: a shape the lexer *does* produce is
-  not a shape the guard may miss, which is why the redirect set enumerates `&>` and `>|` instead of
-  the two spellings that come to mind first.
+  position — a wrapper (`sudo pip install`), a reserved word standing in front of the program
+  (`do`, `then`, `time`), a grep pattern, a `tee` being searched for rather than run, or a heredoc
+  body all lex perfectly, so `_shell.py` and the executable-position test resolve each one rather
+  than shrugging at it. The inverse holds too: a shape the lexer *does* produce is not a shape the
+  guard may miss, which is why the redirect set enumerates `&>` and `>|` instead of the two
+  spellings that come to mind first. What stays out of reach is a *value*: `sed -i '' s/a/b/ $f`
+  lexes cleanly and stands in the right position, and no lexer knows which file `$f` names.
 
 Same standing as the git hooks: **local convenience, not the gate.** They are Claude Code-specific,
 so a contributor using another tool — or none — gets nothing from them, and CI stays the floor for

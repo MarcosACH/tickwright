@@ -48,6 +48,20 @@ _WRAPPER_VALUE_FLAGS = frozenset(
     }
 )
 
+# Shell reserved words, and the two prefix commands that behave exactly like them. These
+# stand where a program stands *without being one*, so a guard keyed on the first token
+# reads `do` or `then`, matches nothing, and allows the call — the wrapper problem again,
+# reached through the grammar rather than through a program. `for f in *.py; do sed -i …`
+# is how one edit gets made across several files, which is the case the write guard is for.
+#
+# `if`, `while` and `until` are followed by a command directly, so peeling them is right.
+# `for`, `case` and `select` are followed by a *name*, and peeling one would offer a loop
+# variable as the program; they are deliberately absent. So are the closers (`done`, `fi`,
+# `}`), which nothing runs behind.
+_KEYWORDS = frozenset(
+    {"!", "{", "do", "then", "elif", "else", "if", "while", "until", "time", "nohup", "exec"}
+)
+
 
 def tokens(command: str) -> list[str]:
     """Split a shell command, keeping operators as tokens of their own.
@@ -170,22 +184,24 @@ def _is_assignment(token: str) -> bool:
 
 
 def unwrap(segment: list[str]) -> list[str]:
-    """The segment from its real program onward, wrappers and assignments peeled away.
+    """The segment from its real program onward — wrappers, keywords and assignments gone.
 
-    `sudo -u root env FOO=1 pip install httpx` is a `pip install`. Every guard here
-    decides on the program, so each one has to see past whatever is standing in front of
-    it — and the wrapper case is not the deliberate fail-open, since the lexer parses it
-    perfectly and the guard simply reads the wrong token.
+    `sudo -u root env FOO=1 pip install httpx` is a `pip install`, and so is the
+    `do pip install httpx` of a loop body. Every guard here decides on the program, so
+    each one has to see past whatever is standing in front of it — and neither case is
+    the deliberate fail-open, since the lexer parses both perfectly and the guard simply
+    reads the wrong token.
 
-    A segment that is only a wrapper (`sudo -v`) unwraps to nothing, and a guard reading
-    an empty segment matches no rule, which is the right answer for it.
+    A segment that is only a wrapper or a keyword (`sudo -v`, `done`) unwraps to nothing
+    or to a word no rule names, which is the right answer for it.
     """
     rest = list(segment)
     while rest:
         if _is_assignment(rest[0]):
             rest = rest[1:]
             continue
-        if rest[0].rsplit("/", 1)[-1] not in _WRAPPERS:
+        head = rest[0].rsplit("/", 1)[-1]
+        if head not in _WRAPPERS and head not in _KEYWORDS:
             break
         rest = rest[1:]
         while rest and (_is_assignment(rest[0]) or rest[0].startswith("-")):
@@ -195,10 +211,11 @@ def unwrap(segment: list[str]) -> list[str]:
 
 
 def command_name(segment: list[str]) -> str:
-    """The program a segment runs, bare of its path, its assignments and its wrappers.
+    """The program a segment runs, bare of its path, assignments, wrappers and keywords.
 
-    `FOO=bar sudo /usr/bin/cat x` runs `cat`. A guard keyed on the raw first token would
-    miss every assignment prefix and every wrapper; `unwrap` is where both are peeled.
+    `FOO=bar sudo /usr/bin/cat x` runs `cat`, and so does the `do cat x` of a loop body.
+    A guard keyed on the raw first token would miss every assignment prefix, every
+    wrapper and every reserved word; `unwrap` is where all three are peeled.
     """
     unwrapped = unwrap(segment)
     return unwrapped[0].rsplit("/", 1)[-1] if unwrapped else ""

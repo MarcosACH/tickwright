@@ -110,6 +110,13 @@ class TestNoTrackedWrites:
             # not whether the harness's copy of it goes stale.
             "sudo sed -i '' 's/x/y/' src/tracked.py",
             "echo 'x = 2' | sudo tee src/tracked.py",
+            # A reserved word stands where a program does and, unlike a wrapper, is not a
+            # program at all — so a guard keyed on the first token reads `do` and allows
+            # the write. The loop is the form an agent reaches for to make one edit across
+            # several files, which is the case this guard exists for.
+            "for f in a b; do sed -i '' 's/x/y/' src/tracked.py; done",
+            "echo 'x = 2' | while read l; do tee src/tracked.py; done",
+            "time sed -i '' 's/x/y/' src/tracked.py",
             # `punctuation_chars` groups a run of punctuation into one token, so these
             # arrive whole and equal neither `>` nor `>>`. They truncate the file all the
             # same: `&>` is bash's both-streams form and `>|` overrides noclobber.
@@ -167,6 +174,10 @@ class TestNoTrackedWrites:
             # unbalanced quote, so the lexer already refuses them and the guard fails open
             # for the wrong reason.
             'git commit -m "fix: the write guard\n\necho x > src/tracked.py\n\nis allowed now"',
+            # Peeling the reserved word exposes the program behind it and nothing else:
+            # the loop *list* names a tracked file, and iterating over a file is not
+            # writing to it.
+            "for f in src/tracked.py; do echo $f; done",
         ],
     )
     def test_a_write_that_stales_nothing_is_allowed(self, repo: Path, command: str) -> None:
@@ -218,6 +229,12 @@ class TestNoExcludedReads:
             "sudo cat .env",
             # The pattern came from `-e`, so every non-flag argument left is a path.
             "grep -e 'noise' logs/run.log",
+            # A reserved word is where a program stands without being one. `do`, `then`
+            # and `time` each leave the reader one token further along, and a guard that
+            # reads only the first token of the segment finds a word it has no rule for.
+            "while read l; do cat logs/run.log; done",
+            "if grep -q 'noise' logs/run.log; then echo hit; fi",
+            "time cat .env",
         ],
     )
     def test_a_read_of_an_excluded_path_is_refused(self, repo: Path, command: str) -> None:
@@ -252,6 +269,10 @@ class TestNoExcludedReads:
             ".venv/bin/pytest -q",
             # A reader with no path at all.
             "cat",
+            # The reserved-word peel exposes the reader; it does not widen what counts as
+            # one. Both of these read tracked source from inside a construct.
+            "while read l; do cat src/tracked.py; done",
+            "if grep -q 'x' src/tracked.py; then echo hit; fi",
         ],
     )
     def test_a_read_that_costs_no_context_is_allowed(self, repo: Path, command: str) -> None:
@@ -327,6 +348,12 @@ class TestNoGlobalInstalls:
             "sudo npm install -g typescript",
             "sudo brew install jq",
             "env PIP_NO_INPUT=1 pip install httpx",
+            # And a reserved word is not the program either — the loop and the conditional
+            # put the install one token past where a first-token read looks, and this
+            # guard is the one whose miss survives the branch, the PR and the revert.
+            "if true; then pip install httpx; fi",
+            "for p in httpx; do sudo pip install $p; done",
+            "nohup pip install httpx",
         ],
     )
     def test_an_install_outside_the_project_venv_is_refused(self, repo: Path, command: str) -> None:
@@ -360,6 +387,8 @@ class TestNoGlobalInstalls:
             # A newline inside a quoted argument does not end a command, so writing
             # *about* an install is not performing one.
             'git commit -m "docs: the guard\n\npip install httpx\n\nis what it refuses"',
+            # The sanctioned command stays sanctioned inside a construct.
+            "for p in httpx; do uv add $p; done",
         ],
     )
     def test_an_install_into_the_project_is_allowed(self, repo: Path, command: str) -> None:
