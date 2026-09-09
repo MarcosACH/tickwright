@@ -191,6 +191,11 @@ class TestNoExcludedReads:
             # The plan file is ignored on purpose and reading it is the whole point of
             # the convention, so the one exception the guard carries.
             "cat .agents/plans/issue-1.md",
+            # The directory is the exemption too — "which plan mentions this behavior"
+            # is asked by sweeping it, and `normpath` strips the separator a prefix
+            # match on `.agents/plans/` needs.
+            "grep -rn 'behavior' .agents/plans",
+            "grep -rn 'behavior' .agents/plans/",
             # Repo source is the normal case and must stay cheap.
             "cat src/tracked.py",
             "grep -rn 'x' src/",

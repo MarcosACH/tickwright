@@ -56,8 +56,10 @@ _READERS = frozenset(
 )
 
 # Ignored and meant to be read. Matched on the repo-relative path, so a directory of the
-# same name elsewhere on the filesystem is not covered by it.
-_READABLE_IGNORED = (".agents/plans/",)
+# same name elsewhere on the filesystem is not covered by it. Named without a trailing
+# separator because `_readable` adds one for the sub-path test and compares the bare form
+# for the directory itself — the sibling `.agents/plans-old` must not inherit the pass.
+_READABLE_IGNORED = (".agents/plans",)
 
 
 def _repo_root(cwd: str) -> str | None:
@@ -76,6 +78,18 @@ def _repo_relative(root: str, cwd: str, path: str) -> str | None:
     return os.path.relpath(absolute, root)
 
 
+def _readable(relative: str) -> bool:
+    """Whether an ignored path is one of the trees ignored *in order* to be read.
+
+    The directory counts, not only what is under it: sweeping the plans with `grep -rn`
+    is how "which plan mentions this behavior" gets asked, and `_repo_relative` runs
+    through `normpath`, which drops the trailing separator whether or not it was typed.
+    """
+    return any(
+        relative == entry or relative.startswith(entry + os.sep) for entry in _READABLE_IGNORED
+    )
+
+
 def _excluded(cwd: str, candidates: list[str]) -> list[str]:
     """The candidates git ignores, minus the ones ignored in order to be read."""
     root = _repo_root(cwd)
@@ -85,7 +99,7 @@ def _excluded(cwd: str, candidates: list[str]) -> list[str]:
     found: list[str] = []
     for cand in candidates:
         relative = _repo_relative(root, cwd, cand)
-        if relative is None or relative.startswith(_READABLE_IGNORED):
+        if relative is None or _readable(relative):
             continue
         ignored = subprocess.run(
             ["git", "check-ignore", "-q", "--", cand],
