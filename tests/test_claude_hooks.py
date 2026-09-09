@@ -350,6 +350,14 @@ class TestNoExcludedReads:
             "while read l; do cat logs/run.log; done",
             "if grep -q 'noise' logs/run.log; then echo hit; fi",
             "time cat .env",
+            # A grep pattern spelled like a redirect. `shlex` strips the quotes, so `'>'`
+            # arrives as the operator token itself and is indistinguishable from one —
+            # which is why the pattern is taken out of the way *before* the redirect scan
+            # runs, rather than after. Filtered first, the log behind it reads as a write
+            # target and the guard opens a hole in the commonest reader it covers.
+            "grep '>' logs/run.log",
+            "grep '>>' logs/run.log",
+            "grep -e '2>' logs/run.log",
         ],
     )
     def test_a_read_of_an_excluded_path_is_refused(self, repo: Path, command: str) -> None:

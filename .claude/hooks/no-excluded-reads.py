@@ -113,6 +113,16 @@ def _read_candidates(segment: list[str]) -> list[str]:
       refusing `cat src/x.py > logs/out.log` answers a command that was already reporting
       with "derive it with a command that reports". `without_write_redirects` keeps the
       operand of a `< file`, which does name something being read.
+
+    **The pattern comes off first, and the redirects second.** `shlex` strips quotes, so
+    the `'>'` of `grep '>' logs/run.log` reaches this function as the operator token and
+    nothing in the token list tells the two apart. Scanning for redirects first therefore
+    reads the log as a write target and drops it, opening a hole in the commonest reader
+    this guard covers. Taking the pattern out of the way first is what makes the ambiguity
+    unreachable: only tokens that are already known to be paths are offered to the scan.
+
+    Flags are gone by then, and that costs nothing — a flag never stands between a
+    redirect and its target, so the adjacency the scan reads is intact.
     """
     name = command_name(segment)
     if name not in _READERS:
@@ -126,7 +136,7 @@ def _read_candidates(segment: list[str]) -> list[str]:
     paths: list[str] = []
     pattern_from_flag = False
     skip_value = False
-    for tok in unwrap(without_write_redirects(segment))[1:]:
+    for tok in unwrap(segment)[1:]:
         if skip_value:
             skip_value = False
             continue
@@ -140,8 +150,8 @@ def _read_candidates(segment: list[str]) -> list[str]:
         paths.append(tok)
 
     if searching and not pattern_from_flag and paths:
-        return paths[1:]
-    return paths
+        paths = paths[1:]
+    return without_write_redirects(paths)
 
 
 def _excluded(cwd: str, candidates: list[str]) -> list[str]:

@@ -220,10 +220,14 @@ def _dump_candidates(command: str) -> list[str]:
     a write with "read it by section instead" — an instruction that does not apply, about
     a file `no-tracked-writes` has something true to say about instead.
 
+    It runs **before** `unwrap` here, unlike in `no-excluded-reads`, and the difference is
+    `_DUMPERS` rather than taste: nothing in it takes a *pattern*, so there is no quoted
+    `'>'` to be mistaken for an operator and no reason to defer the scan. Going first buys
+    the leading-redirect form (`> out.log cat notes.md`), which a scan run after `unwrap`
+    has already lost the operator of.
+
     Over-collects the rest: a value riding a flag (`nl -w 5 notes.md`) lands here beside
-    the file. Nothing in `_DUMPERS` takes a *pattern* the way the grep family does, which
-    is the one over-collection that would cost something, so a token naming no corpus
-    file simply fails `_refusal_for` and changes no outcome.
+    the file, which costs one `isfile` and changes no outcome.
     """
     return [
         token

@@ -222,6 +222,13 @@ def without_write_redirects(segment: list[str]) -> list[str]:
 
     What a redirect never does is end the command, so the tokens after one are still the
     program's own: `cat > out.log src/x.py` reads `src/x.py`.
+
+    **The one ambiguity is a quoted operator.** `shlex` strips quotes, so the `'>'` of
+    `grep '>' logs/run.log` arrives here as the operator token and nothing in the list
+    distinguishes them. That is not a parse this can fail open on — both readings lex
+    perfectly — so the callers order around it instead: `no-excluded-reads` takes the grep
+    pattern out of the way before calling this, and `no-unsliced-doc-reads` has no
+    pattern-taking program in its list to protect.
     """
     out: list[str] = []
     i = 0
