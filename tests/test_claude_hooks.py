@@ -537,6 +537,69 @@ class TestNoUnslicedDocReads:
         )
         assert result.returncode == ALLOW
 
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "cat docs/adr/0001-a-decision.md",
+            "bat CONTEXT.md",
+            "less docs/module-maps/surface.md",
+            "more docs/research/note.md",
+            "nl docs/adr/0001-a-decision.md",
+            "strings docs/adr/0001-a-decision.md",
+            "cat docs/adr/0001-a-decision.md | head -40",
+        ],
+    )
+    def test_a_shell_dump_of_a_corpus_file_is_refused(self, docs_repo: Path, command: str) -> None:
+        """A guard bound to ``Read`` alone proves nothing: ``cat`` loads the identical
+        bytes through Bash, and the eval case this guard replaces graded both doors for
+        exactly that reason. The last one is the shape that makes it obvious — piping a
+        whole file into ``head`` still spends the whole file first."""
+        result = run_hook("no-unsliced-doc-reads.py", command, docs_repo)
+        assert result.returncode == BLOCK
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            # Already the slice the rule asks for. Bounding a read is compliance, not evasion.
+            "head -40 docs/adr/0001-a-decision.md",
+            "tail -20 CONTEXT.md",
+            "sed -n '1,40p' docs/adr/0001-a-decision.md",
+            "grep -n 'leverage' docs/adr/0001-a-decision.md",
+            "rg 'leverage' docs/module-maps/surface.md",
+            "wc -l docs/adr/0001-a-decision.md",
+            # The sanctioned path itself.
+            ".agents/tools/doc-slice docs/adr/0001-a-decision.md Decision",
+            ".agents/tools/doc-slice --amendments docs/adr/0001-a-decision.md",
+            # Outside the corpus.
+            "cat README.md",
+            "cat docs/agents/guide.md",
+            # Not a read of it at all.
+            "git log --oneline -- docs/adr/0001-a-decision.md",
+            "ls docs/adr/",
+        ],
+    )
+    def test_a_bounded_read_of_a_corpus_file_is_allowed(
+        self, docs_repo: Path, command: str
+    ) -> None:
+        result = run_hook("no-unsliced-doc-reads.py", command, docs_repo)
+        assert result.returncode == ALLOW
+
+    def test_a_dump_on_a_later_line_is_still_a_dump(self, docs_repo: Path) -> None:
+        """The regression the first three guards found on their own first live call: the
+        lexer drops newlines like any other space, so without a per-line split a dumper
+        opening line two reads as an argument to whatever ended line one."""
+        result = run_hook(
+            "no-unsliced-doc-reads.py",
+            "git status --porcelain\ncat docs/adr/0001-a-decision.md",
+            docs_repo,
+        )
+        assert result.returncode == BLOCK
+
+    def test_a_refused_dump_gets_the_same_index_a_refused_read_does(self, docs_repo: Path) -> None:
+        result = run_hook("no-unsliced-doc-reads.py", "cat docs/adr/0001-a-decision.md", docs_repo)
+        assert "Consequences" in result.stderr
+        assert "(+1)" in result.stderr
+
     def test_the_hook_is_executable(self) -> None:
         assert os.access(_HOOKS / "no-unsliced-doc-reads.py", os.X_OK)
 

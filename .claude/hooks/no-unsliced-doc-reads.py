@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PreToolUse:Read — refuse a whole read of the long-form corpus.
+"""PreToolUse:Read|Bash — refuse a whole read of the long-form corpus.
 
 This repo carries ~140k words across 50 ADRs, `CONTEXT.md`, the module maps and the
 research notes. Reading one whole is most of a planning budget, so `CLAUDE.md` asks for
@@ -11,11 +11,21 @@ Nothing goes red when it is ignored, either. The window is simply gone — and o
 something worse has happened, because `docs/adr/` is append-corrected and document order
 hands back the *superseded* decision as if it were current.
 
+**Both doors, because one of them proves nothing.** A guard bound to `Read` alone is
+evaded by `cat`, which loads the identical bytes through Bash — the evasion the eval case
+this guard replaced graded explicitly, and the door bypass-permissions mode actively
+pushes an agent toward. So the Bash arm refuses the whole-file *dumpers* and leaves the
+bounded readers alone.
+
 The escape is deliberate. A `Read` carrying an explicit `offset`/`limit` is allowed
 through, including one wide enough to span the file. The rule being enforced is that a
 whole read is an act someone chose, not the default shape of the call; a guard with no
 deliberate escape is one an agent routes around, which costs more than the call it
 wrongly blocked.
+
+A refusal is never bare: it carries the file's own index — an annotated table of contents,
+or for the glossary its terms and their line numbers. Complying then costs one turn rather
+than two, which was the asymmetry that made the prose version of this rule lose.
 """
 
 import fnmatch
@@ -24,6 +34,8 @@ import os
 import re
 import subprocess
 import sys
+
+from _shell import arguments, command_name, segments
 
 # The four families `CLAUDE.md` already names. Unlike the two path guards, this list is
 # not derived from git: "long enough to be worth slicing" is an editorial judgement and
@@ -49,6 +61,16 @@ _DOC_SLICE = ".agents/tools/doc-slice"
 # bold-prefixed lines would index its emphasis instead.
 _TERM_INDEXED = ("CONTEXT.md",)
 _TERM = re.compile(r"^\*\*([^*]+)\*\*:")
+
+# Programs that load a file **whole**. Deliberately narrower than
+# `no-excluded-reads._READERS`, and a separate list rather than a shared one: that guard
+# asks "is this a read at all", over paths nothing may read; this one asks "is this an
+# *unbounded* read", over paths that are read constantly and correctly. Merging them
+# would make `grep` unusable on an ADR, which is the opposite of the point.
+#
+# `head`, `tail`, `sed -n`, `grep`, `rg` and `wc` are absent on purpose: they are already
+# the bounded read the rule asks for, so bounding one is compliance rather than evasion.
+_DUMPERS = frozenset({"cat", "bat", "less", "more", "nl", "od", "xxd", "strings"})
 
 
 def _in_corpus(relative: str) -> bool:
@@ -155,22 +177,64 @@ def _refusal(path: str, toc: str, corrected: bool) -> str:
     )
 
 
+def _refusal_for(root: str, cwd: str, path: str) -> str | None:
+    """The reason `path` may not be loaded whole, or None if it may be."""
+    absolute = os.path.normpath(os.path.join(cwd, os.path.expanduser(path)))
+    if not absolute.startswith(root + os.sep) or not os.path.isfile(absolute):
+        return None
+
+    relative = os.path.relpath(absolute, root)
+    if not _in_corpus(relative):
+        return None
+
+    if relative in _TERM_INDEXED:
+        index = _term_index(absolute)
+        return None if index is None else _glossary_refusal(relative, index)
+
+    tool = os.path.join(root, _DOC_SLICE)
+    if not os.access(tool, os.X_OK):
+        return None
+
+    toc = _annotated_toc(tool, absolute)
+    return None if toc is None else _refusal(relative, toc, corrected="(+" in toc)
+
+
+def _read_candidate(tool_input: dict[str, object]) -> str | None:
+    """The path a `Read` would load whole, or None when it would not load one."""
+    # The escape, checked before anything expensive.
+    if tool_input.get("offset") is not None or tool_input.get("limit") is not None:
+        return None
+    path = tool_input.get("file_path")
+    return path if isinstance(path, str) and path else None
+
+
+def _dump_candidates(command: str) -> list[str]:
+    """The paths a shell command would load whole."""
+    return [
+        argument
+        for segment in segments(command)
+        if command_name(segment) in _DUMPERS
+        for argument in arguments(segment)
+    ]
+
+
 def main() -> int:
     try:
         event = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError):
         return 0  # An event this guard cannot read is not one it may block on.
 
-    if event.get("tool_name") != "Read":
-        return 0
-
     tool_input = event.get("tool_input", {})
-    file_path = tool_input.get("file_path")
-    if not isinstance(file_path, str) or not file_path:
+    tool_name = event.get("tool_name")
+    if tool_name == "Read":
+        candidate = _read_candidate(tool_input)
+        candidates = [candidate] if candidate else []
+    elif tool_name == "Bash":
+        candidates = _dump_candidates(tool_input.get("command", ""))
+    else:
         return 0
 
-    # The escape, checked before anything expensive.
-    if tool_input.get("offset") is not None or tool_input.get("limit") is not None:
+    if not candidates:
         return 0
 
     cwd = event.get("cwd") or os.getcwd()
@@ -178,30 +242,13 @@ def main() -> int:
     if root is None:
         return 0
 
-    absolute = os.path.normpath(os.path.join(cwd, os.path.expanduser(file_path)))
-    if not absolute.startswith(root + os.sep) or not os.path.isfile(absolute):
+    reasons = [
+        reason for path in candidates if (reason := _refusal_for(root, cwd, path)) is not None
+    ]
+    if not reasons:
         return 0
 
-    relative = os.path.relpath(absolute, root)
-    if not _in_corpus(relative):
-        return 0
-
-    if relative in _TERM_INDEXED:
-        index = _term_index(absolute)
-        if index is None:
-            return 0
-        print(_glossary_refusal(relative, index), file=sys.stderr)
-        return 2
-
-    tool = os.path.join(root, _DOC_SLICE)
-    if not os.access(tool, os.X_OK):
-        return 0
-
-    toc = _annotated_toc(tool, absolute)
-    if toc is None:
-        return 0
-
-    print(_refusal(relative, toc, corrected="(+" in toc), file=sys.stderr)
+    print("\n\n".join(reasons), file=sys.stderr)
     return 2
 
 
