@@ -38,6 +38,7 @@ one place a double is allowed.
 """
 
 from collections.abc import Iterable, Mapping
+from dataclasses import replace
 from decimal import Decimal
 
 from ledgers import GENESIS
@@ -54,6 +55,84 @@ from tickwright.domain import (
     VenuePositionState,
     VenueReadFailure,
 )
+
+_ZERO = Decimal("0")
+
+RECORDED_ENTRY_PRICE = Decimal("64809.0")
+"""The recorded snapshot's own entry price, and the default every derived leg
+is priced from — named because a roster the case chose the sizes of has to be
+able to say it entered somewhere else."""
+
+
+def implied_notional(signed_size: Decimal, entry_price: Decimal, unrealized: Decimal) -> Decimal:
+    """The ``positionValue`` a venue holding this position would publish.
+
+    ``|szi| × mark``, with the mark the position's own numbers imply: a long
+    entered at ``entry`` and carrying ``uPnL`` is marked at ``entry + uPnL/szi``,
+    so the exposure is ``|szi| × entry`` plus the open PnL — less it on a short,
+    where the same profit means a mark that has fallen.
+
+    The recorded constant it replaces is the arithmetic of the snapshot it came
+    from and of nothing a suite builds beside it: 129.584 is 0.002 BTC at 64809
+    carrying −0.034, which every case that marks its book differently then
+    contradicts. Inert until #291 compared the field; compared, it is a
+    ``NOTIONAL`` divergence in every case that says nothing about exposure —
+    ``implied_free_margin``'s lesson on the field the band is scaled by.
+
+    No ``declared`` escape hatch beside that one's, and the asymmetry is the
+    point: a free margin the venue disagrees on is a snapshot it could have
+    returned, while a ``positionValue`` that contradicts the size, entry and
+    uPnL published beside it is not. A case that wants an exposure disagreement
+    moves the leg's ``entry_price`` or its uPnL and gets one that adds up.
+    """
+    exposure = abs(signed_size) * entry_price
+    return exposure + unrealized if signed_size > 0 else exposure - unrealized
+
+
+def margined(position: VenuePositionState) -> VenuePositionState:
+    """``position`` with the ``marginUsed`` a venue holding it would publish.
+
+    Each mode's own identity, read off the row's own fields (ADR-0040 §3): a
+    cross position posts ``positionValue / L`` out of the account pool, and an
+    isolated one posts the bucket it locked, marked to market — its ``collateral
+    + uPnL``. The two differ at every mark but the entry, so a fixture answering
+    one of them for both is a snapshot no venue returns.
+
+    Applied by every constructor and every mutator that moves one of those
+    inputs, rather than once at construction, because a leverage or a bucket set
+    afterwards changes the figure: ``margin_used`` is the third field of this
+    family (after ``free_margin`` and ``notional``) whose recorded constant went
+    stale the moment ADR-0040 §6 compared it, and it is the first that a *later*
+    replacement can invalidate.
+
+    **A row that answers the two mode questions differently is refused rather
+    than priced**, and the refusal is what makes the rest of this trustworthy.
+    ``VenuePositionState`` carries the mode twice — ``isolated_collateral`` is
+    ``None`` *exactly* when the position is cross and backed by the account
+    pool, while ``leverage`` is the venue's stored setting — so either half
+    alone picks the rule, and a row where they disagree has two answers and no
+    reason to prefer one. Read off the leverage with the bucket defaulted to
+    ``0``, as this used to be, the isolated arm publishes the bare unrealized
+    PnL wearing the bucket's name: a **negative** ``marginUsed`` on any losing
+    position, which is not a number a venue returns. Inventing the missing
+    bucket cost nothing to write, so every constructor below had to be *trusted*
+    to keep the pair in step; refused, an incoherent row cannot reach a
+    comparison at all.
+    """
+    bucket = position.isolated_collateral
+    if position.leverage.mode == "cross":
+        if bucket is not None:
+            raise ValueError(
+                f"{position.symbol}: a cross row is backed by the account pool and posts no "
+                f"bucket of its own, got isolated_collateral={bucket}"
+            )
+        return replace(position, margin_used=position.notional / position.leverage.leverage)
+    if bucket is None:
+        raise ValueError(
+            f"{position.symbol}: an isolated row has to declare the bucket its margin is "
+            "computed from, got isolated_collateral=None, which is how a venue says cross"
+        )
+    return replace(position, margin_used=bucket + position.unrealized_pnl)
 
 
 def implied_free_margin(equity: str, unrealized: Iterable[str], *, declared: str | None) -> Decimal:
@@ -85,8 +164,54 @@ def implied_free_margin(equity: str, unrealized: Iterable[str], *, declared: str
     return Decimal(equity) - sum((Decimal(pnl) for pnl in unrealized), Decimal("0"))
 
 
+UNPOSTED_BUCKET = Decimal("0")
+"""The isolated bucket this fixture's rows declare, and the one figure here that
+is the **ledger's** shape rather than a venue's.
+
+A real venue's isolated position always locks a positive bucket, so a venue
+returning this row is not what it models. What it models is the pre-ingest state
+the cadence actually compares against: live never computes the bucket
+(``_lock_isolated_collateral`` declines on the declared-versus-ingested
+predicate), the reading is taken *before* the pass ingests it, and our own
+``Position.isolated_collateral`` opens at the ``0`` the dataclass gives it. So a
+ledger holding one of these symbols computes ``0 + uPnL``, and the row that
+agrees with it is this one.
+
+Declared rather than left at ``None``, which is what it used to be, and the
+difference is the point: ``None`` is how ``VenuePositionState`` says **cross**,
+so the row claimed a cross bucket beside an isolated ``leverage`` and ``margined``
+resolved the contradiction by inventing the zero. Written down, the same numbers
+come out of a row whose two mode signals agree, and ``margined`` can refuse the
+ones that do not.
+
+A case whose subject *is* the bucket posts a real one with ``_isolated`` and gets
+the ``MARGIN_USED`` divergence a first cycle of a life genuinely reports."""
+
+
+CROSSLESS_MAINTENANCE = Decimal("0")
+"""``crossMaintenanceMarginUsed`` on a book holding no cross position.
+
+The venue's field is **cross-scoped** and an isolated leg contributes nothing to
+it (ADR-0046 §2.1, measured: an account of one isolated position publishes
+``0.0``), and both fixtures below build their rows at the ledger's default
+isolated 1x — so this, and not the recorded snapshot's figure, is what a venue
+holding them returns.
+
+The recorded ``1.6198`` it replaces is the *cross 5x* account it was measured
+from, and it is the fourth constant of this family to go stale the moment its
+field was compared, after ``free_margin``, ``notional`` and ``margin_used``.
+Unlike those three there is nothing here to derive it from: maintenance is
+``notional × margin_maint`` and the rate lives on an ``InstrumentSpec`` no venue
+snapshot carries. So a case running a **cross** book declares the figure its own
+account would publish — which ``_levered`` cannot do for it, for the same
+reason."""
+
+
 def account_state(
-    equity: str, *unrealized: str, free_margin: str | None = None
+    equity: str,
+    *unrealized: str,
+    free_margin: str | None = None,
+    maintenance: str | None = None,
 ) -> VenueAccountState:
     """A successful venue account read holding one position per ``unrealized``.
 
@@ -99,32 +224,50 @@ def account_state(
     rest are a real venue's own numbers, so what a suite hands the seam is a
     shape the venue could have returned rather than one invented to fit.
 
-    ``free_margin`` is derived from ``equity`` and the legs rather than kept at
-    the recorded constant, on the premise ``implied_free_margin`` states and a
-    case that wants some other figure overrides.
+    ``free_margin`` and each leg's ``notional`` are derived from ``equity`` and
+    the legs rather than kept at their recorded constants, on the premises
+    ``implied_free_margin`` and ``implied_notional`` state; the first takes a
+    case's own figure where it wants the disagreement, the second is the
+    snapshot's own arithmetic and takes nothing.
+
+    ``maintenance`` is the third that had to move off its recorded constant, on
+    ``CROSSLESS_MAINTENANCE``'s premise: this fixture's rows are isolated, and
+    the venue's field counts only cross ones.
+
+    Those rows are isolated in **both** places that say so — an
+    ``UNPOSTED_BUCKET`` beside the isolated ``leverage`` — so ``margined`` prices
+    them off a bucket the row declares rather than one it invents.
     """
     return VenueAccountState(
         equity=Decimal(equity),
         free_margin=implied_free_margin(equity, unrealized, declared=free_margin),
-        cross_maintenance_margin=Decimal("1.6198"),
+        cross_maintenance_margin=(
+            CROSSLESS_MAINTENANCE if maintenance is None else Decimal(maintenance)
+        ),
         positions=tuple(
-            VenuePositionState(
-                symbol="BTC",
-                signed_size=Decimal("0.002"),
-                entry_price=Decimal("64809.0"),
-                notional=Decimal("129.584"),
-                unrealized_pnl=Decimal(pnl),
-                margin_used=Decimal("25.9168"),
-                isolated_collateral=None,
-                liquidation_price=None,
-                # The **ledger's** default pair rather than the recorded body's
-                # ``cross 5``, on the same premise ``implied_free_margin``
-                # states: this fixture's account is one a suite builds at
-                # isolated 1x, and a venue setting that disagreed with it would
-                # put a standing ``LEVERAGE_DIVERGENCE`` under every case here
-                # that says nothing about leverage (ADR-0044 §10). A case about
-                # drift overrides it.
-                leverage=DEFAULT_LEVERAGE,
+            margined(
+                VenuePositionState(
+                    symbol="BTC",
+                    signed_size=Decimal("0.002"),
+                    entry_price=RECORDED_ENTRY_PRICE,
+                    notional=implied_notional(Decimal("0.002"), RECORDED_ENTRY_PRICE, Decimal(pnl)),
+                    unrealized_pnl=Decimal(pnl),
+                    # Overwritten by ``margined`` — the recorded 25.9168 is
+                    # ``positionValue / 5`` on the snapshot's own cross book,
+                    # which is not the book a suite builds beside it.
+                    margin_used=_ZERO,
+                    isolated_collateral=UNPOSTED_BUCKET,
+                    liquidation_price=None,
+                    # The **ledger's** default pair rather than the recorded
+                    # body's ``cross 5``, on the same premise
+                    # ``implied_free_margin`` states: this fixture's account is
+                    # one a suite builds at isolated 1x, and a venue setting
+                    # that disagreed with it would put a standing
+                    # ``LEVERAGE_DIVERGENCE`` under every case here that says
+                    # nothing about leverage (ADR-0044 §10). A case about drift
+                    # overrides it.
+                    leverage=DEFAULT_LEVERAGE,
+                )
             )
             for pnl in unrealized
         ),

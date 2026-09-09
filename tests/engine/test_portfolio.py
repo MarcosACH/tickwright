@@ -22,6 +22,7 @@ from tickwright.domain import (
     Account,
     AccountSpec,
     FundingAccrual,
+    InstrumentSpec,
     InvariantViolation,
     LeverageBook,
     LeverageSpec,
@@ -109,6 +110,7 @@ def _projection(
     *,
     store: Store | None = None,
     leverage: LeverageBook = EMPTY_LEVERAGE_BOOK,
+    specs: Mapping[str, InstrumentSpec] | None = None,
 ) -> PortfolioProjection:
     """A ledger on a paper-shaped account, unless ``genesis`` is ``None`` — which
     is the *live* shape, where the opening value is ingested from the venue
@@ -116,7 +118,11 @@ def _projection(
 
     ``leverage`` is the resolved book the composition root injects; the default
     empty one takes ADR-0040 §5's safest pair for every symbol, which is what a
-    case with no margin opinion of its own wants."""
+    case with no margin opinion of its own wants.
+
+    ``specs`` is the venue universe the same root hands over, and a case with no
+    opinion passes none: absent, every maintenance rate is unknown rather than
+    zero, which is the answer a specless projection owes (ADR-0041 §6)."""
     spec = AccountSpec(
         # Two segments on paper against live's three (ADR-0038/0042 §5), so a
         # row written by one shape is never confusable with the other's.
@@ -128,6 +134,7 @@ def _projection(
         store=store if store is not None else SQLiteStore(":memory:"),
         clock=ManualClock(7),
         leverage=leverage,
+        specs=specs,
     )
 
 
@@ -366,6 +373,94 @@ def test_the_reconcile_cycles_ledger_side_comes_off_one_read() -> None:
     assert reading.mark_observed == {"BTC": 9_000}
     assert reading.account.cash == Decimal("100000")
     assert reading.account.equity is None
+
+
+def test_the_one_read_carries_both_margin_folds_at_the_grain_the_venue_publishes() -> None:
+    """``margin_used`` and ``maintenance_margin`` reach the cadence per **symbol**.
+
+    The two figures ADR-0040 §6 compares one symbol at a time, and neither is
+    readable off the ``AccountView`` beside them: that carries only the Σ, which
+    has already added the symbols together and cannot be taken apart again
+    (ADR-0041 §4/§8). They join the reading rather than the class's surface for
+    the reason the folds already there did — one read per side per pass.
+
+    Each mode's number is worked by hand from its own rule, so a fold that
+    answered one and fabricated the other would not pass:
+
+    - BTC is **cross** at 5×. Alpha is long 2 and beta long 3, so the account
+      nets +5 against a mark of 110: notional 550, and cross posts ``550 / 5 =
+      110`` out of the account pool, never touching its backing.
+    - ETH is **isolated** at 2×. Beta's open locked ``1 × 3000 / 2 = 1500`` into
+      the bucket, the mark has since moved to 3300, and the venue's own identity
+      is ``collateral + uPnL = 1500 + 300 = 1800`` — a different number from
+      ``notional / leverage`` (1650) at every mark but the entry, which is what
+      makes the mode split visible here at all.
+
+    Maintenance takes the instrument universe where margin takes the leverage
+    book: BTC's rate is 0.0125 on 550 → 6.875, ETH's 0.02 on 3300 → 66. SOL is
+    marked and held and has **no spec**, so its maintenance is ``None`` while its
+    margin is a real 210 / 3 = 70 — the specless answer is unknown, never the
+    zero a fabricated default rate would compute (ADR-0041 §6).
+    """
+    projection = _projection(
+        leverage=LeverageBook(
+            entries={
+                "BTC": LeverageSpec(mode="cross", leverage=5),
+                "ETH": LeverageSpec(mode="isolated", leverage=2),
+                "SOL": LeverageSpec(mode="cross", leverage=3),
+            }
+        ),
+        specs={
+            "BTC": InstrumentSpec(
+                symbol="BTC",
+                sz_decimals=3,
+                max_decimals=6,
+                min_notional=Decimal("0"),
+                max_leverage=50,
+                margin_maint=Decimal("0.0125"),
+            ),
+            "ETH": InstrumentSpec(
+                symbol="ETH",
+                sz_decimals=2,
+                max_decimals=6,
+                min_notional=Decimal("0"),
+                max_leverage=25,
+                margin_maint=Decimal("0.02"),
+            ),
+        },
+    )
+    book_fill(projection, _fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
+    book_fill(
+        projection,
+        _fill(trade_id="f2", quantity="3", price="100", strategy_id="beta"),
+        side=Side.BUY,
+    )
+    book_fill(
+        projection,
+        _fill(trade_id="f3", quantity="1", price="3000", symbol="ETH", strategy_id="beta"),
+        side=Side.BUY,
+    )
+    book_fill(
+        projection,
+        _fill(trade_id="f4", quantity="10", price="20", symbol="SOL"),
+        side=Side.BUY,
+    )
+    projection.observe_mark(_mark(price="110", ts_event=9_000))
+    projection.observe_mark(_mark(price="3300", ts_event=9_000, symbol="ETH"))
+    projection.observe_mark(_mark(price="21", ts_event=9_000, symbol="SOL"))
+
+    reading = projection.ledger_reading()
+
+    assert reading.margin_used == {
+        "BTC": Decimal("110"),
+        "ETH": Decimal("1800"),
+        "SOL": Decimal("70"),
+    }
+    assert reading.maintenance_margin == {
+        "BTC": Decimal("6.875"),
+        "ETH": Decimal("66"),
+        "SOL": None,
+    }
 
 
 def test_a_stale_mark_freezes_at_its_last_value_and_is_never_rejected_on_read() -> None:

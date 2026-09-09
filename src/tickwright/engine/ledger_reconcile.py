@@ -12,6 +12,7 @@ one would be the second internal projection ADR-0035 rejects, agreeing only ever
 with itself. What paper has in its place is the atomic ledger write.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
@@ -20,6 +21,7 @@ from tickwright.domain import (
     AccountAnchor,
     AccountModeVerdict,
     CashCorrection,
+    LeverageSpec,
     ReconciliationFill,
     Side,
     VenueAccountState,
@@ -80,7 +82,7 @@ class DivergenceField(Enum):
     that silently never fires, on a cadence whose whole job is to notice what
     nothing else would.
 
-    The account grain's two figures carry no symbol; the per-symbol two do
+    The account grain's figures carry no symbol; the per-symbol ones do
     (``Divergence.symbol``), which is the other half of what a consumer keys on.
     """
 
@@ -89,6 +91,9 @@ class DivergenceField(Enum):
     EQUITY = "equity"
     FREE_MARGIN = "free_margin"
     UNREALIZED_PNL = "unrealized_pnl"
+    NOTIONAL = "notional"
+    MARGIN_USED = "margin_used"
+    MAINTENANCE_MARGIN = "maintenance_margin"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -189,12 +194,22 @@ class ValuationBand:
         narrower band alerts rather than stays quiet.
 
         **No cadence reaches that arm today**, and it is worth saying so here
-        rather than leaving a reader to believe a live path depends on it: the
-        three fields this cycle compares all need the very mark their notional
-        needs, so a reference this method cannot compute belongs to a figure the
-        classification already dropped (see ``_reference``). It is kept as the
-        conservative default for the fields #291 adds, which are folded per
-        symbol and need not fail together with the reference the way these do.
+        rather than leaving a reader to believe a live path depends on it: a
+        reference this method cannot compute belongs to a figure the
+        classification already dropped (see ``_reference``).
+
+        This paragraph used to expect the three fields #291 adds to break that,
+        being folded per symbol and so free to fail apart from the reference.
+        They do not, and each closes it differently. ``notional``'s reference is
+        the figure itself. A cross ``margin_used`` is ``notional / L`` and an
+        isolated one inherits from the uPnL computed off the same absent mark,
+        so both go unknown exactly when the notional does — and the one shape
+        where they come apart, an account-net flat over offsetting legs, is not
+        ``holds`` and never reaches a classifier. Account ``maintenance_margin``
+        closes it from the other end: ``_maintenance_margin`` drops the finding
+        when the cross-subset Σ is ``None``, so ``_reference`` only ever
+        recomputes a Σ already proven to exist.
+
         Unreached is not untested: ``ReconcileFindings.classify`` takes the
         reading as an argument, so ``tests/engine/test_reconcile_findings.py``
         pins the fallback on a reading built by hand.
@@ -314,7 +329,11 @@ def _stale_grains(
     return frozenset(stale) | (frozenset({None}) if stale else frozenset())
 
 
-def _reference(divergence: Divergence, reading: LedgerReading) -> Decimal | None:
+def _reference(
+    divergence: Divergence,
+    reading: LedgerReading,
+    leverage_for: Callable[[str], LeverageSpec],
+) -> Decimal | None:
     """The notional ADR-0046 §5 scales the band's relative term by.
 
     One rule with two grains, and the grain is the divergence's own: a per-symbol
@@ -322,6 +341,31 @@ def _reference(divergence: Divergence, reading: LedgerReading) -> Decimal | None
     account-grain figure carries none and errs by at most the book's total —
     ``equity`` and ``free_margin`` are both Σs over every position's valuation,
     so a skew reaches them through every notional at once.
+
+    ``margin_used`` is the exception, and it is the same rule rather than a
+    second one: the quantity is *self-scaling* (ADR-0046 §5), so its reference
+    is the notional a skew reaches **it** through — which the margin mode
+    decides, because the two modes post by different rules. Cross posts
+    ``notional / L`` out of the shared pool and is referenced against that, not
+    the exposure above it: referenced against the exposure the band would be
+    ``L`` times too wide, and widest at the leverage where a margin gap is worth
+    the most. Isolated posts a locked bucket marked to market — ``collateral +
+    uPnL``, which no leverage divides — so the skew arrives at full exposure and
+    the reference is the position's own notional. Divided anyway, the band is
+    ``L`` times too *narrow* on every isolated book, and narrowest at the
+    leverage an operator reached for to hold a larger position.
+
+    ``maintenance_margin`` is the second exception and, again, the same rule:
+    it is the one field whose reported and compared quantities differ, and the
+    reference follows the **compared** one. ADR-0046 §2.1 narrows the comparison
+    to the cross subset because the venue's field omits isolated positions, so
+    the reference is that subset's Σ and not the book's — recomputed here rather
+    than read off ``divergence.ledger``, which would make the band a function of
+    the number under test. Left at the account-grain default the band widens by
+    ``Σ_all / Σ_cross``, which is unbounded and largest on an account holding a
+    big isolated leg beside a small cross one — the primary shape in practice,
+    and exactly where the tier-crossing signal ADR-0040 §4 exists for is worth
+    the most.
 
     The Σ propagates the unknown the way ``domain.valuation`` does: one symbol
     waiting on a mark makes the *total* unknown, because a partial Σ used as a
@@ -343,7 +387,15 @@ def _reference(divergence: Divergence, reading: LedgerReading) -> Decimal | None
     ``InstrumentSpec`` can make unknown with every mark in place.
     """
     if divergence.symbol is not None:
-        return reading.notional.get(divergence.symbol)
+        notional = reading.notional.get(divergence.symbol)
+        if notional is None or divergence.field is not DivergenceField.MARGIN_USED:
+            return notional
+        leverage = leverage_for(divergence.symbol)
+        if leverage.mode == "isolated":
+            return notional
+        return notional / leverage.leverage
+    if divergence.field is DivergenceField.MAINTENANCE_MARGIN:
+        return _cross_maintenance(reading, leverage_for)
     total = _ZERO
     for term in reading.notional.values():
         if term is None:
@@ -479,6 +531,80 @@ def _free_margin(state: VenueAccountState, reading: LedgerReading) -> tuple[Dive
     )
 
 
+def _cross_maintenance(
+    reading: LedgerReading, leverage_for: Callable[[str], LeverageSpec]
+) -> Decimal | None:
+    """The ledger's maintenance Σ over its **cross** held symbols, or ``None``.
+
+    The one figure whose two sides are scoped differently, and the narrowing is
+    ours to do: the venue's ``crossMaintenanceMarginUsed`` counts cross
+    positions and silently omits isolated ones (ADR-0046 §2.1), while ADR-0040
+    §2's account row is a Σ over every position. A total handed over whole
+    cannot be narrowed to a subset afterwards, which is why the reading carries
+    the terms and this adds them up.
+
+    Cross-ness is the run's **config**, read through ``leverage_for`` rather than
+    off the snapshot's rows, for the reason the reference beside it is: the Σ
+    being built is the *ledger's*, and a ledger's own book is the one it was
+    told to keep. A venue that disagrees is already a ``LEVERAGE_DIVERGENCE``
+    (ADR-0044 §10), and taking the venue's mode here would silently move a
+    symbol in or out of our subset on the strength of the very setting that
+    check exists to report.
+
+    Ranged over ``holds`` for the reason every Tier-2 range is: a symbol the
+    ledger reads flat owes maintenance on nothing, and a rate that has gone
+    missing beneath it is not an unknown Σ. ``None`` propagates from any term
+    that is left — a partial Σ compared against the venue's whole one is a
+    divergence about arithmetic rather than about the book, and the missing term
+    is an absent ``InstrumentSpec`` as often as an absent mark, so this figure
+    can go unknown with every mark in place.
+    """
+    total = _ZERO
+    for symbol, term in reading.maintenance_margin.items():
+        if not reading.holds(symbol) or leverage_for(symbol).mode != "cross":
+            continue
+        if term is None:
+            return None
+        total += term
+    return total
+
+
+def _maintenance_margin(
+    state: VenueAccountState,
+    reading: LedgerReading,
+    leverage_for: Callable[[str], LeverageSpec],
+) -> tuple[Divergence, ...]:
+    """Tier-2: the cross subset's maintenance, against the venue's own field.
+
+    Compared at all because it is the number ADR-0040 §4's tier-crossing alert
+    is computed off, and because the venue publishes one — narrowly. The cost
+    ADR-0046 §2.1 states rather than hides is that **isolated maintenance has no
+    venue cross-check at all**: the venue publishes neither a per-position
+    maintenance field nor an isolated total, so that half is computed-only.
+
+    The *reported* figure is untouched and stays Σ-over-all, which is the honest
+    account-wide maintenance a strategy reads. Only the comparison narrows.
+
+    Account grain, so the record carries no symbol — maintenance is owed against
+    the one collateral pool — and it lands with the equity and free-margin
+    findings ahead of the per-symbol ones, in the order the account's own lines
+    are read. A ``None`` is dropped on the rule ``_equity`` states: a Σ waiting
+    on a rate or a mark is unknown, not disputed.
+    """
+    maintenance = _cross_maintenance(reading, leverage_for)
+    if maintenance is None or maintenance == state.cross_maintenance_margin:
+        return ()
+    return (
+        Divergence(
+            tier=DivergenceTier.TIER_2,
+            field=DivergenceField.MAINTENANCE_MARGIN,
+            symbol=None,
+            ledger=maintenance,
+            venue=state.cross_maintenance_margin,
+        ),
+    )
+
+
 def _unrealized(state: VenueAccountState, reading: LedgerReading) -> tuple[Divergence, ...]:
     """Tier-2: per-symbol open PnL, at the account grain both sides hold it.
 
@@ -518,16 +644,107 @@ def _unrealized(state: VenueAccountState, reading: LedgerReading) -> tuple[Diver
     )
 
 
-def _unvalued(state: VenueAccountState, reading: LedgerReading) -> int:
+def _notional(state: VenueAccountState, reading: LedgerReading) -> tuple[Divergence, ...]:
+    """Tier-2: per-symbol ``positionValue``, the venue's own exposure figure.
+
+    ``_unrealized``'s range and rules exactly — both sides' rosters intersected
+    on the ledger's net, ``None`` skipped and counted rather than compared —
+    because the two are read off the same mark and a symbol only one side holds
+    is a Tier-1 size finding either way.
+
+    Compared at all because it is the band's **own input**: ADR-0046 §5 scales
+    every Tier-2 tolerance on this grain by the notional, so a drifted notional
+    is a drifted tolerance for every figure beside it. Unchecked, it would be
+    the one number the cycle both depends on and never looks at — and the band
+    it sets would widen exactly when the book it is measuring is worst.
+
+    Alerted and never healed, like the rest of the tier: a mark this engine has
+    not seen yet is not a wrong ledger (ADR-0034).
+    """
+    ledger = reading.notional
+    return tuple(
+        Divergence(
+            tier=DivergenceTier.TIER_2,
+            field=DivergenceField.NOTIONAL,
+            symbol=position.symbol,
+            ledger=held,
+            venue=position.notional,
+        )
+        for position in sorted(state.positions, key=lambda p: p.symbol)
+        if reading.holds(position.symbol)
+        and (held := ledger.get(position.symbol)) is not None
+        and held != position.notional
+    )
+
+
+def _margin_used(state: VenueAccountState, reading: LedgerReading) -> tuple[Divergence, ...]:
+    """Tier-2: per-symbol posted margin, against the venue's own ``marginUsed``.
+
+    ``_notional``'s range and rules — both rosters intersected on the ledger's
+    net, ``None`` skipped and counted — and per symbol because that is the grain
+    the venue publishes the figure at (ADR-0041 §4): a Σ has already added the
+    positions together, and the comparison would then be against a total the
+    response never returned.
+
+    Compared at all because this is the figure a margin call is computed off:
+    every quantity an operator would act on — free margin, effective leverage,
+    the distance to liquidation — is this number or a fold over it, so a ledger
+    that has it wrong is one whose account view is wrong everywhere at once
+    while agreeing on every position it holds.
+
+    Alerted and never healed, with the rest of the tier.
+    """
+    ledger = reading.margin_used
+    return tuple(
+        Divergence(
+            tier=DivergenceTier.TIER_2,
+            field=DivergenceField.MARGIN_USED,
+            symbol=position.symbol,
+            ledger=held,
+            venue=position.margin_used,
+        )
+        for position in sorted(state.positions, key=lambda p: p.symbol)
+        if reading.holds(position.symbol)
+        and (held := ledger.get(position.symbol)) is not None
+        and held != position.margin_used
+    )
+
+
+def _unvalued(
+    state: VenueAccountState,
+    reading: LedgerReading,
+    leverage_for: Callable[[str], LeverageSpec],
+) -> int:
     """How many Tier-2 figures this pass could not compute at all.
 
-    The account grain's **two** figures, plus one per symbol **both** sides
-    hold whose ledger valuation is waiting on a mark — the same ``holds``
-    range ``_unrealized`` classifies over, since a symbol only one side
-    carries is already a Tier-1 size finding rather than a missing
-    valuation. A symbol the ledger holds flat, or does not carry at all,
-    reads as not held and so is never unvalued: nothing was going to value
-    it.
+    The account grain's **three** figures, plus every per-symbol figure that is
+    waiting on a mark on a symbol **both** sides hold — the same ``holds``
+    range the classifiers use, since a symbol only one side carries is already
+    a Tier-1 size finding rather than a missing valuation. A symbol the ledger
+    holds flat, or does not carry at all, reads as not held and so is never
+    unvalued: nothing was going to value it.
+
+    Per **figure** and not per symbol, which is the same rule the account grain
+    below is counted by and the reason one unmarked symbol now costs three: its
+    uPnL, its exposure and the margin posted against it are three comparisons
+    the pass did not make, and a count of symbols would report a book with three
+    figures missing and a book with nine as equally unlooked-at (ADR-0011 inv 1).
+
+    ``margin_used`` is counted on the predicate it is *dropped* on and not on
+    the mark behind it, which is the same reason ``free_margin`` is asked for
+    separately below: at isolated 1x with no bucket ingested the figure is the
+    uPnL over again, so the two go unknown together — an equivalence between two
+    derivations rather than a rule either states, and one the cross arm does not
+    share.
+
+    ``maintenance_margin`` is asked for by **recomputing the Σ**, not read off
+    ``reading.account.total_maintenance_margin`` beside the other two account
+    figures, because those are two different quantities: the reported total is
+    Σ-over-all and what this pass compared is the cross subset (ADR-0046 §2.1),
+    so the reported one can be a number while the compared one is unknown. It is
+    also the only member here that goes unknown with **every mark in place** —
+    the missing term is an absent ``InstrumentSpec`` as often as an absent mark
+    — which is exactly why the mark-keyed arm above could never stand in for it.
 
     Counted **one per figure the classification dropped**, which is why
     ``free_margin`` is asked for separately rather than read off ``equity``
@@ -545,10 +762,24 @@ def _unvalued(state: VenueAccountState, reading: LedgerReading) -> int:
     absent_marks = sum(
         1
         for position in state.positions
-        if reading.holds(position.symbol) and reading.unrealized.get(position.symbol) is None
+        if reading.holds(position.symbol)
+        for figure in (
+            reading.unrealized.get(position.symbol),
+            reading.notional.get(position.symbol),
+            reading.margin_used.get(position.symbol),
+        )
+        if figure is None
     )
     account = reading.account
-    account_grain = sum(1 for figure in (account.equity, account.free_margin) if figure is None)
+    account_grain = sum(
+        1
+        for figure in (
+            account.equity,
+            account.free_margin,
+            _cross_maintenance(reading, leverage_for),
+        )
+        if figure is None
+    )
     return absent_marks + account_grain
 
 
@@ -590,6 +821,7 @@ class ReconcileFindings:
         *,
         band: ValuationBand,
         now_ns: int,
+        leverage_for: Callable[[str], LeverageSpec],
     ) -> "ReconcileFindings":
         """Compare one reading against one snapshot and decide what to say.
 
@@ -602,13 +834,23 @@ class ReconcileFindings:
         age is a fact about the snapshot this comparison was made on — read
         later, beside the alerts, it would be measured against a clock the pass's
         own heal has already moved forward.
+
+        ``leverage_for`` is an argument and not a member of the reading, because
+        the reading is *folds* — figures this pass computed off marks and fills —
+        while a leverage is the run's own config, which no cadence derives and no
+        band may be widened by having forgotten. It is asked per symbol rather
+        than handed as a book, so the classification cannot range over entries
+        the venue never returned.
         """
         divergences = (
             _cash(state, reading)
             + _sizes(state, reading)
             + _equity(state, reading)
             + _free_margin(state, reading)
+            + _maintenance_margin(state, reading, leverage_for)
             + _unrealized(state, reading)
+            + _notional(state, reading)
+            + _margin_used(state, reading)
         )
         explained = _tier_1_grains(divergences)
         stale = _stale_grains(reading, now_ns=now_ns, band=band)
@@ -618,7 +860,7 @@ class ReconcileFindings:
             if (
                 divergence.tier is not DivergenceTier.TIER_2
                 or divergence.symbol in explained
-                or band.covers(divergence, reference=_reference(divergence, reading))
+                or band.covers(divergence, reference=_reference(divergence, reading, leverage_for))
             ):
                 continue
             # Staleness is asked **after** the band, so the count means "would
@@ -634,7 +876,7 @@ class ReconcileFindings:
             divergences=divergences,
             alerts=tuple(alerts),
             suppressed=suppressed,
-            unvalued=_unvalued(state, reading),
+            unvalued=_unvalued(state, reading, leverage_for),
         )
 
 
@@ -789,6 +1031,11 @@ class LedgerReconciliation:
             # compared against: taken beside the alerts instead, it would be
             # measured against a clock this pass's own heal has moved forward.
             now_ns=self._checkpointer.clock.timestamp_ns(),
+            # The run's own resolved book, read through the projection that
+            # already holds it (ADR-0044 §7) — the band's divisor for a cross
+            # margin, and the config half of it, so it comes from where config
+            # lives rather than from the snapshot being compared.
+            leverage_for=self._portfolio.leverage_for,
         )
         divergences = findings.divergences
         # One stamp for the pass, spent on both halves of its heal: the

@@ -25,6 +25,8 @@ from tickwright.domain import (
     Position,
     PositionView,
     Side,
+    account_maintenance_margin,
+    account_margin_used,
     account_view,
     position_view,
 )
@@ -51,6 +53,16 @@ ETH_25X = InstrumentSpec(
     min_notional=Decimal("10"),
     max_leverage=25,
     margin_maint=Decimal("0.02"),  # 1/(2 x 25)
+)
+
+
+SOL_20X = InstrumentSpec(
+    symbol="SOL",
+    sz_decimals=2,
+    max_decimals=6,
+    min_notional=Decimal("10"),
+    max_leverage=20,
+    margin_maint=Decimal("0.025"),  # 1/(2 x 20)
 )
 
 
@@ -1012,3 +1024,157 @@ def test_free_margin_is_reported_when_negative() -> None:
     assert view.total_margin_used == Decimal("30000")
     assert view.free_margin == Decimal("-28000")
     assert view.effective_leverage == Decimal("15")
+
+
+def test_the_account_grain_margin_used_fold_posts_each_symbol_by_its_own_mode() -> None:
+    """``account_margin_used``: the per-symbol collateral behind each position,
+    at the grain the venue holds it.
+
+    The account-grain counterpart to ``account_notional``, and it exists for the
+    same reason that one does — the reconcile cadence compares a symbol's whole
+    position against the venue's, and ``AccountView`` publishes only the Σ, which
+    has already added the symbols together (ADR-0041 §4/§8).
+
+    The two modes are different rules, not one rule parameterised (ADR-0040 §3),
+    so both are worked here. On the same book the account totals are worked from:
+
+        BTC  cross 10x   +0.5 @ 58000, mark 60000
+                         notional 30000 -> margin_used 30000/10 = 3000
+        ETH  isolated 5x +10 @ 3000, mark 3200, bucket 6000
+                         uPnL 2000      -> margin_used 6000 + 2000 = 8000
+
+    The configured leverage is deliberately absent from the isolated arm: the
+    bucket is sized at open and a later leverage change never re-margins a held
+    position, so reading the setting back would report a number the venue has
+    stopped holding.
+
+    The unmarked pair covers ADR-0041 §6's per-term rule in **both** modes,
+    because each inherits it through a different term — cross through the
+    notional, isolated through the account-net uPnL inside its marked bucket. A
+    fold that answered one and fabricated the other would be the
+    unknown-as-worthless mistake, and worth pinning per mode rather than once.
+    """
+    btc = _position(quantity="0.5", price="58000", side=Side.BUY, symbol="BTC")
+    eth = _position(
+        quantity="10", price="3000", side=Side.BUY, symbol="ETH", isolated_collateral="6000"
+    )
+    sol = _position(quantity="100", price="20", side=Side.BUY, symbol="SOL")
+    doge = _position(
+        quantity="5000", price="0.1", side=Side.BUY, symbol="DOGE", isolated_collateral="100"
+    )
+
+    margin = account_margin_used(
+        (btc, eth, sol, doge),
+        {"BTC": Decimal("60000"), "ETH": Decimal("3200")},
+        leverage=LeverageBook(
+            entries={
+                "BTC": CROSS_10X,
+                "ETH": ISOLATED_5X,
+                "SOL": CROSS_1X,
+                "DOGE": ISOLATED_1X,
+            }
+        ),
+    )
+
+    assert margin == {
+        "BTC": Decimal("3000"),
+        "ETH": Decimal("8000"),
+        "SOL": None,
+        "DOGE": None,
+    }
+
+
+def test_the_account_grain_margin_used_fold_ranges_over_symbols_not_partitions() -> None:
+    """Folded over the symbol's **account-net** size, so two strategies holding
+    offsetting legs post collateral against the position the venue actually has
+    (ADR-0035, ADR-0041 §4).
+
+    The account holds nothing in BTC, so cross posts a real ``0`` — and posts it
+    with **no mark**, on the per-term rule: ``|0| × mark`` is zero at every
+    price, including one nobody has seen. A per-partition fold would report
+    ``2 × 110 / 10`` twice over, against a book with no exposure.
+
+    That zero is exactly where the two modes come apart, which is why the mode
+    that keeps needing a mark is worth stating beside it: an isolated symbol
+    whose net is flat still has open legs behind it, and its bucket is marked to
+    the uPnL of those legs. Here ETH's two legs are ``+3`` at 2000 and ``−3`` at
+    2400, so the bucket's uPnL term is ``3 × (2200 − 2000) − 3 × (2200 − 2400)``
+    = ``600 + 600`` = ``1200`` on a flat net — a real number the cross arm above
+    never has to ask for.
+    """
+    long_leg = _position(quantity="2", price="100", side=Side.BUY, symbol="BTC")
+    short_leg = _position(quantity="2", price="120", side=Side.SELL, symbol="BTC")
+    eth_long = _position(
+        quantity="3", price="2000", side=Side.BUY, symbol="ETH", isolated_collateral="1200"
+    )
+    eth_short = _position(
+        quantity="3", price="2400", side=Side.SELL, symbol="ETH", isolated_collateral="1440"
+    )
+
+    margin = account_margin_used(
+        (long_leg, short_leg, eth_long, eth_short),
+        {"ETH": Decimal("2200")},
+        leverage=LeverageBook(entries={"BTC": CROSS_10X, "ETH": ISOLATED_5X}),
+    )
+
+    assert margin == {"BTC": Decimal("0"), "ETH": Decimal("3840")}
+
+
+def test_the_account_grain_maintenance_margin_fold_rates_each_symbols_notional() -> None:
+    """``account_maintenance_margin``: ``notional × margin_maint`` per symbol, at
+    the flat tier-0 rate (ADR-0040 §4).
+
+    The third account-grain fold, and the one with **no mode term** — maintenance
+    is owed on the exposure whichever pool backs it, so unlike ``margin_used``
+    beside it this takes the instrument universe and not the leverage book. It is
+    folded per symbol for the reconcile cadence, which compares only the **cross
+    subset** against the venue's ``crossMaintenanceMarginUsed`` while the
+    reported figure stays Σ-over-all (ADR-0046 §2.1): a Σ handed over whole
+    cannot be narrowed to a subset afterwards.
+
+        BTC  +0.5 @ 58000, mark 60000  notional 30000, rate 0.0125 -> 375
+        ETH  +10  @ 3000,  mark 3200   notional 32000, rate 0.02   -> 640
+
+    The two unknowns are separate arms because they arrive through separate
+    terms, and only one of them is about marks: SOL has a rate and no price,
+    DOGE has a price and no rate. A symbol outside the configured universe is
+    the second case in practice — the reserved unattributed partition, where a
+    fabricated ``0`` would report a position as needing no maintenance at all.
+    """
+    btc = _position(quantity="0.5", price="58000", side=Side.BUY, symbol="BTC")
+    eth = _position(quantity="10", price="3000", side=Side.BUY, symbol="ETH")
+    sol = _position(quantity="100", price="20", side=Side.BUY, symbol="SOL")
+    doge = _position(quantity="5000", price="0.1", side=Side.BUY, symbol="DOGE")
+
+    maintenance = account_maintenance_margin(
+        (btc, eth, sol, doge),
+        {"BTC": Decimal("60000"), "ETH": Decimal("3200"), "DOGE": Decimal("0.12")},
+        specs={"BTC": BTC_40X, "ETH": ETH_25X, "SOL": SOL_20X},
+    )
+
+    assert maintenance == {
+        "BTC": Decimal("375"),
+        "ETH": Decimal("640"),
+        "SOL": None,
+        "DOGE": None,
+    }
+
+
+def test_a_flat_account_net_owes_a_real_zero_maintenance_with_neither_mark_nor_spec() -> None:
+    """ADR-0041 §6's rule is per **term**, and a flat account-net is where both
+    of this fold's terms are exempt at once: ``|0| × mark`` is zero at every
+    price and ``0 × rate`` is zero at every rate, so the answer is a real ``0``
+    rather than the unknown either missing input would otherwise make it.
+
+    Not hypothetical, and the reason it is worth its own case: the unattributed
+    partition is where the mark and the spec go missing **together** — a symbol
+    outside our configured universe is also one no ``MarkTick`` subscription
+    covers — so a fold that required either would report the whole book unknown
+    the moment a position it never traded was healed in and closed again.
+    """
+    long_leg = _position(quantity="2", price="100", side=Side.BUY, symbol="BTC")
+    short_leg = _position(quantity="2", price="120", side=Side.SELL, symbol="BTC")
+
+    maintenance = account_maintenance_margin((long_leg, short_leg), {}, specs={})
+
+    assert maintenance == {"BTC": Decimal("0")}
