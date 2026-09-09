@@ -125,13 +125,20 @@ tree, allows `Write`/`Edit`/`Bash`, and grades the edits themselves
 failure worth catching — but only the second shape can catch guidance that is given and then not
 followed.
 
-**A rule that becomes a hook stops belonging here.** `tdd/edits-instead-of-bash-writes` used to sit
-beside those, measuring whether the skill persuaded a model not to `sed -i` a file it had read.
-`.claude/hooks/no-tracked-writes.py` now refuses the call outright, so the question is settled by an
-exit code rather than by six agent runs and an LLM grader — and the case was deleted, not kept. Two
-assertions of one rule is one assertion too many, and the probabilistic one is the copy that drifts.
-The deterministic half is fenced by `tests/test_claude_hooks.py`, in `ci`, for free. Ask this of any
-case you write: if the behavior could be made impossible, should it be an eval at all?
+**A rule that becomes a hook stops belonging here.** Two cases used to sit beside those and no
+longer exist. `tdd/edits-instead-of-bash-writes` measured whether the skill persuaded a model not to
+`sed -i` a file it had read; `.claude/hooks/no-tracked-writes.py` refuses the call outright.
+`tdd/plans-with-sliced-reading` measured whether it sliced a module map instead of loading it;
+`.claude/hooks/no-unsliced-doc-reads.py` refuses that too, on both the `Read` and the `cat` the case
+had to grade separately. Each question is now settled by an exit code rather than by six agent runs
+and an LLM grader, and each case was deleted, not kept. Two assertions of one rule is one assertion
+too many, and the probabilistic one is the copy that drifts. The deterministic halves are fenced by
+`tests/test_claude_hooks.py`, in `ci`, for free.
+
+Ask this of any case you write: if the behavior could be made impossible, should it be an eval at
+all? The residue is the useful part — what survives from `plans-with-sliced-reading` is the half a
+guard cannot judge, that the *right* sections were chosen, and it is worth a case only if it can be
+graded on something better than which tool fired.
 
 Neither shape measures **token consumption**. The context-budget rules in `/tdd` are graded by
 proxy — which tool was used, whether a doc was sliced or read whole, whether reading was deferred
@@ -149,31 +156,34 @@ regression when nothing regressed. Assert behavior, not a number.
   is committed, because `.gitignore`'s `.agents/plans/` has an interior slash and is therefore
   anchored to the repo root. Check a new one with `git check-ignore -v <path>` before assuming it
   survives the commit.
-- Copy a tool the case needs into the fixture rather than reaching out of the sandbox for it
-  (`tdd/plans-with-sliced-reading/fixture/.agents/tools/doc-slice`). It drifts, and a stale copy is
-  the cost of a hermetic sandbox.
+- Copy a tool the case needs into the fixture rather than reaching out of the sandbox for it. It
+  drifts, and a stale copy is the cost of a hermetic sandbox. No case carries one today — the one
+  that did (a `doc-slice` copy) became a hook. `tests/test_claude_hooks.py` shows the alternative
+  where the harness allows it: copy the real tool in at run time, so it cannot go stale at all.
 - A fixture is a directory, **not a repository** — a nested `.git` is not committable. A case whose
   behavior needs git history (`tdd/resumes-from-plan` reconciles a plan against `git log`) supplies
   it with `context.scaffold_script`, and must state what the case degrades to when the run is not
   given `--scaffold`, since that flag is off by default.
 - A fixture that asserts something about *size* states its own measurements in its header
-  (`tdd/plans-with-sliced-reading/fixture/docs/module-maps/leverage-surface.md`). A comment claiming
-  a file is "large" is unfalsifiable and goes stale the first time someone edits it. State one unit
-  and the range you actually mean: that map's h3 module sections run 275–2,356 characters, while its
-  h2 wrappers run from 165 up to 15,204, so "a section runs …" without the qualifier is false.
+  (`tdd/resumes-from-plan/fixture/docs/module-maps/leverage-surface.md`). A comment claiming a file
+  is "large" is unfalsifiable and goes stale the first time someone edits it. State one unit and the
+  range you actually mean: that map's h3 module sections run 275–2,356 characters, while its h2
+  wrappers run from 165 up to 15,204, so "a section runs …" without the qualifier is false.
 - A fixture standing in for a `doc-slice` target must not carry a **section name inside its title**.
   `doc-slice` matches a heading substring and falls back to the first match, so a map titled
   "Leverage surface" answers `doc-slice … Leverage` with the whole file — through the very tool the
   case is checking the agent reached for, past a `Read`/`cat` grader pair that sees nothing wrong.
-  Name the file after its subject and the title after something broader.
+  Name the file after its subject and the title after something broader; the map above is titled
+  "Perps margin surface" for exactly this reason, and says so in its own header.
 
 ### Grading a read, and grading its absence
 
 A `max: 0` grader keyed on the `Read` tool does not prove a file went unread: `cat` loads the same
 bytes through `Bash` and scores zero on it. Pair every `max: 0` on `Read` with the matching
-`tool_used: Bash, input_match: cat <path>` — `tdd/plans-with-sliced-reading` does this for both the
-module map and the deferred venue module. The evasion is not hypothetical, since the
-bypass-permissions guidance actively pushes reads toward `cat`.
+`tool_used: Bash, input_match: cat <path>`. The evasion is not hypothetical, since the
+bypass-permissions guidance actively pushes reads toward `cat` — which is why
+`no-unsliced-doc-reads` binds both tools, and why the case that used to demonstrate this pairing
+here is the one that became that hook.
 
 For the mirror-image claim — that a file *was* consulted — grade the **trace**, not the tool:
 `regex` with `target: trace` over the path catches the `Read` and the `cat` alike
