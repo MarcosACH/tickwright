@@ -59,12 +59,66 @@ def _repo_root(cwd: str) -> str | None:
     return result.stdout.strip() if result.returncode == 0 else None
 
 
-def _refusal(path: str) -> str:
+def _slice(tool: str, *args: str) -> tuple[int, str]:
+    result = subprocess.run([tool, *args], capture_output=True, text=True)
+    return result.returncode, result.stdout
+
+
+def _amendment_counts(tool: str, path: str) -> dict[str, int]:
+    """How many amendment blocks each section carries, keyed on its heading text.
+
+    `--amendments` exits **3** on a file outside the append-corrected convention — the
+    research notes, where `**(` is ordinary bold prose opening a block that never closes.
+    That means *out of domain*, not malformed, so it yields no counts and no annotation
+    rather than costing the caller its table of contents.
+    """
+    code, out = _slice(tool, "--amendments", path)
+    if code != 0:
+        return {}
+
+    counts: dict[str, int] = {}
+    for line in out.splitlines():
+        if not line.startswith("--- "):
+            continue
+        banner = line[4:].split(None, 1)  # "<line>  <heading>"
+        if len(banner) == 2:
+            counts[banner[1]] = counts.get(banner[1], 0) + 1
+    return counts
+
+
+def _annotated_toc(tool: str, path: str) -> str | None:
+    """The file's table of contents, each corrected section marked `(+N)`.
+
+    None when there is nothing to offer, which is the one case this guard stays quiet in:
+    a refusal that hands back no index is an obstacle rather than a guard.
+    """
+    code, out = _slice(tool, path)
+    if code != 0 or not out.strip():
+        return None
+
+    counts = _amendment_counts(tool, path)
+    lines = []
+    for line in out.splitlines():
+        heading = line.split(None, 2)  # "<line>  <level>  <heading>"
+        n = counts.get(heading[2]) if len(heading) == 3 else None
+        lines.append(f"{line}  (+{n})" if n else line)
+    return "\n".join(lines)
+
+
+def _refusal(path: str, toc: str, corrected: bool) -> str:
+    correction = (
+        "\nA section marked (+N) carries N amendment blocks. This corpus is "
+        "append-corrected: those blocks hold the current truth and the prose above them "
+        "is often the retired version, so read a marked section's amendments first.\n"
+        if corrected
+        else ""
+    )
     return (
-        f"Blocked: {path} is read by section, not whole.\n\n"
-        f"  {_DOC_SLICE} <file>                          its table of contents\n"
-        f"  {_DOC_SLICE} <file> <heading-substr>         one section\n"
-        f"  {_DOC_SLICE} --amendments <file> [<heading>] that section's corrections\n\n"
+        f"Blocked: {path} is read by section, not whole. Its table of contents:\n\n"
+        f"{toc}\n"
+        f"{correction}\n"
+        f"  {_DOC_SLICE} {path} <heading-substr>\n"
+        f"  {_DOC_SLICE} --amendments {path} <heading-substr>\n\n"
         "If you genuinely need the raw lines, Read it again with an explicit offset/limit."
     )
 
@@ -100,7 +154,15 @@ def main() -> int:
     if not _in_corpus(relative):
         return 0
 
-    print(_refusal(relative), file=sys.stderr)
+    tool = os.path.join(root, _DOC_SLICE)
+    if not os.access(tool, os.X_OK):
+        return 0
+
+    toc = _annotated_toc(tool, absolute)
+    if toc is None:
+        return 0
+
+    print(_refusal(relative, toc, corrected="(+" in toc), file=sys.stderr)
     return 2
 
 

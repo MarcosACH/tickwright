@@ -444,6 +444,65 @@ class TestNoUnslicedDocReads:
         )
         assert result.returncode == ALLOW
 
+    def test_the_refusal_carries_the_table_of_contents(self, docs_repo: Path) -> None:
+        """A bare "no" costs the agent a turn to recover from and teaches it to argue.
+
+        The refusal hands back the index the caller was going to need anyway, so the
+        blocked call resolves in one more turn rather than two — and complying stops
+        being the expensive option, which is the whole reason the rule needed a guard.
+        """
+        result = run_tool_hook(
+            "no-unsliced-doc-reads.py",
+            "Read",
+            {"file_path": "docs/adr/0001-a-decision.md"},
+            docs_repo,
+        )
+        assert result.returncode == BLOCK
+        for heading in ("Context", "Decision", "Consequences"):
+            assert heading in result.stderr
+
+    def test_a_corrected_section_is_marked_in_that_table_of_contents(self, docs_repo: Path) -> None:
+        """``docs/adr/`` is append-corrected, so the amendment blocks hold the current
+        truth and the prose above them is often the retired version. Marking which
+        sections carry one turns the reading order from a rule the agent has to remember
+        into a fact it is handed."""
+        result = run_tool_hook(
+            "no-unsliced-doc-reads.py",
+            "Read",
+            {"file_path": "docs/adr/0001-a-decision.md"},
+            docs_repo,
+        )
+        marked = [line for line in result.stderr.splitlines() if "(+1)" in line]
+        assert [line for line in marked if "Decision" in line], result.stderr
+        assert not [line for line in marked if "Context" in line], result.stderr
+
+    def test_a_file_outside_the_amendment_convention_still_gets_its_contents(
+        self, docs_repo: Path
+    ) -> None:
+        """``doc-slice --amendments`` exits 3 on the research notes: there ``**(`` is
+        ordinary bold prose and opens a block that never closes. That exit means *out of
+        domain*, not malformed, so the guard drops the annotation and keeps the TOC —
+        treating it as a failure would refuse the read with nothing to offer."""
+        result = run_tool_hook(
+            "no-unsliced-doc-reads.py", "Read", {"file_path": "docs/research/note.md"}, docs_repo
+        )
+        assert result.returncode == BLOCK
+        assert "Finding" in result.stderr
+        assert "(+" not in result.stderr
+
+    def test_a_repo_with_no_doc_slice_is_not_blocked(self, docs_repo: Path) -> None:
+        """Fail open, for a reason narrower than the usual one: without the tool there is
+        no index to answer with, and a refusal that offers nothing is an obstacle rather
+        than a guard. ``TestWiring`` is what keeps the real tool from going missing."""
+        (docs_repo / ".agents" / "tools" / "doc-slice").unlink()
+        result = run_tool_hook(
+            "no-unsliced-doc-reads.py",
+            "Read",
+            {"file_path": "docs/adr/0001-a-decision.md"},
+            docs_repo,
+        )
+        assert result.returncode == ALLOW
+
     def test_the_hook_is_executable(self) -> None:
         assert os.access(_HOOKS / "no-unsliced-doc-reads.py", os.X_OK)
 
