@@ -358,6 +358,12 @@ class TestNoExcludedReads:
             "grep '>' logs/run.log",
             "grep '>>' logs/run.log",
             "grep -e '2>' logs/run.log",
+            # An *input* redirect names a file the command reads, so only the operator is
+            # dropped and the operand stays a candidate — `cat < logs/run.log` spends the
+            # log exactly as `cat logs/run.log` does. The descriptor prefix goes with it:
+            # `0<` lexes as `0` then `<`.
+            "cat < logs/run.log",
+            "cat 0< logs/run.log",
         ],
     )
     def test_a_read_of_an_excluded_path_is_refused(self, repo: Path, command: str) -> None:
@@ -404,6 +410,10 @@ class TestNoExcludedReads:
             "grep -n 'x' src/tracked.py >> logs/out.log",
             "cat src/tracked.py &> logs/out.log",
             "cat src/tracked.py 2> logs/err.log",
+            # A here-string's operand is the data itself. It never named a file, so it
+            # goes with its operator rather than being offered as a path that happens to
+            # spell one.
+            "cat <<< 'logs/run.log'",
         ],
     )
     def test_a_read_that_costs_no_context_is_allowed(self, repo: Path, command: str) -> None:

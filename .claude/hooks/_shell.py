@@ -74,9 +74,11 @@ WRITE_REDIRECTS = (">", ">>", ">|", "&>", "&>>", "&>|")
 # file at all. What follows tells them apart — a descriptor is a number, or `-` to close.
 DUP_REDIRECT = ">&"
 
-# Operands that are not paths at all: `<&` names a descriptor, and a here-string's operand
-# is the data itself. Both are dropped whole, target included.
-_OPAQUE_REDIRECTS = ("<&", "<<<")
+# A here-string's operand is the data itself, so it is dropped whole rather than offered
+# as a path that happens to spell one. `<&` is deliberately absent: bash requires its
+# operand to be a descriptor or `-`, so it can never name a file, and a branch that cannot
+# change a verdict is one no test can fence.
+_HERE_STRING = ("<<<",)
 
 # An input redirect names a file the command **reads**, so only the operator is dropped
 # and the operand stays a candidate: `cat < logs/run.log` spends the log exactly as
@@ -213,8 +215,8 @@ def without_write_redirects(segment: list[str]) -> list[str]:
     Three kinds, and the distinction between them is the whole reason this is not a
     blanket "drop the tail":
 
-    - a **write** target and an opaque operand (a descriptor, a here-string's data) go
-      with their operator;
+    - a **write** target, and a here-string's operand, which is the data itself, go with
+      their operator;
     - an **input** redirect loses only its operator, because `< file` names a file being
       read and that is precisely what the callers are looking for;
     - the **descriptor prefix** of `2> err.log` goes too. `2` lexes as its own token, so
@@ -236,7 +238,7 @@ def without_write_redirects(segment: list[str]) -> list[str]:
         token = segment[i]
         following = segment[i + 1] if i + 1 < len(segment) else None
 
-        opaque = token in WRITE_REDIRECTS or token in _OPAQUE_REDIRECTS
+        opaque = token in WRITE_REDIRECTS or token in _HERE_STRING
         if token == DUP_REDIRECT and following is not None:
             # `2>&1` names a descriptor and was never a path; `>& file` is a write.
             opaque = not following.isdigit() and following != "-"
