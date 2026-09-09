@@ -71,7 +71,7 @@ Run these and treat any failure as BLOCKING. The list mirrors the authoritative 
 ```bash
 uv run ruff format --check .
 uv run ruff check .
-uv run mypy .
+uv run mypy           # bare: a path argument overrides `files` and skips `.claude/hooks`
 uv run lint-imports   # ADR-0032 dependency-direction boundaries — a build-failing gate
 uv run pytest --cov --cov-report=term-missing --cov-fail-under=90
 ```
@@ -268,7 +268,7 @@ Use this as the substantive-pass spine. Each item maps to a `Category` value.
 ### Tooling & docs
 - [ ] `uv run ruff check .` clean (mechanical pass).
 - [ ] `uv run ruff format --check .` clean.
-- [ ] `uv run mypy .` clean (or new `# type: ignore` lines explained).
+- [ ] `uv run mypy` clean (or new `# type: ignore` lines explained).
 - [ ] No `# noqa` without a rule code and reason.
 - [ ] First sentence of each public function/class docstring is one line, ~15 words.
 - [ ] **Docs-sync**: if the diff changes behavior or conventions documented elsewhere (`CLAUDE.md`, `docs/agents/`, `docs/workflow/`, `docs/adr/`, `CONTEXT.md`, `.claude/skills/`, CI workflows), the same PR updates those files. A stale doc left behind is WARN; a contradicted canonical source (e.g. an ADR or `issue-tracker.md`) is BLOCKING.

@@ -66,4 +66,6 @@ if ! git diff --quiet || ! git diff --cached --quiet; then
 fi
 
 echo "pre-push: mypy"
-uv run mypy .
+# Bare, matching ci.yml: a path argument overrides `files` in pyproject.toml and skips
+# hidden directories, which left `.claude/hooks` unchecked.
+uv run mypy

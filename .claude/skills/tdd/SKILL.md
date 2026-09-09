@@ -239,7 +239,7 @@ Rules:
 
 Match the feedback loop to its cost — cheap checks often, the expensive one once:
 
-- **Typecheck regularly** — `uv run mypy .` after each green (and `uv run ruff check .` for lint). Fast, and catches the class of error a single test won't.
+- **Typecheck regularly** — `uv run mypy` after each green (and `uv run ruff check .` for lint). Fast, and catches the class of error a single test won't.
 - **Run the single test file regularly** — `uv run pytest tests/<area>/test_x.py -v` (or `::TestClass::test`) is your inner loop; run it every red→green, not the whole suite.
 - **Run the full suite once at the end** — `uv run pytest -v` before you consider the branch done, to catch cross-module regressions the focused runs miss. Don't pay for the full suite on every cycle.
 

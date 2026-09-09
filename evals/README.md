@@ -121,9 +121,17 @@ a `regex` over a planted phrase is both free and stable.
 Cases come in two shapes. The cheap one runs in an **empty sandbox with no write tools** and grades
 what the skill tells the agent to *do* (`tdd/red-before-green`); the expensive one mounts a fixture
 tree, allows `Write`/`Edit`/`Bash`, and grades the edits themselves
-(`tdd/writes-test-before-src`, `tdd/edits-instead-of-bash-writes`). A skill is guidance, and
-guidance that stopped being given is the failure worth catching — but only the second shape can
-catch guidance that is given and then not followed.
+(`tdd/writes-test-before-src`). A skill is guidance, and guidance that stopped being given is the
+failure worth catching — but only the second shape can catch guidance that is given and then not
+followed.
+
+**A rule that becomes a hook stops belonging here.** `tdd/edits-instead-of-bash-writes` used to sit
+beside those, measuring whether the skill persuaded a model not to `sed -i` a file it had read.
+`.claude/hooks/no-tracked-writes.py` now refuses the call outright, so the question is settled by an
+exit code rather than by six agent runs and an LLM grader — and the case was deleted, not kept. Two
+assertions of one rule is one assertion too many, and the probabilistic one is the copy that drifts.
+The deterministic half is fenced by `tests/test_claude_hooks.py`, in `ci`, for free. Ask this of any
+case you write: if the behavior could be made impossible, should it be an eval at all?
 
 Neither shape measures **token consumption**. The context-budget rules in `/tdd` are graded by
 proxy — which tool was used, whether a doc was sliced or read whole, whether reading was deferred

@@ -24,7 +24,7 @@ changes small, well-tested, and easy to read.
 | Tests | `uv run pytest -v` (property tests via `hypothesis`; target ≥90% coverage on the core) |
 | Lint  | `uv run ruff check .` |
 | Format | `uv run ruff format .` |
-| Types | `uv run mypy .` |
+| Types | `uv run mypy` (no `.` — the argument overrides `files` in `pyproject.toml` and skips the hidden `.claude/hooks`) |
 | Imports | `uv run lint-imports` (dependency-direction boundaries, ADR-0032) |
 
 The default paper-exchange + in-memory-bus path runs with **no external services and no API keys**.
@@ -81,6 +81,46 @@ With `core.hooksPath` enabled (see setup):
 
 They exist to catch problems early; the **authoritative gate is CI**, which re-runs everything and
 can't be skipped with `--no-verify`.
+
+### Agent-loop guards (Claude Code hooks)
+
+Git hooks fire at commit time. An agent breaks a rule *mid-loop*, dozens of tool calls earlier, and
+by the time a commit exists the cost is already paid. `.claude/hooks/` closes that window: three
+`PreToolUse` guards on `Bash`, wired in the committed `.claude/settings.json`. Each reads the event
+on stdin and exits `0` to allow or `2` to block, with the reason on stderr going back to the agent.
+
+| Guard | Refuses | Stays allowed |
+| ----- | ------- | ------------- |
+| `no-tracked-writes` | `sed -i`, a redirect in any shape that names a file (`>`, `>>`, `>\|`, `&>`, `&>>`, `>& file`) or `tee` aimed at a **git-tracked** file, or at a **glob** that matches one | creating a new file; `2>&1` and `>&2`, which name a descriptor; `tee` as a grep **pattern**; a heredoc **body** that quotes a write; a **directory**, whose contents are not the target; anything outside the repo |
+| `no-excluded-reads` | `cat`/`head`/`grep`/… of a path `git check-ignore` matches | `.agents/plans/`; a program in the **executable position**, so `.venv/bin/ruff` still runs; a grep **pattern** that merely spells an ignored path |
+| `no-global-installs` | `pip install`, `uv pip install --system`, `uv tool install`, `pipx`, `brew`, `npm -g` — and the same behind a `sudo` or inside a loop body | `uv add`/`uv sync`/`uvx`/`uv tool run`; `uv pip install` without `--system` |
+
+Three properties are deliberate:
+
+- **Committed, not local.** The point of turning a rule into a guard is that it reaches *other
+  people's* agents. One in `settings.local.json` would be the tribal knowledge it replaced.
+- **Derived, not listed.** Both path guards ask `git`. Copying `.gitignore`'s globs into a hook
+  would be two lists that must agree — the drift this project calls a bug — and the derived form
+  also covers whatever gets ignored next.
+- **They fail open.** A command the lexer cannot parse is allowed through. A guard that misfires on
+  input it does not understand is one an agent learns to route around, which costs more than the
+  call it wrongly blocked. That licence covers a *parse*, never a token the guard read in the wrong
+  position — a wrapper (`sudo pip install`), a reserved word standing in front of the program
+  (`do`, `then`, `time`), a grep pattern, a `tee` being searched for rather than run, or a heredoc
+  body all lex perfectly, so `_shell.py` and the executable-position test resolve each one rather
+  than shrugging at it. The inverse holds too: a shape the lexer *does* produce is not a shape the
+  guard may miss, which is why the redirect set enumerates `&>` and `>|` instead of the two
+  spellings that come to mind first, and why `src/*.py` is handed to `git` to resolve rather than
+  judged by how many files came back — counting them would allow a write in proportion to how many
+  it rewrites. What stays out of reach is a *value*: `sed -i '' s/a/b/ $f` lexes cleanly and stands
+  in the right position, and no lexer knows which file `$f` names.
+
+Same standing as the git hooks: **local convenience, not the gate.** They are Claude Code-specific,
+so a contributor using another tool — or none — gets nothing from them, and CI stays the floor for
+everyone. They are ordinary stdlib Python with no network access; read them before you trust them.
+`tests/test_claude_hooks.py` fences all three, and asserts the wiring too: a guard nothing runs is a
+guard that does not exist. Hook config is read when a session starts, so restart Claude Code after
+changing one.
 
 #### Local hook guards
 

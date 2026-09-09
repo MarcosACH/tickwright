@@ -55,7 +55,7 @@ See `docs/workflow/labels.md` for the label schema and `docs/agents/issue-tracke
 
 ## Context Discipline
 
-- Never read `.venv/`, `__pycache__/`, `.mypy_cache/`, `.pytest_cache/`, `.ruff_cache/`, `.import_linter_cache/`, `*.egg-info/`, `*.pyc`, `logs/`, `*.log`. The `.claude/settings.json` deny list enforces this.
+- Never read `.venv/`, `__pycache__/`, `.mypy_cache/`, `.pytest_cache/`, `.ruff_cache/`, `.import_linter_cache/`, `*.egg-info/`, `*.pyc`, `logs/`, `*.log`. Enforced at both doors: the `.claude/settings.json` deny list binds `Read`, and the `no-excluded-reads` hook binds the `cat`/`head`/`grep` that reach the same bytes through Bash. Membership is `git check-ignore`, so `.gitignore` is the one list. `.agents/plans/` is ignored and readable — that is the exception, not an oversight.
 - For `CONTEXT.md`, ADRs, `docs/module-maps/*.md`, and `docs/research/*.md`, use `.agents/tools/doc-slice`:
   - `.agents/tools/doc-slice <file>` — list TOC (`line  level  heading`)
   - `.agents/tools/doc-slice <file> <heading-substr>` — print just that section
@@ -63,7 +63,7 @@ See `docs/workflow/labels.md` for the label schema and `docs/agents/issue-tracke
 - **ADRs are append-corrected: read a section's amendments before its prose, or instead of it.** The blocks carry the current truth and the prose above them is often the retired version, so document order reads the superseded decision. The mechanism, the delimiter rule, and the worked counter-example are canonical in [`docs/agents/adr-reading.md`](docs/agents/adr-reading.md).
 - For large source/test files, use `Read` with `offset`/`limit` targeting the symbol you need.
 - For GitHub issues, use `gh issue view <N>`.
-- **Editing a file you have already read: use `Edit`, not a Bash write.** Any Bash write stales the harness's cached copy — a one-line `sed -i` no less than a whole-file heredoc, diff size is irrelevant — and the next `Edit` warns that the file changed on disk, which pushes you into a full re-read. Reserve heredocs and `sed -i` for creating new files. This deliberately overrides the bypass-permissions guidance the harness injects, which is right for one-shot shell work and wrong for a loop that edits the same handful of files repeatedly.
+- **Editing a file git already tracks: use `Edit`.** A Bash write stales the harness's cached copy and costs a full re-read. The `no-tracked-writes` hook refuses it, so this is not a rule to remember; heredocs and `sed -i` stay available for creating new files. See [`CONTRIBUTING.md` → Agent-loop guards](CONTRIBUTING.md#agent-loop-guards-claude-code-hooks).
 
 ## Local Development (macOS)
 
@@ -107,7 +107,7 @@ A separate tier from `pytest`: it tests the skills in `.claude/skills/`, not the
 ```bash
 uv run ruff check .
 uv run ruff format .
-uv run mypy .
+uv run mypy           # bare: `mypy .` overrides files= and skips .claude/hooks
 uv run lint-imports   # dependency-direction boundaries (ADR-0032)
 ```
 

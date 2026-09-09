@@ -77,7 +77,12 @@ jobs:
         run: |
           uv run ruff format --check .
           uv run ruff check .
-          uv run mypy .
+          # Bare, with no `.`: a path argument overrides `files` in pyproject.toml, and
+          # `.` skips hidden directories — so `mypy .` silently left `.claude/hooks`
+          # unchecked while reporting success. Those hooks block tool calls; untyped,
+          # one that fails open does so with nothing to say. Ruff already reaches them
+          # under a bare `.`, which is what made the gap easy to miss.
+          uv run mypy
           uv run lint-imports
           uv run python -m compileall -q src
 
