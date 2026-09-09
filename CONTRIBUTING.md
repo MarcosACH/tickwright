@@ -91,7 +91,7 @@ on stdin and exits `0` to allow or `2` to block, with the reason on stderr going
 
 | Guard | Refuses | Stays allowed |
 | ----- | ------- | ------------- |
-| `no-tracked-writes` | `sed -i`, a redirect in any shape that names a file (`>`, `>>`, `>\|`, `&>`, `&>>`, `>& file`) or `tee` aimed at a **git-tracked** file | creating a new file; `2>&1` and `>&2`, which name a descriptor; `tee` as a grep **pattern**; a heredoc **body** that quotes a write; anything outside the repo |
+| `no-tracked-writes` | `sed -i`, a redirect in any shape that names a file (`>`, `>>`, `>\|`, `&>`, `&>>`, `>& file`) or `tee` aimed at a **git-tracked** file, or at a **glob** that matches one | creating a new file; `2>&1` and `>&2`, which name a descriptor; `tee` as a grep **pattern**; a heredoc **body** that quotes a write; a **directory**, whose contents are not the target; anything outside the repo |
 | `no-excluded-reads` | `cat`/`head`/`grep`/… of a path `git check-ignore` matches | `.agents/plans/`; a program in the **executable position**, so `.venv/bin/ruff` still runs; a grep **pattern** that merely spells an ignored path |
 | `no-global-installs` | `pip install`, `uv pip install --system`, `uv tool install`, `pipx`, `brew`, `npm -g` — and the same behind a `sudo` or inside a loop body | `uv add`/`uv sync`/`uvx`/`uv tool run`; `uv pip install` without `--system` |
 
@@ -110,8 +110,10 @@ Three properties are deliberate:
   body all lex perfectly, so `_shell.py` and the executable-position test resolve each one rather
   than shrugging at it. The inverse holds too: a shape the lexer *does* produce is not a shape the
   guard may miss, which is why the redirect set enumerates `&>` and `>|` instead of the two
-  spellings that come to mind first. What stays out of reach is a *value*: `sed -i '' s/a/b/ $f`
-  lexes cleanly and stands in the right position, and no lexer knows which file `$f` names.
+  spellings that come to mind first, and why `src/*.py` is handed to `git` to resolve rather than
+  judged by how many files came back — counting them would allow a write in proportion to how many
+  it rewrites. What stays out of reach is a *value*: `sed -i '' s/a/b/ $f` lexes cleanly and stands
+  in the right position, and no lexer knows which file `$f` names.
 
 Same standing as the git hooks: **local convenience, not the gate.** They are Claude Code-specific,
 so a contributor using another tool — or none — gets nothing from them, and CI stays the floor for

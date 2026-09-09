@@ -40,11 +40,14 @@ def _git(cwd: Path, *args: str) -> None:
 
 @pytest.fixture
 def repo(tmp_path: Path) -> Path:
-    """A scratch repo carrying one tracked file, one ignored tree, and one plan file.
+    """A scratch repo carrying two tracked files, one ignored tree, and one plan file.
 
     ``.gitignore`` mirrors the shape of the real one that matters to these hooks: a
     build/venv tree, a log, and ``.agents/plans/`` — which is ignored *and* meant to be
     read, so it is the exception the read guard has to carry.
+
+    **Two** tracked files under ``src/``, because one cannot tell a glob from a single
+    path: ``src/*.py`` matching exactly one file is the case that passes by accident.
     """
     root = tmp_path / "repo"
     (root / "src").mkdir(parents=True)
@@ -54,6 +57,7 @@ def repo(tmp_path: Path) -> Path:
 
     (root / ".gitignore").write_text(".venv/\nlogs/\n*.log\n.agents/plans/\n.env\n")
     (root / "src" / "tracked.py").write_text("x = 1\n")
+    (root / "src" / "tracked_too.py").write_text("y = 1\n")
     (root / ".venv" / "bin" / "ruff").write_text("#!/bin/sh\n")
     (root / "logs" / "run.log").write_text("noise\n")
     (root / ".agents" / "plans" / "issue-1.md").write_text("- [ ] behavior\n")
@@ -62,7 +66,7 @@ def repo(tmp_path: Path) -> Path:
     _git(root, "init", "-q", "-b", "main")
     _git(root, "config", "user.name", "Test")
     _git(root, "config", "user.email", "test@example.com")
-    _git(root, "add", ".gitignore", "src/tracked.py")
+    _git(root, "add", ".gitignore", "src/tracked.py", "src/tracked_too.py")
     _git(root, "commit", "-q", "-m", "seed")
     return root
 
@@ -126,12 +130,26 @@ class TestNoTrackedWrites:
             # `>& file` writes both streams to a file; only `>&<digit>` duplicates a
             # descriptor, and that is what separates this from the `2>&1` below.
             "uv run pytest >& src/tracked.py",
+            # A glob is a pathspec git resolves, not a value only the shell knows — it
+            # lexes whole and stands in the argument position the guard already reads.
+            # Deciding it by how *many* files came back fires backwards, allowing the
+            # write in proportion to how many it rewrites, and the multi-file edit is
+            # the case this guard exists for.
+            "sed -i '' 's/x/y/' src/*.py",
+            "echo 'x = 2' | tee src/*.py",
         ],
     )
     def test_a_write_at_a_tracked_path_is_refused(self, repo: Path, command: str) -> None:
         result = run_hook("no-tracked-writes.py", command, repo)
         assert result.returncode == BLOCK
         assert "src/tracked.py" in result.stderr
+
+    def test_a_glob_refusal_names_every_file_it_would_rewrite(self, repo: Path) -> None:
+        """The reason is the agent's only account of what the call would have done, and
+        one name out of a glob's fifty is the wrong account."""
+        result = run_hook("no-tracked-writes.py", "sed -i '' 's/x/y/' src/*.py", repo)
+        assert "src/tracked.py" in result.stderr
+        assert "src/tracked_too.py" in result.stderr
 
     @pytest.mark.parametrize(
         "command",
@@ -178,6 +196,11 @@ class TestNoTrackedWrites:
             # the loop *list* names a tracked file, and iterating over a file is not
             # writing to it.
             "for f in src/tracked.py; do echo $f; done",
+            # A directory is what the cardinality rule was really excluding: git answers
+            # a directory pathspec with every file beneath it, and none of them is the
+            # write target. Tested directly now, so the glob above can be refused.
+            "sed -i '' 's/x/y/' src",
+            "echo 'x = 2' | tee src",
         ],
     )
     def test_a_write_that_stales_nothing_is_allowed(self, repo: Path, command: str) -> None:

@@ -101,14 +101,22 @@ def _tracked_files(cwd: str, candidates: list[str]) -> list[str]:
     """The candidates git reports as tracked files, in the repo-relative form it uses.
 
     Each is asked for on its own with `--error-unmatch` so a candidate that is not a path
-    fails alone. The answer must be a *single* entry equal to the candidate itself: a
-    directory pathspec matches every file beneath it, and that is not a write target.
+    fails alone, and **every** entry git answers with is a write target. A glob is a
+    pathspec git resolves — `sed -i '' 's/x/y/' src/*.py` rewrites each file it matches —
+    so counting the answers would allow the write in proportion to how many files it
+    touches, and the multi-file edit is the case this guard exists for.
+
+    A **directory** is the one candidate whose entries are not targets: git answers a
+    directory pathspec with everything beneath it, and none of them is being written.
+    That is asked directly rather than inferred from the answer's size.
     """
     found: list[str] = []
     for cand in candidates:
         if not cand or cand.startswith("-") or cand.startswith(":"):
             continue
         path = os.path.normpath(os.path.join(cwd, os.path.expanduser(cand)))
+        if os.path.isdir(path):
+            continue
         result = subprocess.run(
             ["git", "ls-files", "--error-unmatch", "-z", "--", path],
             cwd=cwd,
@@ -117,9 +125,9 @@ def _tracked_files(cwd: str, candidates: list[str]) -> list[str]:
         )
         if result.returncode != 0:
             continue
-        entries = [e for e in result.stdout.split("\0") if e]
-        if len(entries) == 1 and entries[0] not in found:
-            found.append(entries[0])
+        for entry in result.stdout.split("\0"):
+            if entry and entry not in found:
+                found.append(entry)
     return found
 
 
