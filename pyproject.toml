@@ -59,9 +59,14 @@ python_version = "3.13"
 check_untyped_defs = true
 warn_unused_ignores = true
 warn_redundant_casts = true
-# `.claude/hooks` is agent tooling rather than engine code, but it is Python that
-# blocks tool calls, so a type error there is a guard that fails open. `ruff` already
-# reaches it under a bare `.`; this makes `mypy .` agree.
+# `.claude/hooks` is agent tooling rather than engine code, but it is Python that blocks
+# tool calls, so a type error there is a guard that fails open with nothing to say.
+#
+# It is only checked when mypy is invoked **bare**. A path argument overrides this list
+# outright, and `.` skips hidden directories — so `mypy .` reported success over a tree
+# it had never opened. Every call site therefore drops the `.` (ci.yml, .githooks/pre-push,
+# CONTRIBUTING.md, README.md, CLAUDE.md, the skills). Ruff has no such rule and reaches
+# these files under a bare `.`, which is what made the gap easy to miss.
 files = ["src", "tests", ".claude/hooks"]
 # Skill-eval fixtures are throwaway sandbox trees, not repo code, and several
 # carry the same module names on purpose (three `domain/leverage.py`). `files`

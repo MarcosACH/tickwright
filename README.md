@@ -167,7 +167,7 @@ adapters never import each other. The direction is enforced in CI by `import-lin
 uv run pytest -v          # tests (property tests via hypothesis; ≥90% coverage on the core)
 uv run ruff check .       # lint
 uv run ruff format .      # format
-uv run mypy .             # type-check
+uv run mypy               # type-check (bare: `mypy .` skips the hidden .claude/hooks)
 uv run lint-imports       # dependency-direction boundaries (ADR-0032)
 ```
 

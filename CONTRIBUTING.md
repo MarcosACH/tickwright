@@ -24,7 +24,7 @@ changes small, well-tested, and easy to read.
 | Tests | `uv run pytest -v` (property tests via `hypothesis`; target ≥90% coverage on the core) |
 | Lint  | `uv run ruff check .` |
 | Format | `uv run ruff format .` |
-| Types | `uv run mypy .` |
+| Types | `uv run mypy` (no `.` — the argument overrides `files` in `pyproject.toml` and skips the hidden `.claude/hooks`) |
 | Imports | `uv run lint-imports` (dependency-direction boundaries, ADR-0032) |
 
 The default paper-exchange + in-memory-bus path runs with **no external services and no API keys**.

@@ -107,7 +107,7 @@ A separate tier from `pytest`: it tests the skills in `.claude/skills/`, not the
 ```bash
 uv run ruff check .
 uv run ruff format .
-uv run mypy .
+uv run mypy           # bare, not `mypy .` — see below
 uv run lint-imports   # dependency-direction boundaries (ADR-0032)
 ```
 
