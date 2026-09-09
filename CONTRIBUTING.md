@@ -82,6 +82,37 @@ With `core.hooksPath` enabled (see setup):
 They exist to catch problems early; the **authoritative gate is CI**, which re-runs everything and
 can't be skipped with `--no-verify`.
 
+### Agent-loop guards (Claude Code hooks)
+
+Git hooks fire at commit time. An agent breaks a rule *mid-loop*, dozens of tool calls earlier, and
+by the time a commit exists the cost is already paid. `.claude/hooks/` closes that window: three
+`PreToolUse` guards on `Bash`, wired in the committed `.claude/settings.json`. Each reads the event
+on stdin and exits `0` to allow or `2` to block, with the reason on stderr going back to the agent.
+
+| Guard | Refuses | Stays allowed |
+| ----- | ------- | ------------- |
+| `no-tracked-writes` | `sed -i`, a `>`/`>>` redirect or `tee` aimed at a **git-tracked** file | creating a new file; `2>&1`; anything outside the repo |
+| `no-excluded-reads` | `cat`/`head`/`grep`/… of a path `git check-ignore` matches | `.agents/plans/`; a program in the **executable position**, so `.venv/bin/ruff` still runs |
+| `no-global-installs` | `pip install`, `uv pip install --system`, `uv tool install`, `pipx`, `brew`, `npm -g` | `uv add`/`uv sync`/`uvx`/`uv tool run`; `uv pip install` without `--system` |
+
+Three properties are deliberate:
+
+- **Committed, not local.** The point of turning a rule into a guard is that it reaches *other
+  people's* agents. One in `settings.local.json` would be the tribal knowledge it replaced.
+- **Derived, not listed.** Both path guards ask `git`. Copying `.gitignore`'s globs into a hook
+  would be two lists that must agree — the drift this project calls a bug — and the derived form
+  also covers whatever gets ignored next.
+- **They fail open.** A command the lexer cannot parse is allowed through. A guard that misfires on
+  input it does not understand is one an agent learns to route around, which costs more than the
+  call it wrongly blocked.
+
+Same standing as the git hooks: **local convenience, not the gate.** They are Claude Code-specific,
+so a contributor using another tool — or none — gets nothing from them, and CI stays the floor for
+everyone. They are ordinary stdlib Python with no network access; read them before you trust them.
+`tests/test_claude_hooks.py` fences all three, and asserts the wiring too: a guard nothing runs is a
+guard that does not exist. Hook config is read when a session starts, so restart Claude Code after
+changing one.
+
 #### Local hook guards
 
 `pre-commit` and `commit-msg` each finish by handing off to an optional **local hook guard**: an
