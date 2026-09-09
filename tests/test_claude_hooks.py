@@ -158,6 +158,45 @@ def python_repo(tmp_path: Path) -> Path:
     return root
 
 
+_PLAN = """# issue-900 — the leverage bound
+
+## Behavior checklist
+- [x] 1. a leverage below 1 is refused                     abc1234/def5678
+- [ ] 2. a leverage above `max_leverage` is refused
+- [ ] 3. the engine reads the resolved book
+
+## Docs-sync
+- [ ] `CLAUDE.md` gains the bound
+"""
+
+
+@pytest.fixture
+def ralph_repo(tmp_path: Path) -> Path:
+    """A scratch repo mid-slice: on ``ralph/issue-900``, with #900's plan beside it.
+
+    This is the state both fast-feedback hooks read. ``no-unlinked-prs`` derives the
+    ``Closes #900`` line it hands back from the branch name; ``resume-from-plan`` reads
+    the branch to find the plan and the plan to find what is left. Neither is told the
+    number — deriving it is the behavior under test, and it is what makes the pair
+    something other than a rule the agent has to remember.
+    """
+    root = tmp_path / "ralph-repo"
+    (root / ".agents" / "plans").mkdir(parents=True)
+    (root / "src").mkdir()
+
+    (root / ".gitignore").write_text(".agents/plans/\n")
+    (root / "src" / "leverage.py").write_text("x = 1\n")
+    (root / ".agents" / "plans" / "issue-900.md").write_text(_PLAN)
+
+    _git(root, "init", "-q", "-b", "main")
+    _git(root, "config", "user.name", "Test")
+    _git(root, "config", "user.email", "test@example.com")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "seed")
+    _git(root, "checkout", "-q", "-b", "ralph/issue-900")
+    return root
+
+
 def _run_raw(name: str, payload: str, cwd: Path) -> subprocess.CompletedProcess[str]:
     """Run one hook as a real process against whatever bytes are on stdin."""
     return subprocess.run(
@@ -668,6 +707,127 @@ class TestNoUnslicedDocReads:
 
     def test_the_hook_is_executable(self) -> None:
         assert os.access(_HOOKS / "no-unsliced-doc-reads.py", os.X_OK)
+
+
+class TestNoUnlinkedPrs:
+    """A PR that closes nothing is caught at `gh pr create`, not by a red check.
+
+    ``pr-policy``'s *Body closes an issue* step is right and stays the floor. It just
+    reports late: the PR exists by then, the check is red, and clearing it costs a
+    ``gh pr edit`` and a re-run. The branch already names the issue, so the missing line
+    is derivable rather than merely detectable — which is why the refusal hands back the
+    exact text instead of naming the rule.
+    """
+
+    def test_a_body_that_closes_nothing_is_refused(self, ralph_repo: Path) -> None:
+        result = run_hook(
+            "no-unlinked-prs.py",
+            'gh pr create --title "feat: a thing" --body "It does the thing."',
+            ralph_repo,
+        )
+        assert result.returncode == BLOCK
+
+    def test_the_refusal_carries_the_line_the_branch_implies(self, ralph_repo: Path) -> None:
+        """Answer, don't just refuse. ``ralph/issue-900`` is the whole derivation, so the
+        agent gets the text to paste rather than a rule to look up."""
+        result = run_hook(
+            "no-unlinked-prs.py",
+            'gh pr create --title "feat: a thing" --body "It does the thing."',
+            ralph_repo,
+        )
+        assert "Closes #900" in result.stderr
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "Closes #900",
+            "closes #900",
+            "Fixes #900",
+            "fixed #900",
+            "Resolves #900",
+            "Does the thing.\n\nCloses #900\n",
+        ],
+    )
+    def test_a_body_that_closes_an_issue_is_allowed(self, ralph_repo: Path, body: str) -> None:
+        """Every spelling GitHub honours, because the hook holds ``pr-policy``'s pattern
+        rather than this project's narrower house style. A hook stricter than the check
+        it front-runs refuses bodies that would have passed, which is a false refusal."""
+        command = f'gh pr create --title "t" --body {json.dumps(body)}'
+        assert run_hook("no-unlinked-prs.py", command, ralph_repo).returncode == ALLOW
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            'gh pr create -b "no reference"',
+            'gh pr create --body="no reference"',
+            'gh -R MarcosACH/tickwright pr create --assignee @me --body "no reference"',
+            'git push -u origin HEAD\ngh pr create --title "t" --body "no reference"',
+        ],
+    )
+    def test_every_shape_the_body_arrives_in_is_read(self, ralph_repo: Path, command: str) -> None:
+        """The short flag, the ``=`` form, a flag ahead of the subcommand, and the
+        multi-line script — the last of which is the regression #307 found live, where
+        the lexer discards newlines and a whole script reads as one segment."""
+        assert run_hook("no-unlinked-prs.py", command, ralph_repo).returncode == BLOCK
+
+    def test_a_body_file_is_read_and_judged(self, ralph_repo: Path) -> None:
+        (ralph_repo / "body.md").write_text("It does the thing.\n")
+        result = run_hook("no-unlinked-prs.py", "gh pr create -F body.md", ralph_repo)
+        assert result.returncode == BLOCK
+        assert "Closes #900" in result.stderr
+
+    def test_a_body_file_that_closes_is_allowed(self, ralph_repo: Path) -> None:
+        (ralph_repo / "body.md").write_text("It does the thing.\n\nCloses #900\n")
+        command = "gh pr create --body-file body.md"
+        assert run_hook("no-unlinked-prs.py", command, ralph_repo).returncode == ALLOW
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            # No body this hook can see: gh builds one from the commits, or opens an
+            # editor, or hands the whole thing to a browser. Judging what is not there
+            # is guessing, and a guard that guesses gets routed around.
+            'gh pr create --title "t" --fill',
+            'gh pr create --title "t" --fill-verbose',
+            "gh pr create --web",
+            'gh pr create --title "t"',
+            "gh pr create -F -",
+            "gh pr create -F missing.md",
+            # Not the subject at all.
+            'gh pr edit 310 --body "no reference"',
+            'gh issue create --title "t" --body "no reference"',
+            "gh pr view 310",
+            'echo "gh pr create --body nothing"',
+        ],
+    )
+    def test_a_body_this_hook_cannot_read_is_not_one_it_may_refuse(
+        self, ralph_repo: Path, command: str
+    ) -> None:
+        assert run_hook("no-unlinked-prs.py", command, ralph_repo).returncode == ALLOW
+
+    def test_a_branch_that_names_no_issue_is_still_refused(self, ralph_repo: Path) -> None:
+        """The rule is the body, not the branch. Off a ``ralph/issue-<N>`` branch there is
+        no number to hand back, so the refusal says what is missing without inventing
+        one — a fabricated number is worse than none."""
+        _git(ralph_repo, "checkout", "-q", "-b", "spike/try-something")
+        result = run_hook(
+            "no-unlinked-prs.py", 'gh pr create --title "t" --body "nothing"', ralph_repo
+        )
+        assert result.returncode == BLOCK
+        assert "Closes #" in result.stderr
+        assert "#900" not in result.stderr
+
+    def test_another_tool_is_not_this_hooks_business(self, ralph_repo: Path) -> None:
+        result = run_tool_hook(
+            "no-unlinked-prs.py",
+            "Read",
+            {"file_path": str(ralph_repo / "src" / "leverage.py")},
+            ralph_repo,
+        )
+        assert result.returncode == ALLOW
+
+    def test_an_unreadable_event_is_not_one_to_block_on(self, ralph_repo: Path) -> None:
+        assert _run_raw("no-unlinked-prs.py", "{oops", ralph_repo).returncode == ALLOW
 
 
 class TestRuffOnWrite:
