@@ -63,7 +63,28 @@ class WsSession:
         self._subscribe = subscribe
         self._consume = consume
         self._connection: WsConnection | None = None
+        self._opened: WsConnection | None = None
         self._stopping = False
+
+    async def start(self) -> None:
+        """Open and subscribe the first socket now, and return.
+
+        Optional, and only the feed calls it: a caller that needs a *refused*
+        connect to be an error rather than a retry uses this, because inside
+        ``run()`` the same failure is paced and gone round again, which is right
+        for a reconnect and wrong for a boot (#226). ``OSError`` propagates
+        untouched — the whole point is that someone above can see it.
+
+        The socket it opens is handed to ``run()`` rather than consumed here, so
+        a caller that starts and never runs holds an idle subscribed socket that
+        ``stop()`` still closes. A caller that skips this — ``FundingIngest``,
+        whose connect has no boot to fail — sees ``run()`` behave exactly as it
+        always has.
+        """
+        connection = await self._connect(self._config.ws_url)
+        self._connection = connection
+        await self._subscribe(connection)
+        self._opened = connection
 
     async def run(self) -> None:
         """Hold the subscription open until ``stop()``, reconnecting as needed.
@@ -78,19 +99,26 @@ class WsSession:
             maximum=self._config.reconnect_max_backoff_seconds,
         )
         while not self._stopping:
-            try:
-                connection = await self._connect(self._config.ws_url)
-            except OSError:
-                # Connect refused/unreachable: pace the retry on the injected
-                # clock, doubling up to the cap (virtual under ManualClock), so
-                # an outage can never turn into a reconnect storm.
-                await backoff.sleep_on(self._clock)
-                continue
+            # A socket ``start()`` already opened and subscribed is consumed as
+            # it stands; every later turn of this loop opens its own. Taken
+            # rather than read, so a reconnect after the first one cannot pick
+            # up the dead socket the boot handed over.
+            connection = self._opened
+            self._opened = None
+            if connection is None:
+                try:
+                    connection = await self._connect(self._config.ws_url)
+                except OSError:
+                    # Connect refused/unreachable: pace the retry on the injected
+                    # clock, doubling up to the cap (virtual under ManualClock), so
+                    # an outage can never turn into a reconnect storm.
+                    await backoff.sleep_on(self._clock)
+                    continue
+                # Held for stop(), which ends run() by closing the socket the
+                # consumer is blocked on — the one thing that can unblock a reader.
+                self._connection = connection
+                await self._subscribe(connection)
             backoff.reset()
-            # Held for stop(), which ends run() by closing the socket the
-            # consumer is blocked on — the one thing that can unblock a reader.
-            self._connection = connection
-            await self._subscribe(connection)
             await self._consume(connection)
             # The consumer is done: a stop() is final; anything else was the
             # venue hanging up, so back off once and go resubscribe.

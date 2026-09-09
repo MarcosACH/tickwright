@@ -49,7 +49,18 @@ class ReplayFeed:
         # Per-symbol source sequence, disambiguating the weak replay dedup key.
         self._seq_by_symbol: dict[str, int] = {}
 
-    async def start(self) -> None:
+    async def start(self) -> None:  # noqa: B027 - a file needs no connecting.
+        """No-op: replay has no venue to reach, so there is nothing to fail on.
+
+        Deliberately empty rather than absent. The seam's three members mean the
+        same thing on every adapter — align, produce, release — and a replay
+        simply has nothing to align, exactly as ``HyperliquidExchange`` has
+        nothing to supervise in ``run()``. Draining the file here instead would
+        make the runner's inline ``await`` at ADR-0024 step 7 replay the whole
+        recording before the supervised task was ever created.
+        """
+
+    async def run(self) -> None:
         for row in self._read_rows():
             # ``_to_tick`` advances virtual time, which may release parked
             # ``sleep_until`` waiters (ADR-0033). Yield once so a matured
@@ -70,7 +81,7 @@ class ReplayFeed:
             await self._bus.publish(tick)
 
     async def stop(self) -> None:  # noqa: B027 - replay has no live resources to release.
-        """No-op: a replay drains at ``start`` and holds nothing open."""
+        """No-op: a replay drains at ``run`` and holds nothing open."""
 
     def _read_rows(self) -> Iterator[_TickRow]:
         with self._path.open("r", encoding="utf-8") as handle:

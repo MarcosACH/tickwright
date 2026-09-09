@@ -1145,6 +1145,9 @@ class _HangingFeed:
     async def start(self) -> None:
         return None
 
+    async def run(self) -> None:
+        return None
+
     async def stop(self) -> None:
         await asyncio.Event().wait()
 
@@ -1158,6 +1161,9 @@ class _BlockingFeed:
         self.started = asyncio.Event()
 
     async def start(self) -> None:
+        return None
+
+    async def run(self) -> None:
         self.started.set()
         await asyncio.Event().wait()
 
@@ -1400,10 +1406,77 @@ class _FaultingFeed:
         self._timeline = timeline if timeline is not None else []
 
     async def start(self) -> None:
+        return None
+
+    async def run(self) -> None:
         raise InvariantViolation("the read loop broke an engine assumption")
 
     async def stop(self) -> None:
         self._timeline.append("feed.stop")
+
+
+class _UnreachableFeed:
+    """A feed the venue refuses at the boot connect — the defect #227 closed.
+
+    The refusal is in ``start()``, which is the whole point: before the triple,
+    ``start()`` *was* the loop, so this failure had nowhere to land but an
+    infinite backoff inside the supervised task."""
+
+    def __init__(self) -> None:
+        self.ran = False
+
+    async def start(self) -> None:
+        raise ConnectionRefusedError("the venue refused the market-data socket")
+
+    async def run(self) -> None:
+        self.ran = True
+
+    async def stop(self) -> None:
+        return None
+
+
+def test_a_feed_the_venue_refuses_at_the_boot_connect_faults_the_run(tmp_path: Path) -> None:
+    """ADR-0024 step 7, the half the seam had no member for (#227).
+
+    An unreachable feed is now a boot refusal like any other: the inline
+    ``await self._feed.start()`` raises, the ``TaskGroup`` aborts, and the run
+    exits non-zero ``FAULTED``. What it must never do is what it used to —
+    reach the supervised task and back off there forever, leaving a run whose
+    exit code says healthy and whose feed has never connected.
+
+    ``engine.feed_started`` is the witness rather than ``ComponentState``: the
+    state reads ``RUNNING`` from step 6, one line ahead of the connect, so the
+    event is what distinguishes a feed that is up from one that got as far as
+    being asked. ``ran`` is the second witness, from the other side — the
+    supervised task the old shape would have parked in was never created.
+    """
+    feed = _UnreachableFeed()
+
+    async def refused_boot() -> tuple[int, Engine]:
+        bus = InMemoryBus()
+        clock = ManualClock()
+        store = SQLiteStore(tmp_path / "saga.db")
+        exchange = PaperExchange(
+            bus=bus,
+            clock=clock,
+            fill_model=ImmediateFillModel(),
+            genesis_collateral=GENESIS,
+            account_net=dict,
+        )
+        engine = Engine(bus=bus, clock=clock, store=store, exchange=exchange, feed=feed)
+        return await engine.run(), engine
+
+    with capture_events() as logs:
+        exit_code, engine = asyncio.run(refused_boot())
+
+    names = [log["event"] for log in logs]
+    assert exit_code != 0
+    assert engine.state is ComponentState.FAULTED
+    assert "engine.feed_started" not in names, "a refused connect must not read as a started feed"
+    assert not feed.ran, "the supervised task must never be created on a refused boot"
+    faults = [log for log in logs if log["event"] == "engine.faulted"]
+    assert len(faults) == 1
+    assert "ConnectionRefusedError" in faults[0]["error"]
 
 
 def _kafka_bus(broker: FakeKafkaBroker) -> KafkaBus:

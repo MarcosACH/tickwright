@@ -28,6 +28,7 @@ from .errors import (
     VenueReadUnresolvable,
 )
 from .events import (
+    AccountModeVerdict,
     CancelSignal,
     CashCorrection,
     Event,
@@ -87,18 +88,28 @@ from .position import (
     account_net_size,
 )
 from .protocols import (
+    AccountAnchor,
     Clock,
     EventBus,
     Exchange,
     Handler,
     MarketFeed,
+    OrderAnchor,
     Portfolio,
     PreTradeGuard,
     ReplayClock,
     Store,
     Strategy,
 )
-from .valuation import LiquidationSource, account_unrealized_pnl, account_view, position_view
+from .valuation import (
+    LiquidationSource,
+    account_maintenance_margin,
+    account_margin_used,
+    account_notional,
+    account_unrealized_pnl,
+    account_view,
+    position_view,
+)
 
 __all__ = [
     # enums
@@ -124,6 +135,7 @@ __all__ = [
     "EMPTY_LEVERAGE_BOOK",
     "UNATTRIBUTED",
     "Account",
+    "AccountModeVerdict",
     "AccountSpec",
     "AccountView",
     "Approved",
@@ -182,23 +194,28 @@ __all__ = [
     "funding_boundaries",
     # the Σ-invariant's left-hand side
     "account_net_size",
+    "account_notional",
     # the cash line a venue snapshot implies — the genesis and the reconcile
     # anchor read it from one place
     "venue_cash",
     # Tier-2 view assembly (pure, never stored)
     "LiquidationSource",
+    "account_maintenance_margin",
+    "account_margin_used",
     "account_unrealized_pnl",
     "account_view",
     "position_view",
     # retry pacing
     "Backoff",
     "Deadline",
-    # seam Protocols
+    # seam Protocols — ``Exchange`` composes the two anchors beside it
+    "AccountAnchor",
     "Clock",
     "EventBus",
     "Exchange",
     "Handler",
     "MarketFeed",
+    "OrderAnchor",
     "Portfolio",
     "PreTradeGuard",
     "ReplayClock",

@@ -1411,6 +1411,10 @@ _SEAM_CLAIMS = {
     "fetch_order": "test_fetch_order_bundles_the_venue_status_and_fills_into_one_view",
     # test_account.py — the module that owns what clearinghouseState means.
     "fetch_account_state": "test_a_recorded_cross_snapshot_normalizes_to_the_measured_account_figures",
+    # test_preflight.py — the module that owns the mode allowlist on both paths.
+    "verify_account_mode": (
+        "test_an_in_flight_mode_the_gate_would_have_refused_is_a_verdict_not_a_refusal"
+    ),
     # test_account.py — the module that owns what qualifies an account id.
     "account_spec": "test_the_account_id_is_qualified_by_venue_network_and_address",
     "instrument_specs": "test_the_venue_hands_out_the_meta_sourced_specs_by_copy",

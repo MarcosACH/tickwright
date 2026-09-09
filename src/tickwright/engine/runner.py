@@ -51,7 +51,7 @@ from .cadence import run_cadence
 from .checkpoint import Checkpointer
 from .execution import ExecutionManager
 from .guard import NoopGuard
-from .ledger_reconcile import LedgerReconciliation
+from .ledger_reconcile import LedgerReconciliation, ValuationBand
 from .portfolio import PortfolioProjection
 from .reconcile import ReconcileConfig, Reconciler
 from .strategy_host import StrategyHost
@@ -65,6 +65,16 @@ class EngineConfig:
     shutdown_timeout_seconds: float = 10.0
     tick_staleness_ns: int | None = None
     reconcile: ReconcileConfig | None = None
+    band: ValuationBand = ValuationBand()
+    """The Tier-2 alert tolerance (ADR-0040 §6), the one knob its cycle owns.
+
+    Whole, not ``| None`` like ``reconcile`` beside it: that one is optional
+    because the runner *also* paces its own cadences off it and so has to
+    resolve it here either way, while this one is read once and handed
+    straight on — an unconfigured run and a run configured to the defaults are
+    the same run, so there is nothing for the ``None`` to mean.
+    """
+
     run_id: str | None = None
     """The correlation id for this run (ADR-0020); ``None`` generates one."""
 
@@ -135,7 +145,7 @@ class Engine:
         # is real — the cadence below — rather than turning this attribute
         # ``None`` and handing every later reader a second thing to unwrap.
         self._ledger_reconciler = LedgerReconciliation(
-            exchange=exchange, checkpointer=self._checkpointer
+            exchange=exchange, checkpointer=self._checkpointer, band=self._config.band
         )
         self._host = StrategyHost(
             bus=bus, clock=clock, store=store, tick_staleness_ns=self._config.tick_staleness_ns
@@ -247,8 +257,11 @@ class Engine:
                 # possible after the barrier cleared, so nothing places before
                 # reconciliation completes. Replay end-of-file ends the task but
                 # not the run — like the CLI, the engine stops only when told to.
+                # The connect is inline and the loop is supervised, for the
+                # reasons ADR-0024 step 7's amendment states in full.
+                await self._feed.start()
                 named_event(NamedEvent.ENGINE_FEED_STARTED)
-                self._feed_task = tg.create_task(self._feed.start())
+                self._feed_task = tg.create_task(self._feed.run())
                 tg.create_task(self._stop_when_requested())
         except Exception as exc:
             # The first raw-handler exception aborted the TaskGroup and

@@ -91,7 +91,7 @@ def _run(
     bus.subscribe(ExecutionReport, manager.on_execution_report)
     bus.subscribe(OrderEvent, strategy.on_order_event)
 
-    asyncio.run(feed.start())
+    asyncio.run(feed.run())
     return recorded, strategy, store
 
 

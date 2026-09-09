@@ -91,6 +91,13 @@ class NamedEvent(StrEnum):
     # outcome those counts would hide: a Tier-2 figure whose mark is absent is
     # dropped rather than reported (ADR-0041 §6), which is correct and would
     # otherwise make a pass that never looked identical to one that agreed.
+    # ``suppressed`` is the fourth, and the other half of that pair: a figure
+    # that *was* computed, cleared the band, and was withheld anyway because the
+    # mark behind it was too old to band (ADR-0040 §6). The two range over
+    # different sets — dropped before the band against withheld after it — which
+    # is what lets an operator tell a book that was never valued from one whose
+    # mark stream froze. Either count alone reads as the silence a healthy book
+    # also produces.
     ACCOUNT_RECONCILED = "account.reconciled"
     # The same grain's failed read: the account anchor came back empty, so
     # nothing was inferred from it rather than reading an outage as a flat book
@@ -127,6 +134,72 @@ class NamedEvent(StrEnum):
     # landed is worse than the silence: it would close the audit question it
     # exists to answer with the wrong answer.
     ACCOUNT_HEALED = "account.healed"
+    # The cash heal the cycle refused because the venue's account abstraction
+    # mode could no longer be verified (ADR-0046 §4). The account grain's
+    # cross-check has stopped; the position grain and the local ledger carry on.
+    #
+    # Deliberately **not** a ``*_DIVERGENCE``. Its two neighbours report a
+    # number disagreeing with the venue; this one reports that the two numbers
+    # can no longer be compared at all, which is a different thing to page on —
+    # a divergence asks which side is wrong, this asks nobody anything until an
+    # operator puts the account back.
+    #
+    # ``reason`` carries ``changed`` against ``unreadable``, the one distinction
+    # the control flow does *not* make: both fail closed, because an unverified
+    # mode is not evidence of an unchanged one. It exists for the operator, who
+    # is sent to the venue UI by one and to the network by the other.
+    #
+    # The ``unreadable`` half arrives **beneath** an ``EXCHANGE_REQUEST_FAILED``
+    # naming the ``userAbstraction`` read that failed, since a mode the adapter
+    # could not read is a failed venue read like any other. Two records rather
+    # than one because they answer different questions: that one says why the
+    # venue could not be read and quotes the body, this one says what the engine
+    # stopped doing about it. A ``changed`` mode has no such pair — the venue
+    # answered, and the answer was a mode we refuse.
+    ACCOUNT_MODE_UNVERIFIED = "account.mode_unverified"
+    # A Tier-2 figure the cycle recomputed and the venue's own number disagreed
+    # with by more than the band allows (ADR-0040 §6). **Alert-only, always**:
+    # Tier-2 is recomputed from ``(position, mark)`` on every read and never
+    # stored, so there is nothing here to heal — a stale mark is not a wrong
+    # ledger, and a correction would be one applied to a number that will be
+    # thrown away and derived again on the next read.
+    #
+    # Carries ``field``/``symbol``/``ledger``/``venue``, the shape
+    # ``account.healed`` carries and for the same reason: a delta cannot tell a
+    # mark the engine has not seen yet from a position it has mis-valued. It
+    # deliberately does **not** carry the band it broke — the band is config an
+    # operator already has, while the pair is the only thing the pass knows.
+    VALUATION_DIVERGENCE = "valuation.divergence"
+    # The venue's stored leverage or margin mode for a held symbol no longer
+    # equal to the pair config asked for (ADR-0044 §10). Its neighbour above
+    # reports a *computed* number drifting inside a tolerance; this reports a
+    # discrete **operator setting**, so the comparison is an exact match and
+    # there is no band — a pair has nothing to measure a tolerance in.
+    #
+    # **Alert-only, and specifically never a re-push.** An operator who lowers a
+    # leverage in the venue UI to de-risk a live position is making a decision
+    # about live risk with more context than a config file has; an engine that
+    # re-imposed the boot-time value would undo that silently, and at the moment
+    # it matters most. Config wins at startup, the venue wins in flight.
+    #
+    # Carries ``symbol`` plus **both** pairs, spelled out —
+    # ``configured_mode``/``configured_leverage`` against
+    # ``venue_mode``/``venue_leverage``. Configured rather than "ledger",
+    # because the engine's side of this comparison is what an operator wrote and
+    # not a figure the ledger accumulated, which is the one place this record's
+    # vocabulary parts from its two neighbours'. Both sides ride it for the
+    # reason they do: the operator who made the change is being told which of
+    # the two settings the margin model keeps computing against.
+    #
+    # Plus one bit, ``declared``, which is the caveat on that word. The check
+    # ranges over the venue's rows, so it reaches a symbol the resolved book
+    # never named — a leftover position, or one opened by hand — where the
+    # engine's side is the safe fallback rather than a choice. Still alerted,
+    # because the fallback is what the margin model really computes that row
+    # against once the Tier-1 heal books it in; but ``declared=false`` is
+    # different advice, and an operator sent to reconcile a config that does not
+    # mention the symbol is being sent to the wrong file.
+    LEVERAGE_DIVERGENCE = "leverage.divergence"
 
     # A live-exchange request that yielded no usable answer, on either path and
     # for either reason (``HyperliquidExchange``): a send or read that failed in

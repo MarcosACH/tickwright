@@ -95,10 +95,10 @@ auth, quirk translation — and importing no other adapter. It provides both a `
 `Exchange`, and sources its own `InstrumentSpec`s. Study
 [`venues/hyperliquid/`](../src/tickwright/venues/hyperliquid/) as the reference.
 
-- [ ] Create `src/tickwright/venues/<venue>/` with a `MarketFeed` adapter (`start`/`stop`, publishes
-  `MarketTick`s **and `MarkTick`s** — the mark is market data and enters here, never off a reconcile
-  pull, so a feed that omits it leaves every Tier-2 valuation reading `None`, ADR-0039), an
-  `Exchange` adapter (`start`/`run`/`stop` plus
+- [ ] Create `src/tickwright/venues/<venue>/` with a `MarketFeed` adapter (`start`/`run`/`stop`, publishes
+  `MarketTick`s **and `MarkTick`s** — the obligation and its consequence are stated on the
+  [`MarketFeed` Protocol](../src/tickwright/domain/protocols.py) itself, and made executable by the
+  shared feed contract in the TDD bullet below), an `Exchange` adapter (`start`/`run`/`stop` plus
   `place`/`cancel`/`fetch_order`/`fetch_account_state`/`account_spec`/`instrument_specs`), spec
   sourcing, and a `<Venue>Config`.
 - [ ] Honor the `Exchange` contracts: a failed read is **never venue truth** (never `[]`, never a
@@ -118,10 +118,16 @@ auth, quirk translation — and importing no other adapter. It provides both a `
   barrier reads an already-aligned venue. Retry a transient venue blip inside the
   `startup_reconciliation_timeout` budget yourself; the runner does not retry the call, so raising
   spends the last of it. That budget is **yours to enforce** — the runner neither retries nor bounds
-  `start()`, so it **must not hang**: a wedged boot has no bound and no operator escape (the task
-  that watches SIGINT is not created until the start sequence returns, so SIGKILL is the only way
-  out). Put a timeout on any blocking venue call you make here.
-  `run()` is the **supervised long-lived half** — the peer of `MarketFeed.start()`, one seam over.
+  `start()`, so it **must not hang**: a wedged boot has no bound and no operator escape. The task
+  that watches SIGINT is created only *after* the last inline `start()` — the exchange's at step 4
+  and the feed's at step 7 are both ahead of it — so for either of them SIGKILL is the only way out.
+  Put a timeout on any blocking venue call you make here, as a constant of your own rather than a
+  knob: the shipped websocket transport bounds its handshake with `WS_OPEN_TIMEOUT_SECONDS` beside
+  `post_json`'s `ClientTimeout`, and neither is injected config — `startup_timeout_seconds` is a
+  *retry budget across boot guards* (ADR-0044 §6), which is a different thing from a per-call bound.
+  `run()` is the **supervised long-lived half** — the peer of `MarketFeed.run()`, one seam over,
+  and since [#227](https://github.com/MarcosACH/tickwright/issues/227) the two seams take the same
+  three members meaning the same three things, so this whole bullet reads across both.
   Anything of yours that loops for the life of the run goes here and nowhere else: the runner
   task-creates it inside its `TaskGroup`, so a failure in it aborts the group and faults the engine
   **at the moment it happens**. A loop you spawn for yourself in `start()` has no fault channel at
@@ -153,6 +159,14 @@ auth, quirk translation — and importing no other adapter. It provides both a `
   feed drives virtual time (a live feed uses `LiveClock`).
 - [ ] Confirm the import boundary: `uv run lint-imports` must pass — the package imports `domain` and
   `observability` only, never `engine` or another adapter.
+- [ ] Drive your `MarketFeed` half through the **shared feed contract**
+  ([`tests/_support/feed_contract.py`](../tests/_support/feed_contract.py)): subscribe with
+  `record_market_data(bus)`, drive your feed however your feed is driven — a file, recorded frames,
+  whatever your transport needs — and hand the transcript to `assert_every_traded_symbol_is_marked`,
+  as both shipped adapters do. The driving is yours because the two shipped feeds share no lifecycle
+  worth parametrizing (one reads a finite file and returns, the other opens a socket and does not);
+  the obligation is not yours to restate. Assert *how* you source the mark in your own suite —
+  provenance is one per deployment by design (ADR-0039) and deliberately outside the contract.
 - [ ] TDD the adapters at their own seam, and give the `Exchange` half a **claim per member**:
   `assert isinstance(exchange, Exchange)`, plus a `_SEAM_CLAIMS` map — member → the test that says
   what that member does on *your* venue — handed to `assert_every_member_is_claimed`

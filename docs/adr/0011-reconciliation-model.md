@@ -36,6 +36,27 @@ ADR-0009).
    window** (default ~30s ≈ one slow cycle): skip ghost evaluation for orders whose last saga
    event is too recent — the grace clock never arms — to avoid racing the venue's not-yet-
    propagated open-orders snapshot. The fill-history cross-check still runs inside the window.
+   **(Amended by #243 — this invariant governs the startup pass too:**
+   it was silently read as exempting it.
+   The mass rebuild used to ghost a `LIVE` saga on the *first* absent read and report
+   the pass successful — terminal, since the `StartupBarrier` only re-drives a step that returns
+   `False`, so there was no second look. Boot may not answer "is this order gone?" more
+   aggressively than the running engine does, and boot is where it has the least standing to:
+   a restart moments after a placement ack reads a venue whose record has not propagated to the
+   read node, which is the exact race the second clause exists to prevent. The counter-argument
+   in the code — the venue once ACKed it, so an empty read means gone — is true and applies
+   verbatim at runtime, where the engine nonetheless waits the window out. Startup now puts an
+   absent resting order to the same `GhostGate`: it **arms** the grace clock rather than
+   concluding on it, and the pass still returns `True`, because the read succeeded and only the
+   verdict is deferred. Freezing instead would spend the whole window and then fault startup on
+   one absent order, which is a worse trade than a slower first ghost. The window is therefore
+   measured from the boot instant, so a boot that re-drives across it ghosts on the startup pass
+   itself; a record that returns first resets it, like any other presence. What boot cannot use
+   is the **protection** clause: `Cache.rebuild()` deliberately clears `_last_event_ns`, so every
+   recovered saga reads `None` recency and the pre-filter has nothing to protect with — grace is
+   boot's only guard, and that is now the stated reason rather than an accident of the rebuild.
+   Unchanged: a `PENDING`/`SUBMITTED` saga the venue has no record of still resolves `FAILED` on
+   the startup pass, a different resolution under *Resolutions* below. [#243]**)**
 4. **Fill history is mandatory.** Venue open-orders endpoints exclude closed orders, so
    open-orders alone cannot distinguish "missing" from "recently closed." Always consult fill
    history (Hyperliquid `userFills`/`userFillsByTime`).

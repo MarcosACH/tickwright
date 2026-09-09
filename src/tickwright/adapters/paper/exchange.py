@@ -34,6 +34,7 @@ from decimal import Decimal
 
 from tickwright.domain import (
     EMPTY_LEVERAGE_BOOK,
+    AccountModeVerdict,
     AccountSpec,
     Clock,
     EventBus,
@@ -423,6 +424,24 @@ class PaperExchange:
         *no truth to compare against ⇒ never heal*, reached by a different route.
         """
         return None
+
+    async def verify_account_mode(self) -> AccountModeVerdict:
+        """``VERIFIED`` **always**, and for the mirror of the reason above.
+
+        The guard exists because a live venue's ``accountValue`` means something
+        different under a pooled account abstraction mode (ADR-0046 §1). This
+        venue has no abstraction mode to be in, no ``accountValue`` to be
+        misread, and — by the method above — no account truth for a Tier-1 cash
+        heal to move the ledger toward. So there is nothing to verify, which is
+        a different answer from nothing verified.
+
+        Fail-closed does not apply here the way it does to the read above: this
+        verdict gates a heal that reads ``fetch_account_state``, so a paper
+        cadence is already frozen one step earlier. Refusing here would add no
+        safety and would make a venue that answers the question look like one
+        that was never asked (ADR-0046 §4: paper performs no check).
+        """
+        return AccountModeVerdict.VERIFIED
 
     def _status_report(
         self, order: PlaceOrder, status: OrderState, *, reason: str | None = None

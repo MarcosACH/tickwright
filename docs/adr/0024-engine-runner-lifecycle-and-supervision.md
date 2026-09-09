@@ -78,6 +78,25 @@ those components.
 7. Start the `MarketFeed` **last** — the first tick is only possible after the barrier clears, so
    no order can be placed before reconciliation completes (ADR-0011 inv 5).
 
+**(Amended by [#227](https://github.com/MarcosACH/tickwright/issues/227): step 7 is now two
+calls, not one.** `MarketFeed` took the `start()`/`run()`/`stop()` triple `Exchange` was given in
+[#226](https://github.com/MarcosACH/tickwright/issues/226), so the runner `await`s `feed.start()`
+inline and *then* task-creates `feed.run()` in the `TaskGroup`. Before this, `start()` **was** the
+loop, and the two adjacent `create_task` lines did the same thing under different names one seam
+apart. The consequence was not cosmetic: a first connect the venue refused folded into an infinite
+backoff **inside** the supervised task, so there was no instant at which the runner could fail a
+boot on an unreachable feed — the engine reached `RUNNING` with a feed that had never connected, and
+nothing said so, while `Exchange.start()` had refused at step 4 since ADR-0046. The inline `await`
+is that instant; a raise there aborts the group like any other boot refusal.
+
+The connect stays **at step 7 rather than moving up beside `Exchange.start()`** at step 4. Nothing
+is read off the socket until `run()`, so connecting earlier would leave it buffering across the
+entire barrier and the first thing `run()` read would be stale by however long reconciliation took.
+The ordering this step exists to state — the feed is last, no tick before the barrier — is
+therefore unchanged; it is now enforced across two calls instead of one. An adapter with nothing to
+reach returns at once from `start()` and that is a legitimate implementation, not an omission:
+`ReplayFeed` has no venue, exactly as `HyperliquidExchange` has no loop to supervise in `run()`.**)**
+
 **Barrier-failure policy: bounded retry, then fail-fast.** The barrier retries the mass-rebuild
 with backoff up to `startup_reconciliation_timeout`. A transient boot-time venue blip resolves and
 we proceed; a sustained outage trips the timeout → `FAULTED` → the process exits non-zero → the
