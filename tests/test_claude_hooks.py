@@ -17,15 +17,37 @@ The hooks are held to the stdlib alone and to ``/usr/bin/env python3``: they run
 reliably on a hook's PATH.
 """
 
+import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
 _HOOKS = Path(__file__).resolve().parent.parent / ".claude" / "hooks"
+
+
+def _load_guard(filename: str) -> ModuleType:
+    """Import a hook as a module, for the few assertions that need its own helpers.
+
+    Every other case here drives a hook as a real process, which is what it is — but a
+    guard's *inputs* are sometimes checkable only from inside, and scraping a regex out
+    of the source text would be a second copy of it. A hook runs as a script, so its own
+    directory is `sys.path[0]`; importing one means putting it there by hand.
+    """
+    if str(_HOOKS) not in sys.path:
+        sys.path.insert(0, str(_HOOKS))
+    spec = importlib.util.spec_from_file_location(filename.removesuffix(".py"), _HOOKS / filename)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
 
 _ENV = {
     **os.environ,
@@ -111,6 +133,13 @@ def docs_repo(tmp_path: Path) -> Path:
         "**Engine**:\nThe process that hosts the pipeline.\n\n"
         "**EventBus**:\nThe transport everything couples through.\n\n"
         "## Relationships\n\n- The Engine hosts one EventBus.\n"
+    )
+    # Nested one level below the glob, which is what the depth comparison in `_in_corpus`
+    # decides on: `fnmatch`'s `*` crosses `/` happily, so `docs/adr/*.md` would claim this
+    # too and an archived ADR would be refused as if it were the live corpus.
+    (root / "docs" / "adr" / "archive").mkdir()
+    (root / "docs" / "adr" / "archive" / "0001-old.md").write_text(
+        "# ADR-0001: A retired decision\n\n## Decision\n\nSuperseded.\n"
     )
     (root / "docs" / "module-maps" / "surface.md").write_text("# A surface\n\n## Module\n\nIt.\n")
     (root / "docs" / "research" / "note.md").write_text(
@@ -537,13 +566,40 @@ class TestNoUnslicedDocReads:
         assert path in result.stderr
 
     @pytest.mark.parametrize(
-        "path", ["README.md", "docs/agents/guide.md", ".agents/tools/doc-slice"]
+        "path",
+        ["README.md", "docs/agents/guide.md", ".agents/tools/doc-slice"],
     )
     def test_a_file_outside_the_corpus_is_read_whole(self, docs_repo: Path, path: str) -> None:
         """The corpus is four globs, not "documentation". ``docs/agents/`` is workflow
         prose read end to end on purpose, and a guard that reached it would be charging
         for the cheap files to protect the expensive ones."""
         result = run_tool_hook("no-unsliced-doc-reads.py", "Read", {"file_path": path}, docs_repo)
+        assert result.returncode == ALLOW
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "Read docs/adr/archive/0001-old.md",
+            "cat docs/adr/archive/0001-old.md",
+        ],
+    )
+    def test_a_file_one_level_below_a_corpus_glob_is_read_whole(
+        self, docs_repo: Path, command: str
+    ) -> None:
+        """``fnmatch``'s ``*`` crosses ``/``, so ``docs/adr/*.md`` claims
+        ``docs/adr/archive/0001-old.md`` unless the depth is compared too. An archive is
+        where a superseded ADR goes precisely so that nobody plans against it, and
+        charging the slicing toll on one would be the guard reaching past its corpus.
+
+        Both doors, because the depth test lives in ``_in_corpus``, which is behind both
+        and would be deleted once for both."""
+        tool, path = command.split(" ", 1)
+        if tool == "Read":
+            result = run_tool_hook(
+                "no-unsliced-doc-reads.py", "Read", {"file_path": path}, docs_repo
+            )
+        else:
+            result = run_hook("no-unsliced-doc-reads.py", command, docs_repo)
         assert result.returncode == ALLOW
 
     @pytest.mark.parametrize(
@@ -851,6 +907,29 @@ class TestWiring:
         assert len(globs) == 4, globs
         for glob in globs:
             assert list(root.glob(glob)), glob
+
+    def test_the_glossary_still_matches_the_shape_its_index_is_built_from(self) -> None:
+        """The third way this guard can be disarmed from outside its own file.
+
+        ``CONTEXT.md`` is the one corpus file indexed by term rather than by heading, and
+        ``_refusal_for`` **allows** the whole read when that index comes back empty — a
+        refusal with nothing to offer is an obstacle, not a guard. So reformatting the
+        glossary to ``**Term** — …`` would leave the largest file in the corpus unguarded
+        with every other test here green.
+
+        The count is read from ``CLAUDE.md`` rather than written down twice: the prose
+        there quotes it, and a bare ``> 0`` would let the index shrink silently while the
+        claim went stale. One number, one place, and this is what compares them.
+        """
+        root = _HOOKS.parent.parent
+        guard = _load_guard("no-unsliced-doc-reads.py")
+
+        index = guard._term_index(str(root / "CONTEXT.md"))
+        assert index is not None, "CONTEXT.md yields no terms; the guard now allows it whole"
+
+        claimed = re.search(r"its (\d+) terms", (root / "CLAUDE.md").read_text())
+        assert claimed is not None, "CLAUDE.md no longer states the term count"
+        assert len(index.splitlines()) == int(claimed.group(1))
 
     def test_doc_slice_is_where_the_guard_looks_for_it(self) -> None:
         """The guard falls open when the tool is missing, since a refusal with no index
