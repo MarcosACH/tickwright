@@ -72,7 +72,10 @@ def _refusal(segment: list[str]) -> str | None:
             return "`python -m pip install` targets whichever Python is on PATH"
 
     if name == "uv":
-        if args[:1] == ["pip"] and "--system" in rest:
+        # The verb, not just the flag: `--system` also scopes a query, and refusing
+        # `uv pip list --system` would answer with a sentence naming a command that was
+        # never run. Every other branch here gates on the subcommand the same way.
+        if args[:2] == ["pip", "install"] and "--system" in rest:
             return "`uv pip install --system` is the one uv form that skips the venv"
         if args[:2] == ["tool", "install"]:
             return "`uv tool install` is a durable machine-wide install; `uv tool run` is not"

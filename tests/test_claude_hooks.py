@@ -293,9 +293,11 @@ class TestNoGlobalInstalls:
             ".venv/bin/pip install httpx",
             # An install that is local to a project, not to the machine.
             "npm install",
-            # Not an install at all.
+            # Not an install at all — `--system` scopes a query here, and every other
+            # branch in the guard gates on the verb.
             "pip --version",
             "brew list",
+            "uv pip list --system",
         ],
     )
     def test_an_install_into_the_project_is_allowed(self, repo: Path, command: str) -> None:
