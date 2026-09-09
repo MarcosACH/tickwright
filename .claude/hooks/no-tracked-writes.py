@@ -30,10 +30,17 @@ from _shell import command_name, segments, unwrap
 # so the flag is matched by prefix rather than by equality.
 _SED_IN_PLACE = ("-i", "--in-place")
 
-# Redirections that truncate or append to a named file. `2>&1` lexes as `2`, `>&`, `1`
-# under `punctuation_chars`, so it never reaches this set — which is the commonest false
-# positive a naive scan for `>` produces.
-_WRITE_REDIRECTS = (">", ">>")
+# Redirections that truncate or append to a named file. Every *shape* of one, not the two
+# spellings that come to mind first: `punctuation_chars` groups a run of punctuation into
+# a single token, so bash's both-streams `&>`/`&>>` and the noclobber-override `>|` arrive
+# whole and equal neither `>` nor `>>`. A digit is not a punctuation char, so `2>` lexes
+# as `2` then `>` and the plain form already covers it.
+_WRITE_REDIRECTS = (">", ">>", ">|", "&>", "&>>", "&>|")
+
+# `>&` is the one shape that cannot be decided on the token alone: `>& file` writes both
+# streams to a file, while the far commoner `2>&1` duplicates a descriptor and names no
+# file at all. What follows tells them apart — a descriptor is a number, or `-` to close.
+_DUP_REDIRECT = ">&"
 
 
 def _write_targets(segment: list[str]) -> list[str]:
@@ -43,10 +50,14 @@ def _write_targets(segment: list[str]) -> list[str]:
     once git confirms it is a tracked file, so a token that is not a path at all costs
     one cheap lookup and changes no outcome.
 
-    **One command at a time is the whole point.** Read over a whole shell line, the
-    in-place predicate finds a `sed` in one command and an `-i` in another and refuses
-    `grep -i x tracked.py | sed 's/a/b/'`, which writes nothing — and it answers with
+    **One command at a time is the whole point**, and within it, the program is read from
+    the executable position. Over a whole shell line the in-place predicate finds a `sed`
+    in one command and an `-i` in another and refuses `grep -i x tracked.py | sed
+    's/a/b/'`; over a whole segment the `tee` predicate finds the word as an argument and
+    refuses `grep -n tee CONTRIBUTING.md`. Neither writes anything, and both answer with
     the wrong instruction, since there is no edit there to move to the `Edit` tool.
+
+    A redirect is the exception that stays positional: it writes wherever it appears.
     """
     targets: list[str] = []
 
@@ -61,18 +72,27 @@ def _write_targets(segment: list[str]) -> list[str]:
         # platform and the script itself may be several arguments. Offer them all.
         targets.extend(unwrapped)
 
+    if command_name(segment) == "tee":
+        # Everything up to the next redirect is a file `tee` writes; the pipe that would
+        # also end the list has already ended the segment. Off the unwrapped remainder,
+        # and keyed on the **executable position** for the same reason `sed` is: a `tee`
+        # standing in an argument is a word being searched for, not a program being run,
+        # and `grep -n tee CONTRIBUTING.md` writes nothing.
+        for tok in unwrapped[1:]:
+            if tok.startswith("-"):
+                continue
+            if not tok or tok[0] in "|;&<>":
+                break
+            targets.append(tok)
+
     for i, tok in enumerate(segment):
-        if tok in _WRITE_REDIRECTS and i + 1 < len(segment):
-            targets.append(segment[i + 1])
-        if tok == "tee" or tok.endswith("/tee"):
-            # Everything up to the next redirect is a file `tee` writes; the pipe that
-            # would also end the list has already ended the segment.
-            for nxt in segment[i + 1 :]:
-                if nxt.startswith("-"):
-                    continue
-                if not nxt or nxt[0] in "|;&<>":
-                    break
-                targets.append(nxt)
+        if i + 1 >= len(segment):
+            break
+        following = segment[i + 1]
+        if tok in _WRITE_REDIRECTS:
+            targets.append(following)
+        elif tok == _DUP_REDIRECT and not following.isdigit() and following != "-":
+            targets.append(following)
 
     return targets
 

@@ -109,6 +109,16 @@ class TestNoTrackedWrites:
             # A wrapper is not the program. `sudo` in front changes who writes the file,
             # not whether the harness's copy of it goes stale.
             "sudo sed -i '' 's/x/y/' src/tracked.py",
+            "echo 'x = 2' | sudo tee src/tracked.py",
+            # `punctuation_chars` groups a run of punctuation into one token, so these
+            # arrive whole and equal neither `>` nor `>>`. They truncate the file all the
+            # same: `&>` is bash's both-streams form and `>|` overrides noclobber.
+            "uv run pytest &> src/tracked.py",
+            "uv run pytest &>> src/tracked.py",
+            "echo 'x = 2' >| src/tracked.py",
+            # `>& file` writes both streams to a file; only `>&<digit>` duplicates a
+            # descriptor, and that is what separates this from the `2>&1` below.
+            "uv run pytest >& src/tracked.py",
         ],
     )
     def test_a_write_at_a_tracked_path_is_refused(self, repo: Path, command: str) -> None:
@@ -130,6 +140,15 @@ class TestNoTrackedWrites:
             "ls src/ 2>/dev/null",
             # A read of the tracked file is not a write.
             "grep -n 'x' src/tracked.py",
+            # `tee` in the *argument* position is a word being searched for, not a program
+            # being run — and it is an ordinary word to search this repo for, since the
+            # hook, its test and CONTRIBUTING.md all document the `tee` clause.
+            "grep -n 'tee' src/tracked.py",
+            "rg tee src/tracked.py",
+            # The descriptor-duplicating forms name no file: the token after `>&` is a
+            # file descriptor, so there is nothing here to stale.
+            "uv run pytest >&2",
+            "uv run pytest > /tmp/scratch.txt 2>&1",
             # `sed` without `-i` writes to stdout, and the `-i` belongs to the `grep`
             # upstream of the pipe. Reading the predicate over the whole command sees a
             # `sed` and an `-i` and refuses a command that writes nothing.
