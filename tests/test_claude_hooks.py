@@ -241,6 +241,13 @@ def run_hook(
     return run_tool_hook(name, tool, {"command": command}, cwd)
 
 
+def run_session_hook(
+    name: str, cwd: Path, source: str = "startup"
+) -> subprocess.CompletedProcess[str]:
+    """Drive one hook with a ``SessionStart`` event, whose stdout becomes context."""
+    return _run(name, {"hook_event_name": "SessionStart", "source": source, "cwd": str(cwd)}, cwd)
+
+
 def context_of(result: subprocess.CompletedProcess[str]) -> str:
     """The text a ``PostToolUse`` hook hands back to the agent, or ``""`` for silence.
 
@@ -954,6 +961,82 @@ class TestRuffOnWrite:
         result = _run_raw("ruff-on-write.py", "not json at all", python_repo)
         assert result.returncode == ALLOW
         assert result.stdout.strip() == ""
+
+
+class TestResumeFromPlan:
+    """Where the work stopped is delivered at session start, not re-derived.
+
+    ``/tdd`` writes the confirmed plan to ``.agents/plans/issue-<N>.md`` precisely so a
+    compacted or restarted session resumes without re-exploring. That only works if the
+    agent knows to look, and knowing to look was prose in ``CLAUDE.md`` competing with
+    everything else in a fresh window. The path is not a judgement call — it is
+    ``ralph/issue-<N>`` read off ``git branch`` — so nothing is decided here and nothing
+    is refused. The file the session was going to need is simply already in the window.
+    """
+
+    def test_the_open_behaviors_arrive_with_the_session(self, ralph_repo: Path) -> None:
+        out = run_session_hook("resume-from-plan.py", ralph_repo).stdout
+        assert "#900" in out
+        assert ".agents/plans/issue-900.md" in out
+        assert "a leverage above `max_leverage` is refused" in out
+        assert "the engine reads the resolved book" in out
+        assert "`CLAUDE.md` gains the bound" in out
+
+    def test_a_ticked_behavior_is_counted_not_printed(self, ralph_repo: Path) -> None:
+        """What is done is a number; what is open is the work. Reprinting the finished
+        half every session spends the budget this hook exists to save."""
+        out = run_session_hook("resume-from-plan.py", ralph_repo).stdout
+        assert "a leverage below 1 is refused" not in out
+        assert "1 of 4" in out
+
+    def test_the_recorded_shas_are_flagged_as_needing_confirmation(self, ralph_repo: Path) -> None:
+        """The plan is written by hand, so it can be ahead of or behind what landed.
+        Handing it over without saying so would turn a resume aid into a trusted source."""
+        out = run_session_hook("resume-from-plan.py", ralph_repo).stdout
+        assert "git log" in out
+
+    def test_a_long_checklist_is_capped(self, ralph_repo: Path) -> None:
+        """A 40-item plan dumped whole is the cost this hook was written to avoid."""
+        plan = ralph_repo / ".agents" / "plans" / "issue-900.md"
+        plan.write_text("".join(f"- [ ] behavior {n}\n" for n in range(40)))
+        out = run_session_hook("resume-from-plan.py", ralph_repo).stdout
+        assert out.count("- [ ]") < 40
+        assert "more" in out
+
+    def test_a_finished_checklist_says_so(self, ralph_repo: Path) -> None:
+        """Nothing open is a fact worth stating: it means the slice may be ready to ship,
+        which is a different next step from resuming one."""
+        plan = ralph_repo / ".agents" / "plans" / "issue-900.md"
+        plan.write_text("- [x] 1. done   abc1234\n- [x] 2. also done   def5678\n")
+        out = run_session_hook("resume-from-plan.py", ralph_repo).stdout
+        assert "#900" in out
+        assert "2 of 2" in out
+
+    def test_a_branch_that_names_no_issue_gets_nothing(self, ralph_repo: Path) -> None:
+        _git(ralph_repo, "checkout", "-q", "main")
+        assert run_session_hook("resume-from-plan.py", ralph_repo).stdout == ""
+
+    def test_an_issue_with_no_plan_yet_gets_nothing(self, ralph_repo: Path) -> None:
+        """The first session of a slice, before ``/tdd`` has confirmed anything. There is
+        nothing to hand over and an announcement would be noise."""
+        (ralph_repo / ".agents" / "plans" / "issue-900.md").unlink()
+        assert run_session_hook("resume-from-plan.py", ralph_repo).stdout == ""
+
+    def test_a_directory_that_is_not_a_repo_gets_nothing(self, tmp_path: Path) -> None:
+        loose = tmp_path / "loose"
+        loose.mkdir()
+        assert run_session_hook("resume-from-plan.py", loose).stdout == ""
+
+    def test_an_unreadable_event_is_not_one_to_answer(self, ralph_repo: Path) -> None:
+        result = _run_raw("resume-from-plan.py", "", ralph_repo)
+        assert result.returncode == ALLOW
+        assert result.stdout == ""
+
+    @pytest.mark.parametrize("source", ["startup", "resume", "clear", "compact"])
+    def test_every_way_a_session_begins_is_answered(self, ralph_repo: Path, source: str) -> None:
+        """No matcher on the wiring, on purpose. A compaction is the moment the plan is
+        most needed and the one a ``startup``-only matcher would miss."""
+        assert "#900" in run_session_hook("resume-from-plan.py", ralph_repo, source).stdout
 
 
 class TestWiring:
