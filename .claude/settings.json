@@ -34,6 +34,11 @@
             "type": "command",
             "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/no-global-installs.py",
             "statusMessage": "Checking the install target..."
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/no-unlinked-prs.py",
+            "statusMessage": "Checking the pull request body..."
           }
         ]
       },
@@ -44,6 +49,31 @@
             "type": "command",
             "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/no-unsliced-doc-reads.py",
             "statusMessage": "Checking the read span..."
+          }
+        ]
+      }
+    ],
+
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/ruff-on-write.py",
+            "statusMessage": "Formatting what was written..."
+          }
+        ]
+      }
+    ],
+
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/resume-from-plan.py",
+            "statusMessage": "Looking for the current slice's plan..."
           }
         ]
       }
