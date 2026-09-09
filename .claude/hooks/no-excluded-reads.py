@@ -60,14 +60,16 @@ _READERS = frozenset(
 _READABLE_IGNORED = (".agents/plans/",)
 
 
-def _repo_relative(cwd: str, path: str) -> str | None:
-    """`path` as git would name it, or None when it is outside the repo entirely."""
+def _repo_root(cwd: str) -> str | None:
+    """The repo `cwd` sits in, or None when it is not in one — asked once per event."""
     result = subprocess.run(
         ["git", "rev-parse", "--show-toplevel"], cwd=cwd, capture_output=True, text=True
     )
-    if result.returncode != 0:
-        return None
-    root = result.stdout.strip()
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def _repo_relative(root: str, cwd: str, path: str) -> str | None:
+    """`path` as git would name it, or None when it is outside the repo entirely."""
     absolute = os.path.normpath(os.path.join(cwd, os.path.expanduser(path)))
     if not absolute.startswith(root + os.sep):
         return None
@@ -76,9 +78,13 @@ def _repo_relative(cwd: str, path: str) -> str | None:
 
 def _excluded(cwd: str, candidates: list[str]) -> list[str]:
     """The candidates git ignores, minus the ones ignored in order to be read."""
+    root = _repo_root(cwd)
+    if root is None:
+        return []
+
     found: list[str] = []
     for cand in candidates:
-        relative = _repo_relative(cwd, cand)
+        relative = _repo_relative(root, cwd, cand)
         if relative is None or relative.startswith(_READABLE_IGNORED):
             continue
         ignored = subprocess.run(

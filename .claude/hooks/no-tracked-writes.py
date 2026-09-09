@@ -21,9 +21,10 @@ fresh clone before `uv sync`, and the venv is not reliably on a hook's PATH.
 
 import json
 import os
-import shlex
 import subprocess
 import sys
+
+from _shell import tokens
 
 # `sed` edits in place under any of these. The `-i.bak` form takes its suffix attached,
 # so the flag is matched by prefix rather than by equality.
@@ -35,23 +36,7 @@ _SED_IN_PLACE = ("-i", "--in-place")
 _WRITE_REDIRECTS = (">", ">>")
 
 
-def _tokens(command: str) -> list[str]:
-    """Split a shell command, keeping redirection operators as tokens of their own.
-
-    `punctuation_chars` is what separates `> file` from `>file` and groups `>&` whole.
-    A command the lexer cannot split (an unbalanced quote, most often) yields nothing:
-    this guard then allows the call rather than blocking on a parse it does not
-    understand, because a guard that misfires is one an agent learns to route around.
-    """
-    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
-    lexer.whitespace_split = True
-    try:
-        return list(lexer)
-    except ValueError:
-        return []
-
-
-def _write_targets(tokens: list[str]) -> list[str]:
+def _write_targets(toks: list[str]) -> list[str]:
     """Every token the command could be writing to.
 
     Deliberately over-collects. A candidate only becomes a refusal once git confirms it
@@ -60,20 +45,20 @@ def _write_targets(tokens: list[str]) -> list[str]:
     """
     targets: list[str] = []
 
-    sed_in_place = any(tok == "sed" or tok.endswith("/sed") for tok in tokens) and any(
-        tok.startswith(_SED_IN_PLACE) for tok in tokens
+    sed_in_place = any(tok == "sed" or tok.endswith("/sed") for tok in toks) and any(
+        tok.startswith(_SED_IN_PLACE) for tok in toks
     )
     if sed_in_place:
         # `sed -i '' 's/x/y/' file` puts the target last, but the flag forms differ per
         # platform and the script itself may be several arguments. Offer them all.
-        targets.extend(tokens)
+        targets.extend(toks)
 
-    for i, tok in enumerate(tokens):
-        if tok in _WRITE_REDIRECTS and i + 1 < len(tokens):
-            targets.append(tokens[i + 1])
+    for i, tok in enumerate(toks):
+        if tok in _WRITE_REDIRECTS and i + 1 < len(toks):
+            targets.append(toks[i + 1])
         if tok == "tee" or tok.endswith("/tee"):
             # Everything up to the next pipe or redirect is a file `tee` writes.
-            for nxt in tokens[i + 1 :]:
+            for nxt in toks[i + 1 :]:
                 if nxt.startswith("-"):
                     continue
                 if not nxt or nxt[0] in "|;&<>":
@@ -123,7 +108,7 @@ def main() -> int:
     command = event.get("tool_input", {}).get("command", "")
     cwd = event.get("cwd") or os.getcwd()
 
-    tracked = _tracked_files(cwd, _write_targets(_tokens(command)))
+    tracked = _tracked_files(cwd, _write_targets(tokens(command)))
     if not tracked:
         return 0
 
