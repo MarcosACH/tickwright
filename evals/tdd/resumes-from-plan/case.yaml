@@ -57,6 +57,15 @@ graders:
   # as well — the Edit-over-Bash rule governs writes, not reads. The prompt
   # never names this path, so the path appearing in the trace at all is the
   # signal that the plan was located rather than guessed at.
+  #
+  # `.claude/hooks/resume-from-plan.py` does NOT supersede this, and the reason
+  # is the scenario rather than the tool. That hook derives `N` from a
+  # `ralph/issue-<N>` branch; this case hands `N` over as an issue reference in
+  # the prompt and its sandbox sits on `main` (see `scaffold_script`), which is
+  # the shape of `/tdd #190` typed off-branch — the one path the hook cannot
+  # reach and the skill still has to carry. Do not delete this grader as
+  # settled-by-hook without first changing that branch, which would make the
+  # case a second assertion of what `tests/test_claude_hooks.py` already fences.
   - name: plan-consulted
     type: regex
     target: trace

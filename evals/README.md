@@ -135,10 +135,21 @@ and an LLM grader, and each case was deleted, not kept. Two assertions of one ru
 too many, and the probabilistic one is the copy that drifts. The deterministic halves are fenced by
 `tests/test_claude_hooks.py`, in `ci`, for free.
 
+**Check the scenario before you conclude a hook superseded a case.** `tdd/resumes-from-plan` looked
+like the third deletion when `.claude/hooks/resume-from-plan.py` landed — that hook prints the
+plan's open behaviors at session start, which is exactly what the case's `plan-consulted` grader
+measures the skill persuading a model to go and find. It does not supersede it. The hook derives the
+issue number from a `ralph/issue-<N>` branch; the case hands the number over as an issue reference
+in the prompt and scaffolds its sandbox on `main`, which is `/tdd #190` typed off-branch — the one
+path the hook cannot reach. The case survives untouched, and the grader carries a comment saying so,
+because the next reader will have the same first thought.
+
 Ask this of any case you write: if the behavior could be made impossible, should it be an eval at
 all? The residue is the useful part — what survives from `plans-with-sliced-reading` is the half a
 guard cannot judge, that the *right* sections were chosen, and it is worth a case only if it can be
-graded on something better than which tool fired.
+graded on something better than which tool fired. `resumes-from-plan` keeps two such halves outright:
+whether the recorded shas are reconciled against `git log`, and whether the resume point is stated
+back for confirmation. A hook can hand a plan over; it cannot make one be doubted.
 
 Neither shape measures **token consumption**. The context-budget rules in `/tdd` are graded by
 proxy — which tool was used, whether a doc was sliced or read whole, whether reading was deferred
