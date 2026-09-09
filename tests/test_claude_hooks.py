@@ -217,3 +217,64 @@ class TestNoExcludedReads:
 
     def test_the_hook_is_executable(self) -> None:
         assert os.access(_HOOKS / "no-excluded-reads.py", os.X_OK)
+
+
+class TestNoGlobalInstalls:
+    """Dependencies land in the project venv through `uv`, never in the system one.
+
+    The rule is the maintainer's, stated once at the user level and nowhere enforced.
+    It is worth a guard rather than a paragraph because the damage is off-repo: a
+    package installed into the system Python survives the branch, the PR and the
+    revert, and nothing in this repo's gate can see that it happened.
+    """
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "pip install httpx",
+            "pip3 install httpx",
+            "python -m pip install httpx",
+            "python3 -m pip install --upgrade httpx",
+            "uv pip install --system httpx",
+            "uv tool install ruff",
+            "pipx install ruff",
+            "brew install jq",
+            "npm install -g typescript",
+            "npm i -g typescript",
+            "npm install --global typescript",
+        ],
+    )
+    def test_an_install_outside_the_project_venv_is_refused(self, repo: Path, command: str) -> None:
+        assert run_hook("no-global-installs.py", command, repo).returncode == BLOCK
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            # The sanctioned path: uv against the project venv and its lockfile.
+            "uv add httpx",
+            "uv add --dev pytest-xdist",
+            "uv sync --frozen --dev",
+            "uv run pytest -q",
+            # Ephemeral, isolated, and installs nothing durable — the CI dependency
+            # audit is exactly this shape.
+            "uvx yt-dlp --version",
+            "uv tool run pip-audit --requirement /tmp/requirements.txt",
+            # venv-local by construction, so outside the rule even though it says pip.
+            "uv pip install httpx",
+            ".venv/bin/pip install httpx",
+            # An install that is local to a project, not to the machine.
+            "npm install",
+            # Not an install at all.
+            "pip --version",
+            "brew list",
+        ],
+    )
+    def test_an_install_into_the_project_is_allowed(self, repo: Path, command: str) -> None:
+        assert run_hook("no-global-installs.py", command, repo).returncode == ALLOW
+
+    def test_the_reason_names_the_sanctioned_command(self, repo: Path) -> None:
+        result = run_hook("no-global-installs.py", "pip install httpx", repo)
+        assert "uv add" in result.stderr
+
+    def test_the_hook_is_executable(self) -> None:
+        assert os.access(_HOOKS / "no-global-installs.py", os.X_OK)
