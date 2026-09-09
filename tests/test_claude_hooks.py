@@ -127,6 +127,11 @@ class TestNoTrackedWrites:
             "ls src/ 2>/dev/null",
             # A read of the tracked file is not a write.
             "grep -n 'x' src/tracked.py",
+            # `sed` without `-i` writes to stdout, and the `-i` belongs to the `grep`
+            # upstream of the pipe. Reading the predicate over the whole command sees a
+            # `sed` and an `-i` and refuses a command that writes nothing.
+            "grep -i 'x' src/tracked.py | sed 's/a/b/'",
+            "grep -i 'x' src/tracked.py\nsed 's/a/b/' /tmp/scratch.txt",
         ],
     )
     def test_a_write_that_stales_nothing_is_allowed(self, repo: Path, command: str) -> None:

@@ -24,7 +24,7 @@ import os
 import subprocess
 import sys
 
-from _shell import tokens
+from _shell import command_name, segments
 
 # `sed` edits in place under any of these. The `-i.bak` form takes its suffix attached,
 # so the flag is matched by prefix rather than by equality.
@@ -36,29 +36,32 @@ _SED_IN_PLACE = ("-i", "--in-place")
 _WRITE_REDIRECTS = (">", ">>")
 
 
-def _write_targets(toks: list[str]) -> list[str]:
-    """Every token the command could be writing to.
+def _write_targets(segment: list[str]) -> list[str]:
+    """Every token this one command could be writing to.
 
-    Deliberately over-collects. A candidate only becomes a refusal once git confirms it
-    is a tracked file, so a token that is not a path at all costs one cheap lookup and
-    changes no outcome.
+    Deliberately over-collects *within* a segment. A candidate only becomes a refusal
+    once git confirms it is a tracked file, so a token that is not a path at all costs
+    one cheap lookup and changes no outcome.
+
+    **One command at a time is the whole point.** Read over a whole shell line, the
+    in-place predicate finds a `sed` in one command and an `-i` in another and refuses
+    `grep -i x tracked.py | sed 's/a/b/'`, which writes nothing — and it answers with
+    the wrong instruction, since there is no edit there to move to the `Edit` tool.
     """
     targets: list[str] = []
 
-    sed_in_place = any(tok == "sed" or tok.endswith("/sed") for tok in toks) and any(
-        tok.startswith(_SED_IN_PLACE) for tok in toks
-    )
-    if sed_in_place:
+    if command_name(segment) == "sed" and any(tok.startswith(_SED_IN_PLACE) for tok in segment[1:]):
         # `sed -i '' 's/x/y/' file` puts the target last, but the flag forms differ per
         # platform and the script itself may be several arguments. Offer them all.
-        targets.extend(toks)
+        targets.extend(segment)
 
-    for i, tok in enumerate(toks):
-        if tok in _WRITE_REDIRECTS and i + 1 < len(toks):
-            targets.append(toks[i + 1])
+    for i, tok in enumerate(segment):
+        if tok in _WRITE_REDIRECTS and i + 1 < len(segment):
+            targets.append(segment[i + 1])
         if tok == "tee" or tok.endswith("/tee"):
-            # Everything up to the next pipe or redirect is a file `tee` writes.
-            for nxt in toks[i + 1 :]:
+            # Everything up to the next redirect is a file `tee` writes; the pipe that
+            # would also end the list has already ended the segment.
+            for nxt in segment[i + 1 :]:
                 if nxt.startswith("-"):
                     continue
                 if not nxt or nxt[0] in "|;&<>":
@@ -108,7 +111,11 @@ def main() -> int:
     command = event.get("tool_input", {}).get("command", "")
     cwd = event.get("cwd") or os.getcwd()
 
-    tracked = _tracked_files(cwd, _write_targets(tokens(command)))
+    candidates: list[str] = []
+    for segment in segments(command):
+        candidates.extend(_write_targets(segment))
+
+    tracked = _tracked_files(cwd, candidates)
     if not tracked:
         return 0
 
