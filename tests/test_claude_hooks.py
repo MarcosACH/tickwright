@@ -1050,44 +1050,83 @@ class TestWiring:
     """
 
     @staticmethod
-    def _wiring() -> list[tuple[str, str]]:
-        """Every ``PreToolUse`` hook as ``(matcher, command)``."""
+    def _wiring() -> list[tuple[str, str, str]]:
+        """Every wired hook as ``(event, matcher, command)``.
+
+        Every event key is walked, not just ``PreToolUse``. A hook filed under the wrong
+        event passes every direct-invocation case in this file — the script is fine, it
+        is simply never called — and reading one event only would make that invisible.
+        """
         settings = json.loads((_HOOKS.parent / "settings.json").read_text())
         return [
-            (entry.get("matcher", ""), hook["command"])
-            for entry in settings["hooks"]["PreToolUse"]
+            (event, entry.get("matcher", ""), hook["command"])
+            for event, entries in settings["hooks"].items()
+            for entry in entries
             for hook in entry["hooks"]
         ]
 
     @pytest.mark.parametrize(
-        ("hook", "tools"),
+        ("hook", "event", "tools"),
         [
-            ("no-tracked-writes.py", ["Bash"]),
-            ("no-excluded-reads.py", ["Bash"]),
-            ("no-global-installs.py", ["Bash"]),
-            ("no-unsliced-doc-reads.py", ["Read", "Bash"]),
+            ("no-tracked-writes.py", "PreToolUse", ["Bash"]),
+            ("no-excluded-reads.py", "PreToolUse", ["Bash"]),
+            ("no-global-installs.py", "PreToolUse", ["Bash"]),
+            ("no-unsliced-doc-reads.py", "PreToolUse", ["Read", "Bash"]),
+            ("no-unlinked-prs.py", "PreToolUse", ["Bash"]),
+            ("ruff-on-write.py", "PostToolUse", ["Edit", "Write"]),
+            ("resume-from-plan.py", "SessionStart", []),
         ],
     )
-    def test_every_guard_is_wired_to_every_tool_it_judges(
-        self, hook: str, tools: list[str]
+    def test_every_hook_is_wired_to_the_event_and_tools_it_judges(
+        self, hook: str, event: str, tools: list[str]
     ) -> None:
-        """The tool list is the second half of the claim. ``no-unsliced-doc-reads``
-        decides on both a ``Read`` and a ``Bash`` event, and a matcher naming only one of
-        them would leave the guard passing every test above while the ``cat`` door stayed
-        open in the loop it was written for."""
-        matchers = [matcher for matcher, command in self._wiring() if command.endswith(hook)]
-        assert matchers, f"{hook} is wired to nothing"
+        """The event is half the claim and the tool list is the other half.
+        ``no-unsliced-doc-reads`` decides on both a ``Read`` and a ``Bash`` event, and a
+        matcher naming only one of them would leave the guard passing every test above
+        while the ``cat`` door stayed open in the loop it was written for.
+
+        ``resume-from-plan`` names no tool because ``SessionStart`` has none, and it
+        deliberately carries no ``source`` matcher either — asserted below.
+        """
+        matchers = [
+            matcher
+            for wired, matcher, command in self._wiring()
+            if command.endswith(hook) and wired == event
+        ]
+        assert matchers, f"{hook} is wired to nothing under {event}"
         for tool in tools:
             assert any(tool in matcher.split("|") for matcher in matchers), (hook, tool)
+
+    def test_the_session_hook_answers_every_way_a_session_begins(self) -> None:
+        """A ``source`` matcher would be the one mistake that costs the most: ``compact``
+        is when the plan is most needed, and a ``startup``-only wiring misses exactly it.
+        No matcher means every source."""
+        matchers = [
+            matcher
+            for event, matcher, command in self._wiring()
+            if event == "SessionStart" and command.endswith("resume-from-plan.py")
+        ]
+        assert matchers == [""], matchers
 
     def test_every_wired_path_exists_and_runs(self) -> None:
         """``${CLAUDE_PROJECT_DIR}`` is what keeps the wiring correct from a subdirectory
         or a worktree; a relative path would resolve against whatever cwd the call had."""
-        for _, command in self._wiring():
+        for _, _, command in self._wiring():
             assert command.startswith("${CLAUDE_PROJECT_DIR}/")
             path = _HOOKS.parent.parent / command.removeprefix("${CLAUDE_PROJECT_DIR}/")
             assert path.is_file(), command
             assert os.access(path, os.X_OK), command
+
+    def test_the_closes_pattern_is_the_one_ci_holds(self) -> None:
+        """``no-unlinked-prs`` front-runs ``pr-policy``'s *Body closes an issue* step, so
+        the two have to accept the same bodies. There is no predicate to derive one from
+        the other, so this test is what stands in — the same standing as the corpus-glob
+        assertion below. A hook stricter than the check it front-runs refuses bodies that
+        would have passed, and a false refusal is the failure worth guarding against."""
+        source = (_HOOKS / "no-unlinked-prs.py").read_text()
+        pattern = source.split('_CLOSES = re.compile(r"', 1)[1].split('"', 1)[0]
+        workflow = (_ROOT / ".github" / "workflows" / "pr-policy.yml").read_text()
+        assert pattern in workflow, pattern
 
     def test_every_corpus_glob_matches_a_real_file(self) -> None:
         """``no-unsliced-doc-reads`` is the one guard whose subject is a hand-written
@@ -1110,3 +1149,11 @@ class TestWiring:
         tool = _HOOKS.parent.parent / ".agents" / "tools" / "doc-slice"
         assert tool.is_file()
         assert os.access(tool, os.X_OK)
+
+    def test_ruff_is_where_the_hook_looks_for_it(self) -> None:
+        """``ruff-on-write`` hardcodes ``<root>/.venv/bin/ruff`` and falls silent when
+        nothing is there, because a fresh clone has not run ``uv sync`` yet. That makes a
+        moved venv another silent disarming — so it is asserted rather than assumed.
+        This suite runs out of that venv, so its absence is a real failure, not a skip."""
+        assert _RUFF.is_file()
+        assert os.access(_RUFF, os.X_OK)
