@@ -149,3 +149,71 @@ class TestNoTrackedWrites:
     def test_the_hook_is_executable(self) -> None:
         """Claude Code execs the file directly; a lost mode bit is a silently dead guard."""
         assert os.access(_HOOKS / "no-tracked-writes.py", os.X_OK)
+
+
+class TestNoExcludedReads:
+    """What `.claude/settings.json` denies to `Read`, Bash may not fetch either.
+
+    The deny list binds one tool. `cat`, `head` and `grep` reach the same bytes, and
+    bypass-permissions mode is what pushes an agent toward Bash in the first place — so
+    the deny list guards the door the agent is being told not to use.
+
+    The membership test is `git check-ignore`, not a second path list. `.gitignore`
+    already names every tree this repo keeps out of context, and two lists that must
+    agree are the drift this project calls a bug.
+    """
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "cat .venv/bin/ruff",
+            "head -20 .venv/bin/ruff",
+            "tail -f logs/run.log",
+            "less logs/run.log",
+            "grep -n 'noise' logs/run.log",
+            "wc -l .venv/bin/ruff",
+            # Secrets are ignored for a stronger reason than context budget, and the one
+            # rule covers both.
+            "cat .env",
+        ],
+    )
+    def test_a_read_of_an_excluded_path_is_refused(self, repo: Path, command: str) -> None:
+        assert run_hook("no-excluded-reads.py", command, repo).returncode == BLOCK
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            # The plan file is ignored on purpose and reading it is the whole point of
+            # the convention, so the one exception the guard carries.
+            "cat .agents/plans/issue-1.md",
+            # Repo source is the normal case and must stay cheap.
+            "cat src/tracked.py",
+            "grep -rn 'x' src/",
+            # An ignored path in the *executable* position is a program being run, not a
+            # file being read — and running the venv binaries directly is what keeps a
+            # PostToolUse hook fast enough to exist.
+            ".venv/bin/ruff check src/",
+            ".venv/bin/pytest -q",
+            # A reader with no path at all.
+            "cat",
+        ],
+    )
+    def test_a_read_that_costs_no_context_is_allowed(self, repo: Path, command: str) -> None:
+        assert run_hook("no-excluded-reads.py", command, repo).returncode == ALLOW
+
+    def test_the_reason_names_the_path_and_why(self, repo: Path) -> None:
+        result = run_hook("no-excluded-reads.py", "cat logs/run.log", repo)
+        assert "logs/run.log" in result.stderr
+        assert ".gitignore" in result.stderr
+
+    def test_a_reader_downstream_of_a_pipe_is_still_a_reader(self, repo: Path) -> None:
+        """Segmenting on the pipe is what keeps the executable-position exemption honest;
+        without it, everything after the first command reads as an argument."""
+        result = run_hook("no-excluded-reads.py", "echo x | cat logs/run.log", repo)
+        assert result.returncode == BLOCK
+
+    def test_another_tool_is_not_this_hooks_business(self, repo: Path) -> None:
+        assert run_hook("no-excluded-reads.py", "cat .env", repo, tool="Read").returncode == ALLOW
+
+    def test_the_hook_is_executable(self) -> None:
+        assert os.access(_HOOKS / "no-excluded-reads.py", os.X_OK)
