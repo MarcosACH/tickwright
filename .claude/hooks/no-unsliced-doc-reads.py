@@ -35,7 +35,7 @@ import re
 import subprocess
 import sys
 
-from _shell import arguments, command_name, segments
+from _shell import command_name, segments, unwrap
 
 # The four families `CLAUDE.md` already names. Unlike the two path guards, this list is
 # not derived from git: "long enough to be worth slicing" is an editorial judgement and
@@ -209,12 +209,23 @@ def _read_candidate(tool_input: dict[str, object]) -> str | None:
 
 
 def _dump_candidates(command: str) -> list[str]:
-    """The paths a shell command would load whole."""
+    """The paths a shell command would load whole.
+
+    `unwrap` peels the assignments, wrappers and reserved words standing in front of the
+    program, so `sudo cat CONTEXT.md` and the `do cat "$f"` of a loop body are read at
+    the same token `command_name` decided on.
+
+    Over-collects the rest: a value riding a flag (`nl -w 5 notes.md`) lands here beside
+    the file. Nothing in `_DUMPERS` takes a *pattern* the way the grep family does, which
+    is the one over-collection that would cost something, so a token naming no corpus
+    file simply fails `_refusal_for` and changes no outcome.
+    """
     return [
-        argument
+        token
         for segment in segments(command)
         if command_name(segment) in _DUMPERS
-        for argument in arguments(segment)
+        for token in unwrap(segment)[1:]
+        if not token.startswith("-")
     ]
 
 

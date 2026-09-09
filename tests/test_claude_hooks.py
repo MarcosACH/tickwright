@@ -43,11 +43,14 @@ def _git(cwd: Path, *args: str) -> None:
 
 @pytest.fixture
 def repo(tmp_path: Path) -> Path:
-    """A scratch repo carrying one tracked file, one ignored tree, and one plan file.
+    """A scratch repo carrying two tracked files, one ignored tree, and one plan file.
 
     ``.gitignore`` mirrors the shape of the real one that matters to these hooks: a
     build/venv tree, a log, and ``.agents/plans/`` — which is ignored *and* meant to be
     read, so it is the exception the read guard has to carry.
+
+    **Two** tracked files under ``src/``, because one cannot tell a glob from a single
+    path: ``src/*.py`` matching exactly one file is the case that passes by accident.
     """
     root = tmp_path / "repo"
     (root / "src").mkdir(parents=True)
@@ -57,6 +60,7 @@ def repo(tmp_path: Path) -> Path:
 
     (root / ".gitignore").write_text(".venv/\nlogs/\n*.log\n.agents/plans/\n.env\n")
     (root / "src" / "tracked.py").write_text("x = 1\n")
+    (root / "src" / "tracked_too.py").write_text("y = 1\n")
     (root / ".venv" / "bin" / "ruff").write_text("#!/bin/sh\n")
     (root / "logs" / "run.log").write_text("noise\n")
     (root / ".agents" / "plans" / "issue-1.md").write_text("- [ ] behavior\n")
@@ -65,7 +69,7 @@ def repo(tmp_path: Path) -> Path:
     _git(root, "init", "-q", "-b", "main")
     _git(root, "config", "user.name", "Test")
     _git(root, "config", "user.email", "test@example.com")
-    _git(root, "add", ".gitignore", "src/tracked.py")
+    _git(root, "add", ".gitignore", "src/tracked.py", "src/tracked_too.py")
     _git(root, "commit", "-q", "-m", "seed")
     return root
 
@@ -169,12 +173,46 @@ class TestNoTrackedWrites:
             "echo 'x = 2' >> src/tracked.py",
             "echo 'x = 2' | tee src/tracked.py",
             "echo 'x = 2' | tee -a src/tracked.py",
+            # A wrapper is not the program. `sudo` in front changes who writes the file,
+            # not whether the harness's copy of it goes stale.
+            "sudo sed -i '' 's/x/y/' src/tracked.py",
+            "echo 'x = 2' | sudo tee src/tracked.py",
+            # A reserved word stands where a program does and, unlike a wrapper, is not a
+            # program at all — so a guard keyed on the first token reads `do` and allows
+            # the write. The loop is the form an agent reaches for to make one edit across
+            # several files, which is the case this guard exists for.
+            "for f in a b; do sed -i '' 's/x/y/' src/tracked.py; done",
+            "echo 'x = 2' | while read l; do tee src/tracked.py; done",
+            "time sed -i '' 's/x/y/' src/tracked.py",
+            # `punctuation_chars` groups a run of punctuation into one token, so these
+            # arrive whole and equal neither `>` nor `>>`. They truncate the file all the
+            # same: `&>` is bash's both-streams form and `>|` overrides noclobber.
+            "uv run pytest &> src/tracked.py",
+            "uv run pytest &>> src/tracked.py",
+            "echo 'x = 2' >| src/tracked.py",
+            # `>& file` writes both streams to a file; only `>&<digit>` duplicates a
+            # descriptor, and that is what separates this from the `2>&1` below.
+            "uv run pytest >& src/tracked.py",
+            # A glob is a pathspec git resolves, not a value only the shell knows — it
+            # lexes whole and stands in the argument position the guard already reads.
+            # Deciding it by how *many* files came back fires backwards, allowing the
+            # write in proportion to how many it rewrites, and the multi-file edit is
+            # the case this guard exists for.
+            "sed -i '' 's/x/y/' src/*.py",
+            "echo 'x = 2' | tee src/*.py",
         ],
     )
     def test_a_write_at_a_tracked_path_is_refused(self, repo: Path, command: str) -> None:
         result = run_hook("no-tracked-writes.py", command, repo)
         assert result.returncode == BLOCK
         assert "src/tracked.py" in result.stderr
+
+    def test_a_glob_refusal_names_every_file_it_would_rewrite(self, repo: Path) -> None:
+        """The reason is the agent's only account of what the call would have done, and
+        one name out of a glob's fifty is the wrong account."""
+        result = run_hook("no-tracked-writes.py", "sed -i '' 's/x/y/' src/*.py", repo)
+        assert "src/tracked.py" in result.stderr
+        assert "src/tracked_too.py" in result.stderr
 
     @pytest.mark.parametrize(
         "command",
@@ -190,6 +228,42 @@ class TestNoTrackedWrites:
             "ls src/ 2>/dev/null",
             # A read of the tracked file is not a write.
             "grep -n 'x' src/tracked.py",
+            # `tee` in the *argument* position is a word being searched for, not a program
+            # being run — and it is an ordinary word to search this repo for, since the
+            # hook, its test and CONTRIBUTING.md all document the `tee` clause.
+            "grep -n 'tee' src/tracked.py",
+            "rg tee src/tracked.py",
+            # The descriptor-duplicating forms name no file: the token after `>&` is a
+            # file descriptor, so there is nothing here to stale.
+            "uv run pytest >&2",
+            "uv run pytest > /tmp/scratch.txt 2>&1",
+            # `sed` without `-i` writes to stdout, and the `-i` belongs to the `grep`
+            # upstream of the pipe. Reading the predicate over the whole command sees a
+            # `sed` and an `-i` and refuses a command that writes nothing.
+            "grep -i 'x' src/tracked.py | sed 's/a/b/'",
+            "grep -i 'x' src/tracked.py\nsed 's/a/b/' /tmp/scratch.txt",
+            # A heredoc *body* is data, not commands. Writing a new file whose content
+            # quotes a shell example must not be read as running that example — the
+            # refusal would name a file the command never opens, and the natural cases
+            # are this repo's own: a doc, or a test whose fixtures are shell commands.
+            "cat <<'DOC' > /tmp/notes.md\necho hi > src/tracked.py\nDOC",
+            "cat <<'DOC' > src/brand_new.md\nsed -i '' 's/a/b/' src/tracked.py\nDOC",
+            # A newline *inside a quoted argument* is data as well. A multi-line commit
+            # message or a `--body` that quotes a shell example is one command, and only
+            # the newlines outside the quotes end anything. The example has to sit on an
+            # interior line to be worth asserting: the opening and closing lines carry an
+            # unbalanced quote, so the lexer already refuses them and the guard fails open
+            # for the wrong reason.
+            'git commit -m "fix: the write guard\n\necho x > src/tracked.py\n\nis allowed now"',
+            # Peeling the reserved word exposes the program behind it and nothing else:
+            # the loop *list* names a tracked file, and iterating over a file is not
+            # writing to it.
+            "for f in src/tracked.py; do echo $f; done",
+            # A directory is what the cardinality rule was really excluding: git answers
+            # a directory pathspec with every file beneath it, and none of them is the
+            # write target. Tested directly now, so the glob above can be refused.
+            "sed -i '' 's/x/y/' src",
+            "echo 'x = 2' | tee src",
         ],
     )
     def test_a_write_that_stales_nothing_is_allowed(self, repo: Path, command: str) -> None:
@@ -238,6 +312,15 @@ class TestNoExcludedReads:
             # Secrets are ignored for a stronger reason than context budget, and the one
             # rule covers both.
             "cat .env",
+            "sudo cat .env",
+            # The pattern came from `-e`, so every non-flag argument left is a path.
+            "grep -e 'noise' logs/run.log",
+            # A reserved word is where a program stands without being one. `do`, `then`
+            # and `time` each leave the reader one token further along, and a guard that
+            # reads only the first token of the segment finds a word it has no rule for.
+            "while read l; do cat logs/run.log; done",
+            "if grep -q 'noise' logs/run.log; then echo hit; fi",
+            "time cat .env",
         ],
     )
     def test_a_read_of_an_excluded_path_is_refused(self, repo: Path, command: str) -> None:
@@ -249,9 +332,22 @@ class TestNoExcludedReads:
             # The plan file is ignored on purpose and reading it is the whole point of
             # the convention, so the one exception the guard carries.
             "cat .agents/plans/issue-1.md",
+            # The directory is the exemption too — "which plan mentions this behavior"
+            # is asked by sweeping it, and `normpath` strips the separator a prefix
+            # match on `.agents/plans/` needs.
+            "grep -rn 'behavior' .agents/plans",
+            "grep -rn 'behavior' .agents/plans/",
             # Repo source is the normal case and must stay cheap.
             "cat src/tracked.py",
             "grep -rn 'x' src/",
+            # A grep *pattern* is not a path. `.env` and `logs/run.log` are strings this
+            # repo's code and docs name constantly, and searching tracked source for one
+            # opens nothing ignored — `check-ignore` answers on the string alone.
+            "grep -rn '.env' src/",
+            "grep -rn 'logs/run.log' src/tracked.py",
+            # A newline inside a quoted argument does not end a command, so a message
+            # whose second line opens with a reader's name is prose, not a read.
+            'git commit -m "docs: note the guard\n\ncat logs/run.log\n\nis how it surfaced"',
             # An ignored path in the *executable* position is a program being run, not a
             # file being read — and running the venv binaries directly is what keeps a
             # PostToolUse hook fast enough to exist.
@@ -259,6 +355,10 @@ class TestNoExcludedReads:
             ".venv/bin/pytest -q",
             # A reader with no path at all.
             "cat",
+            # The reserved-word peel exposes the reader; it does not widen what counts as
+            # one. Both of these read tracked source from inside a construct.
+            "while read l; do cat src/tracked.py; done",
+            "if grep -q 'x' src/tracked.py; then echo hit; fi",
         ],
     )
     def test_a_read_that_costs_no_context_is_allowed(self, repo: Path, command: str) -> None:
@@ -324,6 +424,22 @@ class TestNoGlobalInstalls:
             "npm install -g typescript",
             "npm i -g typescript",
             "npm install --global typescript",
+            # A wrapper is not the program, and this is the form that does the most
+            # damage: root, into the system Python. Every branch above is one `sudo`
+            # away from doing nothing at all.
+            "sudo pip install httpx",
+            "sudo -H pip3 install httpx",
+            "sudo -u root pip install httpx",
+            "sudo python3 -m pip install httpx",
+            "sudo npm install -g typescript",
+            "sudo brew install jq",
+            "env PIP_NO_INPUT=1 pip install httpx",
+            # And a reserved word is not the program either — the loop and the conditional
+            # put the install one token past where a first-token read looks, and this
+            # guard is the one whose miss survives the branch, the PR and the revert.
+            "if true; then pip install httpx; fi",
+            "for p in httpx; do sudo pip install $p; done",
+            "nohup pip install httpx",
         ],
     )
     def test_an_install_outside_the_project_venv_is_refused(self, repo: Path, command: str) -> None:
@@ -346,9 +462,19 @@ class TestNoGlobalInstalls:
             ".venv/bin/pip install httpx",
             # An install that is local to a project, not to the machine.
             "npm install",
-            # Not an install at all.
+            # Not an install at all — `--system` scopes a query here, and every other
+            # branch in the guard gates on the verb.
             "pip --version",
             "brew list",
+            "uv pip list --system",
+            # A wrapper with no install behind it is not the subject either.
+            "sudo -v",
+            "sudo launchctl list",
+            # A newline inside a quoted argument does not end a command, so writing
+            # *about* an install is not performing one.
+            'git commit -m "docs: the guard\n\npip install httpx\n\nis what it refuses"',
+            # The sanctioned command stays sanctioned inside a construct.
+            "for p in httpx; do uv add $p; done",
         ],
     )
     def test_an_install_into_the_project_is_allowed(self, repo: Path, command: str) -> None:
@@ -595,6 +721,24 @@ class TestNoUnslicedDocReads:
             "git status --porcelain\ncat docs/adr/0001-a-decision.md",
             docs_repo,
         )
+        assert result.returncode == BLOCK
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "sudo cat docs/adr/0001-a-decision.md",
+            "for f in a b; do cat docs/adr/0001-a-decision.md; done",
+            "PAGER=cat cat docs/adr/0001-a-decision.md",
+        ],
+    )
+    def test_a_dumper_behind_a_wrapper_or_a_keyword_is_still_a_dumper(
+        self, docs_repo: Path, command: str
+    ) -> None:
+        """The bypass the other three guards close through ``_shell.unwrap``, asserted
+        here too because this guard is the fourth door onto the same corpus. Key on the
+        raw first token and ``sudo``, a loop's ``do`` or an assignment prefix stands where
+        ``cat`` does: the guard matches nothing and the whole file is spent anyway."""
+        result = run_hook("no-unsliced-doc-reads.py", command, docs_repo)
         assert result.returncode == BLOCK
 
     def test_a_refused_dump_gets_the_same_index_a_refused_read_does(self, docs_repo: Path) -> None:
