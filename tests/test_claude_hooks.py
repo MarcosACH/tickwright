@@ -1,14 +1,21 @@
-"""The ``.claude/hooks`` guards: rules enforced at the tool call, not asked for in prose.
+"""The ``.claude/hooks`` scripts: work done at the tool call, not asked for in prose.
 
-Four ``PreToolUse`` hooks — three on ``Bash``, one on ``Read`` and ``Bash`` both. Each
-reads the event JSON on stdin and answers with an exit code — ``0`` allows the call, ``2``
-blocks it and hands the text on stderr back to the agent as the reason. That contract is
-the whole subject here, so nothing is mocked: the hooks are run as real processes, the way
-Claude Code runs them.
+Six hooks across three events, and they come in two shapes.
 
-Three of the four decide by asking a real tool about the path — ``git`` (tracked?
-ignored?) or ``doc-slice`` (what are its sections?) — so the fixtures are real scratch
-repos rather than stubbed answers, the same shape and the same reason as
+**Five guards** refuse. ``PreToolUse`` on ``Bash`` (and, for one of them, ``Read`` too):
+each reads the event JSON on stdin and answers with an exit code — ``0`` allows the call,
+``2`` blocks it and hands the text on stderr back to the agent as the reason.
+
+**Two answer instead.** ``ruff-on-write`` runs on ``PostToolUse``, which cannot block by
+design, and fixes the file rather than arguing about it; ``resume-from-plan`` runs on
+``SessionStart`` and prints, where stdout becomes context. Neither has a refusal to
+assert, so what is asserted is the effect on disk and the text handed back.
+
+That contract is the whole subject here, so nothing is mocked: the hooks are run as real
+processes, the way Claude Code runs them. Most of them decide by asking a real tool about
+the path — ``git`` (tracked? ignored? which branch?), ``doc-slice`` (what are its
+sections?) or ``ruff`` (is this formatted?) — so the fixtures are real scratch repos
+rather than stubbed answers, the same shape and the same reason as
 ``tests/test_githooks.py``. Global and system git config are pinned to ``/dev/null`` so a
 developer's own settings cannot reach an outcome.
 
@@ -25,7 +32,9 @@ from pathlib import Path
 
 import pytest
 
-_HOOKS = Path(__file__).resolve().parent.parent / ".claude" / "hooks"
+_ROOT = Path(__file__).resolve().parent.parent
+_HOOKS = _ROOT / ".claude" / "hooks"
+_RUFF = _ROOT / ".venv" / "bin" / "ruff"
 
 _ENV = {
     **os.environ,
@@ -123,19 +132,37 @@ def docs_repo(tmp_path: Path) -> Path:
     return root
 
 
-def run_tool_hook(
-    name: str, tool: str, tool_input: dict[str, object], cwd: Path
-) -> subprocess.CompletedProcess[str]:
-    """Drive one hook with the event Claude Code would hand it."""
-    event = {
-        "hook_event_name": "PreToolUse",
-        "tool_name": tool,
-        "tool_input": tool_input,
-        "cwd": str(cwd),
-    }
+@pytest.fixture
+def python_repo(tmp_path: Path) -> Path:
+    """A scratch repo carrying this project's ruff settings and a ruff to apply them.
+
+    Both are taken from the real tree at fixture time rather than written out here.
+    ``pyproject.toml`` is copied because ruff reads its settings from the checked file's
+    own tree, so a scratch repo without it would be judged against upstream defaults —
+    88 columns rather than this project's 100 — and the test would assert a formatting
+    this repo does not use. ``ruff`` is symlinked because the hook resolves the binary at
+    ``<repo root>/.venv/bin/ruff``, which is a path a scratch repo has to actually have.
+
+    Neither can go stale, which is the point: the same reasoning as ``docs_repo``'s
+    ``doc-slice`` copy, and the alternative ``evals/README.md`` points at.
+    """
+    root = tmp_path / "py-repo"
+    (root / "src").mkdir(parents=True)
+    (root / ".venv" / "bin").mkdir(parents=True)
+    (root / ".venv" / "bin" / "ruff").symlink_to(_RUFF)
+    shutil.copy(_ROOT / "pyproject.toml", root / "pyproject.toml")
+
+    _git(root, "init", "-q", "-b", "main")
+    _git(root, "config", "user.name", "Test")
+    _git(root, "config", "user.email", "test@example.com")
+    return root
+
+
+def _run_raw(name: str, payload: str, cwd: Path) -> subprocess.CompletedProcess[str]:
+    """Run one hook as a real process against whatever bytes are on stdin."""
     return subprocess.run(
         [str(_HOOKS / name)],
-        input=json.dumps(event),
+        input=payload,
         cwd=cwd,
         env=_ENV,
         capture_output=True,
@@ -143,11 +170,48 @@ def run_tool_hook(
     )
 
 
+def _run(name: str, event: dict[str, object], cwd: Path) -> subprocess.CompletedProcess[str]:
+    """Run one hook against the event JSON Claude Code would send."""
+    return _run_raw(name, json.dumps(event), cwd)
+
+
+def run_tool_hook(
+    name: str,
+    tool: str,
+    tool_input: dict[str, object],
+    cwd: Path,
+    hook_event: str = "PreToolUse",
+) -> subprocess.CompletedProcess[str]:
+    """Drive one hook with a tool event. ``PostToolUse`` additionally carries the tool's
+    own result, which the runtime sends and a hook is free to ignore."""
+    event: dict[str, object] = {
+        "hook_event_name": hook_event,
+        "tool_name": tool,
+        "tool_input": tool_input,
+        "cwd": str(cwd),
+    }
+    if hook_event == "PostToolUse":
+        event["tool_response"] = {"success": True}
+    return _run(name, event, cwd)
+
+
 def run_hook(
     name: str, command: str, cwd: Path, tool: str = "Bash"
 ) -> subprocess.CompletedProcess[str]:
-    """Drive one hook with a Bash call — the shape three of the four guards judge."""
+    """Drive one hook with a Bash call — the shape most of the guards judge."""
     return run_tool_hook(name, tool, {"command": command}, cwd)
+
+
+def context_of(result: subprocess.CompletedProcess[str]) -> str:
+    """The text a ``PostToolUse`` hook hands back to the agent, or ``""`` for silence.
+
+    Silence is a real answer and the commonest one, so it is spelled as empty rather than
+    raised on: a hook with nothing to say prints nothing at all, which costs no context.
+    """
+    if not result.stdout.strip():
+        return ""
+    payload = json.loads(result.stdout)
+    return str(payload["hookSpecificOutput"]["additionalContext"])
 
 
 class TestNoTrackedWrites:
@@ -604,6 +668,132 @@ class TestNoUnslicedDocReads:
 
     def test_the_hook_is_executable(self) -> None:
         assert os.access(_HOOKS / "no-unsliced-doc-reads.py", os.X_OK)
+
+
+class TestRuffOnWrite:
+    """The formatter runs at the edit, not at the pull request.
+
+    ``ci`` runs ``ruff format --check .`` and ``ruff check .`` and **reports only** —
+    neither auto-fixes, so one formatting slip costs a red run, a fix commit and a second
+    run. The fix is mechanical and the tool is already in ``.venv``. This closes that
+    window: after every ``Edit`` or ``Write`` of a Python file, ruff formats and fixes it
+    in place, and the hook says what it changed.
+
+    ``PostToolUse`` cannot block, and that is the right event rather than a limitation —
+    the write already happened and the point is to correct it, not to argue with it.
+    """
+
+    @staticmethod
+    def _write(repo: Path, relative: str, body: str) -> Path:
+        target = repo / relative
+        target.write_text(body)
+        return target
+
+    def _fire(self, repo: Path, target: Path) -> subprocess.CompletedProcess[str]:
+        return run_tool_hook(
+            "ruff-on-write.py", "Write", {"file_path": str(target)}, repo, "PostToolUse"
+        )
+
+    def test_an_unformatted_write_is_reformatted_in_place(self, python_repo: Path) -> None:
+        target = self._write(python_repo, "src/spacing.py", "x = {  'a':1 }\n")
+        assert self._fire(python_repo, target).returncode == ALLOW
+        assert target.read_text() == 'x = {"a": 1}\n'
+
+    def test_an_auto_fixable_finding_is_fixed_in_place(self, python_repo: Path) -> None:
+        """Formatting is not the whole of it: ``ruff check --fix`` is a second pass with
+        its own fixes, and import order (``I001``) is the one an agent trips constantly
+        and the formatter will never touch."""
+        target = self._write(
+            python_repo, "src/imports.py", "import os\nimport json\n\nprint(json, os)\n"
+        )
+        self._fire(python_repo, target)
+        assert target.read_text() == "import json\nimport os\n\nprint(json, os)\n"
+
+    def test_the_report_names_the_file_and_the_stale_copy(self, python_repo: Path) -> None:
+        """Rewriting a file behind the harness's back invalidates its cached copy, and
+        the next ``Edit`` fails with a modification error the agent has no explanation
+        for. Saying so is not a courtesy; it is what makes the rewrite survivable."""
+        target = self._write(python_repo, "src/spacing.py", "x = {  'a':1 }\n")
+        context = context_of(self._fire(python_repo, target))
+        assert "src/spacing.py" in context
+        assert "stale" in context.lower()
+
+    def test_a_finding_ruff_cannot_fix_is_reported(self, python_repo: Path) -> None:
+        """The half a formatter cannot close. ``ci`` would report it minutes later and
+        still not fix it, so the agent is the only thing that can, and it needs the
+        line."""
+        target = self._write(python_repo, "src/undefined.py", "def f():\n    return nope\n")
+        context = context_of(self._fire(python_repo, target))
+        assert "F821" in context
+        assert "src/undefined.py:2:12" in context
+
+    def test_a_clean_file_says_nothing_at_all(self, python_repo: Path) -> None:
+        """The common case, and it has to cost nothing. A hook that reports "no changes"
+        on every edit spends the context budget it was written to protect."""
+        target = self._write(python_repo, "src/clean.py", 'x = {"a": 1}\n')
+        result = self._fire(python_repo, target)
+        assert result.returncode == ALLOW
+        assert result.stdout.strip() == ""
+
+    @pytest.mark.parametrize(
+        ("relative", "body"),
+        [
+            ("notes.md", "# not python\n"),
+            ("data.json", '{"a":1}\n'),
+        ],
+    )
+    def test_a_file_ruff_does_not_judge_is_left_alone(
+        self, python_repo: Path, relative: str, body: str
+    ) -> None:
+        target = self._write(python_repo, relative, body)
+        result = self._fire(python_repo, target)
+        assert result.stdout.strip() == ""
+        assert target.read_text() == body
+
+    def test_a_path_outside_the_repo_is_left_alone(self, python_repo: Path, tmp_path: Path) -> None:
+        """Scratch space is not this repo's code and is not held to its settings."""
+        outside = tmp_path / "elsewhere.py"
+        outside.write_text("x = {  'a':1 }\n")
+        result = self._fire(python_repo, outside)
+        assert result.stdout.strip() == ""
+        assert outside.read_text() == "x = {  'a':1 }\n"
+
+    def test_a_clone_with_no_ruff_yet_is_silent(self, python_repo: Path) -> None:
+        """A hook runs before ``uv sync`` has necessarily happened. With no binary there
+        is nothing to say and nothing to fix, and a complaint would be noise on the one
+        turn a new contributor is least able to act on it."""
+        (python_repo / ".venv" / "bin" / "ruff").unlink()
+        target = self._write(python_repo, "src/spacing.py", "x = {  'a':1 }\n")
+        result = self._fire(python_repo, target)
+        assert result.returncode == ALLOW
+        assert result.stdout.strip() == ""
+        assert target.read_text() == "x = {  'a':1 }\n"
+
+    def test_a_write_that_left_no_file_is_not_an_error(self, python_repo: Path) -> None:
+        """``tool_input`` names a path; nothing promises it still exists by the time the
+        hook runs. Same fail-open rule the guards hold."""
+        result = self._fire(python_repo, python_repo / "src" / "vanished.py")
+        assert result.returncode == ALLOW
+        assert result.stdout.strip() == ""
+
+    def test_another_tool_is_not_this_hooks_business(self, python_repo: Path) -> None:
+        """The matcher narrows to ``Edit`` and ``Write``, but a hook that trusts its
+        matcher is a hook that misfires the day the matcher is widened."""
+        target = self._write(python_repo, "src/spacing.py", "x = {  'a':1 }\n")
+        result = run_tool_hook(
+            "ruff-on-write.py",
+            "Bash",
+            {"command": f"touch {target}"},
+            python_repo,
+            "PostToolUse",
+        )
+        assert result.stdout.strip() == ""
+        assert target.read_text() == "x = {  'a':1 }\n"
+
+    def test_an_unreadable_event_is_not_one_to_act_on(self, python_repo: Path) -> None:
+        result = _run_raw("ruff-on-write.py", "not json at all", python_repo)
+        assert result.returncode == ALLOW
+        assert result.stdout.strip() == ""
 
 
 class TestWiring:
