@@ -104,14 +104,35 @@ def margined(position: VenuePositionState) -> VenuePositionState:
     family (after ``free_margin`` and ``notional``) whose recorded constant went
     stale the moment ADR-0040 §6 compared it, and it is the first that a *later*
     replacement can invalidate.
+
+    **A row that answers the two mode questions differently is refused rather
+    than priced**, and the refusal is what makes the rest of this trustworthy.
+    ``VenuePositionState`` carries the mode twice — ``isolated_collateral`` is
+    ``None`` *exactly* when the position is cross and backed by the account
+    pool, while ``leverage`` is the venue's stored setting — so either half
+    alone picks the rule, and a row where they disagree has two answers and no
+    reason to prefer one. Read off the leverage with the bucket defaulted to
+    ``0``, as this used to be, the isolated arm publishes the bare unrealized
+    PnL wearing the bucket's name: a **negative** ``marginUsed`` on any losing
+    position, which is not a number a venue returns. Inventing the missing
+    bucket cost nothing to write, so every constructor below had to be *trusted*
+    to keep the pair in step; refused, an incoherent row cannot reach a
+    comparison at all.
     """
-    if position.leverage.mode == "cross":
-        return replace(position, margin_used=position.notional / position.leverage.leverage)
     bucket = position.isolated_collateral
-    return replace(
-        position,
-        margin_used=(_ZERO if bucket is None else bucket) + position.unrealized_pnl,
-    )
+    if position.leverage.mode == "cross":
+        if bucket is not None:
+            raise ValueError(
+                f"{position.symbol}: a cross row is backed by the account pool and posts no "
+                f"bucket of its own, got isolated_collateral={bucket}"
+            )
+        return replace(position, margin_used=position.notional / position.leverage.leverage)
+    if bucket is None:
+        raise ValueError(
+            f"{position.symbol}: an isolated row has to declare the bucket its margin is "
+            "computed from, got isolated_collateral=None, which is how a venue says cross"
+        )
+    return replace(position, margin_used=bucket + position.unrealized_pnl)
 
 
 def implied_free_margin(equity: str, unrealized: Iterable[str], *, declared: str | None) -> Decimal:
@@ -141,6 +162,30 @@ def implied_free_margin(equity: str, unrealized: Iterable[str], *, declared: str
     if declared is not None:
         return Decimal(declared)
     return Decimal(equity) - sum((Decimal(pnl) for pnl in unrealized), Decimal("0"))
+
+
+UNPOSTED_BUCKET = Decimal("0")
+"""The isolated bucket this fixture's rows declare, and the one figure here that
+is the **ledger's** shape rather than a venue's.
+
+A real venue's isolated position always locks a positive bucket, so a venue
+returning this row is not what it models. What it models is the pre-ingest state
+the cadence actually compares against: live never computes the bucket
+(``_lock_isolated_collateral`` declines on the declared-versus-ingested
+predicate), the reading is taken *before* the pass ingests it, and our own
+``Position.isolated_collateral`` opens at the ``0`` the dataclass gives it. So a
+ledger holding one of these symbols computes ``0 + uPnL``, and the row that
+agrees with it is this one.
+
+Declared rather than left at ``None``, which is what it used to be, and the
+difference is the point: ``None`` is how ``VenuePositionState`` says **cross**,
+so the row claimed a cross bucket beside an isolated ``leverage`` and ``margined``
+resolved the contradiction by inventing the zero. Written down, the same numbers
+come out of a row whose two mode signals agree, and ``margined`` can refuse the
+ones that do not.
+
+A case whose subject *is* the bucket posts a real one with ``_isolated`` and gets
+the ``MARGIN_USED`` divergence a first cycle of a life genuinely reports."""
 
 
 CROSSLESS_MAINTENANCE = Decimal("0")
@@ -188,6 +233,10 @@ def account_state(
     ``maintenance`` is the third that had to move off its recorded constant, on
     ``CROSSLESS_MAINTENANCE``'s premise: this fixture's rows are isolated, and
     the venue's field counts only cross ones.
+
+    Those rows are isolated in **both** places that say so — an
+    ``UNPOSTED_BUCKET`` beside the isolated ``leverage`` — so ``margined`` prices
+    them off a bucket the row declares rather than one it invents.
     """
     return VenueAccountState(
         equity=Decimal(equity),
@@ -207,7 +256,7 @@ def account_state(
                     # ``positionValue / 5`` on the snapshot's own cross book,
                     # which is not the book a suite builds beside it.
                     margin_used=_ZERO,
-                    isolated_collateral=None,
+                    isolated_collateral=UNPOSTED_BUCKET,
                     liquidation_price=None,
                     # The **ledger's** default pair rather than the recorded
                     # body's ``cross 5``, on the same premise

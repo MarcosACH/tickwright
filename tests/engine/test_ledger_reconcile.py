@@ -15,11 +15,13 @@ from dataclasses import replace
 from decimal import Decimal
 from typing import Final
 
+import pytest
 from ledgers import book_fill
 from venue_doubles import (
     CROSSLESS_MAINTENANCE,
     LIVE_ACCOUNT_ID,
     RECORDED_ENTRY_PRICE,
+    UNPOSTED_BUCKET,
     account_state,
     implied_free_margin,
     implied_notional,
@@ -2064,12 +2066,38 @@ def _levered(
     leverage change never re-margins an open position — but this helper builds
     the venue's steady state rather than the instant after an edit, and a
     fixture that held both would be inventing a third.
+
+    The **bucket** moves with the setting for the same reason and is the other
+    half of that steady state: a row's mode is written on it twice, and a cross
+    position posts no bucket at all while an isolated one posts the bucket its
+    margin is computed from (``UNPOSTED_BUCKET`` here, these rows being the
+    pre-ingest shape ``account_state`` builds). Left where it was, a snapshot
+    re-margined to cross would carry an isolated position's bucket beside a
+    cross setting, which ``margined`` now refuses rather than silently pricing
+    off whichever field it read first.
     """
+
+    def remargined(position: VenuePositionState) -> VenuePositionState:
+        return margined(
+            replace(
+                position,
+                leverage=spec,
+                isolated_collateral=(
+                    None
+                    if spec.mode == "cross"
+                    else (
+                        UNPOSTED_BUCKET
+                        if position.isolated_collateral is None
+                        else position.isolated_collateral
+                    )
+                ),
+            )
+        )
+
     return replace(
         state,
         positions=tuple(
-            margined(replace(p, leverage=spec)) if symbol is None or p.symbol == symbol else p
-            for p in state.positions
+            remargined(p) if symbol is None or p.symbol == symbol else p for p in state.positions
         ),
     )
 
@@ -2344,15 +2372,25 @@ def test_a_paper_run_checks_no_leverage_because_it_has_no_venue_to_check() -> No
 
 
 def _isolated(
-    state: VenueAccountState, collateral: Decimal | None, *, margin_used: str | None = None
+    state: VenueAccountState, collateral: Decimal, *, margin_used: str | None = None
 ) -> VenueAccountState:
     """The same snapshot with ``collateral`` on every position it carries, and
     the ``margin_used`` that bucket backs.
 
-    ``None`` is not an absent value here: it is the venue saying the position is
-    **cross** and backed by the account pool, which is the claim the adapter's
-    own ``_isolated_collateral`` refuses to guess at — and ``margined`` then
-    posts that row out of the pool instead, by the rule its own mode implies.
+    A real venue's isolated position locks a positive bucket, and this is what
+    posts one: ``account_state``'s rows carry ``UNPOSTED_BUCKET`` instead,
+    modelling the ledger's pre-ingest ``0`` so that cases about something else
+    are not all reporting a margin divergence.
+
+    A ``Decimal`` and not ``Decimal | None``. This used to take ``None`` for
+    "the venue says **cross**, backed by the account pool" — the claim the
+    adapter's own ``_isolated_collateral`` refuses to guess at — and promised
+    ``margined`` would then post the row out of the pool. It never did: it
+    branched on the row's ``leverage``, which this helper does not touch, so a
+    ``None`` produced an isolated rule over an invented zero bucket instead. No
+    caller ever passed one, so the paragraph documented a path that did not
+    exist. A case wanting the venue's cross rule uses ``_levered``, which moves
+    the setting and the bucket together.
 
     ``margin_used`` takes precedence and is the escape hatch, the one
     ``implied_free_margin`` holds for its own field: a case whose subject is the
@@ -2384,6 +2422,33 @@ def test_the_isolated_snapshot_carries_the_margin_a_venue_would_have_published()
     state = _isolated(account_state("25.9264", "0.012"), _BTC_BUCKET)
 
     assert [p.margin_used for p in state.positions] == [Decimal("25.910067")]
+
+
+def test_a_row_whose_bucket_and_margin_mode_disagree_is_refused_rather_than_priced() -> None:
+    """``margined`` will not price a row whose two mode signals contradict each
+    other, because neither rule has an honest figure to give it.
+
+    ``VenuePositionState`` carries the mode twice and the two have to agree:
+    ``isolated_collateral`` is ``None`` **exactly** when the position is cross
+    and backed by the account pool, while ``leverage`` is the venue's stored
+    setting for the symbol. Either half alone decides which of ADR-0040 §3's two
+    rules the row posts by, so a row that answers them differently is a snapshot
+    no venue returns.
+
+    It used to be priced anyway. The isolated arm read an absent bucket as
+    ``0`` and published the bare unrealized PnL wearing the bucket's name —
+    which on a losing position is a **negative** ``marginUsed``, a figure no
+    venue has ever returned. Inventing the bucket made the contradiction free to
+    write, so every fixture below had to be trusted not to express it; refused,
+    it cannot reach a comparison at all.
+    """
+    row = account_state("25.9264", "-0.034").positions[0]
+
+    with pytest.raises(ValueError, match="isolated row"):
+        margined(replace(row, isolated_collateral=None))
+
+    with pytest.raises(ValueError, match="cross row"):
+        margined(replace(row, isolated_collateral=_BTC_BUCKET, leverage=_CROSS_5X))
 
 
 def test_a_case_that_wants_the_isolated_margin_disagreement_declares_it() -> None:
