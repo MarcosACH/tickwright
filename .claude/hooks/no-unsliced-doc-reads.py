@@ -21,6 +21,7 @@ wrongly blocked.
 import fnmatch
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -37,6 +38,17 @@ _CORPUS = (
 )
 
 _DOC_SLICE = ".agents/tools/doc-slice"
+
+# `CONTEXT.md` is the one corpus file whose units are not headings: its `Language` section
+# is a single h2 running 770 of 810 lines, so a table of contents of it is not an index of
+# it, and offering one would send the caller to `doc-slice CONTEXT.md Language` — which
+# returns the file it was just refused. Its 45 bold terms are the index (1,086 characters
+# against 61,122), each with the line number the offset/limit escape takes.
+#
+# Named, not inferred. An ADR's headings *are* its units, and scanning one for
+# bold-prefixed lines would index its emphasis instead.
+_TERM_INDEXED = ("CONTEXT.md",)
+_TERM = re.compile(r"^\*\*([^*]+)\*\*:")
 
 
 def _in_corpus(relative: str) -> bool:
@@ -105,6 +117,26 @@ def _annotated_toc(tool: str, path: str) -> str | None:
     return "\n".join(lines)
 
 
+def _term_index(absolute: str) -> str | None:
+    """The glossary's terms with their line numbers, or None if it carries none."""
+    entries = []
+    with open(absolute, encoding="utf-8", errors="replace") as handle:
+        for number, line in enumerate(handle, 1):
+            match = _TERM.match(line)
+            if match:
+                entries.append(f"{number:5d}  {match.group(1)}")
+    return "\n".join(entries) or None
+
+
+def _glossary_refusal(path: str, index: str) -> str:
+    return (
+        f"Blocked: {path} is read by term, not whole. Its terms, with line numbers:\n\n"
+        f"{index}\n\n"
+        f'  Read(file_path="{path}", offset=<line>, limit=20)  the entry you need\n'
+        f"  {_DOC_SLICE} {path} <heading-substr>              a section other than the glossary"
+    )
+
+
 def _refusal(path: str, toc: str, corrected: bool) -> str:
     correction = (
         "\nA section marked (+N) carries N amendment blocks. This corpus is "
@@ -153,6 +185,13 @@ def main() -> int:
     relative = os.path.relpath(absolute, root)
     if not _in_corpus(relative):
         return 0
+
+    if relative in _TERM_INDEXED:
+        index = _term_index(absolute)
+        if index is None:
+            return 0
+        print(_glossary_refusal(relative, index), file=sys.stderr)
+        return 2
 
     tool = os.path.join(root, _DOC_SLICE)
     if not os.access(tool, os.X_OK):

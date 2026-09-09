@@ -100,7 +100,12 @@ def docs_repo(tmp_path: Path) -> Path:
         "**(Amended by ADR-0002:** the answer is now the second one.**)**\n\n"
         "## Consequences\n\nThey follow.\n"
     )
-    (root / "CONTEXT.md").write_text("# Glossary\n\n## Term\n\nA meaning.\n")
+    (root / "CONTEXT.md").write_text(
+        "# Glossary\n\n## Language\n\n"
+        "**Engine**:\nThe process that hosts the pipeline.\n\n"
+        "**EventBus**:\nThe transport everything couples through.\n\n"
+        "## Relationships\n\n- The Engine hosts one EventBus.\n"
+    )
     (root / "docs" / "module-maps" / "surface.md").write_text("# A surface\n\n## Module\n\nIt.\n")
     (root / "docs" / "research" / "note.md").write_text(
         "# A note\n\n## Finding\n\nThe venue does this **(unverified)**.\n"
@@ -489,6 +494,35 @@ class TestNoUnslicedDocReads:
         assert result.returncode == BLOCK
         assert "Finding" in result.stderr
         assert "(+" not in result.stderr
+
+    def test_the_glossary_is_indexed_by_term_rather_than_by_heading(self, docs_repo: Path) -> None:
+        """``CONTEXT.md``'s units are bold terms, not headings — its ``Language`` section
+        is one h2 running 770 of the real file's 810 lines. A table of contents of it is
+        therefore not an index of it, and a refusal offering one would send the agent to
+        ``doc-slice CONTEXT.md Language``, which returns the file it was just refused.
+
+        The term lines are the index: 45 of them, 1,086 characters against 61,122. Each
+        carries its line number, so the follow-up is the ``offset``/``limit`` Read this
+        guard already allows.
+        """
+        result = run_tool_hook(
+            "no-unsliced-doc-reads.py", "Read", {"file_path": "CONTEXT.md"}, docs_repo
+        )
+        assert result.returncode == BLOCK
+        assert "Engine" in result.stderr
+        assert "EventBus" in result.stderr
+        assert "offset" in result.stderr
+
+    def test_only_the_glossary_is_indexed_by_term(self, docs_repo: Path) -> None:
+        """The exception is named, not inferred. An ADR's headings *are* its units, and
+        scanning it for bold-prefixed lines would index its emphasis."""
+        result = run_tool_hook(
+            "no-unsliced-doc-reads.py",
+            "Read",
+            {"file_path": "docs/adr/0001-a-decision.md"},
+            docs_repo,
+        )
+        assert "Amended by ADR-0002" not in result.stderr
 
     def test_a_repo_with_no_doc_slice_is_not_blocked(self, docs_repo: Path) -> None:
         """Fail open, for a reason narrower than the usual one: without the tool there is
