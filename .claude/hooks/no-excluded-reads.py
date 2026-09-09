@@ -28,7 +28,7 @@ import os
 import subprocess
 import sys
 
-from _shell import command_name, segments, unwrap
+from _shell import command_name, segments, unwrap, without_write_redirects
 
 # Commands whose arguments are files they pull into the context window. Narrow on
 # purpose: the guard acts only where it is sure a read is what is being asked for, so an
@@ -104,8 +104,15 @@ def _read_candidates(segment: list[str]) -> list[str]:
 
     Still over-collects — a `--include` glob lands here beside the tree it filters — and
     that is affordable, because a candidate only becomes a refusal once `check-ignore`
-    matches it. A grep pattern is the one token where it is not: the pattern is written
-    to *name* things, so it matches an ignored path by design rather than by accident.
+    matches it. Two tokens are where it is not, and both are dropped rather than paid for:
+
+    - A grep **pattern**. It is written to *name* things, so it matches an ignored path by
+      design rather than by accident.
+    - A redirect **target**. Sending a run into `logs/` is the ordinary use of an ignored
+      tree rather than an evasion of the rule — it is what the tree is ignored *for* — and
+      refusing `cat src/x.py > logs/out.log` answers a command that was already reporting
+      with "derive it with a command that reports". `without_write_redirects` keeps the
+      operand of a `< file`, which does name something being read.
     """
     name = command_name(segment)
     if name not in _READERS:
@@ -119,7 +126,7 @@ def _read_candidates(segment: list[str]) -> list[str]:
     paths: list[str] = []
     pattern_from_flag = False
     skip_value = False
-    for tok in unwrap(segment)[1:]:
+    for tok in unwrap(without_write_redirects(segment))[1:]:
         if skip_value:
             skip_value = False
             continue

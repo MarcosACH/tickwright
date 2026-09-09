@@ -24,23 +24,16 @@ import os
 import subprocess
 import sys
 
-from _shell import command_name, segments, unwrap
+from _shell import DUP_REDIRECT, WRITE_REDIRECTS, command_name, segments, unwrap
 
 # `sed` edits in place under any of these. The `-i.bak` form takes its suffix attached,
 # so the flag is matched by prefix rather than by equality.
 _SED_IN_PLACE = ("-i", "--in-place")
 
-# Redirections that truncate or append to a named file. Every *shape* of one, not the two
-# spellings that come to mind first: `punctuation_chars` groups a run of punctuation into
-# a single token, so bash's both-streams `&>`/`&>>` and the noclobber-override `>|` arrive
-# whole and equal neither `>` nor `>>`. A digit is not a punctuation char, so `2>` lexes
-# as `2` then `>` and the plain form already covers it.
-_WRITE_REDIRECTS = (">", ">>", ">|", "&>", "&>>", "&>|")
-
-# `>&` is the one shape that cannot be decided on the token alone: `>& file` writes both
-# streams to a file, while the far commoner `2>&1` duplicates a descriptor and names no
-# file at all. What follows tells them apart — a descriptor is a number, or `-` to close.
-_DUP_REDIRECT = ">&"
+# The redirect shapes are `_shell.WRITE_REDIRECTS` and `_shell.DUP_REDIRECT`, not a copy
+# kept here: what this guard collects is exactly what the two read guards discard, and two
+# lists that must agree is the drift this project calls a bug. The reasoning for each shape
+# is on the constants themselves.
 
 
 def _write_targets(segment: list[str]) -> list[str]:
@@ -89,9 +82,9 @@ def _write_targets(segment: list[str]) -> list[str]:
         if i + 1 >= len(segment):
             break
         following = segment[i + 1]
-        if tok in _WRITE_REDIRECTS:
+        if tok in WRITE_REDIRECTS:
             targets.append(following)
-        elif tok == _DUP_REDIRECT and not following.isdigit() and following != "-":
+        elif tok == DUP_REDIRECT and not following.isdigit() and following != "-":
             targets.append(following)
 
     return targets

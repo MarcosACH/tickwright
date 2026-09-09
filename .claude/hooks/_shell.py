@@ -62,6 +62,27 @@ _KEYWORDS = frozenset(
     {"!", "{", "do", "then", "elif", "else", "if", "while", "until", "time", "nohup", "exec"}
 )
 
+# Redirections that truncate or append to a named file. Every *shape* of one, not the two
+# spellings that come to mind first: `punctuation_chars` groups a run of punctuation into
+# a single token, so bash's both-streams `&>`/`&>>` and the noclobber-override `>|` arrive
+# whole and equal neither `>` nor `>>`. A digit is not a punctuation char, so `2>` lexes
+# as `2` then `>` and the plain form already covers it.
+WRITE_REDIRECTS = (">", ">>", ">|", "&>", "&>>", "&>|")
+
+# `>&` is the one shape that cannot be decided on the token alone: `>& file` writes both
+# streams to a file, while the far commoner `2>&1` duplicates a descriptor and names no
+# file at all. What follows tells them apart — a descriptor is a number, or `-` to close.
+DUP_REDIRECT = ">&"
+
+# Operands that are not paths at all: `<&` names a descriptor, and a here-string's operand
+# is the data itself. Both are dropped whole, target included.
+_OPAQUE_REDIRECTS = ("<&", "<<<")
+
+# An input redirect names a file the command **reads**, so only the operator is dropped
+# and the operand stays a candidate: `cat < logs/run.log` spends the log exactly as
+# `cat logs/run.log` does.
+_INPUT_REDIRECTS = ("<", "<>")
+
 
 def tokens(command: str) -> list[str]:
     """Split a shell command, keeping operators as tokens of their own.
@@ -175,6 +196,51 @@ def segments(command: str) -> list[list[str]]:
             i += 1
         if current:
             out.append(current)
+    return out
+
+
+def without_write_redirects(segment: list[str]) -> list[str]:
+    """The segment with everything a redirect writes to removed.
+
+    The mirror of `no-tracked-writes._write_targets`, off the same two constants so the
+    shapes cannot drift apart: what that guard collects is what the two *read* guards
+    have to discard. A redirect target is where output goes, and neither read guard has
+    anything true to say about it — `cat src/x.py > logs/out.log` reads no log, and
+    `cat README.md > docs/adr/0001.md` reads no ADR. Answering either with "that path is
+    excluded" or "read it by section" is the misfire that teaches an agent to route
+    around a guard.
+
+    Three kinds, and the distinction between them is the whole reason this is not a
+    blanket "drop the tail":
+
+    - a **write** target and an opaque operand (a descriptor, a here-string's data) go
+      with their operator;
+    - an **input** redirect loses only its operator, because `< file` names a file being
+      read and that is precisely what the callers are looking for;
+    - the **descriptor prefix** of `2> err.log` goes too. `2` lexes as its own token, so
+      leaving it behind offers a bare digit where a path would stand.
+
+    What a redirect never does is end the command, so the tokens after one are still the
+    program's own: `cat > out.log src/x.py` reads `src/x.py`.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(segment):
+        token = segment[i]
+        following = segment[i + 1] if i + 1 < len(segment) else None
+
+        opaque = token in WRITE_REDIRECTS or token in _OPAQUE_REDIRECTS
+        if token == DUP_REDIRECT and following is not None:
+            # `2>&1` names a descriptor and was never a path; `>& file` is a write.
+            opaque = not following.isdigit() and following != "-"
+        if opaque or token in _INPUT_REDIRECTS:
+            if out and out[-1].isdigit():
+                out.pop()  # the `2` of `2> err.log`, standing where a path would
+            i += 2 if opaque and following is not None else 1
+            continue
+
+        out.append(token)
+        i += 1
     return out
 
 

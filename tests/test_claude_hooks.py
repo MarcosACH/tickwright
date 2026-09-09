@@ -359,10 +359,27 @@ class TestNoExcludedReads:
             # one. Both of these read tracked source from inside a construct.
             "while read l; do cat src/tracked.py; done",
             "if grep -q 'x' src/tracked.py; then echo hit; fi",
+            # A redirect *target* is where output goes, not a file being read. Sending a
+            # run into `logs/` is the ordinary use of an ignored tree — the point of
+            # ignoring it — and this guard refusing it says "derive it with a command
+            # that reports" about a command that was already reporting.
+            "cat src/tracked.py > logs/out.log",
+            "grep -n 'x' src/tracked.py >> logs/out.log",
+            "cat src/tracked.py &> logs/out.log",
+            "cat src/tracked.py 2> logs/err.log",
         ],
     )
     def test_a_read_that_costs_no_context_is_allowed(self, repo: Path, command: str) -> None:
         assert run_hook("no-excluded-reads.py", command, repo).returncode == ALLOW
+
+    def test_a_read_that_also_redirects_is_still_a_read(self, repo: Path) -> None:
+        """The other half of dropping redirect targets: the *source* is untouched by it.
+        ``cat logs/run.log > /tmp/x`` still spends the file, and a scan that dropped the
+        whole tail of the segment rather than the operator and its target would let it
+        through."""
+        result = run_hook("no-excluded-reads.py", "cat logs/run.log > /tmp/copy", repo)
+        assert result.returncode == BLOCK
+        assert "logs/run.log" in result.stderr
 
     def test_the_reason_names_the_path_and_why(self, repo: Path) -> None:
         result = run_hook("no-excluded-reads.py", "cat logs/run.log", repo)
@@ -740,6 +757,27 @@ class TestNoUnslicedDocReads:
         ``cat`` does: the guard matches nothing and the whole file is spent anyway."""
         result = run_hook("no-unsliced-doc-reads.py", command, docs_repo)
         assert result.returncode == BLOCK
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "cat README.md > docs/adr/0001-a-decision.md",
+            "cat README.md >> CONTEXT.md",
+            "cat README.md &> docs/module-maps/surface.md",
+            "cat README.md 2> docs/research/note.md",
+        ],
+    )
+    def test_a_redirect_target_is_not_a_read_of_it(self, docs_repo: Path, command: str) -> None:
+        """A corpus file being written to is not one being read, and this guard's whole
+        subject is what a call pulls into the window. Refusing here would answer a write
+        with "read it by section instead", which is not an instruction that applies —
+        and ``no-tracked-writes`` is the guard that has something true to say about it.
+
+        The last two are the shapes a hand-rolled scan misses: ``&>`` arrives as one
+        token that equals neither ``>`` nor ``>>``, and ``2>`` lexes as ``2`` then ``>``,
+        leaving a bare descriptor standing where a path would."""
+        result = run_hook("no-unsliced-doc-reads.py", command, docs_repo)
+        assert result.returncode == ALLOW
 
     def test_a_refused_dump_gets_the_same_index_a_refused_read_does(self, docs_repo: Path) -> None:
         result = run_hook("no-unsliced-doc-reads.py", "cat docs/adr/0001-a-decision.md", docs_repo)

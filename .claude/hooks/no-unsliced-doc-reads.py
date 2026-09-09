@@ -35,7 +35,7 @@ import re
 import subprocess
 import sys
 
-from _shell import command_name, segments, unwrap
+from _shell import command_name, segments, unwrap, without_write_redirects
 
 # The four families `CLAUDE.md` already names. Unlike the two path guards, this list is
 # not derived from git: "long enough to be worth slicing" is an editorial judgement and
@@ -215,6 +215,11 @@ def _dump_candidates(command: str) -> list[str]:
     program, so `sudo cat CONTEXT.md` and the `do cat "$f"` of a loop body are read at
     the same token `command_name` decided on.
 
+    `without_write_redirects` drops what the command writes to, which is not a file it
+    reads: `cat README.md > docs/adr/0001.md` opens no ADR, and refusing it would answer
+    a write with "read it by section instead" — an instruction that does not apply, about
+    a file `no-tracked-writes` has something true to say about instead.
+
     Over-collects the rest: a value riding a flag (`nl -w 5 notes.md`) lands here beside
     the file. Nothing in `_DUMPERS` takes a *pattern* the way the grep family does, which
     is the one over-collection that would cost something, so a token naming no corpus
@@ -224,7 +229,7 @@ def _dump_candidates(command: str) -> list[str]:
         token
         for segment in segments(command)
         if command_name(segment) in _DUMPERS
-        for token in unwrap(segment)[1:]
+        for token in unwrap(without_write_redirects(segment))[1:]
         if not token.startswith("-")
     ]
 
