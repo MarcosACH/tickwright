@@ -278,3 +278,39 @@ class TestNoGlobalInstalls:
 
     def test_the_hook_is_executable(self) -> None:
         assert os.access(_HOOKS / "no-global-installs.py", os.X_OK)
+
+
+class TestWiring:
+    """A guard nothing runs is a guard that does not exist.
+
+    Every case above drives a hook directly, which proves the script decides correctly
+    and proves nothing at all about whether Claude Code ever calls it. The wiring in the
+    committed ``.claude/settings.json`` is the other half, and it is committed rather
+    than local precisely so it reaches every clone — the point of the exercise is other
+    people's agents, not only the maintainer's.
+    """
+
+    @staticmethod
+    def _bash_hook_commands() -> list[str]:
+        settings = json.loads((_HOOKS.parent / "settings.json").read_text())
+        return [
+            hook["command"]
+            for entry in settings["hooks"]["PreToolUse"]
+            if entry.get("matcher") == "Bash"
+            for hook in entry["hooks"]
+        ]
+
+    @pytest.mark.parametrize(
+        "hook", ["no-tracked-writes.py", "no-excluded-reads.py", "no-global-installs.py"]
+    )
+    def test_every_guard_is_wired_to_pretooluse_bash(self, hook: str) -> None:
+        assert any(command.endswith(hook) for command in self._bash_hook_commands())
+
+    def test_every_wired_path_exists_and_runs(self) -> None:
+        """``${CLAUDE_PROJECT_DIR}`` is what keeps the wiring correct from a subdirectory
+        or a worktree; a relative path would resolve against whatever cwd the call had."""
+        for command in self._bash_hook_commands():
+            assert command.startswith("${CLAUDE_PROJECT_DIR}/")
+            path = _HOOKS.parent.parent / command.removeprefix("${CLAUDE_PROJECT_DIR}/")
+            assert path.is_file(), command
+            assert os.access(path, os.X_OK), command
