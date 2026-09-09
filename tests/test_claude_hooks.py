@@ -17,6 +17,7 @@ reliably on a hook's PATH.
 
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -67,14 +68,62 @@ def repo(tmp_path: Path) -> Path:
     return root
 
 
-def run_hook(
-    name: str, command: str, cwd: Path, tool: str = "Bash"
+@pytest.fixture
+def docs_repo(tmp_path: Path) -> Path:
+    """A scratch repo carrying one file of each corpus shape, plus two that are not.
+
+    ``doc-slice`` is **copied in at fixture time** rather than committed as a fixture
+    file: the guard resolves the tool from the repo root of the call it is judging, so a
+    scratch repo needs a real one, and a checked-in copy is the stale-fixture problem
+    ``evals/README.md`` warns about. Copying it each run means it cannot drift.
+
+    The research note carries a bare ``**(unverified)**`` — the inline bold form that is
+    ordinary prose everywhere outside the append-corrected corpus. ``doc-slice
+    --amendments`` exits 3 on it, which is the *out of domain* signal the guard has to
+    survive rather than treat as failure.
+    """
+    root = tmp_path / "docs-repo"
+    (root / "docs" / "adr").mkdir(parents=True)
+    (root / "docs" / "module-maps").mkdir(parents=True)
+    (root / "docs" / "research").mkdir(parents=True)
+    (root / "docs" / "agents").mkdir(parents=True)
+    (root / ".agents" / "tools").mkdir(parents=True)
+
+    tool = root / ".agents" / "tools" / "doc-slice"
+    shutil.copy(_HOOKS.parent.parent / ".agents" / "tools" / "doc-slice", tool)
+    tool.chmod(0o755)
+
+    (root / "docs" / "adr" / "0001-a-decision.md").write_text(
+        "# ADR-0001: A decision\n\n"
+        "## Context\n\nSomething was true.\n\n"
+        "## Decision\n\nThe first answer.\n\n"
+        "**(Amended by ADR-0002:** the answer is now the second one.**)**\n\n"
+        "## Consequences\n\nThey follow.\n"
+    )
+    (root / "CONTEXT.md").write_text("# Glossary\n\n## Term\n\nA meaning.\n")
+    (root / "docs" / "module-maps" / "surface.md").write_text("# A surface\n\n## Module\n\nIt.\n")
+    (root / "docs" / "research" / "note.md").write_text(
+        "# A note\n\n## Finding\n\nThe venue does this **(unverified)**.\n"
+    )
+    (root / "docs" / "agents" / "guide.md").write_text("# A guide\n\n## How\n\nLike this.\n")
+    (root / "README.md").write_text("# Readme\n\nShort.\n")
+
+    _git(root, "init", "-q", "-b", "main")
+    _git(root, "config", "user.name", "Test")
+    _git(root, "config", "user.email", "test@example.com")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "seed")
+    return root
+
+
+def run_tool_hook(
+    name: str, tool: str, tool_input: dict[str, object], cwd: Path
 ) -> subprocess.CompletedProcess[str]:
     """Drive one hook with the event Claude Code would hand it."""
     event = {
         "hook_event_name": "PreToolUse",
         "tool_name": tool,
-        "tool_input": {"command": command},
+        "tool_input": tool_input,
         "cwd": str(cwd),
     }
     return subprocess.run(
@@ -85,6 +134,13 @@ def run_hook(
         capture_output=True,
         text=True,
     )
+
+
+def run_hook(
+    name: str, command: str, cwd: Path, tool: str = "Bash"
+) -> subprocess.CompletedProcess[str]:
+    """Drive one hook with a Bash call — the shape three of the four guards judge."""
+    return run_tool_hook(name, tool, {"command": command}, cwd)
 
 
 class TestNoTrackedWrites:
@@ -304,6 +360,92 @@ class TestNoGlobalInstalls:
 
     def test_the_hook_is_executable(self) -> None:
         assert os.access(_HOOKS / "no-global-installs.py", os.X_OK)
+
+
+class TestNoUnslicedDocReads:
+    """The long-form corpus is read by section, and a whole read has to be asked for.
+
+    Membership is a glob list rather than a git predicate, unlike the two path guards:
+    "long enough to be worth slicing" is editorial and git has no opinion on it. What is
+    fenced instead is that the list still names real files —
+    ``test_every_corpus_glob_matches_a_real_file`` — so a renamed directory fails here
+    rather than silently disarming the guard.
+    """
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "docs/adr/0001-a-decision.md",
+            "CONTEXT.md",
+            "docs/module-maps/surface.md",
+            "docs/research/note.md",
+        ],
+    )
+    def test_a_whole_read_of_a_corpus_file_is_refused(self, docs_repo: Path, path: str) -> None:
+        result = run_tool_hook("no-unsliced-doc-reads.py", "Read", {"file_path": path}, docs_repo)
+        assert result.returncode == BLOCK
+        assert path in result.stderr
+
+    @pytest.mark.parametrize(
+        "path", ["README.md", "docs/agents/guide.md", ".agents/tools/doc-slice"]
+    )
+    def test_a_file_outside_the_corpus_is_read_whole(self, docs_repo: Path, path: str) -> None:
+        """The corpus is four globs, not "documentation". ``docs/agents/`` is workflow
+        prose read end to end on purpose, and a guard that reached it would be charging
+        for the cheap files to protect the expensive ones."""
+        result = run_tool_hook("no-unsliced-doc-reads.py", "Read", {"file_path": path}, docs_repo)
+        assert result.returncode == ALLOW
+
+    @pytest.mark.parametrize(
+        "tool_input",
+        [
+            {"file_path": "docs/adr/0001-a-decision.md", "offset": 5},
+            {"file_path": "docs/adr/0001-a-decision.md", "limit": 40},
+            {"file_path": "docs/adr/0001-a-decision.md", "offset": 5, "limit": 40},
+            {"file_path": "docs/adr/0001-a-decision.md", "offset": 1, "limit": 99999},
+        ],
+    )
+    def test_an_explicit_offset_or_limit_is_allowed(
+        self, docs_repo: Path, tool_input: dict[str, object]
+    ) -> None:
+        """Including the last one, which reads the file whole.
+
+        That is the escape, not a hole in the guard. The rule being enforced is that a
+        whole read is a **deliberate** act rather than the default shape of the call, and
+        a guard with no deliberate escape is one an agent learns to route around — the
+        same reasoning that makes all four of these fail open on input they cannot parse.
+        """
+        result = run_tool_hook("no-unsliced-doc-reads.py", "Read", tool_input, docs_repo)
+        assert result.returncode == ALLOW
+
+    def test_an_absolute_path_is_judged_the_same_as_a_relative_one(self, docs_repo: Path) -> None:
+        result = run_tool_hook(
+            "no-unsliced-doc-reads.py",
+            "Read",
+            {"file_path": str(docs_repo / "docs" / "adr" / "0001-a-decision.md")},
+            docs_repo,
+        )
+        assert result.returncode == BLOCK
+
+    def test_a_path_outside_the_repo_is_allowed(self, docs_repo: Path, tmp_path: Path) -> None:
+        elsewhere = tmp_path / "docs" / "adr" / "0001-somebody-elses.md"
+        elsewhere.parent.mkdir(parents=True)
+        elsewhere.write_text("# Not ours\n")
+        result = run_tool_hook(
+            "no-unsliced-doc-reads.py", "Read", {"file_path": str(elsewhere)}, docs_repo
+        )
+        assert result.returncode == ALLOW
+
+    def test_a_corpus_path_that_does_not_exist_is_allowed(self, docs_repo: Path) -> None:
+        """There is nothing to slice, so the refusal would have no index to offer and the
+        `Read` is about to report the real problem anyway."""
+        result = run_tool_hook(
+            "no-unsliced-doc-reads.py", "Read", {"file_path": "docs/adr/0099-absent.md"}, docs_repo
+        )
+        assert result.returncode == ALLOW
+
+    def test_the_hook_is_executable(self) -> None:
+        assert os.access(_HOOKS / "no-unsliced-doc-reads.py", os.X_OK)
 
 
 class TestWiring:
