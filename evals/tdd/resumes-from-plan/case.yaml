@@ -66,9 +66,9 @@ graders:
   # And not by exploring source instead. Stated as "not read" rather than as a
   # `tool_order` with the source read as its `after`: a compliant run answers
   # "where did we get to" from the plan alone and may never open source, and a
-  # `tool_order` whose `after` never fires has no defined verdict — the same
-  # reasoning ../plans-with-sliced-reading/case.yaml gives for its deferral
-  # grader. Paired against `cat` for the same evasion reason that case gives.
+  # `tool_order` whose `after` never fires has no defined verdict. Paired
+  # against `cat` because a `max: 0` on `Read` alone is evadable — both rules
+  # are in ../../README.md under "Grading a read, and grading its absence".
   - name: source-not-explored-instead
     type: tool_used
     tool: Read

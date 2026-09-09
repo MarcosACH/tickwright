@@ -4,8 +4,8 @@
 `.claude/settings.json` denies `.venv/`, the caches, `logs/` and the rest to the `Read`
 tool. That deny list binds one tool, and `cat`, `head` and `grep` fetch the same bytes
 through Bash — which is the door bypass-permissions mode actively pushes an agent
-toward. `evals/tdd/plans-with-sliced-reading` names the same evasion in its own grader
-comments. This closes it.
+toward. `evals/README.md` names the same evasion in its grading rules. This closes it for
+the ignored trees; `no-unsliced-doc-reads` closes it for the long-form corpus.
 
 **Membership is `git check-ignore`, not a second path list.** `.gitignore` already names
 every tree this repo keeps out of a context window, plus `.env`, whose exclusion matters
