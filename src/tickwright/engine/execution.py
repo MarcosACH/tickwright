@@ -37,15 +37,16 @@ path needs no policy wired in.
 """
 
 from decimal import Decimal
+from typing import TypedDict
 
 from tickwright.domain import (
     CancelSignal,
     Denied,
     EventBus,
-    Exchange,
     ExecutionReport,
     FillReport,
     Order,
+    OrderAnchor,
     OrderCancelled,
     OrderDenied,
     OrderEvent,
@@ -87,6 +88,71 @@ _SAGA_EVENTS: dict[type[OrderEvent], NamedEvent] = {
 }
 
 
+class _SagaEnvelope(TypedDict):
+    """Every field an ``OrderEvent`` carries that is not its own family's.
+
+    ``Event``'s two stamps plus ``OrderEvent``'s six identity fields — the
+    membership is exactly those two declarations, so a field a *family* adds
+    (``reason``) belongs to the builder that requires it and never here.
+
+    A ``TypedDict`` rather than a value type, because the thing being named is a
+    set of constructor arguments: splatted into ``event_type(**envelope)`` it
+    stays checked against the family being built, so a member missing here is
+    reported at the construction site as the missing argument it is, and one
+    added to ``OrderEvent`` cannot be quietly defaulted past.
+    """
+
+    ts_event: int
+    ts_init: int
+    cloid: str
+    strategy_id: str
+    signal_id: str
+    symbol: str
+    venue_oid: str | None
+    reconciliation: bool
+
+
+def _saga_envelope(
+    order: Order,
+    *,
+    now_ns: int,
+    venue_oid: str | None = None,
+    reconciliation: bool = False,
+) -> _SagaEnvelope:
+    """One saga transition's envelope, taken off ``order``'s identity.
+
+    The one home for it, which the three builders below used to claim in a
+    docstring while spelling the seven fields out apiece. What that cost was not
+    the repetition but the **rule** inside it: *a fresher ``venue_oid`` wins,
+    otherwise the saga's own is kept* was written twice and stated in prose a
+    third time, and it is the clause that decides whether a terminal reaches an
+    operator carrying the venue's own id.
+
+    That clause is load-bearing on the reconciler's paths, where it is the only
+    thing supplying one: ``Reconciler._verdict`` mints its synthetic
+    ``OrderStatusReport`` with no ``venue_oid`` at all, so a ghost-resolved
+    ``LIVE`` order keeps the id its ack recorded (``Order.apply``) or loses it
+    for good — and losing it is silent, since the event publishes either way.
+
+    ``now_ns`` is handed in rather than read from a clock: both stamps are the
+    same instant by ADR-0005 — a saga transition is a fact that occurs here —
+    and a function that took a ``Clock`` to read one number twice would be a
+    collaborator where an argument was meant. The fill family is assembled by
+    ``Order.record_fill`` instead, which is why ``ts_event`` never differs from
+    ``ts_init`` on anything built from this.
+    """
+    return _SagaEnvelope(
+        ts_event=now_ns,
+        ts_init=now_ns,
+        cloid=order.cloid,
+        strategy_id=order.strategy_id,
+        signal_id=order.signal_id,
+        symbol=order.symbol,
+        venue_oid=venue_oid if venue_oid is not None else order.venue_oid,
+        reconciliation=reconciliation,
+    )
+
+
 class ExecutionManager:
     """Owns cloid assignment, the saga FSM, and canonical ``OrderEvent`` publishing."""
 
@@ -94,11 +160,14 @@ class ExecutionManager:
         self,
         *,
         bus: EventBus,
-        exchange: Exchange,
+        exchange: OrderAnchor,
         checkpointer: Checkpointer,
         guard: PreTradeGuard | None = None,
     ) -> None:
         self._bus = bus
+        # The **cloid** anchor and not the whole ``Exchange``: this manager
+        # sends and never reads the account, so the seam it declares is the
+        # grain it drives (ADR-0034's two anchors, ``domain/protocols.py``).
         self._exchange = exchange
         # Both read-models, the store behind them and the clock that stamps
         # them, as one collaborator rather than four a caller had to keep
@@ -323,42 +392,37 @@ class ExecutionManager:
         venue_oid: str | None = None,
         reconciliation: bool = False,
     ) -> E:
-        """Build a reason-less canonical ``OrderEvent`` from ``order``'s identity.
+        """Build a reason-less canonical ``OrderEvent`` on ``_saga_envelope``.
 
-        The one home for the shared saga-event envelope (cloid, strategy id,
-        signal id, symbol, venue oid, timestamps). ``venue_oid`` defaults to the
-        order's own; a venue status carrying a fresher one passes it in. The
-        constraint set is exactly the reason-less families — ``OrderRejected``
-        and the other terminal-with-reason events are built explicitly, so mypy
-        rejects routing them through here without their required ``reason``.
+        What this adds to the envelope is the **constraint set**: exactly the
+        reason-less families, so mypy rejects routing a terminal-with-reason
+        through here without the ``reason`` it requires. That is the whole of
+        what distinguishes this builder from ``_reasoned_event`` below — the
+        fields the two share are the envelope's, stated once.
         """
-        now = self._clock.timestamp_ns()
         return event_type(
-            ts_event=now,
-            ts_init=now,
-            cloid=order.cloid,
-            strategy_id=order.strategy_id,
-            signal_id=order.signal_id,
-            symbol=order.symbol,
-            venue_oid=venue_oid if venue_oid is not None else order.venue_oid,
-            reconciliation=reconciliation,
+            **_saga_envelope(
+                order,
+                now_ns=self._clock.timestamp_ns(),
+                venue_oid=venue_oid,
+                reconciliation=reconciliation,
+            )
         )
 
     def _denied_event(self, order: Order, reason: str) -> OrderDenied:
         """Build the ``DENIED`` terminal from ``order``'s identity (ADR-0010).
 
         The guard's pre-trade refusal, minted here rather than by a venue fact —
-        ``DENIED`` is the one terminal the venue never sees."""
-        now = self._clock.timestamp_ns()
+        ``DENIED`` is the one terminal the venue never sees. So it offers the
+        envelope neither of the two the other builders vary: there is no fresher
+        ``venue_oid`` because nothing was sent, and no ``reconciliation``
+        provenance because no reconciler mints this. Both take the envelope's
+        defaults, which is the same answer the explicit ``order.venue_oid`` and
+        the omitted flag gave before, arrived at by the rule rather than beside
+        it.
+        """
         return OrderDenied(
-            ts_event=now,
-            ts_init=now,
-            cloid=order.cloid,
-            strategy_id=order.strategy_id,
-            signal_id=order.signal_id,
-            symbol=order.symbol,
-            venue_oid=order.venue_oid,
-            reason=reason,
+            **_saga_envelope(order, now_ns=self._clock.timestamp_ns()), reason=reason
         )
 
     def _status_event(self, order: Order, report: OrderStatusReport) -> OrderEvent | None:
@@ -393,17 +457,21 @@ class ExecutionManager:
         report: OrderStatusReport,
         default_reason: str,
     ) -> E:
-        """Build a terminal-with-reason event from ``order``'s identity and the
-        report's adjudication — the required-``reason`` twin of ``_event``."""
-        now = self._clock.timestamp_ns()
+        """Build a terminal-with-reason event on ``_saga_envelope`` — the
+        required-``reason`` twin of ``_event``, with the report as the fresher
+        side of both fields the envelope varies.
+
+        This is the builder the fallback actually protects: a reconciler verdict
+        carries no ``venue_oid`` (``Reconciler._verdict``), so a ghost-resolved
+        or proven-never-landed terminal reaches an operator with the venue's own
+        id only because the envelope keeps the saga's.
+        """
         return event_type(
-            ts_event=now,
-            ts_init=now,
-            cloid=order.cloid,
-            strategy_id=order.strategy_id,
-            signal_id=order.signal_id,
-            symbol=order.symbol,
-            venue_oid=report.venue_oid if report.venue_oid is not None else order.venue_oid,
+            **_saga_envelope(
+                order,
+                now_ns=self._clock.timestamp_ns(),
+                venue_oid=report.venue_oid,
+                reconciliation=report.reconciliation,
+            ),
             reason=report.reason or default_reason,
-            reconciliation=report.reconciliation,
         )

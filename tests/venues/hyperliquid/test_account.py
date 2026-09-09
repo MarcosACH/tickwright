@@ -25,7 +25,7 @@ from pydantic import SecretStr
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
-from tickwright.domain import InstrumentSpec, Netting, VenueAccountState
+from tickwright.domain import InstrumentSpec, LeverageSpec, Netting, VenueAccountState
 from tickwright.observability import NamedEvent
 from tickwright.observability.testing import capture_events
 from tickwright.venues.hyperliquid import (
@@ -267,14 +267,19 @@ def _position_without(snapshot: dict, field: str) -> dict:
     return snapshot | {"assetPositions": [entry | {"position": _without(entry["position"], field)}]}
 
 
-def _with_margin_mode(snapshot: dict, mode: str) -> dict:
-    """``snapshot`` with its position's margin mode replaced — the venue naming a
-    mode this adapter has never been measured against."""
+def _with_leverage_field(snapshot: dict, field: str, value: object) -> dict:
+    """``snapshot`` with one field of its position's ``leverage`` sub-object replaced.
+
+    Both halves of the pair go through here because both are refused to one
+    standard: ``type`` is the venue naming a mode this adapter has never been
+    measured against, ``value`` the venue re-typing the multiplier. One helper
+    rather than two, since the sub-object has exactly two readers' worth of
+    fields and a second copy would be the shape that drifts."""
     (entry,) = snapshot["assetPositions"]
     position = entry["position"]
     return snapshot | {
         "assetPositions": [
-            entry | {"position": position | {"leverage": position["leverage"] | {"type": mode}}}
+            entry | {"position": position | {"leverage": position["leverage"] | {field: value}}}
         ]
     }
 
@@ -514,6 +519,28 @@ def test_a_mixed_book_keeps_both_rows_in_venue_order_with_each_mode_read_as_its_
     assert isolated.margin_used == Decimal("30589.794971")
 
 
+def test_each_row_carries_the_leverage_pair_the_venue_holds_it_at() -> None:
+    """The setting itself crosses the boundary, not merely its consequences.
+
+    ``isolated_collateral`` already says which *mode* a row is in, so the mode is
+    recoverable downstream; the **number** is not recoverable from anything on the
+    row. ``margin_used`` cannot stand in for it — a leverage change never
+    re-margins an open position (ADR-0044 §10), so the figure keeps whatever
+    leverage the position opened at and says nothing about the setting the venue
+    holds now. Without this field the post-boot drift check has nothing to compare.
+
+    Read off the mixed body because it is the one that carries two different
+    values as well as two modes: `cross 5` against `isolated 2`, so a normalizer
+    that hardcoded either half is visibly wrong within one read.
+    """
+    state = _fetch_state(MIXED_SNAPSHOT)
+
+    assert state is not None
+    cross, isolated = state.positions
+    assert cross.leverage == LeverageSpec(mode="cross", leverage=5)
+    assert isolated.leverage == LeverageSpec(mode="isolated", leverage=2)
+
+
 def test_a_short_keeps_the_direction_the_venue_reports_it_with() -> None:
     """``signed_size`` is the only thing a consumer can reconstruct side from.
 
@@ -622,7 +649,26 @@ def test_a_transport_failure_reads_as_no_venue_truth_never_as_a_flat_book() -> N
         # unrecognized mode as cross would report a position holding a locked
         # collateral bucket as backed by the account pool, and ``None`` collateral
         # is indistinguishable downstream from a genuine cross read.
-        ("a margin mode we do not recognize", _with_margin_mode(CROSS_SNAPSHOT, "portfolioMargin")),
+        (
+            "a margin mode we do not recognize",
+            _with_leverage_field(CROSS_SNAPSHOT, "type", "portfolioMargin"),
+        ),
+        # The **other** half of that sub-object, and unreadable at this grain
+        # only since #196 put the setting on the row: before it, ``_position``
+        # reached ``leverage`` solely through ``_isolated_collateral``, which
+        # reads ``type`` and never ``value``, so a re-typed multiplier
+        # normalized cleanly and cost nothing here. Now the pair is what the
+        # post-boot drift check compares, so a value we cannot read has to
+        # freeze the cycle rather than ride onto a ``VenuePositionState``.
+        # ``True`` rather than a string, because it is the one input that would
+        # otherwise pass an ``isinstance(..., int)`` — ``bool`` is an ``int``
+        # subclass, so a ``True`` taken for ``1`` reads as *agreement* with the
+        # commonest configured pair, which is fail-open in the same direction
+        # the NaN cases above are.
+        (
+            "a leverage value the venue re-typed",
+            _with_leverage_field(CROSS_SNAPSHOT, "value", True),
+        ),
         # A figure that is not a number but *is* a legal ``Decimal``. These are
         # the one class of unreadable figure that does not announce itself:
         # ``Decimal("nan")`` and ``Decimal("Infinity")`` construct fine, so

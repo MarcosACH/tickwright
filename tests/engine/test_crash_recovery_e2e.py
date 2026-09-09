@@ -195,7 +195,7 @@ def _first_life(
     bus.subscribe(ExecutionReport, manager.on_execution_report)
 
     with pytest.raises(ConnectionError):
-        asyncio.run(feed.start())
+        asyncio.run(feed.run())
 
     # The write-ahead intent is the durable truth the crash left behind.
     record = store.get_order(_CLOID)

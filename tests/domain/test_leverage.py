@@ -102,11 +102,21 @@ def test_a_symbol_outside_the_book_reads_the_default_the_resolution_would_have_f
     default for a symbol the book does not carry are the *same* answer — so a
     read can never be more permissive than the map, and the two cannot drift
     apart by living in two modules.
+
+    ``declares`` is the only thing that tells them apart, and it is the whole
+    reason the pair is a second read rather than a wider ``for_symbol`` return:
+    BTC was filled in over a symbol a strategy trades, SOL was never named, and
+    the two are worth the same amount deliberately. Nothing that computes a
+    margin may ask which — only the post-boot drift alert, which reports the
+    engine's pair to an operator and must not call a fallback ``configured``
+    (ADR-0044 §10).
     """
     book = LeverageBook.resolve({}, traded=["BTC"])
 
     assert book.for_symbol("BTC") == DEFAULT_LEVERAGE
     assert book.for_symbol("SOL") == DEFAULT_LEVERAGE
+    assert book.declares("BTC") is True
+    assert book.declares("SOL") is False
 
 
 def test_a_traded_symbol_with_no_instrument_spec_is_refused_by_its_missing_spec() -> None:

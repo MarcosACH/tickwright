@@ -161,7 +161,7 @@ def _run(
 
     async def drive() -> None:
         await bus.start()
-        await feed.start()
+        await feed.run()
         if close_with is not None:
             await bus.publish(close_with)
         await bus.drain()

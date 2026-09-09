@@ -104,7 +104,7 @@ def _life(
     bus.subscribe(Signal, record)
 
     feed = ReplayFeed(path=ticks, bus=bus, clock=clock)
-    asyncio.run(feed.start())
+    asyncio.run(feed.run())
     return host, btc_strat, eth_strat, signals
 
 

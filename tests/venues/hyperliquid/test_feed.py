@@ -7,11 +7,17 @@ path hermetically.
 """
 
 import asyncio
+import contextlib
 import json
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from feed_contract import (
+    MarketDataTranscript,
+    assert_every_traded_symbol_is_marked,
+    record_market_data,
+)
 from hyperliquid_fakes import (
     FakeWsConnection,
     RecordingClock,
@@ -19,11 +25,12 @@ from hyperliquid_fakes import (
     trade,
     trades_frame,
 )
+from seam_claims import assert_every_member_is_claimed
 from structlog.typing import EventDict
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
-from tickwright.domain import AggressorSide, MarketTick, MarkTick
+from tickwright.domain import AggressorSide, MarketFeed, MarketTick, MarkTick
 from tickwright.observability.testing import capture_events
 from tickwright.venues.hyperliquid import HyperliquidConfig, HyperliquidFeed
 
@@ -75,7 +82,7 @@ def _run_feed[E: (MarketTick, MarkTick)](
             clock=clock,
             connect=connect,
         )
-        run = asyncio.create_task(feed.start())
+        run = asyncio.create_task(feed.run())
         await asyncio.wait_for(enough.wait(), timeout=2)
         await feed.stop()
         await asyncio.wait_for(run, timeout=2)
@@ -184,7 +191,7 @@ def test_slow_consumer_gets_only_the_latest_tick_per_symbol_with_one_lagged_per_
             connect=connect,
         )
         with capture_events() as logs:
-            run = asyncio.create_task(feed.start())
+            run = asyncio.create_task(feed.run())
             await asyncio.wait_for(first_delivered.wait(), timeout=2)
             # The publish is stuck in the slow consumer; the reader must still
             # drain the socket to the end before we let the consumer go.
@@ -212,6 +219,63 @@ def test_slow_consumer_gets_only_the_latest_tick_per_symbol_with_one_lagged_per_
     assert len(lagged) == 1
     assert lagged[0]["symbol"] == "BTC"
     assert lagged[0]["dropped_trade_id"] == "2"
+
+
+def test_a_publish_that_raises_tears_the_socket_reader_down_with_it() -> None:
+    """The fault twin of the stall above: a *slow* subscriber must not stop the
+    reader draining the socket, and a *failing* one must stop it at once.
+
+    The two coroutines behind one connection are paired in a ``TaskGroup`` for
+    exactly this — a reader that outlived its publisher would keep pulling
+    frames, conflating them into a buffer nothing drains again, and hold the
+    socket open on an engine that is already faulting. So the fault leaves the
+    group instead of being swallowed by it: ``WsSession`` answers only a refused
+    *connect*, which is what makes the runner's supervising ``TaskGroup`` the
+    fault channel for everything a consumer raises (ADR-0024).
+
+    Distinct from ``test_session.py``'s consumer-raises case, which drives a
+    stand-in ``consume`` and pins the session's no-reconnect policy. This one
+    pins the pairing the real ``consume`` is built from, and nothing else
+    reaches it: the parse path never raises (a bad frame is a named drop), so a
+    failing publish is the only way this group is ever asked to abort.
+    """
+
+    class Boom(Exception):
+        """A subscriber's fault, from the far side of ``bus.publish``."""
+
+    async def main() -> FakeWsConnection:
+        bus = InMemoryBus()
+
+        async def explode(tick: MarketTick) -> None:
+            raise Boom
+
+        bus.subscribe(MarketTick, explode)
+        # More frames than the reader can have read: the first tick faults the
+        # publisher, so a reader still standing would consume the rest and set
+        # ``drained``. ``drop_when_drained`` keeps that failure a failed
+        # assertion rather than a hang on a socket nobody closes.
+        connection = FakeWsConnection(
+            [trades_frame(trade("BTC", "100", tid)) for tid in (1, 2, 3)],
+            drop_when_drained=True,
+        )
+
+        async def connect(url: str) -> FakeWsConnection:
+            return connection
+
+        feed = HyperliquidFeed(
+            config=HyperliquidConfig(symbols=["BTC"]), bus=bus, clock=ManualClock(), connect=connect
+        )
+        with pytest.raises(ExceptionGroup) as raised:
+            await asyncio.wait_for(feed.run(), timeout=2)
+
+        # The subscriber's fault alone: the reader's cancellation is the group's
+        # own doing and is not reported as a second failure.
+        assert [type(error) for error in raised.value.exceptions] == [Boom]
+        return connection
+
+    connection = asyncio.run(main())
+
+    assert not connection.drained.is_set()  # torn down mid-socket, not run to the end
 
 
 def test_ws_drop_reconnects_with_backoff_resubscribes_and_resumes() -> None:
@@ -251,7 +315,7 @@ def test_ws_drop_reconnects_with_backoff_resubscribes_and_resumes() -> None:
         feed = HyperliquidFeed(
             config=HyperliquidConfig(symbols=["BTC"]), bus=bus, clock=clock, connect=connect
         )
-        run = asyncio.create_task(feed.start())
+        run = asyncio.create_task(feed.run())
         await asyncio.wait_for(resumed.wait(), timeout=2)
         await feed.stop()
         await asyncio.wait_for(run, timeout=2)
@@ -290,7 +354,7 @@ def test_stop_does_not_trigger_a_reconnect() -> None:
         feed = HyperliquidFeed(
             config=HyperliquidConfig(symbols=["BTC"]), bus=bus, clock=ManualClock(), connect=connect
         )
-        run = asyncio.create_task(feed.start())
+        run = asyncio.create_task(feed.run())
         await asyncio.wait_for(got_one.wait(), timeout=2)
         await feed.stop()
         await asyncio.wait_for(run, timeout=2)
@@ -404,15 +468,226 @@ def test_a_mark_frame_we_cannot_read_is_dropped_and_named_not_faulted(data: obje
     assert [record["event"] for record in logs] == ["feed.frame_dropped"]
 
 
-def test_non_trades_frames_are_ignored() -> None:
+def test_the_live_feed_connects_in_start_and_leaves_the_loop_to_run() -> None:
+    """The lifecycle half of the seam, now shaped like ``Exchange``'s (#226).
+
+    ``start()`` opens and subscribes the socket and **returns**; ``run()`` is the
+    long-lived half the runner supervises. The bound on ``start()`` is the
+    assertion rather than a guard against a slow test: a ``start()`` that *is*
+    the loop never returns at all, which is precisely the defect — there was no
+    instant at which the runner could fail a boot on an unreachable feed, so an
+    engine could reach ``RUNNING`` with a feed that had never connected.
+
+    Nothing is read off the socket until ``run()``, so ADR-0024's ordering is
+    untouched: the connect is the last thing before the supervised task, not a
+    socket left buffering across the barrier.
+    """
+
+    async def main() -> None:
+        bus = InMemoryBus()
+        transcript = record_market_data(bus)
+        connection = FakeWsConnection([trades_frame(trade("BTC", "43000", 1))])
+        connects = 0
+
+        async def connect(url: str) -> FakeWsConnection:
+            nonlocal connects
+            connects += 1
+            return connection
+
+        feed = HyperliquidFeed(
+            config=HyperliquidConfig(symbols=["BTC"]),
+            bus=bus,
+            clock=ManualClock(),
+            connect=connect,
+        )
+
+        await asyncio.wait_for(feed.start(), timeout=2)
+
+        assert connects == 1
+        assert connection.sent, "start() must subscribe the socket it opened"
+        assert transcript.ticks == [], "start() must not consume — that is run()'s"
+
+        run = asyncio.create_task(feed.run())
+        await asyncio.wait_for(connection.drained.wait(), timeout=2)
+        await feed.stop()
+        await asyncio.wait_for(run, timeout=2)
+
+        assert [t.symbol for t in transcript.ticks] == ["BTC"]
+        assert connects == 1, "run() must consume the socket start() opened, not open a second"
+
+    asyncio.run(main())
+
+
+def test_a_first_connect_the_venue_refuses_faults_the_boot_rather_than_backing_off() -> None:
+    """The point of the triple, stated as the failure it buys (#227).
+
+    A refused connect is a *reconnect's* business inside ``run()``, where pacing
+    it and going round again is exactly right — an outage mid-run must not
+    become a retry storm, and must not end the engine. At boot it is the
+    opposite fact: nothing has arrived yet, nothing can, and the operator wants
+    to know now. So ``start()`` refuses rather than paces, and the runner's
+    inline ``await`` at ADR-0024 step 7 turns that into a faulted boot.
+
+    Two independent witnesses that the boot did not enter the reconnect loop,
+    neither of which is a timeout: **one** connect was attempted, and virtual
+    time never moved. ``Backoff.sleep_on`` advances a ``ManualClock``, so a
+    ``start()`` that paced even one retry would leave the clock past zero.
+    """
+
+    async def main() -> None:
+        clock = ManualClock()
+        connects = 0
+
+        async def connect(url: str) -> FakeWsConnection:
+            nonlocal connects
+            connects += 1
+            raise ConnectionRefusedError("connection refused")
+
+        feed = HyperliquidFeed(
+            config=HyperliquidConfig(symbols=["BTC"]),
+            bus=InMemoryBus(),
+            clock=clock,
+            connect=connect,
+        )
+
+        with pytest.raises(ConnectionRefusedError):
+            await feed.start()
+
+        assert connects == 1, "start() must refuse the first connect, not retry it"
+        assert clock.timestamp_ns() == 0, "a paced retry would have moved virtual time"
+
+        # The boot's own cleanup still runs on the fault path (`_stop_feed`), and
+        # a session that never opened a socket has nothing to close.
+        await feed.stop()
+
+    asyncio.run(main())
+
+
+def _drive_contract(
+    frames: list[str], *, symbols: list[str], expected: int
+) -> MarketDataTranscript:
+    """Run the feed over ``frames`` until both streams have landed, then stop.
+
+    ``_run_feed`` above waits on a count of **one** event type, which cannot
+    express this: the obligation relates the two streams, so a driver that
+    stopped at the last trade would race the mark behind it and a driver that
+    stopped at the last mark would race the trade.
+
+    ``expected`` is the total across both streams, and a timeout waiting for it
+    is **suppressed rather than raised**. That is the load-bearing line. The
+    wait is an optimisation — it ends the run as soon as the venue's frames are
+    through instead of parking for the full timeout — but a feed that published
+    no mark would never reach the count, and failing here would report a
+    ``TimeoutError`` from a test helper for what is a contract violation with a
+    sentence of its own. Falling through hands the verdict to the contract.
+    """
+
+    async def main() -> MarketDataTranscript:
+        bus = InMemoryBus()
+        transcript = record_market_data(bus)
+        enough = asyncio.Event()
+
+        async def count(_event: MarketTick | MarkTick) -> None:
+            if len(transcript.ticks) + len(transcript.marks) >= expected:
+                enough.set()
+
+        bus.subscribe(MarketTick, count)
+        bus.subscribe(MarkTick, count)
+        connection = FakeWsConnection(frames)
+
+        async def connect(url: str) -> FakeWsConnection:
+            return connection
+
+        feed = HyperliquidFeed(
+            config=HyperliquidConfig(symbols=symbols),
+            bus=bus,
+            clock=ManualClock(start_ns=4_000),
+            connect=connect,
+        )
+        run = asyncio.create_task(feed.run())
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(enough.wait(), timeout=2)
+        await feed.stop()
+        await asyncio.wait_for(run, timeout=2)
+        return transcript
+
+    return asyncio.run(main())
+
+
+def test_the_live_feed_marks_every_symbol_it_trades() -> None:
+    """The shared ``MarketFeed`` obligation (``tests/_support/feed_contract.py``),
+    driven over recorded frames from the socket this adapter opens.
+
+    Word for word the assertion ``ReplayFeed`` answers, which is the point: two
+    adapters that reach the mark by entirely different routes — a proxy derived
+    from the trade price, versus ``ctx.markPx`` off a second subscribed channel
+    — owe the engine the same thing, and a third venue learns the obligation
+    from a contract rather than from prose in a checklist.
+
+    The frames interleave the two channels per symbol because that is what the
+    venue does; nothing here asserts an order between them, since the streams
+    are independent and only the live adapter's own tests above pin how each is
+    read.
+    """
+    frames = [
+        trades_frame(trade("BTC", "43000", 1)),
+        asset_ctx_frame("BTC", "43251.0"),
+        trades_frame(trade("ETH", "2200", 2)),
+        asset_ctx_frame("ETH", "2205.0"),
+    ]
+
+    transcript = _drive_contract(frames, symbols=["BTC", "ETH"], expected=4)
+
+    assert_every_traded_symbol_is_marked(transcript, feed="HyperliquidFeed")
+
+
+def test_non_trades_frames_are_ignored_silently() -> None:
+    """The venue's housekeeping traffic is skipped and says nothing about it —
+    the *silence* is the assertion, not a side effect of one.
+
+    A ``subscriptionResponse`` or a ``pong`` is the venue working, and it arrives
+    for as long as the socket lives; naming one would drown every real drop in
+    the same log. That is the opposite answer to the malformed frames below, and
+    the two are only kept apart by both being pinned: without the empty-log line
+    here, a change that named housekeeping passes this case and the one below it
+    alike, and the distinction the pair exists to hold survives in prose only.
+    """
     frames = [
         json.dumps({"channel": "subscriptionResponse", "data": {"method": "subscribe"}}),
         json.dumps({"channel": "pong"}),
         trades_frame(trade("BTC", "100", 1)),
     ]
-    seen, _ = _drive(frames, symbols=["BTC"], until_ticks=1)
+    with capture_events() as logs:
+        seen, _ = _drive(frames, symbols=["BTC"], until_ticks=1)
 
     assert [t.trade_id for t in seen] == ["1"]
+    assert [record["event"] for record in logs] == []
+
+
+@pytest.mark.parametrize("frame", ["[1,2]", '"hello"', "42", "null"])
+def test_a_frame_that_is_json_but_not_an_object_is_dropped_and_named(frame: str) -> None:
+    """A frame the feed cannot read is named however it is malformed — deliberately
+    the *opposite* answer to the unsourced-channel frames pinned directly above.
+
+    The two look alike and are not: a ``subscriptionResponse`` is the venue
+    working, constant housekeeping traffic that would drown the log if named,
+    while a bare list or a naked ``null`` is the venue breaking its own contract.
+    Filing the second under the first's silence is what makes a total feed loss
+    indistinguishable from a quiet market — no named event, no exception, no
+    reconnect, while every Tier-2 valuation decays to ``None`` (ADR-0039) and
+    nothing fills. ADR-0023 makes the stream lossy by contract; ADR-0020's
+    catalog is what keeps the loss observable, so it is dropped, never silently.
+
+    Parametrized over all four non-object JSON kinds because ``null`` in
+    particular reads as an absence rather than a corruption, and is the one most
+    likely to be special-cased back into silence.
+    """
+    frames = [frame, trades_frame(trade("BTC", "100", 1))]
+    with capture_events() as logs:
+        seen, _ = _drive(frames, symbols=["BTC"], until_ticks=1)
+
+    assert [t.trade_id for t in seen] == ["1"]  # the good frame after it still ticks
+    assert [record["event"] for record in logs] == ["feed.frame_dropped"]
 
 
 @pytest.mark.parametrize("figure", ["NaN", "Infinity", "-Infinity"])
@@ -450,7 +725,7 @@ def test_a_non_finite_tick_figure_is_dropped_not_ticked(figure: str) -> None:
             config=HyperliquidConfig(symbols=["BTC"]), bus=bus, clock=clock, connect=connect
         )
         with capture_events() as logs:
-            run = asyncio.create_task(feed.start())
+            run = asyncio.create_task(feed.run())
             await asyncio.wait_for(enough.wait(), timeout=2)
             await feed.stop()
             await asyncio.wait_for(run, timeout=2)
@@ -508,7 +783,7 @@ def test_a_re_typed_tick_figure_is_dropped_not_coerced(figure: object) -> None:
             config=HyperliquidConfig(symbols=["BTC"]), bus=bus, clock=clock, connect=connect
         )
         with capture_events() as logs:
-            run = asyncio.create_task(feed.start())
+            run = asyncio.create_task(feed.run())
             await asyncio.wait_for(enough.wait(), timeout=2)
             await feed.stop()
             await asyncio.wait_for(run, timeout=2)
@@ -554,7 +829,7 @@ def test_malformed_frames_are_skipped_and_named_while_good_frames_keep_flowing()
             config=HyperliquidConfig(symbols=["BTC"]), bus=bus, clock=clock, connect=connect
         )
         with capture_events() as logs:
-            run = asyncio.create_task(feed.start())
+            run = asyncio.create_task(feed.run())
             await asyncio.wait_for(enough.wait(), timeout=2)
             await feed.stop()
             await asyncio.wait_for(run, timeout=2)
@@ -569,3 +844,38 @@ def test_malformed_frames_are_skipped_and_named_while_good_frames_keep_flowing()
     # a figure that is not a number drops at row grain like any other, so the
     # good trade batched with it is unaffected.
     assert len(dropped) == 5
+
+
+def test_the_live_feed_satisfies_the_market_feed_seam() -> None:
+    """Conformance asserted at the adapter, as the replay suite asserts its own
+    and both ``Exchange`` adapters assert theirs. ``MarketFeed`` is
+    ``runtime_checkable``, so this is a member-presence check; the half it cannot
+    see — a member implemented but unasserted — is ``_SEAM_CLAIMS``' below."""
+    feed = HyperliquidFeed(
+        config=HyperliquidConfig(symbols=["BTC"]), bus=InMemoryBus(), clock=ManualClock()
+    )
+
+    assert isinstance(feed, MarketFeed)
+
+
+# Which test claims each ``MarketFeed`` member for *this* adapter. Not a second
+# copy of the seam: the gate below asserts it against the Protocol itself, so a
+# new member cannot arrive without someone naming what asserts it here.
+_SEAM_CLAIMS = {
+    "start": "test_the_live_feed_connects_in_start_and_leaves_the_loop_to_run",
+    "run": "test_ws_drop_reconnects_with_backoff_resubscribes_and_resumes",
+    "stop": "test_stop_does_not_trigger_a_reconnect",
+}
+
+
+def test_every_market_feed_member_carries_a_claim_in_the_live_suite() -> None:
+    """The completeness gate the ``isinstance`` check above cannot be (#227).
+
+    Deliberately the same three members answered by a different three tests than
+    the replay suite names: the seam is one obligation and the adapters meet it
+    in their own idioms, which is why the claim is declared per suite rather than
+    driven from one shared map the way ``Store``'s identical-behaviour gate is.
+    ``run`` is claimed by the reconnect test rather than by any of the parsing
+    ones above it — those exercise the loop incidentally, while that one asserts
+    what makes it the long-lived half: it survives its sockets."""
+    assert_every_member_is_claimed(MarketFeed, _SEAM_CLAIMS, suite=Path(__file__).parent)

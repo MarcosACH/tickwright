@@ -14,6 +14,7 @@ engine's observable surface.
 
 import asyncio
 from collections.abc import Callable
+from dataclasses import replace
 from decimal import Decimal
 
 import pytest
@@ -26,13 +27,14 @@ from hyperliquid_fakes import (
 )
 from ledgers import GENESIS, checkpointer
 from pydantic import SecretStr
-from venue_doubles import DERIVED_STATE, LiveVenueDouble, VenueDouble
+from venue_doubles import DERIVED_STATE, LiveVenueDouble, VenueDouble, account_state
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
+    AccountModeVerdict,
     AggressorSide,
     Exchange,
     ExecutionReport,
@@ -605,6 +607,9 @@ class _IdleFeed:
     async def start(self) -> None:
         return None
 
+    async def run(self) -> None:
+        return None
+
     async def stop(self) -> None:
         return None
 
@@ -613,6 +618,9 @@ class _PoisonedFeed:
     """A feed whose read loop breaks an engine assumption — the fail-fast class."""
 
     async def start(self) -> None:
+        return None
+
+    async def run(self) -> None:
         raise InvariantViolation("the read loop broke an engine assumption")
 
     async def stop(self) -> None:
@@ -731,7 +739,7 @@ def _drive_feed_lagged() -> None:
         feed = HyperliquidFeed(
             config=HyperliquidConfig(symbols=["BTC"]), bus=bus, clock=clock, connect=connect
         )
-        run = asyncio.create_task(feed.start())
+        run = asyncio.create_task(feed.run())
         await stalled.wait()
         # While the first publish is stuck, 42001 lands unpublished and 42002
         # supersedes it — the drop that emits feed.lagged.
@@ -770,7 +778,7 @@ def _drive_feed_frame_dropped() -> None:
         feed = HyperliquidFeed(
             config=HyperliquidConfig(symbols=["BTC"]), bus=bus, clock=clock, connect=connect
         )
-        run = asyncio.create_task(feed.start())
+        run = asyncio.create_task(feed.run())
         await ticked.wait()  # the good frame landed → the feed survived the bad one
         await feed.stop()
         await run
@@ -804,6 +812,37 @@ def _drive_account_reconciled() -> None:
     asyncio.run(go())
 
 
+def _drive_account_mode_unverified() -> None:
+    """The same cycle, against a venue whose account abstraction mode no longer
+    verifies: the Tier-1 cash heal is refused and the refusal is named
+    (``account.mode_unverified``, ADR-0046 §4).
+
+    The pass still finds its divergence and still records itself — this is a
+    freeze of the account-grain cross-check, not a fault — so the name arrives
+    off the same healthy cycle rather than a broken one.
+
+    The venue's equity is moved off the one the ledger was materialised from,
+    because the guard runs *only* where there is a cash heal to make: a snapshot
+    agreeing on cash reaches no mode read at all, which is the affordability
+    ADR-0046 §4 is built on and would leave this scenario silently driving
+    nothing."""
+
+    class _SwitchedVenue(_LiveShapedVenue):
+        async def verify_account_mode(self) -> AccountModeVerdict:
+            return AccountModeVerdict.CHANGED
+
+    async def go() -> None:
+        venue = _SwitchedVenue(state=account_state("30.0", "-0.034"))
+        keeper = Checkpointer(
+            spec=venue.account_spec(), store=SQLiteStore(":memory:"), clock=ManualClock()
+        )
+        keeper.recover()
+        keeper.portfolio.materialise(DERIVED_STATE)
+        await LedgerReconciliation(exchange=venue, checkpointer=keeper).reconcile_account()
+
+    asyncio.run(go())
+
+
 def _drive_account_reconcile_frozen() -> None:
     """The account cycle's anchor read fails: the cycle freezes, heals nothing
     and says so (``account.reconcile_frozen``, ADR-0011 inv 1) — the record an
@@ -815,6 +854,57 @@ def _drive_account_reconcile_frozen() -> None:
             spec=venue.account_spec(), store=SQLiteStore(":memory:"), clock=ManualClock()
         )
         keeper.recover()
+        await LedgerReconciliation(exchange=venue, checkpointer=keeper).reconcile_account()
+
+    asyncio.run(go())
+
+
+def _drive_valuation_divergence() -> None:
+    """The same account cycle, against a snapshot whose *valuation* disagrees:
+    the recomputed equity is outside the band and the gap is alerted rather than
+    healed (``valuation.divergence``, ADR-0040 §6).
+
+    The venue's equity and its unrealized leg are moved **together**, so that
+    ``venue_cash`` lands back on the line the ledger was materialised at. That
+    is what keeps the scenario driving the path it names: a cash gap is Tier-1,
+    and a Tier-1 finding at the account grain suppresses exactly this alert."""
+
+    async def go() -> None:
+        venue = _LiveShapedVenue(state=account_state("26.9264", "0.966"))
+        keeper = Checkpointer(
+            spec=venue.account_spec(), store=SQLiteStore(":memory:"), clock=ManualClock()
+        )
+        keeper.recover()
+        keeper.portfolio.materialise(DERIVED_STATE)
+        await LedgerReconciliation(exchange=venue, checkpointer=keeper).reconcile_account()
+
+    asyncio.run(go())
+
+
+def _drive_leverage_divergence() -> None:
+    """The same account cycle, against a venue holding the position at a pair
+    config never asked for: the drift is alerted and nothing is written back
+    (``leverage.divergence``, ADR-0044 §10).
+
+    The snapshot is the healthy one with its **setting** moved and every figure
+    left alone, which is the whole point of the check — a leverage change never
+    re-margins an open position, so a body that also moved ``marginUsed`` would
+    be driving this name off a divergence some other tier would have caught."""
+
+    async def go() -> None:
+        drifted = replace(
+            DERIVED_STATE,
+            positions=tuple(
+                replace(position, leverage=LeverageSpec(mode="cross", leverage=5))
+                for position in DERIVED_STATE.positions
+            ),
+        )
+        venue = _LiveShapedVenue(state=drifted)
+        keeper = Checkpointer(
+            spec=venue.account_spec(), store=SQLiteStore(":memory:"), clock=ManualClock()
+        )
+        keeper.recover()
+        keeper.portfolio.materialise(DERIVED_STATE)
         await LedgerReconciliation(exchange=venue, checkpointer=keeper).reconcile_account()
 
     asyncio.run(go())
@@ -855,6 +945,9 @@ SCENARIOS: dict[NamedEvent, Callable[[], None]] = {
     NamedEvent.RECONCILE_FROZEN: _drive_frozen,
     NamedEvent.ACCOUNT_RECONCILED: _drive_account_reconciled,
     NamedEvent.ACCOUNT_HEALED: _drive_account_reconciled,
+    NamedEvent.ACCOUNT_MODE_UNVERIFIED: _drive_account_mode_unverified,
+    NamedEvent.VALUATION_DIVERGENCE: _drive_valuation_divergence,
+    NamedEvent.LEVERAGE_DIVERGENCE: _drive_leverage_divergence,
     NamedEvent.ACCOUNT_RECONCILE_FROZEN: _drive_account_reconcile_frozen,
     NamedEvent.EXCHANGE_REQUEST_FAILED: _drive_exchange_request_failed,
     NamedEvent.EXCHANGE_ACTION_REJECTED: _drive_exchange_action_rejected,

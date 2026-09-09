@@ -110,10 +110,32 @@ class LeverageBook:
 
         Falls back to the same ``DEFAULT_LEVERAGE`` the resolution fills in, so
         a read can never be more permissive than the map, whatever the caller
-        asks for. A symbol outside the traded set has no position to value in
-        the first place.
+        asks for. That fallback is the *answer*, not a placeholder for one: a
+        venue position in a symbol outside the book still reaches the ledger
+        through a reconcile heal, and ``valuation`` margins it at whatever this
+        returns — so a caller reaching past the traded set gets the pair the
+        model really uses, and ``declares`` below is where it finds out the pair
+        was a fallback.
         """
         return self.entries.get(symbol, DEFAULT_LEVERAGE)
+
+    def declares(self, symbol: str) -> bool:
+        """Whether ``symbol`` has an entry, as against taking ``for_symbol``'s fallback.
+
+        The two are indistinguishable in the returned pair — a symbol resolved
+        to ``DEFAULT_LEVERAGE`` because nobody configured it and a symbol the
+        book has never heard of answer with the same object, deliberately, since
+        the point of the fallback is that a miss is *safe* rather than special.
+        What separates them is provenance, and exactly one caller needs it: the
+        post-boot drift alert reports the engine's side as a pair an operator
+        set, which is true of an entry and not of a miss (ADR-0044 §10).
+
+        Not a second way to read the book, and not a shape ``for_symbol`` could
+        have returned instead: every other consumer wants the pair and would
+        have to unwrap a tuple to reach it, for a bit that is never a term in
+        any computation. A margin figure must never branch on this.
+        """
+        return symbol in self.entries
 
     def validate_against(self, specs: Mapping[str, InstrumentSpec]) -> None:
         """Refuse a book any instrument cannot carry (ADR-0044 §9).
