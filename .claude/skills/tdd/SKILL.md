@@ -125,9 +125,12 @@ a new source module.
 
 ### 1. Planning
 
-**Resume check — before any exploration.** Derive `N` from the issue reference (`/tdd #190`), or
-from `git branch --show-current` on a `ralph/issue-<N>` branch, then look for
-`.agents/plans/issue-<N>.md`. If it exists, **reconcile it rather than trusting it** — a plan goes
+**Resume check — before any exploration.** On a `ralph/issue-<N>` branch the `resume-from-plan`
+hook has already put the plan's path and its open behaviors in this window at session start, so
+locating the file is not work you have to do. Where it has not — invoked with an issue reference
+(`/tdd #190`) that is not the current branch, or in a session that started before the branch was
+cut — derive `N` from the reference or from `git branch --show-current`, then look for
+`.agents/plans/issue-<N>.md`. Either way, **reconcile it rather than trusting it** — a plan goes
 stale when behaviors land, when the base branch moves, and when the ticket gets recut. The recorded
 shas are the cheap guard: one `git log --oneline <base>..HEAD` (~200 tokens) reconciles the file
 against reality. Then state the resume point ("behaviors 1–4 done through `<sha>`, next is 5") and

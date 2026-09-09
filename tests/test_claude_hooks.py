@@ -1,6 +1,6 @@
 """The ``.claude/hooks`` scripts: work done at the tool call, not asked for in prose.
 
-Six hooks across three events, and they come in two shapes.
+Seven hooks across three events, and they come in two shapes.
 
 **Five guards** refuse. ``PreToolUse`` on ``Bash`` (and, for one of them, ``Read`` too):
 each reads the event JSON on stdin and answers with an exit code — ``0`` allows the call,
@@ -530,7 +530,7 @@ class TestNoUnslicedDocReads:
         That is the escape, not a hole in the guard. The rule being enforced is that a
         whole read is a **deliberate** act rather than the default shape of the call, and
         a guard with no deliberate escape is one an agent learns to route around — the
-        same reasoning that makes all four of these fail open on input they cannot parse.
+        same reasoning that makes every guard here fail open on input it cannot parse.
         """
         result = run_tool_hook("no-unsliced-doc-reads.py", "Read", tool_input, docs_repo)
         assert result.returncode == ALLOW

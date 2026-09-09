@@ -82,12 +82,15 @@ With `core.hooksPath` enabled (see setup):
 They exist to catch problems early; the **authoritative gate is CI**, which re-runs everything and
 can't be skipped with `--no-verify`.
 
-### Agent-loop guards (Claude Code hooks)
+### Agent-loop hooks (Claude Code)
 
 Git hooks fire at commit time. An agent breaks a rule *mid-loop*, dozens of tool calls earlier, and
-by the time a commit exists the cost is already paid. `.claude/hooks/` closes that window: four
-`PreToolUse` guards, wired in the committed `.claude/settings.json`. Each reads the event on stdin
-and exits `0` to allow or `2` to block, with the reason on stderr going back to the agent.
+by the time a commit exists the cost is already paid. `.claude/hooks/` closes that window: seven
+scripts wired in the committed `.claude/settings.json`, each reading the event on stdin. They come
+in two shapes, and the difference is not cosmetic.
+
+**Five guards refuse.** They run on `PreToolUse` and exit `0` to allow or `2` to block, with the
+reason on stderr going back to the agent.
 
 | Guard | Binds | Refuses | Stays allowed |
 | ----- | ----- | ------- | ------------- |
@@ -95,33 +98,61 @@ and exits `0` to allow or `2` to block, with the reason on stderr going back to 
 | `no-excluded-reads` | `Bash` | `cat`/`head`/`grep`/… of a path `git check-ignore` matches | `.agents/plans/`; a program in the **executable position**, so `.venv/bin/ruff` still runs |
 | `no-global-installs` | `Bash` | `pip install`, `uv pip install --system`, `uv tool install`, `pipx`, `brew`, `npm -g` | `uv add`/`uv sync`/`uvx`/`uv tool run`; `uv pip install` without `--system` |
 | `no-unsliced-doc-reads` | `Read`, `Bash` | a whole read of `CONTEXT.md`, an ADR, a module map or a research note — by `Read`, or by `cat`/`less`/`nl`/… | `head`/`tail`/`sed -n`/`grep`, which are already the slice; `doc-slice`; a `Read` with an explicit `offset`/`limit` |
+| `no-unlinked-prs` | `Bash` | a `gh pr create` whose `--body`/`--body-file` carries no `Closes #N` | every body it cannot see — `--fill`, `--web`, an editor, `-F -` |
 
-The last one is the only guard that **answers** rather than just refusing: the block reason carries
-the file's own index — the `doc-slice` table of contents, with each section marked `(+N)` for the
-amendment blocks it carries, or for `CONTEXT.md` its terms and their line numbers. That matters
-because the rule it replaces lost on economics rather than on clarity: complying cost two tool calls
-and ignoring it cost one, so the wrong path was the cheap one. Answering makes them equal.
+**Two answer instead**, because there is nothing to refuse. They run on events with no veto, which
+is the right shape rather than a limitation worked around.
 
-Three properties are deliberate:
+| Hook | Event | Does |
+| ---- | ----- | ---- |
+| `ruff-on-write` | `PostToolUse` on `Edit`, `Write` | runs `ruff format` and `ruff check --fix` on the one `*.py` file just written, then reports the rewrite and anything it could not fix |
+| `resume-from-plan` | `SessionStart` | prints the current slice's open behaviors, read off `ralph/issue-<N>` and `.agents/plans/issue-<N>.md` |
 
-- **Committed, not local.** The point of turning a rule into a guard is that it reaches *other
+Two of them **answer rather than merely refusing**, and that is the property worth copying.
+`no-unsliced-doc-reads` returns the file's own index — the `doc-slice` table of contents, with each
+section marked `(+N)` for the amendment blocks it carries, or for `CONTEXT.md` its terms and their
+line numbers. `no-unlinked-prs` returns the `Closes #<N>` line the branch implies. In both cases the
+rule they replace lost on economics rather than on clarity: complying cost an extra call and
+ignoring it cost nothing, so the wrong path was the cheap one. Answering makes them equal.
+
+The two fast-feedback hooks front-run checks that already exist and replace neither. `ci` runs
+`ruff format --check .` and `ruff check .` and **reports only** — so a formatting slip used to cost
+a red run, a fix commit and a second run, for a change the binary in `.venv` makes in milliseconds.
+`pr-policy`'s *Body closes an issue* step is likewise correct and likewise late. Moving the answer
+earlier is the whole of it; the floor does not move.
+
+Four properties are deliberate:
+
+- **Committed, not local.** The point of turning a rule into a hook is that it reaches *other
   people's* agents. One in `settings.local.json` would be the tribal knowledge it replaced.
-- **Derived, not listed.** Both path guards ask `git`. Copying `.gitignore`'s globs into a hook
-  would be two lists that must agree — the drift this project calls a bug — and the derived form
-  also covers whatever gets ignored next. `no-unsliced-doc-reads` is the exception, because "long
-  enough to be worth slicing" is editorial and git has no predicate for it; what stands in is a test
-  asserting every glob still matches a real file, so a renamed directory fails loudly rather than
-  disarming the guard in silence.
-- **They fail open.** A command the lexer cannot parse is allowed through. A guard that misfires on
-  input it does not understand is one an agent learns to route around, which costs more than the
-  call it wrongly blocked.
+- **Derived, not listed.** Both path guards ask `git`; both fast-feedback hooks read the issue
+  number off the branch. Copying `.gitignore`'s globs into a hook would be two lists that must agree
+  — the drift this project calls a bug — and the derived form also covers whatever gets ignored
+  next. Two exceptions exist because there is no predicate to derive from: `no-unsliced-doc-reads`'s
+  corpus, since "long enough to be worth slicing" is editorial, and `no-unlinked-prs`'s pattern,
+  which must match `pr-policy`'s exactly. Each is held by a test instead — that every glob still
+  names a real file, and that the pattern still appears verbatim in the workflow — so a rename fails
+  loudly rather than disarming a hook in silence.
+- **They fail open.** A command the lexer cannot parse is allowed through, a body that is not
+  visible is not judged, and a missing `.venv/bin/ruff` is silence rather than a complaint. A hook
+  that misfires on input it does not understand is one an agent learns to route around, which costs
+  more than the call it wrongly blocked.
+- **`.venv/bin/<tool>`, never `uv run <tool>`.** `uv run` re-syncs the environment before handing
+  over: 1.99 s against 0.013 s for the binary. A two-second tax on every edit is a hook someone
+  turns off, and a hook that is off enforces nothing.
+
+`ruff-on-write` deliberately does **not** run mypy. Ruff's half *fixes*, so it spends no context and
+asks for no judgement; a type check can only report, and mid-red a TDD step legitimately
+type-errors. The note would be noise on exactly the edits the hook fires hardest on, and an agent
+that learns to skim it skims the "this file was rewritten, your copy is stale" line beside it. `ci`
+keeps mypy, where a complete diff makes the reading trustworthy.
 
 Same standing as the git hooks: **local convenience, not the gate.** They are Claude Code-specific,
 so a contributor using another tool — or none — gets nothing from them, and CI stays the floor for
 everyone. They are ordinary stdlib Python with no network access; read them before you trust them.
-`tests/test_claude_hooks.py` fences all four, and asserts the wiring too: a guard nothing runs is a
-guard that does not exist. Hook config is read when a session starts, so restart Claude Code after
-changing one.
+`tests/test_claude_hooks.py` fences all seven, and asserts the wiring too — across every event key,
+since a hook filed under the wrong event passes every direct-invocation test while never being
+called. Hook config is read when a session starts, so restart Claude Code after changing one.
 
 #### Local hook guards
 
