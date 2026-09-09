@@ -29,7 +29,7 @@ from pydantic import SecretStr
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.store import SQLiteStore
-from tickwright.domain import InstrumentSpec
+from tickwright.domain import InstrumentSpec, LeverageBook, LeverageSpec, MarkTick
 from tickwright.engine.checkpoint import Checkpointer
 from tickwright.engine.ledger_reconcile import (
     DivergenceField,
@@ -49,7 +49,19 @@ WALLET_ADDRESS = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
 UNIVERSE = HyperliquidUniverse(
     specs={
         "BTC": InstrumentSpec(
-            symbol="BTC", sz_decimals=5, max_decimals=6, min_notional=Decimal("10"), max_sig_figs=5
+            symbol="BTC",
+            sz_decimals=5,
+            max_decimals=6,
+            min_notional=Decimal("10"),
+            max_sig_figs=5,
+            # The margin model's two spec-sourced inputs (ADR-0040 §4), and both
+            # are the recorded body's own: ``maxLeverage: 40`` sits on the
+            # position below, and the flat tier-0 rate is what that ADR reads
+            # off it — ``1/(2 × 40)``. Carried on the universe rather than
+            # beside the case that needs them, since they arrive from the same
+            # ``meta`` response the adapter quantizes from.
+            max_leverage=40,
+            margin_maint=Decimal("0.0125"),
         )
     },
     asset_indices={"BTC": 3},
@@ -256,4 +268,109 @@ def test_a_tier_1_divergence_heals_to_the_venues_own_figures_through_the_real_ad
     assert [payload["type"] for _, payload in post.requests] == [
         "clearinghouseState",
         "userAbstraction",
+    ]
+
+
+def test_the_healed_ledger_reproduces_every_figure_the_venue_published() -> None:
+    """The same recorded body, read twice: a divergence before the heal and
+    agreement on **every** figure after it.
+
+    The provenance case for the Tier-2 quantities, and the one the case above
+    cannot make. Its ledger is flat where the venue holds BTC, so ``holds``
+    intersects to nothing and the per-symbol comparisons never run: what it
+    proves is that a *heal* lands on the venue's own strings. This proves the
+    other half — that the arithmetic those strings are then compared against
+    reproduces them. Without it ``notional`` and ``margin_used`` are asserted
+    only against ``tests/_support/venue_doubles``, whose ``implied_notional``
+    and ``margined`` derive the venue's side from ADR-0040 §3's identity — the
+    same identity ``domain.valuation`` implements, so the comparison is our
+    formula against our formula. That is the trap the case above names for the
+    cash line: "a test that handed the cycle a ``VenueAccountState`` would have
+    asserted that arithmetic against itself".
+
+    The one input not on the wire is the **mark**, which is the point rather
+    than a gap: a mark reaches this surface through the feed (ADR-0039), never
+    through ``clearinghouseState``. Everything else is derived from it and from
+    strings in the body — and the body itself pins the mark, since ``64792`` is
+    the only price at which the recorded ``unrealizedPnl`` of ``-0.034`` follows
+    from the recorded ``szi`` and ``entryPx``.
+
+    So six figures are computed here and six recorded strings are reproduced:
+    ``positionValue`` and ``unrealizedPnl`` per symbol; ``marginUsed`` out of
+    the cross rule; ``accountValue`` as equity; ``crossMarginSummary``'s
+    difference as free margin; and ``crossMaintenanceMarginUsed`` out of the
+    flat rate ADR-0040 §4 reads off the position's own ``maxLeverage``.
+
+    The run is configured **cross 5x** rather than at the default isolated 1x
+    because that is what the recorded account was: at the default the venue's
+    own setting would be a standing ``LEVERAGE_DIVERGENCE`` (ADR-0044 §10), and
+    ``margin_used`` would be compared against the wrong mode's rule — a
+    disagreement about this file's config rather than about the arithmetic.
+    """
+    store = SQLiteStore(":memory:")
+    opening, _ = _exchange(FLAT_SNAPSHOT)
+    keeper = Checkpointer(
+        spec=opening.account_spec(),
+        store=store,
+        clock=ManualClock(7),
+        leverage=LeverageBook(entries={"BTC": LeverageSpec(mode="cross", leverage=5)}),
+        specs=UNIVERSE.specs,
+    )
+    keeper.recover()
+    assert asyncio.run(
+        LedgerReconciliation(exchange=opening, checkpointer=keeper).materialise_account()
+    )
+
+    # One adapter for both passes, deliberately: the venue does not change
+    # between them and that is the claim. What moves is our side — the heal, and
+    # then a mark that lets the Tier-2 figures exist at all.
+    venue, post = _exchange(CROSS_SNAPSHOT)
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+    assert asyncio.run(cycle.reconcile_account())
+
+    keeper.portfolio.observe_mark(
+        MarkTick(ts_event=7, ts_init=7, symbol="BTC", price=Decimal("64792"))
+    )
+
+    with capture_events() as logs:
+        divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences == ()
+    # Emptiness on its own is the assertion a book nobody looked at also passes,
+    # so the summary is asserted beside it: nothing was dropped for want of a
+    # mark or a rate (``unvalued``), and nothing was found and then held back
+    # (``suppressed``). Together they say the pass compared everything it has
+    # and disagreed nowhere.
+    (record,) = [log for log in logs if log["event"] == NamedEvent.ACCOUNT_RECONCILED.value]
+    assert (record["tier_1"], record["tier_2"], record["unvalued"], record["suppressed"]) == (
+        0,
+        0,
+        0,
+        0,
+    )
+
+    # And the figures themselves, against the strings in ``CROSS_SNAPSHOT``.
+    # Asserted positively rather than left to the empty tuple above, which would
+    # also hold if both sides were wrong by the same amount.
+    (held,) = keeper.portfolio.open_positions(strategy_id=None)
+    assert (held.symbol, held.leverage, held.margin_mode) == ("BTC", 5, "cross")
+    assert (held.unrealized_pnl, held.notional, held.margin_used, held.maintenance_margin) == (
+        Decimal("-0.034"),  # unrealizedPnl
+        Decimal("129.584"),  # positionValue
+        Decimal("25.9168"),  # marginUsed
+        Decimal("1.6198"),  # its whole share of crossMaintenanceMarginUsed
+    )
+    account = keeper.portfolio.account()
+    assert (account.equity, account.free_margin, account.total_maintenance_margin) == (
+        Decimal("25.9264"),  # marginSummary.accountValue
+        Decimal("0.0096"),  # crossMarginSummary accountValue − totalMarginUsed
+        Decimal("1.6198"),  # crossMaintenanceMarginUsed
+    )
+
+    # Two anchor reads and the one mode read the first pass's cash heal bought.
+    # The clean pass asks for no mode, having nothing to write behind it.
+    assert [payload["type"] for _, payload in post.requests] == [
+        "clearinghouseState",
+        "userAbstraction",
+        "clearinghouseState",
     ]
