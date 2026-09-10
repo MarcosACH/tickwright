@@ -79,6 +79,35 @@ A strategy consumes ticks and lifecycle events and emits `PlaceSignal`/`CancelSi
   ([`strategies/emitter.py`](../src/tickwright/strategies/emitter.py)) — it owns the `seq`,
   clock-stamps each signal, and publishes it. Never build a `signal_id` by hand.
 - [ ] Make `snapshot()`/`restore()` a versioned, minimal payload; raise on an unknown version.
+- [ ] Read your own economics through the [`Portfolio`](../src/tickwright/domain/protocols.py)
+  seam, if the strategy needs them. Take it as a constructor argument. The composition root hands
+  you a facade already scoped to your `strategy_id`, so no method takes a strategy or account
+  argument. Three synchronous calls, each returning a frozen snapshot:
+
+  ```python
+  class MyStrategy:
+      def __init__(self, *, strategy_id: str, bus: EventBus, clock: Clock, portfolio: Portfolio):
+          self._portfolio = portfolio
+          ...
+
+      async def on_order_event(self, event: OrderEvent) -> None:
+          if isinstance(event, OrderFilled):
+              view = self._portfolio.position(event.symbol)   # PositionView | None
+              account = self._portfolio.account()              # AccountView
+              if view is not None and view.unrealized_pnl is not None:
+                  ...
+  ```
+
+  `position(symbol)` is your position in one symbol, or `None` if you never traded it. A flat
+  position with history is not `None`: it reads `size = 0` with its realized PnL kept.
+  `open_positions()` is every position of yours still holding exposure. `account()` is the whole
+  account, not a slice of it: collateral is one pool. The mark-dependent fields
+  (`unrealized_pnl`, `notional`, `margin_used`, `liquidation_price`, `equity`, `free_margin`,
+  and the two `effective_leverage`s) are `None` until the first mark for that symbol arrives, so
+  check for `None` before you do arithmetic. Reads are method calls, never a PnL subscription
+  (ADR-0004). A read inside `on_order_event` for a fill is coherent with that fill: the projection
+  applied it before the event was published (ADR-0041 §7). Do not take the argument if you read
+  nothing. `single_shot_limit` does not, on purpose.
 - [ ] Add a `kind` value to the `StrategyConfig.kind` `Literal` in
   [`app/config.py`](../src/tickwright/app/config.py), plus any config fields it needs (validate
   cross-field requirements in the model, as `single_shot_limit`'s `price` does).
@@ -99,8 +128,8 @@ auth, quirk translation — and importing no other adapter. It provides both a `
   `MarketTick`s **and `MarkTick`s** — the obligation and its consequence are stated on the
   [`MarketFeed` Protocol](../src/tickwright/domain/protocols.py) itself, and made executable by the
   shared feed contract in the TDD bullet below), an `Exchange` adapter (`start`/`run`/`stop` plus
-  `place`/`cancel`/`fetch_order`/`fetch_account_state`/`account_spec`/`instrument_specs`), spec
-  sourcing, and a `<Venue>Config`.
+  `place`/`cancel`/`fetch_order`/`fetch_account_state`/`verify_account_mode`/`account_spec`/
+  `instrument_specs`), spec sourcing, and a `<Venue>Config`.
 - [ ] Honor the `Exchange` contracts: a failed read is **never venue truth** (never `[]`, never a
   view — an outage must not look like "no orders", ADR-0011 inv 1), and the two read grains say so
   differently. `fetch_order` returns a **`VenueReadFailure`**, whose member says *which way* it
@@ -111,6 +140,25 @@ auth, quirk translation — and importing no other adapter. It provides both a `
   `fetch_account_state` reads one grain with no worklist behind it, so it collapses both and
   returns **`None`**. `place`/`cancel` emit raw `ExecutionReport`s on the bus rather than
   returning them; a cancel of an unknown order is a benign no-op.
+- [ ] Answer the four questions the accounting surface asks of an `Exchange`. Each is a member the
+  seam-claims gate below will make you name a test for.
+  - `account_spec()` returns an `AccountSpec`: the qualified `account_id` the store keys the ledger
+    on (ADR-0038), the netting mode (v1 is `NET` only), and the genesis collateral if the venue
+    cannot report one. Paper takes it from config. A live venue leaves it to the startup barrier,
+    which reads `accountValue − Σ unrealized_pnl` from the venue (ADR-0042).
+  - `instrument_specs()` returns every symbol the venue publishes, with `max_leverage` set.
+    `start()` refuses a boot where a traded symbol is missing, because its configured leverage
+    would have no cap to check against (ADR-0044 §9).
+  - `fetch_account_state()` returns a `VenueAccountState`, or `None` when you have no venue truth.
+    `None` is never "flat". The ledger reconciler freezes on it and heals nothing. Paper answers
+    `None` always, because it holds no account state. A live adapter answers `None` on a failed
+    read. Its peer `verify_account_mode()` guards the one path that writes a venue number to disk:
+    answer `VERIFIED` only while the account is in a mode whose numbers may be healed toward
+    (ADR-0046 §4). Paper answers `VERIFIED` always, for the same reason it answers `None` above.
+  - Funding. If the venue pays funding, publish each payment as a `FundingAccrual` event with the
+    venue's own amount, never one you recomputed (ADR-0037). If nobody can be asked, generate it
+    in `run()` as `PaperExchange` does. `run()` is where that loop lives, and the bullet below says
+    why.
 - [ ] Put venue alignment in `start()`, a loop of your own in `run()`, and release in `stop()` —
   never in `__init__` or a placement.
   The runner drives `start()` at ADR-0024 step 4 — after the bus, **before** the startup barrier — so
