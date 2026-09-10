@@ -1,6 +1,6 @@
 ---
 name: python-codebase-mastering
-description: Python-focused codebase mastering pass for high-impact refactoring, package/module/folder structure, public API shape, testability, and release-readiness polish. Use when the user asks to "master" a Python codebase, harden it before release, improve folder structure, clean up architecture, or perform scoped refactoring without changing behavior.
+description: Use when the user asks to carry out a refactor without changing behavior, tighten a public API, or fix folder structure. Use improve-codebase-architecture to find what needs changing.
 ---
 
 # Python Codebase Mastering

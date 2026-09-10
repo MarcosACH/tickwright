@@ -1,6 +1,6 @@
 ---
 name: to-tickets
-description: Break a plan, spec, or PRD into independently-grabbable tickets on the project issue tracker using tracer-bullet vertical slices, each declaring its blocking edges. Use when user wants to convert a plan into issues, create implementation tickets, or break down work into issues.
+description: Use when the user asks to break a PRD or plan into issues, tickets, or vertical slices on the tracker. Use wayfinder when the route is still unclear.
 ---
 
 # To Tickets

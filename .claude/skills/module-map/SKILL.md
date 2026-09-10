@@ -1,6 +1,6 @@
 ---
 name: module-map
-description: Design an upfront module map for a planned feature, informed by the PRD and domain glossary. Use after PRD is approved but before implementation starts, to establish architectural anchors for agents.
+description: Use when the user asks for a module map, or for a feature's architecture to be settled before code. Runs after the PRD, before tickets.
 ---
 
 # Module Map

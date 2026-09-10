@@ -1,6 +1,6 @@
 ---
 name: to-spec
-description: Synthesize the current conversation into a PRD and publish it as a GitHub issue — no interview, just synthesis of what you already know. Use when alignment is done (typically via /grill-with-docs) and you want the destination document filed.
+description: Use when the user asks for a PRD or a spec issue after alignment is done. No interview. Run grill-with-docs first if questions remain.
 ---
 
 This skill turns the current conversation context and codebase understanding into a **PRD** (the produced artifact is still called a PRD, not a "spec" — only the skill's invocation name is `to-spec`). It is **synthesis-only: do NOT interview the user**. Alignment is `/grill-with-docs`'s job (Phase 0); by the time you invoke this skill the shared understanding already exists, and this skill just proves you can summarise it. If you find yourself needing to ask a load-bearing question, that is a signal to stop and run `/grill-with-docs` first, not to interview here.
