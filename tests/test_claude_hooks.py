@@ -24,17 +24,39 @@ The hooks are held to the stdlib alone and to ``/usr/bin/env python3``: they run
 reliably on a hook's PATH.
 """
 
+import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
 _ROOT = Path(__file__).resolve().parent.parent
 _HOOKS = _ROOT / ".claude" / "hooks"
 _RUFF = _ROOT / ".venv" / "bin" / "ruff"
+
+
+def _load_guard(filename: str) -> ModuleType:
+    """Import a hook as a module, for the few assertions that need its own helpers.
+
+    Every other case here drives a hook as a real process, which is what it is — but a
+    guard's *inputs* are sometimes checkable only from inside, and scraping a regex out
+    of the source text would be a second copy of it. A hook runs as a script, so its own
+    directory is `sys.path[0]`; importing one means putting it there by hand.
+    """
+    if str(_HOOKS) not in sys.path:
+        sys.path.insert(0, str(_HOOKS))
+    spec = importlib.util.spec_from_file_location(filename.removesuffix(".py"), _HOOKS / filename)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
 
 _ENV = {
     **os.environ,
@@ -52,11 +74,14 @@ def _git(cwd: Path, *args: str) -> None:
 
 @pytest.fixture
 def repo(tmp_path: Path) -> Path:
-    """A scratch repo carrying one tracked file, one ignored tree, and one plan file.
+    """A scratch repo carrying two tracked files, one ignored tree, and one plan file.
 
     ``.gitignore`` mirrors the shape of the real one that matters to these hooks: a
     build/venv tree, a log, and ``.agents/plans/`` — which is ignored *and* meant to be
     read, so it is the exception the read guard has to carry.
+
+    **Two** tracked files under ``src/``, because one cannot tell a glob from a single
+    path: ``src/*.py`` matching exactly one file is the case that passes by accident.
     """
     root = tmp_path / "repo"
     (root / "src").mkdir(parents=True)
@@ -66,6 +91,7 @@ def repo(tmp_path: Path) -> Path:
 
     (root / ".gitignore").write_text(".venv/\nlogs/\n*.log\n.agents/plans/\n.env\n")
     (root / "src" / "tracked.py").write_text("x = 1\n")
+    (root / "src" / "tracked_too.py").write_text("y = 1\n")
     (root / ".venv" / "bin" / "ruff").write_text("#!/bin/sh\n")
     (root / "logs" / "run.log").write_text("noise\n")
     (root / ".agents" / "plans" / "issue-1.md").write_text("- [ ] behavior\n")
@@ -74,7 +100,7 @@ def repo(tmp_path: Path) -> Path:
     _git(root, "init", "-q", "-b", "main")
     _git(root, "config", "user.name", "Test")
     _git(root, "config", "user.email", "test@example.com")
-    _git(root, "add", ".gitignore", "src/tracked.py")
+    _git(root, "add", ".gitignore", "src/tracked.py", "src/tracked_too.py")
     _git(root, "commit", "-q", "-m", "seed")
     return root
 
@@ -116,6 +142,13 @@ def docs_repo(tmp_path: Path) -> Path:
         "**Engine**:\nThe process that hosts the pipeline.\n\n"
         "**EventBus**:\nThe transport everything couples through.\n\n"
         "## Relationships\n\n- The Engine hosts one EventBus.\n"
+    )
+    # Nested one level below the glob, which is what the depth comparison in `_in_corpus`
+    # decides on: `fnmatch`'s `*` crosses `/` happily, so `docs/adr/*.md` would claim this
+    # too and an archived ADR would be refused as if it were the live corpus.
+    (root / "docs" / "adr" / "archive").mkdir()
+    (root / "docs" / "adr" / "archive" / "0001-old.md").write_text(
+        "# ADR-0001: A retired decision\n\n## Decision\n\nSuperseded.\n"
     )
     (root / "docs" / "module-maps" / "surface.md").write_text("# A surface\n\n## Module\n\nIt.\n")
     (root / "docs" / "research" / "note.md").write_text(
@@ -279,12 +312,46 @@ class TestNoTrackedWrites:
             "echo 'x = 2' >> src/tracked.py",
             "echo 'x = 2' | tee src/tracked.py",
             "echo 'x = 2' | tee -a src/tracked.py",
+            # A wrapper is not the program. `sudo` in front changes who writes the file,
+            # not whether the harness's copy of it goes stale.
+            "sudo sed -i '' 's/x/y/' src/tracked.py",
+            "echo 'x = 2' | sudo tee src/tracked.py",
+            # A reserved word stands where a program does and, unlike a wrapper, is not a
+            # program at all — so a guard keyed on the first token reads `do` and allows
+            # the write. The loop is the form an agent reaches for to make one edit across
+            # several files, which is the case this guard exists for.
+            "for f in a b; do sed -i '' 's/x/y/' src/tracked.py; done",
+            "echo 'x = 2' | while read l; do tee src/tracked.py; done",
+            "time sed -i '' 's/x/y/' src/tracked.py",
+            # `punctuation_chars` groups a run of punctuation into one token, so these
+            # arrive whole and equal neither `>` nor `>>`. They truncate the file all the
+            # same: `&>` is bash's both-streams form and `>|` overrides noclobber.
+            "uv run pytest &> src/tracked.py",
+            "uv run pytest &>> src/tracked.py",
+            "echo 'x = 2' >| src/tracked.py",
+            # `>& file` writes both streams to a file; only `>&<digit>` duplicates a
+            # descriptor, and that is what separates this from the `2>&1` below.
+            "uv run pytest >& src/tracked.py",
+            # A glob is a pathspec git resolves, not a value only the shell knows — it
+            # lexes whole and stands in the argument position the guard already reads.
+            # Deciding it by how *many* files came back fires backwards, allowing the
+            # write in proportion to how many it rewrites, and the multi-file edit is
+            # the case this guard exists for.
+            "sed -i '' 's/x/y/' src/*.py",
+            "echo 'x = 2' | tee src/*.py",
         ],
     )
     def test_a_write_at_a_tracked_path_is_refused(self, repo: Path, command: str) -> None:
         result = run_hook("no-tracked-writes.py", command, repo)
         assert result.returncode == BLOCK
         assert "src/tracked.py" in result.stderr
+
+    def test_a_glob_refusal_names_every_file_it_would_rewrite(self, repo: Path) -> None:
+        """The reason is the agent's only account of what the call would have done, and
+        one name out of a glob's fifty is the wrong account."""
+        result = run_hook("no-tracked-writes.py", "sed -i '' 's/x/y/' src/*.py", repo)
+        assert "src/tracked.py" in result.stderr
+        assert "src/tracked_too.py" in result.stderr
 
     @pytest.mark.parametrize(
         "command",
@@ -300,6 +367,42 @@ class TestNoTrackedWrites:
             "ls src/ 2>/dev/null",
             # A read of the tracked file is not a write.
             "grep -n 'x' src/tracked.py",
+            # `tee` in the *argument* position is a word being searched for, not a program
+            # being run — and it is an ordinary word to search this repo for, since the
+            # hook, its test and CONTRIBUTING.md all document the `tee` clause.
+            "grep -n 'tee' src/tracked.py",
+            "rg tee src/tracked.py",
+            # The descriptor-duplicating forms name no file: the token after `>&` is a
+            # file descriptor, so there is nothing here to stale.
+            "uv run pytest >&2",
+            "uv run pytest > /tmp/scratch.txt 2>&1",
+            # `sed` without `-i` writes to stdout, and the `-i` belongs to the `grep`
+            # upstream of the pipe. Reading the predicate over the whole command sees a
+            # `sed` and an `-i` and refuses a command that writes nothing.
+            "grep -i 'x' src/tracked.py | sed 's/a/b/'",
+            "grep -i 'x' src/tracked.py\nsed 's/a/b/' /tmp/scratch.txt",
+            # A heredoc *body* is data, not commands. Writing a new file whose content
+            # quotes a shell example must not be read as running that example — the
+            # refusal would name a file the command never opens, and the natural cases
+            # are this repo's own: a doc, or a test whose fixtures are shell commands.
+            "cat <<'DOC' > /tmp/notes.md\necho hi > src/tracked.py\nDOC",
+            "cat <<'DOC' > src/brand_new.md\nsed -i '' 's/a/b/' src/tracked.py\nDOC",
+            # A newline *inside a quoted argument* is data as well. A multi-line commit
+            # message or a `--body` that quotes a shell example is one command, and only
+            # the newlines outside the quotes end anything. The example has to sit on an
+            # interior line to be worth asserting: the opening and closing lines carry an
+            # unbalanced quote, so the lexer already refuses them and the guard fails open
+            # for the wrong reason.
+            'git commit -m "fix: the write guard\n\necho x > src/tracked.py\n\nis allowed now"',
+            # Peeling the reserved word exposes the program behind it and nothing else:
+            # the loop *list* names a tracked file, and iterating over a file is not
+            # writing to it.
+            "for f in src/tracked.py; do echo $f; done",
+            # A directory is what the cardinality rule was really excluding: git answers
+            # a directory pathspec with every file beneath it, and none of them is the
+            # write target. Tested directly now, so the glob above can be refused.
+            "sed -i '' 's/x/y/' src",
+            "echo 'x = 2' | tee src",
         ],
     )
     def test_a_write_that_stales_nothing_is_allowed(self, repo: Path, command: str) -> None:
@@ -312,6 +415,16 @@ class TestNoTrackedWrites:
             "no-tracked-writes.py", "sed -i '' 's/x/y/' src/tracked.py", repo, tool="Read"
         )
         assert result.returncode == ALLOW
+
+    def test_a_redirect_standing_before_the_program_does_not_hide_it(self, repo: Path) -> None:
+        """The `sed -i` arm keys on the program, so a redirect written before it stands
+        where `sudo` and a loop's `do` stand and the edit goes through unseen. The
+        *redirect* arm never had the gap: `_write_targets` scans the whole segment, so a
+        leading `> src/tracked.py` was always caught wherever it sat."""
+        result = run_hook(
+            "no-tracked-writes.py", "2>/dev/null sed -i '' 's/x/y/' src/tracked.py", repo
+        )
+        assert result.returncode == BLOCK
 
     def test_the_reason_names_edit(self, repo: Path) -> None:
         """Exit 2 hands stderr back to the agent as the block reason, so the text is the
@@ -348,6 +461,29 @@ class TestNoExcludedReads:
             # Secrets are ignored for a stronger reason than context budget, and the one
             # rule covers both.
             "cat .env",
+            "sudo cat .env",
+            # The pattern came from `-e`, so every non-flag argument left is a path.
+            "grep -e 'noise' logs/run.log",
+            # A reserved word is where a program stands without being one. `do`, `then`
+            # and `time` each leave the reader one token further along, and a guard that
+            # reads only the first token of the segment finds a word it has no rule for.
+            "while read l; do cat logs/run.log; done",
+            "if grep -q 'noise' logs/run.log; then echo hit; fi",
+            "time cat .env",
+            # A grep pattern spelled like a redirect. `shlex` strips the quotes, so `'>'`
+            # arrives as the operator token itself and is indistinguishable from one —
+            # which is why the pattern is taken out of the way *before* the redirect scan
+            # runs, rather than after. Filtered first, the log behind it reads as a write
+            # target and the guard opens a hole in the commonest reader it covers.
+            "grep '>' logs/run.log",
+            "grep '>>' logs/run.log",
+            "grep -e '2>' logs/run.log",
+            # An *input* redirect names a file the command reads, so only the operator is
+            # dropped and the operand stays a candidate — `cat < logs/run.log` spends the
+            # log exactly as `cat logs/run.log` does. The descriptor prefix goes with it:
+            # `0<` lexes as `0` then `<`.
+            "cat < logs/run.log",
+            "cat 0< logs/run.log",
         ],
     )
     def test_a_read_of_an_excluded_path_is_refused(self, repo: Path, command: str) -> None:
@@ -359,9 +495,22 @@ class TestNoExcludedReads:
             # The plan file is ignored on purpose and reading it is the whole point of
             # the convention, so the one exception the guard carries.
             "cat .agents/plans/issue-1.md",
+            # The directory is the exemption too — "which plan mentions this behavior"
+            # is asked by sweeping it, and `normpath` strips the separator a prefix
+            # match on `.agents/plans/` needs.
+            "grep -rn 'behavior' .agents/plans",
+            "grep -rn 'behavior' .agents/plans/",
             # Repo source is the normal case and must stay cheap.
             "cat src/tracked.py",
             "grep -rn 'x' src/",
+            # A grep *pattern* is not a path. `.env` and `logs/run.log` are strings this
+            # repo's code and docs name constantly, and searching tracked source for one
+            # opens nothing ignored — `check-ignore` answers on the string alone.
+            "grep -rn '.env' src/",
+            "grep -rn 'logs/run.log' src/tracked.py",
+            # A newline inside a quoted argument does not end a command, so a message
+            # whose second line opens with a reader's name is prose, not a read.
+            'git commit -m "docs: note the guard\n\ncat logs/run.log\n\nis how it surfaced"',
             # An ignored path in the *executable* position is a program being run, not a
             # file being read — and running the venv binaries directly is what keeps a
             # PostToolUse hook fast enough to exist.
@@ -369,10 +518,58 @@ class TestNoExcludedReads:
             ".venv/bin/pytest -q",
             # A reader with no path at all.
             "cat",
+            # The reserved-word peel exposes the reader; it does not widen what counts as
+            # one. Both of these read tracked source from inside a construct.
+            "while read l; do cat src/tracked.py; done",
+            "if grep -q 'x' src/tracked.py; then echo hit; fi",
+            # A redirect *target* is where output goes, not a file being read. Sending a
+            # run into `logs/` is the ordinary use of an ignored tree — the point of
+            # ignoring it — and this guard refusing it says "derive it with a command
+            # that reports" about a command that was already reporting.
+            "cat src/tracked.py > logs/out.log",
+            "grep -n 'x' src/tracked.py >> logs/out.log",
+            "cat src/tracked.py &> logs/out.log",
+            "cat src/tracked.py 2> logs/err.log",
+            # A here-string's operand is the data itself. It never named a file, so it
+            # goes with its operator rather than being offered as a path that happens to
+            # spell one.
+            "cat <<< 'logs/run.log'",
         ],
     )
     def test_a_read_that_costs_no_context_is_allowed(self, repo: Path, command: str) -> None:
         assert run_hook("no-excluded-reads.py", command, repo).returncode == ALLOW
+
+    def test_a_read_that_also_redirects_is_still_a_read(self, repo: Path) -> None:
+        """The other half of dropping redirect targets: the *source* is untouched by it.
+        ``cat logs/run.log > /tmp/x`` still spends the file, and a scan that dropped the
+        whole tail of the segment rather than the operator and its target would let it
+        through."""
+        result = run_hook("no-excluded-reads.py", "cat logs/run.log > /tmp/copy", repo)
+        assert result.returncode == BLOCK
+        assert "logs/run.log" in result.stderr
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "2>/dev/null cat logs/run.log",
+            "> /tmp/copy cat .env",
+            "&> /tmp/copy grep -n 'noise' logs/run.log",
+        ],
+    )
+    def test_a_redirect_standing_before_the_program_does_not_hide_it(
+        self, repo: Path, command: str
+    ) -> None:
+        """A redirect may be written *before* the command it belongs to, and there it
+        occupies the executable position exactly as ``sudo`` and a loop's ``do`` do —
+        the wrapper problem reached through the grammar again. Read the program off the
+        raw first token and ``2>/dev/null cat .env`` names the bare ``2``, matches no
+        rule, and hands over the key anyway.
+
+        Peeling is **leading-only**, and that is what keeps it safe here where the
+        blanket scan is not: ``shlex`` strips quotes, so the ``'>'`` of
+        ``grep '>' logs/run.log`` is indistinguishable from the operator — but a pattern
+        is an *argument*, and nothing standing before the program is ever data."""
+        assert run_hook("no-excluded-reads.py", command, repo).returncode == BLOCK
 
     def test_the_reason_names_the_path_and_why(self, repo: Path) -> None:
         result = run_hook("no-excluded-reads.py", "cat logs/run.log", repo)
@@ -434,6 +631,22 @@ class TestNoGlobalInstalls:
             "npm install -g typescript",
             "npm i -g typescript",
             "npm install --global typescript",
+            # A wrapper is not the program, and this is the form that does the most
+            # damage: root, into the system Python. Every branch above is one `sudo`
+            # away from doing nothing at all.
+            "sudo pip install httpx",
+            "sudo -H pip3 install httpx",
+            "sudo -u root pip install httpx",
+            "sudo python3 -m pip install httpx",
+            "sudo npm install -g typescript",
+            "sudo brew install jq",
+            "env PIP_NO_INPUT=1 pip install httpx",
+            # And a reserved word is not the program either — the loop and the conditional
+            # put the install one token past where a first-token read looks, and this
+            # guard is the one whose miss survives the branch, the PR and the revert.
+            "if true; then pip install httpx; fi",
+            "for p in httpx; do sudo pip install $p; done",
+            "nohup pip install httpx",
         ],
     )
     def test_an_install_outside_the_project_venv_is_refused(self, repo: Path, command: str) -> None:
@@ -456,9 +669,19 @@ class TestNoGlobalInstalls:
             ".venv/bin/pip install httpx",
             # An install that is local to a project, not to the machine.
             "npm install",
-            # Not an install at all.
+            # Not an install at all — `--system` scopes a query here, and every other
+            # branch in the guard gates on the verb.
             "pip --version",
             "brew list",
+            "uv pip list --system",
+            # A wrapper with no install behind it is not the subject either.
+            "sudo -v",
+            "sudo launchctl list",
+            # A newline inside a quoted argument does not end a command, so writing
+            # *about* an install is not performing one.
+            'git commit -m "docs: the guard\n\npip install httpx\n\nis what it refuses"',
+            # The sanctioned command stays sanctioned inside a construct.
+            "for p in httpx; do uv add $p; done",
         ],
     )
     def test_an_install_into_the_project_is_allowed(self, repo: Path, command: str) -> None:
@@ -467,6 +690,15 @@ class TestNoGlobalInstalls:
     def test_the_reason_names_the_sanctioned_command(self, repo: Path) -> None:
         result = run_hook("no-global-installs.py", "pip install httpx", repo)
         assert "uv add" in result.stderr
+
+    def test_a_redirect_standing_before_the_program_does_not_hide_it(self, repo: Path) -> None:
+        """The most costly place for this guard to read the wrong token: it fails open,
+        so `2>/dev/null pip install httpx` names the bare `2`, matches no rule, and the
+        install lands in whatever environment was active."""
+        assert (
+            run_hook("no-global-installs.py", "2>/dev/null pip install httpx", repo).returncode
+            == BLOCK
+        )
 
     def test_an_install_on_a_later_line_is_still_an_install(self, repo: Path) -> None:
         """Same newline bug as the read guard, and worse here: this one fails *open*, so
@@ -504,13 +736,40 @@ class TestNoUnslicedDocReads:
         assert path in result.stderr
 
     @pytest.mark.parametrize(
-        "path", ["README.md", "docs/agents/guide.md", ".agents/tools/doc-slice"]
+        "path",
+        ["README.md", "docs/agents/guide.md", ".agents/tools/doc-slice"],
     )
     def test_a_file_outside_the_corpus_is_read_whole(self, docs_repo: Path, path: str) -> None:
         """The corpus is four globs, not "documentation". ``docs/agents/`` is workflow
         prose read end to end on purpose, and a guard that reached it would be charging
         for the cheap files to protect the expensive ones."""
         result = run_tool_hook("no-unsliced-doc-reads.py", "Read", {"file_path": path}, docs_repo)
+        assert result.returncode == ALLOW
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "Read docs/adr/archive/0001-old.md",
+            "cat docs/adr/archive/0001-old.md",
+        ],
+    )
+    def test_a_file_one_level_below_a_corpus_glob_is_read_whole(
+        self, docs_repo: Path, command: str
+    ) -> None:
+        """``fnmatch``'s ``*`` crosses ``/``, so ``docs/adr/*.md`` claims
+        ``docs/adr/archive/0001-old.md`` unless the depth is compared too. An archive is
+        where a superseded ADR goes precisely so that nobody plans against it, and
+        charging the slicing toll on one would be the guard reaching past its corpus.
+
+        Both doors, because the depth test lives in ``_in_corpus``, which is behind both
+        and would be deleted once for both."""
+        tool, path = command.split(" ", 1)
+        if tool == "Read":
+            result = run_tool_hook(
+                "no-unsliced-doc-reads.py", "Read", {"file_path": path}, docs_repo
+            )
+        else:
+            result = run_hook("no-unsliced-doc-reads.py", command, docs_repo)
         assert result.returncode == ALLOW
 
     @pytest.mark.parametrize(
@@ -705,6 +964,132 @@ class TestNoUnslicedDocReads:
             "git status --porcelain\ncat docs/adr/0001-a-decision.md",
             docs_repo,
         )
+        assert result.returncode == BLOCK
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "sudo cat docs/adr/0001-a-decision.md",
+            "for f in a b; do cat docs/adr/0001-a-decision.md; done",
+            "PAGER=cat cat docs/adr/0001-a-decision.md",
+        ],
+    )
+    def test_a_dumper_behind_a_wrapper_or_a_keyword_is_still_a_dumper(
+        self, docs_repo: Path, command: str
+    ) -> None:
+        """The bypass the other three guards close through ``_shell.unwrap``, asserted
+        here too because this guard is the fourth door onto the same corpus. Key on the
+        raw first token and ``sudo``, a loop's ``do`` or an assignment prefix stands where
+        ``cat`` does: the guard matches nothing and the whole file is spent anyway."""
+        result = run_hook("no-unsliced-doc-reads.py", command, docs_repo)
+        assert result.returncode == BLOCK
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "2>/dev/null cat docs/adr/0001-a-decision.md",
+            "> /tmp/dump.log cat CONTEXT.md",
+            "&> /tmp/dump.log cat docs/module-maps/surface.md",
+        ],
+    )
+    def test_a_redirect_standing_before_the_program_does_not_hide_it(
+        self, docs_repo: Path, command: str
+    ) -> None:
+        """A redirect may precede the command it belongs to, and there it stands exactly
+        where ``sudo`` and a loop's ``do`` stand in the case above. Key on the raw first
+        token and the program reads as ``>``, or as the bare ``2`` of ``2>``, matching
+        nothing while the whole file is spent anyway.
+
+        So the redirect scan comes off before the program is *named*, not merely before
+        its paths are collected — one strip feeding both reads."""
+        result = run_hook("no-unsliced-doc-reads.py", command, docs_repo)
+        assert result.returncode == BLOCK
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "cat README.md > docs/adr/0001-a-decision.md",
+            "cat README.md >> CONTEXT.md",
+            "cat README.md &> docs/module-maps/surface.md",
+            "cat README.md 2> docs/research/note.md",
+        ],
+    )
+    def test_a_redirect_target_is_not_a_read_of_it(self, docs_repo: Path, command: str) -> None:
+        """A corpus file being written to is not one being read, and this guard's whole
+        subject is what a call pulls into the window. Refusing here would answer a write
+        with "read it by section instead", which is not an instruction that applies —
+        and ``no-tracked-writes`` is the guard that has something true to say about it.
+
+        The last two are the shapes a hand-rolled scan misses: ``&>`` arrives as one
+        token that equals neither ``>`` nor ``>>``, and ``2>`` lexes as ``2`` then ``>``,
+        leaving a bare descriptor standing where a path would."""
+        result = run_hook("no-unsliced-doc-reads.py", command, docs_repo)
+        assert result.returncode == ALLOW
+
+    @pytest.mark.parametrize("command", ["cat docs/adr/*.md", "cat *.md"])
+    def test_a_glob_that_expands_onto_the_corpus_is_refused(
+        self, docs_repo: Path, command: str
+    ) -> None:
+        """The cheapest whole read to write and the most expensive to serve: on the real
+        repo ``cat docs/adr/*.md`` is fifty ADRs at once, the single largest spend the
+        corpus allows.
+
+        ``shlex`` does not expand globs, so the literal reaches ``os.path.isfile``, which
+        says no, and the call goes through. ``no-excluded-reads`` refuses the same shape
+        for free because ``git check-ignore`` resolves a pathspec; this guard has no git
+        predicate to ask, so it expands the pattern itself."""
+        result = run_hook("no-unsliced-doc-reads.py", command, docs_repo)
+        assert result.returncode == BLOCK
+
+    def test_a_glob_refusal_names_the_corpus_files_instead_of_indexing_each(
+        self, docs_repo: Path
+    ) -> None:
+        """One index is the answer to a whole read; several are a bigger one than the
+        read they refused. ADR-0040's table of contents alone is 1,292 characters, so
+        fifty of them cost more than the file the guard was protecting.
+
+        Past one file the refusal therefore names them and asks for a choice. The
+        glossary is in this expansion too, which is why the count rather than the
+        corpus-file kind is what decides."""
+        result = run_hook("no-unsliced-doc-reads.py", "cat *.md docs/adr/*.md", docs_repo)
+        assert result.returncode == BLOCK
+        assert "CONTEXT.md" in result.stderr
+        assert "docs/adr/0001-a-decision.md" in result.stderr
+        assert "Consequences" not in result.stderr  # no table of contents was printed
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            # Expands only onto the archived ADR, which the depth check in `_in_corpus`
+            # keeps out of the corpus — the expansion must not smuggle it back in.
+            "cat docs/adr/archive/*.md",
+            # Expands onto nothing at all, and a pattern naming no file reads none.
+            "cat docs/adr/*.rst",
+        ],
+    )
+    def test_a_glob_that_misses_the_corpus_is_allowed(self, docs_repo: Path, command: str) -> None:
+        result = run_hook("no-unsliced-doc-reads.py", command, docs_repo)
+        assert result.returncode == ALLOW
+
+    @pytest.mark.parametrize("pattern", ["docs/adr/*.md", "docs/adr/0001-a-decision.md"])
+    def test_a_home_relative_path_is_judged_whether_or_not_it_globs(
+        self, docs_repo: Path, monkeypatch: pytest.MonkeyPatch, pattern: str
+    ) -> None:
+        """``~`` is expanded by the shell, and by ``os.path.expanduser`` — but not by
+        ``glob``, which passes an unexpanded ``~`` straight through and matches nothing.
+
+        The guard expanded the user prefix only when deciding whether a *resolved* path
+        was in the corpus, so the same file was refused when named directly and allowed
+        the moment a wildcard was added: the empty match fell back to the literal, which
+        then failed ``isfile`` because it still held the ``*``. Both spellings are the
+        largest read the corpus allows, so both are the guard's subject.
+
+        ``HOME`` is patched into the environment the hook subprocess is handed, since
+        that is what ``expanduser`` reads and what makes ``~`` name the scratch repo.
+        """
+        monkeypatch.setitem(_ENV, "HOME", str(docs_repo.parent))
+        command = f"cat ~/{docs_repo.name}/{pattern}"
+        result = run_hook("no-unsliced-doc-reads.py", command, docs_repo)
         assert result.returncode == BLOCK
 
     def test_a_refused_dump_gets_the_same_index_a_refused_read_does(self, docs_repo: Path) -> None:
@@ -1141,6 +1526,29 @@ class TestWiring:
         assert len(globs) == 4, globs
         for glob in globs:
             assert list(root.glob(glob)), glob
+
+    def test_the_glossary_still_matches_the_shape_its_index_is_built_from(self) -> None:
+        """The third way this guard can be disarmed from outside its own file.
+
+        ``CONTEXT.md`` is the one corpus file indexed by term rather than by heading, and
+        ``_refusal_for`` **allows** the whole read when that index comes back empty — a
+        refusal with nothing to offer is an obstacle, not a guard. So reformatting the
+        glossary to ``**Term** — …`` would leave the largest file in the corpus unguarded
+        with every other test here green.
+
+        The count is read from ``CLAUDE.md`` rather than written down twice: the prose
+        there quotes it, and a bare ``> 0`` would let the index shrink silently while the
+        claim went stale. One number, one place, and this is what compares them.
+        """
+        root = _HOOKS.parent.parent
+        guard = _load_guard("no-unsliced-doc-reads.py")
+
+        index = guard._term_index(str(root / "CONTEXT.md"))
+        assert index is not None, "CONTEXT.md yields no terms; the guard now allows it whole"
+
+        claimed = re.search(r"its (\d+) terms", (root / "CLAUDE.md").read_text())
+        assert claimed is not None, "CLAUDE.md no longer states the term count"
+        assert len(index.splitlines()) == int(claimed.group(1))
 
     def test_doc_slice_is_where_the_guard_looks_for_it(self) -> None:
         """The guard falls open when the tool is missing, since a refusal with no index
