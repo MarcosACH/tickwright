@@ -88,7 +88,8 @@ Rules:
   one PR. Never ship a single layer alone.
 - **One PR per issue**, targeting `main`, with `Closes #N` in the body. Never close an issue by
   hand. The merge does it. Two things have no merge event of their own: a parent PRD closes at
-  release, and a wayfinder ticket closes on resolution (ADR-0050).
+  release (`docs/workflow/versioning.md`), and a wayfinder ticket closes on resolution
+  (`docs/agents/issue-tracker.md`).
 - **Releases.** At a shippable milestone, propose a version and its SemVer reason, then wait for my
   sign-off. Never tag or publish a release yourself. See `docs/workflow/versioning.md`.
 - **Docs-sync.** If a change makes another file wrong, fix that file in the same PR. Link one
