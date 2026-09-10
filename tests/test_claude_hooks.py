@@ -306,6 +306,16 @@ class TestNoTrackedWrites:
         )
         assert result.returncode == ALLOW
 
+    def test_a_redirect_standing_before_the_program_does_not_hide_it(self, repo: Path) -> None:
+        """The `sed -i` arm keys on the program, so a redirect written before it stands
+        where `sudo` and a loop's `do` stand and the edit goes through unseen. The
+        *redirect* arm never had the gap: `_write_targets` scans the whole segment, so a
+        leading `> src/tracked.py` was always caught wherever it sat."""
+        result = run_hook(
+            "no-tracked-writes.py", "2>/dev/null sed -i '' 's/x/y/' src/tracked.py", repo
+        )
+        assert result.returncode == BLOCK
+
     def test_the_reason_names_edit(self, repo: Path) -> None:
         """Exit 2 hands stderr back to the agent as the block reason, so the text is the
         hook's only chance to say what to do instead."""
@@ -428,6 +438,29 @@ class TestNoExcludedReads:
         assert result.returncode == BLOCK
         assert "logs/run.log" in result.stderr
 
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "2>/dev/null cat logs/run.log",
+            "> /tmp/copy cat .env",
+            "&> /tmp/copy grep -n 'noise' logs/run.log",
+        ],
+    )
+    def test_a_redirect_standing_before_the_program_does_not_hide_it(
+        self, repo: Path, command: str
+    ) -> None:
+        """A redirect may be written *before* the command it belongs to, and there it
+        occupies the executable position exactly as ``sudo`` and a loop's ``do`` do —
+        the wrapper problem reached through the grammar again. Read the program off the
+        raw first token and ``2>/dev/null cat .env`` names the bare ``2``, matches no
+        rule, and hands over the key anyway.
+
+        Peeling is **leading-only**, and that is what keeps it safe here where the
+        blanket scan is not: ``shlex`` strips quotes, so the ``'>'`` of
+        ``grep '>' logs/run.log`` is indistinguishable from the operator — but a pattern
+        is an *argument*, and nothing standing before the program is ever data."""
+        assert run_hook("no-excluded-reads.py", command, repo).returncode == BLOCK
+
     def test_the_reason_names_the_path_and_why(self, repo: Path) -> None:
         result = run_hook("no-excluded-reads.py", "cat logs/run.log", repo)
         assert "logs/run.log" in result.stderr
@@ -547,6 +580,15 @@ class TestNoGlobalInstalls:
     def test_the_reason_names_the_sanctioned_command(self, repo: Path) -> None:
         result = run_hook("no-global-installs.py", "pip install httpx", repo)
         assert "uv add" in result.stderr
+
+    def test_a_redirect_standing_before_the_program_does_not_hide_it(self, repo: Path) -> None:
+        """The most costly place for this guard to read the wrong token: it fails open,
+        so `2>/dev/null pip install httpx` names the bare `2`, matches no rule, and the
+        install lands in whatever environment was active."""
+        assert (
+            run_hook("no-global-installs.py", "2>/dev/null pip install httpx", repo).returncode
+            == BLOCK
+        )
 
     def test_an_install_on_a_later_line_is_still_an_install(self, repo: Path) -> None:
         """Same newline bug as the read guard, and worse here: this one fails *open*, so

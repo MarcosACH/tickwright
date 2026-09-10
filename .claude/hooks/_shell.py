@@ -85,6 +85,13 @@ _HERE_STRING = ("<<<",)
 # `cat logs/run.log` does.
 _INPUT_REDIRECTS = ("<", "<>")
 
+# The shapes `unwrap` peels when one stands *before* the program. Every redirect whose
+# operand is a destination rather than a read, which is all of them but `_INPUT_REDIRECTS`
+# — see `unwrap` for why that one is left alone. `>&` is here unconditionally: at this
+# position both readings of it are noise, so the `2>&1`-versus-`>& file` distinction
+# `without_write_redirects` has to make does not arise.
+_HEAD_REDIRECTS = WRITE_REDIRECTS + (DUP_REDIRECT,) + _HERE_STRING
+
 
 def tokens(command: str) -> list[str]:
     """Split a shell command, keeping operators as tokens of their own.
@@ -258,20 +265,48 @@ def _is_assignment(token: str) -> bool:
     return "=" in token and not token.startswith("=") and "/" not in token.split("=", 1)[0]
 
 
+def _leading_redirect_span(rest: list[str]) -> int:
+    """How many tokens a redirect written at the head of `rest` occupies, else 0.
+
+    `2>/dev/null` lexes as `2`, `>`, `/dev/null`, so the descriptor prefix is counted
+    with the operator it belongs to; a bare `>` or `&>` takes the operand alone.
+    """
+    i = 1 if rest[0].isdigit() and len(rest) > 1 and rest[1] in _HEAD_REDIRECTS else 0
+    if i < len(rest) and rest[i] in _HEAD_REDIRECTS:
+        return min(i + 2, len(rest))
+    return 0
+
+
 def unwrap(segment: list[str]) -> list[str]:
-    """The segment from its real program onward — wrappers, keywords and assignments gone.
+    """The segment from its real program onward — redirects, wrappers, keywords and
+    assignments standing in front of it gone.
 
     `sudo -u root env FOO=1 pip install httpx` is a `pip install`, and so is the
-    `do pip install httpx` of a loop body. Every guard here decides on the program, so
-    each one has to see past whatever is standing in front of it — and neither case is
-    the deliberate fail-open, since the lexer parses both perfectly and the guard simply
-    reads the wrong token.
+    `do pip install httpx` of a loop body and the `2>/dev/null pip install httpx` that
+    silences one. Every guard here decides on the program, so each one has to see past
+    whatever is standing in front of it — and none of these is the deliberate fail-open,
+    since the lexer parses them all perfectly and the guard simply reads the wrong token.
+
+    **A redirect is peeled only at the head, never in the middle**, and that is what
+    keeps it safe where a blanket `without_write_redirects` is not. `shlex` strips
+    quotes, so the `'>'` of `grep '>' logs/run.log` is indistinguishable from the
+    operator — but a pattern is an *argument*, and nothing standing before the program
+    is ever data. The operand goes with the operator here for the same reason: at this
+    position it is a destination, and no guard has anything to say about one.
+
+    `< file cmd` is deliberately not peeled. Its operand *is* a read, so dropping it
+    would lose a path while keeping it would leave that path where the program stands —
+    a shape needing its own answer rather than this one, and left as it was.
 
     A segment that is only a wrapper or a keyword (`sudo -v`, `done`) unwraps to nothing
     or to a word no rule names, which is the right answer for it.
     """
     rest = list(segment)
     while rest:
+        span = _leading_redirect_span(rest)
+        if span:
+            rest = rest[span:]
+            continue
         if _is_assignment(rest[0]):
             rest = rest[1:]
             continue

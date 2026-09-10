@@ -274,12 +274,12 @@ def _dump_candidates(command: str) -> list[str]:
     `_DUMPERS` rather than taste: nothing in it takes a *pattern*, so there is no quoted
     `'>'` to be mistaken for an operator and no reason to defer the scan.
 
-    **One strip feeds both reads, the program's name included.** A redirect may stand
-    *before* the command it belongs to, and there it occupies the executable position
-    exactly as `sudo` and a loop's `do` do: name the program off the raw segment and
-    `2>/dev/null cat notes.md` reads its program as the bare `2`, matching nothing while
-    the whole file is spent anyway. That is not the deliberate fail-open — the lexer
-    parses it perfectly and the guard simply read the wrong token.
+    **One strip feeds both reads, the program's name included.** A redirect standing
+    *before* the command it belongs to occupies the executable position exactly as
+    `sudo` and a loop's `do` do, so `2>/dev/null cat notes.md` names the bare `2` and
+    matches nothing while the whole file is spent anyway. `unwrap` peels that shape for
+    every guard now, which makes naming off `stripped` here the same answer reached
+    twice — kept because it is the one this function can be read without leaving.
 
     Over-collects the rest: a value riding a flag (`nl -w 5 notes.md`) lands here beside
     the file, which costs one `isfile` and changes no outcome.
