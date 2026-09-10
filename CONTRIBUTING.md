@@ -1,8 +1,8 @@
 # Contributing to Tickwright
 
-Thanks for your interest in Tickwright — a readable, event-driven algorithmic trading engine
-built as a reference implementation. **Clarity and correctness are the priorities**; please keep
-changes small, well-tested, and easy to read.
+Thanks for your interest in Tickwright, a readable, event-driven algorithmic trading engine.
+**Clarity and correctness are the priorities.** Please keep changes small, well-tested, and easy to
+read.
 
 ## Before you start
 

@@ -1,127 +1,195 @@
-# CLAUDE.md
+## What Tickwright is
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Tickwright is a trading engine. A user brings config and a strategy. The engine handles the rest:
+market feed, event flow, order execution, crash recovery, and exchange reconciliation. It is
+designed to run against testnet and against real money.
 
-## Project Overview
+It is built to be extended. v1 covers Hyperliquid market data, an in-process deterministic paper
+exchange, and the `InMemory` and `Kafka` bus backends. More venues come later, and the architecture
+exists to make that cheap. We are building the foundation right now, so foundation quality matters
+more than feature count.
 
-**Tickwright** is an event-driven algorithmic trading engine, built as a rigorous, readable **reference implementation**. It turns a market feed into orders through an event-driven pipeline: `MarketFeed → Strategy → Exchange`, coordinated by an `EventBus`, with a crash-safe order-lifecycle saga, idempotent recovery, and exchange reconciliation.
+Full scope and non-goals: `README.md`.
 
-v1 scope: Hyperliquid (real, read-only-auth market data) + an in-process deterministic **paper exchange**; `InMemory` and `Kafka` event-bus backends; engine-only, live/paper execution, **no backtesting**. See `README.md` for the full vision, scope, and non-goals.
+## Never compromise these
 
-## Workflow (grill-with-docs)
+A change that damages one of these is wrong, even when it is good in every other way.
 
-This repo uses the grill-with-docs / tracer-bullet workflow. Single repo; vertical-slice issues.
+1. **Safety.** Real money can move through this engine. A bug here costs a user real funds. When
+   correctness and speed conflict, pick correctness. When you are not sure a path is safe, stop and
+   ask me.
+2. **Recovery.** The order saga has to survive a crash. Consumers stay idempotent. Events stay
+   replayable. Reconciliation stays able to tell the truth after a restart.
+3. **A hermetic default path.** The paper exchange plus in-memory bus must run with no external
+   service, no API key, and no ambient config. See Configuration below.
+4. **The seams.** A seam exists so a second venue or backend can plug in. Do not collapse one
+   because a single implementation would be shorter today.
 
-Pipeline:
+Review-blocking detail lives in `docs/agents/invariants.md`.
 
-1. `/grill-with-docs` — exhaustive Phase 0 interview to define **all** requirements and scope before any code. Resolve terms in `CONTEXT.md`; write ADRs for load-bearing decisions. **Gate:** no PRD, no code until the maintainer confirms requirements/scope are signed off.
-2. `/to-spec` — synthesize the parent PRD issue (**synthesis-only, no interview** — alignment already happened in step 1). The artifact is still a PRD.
-3. `/module-map` — architecture anchor at `docs/module-maps/<slug>.md`.
-4. `/to-tickets` — break the PRD into vertical-slice child tickets, linked as GitHub sub-issues (all in this repo), each declaring its blocking edges. The last child is always an `integrate-and-verify` slice, blocked by all its siblings, asserting the cross-slice scenarios no single slice could (ADR-0050).
-5. `/tdd` per child — red-green-refactor on `ralph/issue-<N>` branch; vertical tracer through `feed → strategy → exchange → engine`. The confirmed plan (seams, behavior checklist, shas) is written to the gitignored `.agents/plans/issue-<N>.md` and ticked per cycle, so a compacted or restarted session resumes without re-exploring. **Finding it is not a rule to remember either:** the `resume-from-plan` hook reads the issue number off the branch and prints the plan's open behaviors at session start, on a compaction as much as on a cold start. The ticked half is counted rather than reprinted, and the recorded shas still want confirming against `git log` — a plan is written by hand, so it can be ahead of what landed or behind it.
-6. Open one PR per issue with `Closes #<N>` in the body.
-7. `/code-review` — structured BLOCKING/WARN/NIT review; label `ralph:ready` when clean. Merge closes the issue automatically.
+## A note from Marcos
 
-Auxiliary skills (used as needed, not part of the linear pipeline): `/wayfinder` — chart a huge, foggy effort as a map of decision tickets on the tracker before it's spec-able; `/research` — delegate primary-source investigation to a background agent, cited Markdown under `docs/research/`; `/prototype` — throwaway logic prototype to pressure-test a state model before committing; `/blast-radius` — what a change breaks *somewhere else*, before it ships, with the one fact it's safe because of proven by running code rather than written up (not a merge gate; `/code-review` is); `/how` — how a subsystem works, and where a new thing belongs; `/why` — the motivation behind code that already exists, cited; `/unslop` — cut AI tells from any writing, always applies.
+I am not a native English speaker. I read every message you write. When your writing is dense I
+lose time and I lose the thread. Plain writing is not a style preference here. It is how I stay in
+control of my own project.
 
-See `docs/workflow/labels.md` for the label schema and `docs/agents/issue-tracker.md` for gh CLI / project-board conventions.
+I like simple systems. Do not keep complexity just because it is already there. Do not add
+machinery because it looks impressive. Find the real constraint, then build the smallest thing that
+makes the correct behavior obvious.
 
-## Required Behavior
+Ask me when you are unsure. A question costs one message. A wrong assumption costs a session.
 
-- **Be concise.** Keep responses short and to the point; skip preamble, hedging, and restating the question.
-- Always aim for best software-engineering and architectural practices.
-- Prefer minimal, targeted edits over broad rewrites; match existing naming and style.
-- **No code is copied from any prior/private codebase.** Generalizable patterns are reimplemented from first principles and validated against current best practice before coding.
-- **TDD policy (mandatory):** red test first, green implementation, refactor only after green. One behavior at a time.
-- **Vertical slice policy (mandatory):** features/bugfixes cross every relevant layer (feed → strategy → exchange → engine) in one PR. Never deliver a horizontal layer in isolation.
-- **PR policy (mandatory):** all code changes ship as PRs with `Closes #N` in the body, targeting **`main`** — there is no long-lived PRD or integration branch, because GitHub honours a closing keyword only against the default branch and `pr-policy` would pass anyway, reporting green with no effect (`docs/adr/0050-trunk-based-delivery-and-prd-level-verification.md`). Never close issues manually — the PR merge closes them. The `no-unlinked-prs` hook refuses a `gh pr create` whose body carries no closing reference and hands back the `Closes #<N>` line the branch implies, so the check that would have gone red says it at the call instead. The exceptions are the issues with no merge event of their own: a parent PRD, closed deliberately at release (`docs/workflow/versioning.md`), and a wayfinder ticket, closed on resolution, with its map closed on hand-off (`docs/agents/issue-tracker.md` → *Wayfinding operations*).
-- **Release policy (mandatory):** when work reaches a shippable milestone (a PRD delivered, a meaningful feature set, an important fix), proactively propose a release — a version number *with its SemVer rationale* — and wait for maintainer sign-off before tagging. Never self-authorize a tag or GitHub Release. Full policy and procedure: `docs/workflow/versioning.md`.
-- **Commit grouping:** one logical change per commit (not one file per commit). Group tightly-related changes; split unrelated ones.
-- **Two implementations per seam, no more.** One looks hardcoded; three is scope creep.
-- **Docs-sync policy (mandatory):** a change that alters anything documented elsewhere — workflow conventions (`docs/agents/`, `docs/workflow/`), skills (`.claude/skills/`), invariants (`docs/agents/invariants.md`), ADRs, `CONTEXT.md`, CI workflows, or this file — updates every affected file **in the same PR**. Duplication that can drift is a bug: prefer linking one canonical source over copying, and when two files disagree, fix the copy, not the canon.
-- **Dependencies are managed with `uv` in a project virtual environment — never installed globally.**
+## How to write
 
-## Project Context Files
+This is the rule I care about most.
 
-- Domain glossary: `CONTEXT.md`
-- Architecture decisions: `docs/adr/`
-- Module maps for in-flight features: `docs/module-maps/`
-- Primary-source research notes: `docs/research/` — dated captures backing the ADRs, **not maintained**; where a note and an ADR disagree, the ADR wins
-- Workflow & label schema: `docs/workflow/labels.md`
-- Versioning, tags & releases: `docs/workflow/versioning.md`
-- Issue-tracker conventions: `docs/agents/issue-tracker.md`
-- Triage label roles: `docs/agents/triage-labels.md`
-- Skill evals (the tier that tests `.claude/skills/`, not the engine): `evals/README.md`
+**Length**
 
-## Context Discipline
+- Default to under 150 words.
+- Past that, use a list or a table. Never a wall of prose.
+- Past 400 words, ask me first.
 
-- Never read `.venv/`, `__pycache__/`, `.mypy_cache/`, `.pytest_cache/`, `.ruff_cache/`, `.import_linter_cache/`, `*.egg-info/`, `*.pyc`, `logs/`, `*.log`. Enforced at both doors: the `.claude/settings.json` deny list binds `Read`, and the `no-excluded-reads` hook binds the `cat`/`head`/`grep` that reach the same bytes through Bash. Membership is `git check-ignore`, so `.gitignore` is the one list. `.agents/plans/` is ignored and readable — that is the exception, not an oversight.
-- **`CONTEXT.md`, `docs/adr/*.md`, `docs/module-maps/*.md` and `docs/research/*.md` are read by section, not whole.** The `no-unsliced-doc-reads` hook refuses a whole `Read` and a `cat` of them alike, and answers with the file's own index rather than a bare no — the `doc-slice` table of contents with each corrected section marked `(+N)`, or, for `CONTEXT.md`, its 45 terms and their line numbers. So the invocation arrives at the point you need it instead of being remembered: `.agents/tools/doc-slice <file> <heading-substr>` for a section, `--amendments <file> [<heading-substr>]` for its corrections. **ADRs are append-corrected** — a marked section's `**( … **)**` blocks hold the current truth and the prose above them is often the retired version, so document order reads the superseded decision. The convention and the delimiter rule are canonical in [`docs/agents/adr-reading.md`](docs/agents/adr-reading.md). The escape, when raw lines are genuinely what you need, is `Read` with an explicit `offset`/`limit`.
-- For large source/test files, use `Read` with `offset`/`limit` targeting the symbol you need.
-- For GitHub issues, use `gh issue view <N>`.
-- **Editing a file git already tracks: use `Edit`.** A Bash write stales the harness's cached copy and costs a full re-read. The `no-tracked-writes` hook refuses it, so this is not a rule to remember; heredocs and `sed -i` stay available for creating new files. The one other thing that stales that copy is the `ruff-on-write` hook reformatting what you just wrote — it says so when it does, and re-reading before the next edit is the answer. See [`CONTRIBUTING.md` → Agent-loop hooks](CONTRIBUTING.md#agent-loop-hooks-claude-code).
+**Sentences**
 
-## Local Development (macOS)
+- One idea per sentence. Aim for 15 words. Never go past 25.
+- Do not use em dashes or semicolons. If a sentence seems to need one, it is two sentences.
+- Use the common word. Say "use" not "leverage". Say "is" not "serves as".
+- No aphorisms and no clever inversions. Say the plain thing.
+- Sentence case headings. Straight quotes. No decorative emoji.
+- No filler openers like "Of course!" or "Great question!".
 
-Package/dependency manager is **[uv](https://github.com/astral-sh/uv)** against a project `.venv`. Dependencies are never installed globally.
+This applies to chat, PR titles and bodies, issue text, commit messages, code comments, and
+docstrings. It applies to any new line in any doc. Do not rewrite old text to match it.
+
+**PR and issue titles.** Say why the change matters, in words I could read out loud.
+
+- Bad: `fix(engine): one absent read never ghosts a resting order, at boot no less than in flight`
+- Good: `fix(engine): keep resting orders when the exchange read fails at boot`
+
+**PR and issue bodies.** Open with the problem, in the words I used when I asked for it. Then the
+solution. Never open with a list of what you implemented.
+
+- Bad: "The `MarketFeed` seam was two members and one line of prose, and since #175 both adapters
+  owed a second thing that line never mentioned."
+- Good: "A feed could pass the type checker without ever publishing a mark. When that happened,
+  every P&L number silently read `None`, and no test went red."
+
+**Code comments.** Say why, not what. Update them when the code around them moves.
+
+## Rules and defaults
+
+A **rule** is not negotiable. If my prompt conflicts with one, stop and tell me before you act.
+Everything else here is a **default**. My prompt wins, and you do not have to argue for it.
+
+Rules:
+
+- **TDD.** Red test, then green implementation, then refactor. One behavior at a time.
+- **Vertical slice.** A change crosses every layer it touches (feed, strategy, exchange, engine) in
+  one PR. Never ship a single layer alone.
+- **One PR per issue**, targeting `main`, with `Closes #N` in the body. Never close an issue by
+  hand. The merge does it. Two things have no merge event of their own: a parent PRD closes at
+  release, and a wayfinder ticket closes on resolution (ADR-0050).
+- **Releases.** At a shippable milestone, propose a version and its SemVer reason, then wait for my
+  sign-off. Never tag or publish a release yourself. See `docs/workflow/versioning.md`.
+- **Docs-sync.** If a change makes another file wrong, fix that file in the same PR. Link one
+  canonical source instead of copying it. When two files disagree, fix the copy, not the canon.
+- **Dependencies.** Use `uv` against the project `.venv`. Never install globally.
+- **No copied code.** Never copy from a prior or private codebase. Build from first principles, then
+  check the result against current practice.
+
+Defaults:
+
+- Prefer small, targeted edits over rewrites. Match the naming and style around you.
+- Two implementations per seam, no more. One is hard to tell apart from hardcoding. Three is scope
+  creep.
+- One logical change per commit, not one file per commit.
+
+## Workflow
+
+Single repo, vertical-slice issues. Skills live in `.claude/skills/` and describe their own
+triggers.
+
+1. `/grill-with-docs` sets requirements and scope. No PRD and no code until I sign off.
+2. `/to-spec` writes the parent PRD issue. Synthesis only, with no second interview.
+3. `/module-map` writes the architecture anchor at `docs/module-maps/<slug>.md`.
+4. `/to-tickets` splits the PRD into vertical-slice child issues, each declaring what blocks it. The
+   last child is always `integrate-and-verify`, blocked by all its siblings (ADR-0050).
+5. `/tdd` runs red-green-refactor on `ralph/issue-<N>`. The confirmed plan goes in
+   `.agents/plans/issue-<N>.md`. The `resume-from-plan` hook reprints its open behaviors at session
+   start. Recorded shas are hand-written, so check them against `git log`.
+6. One PR per issue, with `Closes #<N>` in the body.
+7. `/code-review` reports BLOCKING, WARN, and NIT. Label `ralph:ready` when it is clean.
+
+Conventions: `docs/workflow/labels.md`, `docs/agents/issue-tracker.md`.
+
+## Context discipline
+
+- **Read `CONTEXT.md`, ADRs, module maps, and research notes by section, never whole.** Use
+  `.agents/tools/doc-slice <file> <heading-substr>`, or `--amendments <file> [<heading>]` for
+  corrections. **ADRs are append-corrected.** A section's `**( … **)**` blocks hold the current
+  truth. The prose above them is often the retired version, so reading in document order gives you
+  the superseded decision. Canon: `docs/agents/adr-reading.md`.
+- Never read ignored paths such as `.venv/`, caches, `logs/`, or `*.pyc`. Membership is
+  `git check-ignore`, so `.gitignore` is the one list. `.agents/plans/` is ignored and readable by
+  design.
+- For large source and test files, use `Read` with `offset` and `limit` on the symbol you need.
+- Read GitHub issues with `gh issue view <N>`.
+- **Edit a tracked file with `Edit`, not a Bash write.** A Bash write stales the harness's cached
+  copy and costs a full re-read.
+- Hooks in `.claude/hooks/` enforce the rules above at the call, and they answer with the right
+  invocation instead of a bare refusal. They are why none of this has to be remembered. See
+  [`CONTRIBUTING.md` → Agent-loop hooks](CONTRIBUTING.md#agent-loop-hooks-claude-code).
+
+## Setup and checks
 
 ```bash
-# one-time
-uv venv                 # create .venv
-uv sync                 # install locked deps
-source .venv/bin/activate   # optional; or prefix commands with `uv run`
-
-# infrastructure for the non-default backends (optional; the hermetic
-# in-memory-bus + SQLite path needs nothing)
-docker compose up -d postgres   # Postgres for the PostgresStore path (ADR-0019)
-docker compose up -d kafka      # Kafka broker for the KafkaBus path (ADR-0028)
-```
-
-## Tests
-
-Run with the project venv via `uv run`:
-
-| Scope        | Command                                              |
-| ------------ | ---------------------------------------------------- |
-| All          | `uv run pytest -v`                                   |
-| One dir      | `uv run pytest tests/<area> -v`                      |
-| Single test  | `uv run pytest tests/test_x.py::TestClass::test -v`  |
-
-- `hypothesis` for property-based tests. Target **≥90% coverage** on the core.
-- Mock at process boundaries only (HTTP/WS, Kafka client, system clock, randomness). Never mock our own classes.
-- The default paper-exchange + in-memory-bus path runs with **no external services and no API keys**.
-- The suite is **hermetic against ambient config**: an outcome must never depend on a developer `.env` or an exported `TICKWRIGHT_*` var. Build the pure `AppConfig`, never `AppSettings` (see *Environment Variables*), and hand any subprocess a `TICKWRIGHT_`-scrubbed environment. CI asserts this by running `tests/app` under a hostile live-venue env.
-- Tests marked `postgres` need a real Postgres (`PostgresStore` contract, ADR-0019); they auto-skip unless `STORE_POSTGRES_DSN` points at a reachable server. Bring one up with `docker compose up -d postgres`, then `STORE_POSTGRES_DSN=postgresql://tickwright:tickwright@localhost:5432/tickwright uv run pytest -m postgres`. `-m "not postgres"` deselects them. **CI runs this tier** — the `ci` job starts a `postgres:17` service and sets the DSN (issue #253), so the ADR-0019 parity promise is gated, not merely available; the local default still auto-skips. **The DSN must address a database dedicated to the suite** — the per-test reset truncates every table in the schema, reading the list from `pg_tables` rather than a transcribed one, so it owns whatever it finds there.
-- Tests marked `live` place real orders on Hyperliquid **testnet** (ADR-0022); they auto-skip unless you opt in with `TICKWRIGHT_LIVE_TESTNET=1` **and** `TICKWRIGHT_HYPERLIQUID__SIGNING_KEY` holds a funded testnet key. The opt-in flag is a dedicated run-gate mapping onto no config field (issue #73), so the key alone never enrols the suite and CI can run the whole thing under a hostile config. Run locally with `TICKWRIGHT_LIVE_TESTNET=1 uv run pytest -m live`; in CI it runs from `.github/workflows/ci-live.yml` — **weekly** (Mondays 10:17 UTC) plus `workflow_dispatch`, on the repo's `TICKWRIGHT_HYPERLIQUID__SIGNING_KEY` secret and `TICKWRIGHT_HYPERLIQUID__ACCOUNT_ADDRESS` variable (issue #255). Never part of the merge gate and never a required check. Weekly is the pre-1.0 setting — the tier catches venue drift, which accrues by calendar rather than by commit; escalate to nightly when real money is in play. The tier now calls `start()` (issue #180), so ADR-0046's account-mode gate and ADR-0044's `updateLeverage` push are both covered live; the push arm skips itself rather than flatten a testnet account that holds the symbol it would write. It also measures the one Tier-1 premise no recorded body can settle (issue #178): that `venue_cash` — `accountValue − Σ unrealizedPnl` — is invariant under a moving mark, since a drift there makes ADR-0034's exact cash comparison heal the venue's own rounding on every cadence deadline. That arm skips on a flat account and on a parked mark, having no evidence either way.
-
-## Skill Evals
-
-A separate tier from `pytest`: it tests the skills in `.claude/skills/`, not the engine. Run with `claude plugin eval .` from the repo root; cases live in `evals/**/case.yaml`, one behavior each, and every case runs a with-skill and a without-skill arm so a case that scores the same in both is exposed as testing the base model rather than the skill. Never a merge gate — scores are noisy and the runner reaches the API. Run it when you edit a skill, and before a release. The runner is early access and not enabled here yet, so the committed cases have not been run. Full conventions, grader reference and cost discipline: `evals/README.md`.
-
-## Linting & formatting
-
-```bash
-uv run ruff check .
-uv run ruff format .
-uv run mypy           # bare: `mypy .` overrides files= and skips .claude/hooks
+uv venv && uv sync    # one-time
+uv run pytest -v      # tests
+uv run ruff check .   # lint
+uv run ruff format .  # format
+uv run mypy           # types (bare: `mypy .` overrides files= and skips .claude/hooks)
 uv run lint-imports   # dependency-direction boundaries (ADR-0032)
 ```
 
-A Python file you just wrote through `Edit` or `Write` is already formatted and auto-fixed: the `ruff-on-write` hook runs `ruff check --fix` and then `ruff format` on that one file at the call, so the report-only ruff steps in `ci` have nothing left to find. That order is load-bearing — a fix applied after formatting is never formatted, and the ones that move the lines around them would leave the file in a state `ci` rejects; the findings it reports are re-read after the format, so their line numbers are the ones in the file on disk. It rewrites the file when it acts, which stales the harness's copy — re-read before the next edit. It says what it could not fix; those are yours. It does **not** run mypy, deliberately: a red TDD step legitimately type-errors, so the note would be noise on exactly the edits it fires hardest on.
+The default paper-exchange and in-memory-bus path needs no external service and no API key. Test
+tiers, the `postgres` and `live` markers, skill evals, and the Docker services are all documented in
+[`CONTRIBUTING.md` → Running checks](CONTRIBUTING.md#running-checks). Read it before you reach for
+one.
 
-## Code Style
+Two things about tests are easy to get wrong, so they are here too:
 
-- **Line length:** 100 characters
-- **Formatter:** Ruff (double quotes)
-- **Linter:** Ruff rules E, W, F, I, B, C4, UP (E501 and F403 ignored)
-- **Type checker:** MyPy with `check_untyped_defs = true`
+- **Mock at process boundaries only** (HTTP, WebSocket, the Kafka client, the system clock,
+  randomness). Never mock our own classes.
+- **Stay hermetic against ambient config.** An outcome must never depend on a developer `.env` or an
+  exported `TICKWRIGHT_*` variable. Build the pure `AppConfig`, never `AppSettings`. Hand any
+  subprocess an environment with `TICKWRIGHT_` scrubbed.
 
-## Environment Variables
+A `.py` file you just wrote through `Edit` or `Write` is already fixed and formatted. The
+`ruff-on-write` hook does it at the call and reports what it could not fix. It rewrites the file, so
+re-read before your next edit. It does not run mypy, because a red TDD step is allowed to
+type-error. Style is 100-char lines, the Ruff formatter, and rules E, W, F, I, B, C4, UP.
 
-The CLI (`tickwright` / `python -m tickwright.app`) reads `AppSettings` from the environment and `.env`. **`.env.example` is the canonical variable reference** — every variable maps onto a field of `AppConfig` (`src/tickwright/app/config.py`) with the `TICKWRIGHT_` prefix, `__` for nesting, and JSON for complex values (e.g. `TICKWRIGHT_REPLAY__PATH`, `TICKWRIGHT_STRATEGIES`).
+## Configuration
 
-`config.py` holds two classes and the split is load-bearing (issue #71): `AppConfig` is a pure `BaseModel` that reads nothing ambient and is what `build_engine` takes and tests build; `AppSettings` subclasses it with the env/`.env` skin, and **`__main__.py` is its only legitimate builder**. Reading ambient config anywhere else — including a test — lets a developer `.env` or an exported `TICKWRIGHT_*` var outrank the class defaults and silently wire a live venue into a paper path. `AppSettings` stays out of `app`'s `__all__` for that reason; don't export it.
+**`.env.example` is the canonical variable reference.** It lists every variable, its default, its
+constraints, and the ADR behind it. Each one maps onto a field of `AppConfig`
+(`src/tickwright/app/config.py`) using the `TICKWRIGHT_` prefix, `__` for nesting, and JSON for
+complex values. The behavior behind a variable belongs to its ADR. Start at `.env.example` and
+follow the citation.
 
-The `KafkaBus` backend reads `TICKWRIGHT_BUS=kafka` plus `TICKWRIGHT_KAFKA__{BOOTSTRAP_SERVERS,EVENTS_TOPIC,GROUP_ID}` (ADR-0028; the `docker compose up kafka` service advertises the default `localhost:9092`). The `PostgresStore` backend reads `TICKWRIGHT_STORE=postgres` plus `TICKWRIGHT_POSTGRES__DSN` (ADR-0019; the `docker compose up postgres` service is its default). The live `HyperliquidFeed` reads `TICKWRIGHT_FEED=hyperliquid` plus `TICKWRIGHT_HYPERLIQUID__{SYMBOLS,TESTNET,...}` (ADR-0021; no API key — the trades channel is unauthenticated). The live `HyperliquidExchange` reads `TICKWRIGHT_EXCHANGE=hyperliquid` plus `TICKWRIGHT_HYPERLIQUID__{SIGNING_KEY,ACCOUNT_ADDRESS,SLIPPAGE_BOUND}` (ADR-0030; the signing key is env-only, never persisted, redacted from logs — the paper default needs none). The default `PaperExchange` needs no key and no service. ADR-0042's two paper-account genesis variables are **wired** (issue #171): `TICKWRIGHT_PAPER__GENESIS_COLLATERAL` (> 0, no default: the account's opening cash line, so there is nothing sane to assume — demanded by an `AppConfig` model validator only when `TICKWRIGHT_EXCHANGE=paper`, never required at field level, so a live run is never asked for it) and `TICKWRIGHT_PAPER__ACCOUNT_LABEL` (defaults to `default`, a lowercase slug with no hyphen). Both reach the engine through `PaperExchange.account_spec()`, whose `paper-<label>` id is deliberately two segments against live's `hyperliquid-<network>-<address>` three. Both are now **persisted**: `PortfolioProjection.recover()` seeds the paper account row from that same spec on a first start against an empty store, and restores it rather than re-seeding on every start after (ADR-0043 §6, issue #187). Their fail-fast when the configured values disagree with the row already there is **wired** (issue #188): a changed genesis or a changed label is refused at startup with `StoreAccountMismatch`, raised from `recover()`'s check step ahead of `cache.rebuild()` and naming **every** disagreeing field at once rather than one per restart. The same error refuses a paper store carrying order history with no ledger behind it — fees that were never charged and funding that never existed must not be backfilled as zeroes — asked with `Store.has_orders()` rather than the mass read. Both conditions are gated on `account_spec().genesis_collateral is not None`, the declared-versus-ingested predicate: on live the genesis has no configured counterpart to disagree with, and a store predating the ledger is legitimate and heals from the venue. `account_id` compares on both paths. ADR-0043 fixes the ledger schema those variables are checked against — the genesis column is `NOT NULL` with no `CHECK`, and `AccountSpec.genesis_collateral` is what carries the configured value to the startup check. ADR-0040/0044's third variable, `TICKWRIGHT_LEVERAGE` (JSON, symbol → `{mode, leverage}`; default `1x`/`isolated` per symbol), is now **wired** (issue #190) — deliberately **venue-agnostic**, a top-level `AppConfig.leverage` peer of `strategies` rather than a field nested under `PAPER__` or `HYPERLIQUID__`, because the model reading it is venue-agnostic and no live run may read a paper block (ADR-0042 §1). It is *sparse*: `build.py`'s `resolve_leverage` completes it over the strategy-declared symbol set and injects that one map into both consumers — the `PortfolioProjection` (reachable for reads as `Engine.portfolio.leverage_for`) and the `Exchange` — which is the only scope holding both inputs, since an `Exchange` knows nothing of strategies. An entry naming a symbol no configured strategy trades is refused at config load as dead config. `Exchange.start()` validates `1 ≤ leverage ≤ InstrumentSpec.max_leverage` on **both** paths through one shared `domain` check (leaving live's half to the venue would let paper compute off a leverage live rejects, surfacing only on promotion), raising `LeverageOutOfBounds` and naming every offending symbol at once; live runs it behind ADR-0046's mode gate, whose premise the margin model depends on. Paper validates and never writes. `InstrumentSpec` carries the bound's two spec-sourced inputs, `max_leverage` (default `1`, **not** `0`, which would make the bound unsatisfiable) and `margin_maint` (default `0`), both sourced from the venue meta endpoint on live. The boot-time `updateLeverage` push is now **wired** (issue #180) and is live-only — paper issues no venue write here or anywhere. It runs in `venues/hyperliquid/preflight.py` behind ADR-0046's account-mode gate and ahead of the barrier, splitting every symbol in the resolved book three ways off **one** `clearinghouseState` read: already aligned → skip (the sole source of `EXCHANGE_LEVERAGE_UNCHANGED`, since a no-op write returns the identical `ok` envelope a real change does), flat → write blind, a **held** position that disagrees → refuse to start with `VenueLeverageMismatch`, naming every disagreeing symbol and both pairs at once. Every disagreement is found before the first write goes out, so a refusal never leaves the account half re-margined. Config wins at startup and the venue wins in flight: it never re-pushes, so an operator who lowers a leverage in the venue UI to de-risk a live position is not silently reverted. A call that never lands inside the boot budget is `VenueLeveragePushFailed`, and so is an `err` envelope, which faults at once quoting the venue's own string unclassified. Both boot guards spend **one** `Deadline`, opened in `start()` off the barrier's budget and shared between them (ADR-0044 §6) — so a boot still spends at most two windows, `start()`'s and the barrier's, however the retries divide. `Deadline` and the `Backoff` pacing it live in `domain/pacing.py`, shared with `StartupBarrier`. The post-boot drift alert is now **wired** (#196), and it is the boot push's inverse: the venue's stored setting rides `VenuePositionState.leverage` as a **required** field — undefaulted, since a fabricated `1x`/`isolated` reads as agreement against the commonest config — and every ledger cadence compares it against `PortfolioProjection.leverage_for` over the **venue's** held rows, emitting `LEVERAGE_DIVERGENCE` with both pairs on an exact mismatch, plus a `declared` bit saying whether the engine's half was an entry in the resolved book or `leverage_for`'s fallback — the range is the venue's rows, so it reaches a symbol no strategy trades, where alerting is still right (the Tier-1 heal books that row in and the margin model values it at exactly that fallback) but calling the fallback `configured_*` would send an operator to a config that never names the symbol. That bit is `LeverageBook.declares`, a separate read rather than a widened `for_symbol`, because no margin figure may branch on it. No band (the pair is discrete, so there is nothing to measure a tolerance in), no heal, no write of any kind, and **not** a `Divergence` — it is off `account.reconciled`'s tier counts, whose members are numbers the two sides computed. The refusal to re-push is structural rather than observed: the cycle is constructed against `AccountAnchor`, whose two members are the snapshot read and the mode verdict, so there is no venue write to reach for. Live-only falls out of that same seam and not a flag — `PaperExchange` answers the anchor permanently with `None`, so a paper cycle freezes at the read and never reaches a leverage pair. ADR-0040 §6's Tier-2 alert band is **wired** (#194) as a fourth family, `TICKWRIGHT_ENGINE__BAND__{ATOL,RTOL,MARK_MAX_AGE_SECONDS}`, reaching the cycle as `EngineConfig.band`. `atol` is a pure rounding floor. `rtol` scales by the **notional** the figure's mark-sensitivity flows through, never by the compared value (ADR-0046 §5). `mark_max_age_seconds` is the band's domain of validity rather than a third tolerance: past it a figure is not banded wider, its alert is suppressed and counted on `account.reconciled` beside `unvalued`. The band gates the alert only, so the classification, the record and the Tier-1 heal beside it are unaffected, and Tier-2 is never healed.
+`config.py` holds two classes and the split is load-bearing (issue #71). `AppConfig` is a pure
+`BaseModel` that reads nothing ambient. It is what `build_engine` takes and what tests build.
+`AppSettings` adds the env and `.env` skin on top, and `__main__.py` is its only legitimate builder.
+Reading ambient config anywhere else, including in a test, lets a developer `.env` or an exported
+variable outrank the class defaults. That can silently wire a live venue into a paper path.
+`AppSettings` stays out of `app`'s `__all__`. Do not export it.
 
-ADR-0046 adds a live-only **precondition with no variable**: the Hyperliquid account must be in **Manual/Standard** account-abstraction mode (`userAbstraction` reading `default` or `disabled`). Under `unifiedAccount` or `portfolioMargin` the perps clearinghouse reports only the collateral posted into perps, so account equity and free margin read an order of magnitude low with nothing in the response indicating it — so the mode is **read from the venue and verified at boot** (ahead of ADR-0044's leverage push, gating it — ADR-0024 step 4 opens with it) and re-read before any Tier-1 cash heal. The guard fails closed at both points: boot refuses to start on an unsupported *or unreadable* mode (`VenueAccountModeUnsupported`), and in flight a changed *or unverifiable* mode refuses the heal and freezes the account-grain reconcile (`ACCOUNT_MODE_UNVERIFIED`). Switching an account is a **user-signed** action an agent wallet cannot perform: `userSetAbstraction("disabled")` with the master wallet, then a spot→perps `usdClassTransfer`. Nothing is configured, so `.env.example` gains nothing.
+## Reference
+
+- Domain glossary: `CONTEXT.md`
+- Architecture decisions: `docs/adr/`, read by section, append-corrected
+- Module maps for in-flight features: `docs/module-maps/`
+- Research notes: `docs/research/`, dated captures that are **not maintained**. Where a note and an
+  ADR disagree, the ADR wins.
+- Review-blocking invariants: `docs/agents/invariants.md`
+- Labels and triage: `docs/workflow/labels.md`, `docs/agents/triage-labels.md`

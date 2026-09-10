@@ -1704,9 +1704,11 @@ class TestWiring:
         glossary to ``**Term** — …`` would leave the largest file in the corpus unguarded
         with every other test here green.
 
-        The count is read from ``CLAUDE.md`` rather than written down twice: the prose
-        there quotes it, and a bare ``> 0`` would let the index shrink silently while the
-        claim went stale. One number, one place, and this is what compares them.
+        A bare ``> 0`` would let the index shrink silently, so the count is compared
+        against a claim written down once. That claim lives in the guard's own comment
+        rather than in ``CLAUDE.md``. The guard is the file that breaks when the glossary
+        is reformatted, so it is the file that should carry the number, and a count in
+        prose goes stale every time a term is added.
         """
         root = _HOOKS.parent.parent
         guard = _load_guard("no-unsliced-doc-reads.py")
@@ -1714,8 +1716,9 @@ class TestWiring:
         index = guard._term_index(str(root / "CONTEXT.md"))
         assert index is not None, "CONTEXT.md yields no terms; the guard now allows it whole"
 
-        claimed = re.search(r"its (\d+) terms", (root / "CLAUDE.md").read_text())
-        assert claimed is not None, "CLAUDE.md no longer states the term count"
+        source = (_HOOKS / "no-unsliced-doc-reads.py").read_text()
+        claimed = re.search(r"Its (\d+) bold terms", source)
+        assert claimed is not None, "the guard no longer states the term count"
         assert len(index.splitlines()) == int(claimed.group(1))
 
     def test_doc_slice_is_where_the_guard_looks_for_it(self) -> None:
