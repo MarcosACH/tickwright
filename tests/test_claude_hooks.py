@@ -835,6 +835,27 @@ class TestNoUnslicedDocReads:
     @pytest.mark.parametrize(
         "command",
         [
+            "2>/dev/null cat docs/adr/0001-a-decision.md",
+            "> /tmp/dump.log cat CONTEXT.md",
+            "&> /tmp/dump.log cat docs/module-maps/surface.md",
+        ],
+    )
+    def test_a_redirect_standing_before_the_program_does_not_hide_it(
+        self, docs_repo: Path, command: str
+    ) -> None:
+        """A redirect may precede the command it belongs to, and there it stands exactly
+        where ``sudo`` and a loop's ``do`` stand in the case above. Key on the raw first
+        token and the program reads as ``>``, or as the bare ``2`` of ``2>``, matching
+        nothing while the whole file is spent anyway.
+
+        So the redirect scan comes off before the program is *named*, not merely before
+        its paths are collected — one strip feeding both reads."""
+        result = run_hook("no-unsliced-doc-reads.py", command, docs_repo)
+        assert result.returncode == BLOCK
+
+    @pytest.mark.parametrize(
+        "command",
+        [
             "cat README.md > docs/adr/0001-a-decision.md",
             "cat README.md >> CONTEXT.md",
             "cat README.md &> docs/module-maps/surface.md",
