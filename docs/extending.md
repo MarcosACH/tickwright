@@ -250,6 +250,26 @@ The `EventBus` and `Store` seams are pure infrastructure swaps — same interfac
 
 ---
 
+## Deferred extension points
+
+The accounting surface ships with seven named gaps. Each was decided in an ADR, and each is
+additive when taken. The table says what is missing, what would make someone take it, and where
+the reasoning lives. If you find yourself needing one, open an issue that names the trigger.
+
+| Extension point | What ships today | Take it when | ADR |
+| --- | --- | --- | --- |
+| Margin-tier table | A flat tier-0 maintenance rate, `1/(2·max_leverage)`. Exact only below an asset's first tier band. | A position crosses its first band (over ~$3M on a low-cap asset, over ~$150M on BTC). The bands are in the raw `meta.marginTables`. | [0040 §4](adr/0040-reported-margin-leverage-liquidation-model.md) |
+| Ledger line-item log | Current-state rows: one per position, one per account. A sum, not a trail. | An audit or a per-fill replay needs the history. Never retroactive: the log starts the day it lands. | [0043 §1](adr/0043-accounting-ledger-durability-and-recovery.md) |
+| Dynamic isolated margin | Isolated collateral is fixed at open. No `updateIsolatedMargin` write. | Paper can model a top-up. Live gains nothing until then, because a write with no paper twin breaks the identical-compute rule. | [0044 §8](adr/0044-venue-leverage-and-margin-mode-write.md) |
+| Memoized Tier-2 cache | Every read recomputes unrealized PnL, margin, and liquidation price from `(position, mark)`. | Read volume makes the recompute measurable. Invalidate on the mark. | [0035](adr/0035-accounting-surface-topology-and-placement.md) |
+| `on_mark` strategy callback | Strategies see the mark only as `mark_ts` on a `PositionView`. The mark is an accounting input, not a signal. | A strategy needs the raw mark value as a signal. The event is already on the bus, so this is one default-no-op method. | [0039](adr/0039-mark-price-data-model.md), [0041 §8](adr/0041-strategy-read-api-portfolio-protocol.md) |
+| Replayed historical funding rates | Paper accrues funding at a configured flat rate on the venue's schedule. | A replay needs venue-faithful funding. It requires a funding-rate channel in the feed, which the trades-only replay feed does not carry. | [0037](adr/0037-perp-funding-model.md) |
+| Non-strategy read surface | `Portfolio` is strategy-only. Telemetry and reconciliation read the `engine` concrete directly. | A CLI or a read-only guard needs the account-net position or the unattributed partition. It lands on the `engine` concrete, never on the `domain` seam. | [0041 §8](adr/0041-strategy-read-api-portfolio-protocol.md) |
+
+Two related items are not on this list because they are not extension points of the accounting
+surface. `HEDGE` netting is a declared v1 non-goal (ADR-0034), and margin enforcement or
+liquidation is a future risk map (ADR-0017).
+
 ## Why one `match` arm, and nowhere else
 
 Exactly one module — the composition root — knows every concrete
