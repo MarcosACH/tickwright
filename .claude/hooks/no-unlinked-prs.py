@@ -108,15 +108,28 @@ def _heredoc_body(text: str) -> str | None:
     `--body "$(cat <<'EOF' … EOF)"` is the shape this project writes PR bodies in, and its
     text is right there in the token: the substitution is opaque, the heredoc feeding it
     is not. A closing line is required, so the `<<` of prose does not read as an opener.
+
+    **A terminator counts in column 0 and nowhere else**, which is the rule the shell
+    itself applies — leading tabs, and only under `<<-`. A body quoting a shell snippet
+    carries indented terminators of its own, and honouring one ends the body early: the
+    `Closes #N` standing after the snippet is dropped and the PR is refused on a body
+    that closes its issue. For the same reason the **last** closing line is the one that
+    ends it. A terminator written at column 0 inside a fenced block is indistinguishable
+    from the real one, and only the last can be the heredoc feeding this argument —
+    nothing follows it in the token but the substitution's own `)`.
     """
     match = _HEREDOC.search(text)
     if match is None:
         return None
+    terminator = match.group(2)
+    tabbed = match.group(0).startswith("<<-")
     body = text[match.end() :].splitlines()
-    for index, line in enumerate(body):
-        if line.strip() == match.group(2):
-            return "\n".join(body[:index])
-    return None
+    closes = [
+        index
+        for index, line in enumerate(body)
+        if line == terminator or (tabbed and line.lstrip("\t") == terminator)
+    ]
+    return "\n".join(body[: closes[-1]]) if closes else None
 
 
 def _visible(body: str) -> str | None:

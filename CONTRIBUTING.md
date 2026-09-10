@@ -98,7 +98,7 @@ reason on stderr going back to the agent.
 | `no-excluded-reads` | `Bash` | `cat`/`head`/`grep`/… of a path `git check-ignore` matches | `.agents/plans/`; a program in the **executable position**, so `.venv/bin/ruff` still runs; a grep **pattern** that merely spells an ignored path; a redirect **target**, so a run still reports into `logs/` |
 | `no-global-installs` | `Bash` | `pip install`, `uv pip install --system`, `uv tool install`, `pipx`, `brew`, `npm -g` — and the same behind a `sudo` or inside a loop body | `uv add`/`uv sync`/`uvx`/`uv tool run`; `uv pip install` without `--system` |
 | `no-unsliced-doc-reads` | `Read`, `Bash` | a whole read of `CONTEXT.md`, an ADR, a module map or a research note — by `Read`, or by `cat`/`less`/`nl`/…, and through a **glob** that expands onto the corpus | `head`/`tail`/`sed -n`/`grep`, which are already the slice; `doc-slice`; a `Read` with an explicit `offset`/`limit`; a redirect **target**, which is a write |
-| `no-unlinked-prs` | `Bash` | a `gh pr create` whose `--body`/`--body-file` carries no `Closes #N` | every body it cannot see — `--fill`, `--web`, an editor, `-F -`, and a `--body "$(cat notes.md)"` or `"$BODY"` the shell has yet to expand; a heredoc is read, since its text is in the token |
+| `no-unlinked-prs` | `Bash` | a `gh pr create` whose `--body`/`--body-file` carries no `Closes #N` | every body it cannot see — `--fill`, `--web`, an editor, `-F -`, and a `--body "$(cat notes.md)"` or `"$BODY"` the shell has yet to expand; a heredoc is read, since its text is in the token, and read to its **last** column-0 terminator so a quoted snippet does not truncate it |
 
 **Two answer instead**, because there is nothing to refuse. They run on events with no veto, which
 is the right shape rather than a limitation worked around.
@@ -158,10 +158,13 @@ Four properties are deliberate:
   What stays out of reach is a *value*: `sed -i '' s/a/b/ $f` lexes cleanly and stands in the right
   position, and no lexer knows which file `$f` names. That cuts the other way too, and
   `no-unlinked-prs` is where it bites — a `--body "$(cat notes.md)"` is a value nothing here
-  expands, so judging the fourteen literal characters would refuse a PR whose real body closes its
-  issue. A body holding an unexpanded expansion is hidden rather than badly spelled, and is waived
-  on the same terms as `-F -`. A heredoc is the one that is not: its text is in the token. Three shapes sit beside that one and are out
-  of **scope** rather than out of reach, each decidable and none decided: `$HOME/repo/CONTEXT.md`,
+  expands, so judging those literal characters would refuse a PR whose real body closes its issue.
+  A body holding an unexpanded expansion is hidden rather than badly spelled, and is waived on the
+  same terms as `-F -`. A heredoc is the one that is not: its text is in the token, and it is read
+  the way the shell reads it — a terminator counts in **column 0** and the **last** one ends the
+  body, so the indented `EOF` of a snippet quoted inside a body does not truncate it and drop the
+  `Closes #N` standing after it. Three shapes sit beside the value case and are out of **scope**
+  rather than out of reach, each decidable and none decided: `$HOME/repo/CONTEXT.md`,
   whose value a guard already reads to expand the `~` spelling of the same path; brace expansion
   (`docs/{adr,module-maps}/*.md`), which nothing here expands; and a `cd` in an earlier segment,
   which would mean tracking a working directory across a command rather than reading one off the

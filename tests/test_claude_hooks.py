@@ -1243,8 +1243,8 @@ class TestNoUnlinkedPrs:
     ) -> None:
         """A ``--body`` argument is not always its own value.
 
-        ``shlex`` does not expand, so ``"$(cat body.md)"`` arrives as those fourteen
-        literal characters. Judging them refuses a PR whose real body closes its issue —
+        ``shlex`` does not expand, so ``"$(cat body.md)"`` arrives as those literal
+        characters. Judging them refuses a PR whose real body closes its issue —
         a **false refusal**, which this project calls worse than no guard at all. The body
         is not badly spelled here, it is genuinely hidden, in the same way ``-F -``'s is.
 
@@ -1268,6 +1268,33 @@ class TestNoUnlinkedPrs:
         feeds is not. Waiving it along with the rest would give the hook away on the one
         form the loop actually reaches for.
         """
+        command = f'gh pr create --title "t" --body "$(cat <<\'EOF\'\n{body}\nEOF\n)"'
+        assert run_hook("no-unlinked-prs.py", command, ralph_repo).returncode == expected
+
+    @pytest.mark.parametrize(
+        ("tail", "expected"),
+        [("Closes #900", ALLOW), ("No reference anywhere.", BLOCK)],
+    )
+    def test_a_terminator_the_shell_would_not_honour_does_not_end_the_body(
+        self, ralph_repo: Path, tail: str, expected: int
+    ) -> None:
+        """A heredoc ends at a terminator in **column 0**, and nowhere else.
+
+        The shell honours a closing line only unindented — leading tabs, and only under
+        ``<<-``. So an ``EOF`` inside an indented snippet ends nothing, and reading it as
+        a terminator truncates the body there: a ``Closes #N`` standing after the snippet
+        is dropped and the PR is refused on a body that closes its issue. That is the
+        false refusal the expansion licence above exists to avoid, reached from inside
+        the one shape the licence deliberately does not cover.
+
+        The second arm is what keeps the fix from being a waiver: a body carrying an
+        inner terminator and no reference at all is still refused.
+        """
+        body = (
+            "Quoting the fixture it writes:\n\n"
+            "    cat <<EOF > notes.txt\n    hello\n    EOF\n\n"
+            f"{tail}"
+        )
         command = f'gh pr create --title "t" --body "$(cat <<\'EOF\'\n{body}\nEOF\n)"'
         assert run_hook("no-unlinked-prs.py", command, ralph_repo).returncode == expected
 
