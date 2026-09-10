@@ -961,6 +961,27 @@ class TestNoUnslicedDocReads:
         result = run_hook("no-unsliced-doc-reads.py", command, docs_repo)
         assert result.returncode == ALLOW
 
+    @pytest.mark.parametrize("pattern", ["docs/adr/*.md", "docs/adr/0001-a-decision.md"])
+    def test_a_home_relative_path_is_judged_whether_or_not_it_globs(
+        self, docs_repo: Path, monkeypatch: pytest.MonkeyPatch, pattern: str
+    ) -> None:
+        """``~`` is expanded by the shell, and by ``os.path.expanduser`` — but not by
+        ``glob``, which passes an unexpanded ``~`` straight through and matches nothing.
+
+        The guard expanded the user prefix only when deciding whether a *resolved* path
+        was in the corpus, so the same file was refused when named directly and allowed
+        the moment a wildcard was added: the empty match fell back to the literal, which
+        then failed ``isfile`` because it still held the ``*``. Both spellings are the
+        largest read the corpus allows, so both are the guard's subject.
+
+        ``HOME`` is patched into the environment the hook subprocess is handed, since
+        that is what ``expanduser`` reads and what makes ``~`` name the scratch repo.
+        """
+        monkeypatch.setitem(_ENV, "HOME", str(docs_repo.parent))
+        command = f"cat ~/{docs_repo.name}/{pattern}"
+        result = run_hook("no-unsliced-doc-reads.py", command, docs_repo)
+        assert result.returncode == BLOCK
+
     def test_a_refused_dump_gets_the_same_index_a_refused_read_does(self, docs_repo: Path) -> None:
         result = run_hook("no-unsliced-doc-reads.py", "cat docs/adr/0001-a-decision.md", docs_repo)
         assert "Consequences" in result.stderr

@@ -97,10 +97,17 @@ def _expand(cwd: str, candidate: str) -> list[str]:
 
     A pattern matching nothing falls back to the literal, which is what the shell does
     with an unmatched glob and what the caller below already answers correctly.
+
+    `~` is expanded here rather than left to `_corpus_member`, which is the only other
+    place that knows about it. `glob` does not expand a user prefix — it matches nothing
+    and the fall-back literal then fails `isfile` on the `*` it still carries — so a
+    guard that expanded it only on the resolved path refused `~/repo/CONTEXT.md` and
+    allowed `~/repo/docs/adr/*.md`, which is the larger read of the two.
     """
-    if not any(char in candidate for char in "*?["):
-        return [candidate]
-    return sorted(glob.glob(candidate, root_dir=cwd)) or [candidate]
+    expanded = os.path.expanduser(candidate)
+    if not any(char in expanded for char in "*?["):
+        return [expanded]
+    return sorted(glob.glob(expanded, root_dir=cwd)) or [expanded]
 
 
 def _repo_root(cwd: str) -> str | None:
