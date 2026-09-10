@@ -29,6 +29,7 @@ than two, which was the asymmetry that made the prose version of this rule lose.
 """
 
 import fnmatch
+import glob
 import json
 import os
 import re
@@ -80,9 +81,26 @@ def _in_corpus(relative: str) -> bool:
     `docs/adr/*.md` would otherwise claim `docs/adr/archive/0001-old.md` as well.
     """
     return any(
-        fnmatch.fnmatch(relative, glob) and relative.count("/") == glob.count("/")
-        for glob in _CORPUS
+        fnmatch.fnmatch(relative, pattern) and relative.count("/") == pattern.count("/")
+        for pattern in _CORPUS
     )
+
+
+def _expand(cwd: str, candidate: str) -> list[str]:
+    """The paths a candidate token names, with any glob resolved.
+
+    `shlex` hands a pattern through as the literal it lexed, and `os.path.isfile` then
+    says no — so `cat docs/adr/*.md` went through, which on the real repo is fifty ADRs
+    at once and the largest single spend the corpus allows. `no-excluded-reads` never had
+    the gap because `git check-ignore` takes a pathspec and resolves it itself; this
+    guard has no git predicate to ask, so the expansion happens here.
+
+    A pattern matching nothing falls back to the literal, which is what the shell does
+    with an unmatched glob and what the caller below already answers correctly.
+    """
+    if not any(char in candidate for char in "*?["):
+        return [candidate]
+    return sorted(glob.glob(candidate, root_dir=cwd)) or [candidate]
 
 
 def _repo_root(cwd: str) -> str | None:
@@ -177,16 +195,48 @@ def _refusal(path: str, toc: str, corrected: bool) -> str:
     )
 
 
-def _refusal_for(root: str, cwd: str, path: str) -> str | None:
-    """The reason `path` may not be loaded whole, or None if it may be."""
+def _bulk_refusal(root: str, members: list[str]) -> str | None:
+    """The refusal for a call naming several corpus files at once.
+
+    One index answers a whole read; several cost more than the read they refused —
+    ADR-0040's table of contents alone is 1,292 characters, so the fifty a
+    `cat docs/adr/*.md` would earn are worse than the file the guard was protecting.
+    Past one file the answer is the list and a request to choose, which is also the only
+    honest one: nothing here can guess which of them was wanted.
+
+    None when `doc-slice` is missing, for the reason the single-file path fails open on
+    it — what this offers is that tool's output, and a refusal pointing at something the
+    repo does not have is an obstacle rather than a guard.
+    """
+    if not os.access(os.path.join(root, _DOC_SLICE), os.X_OK):
+        return None
+    listing = "\n".join(f"  {member}" for member in members)
+    return (
+        f"Blocked: that reads {len(members)} files of the sliced corpus whole:\n\n"
+        f"{listing}\n\n"
+        "Name one on its own and the refusal answers with its index, or go straight to a "
+        f"section:\n\n  {_DOC_SLICE} <file> <heading-substr>"
+    )
+
+
+def _corpus_member(root: str, cwd: str, path: str) -> str | None:
+    """The repo-relative path when it is a corpus file, else None.
+
+    Split from the refusal below because deciding *whether* to block has to stay cheap:
+    an expanded glob asks this of every file it matched, and pricing that in a
+    `doc-slice` subprocess each would spend more than the read being refused.
+    """
     absolute = os.path.normpath(os.path.join(cwd, os.path.expanduser(path)))
     if not absolute.startswith(root + os.sep) or not os.path.isfile(absolute):
         return None
 
     relative = os.path.relpath(absolute, root)
-    if not _in_corpus(relative):
-        return None
+    return relative if _in_corpus(relative) else None
 
+
+def _refusal_for(root: str, relative: str) -> str | None:
+    """The reason a corpus file may not be loaded whole, or None if it may be."""
+    absolute = os.path.join(root, relative)
     if relative in _TERM_INDEXED:
         index = _term_index(absolute)
         return None if index is None else _glossary_refusal(relative, index)
@@ -267,13 +317,24 @@ def main() -> int:
     if root is None:
         return 0
 
-    reasons = [
-        reason for path in candidates if (reason := _refusal_for(root, cwd, path)) is not None
-    ]
-    if not reasons:
+    # `dict.fromkeys` rather than a set: two globs can name one file, and the listing a
+    # bulk refusal prints should read in the order the command did.
+    members = list(
+        dict.fromkeys(
+            member
+            for candidate in candidates
+            for path in _expand(cwd, candidate)
+            if (member := _corpus_member(root, cwd, path)) is not None
+        )
+    )
+    if not members:
         return 0
 
-    print("\n\n".join(reasons), file=sys.stderr)
+    reason = _bulk_refusal(root, members) if len(members) > 1 else _refusal_for(root, members[0])
+    if reason is None:
+        return 0
+
+    print(reason, file=sys.stderr)
     return 2
 
 

@@ -874,6 +874,51 @@ class TestNoUnslicedDocReads:
         result = run_hook("no-unsliced-doc-reads.py", command, docs_repo)
         assert result.returncode == ALLOW
 
+    @pytest.mark.parametrize("command", ["cat docs/adr/*.md", "cat *.md"])
+    def test_a_glob_that_expands_onto_the_corpus_is_refused(
+        self, docs_repo: Path, command: str
+    ) -> None:
+        """The cheapest whole read to write and the most expensive to serve: on the real
+        repo ``cat docs/adr/*.md`` is fifty ADRs at once, the single largest spend the
+        corpus allows.
+
+        ``shlex`` does not expand globs, so the literal reaches ``os.path.isfile``, which
+        says no, and the call goes through. ``no-excluded-reads`` refuses the same shape
+        for free because ``git check-ignore`` resolves a pathspec; this guard has no git
+        predicate to ask, so it expands the pattern itself."""
+        result = run_hook("no-unsliced-doc-reads.py", command, docs_repo)
+        assert result.returncode == BLOCK
+
+    def test_a_glob_refusal_names_the_corpus_files_instead_of_indexing_each(
+        self, docs_repo: Path
+    ) -> None:
+        """One index is the answer to a whole read; several are a bigger one than the
+        read they refused. ADR-0040's table of contents alone is 1,292 characters, so
+        fifty of them cost more than the file the guard was protecting.
+
+        Past one file the refusal therefore names them and asks for a choice. The
+        glossary is in this expansion too, which is why the count rather than the
+        corpus-file kind is what decides."""
+        result = run_hook("no-unsliced-doc-reads.py", "cat *.md docs/adr/*.md", docs_repo)
+        assert result.returncode == BLOCK
+        assert "CONTEXT.md" in result.stderr
+        assert "docs/adr/0001-a-decision.md" in result.stderr
+        assert "Consequences" not in result.stderr  # no table of contents was printed
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            # Expands only onto the archived ADR, which the depth check in `_in_corpus`
+            # keeps out of the corpus — the expansion must not smuggle it back in.
+            "cat docs/adr/archive/*.md",
+            # Expands onto nothing at all, and a pattern naming no file reads none.
+            "cat docs/adr/*.rst",
+        ],
+    )
+    def test_a_glob_that_misses_the_corpus_is_allowed(self, docs_repo: Path, command: str) -> None:
+        result = run_hook("no-unsliced-doc-reads.py", command, docs_repo)
+        assert result.returncode == ALLOW
+
     def test_a_refused_dump_gets_the_same_index_a_refused_read_does(self, docs_repo: Path) -> None:
         result = run_hook("no-unsliced-doc-reads.py", "cat docs/adr/0001-a-decision.md", docs_repo)
         assert "Consequences" in result.stderr
