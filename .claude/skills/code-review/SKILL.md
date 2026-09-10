@@ -1,6 +1,6 @@
 ---
 name: code-review
-description: Use when the user asks to review a branch, a PR, or a diff before merge. Produces BLOCKING, WARN and NIT comments that gate the merge.
+description: Use when the user asks to review a branch, a PR, or a diff before merge. Produces BLOCKING, WARN and NIT comments that gate the merge. Use blast-radius to find what a change could break beyond the diff.
 ---
 
 # Python Code Review

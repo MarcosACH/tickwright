@@ -1,6 +1,6 @@
 ---
 name: why
-description: "Use for \"why does X work this way\", design rationale, a regression, a postmortem, or where a threshold came from. Use how for runtime behavior."
+description: "Use for \"why does X work this way\", \"why we picked Y\", design rationale, a regression, a postmortem, or where a threshold came from. Use how for runtime behavior."
 ---
 
 # Why

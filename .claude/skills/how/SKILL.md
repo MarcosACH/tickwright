@@ -1,6 +1,6 @@
 ---
 name: how
-description: "Use for \"how does X work\" and for a walkthrough before a change. Also for placement questions: where should this live, which package owns this. Use why for rationale."
+description: "Use for \"how does X work\" and for a walkthrough before a change. Also for placement questions: where should this live, which package owns this, is this the right layer. Can critique architecture. Use why for rationale."
 ---
 
 # How

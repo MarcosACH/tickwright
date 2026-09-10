@@ -1,6 +1,6 @@
 ---
 name: to-tickets
-description: Use when the user asks to break a PRD or plan into issues, tickets, or vertical slices on the tracker.
+description: Use when the user asks to break a PRD or plan into issues, tickets, or vertical slices on the tracker. Use wayfinder when the route is still unclear.
 ---
 
 # To Tickets
