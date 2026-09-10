@@ -133,7 +133,13 @@ Three properties are deliberate:
   it rewrites — and why a `~` is expanded before a pattern is matched rather than only after, since
   `glob` leaves a user prefix alone and would let `~/repo/docs/adr/*.md` match nothing. What stays
   out of reach is a *value*: `sed -i '' s/a/b/ $f` lexes cleanly and stands in the right position,
-  and no lexer knows which file `$f` names.
+  and no lexer knows which file `$f` names. Three shapes sit beside that one and are out of
+  **scope** rather than out of reach, each decidable and none decided: `$HOME/repo/CONTEXT.md`,
+  whose value a guard already reads to expand the `~` spelling of the same path; brace expansion
+  (`docs/{adr,module-maps}/*.md`), which nothing here expands; and a `cd` in an earlier segment,
+  which would mean tracking a working directory across a command rather than reading one off the
+  event. Each is a whole-file read that goes through, so they are listed here rather than left to
+  be rediscovered one at a time.
 
 Same standing as the git hooks: **local convenience, not the gate.** They are Claude Code-specific,
 so a contributor using another tool — or none — gets nothing from them, and CI stays the floor for
