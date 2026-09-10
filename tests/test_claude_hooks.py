@@ -1333,6 +1333,23 @@ class TestRuffOnWrite:
         assert result.stdout.strip() == ""
         assert target.read_text() == body
 
+    def test_a_path_ruff_itself_excludes_is_left_alone(self, python_repo: Path) -> None:
+        """``--force-exclude`` is what makes this hook's verdict the one ``ci`` reaches,
+        and it is the one property of the call that nothing else would catch. Ruff honours
+        ``exclude`` while walking a directory but **not** for a file named on the command
+        line, so without the flag an edit under ``.venv/`` is rewritten inside a commit
+        ``ruff format --check .`` never inspects. Dropping it leaves every other case in
+        this class green — the silent disarming ``test_every_corpus_glob_matches_a_real_file``
+        exists to prevent, one hook over."""
+        vendored = python_repo / ".venv" / "lib" / "vendored.py"
+        vendored.parent.mkdir(parents=True)
+        vendored.write_text("x = {  'a':1 }\n")
+
+        result = self._fire(python_repo, vendored)
+        assert result.returncode == ALLOW
+        assert result.stdout.strip() == ""
+        assert vendored.read_text() == "x = {  'a':1 }\n"
+
     def test_a_path_outside_the_repo_is_left_alone(self, python_repo: Path, tmp_path: Path) -> None:
         """Scratch space is not this repo's code and is not held to its settings."""
         outside = tmp_path / "elsewhere.py"
