@@ -36,6 +36,11 @@ move the lines around them rather than one expression inside them — `UP035` ta
 hook rewrites a file into a state `ruff format --check .` rejects while reporting only that
 it rewrote it: the failure it exists to prevent, delivered with a false all-clear.
 
+That order costs a third call. What `check --fix` prints is written against a file the
+formatter then moves, so the findings are re-read afterwards rather than carried over — a
+line number is the whole of what an unfixable finding is worth, and one pointing into the
+file as it was before this hook rewrote it sends the agent looking.
+
 One consequence worth stating: rewriting a file behind the harness's back invalidates its
 cached copy, and the next `Edit` fails with a modification error. The report says so. It
 is safe to rewrite the *whole* file rather than only the edited span because `ci` gates
@@ -157,16 +162,21 @@ def main() -> int:
     with open(absolute, "rb") as handle:
         before = handle.read()
 
-    checked = _ruff(root, "check", "--fix", "--output-format=concise", relative)
-    if checked is None:
+    if _ruff(root, "check", "--fix", "--output-format=concise", relative) is None:
         return 0
     if _ruff(root, "format", relative) is None:
+        return 0
+
+    # Read again rather than keeping the fixing pass's output: the formatter has moved
+    # the lines under it, and a finding is only actionable at the line it is now on.
+    remaining = _ruff(root, "check", "--output-format=concise", relative)
+    if remaining is None:
         return 0
 
     with open(absolute, "rb") as handle:
         after = handle.read()
 
-    report = _report(relative, after != before, _findings(checked.stdout, relative))
+    report = _report(relative, after != before, _findings(remaining.stdout, relative))
     if not report:
         return 0
 

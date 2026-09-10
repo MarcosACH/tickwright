@@ -178,7 +178,9 @@ Four properties are deliberate:
 order rather than a preference: a fix applied after formatting is never formatted, and the ones that
 move the lines around them — `UP035` taking the last `typing` import out leaves the blank lines it
 stood between behind — would have the hook rewrite a file into a state `ruff format --check .`
-rejects, while reporting only that it rewrote it.
+rejects, while reporting only that it rewrote it. The findings it prints are then re-read *after*
+the format: what the fixing pass said was written against a file the formatter has since moved, and
+a finding pointing at a line the hook itself shifted sends the agent looking for it.
 
 `ruff-on-write` deliberately does **not** run mypy. Ruff's half *fixes*, so it spends no context and
 asks for no judgement; a type check can only report, and mid-red a TDD step legitimately

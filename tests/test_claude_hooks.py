@@ -1411,6 +1411,25 @@ class TestRuffOnWrite:
         assert "F821" in context
         assert "src/undefined.py:2:12" in context
 
+    def test_a_finding_is_reported_at_the_line_it_ends_up_on(self, python_repo: Path) -> None:
+        """The line has to be the one in the file on disk, not the one before the rewrite.
+
+        ``check --fix`` runs first, so its output is written against a file the formatter
+        then moves — and the report goes out in the same breath as "your cached copy is
+        stale", pointing at a line the agent would have to go and look for. The findings
+        are re-read after the format for that reason, which also makes them character for
+        character what ``ci`` will print.
+        """
+        target = self._write(
+            python_repo,
+            "src/moved.py",
+            "from typing import List\n\n\n"
+            'def g(x: "List[int]"):\n    y  =  1\n    return nope(x, y)\n',
+        )
+        context = context_of(self._fire(python_repo, target))
+        assert "F821" in context
+        assert "src/moved.py:3:12" in context
+
     def test_a_clean_file_says_nothing_at_all(self, python_repo: Path) -> None:
         """The common case, and it has to cost nothing. A hook that reports "no changes"
         on every edit spends the context budget it was written to protect."""
