@@ -79,6 +79,35 @@ A strategy consumes ticks and lifecycle events and emits `PlaceSignal`/`CancelSi
   ([`strategies/emitter.py`](../src/tickwright/strategies/emitter.py)) — it owns the `seq`,
   clock-stamps each signal, and publishes it. Never build a `signal_id` by hand.
 - [ ] Make `snapshot()`/`restore()` a versioned, minimal payload; raise on an unknown version.
+- [ ] Read your own economics through the [`Portfolio`](../src/tickwright/domain/protocols.py)
+  seam, if the strategy needs them. Take it as a constructor argument. The composition root hands
+  you a facade already scoped to your `strategy_id`, so no method takes a strategy or account
+  argument. Three synchronous calls, each returning a frozen snapshot:
+
+  ```python
+  class MyStrategy:
+      def __init__(self, *, strategy_id: str, bus: EventBus, clock: Clock, portfolio: Portfolio):
+          self._portfolio = portfolio
+          ...
+
+      async def on_order_event(self, event: OrderEvent) -> None:
+          if isinstance(event, OrderFilled):
+              view = self._portfolio.position(event.symbol)  # PositionView | None
+              account = self._portfolio.account()  # AccountView
+              if view is not None and view.unrealized_pnl is not None:
+                  ...
+  ```
+
+  `position(symbol)` is your position in one symbol, or `None` if you never traded it. A flat
+  position with history is not `None`: it reads `size = 0` with its realized PnL kept.
+  `open_positions()` is every position of yours still holding exposure. `account()` is the whole
+  account, not a slice of it: collateral is one pool. Every mark-dependent field, such as
+  `unrealized_pnl`, `notional`, `margin_used`, `liquidation_price`, `equity`, `free_margin`, and
+  the two `effective_leverage`s, is `None` until the first mark for that symbol arrives, so check
+  for `None` before you do arithmetic. Reads are method calls, never a PnL subscription
+  (ADR-0004). A read inside `on_order_event` for a fill is coherent with that fill: the projection
+  applied it before the event was published (ADR-0041 §7). Do not take the argument if you read
+  nothing. `single_shot_limit` does not, on purpose.
 - [ ] Add a `kind` value to the `StrategyConfig.kind` `Literal` in
   [`app/config.py`](../src/tickwright/app/config.py), plus any config fields it needs (validate
   cross-field requirements in the model, as `single_shot_limit`'s `price` does).
@@ -99,8 +128,8 @@ auth, quirk translation — and importing no other adapter. It provides both a `
   `MarketTick`s **and `MarkTick`s** — the obligation and its consequence are stated on the
   [`MarketFeed` Protocol](../src/tickwright/domain/protocols.py) itself, and made executable by the
   shared feed contract in the TDD bullet below), an `Exchange` adapter (`start`/`run`/`stop` plus
-  `place`/`cancel`/`fetch_order`/`fetch_account_state`/`account_spec`/`instrument_specs`), spec
-  sourcing, and a `<Venue>Config`.
+  `place`/`cancel`/`fetch_order`/`fetch_account_state`/`verify_account_mode`/`account_spec`/
+  `instrument_specs`), spec sourcing, and a `<Venue>Config`.
 - [ ] Honor the `Exchange` contracts: a failed read is **never venue truth** (never `[]`, never a
   view — an outage must not look like "no orders", ADR-0011 inv 1), and the two read grains say so
   differently. `fetch_order` returns a **`VenueReadFailure`**, whose member says *which way* it
@@ -111,6 +140,25 @@ auth, quirk translation — and importing no other adapter. It provides both a `
   `fetch_account_state` reads one grain with no worklist behind it, so it collapses both and
   returns **`None`**. `place`/`cancel` emit raw `ExecutionReport`s on the bus rather than
   returning them; a cancel of an unknown order is a benign no-op.
+- [ ] Answer the four questions the accounting surface asks of an `Exchange`. Each is a member the
+  seam-claims gate below will make you name a test for.
+  - `account_spec()` returns an `AccountSpec`: the qualified `account_id` the store keys the ledger
+    on (ADR-0038), the netting mode (v1 is `NET` only), and the genesis collateral if the venue
+    cannot report one. Paper takes it from config. A live venue leaves it to the startup barrier,
+    which reads `accountValue − Σ unrealized_pnl` from the venue (ADR-0042).
+  - `instrument_specs()` returns every symbol the venue publishes, with `max_leverage` set.
+    `start()` refuses a boot where a traded symbol is missing, because its configured leverage
+    would have no cap to check against (ADR-0044 §9).
+  - `fetch_account_state()` returns a `VenueAccountState`, or `None` when you have no venue truth.
+    `None` is never "flat". The ledger reconciler freezes on it and heals nothing. Paper answers
+    `None` always, because it holds no account state. A live adapter answers `None` on a failed
+    read. Its peer `verify_account_mode()` guards the one path that writes a venue number to disk:
+    answer `VERIFIED` only while the account is in a mode whose numbers may be healed toward
+    (ADR-0046 §4). Paper answers `VERIFIED` always, for the same reason it answers `None` above.
+  - Funding. If the venue pays funding, publish each payment as a `FundingAccrual` event with the
+    venue's own amount, never one you recomputed (ADR-0037). If nobody can be asked, generate it
+    in `run()` as `PaperExchange` does. `run()` is where that loop lives, and the bullet below says
+    why.
 - [ ] Put venue alignment in `start()`, a loop of your own in `run()`, and release in `stop()` —
   never in `__init__` or a placement.
   The runner drives `start()` at ADR-0024 step 4 — after the bus, **before** the startup barrier — so
@@ -201,6 +249,26 @@ The `EventBus` and `Store` seams are pure infrastructure swaps — same interfac
 - [ ] Document the new config in [`.env.example`](../.env.example).
 
 ---
+
+## Deferred extension points
+
+The accounting surface ships with seven named gaps. Each was decided in an ADR, and each is
+additive when taken. The table says what is missing, what would make someone take it, and where
+the reasoning lives. If you find yourself needing one, open an issue that names the trigger.
+
+| Extension point | What ships today | Take it when | ADR |
+| --- | --- | --- | --- |
+| Margin-tier table | A flat tier-0 maintenance rate, `1/(2·max_leverage)`. Exact only below an asset's first tier band. | A position crosses its first band. The bands differ by network: mainnet BTC's first band opens at $150M, testnet BTC's at $10k, so a paper run against testnet specs can reach it. Read the bands from the raw `meta.marginTables`, never from a doc. | [0040 §4](adr/0040-reported-margin-leverage-liquidation-model.md) |
+| Ledger line-item log | Current-state rows: one per position, one per account. A sum, not a trail. | An audit or a per-fill replay needs the history. Never retroactive: the log starts the day it lands. | [0043 §1](adr/0043-accounting-ledger-durability-and-recovery.md) |
+| Dynamic isolated margin | Isolated collateral is fixed at open. No `updateIsolatedMargin` write. | Paper can model a top-up. Live gains nothing until then, because a write with no paper twin breaks the identical-compute rule. | [0044 §8](adr/0044-venue-leverage-and-margin-mode-write.md) |
+| Memoized Tier-2 cache | Every read recomputes unrealized PnL, margin, and liquidation price from `(position, mark)`. | Read volume makes the recompute measurable. Invalidate on the mark. | [0035](adr/0035-accounting-surface-topology-and-placement.md) |
+| `on_mark` strategy callback | Strategies see the mark only as `mark_ts` on a `PositionView`. The mark is an accounting input, not a signal. | A strategy needs the raw mark value as a signal. The event is already on the bus, so this is one default-no-op method. | [0039](adr/0039-mark-price-data-model.md), [0041 §6](adr/0041-strategy-read-api-portfolio-protocol.md) |
+| Replayed historical funding rates | Paper accrues funding at a configured flat rate on the venue's schedule. | A replay needs venue-faithful funding. It requires a funding-rate channel in the feed, which the trades-only replay feed does not carry. | [0037](adr/0037-perp-funding-model.md) |
+| Non-strategy read surface | `Portfolio` is strategy-only. Telemetry and reconciliation read the `engine` concrete directly. | A CLI or a read-only guard needs the account-net position or the unattributed partition. It lands on the `engine` concrete, never on the `domain` seam. | [0041 §8](adr/0041-strategy-read-api-portfolio-protocol.md) |
+
+Two related items are not on this list because they are not extension points of the accounting
+surface. `HEDGE` netting is a declared v1 non-goal (ADR-0034), and margin enforcement or
+liquidation is a future risk map (ADR-0017).
 
 ## Why one `match` arm, and nowhere else
 

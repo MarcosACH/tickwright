@@ -357,8 +357,10 @@ _Avoid_: fake event, manual event.
 The in-process deterministic `Exchange` impl and the default v1 target. Holds a book of resting
 LIMIT orders, fills MARKET on receipt against the latest [[MarketTick]], re-checks limits each
 tick. It also stamps each fill's [[Fee]], computed after matching from the instrument's rates —
-so the [[Fill model]] still emits price + quantity only. Margin and PnL stay deferred.
-See ADR-0012, ADR-0036, ADR-0013.
+so the [[Fill model]] still emits price + quantity only. It generates [[Funding]] in `run()` at
+the venue's schedule, because paper has no venue to ask. It holds no position, cash or equity
+state: those live in the [[PortfolioProjection]], so `fetch_account_state` answers `None` always.
+See ADR-0012, ADR-0036, ADR-0037, ADR-0013.
 _Avoid_: simulator, mock exchange, backtester (it is a live/paper venue, not a backtest engine).
 
 **Fill model**:
@@ -769,7 +771,10 @@ a step earlier still, seeded by the startup check that would otherwise refuse th
 §6). Persisted as its own column on both paths — beside the instant it was written — and
 distinct from the cash line that accumulates away from it; on paper a config value disagreeing with
 the stored one **fail-fasts** alongside the [[AccountSpec]] `account_id` check — a different genesis
-is a different account history. Together with realized PnL, [[Fee|fees]] and [[Funding]] it closes
+is a different account history. Both raise `StoreAccountMismatch`, and so does a paper store that
+holds order history with no ledger behind it (ADR-0043 §10). That store predates the ledger. It is
+refused, never backfilled, because the fees and funding it never recorded cannot be rebuilt from
+its orders. Together with realized PnL, [[Fee|fees]] and [[Funding]] it closes
 the cash line's write-set at four **accruing** inputs — three added and fees subtracted — while the
 reconciler's synthetic cash adjustment (ADR-0034) corrects that line on live but accrues nothing to
 it: deposits, withdrawals and transfers
