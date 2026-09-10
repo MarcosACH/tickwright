@@ -38,6 +38,11 @@ order, and how the system recovers when the process dies mid-placement.
   (production parity). Same `Store` interface.
 - **Engine-only, live/paper execution.** Reference strategies (a one-shot market/limit order) exist
   only to exercise the pipeline. No strategy library, no UI.
+- **A venue-agnostic accounting surface** (perps only). The engine keeps one `Position` per symbol
+  and one `Account` per process, updated on every fill, fee, and funding payment. A strategy reads
+  them through the `Portfolio` seam: realized and unrealized PnL, notional, margin used, liquidation
+  price, equity, and free margin. The same model runs on paper and on live. On live the numbers are
+  cross-checked against the venue's account snapshot, and a disagreement is alerted, never hidden.
 
 **Two implementations per seam — no more.** One looks hardcoded; three is scope creep. Two proves
 the abstraction is real.
@@ -47,7 +52,13 @@ the abstraction is real.
 - ❌ Not a universal "any exchange / any feed / build your platform" framework.
 - ❌ Not competing on latency or throughput (it's Python, proudly so).
 - ❌ **No backtesting.** v1 is live/paper execution only. The `ReplayFeed` is a *deterministic
-  test/dev feed*, not a backtester — no portfolio simulation, no performance analytics.
+  test/dev feed*, not a backtester — no performance analytics.
+- ❌ **The accounting surface reports. It never acts.** There is no margin-gated rejection: an order
+  that would exceed free margin is placed. There is no liquidation: paper never closes a position
+  for you, and live leaves that to the venue. A negative free margin is reported without
+  consequence. It is the honest "underwater" signal, and what a strategy does with it is its own
+  business. Deferred follow-ups are listed in
+  [`docs/extending.md`](docs/extending.md#deferred-extension-points).
 - ❌ Not a strategy marketplace, indicator library, or research product.
 - ❌ Not a plugin system with registries or config-DSLs. Extensibility is via **implementing a
   Protocol**, documented in [`docs/extending.md`](docs/extending.md) — nothing more.
@@ -89,13 +100,17 @@ The engine keeps running after the replay drains (a live/paper engine waits for 
 reconciliation cadence — it does not self-exit on end-of-file). Press **Ctrl-C** to stop it: it
 shuts down gracefully, takes final strategy snapshots, leaves resting orders alone, and exits `0`.
 
+A paper run has one required variable: `TICKWRIGHT_PAPER__GENESIS_COLLATERAL`, the collateral the
+paper account opens with. It has no default on purpose. Equity and free margin are measured against
+it, so the engine refuses to start against a number nobody chose. `.env.example` sets it to
+`100000`, which is why step 3 runs as is. A live run never needs it. Its genesis is read from the
+venue at startup.
+
 Everything is configured through the environment / `.env` — [`.env.example`](.env.example) is the
 canonical variable reference, and every variable maps onto a field of `AppConfig`
-([`src/tickwright/app/config.py`](src/tickwright/app/config.py)) with the `TICKWRIGHT_` prefix — the
-one exception being a block explicitly marked NOT YET WIRED, decided in an ADR and ignored by the
-build until its slice lands. To switch the fill model to `stochastic`, swap in the Kafka bus or
-Postgres store, or point the live Hyperliquid feed at real market data, edit `.env` — no code
-changes.
+([`src/tickwright/app/config.py`](src/tickwright/app/config.py)) with the `TICKWRIGHT_` prefix. To
+switch the fill model to `stochastic`, swap in the Kafka bus or Postgres store, or point the live
+Hyperliquid feed at real market data, edit `.env` — no code changes.
 
 ## Architecture at a glance
 
@@ -115,6 +130,7 @@ MarketFeed ─────▶ Strategy ─────▶ Exchange ────�
         │  • reconciliation loop            │   Reconciliation (+ ghost gate)
         │  • idempotent recovery            │   Cache (write-through read-model)
         │  • pre-trade guard + kill switch  │   PreTradeGuard
+        │  • positions, account, PnL        │   PortfolioProjection (+ ledger reconcile)
         │  • durable checkpoints            │   Store   SQLite | Postgres
         └───────────────────────────────────┘
 ```
@@ -126,7 +142,12 @@ mid-placement is recoverable. **Reconciliation** periodically compares local sag
 venue truth, with a grace period and a connectivity-failure guard — a failed read is never a view
 and never `[]` — so an outage is never misread as "all orders vanished." **Recovery** replays from
 the store and rebuilds the `Cache` read-model; restarting converges to the same state — no
-double-fills, no orphaned orders.
+double-fills, no orphaned orders. **Accounting** is a second projection beside the order cache.
+Every fill writes the position, the account cash line, and the order checkpoint in one store
+transaction, so a crash cannot leave a fill without its economics. Mark-dependent numbers
+(unrealized PnL, margin, liquidation price) are recomputed from the latest mark on every read, never
+stored. On live a **ledger reconciliation** loop compares them against the venue's account snapshot
+and heals the cash line toward venue truth.
 
 The runtime is a **single `asyncio` process**. All time flows through an injected `Clock` (so the
 test suite never sleeps), and every state-affecting path emits a named observability event.
