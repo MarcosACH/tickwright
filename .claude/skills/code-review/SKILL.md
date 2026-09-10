@@ -1,6 +1,6 @@
 ---
 name: code-review
-description: Python-focused code review with structured PR comments and a merge gate. Use when reviewing a branch, PR, or diff before merge. Produces ID'd comments (BLOCKING/WARN/NIT) that the implementing agent must resolve before merge.
+description: Use when the user asks to review a branch, a PR, or a diff before merge. Produces BLOCKING, WARN and NIT comments that gate the merge.
 ---
 
 # Python Code Review

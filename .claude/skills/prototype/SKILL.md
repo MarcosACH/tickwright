@@ -1,6 +1,6 @@
 ---
 name: prototype
-description: Build a throwaway logic prototype to answer a design question — a tiny interactive terminal app that drives a state model by hand. Use when the user wants to sanity-check whether a state machine, saga, or data shape feels right before committing to it.
+description: Use when the user wants to sanity-check a state machine, saga, or data shape before committing to it. Builds a throwaway terminal app to drive it by hand.
 ---
 
 # Prototype

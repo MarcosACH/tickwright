@@ -1,6 +1,6 @@
 ---
 name: research
-description: Investigate a question against high-trust primary sources and capture the findings as a cited Markdown file under docs/research/. Use when the user wants a topic researched, docs or API facts gathered, or reading legwork delegated to a background agent.
+description: Use when the user asks for research, for docs or API facts checked against primary sources, or for reading to be delegated.
 ---
 
 # Research

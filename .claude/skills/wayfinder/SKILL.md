@@ -1,6 +1,6 @@
 ---
 name: wayfinder
-description: Plan a huge chunk of work — more than one agent session can hold — as a shared map of decision tickets on the GitHub tracker, and resolve them one at a time until the way to the destination is clear.
+description: Use for a chunk of work too big for one session, where the route is still unclear. Use to-tickets when the plan is already settled.
 disable-model-invocation: true
 ---
 
