@@ -1,14 +1,21 @@
-"""The ``.claude/hooks`` guards: rules enforced at the tool call, not asked for in prose.
+"""The ``.claude/hooks`` scripts: work done at the tool call, not asked for in prose.
 
-Four ``PreToolUse`` hooks — three on ``Bash``, one on ``Read`` and ``Bash`` both. Each
-reads the event JSON on stdin and answers with an exit code — ``0`` allows the call, ``2``
-blocks it and hands the text on stderr back to the agent as the reason. That contract is
-the whole subject here, so nothing is mocked: the hooks are run as real processes, the way
-Claude Code runs them.
+Seven hooks across three events, and they come in two shapes.
 
-Three of the four decide by asking a real tool about the path — ``git`` (tracked?
-ignored?) or ``doc-slice`` (what are its sections?) — so the fixtures are real scratch
-repos rather than stubbed answers, the same shape and the same reason as
+**Five guards** refuse. ``PreToolUse`` on ``Bash`` (and, for one of them, ``Read`` too):
+each reads the event JSON on stdin and answers with an exit code — ``0`` allows the call,
+``2`` blocks it and hands the text on stderr back to the agent as the reason.
+
+**Two answer instead.** ``ruff-on-write`` runs on ``PostToolUse``, which cannot block by
+design, and fixes the file rather than arguing about it; ``resume-from-plan`` runs on
+``SessionStart`` and prints, where stdout becomes context. Neither has a refusal to
+assert, so what is asserted is the effect on disk and the text handed back.
+
+That contract is the whole subject here, so nothing is mocked: the hooks are run as real
+processes, the way Claude Code runs them. Most of them decide by asking a real tool about
+the path — ``git`` (tracked? ignored? which branch?), ``doc-slice`` (what are its
+sections?) or ``ruff`` (is this formatted?) — so the fixtures are real scratch repos
+rather than stubbed answers, the same shape and the same reason as
 ``tests/test_githooks.py``. Global and system git config are pinned to ``/dev/null`` so a
 developer's own settings cannot reach an outcome.
 
@@ -29,7 +36,9 @@ from types import ModuleType
 
 import pytest
 
-_HOOKS = Path(__file__).resolve().parent.parent / ".claude" / "hooks"
+_ROOT = Path(__file__).resolve().parent.parent
+_HOOKS = _ROOT / ".claude" / "hooks"
+_RUFF = _ROOT / ".venv" / "bin" / "ruff"
 
 
 def _load_guard(filename: str) -> ModuleType:
@@ -156,19 +165,76 @@ def docs_repo(tmp_path: Path) -> Path:
     return root
 
 
-def run_tool_hook(
-    name: str, tool: str, tool_input: dict[str, object], cwd: Path
-) -> subprocess.CompletedProcess[str]:
-    """Drive one hook with the event Claude Code would hand it."""
-    event = {
-        "hook_event_name": "PreToolUse",
-        "tool_name": tool,
-        "tool_input": tool_input,
-        "cwd": str(cwd),
-    }
+@pytest.fixture
+def python_repo(tmp_path: Path) -> Path:
+    """A scratch repo carrying this project's ruff settings and a ruff to apply them.
+
+    Both are taken from the real tree at fixture time rather than written out here.
+    ``pyproject.toml`` is copied because ruff reads its settings from the checked file's
+    own tree, so a scratch repo without it would be judged against upstream defaults —
+    88 columns rather than this project's 100 — and the test would assert a formatting
+    this repo does not use. ``ruff`` is symlinked because the hook resolves the binary at
+    ``<repo root>/.venv/bin/ruff``, which is a path a scratch repo has to actually have.
+
+    Neither can go stale, which is the point: the same reasoning as ``docs_repo``'s
+    ``doc-slice`` copy, and the alternative ``evals/README.md`` points at.
+    """
+    root = tmp_path / "py-repo"
+    (root / "src").mkdir(parents=True)
+    (root / ".venv" / "bin").mkdir(parents=True)
+    (root / ".venv" / "bin" / "ruff").symlink_to(_RUFF)
+    shutil.copy(_ROOT / "pyproject.toml", root / "pyproject.toml")
+
+    _git(root, "init", "-q", "-b", "main")
+    _git(root, "config", "user.name", "Test")
+    _git(root, "config", "user.email", "test@example.com")
+    return root
+
+
+_PLAN = """# issue-900 — the leverage bound
+
+## Behavior checklist
+- [x] 1. a leverage below 1 is refused                     abc1234/def5678
+- [ ] 2. a leverage above `max_leverage` is refused
+- [ ] 3. the engine reads the resolved book
+
+## Docs-sync
+- [ ] `CLAUDE.md` gains the bound
+"""
+
+
+@pytest.fixture
+def ralph_repo(tmp_path: Path) -> Path:
+    """A scratch repo mid-slice: on ``ralph/issue-900``, with #900's plan beside it.
+
+    This is the state both fast-feedback hooks read. ``no-unlinked-prs`` derives the
+    ``Closes #900`` line it hands back from the branch name; ``resume-from-plan`` reads
+    the branch to find the plan and the plan to find what is left. Neither is told the
+    number — deriving it is the behavior under test, and it is what makes the pair
+    something other than a rule the agent has to remember.
+    """
+    root = tmp_path / "ralph-repo"
+    (root / ".agents" / "plans").mkdir(parents=True)
+    (root / "src").mkdir()
+
+    (root / ".gitignore").write_text(".agents/plans/\n")
+    (root / "src" / "leverage.py").write_text("x = 1\n")
+    (root / ".agents" / "plans" / "issue-900.md").write_text(_PLAN)
+
+    _git(root, "init", "-q", "-b", "main")
+    _git(root, "config", "user.name", "Test")
+    _git(root, "config", "user.email", "test@example.com")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "seed")
+    _git(root, "checkout", "-q", "-b", "ralph/issue-900")
+    return root
+
+
+def _run_raw(name: str, payload: str, cwd: Path) -> subprocess.CompletedProcess[str]:
+    """Run one hook as a real process against whatever bytes are on stdin."""
     return subprocess.run(
         [str(_HOOKS / name)],
-        input=json.dumps(event),
+        input=payload,
         cwd=cwd,
         env=_ENV,
         capture_output=True,
@@ -176,11 +242,55 @@ def run_tool_hook(
     )
 
 
+def _run(name: str, event: dict[str, object], cwd: Path) -> subprocess.CompletedProcess[str]:
+    """Run one hook against the event JSON Claude Code would send."""
+    return _run_raw(name, json.dumps(event), cwd)
+
+
+def run_tool_hook(
+    name: str,
+    tool: str,
+    tool_input: dict[str, object],
+    cwd: Path,
+    hook_event: str = "PreToolUse",
+) -> subprocess.CompletedProcess[str]:
+    """Drive one hook with a tool event. ``PostToolUse`` additionally carries the tool's
+    own result, which the runtime sends and a hook is free to ignore."""
+    event: dict[str, object] = {
+        "hook_event_name": hook_event,
+        "tool_name": tool,
+        "tool_input": tool_input,
+        "cwd": str(cwd),
+    }
+    if hook_event == "PostToolUse":
+        event["tool_response"] = {"success": True}
+    return _run(name, event, cwd)
+
+
 def run_hook(
     name: str, command: str, cwd: Path, tool: str = "Bash"
 ) -> subprocess.CompletedProcess[str]:
-    """Drive one hook with a Bash call — the shape three of the four guards judge."""
+    """Drive one hook with a Bash call — the shape most of the guards judge."""
     return run_tool_hook(name, tool, {"command": command}, cwd)
+
+
+def run_session_hook(
+    name: str, cwd: Path, source: str = "startup"
+) -> subprocess.CompletedProcess[str]:
+    """Drive one hook with a ``SessionStart`` event, whose stdout becomes context."""
+    return _run(name, {"hook_event_name": "SessionStart", "source": source, "cwd": str(cwd)}, cwd)
+
+
+def context_of(result: subprocess.CompletedProcess[str]) -> str:
+    """The text a ``PostToolUse`` hook hands back to the agent, or ``""`` for silence.
+
+    Silence is a real answer and the commonest one, so it is spelled as empty rather than
+    raised on: a hook with nothing to say prints nothing at all, which costs no context.
+    """
+    if not result.stdout.strip():
+        return ""
+    payload = json.loads(result.stdout)
+    return str(payload["hookSpecificOutput"]["additionalContext"])
 
 
 class TestNoTrackedWrites:
@@ -679,7 +789,7 @@ class TestNoUnslicedDocReads:
         That is the escape, not a hole in the guard. The rule being enforced is that a
         whole read is a **deliberate** act rather than the default shape of the call, and
         a guard with no deliberate escape is one an agent learns to route around — the
-        same reasoning that makes all four of these fail open on input they cannot parse.
+        same reasoning that makes every guard here fail open on input it cannot parse.
         """
         result = run_tool_hook("no-unsliced-doc-reads.py", "Read", tool_input, docs_repo)
         assert result.returncode == ALLOW
@@ -991,6 +1101,497 @@ class TestNoUnslicedDocReads:
         assert os.access(_HOOKS / "no-unsliced-doc-reads.py", os.X_OK)
 
 
+class TestNoUnlinkedPrs:
+    """A PR that closes nothing is caught at `gh pr create`, not by a red check.
+
+    ``pr-policy``'s *Body closes an issue* step is right and stays the floor. It just
+    reports late: the PR exists by then, the check is red, and clearing it costs a
+    ``gh pr edit`` and a re-run. The branch already names the issue, so the missing line
+    is derivable rather than merely detectable — which is why the refusal hands back the
+    exact text instead of naming the rule.
+    """
+
+    def test_a_body_that_closes_nothing_is_refused(self, ralph_repo: Path) -> None:
+        result = run_hook(
+            "no-unlinked-prs.py",
+            'gh pr create --title "feat: a thing" --body "It does the thing."',
+            ralph_repo,
+        )
+        assert result.returncode == BLOCK
+
+    def test_the_refusal_carries_the_line_the_branch_implies(self, ralph_repo: Path) -> None:
+        """Answer, don't just refuse. ``ralph/issue-900`` is the whole derivation, so the
+        agent gets the text to paste rather than a rule to look up."""
+        result = run_hook(
+            "no-unlinked-prs.py",
+            'gh pr create --title "feat: a thing" --body "It does the thing."',
+            ralph_repo,
+        )
+        assert "Closes #900" in result.stderr
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "Closes #900",
+            "closes #900",
+            "Fixes #900",
+            "fixed #900",
+            "Resolves #900",
+            "Does the thing.\n\nCloses #900\n",
+        ],
+    )
+    def test_a_body_that_closes_an_issue_is_allowed(self, ralph_repo: Path, body: str) -> None:
+        """Every spelling GitHub honours, because the hook holds ``pr-policy``'s pattern
+        rather than this project's narrower house style. A hook stricter than the check
+        it front-runs refuses bodies that would have passed, which is a false refusal."""
+        command = f'gh pr create --title "t" --body {json.dumps(body)}'
+        assert run_hook("no-unlinked-prs.py", command, ralph_repo).returncode == ALLOW
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            'gh pr create -b "no reference"',
+            'gh pr create --body="no reference"',
+            'gh pr create -b="no reference"',
+            'gh pr create -b"no reference"',
+            'gh -R MarcosACH/tickwright pr create --assignee @me --body "no reference"',
+            'git push -u origin HEAD\ngh pr create --title "t" --body "no reference"',
+        ],
+    )
+    def test_every_shape_the_body_arrives_in_is_read(self, ralph_repo: Path, command: str) -> None:
+        """The short flag, the ``=`` form, a flag ahead of the subcommand, and the
+        multi-line script — the last of which is the regression #307 found live, where
+        the lexer discards newlines and a whole script reads as one segment.
+
+        ``-b=…`` and ``-b…`` are the two shorthand spellings ``pflag`` accepts beside the
+        separated one, so ``gh`` reads all three as one flag with one value. A guard that
+        reads only some of them is not fail-open on an ambiguity — it is blind to a body
+        that is fully visible, which is the shape ``CONTRIBUTING.md`` rules out.
+        """
+        assert run_hook("no-unlinked-prs.py", command, ralph_repo).returncode == BLOCK
+
+    def test_a_body_file_is_read_and_judged(self, ralph_repo: Path) -> None:
+        (ralph_repo / "body.md").write_text("It does the thing.\n")
+        result = run_hook("no-unlinked-prs.py", "gh pr create -F body.md", ralph_repo)
+        assert result.returncode == BLOCK
+        assert "Closes #900" in result.stderr
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "gh pr create --body-file=body.md",
+            "gh pr create -F=body.md",
+            "gh pr create -Fbody.md",
+        ],
+    )
+    def test_a_body_file_is_read_in_every_spelling_too(
+        self, ralph_repo: Path, command: str
+    ) -> None:
+        """The ``=`` and attached forms are not a long-flag privilege. ``--body`` handled
+        them and ``--body-file`` did not, so the same body went unjudged purely for being
+        passed by path — an asymmetry inside one function rather than a decision."""
+        (ralph_repo / "body.md").write_text("It does the thing.\n")
+        result = run_hook("no-unlinked-prs.py", command, ralph_repo)
+        assert result.returncode == BLOCK
+        assert "Closes #900" in result.stderr
+
+    def test_a_body_file_that_closes_is_allowed(self, ralph_repo: Path) -> None:
+        (ralph_repo / "body.md").write_text("It does the thing.\n\nCloses #900\n")
+        command = "gh pr create --body-file body.md"
+        assert run_hook("no-unlinked-prs.py", command, ralph_repo).returncode == ALLOW
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            # No body this hook can see: gh builds one from the commits, or opens an
+            # editor, or hands the whole thing to a browser. Judging what is not there
+            # is guessing, and a guard that guesses gets routed around.
+            'gh pr create --title "t" --fill',
+            'gh pr create --title "t" --fill-verbose',
+            "gh pr create --web",
+            'gh pr create --title "t"',
+            "gh pr create -F -",
+            "gh pr create --body-file=-",
+            "gh pr create -F=-",
+            "gh pr create -F-",
+            "gh pr create -F missing.md",
+            "gh pr create --body-file=missing.md",
+            # Not the subject at all.
+            'gh pr edit 310 --body "no reference"',
+            'gh issue create --title "t" --body "no reference"',
+            "gh pr view 310",
+            'echo "gh pr create --body nothing"',
+        ],
+    )
+    def test_a_body_this_hook_cannot_read_is_not_one_it_may_refuse(
+        self, ralph_repo: Path, command: str
+    ) -> None:
+        assert run_hook("no-unlinked-prs.py", command, ralph_repo).returncode == ALLOW
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            'gh pr create --title "t" --body "$(cat body.md)"',
+            'gh pr create --title "t" --body "`cat body.md`"',
+            'gh pr create --title "t" --body "$BODY"',
+            'gh pr create --title "t" --body "${BODY}"',
+            'gh pr create --title "t" --body "$1"',
+        ],
+    )
+    def test_a_body_the_shell_has_yet_to_expand_is_not_one_this_hook_may_refuse(
+        self, ralph_repo: Path, command: str
+    ) -> None:
+        """A ``--body`` argument is not always its own value.
+
+        ``shlex`` does not expand, so ``"$(cat body.md)"`` arrives as those literal
+        characters. Judging them refuses a PR whose real body closes its issue —
+        a **false refusal**, which this project calls worse than no guard at all. The body
+        is not badly spelled here, it is genuinely hidden, in the same way ``-F -``'s is.
+
+        The file exists and closes #900 in every case below, which is the point: the
+        refusal would be wrong on the merits and not merely unlucky.
+        """
+        (ralph_repo / "body.md").write_text("It does the thing.\n\nCloses #900\n")
+        assert run_hook("no-unlinked-prs.py", command, ralph_repo).returncode == ALLOW
+
+    @pytest.mark.parametrize(
+        ("body", "expected"),
+        [("It does the thing.", BLOCK), ("It does the thing.\n\nCloses #900", ALLOW)],
+    )
+    def test_a_heredoc_body_is_visible_and_so_is_still_judged(
+        self, ralph_repo: Path, body: str, expected: int
+    ) -> None:
+        """The licence above covers a body that is *hidden*, and this one is not.
+
+        ``--body "$(cat <<'EOF' … EOF)"`` is how this project writes a PR body, and the
+        text sits right there in the token: the substitution is opaque, the heredoc it
+        feeds is not. Waiving it along with the rest would give the hook away on the one
+        form the loop actually reaches for.
+        """
+        command = f'gh pr create --title "t" --body "$(cat <<\'EOF\'\n{body}\nEOF\n)"'
+        assert run_hook("no-unlinked-prs.py", command, ralph_repo).returncode == expected
+
+    @pytest.mark.parametrize(
+        ("tail", "expected"),
+        [("Closes #900", ALLOW), ("No reference anywhere.", BLOCK)],
+    )
+    def test_a_terminator_the_shell_would_not_honour_does_not_end_the_body(
+        self, ralph_repo: Path, tail: str, expected: int
+    ) -> None:
+        """A heredoc ends at a terminator in **column 0**, and nowhere else.
+
+        The shell honours a closing line only unindented — leading tabs, and only under
+        ``<<-``. So an ``EOF`` inside an indented snippet ends nothing, and reading it as
+        a terminator truncates the body there: a ``Closes #N`` standing after the snippet
+        is dropped and the PR is refused on a body that closes its issue. That is the
+        false refusal the expansion licence above exists to avoid, reached from inside
+        the one shape the licence deliberately does not cover.
+
+        The second arm is what keeps the fix from being a waiver: a body carrying an
+        inner terminator and no reference at all is still refused.
+        """
+        body = (
+            "Quoting the fixture it writes:\n\n"
+            "    cat <<EOF > notes.txt\n    hello\n    EOF\n\n"
+            f"{tail}"
+        )
+        command = f'gh pr create --title "t" --body "$(cat <<\'EOF\'\n{body}\nEOF\n)"'
+        assert run_hook("no-unlinked-prs.py", command, ralph_repo).returncode == expected
+
+    def test_a_branch_that_names_no_issue_is_still_refused(self, ralph_repo: Path) -> None:
+        """The rule is the body, not the branch. Off a ``ralph/issue-<N>`` branch there is
+        no number to hand back, so the refusal says what is missing without inventing
+        one — a fabricated number is worse than none."""
+        _git(ralph_repo, "checkout", "-q", "-b", "spike/try-something")
+        result = run_hook(
+            "no-unlinked-prs.py", 'gh pr create --title "t" --body "nothing"', ralph_repo
+        )
+        assert result.returncode == BLOCK
+        assert "Closes #" in result.stderr
+        assert "#900" not in result.stderr
+
+    def test_another_tool_is_not_this_hooks_business(self, ralph_repo: Path) -> None:
+        result = run_tool_hook(
+            "no-unlinked-prs.py",
+            "Read",
+            {"file_path": str(ralph_repo / "src" / "leverage.py")},
+            ralph_repo,
+        )
+        assert result.returncode == ALLOW
+
+    def test_an_unreadable_event_is_not_one_to_block_on(self, ralph_repo: Path) -> None:
+        assert _run_raw("no-unlinked-prs.py", "{oops", ralph_repo).returncode == ALLOW
+
+
+class TestRuffOnWrite:
+    """The formatter runs at the edit, not at the pull request.
+
+    ``ci`` runs ``ruff format --check .`` and ``ruff check .`` and **reports only** —
+    neither auto-fixes, so one formatting slip costs a red run, a fix commit and a second
+    run. The fix is mechanical and the tool is already in ``.venv``. This closes that
+    window: after every ``Edit`` or ``Write`` of a Python file, ruff formats and fixes it
+    in place, and the hook says what it changed.
+
+    ``PostToolUse`` cannot block, and that is the right event rather than a limitation —
+    the write already happened and the point is to correct it, not to argue with it.
+    """
+
+    @staticmethod
+    def _write(repo: Path, relative: str, body: str) -> Path:
+        target = repo / relative
+        target.write_text(body)
+        return target
+
+    def _fire(self, repo: Path, target: Path) -> subprocess.CompletedProcess[str]:
+        return run_tool_hook(
+            "ruff-on-write.py", "Write", {"file_path": str(target)}, repo, "PostToolUse"
+        )
+
+    def test_an_unformatted_write_is_reformatted_in_place(self, python_repo: Path) -> None:
+        target = self._write(python_repo, "src/spacing.py", "x = {  'a':1 }\n")
+        assert self._fire(python_repo, target).returncode == ALLOW
+        assert target.read_text() == 'x = {"a": 1}\n'
+
+    def test_an_auto_fixable_finding_is_fixed_in_place(self, python_repo: Path) -> None:
+        """Formatting is not the whole of it: ``ruff check --fix`` is a second pass with
+        its own fixes, and import order (``I001``) is the one an agent trips constantly
+        and the formatter will never touch."""
+        target = self._write(
+            python_repo, "src/imports.py", "import os\nimport json\n\nprint(json, os)\n"
+        )
+        self._fire(python_repo, target)
+        assert target.read_text() == "import json\nimport os\n\nprint(json, os)\n"
+
+    def test_a_fix_that_moves_the_lines_around_it_is_still_formatted(
+        self, python_repo: Path
+    ) -> None:
+        """The linter's fixes run **before** the formatter, never after it.
+
+        A fix applied after formatting is never formatted. Several safe ones change the
+        shape of the file rather than one expression inside it — ``UP035`` taking the last
+        ``typing`` import out leaves behind the blank lines it stood between — so the wrong
+        order rewrites a file into a state ``ruff format --check .`` rejects, and reports
+        only that it rewrote it. That is worse than doing nothing: the hook introduces the
+        failure it exists to prevent, and its report is a false all-clear on the one fact
+        the agent relies on it for.
+
+        ``I001`` above cannot catch this. Its fix happens to land already formatted, which
+        is what let the order look right for as long as it did.
+        """
+        target = self._write(
+            python_repo,
+            "src/annotated.py",
+            'from typing import List\n\n\ndef g(x: "List[int]") -> int:\n    return len(x)\n',
+        )
+        self._fire(python_repo, target)
+
+        verdict = subprocess.run(
+            [str(_RUFF), "format", "--check", "src/annotated.py", "--force-exclude"],
+            cwd=python_repo,
+            capture_output=True,
+            text=True,
+        )
+        assert verdict.returncode == 0, verdict.stdout + verdict.stderr
+
+    def test_the_report_names_the_file_and_the_stale_copy(self, python_repo: Path) -> None:
+        """Rewriting a file behind the harness's back invalidates its cached copy, and
+        the next ``Edit`` fails with a modification error the agent has no explanation
+        for. Saying so is not a courtesy; it is what makes the rewrite survivable."""
+        target = self._write(python_repo, "src/spacing.py", "x = {  'a':1 }\n")
+        context = context_of(self._fire(python_repo, target))
+        assert "src/spacing.py" in context
+        assert "stale" in context.lower()
+
+    def test_a_finding_ruff_cannot_fix_is_reported(self, python_repo: Path) -> None:
+        """The half a formatter cannot close. ``ci`` would report it minutes later and
+        still not fix it, so the agent is the only thing that can, and it needs the
+        line."""
+        target = self._write(python_repo, "src/undefined.py", "def f():\n    return nope\n")
+        context = context_of(self._fire(python_repo, target))
+        assert "F821" in context
+        assert "src/undefined.py:2:12" in context
+
+    def test_a_finding_is_reported_at_the_line_it_ends_up_on(self, python_repo: Path) -> None:
+        """The line has to be the one in the file on disk, not the one before the rewrite.
+
+        ``check --fix`` runs first, so its output is written against a file the formatter
+        then moves — and the report goes out in the same breath as "your cached copy is
+        stale", pointing at a line the agent would have to go and look for. The findings
+        are re-read after the format for that reason, which also makes them character for
+        character what ``ci`` will print.
+        """
+        target = self._write(
+            python_repo,
+            "src/moved.py",
+            "from typing import List\n\n\n"
+            'def g(x: "List[int]"):\n    y  =  1\n    return nope(x, y)\n',
+        )
+        context = context_of(self._fire(python_repo, target))
+        assert "F821" in context
+        assert "src/moved.py:3:12" in context
+
+    def test_a_clean_file_says_nothing_at_all(self, python_repo: Path) -> None:
+        """The common case, and it has to cost nothing. A hook that reports "no changes"
+        on every edit spends the context budget it was written to protect."""
+        target = self._write(python_repo, "src/clean.py", 'x = {"a": 1}\n')
+        result = self._fire(python_repo, target)
+        assert result.returncode == ALLOW
+        assert result.stdout.strip() == ""
+
+    @pytest.mark.parametrize(
+        ("relative", "body"),
+        [
+            ("notes.md", "# not python\n"),
+            ("data.json", '{"a":1}\n'),
+        ],
+    )
+    def test_a_file_ruff_does_not_judge_is_left_alone(
+        self, python_repo: Path, relative: str, body: str
+    ) -> None:
+        target = self._write(python_repo, relative, body)
+        result = self._fire(python_repo, target)
+        assert result.stdout.strip() == ""
+        assert target.read_text() == body
+
+    def test_a_path_ruff_itself_excludes_is_left_alone(self, python_repo: Path) -> None:
+        """``--force-exclude`` is what makes this hook's verdict the one ``ci`` reaches,
+        and it is the one property of the call that nothing else would catch. Ruff honours
+        ``exclude`` while walking a directory but **not** for a file named on the command
+        line, so without the flag an edit under ``.venv/`` is rewritten inside a commit
+        ``ruff format --check .`` never inspects. Dropping it leaves every other case in
+        this class green — the silent disarming ``test_every_corpus_glob_matches_a_real_file``
+        exists to prevent, one hook over."""
+        vendored = python_repo / ".venv" / "lib" / "vendored.py"
+        vendored.parent.mkdir(parents=True)
+        vendored.write_text("x = {  'a':1 }\n")
+
+        result = self._fire(python_repo, vendored)
+        assert result.returncode == ALLOW
+        assert result.stdout.strip() == ""
+        assert vendored.read_text() == "x = {  'a':1 }\n"
+
+    def test_a_path_outside_the_repo_is_left_alone(self, python_repo: Path, tmp_path: Path) -> None:
+        """Scratch space is not this repo's code and is not held to its settings."""
+        outside = tmp_path / "elsewhere.py"
+        outside.write_text("x = {  'a':1 }\n")
+        result = self._fire(python_repo, outside)
+        assert result.stdout.strip() == ""
+        assert outside.read_text() == "x = {  'a':1 }\n"
+
+    def test_a_clone_with_no_ruff_yet_is_silent(self, python_repo: Path) -> None:
+        """A hook runs before ``uv sync`` has necessarily happened. With no binary there
+        is nothing to say and nothing to fix, and a complaint would be noise on the one
+        turn a new contributor is least able to act on it."""
+        (python_repo / ".venv" / "bin" / "ruff").unlink()
+        target = self._write(python_repo, "src/spacing.py", "x = {  'a':1 }\n")
+        result = self._fire(python_repo, target)
+        assert result.returncode == ALLOW
+        assert result.stdout.strip() == ""
+        assert target.read_text() == "x = {  'a':1 }\n"
+
+    def test_a_write_that_left_no_file_is_not_an_error(self, python_repo: Path) -> None:
+        """``tool_input`` names a path; nothing promises it still exists by the time the
+        hook runs. Same fail-open rule the guards hold."""
+        result = self._fire(python_repo, python_repo / "src" / "vanished.py")
+        assert result.returncode == ALLOW
+        assert result.stdout.strip() == ""
+
+    def test_another_tool_is_not_this_hooks_business(self, python_repo: Path) -> None:
+        """The matcher narrows to ``Edit`` and ``Write``, but a hook that trusts its
+        matcher is a hook that misfires the day the matcher is widened."""
+        target = self._write(python_repo, "src/spacing.py", "x = {  'a':1 }\n")
+        result = run_tool_hook(
+            "ruff-on-write.py",
+            "Bash",
+            {"command": f"touch {target}"},
+            python_repo,
+            "PostToolUse",
+        )
+        assert result.stdout.strip() == ""
+        assert target.read_text() == "x = {  'a':1 }\n"
+
+    def test_an_unreadable_event_is_not_one_to_act_on(self, python_repo: Path) -> None:
+        result = _run_raw("ruff-on-write.py", "not json at all", python_repo)
+        assert result.returncode == ALLOW
+        assert result.stdout.strip() == ""
+
+
+class TestResumeFromPlan:
+    """Where the work stopped is delivered at session start, not re-derived.
+
+    ``/tdd`` writes the confirmed plan to ``.agents/plans/issue-<N>.md`` precisely so a
+    compacted or restarted session resumes without re-exploring. That only works if the
+    agent knows to look, and knowing to look was prose in ``CLAUDE.md`` competing with
+    everything else in a fresh window. The path is not a judgement call — it is
+    ``ralph/issue-<N>`` read off ``git branch`` — so nothing is decided here and nothing
+    is refused. The file the session was going to need is simply already in the window.
+    """
+
+    def test_the_open_behaviors_arrive_with_the_session(self, ralph_repo: Path) -> None:
+        out = run_session_hook("resume-from-plan.py", ralph_repo).stdout
+        assert "#900" in out
+        assert ".agents/plans/issue-900.md" in out
+        assert "a leverage above `max_leverage` is refused" in out
+        assert "the engine reads the resolved book" in out
+        assert "`CLAUDE.md` gains the bound" in out
+
+    def test_a_ticked_behavior_is_counted_not_printed(self, ralph_repo: Path) -> None:
+        """What is done is a number; what is open is the work. Reprinting the finished
+        half every session spends the budget this hook exists to save."""
+        out = run_session_hook("resume-from-plan.py", ralph_repo).stdout
+        assert "a leverage below 1 is refused" not in out
+        assert "1 of 4" in out
+
+    def test_the_recorded_shas_are_flagged_as_needing_confirmation(self, ralph_repo: Path) -> None:
+        """The plan is written by hand, so it can be ahead of or behind what landed.
+        Handing it over without saying so would turn a resume aid into a trusted source."""
+        out = run_session_hook("resume-from-plan.py", ralph_repo).stdout
+        assert "git log" in out
+
+    def test_a_long_checklist_is_capped(self, ralph_repo: Path) -> None:
+        """A 40-item plan dumped whole is the cost this hook was written to avoid."""
+        plan = ralph_repo / ".agents" / "plans" / "issue-900.md"
+        plan.write_text("".join(f"- [ ] behavior {n}\n" for n in range(40)))
+        out = run_session_hook("resume-from-plan.py", ralph_repo).stdout
+        assert out.count("- [ ]") < 40
+        assert "more" in out
+
+    def test_a_finished_checklist_says_so(self, ralph_repo: Path) -> None:
+        """Nothing open is a fact worth stating: it means the slice may be ready to ship,
+        which is a different next step from resuming one."""
+        plan = ralph_repo / ".agents" / "plans" / "issue-900.md"
+        plan.write_text("- [x] 1. done   abc1234\n- [x] 2. also done   def5678\n")
+        out = run_session_hook("resume-from-plan.py", ralph_repo).stdout
+        assert "#900" in out
+        assert "2 of 2" in out
+
+    def test_a_branch_that_names_no_issue_gets_nothing(self, ralph_repo: Path) -> None:
+        _git(ralph_repo, "checkout", "-q", "main")
+        assert run_session_hook("resume-from-plan.py", ralph_repo).stdout == ""
+
+    def test_an_issue_with_no_plan_yet_gets_nothing(self, ralph_repo: Path) -> None:
+        """The first session of a slice, before ``/tdd`` has confirmed anything. There is
+        nothing to hand over and an announcement would be noise."""
+        (ralph_repo / ".agents" / "plans" / "issue-900.md").unlink()
+        assert run_session_hook("resume-from-plan.py", ralph_repo).stdout == ""
+
+    def test_a_directory_that_is_not_a_repo_gets_nothing(self, tmp_path: Path) -> None:
+        loose = tmp_path / "loose"
+        loose.mkdir()
+        assert run_session_hook("resume-from-plan.py", loose).stdout == ""
+
+    def test_an_unreadable_event_is_not_one_to_answer(self, ralph_repo: Path) -> None:
+        result = _run_raw("resume-from-plan.py", "", ralph_repo)
+        assert result.returncode == ALLOW
+        assert result.stdout == ""
+
+    @pytest.mark.parametrize("source", ["startup", "resume", "clear", "compact"])
+    def test_every_way_a_session_begins_is_answered(self, ralph_repo: Path, source: str) -> None:
+        """No matcher on the wiring, on purpose. A compaction is the moment the plan is
+        most needed and the one a ``startup``-only matcher would miss."""
+        assert "#900" in run_session_hook("resume-from-plan.py", ralph_repo, source).stdout
+
+
 class TestWiring:
     """A guard nothing runs is a guard that does not exist.
 
@@ -1002,44 +1603,83 @@ class TestWiring:
     """
 
     @staticmethod
-    def _wiring() -> list[tuple[str, str]]:
-        """Every ``PreToolUse`` hook as ``(matcher, command)``."""
+    def _wiring() -> list[tuple[str, str, str]]:
+        """Every wired hook as ``(event, matcher, command)``.
+
+        Every event key is walked, not just ``PreToolUse``. A hook filed under the wrong
+        event passes every direct-invocation case in this file — the script is fine, it
+        is simply never called — and reading one event only would make that invisible.
+        """
         settings = json.loads((_HOOKS.parent / "settings.json").read_text())
         return [
-            (entry.get("matcher", ""), hook["command"])
-            for entry in settings["hooks"]["PreToolUse"]
+            (event, entry.get("matcher", ""), hook["command"])
+            for event, entries in settings["hooks"].items()
+            for entry in entries
             for hook in entry["hooks"]
         ]
 
     @pytest.mark.parametrize(
-        ("hook", "tools"),
+        ("hook", "event", "tools"),
         [
-            ("no-tracked-writes.py", ["Bash"]),
-            ("no-excluded-reads.py", ["Bash"]),
-            ("no-global-installs.py", ["Bash"]),
-            ("no-unsliced-doc-reads.py", ["Read", "Bash"]),
+            ("no-tracked-writes.py", "PreToolUse", ["Bash"]),
+            ("no-excluded-reads.py", "PreToolUse", ["Bash"]),
+            ("no-global-installs.py", "PreToolUse", ["Bash"]),
+            ("no-unsliced-doc-reads.py", "PreToolUse", ["Read", "Bash"]),
+            ("no-unlinked-prs.py", "PreToolUse", ["Bash"]),
+            ("ruff-on-write.py", "PostToolUse", ["Edit", "Write"]),
+            ("resume-from-plan.py", "SessionStart", []),
         ],
     )
-    def test_every_guard_is_wired_to_every_tool_it_judges(
-        self, hook: str, tools: list[str]
+    def test_every_hook_is_wired_to_the_event_and_tools_it_judges(
+        self, hook: str, event: str, tools: list[str]
     ) -> None:
-        """The tool list is the second half of the claim. ``no-unsliced-doc-reads``
-        decides on both a ``Read`` and a ``Bash`` event, and a matcher naming only one of
-        them would leave the guard passing every test above while the ``cat`` door stayed
-        open in the loop it was written for."""
-        matchers = [matcher for matcher, command in self._wiring() if command.endswith(hook)]
-        assert matchers, f"{hook} is wired to nothing"
+        """The event is half the claim and the tool list is the other half.
+        ``no-unsliced-doc-reads`` decides on both a ``Read`` and a ``Bash`` event, and a
+        matcher naming only one of them would leave the guard passing every test above
+        while the ``cat`` door stayed open in the loop it was written for.
+
+        ``resume-from-plan`` names no tool because ``SessionStart`` has none, and it
+        deliberately carries no ``source`` matcher either — asserted below.
+        """
+        matchers = [
+            matcher
+            for wired, matcher, command in self._wiring()
+            if command.endswith(hook) and wired == event
+        ]
+        assert matchers, f"{hook} is wired to nothing under {event}"
         for tool in tools:
             assert any(tool in matcher.split("|") for matcher in matchers), (hook, tool)
+
+    def test_the_session_hook_answers_every_way_a_session_begins(self) -> None:
+        """A ``source`` matcher would be the one mistake that costs the most: ``compact``
+        is when the plan is most needed, and a ``startup``-only wiring misses exactly it.
+        No matcher means every source."""
+        matchers = [
+            matcher
+            for event, matcher, command in self._wiring()
+            if event == "SessionStart" and command.endswith("resume-from-plan.py")
+        ]
+        assert matchers == [""], matchers
 
     def test_every_wired_path_exists_and_runs(self) -> None:
         """``${CLAUDE_PROJECT_DIR}`` is what keeps the wiring correct from a subdirectory
         or a worktree; a relative path would resolve against whatever cwd the call had."""
-        for _, command in self._wiring():
+        for _, _, command in self._wiring():
             assert command.startswith("${CLAUDE_PROJECT_DIR}/")
             path = _HOOKS.parent.parent / command.removeprefix("${CLAUDE_PROJECT_DIR}/")
             assert path.is_file(), command
             assert os.access(path, os.X_OK), command
+
+    def test_the_closes_pattern_is_the_one_ci_holds(self) -> None:
+        """``no-unlinked-prs`` front-runs ``pr-policy``'s *Body closes an issue* step, so
+        the two have to accept the same bodies. There is no predicate to derive one from
+        the other, so this test is what stands in — the same standing as the corpus-glob
+        assertion below. A hook stricter than the check it front-runs refuses bodies that
+        would have passed, and a false refusal is the failure worth guarding against."""
+        source = (_HOOKS / "no-unlinked-prs.py").read_text()
+        pattern = source.split('_CLOSES = re.compile(r"', 1)[1].split('"', 1)[0]
+        workflow = (_ROOT / ".github" / "workflows" / "pr-policy.yml").read_text()
+        assert pattern in workflow, pattern
 
     def test_every_corpus_glob_matches_a_real_file(self) -> None:
         """``no-unsliced-doc-reads`` is the one guard whose subject is a hand-written
@@ -1085,3 +1725,11 @@ class TestWiring:
         tool = _HOOKS.parent.parent / ".agents" / "tools" / "doc-slice"
         assert tool.is_file()
         assert os.access(tool, os.X_OK)
+
+    def test_ruff_is_where_the_hook_looks_for_it(self) -> None:
+        """``ruff-on-write`` hardcodes ``<root>/.venv/bin/ruff`` and falls silent when
+        nothing is there, because a fresh clone has not run ``uv sync`` yet. That makes a
+        moved venv another silent disarming — so it is asserted rather than assumed.
+        This suite runs out of that venv, so its absence is a real failure, not a skip."""
+        assert _RUFF.is_file()
+        assert os.access(_RUFF, os.X_OK)

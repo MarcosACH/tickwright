@@ -104,7 +104,7 @@ Run `gh issue view <number> -R MarcosACH/tickwright --comments`.
 
 ## Linking PRs to issues
 
-Every implementation PR must include `Closes #<issue-number>` in its body. GitHub then:
+Every implementation PR must include `Closes #<issue-number>` in its body. The `no-unlinked-prs` hook refuses a `gh pr create` whose body it can read and which carries no closing reference, handing back the `Closes #<N>` line the `ralph/issue-<N>` branch implies — so `pr-policy`'s check answers at the call rather than as a red run on a PR that already exists ([CONTRIBUTING.md → Agent-loop hooks](../../CONTRIBUTING.md#agent-loop-hooks-claude-code)). GitHub then:
 
 - Links the PR to the issue (visible from both)
 - Auto-closes the issue when the PR merges to the default branch — no manual `gh issue close` needed
