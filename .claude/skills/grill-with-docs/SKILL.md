@@ -14,7 +14,7 @@ Ask the questions **one at a time**, waiting for feedback on each before continu
 
 ## Domain awareness
 
-During codebase exploration, also look for existing documentation. In this repo, read `CONTEXT.md` and ADRs through `.agents/tools/doc-slice <file> [heading-substr]` (TOC first, then just the section you need) — `CONTEXT.md` is 300+ lines and there are 30+ ADRs; whole-file reads waste the context budget.
+During codebase exploration, also look for existing documentation. In this repo, read `CONTEXT.md` and ADRs through `.agents/tools/doc-slice <file> [heading-substr]` — the `no-unsliced-doc-reads` hook refuses a whole read of either and hands back the index to slice from, so the first call is made for you.
 
 ### File structure
 

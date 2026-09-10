@@ -23,6 +23,9 @@ on:
 
 permissions:
   contents: read
+  # The label step re-reads the PR rather than trusting the event payload; see the
+  # comment on it for why.
+  pull-requests: read
 
 jobs:
   pr-policy:
@@ -31,9 +34,27 @@ jobs:
       - name: Exactly one ralph:* state label
         if: ${{ github.event.pull_request.user.login != 'dependabot[bot]' }}
         env:
-          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
         run: |
-          n=$(tr ',' '\n' <<<"$LABELS" | grep -c '^ralph:' || true)
+          # Read the labels from the API, not from the event payload. `gh pr create
+          # --label` is not atomic: GitHub creates the PR, fires `opened`, and attaches
+          # the label after — so the payload this job started from reports zero on a PR
+          # that carries one, and the red check survives the `labeled` re-run that passes.
+          #
+          # Retry only while the count is zero, which is the only value the race can
+          # produce. Two labels is a real error and fails on the first read; a genuinely
+          # unlabelled PR pays ten seconds once to reach the same verdict.
+          n=0
+          for _ in 1 2 3 4 5; do
+            n=$(gh api "repos/$REPO/pulls/$PR" \
+                  --jq '[.labels[].name | select(startswith("ralph:"))] | length')
+            if [ "$n" -ne 0 ]; then
+              break
+            fi
+            sleep 2
+          done
           if [ "$n" -ne 1 ]; then
             echo "::error::PR carries $n 'ralph:*' state labels; exactly one is required" \
                  "(see docs/workflow/labels.md — PR state machine)."

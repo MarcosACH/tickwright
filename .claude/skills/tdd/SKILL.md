@@ -77,21 +77,23 @@ So split the reading in two:
 - **Per-behavior reading, acquired when its test is written.** The source and the ADR sections a
   behavior needs are read inside that behavior's red→green cycle, not in advance.
 
-**`doc-slice` the module map — never read it whole.**
-`docs/module-maps/trade-economics-accounting-surface.md` is **86,298 chars ≈ 21.6k tokens**, larger
-than any ADR: one `cat` is three times the entire cheap-planning budget. Its TOC is 1,253 chars
-≈ 0.3k. And **sections are chosen, not swept** — they run 0.6k (`Leverage`) to **3.2k**
-(`PortfolioProjection`, 12,865 chars), so four of the wrong ones blow the budget on their own.
-Pass the **bare module name** as the heading substring: the TOC prints the path inside backticks
-(``PortfolioProjection (`engine/portfolio.py`)``), so a substring copied with the parenthesised path
-but without them matches nothing. The invocation is canonical in
-[CLAUDE.md → Context Discipline](../../../CLAUDE.md); don't restate it here.
+**The long docs are read by section, and that is now true rather than asked for.** The
+`no-unsliced-doc-reads` hook refuses a whole `Read` or a `cat` of a module map, an ADR, `CONTEXT.md`
+or a research note, and answers with the file's own index — so the invocation and the section list
+arrive together, at the moment you need them. Two things the index cannot tell you:
 
-**Read an ADR section's amendments before its prose — `doc-slice --amendments`.**
-The corpus is append-corrected, so the closing `**( … **)**` blocks hold the current decision and
-the prose above them is often the version it replaced. Reading in document order is how issue #190
-could have shipped ADR-0040 §5's superseded `PaperExchangeConfig` placement and neither of §4's
-field defaults. The flag, the delimiter rule and that counter-example are canonical in
+- **Sections are chosen, not swept.** In `docs/module-maps/trade-economics-accounting-surface.md`
+  they run 0.6k (`Leverage`) to **3.2k** (`PortfolioProjection`, 12,865 chars), so four of the wrong
+  ones blow the cheap-planning budget on their own.
+- **Pass the bare module name** as the heading substring. The TOC prints the path inside backticks
+  (``PortfolioProjection (`engine/portfolio.py`)``), so a substring copied with the parenthesised
+  path but without them matches nothing.
+
+**Read a marked section's amendments before its prose.** The `(+N)` beside a heading in that index
+counts the `**( … **)**` blocks it carries; those hold the current decision and the prose above them
+is often the version it replaced. Reading in document order is how issue #190 could have shipped
+ADR-0040 §5's superseded `PaperExchangeConfig` placement and neither of §4's field defaults. The
+flag, the delimiter rule and that counter-example are canonical in
 [docs/agents/adr-reading.md](../../../docs/agents/adr-reading.md); reach for the full section only
 when the *original reasoning* is what the behavior needs.
 

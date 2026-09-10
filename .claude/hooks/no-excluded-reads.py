@@ -4,8 +4,8 @@
 `.claude/settings.json` denies `.venv/`, the caches, `logs/` and the rest to the `Read`
 tool. That deny list binds one tool, and `cat`, `head` and `grep` fetch the same bytes
 through Bash — which is the door bypass-permissions mode actively pushes an agent
-toward. `evals/tdd/plans-with-sliced-reading` names the same evasion in its own grader
-comments. This closes it.
+toward. `evals/README.md` names the same evasion in its grading rules. This closes it for
+the ignored trees; `no-unsliced-doc-reads` closes it for the long-form corpus.
 
 **Membership is `git check-ignore`, not a second path list.** `.gitignore` already names
 every tree this repo keeps out of a context window, plus `.env`, whose exclusion matters
@@ -28,7 +28,7 @@ import os
 import subprocess
 import sys
 
-from _shell import command_name, segments, unwrap
+from _shell import command_name, segments, unwrap, without_write_redirects
 
 # Commands whose arguments are files they pull into the context window. Narrow on
 # purpose: the guard acts only where it is sure a read is what is being asked for, so an
@@ -104,8 +104,25 @@ def _read_candidates(segment: list[str]) -> list[str]:
 
     Still over-collects — a `--include` glob lands here beside the tree it filters — and
     that is affordable, because a candidate only becomes a refusal once `check-ignore`
-    matches it. A grep pattern is the one token where it is not: the pattern is written
-    to *name* things, so it matches an ignored path by design rather than by accident.
+    matches it. Two tokens are where it is not, and both are dropped rather than paid for:
+
+    - A grep **pattern**. It is written to *name* things, so it matches an ignored path by
+      design rather than by accident.
+    - A redirect **target**. Sending a run into `logs/` is the ordinary use of an ignored
+      tree rather than an evasion of the rule — it is what the tree is ignored *for* — and
+      refusing `cat src/x.py > logs/out.log` answers a command that was already reporting
+      with "derive it with a command that reports". `without_write_redirects` keeps the
+      operand of a `< file`, which does name something being read.
+
+    **The pattern comes off first, and the redirects second.** `shlex` strips quotes, so
+    the `'>'` of `grep '>' logs/run.log` reaches this function as the operator token and
+    nothing in the token list tells the two apart. Scanning for redirects first therefore
+    reads the log as a write target and drops it, opening a hole in the commonest reader
+    this guard covers. Taking the pattern out of the way first is what makes the ambiguity
+    unreachable: only tokens that are already known to be paths are offered to the scan.
+
+    Flags are gone by then, and that costs nothing — a flag never stands between a
+    redirect and its target, so the adjacency the scan reads is intact.
     """
     name = command_name(segment)
     if name not in _READERS:
@@ -133,8 +150,8 @@ def _read_candidates(segment: list[str]) -> list[str]:
         paths.append(tok)
 
     if searching and not pattern_from_flag and paths:
-        return paths[1:]
-    return paths
+        paths = paths[1:]
+    return without_write_redirects(paths)
 
 
 def _excluded(cwd: str, candidates: list[str]) -> list[str]:
