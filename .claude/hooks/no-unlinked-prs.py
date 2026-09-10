@@ -20,6 +20,12 @@ It reads only the bodies that are actually visible. `--fill`, `--fill-verbose`, 
 bare invocation that opens an editor, and `-F -` all build the body somewhere this hook
 cannot see, so they are allowed. Judging what is not there is guessing.
 
+That licence covers what is *hidden*, never a spelling. `gh` parses with `pflag`, so
+`--body value`, `--body=value`, `-b value`, `-b=value` and `-bvalue` are one flag with one
+value, and the same five hold for `--body-file`. A body passed in a form this hook did not
+happen to parse is fully visible and simply unread, which is the failure a guard does not
+get to call fail-open — `_flag_value` is where all of them meet one reader.
+
 Two limits worth stating rather than working around:
 
 - `gh pr edit --body` can remove the reference afterwards. `pr-policy` re-evaluates on
@@ -63,6 +69,26 @@ def _is_pr_create(segment: list[str]) -> bool:
     return any(a == "pr" and b == "create" for a, b in zip(segment, segment[1:], strict=False))
 
 
+def _flag_value(token: str, following: str | None, flags: tuple[str, ...]) -> str | None:
+    """The value one of `flags` carries at `token`, in every spelling `gh` accepts.
+
+    `gh` parses with `pflag`, which reads `--flag value`, `--flag=value`, `-f value`,
+    `-f=value` and `-fvalue` as one flag with one value. Reading only some of them is not
+    failing open on an ambiguity — the body is fully visible in every one of these, so a
+    spelling this misses is a body that goes unjudged. The attached form is a *short*-flag
+    spelling only: the characters after `--body` are the name of another flag, not a value,
+    which is what keeps `--body-file` from being read as `--body` carrying `-file`.
+    """
+    for flag in flags:
+        if token == flag:
+            return following
+        if token.startswith(flag + "="):
+            return token[len(flag) + 1 :]
+        if len(flag) == 2 and token.startswith(flag):
+            return token[len(flag) :]
+    return None
+
+
 def _body(segment: list[str], cwd: str) -> str | None:
     """The PR body as this hook can see it, or None when it cannot see one.
 
@@ -74,14 +100,15 @@ def _body(segment: list[str], cwd: str) -> str | None:
 
     for index, token in enumerate(segment):
         following = segment[index + 1] if index + 1 < len(segment) else None
-        if token in _BODY_FLAGS and following is not None:
-            return following
-        for flag in _BODY_FLAGS:
-            if token.startswith(flag + "="):
-                return token[len(flag) + 1 :]
-        if token in _BODY_FILE_FLAGS and following is not None and following != "-":
+
+        inline = _flag_value(token, following, _BODY_FLAGS)
+        if inline is not None:
+            return inline
+
+        path = _flag_value(token, following, _BODY_FILE_FLAGS)
+        if path is not None and path != "-":
             try:
-                with open(os.path.join(cwd, os.path.expanduser(following))) as handle:
+                with open(os.path.join(cwd, os.path.expanduser(path))) as handle:
                     return handle.read()
             except OSError:
                 return None

@@ -1152,6 +1152,8 @@ class TestNoUnlinkedPrs:
         [
             'gh pr create -b "no reference"',
             'gh pr create --body="no reference"',
+            'gh pr create -b="no reference"',
+            'gh pr create -b"no reference"',
             'gh -R MarcosACH/tickwright pr create --assignee @me --body "no reference"',
             'git push -u origin HEAD\ngh pr create --title "t" --body "no reference"',
         ],
@@ -1159,12 +1161,37 @@ class TestNoUnlinkedPrs:
     def test_every_shape_the_body_arrives_in_is_read(self, ralph_repo: Path, command: str) -> None:
         """The short flag, the ``=`` form, a flag ahead of the subcommand, and the
         multi-line script — the last of which is the regression #307 found live, where
-        the lexer discards newlines and a whole script reads as one segment."""
+        the lexer discards newlines and a whole script reads as one segment.
+
+        ``-b=…`` and ``-b…`` are the two shorthand spellings ``pflag`` accepts beside the
+        separated one, so ``gh`` reads all three as one flag with one value. A guard that
+        reads only some of them is not fail-open on an ambiguity — it is blind to a body
+        that is fully visible, which is the shape ``CONTRIBUTING.md`` rules out.
+        """
         assert run_hook("no-unlinked-prs.py", command, ralph_repo).returncode == BLOCK
 
     def test_a_body_file_is_read_and_judged(self, ralph_repo: Path) -> None:
         (ralph_repo / "body.md").write_text("It does the thing.\n")
         result = run_hook("no-unlinked-prs.py", "gh pr create -F body.md", ralph_repo)
+        assert result.returncode == BLOCK
+        assert "Closes #900" in result.stderr
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "gh pr create --body-file=body.md",
+            "gh pr create -F=body.md",
+            "gh pr create -Fbody.md",
+        ],
+    )
+    def test_a_body_file_is_read_in_every_spelling_too(
+        self, ralph_repo: Path, command: str
+    ) -> None:
+        """The ``=`` and attached forms are not a long-flag privilege. ``--body`` handled
+        them and ``--body-file`` did not, so the same body went unjudged purely for being
+        passed by path — an asymmetry inside one function rather than a decision."""
+        (ralph_repo / "body.md").write_text("It does the thing.\n")
+        result = run_hook("no-unlinked-prs.py", command, ralph_repo)
         assert result.returncode == BLOCK
         assert "Closes #900" in result.stderr
 
@@ -1184,7 +1211,11 @@ class TestNoUnlinkedPrs:
             "gh pr create --web",
             'gh pr create --title "t"',
             "gh pr create -F -",
+            "gh pr create --body-file=-",
+            "gh pr create -F=-",
+            "gh pr create -F-",
             "gh pr create -F missing.md",
+            "gh pr create --body-file=missing.md",
             # Not the subject at all.
             'gh pr edit 310 --body "no reference"',
             'gh issue create --title "t" --body "no reference"',
