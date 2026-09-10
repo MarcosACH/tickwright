@@ -53,6 +53,6 @@ Any safety fact you can't get to step 4, say so out loud. Don't write it up as s
 - **Cleared.** What you checked and why it's fine.
 - **Before you merge.** The cheapest test or repro that catches the real bug, including the script you wrote.
 
-Write it through `unslop` and cite real code. Nothing secret goes in the writeup. No signing key, no funded testnet address, no pasted `.env`. `TICKWRIGHT_HYPERLIQUID__SIGNING_KEY` is env-only and redacted from logs, so don't be the one who prints it.
+Write it under the `CLAUDE.md` writing rules and cite real code. Nothing secret goes in the writeup. No signing key, no funded testnet address, no pasted `.env`. `TICKWRIGHT_HYPERLIQUID__SIGNING_KEY` is env-only and redacted from logs, so don't be the one who prints it.
 
 **Reply:** the writeup above, with the one safety fact either proven or marked unproven.

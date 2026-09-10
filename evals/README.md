@@ -4,8 +4,8 @@ The third test tier. `ci` proves the **engine** still behaves; this proves the *
 `.claude/skills/` still say what they are supposed to say**.
 
 Those skills carry mandatory policy: `/tdd` enforces red-before-green and seam confirmation,
-`/unslop` enforces the writing rules, `/code-review` enforces the BLOCKING/WARN/NIT gate. Nothing
-in `ci` reads them. Edit a skill's wording and the rule can stop landing with no failing check and
+`/blast-radius` refuses to sign off without proving its safety fact, `/code-review` enforces the
+BLOCKING/WARN/NIT gate. Nothing in `ci` reads them. Edit a skill's wording and the rule can stop landing with no failing check and
 no diff that looks wrong. An eval is the only test that notices.
 
 Runner: `claude plugin eval` (Claude Code CLI). See *Availability* below before you plan on it.
