@@ -107,7 +107,7 @@ uv run mypy           # bare: `mypy .` overrides files= and skips .claude/hooks
 uv run lint-imports   # dependency-direction boundaries (ADR-0032)
 ```
 
-A Python file you just wrote through `Edit` or `Write` is already formatted and auto-fixed: the `ruff-on-write` hook runs `ruff format` and `ruff check --fix` on that one file at the call, so the report-only ruff steps in `ci` have nothing left to find. It rewrites the file when it acts, which stales the harness's copy — re-read before the next edit. It says what it could not fix; those are yours. It does **not** run mypy, deliberately: a red TDD step legitimately type-errors, so the note would be noise on exactly the edits it fires hardest on.
+A Python file you just wrote through `Edit` or `Write` is already formatted and auto-fixed: the `ruff-on-write` hook runs `ruff check --fix` and then `ruff format` on that one file at the call, so the report-only ruff steps in `ci` have nothing left to find. That order is load-bearing — a fix applied after formatting is never formatted, and the ones that move the lines around them would leave the file in a state `ci` rejects. It rewrites the file when it acts, which stales the harness's copy — re-read before the next edit. It says what it could not fix; those are yours. It does **not** run mypy, deliberately: a red TDD step legitimately type-errors, so the note would be noise on exactly the edits it fires hardest on.
 
 ## Code Style
 

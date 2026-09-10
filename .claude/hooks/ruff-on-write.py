@@ -29,6 +29,13 @@ Three things it deliberately does not do:
 - **It says nothing when there is nothing to say.** That is the common case, and a hook
   reporting "no changes" on every edit spends the budget it exists to protect.
 
+**`check --fix` runs first and `format` second**, which is ruff's own documented order and
+not a preference. A fix applied after formatting is never formatted, and several safe ones
+move the lines around them rather than one expression inside them — `UP035` taking the last
+`typing` import out leaves the blank lines it stood between behind. The wrong way round, the
+hook rewrites a file into a state `ruff format --check .` rejects while reporting only that
+it rewrote it: the failure it exists to prevent, delivered with a false all-clear.
+
 One consequence worth stating: rewriting a file behind the harness's back invalidates its
 cached copy, and the next `Edit` fails with a modification error. The report says so. It
 is safe to rewrite the *whole* file rather than only the edited span because `ci` gates
@@ -119,7 +126,7 @@ def _report(relative: str, rewritten: bool, findings: list[str]) -> str:
     parts: list[str] = []
     if rewritten:
         parts.append(
-            f"ruff rewrote `{relative}` (format, then `check --fix`). Your cached copy of "
+            f"ruff rewrote `{relative}` (`check --fix`, then format). Your cached copy of "
             "it is stale — re-read the file before editing it again."
         )
     if findings:
@@ -150,10 +157,10 @@ def main() -> int:
     with open(absolute, "rb") as handle:
         before = handle.read()
 
-    if _ruff(root, "format", relative) is None:
-        return 0
     checked = _ruff(root, "check", "--fix", "--output-format=concise", relative)
     if checked is None:
+        return 0
+    if _ruff(root, "format", relative) is None:
         return 0
 
     with open(absolute, "rb") as handle:

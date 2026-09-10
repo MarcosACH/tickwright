@@ -105,7 +105,7 @@ is the right shape rather than a limitation worked around.
 
 | Hook | Event | Does |
 | ---- | ----- | ---- |
-| `ruff-on-write` | `PostToolUse` on `Edit`, `Write` | runs `ruff format` and `ruff check --fix` on the one `*.py` file just written, then reports the rewrite and anything it could not fix |
+| `ruff-on-write` | `PostToolUse` on `Edit`, `Write` | runs `ruff check --fix` and then `ruff format` on the one `*.py` file just written, then reports the rewrite and anything it could not fix |
 | `resume-from-plan` | `SessionStart` | prints the current slice's open behaviors, read off `ralph/issue-<N>` and `.agents/plans/issue-<N>.md` |
 
 Two of the **guards** answer rather than merely refusing — `no-unsliced-doc-reads` and
@@ -166,6 +166,12 @@ Four properties are deliberate:
 - **`.venv/bin/<tool>`, never `uv run <tool>`.** `uv run` re-syncs the environment before handing
   over: 1.99 s against 0.013 s for the binary. A two-second tax on every edit is a hook someone
   turns off, and a hook that is off enforces nothing.
+
+`ruff-on-write` runs the linter's fixes **before** the formatter, which is ruff's own documented
+order rather than a preference: a fix applied after formatting is never formatted, and the ones that
+move the lines around them — `UP035` taking the last `typing` import out leaves the blank lines it
+stood between behind — would have the hook rewrite a file into a state `ruff format --check .`
+rejects, while reporting only that it rewrote it.
 
 `ruff-on-write` deliberately does **not** run mypy. Ruff's half *fixes*, so it spends no context and
 asks for no judgement; a type check can only report, and mid-red a TDD step legitimately

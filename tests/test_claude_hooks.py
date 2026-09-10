@@ -1292,6 +1292,37 @@ class TestRuffOnWrite:
         self._fire(python_repo, target)
         assert target.read_text() == "import json\nimport os\n\nprint(json, os)\n"
 
+    def test_a_fix_that_moves_the_lines_around_it_is_still_formatted(
+        self, python_repo: Path
+    ) -> None:
+        """The linter's fixes run **before** the formatter, never after it.
+
+        A fix applied after formatting is never formatted. Several safe ones change the
+        shape of the file rather than one expression inside it — ``UP035`` taking the last
+        ``typing`` import out leaves behind the blank lines it stood between — so the wrong
+        order rewrites a file into a state ``ruff format --check .`` rejects, and reports
+        only that it rewrote it. That is worse than doing nothing: the hook introduces the
+        failure it exists to prevent, and its report is a false all-clear on the one fact
+        the agent relies on it for.
+
+        ``I001`` above cannot catch this. Its fix happens to land already formatted, which
+        is what let the order look right for as long as it did.
+        """
+        target = self._write(
+            python_repo,
+            "src/annotated.py",
+            'from typing import List\n\n\ndef g(x: "List[int]") -> int:\n    return len(x)\n',
+        )
+        self._fire(python_repo, target)
+
+        verdict = subprocess.run(
+            [str(_RUFF), "format", "--check", "src/annotated.py", "--force-exclude"],
+            cwd=python_repo,
+            capture_output=True,
+            text=True,
+        )
+        assert verdict.returncode == 0, verdict.stdout + verdict.stderr
+
     def test_the_report_names_the_file_and_the_stale_copy(self, python_repo: Path) -> None:
         """Rewriting a file behind the harness's back invalidates its cached copy, and
         the next ``Edit`` fails with a modification error the agent has no explanation
