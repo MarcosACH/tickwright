@@ -1228,6 +1228,49 @@ class TestNoUnlinkedPrs:
     ) -> None:
         assert run_hook("no-unlinked-prs.py", command, ralph_repo).returncode == ALLOW
 
+    @pytest.mark.parametrize(
+        "command",
+        [
+            'gh pr create --title "t" --body "$(cat body.md)"',
+            'gh pr create --title "t" --body "`cat body.md`"',
+            'gh pr create --title "t" --body "$BODY"',
+            'gh pr create --title "t" --body "${BODY}"',
+            'gh pr create --title "t" --body "$1"',
+        ],
+    )
+    def test_a_body_the_shell_has_yet_to_expand_is_not_one_this_hook_may_refuse(
+        self, ralph_repo: Path, command: str
+    ) -> None:
+        """A ``--body`` argument is not always its own value.
+
+        ``shlex`` does not expand, so ``"$(cat body.md)"`` arrives as those fourteen
+        literal characters. Judging them refuses a PR whose real body closes its issue —
+        a **false refusal**, which this project calls worse than no guard at all. The body
+        is not badly spelled here, it is genuinely hidden, in the same way ``-F -``'s is.
+
+        The file exists and closes #900 in every case below, which is the point: the
+        refusal would be wrong on the merits and not merely unlucky.
+        """
+        (ralph_repo / "body.md").write_text("It does the thing.\n\nCloses #900\n")
+        assert run_hook("no-unlinked-prs.py", command, ralph_repo).returncode == ALLOW
+
+    @pytest.mark.parametrize(
+        ("body", "expected"),
+        [("It does the thing.", BLOCK), ("It does the thing.\n\nCloses #900", ALLOW)],
+    )
+    def test_a_heredoc_body_is_visible_and_so_is_still_judged(
+        self, ralph_repo: Path, body: str, expected: int
+    ) -> None:
+        """The licence above covers a body that is *hidden*, and this one is not.
+
+        ``--body "$(cat <<'EOF' … EOF)"`` is how this project writes a PR body, and the
+        text sits right there in the token: the substitution is opaque, the heredoc it
+        feeds is not. Waiving it along with the rest would give the hook away on the one
+        form the loop actually reaches for.
+        """
+        command = f'gh pr create --title "t" --body "$(cat <<\'EOF\'\n{body}\nEOF\n)"'
+        assert run_hook("no-unlinked-prs.py", command, ralph_repo).returncode == expected
+
     def test_a_branch_that_names_no_issue_is_still_refused(self, ralph_repo: Path) -> None:
         """The rule is the body, not the branch. Off a ``ralph/issue-<N>`` branch there is
         no number to hand back, so the refusal says what is missing without inventing
