@@ -122,12 +122,18 @@ Three properties are deliberate:
   a `tee` being searched for rather than run, or a heredoc body all lex perfectly, so `_shell.py`
   and the executable-position test resolve each one rather than shrugging at it. The redirect is
   peeled **only** at the head, which is what makes it safe: a quoted `'>'` is indistinguishable
-  from the operator, but a pattern is an argument, and nothing standing before the program is data. The inverse holds too: a shape the lexer *does* produce is not a shape the
+  from the operator, but a pattern is an argument, and nothing standing before the program is data.
+  A leading **input** redirect (`< CONTEXT.md cat`) is the one shape left unpeeled and so the one
+  read of this kind that still goes through: its operand *is* a file being read, so dropping it
+  would lose a path while keeping it leaves that path standing where the program does. It needs an
+  answer of its own rather than this one. The inverse holds too: a shape the lexer *does* produce is not a shape the
   guard may miss, which is why the redirect set enumerates `&>` and `>|` instead of the two
-  spellings that come to mind first, and why `src/*.py` is handed to `git` to resolve rather than
+  spellings that come to mind first, why `src/*.py` is handed to `git` to resolve rather than
   judged by how many files came back — counting them would allow a write in proportion to how many
-  it rewrites. What stays out of reach is a *value*: `sed -i '' s/a/b/ $f` lexes cleanly and stands
-  in the right position, and no lexer knows which file `$f` names.
+  it rewrites — and why a `~` is expanded before a pattern is matched rather than only after, since
+  `glob` leaves a user prefix alone and would let `~/repo/docs/adr/*.md` match nothing. What stays
+  out of reach is a *value*: `sed -i '' s/a/b/ $f` lexes cleanly and stands in the right position,
+  and no lexer knows which file `$f` names.
 
 Same standing as the git hooks: **local convenience, not the gate.** They are Claude Code-specific,
 so a contributor using another tool — or none — gets nothing from them, and CI stays the floor for
