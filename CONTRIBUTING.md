@@ -108,7 +108,8 @@ is the right shape rather than a limitation worked around.
 | `ruff-on-write` | `PostToolUse` on `Edit`, `Write` | runs `ruff format` and `ruff check --fix` on the one `*.py` file just written, then reports the rewrite and anything it could not fix |
 | `resume-from-plan` | `SessionStart` | prints the current slice's open behaviors, read off `ralph/issue-<N>` and `.agents/plans/issue-<N>.md` |
 
-Two of them **answer rather than merely refusing**, and that is the property worth copying.
+Two of the **guards** answer rather than merely refusing — `no-unsliced-doc-reads` and
+`no-unlinked-prs`, back in the table above — and that is the property worth copying.
 `no-unsliced-doc-reads` returns the file's own index — the `doc-slice` table of contents, with each
 section marked `(+N)` for the amendment blocks it carries, or for `CONTEXT.md` its terms and their
 line numbers. `no-unlinked-prs` returns the `Closes #<N>` line the branch implies. In both cases the
