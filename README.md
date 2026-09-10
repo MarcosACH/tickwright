@@ -1,6 +1,6 @@
 # Tickwright
 
-> Apache-2.0 · a readable, event-driven algorithmic trading engine (reference implementation).
+> Apache-2.0 · a readable, event-driven algorithmic trading engine.
 
 Tickwright turns a market feed into orders through an event-driven pipeline —
 `MarketFeed → Strategy → Exchange`, coordinated by an `EventBus` — with a crash-safe
@@ -52,7 +52,8 @@ the abstraction is real.
 - ❌ Not a plugin system with registries or config-DSLs. Extensibility is via **implementing a
   Protocol**, documented in [`docs/extending.md`](docs/extending.md) — nothing more.
 - ❌ No GUI, notifications, or broker integrations beyond the two venues above.
-- ❌ Not financial advice, and not certified for live money. A reference implementation.
+- ❌ Not financial advice, and not certified for live money. Run it against real funds at your own
+  risk.
 
 ## Quickstart
 

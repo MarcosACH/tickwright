@@ -1,7 +1,7 @@
 [project]
 name = "tickwright"
 version = "0.2.0"
-description = "An event-driven algorithmic trading engine built as a readable reference implementation."
+description = "A readable, event-driven algorithmic trading engine."
 requires-python = ">=3.13,<3.14"
 license = "Apache-2.0"
 authors = [{ name = "Marcos Achaval" }]
