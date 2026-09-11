@@ -500,6 +500,59 @@ def test_a_first_connect_the_venue_refuses_faults_the_boot_rather_than_backing_o
     asyncio.run(main())
 
 
+def test_run_consumes_the_socket_start_opened_rather_than_opening_a_second() -> None:
+    """The other half of the boot claim: ``start()`` opens and subscribes,
+    ``run()`` reads. A ``run()`` that opened its own socket would leave the
+    boot's one idle and subscribed, and the venue would see two connects for
+    one subscription. So the witnesses are the connect count staying at one
+    across both calls, and the payment arriving only once ``run()`` reads.
+    """
+
+    async def main() -> None:
+        bus = InMemoryBus()
+        seen: list[FundingAccrual] = []
+        arrived = asyncio.Event()
+
+        async def record(accrual: FundingAccrual) -> None:
+            seen.append(accrual)
+            arrived.set()
+
+        bus.subscribe(FundingAccrual, record)
+        connection = FakeWsConnection(
+            [user_fundings_frame(funding(time_ms=1681222254710, coin="ETH", usdc="-3.625312"))]
+        )
+        connects = 0
+
+        async def connect(url: str) -> FakeWsConnection:
+            nonlocal connects
+            connects += 1
+            return connection
+
+        exchange = make_exchange(
+            FakeExchangeApi({"userAbstraction": "disabled"}),
+            bus=bus,
+            clock=ManualClock(),
+            connect=connect,
+        )
+
+        await exchange.start()
+
+        assert connects == 1
+        assert connection.sent, "start() must subscribe the socket it opened"
+        assert seen == [], "start() must not consume — that is run()'s"
+
+        async with asyncio.TaskGroup() as tg:
+            running = tg.create_task(exchange.run())
+            await asyncio.wait_for(arrived.wait(), timeout=2)
+            await exchange.stop()
+            await running
+
+        assert [a.amount for a in seen] == [Decimal("-3.625312")]
+        assert connects == 1, "run() must consume the socket start() opened, not open a second"
+
+    asyncio.run(main())
+
+
 def test_the_venue_s_own_housekeeping_frames_are_ignored_rather_than_refused() -> None:
     """The other half of the rule, deliberately adjacent to the two above.
 
