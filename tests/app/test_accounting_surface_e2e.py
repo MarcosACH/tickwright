@@ -370,6 +370,50 @@ def test_a_store_with_orders_but_no_ledger_is_refused(tmp_path: Path) -> None:
     assert "fresh store" in error
 
 
+def _marked_past_the_boundary(portfolio: Portfolio) -> bool:
+    """The second row has marked the book: the first row's fill, if any, is in."""
+    view = portfolio.position("BTC")
+    return view is not None and view.unrealized_pnl not in (None, Decimal(0))
+
+
+def test_a_refused_boot_leaves_the_strategy_snapshot_as_it_found_it(tmp_path: Path) -> None:
+    """The refusal's remedy is "restore the declared values to resume". A boot
+    that refuses before ``host.start()`` has restored nothing, so the snapshot it
+    would take is the strategy's blank state. Writing that over the previous
+    life's snapshot makes the remedy re-fire the single shot on resume: a second
+    order the operator never asked for."""
+    _run(_config(tmp_path))
+
+    _refused(
+        _config(
+            tmp_path,
+            paper=PaperExchangeConfig(
+                instrument_specs={"BTC": SPEC}, genesis_collateral=GENESIS * 2
+            ),
+        )
+    )
+
+    store = build_store(_config(tmp_path))
+    try:
+        snapshot = store.load_strategy_snapshot("demo")
+        assert snapshot is not None
+        assert json.loads(snapshot)["fired"] is True
+    finally:
+        store.close()
+
+    resumed = _run(_config(tmp_path), settled=_marked_past_the_boundary)
+
+    position = resumed.position("BTC")
+    assert position is not None
+    assert position.size == QUANTITY
+    assert position.fees == EXPECTED_FEE
+    store = build_store(_config(tmp_path))
+    try:
+        assert len(store.all_orders()) == 1
+    finally:
+        store.close()
+
+
 ETH_SPEC = InstrumentSpec(
     symbol="ETH",
     sz_decimals=2,

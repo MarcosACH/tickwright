@@ -57,6 +57,10 @@ class StrategyHost:
         # ``AppConfig`` refuses the same overlap at load and must refuse it in
         # the same words (ADR-0034; see ``domain/ownership.py``).
         self._ownership = SymbolOwnership()
+        # Set by ``start()`` once every strategy holds its restored state. Until
+        # then a strategy holds only its blank constructor state, and ``stop()``
+        # has nothing true to persist (see there).
+        self._started = False
 
     def register(self, strategy: Strategy, *, symbols: Iterable[str]) -> None:
         """Add ``strategy`` to the registry with its declared symbol set.
@@ -106,6 +110,7 @@ class StrategyHost:
             self._restore(strategy)
             strategy.set_next_seq(high_water.get(strategy.strategy_id, 0) + 1)
             self._subscribe(strategy)
+        self._started = True
 
     def _seq_high_water(self) -> dict[str, int]:
         """Max consumed seq per strategy across every checkpointed saga.
@@ -151,7 +156,15 @@ class StrategyHost:
 
         The graceful-stop half of ADR-0016's cadence: the engine owns
         durability, so the strategy's last state content outlives the process.
+
+        A no-op before ``start()``. The runner walks the same teardown when the
+        boot faults ahead of ``start()``, and a strategy that was never restored
+        holds only its blank state. Persisting that would overwrite the previous
+        life's snapshot, so the refusal's own remedy ("restore the declared
+        values to resume") would resume a strategy that forgot what it did.
         """
+        if not self._started:
+            return
         for strategy in self._strategies.values():
             self._store.save_strategy_snapshot(
                 strategy.strategy_id, strategy.snapshot(), ts_ns=self._clock.timestamp_ns()

@@ -272,6 +272,22 @@ def test_stop_persists_a_final_snapshot_per_strategy() -> None:
     assert store.load_strategy_snapshot("beta") == b"beta-final"
 
 
+def test_stop_before_start_writes_no_snapshot() -> None:
+    """A boot that faults before ``start()`` still runs the teardown, and a
+    strategy that was never restored holds only its blank state. Persisting that
+    would overwrite the previous life's snapshot with nothing this life did."""
+    store = SQLiteStore(":memory:")
+    store.save_strategy_snapshot("alpha", b"prior-life", ts_ns=1_000)
+    host = StrategyHost(bus=InMemoryBus(), clock=ManualClock(), store=store)
+    alpha = RecordingStrategy("alpha")
+    alpha.state = b"blank"
+    host.register(alpha, symbols={"BTC"})
+
+    host.stop()
+
+    assert store.load_strategy_snapshot("alpha") == b"prior-life"
+
+
 def test_start_restores_the_persisted_snapshot() -> None:
     store = SQLiteStore(":memory:")
     store.save_strategy_snapshot("alpha", b"prior-life", ts_ns=1_000)
