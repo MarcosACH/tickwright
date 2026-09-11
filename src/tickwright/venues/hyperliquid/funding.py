@@ -19,9 +19,17 @@ from collections.abc import Iterable, Mapping
 from decimal import Decimal
 from typing import Any, NoReturn
 
-from tickwright.domain import Clock, EventBus, FundingAccrual, VenueFactUnsupported
+from tickwright.domain import (
+    Clock,
+    Deadline,
+    EventBus,
+    FundingAccrual,
+    VenueFactUnsupported,
+    VenueSubscriptionUnreachable,
+)
 
 from .config import HyperliquidConfig
+from .preflight import until_deadline
 from .reading import UNREADABLE, figure, refuse_non_usdc, rendered
 from .session import WsSession
 from .transport import Connect, WsConnection
@@ -157,11 +165,32 @@ class FundingIngest:
             consume=self._read_frames,
         )
 
-    async def start(self) -> None:
-        """Open and subscribe the funding socket now, so a refused connect
-        faults the boot instead of pacing a retry behind a `RUNNING` engine
-        (#300). The socket is handed to `run()`, which consumes it."""
-        await self._session.start()
+    async def start(self, *, deadline: Deadline) -> None:
+        """Open and subscribe the funding socket now, and return.
+
+        Inside `run()` a refused connect is paced and retried, which is right
+        for a reconnect and wrong for a boot: the engine reached `RUNNING` with
+        a socket that never connected (#300). So the boot opens it here, on the
+        same `deadline` the two guards ahead of it spend (ADR-0044 §6), and a
+        refusal that outlives the budget faults the boot as
+        `VenueSubscriptionUnreachable`. The socket is handed to `run()`.
+        """
+        await until_deadline(
+            self._session.start,
+            on_exhausted=self._unreachable,
+            clock=self._clock,
+            deadline=deadline,
+        )
+
+    def _unreachable(self, exc: BaseException, deadline: Deadline) -> VenueSubscriptionUnreachable:
+        """The refusal when the budget went without a socket: names the
+        subscription and the address, since that is what an operator checks."""
+        return VenueSubscriptionUnreachable(
+            f"could not open the userFundings subscription for {self._address} "
+            f"within the {deadline.budget_seconds}s startup budget ({exc}); "
+            "refusing to start rather than run with no funding stream (#300). "
+            "Check the venue websocket is reachable, then restart."
+        )
 
     async def run(self) -> None:
         await self._session.run()
