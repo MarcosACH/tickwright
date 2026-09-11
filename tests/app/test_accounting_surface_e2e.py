@@ -325,3 +325,27 @@ def test_a_changed_genesis_on_the_second_life_is_refused(tmp_path: Path) -> None
     assert "genesis_collateral" in error
     assert str(GENESIS) in error
     assert str(GENESIS * 2) in error
+
+
+def test_a_changed_account_label_on_the_second_life_is_refused(tmp_path: Path) -> None:
+    """ADR-0042 section 5: the label decides the ``paper-<label>`` account id,
+    so relabelling a run points it at a ledger another account opened."""
+    _run(_config(tmp_path))
+
+    error = _refused(
+        _config(
+            tmp_path,
+            paper=PaperExchangeConfig(
+                instrument_specs={"BTC": SPEC},
+                genesis_collateral=GENESIS,
+                account_label="other",
+            ),
+            strategies=[],
+            leverage={},
+        )
+    )
+
+    assert "StoreAccountMismatch" in error
+    assert "account_id" in error
+    assert "paper-default" in error
+    assert "paper-other" in error
