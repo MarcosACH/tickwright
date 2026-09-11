@@ -10,8 +10,10 @@ from the code. The arithmetic is spelled out beside each constant.
 """
 
 import asyncio
+import contextlib
 import json
 import os
+import sqlite3
 from collections.abc import Callable
 from decimal import Decimal
 from pathlib import Path
@@ -349,3 +351,20 @@ def test_a_changed_account_label_on_the_second_life_is_refused(tmp_path: Path) -
     assert "account_id" in error
     assert "paper-default" in error
     assert "paper-other" in error
+
+
+def test_a_store_with_orders_but_no_ledger_is_refused(tmp_path: Path) -> None:
+    """ADR-0043 section 8: a paper store that predates the ledger holds orders
+    whose fees and funding cannot be rebuilt. Seeding a fresh ledger over it
+    would report a flat account at full cash, so the run is refused instead."""
+    _run(_config(tmp_path))
+    # The one way to reach that shape from a finished run is to drop the ledger
+    # row by hand. The store has no seam for it, because nothing should do it.
+    with contextlib.closing(sqlite3.connect(tmp_path / "ledger.db")) as db, db:
+        db.execute("DELETE FROM account")
+
+    error = _refused(_config(tmp_path, strategies=[], leverage={}))
+
+    assert "StoreAccountMismatch" in error
+    assert "no ledger" in error
+    assert "fresh store" in error
