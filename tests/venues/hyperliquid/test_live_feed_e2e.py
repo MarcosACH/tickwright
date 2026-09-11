@@ -53,11 +53,11 @@ def test_mocked_frames_reach_a_paper_fill_through_the_whole_pipeline() -> None:
         )
         connection = FakeWsConnection([trades_frame(trade("BTC", "43250.5", 1, sz="3"))])
 
-        async def connect(url: str) -> FakeWsConnection:
-            return connection
-
         feed = HyperliquidFeed(
-            config=HyperliquidConfig(symbols=["BTC"]), bus=bus, clock=clock, connect=connect
+            config=HyperliquidConfig(symbols=["BTC"]),
+            bus=bus,
+            clock=clock,
+            connect=connection.connect,
         )
 
         bus.subscribe(MarketTick, strategy.on_tick)

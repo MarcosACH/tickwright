@@ -73,14 +73,11 @@ def _run_feed[E: (MarketTick, MarkTick)](
         bus.subscribe(event_type, record)
         connection = FakeWsConnection(frames)
 
-        async def connect(url: str) -> FakeWsConnection:
-            return connection
-
         feed = HyperliquidFeed(
             config=HyperliquidConfig(symbols=symbols),
             bus=bus,
             clock=clock,
-            connect=connect,
+            connect=connection.connect,
         )
         await feed.start()
         run = asyncio.create_task(feed.run())
@@ -182,14 +179,11 @@ def test_slow_consumer_gets_only_the_latest_tick_per_symbol_with_one_lagged_per_
             ]
         )
 
-        async def connect(url: str) -> FakeWsConnection:
-            return connection
-
         feed = HyperliquidFeed(
             config=HyperliquidConfig(symbols=["BTC", "ETH"]),
             bus=bus,
             clock=clock,
-            connect=connect,
+            connect=connection.connect,
         )
         with capture_events() as logs:
             await feed.start()
@@ -261,11 +255,11 @@ def test_a_publish_that_raises_tears_the_socket_reader_down_with_it() -> None:
             drop_when_drained=True,
         )
 
-        async def connect(url: str) -> FakeWsConnection:
-            return connection
-
         feed = HyperliquidFeed(
-            config=HyperliquidConfig(symbols=["BTC"]), bus=bus, clock=ManualClock(), connect=connect
+            config=HyperliquidConfig(symbols=["BTC"]),
+            bus=bus,
+            clock=ManualClock(),
+            connect=connection.connect,
         )
         await feed.start()
         with pytest.raises(ExceptionGroup) as raised:
@@ -600,14 +594,11 @@ def _drive_contract(
         bus.subscribe(MarkTick, count)
         connection = FakeWsConnection(frames)
 
-        async def connect(url: str) -> FakeWsConnection:
-            return connection
-
         feed = HyperliquidFeed(
             config=HyperliquidConfig(symbols=symbols),
             bus=bus,
             clock=ManualClock(start_ns=4_000),
-            connect=connect,
+            connect=connection.connect,
         )
         await feed.start()
         run = asyncio.create_task(feed.run())
@@ -724,11 +715,11 @@ def test_a_non_finite_tick_figure_is_dropped_not_ticked(figure: str) -> None:
             ]
         )
 
-        async def connect(url: str) -> FakeWsConnection:
-            return connection
-
         feed = HyperliquidFeed(
-            config=HyperliquidConfig(symbols=["BTC"]), bus=bus, clock=clock, connect=connect
+            config=HyperliquidConfig(symbols=["BTC"]),
+            bus=bus,
+            clock=clock,
+            connect=connection.connect,
         )
         with capture_events() as logs:
             await feed.start()
@@ -783,11 +774,11 @@ def test_a_re_typed_tick_figure_is_dropped_not_coerced(figure: object) -> None:
             ]
         )
 
-        async def connect(url: str) -> FakeWsConnection:
-            return connection
-
         feed = HyperliquidFeed(
-            config=HyperliquidConfig(symbols=["BTC"]), bus=bus, clock=clock, connect=connect
+            config=HyperliquidConfig(symbols=["BTC"]),
+            bus=bus,
+            clock=clock,
+            connect=connection.connect,
         )
         with capture_events() as logs:
             await feed.start()
@@ -830,11 +821,11 @@ def test_malformed_frames_are_skipped_and_named_while_good_frames_keep_flowing()
             ]
         )
 
-        async def connect(url: str) -> FakeWsConnection:
-            return connection
-
         feed = HyperliquidFeed(
-            config=HyperliquidConfig(symbols=["BTC"]), bus=bus, clock=clock, connect=connect
+            config=HyperliquidConfig(symbols=["BTC"]),
+            bus=bus,
+            clock=clock,
+            connect=connection.connect,
         )
         with capture_events() as logs:
             await feed.start()

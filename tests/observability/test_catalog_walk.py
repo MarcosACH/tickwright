@@ -736,11 +736,11 @@ def _drive_feed_lagged() -> None:
             ]
         )
 
-        async def connect(url: str) -> FakeWsConnection:
-            return connection
-
         feed = HyperliquidFeed(
-            config=HyperliquidConfig(symbols=["BTC"]), bus=bus, clock=clock, connect=connect
+            config=HyperliquidConfig(symbols=["BTC"]),
+            bus=bus,
+            clock=clock,
+            connect=connection.connect,
         )
         await feed.start()
         run = asyncio.create_task(feed.run())
@@ -776,11 +776,11 @@ def _drive_feed_frame_dropped() -> None:
             ]
         )
 
-        async def connect(url: str) -> FakeWsConnection:
-            return connection
-
         feed = HyperliquidFeed(
-            config=HyperliquidConfig(symbols=["BTC"]), bus=bus, clock=clock, connect=connect
+            config=HyperliquidConfig(symbols=["BTC"]),
+            bus=bus,
+            clock=clock,
+            connect=connection.connect,
         )
         await feed.start()
         run = asyncio.create_task(feed.run())

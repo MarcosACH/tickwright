@@ -128,6 +128,12 @@ class FakeWsConnection:
         """
         return self._closed.is_set()
 
+    async def connect(self, url: str) -> "FakeWsConnection":
+        """This socket as the ``connect`` an adapter takes: the venue answers
+        every open with it. For a test about the frames, not the connects.
+        A test counting or refusing connects still writes its own."""
+        return self
+
     async def send(self, message: str) -> None:
         self.sent.append(message)
 

@@ -231,10 +231,7 @@ def _ingest(frames: list[str], *, until: int) -> tuple[list[FundingAccrual], Fak
         bus.subscribe(FundingAccrual, record)
         connection = FakeWsConnection(frames)
 
-        async def connect(url: str) -> FakeWsConnection:
-            return connection
-
-        exchange = make_exchange(aligned_venue(), bus=bus, clock=clock, connect=connect)
+        exchange = make_exchange(aligned_venue(), bus=bus, clock=clock, connect=connection.connect)
         await exchange.start()
         async with asyncio.TaskGroup() as tg:
             running = tg.create_task(exchange.run())
@@ -307,10 +304,7 @@ def _ingest_refusing(frames: list[str]) -> str:
         clock = ManualClock(start_ns=7)
         connection = FakeWsConnection(frames)
 
-        async def connect(url: str) -> FakeWsConnection:
-            return connection
-
-        exchange = make_exchange(aligned_venue(), bus=bus, clock=clock, connect=connect)
+        exchange = make_exchange(aligned_venue(), bus=bus, clock=clock, connect=connection.connect)
         await exchange.start()
         await asyncio.wait_for(exchange.run(), timeout=2)
 
@@ -642,10 +636,7 @@ def _ingest_into_ledger(
         bus.subscribe(FundingAccrual, book)
         connection = FakeWsConnection(frames)
 
-        async def connect(url: str) -> FakeWsConnection:
-            return connection
-
-        exchange = make_exchange(aligned_venue(), bus=bus, clock=clock, connect=connect)
+        exchange = make_exchange(aligned_venue(), bus=bus, clock=clock, connect=connection.connect)
         await exchange.start()
         async with asyncio.TaskGroup() as tg:
             running = tg.create_task(exchange.run())
