@@ -123,22 +123,46 @@ async def _until(condition: Callable[[], bool]) -> None:
     await asyncio.wait_for(poll(), timeout=5)
 
 
-def _run(config: AppConfig) -> Portfolio:
-    """One graceful life: build, run until the mark lands, stop."""
+def _funded(funding: Decimal) -> Callable[[Portfolio], bool]:
+    """The book has settled ``funding`` and holds a mark: the scenario has landed."""
+
+    def settled(portfolio: Portfolio) -> bool:
+        view = portfolio.position("BTC")
+        return view is not None and view.funding == funding and view.unrealized_pnl is not None
+
+    return settled
+
+
+_SCENARIO_LANDED = _funded(EXPECTED_FUNDING)
+
+
+def _run(
+    config: AppConfig,
+    *,
+    settled: Callable[[Portfolio], bool] = _SCENARIO_LANDED,
+    crash: bool = False,
+) -> Portfolio:
+    """One life: build, run until ``settled``, then stop gracefully or crash.
+
+    ``crash`` cancels the run instead of asking it to stop. Nothing is torn
+    down, which is what a killed process leaves behind for the next life.
+    """
     engine = build_engine(config)
     portfolio = engine.portfolio_for("demo")
 
-    def marked() -> bool:
-        view = portfolio.position("BTC")
-        return view is not None and view.funding != 0 and view.unrealized_pnl is not None
-
-    async def life() -> int:
+    async def life() -> int | None:
         run = asyncio.create_task(engine.run())
-        await _until(marked)
+        await _until(lambda: settled(portfolio))
+        if crash:
+            run.cancel()
+            await asyncio.gather(run, return_exceptions=True)
+            return None
         await engine.stop()
         return await run
 
-    assert asyncio.run(life()) == 0
+    exit_code = asyncio.run(life())
+    if not crash:
+        assert exit_code == 0
     return portfolio
 
 
@@ -195,5 +219,59 @@ def _durable_rows(config: AppConfig) -> tuple[list[Position], Decimal | None, in
             account.cash if account is not None else None,
             store.funding_mark("BTC"),
         )
+    finally:
+        store.close()
+
+
+# Life 2 replays the second row again and one row past the second hourly
+# boundary. The first epoch is already on the watermark, so it must be dropped.
+# The second settles at the last trade before it (42100).
+SECOND_LIFE_ROWS = [
+    ROWS[1],
+    {
+        "symbol": "BTC",
+        "price": "42200",
+        "size": "3",
+        "aggressor_side": "buy",
+        "trade_id": "c",
+        "ts_event": 2 * HOUR_NS + 1_000,
+    },
+]
+# second epoch = -(0.5 * 42100 * 0.0001) = -2.105
+# funding line after both epochs = -2.1 - 2.105
+EXPECTED_FUNDING_AFTER_RESTART = Decimal("-4.205")
+# cash after both epochs = 2988.45 - 2.105
+EXPECTED_CASH_AFTER_RESTART = Decimal("2986.345")
+
+
+def test_a_killed_run_restarts_onto_the_same_book_without_double_counting(
+    tmp_path: Path,
+) -> None:
+    """ADR-0043 section 6: ledger recovery restores every Tier-1 line and the
+    watermark. The barrier then heals nothing for a filled order, and a funding
+    epoch already on the watermark is dropped rather than paid twice."""
+    _run(_config(tmp_path), crash=True)
+
+    second = tmp_path / "second.jsonl"
+    second.write_text("\n".join(json.dumps(r) for r in SECOND_LIFE_ROWS) + "\n")
+    # No strategy on the second life: the single shot fires once per process,
+    # so the book it holds must come back from the ledger, not from a new fill.
+    restarted = _run(
+        _config(tmp_path, replay=ReplayFeedConfig(path=second), strategies=[], leverage={}),
+        settled=_funded(EXPECTED_FUNDING_AFTER_RESTART),
+    )
+
+    position = restarted.position("BTC")
+    assert position is not None
+    assert position.size == QUANTITY
+    assert position.entry_price == FILL_PRICE
+    assert position.fees == EXPECTED_FEE
+    assert position.funding == EXPECTED_FUNDING_AFTER_RESTART
+    assert restarted.account().cash == EXPECTED_CASH_AFTER_RESTART
+
+    store = build_store(_config(tmp_path))
+    try:
+        assert store.funding_mark("BTC") == 2 * HOUR_NS
+        assert [p.signed_size for p in store.all_positions()] == [QUANTITY]
     finally:
         store.close()
