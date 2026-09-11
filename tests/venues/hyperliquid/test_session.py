@@ -64,8 +64,11 @@ def _connector(
 def _drive(
     outcomes: list[FakeWsConnection | Exception], *, until_frames: int
 ) -> tuple[_Driver, RecordingClock, list[str]]:
-    """Run a session over ``outcomes`` until ``until_frames`` frames are read,
-    then stop it and wait the loop out."""
+    """Boot a session on the first of ``outcomes``, run it until ``until_frames``
+    frames are read, then stop it and wait the loop out.
+
+    ``start()`` opens the first socket, as both adapters do at boot, so the
+    first outcome has to be a connection. Refusals belong to the reconnects."""
     driver = _Driver()
     clock = RecordingClock()
     connect, asked = _connector(outcomes)
@@ -78,6 +81,7 @@ def _drive(
             subscribe=driver.subscribe,
             consume=driver.consume,
         )
+        await session.start()
         running = asyncio.create_task(session.run())
         while len(driver.consumed) < until_frames:
             await asyncio.sleep(0)
@@ -108,20 +112,25 @@ def test_a_dropped_socket_reconnects_and_resubscribes_the_new_one() -> None:
     assert clock.sleeps == [1.0]
 
 
-def test_a_refused_connect_paces_the_retry_and_doubles_until_one_lands() -> None:
+def test_a_refused_reconnect_paces_the_retry_and_doubles_until_one_lands() -> None:
     """A venue that is down must not be hammered: the delay doubles from the
     configured initial toward the cap, slept on the injected clock (ADR-0021).
+
+    The refusals are reconnects, after a socket the boot opened has dropped.
+    A refused *first* connect is the boot's to fail, not this loop's to pace.
     """
-    landed = FakeWsConnection(["frame-1"])
+    first = FakeWsConnection(["frame-1"], drop_when_drained=True)
+    landed = FakeWsConnection(["frame-2"])
 
     driver, clock, asked = _drive(
-        [ConnectionRefusedError("down"), ConnectionRefusedError("still down"), landed],
-        until_frames=1,
+        [first, ConnectionRefusedError("down"), ConnectionRefusedError("still down"), landed],
+        until_frames=2,
     )
 
-    assert driver.consumed == ["frame-1"]
-    assert len(asked) == 3
-    assert clock.sleeps == [1.0, 2.0]
+    assert driver.consumed == ["frame-1", "frame-2"]
+    assert len(asked) == 4
+    # One hangup and two refusals, each paced on the same doubling delay.
+    assert clock.sleeps == [1.0, 2.0, 4.0]
 
 
 def test_a_good_connection_resets_the_pacing_so_a_later_outage_starts_over() -> None:
@@ -219,6 +228,40 @@ def test_a_session_that_started_but_never_ran_still_closes_its_socket() -> None:
     assert connection.closed, "a socket opened by start() and never run must still be released"
 
 
+def test_a_run_without_a_start_refuses_rather_than_opening_its_own_socket() -> None:
+    """The first socket is ``start()``'s, and ``run()`` does not open one for it.
+
+    #300 was a caller that skipped ``start()``. Its first connect then happened
+    inside ``run()``, where a refusal is paced and retried, so a venue that
+    refused the socket left the engine ``RUNNING`` and ingesting nothing. A
+    docstring said which caller may skip the boot. Now the session says it: a
+    ``run()`` with no socket handed over refuses before it connects, so a third
+    subscription cannot opt out by not writing the line.
+
+    The reconnect path is untouched. Every turn after the first opens its own
+    socket, which ``test_a_reconnect_never_reuses_the_socket_the_boot_handed_over``
+    pins. And a session stopped before it ever started still returns at once,
+    which the teardown after a faulted boot relies on.
+    """
+    connect, asked = _connector([FakeWsConnection([])])
+    clock = RecordingClock()
+
+    async def main() -> None:
+        session = WsSession(
+            config=CONFIG,
+            clock=clock,
+            connect=connect,  # type: ignore[arg-type]
+            subscribe=_Driver().subscribe,
+            consume=_Driver().consume,
+        )
+        await asyncio.wait_for(session.run(), timeout=2)
+
+    with pytest.raises(RuntimeError, match="before start"):
+        asyncio.run(main())
+    assert asked == [], "run() must not open the boot socket itself"
+    assert clock.sleeps == [], "and must not pace a retry either"
+
+
 def test_a_reconnect_never_reuses_the_socket_the_boot_handed_over() -> None:
     """The handoff slot is *taken*, not read (#227).
 
@@ -301,6 +344,7 @@ def test_a_consumer_that_raises_faults_the_run_rather_than_reconnecting() -> Non
             subscribe=subscribe,
             consume=consume,
         )
+        await session.start()
         await asyncio.wait_for(session.run(), timeout=2)
 
     with pytest.raises(RuntimeError, match="cannot represent"):

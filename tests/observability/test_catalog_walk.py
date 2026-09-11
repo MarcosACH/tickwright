@@ -742,6 +742,7 @@ def _drive_feed_lagged() -> None:
         feed = HyperliquidFeed(
             config=HyperliquidConfig(symbols=["BTC"]), bus=bus, clock=clock, connect=connect
         )
+        await feed.start()
         run = asyncio.create_task(feed.run())
         await stalled.wait()
         # While the first publish is stuck, 42001 lands unpublished and 42002
@@ -781,6 +782,7 @@ def _drive_feed_frame_dropped() -> None:
         feed = HyperliquidFeed(
             config=HyperliquidConfig(symbols=["BTC"]), bus=bus, clock=clock, connect=connect
         )
+        await feed.start()
         run = asyncio.create_task(feed.run())
         await ticked.wait()  # the good frame landed → the feed survived the bad one
         await feed.stop()

@@ -63,6 +63,17 @@ def make_exchange(
     )
 
 
+def aligned_venue() -> FakeExchangeApi:
+    """A venue ``start()`` finds already aligned, so the boot reaches the
+    funding socket.
+
+    The mode gate reads ``userAbstraction`` and the leverage push sends nothing
+    for an empty book, so this one answer is the whole boot ahead of the socket.
+    Fresh per call, because the fake records every request it was asked.
+    """
+    return FakeExchangeApi({"userAbstraction": "disabled"})
+
+
 def funding(*, time_ms: int, coin: str, usdc: str, szi: str = "1", rate: str = "0.0000417") -> dict:
     """One `WsUserFunding` record, the venue's flat per-payment shape."""
     return {"time": time_ms, "coin": coin, "usdc": usdc, "szi": szi, "fundingRate": rate}
@@ -223,7 +234,8 @@ def _ingest(frames: list[str], *, until: int) -> tuple[list[FundingAccrual], Fak
         async def connect(url: str) -> FakeWsConnection:
             return connection
 
-        exchange = make_exchange(FakeExchangeApi({}), bus=bus, clock=clock, connect=connect)
+        exchange = make_exchange(aligned_venue(), bus=bus, clock=clock, connect=connect)
+        await exchange.start()
         async with asyncio.TaskGroup() as tg:
             running = tg.create_task(exchange.run())
             await asyncio.wait_for(enough.wait(), timeout=2)
@@ -298,7 +310,8 @@ def _ingest_refusing(frames: list[str]) -> str:
         async def connect(url: str) -> FakeWsConnection:
             return connection
 
-        exchange = make_exchange(FakeExchangeApi({}), bus=bus, clock=clock, connect=connect)
+        exchange = make_exchange(aligned_venue(), bus=bus, clock=clock, connect=connect)
+        await exchange.start()
         await asyncio.wait_for(exchange.run(), timeout=2)
 
     with pytest.raises(VenueFactUnsupported) as raised:
@@ -441,7 +454,8 @@ def test_a_dropped_socket_resubscribes_and_the_re_delivered_snapshot_heals_the_g
         async def connect(url: str) -> FakeWsConnection:
             return sockets.pop(0)
 
-        exchange = make_exchange(FakeExchangeApi({}), bus=bus, clock=clock, connect=connect)
+        exchange = make_exchange(aligned_venue(), bus=bus, clock=clock, connect=connect)
+        await exchange.start()
         async with asyncio.TaskGroup() as tg:
             running = tg.create_task(exchange.run())
             await asyncio.wait_for(enough.wait(), timeout=2)
@@ -485,7 +499,7 @@ def test_a_first_connect_the_venue_refuses_faults_the_boot_rather_than_backing_o
             raise ConnectionRefusedError("connection refused")
 
         exchange = make_exchange(
-            FakeExchangeApi({"userAbstraction": "disabled"}),
+            aligned_venue(),
             bus=InMemoryBus(),
             clock=clock,
             connect=connect,
@@ -533,7 +547,7 @@ def test_run_consumes_the_socket_start_opened_rather_than_opening_a_second() -> 
             return connection
 
         exchange = make_exchange(
-            FakeExchangeApi({"userAbstraction": "disabled"}),
+            aligned_venue(),
             bus=bus,
             clock=ManualClock(),
             connect=connect,
@@ -631,7 +645,8 @@ def _ingest_into_ledger(
         async def connect(url: str) -> FakeWsConnection:
             return connection
 
-        exchange = make_exchange(FakeExchangeApi({}), bus=bus, clock=clock, connect=connect)
+        exchange = make_exchange(aligned_venue(), bus=bus, clock=clock, connect=connect)
+        await exchange.start()
         async with asyncio.TaskGroup() as tg:
             running = tg.create_task(exchange.run())
             await asyncio.wait_for(enough.wait(), timeout=2)

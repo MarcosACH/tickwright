@@ -77,8 +77,8 @@ class WsSession:
 
         The socket it opens is handed to ``run()`` rather than consumed here, so
         a caller that starts and never runs holds an idle subscribed socket that
-        ``stop()`` still closes. A ``run()`` without a ``start()`` still works
-        and opens its own socket, which is what the reconnect path relies on.
+        ``stop()`` still closes. A ``run()`` without a ``start()`` refuses, so
+        no caller can skip the boot by not writing the line.
         """
         connection = await self._connect(self._config.ws_url)
         self._connection = connection
@@ -92,7 +92,16 @@ class WsSession:
         is the property both adapters' supervised tasks rest on (ADR-0024): a
         task that completed on its own would leave the engine ``RUNNING`` with
         nothing arriving.
+
+        Raises ``RuntimeError`` if ``start()`` never handed a socket over. The
+        first connect is the boot's, where a refusal is an error. Opened here
+        it would be paced and retried instead, and that is #300: a caller that
+        skipped ``start()`` ran forever behind a ``RUNNING`` engine, ingesting
+        nothing. A session stopped before it started has no boot to refuse and
+        returns at once, which the teardown after a faulted boot relies on.
         """
+        if self._opened is None and not self._stopping:
+            raise RuntimeError("WsSession.run() before start(): the first socket is the boot's")
         backoff = Backoff(
             initial=self._config.reconnect_initial_backoff_seconds,
             maximum=self._config.reconnect_max_backoff_seconds,
