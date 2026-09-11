@@ -321,7 +321,18 @@ is reached through `run()`. That is still where it is read. It is now *opened* b
 refused connect inside `run()` is paced and retried, which is right for a reconnect. At boot it
 meant the engine reached `RUNNING` and ingested no funding for the life of the process, with
 nothing raised. Now the refusal propagates and faults the boot. `WsSession.start()` is no longer
-optional per caller. Both adapters call it.**)**
+optional per caller. Both adapters call it, and `WsSession.run()` refuses to open a first socket
+of its own, so a third subscription cannot skip the boot by not writing the line.
+
+Two things this block has to say that the feed's version did not. First, the socket sits
+subscribed and unread from step 4 until the runner task-creates `run()` after step 6, across the
+barrier. ADR-0024 keeps the feed's
+connect at step 7 so no tick buffers across it, because a buffered tick is stale. That reason
+does not reach funding. A payment is a fact, not a quote, and the watermark (ADR-0043 §5.2)
+drops any the ledger already holds, so a frame that waited is applied exactly as a frame that did
+not. Second, the connect is one attempt with no retry, bounded by `WS_OPEN_TIMEOUT_SECONDS` and
+spending nothing from the `Deadline` the two guards share (ADR-0044 §6). That is the feed's
+policy at step 7, applied at step 4, and it leaves the two-window ceiling above as it was.**)**
 
 ---
 
