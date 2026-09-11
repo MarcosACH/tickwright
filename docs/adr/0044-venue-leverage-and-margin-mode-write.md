@@ -368,6 +368,11 @@ venue's sentence **unclassified** — all three strings tabled above are already
 thing anyone could say, and a taxonomy over them would be a second encoding of a venue fact, free to
 fall behind the strings it matches on.**)**
 
+**(A third spender since [#300](https://github.com/MarcosACH/tickwright/issues/300):** the
+`userFundings` connect now runs at the end of the same `start()`, on the same deadline and under
+the same `until_deadline` rule as the two guards. A refusal that outlives the budget is
+`VenueSubscriptionUnreachable`. The decision and its reasons live in ADR-0024 step 4.**)**
+
 ## 7. The seam: `Exchange.start()`, at ADR-0024 step 4
 
 The `Exchange` Protocol gains **`async def start(self) -> None`**, called by
