@@ -290,6 +290,22 @@ def restore_account(row: Sequence[Any]) -> Account:
     )
 
 
+# The strategy snapshot row (ADR-0016): opaque bytes per strategy, latest wins.
+SNAPSHOT_COLUMNS: tuple[str, ...] = ("strategy_id", "data", "ts_ns")
+
+SNAPSHOT_KEY_COLUMNS: tuple[str, ...] = ("strategy_id",)
+
+SNAPSHOT_UPDATE_COLUMNS: tuple[str, ...] = ("data", "ts_ns")
+
+# The kill-switch row (ADR-0026): single by ``CHECK (id = 1)``, like the
+# account, so ``id`` is a literal in the statement here too.
+KILL_SWITCH_COLUMNS: tuple[str, ...] = ("tripped", "reason", "ts_ns")
+
+KILL_SWITCH_KEY_COLUMNS: tuple[str, ...] = ("id",)
+
+KILL_SWITCH_UPDATE_COLUMNS: tuple[str, ...] = KILL_SWITCH_COLUMNS
+
+
 _NO_LITERALS: Mapping[str, str] = MappingProxyType({})
 
 
@@ -330,7 +346,7 @@ def _upsert(
 class Upserts:
     """Every durable write the store makes, rendered for one backend's dialect.
 
-    One object rather than four constants per adapter, because the four
+    One object rather than six constants per adapter, because the six
     statements express one decision — what a row is, and which of its columns a
     re-write may move — and that decision has no per-backend half. The adapter
     holds the dialect; this holds the semantics.
@@ -340,10 +356,12 @@ class Upserts:
     account: str
     position: str
     funding_mark: str
+    snapshot: str
+    kill_switch: str
 
 
 def upserts_for(placeholder: str) -> Upserts:
-    """The store's four upserts, parameterized by ``placeholder`` (``?`` / ``%s``).
+    """The store's six upserts, parameterized by ``placeholder`` (``?`` / ``%s``).
 
     That marker is the whole of what used to differ between the two adapters'
     write SQL, which was otherwise transcribed twice from these same tuples. A
@@ -380,5 +398,20 @@ def upserts_for(placeholder: str) -> Upserts:
             key_columns=FUNDING_MARK_KEY_COLUMNS,
             update_columns=FUNDING_MARK_UPDATE_COLUMNS,
             placeholder=placeholder,
+        ),
+        snapshot=_upsert(
+            table="strategy_snapshots",
+            columns=SNAPSHOT_COLUMNS,
+            key_columns=SNAPSHOT_KEY_COLUMNS,
+            update_columns=SNAPSHOT_UPDATE_COLUMNS,
+            placeholder=placeholder,
+        ),
+        kill_switch=_upsert(
+            table="kill_switch",
+            columns=KILL_SWITCH_COLUMNS,
+            key_columns=KILL_SWITCH_KEY_COLUMNS,
+            update_columns=KILL_SWITCH_UPDATE_COLUMNS,
+            placeholder=placeholder,
+            literals={"id": "1"},
         ),
     )
