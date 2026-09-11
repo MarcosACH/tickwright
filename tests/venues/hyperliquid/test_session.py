@@ -228,6 +228,35 @@ def test_a_session_that_started_but_never_ran_still_closes_its_socket() -> None:
     assert connection.closed, "a socket opened by start() and never run must still be released"
 
 
+def test_a_subscribe_that_fails_in_start_closes_the_socket_it_opened() -> None:
+    """``start()`` is retried at boot on the shared deadline (#300), so a
+    connect that landed and a subscribe that then failed is a socket the next
+    attempt would otherwise leave open behind it. The failure still propagates,
+    because the retry is the caller's to pace.
+    """
+    connection = FakeWsConnection([])
+    connect, asked = _connector([connection])
+
+    async def refuse(connection: WsConnection) -> None:
+        raise ConnectionResetError("reset during subscribe")
+
+    async def main() -> None:
+        session = WsSession(
+            config=CONFIG,
+            clock=RecordingClock(),
+            connect=connect,  # type: ignore[arg-type]
+            subscribe=refuse,
+            consume=_Driver().consume,
+        )
+        with pytest.raises(ConnectionResetError):
+            await session.start()
+
+    asyncio.run(main())
+
+    assert len(asked) == 1
+    assert connection.closed, "a socket whose subscribe failed must not outlive the attempt"
+
+
 def test_a_run_without_a_start_refuses_rather_than_opening_its_own_socket() -> None:
     """The first socket is ``start()``'s, and ``run()`` does not open one for it.
 

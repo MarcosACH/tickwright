@@ -73,7 +73,9 @@ class WsSession:
         to be an error rather than a retry: inside ``run()`` the same failure
         is paced and gone round again, which is right for a reconnect and wrong
         for a boot (#226, #300). ``OSError`` propagates untouched — the whole
-        point is that someone above can see it.
+        point is that someone above can see it, and pace a retry on the boot's
+        own budget. A socket whose subscribe failed is closed before the raise,
+        so that retry never leaves one open behind it.
 
         The socket it opens is handed to ``run()`` rather than consumed here, so
         a caller that starts and never runs holds an idle subscribed socket that
@@ -82,7 +84,15 @@ class WsSession:
         """
         connection = await self._connect(self._config.ws_url)
         self._connection = connection
-        await self._subscribe(connection)
+        try:
+            await self._subscribe(connection)
+        except BaseException:
+            # The boot retries a failed start() on its deadline (#300), so a
+            # socket that connected but never subscribed must not outlive the
+            # attempt that opened it.
+            self._connection = None
+            await connection.close()
+            raise
         self._opened = connection
 
     async def run(self) -> None:
