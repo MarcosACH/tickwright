@@ -34,6 +34,7 @@ from tickwright.domain import (
     Portfolio,
     Position,
     Side,
+    StoreAccountMismatch,
 )
 from tickwright.observability.testing import capture_events
 
@@ -287,12 +288,12 @@ def test_a_killed_run_restarts_onto_the_same_book_without_double_counting(
         store.close()
 
 
-def _refused(config: AppConfig) -> str:
+def _refused(config: AppConfig) -> StoreAccountMismatch:
     """Run ``config`` and return the fault that stopped it before the feed started.
 
-    ``engine.run`` never raises. It faults, returns non-zero for the supervisor,
-    and names the cause once on the trail. The trail is the only place the
-    reason is legible, so that is what a refusal test reads.
+    ``engine.run`` never raises. It faults and returns non-zero for the
+    supervisor. The exception itself stays on ``engine.fault``, so a refusal
+    test reads the type and the message there rather than off the trail.
     """
     engine = build_engine(config)
     with capture_events() as logs:
@@ -301,9 +302,9 @@ def _refused(config: AppConfig) -> str:
     assert exit_code != 0
     assert engine.state is ComponentState.FAULTED
     assert [log for log in logs if log["event"] == "engine.feed_started"] == []
-    faults = [log for log in logs if log["event"] == "engine.faulted"]
-    assert len(faults) == 1
-    return str(faults[0]["error"])
+    fault = engine.fault
+    assert isinstance(fault, StoreAccountMismatch)
+    return fault
 
 
 def test_a_changed_genesis_on_the_second_life_is_refused(tmp_path: Path) -> None:
@@ -323,10 +324,9 @@ def test_a_changed_genesis_on_the_second_life_is_refused(tmp_path: Path) -> None
         )
     )
 
-    assert "StoreAccountMismatch" in error
-    assert "genesis_collateral" in error
-    assert str(GENESIS) in error
-    assert str(GENESIS * 2) in error
+    assert "genesis_collateral" in str(error)
+    assert str(GENESIS) in str(error)
+    assert str(GENESIS * 2) in str(error)
 
 
 def test_a_changed_account_label_on_the_second_life_is_refused(tmp_path: Path) -> None:
@@ -347,10 +347,9 @@ def test_a_changed_account_label_on_the_second_life_is_refused(tmp_path: Path) -
         )
     )
 
-    assert "StoreAccountMismatch" in error
-    assert "account_id" in error
-    assert "paper-default" in error
-    assert "paper-other" in error
+    assert "account_id" in str(error)
+    assert "paper-default" in str(error)
+    assert "paper-other" in str(error)
 
 
 def test_a_store_with_orders_but_no_ledger_is_refused(tmp_path: Path) -> None:
@@ -365,9 +364,8 @@ def test_a_store_with_orders_but_no_ledger_is_refused(tmp_path: Path) -> None:
 
     error = _refused(_config(tmp_path, strategies=[], leverage={}))
 
-    assert "StoreAccountMismatch" in error
-    assert "no ledger" in error
-    assert "fresh store" in error
+    assert "no ledger" in str(error)
+    assert "fresh store" in str(error)
 
 
 def _marked_past_the_boundary(portfolio: Portfolio) -> bool:
