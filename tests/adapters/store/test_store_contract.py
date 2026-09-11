@@ -308,6 +308,17 @@ def test_kill_switch_round_trips_and_is_none_until_written(store_backend: Backen
         assert state.reason == "drawdown"
         assert state.ts_ns == 1_000
 
+        # The reset is the second write onto the single row, so it is the one
+        # that proves the upsert overwrites rather than refusing the collision.
+        reopened.save_kill_switch(tripped=False, reason=None, ts_ns=2_000)
+
+    with store_backend.open() as reset:
+        state = reset.load_kill_switch()
+        assert state is not None
+        assert state.tripped is False
+        assert state.reason is None
+        assert state.ts_ns == 2_000
+
 
 def test_account_round_trips_and_is_none_until_checkpointed(store_backend: Backend) -> None:
     """``None`` is the live-first-run / paper-seed-genesis state (ADR-0043 §9), and
