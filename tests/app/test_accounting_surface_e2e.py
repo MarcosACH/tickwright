@@ -133,11 +133,11 @@ async def _until(condition: Callable[[], bool]) -> None:
     await asyncio.wait_for(poll(), timeout=5)
 
 
-def _funded(funding: Decimal) -> Callable[[Portfolio], bool]:
+def _funded(funding: Decimal, symbol: str = "BTC") -> Callable[[Portfolio], bool]:
     """The book has settled ``funding`` and holds a mark: the scenario has landed."""
 
     def settled(portfolio: Portfolio) -> bool:
-        view = portfolio.position("BTC")
+        view = portfolio.position(symbol)
         return view is not None and view.funding == funding and view.unrealized_pnl is not None
 
     return settled
@@ -368,3 +368,103 @@ def test_a_store_with_orders_but_no_ledger_is_refused(tmp_path: Path) -> None:
     assert "StoreAccountMismatch" in error
     assert "no ledger" in error
     assert "fresh store" in error
+
+
+ETH_SPEC = InstrumentSpec(
+    symbol="ETH",
+    sz_decimals=2,
+    max_decimals=6,
+    min_notional=Decimal("10"),
+    taker_fee=Decimal("0.00045"),
+    funding_rate=Decimal("0.0001"),
+    max_leverage=50,
+    margin_maint=Decimal("0.01"),
+)
+ETH_QUANTITY = Decimal("2")
+# The ETH rows interleave with the BTC ones: a fill before the boundary and a
+# mark past it, so both books settle one epoch and hold a mark.
+TWO_SYMBOL_ROWS = [
+    ROWS[0],
+    {
+        "symbol": "ETH",
+        "price": "2500",
+        "size": "10",
+        "aggressor_side": "sell",
+        "trade_id": "e1",
+        "ts_event": 1_500,
+    },
+    ROWS[1],
+    {
+        "symbol": "ETH",
+        "price": "2520",
+        "size": "10",
+        "aggressor_side": "buy",
+        "trade_id": "e2",
+        "ts_event": HOUR_NS + 1_500,
+    },
+]
+# ETH funding = -(-2 * 2500 * 0.0001), received by the short
+EXPECTED_ETH_FUNDING = Decimal("0.5")
+
+
+def test_two_strategies_partition_the_book_and_sum_to_the_account_net(tmp_path: Path) -> None:
+    """ADR-0034 and ADR-0041 section 8: the ledger is partitioned by strategy,
+    every fill lands in the partition that placed it, and the per-strategy sizes
+    sum to the account net the venue holds. Nothing falls into the reserved
+    unattributed partition on the paper path."""
+    ticks = tmp_path / "two.jsonl"
+    ticks.write_text("\n".join(json.dumps(r) for r in TWO_SYMBOL_ROWS) + "\n")
+    config = _config(
+        tmp_path,
+        replay=ReplayFeedConfig(path=ticks),
+        paper=PaperExchangeConfig(
+            instrument_specs={"BTC": SPEC, "ETH": ETH_SPEC}, genesis_collateral=GENESIS
+        ),
+        leverage={"BTC": LEVERAGE, "ETH": LEVERAGE},
+        strategies=[
+            StrategyConfig(
+                kind="single_shot_market",
+                strategy_id="demo",
+                symbol="BTC",
+                side=Side.BUY,
+                quantity=QUANTITY,
+            ),
+            StrategyConfig(
+                kind="single_shot_market",
+                strategy_id="hedge",
+                symbol="ETH",
+                side=Side.SELL,
+                quantity=ETH_QUANTITY,
+            ),
+        ],
+    )
+    engine = build_engine(config)
+    demo = engine.portfolio_for("demo")
+    hedge = engine.portfolio_for("hedge")
+
+    async def life() -> int:
+        run = asyncio.create_task(engine.run())
+        eth_landed = _funded(EXPECTED_ETH_FUNDING, "ETH")
+        await _until(lambda: _SCENARIO_LANDED(demo) and eth_landed(hedge))
+        await engine.stop()
+        return await run
+
+    assert asyncio.run(life()) == 0
+
+    assert [p.symbol for p in demo.open_positions()] == ["BTC"]
+    assert [p.symbol for p in hedge.open_positions()] == ["ETH"]
+    btc = demo.position("BTC")
+    eth = hedge.position("ETH")
+    assert btc is not None and btc.size == QUANTITY
+    assert eth is not None and eth.size == -ETH_QUANTITY
+    assert engine.portfolio.account_net() == {"BTC": QUANTITY, "ETH": -ETH_QUANTITY}
+    assert engine.portfolio.open_positions(strategy_id=None) == ()
+
+    store = build_store(config)
+    try:
+        assert sorted((p.strategy_id, p.symbol) for p in store.all_positions()) == [
+            ("demo", "BTC"),
+            ("hedge", "ETH"),
+        ]
+    finally:
+        store.close()
