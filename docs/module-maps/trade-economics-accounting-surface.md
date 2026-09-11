@@ -313,6 +313,16 @@ The **frame policy widened to the frame grain**: a `userFundings` frame whose bo
 
 And the **USDC-only rule is stated once**, in `reading.refuse_non_usdc`. The two detections differ and stay with their grains — a fill has a `feeToken` to compare, a funding record's denomination is the key's own name — but the reason, the exception and the operator's sentence are shared rather than restated in a second `_settled_in_usdc` of the same name in the same package.**)**
 
+**(The funding socket is opened at boot, not inside `run()`
+([#300](https://github.com/MarcosACH/tickwright/issues/300)).** The block above says the ingest
+is reached through `run()`. That is still where it is read. It is now *opened* by
+`HyperliquidExchange.start()`, after the mode gate and the leverage push, through
+`FundingIngest.start()` and `WsSession.start()`. The reason is the one #227 gave the feed. A
+refused connect inside `run()` is paced and retried, which is right for a reconnect. At boot it
+meant the engine reached `RUNNING` and ingested no funding for the life of the process, with
+nothing raised. Now the refusal propagates and faults the boot. `WsSession.start()` is no longer
+optional per caller. Both adapters call it.**)**
+
 ---
 
 ### strategies (`strategies/single_shot.py`)

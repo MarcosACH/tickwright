@@ -497,6 +497,10 @@ def test_a_first_connect_the_venue_refuses_faults_the_boot_rather_than_backing_o
         assert connects == 1, "start() must refuse the first connect, not retry it"
         assert clock.timestamp_ns() == 0, "a paced retry would have moved virtual time"
 
+        # The boot's own cleanup still runs on the fault path (`_stop_exchange`),
+        # and a session that never opened a socket has nothing to close.
+        await exchange.stop()
+
     asyncio.run(main())
 
 
