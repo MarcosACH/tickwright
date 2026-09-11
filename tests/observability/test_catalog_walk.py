@@ -22,6 +22,7 @@ from hyperliquid_fakes import (
     TEST_SIGNING_KEY,
     FakeExchangeApi,
     FakeWsConnection,
+    idle_ws,
     trade,
     trades_frame,
 )
@@ -578,6 +579,8 @@ def _drive_exchange_leverage_unchanged() -> None:
             clock=ManualClock(),
             universe=HyperliquidUniverse(specs={"BTC": _SPEC}, asset_indices={"BTC": 0}),
             startup_timeout_seconds=60.0,
+            # ``start()`` also opens the funding socket (#300), not this walk's.
+            connect=idle_ws,
             post=FakeExchangeApi(
                 {
                     "userAbstraction": "disabled",

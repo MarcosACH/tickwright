@@ -151,6 +151,16 @@ class FakeWsConnection:
         raise StopAsyncIteration
 
 
+async def idle_ws(url: str) -> FakeWsConnection:
+    """A ``connect`` that answers with a socket carrying no frames.
+
+    For a test that boots the live exchange but is not about its funding
+    socket: ``start()`` opens ``userFundings`` (#300), so without this the
+    default ``connect`` would reach the real venue from inside the suite.
+    """
+    return FakeWsConnection([])
+
+
 def trades_frame(*trades: dict) -> str:
     """One ``trades``-channel frame carrying ``trades`` (the venue batches)."""
     return json.dumps({"channel": "trades", "data": list(trades)})

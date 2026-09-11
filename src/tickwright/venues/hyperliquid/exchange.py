@@ -135,9 +135,10 @@ class HyperliquidExchange:
         )
 
     async def start(self) -> None:
-        """Nothing to connect — placement is request-scoped HTTP and the tick
-        subscription is wired at construction — but the venue alignment this
-        step exists to host, in order.
+        """Align the venue, in order, then open the funding socket.
+
+        Placement is request-scoped HTTP and the tick subscription is wired at
+        construction, so the one thing to connect here is ``userFundings``.
 
         The ``userAbstraction`` mode gate is first and gates everything after it
         (ADR-0046 §3, which opens ADR-0024 step 4): a wrong mode invalidates the
@@ -178,6 +179,12 @@ class HyperliquidExchange:
             clock=self._clock,
             deadline=deadline,
         )
+        # Last, once the venue is aligned: a refused connect propagates and
+        # faults the boot. Inside ``run()`` the same refusal would be paced and
+        # retried forever behind a ``RUNNING`` engine, ingesting nothing (#300).
+        # One attempt with no retry loop, so it spends nothing from the deadline
+        # above.
+        await self._funding.start()
 
     async def run(self) -> None:
         """Ingest the venue's funding payments for as long as the run lives.

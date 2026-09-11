@@ -17,7 +17,7 @@ import asyncio
 from decimal import Decimal
 
 import pytest
-from hyperliquid_fakes import TEST_SIGNING_KEY, FakeExchangeApi, request_type
+from hyperliquid_fakes import TEST_SIGNING_KEY, FakeExchangeApi, idle_ws, request_type
 from pydantic import SecretStr
 
 from tickwright.adapters.bus import InMemoryBus
@@ -171,6 +171,9 @@ def _exchange(
         clock=clock if clock is not None else ManualClock(),
         universe=UNIVERSE,
         post=post,
+        # Not under test here: ``start()`` also opens the funding socket (#300),
+        # and this suite is about the HTTP guards ahead of it.
+        connect=idle_ws,
         startup_timeout_seconds=STARTUP_TIMEOUT_SECONDS,
         leverage=leverage,
     )

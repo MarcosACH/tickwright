@@ -463,6 +463,43 @@ def test_a_dropped_socket_resubscribes_and_the_re_delivered_snapshot_heals_the_g
     assert len(dropped.sent) == len(recovered.sent) == 1
 
 
+def test_a_first_connect_the_venue_refuses_faults_the_boot_rather_than_backing_off() -> None:
+    """The funding half of #227's claim, closed for the socket it left open (#300).
+
+    Inside ``run()`` a refused connect is paced and gone round again. That is
+    right for a reconnect. At boot it means no payment can ever arrive, and the
+    engine would reach ``RUNNING`` with nothing raised and nothing named. So
+    ``Exchange.start()`` opens the funding socket and lets the refusal out.
+
+    Two witnesses that the boot never entered the reconnect loop, neither of
+    which is a timeout: one connect was attempted, and virtual time never moved.
+    """
+
+    async def main() -> None:
+        clock = ManualClock()
+        connects = 0
+
+        async def connect(url: str) -> FakeWsConnection:
+            nonlocal connects
+            connects += 1
+            raise ConnectionRefusedError("connection refused")
+
+        exchange = make_exchange(
+            FakeExchangeApi({"userAbstraction": "disabled"}),
+            bus=InMemoryBus(),
+            clock=clock,
+            connect=connect,
+        )
+
+        with pytest.raises(ConnectionRefusedError):
+            await exchange.start()
+
+        assert connects == 1, "start() must refuse the first connect, not retry it"
+        assert clock.timestamp_ns() == 0, "a paced retry would have moved virtual time"
+
+    asyncio.run(main())
+
+
 def test_the_venue_s_own_housekeeping_frames_are_ignored_rather_than_refused() -> None:
     """The other half of the rule, deliberately adjacent to the two above.
 

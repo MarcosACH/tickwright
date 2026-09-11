@@ -157,6 +157,12 @@ class FundingIngest:
             consume=self._read_frames,
         )
 
+    async def start(self) -> None:
+        """Open and subscribe the funding socket now, so a refused connect
+        faults the boot instead of pacing a retry behind a `RUNNING` engine
+        (#300). The socket is handed to `run()`, which consumes it."""
+        await self._session.start()
+
     async def run(self) -> None:
         await self._session.run()
 

@@ -15,7 +15,13 @@ from pathlib import Path
 import pytest
 from eth_account import Account
 from hyperliquid.utils.signing import recover_agent_or_user_from_l1_action
-from hyperliquid_fakes import TEST_SIGNING_KEY, FakeExchangeApi, request_type, resting_response
+from hyperliquid_fakes import (
+    TEST_SIGNING_KEY,
+    FakeExchangeApi,
+    idle_ws,
+    request_type,
+    resting_response,
+)
 from pydantic import SecretStr
 from seam_claims import assert_every_member_is_claimed
 
@@ -75,6 +81,9 @@ def make_exchange(
         clock=clock,
         universe=UNIVERSE,
         post=post,
+        # The funding socket ``start()`` opens (#300). Its frames are
+        # ``test_funding.py``'s business, so here it carries none.
+        connect=idle_ws,
         # ADR-0024's barrier budget, which the boot guards in ``start()`` are
         # bounded by. Only the mode-gate tests in ``test_preflight.py`` spend it.
         startup_timeout_seconds=60.0,
