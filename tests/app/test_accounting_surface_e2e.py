@@ -25,7 +25,15 @@ from tickwright.adapters.paper.funding import HOUR_NS
 from tickwright.adapters.store import PostgresStoreConfig, SQLiteStoreConfig
 from tickwright.app.build import build_engine, build_store
 from tickwright.app.config import AppConfig, StrategyConfig
-from tickwright.domain import InstrumentSpec, LeverageSpec, Portfolio, Position, Side
+from tickwright.domain import (
+    ComponentState,
+    InstrumentSpec,
+    LeverageSpec,
+    Portfolio,
+    Position,
+    Side,
+)
+from tickwright.observability.testing import capture_events
 
 # A small account against a 10x position, so the liquidation price is a real
 # level rather than the ``None`` a well-collateralised long reports.
@@ -275,3 +283,45 @@ def test_a_killed_run_restarts_onto_the_same_book_without_double_counting(
         assert [p.signed_size for p in store.all_positions()] == [QUANTITY]
     finally:
         store.close()
+
+
+def _refused(config: AppConfig) -> str:
+    """Run ``config`` and return the fault that stopped it before the feed started.
+
+    ``engine.run`` never raises. It faults, returns non-zero for the supervisor,
+    and names the cause once on the trail. The trail is the only place the
+    reason is legible, so that is what a refusal test reads.
+    """
+    engine = build_engine(config)
+    with capture_events() as logs:
+        exit_code = asyncio.run(engine.run())
+
+    assert exit_code != 0
+    assert engine.state is ComponentState.FAULTED
+    assert [log for log in logs if log["event"] == "engine.feed_started"] == []
+    faults = [log for log in logs if log["event"] == "engine.faulted"]
+    assert len(faults) == 1
+    return str(faults[0]["error"])
+
+
+def test_a_changed_genesis_on_the_second_life_is_refused(tmp_path: Path) -> None:
+    """ADR-0043 section 10: a store opened at one genesis may not be traded
+    under another. The refusal names the field and both values, so the operator
+    can tell a typo from a swapped store."""
+    _run(_config(tmp_path))
+
+    error = _refused(
+        _config(
+            tmp_path,
+            paper=PaperExchangeConfig(
+                instrument_specs={"BTC": SPEC}, genesis_collateral=GENESIS * 2
+            ),
+            strategies=[],
+            leverage={},
+        )
+    )
+
+    assert "StoreAccountMismatch" in error
+    assert "genesis_collateral" in error
+    assert str(GENESIS) in error
+    assert str(GENESIS * 2) in error
