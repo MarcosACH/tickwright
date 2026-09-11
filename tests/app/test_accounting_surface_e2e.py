@@ -11,17 +11,21 @@ from the code. The arithmetic is spelled out beside each constant.
 
 import asyncio
 import json
+import os
 from collections.abc import Callable
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+from store_backends import POSTGRES_DSN_ENV, resolve_backend
+
 from tickwright.adapters.feed import ReplayFeedConfig
 from tickwright.adapters.paper import PaperExchangeConfig
 from tickwright.adapters.paper.funding import HOUR_NS
-from tickwright.adapters.store import SQLiteStoreConfig
-from tickwright.app.build import build_engine
+from tickwright.adapters.store import PostgresStoreConfig, SQLiteStoreConfig
+from tickwright.app.build import build_engine, build_store
 from tickwright.app.config import AppConfig, StrategyConfig
-from tickwright.domain import InstrumentSpec, LeverageSpec, Portfolio, Side
+from tickwright.domain import InstrumentSpec, LeverageSpec, Portfolio, Position, Side
 
 # A small account against a 10x position, so the liquidation price is a real
 # level rather than the ``None`` a well-collateralised long reports.
@@ -91,13 +95,14 @@ def _write_ticks(path: Path) -> Path:
     return path
 
 
-def _config(tmp_path: Path) -> AppConfig:
-    return AppConfig(
-        replay=ReplayFeedConfig(path=_write_ticks(tmp_path / "ticks.jsonl")),
-        sqlite=SQLiteStoreConfig(path=tmp_path / "ledger.db"),
-        paper=PaperExchangeConfig(instrument_specs={"BTC": SPEC}, genesis_collateral=GENESIS),
-        leverage={"BTC": LEVERAGE},
-        strategies=[
+def _config(tmp_path: Path, **overrides: object) -> AppConfig:
+    """The scenario's config over ``tmp_path``; overrides poke one field."""
+    fields: dict[str, object] = {
+        "replay": ReplayFeedConfig(path=_write_ticks(tmp_path / "ticks.jsonl")),
+        "sqlite": SQLiteStoreConfig(path=tmp_path / "ledger.db"),
+        "paper": PaperExchangeConfig(instrument_specs={"BTC": SPEC}, genesis_collateral=GENESIS),
+        "leverage": {"BTC": LEVERAGE},
+        "strategies": [
             StrategyConfig(
                 kind="single_shot_market",
                 strategy_id="demo",
@@ -106,7 +111,8 @@ def _config(tmp_path: Path) -> AppConfig:
                 quantity=QUANTITY,
             )
         ],
-    )
+    }
+    return AppConfig(**{**fields, **overrides})  # type: ignore[arg-type]
 
 
 async def _until(condition: Callable[[], bool]) -> None:
@@ -159,3 +165,35 @@ def test_one_run_reports_the_hand_computed_book(tmp_path: Path) -> None:
     assert account.free_margin == EXPECTED_FREE_MARGIN
     assert account.effective_leverage is not None
     assert account.effective_leverage.quantize(Decimal("0.0001")) == EXPECTED_EFFECTIVE_LEVERAGE
+
+
+@pytest.mark.postgres
+def test_the_postgres_run_reports_the_same_book_as_the_sqlite_run(tmp_path: Path) -> None:
+    """ADR-0019's parity promise at PRD grain: swapping the store changes
+    durability, never a reported number or a durable row."""
+    resolve_backend("postgres", tmp_path / "unused.db")  # skips without a server
+    postgres_config = _config(
+        tmp_path, store="postgres", postgres=PostgresStoreConfig(dsn=os.environ[POSTGRES_DSN_ENV])
+    )
+    sqlite_config = _config(tmp_path)
+
+    on_sqlite = _run(sqlite_config)
+    on_postgres = _run(postgres_config)
+
+    assert on_postgres.position("BTC") == on_sqlite.position("BTC")
+    assert on_postgres.account() == on_sqlite.account()
+    assert _durable_rows(postgres_config) == _durable_rows(sqlite_config)
+
+
+def _durable_rows(config: AppConfig) -> tuple[list[Position], Decimal | None, int | None]:
+    """What a fresh open of the configured store reads back: partitions, cash, watermark."""
+    store = build_store(config)
+    try:
+        account = store.load_account()
+        return (
+            store.all_positions(),
+            account.cash if account is not None else None,
+            store.funding_mark("BTC"),
+        )
+    finally:
+        store.close()
