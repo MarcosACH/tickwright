@@ -151,6 +151,7 @@ class Engine:
             bus=bus, clock=clock, store=store, tick_staleness_ns=self._config.tick_staleness_ns
         )
         self._state = ComponentState.READY
+        self._fault: Exception | None = None
         self._stop_requested = asyncio.Event()
         self._stopped = asyncio.Event()
         self._feed_task: asyncio.Task[None] | None = None
@@ -160,6 +161,16 @@ class Engine:
     @property
     def state(self) -> ComponentState:
         return self._state
+
+    @property
+    def fault(self) -> Exception | None:
+        """The exception that faulted the run, or ``None`` while it has not.
+
+        ``run()`` returns the exit code (ADR-0024) and names the cause on the
+        trail. Neither says *which* refusal a boot hit in a form code can act
+        on, so the exception itself is kept here for whoever holds the engine.
+        """
+        return self._fault
 
     @property
     def portfolio(self) -> PortfolioProjection:
@@ -268,6 +279,7 @@ class Engine:
             # cancelled its siblings (ADR-0024): fail fast, but leave a
             # readable trail and let waiters through before exiting non-zero.
             self._state = ComponentState.FAULTED
+            self._fault = exc
             named_event(NamedEvent.ENGINE_FAULTED, error=repr(exc))
             await self._run_best_effort_stop_hooks()
             self._stopped.set()

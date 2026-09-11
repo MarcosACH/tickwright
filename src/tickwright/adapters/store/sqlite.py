@@ -16,295 +16,110 @@ Each checkpoint is one transaction — the write the crash-safety argument rests
 on — and ``checkpoint_ledger`` widens that to one transaction across the order
 row and the ledger together, because a fill moves both.
 
-The row shape — the field mapping *and* the upsert semantics — is shared with
-``PostgresStore`` (``_records``); what lives here is the dialect it is rendered
-in (``?`` placeholders), the column types the DDL needs, and this driver's
-transaction handling.
+The members themselves are ``SqlStore``'s (``_sql``), shared with
+``PostgresStore``. What lives here is this backend's dialect: ``?``
+placeholders, the column types the DDL needs, and how sqlite3 scopes a
+transaction.
 """
 
 import sqlite3
-import weakref
 from collections.abc import Sequence
+from contextlib import AbstractContextManager
 from pathlib import Path
-from types import TracebackType
+from typing import Any
 
-from tickwright.domain import (
-    Account,
-    KillSwitchState,
-    Order,
-    OrderState,
-    Position,
+from ._sql import SqlStore
+
+_SCHEMA: tuple[str, ...] = (
+    """
+    CREATE TABLE IF NOT EXISTS orders (
+        cloid             TEXT PRIMARY KEY,
+        strategy_id       TEXT NOT NULL,
+        signal_id         TEXT NOT NULL,
+        symbol            TEXT NOT NULL,
+        side              TEXT NOT NULL,
+        quantity          TEXT NOT NULL,
+        order_type        TEXT NOT NULL,
+        state             TEXT NOT NULL,
+        cum_qty           TEXT NOT NULL,
+        venue_oid         TEXT,
+        reason            TEXT,
+        cancel_requested    INTEGER NOT NULL DEFAULT 0,
+        cancel_requested_ts INTEGER,
+        cancel_signal_id    TEXT,
+        applied_event_ids TEXT NOT NULL,
+        history           TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS strategy_snapshots (
+        strategy_id TEXT PRIMARY KEY,
+        data        BLOB NOT NULL,
+        ts_ns       INTEGER NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS kill_switch (
+        id       INTEGER PRIMARY KEY CHECK (id = 1),
+        tripped  INTEGER NOT NULL,
+        reason   TEXT,
+        ts_ns    INTEGER NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS positions (
+        strategy_id         TEXT NOT NULL,
+        symbol              TEXT NOT NULL,
+        signed_size         TEXT NOT NULL,
+        entry_price         TEXT,
+        realized_pnl        TEXT NOT NULL,
+        fees                TEXT NOT NULL,
+        funding             TEXT NOT NULL,
+        isolated_collateral TEXT,
+        ts_ns               INTEGER NOT NULL,
+        PRIMARY KEY (strategy_id, symbol)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS funding_marks (
+        symbol             TEXT PRIMARY KEY,
+        last_funding_ts_ns INTEGER NOT NULL,
+        ts_ns              INTEGER NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS account (
+        id                 INTEGER PRIMARY KEY CHECK (id = 1),
+        account_id         TEXT NOT NULL,
+        genesis_collateral TEXT NOT NULL,
+        genesis_ts_ns      INTEGER NOT NULL,
+        cash               TEXT NOT NULL,
+        ts_ns              INTEGER NOT NULL
+    )
+    """,
 )
 
-from ._durability import durable
-from ._records import (
-    ACCOUNT_COLUMN_LIST,
-    POSITION_COLUMN_LIST,
-    READ_COLUMN_LIST,
-    account_values,
-    funding_mark_values,
-    next_history,
-    position_values,
-    record_values,
-    restore_account,
-    restore_history,
-    restore_order,
-    restore_position,
-    upserts_for,
-)
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS orders (
-    cloid             TEXT PRIMARY KEY,
-    strategy_id       TEXT NOT NULL,
-    signal_id         TEXT NOT NULL,
-    symbol            TEXT NOT NULL,
-    side              TEXT NOT NULL,
-    quantity          TEXT NOT NULL,
-    order_type        TEXT NOT NULL,
-    state             TEXT NOT NULL,
-    cum_qty           TEXT NOT NULL,
-    venue_oid         TEXT,
-    reason            TEXT,
-    cancel_requested    INTEGER NOT NULL DEFAULT 0,
-    cancel_requested_ts INTEGER,
-    cancel_signal_id    TEXT,
-    applied_event_ids TEXT NOT NULL,
-    history           TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS strategy_snapshots (
-    strategy_id TEXT PRIMARY KEY,
-    data        BLOB NOT NULL,
-    ts_ns       INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS kill_switch (
-    id       INTEGER PRIMARY KEY CHECK (id = 1),
-    tripped  INTEGER NOT NULL,
-    reason   TEXT,
-    ts_ns    INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS positions (
-    strategy_id         TEXT NOT NULL,
-    symbol              TEXT NOT NULL,
-    signed_size         TEXT NOT NULL,
-    entry_price         TEXT,
-    realized_pnl        TEXT NOT NULL,
-    fees                TEXT NOT NULL,
-    funding             TEXT NOT NULL,
-    isolated_collateral TEXT,
-    ts_ns               INTEGER NOT NULL,
-    PRIMARY KEY (strategy_id, symbol)
-);
-CREATE TABLE IF NOT EXISTS funding_marks (
-    symbol             TEXT PRIMARY KEY,
-    last_funding_ts_ns INTEGER NOT NULL,
-    ts_ns              INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS account (
-    id                 INTEGER PRIMARY KEY CHECK (id = 1),
-    account_id         TEXT NOT NULL,
-    genesis_collateral TEXT NOT NULL,
-    genesis_ts_ns      INTEGER NOT NULL,
-    cash               TEXT NOT NULL,
-    ts_ns              INTEGER NOT NULL
-);
-"""
-
-# Every write this adapter makes, rendered from the shared row shape so it can
-# never drift from the write tuple or from ``PostgresStore``. ``?`` is the whole
-# of this backend's contribution.
-_UPSERTS = upserts_for("?")
-
-
-class SQLiteStore:
+class SQLiteStore(SqlStore):
     """A ``Store`` over one SQLite database (file path or ``":memory:"``)."""
 
     # The one thing this adapter contributes to the seam's error contract
     # (``_durability``): the base its driver raises from.
     _driver_error = sqlite3.Error
+    _placeholder = "?"
 
     def __init__(self, path: str | Path = ":memory:") -> None:
         self._conn = sqlite3.connect(str(path))
-        # Tie the connection's lifetime to this store: close it on ``close()`` or,
-        # failing that, when the store is collected — so a store that outlives its
-        # explicit close (e.g. a hypothesis example) never leaks a connection.
-        self._finalizer = weakref.finalize(self, self._conn.close)
-        with self._conn:
-            self._conn.executescript(_SCHEMA)
+        super().__init__(schema=_SCHEMA, release=self._conn.close)
 
-    @durable
-    def checkpoint(self, order: Order, *, ts_ns: int) -> None:
-        """Durably record ``order``'s full saga state as of ``ts_ns``.
+    def _transaction(self) -> AbstractContextManager[object]:
+        # sqlite3's connection is its own transaction scope: commit on exit,
+        # roll back on raise. It does not nest (ADR-0043 §4), and no member
+        # opens one inside another.
+        return self._conn
 
-        Upserts the record and appends ``(state, ts_ns)`` to its transition
-        history, atomically.
-        """
-        with self._conn:
-            self._write_order(order, ts_ns=ts_ns)
+    def _execute(self, sql: str, params: Sequence[Any] = ()) -> sqlite3.Cursor:
+        return self._conn.execute(sql, params)
 
-    def _write_order(self, order: Order, *, ts_ns: int) -> None:
-        """Upsert the saga record and append its transition entry.
-
-        The caller owns the transaction, because ``checkpoint_ledger`` runs this
-        same body inside a wider one (ADR-0043 §4). Shared rather than repeated
-        so the two writes can never disagree about what a saga row is.
-        """
-        row = self._conn.execute(
-            "SELECT history FROM orders WHERE cloid = ?", (order.cloid,)
-        ).fetchone()
-        history = next_history(row[0] if row else None, order.state, ts_ns)
-        self._conn.execute(_UPSERTS.order, record_values(order, history=history))
-
-    @durable
-    def get_order(self, cloid: str) -> Order | None:
-        """Rebuild the checkpointed saga for ``cloid``, or ``None`` if unknown."""
-        row = self._conn.execute(
-            f"SELECT {READ_COLUMN_LIST} FROM orders WHERE cloid = ?", (cloid,)
-        ).fetchone()
-        if row is None:
-            return None
-        return restore_order(row)
-
-    @durable
-    def all_orders(self) -> list[Order]:
-        """Rebuild every checkpointed saga — the recovery mass-read (ADR-0009)."""
-        rows = self._conn.execute(
-            f"SELECT {READ_COLUMN_LIST} FROM orders ORDER BY cloid"
-        ).fetchall()
-        return [restore_order(row) for row in rows]
-
-    @durable
-    def save_strategy_snapshot(self, strategy_id: str, data: bytes, *, ts_ns: int) -> None:
-        """Durably record ``strategy_id``'s opaque state bytes; latest wins (ADR-0016)."""
-        with self._conn:
-            self._conn.execute(
-                "INSERT OR REPLACE INTO strategy_snapshots (strategy_id, data, ts_ns) "
-                "VALUES (?, ?, ?)",
-                (strategy_id, data, ts_ns),
-            )
-
-    @durable
-    def load_strategy_snapshot(self, strategy_id: str) -> bytes | None:
-        """The last persisted snapshot for ``strategy_id``, or ``None`` if never saved."""
-        row = self._conn.execute(
-            "SELECT data FROM strategy_snapshots WHERE strategy_id = ?", (strategy_id,)
-        ).fetchone()
-        return None if row is None else bytes(row[0])
-
-    @durable
-    def save_kill_switch(self, *, tripped: bool, reason: str | None, ts_ns: int) -> None:
-        """Durably record the single-row kill-switch state (ADR-0026)."""
-        with self._conn:
-            self._conn.execute(
-                "INSERT OR REPLACE INTO kill_switch (id, tripped, reason, ts_ns) "
-                "VALUES (1, ?, ?, ?)",
-                (int(tripped), reason, ts_ns),
-            )
-
-    @durable
-    def load_kill_switch(self) -> KillSwitchState | None:
-        """The persisted kill-switch state, or ``None`` if never written."""
-        row = self._conn.execute(
-            "SELECT tripped, reason, ts_ns FROM kill_switch WHERE id = 1"
-        ).fetchone()
-        if row is None:
-            return None
-        return KillSwitchState(tripped=bool(row[0]), reason=row[1], ts_ns=row[2])
-
-    @durable
-    def checkpoint_ledger(
-        self,
-        *,
-        account: Account,
-        positions: Sequence[Position] = (),
-        order: Order | None = None,
-        funding_mark: tuple[str, int] | None = None,
-        ts_ns: int,
-    ) -> None:
-        """Durably record the ledger as of ``ts_ns`` — one transaction (ADR-0043 §4).
-
-        The order row, the position rows and the account row commit together or
-        not at all: as two transactions either ordering is unsound, and on paper
-        the resulting half-fill never heals, because the in-process venue holds
-        no position state and this store is the ledger's sole authority.
-
-        A write the backend refuses raises ``InvariantViolation`` — the
-        transaction has already rolled back, so what the caller must not do is
-        run on believing the ledger moved (ADR-0014). That translation is the
-        seam's, not this method's (``_durability``): it was the one member that
-        made the promise, and now every member does.
-        """
-        with self._conn:
-            if order is not None:
-                self._write_order(order, ts_ns=ts_ns)
-            self._conn.execute(_UPSERTS.account, account_values(account, ts_ns=ts_ns))
-            self._conn.executemany(
-                _UPSERTS.position,
-                [position_values(position, ts_ns=ts_ns) for position in positions],
-            )
-            if funding_mark is not None:
-                self._conn.execute(
-                    _UPSERTS.funding_mark, funding_mark_values(funding_mark, ts_ns=ts_ns)
-                )
-
-    @durable
-    def all_positions(self) -> list[Position]:
-        """Every persisted partition — the recovery mass-read (ADR-0043 §9)."""
-        rows = self._conn.execute(
-            f"SELECT {POSITION_COLUMN_LIST} FROM positions ORDER BY strategy_id, symbol"
-        ).fetchall()
-        return [restore_position(row) for row in rows]
-
-    @durable
-    def has_orders(self) -> bool:
-        """Whether any saga history exists at all — the existence question the
-        startup refusal asks before ``cache.rebuild()`` (ADR-0043 §9). Answering
-        it with ``all_orders()`` would deserialize every saga in the store twice
-        on every start, on the recovery path."""
-        return self._conn.execute("SELECT 1 FROM orders LIMIT 1").fetchone() is not None
-
-    @durable
-    def funding_mark(self, symbol: str) -> int | None:
-        """The last funding boundary applied to ``symbol``, or ``None`` if none
-        ever was — the "never accrued" state ADR-0043 §3 encodes as row absence,
-        which admits any boundary since nothing has been applied to contradict
-        it."""
-        row = self._conn.execute(
-            "SELECT last_funding_ts_ns FROM funding_marks WHERE symbol = ?", (symbol,)
-        ).fetchone()
-        return None if row is None else int(row[0])
-
-    @durable
-    def load_account(self) -> Account | None:
-        """The persisted account, or ``None`` if the ledger was never opened."""
-        row = self._conn.execute(
-            f"SELECT {ACCOUNT_COLUMN_LIST} FROM account WHERE id = 1"
-        ).fetchone()
-        return None if row is None else restore_account(row)
-
-    @durable
-    def history(self, cloid: str) -> list[tuple[OrderState, int]]:
-        """The durable transition trail: one ``(state, ts_ns)`` per checkpoint.
-
-        On the ``Store`` Protocol as the seam's audit surface: recovery rebuilds
-        from the current record alone, but the engine's tests read the trail to
-        assert what a saga did, so it is part of what an implementation must
-        provide.
-        """
-        row = self._conn.execute("SELECT history FROM orders WHERE cloid = ?", (cloid,)).fetchone()
-        return restore_history(row[0] if row else None)
-
-    def __enter__(self) -> "SQLiteStore":
-        return self
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        tb: TracebackType | None,
-    ) -> None:
-        self.close()
-
-    def close(self) -> None:
-        """Close the connection, once. A file-backed store reopens on the same path."""
-        self._finalizer()
+    def _executemany(self, sql: str, rows: Sequence[Sequence[Any]]) -> None:
+        self._conn.executemany(sql, rows)

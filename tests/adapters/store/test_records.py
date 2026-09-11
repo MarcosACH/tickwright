@@ -16,8 +16,10 @@ from decimal import Decimal
 from tickwright.adapters.store._records import (
     ACCOUNT_COLUMNS,
     ACCOUNT_UPDATE_COLUMNS,
+    KILL_SWITCH_COLUMNS,
     POSITION_COLUMNS,
     RECORD_COLUMNS,
+    SNAPSHOT_COLUMNS,
     Upserts,
     position_values,
     restore_position,
@@ -54,6 +56,19 @@ def test_every_write_carries_one_placeholder_per_column() -> None:
     # any caller supplies (ADR-0043 §3).
     assert upserts.account.count("?") == len(ACCOUNT_COLUMNS)
     assert "VALUES (1, " in upserts.account
+
+
+def test_the_snapshot_and_kill_switch_writes_are_rendered_here_too() -> None:
+    """Both were hand-written in each adapter, in two upsert dialects. They are
+    upserts like the other four, so they render from the same builder and the
+    adapters keep no write SQL of their own."""
+    upserts = upserts_for("?")
+
+    assert upserts.snapshot.count("?") == len(SNAPSHOT_COLUMNS)
+    assert upserts.snapshot.startswith("INSERT INTO strategy_snapshots ")
+    # ``kill_switch`` is the second single-row table with ``CHECK (id = 1)``.
+    assert upserts.kill_switch.count("?") == len(KILL_SWITCH_COLUMNS)
+    assert "VALUES (1, " in upserts.kill_switch
 
 
 def test_the_accounts_write_once_trio_is_absent_from_its_update_list() -> None:
