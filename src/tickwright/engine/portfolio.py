@@ -1135,6 +1135,12 @@ class PortfolioProjection:
         ``observe_venue_liquidation`` is deliberately **not** folded in. It is a
         write, and one that must precede this read; hiding it inside a read verb
         would make the ordering invisible at the call site that depends on it.
+
+        The cadence takes one more fold beside this: ``account_net`` once,
+        before the venue read (#284). That fold is not a reading and nothing is
+        compared against it. It exists so the pass can tell which symbols a
+        fill moved while the read was in flight, and the comparison still runs
+        off this one reading.
         """
         return LedgerReading(
             account=self.account(),
@@ -1159,6 +1165,10 @@ class PortfolioProjection:
         rather than the `Portfolio` seam precisely so it can see this (ADR-0041
         §8). Kept private, that cycle would have to re-fold the partitions from
         the outside and the invariant would have two definitions to disagree.
+
+        The cycle reads it twice per pass, and only one of those is the
+        comparison. The other is taken before the venue read, so a symbol a fill
+        moved during the read can be told apart from one that diverged (#284).
         """
         return account_net_size(self._positions.values())
 
