@@ -22,6 +22,7 @@ from hyperliquid_fakes import (
     TEST_SIGNING_KEY,
     FakeExchangeApi,
     FakeWsConnection,
+    idle_ws,
     trade,
     trades_frame,
 )
@@ -578,6 +579,8 @@ def _drive_exchange_leverage_unchanged() -> None:
             clock=ManualClock(),
             universe=HyperliquidUniverse(specs={"BTC": _SPEC}, asset_indices={"BTC": 0}),
             startup_timeout_seconds=60.0,
+            # ``start()`` also opens the funding socket (#300), not this walk's.
+            connect=idle_ws,
             post=FakeExchangeApi(
                 {
                     "userAbstraction": "disabled",
@@ -733,12 +736,13 @@ def _drive_feed_lagged() -> None:
             ]
         )
 
-        async def connect(url: str) -> FakeWsConnection:
-            return connection
-
         feed = HyperliquidFeed(
-            config=HyperliquidConfig(symbols=["BTC"]), bus=bus, clock=clock, connect=connect
+            config=HyperliquidConfig(symbols=["BTC"]),
+            bus=bus,
+            clock=clock,
+            connect=connection.connect,
         )
+        await feed.start()
         run = asyncio.create_task(feed.run())
         await stalled.wait()
         # While the first publish is stuck, 42001 lands unpublished and 42002
@@ -772,12 +776,13 @@ def _drive_feed_frame_dropped() -> None:
             ]
         )
 
-        async def connect(url: str) -> FakeWsConnection:
-            return connection
-
         feed = HyperliquidFeed(
-            config=HyperliquidConfig(symbols=["BTC"]), bus=bus, clock=clock, connect=connect
+            config=HyperliquidConfig(symbols=["BTC"]),
+            bus=bus,
+            clock=clock,
+            connect=connection.connect,
         )
+        await feed.start()
         run = asyncio.create_task(feed.run())
         await ticked.wait()  # the good frame landed → the feed survived the bad one
         await feed.stop()

@@ -49,6 +49,17 @@ those components.
    the account, so every margin number the push and the barrier reason from would be off by an order
    of magnitude, and reporting a leverage mismatch computed against it would be noise on top of an
    error. It is a no-op on **paper** — the mode is a live-only venue concept.**)**
+   **(Extended a third time by [#300](https://github.com/MarcosACH/tickwright/issues/300):** on
+   **live** this step ends by *opening* the `userFundings` socket, behind the leverage push,
+   through `FundingIngest.start()` and `WsSession.start()`. Before this the first connect happened
+   inside `Exchange.run()`, where a refusal is paced and retried. A venue that refused the socket
+   therefore left the engine `RUNNING` and ingesting no funding, with nothing raised. Now the
+   connect is a third spender of the deadline the two guards above share, under the same rule
+   (ADR-0044 §6). A refusal that outlives the budget raises **`VenueSubscriptionUnreachable`**
+   and faults the boot. The socket sits subscribed and unread across the barrier on purpose. Step
+   7's reason for keeping the feed's connect late does not reach a payment, and the module map
+   says why: `docs/module-maps/trade-economics-accounting-surface.md`, the #300 block. It is a
+   no-op on **paper**, which has no socket.**)**
 5. **Startup-reconciliation barrier** — the ADR-0011 mass-rebuild. A **hard gate**: nothing places
    until it succeeds. **(Extended by ADR-0043 §6:** on **live** the barrier also performs a single
    unsigned `clearinghouseState` read to **materialise the account row** when the ledger has none —

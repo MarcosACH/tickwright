@@ -69,21 +69,30 @@ class WsSession:
     async def start(self) -> None:
         """Open and subscribe the first socket now, and return.
 
-        Optional, and only the feed calls it: a caller that needs a *refused*
-        connect to be an error rather than a retry uses this, because inside
-        ``run()`` the same failure is paced and gone round again, which is right
-        for a reconnect and wrong for a boot (#226). ``OSError`` propagates
-        untouched — the whole point is that someone above can see it.
+        Both adapters call this at boot, because a *refused* first connect has
+        to be an error rather than a retry: inside ``run()`` the same failure
+        is paced and gone round again, which is right for a reconnect and wrong
+        for a boot (#226, #300). ``OSError`` propagates untouched — the whole
+        point is that someone above can see it, and pace a retry on the boot's
+        own budget. A socket whose subscribe failed is closed before the raise,
+        so that retry never leaves one open behind it.
 
         The socket it opens is handed to ``run()`` rather than consumed here, so
         a caller that starts and never runs holds an idle subscribed socket that
-        ``stop()`` still closes. A caller that skips this — ``FundingIngest``,
-        whose connect has no boot to fail — sees ``run()`` behave exactly as it
-        always has.
+        ``stop()`` still closes. A ``run()`` without a ``start()`` refuses, so
+        no caller can skip the boot by not writing the line.
         """
         connection = await self._connect(self._config.ws_url)
         self._connection = connection
-        await self._subscribe(connection)
+        try:
+            await self._subscribe(connection)
+        except BaseException:
+            # The boot retries a failed start() on its deadline (#300), so a
+            # socket that connected but never subscribed must not outlive the
+            # attempt that opened it.
+            self._connection = None
+            await connection.close()
+            raise
         self._opened = connection
 
     async def run(self) -> None:
@@ -93,7 +102,16 @@ class WsSession:
         is the property both adapters' supervised tasks rest on (ADR-0024): a
         task that completed on its own would leave the engine ``RUNNING`` with
         nothing arriving.
+
+        Raises ``RuntimeError`` if ``start()`` never handed a socket over. The
+        first connect is the boot's, where a refusal is an error. Opened here
+        it would be paced and retried instead, and that is #300: a caller that
+        skipped ``start()`` ran forever behind a ``RUNNING`` engine, ingesting
+        nothing. A session stopped before it started has no boot to refuse and
+        returns at once, which the teardown after a faulted boot relies on.
         """
+        if self._opened is None and not self._stopping:
+            raise RuntimeError("WsSession.run() before start(): the first socket is the boot's")
         backoff = Backoff(
             initial=self._config.reconnect_initial_backoff_seconds,
             maximum=self._config.reconnect_max_backoff_seconds,

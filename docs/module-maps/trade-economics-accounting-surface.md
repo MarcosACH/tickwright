@@ -313,6 +313,33 @@ The **frame policy widened to the frame grain**: a `userFundings` frame whose bo
 
 And the **USDC-only rule is stated once**, in `reading.refuse_non_usdc`. The two detections differ and stay with their grains — a fill has a `feeToken` to compare, a funding record's denomination is the key's own name — but the reason, the exception and the operator's sentence are shared rather than restated in a second `_settled_in_usdc` of the same name in the same package.**)**
 
+**(The funding socket is opened at boot, not inside `run()`
+([#300](https://github.com/MarcosACH/tickwright/issues/300)).** The block above says the ingest
+is reached through `run()`. That is still where it is read. It is now *opened* by
+`HyperliquidExchange.start()`, after the mode gate and the leverage push, through
+`FundingIngest.start()` and `WsSession.start()`. The reason is the one #227 gave the feed. A
+refused connect inside `run()` is paced and retried, which is right for a reconnect. At boot it
+meant the engine reached `RUNNING` and ingested no funding for the life of the process, with
+nothing raised. Now a refusal that outlives the boot budget faults the boot as
+`VenueSubscriptionUnreachable`. `WsSession.start()` is no longer optional per caller. Both
+adapters call it, and `WsSession.run()` refuses to open a first socket of its own, so a third
+subscription cannot skip the boot by not writing the line.
+
+Two things this block has to say that the feed's version did not. First, the socket sits
+subscribed and unread from step 4 until the runner task-creates `run()` after step 6, across the
+barrier. ADR-0024 keeps the feed's
+connect at step 7 so no tick buffers across it, because a buffered tick is stale. That reason
+does not reach funding. A payment is a fact, not a quote, and the watermark (ADR-0043 §5.2)
+drops any the ledger already holds, so a frame that waited is applied exactly as a frame that did
+not. Second, the connect is not the feed's one attempt. It is a third spender of the `Deadline`
+the mode gate and the leverage push share (ADR-0044 §6), retried under the same
+`until_deadline` rule, because a blip on the socket is as real as a blip on the HTTP reads made
+in the same window. A boot-time blip clears and the boot proceeds. A refusal that outlives the
+budget faults, which is the `Exchange.start()` contract. The two-window ceiling above is
+unchanged, since the connect spends from the first window rather than opening one of its own.
+Each attempt is still bounded by `WS_OPEN_TIMEOUT_SECONDS`, so a handshake that hangs becomes the
+`OSError` the retry paces rather than a wedged boot.**)**
+
 ---
 
 ### strategies (`strategies/single_shot.py`)

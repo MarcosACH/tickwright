@@ -199,3 +199,17 @@ class LeverageOutOfBounds(InvariantViolation):
     instrument universe that a leverage they may never have configured had
     nothing to do with.
     """
+
+
+class VenueSubscriptionUnreachable(InvariantViolation):
+    """A venue subscription the boot has to open kept refusing until the
+    startup budget ran out (ADR-0024 step 4, #300).
+
+    The socket's twin of ``VenueLeveragePushFailed``. Inside the run loop a
+    refused connect is paced and retried, which is right for a reconnect. At
+    boot the same loop reached ``RUNNING`` with a subscription that never
+    connected, and nothing named it. So the boot opens the socket itself,
+    retries a refusal on the one budget the other boot guards spend, and raises
+    this when the budget goes without a socket. Nothing was written and nothing
+    is half done. What is missing is a stream the run cannot do without.
+    """

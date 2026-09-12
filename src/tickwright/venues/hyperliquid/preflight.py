@@ -117,7 +117,7 @@ async def verify_account_mode(
     what puts the allowlist **outside** the retried call below: only the read is
     repeatable, and a verdict on a mode the venue stated is not.
     """
-    mode = await _until_deadline(
+    mode = await until_deadline(
         partial(_read_account_mode, info, address=address),
         on_exhausted=partial(_unreadable_mode, address=address),
         clock=clock,
@@ -203,7 +203,7 @@ async def _read_account_mode(info: InfoRead, *, address: str) -> str:
 
     The **gate's** form of the read, raising where ``reverify_account_mode``'s
     ``reading.read`` returns: this one is driven inside a retry loop, so a
-    failure has to reach ``_until_deadline`` as an exception for the budget to be
+    failure has to reach ``until_deadline`` as an exception for the budget to be
     spent on it. Both spend the same two pieces below — the query and the shape
     check — which is what keeps one module owning the read as well as the
     allowlist.
@@ -320,7 +320,7 @@ async def push_leverage(
         # — so there is no symbol to align and no reason to ask the venue about
         # an account whose answer nothing would read.
         return
-    held = await _until_deadline(
+    held = await until_deadline(
         # Read *and* parsed inside the retry, the way the mode gate retries
         # ``_read_account_mode`` rather than the bare ``info`` call: a body
         # outside the venue's contract is the same "we are not reading what we
@@ -359,7 +359,7 @@ async def push_leverage(
             "isCross": spec.mode == "cross",
             "leverage": spec.leverage,
         }
-        await _until_deadline(
+        await until_deadline(
             # The envelope is inspected *inside* the retry, so the two ways a
             # write fails end where they should: an unreadable body raises into
             # the retry like any other, while the venue's own refusal raises
@@ -372,7 +372,7 @@ async def push_leverage(
         )
 
 
-async def _until_deadline[T](
+async def until_deadline[T](
     call: Callable[[], Awaitable[T]],
     *,
     on_exhausted: Callable[[BaseException, Deadline], InvariantViolation],
@@ -385,7 +385,9 @@ async def _until_deadline[T](
     helper rather than a loop per call site: the mode read, the account read and
     every write share one budget, so they have to share the *rule* for spending
     it — four hand-written loops would be four chances to check the deadline
-    before the attempt, or to forget the cap.
+    before the attempt, or to forget the cap. Public within the package because
+    the funding socket's boot connect spends the same budget under the same
+    rule (#300), from ``funding.py``.
 
     The two failures retried are the same two everywhere: the venue was
     unreachable (``OSError``) or answered with a body outside its contract

@@ -20,7 +20,13 @@ from pydantic import SecretStr
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.store import SQLiteStore
-from tickwright.domain import AccountSpec, FundingAccrual, InstrumentSpec, VenueFactUnsupported
+from tickwright.domain import (
+    AccountSpec,
+    FundingAccrual,
+    InstrumentSpec,
+    VenueFactUnsupported,
+    VenueSubscriptionUnreachable,
+)
 from tickwright.engine.checkpoint import Checkpointer
 from tickwright.engine.portfolio import PortfolioProjection
 from tickwright.venues.hyperliquid import (
@@ -42,6 +48,10 @@ ETH_SPEC = InstrumentSpec(
 )
 UNIVERSE = HyperliquidUniverse(specs={"ETH": ETH_SPEC}, asset_indices={"ETH": 1})
 
+# ADR-0024's one boot budget, which the funding connect spends beside the two
+# HTTP guards (ADR-0044 §6). Virtual, so a full window costs the suite nothing.
+STARTUP_TIMEOUT_SECONDS = 60.0
+
 
 def make_exchange(
     post: FakeExchangeApi, *, bus: InMemoryBus, clock: ManualClock, connect: Connect
@@ -59,8 +69,19 @@ def make_exchange(
         universe=UNIVERSE,
         post=post,
         connect=connect,
-        startup_timeout_seconds=60.0,
+        startup_timeout_seconds=STARTUP_TIMEOUT_SECONDS,
     )
+
+
+def aligned_venue() -> FakeExchangeApi:
+    """A venue ``start()`` finds already aligned, so the boot reaches the
+    funding socket.
+
+    The mode gate reads ``userAbstraction`` and the leverage push sends nothing
+    for an empty book, so this one answer is the whole boot ahead of the socket.
+    Fresh per call, because the fake records every request it was asked.
+    """
+    return FakeExchangeApi({"userAbstraction": "disabled"})
 
 
 def funding(*, time_ms: int, coin: str, usdc: str, szi: str = "1", rate: str = "0.0000417") -> dict:
@@ -220,10 +241,8 @@ def _ingest(frames: list[str], *, until: int) -> tuple[list[FundingAccrual], Fak
         bus.subscribe(FundingAccrual, record)
         connection = FakeWsConnection(frames)
 
-        async def connect(url: str) -> FakeWsConnection:
-            return connection
-
-        exchange = make_exchange(FakeExchangeApi({}), bus=bus, clock=clock, connect=connect)
+        exchange = make_exchange(aligned_venue(), bus=bus, clock=clock, connect=connection.connect)
+        await exchange.start()
         async with asyncio.TaskGroup() as tg:
             running = tg.create_task(exchange.run())
             await asyncio.wait_for(enough.wait(), timeout=2)
@@ -295,10 +314,8 @@ def _ingest_refusing(frames: list[str]) -> str:
         clock = ManualClock(start_ns=7)
         connection = FakeWsConnection(frames)
 
-        async def connect(url: str) -> FakeWsConnection:
-            return connection
-
-        exchange = make_exchange(FakeExchangeApi({}), bus=bus, clock=clock, connect=connect)
+        exchange = make_exchange(aligned_venue(), bus=bus, clock=clock, connect=connection.connect)
+        await exchange.start()
         await asyncio.wait_for(exchange.run(), timeout=2)
 
     with pytest.raises(VenueFactUnsupported) as raised:
@@ -441,7 +458,8 @@ def test_a_dropped_socket_resubscribes_and_the_re_delivered_snapshot_heals_the_g
         async def connect(url: str) -> FakeWsConnection:
             return sockets.pop(0)
 
-        exchange = make_exchange(FakeExchangeApi({}), bus=bus, clock=clock, connect=connect)
+        exchange = make_exchange(aligned_venue(), bus=bus, clock=clock, connect=connect)
+        await exchange.start()
         async with asyncio.TaskGroup() as tg:
             running = tg.create_task(exchange.run())
             await asyncio.wait_for(enough.wait(), timeout=2)
@@ -461,6 +479,148 @@ def test_a_dropped_socket_resubscribes_and_the_re_delivered_snapshot_heals_the_g
     # Both sockets were subscribed: a recovered connection nobody subscribed
     # would sit open and silent, which is the gap this is claiming to close.
     assert len(dropped.sent) == len(recovered.sent) == 1
+
+
+def test_a_funding_socket_the_venue_keeps_refusing_faults_the_boot_once_the_budget_is_spent() -> (
+    None
+):
+    """The funding half of #227's claim, closed for the socket it left open (#300).
+
+    Inside ``run()`` a refused connect is paced and gone round again, forever.
+    That is right for a reconnect. At boot it meant the engine reached
+    ``RUNNING`` with a socket that never connected, and nothing said so. So
+    ``Exchange.start()`` opens the socket, and a venue that keeps refusing it
+    faults the boot.
+
+    Faults it the way the two HTTP guards ahead of it do (ADR-0044 §6): a
+    boot-time blip is real, so the connect is retried on the shared deadline,
+    and only a refusal that outlives the budget becomes the refusal. The
+    elapsed bound is the backoff cap stated as an assertion, so a second budget
+    or an uncapped doubling would fail it. The clock is virtual.
+    """
+
+    async def main() -> None:
+        clock = ManualClock()
+        connects = 0
+
+        async def connect(url: str) -> FakeWsConnection:
+            nonlocal connects
+            connects += 1
+            raise ConnectionRefusedError("connection refused")
+
+        exchange = make_exchange(
+            aligned_venue(),
+            bus=InMemoryBus(),
+            clock=clock,
+            connect=connect,
+        )
+
+        with pytest.raises(VenueSubscriptionUnreachable) as refusal:
+            await exchange.start()
+
+        assert connects > 1, "a single attempt is not a bounded retry"
+        elapsed_seconds = clock.timestamp_ns() / 1_000_000_000
+        assert STARTUP_TIMEOUT_SECONDS <= elapsed_seconds < STARTUP_TIMEOUT_SECONDS + 30
+        message = str(refusal.value)
+        assert "userFundings" in message, "the operator needs the subscription that never opened"
+        assert "connection refused" in message, "and the underlying failure"
+
+        # The boot's own cleanup still runs on the fault path (`_stop_exchange`),
+        # and a session that never opened a socket has nothing to close.
+        await exchange.stop()
+
+    asyncio.run(main())
+
+
+def test_a_funding_socket_blip_that_clears_inside_the_budget_boots_normally() -> None:
+    """The other half of the retry, and the reason there is one.
+
+    A connect refused once and faulted at once would turn every boot-time blip
+    into a restart under the supervisor. Two refusals, then a socket, is a
+    running engine that spent a few seconds of its budget.
+    """
+
+    async def main() -> None:
+        clock = ManualClock()
+        connection = FakeWsConnection([])
+        connects = 0
+
+        async def connect(url: str) -> FakeWsConnection:
+            nonlocal connects
+            connects += 1
+            if connects <= 2:
+                raise ConnectionRefusedError("connection refused")
+            return connection
+
+        exchange = make_exchange(
+            aligned_venue(),
+            bus=InMemoryBus(),
+            clock=clock,
+            connect=connect,
+        )
+
+        await exchange.start()  # no refusal is the assertion
+
+        assert connects == 3, "the two refusals and the connect that landed"
+        assert connection.sent, "the socket that landed is the one subscribed"
+        assert 0 < clock.timestamp_ns() < STARTUP_TIMEOUT_SECONDS * 1_000_000_000
+
+        await exchange.stop()
+
+    asyncio.run(main())
+
+
+def test_run_consumes_the_socket_start_opened_rather_than_opening_a_second() -> None:
+    """The other half of the boot claim: ``start()`` opens and subscribes,
+    ``run()`` reads. A ``run()`` that opened its own socket would leave the
+    boot's one idle and subscribed, and the venue would see two connects for
+    one subscription. So the witnesses are the connect count staying at one
+    across both calls, and the payment arriving only once ``run()`` reads.
+    """
+
+    async def main() -> None:
+        bus = InMemoryBus()
+        seen: list[FundingAccrual] = []
+        arrived = asyncio.Event()
+
+        async def record(accrual: FundingAccrual) -> None:
+            seen.append(accrual)
+            arrived.set()
+
+        bus.subscribe(FundingAccrual, record)
+        connection = FakeWsConnection(
+            [user_fundings_frame(funding(time_ms=1681222254710, coin="ETH", usdc="-3.625312"))]
+        )
+        connects = 0
+
+        async def connect(url: str) -> FakeWsConnection:
+            nonlocal connects
+            connects += 1
+            return connection
+
+        exchange = make_exchange(
+            aligned_venue(),
+            bus=bus,
+            clock=ManualClock(),
+            connect=connect,
+        )
+
+        await exchange.start()
+
+        assert connects == 1
+        assert connection.sent, "start() must subscribe the socket it opened"
+        assert seen == [], "start() must not consume — that is run()'s"
+
+        async with asyncio.TaskGroup() as tg:
+            running = tg.create_task(exchange.run())
+            await asyncio.wait_for(arrived.wait(), timeout=2)
+            await exchange.stop()
+            await running
+
+        assert [a.amount for a in seen] == [Decimal("-3.625312")]
+        assert connects == 1, "run() must consume the socket start() opened, not open a second"
+
+    asyncio.run(main())
 
 
 def test_the_venue_s_own_housekeeping_frames_are_ignored_rather_than_refused() -> None:
@@ -534,10 +694,8 @@ def _ingest_into_ledger(
         bus.subscribe(FundingAccrual, book)
         connection = FakeWsConnection(frames)
 
-        async def connect(url: str) -> FakeWsConnection:
-            return connection
-
-        exchange = make_exchange(FakeExchangeApi({}), bus=bus, clock=clock, connect=connect)
+        exchange = make_exchange(aligned_venue(), bus=bus, clock=clock, connect=connection.connect)
+        await exchange.start()
         async with asyncio.TaskGroup() as tg:
             running = tg.create_task(exchange.run())
             await asyncio.wait_for(enough.wait(), timeout=2)

@@ -135,9 +135,10 @@ class HyperliquidExchange:
         )
 
     async def start(self) -> None:
-        """Nothing to connect — placement is request-scoped HTTP and the tick
-        subscription is wired at construction — but the venue alignment this
-        step exists to host, in order.
+        """Align the venue, in order, then open the funding socket.
+
+        Placement is request-scoped HTTP and the tick subscription is wired at
+        construction, so the one thing to connect here is ``userFundings``.
 
         The ``userAbstraction`` mode gate is first and gates everything after it
         (ADR-0046 §3, which opens ADR-0024 step 4): a wrong mode invalidates the
@@ -146,12 +147,12 @@ class HyperliquidExchange:
         noise on top of an error. The leverage push (ADR-0044 §7) lands behind
         it. Both refusals precede the barrier, so neither can let an order out.
 
-        The two share **one** deadline, opened here and spent between them
+        The three share **one** deadline, opened here and spent between them
         (ADR-0044 §6): they run in the same boot window against the same venue,
         so a budget each would let a boot the operator sized at one
-        ``startup_reconciliation_timeout`` take two before the barrier gets its
-        own. Whatever the gate spends retrying is gone from what the push has
-        left.
+        ``startup_reconciliation_timeout`` take three before the barrier gets
+        its own. Whatever the gate spends retrying is gone from what the push
+        and the funding connect have left.
         """
         deadline = Deadline.opening(clock=self._clock, budget_seconds=self._startup_timeout_seconds)
         await verify_account_mode(
@@ -178,6 +179,11 @@ class HyperliquidExchange:
             clock=self._clock,
             deadline=deadline,
         )
+        # Last, once the venue is aligned. Inside ``run()`` a refused connect
+        # would be paced and retried forever behind a ``RUNNING`` engine,
+        # ingesting nothing (#300). Here it is retried on the same deadline as
+        # the two guards above, then faults the boot.
+        await self._funding.start(deadline=deadline)
 
     async def run(self) -> None:
         """Ingest the venue's funding payments for as long as the run lives.

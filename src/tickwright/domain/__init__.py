@@ -26,6 +26,7 @@ from .errors import (
     VenueLeverageMismatch,
     VenueLeveragePushFailed,
     VenueReadUnresolvable,
+    VenueSubscriptionUnreachable,
 )
 from .events import (
     AccountModeVerdict,
@@ -130,6 +131,7 @@ __all__ = [
     "VenueLeverageMismatch",
     "VenueLeveragePushFailed",
     "VenueReadUnresolvable",
+    "VenueSubscriptionUnreachable",
     # events + value types
     "DEFAULT_LEVERAGE",
     "EMPTY_LEVERAGE_BOOK",
