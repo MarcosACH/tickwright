@@ -1753,6 +1753,36 @@ def test_a_symbol_that_did_not_move_during_the_read_still_heals_beside_one_that_
     ]
 
 
+def test_a_symbol_the_ledger_never_held_opened_during_the_read_is_not_healed() -> None:
+    """Movement is judged over the union of both folds, not over the symbols
+    the ledger held before the read (#284).
+
+    Before the read the ledger has no BTC record at all. The venue carries 0.002
+    the engine never placed, and the engine's first BTC fill lands while the
+    read is in flight. The snapshot carries an entry price, so this is the one
+    open-from-absent shape that can reach the heal. A detector ranging over the
+    pre-read symbols alone would miss it and book the venue's foreign 0.001
+    into the unattributed partition against a ledger that has already moved.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    ledger = keeper.portfolio
+
+    def a_first_btc_fill_lands() -> None:
+        _book_fill(ledger, quantity="0.001", price="64810")
+
+    venue = _SlowAccountVenue(_held("100000", ("BTC", "0.002", "0")), during=a_first_btc_fill_lands)
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+
+    divergences = asyncio.run(cycle.reconcile_account())
+
+    assert [(d.field, d.symbol, d.ledger, d.venue) for d in divergences or ()] == [
+        (DivergenceField.SIGNED_SIZE, "BTC", Decimal("0.001"), Decimal("0.002"))
+    ]
+    assert ledger.account_net() == {"BTC": Decimal("0.001")}
+    assert store.all_positions() == []
+
+
 _BTC_LIQUIDATION = Decimal("52522.4977")
 """The venue's own ``clearinghouseState.liquidationPx``, as measured by #142 and
 recorded in ADR-0040 §3 — the number live must read through rather than solve for."""
