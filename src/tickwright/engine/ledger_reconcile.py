@@ -1351,6 +1351,11 @@ class LedgerReconciliation:
         Judged here and not at the call site, because this is the one place
         that decides which findings heal. The disagreement is ``_net_diff``'s,
         the same grain ``_sizes`` compares the venue on.
+
+        The detector sees net movement only. A fill and its reverse inside one
+        read window net to no movement, so that symbol is not deferred and the
+        stale comparison heals it as before. A per-symbol fill stamp on the row
+        (#304) is what would see that case.
         """
         prices = {position.symbol: position.entry_price for position in state.positions}
         moved = {symbol for symbol, _before, _after in _net_diff(net_before, net)}
