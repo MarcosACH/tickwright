@@ -1673,34 +1673,26 @@ def test_a_healed_fill_and_the_venues_later_delivery_of_it_converge_on_one_appli
     assert ledger.account().cash == Decimal("100000")  # closed at its own entry: nothing realized
 
 
-def test_a_fill_landing_inside_the_account_read_is_healed_away_as_foreign_flow() -> None:
-    """The snapshot is older than the fold it is compared against, and the cycle
-    corrects the engine's own fill out of the account net.
+def test_a_fill_landing_inside_the_account_read_is_reported_but_not_healed() -> None:
+    """A symbol whose ledger moved while the read was in flight is not healed
+    that pass (#284).
 
-    ``reconcile_account`` awaits the venue read and takes its three ledger folds
-    *after* it returns. Everything after that await is synchronous, so no fill
-    can interleave with the heal — but one can interleave with the **read**, and
-    that is the gap. A live account read is a POST; a fill delivered while it is
-    in flight is in the ledger and cannot be in the body already serialised. The
-    cycle then reads the ledger as ahead of the venue and books the difference
-    out, which is the exact inverse of the case it was built for.
+    A live account read is a POST. A fill delivered while it is in flight is in
+    the ledger and cannot be in the body the venue already serialised. Compared
+    as-is, the ledger reads ahead of the venue and the cycle books the engine's
+    own fill out of the account net, durably, into the unattributed partition.
+    The next pass heals it back, so the ledger oscillates instead of drifting,
+    but it writes to the store each way.
 
-    The reducing direction is what makes it reachable rather than theoretical:
-    ``_size_heals`` needs the venue's entry price, and the venue supplies one
-    precisely because it still carries the symbol. A fill that *opens* a
-    partition is safe by accident — the snapshot omits a symbol it does not hold,
-    so there is no price and no heal.
+    The reducing direction is what makes it reachable. ``_size_heals`` needs the
+    venue's entry price, and the venue supplies one precisely because it still
+    carries the symbol. A fill that opens a partition is safe by accident, since
+    the snapshot omits a symbol it does not hold.
 
-    What is asserted is the current behavior, not the desired one. Attribution
-    survives (the correction lands in the unattributed partition, so the
-    strategy's own book still reads the size it placed), and the damage is
-    confined to the account grain, where the net now tracks a snapshot that
-    predates the trade. The next pass reads a current snapshot and heals it back,
-    so the ledger oscillates by the size of whatever landed in the window rather
-    than drifting — but it churns the unattributed partition durably each way.
-    A fix belongs at the comparison, not the heal: the snapshot carries its own
-    venue timestamp, and a symbol whose ledger moved after it has not been
-    compared against anything.
+    The finding is still reported. Declining to heal is the same answer the
+    priceless-symbol arm gives, and a real divergence that happens to coincide
+    with a fill must stay visible. The next deadline reads a current snapshot
+    and compares the symbol for real.
     """
     store = SQLiteStore(":memory:")
     keeper = _ledger(store, equity="100000")
@@ -1715,25 +1707,17 @@ def test_a_fill_landing_inside_the_account_read_is_healed_away_as_foreign_flow()
 
     divergences = asyncio.run(cycle.reconcile_account())
 
-    # The ledger is ahead because it saw the fill first, and the pass reports it
-    # as the venue holding less — indistinguishable, here, from real foreign flow.
+    # Reported: the pass did see the ledger ahead of the snapshot it was handed.
     assert [(d.field, d.symbol, d.ledger, d.venue) for d in divergences or ()] == [
         (DivergenceField.SIGNED_SIZE, "BTC", Decimal("0.003"), Decimal("0.002"))
     ]
+    # Not healed: both fills are the strategy's, and the account net keeps them.
     held = ledger.position("BTC", strategy_id="alpha")
     assert held is not None
-    assert held.size == Decimal("0.003")  # attribution is untouched: both fills are the strategy's
-    residual = ledger.position("BTC", strategy_id=None)
-    assert residual is not None
-    assert residual.size == Decimal("-0.001")  # the second fill, corrected back out
-    assert ledger.account_net() == {"BTC": Decimal("0.002")}  # a net the venue no longer holds
-    # The correction is durable, which is what makes this more than a bad read:
-    # the row survives the restart the strategy's own partition would heal on.
-    # Only the heal's row is here because ``_book_fill`` folds the projection
-    # directly, the checkpoint being the cycle's rather than the fill path's.
-    assert [(p.strategy_id, p.symbol, p.signed_size) for p in store.all_positions()] == [
-        (None, "BTC", Decimal("-0.001"))
-    ]
+    assert held.size == Decimal("0.003")
+    assert ledger.position("BTC", strategy_id=None) is None
+    assert ledger.account_net() == {"BTC": Decimal("0.003")}
+    assert store.all_positions() == []
 
 
 _BTC_LIQUIDATION = Decimal("52522.4977")

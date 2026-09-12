@@ -1009,6 +1009,14 @@ class LedgerReconciliation:
         correct and leaves a pass that never looked indistinguishable from one
         that agreed.
         """
+        # The net fold is taken once more *before* the read, so the pass can
+        # tell which symbols moved while the read was in flight (#284). A live
+        # read is a POST, and a fill delivered during it is in the ledger but
+        # not in the body the venue already serialised. Compared as-is, the
+        # ledger reads ahead and the heal books the engine's own fill out of the
+        # account net. This fold is a movement detector, not a comparison
+        # input: the comparison still runs off the one ``LedgerReading`` below.
+        net_before = dict(self._portfolio.account_net())
         state = await self._exchange.fetch_account_state()
         if state is None:
             self._freeze(_FreezeCaller.CADENCE)
@@ -1043,7 +1051,12 @@ class LedgerReconciliation:
         # correction beside it are one retryable unit rather than two the clock
         # could separate.
         heal_ts_ns = self._checkpointer.clock.timestamp_ns()
-        heals = self._size_heals(state, divergences, ts_ns=heal_ts_ns)
+        moved = frozenset(
+            symbol
+            for symbol in net_before.keys() | reading.net.keys()
+            if net_before.get(symbol, _ZERO) != reading.net.get(symbol, _ZERO)
+        )
+        heals = self._size_heals(state, divergences, ts_ns=heal_ts_ns, moved=moved)
         cash = self._cash_heal(divergences, ts_ns=heal_ts_ns)
         if cash is not None and not await self._mode_verified():
             cash = None
@@ -1269,7 +1282,11 @@ class LedgerReconciliation:
 
     @staticmethod
     def _size_heals(
-        state: VenueAccountState, divergences: tuple[Divergence, ...], *, ts_ns: int
+        state: VenueAccountState,
+        divergences: tuple[Divergence, ...],
+        *,
+        ts_ns: int,
+        moved: frozenset[str],
     ) -> tuple[_SizeHeal, ...]:
         """Turn this pass's Tier-1 size findings into the fills that correct them.
 
@@ -1310,6 +1327,12 @@ class LedgerReconciliation:
 
         ``ts_ns`` is the cycle's, handed in beside the cash correction's rather
         than read here: both halves of one pass's heal are keyed on one stamp.
+
+        ``moved`` is the set of symbols whose net changed while the venue read
+        was in flight (#284). A finding on one of them compares a fresh fold
+        against a stale snapshot, so it is reported and not healed, the same
+        answer the priceless arm gives. The next deadline reads a snapshot that
+        carries the fill and compares the symbol for real.
         """
         prices = {position.symbol: position.entry_price for position in state.positions}
         return tuple(
@@ -1327,6 +1350,7 @@ class LedgerReconciliation:
             if divergence.tier is DivergenceTier.TIER_1
             and divergence.field is DivergenceField.SIGNED_SIZE
             and divergence.symbol is not None
+            and divergence.symbol not in moved
             and (price := prices.get(divergence.symbol)) is not None
             and (delta := divergence.venue - divergence.ledger) != _ZERO
         )
