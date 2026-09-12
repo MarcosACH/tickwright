@@ -12,7 +12,7 @@ one would be the second internal projection ADR-0035 rejects, agreeing only ever
 with itself. What paper has in its place is the atomic ledger write.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
@@ -432,40 +432,57 @@ def _cash(state: VenueAccountState, reading: LedgerReading) -> tuple[Divergence,
     )
 
 
+def _net_diff(
+    left: Mapping[str, Decimal], right: Mapping[str, Decimal]
+) -> tuple[tuple[str, Decimal, Decimal], ...]:
+    """The symbols two net folds disagree on, each with both sides' sizes.
+
+    The cycle's one definition of "these two nets differ". ``_sizes`` reads it
+    for the ledger against the venue. ``_size_heals`` reads it for the ledger
+    before the venue read against the ledger after it (#284). Written out at
+    each site, the two would be free to drift on the grain below.
+
+    Ranged over the **union** of both symbol sets, with an absent side reading
+    flat. Either half alone is a check that cannot see the direction it is not
+    looking in: one side's symbols miss a position only the other side still
+    carries. Flat and absent are one state, the same answer ``holds`` gives, so
+    a symbol traded to flat sits in one fold at zero and agrees with the other
+    omitting it.
+
+    Exact inequality is the whole tolerance. Tier-1 accumulates, so any gap is
+    a missed or duplicated fill rather than noise (ADR-0034). Sorted by symbol
+    so a caller's report is a function of the book and not of dict order.
+    """
+    sizes = (
+        (symbol, left.get(symbol, _ZERO), right.get(symbol, _ZERO))
+        for symbol in sorted(left.keys() | right.keys())
+    )
+    return tuple(row for row in sizes if row[1] != row[2])
+
+
 def _sizes(state: VenueAccountState, reading: LedgerReading) -> tuple[Divergence, ...]:
     """Tier-1: the account-net signed size per symbol against the venue's.
 
-    Ranged over the **union** of both symbol sets, with an absent side
-    reading flat. Either half alone is a check that cannot see the direction
-    it is not looking in: comparing only what the venue returned misses a
-    position the ledger believes it holds and the venue has closed, and
-    comparing only what the ledger knows about misses flow the engine never
-    placed (ADR-0038's unattributed partition), which the account is
-    nonetheless carrying margin for. A symbol traded to flat sits in the
-    ledger's half at zero and agrees with a venue that omits it, so the
-    union costs nothing on the ordinary book.
-
-    Exact equality is the whole tolerance — Tier-1 accumulates, so any gap
-    is a missed or duplicated fill rather than noise (ADR-0034). Sorted by
-    symbol so a cycle's report is a function of the book and not of dict
-    iteration order.
+    Over the union of both sides (``_net_diff``): comparing only what the venue
+    returned misses a position the ledger believes it holds and the venue has
+    closed, and comparing only what the ledger knows about misses flow the
+    engine never placed (ADR-0038's unattributed partition), which the account
+    is nonetheless carrying margin for.
 
     The ledger's half is the reading's net fold, which is also what ``holds``
     reads: the grain that decides a symbol is flat and the grain that decides
     it is unheld cannot be looking at two folds.
     """
-    ledger = reading.net
     venue = {position.symbol: position.signed_size for position in state.positions}
     return tuple(
         Divergence(
             tier=DivergenceTier.TIER_1,
             field=DivergenceField.SIGNED_SIZE,
             symbol=symbol,
-            ledger=ledger.get(symbol, _ZERO),
-            venue=venue.get(symbol, _ZERO),
+            ledger=held,
+            venue=seen,
         )
-        for symbol in sorted(ledger.keys() | venue.keys())
-        if ledger.get(symbol, _ZERO) != venue.get(symbol, _ZERO)
+        for symbol, held, seen in _net_diff(reading.net, venue)
     )
 
 
@@ -1051,12 +1068,9 @@ class LedgerReconciliation:
         # correction beside it are one retryable unit rather than two the clock
         # could separate.
         heal_ts_ns = self._checkpointer.clock.timestamp_ns()
-        moved = frozenset(
-            symbol
-            for symbol in net_before.keys() | reading.net.keys()
-            if net_before.get(symbol, _ZERO) != reading.net.get(symbol, _ZERO)
+        heals = self._size_heals(
+            state, divergences, ts_ns=heal_ts_ns, net_before=net_before, net=reading.net
         )
-        heals = self._size_heals(state, divergences, ts_ns=heal_ts_ns, moved=moved)
         cash = self._cash_heal(divergences, ts_ns=heal_ts_ns)
         if cash is not None and not await self._mode_verified():
             cash = None
@@ -1286,7 +1300,8 @@ class LedgerReconciliation:
         divergences: tuple[Divergence, ...],
         *,
         ts_ns: int,
-        moved: frozenset[str],
+        net_before: Mapping[str, Decimal],
+        net: Mapping[str, Decimal],
     ) -> tuple[_SizeHeal, ...]:
         """Turn this pass's Tier-1 size findings into the fills that correct them.
 
@@ -1328,13 +1343,17 @@ class LedgerReconciliation:
         ``ts_ns`` is the cycle's, handed in beside the cash correction's rather
         than read here: both halves of one pass's heal are keyed on one stamp.
 
-        ``moved`` is the set of symbols whose net changed while the venue read
-        was in flight (#284). A finding on one of them compares a fresh fold
-        against a stale snapshot, so it is reported and not healed, the same
-        answer the priceless arm gives. The next deadline reads a snapshot that
-        carries the fill and compares the symbol for real.
+        ``net_before`` and ``net`` are the ledger's net fold on either side of
+        the venue read (#284). A symbol they disagree on moved while the read
+        was in flight, so its finding compares a fresh fold against a stale
+        snapshot. It is reported and not healed, the same answer the priceless
+        arm gives, and the next deadline reads a snapshot that carries the fill.
+        Judged here and not at the call site, because this is the one place
+        that decides which findings heal. The disagreement is ``_net_diff``'s,
+        the same grain ``_sizes`` compares the venue on.
         """
         prices = {position.symbol: position.entry_price for position in state.positions}
+        moved = {symbol for symbol, _before, _after in _net_diff(net_before, net)}
         return tuple(
             _SizeHeal(
                 divergence=divergence,
