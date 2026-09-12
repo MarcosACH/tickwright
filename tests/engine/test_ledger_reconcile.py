@@ -1720,6 +1720,39 @@ def test_a_fill_landing_inside_the_account_read_is_reported_but_not_healed() -> 
     assert store.all_positions() == []
 
 
+def test_a_symbol_that_did_not_move_during_the_read_still_heals_beside_one_that_did() -> None:
+    """The deferral is per symbol, not per pass (#284).
+
+    A fill on BTC during the read says nothing about SOL. The SOL finding was
+    compared against a snapshot that is current for SOL, so it heals on this
+    pass as it would on any other. Deferring the whole pass would let a busy
+    symbol hold a real divergence on a quiet one open indefinitely.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    ledger = keeper.portfolio
+    _book_fill(ledger, quantity="0.002", price="64809")
+
+    def a_btc_fill_lands() -> None:
+        _book_fill(ledger, quantity="0.001", price="64810", seq=2)
+
+    venue = _SlowAccountVenue(
+        _held("100000", ("BTC", "0.002", "0"), ("SOL", "10", "0")), during=a_btc_fill_lands
+    )
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+
+    divergences = asyncio.run(cycle.reconcile_account())
+
+    assert [(d.field, d.symbol, d.ledger, d.venue) for d in divergences or ()] == [
+        (DivergenceField.SIGNED_SIZE, "BTC", Decimal("0.003"), Decimal("0.002")),
+        (DivergenceField.SIGNED_SIZE, "SOL", Decimal("0"), Decimal("10")),
+    ]
+    assert ledger.account_net() == {"BTC": Decimal("0.003"), "SOL": Decimal("10")}
+    assert [(p.strategy_id, p.symbol, p.signed_size) for p in store.all_positions()] == [
+        (None, "SOL", Decimal("10"))
+    ]
+
+
 _BTC_LIQUIDATION = Decimal("52522.4977")
 """The venue's own ``clearinghouseState.liquidationPx``, as measured by #142 and
 recorded in ADR-0040 §3 — the number live must read through rather than solve for."""
