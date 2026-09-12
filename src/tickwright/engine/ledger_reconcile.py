@@ -340,9 +340,9 @@ def _rests_on_stale(
     symbol's mark age says nothing about a Σ it is not part of, and before #305
     it silenced that alert anyway.
 
-    Cross-ness is read through ``leverage_for`` for the reason ``_cross_maintenance``
-    gives: the subset is the ledger's own, and the venue's mode is the thing
-    ``LEVERAGE_DIVERGENCE`` reports rather than a thing this rule may trust.
+    Cross-ness is read through ``leverage_for``, for the reason ``_cross_maintenance``
+    gives. The subset is the ledger's own. The venue's mode is what
+    ``LEVERAGE_DIVERGENCE`` reports, not a thing this rule may trust.
     """
     if divergence.symbol is not None:
         return divergence.symbol in stale

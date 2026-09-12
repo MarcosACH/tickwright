@@ -3285,7 +3285,7 @@ def test_a_stale_mark_suppresses_the_alert_and_is_counted_on_the_record() -> Non
     assert (record["tier_2"], record["suppressed"], record["unvalued"]) == (4, 4, 0)
 
 
-def test_a_stale_mark_suppresses_the_maintenance_finding_through_the_account_grain() -> None:
+def test_a_stale_cross_mark_suppresses_the_maintenance_finding() -> None:
     """A stale mark on a **cross** symbol suppresses the maintenance finding.
 
     Cross is the qualifier that matters. The figure is compared over the cross
