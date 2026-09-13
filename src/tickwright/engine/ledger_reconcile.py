@@ -427,7 +427,7 @@ def _reference(divergence: Divergence, reading: LedgerReading) -> Decimal | None
     notional unknown is the same one ``equity``, ``free_margin`` and a
     position's ``unrealized_pnl`` are computed from, so a divergence that
     survives classification always has its reference. Per symbol that is
-    ``_unrealized``'s own range — a held symbol whose ledger valuation is not
+    ``_per_symbol``'s own range — a held symbol whose ledger valuation is not
     ``None`` has a mark, hence a notional — and at the account grain the Σ goes
     unknown only when some held symbol lacks a mark, which drops both
     account-grain figures before the band is asked. It is kept, rather than
@@ -1346,8 +1346,9 @@ class LedgerReconciliation:
 
         The detector sees net movement only. A fill and its reverse inside one
         read window net to no movement, so that symbol is not deferred and the
-        stale comparison heals it as before. A per-symbol fill stamp on the row
-        (#304) is what would see that case.
+        stale comparison heals it as before. A per-symbol fill stamp on the
+        ``SymbolValuation`` row would see that case. The row does not carry
+        one yet.
         """
         prices = {position.symbol: position.entry_price for position in state.positions}
         moved = {symbol for symbol, _before, _after in _net_diff(net_before, net)}

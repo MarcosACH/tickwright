@@ -1171,7 +1171,8 @@ class PortfolioProjection:
     def _rows(self) -> dict[str, SymbolValuation]:
         """Every symbol's account-grain row, folded once over the book (#304).
 
-        The one traversal behind ``account()`` and ``ledger_reading()``. Cross
+        The one traversal behind every read: ``account()``, ``position()``,
+        ``open_positions()`` and ``ledger_reading()``. Cross
         posts ``notional / leverage`` out of the account pool and isolated posts
         its locked bucket marked to market (ADR-0040 §3). Maintenance takes the
         instrument universe where margin takes the leverage book (ADR-0040 §4).
