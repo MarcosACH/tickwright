@@ -368,11 +368,66 @@ def test_the_reconcile_cycles_ledger_side_comes_off_one_read() -> None:
     reading = projection.ledger_reading()
 
     assert reading.net == {"BTC": Decimal("5"), "ETH": Decimal("1")}
-    assert reading.unrealized == {"BTC": Decimal("50"), "ETH": None}
-    assert reading.notional == {"BTC": Decimal("550"), "ETH": None}
+    assert {s: r.unrealized_pnl for s, r in reading.rows.items()} == {
+        "BTC": Decimal("50"),
+        "ETH": None,
+    }
+    assert {s: r.notional for s, r in reading.rows.items()} == {"BTC": Decimal("550"), "ETH": None}
     assert reading.mark_observed == {"BTC": 9_000}
     assert reading.account.cash == Decimal("100000")
     assert reading.account.equity is None
+
+
+def test_one_reading_folds_the_book_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``ledger_reading()`` traverses the positions once per fold it owes (#304).
+
+    The type's docstring promises "folded once", and before the row the read
+    ran the public ``domain.valuation`` folds 18 times over one book, because
+    every member was its own traversal and ``account_view`` ran three more.
+    This probe counts the traversing folds by name. Two are owed: the symbol
+    rows, and the account-net fold that the #284 movement check also takes.
+
+    A cost property and not an output one, so the probe is shape-coupled by
+    design: it wraps the fold names where the projection binds them. A fold
+    the reading stops calling drops out of the count. A fold it starts calling
+    twice fails here, which is the regression this exists to catch.
+    """
+    import tickwright.domain.valuation as valuation_module
+    import tickwright.engine.portfolio as portfolio_module
+
+    counts: dict[str, int] = {}
+
+    def counted(module: Any, name: str) -> None:
+        fold = getattr(module, name)
+
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            counts[name] = counts.get(name, 0) + 1
+            return fold(*args, **kwargs)
+
+        monkeypatch.setattr(module, name, wrapper)
+
+    folds = ("account_net_size", "account_valuation") + tuple(
+        name for name in valuation_module.__all__ if name.startswith("account_")
+    )
+    for name in dict.fromkeys(folds):
+        for module in (valuation_module, portfolio_module):
+            if hasattr(module, name):
+                counted(module, name)
+
+    projection = _projection("100000")
+    book_fill(projection, _fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
+    book_fill(
+        projection,
+        _fill(trade_id="f2", quantity="1", price="3000", symbol="ETH", strategy_id="beta"),
+        side=Side.BUY,
+    )
+    projection.observe_mark(_mark(price="110", ts_event=9_000))
+    counts.clear()
+
+    projection.ledger_reading()
+
+    traversals = {name: n for name, n in counts.items() if name != "account_view"}
+    assert traversals == {"account_net_size": 1, "account_valuation": 1}
 
 
 def test_the_one_read_carries_both_margin_folds_at_the_grain_the_venue_publishes() -> None:
@@ -451,12 +506,12 @@ def test_the_one_read_carries_both_margin_folds_at_the_grain_the_venue_publishes
 
     reading = projection.ledger_reading()
 
-    assert reading.margin_used == {
+    assert {s: r.margin_used for s, r in reading.rows.items()} == {
         "BTC": Decimal("110"),
         "ETH": Decimal("1800"),
         "SOL": Decimal("70"),
     }
-    assert reading.maintenance_margin == {
+    assert {s: r.maintenance_margin for s, r in reading.rows.items()} == {
         "BTC": Decimal("6.875"),
         "ETH": Decimal("66"),
         "SOL": None,

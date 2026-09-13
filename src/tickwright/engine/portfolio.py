@@ -42,12 +42,10 @@ from tickwright.domain import (
     Side,
     Store,
     StoreAccountMismatch,
+    SymbolValuation,
     VenueAccountState,
-    account_maintenance_margin,
-    account_margin_used,
     account_net_size,
-    account_notional,
-    account_unrealized_pnl,
+    account_valuation,
     account_view,
     position_view,
 )
@@ -251,28 +249,32 @@ class LedgerReading:
     """
 
     account: AccountView
-    net: Mapping[str, Decimal]
-    """The account-net signed size per symbol, over every partition."""
-    unrealized: Mapping[str, Decimal | None]
-    """Per-symbol open PnL against the marks held at the reading."""
-    notional: Mapping[str, Decimal | None]
-    """Per-symbol notional — the reference ADR-0046 §5 scales the band by."""
-    margin_used: Mapping[str, Decimal | None]
-    """Per-symbol posted margin, by each mode's rule (ADR-0040 §3).
+    rows: Mapping[str, SymbolValuation]
+    """One row per symbol, every account-grain figure on it (#304).
 
     Per symbol and not the ``AccountView``'s Σ, which the venue's own response
     cannot be compared against: it publishes one ``marginUsed`` per position, and
-    a total has already added them together (ADR-0041 §4/§8)."""
-    maintenance_margin: Mapping[str, Decimal | None]
-    """Per-symbol maintenance margin (ADR-0040 §4).
+    a total has already added them together (ADR-0041 §4/§8). Maintenance is
+    per symbol for a narrowing reason too: ADR-0046 §2.1 compares the account's
+    figure over the **cross subset** only, because the venue's
+    ``crossMaintenanceMarginUsed`` excludes isolated positions and says nothing
+    about doing so. A Σ handed over whole cannot be narrowed afterwards.
 
-    Per symbol for the grain reason above **and** for a narrowing one: ADR-0046
-    §2.1 compares the account's figure over the **cross subset** only, because
-    the venue's ``crossMaintenanceMarginUsed`` excludes isolated positions and
-    says nothing about doing so. A Σ handed over whole cannot be narrowed
-    afterwards."""
+    A row carries the leverage pair it was valued against. That is not the
+    leverage book the class docstring refuses. It is the same reported input
+    ``PositionView`` carries, and it is what lets the cross subset be read off
+    the reading instead of through a callback."""
     mark_observed: Mapping[str, int]
     """When each cached mark was stamped: the age input, never a price."""
+
+    @property
+    def net(self) -> dict[str, Decimal]:
+        """The account-net signed size per symbol, read off the rows.
+
+        The Tier-1 size check ranges over this map's keys against the venue's,
+        so it wants the map shape. The row is the source, so ``net`` and the
+        Tier-2 figures beside it cannot come from two folds."""
+        return {symbol: row.net for symbol, row in self.rows.items()}
 
     def holds(self, symbol: str) -> bool:
         """Whether the ledger carries exposure in ``symbol`` — the cycle's one
@@ -292,7 +294,8 @@ class LedgerReading:
         definition in two places is what the class docstring claiming "the
         cycle's one definition of held-ness" was actually describing.
         """
-        return self.net.get(symbol, _ZERO) != _ZERO
+        row = self.rows.get(symbol)
+        return row is not None and row.net != _ZERO
 
 
 class PortfolioProjection:
@@ -1075,42 +1078,27 @@ class PortfolioProjection:
         position = self._positions.get((strategy_id, symbol))
         if position is None:
             return None
-        account = self.account()
-        return self._view(
-            position,
-            net=self.account_net(),
-            upnl=self._account_unrealized(),
-            equity=account.equity,
-            maintenance=account.total_maintenance_margin,
-        )
+        rows = self._rows()
+        return self._view(position, rows=rows, account=account_view(self._account, rows))
 
     def open_positions(self, *, strategy_id: str | None) -> tuple[PositionView, ...]:
         """Every partition of ``strategy_id`` still holding exposure.
 
-        One fold for the whole call, deliberately — **every** fold: the net, the
-        account-net uPnL and the account view's own two Σs are each an
-        aggregation over every partition, so folding any of them per view would
-        be quadratic in the book — and, worse, would let two views in one
-        returned tuple be computed against two different folds if a fill landed
-        between them. The reads are synchronous so that cannot actually happen
-        today; taking the folds once is what keeps it impossible rather than
-        merely unreachable.
+        One fold for the whole call, deliberately: the rows are an aggregation
+        over every partition, so folding them per view would be quadratic in
+        the book — and, worse, would let two views in one returned tuple be
+        computed against two different folds if a fill landed between them. The
+        reads are synchronous so that cannot actually happen today; taking the
+        fold once is what keeps it impossible rather than merely unreachable.
 
-        The equity and the maintenance Σ come off **one** ``AccountView`` rather
-        than two calls, which is the same rule one grain down: they are two terms
-        of one threshold, and two calls could straddle a fill.
+        The account view is built off the **same** rows, which is the same rule
+        one grain down: its equity and maintenance Σ are two terms of one
+        threshold, and a second fold could straddle a fill.
         """
-        net = self.account_net()
-        upnl = self._account_unrealized()
-        account = self.account()
+        rows = self._rows()
+        account = account_view(self._account, rows)
         return tuple(
-            self._view(
-                position,
-                net=net,
-                upnl=upnl,
-                equity=account.equity,
-                maintenance=account.total_maintenance_margin,
-            )
+            self._view(position, rows=rows, account=account)
             for (owner, _symbol), position in self._positions.items()
             if owner == strategy_id and not position.is_flat
         )
@@ -1118,11 +1106,9 @@ class PortfolioProjection:
     def ledger_reading(self) -> LedgerReading:
         """The ledger's whole side of one reconcile pass, folded in one call.
 
-        The one read the account cadence takes, and the reason three of the
-        folds below it are private: each had exactly one caller and a docstring
-        saying so, and every accessor the comparison grew wanted a fourth. The
-        surface the cycle asks for is a reading, so a compared field is added to
-        this type rather than to this class.
+        The one read the account cadence takes, and the reason ``_rows`` is
+        private: the surface the cycle asks for is a reading, so a compared
+        figure is added to the row rather than as an accessor on this class.
 
         Assembled here rather than by the caller because that is what makes a
         second reading unavailable later in the pass instead of merely
@@ -1142,13 +1128,10 @@ class PortfolioProjection:
         fill moved while the read was in flight, and the comparison still runs
         off this one reading.
         """
+        rows = self._rows()
         return LedgerReading(
-            account=self.account(),
-            net=self.account_net(),
-            unrealized=self._account_unrealized(),
-            notional=self._account_notional(),
-            margin_used=self._account_margin_used(),
-            maintenance_margin=self._account_maintenance_margin(),
+            account=account_view(self._account, rows),
+            rows=rows,
             mark_observed=self._mark_observed(),
         )
 
@@ -1183,74 +1166,23 @@ class PortfolioProjection:
         """
         return {symbol: mark.price for symbol, mark in self._marks.items()}
 
-    def _account_unrealized(self) -> dict[str, Decimal | None]:
-        """The account-grain uPnL per symbol, against the marks held right now.
+    def _rows(self) -> dict[str, SymbolValuation]:
+        """Every symbol's account-grain row, folded once over the book (#304).
 
-        The Tier-2 counterpart to ``account_net``: the venue holds one position
-        per symbol, so the reconcile's cross-check needs the symbol's Σ over
-        every partition rather than the per-partition slice a ``PositionView``
-        carries (ADR-0041 §4/§8). ``None`` for a symbol whose valuation
-        genuinely needs a mark that is absent — never a fabricated zero
-        (ADR-0041 §6).
-
-        Private where ``account_net`` is not: this reaches the cycle as a member
-        of ``ledger_reading``, and nothing outside asks for the fold alone.
+        The one traversal behind every read: ``account()``, ``position()``,
+        ``open_positions()`` and ``ledger_reading()``. Cross
+        posts ``notional / leverage`` out of the account pool and isolated posts
+        its locked bucket marked to market (ADR-0040 §3). Maintenance takes the
+        instrument universe where margin takes the leverage book (ADR-0040 §4).
+        A symbol whose spec this run never received is ``None`` and not zero: an
+        unknown rate is not a rate of nothing (ADR-0041 §6). Every branch is
+        ``domain.valuation``'s, so a symbol compared by the cadence can never
+        disagree with the ``PositionView`` a strategy reads for it.
         """
-        return account_unrealized_pnl(
-            self._positions.values(),
-            self._mark_prices(),
-        )
-
-    def _account_notional(self) -> dict[str, Decimal | None]:
-        """The account-grain notional per symbol, against the marks held now.
-
-        The third fold of ``ledger_reading``, beside ``account_net`` and
-        ``_account_unrealized``: it is the reference ADR-0046 §5 scales the
-        Tier-2 alert band by — the notional a quantity's mark error actually
-        flows through — per symbol for a position's uPnL and Σ-over-symbols for
-        the account grain's figures.
-
-        Not readable off ``AccountView``: ``effective_leverage`` is the only
-        field the notional reaches, and it reaches it divided by the backing
-        collateral. ``None`` where a held symbol is waiting on a mark, on the
-        per-term rule the whole surface inherits.
-        """
-        return account_notional(
-            self._positions.values(),
-            self._mark_prices(),
-        )
-
-    def _account_margin_used(self) -> dict[str, Decimal | None]:
-        """The account-grain posted margin per symbol, by each mode's rule.
-
-        The fourth fold of ``ledger_reading``, and the one that reads the
-        resolved leverage book: cross posts ``notional / leverage`` out of the
-        account pool and isolated posts its locked bucket marked to market
-        (ADR-0040 §3). Both branches are ``domain.valuation``'s, so a symbol
-        compared here can never disagree with the ``PositionView`` a strategy
-        reads for it.
-
-        Private for ``_account_notional``'s reason: it reaches the cycle as a
-        member of the reading, and nothing outside asks for the fold alone.
-        """
-        return account_margin_used(
+        return account_valuation(
             self._positions.values(),
             self._mark_prices(),
             leverage=self._leverage,
-        )
-
-    def _account_maintenance_margin(self) -> dict[str, Decimal | None]:
-        """The account-grain maintenance margin per symbol (ADR-0040 §4).
-
-        The fold with no mode term — maintenance is owed on the exposure
-        whichever pool backs it — so this takes the instrument universe where
-        ``_account_margin_used`` takes the leverage book. A symbol whose spec
-        this run never received is ``None`` and not zero: an unknown rate is not
-        a rate of nothing (ADR-0041 §6).
-        """
-        return account_maintenance_margin(
-            self._positions.values(),
-            self._mark_prices(),
             specs=self._specs,
         )
 
@@ -1279,10 +1211,8 @@ class PortfolioProjection:
         self,
         position: Position,
         *,
-        net: dict[str, Decimal],
-        upnl: dict[str, Decimal | None],
-        equity: Decimal | None,
-        maintenance: Decimal | None,
+        rows: Mapping[str, SymbolValuation],
+        account: AccountView,
     ) -> PositionView:
         """Assemble one partition's view against the mark held for its symbol.
 
@@ -1293,30 +1223,36 @@ class PortfolioProjection:
         compute/read-through switch arrive the same way and for the same reason
         — all four are lookups this object already holds.
 
-        ``net``, ``upnl``, ``equity`` and ``maintenance`` are the four the caller
-        must supply, because each is a **fold over every position** rather than a
-        lookup: taken here they would be quadratic in the book, and — the reason
-        that matters — two views in one returned tuple could be built against two
-        different folds. The caller owes all four off **one**
-        ``self._positions``/``self._marks`` snapshot, the same one the mark above
-        is read from, so the position-grain half of the view cannot straddle a
-        fill the own-slice half is on the other side of (ADR-0041 §1).
-        ``equity`` and ``maintenance`` are additionally the two numbers
-        ``account()`` reports, and owed off **one** of its views: they are the two
-        terms of the cross liquidation threshold, so a cross position's level and
-        the account line it is read beside agree by construction.
+        ``rows`` and ``account`` are the two the caller must supply, because
+        each is a **fold over every position** rather than a lookup: taken here
+        they would be quadratic in the book, and — the reason that matters — two
+        views in one returned tuple could be built against two different folds.
+        The caller owes both off **one** ``self._positions``/``self._marks``
+        snapshot, the same one the mark above is read from, so the
+        position-grain half of the view cannot straddle a fill the own-slice
+        half is on the other side of (ADR-0041 §1). The ``account`` must be the
+        view built from these same ``rows``: its equity and maintenance Σ are
+        the two terms of the cross liquidation threshold, so a cross position's
+        level and the account line it is read beside agree by construction.
 
         That last part is a **convention the signature cannot enforce**: nothing
         here can tell a caller's stale fold from a fresh one, which is why the
-        four are named together rather than defaulted one at a time.
+        two are named together rather than defaulted one at a time.
+
+        The row lookup is strict on purpose. Every position in the book has a
+        row, flat ones included, because ``account_valuation`` ranges over
+        ``account_net_size`` and that fold keeps a symbol traded to flat. So a
+        missing row is never "no exposure". It is rows built off another book,
+        and a fallback here would read that as a flat symbol and hide it.
         """
         mark = self._marks.get(position.symbol)
+        row = rows[position.symbol]
         return position_view(
             position,
-            account_net=net.get(position.symbol, _ZERO),
-            account_unrealized_pnl=upnl.get(position.symbol),
-            account_equity=equity,
-            account_maintenance_margin=maintenance,
+            account_net=row.net,
+            account_unrealized_pnl=row.unrealized_pnl,
+            account_equity=account.equity,
+            account_maintenance_margin=account.total_maintenance_margin,
             mark=mark.price if mark is not None else None,
             mark_ts=mark.ts_event if mark is not None else None,
             leverage=self.leverage_for(position.symbol),
@@ -1344,13 +1280,7 @@ class PortfolioProjection:
         flow the engine never placed still backs the same collateral, so leaving
         it out would report an equity the venue does not hold.
         """
-        return account_view(
-            self._account,
-            positions=self._positions.values(),
-            marks=self._mark_prices(),
-            leverage=self._leverage,
-            specs=self._specs,
-        )
+        return account_view(self._account, self._rows())
 
     def for_strategy(self, strategy_id: str) -> Portfolio:
         """The scoped ``Portfolio`` facade the composition root injects into a

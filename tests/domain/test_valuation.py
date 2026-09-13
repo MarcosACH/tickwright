@@ -13,10 +13,12 @@ own terms need it*, so a flat position still reads a real ``0`` — because
 nobody has seen.
 """
 
+from collections.abc import Iterable, Mapping
 from decimal import Decimal
 
 from tickwright.domain import (
     Account,
+    AccountView,
     InstrumentSpec,
     LeverageBook,
     LeverageSpec,
@@ -25,8 +27,8 @@ from tickwright.domain import (
     Position,
     PositionView,
     Side,
-    account_maintenance_margin,
-    account_margin_used,
+    SymbolValuation,
+    account_valuation,
     account_view,
     position_view,
 )
@@ -98,6 +100,30 @@ def _position(
 
 def _account(cash: str = "100000") -> Account:
     return Account(account_id="paper-default", genesis_collateral=Decimal(cash), genesis_ts_ns=7)
+
+
+def _view(
+    account: Account,
+    *,
+    positions: Iterable[Position],
+    marks: Mapping[str, Decimal],
+    leverage: LeverageBook,
+    specs: Mapping[str, InstrumentSpec],
+) -> AccountView:
+    """The view off the book, folded through ``account_valuation`` as the
+    projection does it."""
+    return account_view(
+        account, account_valuation(positions, marks, leverage=leverage, specs=specs)
+    )
+
+
+def _sum(terms: Iterable[Decimal | None]) -> Decimal:
+    """Add row figures a case has already established are priced."""
+    total = Decimal("0")
+    for term in terms:
+        assert term is not None
+        total += term
+    return total
 
 
 def test_a_held_position_with_no_mark_reads_unknown_rather_than_worthless() -> None:
@@ -215,9 +241,7 @@ def test_account_equity_needs_no_mark_when_every_partition_is_flat() -> None:
         side=Side.SELL,
     )
 
-    view = account_view(
-        _account("1000"), positions=(flat,), marks={}, leverage=LeverageBook(), specs={}
-    )
+    view = _view(_account("1000"), positions=(flat,), marks={}, leverage=LeverageBook(), specs={})
 
     assert view.equity == Decimal("1000")
 
@@ -932,7 +956,7 @@ def test_the_account_totals_sum_the_position_grain_numbers() -> None:
         quantity="10", price="3000", side=Side.BUY, symbol="ETH", isolated_collateral="6000"
     )
 
-    view = account_view(
+    view = _view(
         _account("100000"),
         positions=(btc, eth),
         marks={"BTC": Decimal("60000"), "ETH": Decimal("3200")},
@@ -983,7 +1007,7 @@ def test_the_account_totals_range_over_symbols_rather_than_partitions() -> None:
         side=Side.SELL,
     )
 
-    view = account_view(
+    view = _view(
         _account("100000"),
         positions=(long_leg, short_leg),
         marks={"BTC": Decimal("110")},
@@ -1012,7 +1036,7 @@ def test_free_margin_is_reported_when_negative() -> None:
     leaves ``−28000``. Not clamped at zero, which would report a solvent
     account, and not raised, which would make the report the enforcement.
     """
-    view = account_view(
+    view = _view(
         _account("1000"),
         positions=(_position(quantity="0.5", price="58000", side=Side.BUY),),
         marks={"BTC": Decimal("60000")},
@@ -1027,13 +1051,12 @@ def test_free_margin_is_reported_when_negative() -> None:
 
 
 def test_the_account_grain_margin_used_fold_posts_each_symbol_by_its_own_mode() -> None:
-    """``account_margin_used``: the per-symbol collateral behind each position,
+    """The row's ``margin_used``: the per-symbol collateral behind each position,
     at the grain the venue holds it.
 
-    The account-grain counterpart to ``account_notional``, and it exists for the
-    same reason that one does — the reconcile cadence compares a symbol's whole
-    position against the venue's, and ``AccountView`` publishes only the Σ, which
-    has already added the symbols together (ADR-0041 §4/§8).
+    Per symbol because the reconcile cadence compares a symbol's whole position
+    against the venue's, and ``AccountView`` publishes only the Σ, which has
+    already added the symbols together (ADR-0041 §4/§8).
 
     The two modes are different rules, not one rule parameterised (ADR-0040 §3),
     so both are worked here. On the same book the account totals are worked from:
@@ -1063,7 +1086,7 @@ def test_the_account_grain_margin_used_fold_posts_each_symbol_by_its_own_mode() 
         quantity="5000", price="0.1", side=Side.BUY, symbol="DOGE", isolated_collateral="100"
     )
 
-    margin = account_margin_used(
+    rows = account_valuation(
         (btc, eth, sol, doge),
         {"BTC": Decimal("60000"), "ETH": Decimal("3200")},
         leverage=LeverageBook(
@@ -1074,9 +1097,10 @@ def test_the_account_grain_margin_used_fold_posts_each_symbol_by_its_own_mode() 
                 "DOGE": ISOLATED_1X,
             }
         ),
+        specs={},
     )
 
-    assert margin == {
+    assert {symbol: row.margin_used for symbol, row in rows.items()} == {
         "BTC": Decimal("3000"),
         "ETH": Decimal("8000"),
         "SOL": None,
@@ -1111,23 +1135,27 @@ def test_the_account_grain_margin_used_fold_ranges_over_symbols_not_partitions()
         quantity="3", price="2400", side=Side.SELL, symbol="ETH", isolated_collateral="1440"
     )
 
-    margin = account_margin_used(
+    rows = account_valuation(
         (long_leg, short_leg, eth_long, eth_short),
         {"ETH": Decimal("2200")},
         leverage=LeverageBook(entries={"BTC": CROSS_10X, "ETH": ISOLATED_5X}),
+        specs={},
     )
 
-    assert margin == {"BTC": Decimal("0"), "ETH": Decimal("3840")}
+    assert {symbol: row.margin_used for symbol, row in rows.items()} == {
+        "BTC": Decimal("0"),
+        "ETH": Decimal("3840"),
+    }
 
 
 def test_the_account_grain_maintenance_margin_fold_rates_each_symbols_notional() -> None:
-    """``account_maintenance_margin``: ``notional × margin_maint`` per symbol, at
-    the flat tier-0 rate (ADR-0040 §4).
+    """The row's ``maintenance_margin``: ``notional × margin_maint`` per symbol,
+    at the flat tier-0 rate (ADR-0040 §4).
 
-    The third account-grain fold, and the one with **no mode term** — maintenance
-    is owed on the exposure whichever pool backs it, so unlike ``margin_used``
-    beside it this takes the instrument universe and not the leverage book. It is
-    folded per symbol for the reconcile cadence, which compares only the **cross
+    The one figure with **no mode term** — maintenance is owed on the exposure
+    whichever pool backs it, so unlike ``margin_used`` beside it this reads the
+    instrument universe and not the leverage book. It is on the row for the
+    reconcile cadence, which compares only the **cross
     subset** against the venue's ``crossMaintenanceMarginUsed`` while the
     reported figure stays Σ-over-all (ADR-0046 §2.1): a Σ handed over whole
     cannot be narrowed to a subset afterwards.
@@ -1146,13 +1174,14 @@ def test_the_account_grain_maintenance_margin_fold_rates_each_symbols_notional()
     sol = _position(quantity="100", price="20", side=Side.BUY, symbol="SOL")
     doge = _position(quantity="5000", price="0.1", side=Side.BUY, symbol="DOGE")
 
-    maintenance = account_maintenance_margin(
+    rows = account_valuation(
         (btc, eth, sol, doge),
         {"BTC": Decimal("60000"), "ETH": Decimal("3200"), "DOGE": Decimal("0.12")},
+        leverage=LeverageBook(),
         specs={"BTC": BTC_40X, "ETH": ETH_25X, "SOL": SOL_20X},
     )
 
-    assert maintenance == {
+    assert {symbol: row.maintenance_margin for symbol, row in rows.items()} == {
         "BTC": Decimal("375"),
         "ETH": Decimal("640"),
         "SOL": None,
@@ -1175,6 +1204,118 @@ def test_a_flat_account_net_owes_a_real_zero_maintenance_with_neither_mark_nor_s
     long_leg = _position(quantity="2", price="100", side=Side.BUY, symbol="BTC")
     short_leg = _position(quantity="2", price="120", side=Side.SELL, symbol="BTC")
 
-    maintenance = account_maintenance_margin((long_leg, short_leg), {}, specs={})
+    rows = account_valuation((long_leg, short_leg), {}, leverage=LeverageBook(), specs={})
 
-    assert maintenance == {"BTC": Decimal("0")}
+    assert {symbol: row.maintenance_margin for symbol, row in rows.items()} == {"BTC": Decimal("0")}
+
+
+def test_account_valuation_folds_every_per_symbol_figure_into_one_row() -> None:
+    """``account_valuation``: one row per symbol, every account-grain figure on it.
+
+    The reconcile cadence reads these figures one symbol at a time, and before
+    the row it re-zipped five parallel maps at every read (#304). One row is
+    the same numbers the separate folds gave, taken in one traversal, with the
+    leverage pair each figure was valued against beside them.
+
+        BTC  cross 10x    +0.5 @ 58000, mark 60000
+             uPnL 1000, notional 30000, margin 3000, maint 30000 x 0.0125 = 375
+        ETH  isolated 5x  +10 @ 3000, mark 3200, bucket 6000
+             uPnL 2000, notional 32000, margin 6000 + 2000 = 8000, maint 640
+        SOL  cross 1x     +100 @ 20, no mark
+             net 100 and every Tier-2 figure unknown, on the per-term rule
+    """
+    btc = _position(quantity="0.5", price="58000", side=Side.BUY, symbol="BTC")
+    eth = _position(
+        quantity="10", price="3000", side=Side.BUY, symbol="ETH", isolated_collateral="6000"
+    )
+    sol = _position(quantity="100", price="20", side=Side.BUY, symbol="SOL")
+
+    rows = account_valuation(
+        (btc, eth, sol),
+        {"BTC": Decimal("60000"), "ETH": Decimal("3200")},
+        leverage=LeverageBook(entries={"BTC": CROSS_10X, "ETH": ISOLATED_5X, "SOL": CROSS_1X}),
+        specs={"BTC": BTC_40X, "ETH": ETH_25X, "SOL": SOL_20X},
+    )
+
+    assert rows == {
+        "BTC": SymbolValuation(
+            symbol="BTC",
+            net=Decimal("0.5"),
+            unrealized_pnl=Decimal("1000"),
+            notional=Decimal("30000"),
+            margin_used=Decimal("3000"),
+            maintenance_margin=Decimal("375"),
+            leverage=10,
+            margin_mode="cross",
+        ),
+        "ETH": SymbolValuation(
+            symbol="ETH",
+            net=Decimal("10"),
+            unrealized_pnl=Decimal("2000"),
+            notional=Decimal("32000"),
+            margin_used=Decimal("8000"),
+            maintenance_margin=Decimal("640"),
+            leverage=5,
+            margin_mode="isolated",
+        ),
+        "SOL": SymbolValuation(
+            symbol="SOL",
+            net=Decimal("100"),
+            unrealized_pnl=None,
+            notional=None,
+            margin_used=None,
+            maintenance_margin=None,
+            leverage=1,
+            margin_mode="cross",
+        ),
+    }
+
+
+def test_the_account_totals_are_sums_over_the_symbol_rows() -> None:
+    """``AccountView``'s Σs and ``account_valuation``'s rows come from one fold,
+    so the total can never disagree with the rows symbol by symbol (#304).
+
+    The book is picked so a second spelling of the fold could drift: two
+    offsetting BTC legs net to a flat symbol, and a third symbol is held with no
+    mark. The priced book sums to the hand-worked literals. The unmarked one
+    turns every Σ ``None`` because one row is, on the per-term rule
+    (ADR-0041 §6).
+
+        ETH  isolated 5x  +10 @ 3000, mark 3200, bucket 6000
+             margin 8000, maint 640, uPnL 2000
+        BTC  cross 10x    +2 @ 100 and -2 @ 120, flat net
+             margin 0, maint 0, uPnL 2 x (110 - 100) - 2 x (110 - 120) = 40
+        equity 100000 + 2000 + 40 = 102040, free 102040 - 8000 = 94040
+    """
+    eth = _position(
+        quantity="10", price="3000", side=Side.BUY, symbol="ETH", isolated_collateral="6000"
+    )
+    long_leg = _position(quantity="2", price="100", side=Side.BUY, symbol="BTC")
+    short_leg = _position(quantity="2", price="120", side=Side.SELL, symbol="BTC")
+    sol = _position(quantity="100", price="20", side=Side.BUY, symbol="SOL")
+    leverage = LeverageBook(entries={"BTC": CROSS_10X, "ETH": ISOLATED_5X, "SOL": CROSS_1X})
+    specs = {"BTC": BTC_40X, "ETH": ETH_25X, "SOL": SOL_20X}
+    priced = {"BTC": Decimal("110"), "ETH": Decimal("3200")}
+
+    rows = account_valuation((eth, long_leg, short_leg), priced, leverage=leverage, specs=specs)
+    view = account_view(_account("100000"), rows)
+
+    assert view.equity == Decimal("102040")
+    assert view.total_margin_used == Decimal("8000")
+    assert view.total_maintenance_margin == Decimal("640")
+    assert view.free_margin == Decimal("94040")
+    assert view.total_margin_used == _sum(r.margin_used for r in rows.values())
+    assert view.total_maintenance_margin == _sum(r.maintenance_margin for r in rows.values())
+    assert view.equity == Decimal("100000") + _sum(r.unrealized_pnl for r in rows.values())
+
+    unpriced_rows = account_valuation(
+        (eth, long_leg, short_leg, sol), priced, leverage=leverage, specs=specs
+    )
+    unpriced = account_view(_account("100000"), unpriced_rows)
+
+    assert unpriced_rows["SOL"].margin_used is None
+    assert unpriced.equity is None
+    assert unpriced.total_margin_used is None
+    assert unpriced.total_maintenance_margin is None
+    assert unpriced.free_margin is None
+    assert unpriced.effective_leverage is None

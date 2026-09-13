@@ -11,14 +11,16 @@ A reading is built here by hand for exactly that reason. It is the same freedom
 a recorded venue body already has, pointed at the other side of the comparison.
 """
 
-from collections.abc import Callable
 from dataclasses import replace
 from decimal import Decimal
+
+import pytest
 
 from tickwright.domain import (
     DEFAULT_LEVERAGE,
     AccountView,
     LeverageSpec,
+    SymbolValuation,
     VenueAccountState,
     VenuePositionState,
 )
@@ -70,25 +72,38 @@ def _position(
     )
 
 
-def _cross(leverage: int) -> Callable[[str], LeverageSpec]:
-    """A book putting every symbol at cross ``leverage``.
+_CROSS_1X = LeverageSpec(mode="cross", leverage=1)
+_CROSS_5X = LeverageSpec(mode="cross", leverage=5)
 
-    The classification reads the pair per symbol and never the whole book, so a
-    case that runs one mode says so with a function rather than assembling a
-    ``LeverageBook`` whose entries it would then have to keep in step with the
-    roster it built above.
+
+def _row(
+    symbol: str,
+    *,
+    net: str,
+    unrealized_pnl: str | None,
+    notional: str | None,
+    margin_used: str | None = "0",
+    maintenance_margin: str | None = "0",
+    leverage: LeverageSpec = DEFAULT_LEVERAGE,
+) -> SymbolValuation:
+    """One symbol's row of the ledger's side, with the figures a case is not
+    about at zero.
+
+    The margin figures default to zero so they agree with the venue double's
+    own zeros, and the pair defaults to what a run that configured nothing holds
+    every symbol at (ADR-0040 §5). A case whose subject is the mode says so on
+    the row, since the classification reads the pair there and nowhere else.
     """
-    return lambda _symbol: LeverageSpec(mode="cross", leverage=leverage)
-
-
-def _isolated_1x(_symbol: str) -> LeverageSpec:
-    """The pair a run that configured nothing holds every symbol at (ADR-0040 §5).
-
-    What a case whose subject is not the leverage passes: the default is a
-    complete specification rather than a hole, so a book at it says "this pass
-    is not about the margin mode" without any figure of its own to keep in step.
-    """
-    return DEFAULT_LEVERAGE
+    return SymbolValuation(
+        symbol=symbol,
+        net=Decimal(net),
+        unrealized_pnl=None if unrealized_pnl is None else Decimal(unrealized_pnl),
+        notional=None if notional is None else Decimal(notional),
+        margin_used=None if margin_used is None else Decimal(margin_used),
+        maintenance_margin=None if maintenance_margin is None else Decimal(maintenance_margin),
+        leverage=leverage.leverage,
+        margin_mode=leverage.mode,
+    )
 
 
 def test_classifies_both_tiers_off_one_hand_built_reading() -> None:
@@ -119,19 +134,13 @@ def test_classifies_both_tiers_off_one_hand_built_reading() -> None:
             free_margin=Decimal("49900"),
             effective_leverage=None,
         ),
-        net={"BTC": Decimal("0.4")},
-        unrealized={"BTC": Decimal("8000")},
-        notional={"BTC": Decimal("60000")},
-        # Agreeing outright with the venue double's own zeros, so the three
-        # findings this case is about stay the only ones in the pass.
-        margin_used={"BTC": Decimal("0")},
-        maintenance_margin={"BTC": Decimal("0")},
+        # The margin figures agree outright with the venue double's own zeros,
+        # so the three findings this case is about stay the only ones in the pass.
+        rows={"BTC": _row("BTC", net="0.4", unrealized_pnl="8000", notional="60000")},
         mark_observed={"BTC": _NOW_NS},
     )
 
-    findings = ReconcileFindings.classify(
-        state, reading, band=ValuationBand(), now_ns=_NOW_NS, leverage_for=_isolated_1x
-    )
+    findings = ReconcileFindings.classify(state, reading, band=ValuationBand(), now_ns=_NOW_NS)
 
     assert findings.divergences == (
         Divergence(
@@ -205,17 +214,11 @@ def test_a_per_symbol_figure_whose_notional_is_unknown_bands_on_atol_alone() -> 
     )
     unpriced = LedgerReading(
         account=account,
-        net={"BTC": Decimal("0.5")},
-        unrealized={"BTC": Decimal("9995")},
-        notional={"BTC": None},
-        margin_used={"BTC": Decimal("0")},
-        maintenance_margin={"BTC": Decimal("0")},
+        rows={"BTC": _row("BTC", net="0.5", unrealized_pnl="9995", notional=None)},
         mark_observed={"BTC": _NOW_NS},
     )
 
-    findings = ReconcileFindings.classify(
-        state, unpriced, band=ValuationBand(), now_ns=_NOW_NS, leverage_for=_isolated_1x
-    )
+    findings = ReconcileFindings.classify(state, unpriced, band=ValuationBand(), now_ns=_NOW_NS)
 
     gap = Divergence(
         tier=DivergenceTier.TIER_2,
@@ -233,17 +236,11 @@ def test_a_per_symbol_figure_whose_notional_is_unknown_bands_on_atol_alone() -> 
 
     priced = LedgerReading(
         account=account,
-        net={"BTC": Decimal("0.5")},
-        unrealized={"BTC": Decimal("9995")},
-        notional={"BTC": Decimal("60000")},
-        margin_used={"BTC": Decimal("0")},
-        maintenance_margin={"BTC": Decimal("0")},
+        rows={"BTC": _row("BTC", net="0.5", unrealized_pnl="9995", notional="60000")},
         mark_observed={"BTC": _NOW_NS},
     )
 
-    banded = ReconcileFindings.classify(
-        state, priced, band=ValuationBand(), now_ns=_NOW_NS, leverage_for=_isolated_1x
-    )
+    banded = ReconcileFindings.classify(state, priced, band=ValuationBand(), now_ns=_NOW_NS)
 
     assert banded.divergences == (gap,)  # measured either way — the band gates the alert only
     assert banded.alerts == ()
@@ -290,17 +287,20 @@ def test_a_cross_margin_is_banded_against_the_margin_it_posts_not_the_exposure()
             free_margin=Decimal("50000"),
             effective_leverage=None,
         ),
-        net={"BTC": Decimal("0.5")},
-        unrealized={"BTC": Decimal("10000")},
-        notional={"BTC": Decimal("60000")},
-        margin_used={"BTC": Decimal("11970")},
-        maintenance_margin={"BTC": Decimal("0")},
+        rows={
+            "BTC": _row(
+                "BTC",
+                net="0.5",
+                unrealized_pnl="10000",
+                notional="60000",
+                margin_used="11970",
+                leverage=_CROSS_5X,
+            )
+        },
         mark_observed={"BTC": _NOW_NS},
     )
 
-    findings = ReconcileFindings.classify(
-        state, reading, band=ValuationBand(), now_ns=_NOW_NS, leverage_for=_cross(5)
-    )
+    findings = ReconcileFindings.classify(state, reading, band=ValuationBand(), now_ns=_NOW_NS)
 
     gap = Divergence(
         tier=DivergenceTier.TIER_2,
@@ -319,10 +319,12 @@ def test_a_cross_margin_is_banded_against_the_margin_it_posts_not_the_exposure()
     at_1x = replace(state, positions=(replace(state.positions[0], margin_used=Decimal("60000")),))
     unlevered = ReconcileFindings.classify(
         state=at_1x,
-        reading=replace(reading, margin_used={"BTC": Decimal("59970")}),
+        reading=replace(
+            reading,
+            rows={"BTC": replace(reading.rows["BTC"], margin_used=Decimal("59970"), leverage=1)},
+        ),
         band=ValuationBand(),
         now_ns=_NOW_NS,
-        leverage_for=_cross(1),
     )
 
     assert unlevered.alerts == ()
@@ -371,17 +373,14 @@ def test_one_unpriced_symbol_makes_the_account_grains_reference_unknown() -> Non
     )
     unpriced = LedgerReading(
         account=account,
-        net={"BTC": Decimal("0.5"), "ETH": Decimal("10")},
-        unrealized={"BTC": Decimal("10000"), "ETH": Decimal("2000")},
-        notional={"BTC": Decimal("60000"), "ETH": None},
-        margin_used={"BTC": Decimal("0"), "ETH": Decimal("0")},
-        maintenance_margin={"BTC": Decimal("0"), "ETH": Decimal("0")},
+        rows={
+            "BTC": _row("BTC", net="0.5", unrealized_pnl="10000", notional="60000"),
+            "ETH": _row("ETH", net="10", unrealized_pnl="2000", notional=None),
+        },
         mark_observed={"BTC": _NOW_NS, "ETH": _NOW_NS},
     )
 
-    findings = ReconcileFindings.classify(
-        state, unpriced, band=ValuationBand(), now_ns=_NOW_NS, leverage_for=_isolated_1x
-    )
+    findings = ReconcileFindings.classify(state, unpriced, band=ValuationBand(), now_ns=_NOW_NS)
 
     gap = Divergence(
         tier=DivergenceTier.TIER_2,
@@ -398,11 +397,12 @@ def test_one_unpriced_symbol_makes_the_account_grains_reference_unknown() -> Non
 
     # ``replace`` rather than a second literal, so the reference is the only
     # variable structurally and not merely by inspection of two blocks.
-    priced = replace(unpriced, notional={"BTC": Decimal("60000"), "ETH": Decimal("40000")})
-
-    banded = ReconcileFindings.classify(
-        state, priced, band=ValuationBand(), now_ns=_NOW_NS, leverage_for=_isolated_1x
+    priced = replace(
+        unpriced,
+        rows={**unpriced.rows, "ETH": replace(unpriced.rows["ETH"], notional=Decimal("40000"))},
     )
+
+    banded = ReconcileFindings.classify(state, priced, band=ValuationBand(), now_ns=_NOW_NS)
 
     assert banded.divergences == (gap,)
     assert banded.alerts == ()
@@ -425,7 +425,7 @@ def test_a_maintenance_sigma_the_pass_could_not_compute_is_counted_unvalued() ->
 
     The book agrees on everything else — one BTC leg, a fresh mark, and every
     per-symbol figure matching the venue — so the pass's only outcome is the
-    count. ``_cross(1)`` and not the isolated default, because
+    count. The row is at cross 1x and not the isolated default, because
     ``_cross_maintenance`` skips isolated symbols and would reach its zero
     rather than the unknown this case is about.
     """
@@ -443,18 +443,21 @@ def test_a_maintenance_sigma_the_pass_could_not_compute_is_counted_unvalued() ->
             free_margin=Decimal("50000"),
             effective_leverage=None,
         ),
-        net={"BTC": Decimal("0.5")},
-        unrealized={"BTC": Decimal("10000")},
-        notional={"BTC": Decimal("60000")},
-        margin_used={"BTC": Decimal("0")},
-        # The absent-spec shape: a rate that never arrived, beside a mark that did.
-        maintenance_margin={"BTC": None},
+        rows={
+            # The absent-spec shape: a rate that never arrived, beside a mark that did.
+            "BTC": _row(
+                "BTC",
+                net="0.5",
+                unrealized_pnl="10000",
+                notional="60000",
+                maintenance_margin=None,
+                leverage=_CROSS_1X,
+            )
+        },
         mark_observed={"BTC": _NOW_NS},
     )
 
-    findings = ReconcileFindings.classify(
-        state, reading, band=ValuationBand(), now_ns=_NOW_NS, leverage_for=_cross(1)
-    )
+    findings = ReconcileFindings.classify(state, reading, band=ValuationBand(), now_ns=_NOW_NS)
 
     assert findings.divergences == ()
     assert findings.alerts == ()
@@ -497,20 +500,23 @@ def test_a_stale_isolated_mark_leaves_the_cross_subset_maintenance_alert_alone()
             free_margin=Decimal("50000"),
             effective_leverage=None,
         ),
-        net={"BTC": Decimal("1"), "ETH": Decimal("1")},
-        unrealized={"BTC": Decimal("10000"), "ETH": Decimal("0")},
-        notional={"BTC": Decimal("60000"), "ETH": Decimal("40000")},
-        margin_used={"BTC": Decimal("0"), "ETH": Decimal("0")},
-        maintenance_margin={"BTC": Decimal("1000"), "ETH": Decimal("500")},
+        rows={
+            "BTC": _row(
+                "BTC",
+                net="1",
+                unrealized_pnl="10000",
+                notional="60000",
+                maintenance_margin="1000",
+                leverage=_CROSS_1X,
+            ),
+            "ETH": _row(
+                "ETH", net="1", unrealized_pnl="0", notional="40000", maintenance_margin="500"
+            ),
+        },
         mark_observed={"BTC": _NOW_NS, "ETH": _NOW_NS - 300 * 10**9},
     )
 
-    def leverage_for(symbol: str) -> LeverageSpec:
-        return LeverageSpec(mode="cross", leverage=1) if symbol == "BTC" else DEFAULT_LEVERAGE
-
-    findings = ReconcileFindings.classify(
-        state, reading, band=ValuationBand(), now_ns=_NOW_NS, leverage_for=leverage_for
-    )
+    findings = ReconcileFindings.classify(state, reading, band=ValuationBand(), now_ns=_NOW_NS)
 
     assert [(d.field, d.symbol) for d in findings.divergences] == [
         (DivergenceField.MAINTENANCE_MARGIN, None)
@@ -519,3 +525,51 @@ def test_a_stale_isolated_mark_leaves_the_cross_subset_maintenance_alert_alone()
         (DivergenceField.MAINTENANCE_MARGIN, None)
     ]
     assert (findings.suppressed, findings.unvalued) == (0, 0)
+
+
+@pytest.mark.parametrize(
+    ("field", "attribute"),
+    [
+        (DivergenceField.UNREALIZED_PNL, "unrealized_pnl"),
+        (DivergenceField.NOTIONAL, "notional"),
+        (DivergenceField.MARGIN_USED, "margin_used"),
+    ],
+)
+def test_one_broken_venue_figure_is_one_finding_naming_that_figure(
+    field: DivergenceField, attribute: str
+) -> None:
+    """Each per-symbol figure is read off its own venue attribute and no other (#304).
+
+    The per-symbol compare is one roster of (field, ledger read, venue read)
+    triples. A slip that pairs a field with the wrong venue attribute would
+    still produce findings, just under another field's name. So the guard is
+    isolation: with both sides agreeing on everything, nudge one venue figure
+    and expect exactly one per-symbol finding, carrying that figure's name.
+
+    Only the per-symbol grain is asserted. The venue's cash line is implied
+    from equity minus open PnL (ADR-0040 §7), so the uPnL nudge also moves an
+    account figure, and that is the account grain doing its job.
+    """
+    position = _position("BTC", signed_size="0.5", notional="60000", unrealized_pnl="10000")
+    state = _venue(
+        equity="110000",
+        free_margin="50000",
+        positions=(replace(position, **{attribute: getattr(position, attribute) + Decimal("1")}),),
+    )
+    reading = LedgerReading(
+        account=AccountView(
+            cash=Decimal("100000"),
+            equity=Decimal("110000"),
+            total_margin_used=Decimal("0"),
+            total_maintenance_margin=Decimal("0"),
+            free_margin=Decimal("50000"),
+            effective_leverage=None,
+        ),
+        rows={"BTC": _row("BTC", net="0.5", unrealized_pnl="10000", notional="60000")},
+        mark_observed={"BTC": _NOW_NS},
+    )
+
+    findings = ReconcileFindings.classify(state, reading, band=ValuationBand(), now_ns=_NOW_NS)
+
+    per_symbol = [(d.field, d.symbol) for d in findings.divergences if d.symbol is not None]
+    assert per_symbol == [(field, "BTC")]
