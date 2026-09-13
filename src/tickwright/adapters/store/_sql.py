@@ -9,12 +9,13 @@ than transcribed.
 
 What an adapter still owns is its dialect, and nothing else: the driver's
 error base (``_durability``), the parameter marker, the DDL column types, the
-connection, and how that driver scopes a transaction and runs a batch write.
+catalog query behind ``_has_column``, the connection, and how that driver
+scopes a transaction and runs a batch write.
 """
 
 import weakref
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager
 from types import TracebackType
 from typing import Any, ClassVar, Protocol, Self
@@ -30,6 +31,7 @@ from tickwright.domain import (
 from ._durability import durable
 from ._records import (
     ACCOUNT_COLUMN_LIST,
+    ADDED_COLUMNS,
     POSITION_COLUMN_LIST,
     READ_COLUMN_LIST,
     account_values,
@@ -68,7 +70,7 @@ class SqlStore(ABC):
         self,
         *,
         schema: Iterable[str],
-        added_columns: Iterable[tuple[str, str, str]] = (),
+        added_column_types: Mapping[str, str],
         release: Callable[[], None],
     ) -> None:
         self._p = self._placeholder
@@ -80,11 +82,11 @@ class SqlStore(ABC):
         with self._transaction():
             for statement in schema:
                 self._execute(statement)
-            # ``CREATE TABLE IF NOT EXISTS`` leaves an existing table as it was.
-            # A column added after a database was first written is added here,
-            # so a live account's open sagas survive the upgrade (#242).
-            for table, column, declaration in added_columns:
+            # ``_records`` says which columns may be missing from a database
+            # written before they existed. The backend only says their type.
+            for table, column in ADDED_COLUMNS:
                 if not self._has_column(table, column):
+                    declaration = added_column_types[column]
                     self._execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
     @abstractmethod

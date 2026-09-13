@@ -100,9 +100,9 @@ _SCHEMA: tuple[str, ...] = (
     """,
 )
 
-# Columns added after a database may already exist on disk: (table, column,
-# declaration). Each one is also in ``_SCHEMA`` for a fresh database.
-_ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (("orders", "acked_ts_ns", "INTEGER"),)
+# This dialect's type for each column in ``_records.ADDED_COLUMNS``. The
+# column is also in ``_SCHEMA`` for a fresh database.
+_ADDED_COLUMN_TYPES: dict[str, str] = {"acked_ts_ns": "INTEGER"}
 
 
 class SQLiteStore(SqlStore):
@@ -115,7 +115,9 @@ class SQLiteStore(SqlStore):
 
     def __init__(self, path: str | Path = ":memory:") -> None:
         self._conn = sqlite3.connect(str(path))
-        super().__init__(schema=_SCHEMA, added_columns=_ADDED_COLUMNS, release=self._conn.close)
+        super().__init__(
+            schema=_SCHEMA, added_column_types=_ADDED_COLUMN_TYPES, release=self._conn.close
+        )
 
     def _has_column(self, table: str, column: str) -> bool:
         rows = self._conn.execute(f"PRAGMA table_info({table})").fetchall()

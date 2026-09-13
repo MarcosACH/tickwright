@@ -103,9 +103,9 @@ _SCHEMA: tuple[str, ...] = (
     """,
 )
 
-# Columns added after a database may already exist on disk: (table, column,
-# declaration). Each one is also in ``_SCHEMA`` for a fresh database.
-_ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (("orders", "acked_ts_ns", "BIGINT"),)
+# This dialect's type for each column in ``_records.ADDED_COLUMNS``. The
+# column is also in ``_SCHEMA`` for a fresh database.
+_ADDED_COLUMN_TYPES: dict[str, str] = {"acked_ts_ns": "BIGINT"}
 
 
 class PostgresStore(SqlStore):
@@ -118,7 +118,9 @@ class PostgresStore(SqlStore):
 
     def __init__(self, dsn: str) -> None:
         self._conn = psycopg.connect(dsn, autocommit=True)
-        super().__init__(schema=_SCHEMA, added_columns=_ADDED_COLUMNS, release=self._conn.close)
+        super().__init__(
+            schema=_SCHEMA, added_column_types=_ADDED_COLUMN_TYPES, release=self._conn.close
+        )
 
     def _has_column(self, table: str, column: str) -> bool:
         row = self._conn.execute(
