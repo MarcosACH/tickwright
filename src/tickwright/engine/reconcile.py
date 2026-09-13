@@ -245,8 +245,12 @@ class Reconciler:
         and every read doubles as the fill-history cross-check — a vanished
         order may have filled. ``True`` on a completed pass; ``False`` means a
         venue read failed and the cycle froze.
+
+        The handler is ``_adopt`` itself: the cadence and the startup pass read
+        the same answer shapes and must resolve them the same way (inv 3), so
+        there is one resolver and not a per-phase copy of it.
         """
-        return await self._drive("open_order", _OPEN_ORDER_STATES, self._resolve_open_order)
+        return await self._drive("open_order", _OPEN_ORDER_STATES, self._adopt)
 
     async def _drive(
         self,
@@ -310,24 +314,6 @@ class Reconciler:
         if self._inflight_run.record_absent(order.cloid):
             await self._bus.publish(self._failed_verdict(order))
             named_event(NamedEvent.INFLIGHT_RECONCILED, resolution=OrderState.FAILED.value)
-
-    async def _resolve_open_order(self, order: Order, view: VenueOrderView) -> None:
-        """Resolve one resting order against its venue reading. A live record
-        resets the grace clock and adopts. Otherwise the read doubled as the
-        fill-history cross-check (ADR-0011 inv 2/4): a vanished order may have
-        filled, and executed truth heals immediately — no grace wait. A
-        just-acked order still too recent to have propagated is left untouched
-        (no grace-arming, no ghost) rather than raced. Only an order still
-        non-terminal, past its protection window, *and* continuously absent
-        across the grace window is ghost-resolved."""
-        if view.status is not None:
-            await self._adopt(order, view)
-            return
-        await self._heal_fills(view)
-        if order.is_terminal:
-            self._ghost_gate.record_present(order.cloid)
-            return
-        await self._judge_ghost(order)
 
     async def _judge_ghost(self, order: Order) -> None:
         """Put one absent, non-terminal reading of ``order`` to the gate, and act
@@ -414,44 +400,45 @@ class Reconciler:
         return False
 
     async def _adopt(self, order: Order, view: VenueOrderView) -> None:
-        """Align one saga with the venue's view of its cloid."""
-        if not view.has_record:
-            if order.state in _OPEN_ORDER_STATES:
-                # The venue once ACKed this order as working, so if it is absent
-                # it is *gone*, not un-sent: the ghost taxonomy applies — REJECTED
-                # from LIVE, CANCELLED with fills preserved or after a requested
-                # cancel — never FAILED (ADR-0010/0011 resolutions). **Which
-                # taxonomy** is settled here; **whether it is gone at all** is the
-                # gate's, on one absent read no differently at boot than in
-                # flight. Only startup reaches this branch — the two continuous
-                # cycles call ``_adopt`` on a record they already have — so this
-                # is exactly where boot used to conclude on a single read what
-                # the cadence waits a grace window to conclude, and where a
-                # restart moments after a placement ack could abandon a resting
-                # order the read node simply had not propagated yet.
-                await self._judge_ghost(order)
-                return
-            # A successful read with no status and no fills is positive proof
-            # the order never landed: resolve FAILED (ADR-0010/0011) — never a
-            # blind resend (ADR-0008 rule 2). Recreating is the strategy's call.
-            await self._bus.publish(self._failed_verdict(order))
-            return
+        """Align one saga with the venue's view of its cloid.
 
+        Every phase that reads a venue answer resolves it here: the startup
+        pass, the in-flight budget once it has a record, and the open-order
+        cadence directly. One resolver is what keeps boot from answering an
+        absence faster than the running engine does (ADR-0011 inv 3).
+
+        A record resets the grace clock and is replayed as synthetic facts. No
+        record and no fills is positive proof the order never landed, and only
+        an order the venue never acked as working takes that verdict. One it
+        did ack is *gone*, not un-sent, and the ghost taxonomy applies instead
+        (REJECTED from LIVE, CANCELLED with fills preserved or after a requested
+        cancel, ADR-0010). Fills with no record are the cross-check paying out
+        (inv 2/4): they heal first, and the absence left over goes to the gate.
+        """
         if view.status is not None:
             # Presence, and every phase reads it here — so the grace clock is
             # reset here rather than in each caller. The startup pass arms the
-            # window from the branch above; without this it could never *dis*arm
-            # it, since the barrier re-drives the whole rebuild on any freeze and
-            # a record that came back in the meantime would be read and thrown
-            # away. The window would then measure from the first attempt across
-            # an intervening presence, which is not continuous absence at all.
+            # window from the absence branch below; without this it could never
+            # *dis*arm it, since the barrier re-drives the whole rebuild on any
+            # freeze and a record that came back in the meantime would be read
+            # and thrown away. The window would then measure from the first
+            # attempt across an intervening presence, which is not continuous
+            # absence at all.
             #
             # Keyed on the status and not on ``has_record``: a view carrying
             # fills alone is what the venue answers *after* the record is gone,
-            # and the cadence arms on it (``_resolve_open_order``). Resetting on
-            # it would be the one reading that makes boot more willing to forget
-            # an absence than the running engine is.
+            # and the absence branch arms on it. Resetting on it would be the
+            # one reading that makes boot more willing to forget an absence
+            # than the running engine is.
             self._ghost_gate.record_present(order.cloid)
+        elif not view.fills and order.state not in _OPEN_ORDER_STATES:
+            # A successful read with no status and no fills is positive proof
+            # the order never landed: resolve FAILED (ADR-0010/0011) — never a
+            # blind resend (ADR-0008 rule 2). Recreating is the strategy's call.
+            # An order the venue acked as working is excluded on purpose: its
+            # absence is a ghost question, and the branch below asks the gate.
+            await self._bus.publish(self._failed_verdict(order))
+            return
 
         if order.state is OrderState.PENDING:
             # The venue has a record, so the send provably left the box: walk
@@ -466,18 +453,16 @@ class Reconciler:
         # legal once the fills it followed are applied.
         await self._heal_fills(view)
         if view.status is None:
-            # Fills and no order row. ``has_record`` is true of this view, but
-            # what the *gate* rules on is an absent order, and there is one
-            # here — the shape a partially-filled order cancelled while we were
-            # dead reads as, and the same one ``_resolve_open_order`` arms its
-            # clock on. The heal above was inv 4's cross-check, so what is left
-            # is either a saga those fills finished, which is terminal and has
-            # nothing to ghost, or that absence. Boot arms on it identically or
-            # it is still answering one absence shape faster than the cadence.
-            # Both outcomes are the cadence's pair: arm on the absence, and let
-            # a saga the fills finished release the clock, so a run armed by an
-            # earlier look this boot — the barrier re-drives, so there can be
-            # one — is never left behind a cloid nothing will evaluate again.
+            # The order is absent, with or without fills healed above. What is
+            # left is either a saga those fills finished, which is terminal and
+            # has nothing to ghost, or an order the venue once acked and no
+            # longer has: the shape a partially-filled order cancelled while we
+            # were dead reads as, and since #242 the shape of a record the
+            # venue dropped by count. Whether it is gone is the gate's call, on
+            # one absent read no differently at boot than in flight. A saga the
+            # fills finished releases the clock, so a run armed by an earlier
+            # look this boot — the barrier re-drives, so there can be one — is
+            # never left behind a cloid nothing will evaluate again.
             if order.state in _OPEN_ORDER_STATES:
                 await self._judge_ghost(order)
             else:
