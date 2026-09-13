@@ -88,8 +88,9 @@ def probe(addr):
         yield o["order"]["oid"], by_oid["status"], by_cl["status"]
 ```
 
-Sample: 33 addresses read, 28 with fills (the HLP vault and 4 others had none). 556 distinct
-oids asked. 11 rows excluded as system fills with no user order (`dir` of
+Sample: 33 addresses read, 28 with fills (the HLP vault and 4 others had none). The script
+selects 76 addresses. The run was stopped by hand after 33, once the answer was stable. 556
+distinct oids asked. 11 rows excluded as system fills with no user order (`dir` of
 `Spot Dust Conversion` or `Liquidated Isolated Long`, all `unknownOid`). 545 user-order probes
 remain, fill age 0 to 980 days.
 
