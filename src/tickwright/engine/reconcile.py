@@ -67,16 +67,6 @@ _INFLIGHT_STATES = frozenset({OrderState.SUBMITTED})
 _OPEN_ORDER_STATES = frozenset({OrderState.LIVE, OrderState.PARTIALLY_FILLED})
 
 
-def _ref(order: Order) -> OrderRef:
-    """Everything the venue may need to find ``order``, taken from the saga."""
-    return OrderRef(
-        cloid=order.cloid,
-        symbol=order.symbol,
-        venue_oid=order.venue_oid,
-        acked_ts_ns=order.acked_ts_ns,
-    )
-
-
 class _FreezeScope(Enum):
     """How much of a pass one failed read froze (ADR-0049) — the ``scope`` field
     on ``reconcile.frozen``.
@@ -288,7 +278,7 @@ class Reconciler:
                 if states is not None and order.state not in states:
                     continue
                 with operation(cloid=order.cloid):
-                    view = await self._exchange.fetch_order(_ref(order))
+                    view = await self._exchange.fetch_order(OrderRef.of(order))
                     match view:
                         case VenueReadFailure.SEND_FAILED:
                             return self._freeze(_FreezeScope.CYCLE)

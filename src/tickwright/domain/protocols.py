@@ -13,21 +13,18 @@ from typing import Protocol, runtime_checkable
 
 from .account import Account, AccountSpec, AccountView
 from .enums import OrderState
-from .events import (
+from .events import Event, MarketTick, OrderEvent, PlaceSignal
+from .instrument import GuardDecision, InstrumentSpec, KillSwitchState
+from .order import Order
+from .position import Position, PositionView
+from .venue import (
     AccountModeVerdict,
-    Event,
-    MarketTick,
-    OrderEvent,
     OrderRef,
     PlaceOrder,
-    PlaceSignal,
     VenueAccountState,
     VenueOrderView,
     VenueReadFailure,
 )
-from .instrument import GuardDecision, InstrumentSpec, KillSwitchState
-from .order import Order
-from .position import Position, PositionView
 
 type Handler[E: Event] = Callable[[E], Awaitable[None]]
 """An async subscriber of a single event family."""

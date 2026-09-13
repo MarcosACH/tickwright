@@ -29,7 +29,6 @@ from .errors import (
     VenueSubscriptionUnreachable,
 )
 from .events import (
-    AccountModeVerdict,
     CancelSignal,
     CashCorrection,
     Event,
@@ -47,18 +46,12 @@ from .events import (
     OrderLive,
     OrderPartiallyFilled,
     OrderPlaced,
-    OrderRef,
     OrderRejected,
     OrderStatusReport,
     OrderSubmitted,
-    PlaceOrder,
     PlaceSignal,
     ReconciliationFill,
     Signal,
-    VenueAccountState,
-    VenueOrderView,
-    VenuePositionState,
-    VenueReadFailure,
 )
 from .figures import exact_figure
 from .ids import SignalId, derive_cloid
@@ -109,6 +102,15 @@ from .valuation import (
     account_valuation,
     account_view,
     position_view,
+)
+from .venue import (
+    AccountModeVerdict,
+    OrderRef,
+    PlaceOrder,
+    VenueAccountState,
+    VenueOrderView,
+    VenuePositionState,
+    VenueReadFailure,
 )
 
 __all__ = [
