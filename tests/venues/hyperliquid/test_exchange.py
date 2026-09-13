@@ -677,9 +677,10 @@ def test_fetch_order_reads_the_fill_history_by_the_acked_oid_once_the_record_is_
 
 
 def test_fetch_order_reads_the_whole_fill_history_when_the_ack_time_is_unknown() -> None:
-    # A saga recovered from a database written before the ack time was kept
-    # has an oid but no time to bound the read with. The whole recent history
-    # is the only honest window, so the read falls back to userFills.
+    # A saga that never checkpointed as LIVE has an oid but no time to bound
+    # the read with. The store backfills the time for any row that did, so
+    # this is the one case left. The whole recent history is the only honest
+    # window, so the read falls back to userFills (ADR-0011 inv 2).
     post = FakeExchangeApi(
         {
             "orderStatus": {"status": "unknownOid"},

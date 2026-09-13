@@ -450,8 +450,9 @@ class HyperliquidExchange:
         the window starts depends on who still remembers the placement. With
         a record it is the venue's own placement time, exact whatever our
         clock skew. Without one it is our ack time less a skew allowance. With
-        no ack time either, which is a saga recovered from a database written
-        before the time was kept, it is the whole recent history.
+        no ack time either, which is a saga that never checkpointed as LIVE,
+        there is nothing to bound the read with, so it is the whole recent
+        history.
 
         A failed fills read fails the whole read and carries its own cause
         out. Never a partial view: with a record that would read as "no
