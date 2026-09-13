@@ -54,6 +54,11 @@ from .universe import HyperliquidUniverse
 
 _NS_PER_MS = 1_000_000
 
+# How far before our own ack time the fill-history read starts once the venue
+# has dropped the order record. Our ack time is our clock, and the venue's fill
+# time is theirs. The allowance covers the skew between the two (ADR-0011 inv 2).
+_ACK_SKEW_ALLOWANCE_MS = 60_000
+
 _TIF_WIRE = {TimeInForce.GTC: "Gtc", TimeInForce.IOC: "Ioc"}
 
 # The saga-terminal states a venue read can resolve to (ADR-0010): once an order
@@ -425,14 +430,36 @@ class HyperliquidExchange:
             # may ever be mistaken for an empty book.
             return record
         if record is _OrderStatusRead.NO_RECORD:
-            # unknownOid: a *successful* read that positively has no record —
-            # the order never landed (an empty view, not a failed read).
-            return VenueOrderView(status=None)
+            # unknownOid: a *successful* read that positively has no record.
+            # Either the order never landed, or the venue has since dropped the
+            # record while still holding the fills. The ref's oid tells the two
+            # apart, and only the second has a history to read (ADR-0011 inv 2).
+            if ref.venue_oid is None:
+                return VenueOrderView(status=None)
+            return await self._fills_only_view(ref)
         # Cannot fail: ``_decode_order_view`` refused an unmappable status on the
         # way in, so a read with no answer already returned its
         # ``VenueReadFailure`` above.
         state = _order_state(record.status)
         return await self._view_with_fills(cloid, record, state)
+
+    async def _fills_only_view(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
+        """The cross-check for an acked order the venue no longer has a record
+        of: its fill history by the ack's oid, bounded at the ack time."""
+        assert ref.venue_oid is not None
+        since_ms = (
+            None
+            if ref.acked_ts_ns is None
+            else ref.acked_ts_ns // _NS_PER_MS - _ACK_SKEW_ALLOWANCE_MS
+        )
+        fills = await self._fetch_fills(
+            cloid=ref.cloid, symbol=ref.symbol, oid=int(ref.venue_oid), since_ms=since_ms
+        )
+        if isinstance(fills, VenueReadFailure):
+            # Same rule as the recorded case: a failed fills read is the failure,
+            # never an empty view that would read as "no record" (inv 1).
+            return fills
+        return VenueOrderView(status=None, fills=tuple(fills))
 
     async def _view_with_fills(
         self, cloid: str, record: "_OrderRecord", state: OrderState

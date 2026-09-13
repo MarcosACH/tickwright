@@ -587,9 +587,14 @@ def test_cancel_of_a_cloid_the_venue_never_saw_is_a_benign_no_op() -> None:
     assert len(post.requests) == 1
 
 
-async def fetch_view(post: FakeExchangeApi) -> VenueOrderView | VenueReadFailure:
+UNACKED_REF = OrderRef(cloid=CLOID, symbol="BTC")
+
+
+async def fetch_view(
+    post: FakeExchangeApi, ref: OrderRef = UNACKED_REF
+) -> VenueOrderView | VenueReadFailure:
     exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
-    return await exchange.fetch_order(OrderRef(cloid=CLOID, symbol="BTC"))
+    return await exchange.fetch_order(ref)
 
 
 def test_fetch_order_bundles_the_venue_status_and_fills_into_one_view() -> None:
@@ -634,6 +639,37 @@ def test_fetch_order_returns_an_empty_view_when_the_venue_has_no_record() -> Non
     assert not view.has_record
     assert view.status is None
     assert view.fills == ()
+
+
+def test_fetch_order_reads_the_fill_history_by_the_acked_oid_once_the_record_is_gone() -> None:
+    # The venue drops order records by count and keeps fills for years, so an
+    # acked order can answer unknownOid while its fill is still on the books
+    # (ADR-0011 inv 2). The ack's oid keys the fills, and the ack time bounds
+    # the read, less a minute for clock skew between us and the venue.
+    post = FakeExchangeApi(
+        {
+            "orderStatus": {"status": "unknownOid"},
+            "userFillsByTime": [
+                fill_entry(oid=90, tid=555, px="43249.0", sz="1.0"),
+                fill_entry(oid=91, tid=556, px="43250.0", sz="0.5"),
+            ],
+        }
+    )
+    acked = OrderRef(
+        cloid=CLOID, symbol="BTC", venue_oid="91", acked_ts_ns=1_700_000_060_000 * 1_000_000
+    )
+    view = asyncio.run(fetch_view(post, acked))
+
+    assert isinstance(view, VenueOrderView)
+    assert view.status is None
+    (fill,) = view.fills
+    assert (fill.cloid, fill.trade_id, fill.quantity) == (CLOID, "556", Decimal("0.5"))
+    (_, fills_query) = post.requests[1]
+    assert fills_query == {
+        "type": "userFillsByTime",
+        "user": Account.from_key(TEST_SIGNING_KEY).address,
+        "startTime": 1_700_000_000_000,
+    }
 
 
 def test_fetch_order_reports_a_failed_send_when_the_read_itself_fails() -> None:
