@@ -45,6 +45,7 @@ from tickwright.domain import (
     DEFAULT_LEVERAGE,
     AccountSpec,
     Order,
+    OrderRef,
     OrderState,
     OrderType,
     PlaceOrder,
@@ -228,7 +229,7 @@ class _AccountVenue(LiveVenueDouble):
     async def cancel(self, cloid: str) -> None:
         raise AssertionError("the account cycle cancels nothing")
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
+    async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
         raise AssertionError("the account cycle is anchored on the account snapshot, not a cloid")
 
 

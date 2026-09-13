@@ -25,6 +25,7 @@ from tickwright.domain import (
     ExecutionReport,
     LeverageBook,
     LeverageSpec,
+    OrderRef,
     OrderState,
     OrderStatusReport,
     OrderType,
@@ -113,7 +114,7 @@ def test_place_reconcile_cancel_round_trip_on_testnet() -> None:
         assert live.cloid == cloid
 
         # Reconcile-visible: the fetch path sees the resting order as venue truth.
-        view = await exchange.fetch_order(cloid)
+        view = await exchange.fetch_order(OrderRef(cloid=cloid, symbol=SYMBOL))
         assert isinstance(view, VenueOrderView) and view.status is not None
         assert view.status.status is OrderState.LIVE
         assert view.fills == ()
@@ -127,7 +128,7 @@ def test_place_reconcile_cancel_round_trip_on_testnet() -> None:
         assert cancelled, "the venue-accepted cancel must report CANCELLED"
 
         # And the venue agrees: the order record itself reads canceled.
-        after = await exchange.fetch_order(cloid)
+        after = await exchange.fetch_order(OrderRef(cloid=cloid, symbol=SYMBOL))
         assert isinstance(after, VenueOrderView) and after.status is not None
         assert after.status.status is OrderState.CANCELLED
 

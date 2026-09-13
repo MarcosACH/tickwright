@@ -34,6 +34,7 @@ from tickwright.domain import (
     FillReport,
     InstrumentSpec,
     MarketTick,
+    OrderRef,
     OrderState,
     OrderStatusReport,
     OrderType,
@@ -588,7 +589,7 @@ def test_cancel_of_a_cloid_the_venue_never_saw_is_a_benign_no_op() -> None:
 
 async def fetch_view(post: FakeExchangeApi) -> VenueOrderView | VenueReadFailure:
     exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
-    return await exchange.fetch_order(CLOID)
+    return await exchange.fetch_order(OrderRef(cloid=CLOID, symbol="BTC"))
 
 
 def test_fetch_order_bundles_the_venue_status_and_fills_into_one_view() -> None:
@@ -1282,7 +1283,8 @@ def test_a_terminal_fetch_prunes_the_placed_order_so_the_cache_stays_bounded() -
         )
         exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
         await exchange.place(limit_order(Side.BUY, "0.5", "42000"))
-        await exchange.fetch_order(CLOID)  # sees FILLED → prunes _placed[CLOID]
+        # Sees FILLED → prunes _placed[CLOID].
+        await exchange.fetch_order(OrderRef(cloid=CLOID, symbol="BTC"))
         await exchange.cancel(CLOID)
         return post
 

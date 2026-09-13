@@ -30,6 +30,7 @@ from tickwright.domain import (
     OrderFailed,
     OrderFilled,
     OrderLive,
+    OrderRef,
     OrderRejected,
     OrderState,
     OrderStatusReport,
@@ -187,7 +188,7 @@ def test_recovered_submitted_saga_the_venue_never_saw_resolves_failed_not_resent
     assert [type(ev) for ev in events] == [OrderFailed]
     assert events[0].reconciliation is True
     # Never blind-resent (ADR-0008 rule 2): the venue still has no record.
-    view = asyncio.run(exchange.fetch_order("0xabc"))
+    view = asyncio.run(exchange.fetch_order(OrderRef(cloid="0xabc", symbol="BTC")))
     assert isinstance(view, VenueOrderView) and not view.has_record
 
 
@@ -208,7 +209,7 @@ def test_recovered_pending_intent_the_venue_never_saw_resolves_failed() -> None:
     assert recovered.state is OrderState.FAILED
     assert [type(ev) for ev in events] == [OrderFailed]
     # Attempted and proven never-landed (ADR-0010): resolved, never resent.
-    view = asyncio.run(exchange.fetch_order("0xabc"))
+    view = asyncio.run(exchange.fetch_order(OrderRef(cloid="0xabc", symbol="BTC")))
     assert isinstance(view, VenueOrderView) and not view.has_record
 
 
@@ -343,7 +344,7 @@ class _DarkVenue(VenueDouble):
     async def cancel(self, cloid: str) -> None:
         raise AssertionError("nothing may be cancelled before the barrier clears")
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
+    async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
         self.reads += 1
         return VenueReadFailure.SEND_FAILED
 
@@ -413,7 +414,7 @@ class _BlippingVenue(_DarkVenue):
         super().__init__()
         self._failures = failures
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
+    async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
         self.reads += 1
         if self.reads <= self._failures:
             return VenueReadFailure.SEND_FAILED
@@ -454,7 +455,7 @@ class _GarbledVenue(_DarkVenue):
     own contract. The opposite of ``_DarkVenue``: nothing is wrong with the
     link, so a retry costs one ordinary round-trip rather than a timeout."""
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
+    async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
         self.reads += 1
         return VenueReadFailure.UNREADABLE_BODY
 
@@ -466,7 +467,7 @@ class _GarbledThenReadableVenue(_DarkVenue):
         super().__init__()
         self._garbled = garbled
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
+    async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
         self.reads += 1
         if self.reads <= self._garbled:
             return VenueReadFailure.UNREADABLE_BODY
@@ -570,7 +571,7 @@ class _FlakyRecordVenue(_DarkVenue):
         super().__init__()
         self.present = False
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
+    async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
         self.reads += 1
         if not self.present:
             return VenueOrderView(status=None)
@@ -578,11 +579,57 @@ class _FlakyRecordVenue(_DarkVenue):
             status=OrderStatusReport(
                 ts_event=600,
                 ts_init=600,
-                cloid=cloid,
+                cloid=ref.cloid,
                 symbol="BTC",
                 status=OrderState.LIVE,
             )
         )
+
+
+class _RefRecordingVenue(_DarkVenue):
+    """A venue that remembers what each read asked for and knows nothing."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.refs: list[OrderRef] = []
+
+    async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
+        self.reads += 1
+        self.refs.append(ref)
+        return VenueOrderView(status=None)
+
+
+def test_the_reconciler_reads_the_venue_by_the_saga_s_full_identity() -> None:
+    clock = ManualClock(start_ns=2_000)
+    store = SQLiteStore(":memory:")
+    # The cloid alone is not enough once the venue has dropped the record: the
+    # fill history is keyed by the ack's oid and bounded by the ack time
+    # (ADR-0011 inv 2). Every read hands the venue all four.
+    saga = _saga("0xabc", OrderState.SUBMITTED)
+    saga.apply(
+        OrderLive(
+            ts_event=600,
+            ts_init=600,
+            cloid="0xabc",
+            strategy_id="trivial",
+            signal_id="trivial:BTC:1",
+            symbol="BTC",
+            venue_oid="777",
+        )
+    )
+    store.checkpoint(saga, ts_ns=500)
+    venue = _RefRecordingVenue()
+
+    bus = InMemoryBus()
+    checks = checkpointer(store, clock=clock)
+    cache = checks.cache
+    cache.rebuild()
+    reconciler = Reconciler(
+        bus=bus, clock=clock, exchange=venue, cache=cache, config=ReconcileConfig()
+    )
+    asyncio.run(reconciler.reconcile_startup())
+
+    assert venue.refs == [OrderRef(cloid="0xabc", symbol="BTC", venue_oid="777", acked_ts_ns=600)]
 
 
 def _live_saga(cloid: str) -> Order:
@@ -678,9 +725,9 @@ class _OneGarbledBodyVenue(_DarkVenue):
         self._clock = clock
         self._readable_from_ns = readable_from_ns
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
+    async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
         self.reads += 1
-        if cloid != "0xdef":
+        if ref.cloid != "0xdef":
             return VenueOrderView(status=None)
         if self._clock.timestamp_ns() < self._readable_from_ns:
             return VenueReadFailure.UNREADABLE_BODY
@@ -688,7 +735,7 @@ class _OneGarbledBodyVenue(_DarkVenue):
             status=OrderStatusReport(
                 ts_event=600,
                 ts_init=600,
-                cloid=cloid,
+                cloid=ref.cloid,
                 symbol="BTC",
                 status=OrderState.LIVE,
             )
@@ -759,15 +806,15 @@ class _RecordReturnsMidBootVenue(_DarkVenue):
         self._present_ns = present_ns
         self._readable_from_ns = readable_from_ns
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
+    async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
         self.reads += 1
         now_ns = self._clock.timestamp_ns()
-        if cloid == "0xdef":
+        if ref.cloid == "0xdef":
             if now_ns < self._readable_from_ns:
                 return VenueReadFailure.UNREADABLE_BODY
-            return VenueOrderView(status=_live_report(cloid))
+            return VenueOrderView(status=_live_report(ref.cloid))
         if now_ns in self._present_ns:
-            return VenueOrderView(status=_live_report(cloid))
+            return VenueOrderView(status=_live_report(ref.cloid))
         return VenueOrderView(status=None)
 
 
@@ -838,7 +885,7 @@ class _FillsWithoutARecordVenue(_DarkVenue):
         super().__init__()
         self._fill = fill
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
+    async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
         self.reads += 1
         return VenueOrderView(status=None, fills=(self._fill,))
 

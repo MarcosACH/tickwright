@@ -47,6 +47,7 @@ from tickwright.domain import (
     OrderEvent,
     OrderFilled,
     OrderLive,
+    OrderRef,
     OrderState,
     OrderType,
     PlaceOrder,
@@ -557,7 +558,7 @@ class _LiveShapedVenue(LiveVenueDouble):
     async def cancel(self, cloid: str) -> None:
         raise AssertionError("nothing is cancelled: no order exists")
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
+    async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
         return self._view
 
 
@@ -720,7 +721,7 @@ class _PaperShapedVenue(VenueDouble):
     async def cancel(self, cloid: str) -> None:
         raise AssertionError("nothing is cancelled: no order exists")
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
+    async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
         return _NO_RECORD
 
 
@@ -1597,7 +1598,7 @@ class _LifecycleRecordingVenue(VenueDouble):
     async def cancel(self, cloid: str) -> None:
         self._timeline.append("exchange.cancel")
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
+    async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
         self._timeline.append("venue.read")
         return VenueOrderView(status=None)
 
@@ -2122,5 +2123,5 @@ def test_graceful_stop_leaves_resting_live_orders_for_the_next_start_to_re_adopt
     finally:
         after.close()
     # The venue still holds exactly the one resting order — no duplicate send.
-    view = asyncio.run(venue.fetch_order(cloid))
+    view = asyncio.run(venue.fetch_order(OrderRef(cloid=cloid, symbol="BTC")))
     assert isinstance(view, VenueOrderView) and view.has_record

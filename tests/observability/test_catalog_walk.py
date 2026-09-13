@@ -47,6 +47,7 @@ from tickwright.domain import (
     MarketTick,
     Order,
     OrderEvent,
+    OrderRef,
     OrderState,
     OrderStatusReport,
     PlaceOrder,
@@ -156,7 +157,7 @@ class _SilentExchange(VenueDouble):
     async def cancel(self, cloid: str) -> None:
         return None
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
+    async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
         return VenueReadFailure.SEND_FAILED
 
 
@@ -169,7 +170,7 @@ class _ForgetfulVenue(VenueDouble):
     async def cancel(self, cloid: str) -> None:
         raise AssertionError("the reconcile walk never cancels")
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
+    async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
         return VenueOrderView(status=None)
 
 
@@ -183,7 +184,7 @@ class _LiveShapedVenue(LiveVenueDouble):
     async def cancel(self, cloid: str) -> None:
         raise AssertionError("the materialisation walk never cancels")
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
+    async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
         return VenueOrderView(status=None)
 
 
@@ -196,7 +197,7 @@ class _DarkVenue(VenueDouble):
     async def cancel(self, cloid: str) -> None:
         raise AssertionError("the frozen cycle never cancels")
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
+    async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
         return VenueReadFailure.SEND_FAILED
 
 

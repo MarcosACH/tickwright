@@ -588,6 +588,23 @@ class VenueReadFailure(Enum):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class OrderRef:
+    """What a venue read needs to find one order (``Exchange.fetch_order``).
+
+    The cloid is the key the venue's order record answers to. The oid and the
+    ack time are for after the venue has dropped that record: it drops order
+    records by count but keeps fills for years, so the fill history is read by
+    the ack's oid from the ack time (ADR-0011 inv 2). Both are ``None`` for a
+    saga whose ack never arrived. That saga has no fill history to consult.
+    """
+
+    cloid: str
+    symbol: str
+    venue_oid: str | None = None
+    acked_ts_ns: int | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class VenueOrderView:
     """One *successful* venue read for a cloid (``Exchange.fetch_order``).
 

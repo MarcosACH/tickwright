@@ -29,6 +29,7 @@ from tickwright.domain import (
     InstrumentSpec,
     LeverageBook,
     MarketTick,
+    OrderRef,
     OrderState,
     OrderStatusReport,
     OrderType,
@@ -407,12 +408,13 @@ class HyperliquidExchange:
         record = await self._order_status(cloid, normalize=_decode_order_status)
         return record.coin if isinstance(record, _OrderRecord) else None
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
-        """Venue truth for ``cloid``: the order record plus its fill history,
+    async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
+        """Venue truth for ``ref``: the order record plus its fill history,
         the ADR-0011 cross-check in one read. ``unknownOid`` is positive proof
         of no record (an empty view); a read that *failed* is a
         ``VenueReadFailure`` — an outage must never look like "no record"
         (inv 1)."""
+        cloid = ref.cloid
         record = await self._order_status(cloid, normalize=_decode_order_view)
         if isinstance(record, VenueReadFailure):
             # The read failed and ``read`` already named which way. Which way is

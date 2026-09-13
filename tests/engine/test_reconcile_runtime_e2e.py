@@ -28,6 +28,7 @@ from tickwright.domain import (
     MarketTick,
     OrderEvent,
     OrderFilled,
+    OrderRef,
     OrderRejected,
     OrderState,
     Side,
@@ -164,10 +165,10 @@ class _VanishingLinkExchange(VenueLink):
         super().__init__(venue)
         self._clock = clock
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
+    async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
         now_s = self._clock.timestamp_ns() / _NS
         if now_s < 3:
-            return await self._venue.fetch_order(cloid)  # settled and acked
+            return await self._venue.fetch_order(ref)  # settled and acked
         if 10 <= now_s < 12:
             # The outage: a failed *send*, never "no record" — and never the
             # unreadable body beside it, which the venue is up to answer.
@@ -281,7 +282,7 @@ class _GarbledLinkExchange(VenueLink):
     value never changes. A network boundary is the one place a double is
     allowed."""
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
+    async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
         return VenueReadFailure.UNREADABLE_BODY
 
 
