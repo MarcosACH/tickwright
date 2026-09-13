@@ -672,6 +672,30 @@ def test_fetch_order_reads_the_fill_history_by_the_acked_oid_once_the_record_is_
     }
 
 
+def test_fetch_order_reads_the_whole_fill_history_when_the_ack_time_is_unknown() -> None:
+    # A saga recovered from a database written before the ack time was kept
+    # has an oid but no time to bound the read with. The whole recent history
+    # is the only honest window, so the read falls back to userFills.
+    post = FakeExchangeApi(
+        {
+            "orderStatus": {"status": "unknownOid"},
+            "userFills": [fill_entry(oid=91, tid=556, px="43250.0", sz="0.5")],
+        }
+    )
+    acked = OrderRef(cloid=CLOID, symbol="BTC", venue_oid="91")
+    view = asyncio.run(fetch_view(post, acked))
+
+    assert isinstance(view, VenueOrderView)
+    assert view.status is None
+    (fill,) = view.fills
+    assert fill.trade_id == "556"
+    (_, fills_query) = post.requests[1]
+    assert fills_query == {
+        "type": "userFills",
+        "user": Account.from_key(TEST_SIGNING_KEY).address,
+    }
+
+
 def test_fetch_order_reports_a_failed_send_when_the_read_itself_fails() -> None:
     # The connectivity guard (ADR-0011 inv 1): a timeout or transport error is
     # a failure — never an empty view, which would read as "no record" and let
