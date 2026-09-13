@@ -13,11 +13,12 @@ own terms need it*, so a flat position still reads a real ``0`` — because
 nobody has seen.
 """
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from decimal import Decimal
 
 from tickwright.domain import (
     Account,
+    AccountView,
     InstrumentSpec,
     LeverageBook,
     LeverageSpec,
@@ -101,6 +102,21 @@ def _position(
 
 def _account(cash: str = "100000") -> Account:
     return Account(account_id="paper-default", genesis_collateral=Decimal(cash), genesis_ts_ns=7)
+
+
+def _view(
+    account: Account,
+    *,
+    positions: Iterable[Position],
+    marks: Mapping[str, Decimal],
+    leverage: LeverageBook,
+    specs: Mapping[str, InstrumentSpec],
+) -> AccountView:
+    """The view off the book, folded through ``account_valuation`` as the
+    projection does it."""
+    return account_view(
+        account, account_valuation(positions, marks, leverage=leverage, specs=specs)
+    )
 
 
 def _sum(terms: Iterable[Decimal | None]) -> Decimal:
@@ -227,9 +243,7 @@ def test_account_equity_needs_no_mark_when_every_partition_is_flat() -> None:
         side=Side.SELL,
     )
 
-    view = account_view(
-        _account("1000"), positions=(flat,), marks={}, leverage=LeverageBook(), specs={}
-    )
+    view = _view(_account("1000"), positions=(flat,), marks={}, leverage=LeverageBook(), specs={})
 
     assert view.equity == Decimal("1000")
 
@@ -944,7 +958,7 @@ def test_the_account_totals_sum_the_position_grain_numbers() -> None:
         quantity="10", price="3000", side=Side.BUY, symbol="ETH", isolated_collateral="6000"
     )
 
-    view = account_view(
+    view = _view(
         _account("100000"),
         positions=(btc, eth),
         marks={"BTC": Decimal("60000"), "ETH": Decimal("3200")},
@@ -995,7 +1009,7 @@ def test_the_account_totals_range_over_symbols_rather_than_partitions() -> None:
         side=Side.SELL,
     )
 
-    view = account_view(
+    view = _view(
         _account("100000"),
         positions=(long_leg, short_leg),
         marks={"BTC": Decimal("110")},
@@ -1024,7 +1038,7 @@ def test_free_margin_is_reported_when_negative() -> None:
     leaves ``−28000``. Not clamped at zero, which would report a solvent
     account, and not raised, which would make the report the enforcement.
     """
-    view = account_view(
+    view = _view(
         _account("1000"),
         positions=(_position(quantity="0.5", price="58000", side=Side.BUY),),
         marks={"BTC": Decimal("60000")},
@@ -1280,14 +1294,8 @@ def test_the_account_totals_are_sums_over_the_symbol_rows() -> None:
     specs = {"BTC": BTC_40X, "ETH": ETH_25X, "SOL": SOL_20X}
     priced = {"BTC": Decimal("110"), "ETH": Decimal("3200")}
 
-    view = account_view(
-        _account("100000"),
-        positions=(eth, long_leg, short_leg),
-        marks=priced,
-        leverage=leverage,
-        specs=specs,
-    )
     rows = account_valuation((eth, long_leg, short_leg), priced, leverage=leverage, specs=specs)
+    view = account_view(_account("100000"), rows)
 
     assert view.equity == Decimal("102040")
     assert view.total_margin_used == Decimal("8000")
@@ -1297,16 +1305,10 @@ def test_the_account_totals_are_sums_over_the_symbol_rows() -> None:
     assert view.total_maintenance_margin == _sum(r.maintenance_margin for r in rows.values())
     assert view.equity == Decimal("100000") + _sum(r.unrealized_pnl for r in rows.values())
 
-    unpriced = account_view(
-        _account("100000"),
-        positions=(eth, long_leg, short_leg, sol),
-        marks=priced,
-        leverage=leverage,
-        specs=specs,
-    )
     unpriced_rows = account_valuation(
         (eth, long_leg, short_leg, sol), priced, leverage=leverage, specs=specs
     )
+    unpriced = account_view(_account("100000"), unpriced_rows)
 
     assert unpriced_rows["SOL"].margin_used is None
     assert unpriced.equity is None

@@ -435,24 +435,49 @@ def _unrealized_pnl(position: Position, mark: Decimal | None) -> Decimal | None:
     return position.unrealized_pnl(mark)
 
 
-def account_view(
-    account: Account,
-    *,
-    positions: Iterable[Position],
-    marks: Mapping[str, Decimal],
-    leverage: LeverageBook,
-    specs: Mapping[str, InstrumentSpec],
-) -> AccountView:
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SymbolValuation:
+    """One symbol's account-grain figures, valued in one read (#304).
+
+    ``PositionView``'s sibling one grain up. A view is one partition's slice.
+    This row is the symbol's whole position, folded over every partition, which
+    is the grain the venue holds it at and the grain the reconcile cadence
+    compares against (ADR-0035, ADR-0041 §4). A sibling type and not a grain
+    flag on the view, because ADR-0041 §4 keeps the two grains apart on purpose.
+
+    Every Tier-2 field follows the per-term nullability rule the view follows
+    (ADR-0041 §6). A flat net reads real zeros with no mark. A held net without
+    a mark reads ``None``. No field defaults, for ``position_view``'s reason: a
+    row claiming "no mark was seen" must come out of the fold that decided it.
+
+    The leverage pair is on the row as it is on the view. It is what the margin
+    was valued against, reported beside the figure, and not the leverage book
+    itself.
+    """
+
+    symbol: str
+    net: Decimal
+    """The account-net signed size, over every partition."""
+    unrealized_pnl: Decimal | None
+    notional: Decimal | None
+    margin_used: Decimal | None
+    """Posted margin by the symbol's mode: cross ``notional / leverage``, isolated
+    the locked bucket marked to market (ADR-0040 §3)."""
+    maintenance_margin: Decimal | None
+    """Owed on the exposure whichever pool backs it (ADR-0040 §4). ``None`` when
+    the rate or the mark is unknown."""
+    leverage: int
+    margin_mode: MarginMode
+
+
+def account_view(account: Account, rows: Mapping[str, SymbolValuation]) -> AccountView:
     """The account-wide pool's frozen snapshot — one collateral bucket.
 
     Never scoped to a strategy: collateral is one pool per process (ADR-0038),
-    and reporting a slice of it would be a fiction (ADR-0041 §2). So
-    ``positions`` is **every** partition, the reserved unattributed one
-    included — anything the account is holding backs the same bucket, whether or
-    not this engine placed it.
-
-    ``marks`` carries only the symbols a mark has been seen for; a symbol absent
-    from it is what makes the Σ unknown.
+    and reporting a slice of it would be a fiction (ADR-0041 §2). So ``rows``
+    is **every** symbol the account holds, the reserved unattributed
+    partition folded in — anything the account is holding backs the same
+    bucket, whether or not this engine placed it.
 
     The Σs range over **symbols, not partitions**, which is the one structural
     thing this function does beyond adding up. Every position-grain quantity is
@@ -460,24 +485,19 @@ def account_view(
     would double-count the ones that are magnitudes: two strategies holding
     offsetting legs net to a book with no exposure, where a per-partition fold
     reports collateral against a position the venue does not have (ADR-0035).
-    The account-net fold is therefore taken first and the arithmetic run once per
-    symbol, through the **same** helpers ``position_view`` uses — so a total can
-    never disagree with the views it is read beside. Every Σ here, ``equity``
-    included, is a sum over the ``account_valuation`` rows the reconcile cadence
-    reads (#304). That is the strong form of the promise: the book is folded
-    once, and a total the cadence would disagree with symbol by symbol cannot
-    be built.
+    That is why this takes ``account_valuation``'s rows and not the positions
+    (#304): the book is folded once, there, and every Σ here, ``equity``
+    included, is a sum over those rows. A total the reconcile cadence would
+    disagree with symbol by symbol cannot be built, and a caller holding the
+    rows already never folds the book a second time to get the view.
 
-    ``leverage`` is the resolved book rather than one spec, and ``specs`` the
-    instrument universe, because this ranges over symbols where ``position_view``
-    is handed one. A symbol with no spec contributes an unknown maintenance
-    term, on the same per-term rule as an unmarked one.
+    A row waiting on a mark makes the Σ unknown, on the per-term rule
+    (ADR-0041 §6).
     """
-    rows = account_valuation(positions, marks, leverage=leverage, specs=specs).values()
-    equity = _total(account.cash, _summed(row.unrealized_pnl for row in rows))
-    total_notional = _summed(row.notional for row in rows)
-    total_margin_used = _summed(row.margin_used for row in rows)
-    total_maintenance_margin = _summed(row.maintenance_margin for row in rows)
+    equity = _total(account.cash, _summed(row.unrealized_pnl for row in rows.values()))
+    total_notional = _summed(row.notional for row in rows.values())
+    total_margin_used = _summed(row.margin_used for row in rows.values())
+    total_maintenance_margin = _summed(row.maintenance_margin for row in rows.values())
     return AccountView(
         cash=account.cash,
         equity=equity,
@@ -534,41 +554,6 @@ def _total(running: Decimal | None, term: Decimal | None) -> Decimal | None:
 def _negated(term: Decimal | None) -> Decimal | None:
     """``−term``, propagating the unknown — so ``free_margin`` is one Σ rule."""
     return None if term is None else -term
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class SymbolValuation:
-    """One symbol's account-grain figures, valued in one read (#304).
-
-    ``PositionView``'s sibling one grain up. A view is one partition's slice.
-    This row is the symbol's whole position, folded over every partition, which
-    is the grain the venue holds it at and the grain the reconcile cadence
-    compares against (ADR-0035, ADR-0041 §4). A sibling type and not a grain
-    flag on the view, because ADR-0041 §4 keeps the two grains apart on purpose.
-
-    Every Tier-2 field follows the per-term nullability rule the view follows
-    (ADR-0041 §6). A flat net reads real zeros with no mark. A held net without
-    a mark reads ``None``. No field defaults, for ``position_view``'s reason: a
-    row claiming "no mark was seen" must come out of the fold that decided it.
-
-    The leverage pair is on the row as it is on the view. It is what the margin
-    was valued against, reported beside the figure, and not the leverage book
-    itself.
-    """
-
-    symbol: str
-    net: Decimal
-    """The account-net signed size, over every partition."""
-    unrealized_pnl: Decimal | None
-    notional: Decimal | None
-    margin_used: Decimal | None
-    """Posted margin by the symbol's mode: cross ``notional / leverage``, isolated
-    the locked bucket marked to market (ADR-0040 §3)."""
-    maintenance_margin: Decimal | None
-    """Owed on the exposure whichever pool backs it (ADR-0040 §4). ``None`` when
-    the rate or the mark is unknown."""
-    leverage: int
-    margin_mode: MarginMode
 
 
 def account_valuation(
