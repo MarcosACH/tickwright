@@ -14,7 +14,7 @@ from decimal import Decimal
 
 import pytest
 from ledgers import GENESIS, checkpointer
-from venue_doubles import VenueDouble
+from venue_doubles import VenueDouble, answerable
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
@@ -86,6 +86,10 @@ def _saga(cloid: str, state: OrderState) -> Order:
         order_type=OrderType.LIMIT,
     )
     order.state = state
+    if state in (OrderState.LIVE, OrderState.PARTIALLY_FILLED):
+        # A resting saga was acked, and the ack is where the oid comes from.
+        # The fill-history cross-check is keyed by it (ADR-0011 inv 2).
+        order.venue_oid = "777"
     return order
 
 
@@ -887,7 +891,7 @@ class _FillsWithoutARecordVenue(_DarkVenue):
 
     async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
         self.reads += 1
-        return VenueOrderView(status=None, fills=(self._fill,))
+        return answerable(ref, VenueOrderView(status=None, fills=(self._fill,)))
 
 
 def _partially_filled_saga(fill: FillReport) -> Order:

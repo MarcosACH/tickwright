@@ -16,7 +16,7 @@ import structlog.testing
 from hypothesis import given
 from hypothesis import strategies as st
 from ledgers import GENESIS, checkpointer
-from venue_doubles import VenueDouble, VenueLink
+from venue_doubles import VenueDouble, VenueLink, answerable
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
@@ -90,6 +90,10 @@ def _saga(cloid: str, state: OrderState) -> Order:
         order_type=OrderType.LIMIT,
     )
     order.state = state
+    if state in (OrderState.LIVE, OrderState.PARTIALLY_FILLED):
+        # A resting saga was acked, and the ack is where the oid comes from.
+        # The fill-history cross-check is keyed by it (ADR-0011 inv 2).
+        order.venue_oid = "777"
     return order
 
 
@@ -288,7 +292,7 @@ class _ForgetfulVenue(VenueDouble):
         raise AssertionError("the ghost cycle must never cancel")
 
     async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
-        return self.views.get(ref.cloid, VenueOrderView(status=None))
+        return answerable(ref, self.views.get(ref.cloid, VenueOrderView(status=None)))
 
 
 def test_a_live_order_absent_across_the_grace_window_resolves_rejected() -> None:

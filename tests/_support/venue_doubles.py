@@ -275,6 +275,24 @@ def account_state(
     )
 
 
+def answerable(ref: OrderRef, view: VenueOrderView) -> VenueOrderView:
+    """``view``, checked to be a shape the live adapter can answer for ``ref``.
+
+    A view with fills and no status is the fill history read by the ack's oid
+    once the venue has dropped the order record (ADR-0011 inv 2). For a ref
+    with no oid the live adapter answers an empty view and never asks for
+    fills, so a double answering fills there drives the reconciler through a
+    shape no venue produces. The saga a case seeds has to carry the oid.
+    """
+    if view.status is None and view.fills and ref.venue_oid is None:
+        raise AssertionError(
+            f"{ref.cloid}: a fills-only view needs a ref with a venue_oid. The live "
+            "adapter answers an empty view without one (ADR-0011 inv 2/4), so give "
+            "the seeded saga a venue_oid."
+        )
+    return view
+
+
 class VenueDouble:
     """The ``Exchange`` members no double varies.
 

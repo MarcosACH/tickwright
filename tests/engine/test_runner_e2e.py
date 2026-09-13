@@ -26,6 +26,7 @@ from venue_doubles import (
     LiveVenueDouble,
     VenueDouble,
     account_state,
+    answerable,
 )
 
 from tickwright.adapters.bus import InMemoryBus
@@ -559,7 +560,9 @@ class _LiveShapedVenue(LiveVenueDouble):
         raise AssertionError("nothing is cancelled: no order exists")
 
     async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
-        return self._view
+        if isinstance(self._view, VenueReadFailure):
+            return self._view
+        return answerable(ref, self._view)
 
 
 def _live_run(
@@ -831,7 +834,7 @@ def test_a_barrier_fill_lands_on_the_materialised_row_not_a_zero_one(
     tells the two orderings apart.
     """
     store = SQLiteStore(tmp_path / "saga.db")
-    store.checkpoint(_submitted_saga(_LIVE_CLOID), ts_ns=500)
+    store.checkpoint(_resting_saga(_LIVE_CLOID), ts_ns=500)
     venue = _LiveShapedVenue(
         view=VenueOrderView(
             status=None,
@@ -1617,6 +1620,18 @@ def _submitted_saga(cloid: str) -> Order:
         order_type=OrderType.LIMIT,
     )
     order.state = OrderState.SUBMITTED
+    return order
+
+
+def _resting_saga(cloid: str) -> Order:
+    """A saga the venue acked as working, carrying the oid the ack gave it.
+
+    The one to seed when the venue's answer is a fills-only view: the live
+    adapter reads that history by the ack's oid, so a saga without one gets an
+    empty view instead (ADR-0011 inv 2)."""
+    order = _submitted_saga(cloid)
+    order.state = OrderState.LIVE
+    order.venue_oid = "777"
     return order
 
 
