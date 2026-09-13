@@ -266,11 +266,13 @@ saga's, on a different anchor with a different freeze grain).
 **Ledger reading** (`LedgerReading`):
 The ledger's **whole side of one [[Ledger reconciliation]] pass**, folded in one call — the name the
 comparison's venue side always had as its account snapshot and its own side did not. Carries the
-[[AccountView]] plus the three account-grain folds the cycle compares through (net size,
-unrealized PnL, notional) and each mark's **stamp**, never its price; and it owns the cycle's one
-**held-ness** predicate, `holds(symbol)`, which reads the **net** so that flat and absent are one
-state at both tiers. Deliberately **not** the leverage book: that is configuration resolved at
-startup, which no fill can move, so it is not part of one-fold-per-pass. Taken once is the point —
+[[AccountView]] plus one `SymbolValuation` row per symbol, with every account-grain figure the
+cycle compares on it (net size, unrealized PnL, notional, margin used, maintenance margin), and each
+mark's **stamp**, never its price. It owns the cycle's one **held-ness** predicate,
+`holds(symbol)`, which reads the row's **net** so that flat and absent are one state at both tiers.
+Deliberately **not** the leverage book: that is configuration resolved at startup, which no fill
+can move, so it is not part of one-fold-per-pass. A row does report the leverage pair its figures
+were valued against, the same reported input a [[PositionView]] carries. Taken once is the point —
 the pass *writes*, and equity is `cash + Σ uPnL`, so a second reading after the heal reports the
 venue as disagreeing by exactly the amount the cycle just moved. A **reading**, not a snapshot or a
 view: those are the [[Portfolio]] seam's words for what a strategy is handed, and this is the engine

@@ -1106,11 +1106,9 @@ class PortfolioProjection:
     def ledger_reading(self) -> LedgerReading:
         """The ledger's whole side of one reconcile pass, folded in one call.
 
-        The one read the account cadence takes, and the reason three of the
-        folds below it are private: each had exactly one caller and a docstring
-        saying so, and every accessor the comparison grew wanted a fourth. The
-        surface the cycle asks for is a reading, so a compared field is added to
-        this type rather than to this class.
+        The one read the account cadence takes, and the reason ``_rows`` is
+        private: the surface the cycle asks for is a reading, so a compared
+        figure is added to the row rather than as an accessor on this class.
 
         Assembled here rather than by the caller because that is what makes a
         second reading unavailable later in the pass instead of merely
