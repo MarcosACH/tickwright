@@ -462,21 +462,22 @@ def account_view(
     reports collateral against a position the venue does not have (ADR-0035).
     The account-net fold is therefore taken first and the arithmetic run once per
     symbol, through the **same** helpers ``position_view`` uses — so a total can
-    never disagree with the views it is read beside. All three Σs are now
-    literally sums over the public per-symbol folds the reconcile cadence reads,
-    which is the strong form of that promise: the mode split and the maintenance
-    rate are not written twice and cannot come apart.
+    never disagree with the views it is read beside. Every Σ here, ``equity``
+    included, is a sum over the ``account_valuation`` rows the reconcile cadence
+    reads (#304). That is the strong form of the promise: the book is folded
+    once, and a total the cadence would disagree with symbol by symbol cannot
+    be built.
 
     ``leverage`` is the resolved book rather than one spec, and ``specs`` the
     instrument universe, because this ranges over symbols where ``position_view``
     is handed one. A symbol with no spec contributes an unknown maintenance
     term, on the same per-term rule as an unmarked one.
     """
-    held = tuple(positions)
-    equity = _equity(account, held, marks)
-    total_notional = _summed(account_notional(held, marks))
-    total_margin_used = _summed(account_margin_used(held, marks, leverage=leverage))
-    total_maintenance_margin = _summed(account_maintenance_margin(held, marks, specs=specs))
+    rows = account_valuation(positions, marks, leverage=leverage, specs=specs).values()
+    equity = _total(account.cash, _summed(row.unrealized_pnl for row in rows))
+    total_notional = _summed(row.notional for row in rows)
+    total_margin_used = _summed(row.margin_used for row in rows)
+    total_maintenance_margin = _summed(row.maintenance_margin for row in rows)
     return AccountView(
         cash=account.cash,
         equity=equity,
@@ -503,17 +504,17 @@ def _isolated_collateral_by_symbol(positions: Iterable[Position]) -> dict[str, D
     return buckets
 
 
-def _summed(terms: Mapping[str, Decimal | None]) -> Decimal | None:
-    """A per-symbol fold added up under ``_total``'s rule, one unknown poisoning
+def _summed(terms: Iterable[Decimal | None]) -> Decimal | None:
+    """Per-symbol terms added up under ``_total``'s rule, one unknown poisoning
     the whole (ADR-0041 §6).
 
-    The account grain's Σs are literally sums over the per-symbol folds the
-    reconcile cadence reads, rather than a second traversal that computes the
-    same terms again — so ``AccountView`` cannot report a total the cadence
-    would disagree with symbol by symbol.
+    The account grain's Σs are literally sums over the rows the reconcile
+    cadence reads, rather than a second traversal that computes the same terms
+    again. So ``AccountView`` cannot report a total the cadence would disagree
+    with symbol by symbol.
     """
     total: Decimal | None = _ZERO
-    for term in terms.values():
+    for term in terms:
         total = _total(total, term)
     return total
 
@@ -751,31 +752,6 @@ def account_maintenance_margin(
         symbol: _maintenance_margin(notional, spec=specs.get(symbol))
         for symbol, notional in account_notional(positions, marks).items()
     }
-
-
-def _equity(
-    account: Account, positions: Iterable[Position], marks: Mapping[str, Decimal]
-) -> Decimal | None:
-    """``cash + Σ uPnL``, or ``None`` the moment one term cannot be computed.
-
-    The condition is per-**term**, so a flat partition contributes its real zero
-    and never blocks the sum: its uPnL is zero at every mark, mark or no mark.
-    A held partition whose symbol has no mark does block it, and that is the
-    honest answer — the alternative is a partial sum reported as the whole.
-
-    The Σ **inherits** that rule from ``_unrealized_pnl`` rather than restating
-    it: it is one rule at two grains, and the account's half is the one with no
-    unit test of its own for each future exemption. Spelled twice, the two would
-    agree until the first term that is exempt at one grain and not the other,
-    and the disagreement would surface as an equity that is silently ``None``.
-    """
-    total = account.cash
-    for position in positions:
-        term = _unrealized_pnl(position, marks.get(position.symbol))
-        if term is None:
-            return None
-        total += term
-    return total
 
 
 __all__ = ["SymbolValuation", "account_valuation", "account_view", "position_view"]

@@ -13,6 +13,7 @@ own terms need it*, so a flat position still reads a real ``0`` — because
 nobody has seen.
 """
 
+from collections.abc import Iterable
 from decimal import Decimal
 
 from tickwright.domain import (
@@ -100,6 +101,15 @@ def _position(
 
 def _account(cash: str = "100000") -> Account:
     return Account(account_id="paper-default", genesis_collateral=Decimal(cash), genesis_ts_ns=7)
+
+
+def _sum(terms: Iterable[Decimal | None]) -> Decimal:
+    """Add row figures a case has already established are priced."""
+    total = Decimal("0")
+    for term in terms:
+        assert term is not None
+        total += term
+    return total
 
 
 def test_a_held_position_with_no_mark_reads_unknown_rather_than_worthless() -> None:
@@ -1242,3 +1252,65 @@ def test_account_valuation_folds_every_per_symbol_figure_into_one_row() -> None:
             margin_mode="cross",
         ),
     }
+
+
+def test_the_account_totals_are_sums_over_the_symbol_rows() -> None:
+    """``AccountView``'s Σs and ``account_valuation``'s rows come from one fold,
+    so the total can never disagree with the rows symbol by symbol (#304).
+
+    The book is picked so a second spelling of the fold could drift: two
+    offsetting BTC legs net to a flat symbol, and a third symbol is held with no
+    mark. The priced book sums to the hand-worked literals. The unmarked one
+    turns every Σ ``None`` because one row is, on the per-term rule
+    (ADR-0041 §6).
+
+        ETH  isolated 5x  +10 @ 3000, mark 3200, bucket 6000
+             margin 8000, maint 640, uPnL 2000
+        BTC  cross 10x    +2 @ 100 and -2 @ 120, flat net
+             margin 0, maint 0, uPnL 2 x (110 - 100) - 2 x (110 - 120) = 40
+        equity 100000 + 2000 + 40 = 102040, free 102040 - 8000 = 94040
+    """
+    eth = _position(
+        quantity="10", price="3000", side=Side.BUY, symbol="ETH", isolated_collateral="6000"
+    )
+    long_leg = _position(quantity="2", price="100", side=Side.BUY, symbol="BTC")
+    short_leg = _position(quantity="2", price="120", side=Side.SELL, symbol="BTC")
+    sol = _position(quantity="100", price="20", side=Side.BUY, symbol="SOL")
+    leverage = LeverageBook(entries={"BTC": CROSS_10X, "ETH": ISOLATED_5X, "SOL": CROSS_1X})
+    specs = {"BTC": BTC_40X, "ETH": ETH_25X, "SOL": SOL_20X}
+    priced = {"BTC": Decimal("110"), "ETH": Decimal("3200")}
+
+    view = account_view(
+        _account("100000"),
+        positions=(eth, long_leg, short_leg),
+        marks=priced,
+        leverage=leverage,
+        specs=specs,
+    )
+    rows = account_valuation((eth, long_leg, short_leg), priced, leverage=leverage, specs=specs)
+
+    assert view.equity == Decimal("102040")
+    assert view.total_margin_used == Decimal("8000")
+    assert view.total_maintenance_margin == Decimal("640")
+    assert view.free_margin == Decimal("94040")
+    assert view.total_margin_used == _sum(r.margin_used for r in rows.values())
+    assert view.total_maintenance_margin == _sum(r.maintenance_margin for r in rows.values())
+    assert view.equity == Decimal("100000") + _sum(r.unrealized_pnl for r in rows.values())
+
+    unpriced = account_view(
+        _account("100000"),
+        positions=(eth, long_leg, short_leg, sol),
+        marks=priced,
+        leverage=leverage,
+        specs=specs,
+    )
+    unpriced_rows = account_valuation(
+        (eth, long_leg, short_leg, sol), priced, leverage=leverage, specs=specs
+    )
+
+    assert unpriced_rows["SOL"].margin_used is None
+    assert unpriced.equity is None
+    assert unpriced.total_margin_used is None
+    assert unpriced.total_maintenance_margin is None
+    assert unpriced.free_margin is None
+    assert unpriced.effective_leverage is None
