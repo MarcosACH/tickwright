@@ -414,3 +414,25 @@ def test_record_fill_dedups_a_redelivered_trade_id_without_double_counting() -> 
     assert duplicate is None
     assert order.state is OrderState.PARTIALLY_FILLED
     assert order.cum_qty == Decimal("1")
+
+
+def test_live_ack_records_its_time_and_the_first_ack_wins() -> None:
+    # The ack time bounds the reconciler's fill-history read once the venue has
+    # dropped the order record (ADR-0011 inv 2, #242). A later re-read of the
+    # same LIVE record must not move it forward.
+    order = _order()
+    order.apply(_submitted())
+    assert order.acked_ts_ns is None
+    order.apply(_live())
+    assert order.acked_ts_ns == 2
+    later = OrderLive(
+        ts_event=99,
+        ts_init=99,
+        cloid="0xabc",
+        strategy_id="trivial",
+        signal_id="trivial:BTC:1",
+        symbol="BTC",
+        venue_oid="oid-1",
+    )
+    order.apply(later)
+    assert order.acked_ts_ns == 2
