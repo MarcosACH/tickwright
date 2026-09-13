@@ -548,8 +548,10 @@ class HyperliquidExchange:
     async def _fetch_fills(
         self, *, cloid: str, symbol: str, oid: int, since_ms: int | None = None
     ) -> list[FillReport] | VenueReadFailure:
-        """This order's fills from the venue's fill history, by its oid — the
-        one id fills carry (they have no cloid on the wire).
+        """This order's fills from the venue's fill history, by its oid. Recent
+        fill rows also carry an undocumented ``cloid``. It is absent on older
+        fills and on some accounts, so the oid is the only key this read uses
+        (``docs/research/hyperliquid-order-status-retention.md``).
 
         ``since_ms`` bounds the read to fills at or after a known placement time
         (``userFillsByTime``), so an aged order's fills sit at the front of the

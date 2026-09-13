@@ -122,6 +122,9 @@ and the seam the order grain is constructed against: the [[ExecutionManager]] se
 [[Reconciliation|Reconciler]] reads back on it, and neither touches the account. Commands and a
 query together rather than split again, because a placement's outcome is *learned by reading it
 back*: one anchor, two halves of one loop. See ADR-0011, ADR-0015, ADR-0034.
+Since #242 `fetch_order` takes an `OrderRef` rather than a bare cloid. The ref adds the symbol,
+the venue's oid, and the ack time, which the read needs once the venue has dropped the order
+record and only the fill history is left (ADR-0011 inv 2).
 _Avoid_: order API, order client (the anchor is what makes it one seam, not the verb shapes).
 
 **Account anchor** / `AccountAnchor` *(Protocol)*:
