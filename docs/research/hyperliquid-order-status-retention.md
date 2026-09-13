@@ -11,7 +11,7 @@ Citation convention:
 
 - Docs: a URL under `https://hyperliquid.gitbook.io/hyperliquid-docs`.
 - SDK: `hyperliquid-python-sdk@0.24.0 <path>:L<n>`.
-- Probe: a row observed on mainnet on the research date. The script is in the method section.
+- Probe: a row observed on mainnet on the research date. The script sits next to this note.
 - A claim with no citation is marked **(unverified)**.
 
 ## The question
@@ -29,8 +29,8 @@ are kept far longer, at least 980 days. Once an account places about 2000 more o
 of an older order is gone while its fill stays. The two keys share one record. Lookup by cloid
 fails exactly when lookup by oid fails.
 
-Confidence is high because the probe observed 188 such orders across 15 of 28 mainnet accounts,
-with fill ages from 7 minutes to 830 days, and no counter-example.
+Confidence is high because the probe observed 188 such orders across 15 of 28 mainnet accounts.
+Their fill ages ran from 7 minutes to 830 days, and there was no counter-example.
 
 ## Documented facts
 
@@ -63,7 +63,11 @@ All reads are unsigned `POST https://api.hyperliquid.xyz/info`. Nothing was plac
 5. For orders that answered `unknownOid` and whose fill row carries a cloid, ask by cloid too.
 6. Throttle to 900 weight per rolling minute. About 500 weight per address.
 
-Core of the script (full version was `/tmp/hl_probe.py`, rerunnable as written):
+The full script is next to this note:
+[`hyperliquid-order-status-retention.probe.py`](hyperliquid-order-status-retention.probe.py). It
+collects the addresses, runs steps 2 to 5, and prints the tables below. The cross-user check in
+the cloid section was one extra `orderStatus` call made by hand with the same `post` helper. The
+core of the script, with helpers left out:
 
 ```python
 def probe(addr):
@@ -93,7 +97,7 @@ remain, fill age 0 to 980 days.
 
 | Fill age | Probed | Answered with a record | Answered `unknownOid` |
 | --- | --- | --- | --- |
-| under 1 day | 66 | 21 | 45 |
+| under 1 day | 70 | 25 | 45 |
 | 1 to 7 days | 4 | 4 | 0 |
 | 7 to 30 days | 13 | 13 | 0 |
 | 30 to 90 days | 56 | 53 | 3 |
@@ -101,6 +105,9 @@ remain, fill age 0 to 980 days.
 | 180 to 365 days | 112 | 76 | 36 |
 | over 365 days | 152 | 111 | 41 |
 | **total** | **545** | **357** | **188** |
+
+Four fills in the first row landed after the script stamped its clock, so their age reads
+slightly negative. All four answered with a record.
 
 Age does not predict the answer. Order count does:
 
@@ -126,8 +133,8 @@ Reading of the table:
   just past that page still answered.
 
 Fills also outlast the documented bound. For `0xbc1bc64b…` a `userFillsByTime` walk from
-`startTime: 0` paged 12,000 fills between 180 and 149 days old, and the account fills about
-1750 times per day. So the "10000 most recent fills" statement is not what the API enforced on
+`startTime: 0` paged 12,000 fills between 180 and 149 days old. That account fills about 1750
+times per day. So the "10000 most recent fills" statement is not what the API enforced on
 the research date. **(observed on one account, not a documented fact)**
 
 ## Cloid versus oid
@@ -144,11 +151,12 @@ Retention does not differ between the two keys. Both go through the same `oid` r
 ## Side findings
 
 - **Fill rows can carry `cloid`.** 7 of 28 accounts had `cloid` on their recent `userFills`
-  rows, matching the `historicalOrders` cloid for the same oid in 2000 of 2000 checked. On the
+  rows. It matched the `historicalOrders` cloid for the same oid in 2000 of 2000 checked. On the
   account paged above, the key appears on fills newer than about 150 days and is absent on
   older fills. The docs example row and the 0.24.0 docstrings do not list it. The adapter comment
-  at `exchange.py:523` ("they have no cloid on the wire") is true for the docs and for old fills,
-  but not for recent fills of a cloid-placing account. **(observed, not documented)**
+  at `exchange.py:523` says "they have no cloid on the wire". That is true for the docs and for
+  old fills. It is not true for recent fills of a cloid-placing account. **(observed, not
+  documented)**
 - `historicalOrders` rows carry `cloid` (null when the order had none). Observed on every
   account with rows.
 - `userFills` can hold rows with no user order: `Spot Dust Conversion` (zero hash, `tid` 0)
