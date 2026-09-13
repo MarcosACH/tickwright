@@ -193,7 +193,7 @@ class Order:
         self.state = target
         if event.venue_oid is not None:
             self.venue_oid = event.venue_oid
-        if target is OrderState.LIVE and self.acked_ts_ns is None:
+        if target is OrderState.LIVE:
             self.acked_ts_ns = event.ts_event
         if isinstance(event, OrderFillEvent):
             self.cum_qty = event.cum_qty
