@@ -45,6 +45,7 @@ RECORD_COLUMNS: tuple[str, ...] = (
     "state",
     "cum_qty",
     "venue_oid",
+    "acked_ts_ns",
     "reason",
     "cancel_requested",
     "cancel_requested_ts",
@@ -87,6 +88,7 @@ def record_values(order: Order, *, history: Sequence[Any]) -> tuple[Any, ...]:
         order.state.value,
         str(order.cum_qty),
         order.venue_oid,
+        order.acked_ts_ns,
         order.reason,
         order.cancel_requested,
         order.cancel_requested_ts,
@@ -121,11 +123,12 @@ def restore_order(row: Sequence[Any]) -> Order:
         state=OrderState(row[7]),
         cum_qty=Decimal(row[8]),
         venue_oid=row[9],
-        reason=row[10],
-        cancel_requested=bool(row[11]),
-        cancel_requested_ts=row[12],
-        cancel_signal_id=row[13],
-        applied_event_ids=json.loads(row[14]),
+        acked_ts_ns=row[10],
+        reason=row[11],
+        cancel_requested=bool(row[12]),
+        cancel_requested_ts=row[13],
+        cancel_signal_id=row[14],
+        applied_event_ids=json.loads(row[15]),
     )
 
 

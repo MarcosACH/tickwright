@@ -46,6 +46,7 @@ _SCHEMA: tuple[str, ...] = (
         state               TEXT NOT NULL,
         cum_qty             TEXT NOT NULL,
         venue_oid           TEXT,
+        acked_ts_ns         BIGINT,
         reason              TEXT,
         cancel_requested    BOOLEAN NOT NULL DEFAULT FALSE,
         cancel_requested_ts BIGINT,
@@ -102,6 +103,10 @@ _SCHEMA: tuple[str, ...] = (
     """,
 )
 
+# Columns added after a database may already exist on disk: (table, column,
+# declaration). Each one is also in ``_SCHEMA`` for a fresh database.
+_ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (("orders", "acked_ts_ns", "BIGINT"),)
+
 
 class PostgresStore(SqlStore):
     """A ``Store`` over one Postgres database, addressed by a libpq DSN."""
@@ -113,7 +118,15 @@ class PostgresStore(SqlStore):
 
     def __init__(self, dsn: str) -> None:
         self._conn = psycopg.connect(dsn, autocommit=True)
-        super().__init__(schema=_SCHEMA, release=self._conn.close)
+        super().__init__(schema=_SCHEMA, added_columns=_ADDED_COLUMNS, release=self._conn.close)
+
+    def _has_column(self, table: str, column: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = %s AND column_name = %s",
+            (table, column),
+        ).fetchone()
+        return row is not None
 
     def _transaction(self) -> AbstractContextManager[object]:
         return self._conn.transaction()

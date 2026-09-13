@@ -64,7 +64,13 @@ class SqlStore(ABC):
     # psycopg. Every statement below renders through it.
     _placeholder: ClassVar[str]
 
-    def __init__(self, *, schema: Iterable[str], release: Callable[[], None]) -> None:
+    def __init__(
+        self,
+        *,
+        schema: Iterable[str],
+        added_columns: Iterable[tuple[str, str, str]] = (),
+        release: Callable[[], None],
+    ) -> None:
         self._p = self._placeholder
         self._upserts = upserts_for(self._placeholder)
         # Tie the connection's lifetime to this store: close it on ``close()`` or,
@@ -74,6 +80,16 @@ class SqlStore(ABC):
         with self._transaction():
             for statement in schema:
                 self._execute(statement)
+            # ``CREATE TABLE IF NOT EXISTS`` leaves an existing table as it was.
+            # A column added after a database was first written is added here,
+            # so a live account's open sagas survive the upgrade (#242).
+            for table, column, declaration in added_columns:
+                if not self._has_column(table, column):
+                    self._execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+
+    @abstractmethod
+    def _has_column(self, table: str, column: str) -> bool:
+        """Whether ``table`` already carries ``column``, by the driver's catalog."""
 
     @abstractmethod
     def _transaction(self) -> AbstractContextManager[object]:

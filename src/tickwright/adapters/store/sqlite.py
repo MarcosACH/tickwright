@@ -43,6 +43,7 @@ _SCHEMA: tuple[str, ...] = (
         state             TEXT NOT NULL,
         cum_qty           TEXT NOT NULL,
         venue_oid         TEXT,
+        acked_ts_ns       INTEGER,
         reason            TEXT,
         cancel_requested    INTEGER NOT NULL DEFAULT 0,
         cancel_requested_ts INTEGER,
@@ -99,6 +100,10 @@ _SCHEMA: tuple[str, ...] = (
     """,
 )
 
+# Columns added after a database may already exist on disk: (table, column,
+# declaration). Each one is also in ``_SCHEMA`` for a fresh database.
+_ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (("orders", "acked_ts_ns", "INTEGER"),)
+
 
 class SQLiteStore(SqlStore):
     """A ``Store`` over one SQLite database (file path or ``":memory:"``)."""
@@ -110,7 +115,11 @@ class SQLiteStore(SqlStore):
 
     def __init__(self, path: str | Path = ":memory:") -> None:
         self._conn = sqlite3.connect(str(path))
-        super().__init__(schema=_SCHEMA, release=self._conn.close)
+        super().__init__(schema=_SCHEMA, added_columns=_ADDED_COLUMNS, release=self._conn.close)
+
+    def _has_column(self, table: str, column: str) -> bool:
+        rows = self._conn.execute(f"PRAGMA table_info({table})").fetchall()
+        return any(row[1] == column for row in rows)
 
     def _transaction(self) -> AbstractContextManager[object]:
         # sqlite3's connection is its own transaction scope: commit on exit,
