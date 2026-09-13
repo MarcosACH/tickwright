@@ -741,6 +741,28 @@ def test_fetch_order_reports_a_failed_send_when_the_read_itself_fails() -> None:
     assert failures and failures[0]["request"] == "userFills"
 
 
+def test_fetch_order_fails_when_the_fills_read_behind_a_dropped_record_fails() -> None:
+    # The record is gone and the fill history is the only cross-check left.
+    # If that read dies, the answer is the failure. An empty view here would
+    # read as "never landed" and let the ghost gate reject a filled order
+    # (ADR-0011 inv 1).
+    acked = OrderRef(
+        cloid=CLOID, symbol="BTC", venue_oid="91", acked_ts_ns=1_700_000_060_000 * 1_000_000
+    )
+    for failure, verdict in (
+        (ConnectionError("reset"), VenueReadFailure.SEND_FAILED),
+        ({"unexpected": 1}, VenueReadFailure.UNREADABLE_BODY),
+    ):
+        post = FakeExchangeApi(
+            {"orderStatus": {"status": "unknownOid"}, "userFillsByTime": failure}
+        )
+        with capture_events() as events:
+            view = asyncio.run(fetch_view(post, acked))
+        assert view is verdict, failure
+        failures = [e for e in events if e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED]
+        assert failures and failures[0]["request"] == "userFills"
+
+
 def test_fetch_order_names_an_order_status_body_it_cannot_parse() -> None:
     # An orderStatus body outside the venue's two documented shapes — an order
     # record, or the positive `unknownOid` — is a failed read, and the adapter
