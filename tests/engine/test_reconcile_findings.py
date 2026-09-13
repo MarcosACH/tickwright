@@ -14,6 +14,8 @@ a recorded venue body already has, pointed at the other side of the comparison.
 from dataclasses import replace
 from decimal import Decimal
 
+import pytest
+
 from tickwright.domain import (
     DEFAULT_LEVERAGE,
     AccountView,
@@ -523,3 +525,51 @@ def test_a_stale_isolated_mark_leaves_the_cross_subset_maintenance_alert_alone()
         (DivergenceField.MAINTENANCE_MARGIN, None)
     ]
     assert (findings.suppressed, findings.unvalued) == (0, 0)
+
+
+@pytest.mark.parametrize(
+    ("field", "attribute"),
+    [
+        (DivergenceField.UNREALIZED_PNL, "unrealized_pnl"),
+        (DivergenceField.NOTIONAL, "notional"),
+        (DivergenceField.MARGIN_USED, "margin_used"),
+    ],
+)
+def test_one_broken_venue_figure_is_one_finding_naming_that_figure(
+    field: DivergenceField, attribute: str
+) -> None:
+    """Each per-symbol figure is read off its own venue attribute and no other (#304).
+
+    The per-symbol compare is one roster of (field, ledger read, venue read)
+    triples. A slip that pairs a field with the wrong venue attribute would
+    still produce findings, just under another field's name. So the guard is
+    isolation: with both sides agreeing on everything, nudge one venue figure
+    and expect exactly one per-symbol finding, carrying that figure's name.
+
+    Only the per-symbol grain is asserted. The venue's cash line is implied
+    from equity minus open PnL (ADR-0040 §7), so the uPnL nudge also moves an
+    account figure, and that is the account grain doing its job.
+    """
+    position = _position("BTC", signed_size="0.5", notional="60000", unrealized_pnl="10000")
+    state = _venue(
+        equity="110000",
+        free_margin="50000",
+        positions=(replace(position, **{attribute: getattr(position, attribute) + Decimal("1")}),),
+    )
+    reading = LedgerReading(
+        account=AccountView(
+            cash=Decimal("100000"),
+            equity=Decimal("110000"),
+            total_margin_used=Decimal("0"),
+            total_maintenance_margin=Decimal("0"),
+            free_margin=Decimal("50000"),
+            effective_leverage=None,
+        ),
+        rows={"BTC": _row("BTC", net="0.5", unrealized_pnl="10000", notional="60000")},
+        mark_observed={"BTC": _NOW_NS},
+    )
+
+    findings = ReconcileFindings.classify(state, reading, band=ValuationBand(), now_ns=_NOW_NS)
+
+    per_symbol = [(d.field, d.symbol) for d in findings.divergences if d.symbol is not None]
+    assert per_symbol == [(field, "BTC")]
