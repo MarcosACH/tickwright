@@ -104,10 +104,12 @@ from .protocols import (
 )
 from .valuation import (
     LiquidationSource,
+    SymbolValuation,
     account_maintenance_margin,
     account_margin_used,
     account_notional,
     account_unrealized_pnl,
+    account_valuation,
     account_view,
     position_view,
 )
@@ -202,9 +204,11 @@ __all__ = [
     "venue_cash",
     # Tier-2 view assembly (pure, never stored)
     "LiquidationSource",
+    "SymbolValuation",
     "account_maintenance_margin",
     "account_margin_used",
     "account_unrealized_pnl",
+    "account_valuation",
     "account_view",
     "position_view",
     # retry pacing

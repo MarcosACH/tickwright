@@ -25,8 +25,10 @@ from tickwright.domain import (
     Position,
     PositionView,
     Side,
+    SymbolValuation,
     account_maintenance_margin,
     account_margin_used,
+    account_valuation,
     account_view,
     position_view,
 )
@@ -1178,3 +1180,65 @@ def test_a_flat_account_net_owes_a_real_zero_maintenance_with_neither_mark_nor_s
     maintenance = account_maintenance_margin((long_leg, short_leg), {}, specs={})
 
     assert maintenance == {"BTC": Decimal("0")}
+
+
+def test_account_valuation_folds_every_per_symbol_figure_into_one_row() -> None:
+    """``account_valuation``: one row per symbol, every account-grain figure on it.
+
+    The reconcile cadence reads these figures one symbol at a time, and before
+    the row it re-zipped five parallel maps at every read (#304). One row is
+    the same numbers the separate folds gave, taken in one traversal, with the
+    leverage pair each figure was valued against beside them.
+
+        BTC  cross 10x    +0.5 @ 58000, mark 60000
+             uPnL 1000, notional 30000, margin 3000, maint 30000 x 0.0125 = 375
+        ETH  isolated 5x  +10 @ 3000, mark 3200, bucket 6000
+             uPnL 2000, notional 32000, margin 6000 + 2000 = 8000, maint 640
+        SOL  cross 1x     +100 @ 20, no mark
+             net 100 and every Tier-2 figure unknown, on the per-term rule
+    """
+    btc = _position(quantity="0.5", price="58000", side=Side.BUY, symbol="BTC")
+    eth = _position(
+        quantity="10", price="3000", side=Side.BUY, symbol="ETH", isolated_collateral="6000"
+    )
+    sol = _position(quantity="100", price="20", side=Side.BUY, symbol="SOL")
+
+    rows = account_valuation(
+        (btc, eth, sol),
+        {"BTC": Decimal("60000"), "ETH": Decimal("3200")},
+        leverage=LeverageBook(entries={"BTC": CROSS_10X, "ETH": ISOLATED_5X, "SOL": CROSS_1X}),
+        specs={"BTC": BTC_40X, "ETH": ETH_25X, "SOL": SOL_20X},
+    )
+
+    assert rows == {
+        "BTC": SymbolValuation(
+            symbol="BTC",
+            net=Decimal("0.5"),
+            unrealized_pnl=Decimal("1000"),
+            notional=Decimal("30000"),
+            margin_used=Decimal("3000"),
+            maintenance_margin=Decimal("375"),
+            leverage=10,
+            margin_mode="cross",
+        ),
+        "ETH": SymbolValuation(
+            symbol="ETH",
+            net=Decimal("10"),
+            unrealized_pnl=Decimal("2000"),
+            notional=Decimal("32000"),
+            margin_used=Decimal("8000"),
+            maintenance_margin=Decimal("640"),
+            leverage=5,
+            margin_mode="isolated",
+        ),
+        "SOL": SymbolValuation(
+            symbol="SOL",
+            net=Decimal("100"),
+            unrealized_pnl=None,
+            notional=None,
+            margin_used=None,
+            maintenance_margin=None,
+            leverage=1,
+            margin_mode="cross",
+        ),
+    }

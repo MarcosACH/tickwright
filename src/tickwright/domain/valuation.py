@@ -21,7 +21,7 @@ from typing import Self
 
 from .account import Account, AccountView
 from .instrument import InstrumentSpec
-from .leverage import LeverageBook, LeverageSpec
+from .leverage import LeverageBook, LeverageSpec, MarginMode
 from .position import Position, PositionView, account_net_size
 
 _ZERO = Decimal("0")
@@ -535,6 +535,97 @@ def _negated(term: Decimal | None) -> Decimal | None:
     return None if term is None else -term
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SymbolValuation:
+    """One symbol's account-grain figures, valued in one read (#304).
+
+    ``PositionView``'s sibling one grain up. A view is one partition's slice.
+    This row is the symbol's whole position, folded over every partition, which
+    is the grain the venue holds it at and the grain the reconcile cadence
+    compares against (ADR-0035, ADR-0041 §4). A sibling type and not a grain
+    flag on the view, because ADR-0041 §4 keeps the two grains apart on purpose.
+
+    Every Tier-2 field follows the per-term nullability rule the view follows
+    (ADR-0041 §6). A flat net reads real zeros with no mark. A held net without
+    a mark reads ``None``. No field defaults, for ``position_view``'s reason: a
+    row claiming "no mark was seen" must come out of the fold that decided it.
+
+    The leverage pair is on the row as it is on the view. It is what the margin
+    was valued against, reported beside the figure, and not the leverage book
+    itself.
+    """
+
+    symbol: str
+    net: Decimal
+    """The account-net signed size, over every partition."""
+    unrealized_pnl: Decimal | None
+    notional: Decimal | None
+    margin_used: Decimal | None
+    """Posted margin by the symbol's mode: cross ``notional / leverage``, isolated
+    the locked bucket marked to market (ADR-0040 §3)."""
+    maintenance_margin: Decimal | None
+    """Owed on the exposure whichever pool backs it (ADR-0040 §4). ``None`` when
+    the rate or the mark is unknown."""
+    leverage: int
+    margin_mode: MarginMode
+
+
+def account_valuation(
+    positions: Iterable[Position],
+    marks: Mapping[str, Decimal],
+    *,
+    leverage: LeverageBook,
+    specs: Mapping[str, InstrumentSpec],
+) -> dict[str, SymbolValuation]:
+    """Every symbol's account-grain row, folded once over the book.
+
+    The one place the per-symbol figures are computed. ``account_view``'s Σs
+    are sums over these rows, so the mode split and the maintenance rate are
+    written once and a total the reconcile cadence would disagree with symbol
+    by symbol is unconstructible.
+
+    Three partition-grain terms are accumulated in one pass: the account-net
+    size, the account-net uPnL and the isolated bucket. Every Tier-2 figure is
+    then arithmetic per symbol, through the same helpers ``position_view`` uses.
+
+    ``account_equity`` is ``None`` into ``_backing_collateral`` on purpose. It
+    is cross's backing, which ``effective_leverage`` and ``liquidation_price``
+    read, while cross's margin is ``notional / leverage`` and never does
+    (ADR-0040 §3).
+    """
+    held = tuple(positions)
+    upnl: dict[str, Decimal | None] = {}
+    buckets: dict[str, Decimal] = {}
+    for position in held:
+        symbol = position.symbol
+        upnl[symbol] = _total(upnl.get(symbol, _ZERO), _unrealized_pnl(position, marks.get(symbol)))
+        buckets[symbol] = buckets.get(symbol, _ZERO) + position.isolated_collateral
+    rows: dict[str, SymbolValuation] = {}
+    for symbol, size in account_net_size(held).items():
+        symbol_leverage = leverage.for_symbol(symbol)
+        notional = _notional(size, marks.get(symbol))
+        rows[symbol] = SymbolValuation(
+            symbol=symbol,
+            net=size,
+            unrealized_pnl=upnl[symbol],
+            notional=notional,
+            margin_used=_margin_used(
+                notional,
+                leverage=symbol_leverage,
+                backing=_backing_collateral(
+                    leverage=symbol_leverage,
+                    isolated_collateral=buckets[symbol],
+                    account_unrealized_pnl=upnl[symbol],
+                    account_equity=None,
+                ),
+            ),
+            maintenance_margin=_maintenance_margin(notional, spec=specs.get(symbol)),
+            leverage=symbol_leverage.leverage,
+            margin_mode=symbol_leverage.mode,
+        )
+    return rows
+
+
 def account_unrealized_pnl(
     positions: Iterable[Position], marks: Mapping[str, Decimal]
 ) -> dict[str, Decimal | None]:
@@ -687,4 +778,4 @@ def _equity(
     return total
 
 
-__all__ = ["account_view", "position_view"]
+__all__ = ["SymbolValuation", "account_valuation", "account_view", "position_view"]
