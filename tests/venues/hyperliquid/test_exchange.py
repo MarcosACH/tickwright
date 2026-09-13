@@ -1382,6 +1382,33 @@ def test_a_terminal_fetch_prunes_the_placed_order_so_the_cache_stays_bounded() -
     assert len(reads) == 2
 
 
+def test_a_dropped_record_prunes_the_placed_order_too() -> None:
+    # unknownOid for an order this process placed and the venue acked is the
+    # venue saying the order is closed and its record gone. That memory is as
+    # dead as after a terminal record, so it is pruned the same way. Observable
+    # the same way too: a later cancel falls back to an orderStatus read.
+    async def main() -> FakeExchangeApi:
+        post = FakeExchangeApi(
+            {
+                "order": resting_response(oid=77),
+                "orderStatus": {"status": "unknownOid"},
+                "userFillsByTime": [fill_entry(oid=77, tid=556, px="42000.0", sz="0.5")],
+                "cancelByCloid": cancel_success_response(),
+            }
+        )
+        exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
+        await exchange.place(limit_order(Side.BUY, "0.5", "42000"))
+        acked = OrderRef(cloid=CLOID, symbol="BTC", venue_oid="77", acked_ts_ns=1_000_000)
+        await exchange.fetch_order(acked)  # Record gone → prunes _placed[CLOID].
+        await exchange.cancel(CLOID)
+        return post
+
+    post = asyncio.run(main())
+
+    reads = [query for (_, query) in post.requests if query.get("type") == "orderStatus"]
+    assert len(reads) == 2
+
+
 def test_the_venue_link_is_released_without_a_start_having_run() -> None:
     """The faulted teardown walks the same ordered membership as the graceful
     one, so ``stop()`` is reached after a ``start()`` that refused — and after

@@ -470,18 +470,20 @@ class HyperliquidExchange:
         fills = await self._fetch_fills(cloid=ref.cloid, symbol=symbol, oid=oid, since_ms=since_ms)
         if isinstance(fills, VenueReadFailure):
             return fills
-        status = None
-        if record is not None:
-            # Cannot fail: ``_decode_order_view`` refused an unmappable status
-            # on the way in, so the read would have failed above.
-            state = _order_state(record.status)
-            if state in _TERMINAL_STATES:
-                # This order is done: drop the placed-order memory a cancel
-                # would have used, so the cache tracks only still-open orders.
-                self._placed.pop(ref.cloid, None)
-            status = self._status_report(
-                cloid=ref.cloid, symbol=record.coin, status=state, venue_oid=str(record.oid)
-            )
+        if record is None:
+            # The venue dropped the record, so the order is closed. Drop the
+            # placed-order memory a cancel would have used, as a terminal record
+            # does below, so the cache tracks only still-open orders.
+            self._placed.pop(ref.cloid, None)
+            return VenueOrderView(status=None, fills=tuple(fills))
+        # Cannot fail: ``_decode_order_view`` refused an unmappable status on
+        # the way in, so the read would have failed above.
+        state = _order_state(record.status)
+        if state in _TERMINAL_STATES:
+            self._placed.pop(ref.cloid, None)
+        status = self._status_report(
+            cloid=ref.cloid, symbol=record.coin, status=state, venue_oid=str(record.oid)
+        )
         return VenueOrderView(status=status, fills=tuple(fills))
 
     async def fetch_account_state(self) -> VenueAccountState | None:
