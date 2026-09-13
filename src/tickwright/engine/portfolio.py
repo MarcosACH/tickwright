@@ -1239,13 +1239,19 @@ class PortfolioProjection:
         That last part is a **convention the signature cannot enforce**: nothing
         here can tell a caller's stale fold from a fresh one, which is why the
         two are named together rather than defaulted one at a time.
+
+        The row lookup is strict on purpose. Every position in the book has a
+        row, flat ones included, because ``account_valuation`` ranges over
+        ``account_net_size`` and that fold keeps a symbol traded to flat. So a
+        missing row is never "no exposure". It is rows built off another book,
+        and a fallback here would read that as a flat symbol and hide it.
         """
         mark = self._marks.get(position.symbol)
-        row = rows.get(position.symbol)
+        row = rows[position.symbol]
         return position_view(
             position,
-            account_net=row.net if row is not None else _ZERO,
-            account_unrealized_pnl=row.unrealized_pnl if row is not None else None,
+            account_net=row.net,
+            account_unrealized_pnl=row.unrealized_pnl,
             account_equity=account.equity,
             account_maintenance_margin=account.total_maintenance_margin,
             mark=mark.price if mark is not None else None,
