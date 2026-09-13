@@ -12,7 +12,7 @@ one would be the second internal projection ADR-0035 rejects, agreeing only ever
 with itself. What paper has in its place is the atomic ledger write.
 """
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
@@ -326,26 +326,61 @@ def _stale_symbols(reading: LedgerReading, *, now_ns: int, band: ValuationBand) 
     )
 
 
+def _terms(reading: LedgerReading, *, field: DivergenceField, symbol: str | None) -> frozenset[str]:
+    """The symbols whose valuations a compared figure is a Σ over (#304).
+
+    One answer, asked by every rule that ranges over a figure's terms: the
+    staleness rule, the band's reference and the maintenance Σ itself. Before
+    this each spelled the subset on its own, and #305 was one of them missing
+    the narrowing the other two had.
+
+    A per-symbol figure is a Σ over one term, its own symbol. An account-grain
+    figure is a Σ over the **held** symbols, on the cycle's one held-ness rule.
+    ``maintenance_margin`` alone narrows further, to the held symbols the
+    ledger holds **cross**, because that is the subset its venue side counts
+    (ADR-0046 §2.1).
+
+    Cross-ness is the run's config, read off the ledger's own row and never
+    off the venue snapshot. The Σ being scoped is the ledger's, and a venue
+    that disagrees on the mode is already a ``LEVERAGE_DIVERGENCE`` (ADR-0044
+    §10). Taking its word here would move a symbol in or out of our subset on
+    the strength of the very setting that check exists to report.
+    """
+    if symbol is not None:
+        return frozenset((symbol,))
+    return frozenset(
+        candidate
+        for candidate, row in reading.rows.items()
+        if reading.holds(candidate)
+        and (field is not DivergenceField.MAINTENANCE_MARGIN or row.margin_mode == "cross")
+    )
+
+
+def _sum(figures: Iterable[Decimal | None]) -> Decimal | None:
+    """Σ over a figure's terms, unknown when any one term is.
+
+    The propagation ``domain.valuation`` uses, at the Σs this module builds
+    itself. A partial Σ compared against the venue's whole one is a divergence
+    about arithmetic, not the book. A partial Σ used as a band reference is a
+    band silently narrowed by whichever term was left out.
+    """
+    total = _ZERO
+    for figure in figures:
+        if figure is None:
+            return None
+        total += figure
+    return total
+
+
 def _rests_on_stale(divergence: Divergence, stale: frozenset[str], reading: LedgerReading) -> bool:
     """Whether the compared figure contains a term valued off a stale mark.
 
     A Σ is stale on its worst term, never its average, so one frozen term is
-    enough. The question is which terms the Σ contains. ``equity`` and
-    ``free_margin`` are Σs over every held position, so any stale symbol makes
-    them old. ``maintenance_margin`` is compared over the **cross** subset alone
-    (ADR-0046 §2.1), so only a stale cross symbol can make it old. An isolated
-    symbol's mark age says nothing about a Σ it is not part of, and before #305
-    it silenced that alert anyway.
-
-    Cross-ness is read off the row, for the reason ``_cross_maintenance``
-    gives. The subset is the ledger's own. The venue's mode is what
-    ``LEVERAGE_DIVERGENCE`` reports, not a thing this rule may trust.
+    enough. Which terms the Σ contains is ``_terms``'s answer. An isolated
+    symbol's mark age says nothing about the cross maintenance Σ it is not
+    part of, and before #305 it silenced that alert anyway.
     """
-    if divergence.symbol is not None:
-        return divergence.symbol in stale
-    if divergence.field is DivergenceField.MAINTENANCE_MARGIN:
-        return any(reading.rows[symbol].margin_mode == "cross" for symbol in stale)
-    return bool(stale)
+    return not stale.isdisjoint(_terms(reading, field=divergence.field, symbol=divergence.symbol))
 
 
 def _reference(divergence: Divergence, reading: LedgerReading) -> Decimal | None:
@@ -410,12 +445,8 @@ def _reference(divergence: Divergence, reading: LedgerReading) -> Decimal | None
         return row.notional / row.leverage
     if divergence.field is DivergenceField.MAINTENANCE_MARGIN:
         return _cross_maintenance(reading)
-    total = _ZERO
-    for row in reading.rows.values():
-        if row.notional is None:
-            return None
-        total += row.notional
-    return total
+    terms = _terms(reading, field=divergence.field, symbol=None)
+    return _sum(reading.rows[symbol].notional for symbol in terms)
 
 
 def _cash(state: VenueAccountState, reading: LedgerReading) -> tuple[Divergence, ...]:
@@ -572,30 +603,13 @@ def _cross_maintenance(reading: LedgerReading) -> Decimal | None:
     cannot be narrowed to a subset afterwards, which is why the reading carries
     the terms and this adds them up.
 
-    Cross-ness is the run's **config**, read off the ledger's own row rather
-    than off the venue snapshot, for the reason the reference beside it is: the Σ
-    being built is the *ledger's*, and a ledger's own book is the one it was
-    told to keep. A venue that disagrees is already a ``LEVERAGE_DIVERGENCE``
-    (ADR-0044 §10), and taking the venue's mode here would silently move a
-    symbol in or out of our subset on the strength of the very setting that
-    check exists to report.
-
-    Ranged over ``holds`` for the reason every Tier-2 range is: a symbol the
-    ledger reads flat owes maintenance on nothing, and a rate that has gone
-    missing beneath it is not an unknown Σ. ``None`` propagates from any term
-    that is left — a partial Σ compared against the venue's whole one is a
-    divergence about arithmetic rather than about the book, and the missing term
-    is an absent ``InstrumentSpec`` as often as an absent mark, so this figure
-    can go unknown with every mark in place.
+    Which symbols count is ``_terms``'s answer, and why the mode is read off
+    the ledger's row is stated there. The missing term that makes this Σ
+    unknown is an absent ``InstrumentSpec`` as often as an absent mark, so
+    this figure can go unknown with every mark in place.
     """
-    total = _ZERO
-    for symbol, row in reading.rows.items():
-        if not reading.holds(symbol) or row.margin_mode != "cross":
-            continue
-        if row.maintenance_margin is None:
-            return None
-        total += row.maintenance_margin
-    return total
+    terms = _terms(reading, field=DivergenceField.MAINTENANCE_MARGIN, symbol=None)
+    return _sum(reading.rows[symbol].maintenance_margin for symbol in terms)
 
 
 def _maintenance_margin(state: VenueAccountState, reading: LedgerReading) -> tuple[Divergence, ...]:
