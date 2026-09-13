@@ -34,6 +34,7 @@ from tickwright.domain import (
     FillReport,
     InstrumentSpec,
     MarketTick,
+    OrderRef,
     OrderState,
     OrderStatusReport,
     OrderType,
@@ -586,9 +587,14 @@ def test_cancel_of_a_cloid_the_venue_never_saw_is_a_benign_no_op() -> None:
     assert len(post.requests) == 1
 
 
-async def fetch_view(post: FakeExchangeApi) -> VenueOrderView | VenueReadFailure:
+UNACKED_REF = OrderRef(cloid=CLOID, symbol="BTC")
+
+
+async def fetch_view(
+    post: FakeExchangeApi, ref: OrderRef = UNACKED_REF
+) -> VenueOrderView | VenueReadFailure:
     exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
-    return await exchange.fetch_order(CLOID)
+    return await exchange.fetch_order(ref)
 
 
 def test_fetch_order_bundles_the_venue_status_and_fills_into_one_view() -> None:
@@ -627,12 +633,72 @@ def test_fetch_order_bundles_the_venue_status_and_fills_into_one_view() -> None:
 def test_fetch_order_returns_an_empty_view_when_the_venue_has_no_record() -> None:
     # unknownOid is a *successful* read: positive proof the order never landed
     # (the ADR-0008 resend gate), categorically different from a failed read.
-    view = asyncio.run(fetch_view(FakeExchangeApi({"orderStatus": {"status": "unknownOid"}})))
+    # With no oid on the ref the ack never arrived, so there is no fill
+    # history to consult and no second request goes out (ADR-0011 inv 4).
+    post = FakeExchangeApi({"orderStatus": {"status": "unknownOid"}})
+    view = asyncio.run(fetch_view(post, UNACKED_REF))
 
     assert isinstance(view, VenueOrderView)
     assert not view.has_record
     assert view.status is None
     assert view.fills == ()
+    assert [query["type"] for _, query in post.requests] == ["orderStatus"]
+
+
+def test_fetch_order_reads_the_fill_history_by_the_acked_oid_once_the_record_is_gone() -> None:
+    # The venue drops order records by count and keeps fills for years, so an
+    # acked order can answer unknownOid while its fill is still on the books
+    # (ADR-0011 inv 2). The ack's oid keys the fills, and the ack time bounds
+    # the read, less a minute for clock skew between us and the venue.
+    post = FakeExchangeApi(
+        {
+            "orderStatus": {"status": "unknownOid"},
+            "userFillsByTime": [
+                fill_entry(oid=90, tid=555, px="43249.0", sz="1.0"),
+                fill_entry(oid=91, tid=556, px="43250.0", sz="0.5"),
+            ],
+        }
+    )
+    acked = OrderRef(
+        cloid=CLOID, symbol="BTC", venue_oid="91", acked_ts_ns=1_700_000_060_000 * 1_000_000
+    )
+    view = asyncio.run(fetch_view(post, acked))
+
+    assert isinstance(view, VenueOrderView)
+    assert view.status is None
+    (fill,) = view.fills
+    assert (fill.cloid, fill.trade_id, fill.quantity) == (CLOID, "556", Decimal("0.5"))
+    (_, fills_query) = post.requests[1]
+    assert fills_query == {
+        "type": "userFillsByTime",
+        "user": Account.from_key(TEST_SIGNING_KEY).address,
+        "startTime": 1_700_000_000_000,
+    }
+
+
+def test_fetch_order_reads_the_whole_fill_history_when_the_ack_time_is_unknown() -> None:
+    # A saga that never checkpointed as LIVE has an oid but no time to bound
+    # the read with. The store backfills the time for any row that did, so
+    # this is the one case left. The whole recent history is the only honest
+    # window, so the read falls back to userFills (ADR-0011 inv 2).
+    post = FakeExchangeApi(
+        {
+            "orderStatus": {"status": "unknownOid"},
+            "userFills": [fill_entry(oid=91, tid=556, px="43250.0", sz="0.5")],
+        }
+    )
+    acked = OrderRef(cloid=CLOID, symbol="BTC", venue_oid="91")
+    view = asyncio.run(fetch_view(post, acked))
+
+    assert isinstance(view, VenueOrderView)
+    assert view.status is None
+    (fill,) = view.fills
+    assert fill.trade_id == "556"
+    (_, fills_query) = post.requests[1]
+    assert fills_query == {
+        "type": "userFills",
+        "user": Account.from_key(TEST_SIGNING_KEY).address,
+    }
 
 
 def test_fetch_order_reports_a_failed_send_when_the_read_itself_fails() -> None:
@@ -674,6 +740,28 @@ def test_fetch_order_reports_a_failed_send_when_the_read_itself_fails() -> None:
     assert view is VenueReadFailure.SEND_FAILED
     failures = [e for e in events if e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED]
     assert failures and failures[0]["request"] == "userFills"
+
+
+def test_fetch_order_fails_when_the_fills_read_behind_a_dropped_record_fails() -> None:
+    # The record is gone and the fill history is the only cross-check left.
+    # If that read dies, the answer is the failure. An empty view here would
+    # read as "never landed" and let the ghost gate reject a filled order
+    # (ADR-0011 inv 1).
+    acked = OrderRef(
+        cloid=CLOID, symbol="BTC", venue_oid="91", acked_ts_ns=1_700_000_060_000 * 1_000_000
+    )
+    for failure, verdict in (
+        (ConnectionError("reset"), VenueReadFailure.SEND_FAILED),
+        ({"unexpected": 1}, VenueReadFailure.UNREADABLE_BODY),
+    ):
+        post = FakeExchangeApi(
+            {"orderStatus": {"status": "unknownOid"}, "userFillsByTime": failure}
+        )
+        with capture_events() as events:
+            view = asyncio.run(fetch_view(post, acked))
+        assert view is verdict, failure
+        failures = [e for e in events if e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED]
+        assert failures and failures[0]["request"] == "userFills"
 
 
 def test_fetch_order_names_an_order_status_body_it_cannot_parse() -> None:
@@ -1282,7 +1370,8 @@ def test_a_terminal_fetch_prunes_the_placed_order_so_the_cache_stays_bounded() -
         )
         exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
         await exchange.place(limit_order(Side.BUY, "0.5", "42000"))
-        await exchange.fetch_order(CLOID)  # sees FILLED → prunes _placed[CLOID]
+        # Sees FILLED → prunes _placed[CLOID].
+        await exchange.fetch_order(OrderRef(cloid=CLOID, symbol="BTC"))
         await exchange.cancel(CLOID)
         return post
 
@@ -1290,6 +1379,33 @@ def test_a_terminal_fetch_prunes_the_placed_order_so_the_cache_stays_bounded() -
 
     # Two orderStatus reads: the fetch, then the cancel's fallback — which only
     # happens because the terminal fetch pruned the placed-order memory.
+    reads = [query for (_, query) in post.requests if query.get("type") == "orderStatus"]
+    assert len(reads) == 2
+
+
+def test_a_dropped_record_prunes_the_placed_order_too() -> None:
+    # unknownOid for an order this process placed and the venue acked is the
+    # venue saying the order is closed and its record gone. That memory is as
+    # dead as after a terminal record, so it is pruned the same way. Observable
+    # the same way too: a later cancel falls back to an orderStatus read.
+    async def main() -> FakeExchangeApi:
+        post = FakeExchangeApi(
+            {
+                "order": resting_response(oid=77),
+                "orderStatus": {"status": "unknownOid"},
+                "userFillsByTime": [fill_entry(oid=77, tid=556, px="42000.0", sz="0.5")],
+                "cancelByCloid": cancel_success_response(),
+            }
+        )
+        exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
+        await exchange.place(limit_order(Side.BUY, "0.5", "42000"))
+        acked = OrderRef(cloid=CLOID, symbol="BTC", venue_oid="77", acked_ts_ns=1_000_000)
+        await exchange.fetch_order(acked)  # Record gone → prunes _placed[CLOID].
+        await exchange.cancel(CLOID)
+        return post
+
+    post = asyncio.run(main())
+
     reads = [query for (_, query) in post.requests if query.get("type") == "orderStatus"]
     assert len(reads) == 2
 

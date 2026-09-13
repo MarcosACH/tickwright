@@ -16,7 +16,7 @@ import structlog.testing
 from hypothesis import given
 from hypothesis import strategies as st
 from ledgers import GENESIS, checkpointer
-from venue_doubles import VenueDouble, VenueLink
+from venue_doubles import VenueDouble, VenueLink, answerable
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
@@ -34,6 +34,7 @@ from tickwright.domain import (
     OrderFailed,
     OrderFilled,
     OrderLive,
+    OrderRef,
     OrderRejected,
     OrderState,
     OrderType,
@@ -89,6 +90,10 @@ def _saga(cloid: str, state: OrderState) -> Order:
         order_type=OrderType.LIMIT,
     )
     order.state = state
+    if state in (OrderState.LIVE, OrderState.PARTIALLY_FILLED):
+        # A resting saga was acked, and the ack is where the oid comes from.
+        # The fill-history cross-check is keyed by it (ADR-0011 inv 2).
+        order.venue_oid = "777"
     return order
 
 
@@ -160,11 +165,11 @@ class _FlakyLink(VenueLink):
         self.down = False
         self.reads: list[str] = []
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
-        self.reads.append(cloid)
+    async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
+        self.reads.append(ref.cloid)
         if self.down:
             return VenueReadFailure.SEND_FAILED
-        return await self._venue.fetch_order(cloid)
+        return await self._venue.fetch_order(ref)
 
 
 class _GarbledLink(VenueLink):
@@ -177,11 +182,11 @@ class _GarbledLink(VenueLink):
         self.garbled: set[str] = set()
         self.reads: list[str] = []
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
-        self.reads.append(cloid)
-        if cloid in self.garbled:
+    async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
+        self.reads.append(ref.cloid)
+        if ref.cloid in self.garbled:
             return VenueReadFailure.UNREADABLE_BODY
-        return await self._venue.fetch_order(cloid)
+        return await self._venue.fetch_order(ref)
 
 
 # --- Fast in-flight cycle -----------------------------------------------------
@@ -286,8 +291,8 @@ class _ForgetfulVenue(VenueDouble):
     async def cancel(self, cloid: str) -> None:
         raise AssertionError("the ghost cycle must never cancel")
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
-        return self.views.get(cloid, VenueOrderView(status=None))
+    async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
+        return answerable(ref, self.views.get(ref.cloid, VenueOrderView(status=None)))
 
 
 def test_a_live_order_absent_across_the_grace_window_resolves_rejected() -> None:
@@ -428,7 +433,7 @@ def test_a_healed_fill_and_the_venues_late_duplicate_collapse_to_one_apply() -> 
     # The venue's own late copy of the same fill finally arrives. The healed
     # replica shares its event_id — provenance is excluded from the dedup key
     # (ADR-0025) — so the duplicate collapses: applied once, republished never.
-    venue_view = asyncio.run(exchange.fetch_order("0xabc"))
+    venue_view = asyncio.run(exchange.fetch_order(OrderRef(cloid="0xabc", symbol="BTC")))
     assert isinstance(venue_view, VenueOrderView)
     (venue_fill,) = venue_view.fills
     healed_twin = replace(venue_fill, reconciliation=True)

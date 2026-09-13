@@ -79,6 +79,9 @@ class Order:
     state: OrderState = OrderState.PENDING
     cum_qty: Decimal = Decimal("0")
     venue_oid: str | None = None
+    # When the venue first acked the order as resting. It bounds the fill-history
+    # read once the venue has dropped the record itself (ADR-0011 inv 2).
+    acked_ts_ns: int | None = None
     reason: str | None = None
     cancel_requested: bool = False
     cancel_requested_ts: int | None = None
@@ -135,6 +138,7 @@ class Order:
         state: OrderState,
         cum_qty: Decimal,
         venue_oid: str | None,
+        acked_ts_ns: int | None = None,
         reason: str | None,
         cancel_requested: bool,
         cancel_requested_ts: int | None,
@@ -160,6 +164,7 @@ class Order:
             state=state,
             cum_qty=cum_qty,
             venue_oid=venue_oid,
+            acked_ts_ns=acked_ts_ns,
             reason=reason,
             cancel_requested=cancel_requested,
             cancel_requested_ts=cancel_requested_ts,
@@ -188,6 +193,8 @@ class Order:
         self.state = target
         if event.venue_oid is not None:
             self.venue_oid = event.venue_oid
+        if target is OrderState.LIVE:
+            self.acked_ts_ns = event.ts_event
         if isinstance(event, OrderFillEvent):
             self.cum_qty = event.cum_qty
         if isinstance(event, OrderDenied | OrderRejected | OrderFailed):

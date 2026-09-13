@@ -9,12 +9,13 @@ than transcribed.
 
 What an adapter still owns is its dialect, and nothing else: the driver's
 error base (``_durability``), the parameter marker, the DDL column types, the
-connection, and how that driver scopes a transaction and runs a batch write.
+catalog query behind ``_has_column``, the connection, and how that driver
+scopes a transaction and runs a batch write.
 """
 
 import weakref
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager
 from types import TracebackType
 from typing import Any, ClassVar, Protocol, Self
@@ -30,9 +31,11 @@ from tickwright.domain import (
 from ._durability import durable
 from ._records import (
     ACCOUNT_COLUMN_LIST,
+    ADDED_COLUMNS,
     POSITION_COLUMN_LIST,
     READ_COLUMN_LIST,
     account_values,
+    acked_ts_from_history,
     funding_mark_values,
     next_history,
     position_values,
@@ -64,7 +67,13 @@ class SqlStore(ABC):
     # psycopg. Every statement below renders through it.
     _placeholder: ClassVar[str]
 
-    def __init__(self, *, schema: Iterable[str], release: Callable[[], None]) -> None:
+    def __init__(
+        self,
+        *,
+        schema: Iterable[str],
+        added_column_types: Mapping[str, str],
+        release: Callable[[], None],
+    ) -> None:
         self._p = self._placeholder
         self._upserts = upserts_for(self._placeholder)
         # Tie the connection's lifetime to this store: close it on ``close()`` or,
@@ -74,6 +83,37 @@ class SqlStore(ABC):
         with self._transaction():
             for statement in schema:
                 self._execute(statement)
+            # ``_records`` says which columns may be missing from a database
+            # written before they existed. The backend only says their type.
+            for table, column in ADDED_COLUMNS:
+                if not self._has_column(table, column):
+                    declaration = added_column_types[column]
+                    self._execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+                    if (table, column) == ("orders", "acked_ts_ns"):
+                        self._backfill_ack_times()
+
+    def _backfill_ack_times(self) -> None:
+        """Fill ``acked_ts_ns`` for every existing row from its transition history.
+
+        Runs once, when the column is added. Left at ``None``, a resting saga
+        from before the upgrade would read its fill history unbounded, and on an
+        active account the fill can already be past the venue's page. The
+        history has the LIVE checkpoint time, so no row needs to start blind.
+        """
+        rows = self._execute("SELECT cloid, history FROM orders").fetchall()
+        updates = [
+            (acked_ts_ns, cloid)
+            for cloid, history in rows
+            if (acked_ts_ns := acked_ts_from_history(history)) is not None
+        ]
+        if updates:
+            self._executemany(
+                f"UPDATE orders SET acked_ts_ns = {self._p} WHERE cloid = {self._p}", updates
+            )
+
+    @abstractmethod
+    def _has_column(self, table: str, column: str) -> bool:
+        """Whether ``table`` already carries ``column``, by the driver's catalog."""
 
     @abstractmethod
     def _transaction(self) -> AbstractContextManager[object]:

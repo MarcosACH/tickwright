@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from .enums import Netting
-from .events import VenueAccountState
+from .venue import VenueAccountState
 
 _ZERO = Decimal("0")
 

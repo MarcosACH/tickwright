@@ -414,3 +414,27 @@ def test_record_fill_dedups_a_redelivered_trade_id_without_double_counting() -> 
     assert duplicate is None
     assert order.state is OrderState.PARTIALLY_FILLED
     assert order.cum_qty == Decimal("1")
+
+
+def test_live_ack_records_its_time_and_a_redelivered_ack_is_a_no_op() -> None:
+    # The ack time bounds the reconciler's fill-history read once the venue has
+    # dropped the order record (ADR-0011 inv 2, #242). LIVE is only reached
+    # from SUBMITTED, so the only way a second ack arrives is a redelivery.
+    # It shares the first one's event_id and dedups before it can touch the
+    # saga, so the time is never moved.
+    order = _order()
+    order.apply(_submitted())
+    assert order.acked_ts_ns is None
+    order.apply(_live())
+    assert order.acked_ts_ns == 2
+    redelivered = OrderLive(
+        ts_event=99,
+        ts_init=99,
+        cloid="0xabc",
+        strategy_id="trivial",
+        signal_id="trivial:BTC:1",
+        symbol="BTC",
+        venue_oid="oid-1",
+    )
+    assert order.apply(redelivered) is False
+    assert order.acked_ts_ns == 2

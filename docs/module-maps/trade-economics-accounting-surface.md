@@ -18,7 +18,10 @@ src/tickwright/
     valuation.py       # Tier-2 view assembly (pure)                          NEW
     pacing.py          # Backoff + Deadline — the bounded-retry rule every    NEW
                        #   loop shares, below both engine and venues (#180)
-    events.py          # + MarkTick, FundingAccrual, fee, VenueAccountState
+    events.py          # + MarkTick, FundingAccrual, fee
+    venue.py           # + VenueAccountState, VenuePositionState, AccountModeVerdict.
+                       #   Since the #242 review this holds every value type that
+                       #   crosses the Exchange seam (it was a section of events.py)
     instrument.py      # + maker_fee, taker_fee, funding_rate, margin_maint, max_leverage
     protocols.py       # + Portfolio; Exchange ×4, then split into
                        #   OrderAnchor + AccountAnchor (#195 review); Store ×5
@@ -135,7 +138,7 @@ All three landed as named: `fill_fee` in [#173](https://github.com/MarcosACH/tic
 
 ---
 
-### `domain` extended surfaces (`protocols.py`, `events.py`, `instrument.py`, `errors.py`, `ownership.py`)
+### `domain` extended surfaces (`protocols.py`, `events.py`, `venue.py`, `instrument.py`, `errors.py`, `ownership.py`)
 
 **Interface:**
 

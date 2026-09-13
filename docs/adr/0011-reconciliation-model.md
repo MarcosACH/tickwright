@@ -31,6 +31,20 @@ ADR-0009).
    would mean a different amount of waiting under each ([ADR-0049](./0049-failed-read-blast-radius.md)).*
 2. **Cross-check before ghosting.** Before any terminal "gone" resolution, issue a targeted
    single-order/cloid query **and** consult fill history — a vanished order may have filled.
+   **(Amended by #242 — the cross-check is keyed by the ack's oid and bounded by the ack time:**
+   Hyperliquid drops the `orderStatus` record after about the account's last 2000 orders, by
+   count. Fills stay for years. So an active account gets `unknownOid` for an order whose fill
+   is still on the books, and lookup by cloid fails at the same moment lookup by oid does
+   (`docs/research/hyperliquid-order-status-retention.md`). The order record is
+   therefore not where the cross-check can come from once it is gone. The saga keeps the oid
+   and the time from the first `LIVE` ack (`Order.venue_oid`, `Order.acked_ts_ns`), and the
+   read carries both to the venue in an `OrderRef`. On `unknownOid` the adapter reads
+   `userFillsByTime` from the ack time less a 60 s skew allowance, keyed by that oid, and
+   answers a view with no status and those fills. A database written before the time was kept
+   gets the column on open, backfilled from each row's `LIVE` checkpoint time. So a saga with
+   an oid but no ack time is one that never checkpointed as `LIVE`. That case has no bound to
+   read from, and it falls back to `userFills`, the venue's last 2000 fills.
+   A failed fills read is the failure, never an empty view (inv 1). [#242]**)**
 3. **Grace window.** An order must be **continuously absent across the grace window** (default
    ~90s ≈ 3 missed slow cycles) before it is ghost-resolved. Plus a **recent-order protection
    window** (default ~30s ≈ one slow cycle): skip ghost evaluation for orders whose last saga
@@ -60,6 +74,12 @@ ADR-0009).
 4. **Fill history is mandatory.** Venue open-orders endpoints exclude closed orders, so
    open-orders alone cannot distinguish "missing" from "recently closed." Always consult fill
    history (Hyperliquid `userFills`/`userFillsByTime`).
+   **(Amended by #242 — a lost ack has no fill history to consult:**
+   fills are keyed by the venue's oid, and the saga only learns the oid from the ack. A
+   `SUBMITTED` saga whose ack never arrived has no oid, so on `unknownOid` the adapter answers
+   an empty view and sends no fills request. The inflight budget resolves it `FAILED`, as
+   before. Recent fill rows carry an undocumented `cloid` field. It is absent on older fills and
+   on some accounts, so it is not a key the read may rely on. [#242]**)**
 5. **Startup must succeed before trading.** If the venue is unreachable at startup, the engine
    does **not** begin placing orders (freeze, don't guess).
 6. **Synthetic events are first-class.** Events the reconciler generates (a healed fill, a

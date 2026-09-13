@@ -37,6 +37,7 @@ from tickwright.domain import (
     LeverageSpec,
     MarketTick,
     Netting,
+    OrderRef,
     OrderState,
     OrderStatusReport,
     OrderType,
@@ -705,7 +706,7 @@ def test_fetch_order_reports_a_resting_limit_as_live() -> None:
         await exchange.place(_limit_order("41000"))
         # The reconciler's query-shaped read (ADR-0004): venue truth by cloid,
         # never a bus message.
-        return await exchange.fetch_order("0xabc")
+        return await exchange.fetch_order(OrderRef(cloid="0xabc", symbol="BTC"))
 
     view = asyncio.run(scenario())
     # A view, never a `VenueReadFailure`: a paper read can never fail (ADR-0024).
@@ -721,7 +722,7 @@ def test_fetch_order_carries_the_fills_of_a_filled_order() -> None:
     async def scenario() -> VenueOrderView | VenueReadFailure:
         await bus.publish(_tick("42000"))
         await exchange.place(_market_order())
-        return await exchange.fetch_order("0xabc")
+        return await exchange.fetch_order(OrderRef(cloid="0xabc", symbol="BTC"))
 
     view = asyncio.run(scenario())
     assert isinstance(view, VenueOrderView)
@@ -735,7 +736,7 @@ def test_fetch_order_carries_the_fills_of_a_filled_order() -> None:
 def test_fetch_order_for_an_unknown_cloid_is_positive_proof_of_no_record() -> None:
     exchange, _, _, _ = _harness()
 
-    view = asyncio.run(exchange.fetch_order("0xghost"))
+    view = asyncio.run(exchange.fetch_order(OrderRef(cloid="0xghost", symbol="BTC")))
 
     # An empty view, never a failure: on paper a read cannot fail, and "no
     # record" must stay distinguishable from an outage (ADR-0011 inv 1).
@@ -932,7 +933,7 @@ def test_the_paper_venue_releases_without_a_start_and_keeps_its_book() -> None:
         await exchange.place(_limit_order("41000"))  # rests, uncrossed
         await exchange.stop()  # no start() ever ran
         await exchange.stop()  # and again: the faulted pass re-walks the membership
-        return await exchange.fetch_order("0xabc")
+        return await exchange.fetch_order(OrderRef(cloid="0xabc", symbol="BTC"))
 
     view = asyncio.run(scenario())
 

@@ -5,7 +5,8 @@ columns, the same JSON encoding of the applied-event dedup set and the
 transition history, the same ``Decimal``-as-``TEXT`` money mapping, and the same
 upsert semantics. This module owns all of it, so the two backends cannot drift
 on what a row *is* or on how it is written; each backend keeps only what is
-genuinely per-dialect — the parameter marker, and the DDL's column types.
+genuinely per-dialect — the parameter marker, the DDL's column types, and the
+catalog query that says whether a column is already on disk.
 
 Money is written ``str(value)`` and read ``Decimal(text)``, exact in
 *representation* rather than merely in numeric value: trailing zeros, ``-0`` and
@@ -45,6 +46,7 @@ RECORD_COLUMNS: tuple[str, ...] = (
     "state",
     "cum_qty",
     "venue_oid",
+    "acked_ts_ns",
     "reason",
     "cancel_requested",
     "cancel_requested_ts",
@@ -68,6 +70,13 @@ READ_COLUMNS: tuple[str, ...] = RECORD_COLUMNS[:-1]
 
 READ_COLUMN_LIST = ", ".join(READ_COLUMNS)
 
+# Columns that arrived after a database may already have been written, as
+# ``(table, column)``. ``CREATE TABLE IF NOT EXISTS`` leaves an existing table
+# as it was, so a backend adds these with ``ALTER TABLE`` on open and a live
+# account's open sagas survive the upgrade (#242). Each is also in every
+# backend's DDL for a fresh database. The type is the backend's, per dialect.
+ADDED_COLUMNS: tuple[tuple[str, str], ...] = (("orders", "acked_ts_ns"),)
+
 
 def record_values(order: Order, *, history: Sequence[Any]) -> tuple[Any, ...]:
     """The full write tuple for ``order``, in ``RECORD_COLUMNS`` order.
@@ -87,6 +96,7 @@ def record_values(order: Order, *, history: Sequence[Any]) -> tuple[Any, ...]:
         order.state.value,
         str(order.cum_qty),
         order.venue_oid,
+        order.acked_ts_ns,
         order.reason,
         order.cancel_requested,
         order.cancel_requested_ts,
@@ -109,23 +119,28 @@ def restore_order(row: Sequence[Any]) -> Order:
     ``cancel_requested`` is read through ``bool`` so a backend that stores it as
     an integer (SQLite) and one that stores it as a native boolean (Postgres)
     both restore the same marker.
+
+    Read by column name, not position, so a column added to ``RECORD_COLUMNS``
+    is one edit here and never a renumbering of every field after it.
     """
+    column = dict(zip(READ_COLUMNS, row, strict=True))
     return Order.restore(
-        cloid=row[0],
-        strategy_id=row[1],
-        signal_id=row[2],
-        symbol=row[3],
-        side=Side(row[4]),
-        quantity=Decimal(row[5]),
-        order_type=OrderType(row[6]),
-        state=OrderState(row[7]),
-        cum_qty=Decimal(row[8]),
-        venue_oid=row[9],
-        reason=row[10],
-        cancel_requested=bool(row[11]),
-        cancel_requested_ts=row[12],
-        cancel_signal_id=row[13],
-        applied_event_ids=json.loads(row[14]),
+        cloid=column["cloid"],
+        strategy_id=column["strategy_id"],
+        signal_id=column["signal_id"],
+        symbol=column["symbol"],
+        side=Side(column["side"]),
+        quantity=Decimal(column["quantity"]),
+        order_type=OrderType(column["order_type"]),
+        state=OrderState(column["state"]),
+        cum_qty=Decimal(column["cum_qty"]),
+        venue_oid=column["venue_oid"],
+        acked_ts_ns=column["acked_ts_ns"],
+        reason=column["reason"],
+        cancel_requested=bool(column["cancel_requested"]),
+        cancel_requested_ts=column["cancel_requested_ts"],
+        cancel_signal_id=column["cancel_signal_id"],
+        applied_event_ids=json.loads(column["applied_event_ids"]),
     )
 
 
@@ -134,6 +149,20 @@ def restore_history(history_json: str | None) -> list[tuple[OrderState, int]]:
     if not history_json:
         return []
     return [(OrderState(state), ts_ns) for state, ts_ns in json.loads(history_json)]
+
+
+def acked_ts_from_history(history_json: str | None) -> int | None:
+    """The first ``LIVE`` checkpoint's time, or ``None`` if the saga never rested.
+
+    The backfill for ``acked_ts_ns`` on a database written before the column
+    existed (#242). The checkpoint runs on the same clock as the ack it
+    records, so the time is the ack's within the write latency, and well inside
+    the skew allowance the fill-history read subtracts.
+    """
+    for state, ts_ns in restore_history(history_json):
+        if state is OrderState.LIVE:
+            return ts_ns
+    return None
 
 
 # The account row, in write order — the single row ADR-0043 §3 pins with

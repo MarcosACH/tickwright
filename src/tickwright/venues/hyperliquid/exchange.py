@@ -29,6 +29,7 @@ from tickwright.domain import (
     InstrumentSpec,
     LeverageBook,
     MarketTick,
+    OrderRef,
     OrderState,
     OrderStatusReport,
     OrderType,
@@ -52,6 +53,11 @@ from .transport import Connect, PostJson, open_websocket
 from .universe import HyperliquidUniverse
 
 _NS_PER_MS = 1_000_000
+
+# How far before our own ack time the fill-history read starts once the venue
+# has dropped the order record. Our ack time is our clock, and the venue's fill
+# time is theirs. The allowance covers the skew between the two (ADR-0011 inv 2).
+_ACK_SKEW_ALLOWANCE_MS = 60_000
 
 _TIF_WIRE = {TimeInForce.GTC: "Gtc", TimeInForce.IOC: "Ioc"}
 
@@ -407,13 +413,13 @@ class HyperliquidExchange:
         record = await self._order_status(cloid, normalize=_decode_order_status)
         return record.coin if isinstance(record, _OrderRecord) else None
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
-        """Venue truth for ``cloid``: the order record plus its fill history,
+    async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
+        """Venue truth for ``ref``: the order record plus its fill history,
         the ADR-0011 cross-check in one read. ``unknownOid`` is positive proof
         of no record (an empty view); a read that *failed* is a
         ``VenueReadFailure`` — an outage must never look like "no record"
         (inv 1)."""
-        record = await self._order_status(cloid, normalize=_decode_order_view)
+        record = await self._order_status(ref.cloid, normalize=_decode_order_view)
         if isinstance(record, VenueReadFailure):
             # The read failed and ``read`` already named which way. Which way is
             # carried out rather than collapsed: an outage says the venue is
@@ -423,44 +429,63 @@ class HyperliquidExchange:
             # may ever be mistaken for an empty book.
             return record
         if record is _OrderStatusRead.NO_RECORD:
-            # unknownOid: a *successful* read that positively has no record —
-            # the order never landed (an empty view, not a failed read).
-            return VenueOrderView(status=None)
-        # Cannot fail: ``_decode_order_view`` refused an unmappable status on the
-        # way in, so a read with no answer already returned its
-        # ``VenueReadFailure`` above.
-        state = _order_state(record.status)
-        return await self._view_with_fills(cloid, record, state)
+            # unknownOid: a *successful* read that positively has no record.
+            # Either the order never landed, or the venue has since dropped the
+            # record while still holding the fills. The ref's oid tells the two
+            # apart, and only the second has a history to read (ADR-0011 inv 2).
+            if ref.venue_oid is None:
+                return VenueOrderView(status=None)
+            return await self._cross_check(ref, record=None)
+        return await self._cross_check(ref, record=record)
 
-    async def _view_with_fills(
-        self, cloid: str, record: "_OrderRecord", state: OrderState
+    async def _cross_check(
+        self, ref: OrderRef, *, record: "_OrderRecord | None"
     ) -> VenueOrderView | VenueReadFailure:
-        """The second half of the ADR-0011 cross-check: this order's record
-        joined to its fill history, or how that half failed to read."""
-        # Bound the fills read to this order's own lifetime (ADR-0011): starting
-        # at the venue's recorded placement time keeps its fills at the front of
-        # the returned window, so a busy account's later fills can never push
-        # them past the venue's page cap and silently under-report through the
-        # {cloid}:fill:{tid} dedup. The timestamp is the venue's own, so the
-        # bound is exact regardless of local clock skew.
-        fills = await self._fetch_fills(
-            cloid=cloid, symbol=record.coin, oid=record.oid, since_ms=record.timestamp
-        )
+        """The fill-history half of the ADR-0011 cross-check, joined to the
+        order record when the venue still has one.
+
+        The read is bounded to this order's own lifetime, so a busy account's
+        later fills can never push its own past the venue's page cap and
+        silently under-report through the ``{cloid}:fill:{tid}`` dedup. Where
+        the window starts depends on who still remembers the placement. With
+        a record it is the venue's own placement time, exact whatever our
+        clock skew. Without one it is our ack time less a skew allowance. With
+        no ack time either, which is a saga that never checkpointed as LIVE,
+        there is nothing to bound the read with, so it is the whole recent
+        history.
+
+        A failed fills read fails the whole read and carries its own cause
+        out. Never a partial view: with a record that would read as "no
+        fills", and without one as "no record" (inv 1).
+        """
+        if record is None:
+            assert ref.venue_oid is not None  # ``fetch_order`` routed on it
+            symbol, oid = ref.symbol, int(ref.venue_oid)
+            since_ms = (
+                None
+                if ref.acked_ts_ns is None
+                else ref.acked_ts_ns // _NS_PER_MS - _ACK_SKEW_ALLOWANCE_MS
+            )
+        else:
+            symbol, oid, since_ms = record.coin, record.oid, record.timestamp
+        fills = await self._fetch_fills(cloid=ref.cloid, symbol=symbol, oid=oid, since_ms=since_ms)
         if isinstance(fills, VenueReadFailure):
-            # A failed fills half fails the whole read — never a partial view
-            # that would read as "no fills" (ADR-0011 inv 1) — and carries its
-            # own cause out, since the fills half is the one that died.
             return fills
+        if record is None:
+            # The venue dropped the record, so the order is closed. Drop the
+            # placed-order memory a cancel would have used, as a terminal record
+            # does below, so the cache tracks only still-open orders.
+            self._placed.pop(ref.cloid, None)
+            return VenueOrderView(status=None, fills=tuple(fills))
+        # Cannot fail: ``_decode_order_view`` refused an unmappable status on
+        # the way in, so the read would have failed above.
+        state = _order_state(record.status)
         if state in _TERMINAL_STATES:
-            # This order is done: drop the placed-order memory a cancel would
-            # have used, so the adapter's cache tracks only still-open orders.
-            self._placed.pop(cloid, None)
-        return VenueOrderView(
-            status=self._status_report(
-                cloid=cloid, symbol=record.coin, status=state, venue_oid=str(record.oid)
-            ),
-            fills=tuple(fills),
+            self._placed.pop(ref.cloid, None)
+        status = self._status_report(
+            cloid=ref.cloid, symbol=record.coin, status=state, venue_oid=str(record.oid)
         )
+        return VenueOrderView(status=status, fills=tuple(fills))
 
     async def fetch_account_state(self) -> VenueAccountState | None:
         """Venue truth for the account: one ``clearinghouseState`` read, the
@@ -519,8 +544,10 @@ class HyperliquidExchange:
     async def _fetch_fills(
         self, *, cloid: str, symbol: str, oid: int, since_ms: int | None = None
     ) -> list[FillReport] | VenueReadFailure:
-        """This order's fills from the venue's fill history, by its oid — the
-        one id fills carry (they have no cloid on the wire).
+        """This order's fills from the venue's fill history, by its oid. Recent
+        fill rows also carry an undocumented ``cloid``. It is absent on older
+        fills and on some accounts, so the oid is the only key this read uses
+        (``docs/research/hyperliquid-order-status-retention.md``).
 
         ``since_ms`` bounds the read to fills at or after a known placement time
         (``userFillsByTime``), so an aged order's fills sit at the front of the

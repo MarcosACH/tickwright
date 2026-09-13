@@ -26,6 +26,7 @@ from venue_doubles import (
     LiveVenueDouble,
     VenueDouble,
     account_state,
+    answerable,
 )
 
 from tickwright.adapters.bus import InMemoryBus
@@ -47,6 +48,7 @@ from tickwright.domain import (
     OrderEvent,
     OrderFilled,
     OrderLive,
+    OrderRef,
     OrderState,
     OrderType,
     PlaceOrder,
@@ -557,8 +559,10 @@ class _LiveShapedVenue(LiveVenueDouble):
     async def cancel(self, cloid: str) -> None:
         raise AssertionError("nothing is cancelled: no order exists")
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
-        return self._view
+    async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
+        if isinstance(self._view, VenueReadFailure):
+            return self._view
+        return answerable(ref, self._view)
 
 
 def _live_run(
@@ -720,7 +724,7 @@ class _PaperShapedVenue(VenueDouble):
     async def cancel(self, cloid: str) -> None:
         raise AssertionError("nothing is cancelled: no order exists")
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
+    async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
         return _NO_RECORD
 
 
@@ -830,7 +834,7 @@ def test_a_barrier_fill_lands_on_the_materialised_row_not_a_zero_one(
     tells the two orderings apart.
     """
     store = SQLiteStore(tmp_path / "saga.db")
-    store.checkpoint(_submitted_saga(_LIVE_CLOID), ts_ns=500)
+    store.checkpoint(_resting_saga(_LIVE_CLOID), ts_ns=500)
     venue = _LiveShapedVenue(
         view=VenueOrderView(
             status=None,
@@ -1597,7 +1601,7 @@ class _LifecycleRecordingVenue(VenueDouble):
     async def cancel(self, cloid: str) -> None:
         self._timeline.append("exchange.cancel")
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
+    async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
         self._timeline.append("venue.read")
         return VenueOrderView(status=None)
 
@@ -1616,6 +1620,18 @@ def _submitted_saga(cloid: str) -> Order:
         order_type=OrderType.LIMIT,
     )
     order.state = OrderState.SUBMITTED
+    return order
+
+
+def _resting_saga(cloid: str) -> Order:
+    """A saga the venue acked as working, carrying the oid the ack gave it.
+
+    The one to seed when the venue's answer is a fills-only view: the live
+    adapter reads that history by the ack's oid, so a saga without one gets an
+    empty view instead (ADR-0011 inv 2)."""
+    order = _submitted_saga(cloid)
+    order.state = OrderState.LIVE
+    order.venue_oid = "777"
     return order
 
 
@@ -2122,5 +2138,5 @@ def test_graceful_stop_leaves_resting_live_orders_for_the_next_start_to_re_adopt
     finally:
         after.close()
     # The venue still holds exactly the one resting order — no duplicate send.
-    view = asyncio.run(venue.fetch_order(cloid))
+    view = asyncio.run(venue.fetch_order(OrderRef(cloid=cloid, symbol="BTC")))
     assert isinstance(view, VenueOrderView) and view.has_record

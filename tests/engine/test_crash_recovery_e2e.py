@@ -41,6 +41,7 @@ from tickwright.domain import (
     OrderFailed,
     OrderFilled,
     OrderPlaced,
+    OrderRef,
     OrderState,
     OrderSubmitted,
     OrderType,
@@ -92,7 +93,7 @@ class _CrashingTransport(VenueLink):
     async def cancel(self, cloid: str) -> None:
         raise AssertionError("first life never cancels")
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
+    async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
         raise AssertionError("first life never fetches")
 
 
@@ -265,7 +266,7 @@ def test_post_send_kill_recovers_the_landed_order_and_its_fill(
 
     # At-least-once redelivery of the original signal: no duplicate placement.
     asyncio.run(bus.publish(_redelivered_signal()))
-    view = asyncio.run(venue.fetch_order(_CLOID))
+    view = asyncio.run(venue.fetch_order(OrderRef(cloid=_CLOID, symbol="BTC")))
     assert isinstance(view, VenueOrderView)
     assert [fill.trade_id for fill in view.fills] == [f"{_CLOID}-1"]
     assert [type(ev) for ev in events] == [OrderSubmitted, OrderFilled]
@@ -292,7 +293,7 @@ def test_pre_send_kill_resolves_the_unlanded_intent_failed_never_resent(
     asyncio.run(bus.publish(_redelivered_signal()))
     assert [type(ev) for ev in events] == [OrderFailed]
     assert not [ev for ev in events if isinstance(ev, OrderPlaced)]
-    view = asyncio.run(venue.fetch_order(_CLOID))
+    view = asyncio.run(venue.fetch_order(OrderRef(cloid=_CLOID, symbol="BTC")))
     assert isinstance(view, VenueOrderView) and not view.has_record
     store.close()
 

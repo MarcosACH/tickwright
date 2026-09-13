@@ -43,6 +43,7 @@ from tickwright.domain import (
     InvariantViolation,
     LeverageBook,
     MarketTick,
+    OrderRef,
     OrderState,
     OrderStatusReport,
     OrderType,
@@ -392,17 +393,18 @@ class PaperExchange:
         """
         return self._account_spec
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
-        """Venue truth for ``cloid``: last reported status plus every fill.
+    async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
+        """Venue truth for ``ref``: last reported status plus every fill.
 
         In-process reads cannot fail, so this never returns a
         ``VenueReadFailure`` — the startup reconciliation barrier always clears
         on paper (ADR-0024). An unknown cloid gets an empty view: positive proof
-        of no record.
+        of no record. The paper book never drops a record, so the cloid is the
+        only part of the ref it reads.
         """
         return VenueOrderView(
-            status=self._statuses.get(cloid),
-            fills=tuple(self._fills.get(cloid, [])),
+            status=self._statuses.get(ref.cloid),
+            fills=tuple(self._fills.get(ref.cloid, [])),
         )
 
     async def fetch_account_state(self) -> VenueAccountState | None:

@@ -13,20 +13,18 @@ from typing import Protocol, runtime_checkable
 
 from .account import Account, AccountSpec, AccountView
 from .enums import OrderState
-from .events import (
+from .events import Event, MarketTick, OrderEvent, PlaceSignal
+from .instrument import GuardDecision, InstrumentSpec, KillSwitchState
+from .order import Order
+from .position import Position, PositionView
+from .venue import (
     AccountModeVerdict,
-    Event,
-    MarketTick,
-    OrderEvent,
+    OrderRef,
     PlaceOrder,
-    PlaceSignal,
     VenueAccountState,
     VenueOrderView,
     VenueReadFailure,
 )
-from .instrument import GuardDecision, InstrumentSpec, KillSwitchState
-from .order import Order
-from .position import Position, PositionView
 
 type Handler[E: Event] = Callable[[E], Awaitable[None]]
 """An async subscriber of a single event family."""
@@ -447,12 +445,16 @@ class OrderAnchor(Protocol):
         benign no-op (ADR-0026)."""
         ...
 
-    async def fetch_order(self, cloid: str) -> VenueOrderView | VenueReadFailure:
-        """Venue truth for ``cloid`` — the reconciler's query-shaped direct read
-        (ADR-0004), never a bus message. A successful read always returns a
-        view, even an empty one; a read that *failed* returns a
+    async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
+        """Venue truth for the order ``ref`` names — the reconciler's query-shaped
+        direct read (ADR-0004), never a bus message. A successful read always
+        returns a view, even an empty one; a read that *failed* returns a
         ``VenueReadFailure`` and never a view, which is ADR-0011 inv 1 in the
         return type.
+
+        The ref carries more than the cloid because the venue can drop the order
+        record while it still holds the fills. The oid and ack time on the ref
+        are what a venue reads its fill history by then (ADR-0011 inv 2).
 
         The failure carries **which way** it failed, and this is the one read
         with a caller that acts on the difference: the reconciler drives a

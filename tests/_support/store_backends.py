@@ -12,6 +12,7 @@ so a test can checkpoint, close, reopen, and prove the record survived.
 """
 
 import os
+import sqlite3
 from pathlib import Path
 
 import psycopg
@@ -41,6 +42,12 @@ class SQLiteBackend:
     def open(self) -> SQLiteStore:
         return SQLiteStore(self._path)
 
+    def drop_column(self, table: str, column: str) -> None:
+        """Age the backing file: remove a column a newer schema added, so a
+        reopen sees a database written before that column existed."""
+        with sqlite3.connect(self._path) as conn:
+            conn.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+
 
 class PostgresBackend:
     """A Postgres store at a fixed DSN — a reopen reconnects to the same server."""
@@ -50,6 +57,16 @@ class PostgresBackend:
 
     def open(self) -> PostgresStore:
         return PostgresStore(self._dsn)
+
+    def drop_column(self, table: str, column: str) -> None:
+        """Age the database: remove a column a newer schema added, so a reopen
+        sees a database written before that column existed."""
+        with psycopg.connect(self._dsn, autocommit=True) as conn:
+            conn.execute(
+                sql.SQL("ALTER TABLE {} DROP COLUMN {}").format(
+                    sql.Identifier(table), sql.Identifier(column)
+                )
+            )
 
     def reset(self) -> None:
         """Create the schema (a store open runs the DDL) and truncate every table,
