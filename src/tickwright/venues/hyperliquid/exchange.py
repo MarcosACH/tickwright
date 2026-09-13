@@ -419,8 +419,7 @@ class HyperliquidExchange:
         of no record (an empty view); a read that *failed* is a
         ``VenueReadFailure`` — an outage must never look like "no record"
         (inv 1)."""
-        cloid = ref.cloid
-        record = await self._order_status(cloid, normalize=_decode_order_view)
+        record = await self._order_status(ref.cloid, normalize=_decode_order_view)
         if isinstance(record, VenueReadFailure):
             # The read failed and ``read`` already named which way. Which way is
             # carried out rather than collapsed: an outage says the venue is
@@ -436,60 +435,54 @@ class HyperliquidExchange:
             # apart, and only the second has a history to read (ADR-0011 inv 2).
             if ref.venue_oid is None:
                 return VenueOrderView(status=None)
-            return await self._fills_only_view(ref)
-        # Cannot fail: ``_decode_order_view`` refused an unmappable status on the
-        # way in, so a read with no answer already returned its
-        # ``VenueReadFailure`` above.
-        state = _order_state(record.status)
-        return await self._view_with_fills(cloid, record, state)
+            return await self._cross_check(ref, record=None)
+        return await self._cross_check(ref, record=record)
 
-    async def _fills_only_view(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
-        """The cross-check for an acked order the venue no longer has a record
-        of: its fill history by the ack's oid, bounded at the ack time."""
-        assert ref.venue_oid is not None
-        since_ms = (
-            None
-            if ref.acked_ts_ns is None
-            else ref.acked_ts_ns // _NS_PER_MS - _ACK_SKEW_ALLOWANCE_MS
-        )
-        fills = await self._fetch_fills(
-            cloid=ref.cloid, symbol=ref.symbol, oid=int(ref.venue_oid), since_ms=since_ms
-        )
-        if isinstance(fills, VenueReadFailure):
-            # Same rule as the recorded case: a failed fills read is the failure,
-            # never an empty view that would read as "no record" (inv 1).
-            return fills
-        return VenueOrderView(status=None, fills=tuple(fills))
-
-    async def _view_with_fills(
-        self, cloid: str, record: "_OrderRecord", state: OrderState
+    async def _cross_check(
+        self, ref: OrderRef, *, record: "_OrderRecord | None"
     ) -> VenueOrderView | VenueReadFailure:
-        """The second half of the ADR-0011 cross-check: this order's record
-        joined to its fill history, or how that half failed to read."""
-        # Bound the fills read to this order's own lifetime (ADR-0011): starting
-        # at the venue's recorded placement time keeps its fills at the front of
-        # the returned window, so a busy account's later fills can never push
-        # them past the venue's page cap and silently under-report through the
-        # {cloid}:fill:{tid} dedup. The timestamp is the venue's own, so the
-        # bound is exact regardless of local clock skew.
-        fills = await self._fetch_fills(
-            cloid=cloid, symbol=record.coin, oid=record.oid, since_ms=record.timestamp
-        )
+        """The fill-history half of the ADR-0011 cross-check, joined to the
+        order record when the venue still has one.
+
+        The read is bounded to this order's own lifetime, so a busy account's
+        later fills can never push its own past the venue's page cap and
+        silently under-report through the ``{cloid}:fill:{tid}`` dedup. Where
+        the window starts depends on who still remembers the placement. With
+        a record it is the venue's own placement time, exact whatever our
+        clock skew. Without one it is our ack time less a skew allowance. With
+        no ack time either, which is a saga recovered from a database written
+        before the time was kept, it is the whole recent history.
+
+        A failed fills read fails the whole read and carries its own cause
+        out. Never a partial view: with a record that would read as "no
+        fills", and without one as "no record" (inv 1).
+        """
+        if record is None:
+            assert ref.venue_oid is not None  # ``fetch_order`` routed on it
+            symbol, oid = ref.symbol, int(ref.venue_oid)
+            since_ms = (
+                None
+                if ref.acked_ts_ns is None
+                else ref.acked_ts_ns // _NS_PER_MS - _ACK_SKEW_ALLOWANCE_MS
+            )
+        else:
+            symbol, oid, since_ms = record.coin, record.oid, record.timestamp
+        fills = await self._fetch_fills(cloid=ref.cloid, symbol=symbol, oid=oid, since_ms=since_ms)
         if isinstance(fills, VenueReadFailure):
-            # A failed fills half fails the whole read — never a partial view
-            # that would read as "no fills" (ADR-0011 inv 1) — and carries its
-            # own cause out, since the fills half is the one that died.
             return fills
-        if state in _TERMINAL_STATES:
-            # This order is done: drop the placed-order memory a cancel would
-            # have used, so the adapter's cache tracks only still-open orders.
-            self._placed.pop(cloid, None)
-        return VenueOrderView(
-            status=self._status_report(
-                cloid=cloid, symbol=record.coin, status=state, venue_oid=str(record.oid)
-            ),
-            fills=tuple(fills),
-        )
+        status = None
+        if record is not None:
+            # Cannot fail: ``_decode_order_view`` refused an unmappable status
+            # on the way in, so the read would have failed above.
+            state = _order_state(record.status)
+            if state in _TERMINAL_STATES:
+                # This order is done: drop the placed-order memory a cancel
+                # would have used, so the cache tracks only still-open orders.
+                self._placed.pop(ref.cloid, None)
+            status = self._status_report(
+                cloid=ref.cloid, symbol=record.coin, status=state, venue_oid=str(record.oid)
+            )
+        return VenueOrderView(status=status, fills=tuple(fills))
 
     async def fetch_account_state(self) -> VenueAccountState | None:
         """Venue truth for the account: one ``clearinghouseState`` read, the
