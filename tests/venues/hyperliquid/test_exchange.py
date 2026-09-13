@@ -633,12 +633,16 @@ def test_fetch_order_bundles_the_venue_status_and_fills_into_one_view() -> None:
 def test_fetch_order_returns_an_empty_view_when_the_venue_has_no_record() -> None:
     # unknownOid is a *successful* read: positive proof the order never landed
     # (the ADR-0008 resend gate), categorically different from a failed read.
-    view = asyncio.run(fetch_view(FakeExchangeApi({"orderStatus": {"status": "unknownOid"}})))
+    # With no oid on the ref the ack never arrived, so there is no fill
+    # history to consult and no second request goes out (ADR-0011 inv 4).
+    post = FakeExchangeApi({"orderStatus": {"status": "unknownOid"}})
+    view = asyncio.run(fetch_view(post, UNACKED_REF))
 
     assert isinstance(view, VenueOrderView)
     assert not view.has_record
     assert view.status is None
     assert view.fills == ()
+    assert [query["type"] for _, query in post.requests] == ["orderStatus"]
 
 
 def test_fetch_order_reads_the_fill_history_by_the_acked_oid_once_the_record_is_gone() -> None:
