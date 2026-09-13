@@ -304,10 +304,8 @@ def _tier_1_grains(divergences: tuple[Divergence, ...]) -> frozenset[str | None]
     )
 
 
-def _stale_grains(
-    reading: LedgerReading, *, now_ns: int, band: ValuationBand
-) -> frozenset[str | None]:
-    """The grains whose valuation rests on a mark too old to band (ADR-0040 §6).
+def _stale_symbols(reading: LedgerReading, *, now_ns: int, band: ValuationBand) -> frozenset[str]:
+    """The held symbols whose mark is too old to band (ADR-0040 §6).
 
     Ranged over **held** symbols, on the cycle's own held-ness rule: a stale
     mark for a symbol carrying no exposure values nothing, and counting it would
@@ -316,17 +314,41 @@ def _stale_grains(
     function used to re-write the expression inline because a module-level
     helper could not reach the method it lived on.
 
-    The account grain goes stale the moment **any** held symbol does, which is
-    the asymmetry worth stating: ``equity`` and ``free_margin`` are Σs over
-    every position's valuation, so one frozen term is enough to make the total
-    old — and a Σ is stale on its worst term, never its average.
+    Symbols only. Which figures a stale symbol silences is ``_rests_on_stale``'s
+    question, asked per finding, because the account-grain figures are not all
+    Σs over the same terms.
     """
-    stale = {
+    return frozenset(
         symbol
         for symbol, ts_ns in reading.mark_observed.items()
         if reading.holds(symbol) and band.stale(age_ns=now_ns - ts_ns)
-    }
-    return frozenset(stale) | (frozenset({None}) if stale else frozenset())
+    )
+
+
+def _rests_on_stale(
+    divergence: Divergence,
+    stale: frozenset[str],
+    leverage_for: Callable[[str], LeverageSpec],
+) -> bool:
+    """Whether the compared figure contains a term valued off a stale mark.
+
+    A Σ is stale on its worst term, never its average, so one frozen term is
+    enough. The question is which terms the Σ contains. ``equity`` and
+    ``free_margin`` are Σs over every held position, so any stale symbol makes
+    them old. ``maintenance_margin`` is compared over the **cross** subset alone
+    (ADR-0046 §2.1), so only a stale cross symbol can make it old. An isolated
+    symbol's mark age says nothing about a Σ it is not part of, and before #305
+    it silenced that alert anyway.
+
+    Cross-ness is read through ``leverage_for``, for the reason ``_cross_maintenance``
+    gives. The subset is the ledger's own. The venue's mode is what
+    ``LEVERAGE_DIVERGENCE`` reports, not a thing this rule may trust.
+    """
+    if divergence.symbol is not None:
+        return divergence.symbol in stale
+    if divergence.field is DivergenceField.MAINTENANCE_MARGIN:
+        return any(leverage_for(symbol).mode == "cross" for symbol in stale)
+    return bool(stale)
 
 
 def _reference(
@@ -870,7 +892,7 @@ class ReconcileFindings:
             + _margin_used(state, reading)
         )
         explained = _tier_1_grains(divergences)
-        stale = _stale_grains(reading, now_ns=now_ns, band=band)
+        stale = _stale_symbols(reading, now_ns=now_ns, band=band)
         alerts: list[Divergence] = []
         suppressed = 0
         for divergence in divergences:
@@ -885,7 +907,7 @@ class ReconcileFindings:
             # alert, and counting it would report a frozen mark stream on every
             # healthy cycle — the same noise the band exists to prevent, moved
             # into the record.
-            if divergence.symbol in stale:
+            if _rests_on_stale(divergence, stale, leverage_for):
                 suppressed += 1
                 continue
             alerts.append(divergence)

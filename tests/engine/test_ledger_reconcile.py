@@ -3285,17 +3285,13 @@ def test_a_stale_mark_suppresses_the_alert_and_is_counted_on_the_record() -> Non
     assert (record["tier_2"], record["suppressed"], record["unvalued"]) == (4, 4, 0)
 
 
-def test_a_stale_mark_suppresses_the_maintenance_finding_through_the_account_grain() -> None:
-    """The staleness rule reaches ``maintenance_margin`` without naming it, and
-    this pins that rather than trusting it.
+def test_a_stale_cross_mark_suppresses_the_maintenance_finding() -> None:
+    """A stale mark on a **cross** symbol suppresses the maintenance finding.
 
-    ``_stale_grains`` returns the stale symbols **plus the ``None`` grain** the
-    moment any of them is stale, and a maintenance finding carries
-    ``symbol=None`` because maintenance is owed against the one collateral pool.
-    So the suppression is structural: the figure falls to the same grain
-    ``equity`` and ``free_margin`` do, and nothing had to be extended to cover
-    it. Left unpinned, that is a claim only the implementation makes, and one a
-    later slice could break by giving the figure a symbol.
+    Cross is the qualifier that matters. The figure is compared over the cross
+    subset (ADR-0046 §2.1), so a stale term inside that subset makes it old,
+    and a stale isolated mark does not (#305, pinned at the ``classify`` seam).
+    This book holds one cross leg, so its stale mark is inside the subset.
 
     It needs a fixture of its own because the staleness family below cannot
     reach it. Those books configure no ``InstrumentSpec`` and sit at the

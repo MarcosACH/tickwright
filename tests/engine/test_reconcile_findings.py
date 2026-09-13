@@ -459,3 +459,63 @@ def test_a_maintenance_sigma_the_pass_could_not_compute_is_counted_unvalued() ->
     assert findings.divergences == ()
     assert findings.alerts == ()
     assert (findings.suppressed, findings.unvalued) == (0, 1)
+
+
+def test_a_stale_isolated_mark_leaves_the_cross_subset_maintenance_alert_alone() -> None:
+    """Staleness silences a Σ only through a term that Σ contains (#305).
+
+    ``maintenance_margin`` is compared over the **cross** subset alone (ADR-0046
+    §2.1). An isolated symbol contributes nothing to it, so that symbol's mark
+    age says nothing about whether the compared figure is old. Before this fix
+    the account grain went stale on any held symbol, which was right for
+    ``equity`` and ``free_margin`` (Σs over every position) and wrong here.
+
+    BTC is cross, fresh, and carries a real 100-unit maintenance gap. ETH is
+    isolated, five minutes stale, and agrees with the venue on everything. Every
+    other figure is built to agree, so the pass has exactly one finding, and the
+    isolated mark's age is the only variable between this case and a plain alert.
+    The expected outcome is the control run from the issue: one alert, nothing
+    suppressed.
+    """
+    state = replace(
+        _venue(
+            equity="110000",
+            free_margin="50000",
+            positions=(
+                _position("BTC", signed_size="1", notional="60000", unrealized_pnl="10000"),
+                _position("ETH", signed_size="1", notional="40000", unrealized_pnl="0"),
+            ),
+        ),
+        cross_maintenance_margin=Decimal("900"),
+    )
+    reading = LedgerReading(
+        account=AccountView(
+            cash=Decimal("100000"),
+            equity=Decimal("110000"),
+            total_margin_used=Decimal("60000"),
+            total_maintenance_margin=Decimal("1500"),
+            free_margin=Decimal("50000"),
+            effective_leverage=None,
+        ),
+        net={"BTC": Decimal("1"), "ETH": Decimal("1")},
+        unrealized={"BTC": Decimal("10000"), "ETH": Decimal("0")},
+        notional={"BTC": Decimal("60000"), "ETH": Decimal("40000")},
+        margin_used={"BTC": Decimal("0"), "ETH": Decimal("0")},
+        maintenance_margin={"BTC": Decimal("1000"), "ETH": Decimal("500")},
+        mark_observed={"BTC": _NOW_NS, "ETH": _NOW_NS - 300 * 10**9},
+    )
+
+    def leverage_for(symbol: str) -> LeverageSpec:
+        return LeverageSpec(mode="cross", leverage=1) if symbol == "BTC" else DEFAULT_LEVERAGE
+
+    findings = ReconcileFindings.classify(
+        state, reading, band=ValuationBand(), now_ns=_NOW_NS, leverage_for=leverage_for
+    )
+
+    assert [(d.field, d.symbol) for d in findings.divergences] == [
+        (DivergenceField.MAINTENANCE_MARGIN, None)
+    ]
+    assert [(d.field, d.symbol) for d in findings.alerts] == [
+        (DivergenceField.MAINTENANCE_MARGIN, None)
+    ]
+    assert (findings.suppressed, findings.unvalued) == (0, 0)
