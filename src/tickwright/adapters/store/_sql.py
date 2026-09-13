@@ -35,6 +35,7 @@ from ._records import (
     POSITION_COLUMN_LIST,
     READ_COLUMN_LIST,
     account_values,
+    acked_ts_from_history,
     funding_mark_values,
     next_history,
     position_values,
@@ -88,6 +89,27 @@ class SqlStore(ABC):
                 if not self._has_column(table, column):
                     declaration = added_column_types[column]
                     self._execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+                    if (table, column) == ("orders", "acked_ts_ns"):
+                        self._backfill_ack_times()
+
+    def _backfill_ack_times(self) -> None:
+        """Fill ``acked_ts_ns`` for every existing row from its transition history.
+
+        Runs once, when the column is added. Left at ``None``, a resting saga
+        from before the upgrade would read its fill history unbounded, and on an
+        active account the fill can already be past the venue's page. The
+        history has the LIVE checkpoint time, so no row needs to start blind.
+        """
+        rows = self._execute("SELECT cloid, history FROM orders").fetchall()
+        updates = [
+            (acked_ts_ns, cloid)
+            for cloid, history in rows
+            if (acked_ts_ns := acked_ts_from_history(history)) is not None
+        ]
+        if updates:
+            self._executemany(
+                f"UPDATE orders SET acked_ts_ns = {self._p} WHERE cloid = {self._p}", updates
+            )
 
     @abstractmethod
     def _has_column(self, table: str, column: str) -> bool:

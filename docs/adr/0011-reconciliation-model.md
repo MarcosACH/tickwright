@@ -40,8 +40,10 @@ ADR-0009).
    and the time from the first `LIVE` ack (`Order.venue_oid`, `Order.acked_ts_ns`), and the
    read carries both to the venue in an `OrderRef`. On `unknownOid` the adapter reads
    `userFillsByTime` from the ack time less a 60 s skew allowance, keyed by that oid, and
-   answers a view with no status and those fills. A saga with an oid but no ack time is one
-   recovered from a database written before the time was kept. It falls back to `userFills`.
+   answers a view with no status and those fills. A database written before the time was kept
+   gets the column on open, backfilled from each row's `LIVE` checkpoint time. So a saga with
+   an oid but no ack time is one that never checkpointed as `LIVE`. That case has no bound to
+   read from, and it falls back to `userFills`, the venue's last 2000 fills.
    A failed fills read is the failure, never an empty view (inv 1). [#242]**)**
 3. **Grace window.** An order must be **continuously absent across the grace window** (default
    ~90s ≈ 3 missed slow cycles) before it is ghost-resolved. Plus a **recent-order protection

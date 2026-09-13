@@ -151,6 +151,20 @@ def restore_history(history_json: str | None) -> list[tuple[OrderState, int]]:
     return [(OrderState(state), ts_ns) for state, ts_ns in json.loads(history_json)]
 
 
+def acked_ts_from_history(history_json: str | None) -> int | None:
+    """The first ``LIVE`` checkpoint's time, or ``None`` if the saga never rested.
+
+    The backfill for ``acked_ts_ns`` on a database written before the column
+    existed (#242). The checkpoint runs on the same clock as the ack it
+    records, so the time is the ack's within the write latency, and well inside
+    the skew allowance the fill-history read subtracts.
+    """
+    for state, ts_ns in restore_history(history_json):
+        if state is OrderState.LIVE:
+            return ts_ns
+    return None
+
+
 # The account row, in write order — the single row ADR-0043 §3 pins with
 # ``CHECK (id = 1)``, so ``id`` is a literal in the SQL rather than a value here.
 # ``account_id``, ``genesis_collateral`` and ``genesis_ts_ns`` lead because they

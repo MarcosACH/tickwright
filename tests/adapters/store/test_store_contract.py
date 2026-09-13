@@ -18,6 +18,7 @@ reachable (see ``conftest``), so ``uv run pytest`` stays hermetic by default.
 """
 
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from decimal import Decimal
 from typing import get_protocol_members
 
@@ -30,6 +31,7 @@ from tickwright.domain import (
     InvariantViolation,
     Order,
     OrderFilled,
+    OrderLive,
     OrderState,
     OrderSubmitted,
     OrderType,
@@ -57,6 +59,18 @@ def _submitted() -> OrderSubmitted:
     return OrderSubmitted(
         ts_event=1,
         ts_init=1,
+        cloid="0xabc",
+        strategy_id="trivial",
+        signal_id="trivial:BTC:1",
+        symbol="BTC",
+        venue_oid="oid-1",
+    )
+
+
+def _live() -> OrderLive:
+    return OrderLive(
+        ts_event=2,
+        ts_init=2,
         cloid="0xabc",
         strategy_id="trivial",
         signal_id="trivial:BTC:1",
@@ -242,18 +256,39 @@ def test_a_database_from_before_the_ack_time_column_gains_it_on_open(
     store_backend: Backend,
 ) -> None:
     # A live account's open sagas must survive a schema change. An old database
-    # gets the column on open, its old rows read None, and a new checkpoint can
-    # write the column (#242).
+    # gets the column on open, and a new checkpoint can write it (#242).
+    #
+    # An old row is not left at None when the store can do better. The
+    # transition history holds the LIVE checkpoint, on the same clock the ack
+    # used, so a resting saga's ack time is backfilled from it. Without one the
+    # fill-history read falls back to the last 2000 fills, and an active
+    # account can already have paged the fill out (ADR-0011 inv 2).
     old = _order()
     old.apply(_submitted())
     with store_backend.open() as first:
         first.checkpoint(old, ts_ns=1_000)
+        old.apply(_live())
+        first.checkpoint(old, ts_ns=2_000)
+        never_acked = Order(
+            cloid="0x123",
+            strategy_id="trivial",
+            signal_id="trivial:BTC:3",
+            symbol="BTC",
+            side=Side.BUY,
+            quantity=Decimal("2"),
+            order_type=OrderType.MARKET,
+        )
+        never_acked.apply(replace(_submitted(), cloid="0x123", signal_id="trivial:BTC:3"))
+        first.checkpoint(never_acked, ts_ns=3_000)
     store_backend.drop_column("orders", "acked_ts_ns")
 
     with store_backend.open() as reopened:
         loaded_old = reopened.get_order("0xabc")
         assert loaded_old is not None
-        assert loaded_old.acked_ts_ns is None
+        assert loaded_old.acked_ts_ns == 2_000
+        loaded_never_acked = reopened.get_order("0x123")
+        assert loaded_never_acked is not None
+        assert loaded_never_acked.acked_ts_ns is None
         acked = Order.restore(
             cloid="0xdef",
             strategy_id="trivial",
