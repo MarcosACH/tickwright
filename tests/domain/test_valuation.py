@@ -28,8 +28,6 @@ from tickwright.domain import (
     PositionView,
     Side,
     SymbolValuation,
-    account_maintenance_margin,
-    account_margin_used,
     account_valuation,
     account_view,
     position_view,
@@ -1053,13 +1051,12 @@ def test_free_margin_is_reported_when_negative() -> None:
 
 
 def test_the_account_grain_margin_used_fold_posts_each_symbol_by_its_own_mode() -> None:
-    """``account_margin_used``: the per-symbol collateral behind each position,
+    """The row's ``margin_used``: the per-symbol collateral behind each position,
     at the grain the venue holds it.
 
-    The account-grain counterpart to ``account_notional``, and it exists for the
-    same reason that one does — the reconcile cadence compares a symbol's whole
-    position against the venue's, and ``AccountView`` publishes only the Σ, which
-    has already added the symbols together (ADR-0041 §4/§8).
+    Per symbol because the reconcile cadence compares a symbol's whole position
+    against the venue's, and ``AccountView`` publishes only the Σ, which has
+    already added the symbols together (ADR-0041 §4/§8).
 
     The two modes are different rules, not one rule parameterised (ADR-0040 §3),
     so both are worked here. On the same book the account totals are worked from:
@@ -1089,7 +1086,7 @@ def test_the_account_grain_margin_used_fold_posts_each_symbol_by_its_own_mode() 
         quantity="5000", price="0.1", side=Side.BUY, symbol="DOGE", isolated_collateral="100"
     )
 
-    margin = account_margin_used(
+    rows = account_valuation(
         (btc, eth, sol, doge),
         {"BTC": Decimal("60000"), "ETH": Decimal("3200")},
         leverage=LeverageBook(
@@ -1100,9 +1097,10 @@ def test_the_account_grain_margin_used_fold_posts_each_symbol_by_its_own_mode() 
                 "DOGE": ISOLATED_1X,
             }
         ),
+        specs={},
     )
 
-    assert margin == {
+    assert {symbol: row.margin_used for symbol, row in rows.items()} == {
         "BTC": Decimal("3000"),
         "ETH": Decimal("8000"),
         "SOL": None,
@@ -1137,23 +1135,27 @@ def test_the_account_grain_margin_used_fold_ranges_over_symbols_not_partitions()
         quantity="3", price="2400", side=Side.SELL, symbol="ETH", isolated_collateral="1440"
     )
 
-    margin = account_margin_used(
+    rows = account_valuation(
         (long_leg, short_leg, eth_long, eth_short),
         {"ETH": Decimal("2200")},
         leverage=LeverageBook(entries={"BTC": CROSS_10X, "ETH": ISOLATED_5X}),
+        specs={},
     )
 
-    assert margin == {"BTC": Decimal("0"), "ETH": Decimal("3840")}
+    assert {symbol: row.margin_used for symbol, row in rows.items()} == {
+        "BTC": Decimal("0"),
+        "ETH": Decimal("3840"),
+    }
 
 
 def test_the_account_grain_maintenance_margin_fold_rates_each_symbols_notional() -> None:
-    """``account_maintenance_margin``: ``notional × margin_maint`` per symbol, at
-    the flat tier-0 rate (ADR-0040 §4).
+    """The row's ``maintenance_margin``: ``notional × margin_maint`` per symbol,
+    at the flat tier-0 rate (ADR-0040 §4).
 
-    The third account-grain fold, and the one with **no mode term** — maintenance
-    is owed on the exposure whichever pool backs it, so unlike ``margin_used``
-    beside it this takes the instrument universe and not the leverage book. It is
-    folded per symbol for the reconcile cadence, which compares only the **cross
+    The one figure with **no mode term** — maintenance is owed on the exposure
+    whichever pool backs it, so unlike ``margin_used`` beside it this reads the
+    instrument universe and not the leverage book. It is on the row for the
+    reconcile cadence, which compares only the **cross
     subset** against the venue's ``crossMaintenanceMarginUsed`` while the
     reported figure stays Σ-over-all (ADR-0046 §2.1): a Σ handed over whole
     cannot be narrowed to a subset afterwards.
@@ -1172,13 +1174,14 @@ def test_the_account_grain_maintenance_margin_fold_rates_each_symbols_notional()
     sol = _position(quantity="100", price="20", side=Side.BUY, symbol="SOL")
     doge = _position(quantity="5000", price="0.1", side=Side.BUY, symbol="DOGE")
 
-    maintenance = account_maintenance_margin(
+    rows = account_valuation(
         (btc, eth, sol, doge),
         {"BTC": Decimal("60000"), "ETH": Decimal("3200"), "DOGE": Decimal("0.12")},
+        leverage=LeverageBook(),
         specs={"BTC": BTC_40X, "ETH": ETH_25X, "SOL": SOL_20X},
     )
 
-    assert maintenance == {
+    assert {symbol: row.maintenance_margin for symbol, row in rows.items()} == {
         "BTC": Decimal("375"),
         "ETH": Decimal("640"),
         "SOL": None,
@@ -1201,9 +1204,9 @@ def test_a_flat_account_net_owes_a_real_zero_maintenance_with_neither_mark_nor_s
     long_leg = _position(quantity="2", price="100", side=Side.BUY, symbol="BTC")
     short_leg = _position(quantity="2", price="120", side=Side.SELL, symbol="BTC")
 
-    maintenance = account_maintenance_margin((long_leg, short_leg), {}, specs={})
+    rows = account_valuation((long_leg, short_leg), {}, leverage=LeverageBook(), specs={})
 
-    assert maintenance == {"BTC": Decimal("0")}
+    assert {symbol: row.maintenance_margin for symbol, row in rows.items()} == {"BTC": Decimal("0")}
 
 
 def test_account_valuation_folds_every_per_symbol_figure_into_one_row() -> None:

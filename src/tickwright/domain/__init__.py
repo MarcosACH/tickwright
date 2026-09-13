@@ -105,10 +105,6 @@ from .protocols import (
 from .valuation import (
     LiquidationSource,
     SymbolValuation,
-    account_maintenance_margin,
-    account_margin_used,
-    account_notional,
-    account_unrealized_pnl,
     account_valuation,
     account_view,
     position_view,
@@ -198,16 +194,12 @@ __all__ = [
     "funding_boundaries",
     # the Σ-invariant's left-hand side
     "account_net_size",
-    "account_notional",
     # the cash line a venue snapshot implies — the genesis and the reconcile
     # anchor read it from one place
     "venue_cash",
     # Tier-2 view assembly (pure, never stored)
     "LiquidationSource",
     "SymbolValuation",
-    "account_maintenance_margin",
-    "account_margin_used",
-    "account_unrealized_pnl",
     "account_valuation",
     "account_view",
     "position_view",
