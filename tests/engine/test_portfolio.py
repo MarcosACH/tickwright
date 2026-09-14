@@ -385,7 +385,8 @@ def test_one_reading_folds_the_book_once(monkeypatch: pytest.MonkeyPatch) -> Non
     ran the public ``domain.valuation`` folds 18 times over one book, because
     every member was its own traversal and ``account_view`` ran three more.
     This probe counts the traversing folds by name. Two are owed: the symbol
-    rows, and the account-net fold that the #284 movement check also takes.
+    rows, and the account-net fold the rows are keyed on. The fill stamps
+    beside them are a copy of a map, not a traversal (#324).
 
     A cost property and not an output one, so the probe is shape-coupled by
     design: it wraps the fold names where the projection binds them. A fold

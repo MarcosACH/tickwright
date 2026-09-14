@@ -1154,11 +1154,11 @@ class PortfolioProjection:
         write, and one that must precede this read; hiding it inside a read verb
         would make the ordering invisible at the call site that depends on it.
 
-        The cadence takes one more fold beside this: ``account_net`` once,
-        before the venue read (#284). That fold is not a reading and nothing is
-        compared against it. It exists so the pass can tell which symbols a
-        fill moved while the read was in flight, and the comparison still runs
-        off this one reading.
+        The cadence reads one integer beside this: ``fills_applied``, before
+        the venue read (#284, #324). It is not a reading and nothing is compared
+        against it. It exists so the pass can tell, from ``last_fills``, which
+        symbols a fill touched while the read was in flight. The comparison
+        still runs off this one reading.
         """
         rows = self._rows()
         return LedgerReading(
@@ -1184,9 +1184,11 @@ class PortfolioProjection:
         §8). Kept private, that cycle would have to re-fold the partitions from
         the outside and the invariant would have two definitions to disagree.
 
-        The cycle reads it twice per pass, and only one of those is the
-        comparison. The other is taken before the venue read, so a symbol a fill
-        moved during the read can be told apart from one that diverged (#284).
+        The cycle itself now takes that side off ``ledger_reading().net``, the
+        same fold one row per symbol (#304). It read this once more before the
+        venue read as a movement detector (#284) until #324 replaced that with
+        the reading's fill stamps. What remains public is the one-call answer
+        the suites read the book back through.
         """
         return account_net_size(self._positions.values())
 

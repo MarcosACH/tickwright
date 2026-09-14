@@ -483,9 +483,10 @@ def _net_diff(
     """The symbols two net folds disagree on, each with both sides' sizes.
 
     The cycle's one definition of "these two nets differ". ``_sizes`` reads it
-    for the ledger against the venue. ``_size_heals`` reads it for the ledger
-    before the venue read against the ledger after it (#284). Written out at
-    each site, the two would be free to drift on the grain below.
+    for the ledger against the venue. ``_size_heals`` read it too, for the
+    ledger before the venue read against the ledger after it (#284), until
+    #324 replaced that compare with the reading's fill stamps. It stays named
+    because the grain below is a claim of its own, not a detail of one caller.
 
     Ranged over the **union** of both symbol sets, with an absent side reading
     flat. Either half alone is a check that cannot see the direction it is not
