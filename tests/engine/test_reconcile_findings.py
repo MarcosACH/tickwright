@@ -536,6 +536,75 @@ def test_a_stale_isolated_mark_leaves_the_cross_subset_maintenance_alert_alone()
     assert (findings.suppressed, findings.unvalued) == (0, 0)
 
 
+def test_a_size_finding_on_an_isolated_symbol_leaves_the_cross_subset_maintenance_alert_alone() -> (
+    None
+):
+    """A Tier-1 finding silences a Σ only through a term that Σ contains (#322).
+
+    Rule (1) now flows the way rule (2) does, and this is its narrowing case at
+    the classification seam. The case above is the same book under rule (2).
+    ``maintenance_margin`` is compared over the cross subset alone (ADR-0046
+    §2.1). An isolated symbol is not a term of it, so a size gap on that symbol
+    explains nothing about the maintenance figure. A blanket "any size finding
+    silences the account grain" would pass the containment case at the top of
+    this file and fail here.
+
+    BTC is cross and carries the real 100-unit maintenance gap. ETH is isolated,
+    and the venue holds 2 where the ledger holds 1, so ETH's notional gap is the
+    same missed fill in dollars and stays silent on its own grain. ETH's uPnL is
+    0 on both sides, so the cash, equity and free margin lines still agree. One
+    alert, nothing suppressed.
+    """
+    state = replace(
+        _venue(
+            equity="110000",
+            free_margin="50000",
+            positions=(
+                _position("BTC", signed_size="1", notional="60000", unrealized_pnl="10000"),
+                _position("ETH", signed_size="2", notional="80000", unrealized_pnl="0"),
+            ),
+        ),
+        cross_maintenance_margin=Decimal("900"),
+    )
+    reading = LedgerReading(
+        account=AccountView(
+            cash=Decimal("100000"),
+            equity=Decimal("110000"),
+            total_margin_used=Decimal("60000"),
+            total_maintenance_margin=Decimal("1500"),
+            free_margin=Decimal("50000"),
+            effective_leverage=None,
+        ),
+        rows={
+            "BTC": _row(
+                "BTC",
+                net="1",
+                unrealized_pnl="10000",
+                notional="60000",
+                maintenance_margin="1000",
+                leverage=_CROSS_1X,
+            ),
+            "ETH": _row(
+                "ETH", net="1", unrealized_pnl="0", notional="40000", maintenance_margin="500"
+            ),
+        },
+        mark_observed={"BTC": _NOW_NS, "ETH": _NOW_NS},
+        last_fills={},
+    )
+
+    findings = ReconcileFindings.classify(state, reading, band=ValuationBand(), now_ns=_NOW_NS)
+
+    assert [(d.tier, d.field, d.symbol) for d in findings.divergences] == [
+        (DivergenceTier.TIER_1, DivergenceField.SIGNED_SIZE, "ETH"),
+        (DivergenceTier.TIER_2, DivergenceField.MAINTENANCE_MARGIN, None),
+        (DivergenceTier.TIER_2, DivergenceField.NOTIONAL, "ETH"),
+    ]
+    assert [(d.field, d.symbol) for d in findings.alerts] == [
+        (DivergenceField.MAINTENANCE_MARGIN, None)
+    ]
+    assert (findings.suppressed, findings.unvalued) == (0, 0)
+
+
 @pytest.mark.parametrize(
     ("field", "attribute"),
     [
