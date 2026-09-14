@@ -270,11 +270,10 @@ class LedgerReading:
     """The ledger's fill count as of each symbol's last accepted fill (#324).
 
     The cycle's movement signal, and a stamp like ``mark_observed`` rather than
-    a compared figure on the row. A symbol stamped above the count the cycle
-    read before its venue read took a fill while the read was in flight, so its
-    finding compares a fresh fold against a stale snapshot. A net compare misses
-    a fill and its reverse inside one read window. This does not. A symbol no
-    fill touched this run is absent."""
+    a compared figure on the row. ``filled_since`` reads it: a symbol stamped
+    above the count the cycle read before its venue read took a fill while the
+    read was in flight. A net compare misses a fill and its reverse inside one
+    read window. This does not. A symbol no fill touched this run is absent."""
 
     @property
     def net(self) -> dict[str, Decimal]:
@@ -305,6 +304,24 @@ class LedgerReading:
         """
         row = self.rows.get(symbol)
         return row is not None and row.net != _ZERO
+
+    def filled_since(self, fills_before: int) -> frozenset[str]:
+        """The symbols a fill touched after the ledger's count stood at
+        ``fills_before``. The cycle's one movement predicate (#324).
+
+        The cycle reads ``fills_applied`` before its venue read and asks this
+        of the reading it takes after. A symbol named here took a fill while
+        the read was in flight, so its finding compares a fresh fold against a
+        stale snapshot and is reported rather than healed.
+
+        Read off the stamps and not the net, because the rule is "any fill
+        touched it". A fill and its reverse inside one read window leave the net
+        where it was and are still movement. On this type for the reason
+        ``holds`` is: it owns the field the answer is read from.
+        """
+        return frozenset(
+            symbol for symbol, last_fill in self.last_fills.items() if last_fill > fills_before
+        )
 
 
 class PortfolioProjection:
@@ -678,10 +695,11 @@ class PortfolioProjection:
     def fills_applied(self) -> int:
         """How many fills this ledger has accepted this run.
 
-        The reconcile cycle reads it once before its venue read. A row whose
-        ``last_fill`` is above that count took a fill while the read was in
-        flight (#324). One integer, not a fold: it replaced the pre-read
-        ``account_net`` fold #284 took, which saw net movement only.
+        The reconcile cycle reads it once before its venue read and hands it to
+        ``LedgerReading.filled_since`` after. A symbol stamped above that count
+        took a fill while the read was in flight (#324). One integer, not a
+        fold: it replaced the pre-read ``account_net`` fold #284 took, which
+        saw net movement only.
         """
         return self._fills_applied
 
@@ -1155,10 +1173,10 @@ class PortfolioProjection:
         would make the ordering invisible at the call site that depends on it.
 
         The cadence reads one integer beside this: ``fills_applied``, before
-        the venue read (#284, #324). It is not a reading and nothing is compared
-        against it. It exists so the pass can tell, from ``last_fills``, which
-        symbols a fill touched while the read was in flight. The comparison
-        still runs off this one reading.
+        the venue read (#284, #324). It is not a reading and no venue figure is
+        compared against it. It exists so ``filled_since`` can tell which
+        symbols a fill touched while the read was in flight. The venue
+        comparison still runs off this one reading.
         """
         rows = self._rows()
         return LedgerReading(

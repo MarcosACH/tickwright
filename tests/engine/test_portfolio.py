@@ -460,6 +460,33 @@ def test_the_reading_stamps_each_symbol_with_the_fill_that_last_moved_it() -> No
     assert reading.last_fills == {"BTC": 3, "ETH": 2}
 
 
+def test_the_reading_names_the_symbols_a_fill_touched_since_a_count() -> None:
+    """``filled_since`` is the cycle's one movement predicate, on the type that
+    owns the stamp (#324).
+
+    The reconcile cycle reads ``fills_applied`` before its venue read and asks
+    the reading afterwards which symbols a fill touched since. The answer is
+    read off the stamps, so a symbol whose net came back to where it started
+    is still named. ``holds`` lives here for the same reason: one definition,
+    on the type that owns the field it reads.
+    """
+    projection = _projection("100000")
+    book_fill(projection, _fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
+    book_fill(
+        projection,
+        _fill(trade_id="f2", quantity="1", price="3000", symbol="ETH", strategy_id="beta"),
+        side=Side.BUY,
+    )
+    book_fill(projection, _fill(trade_id="f3", quantity="2", price="100"), side=Side.SELL)
+
+    reading = projection.ledger_reading()
+
+    # BTC is back at flat and still named: the question is "any fill", not net.
+    assert reading.filled_since(0) == frozenset({"BTC", "ETH"})
+    assert reading.filled_since(2) == frozenset({"BTC"})
+    assert reading.filled_since(3) == frozenset()
+
+
 def test_the_one_read_carries_both_margin_folds_at_the_grain_the_venue_publishes() -> None:
     """``margin_used`` and ``maintenance_margin`` reach the cadence per **symbol**.
 

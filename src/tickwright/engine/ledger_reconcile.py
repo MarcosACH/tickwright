@@ -1338,13 +1338,14 @@ class LedgerReconciliation:
         than read here: both halves of one pass's heal are keyed on one stamp.
 
         ``fills_before`` is the ledger's fill count as read before the venue
-        read, and ``reading.last_fills`` stamps each symbol with the count as of
-        its last fill (#284, #324). A symbol stamped above the count took a fill
-        while the read was in flight, so its finding compares a fresh fold
-        against a stale snapshot. It is reported and not healed, the same answer
-        the priceless arm gives, and the next deadline reads a snapshot that
-        carries the fill. Judged here and not at the call site, because this is
-        the one place that decides which findings heal.
+        read (#284, #324). A symbol the reading names as filled since then took
+        a fill while the read was in flight, so its finding compares a fresh
+        fold against a stale snapshot. It is reported and not healed, the same
+        answer the priceless arm gives, and the next deadline reads a snapshot
+        that carries the fill. Judged here and not at the call site, because
+        this is the one place that decides which findings heal. Which symbols
+        moved is ``LedgerReading.filled_since``'s question, on the type that
+        owns the stamp, so this method does not re-spell it.
 
         A stamp and not a net compare, because the rule is "any fill touched
         it" and net movement is a proxy for that. A fill and its reverse inside
@@ -1352,9 +1353,7 @@ class LedgerReconciliation:
         the venue's transient size, and the next pass healed it back (#324).
         """
         prices = {position.symbol: position.entry_price for position in state.positions}
-        moved = {
-            symbol for symbol, last_fill in reading.last_fills.items() if last_fill > fills_before
-        }
+        moved = reading.filled_since(fills_before)
         return tuple(
             _SizeHeal(
                 divergence=divergence,
