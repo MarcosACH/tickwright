@@ -3253,6 +3253,72 @@ def test_a_tier_1_size_finding_suppresses_the_account_figures_its_symbol_is_a_te
     assert (record["tier_1"], record["tier_2"], record["suppressed"]) == (1, 4, 0)
 
 
+def test_a_size_finding_on_an_isolated_symbol_does_not_silence_the_cross_maintenance_alert() -> (
+    None
+):
+    """The narrowing that makes rule (1) one decision with rule (2) (#322).
+
+    A size finding silences the figures whose compared Σ contains its symbol,
+    and ``maintenance_margin`` is compared over the cross subset only
+    (ADR-0046 §2.1). An isolated symbol is not a term of that Σ, so a size gap
+    on it explains nothing about the maintenance figure. A blanket "any size
+    finding silences the account grain" would pass the case above and fail
+    this one.
+
+    The book is the cross-subset case above: BTC at cross 5x with a real
+    maintenance gap of 1.625 against 1.600, and a large ETH leg at the isolated
+    default. The one change is the venue holding 101 ETH where the ledger
+    holds 100. ETH is entered and marked at 3000, so its uPnL is 0 on both
+    sides and the equity and cash lines still agree. The size gap silences
+    ETH's own exposure, and the maintenance alert still fires.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(
+        store,
+        equity="100000",
+        leverage=LeverageBook(entries={"BTC": _CROSS_5X, "ETH": DEFAULT_LEVERAGE}),
+        specs={"BTC": _BTC_SPEC, "ETH": _ETH_SPEC},
+    )
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _book_fill(projection, quantity="100", price="3000", symbol="ETH")
+    _mark(projection, "BTC", "65000")
+    _mark(projection, "ETH", "3000")
+    venue = _levered(
+        _held(
+            "100000.382",
+            ("BTC", "0.002", "0.382"),
+            ("ETH", "101", "0"),
+            entry={"ETH": "3000"},
+            free_margin="99974.382",
+            maintenance="1.600",
+        ),
+        _CROSS_5X,
+        symbol="BTC",
+    )
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences is not None
+    assert [(d.tier, d.field, d.symbol) for d in divergences] == [
+        (DivergenceTier.TIER_1, DivergenceField.SIGNED_SIZE, "ETH"),
+        (DivergenceTier.TIER_2, DivergenceField.MAINTENANCE_MARGIN, None),
+        (DivergenceTier.TIER_2, DivergenceField.NOTIONAL, "ETH"),
+    ]
+    assert _alerts(logs) == [
+        {
+            "field": "maintenance_margin",
+            "symbol": None,
+            "ledger": "1.6250000",
+            "venue": "1.600",
+        }
+    ]
+    record = _recorded(logs)
+    assert (record["tier_1"], record["tier_2"], record["suppressed"]) == (1, 2, 0)
+
+
 def test_a_cash_finding_the_mode_gate_refused_still_suppresses_the_account_grain() -> None:
     """The account half of ADR-0040 §6's first suppression, on the pass that
     makes the wording load-bearing (ADR-0046 §4).
