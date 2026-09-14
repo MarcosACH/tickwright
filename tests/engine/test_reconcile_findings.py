@@ -605,6 +605,99 @@ def test_a_size_finding_on_an_isolated_symbol_leaves_the_cross_subset_maintenanc
     assert (findings.suppressed, findings.unvalued) == (0, 0)
 
 
+def _missed_opening_fill() -> VenueAccountState:
+    """The venue holds 0.5 BTC the ledger never booked, at cross.
+
+    Entered at 100,000 and marked at 120,000, so its uPnL is 10,000. The
+    venue's equity of 110,000 implies a cash line of 100,000, which the ledger
+    agrees on. The venue posts 100 of cross maintenance for it.
+    """
+    return replace(
+        _venue(
+            equity="110000",
+            free_margin="50000",
+            positions=(
+                _position("BTC", signed_size="0.5", notional="60000", unrealized_pnl="10000"),
+            ),
+        ),
+        cross_maintenance_margin=Decimal("100"),
+    )
+
+
+def _flat_reading(rows: dict[str, SymbolValuation]) -> LedgerReading:
+    """A ledger holding nothing: cash, equity and free margin all 100,000."""
+    return LedgerReading(
+        account=AccountView(
+            cash=Decimal("100000"),
+            equity=Decimal("100000"),
+            total_margin_used=Decimal("0"),
+            total_maintenance_margin=Decimal("0"),
+            free_margin=Decimal("100000"),
+            effective_leverage=None,
+        ),
+        rows=rows,
+        mark_observed=dict.fromkeys(rows, _NOW_NS),
+        last_fills={},
+    )
+
+
+def test_a_size_finding_on_a_symbol_the_ledger_never_traded_still_explains_the_account_sums() -> (
+    None
+):
+    """Rule (1) ranges over the Tier-1 symbols, not over what the ledger holds (#322).
+
+    A missed opening fill is a size finding on a symbol the ledger is flat in.
+    The ledger's Σ has no BTC term, but the venue's does, and the compared
+    figure is the difference between the two. ``equity`` and ``free_margin``
+    sum every position on both sides, so BTC is a term of each and the gap is
+    the missed fill in dollars.
+
+    ``maintenance_margin`` narrows to the cross subset, and cross-ness is read
+    off the ledger's row (#304). A symbol the ledger never traded has no row,
+    so the mode cannot be read and the figure is left to alert. That errs
+    toward noise, never silence.
+    """
+    findings = ReconcileFindings.classify(
+        _missed_opening_fill(), _flat_reading({}), band=ValuationBand(), now_ns=_NOW_NS
+    )
+
+    assert [(d.tier, d.field, d.symbol) for d in findings.divergences] == [
+        (DivergenceTier.TIER_1, DivergenceField.SIGNED_SIZE, "BTC"),
+        (DivergenceTier.TIER_2, DivergenceField.EQUITY, None),
+        (DivergenceTier.TIER_2, DivergenceField.FREE_MARGIN, None),
+        (DivergenceTier.TIER_2, DivergenceField.MAINTENANCE_MARGIN, None),
+    ]
+    assert [(d.field, d.symbol) for d in findings.alerts] == [
+        (DivergenceField.MAINTENANCE_MARGIN, None)
+    ]
+    assert (findings.suppressed, findings.unvalued) == (0, 0)
+
+
+def test_a_size_finding_on_a_symbol_closed_to_flat_explains_the_cross_maintenance_too() -> None:
+    """The same missed fill on a symbol the ledger traded before (#322).
+
+    A closed position leaves its row behind at zero, and the row still carries
+    the mode the run holds the symbol at. BTC is cross, so it is a term of the
+    maintenance Σ as well, and nothing alerts.
+    """
+    rows = {
+        "BTC": _row("BTC", net="0", unrealized_pnl="0", notional="0", leverage=_CROSS_1X),
+    }
+
+    findings = ReconcileFindings.classify(
+        _missed_opening_fill(), _flat_reading(rows), band=ValuationBand(), now_ns=_NOW_NS
+    )
+
+    assert [(d.tier, d.field, d.symbol) for d in findings.divergences] == [
+        (DivergenceTier.TIER_1, DivergenceField.SIGNED_SIZE, "BTC"),
+        (DivergenceTier.TIER_2, DivergenceField.EQUITY, None),
+        (DivergenceTier.TIER_2, DivergenceField.FREE_MARGIN, None),
+        (DivergenceTier.TIER_2, DivergenceField.MAINTENANCE_MARGIN, None),
+    ]
+    assert findings.alerts == ()
+    assert (findings.suppressed, findings.unvalued) == (0, 0)
+
+
 @pytest.mark.parametrize(
     ("field", "attribute"),
     [
