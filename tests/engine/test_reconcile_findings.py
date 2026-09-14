@@ -116,9 +116,11 @@ def test_classifies_both_tiers_off_one_hand_built_reading() -> None:
     cycle compares: a size it is 0.1 short on, a free margin 100 under, and a
     uPnL 2,000 under.
 
-    The uPnL finding is **classified and not alerted**: BTC already carries a
-    Tier-1 size finding this pass, and a Tier-2 figure on a grain Tier-1 already
-    explains is the same missed fill restated in dollars.
+    The two Tier-2 findings are **classified and not alerted**: BTC already
+    carries a Tier-1 size finding this pass, and a Tier-2 figure whose compared
+    Σ contains BTC is the same missed fill restated in dollars (#322). That is
+    BTC's own uPnL, and it is the account's free margin too, since the held
+    book is one symbol and BTC is a term of it.
     """
     state = _venue(
         equity="110000",
@@ -166,7 +168,7 @@ def test_classifies_both_tiers_off_one_hand_built_reading() -> None:
             venue=Decimal("10000"),
         ),
     )
-    assert findings.alerts == (findings.divergences[1],)  # the uPnL is Tier-1's to explain
+    assert findings.alerts == ()  # both Tier-2 figures are Tier-1's to explain
     assert findings.suppressed == 0
     assert findings.unvalued == 0
 

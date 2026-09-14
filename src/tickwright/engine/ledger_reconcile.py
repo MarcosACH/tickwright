@@ -288,11 +288,14 @@ def _tier_1_grains(divergences: tuple[Divergence, ...]) -> frozenset[str | None]
     """The grains a Tier-1 finding already explains this cycle (ADR-0040 §6).
 
     A ``Divergence.symbol`` **is** the grain — a symbol for the per-symbol
-    checks, ``None`` for the account's own pool — so "for that symbol/account"
-    is one set membership rather than two rules that could disagree. A Tier-2
-    figure landing on a grain in here is the same missed fill restated in
-    dollars: Tier-1 alerts and heals it, so the second report is noise an
-    operator cannot act on, and it is loudest exactly when the ledger is worst.
+    checks, ``None`` for the account's own pool. A Tier-2 figure landing on a
+    grain in here is the same missed fill restated in dollars: Tier-1 alerts
+    and heals it, so the second report is noise an operator cannot act on, and
+    it is loudest exactly when the ledger is worst.
+
+    Grains only. A symbol in here also explains the account figures whose Σ
+    contains it, and that is ``_explained_by_tier_1``'s question, asked per
+    finding through ``_terms`` (#322).
 
     Read off the **findings** rather than the heal plan, which matters for the
     account grain: ADR-0046 §4 refuses a cash heal on an unverifiable account
