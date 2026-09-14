@@ -1023,14 +1023,15 @@ class LedgerReconciliation:
         correct and leaves a pass that never looked indistinguishable from one
         that agreed.
         """
-        # The net fold is taken once more *before* the read, so the pass can
-        # tell which symbols moved while the read was in flight (#284). A live
-        # read is a POST, and a fill delivered during it is in the ledger but
-        # not in the body the venue already serialised. Compared as-is, the
+        # The fill count is read *before* the read, so the pass can tell which
+        # symbols a fill touched while the read was in flight (#284, #324). A
+        # live read is a POST, and a fill delivered during it is in the ledger
+        # but not in the body the venue already serialised. Compared as-is, the
         # ledger reads ahead and the heal books the engine's own fill out of the
-        # account net. This fold is a movement detector, not a comparison
-        # input: the comparison still runs off the one ``LedgerReading`` below.
-        net_before = dict(self._portfolio.account_net())
+        # account net. This is a movement detector, not a comparison input: the
+        # comparison still runs off the one ``LedgerReading`` below. A count and
+        # not a net fold, because a fill and its reverse net to no movement.
+        fills_before = self._portfolio.fills_applied
         state = await self._exchange.fetch_account_state()
         if state is None:
             self._freeze(_FreezeCaller.CADENCE)
@@ -1061,7 +1062,7 @@ class LedgerReconciliation:
         # could separate.
         heal_ts_ns = self._checkpointer.clock.timestamp_ns()
         heals = self._size_heals(
-            state, divergences, ts_ns=heal_ts_ns, net_before=net_before, net=reading.net
+            state, divergences, ts_ns=heal_ts_ns, fills_before=fills_before, reading=reading
         )
         cash = self._cash_heal(divergences, ts_ns=heal_ts_ns)
         if cash is not None and not await self._mode_verified():
@@ -1292,8 +1293,8 @@ class LedgerReconciliation:
         divergences: tuple[Divergence, ...],
         *,
         ts_ns: int,
-        net_before: Mapping[str, Decimal],
-        net: Mapping[str, Decimal],
+        fills_before: int,
+        reading: LedgerReading,
     ) -> tuple[_SizeHeal, ...]:
         """Turn this pass's Tier-1 size findings into the fills that correct them.
 
@@ -1335,23 +1336,24 @@ class LedgerReconciliation:
         ``ts_ns`` is the cycle's, handed in beside the cash correction's rather
         than read here: both halves of one pass's heal are keyed on one stamp.
 
-        ``net_before`` and ``net`` are the ledger's net fold on either side of
-        the venue read (#284). A symbol they disagree on moved while the read
-        was in flight, so its finding compares a fresh fold against a stale
-        snapshot. It is reported and not healed, the same answer the priceless
-        arm gives, and the next deadline reads a snapshot that carries the fill.
-        Judged here and not at the call site, because this is the one place
-        that decides which findings heal. The disagreement is ``_net_diff``'s,
-        the same grain ``_sizes`` compares the venue on.
+        ``fills_before`` is the ledger's fill count as read before the venue
+        read, and ``reading.last_fills`` stamps each symbol with the count as of
+        its last fill (#284, #324). A symbol stamped above the count took a fill
+        while the read was in flight, so its finding compares a fresh fold
+        against a stale snapshot. It is reported and not healed, the same answer
+        the priceless arm gives, and the next deadline reads a snapshot that
+        carries the fill. Judged here and not at the call site, because this is
+        the one place that decides which findings heal.
 
-        The detector sees net movement only. A fill and its reverse inside one
-        read window net to no movement, so that symbol is not deferred and the
-        stale comparison heals it as before. A per-symbol fill stamp on the
-        ``SymbolValuation`` row would see that case. The row does not carry
-        one yet.
+        A stamp and not a net compare, because the rule is "any fill touched
+        it" and net movement is a proxy for that. A fill and its reverse inside
+        one read window net to zero. Compared by net, that symbol was healed to
+        the venue's transient size, and the next pass healed it back (#324).
         """
         prices = {position.symbol: position.entry_price for position in state.positions}
-        moved = {symbol for symbol, _before, _after in _net_diff(net_before, net)}
+        moved = {
+            symbol for symbol, last_fill in reading.last_fills.items() if last_fill > fills_before
+        }
         return tuple(
             _SizeHeal(
                 divergence=divergence,
