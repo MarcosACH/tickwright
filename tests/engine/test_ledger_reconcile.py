@@ -3209,6 +3209,50 @@ def test_a_tier_1_size_finding_suppresses_that_symbols_tier_2_alert() -> None:
     ]
 
 
+def test_a_tier_1_size_finding_suppresses_the_account_figures_its_symbol_is_a_term_of() -> None:
+    """ADR-0040 §6 rule (1), as corrected by #322: a size finding on a symbol
+    explains every Tier-2 figure whose compared Σ contains that symbol.
+
+    The case above builds two opposite gaps so the account Σs agree by
+    construction. This is the case it stepped around. One symbol, one gap: the
+    ledger holds 0.002 BTC, the venue holds 0.003, and cash agrees. The equity
+    gap is then 50, which is the missed 0.001 BTC at the mark restated in
+    dollars. Tier-1 alerts and heals that fill, and the next pass finds the
+    cash gap as Tier-1, so an equity alert here is one an operator cannot act
+    on.
+
+    Before this fix the rule matched on the grain alone. The size finding
+    carries ``symbol="BTC"`` and equity carries ``symbol=None``, so the three
+    per-symbol figures were silenced and the equity alerted anyway.
+
+    Suppression by a Tier-1 finding is not counted, so ``suppressed`` stays 0.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "65000")
+    venue = _held("100050.382", ("BTC", "0.003", "50.382"))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences is not None
+    assert [
+        (divergence.tier, divergence.field, divergence.symbol) for divergence in divergences
+    ] == [
+        (DivergenceTier.TIER_1, DivergenceField.SIGNED_SIZE, "BTC"),
+        (DivergenceTier.TIER_2, DivergenceField.EQUITY, None),
+        (DivergenceTier.TIER_2, DivergenceField.UNREALIZED_PNL, "BTC"),
+        (DivergenceTier.TIER_2, DivergenceField.NOTIONAL, "BTC"),
+        (DivergenceTier.TIER_2, DivergenceField.MARGIN_USED, "BTC"),
+    ]
+    assert _alerts(logs) == []
+    record = _recorded(logs)
+    assert (record["tier_1"], record["tier_2"], record["suppressed"]) == (1, 4, 0)
+
+
 def test_a_cash_finding_the_mode_gate_refused_still_suppresses_the_account_grain() -> None:
     """The account half of ADR-0040 §6's first suppression, on the pass that
     makes the wording load-bearing (ADR-0046 §4).

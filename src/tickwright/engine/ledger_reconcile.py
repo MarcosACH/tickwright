@@ -383,6 +383,25 @@ def _rests_on_stale(divergence: Divergence, stale: frozenset[str], reading: Ledg
     return not stale.isdisjoint(_terms(reading, field=divergence.field, symbol=divergence.symbol))
 
 
+def _explained_by_tier_1(
+    divergence: Divergence, explained: frozenset[str | None], reading: LedgerReading
+) -> bool:
+    """Whether a Tier-1 finding this cycle already explains the compared figure.
+
+    Two ways in. The finding's own grain is in ``explained``, which is how a
+    cash finding freezes the whole account grain (ADR-0046 §4). Or a Tier-1
+    symbol is a term of the Σ the figure is compared over, which is how a size
+    finding on BTC reaches ``equity`` (#322). Which terms the Σ contains is
+    ``_terms``'s answer, the same one the staleness rule reads, so the two
+    rules cannot disagree about which way a symbol finding flows.
+    """
+    if divergence.symbol in explained:
+        return True
+    return not explained.isdisjoint(
+        _terms(reading, field=divergence.field, symbol=divergence.symbol)
+    )
+
+
 def _reference(divergence: Divergence, reading: LedgerReading) -> Decimal | None:
     """The notional ADR-0046 §5 scales the band's relative term by.
 
@@ -874,7 +893,7 @@ class ReconcileFindings:
         for divergence in divergences:
             if (
                 divergence.tier is not DivergenceTier.TIER_2
-                or divergence.symbol in explained
+                or _explained_by_tier_1(divergence, explained, reading)
                 or band.covers(divergence, reference=_reference(divergence, reading))
             ):
                 continue
