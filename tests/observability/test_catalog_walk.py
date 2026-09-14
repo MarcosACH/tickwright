@@ -26,9 +26,15 @@ from hyperliquid_fakes import (
     trade,
     trades_frame,
 )
-from ledgers import GENESIS, checkpointer
+from ledgers import GENESIS, book_fill, checkpointer
 from pydantic import SecretStr
-from venue_doubles import DERIVED_STATE, LiveVenueDouble, VenueDouble, account_state
+from venue_doubles import (
+    DERIVED_STATE,
+    RECORDED_ENTRY_PRICE,
+    LiveVenueDouble,
+    VenueDouble,
+    account_state,
+)
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
@@ -45,8 +51,10 @@ from tickwright.domain import (
     LeverageBook,
     LeverageSpec,
     MarketTick,
+    MarkTick,
     Order,
     OrderEvent,
+    OrderFilled,
     OrderRef,
     OrderState,
     OrderStatusReport,
@@ -873,7 +881,13 @@ def _drive_valuation_divergence() -> None:
     The venue's equity and its unrealized leg are moved **together**, so that
     ``venue_cash`` lands back on the line the ledger was materialised at. That
     is what keeps the scenario driving the path it names: a cash gap is Tier-1,
-    and a Tier-1 finding at the account grain suppresses exactly this alert."""
+    and a Tier-1 finding at the account grain suppresses exactly this alert.
+
+    The ledger holds the venue's 0.002 BTC too, booked at the recorded entry
+    and marked so its uPnL is the healthy snapshot's. Flat, the size gap would
+    be Tier-1 and would explain the equity gap as the same missed fill in
+    dollars (ADR-0040 §6 rule (1), #322). The mark is stamped at the clock's
+    own instant, so the figure is not stale either."""
 
     async def go() -> None:
         venue = _LiveShapedVenue(state=account_state("26.9264", "0.966"))
@@ -882,6 +896,27 @@ def _drive_valuation_divergence() -> None:
         )
         keeper.recover()
         keeper.portfolio.materialise(DERIVED_STATE)
+        book_fill(
+            keeper.portfolio,
+            OrderFilled(
+                ts_event=0,
+                ts_init=0,
+                cloid="0xalpha-BTC-1",
+                strategy_id="alpha",
+                signal_id="alpha:BTC:1",
+                symbol="BTC",
+                trade_id="BTC-1",
+                quantity=Decimal("0.002"),
+                price=RECORDED_ENTRY_PRICE,
+                cum_qty=Decimal("0.002"),
+                fee=Decimal("0"),
+            ),
+            side=Side.BUY,
+        )
+        # 64,792 puts 0.002 BTC entered at 64,809 at the snapshot's own −0.034.
+        keeper.portfolio.observe_mark(
+            MarkTick(ts_event=0, ts_init=0, symbol="BTC", price=Decimal("64792"))
+        )
         await LedgerReconciliation(exchange=venue, checkpointer=keeper).reconcile_account()
 
     asyncio.run(go())

@@ -294,8 +294,8 @@ def _tier_1_grains(divergences: tuple[Divergence, ...]) -> frozenset[str | None]
     it is loudest exactly when the ledger is worst.
 
     Grains only. A symbol in here also explains the account figures whose Σ
-    contains it, and that is ``_explained_by_tier_1``'s question, asked per
-    finding through ``_terms`` (#322).
+    counts it, and that is ``_explained_by_tier_1``'s question, asked per
+    finding through ``_counted`` (#322).
 
     Read off the **findings** rather than the heal plan, which matters for the
     account grain: ADR-0046 §4 refuses a cash heal on an unverifiable account
@@ -353,10 +353,26 @@ def _terms(reading: LedgerReading, *, field: DivergenceField, symbol: str | None
         return frozenset((symbol,))
     return frozenset(
         candidate
-        for candidate, row in reading.rows.items()
-        if reading.holds(candidate)
-        and (field is not DivergenceField.MAINTENANCE_MARGIN or row.margin_mode == "cross")
+        for candidate in reading.rows
+        if reading.holds(candidate) and _counted(reading, candidate, field=field)
     )
+
+
+def _counted(reading: LedgerReading, symbol: str, *, field: DivergenceField) -> bool:
+    """Whether an account figure's Σ counts a symbol that is on the book.
+
+    The narrowing half of ``_terms``, on its own because rule (1) asks it
+    about a symbol the ledger may not hold (#322). Every account figure counts
+    every position, except ``maintenance_margin``, which counts the cross
+    subset alone (ADR-0046 §2.1). Cross-ness is read off the ledger's row and
+    nowhere else (#304). A symbol without a row has no mode to read, so it is
+    not counted there. That errs toward a maintenance alert, never toward
+    silencing one.
+    """
+    if field is not DivergenceField.MAINTENANCE_MARGIN:
+        return True
+    row = reading.rows.get(symbol)
+    return row is not None and row.margin_mode == "cross"
 
 
 def _sum(figures: Iterable[Decimal | None]) -> Decimal | None:
@@ -392,16 +408,28 @@ def _explained_by_tier_1(
     """Whether a Tier-1 finding this cycle already explains the compared figure.
 
     Two ways in. The finding's own grain is in ``explained``, which is how a
-    cash finding freezes the whole account grain (ADR-0046 §4). Or a Tier-1
-    symbol is a term of the Σ the figure is compared over, which is how a size
-    finding on BTC reaches ``equity`` (#322). Which terms the Σ contains is
-    ``_terms``'s answer, the same one the staleness rule reads, so the two
-    rules cannot disagree about which way a symbol finding flows.
+    cash finding freezes the whole account grain (ADR-0046 §4) and how a size
+    finding covers its symbol's own figures. Or the figure is an account Σ and
+    a Tier-1 symbol is a term of it, which is how a size finding on BTC
+    reaches ``equity`` (#322).
+
+    Ranged over the Tier-1 symbols, not over what the ledger holds. A size
+    finding puts its symbol on at least one side by definition, and the
+    compared figure is the difference between the two sides' Σs. A missed
+    opening fill is a symbol the ledger is flat in, and its uPnL is the whole
+    equity gap. Ranging over held symbols, as the staleness rule does, would
+    miss exactly that case. The narrowing is still ``_counted``, the one the
+    staleness rule reads through ``_terms``, so the two rules cannot disagree
+    about which figures a symbol flows into.
     """
     if divergence.symbol in explained:
         return True
-    return not explained.isdisjoint(
-        _terms(reading, field=divergence.field, symbol=divergence.symbol)
+    if divergence.symbol is not None:
+        return False
+    return any(
+        _counted(reading, symbol, field=divergence.field)
+        for symbol in explained
+        if symbol is not None
     )
 
 
