@@ -266,6 +266,15 @@ class LedgerReading:
     the reading instead of through a callback."""
     mark_observed: Mapping[str, int]
     """When each cached mark was stamped: the age input, never a price."""
+    last_fills: Mapping[str, int]
+    """The ledger's fill count as of each symbol's last accepted fill (#324).
+
+    The cycle's movement signal, and a stamp like ``mark_observed`` rather than
+    a compared figure on the row. A symbol stamped above the count the cycle
+    read before its venue read took a fill while the read was in flight, so its
+    finding compares a fresh fold against a stale snapshot. A net compare misses
+    a fill and its reverse inside one read window. This does not. A symbol no
+    fill touched this run is absent."""
 
     @property
     def net(self) -> dict[str, Decimal]:
@@ -323,6 +332,14 @@ class PortfolioProjection:
         # deployment fact (ADR-0038). ``None`` is the reserved unattributed
         # partition, reachable here but never through the seam.
         self._positions: dict[tuple[str | None, str], Position] = {}
+        # The fill stamp (#324). One count over every accepted fill, and per
+        # symbol the count as of its last one. Run state, not ledger state: it
+        # exists so the reconcile cycle can tell a symbol a fill moved during
+        # the venue read from one that diverged, and a pass compares only
+        # stamps taken on either side of its own read. So it is not stored and
+        # starts over at zero on a restart.
+        self._fills_applied = 0
+        self._last_fills: dict[str, int] = {}
         # The Tier-2 half, and the asymmetry with the line above is the model:
         # accumulated ledger state is ordering-critical and so is written
         # synchronously on the fill path, while a latest-value cache is not —
@@ -650,8 +667,23 @@ class PortfolioProjection:
             # ``event.fee`` here instead would bypass that gatekeeper and charge
             # a redelivered fill again. ``Account`` owns the sign (ADR-0042 §4).
             self._account.accrue_fee(position.fees - fees_before, event_id=event.event_id)
+            # Stamped behind the same gatekeeper, so a redelivery that moved
+            # nothing does not read as movement to the reconcile cycle (#324).
+            self._fills_applied += 1
+            self._last_fills[event.symbol] = self._fills_applied
         self._lock_isolated_collateral(position, changes)
         return LedgerChange(account=self._account, position=position, changes=changes)
+
+    @property
+    def fills_applied(self) -> int:
+        """How many fills this ledger has accepted this run.
+
+        The reconcile cycle reads it once before its venue read. A row whose
+        ``last_fill`` is above that count took a fill while the read was in
+        flight (#324). One integer, not a fold: it replaced the pre-read
+        ``account_net`` fold #284 took, which saw net movement only.
+        """
+        return self._fills_applied
 
     def _lock_isolated_collateral(
         self, position: Position, changes: tuple[PositionChange, ...]
@@ -1133,6 +1165,9 @@ class PortfolioProjection:
             account=account_view(self._account, rows),
             rows=rows,
             mark_observed=self._mark_observed(),
+            # A copy, for the reason the folds are: the reading is one instant,
+            # and a fill after it must not move a map it already handed out.
+            last_fills=dict(self._last_fills),
         )
 
     def account_net(self) -> dict[str, Decimal]:

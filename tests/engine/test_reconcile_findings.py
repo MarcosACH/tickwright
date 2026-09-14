@@ -138,6 +138,7 @@ def test_classifies_both_tiers_off_one_hand_built_reading() -> None:
         # so the three findings this case is about stay the only ones in the pass.
         rows={"BTC": _row("BTC", net="0.4", unrealized_pnl="8000", notional="60000")},
         mark_observed={"BTC": _NOW_NS},
+        last_fills={},
     )
 
     findings = ReconcileFindings.classify(state, reading, band=ValuationBand(), now_ns=_NOW_NS)
@@ -216,6 +217,7 @@ def test_a_per_symbol_figure_whose_notional_is_unknown_bands_on_atol_alone() -> 
         account=account,
         rows={"BTC": _row("BTC", net="0.5", unrealized_pnl="9995", notional=None)},
         mark_observed={"BTC": _NOW_NS},
+        last_fills={},
     )
 
     findings = ReconcileFindings.classify(state, unpriced, band=ValuationBand(), now_ns=_NOW_NS)
@@ -238,6 +240,7 @@ def test_a_per_symbol_figure_whose_notional_is_unknown_bands_on_atol_alone() -> 
         account=account,
         rows={"BTC": _row("BTC", net="0.5", unrealized_pnl="9995", notional="60000")},
         mark_observed={"BTC": _NOW_NS},
+        last_fills={},
     )
 
     banded = ReconcileFindings.classify(state, priced, band=ValuationBand(), now_ns=_NOW_NS)
@@ -298,6 +301,7 @@ def test_a_cross_margin_is_banded_against_the_margin_it_posts_not_the_exposure()
             )
         },
         mark_observed={"BTC": _NOW_NS},
+        last_fills={},
     )
 
     findings = ReconcileFindings.classify(state, reading, band=ValuationBand(), now_ns=_NOW_NS)
@@ -378,6 +382,7 @@ def test_one_unpriced_symbol_makes_the_account_grains_reference_unknown() -> Non
             "ETH": _row("ETH", net="10", unrealized_pnl="2000", notional=None),
         },
         mark_observed={"BTC": _NOW_NS, "ETH": _NOW_NS},
+        last_fills={},
     )
 
     findings = ReconcileFindings.classify(state, unpriced, band=ValuationBand(), now_ns=_NOW_NS)
@@ -455,6 +460,7 @@ def test_a_maintenance_sigma_the_pass_could_not_compute_is_counted_unvalued() ->
             )
         },
         mark_observed={"BTC": _NOW_NS},
+        last_fills={},
     )
 
     findings = ReconcileFindings.classify(state, reading, band=ValuationBand(), now_ns=_NOW_NS)
@@ -514,6 +520,7 @@ def test_a_stale_isolated_mark_leaves_the_cross_subset_maintenance_alert_alone()
             ),
         },
         mark_observed={"BTC": _NOW_NS, "ETH": _NOW_NS - 300 * 10**9},
+        last_fills={},
     )
 
     findings = ReconcileFindings.classify(state, reading, band=ValuationBand(), now_ns=_NOW_NS)
@@ -567,6 +574,7 @@ def test_one_broken_venue_figure_is_one_finding_naming_that_figure(
         ),
         rows={"BTC": _row("BTC", net="0.5", unrealized_pnl="10000", notional="60000")},
         mark_observed={"BTC": _NOW_NS},
+        last_fills={},
     )
 
     findings = ReconcileFindings.classify(state, reading, band=ValuationBand(), now_ns=_NOW_NS)

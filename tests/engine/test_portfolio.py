@@ -430,6 +430,35 @@ def test_one_reading_folds_the_book_once(monkeypatch: pytest.MonkeyPatch) -> Non
     assert traversals == {"account_net_size": 1, "account_valuation": 1}
 
 
+def test_the_reading_stamps_each_symbol_with_the_fill_that_last_moved_it() -> None:
+    """The reading carries the projection's fill count as of each symbol's last
+    accepted fill (#324).
+
+    The reconcile cycle reads the count once before the venue read. A symbol
+    stamped above that count took a fill while the read was in flight, whether
+    or not its net moved. That is the signal the net compare of #284 could not
+    see: a fill and its reverse net to zero and read as no movement.
+
+    The stamp is per symbol and counts accepted fills only. A redelivery is a
+    no-op in both ledgers, so it moves nothing and must not look like movement.
+    """
+    projection = _projection("100000")
+    book_fill(projection, _fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
+    book_fill(
+        projection,
+        _fill(trade_id="f2", quantity="1", price="3000", symbol="ETH", strategy_id="beta"),
+        side=Side.BUY,
+    )
+    reduce = _fill(trade_id="f3", quantity="1", price="100")
+    book_fill(projection, reduce, side=Side.SELL)
+    book_fill(projection, reduce, side=Side.SELL)  # redelivered: accepted once
+
+    reading = projection.ledger_reading()
+
+    assert projection.fills_applied == 3
+    assert reading.last_fills == {"BTC": 3, "ETH": 2}
+
+
 def test_the_one_read_carries_both_margin_folds_at_the_grain_the_venue_publishes() -> None:
     """``margin_used`` and ``maintenance_margin`` reach the cadence per **symbol**.
 
