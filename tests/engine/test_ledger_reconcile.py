@@ -1720,6 +1720,48 @@ def test_a_fill_landing_inside_the_account_read_is_reported_but_not_healed() -> 
     assert store.all_positions() == []
 
 
+def test_a_fill_and_its_reverse_inside_the_read_still_defer_the_symbol() -> None:
+    """A symbol any fill touched during the read is deferred, whether or not its
+    net moved (#324).
+
+    The rule #284 stated. Its detector compared the net fold on either side of
+    the read, which is a proxy: a fill and its reverse inside one read window
+    net to zero, so the symbol read as not moved and the pass healed a book
+    that was never wrong. The venue here serialises after the first fill and
+    before its reverse, so it carries 0.003 against a ledger that holds 0.002
+    on both sides of the read.
+
+    Reported and not healed. A heal would book the venue's transient 0.001
+    into the unattributed partition, and the next pass would heal it back out:
+    one wrong synthetic fill and two divergence records for a book that never
+    drifted.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    ledger = keeper.portfolio
+    _book_fill(ledger, quantity="0.002", price="64809")
+
+    def a_fill_and_its_reverse_land() -> None:
+        # At the entry price, so the round trip realizes nothing and the cash
+        # line stays out of the way: the case is about the size finding alone.
+        _book_fill(ledger, quantity="0.001", price="64809", seq=2)
+        _book_fill(ledger, quantity="0.001", price="64809", side=Side.SELL, seq=3)
+
+    venue = _SlowAccountVenue(
+        _held("100000", ("BTC", "0.003", "0")), during=a_fill_and_its_reverse_land
+    )
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+
+    divergences = asyncio.run(cycle.reconcile_account())
+
+    assert [(d.field, d.symbol, d.ledger, d.venue) for d in divergences or ()] == [
+        (DivergenceField.SIGNED_SIZE, "BTC", Decimal("0.002"), Decimal("0.003"))
+    ]
+    assert ledger.position("BTC", strategy_id=None) is None
+    assert ledger.account_net() == {"BTC": Decimal("0.002")}
+    assert store.all_positions() == []
+
+
 def test_a_symbol_that_did_not_move_during_the_read_still_heals_beside_one_that_did() -> None:
     """The deferral is per symbol, not per pass (#284).
 
