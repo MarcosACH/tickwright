@@ -1112,10 +1112,11 @@ class LedgerReconciliation:
         # correction beside it are one retryable unit rather than two the clock
         # could separate.
         heal_ts_ns = self._checkpointer.clock.timestamp_ns()
-        heals = self._size_heals(
-            state, divergences, ts_ns=heal_ts_ns, fills_before=fills_before, reading=reading
-        )
-        cash = self._cash_heal(divergences, ts_ns=heal_ts_ns)
+        # Judged once for both halves of the heal. A fill inside the read moves
+        # the size of its symbol and the cash line with it (#284, #330).
+        moved = reading.filled_since(fills_before)
+        heals = self._size_heals(state, divergences, ts_ns=heal_ts_ns, moved=moved)
+        cash = self._cash_heal(divergences, ts_ns=heal_ts_ns, moved=moved)
         if cash is not None and not await self._mode_verified():
             cash = None
         booked = self._checkpointer.checkpoint_heal(
@@ -1297,7 +1298,9 @@ class LedgerReconciliation:
             _healed(cash.divergence, event_id=cash.correction.event_id)
 
     @staticmethod
-    def _cash_heal(divergences: tuple[Divergence, ...], *, ts_ns: int) -> _CashHeal | None:
+    def _cash_heal(
+        divergences: tuple[Divergence, ...], *, ts_ns: int, moved: frozenset[str]
+    ) -> _CashHeal | None:
         """This pass's Tier-1 cash finding as the correction that closes it.
 
         The target is the divergence's own venue side, so the figure the cycle
@@ -1308,6 +1311,14 @@ class LedgerReconciliation:
         ``None`` when the line agrees, which is what keeps an agreeing pass a
         read: ``_cash`` reports on exact inequality, so a finding here always has
         a real gap behind it.
+
+        ``None`` too when any fill landed inside the read (#330). A fill moves
+        the cash line by its fee and its realized PnL (ADR-0042 §4), and the
+        venue body was serialised before it. The gap that pass reads is the
+        engine's own fee. Healed, the next pass reads it the other way and heals
+        it back. So the finding is reported and not healed, the answer the size
+        arm gives. Any symbol in ``moved`` is enough, because the account has
+        one cash line and every fill lands on it.
 
         There is at most one — the account has one collateral pool (ADR-0041 §2)
         — and the search says so rather than assuming it: a second would mean
@@ -1330,7 +1341,7 @@ class LedgerReconciliation:
             for divergence in divergences
             if divergence.tier is DivergenceTier.TIER_1 and divergence.field is DivergenceField.CASH
         ]
-        if not found:
+        if not found or moved:
             return None
         (divergence,) = found
         return _CashHeal(
@@ -1344,8 +1355,7 @@ class LedgerReconciliation:
         divergences: tuple[Divergence, ...],
         *,
         ts_ns: int,
-        fills_before: int,
-        reading: LedgerReading,
+        moved: frozenset[str],
     ) -> tuple[_SizeHeal, ...]:
         """Turn this pass's Tier-1 size findings into the fills that correct them.
 
@@ -1387,15 +1397,15 @@ class LedgerReconciliation:
         ``ts_ns`` is the cycle's, handed in beside the cash correction's rather
         than read here: both halves of one pass's heal are keyed on one stamp.
 
-        ``fills_before`` is the ledger's fill count as read before the venue
-        read (#284, #324). A symbol the reading names as filled since then took
-        a fill while the read was in flight, so its finding compares a fresh
-        fold against a stale snapshot. It is reported and not healed, the same
+        ``moved`` is the set of symbols a fill touched while the venue read was
+        in flight (#284, #324). Such a symbol's finding compares a fresh fold
+        against a stale snapshot. It is reported and not healed, the same
         answer the priceless arm gives, and the next deadline reads a snapshot
-        that carries the fill. Judged here and not at the call site, because
-        this is the one place that decides which findings heal. Which symbols
-        moved is ``LedgerReading.filled_since``'s question, on the type that
-        owns the stamp, so this method does not re-spell it.
+        that carries the fill. Which findings heal is decided here, the one
+        place that decides it. Which symbols moved is decided once by the
+        cycle, through ``LedgerReading.filled_since`` on the type that owns the
+        stamp, and handed to both halves of the heal. The cash arm defers on
+        the same set (#330).
 
         A stamp and not a net compare, because the rule is "any fill touched
         it" and net movement is a proxy for that. A fill and its reverse inside
@@ -1403,7 +1413,6 @@ class LedgerReconciliation:
         the venue's transient size, and the next pass healed it back (#324).
         """
         prices = {position.symbol: position.entry_price for position in state.positions}
-        moved = reading.filled_since(fills_before)
         return tuple(
             _SizeHeal(
                 divergence=divergence,
