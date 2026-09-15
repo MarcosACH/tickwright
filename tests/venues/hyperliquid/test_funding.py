@@ -14,7 +14,12 @@ from decimal import Decimal
 
 import pytest
 from eth_account import Account
-from hyperliquid_fakes import FakeExchangeApi, FakeWsConnection, user_fundings_frame
+from hyperliquid_fakes import (
+    FakeConnector,
+    FakeExchangeApi,
+    FakeWsConnection,
+    user_fundings_frame,
+)
 from pydantic import SecretStr
 
 from tickwright.adapters.bus import InMemoryBus
@@ -453,11 +458,7 @@ def test_a_dropped_socket_resubscribes_and_the_re_delivered_snapshot_heals_the_g
                 enough.set()
 
         bus.subscribe(FundingAccrual, record)
-        sockets: list[FakeWsConnection] = [dropped, recovered]
-
-        async def connect(url: str) -> FakeWsConnection:
-            return sockets.pop(0)
-
+        connect = FakeConnector([dropped, recovered])
         exchange = make_exchange(aligned_venue(), bus=bus, clock=clock, connect=connect)
         await exchange.start()
         async with asyncio.TaskGroup() as tg:
@@ -501,13 +502,7 @@ def test_a_funding_socket_the_venue_keeps_refusing_faults_the_boot_once_the_budg
 
     async def main() -> None:
         clock = ManualClock()
-        connects = 0
-
-        async def connect(url: str) -> FakeWsConnection:
-            nonlocal connects
-            connects += 1
-            raise ConnectionRefusedError("connection refused")
-
+        connect = FakeConnector([ConnectionRefusedError("connection refused")], repeat_last=True)
         exchange = make_exchange(
             aligned_venue(),
             bus=InMemoryBus(),
@@ -518,7 +513,7 @@ def test_a_funding_socket_the_venue_keeps_refusing_faults_the_boot_once_the_budg
         with pytest.raises(VenueSubscriptionUnreachable) as refusal:
             await exchange.start()
 
-        assert connects > 1, "a single attempt is not a bounded retry"
+        assert len(connect.asked) > 1, "a single attempt is not a bounded retry"
         elapsed_seconds = clock.timestamp_ns() / 1_000_000_000
         assert STARTUP_TIMEOUT_SECONDS <= elapsed_seconds < STARTUP_TIMEOUT_SECONDS + 30
         message = str(refusal.value)
@@ -543,15 +538,8 @@ def test_a_funding_socket_blip_that_clears_inside_the_budget_boots_normally() ->
     async def main() -> None:
         clock = ManualClock()
         connection = FakeWsConnection([])
-        connects = 0
-
-        async def connect(url: str) -> FakeWsConnection:
-            nonlocal connects
-            connects += 1
-            if connects <= 2:
-                raise ConnectionRefusedError("connection refused")
-            return connection
-
+        refused = ConnectionRefusedError("connection refused")
+        connect = FakeConnector([refused, refused, connection])
         exchange = make_exchange(
             aligned_venue(),
             bus=InMemoryBus(),
@@ -561,7 +549,7 @@ def test_a_funding_socket_blip_that_clears_inside_the_budget_boots_normally() ->
 
         await exchange.start()  # no refusal is the assertion
 
-        assert connects == 3, "the two refusals and the connect that landed"
+        assert len(connect.asked) == 3, "the two refusals and the connect that landed"
         assert connection.sent, "the socket that landed is the one subscribed"
         assert 0 < clock.timestamp_ns() < STARTUP_TIMEOUT_SECONDS * 1_000_000_000
 
@@ -591,13 +579,7 @@ def test_run_consumes_the_socket_start_opened_rather_than_opening_a_second() -> 
         connection = FakeWsConnection(
             [user_fundings_frame(funding(time_ms=1681222254710, coin="ETH", usdc="-3.625312"))]
         )
-        connects = 0
-
-        async def connect(url: str) -> FakeWsConnection:
-            nonlocal connects
-            connects += 1
-            return connection
-
+        connect = FakeConnector([connection], repeat_last=True)
         exchange = make_exchange(
             aligned_venue(),
             bus=bus,
@@ -607,7 +589,7 @@ def test_run_consumes_the_socket_start_opened_rather_than_opening_a_second() -> 
 
         await exchange.start()
 
-        assert connects == 1
+        assert len(connect.asked) == 1
         assert connection.sent, "start() must subscribe the socket it opened"
         assert seen == [], "start() must not consume — that is run()'s"
 
@@ -618,7 +600,7 @@ def test_run_consumes_the_socket_start_opened_rather_than_opening_a_second() -> 
             await running
 
         assert [a.amount for a in seen] == [Decimal("-3.625312")]
-        assert connects == 1, "run() must consume the socket start() opened, not open a second"
+        assert len(connect.asked) == 1, "run() must consume the socket start() opened"
 
     asyncio.run(main())
 

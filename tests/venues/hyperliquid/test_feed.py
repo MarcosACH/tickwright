@@ -19,6 +19,7 @@ from feed_contract import (
     record_market_data,
 )
 from hyperliquid_fakes import (
+    FakeConnector,
     FakeWsConnection,
     RecordingClock,
     asset_ctx_frame,
@@ -280,7 +281,7 @@ def test_ws_drop_reconnects_with_backoff_resubscribes_and_resumes() -> None:
     the one after succeeds: the feed sleeps the doubling backoff on the injected
     clock (1s, then 2s — never a real sleep), resubscribes, and resumes."""
 
-    async def main() -> tuple[list[MarketTick], FakeWsConnection, RecordingClock, int]:
+    async def main() -> tuple[list[MarketTick], FakeWsConnection, RecordingClock, FakeConnector]:
         bus = InMemoryBus()
         clock = RecordingClock()
         seen: list[MarketTick] = []
@@ -294,21 +295,7 @@ def test_ws_drop_reconnects_with_backoff_resubscribes_and_resumes() -> None:
         bus.subscribe(MarketTick, record)
         first = FakeWsConnection([trades_frame(trade("BTC", "100", 1))], drop_when_drained=True)
         second = FakeWsConnection([trades_frame(trade("BTC", "101", 2))])
-        outcomes: list[FakeWsConnection | Exception] = [
-            first,
-            ConnectionRefusedError("venue hiccup"),
-            second,
-        ]
-        connects = 0
-
-        async def connect(url: str) -> FakeWsConnection:
-            nonlocal connects
-            connects += 1
-            outcome = outcomes.pop(0)
-            if isinstance(outcome, Exception):
-                raise outcome
-            return outcome
-
+        connect = FakeConnector([first, ConnectionRefusedError("venue hiccup"), second])
         feed = HyperliquidFeed(
             config=HyperliquidConfig(symbols=["BTC"]), bus=bus, clock=clock, connect=connect
         )
@@ -317,12 +304,12 @@ def test_ws_drop_reconnects_with_backoff_resubscribes_and_resumes() -> None:
         await asyncio.wait_for(resumed.wait(), timeout=2)
         await feed.stop()
         await asyncio.wait_for(run, timeout=2)
-        return seen, second, clock, connects
+        return seen, second, clock, connect
 
-    seen, second, clock, connects = asyncio.run(main())
+    seen, second, clock, connect = asyncio.run(main())
 
     assert [t.price for t in seen] == [Decimal("100"), Decimal("101")]  # resumed
-    assert connects == 3
+    assert len(connect.asked) == 3
     assert clock.sleeps == [1.0, 2.0]  # doubling backoff, virtual time only
     assert json.loads(second.sent[0]) == {  # resubscribed on the new socket
         "method": "subscribe",
@@ -332,10 +319,9 @@ def test_ws_drop_reconnects_with_backoff_resubscribes_and_resumes() -> None:
 
 def test_stop_does_not_trigger_a_reconnect() -> None:
     connection = FakeWsConnection([trades_frame(trade("BTC", "100", 1))])
-    connect_count = 0
+    connect = FakeConnector([connection], repeat_last=True)
 
     async def main() -> None:
-        nonlocal connect_count
         bus = InMemoryBus()
         got_one = asyncio.Event()
 
@@ -343,12 +329,6 @@ def test_stop_does_not_trigger_a_reconnect() -> None:
             got_one.set()
 
         bus.subscribe(MarketTick, record)
-
-        async def connect(url: str) -> FakeWsConnection:
-            nonlocal connect_count
-            connect_count += 1
-            return connection
-
         feed = HyperliquidFeed(
             config=HyperliquidConfig(symbols=["BTC"]), bus=bus, clock=ManualClock(), connect=connect
         )
@@ -359,7 +339,7 @@ def test_stop_does_not_trigger_a_reconnect() -> None:
         await asyncio.wait_for(run, timeout=2)
 
     asyncio.run(main())
-    assert connect_count == 1
+    assert len(connect.asked) == 1
 
 
 def _drive_marks(
@@ -486,13 +466,7 @@ def test_the_live_feed_connects_in_start_and_leaves_the_loop_to_run() -> None:
         bus = InMemoryBus()
         transcript = record_market_data(bus)
         connection = FakeWsConnection([trades_frame(trade("BTC", "43000", 1))])
-        connects = 0
-
-        async def connect(url: str) -> FakeWsConnection:
-            nonlocal connects
-            connects += 1
-            return connection
-
+        connect = FakeConnector([connection], repeat_last=True)
         feed = HyperliquidFeed(
             config=HyperliquidConfig(symbols=["BTC"]),
             bus=bus,
@@ -502,7 +476,7 @@ def test_the_live_feed_connects_in_start_and_leaves_the_loop_to_run() -> None:
 
         await asyncio.wait_for(feed.start(), timeout=2)
 
-        assert connects == 1
+        assert len(connect.asked) == 1
         assert connection.sent, "start() must subscribe the socket it opened"
         assert transcript.ticks == [], "start() must not consume — that is run()'s"
 
@@ -512,7 +486,7 @@ def test_the_live_feed_connects_in_start_and_leaves_the_loop_to_run() -> None:
         await asyncio.wait_for(run, timeout=2)
 
         assert [t.symbol for t in transcript.ticks] == ["BTC"]
-        assert connects == 1, "run() must consume the socket start() opened, not open a second"
+        assert len(connect.asked) == 1, "run() must consume the socket start() opened"
 
     asyncio.run(main())
 
@@ -535,13 +509,7 @@ def test_a_first_connect_the_venue_refuses_faults_the_boot_rather_than_backing_o
 
     async def main() -> None:
         clock = ManualClock()
-        connects = 0
-
-        async def connect(url: str) -> FakeWsConnection:
-            nonlocal connects
-            connects += 1
-            raise ConnectionRefusedError("connection refused")
-
+        connect = FakeConnector([ConnectionRefusedError("connection refused")], repeat_last=True)
         feed = HyperliquidFeed(
             config=HyperliquidConfig(symbols=["BTC"]),
             bus=InMemoryBus(),
@@ -552,7 +520,7 @@ def test_a_first_connect_the_venue_refuses_faults_the_boot_rather_than_backing_o
         with pytest.raises(ConnectionRefusedError):
             await feed.start()
 
-        assert connects == 1, "start() must refuse the first connect, not retry it"
+        assert len(connect.asked) == 1, "start() must refuse the first connect, not retry it"
         assert clock.timestamp_ns() == 0, "a paced retry would have moved virtual time"
 
         # The boot's own cleanup still runs on the fault path (`_stop_feed`), and

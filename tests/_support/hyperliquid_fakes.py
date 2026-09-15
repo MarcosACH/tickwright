@@ -5,6 +5,7 @@ the exchange/info endpoints."""
 
 import asyncio
 import json
+from collections.abc import Sequence
 
 from tickwright.adapters.clock import ManualClock
 
@@ -131,7 +132,7 @@ class FakeWsConnection:
     async def connect(self, url: str) -> "FakeWsConnection":
         """This socket as the ``connect`` an adapter takes: the venue answers
         every open with it. For a test about the frames, not the connects.
-        A test counting or refusing connects still writes its own."""
+        A test counting or refusing connects uses ``FakeConnector``."""
         return self
 
     async def send(self, message: str) -> None:
@@ -155,6 +156,38 @@ class FakeWsConnection:
             raise StopAsyncIteration
         await self._closed.wait()
         raise StopAsyncIteration
+
+
+class FakeConnector:
+    """A ``Connect`` that answers each open from ``outcomes`` in order: a socket
+    to hand back, or an exception to raise. ``asked`` records the URL of every
+    open, so ``len(asked)`` is the connect count.
+
+    ``repeat_last`` makes the final outcome answer every open after it, for a
+    venue that refuses for as long as a budget lasts. Without it a queue that
+    runs dry fails the test with a sentence: the reconnect loops catch
+    ``OSError`` only, so an ``AssertionError`` is the one thing they cannot
+    mistake for the venue.
+    """
+
+    def __init__(
+        self, outcomes: Sequence[FakeWsConnection | Exception], *, repeat_last: bool = False
+    ) -> None:
+        self.asked: list[str] = []
+        self._outcomes = list(outcomes)
+        self._repeat_last = repeat_last
+
+    async def __call__(self, url: str) -> FakeWsConnection:
+        self.asked.append(url)
+        if not self._outcomes:
+            raise AssertionError(f"connect #{len(self.asked)} asked with no outcome queued")
+        if self._repeat_last and len(self._outcomes) == 1:
+            outcome = self._outcomes[0]
+        else:
+            outcome = self._outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
 
 
 async def idle_ws(url: str) -> FakeWsConnection:
