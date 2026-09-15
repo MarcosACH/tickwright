@@ -48,7 +48,7 @@ from .account import account_spec, normalize_account_state
 from .config import HyperliquidConfig
 from .funding import FundingIngest
 from .preflight import push_leverage, reverify_account_mode, verify_account_mode
-from .reading import UNREADABLE, failed_send, figure, read, refuse_non_usdc, unreadable_body
+from .reading import figure, read, refuse_non_usdc
 from .transport import Connect, PostJson, open_websocket
 from .universe import HyperliquidUniverse
 
@@ -229,29 +229,22 @@ class HyperliquidExchange:
             "grouping": "na",
         }
         self._placed[order.cloid] = order
-        try:
-            response = await self._send_action(action)
-        except OSError as exc:
-            # The send window's truth is unknown — the order may or may not
-            # have landed — so there is no fact to report. Name the failure;
-            # reconcile-by-cloid resolves the in-flight order (ADR-0008 rule 2).
-            failed_send(request="place", cloid=order.cloid, error=exc)
-            return
-        try:
-            adjudication = _placement_adjudication(response)
-        except UNREADABLE as exc:
-            # The send landed and the venue answered, but its adjudication is in
-            # a shape we cannot read. Same verdict as the failed send above and
-            # for the same reason (inv 1): we hold no fact worth reporting, so
-            # name it and let reconcile-by-cloid resolve the order.
-            #
-            # Guarding the parse and not the send is the point. Everything above
-            # is our own construction — an unknown symbol, an unsigned action —
-            # where a raise is a bug in this process and must keep faulting.
-            # ``VenueFactUnsupported`` is outside this tuple by design, so a
-            # permanent refusal from the post-fill fills read still escalates
-            # rather than being filed here as something a retry could fix.
-            unreadable_body(request="place", cloid=order.cloid, error=exc, response=response)
+        # The signed action goes through the same read as every query: ``read``
+        # guards the send and the pure parse, and nothing else. What sits above
+        # this line is our own construction (an unknown symbol, an unsigned
+        # action), where a raise is a bug in this process and keeps faulting.
+        adjudication = await read(
+            request="place",
+            query=action,
+            send=self._send_action,
+            normalize=_placement_adjudication,
+            cloid=order.cloid,
+        )
+        if isinstance(adjudication, VenueReadFailure):
+            # Either way it failed, we hold no fact worth reporting: a dead send
+            # leaves the order's truth unknown, and an unreadable adjudication
+            # is a body we cannot read (inv 1). ``read`` named it; reconcile-by-
+            # cloid resolves the in-flight order (ADR-0008 rule 2).
             return
         await self._apply_placement(order, adjudication)
 
@@ -340,33 +333,30 @@ class HyperliquidExchange:
         )
 
     async def cancel(self, cloid: str) -> None:
-        try:
-            symbol = await self._cancel_symbol(cloid)
-            if symbol is None:
-                # No usable venue record for this cloid: nothing to cancel,
-                # nothing to report — a benign no-op (ADR-0026). An ambiguous
-                # read is reconciliation's to resolve, not the adapter's.
-                return
-            action = {
-                "type": "cancelByCloid",
-                "cancels": [{"asset": self._universe.asset_indices[symbol], "cloid": cloid}],
-            }
-            response = await self._send_action(action)
-        except OSError as exc:
-            # The cancel_requested marker is already durable (ADR-0026), so an
-            # ack-lost cancel is reconciliation's to resolve — just name it.
-            failed_send(request="cancel", cloid=cloid, error=exc)
+        symbol = await self._cancel_symbol(cloid)
+        if symbol is None:
+            # No usable venue record for this cloid: nothing to cancel,
+            # nothing to report — a benign no-op (ADR-0026). An ambiguous
+            # read is reconciliation's to resolve, not the adapter's.
             return
-        try:
-            adjudication = _cancel_adjudication(response)
-        except UNREADABLE as exc:
-            # An adjudication we cannot read proves nothing about the cancel, so
-            # the only safe verdict is the one an unanswered cancel already gets
-            # (ADR-0026): name it and emit nothing. The durable cancel_requested
-            # marker was written before the send, so reconciliation resolves this
-            # order regardless — faulting the engine over the *shape* of the
-            # answer would discard a run that was covered either way.
-            unreadable_body(request="cancel", cloid=cloid, error=exc, response=response)
+        action = {
+            "type": "cancelByCloid",
+            "cancels": [{"asset": self._universe.asset_indices[symbol], "cloid": cloid}],
+        }
+        adjudication = await read(
+            request="cancel",
+            query=action,
+            send=self._send_action,
+            normalize=_cancel_adjudication,
+            cloid=cloid,
+        )
+        if isinstance(adjudication, VenueReadFailure):
+            # An ack-lost cancel and an adjudication we cannot read prove the
+            # same nothing, and get the same verdict: ``read`` named it, and
+            # nothing is emitted. The cancel_requested marker was durable before
+            # the send (ADR-0026), so reconciliation resolves this order either
+            # way. Faulting the engine over the *shape* of the answer would
+            # discard a run that was covered regardless.
             return
         await self._apply_cancellation(cloid=cloid, symbol=symbol, adjudication=adjudication)
 

@@ -129,32 +129,33 @@ async def read[T](
     Two policies, and the line between them is the retry, which is why a future
     in-flight read inherits this one by default and a new pre-barrier read does
     not.
+
+    The write verbs come here too. ``place`` and ``cancel`` send a signed
+    action, but ``send`` is any callable that posts a dict, so the action is
+    the ``query`` and the adjudication reader is the ``normalize``. What is
+    above them is reconciliation by cloid, which resolves an order whose send
+    or answer failed (ADR-0008 rule 2, ADR-0026). Keeping them here is what
+    keeps the split (guard the pure parse, never the publish) from being
+    re-drawn by hand at a write site (ADR-0048 §4.1, as corrected in #237).
     """
     try:
         response = await send(query)
     except OSError as exc:
-        failed_send(request=request, cloid=cloid, error=exc)
+        _failed_send(request=request, cloid=cloid, error=exc)
         return VenueReadFailure.SEND_FAILED
     try:
         return normalize(response)
     except UNREADABLE as exc:
-        unreadable_body(request=request, cloid=cloid, error=exc, response=response)
+        _unreadable_body(request=request, cloid=cloid, error=exc, response=response)
         return VenueReadFailure.UNREADABLE_BODY
 
 
-def failed_send(*, request: str, cloid: str | None = None, error: OSError) -> None:
-    """Name a request whose send died: no body arrived, so nothing was parsed.
-
-    Public because the **write** verbs fail this way too. ``place`` and
-    ``cancel`` send a signed action rather than a query, so they cannot go
-    through ``read`` — but what a dead transport *means* must not be theirs to
-    decide again, which is the per-site drift owning the taxonomy once exists to
-    end (ADR-0048 §4).
-    """
+def _failed_send(*, request: str, cloid: str | None = None, error: OSError) -> None:
+    """Name a request whose send died: no body arrived, so nothing was parsed."""
     _failed_read(request, cloid, str(error))
 
 
-def unreadable_body(
+def _unreadable_body(
     *, request: str, cloid: str | None = None, error: Exception, response: object
 ) -> None:
     """Name a body that arrived and could not be read, quoting what arrived.
@@ -177,10 +178,10 @@ def _failed_read(request: str, cloid: str | None, error: str) -> None:
     rides along only where the request has one, so the account grain omits it
     rather than logging a ``None`` that reads as a missing value.
 
-    Private, with the two causes above as the way in: a caller that reached this
-    directly would be choosing its own words for a failure the taxonomy already
-    has words for, which is how the write path drifted from the read path in the
-    first place.
+    Private, and so are the two causes above since #237: ``read`` is the one way
+    in. A caller that reached any of them directly would be choosing its own
+    words for a failure the taxonomy already has words for, which is how the
+    write path drifted from the read path in the first place.
     """
     context = {"cloid": cloid} if cloid is not None else {}
     named_event(NamedEvent.EXCHANGE_REQUEST_FAILED, request=request, error=error, **context)
