@@ -225,7 +225,7 @@ class _SizeHeal:
 
     The pair is carried from the moment it exists rather than rebuilt at the
     announcement, because the two are only relatable by the predicate that
-    produced them: ``_size_heals`` decides which findings heal, and anything
+    produced them: ``ReconcileFindings.classify`` decides which findings heal, and anything
     downstream re-deriving that decision is a second statement of it that can
     drift. The announcement needs both halves — the ``event_id`` off the
     synthetic, and the ledger/venue pair off the finding, since a fill carries
@@ -533,7 +533,7 @@ def _net_diff(
     """The symbols two net folds disagree on, each with both sides' sizes.
 
     The cycle's one definition of "these two nets differ". ``_sizes`` reads it
-    for the ledger against the venue. ``_size_heals`` read it too, for the
+    for the ledger against the venue. The size heal read it too, for the
     ledger before the venue read against the ledger after it (#284), until
     #324 replaced that compare with the reading's fill stamps. It stays named
     because the grain below is a claim of its own, not a detail of one caller.
@@ -870,6 +870,11 @@ class ReconcileFindings:
     pass records what it found whatever the band absorbs, so the counts on
     ``account.reconciled`` come off the first and the ``valuation.divergence``
     lines off the second.
+
+    The Tier-1 findings come with their heal plan (#335). Which findings heal
+    is decided here, once, beside the findings themselves. The cycle applies
+    the mode gate and writes what is left. A finding held back is counted, so
+    a pass that deferred reads differently from one that healed.
     """
 
     divergences: tuple[Divergence, ...]
@@ -879,6 +884,14 @@ class ReconcileFindings:
     """Findings that would have alerted but rest on a mark too old to band."""
     unvalued: int
     """Tier-2 figures dropped at classification for want of a mark (ADR-0041 §6)."""
+    heals: tuple[_SizeHeal, ...]
+    """The Tier-1 size findings this pass heals, each with the fill that closes it."""
+    cash: _CashHeal | None
+    """The Tier-1 cash finding this pass heals, with the correction that closes it."""
+    deferred: int
+    """Tier-1 findings a fill inside the read held back. Clears on the next pass."""
+    unpriced: int
+    """Tier-1 size findings the venue posts no entry price for. Persists while it does not."""
 
     @classmethod
     def classify(
@@ -888,6 +901,7 @@ class ReconcileFindings:
         *,
         band: ValuationBand,
         now_ns: int,
+        fills_before: int,
     ) -> "ReconcileFindings":
         """Compare one reading against one snapshot and decide what to say.
 
@@ -899,7 +913,13 @@ class ReconcileFindings:
         ``now_ns`` is handed in rather than read from a clock, because a mark's
         age is a fact about the snapshot this comparison was made on — read
         later, beside the alerts, it would be measured against a clock the pass's
-        own heal has already moved forward.
+        own heal has already moved forward. The same instant stamps the heal.
+        One key for the pass, so a size heal and the cash correction beside it
+        retry as one unit.
+
+        ``fills_before`` is the ledger's fill count read before the venue read.
+        Asked of the reading through ``LedgerReading.filled_since``, it names
+        the symbols a fill touched while the read was in flight (#284, #324).
 
         The leverage pair is read off each row of the reading, never from a
         book handed in beside it (#304). The row reports the pair the ledger
@@ -937,11 +957,93 @@ class ReconcileFindings:
                 suppressed += 1
                 continue
             alerts.append(divergence)
+        # The heal plan. One loop over the Tier-1 findings, so every reason a
+        # finding is held back is stated once and counted where it is decided.
+        # ``moved`` is the set of symbols a fill touched while the venue read
+        # was in flight (#284, #324). Such a finding compares a fresh fold
+        # against a stale snapshot. It is reported and not healed, and the next
+        # deadline reads a snapshot that carries the fill. The cash line moves
+        # with every fill, by its fee and realized PnL (ADR-0042 §4), so any
+        # symbol in ``moved`` defers the cash heal too (#330).
+        moved = reading.filled_since(fills_before)
+        prices = {position.symbol: position.entry_price for position in state.positions}
+        heals: list[_SizeHeal] = []
+        cash_findings: list[Divergence] = []
+        deferred = 0
+        unpriced = 0
+        for divergence in divergences:
+            if divergence.tier is not DivergenceTier.TIER_1:
+                continue
+            if divergence.field is DivergenceField.CASH:
+                cash_findings.append(divergence)
+                continue
+            # A Tier-1 size finding always carries its symbol; this narrows the type.
+            if divergence.symbol is None:
+                continue
+            if divergence.symbol in moved:
+                deferred += 1
+                continue
+            # The price is the venue's own entry price, and a symbol that has
+            # none is not healed this pass. ADR-0034's synthetic needs a price
+            # to book against, and there is no honest substitute: a size booked
+            # at an invented price puts a real number on ``entry_price`` and
+            # makes every valuation off it wrong in a way no later cycle
+            # re-examines. An unhealed symbol diverges again at the next
+            # deadline and stays visible as a finding. The venue omits the
+            # field on a position it does not carry, so a *closing* heal falls
+            # under this too. Counted apart from ``deferred`` because it does
+            # not clear on its own.
+            price = prices.get(divergence.symbol)
+            if price is None:
+                unpriced += 1
+                continue
+            # The delta is ``venue − ledger`` and the venue is authoritative
+            # (ADR-0034), so the fill moves the ledger *to* the snapshot. The
+            # zero arm is unreachable from this pass's own input, since
+            # ``_sizes`` reports on exact inequality, and kept anyway: a heal of
+            # zero is not a fact worth putting on the path, and the alternative
+            # is a synthetic ``Position.apply`` faults the run over.
+            delta = divergence.venue - divergence.ledger
+            if delta == _ZERO:
+                continue
+            heals.append(
+                _SizeHeal(
+                    divergence=divergence,
+                    fill=ReconciliationFill(
+                        symbol=divergence.symbol,
+                        side=Side.BUY if delta > _ZERO else Side.SELL,
+                        quantity=abs(delta),
+                        price=price,
+                        ts_ns=now_ns,
+                    ),
+                )
+            )
+        cash: _CashHeal | None = None
+        if cash_findings and moved:
+            deferred += len(cash_findings)
+        elif cash_findings:
+            # At most one, since the account has one collateral pool (ADR-0041
+            # §2), and the unpack says so rather than assuming it: a second
+            # would mean ``_cash`` had grown a grain, and healing to whichever
+            # came first is the failure a ``next`` hides. Deliberately not an
+            # ``InvariantViolation``, on ``exchange.py``'s adjudicator idiom: no
+            # input through this seam reaches it, and the two fault the run
+            # the same way. The target is the finding's own venue side, so the
+            # figure healed to is the figure classified against.
+            (cash_finding,) = cash_findings
+            cash = _CashHeal(
+                divergence=cash_finding,
+                correction=CashCorrection(target=cash_finding.venue, ts_ns=now_ns),
+            )
         return cls(
             divergences=divergences,
             alerts=tuple(alerts),
             suppressed=suppressed,
             unvalued=_unvalued(state, reading),
+            heals=tuple(heals),
+            cash=cash,
+            deferred=deferred,
+            unpriced=unpriced,
         )
 
 
@@ -1104,23 +1206,19 @@ class LedgerReconciliation:
             # because a mark's age is a fact about the snapshot this pass
             # compared against: taken beside the alerts instead, it would be
             # measured against a clock this pass's own heal has moved forward.
+            # The one read also stamps the heal, so both halves share a key.
             now_ns=self._checkpointer.clock.timestamp_ns(),
+            fills_before=fills_before,
         )
         divergences = findings.divergences
-        # One stamp for the pass, spent on both halves of its heal: the
-        # deterministic key is the *cycle's*, so a size heal and the cash
-        # correction beside it are one retryable unit rather than two the clock
-        # could separate.
-        heal_ts_ns = self._checkpointer.clock.timestamp_ns()
-        # Judged once for both halves of the heal. A fill inside the read moves
-        # the size of its symbol and the cash line with it (#284, #330).
-        moved = reading.filled_since(fills_before)
-        heals = self._size_heals(state, divergences, ts_ns=heal_ts_ns, moved=moved)
-        cash = self._cash_heal(divergences, ts_ns=heal_ts_ns, moved=moved)
+        # The heal plan is the findings' (#335). What stays here is the one
+        # decision that needs the venue: the mode gate on the cash correction
+        # (ADR-0046 §4). A plan with no cash heal never asks.
+        cash = findings.cash
         if cash is not None and not await self._mode_verified():
             cash = None
         booked = self._checkpointer.checkpoint_heal(
-            tuple(heal.fill for heal in heals),
+            tuple(heal.fill for heal in findings.heals),
             cash=None if cash is None else cash.correction,
             # The locked buckets ride the same snapshot and the same transaction
             # (ADR-0043 §3). Not a divergence input: live never computes this
@@ -1132,7 +1230,7 @@ class LedgerReconciliation:
                 position.symbol: position.isolated_collateral for position in state.positions
             },
         )
-        self._record_heals(heals, cash=cash, booked=booked)
+        self._record_heals(findings.heals, cash=cash, booked=booked)
         # Ahead of the pass's own summary, as the heal records are: the summary
         # counts, and a count is read against the lines that produced it.
         for divergence in findings.alerts:
@@ -1268,7 +1366,7 @@ class LedgerReconciliation:
         ledger move" with a move that never happened.
 
         A synthetic the aggregate *refused* is the same claim reached through the
-        one door the producer-side checks do not cover. ``_size_heals`` can only
+        one door the producer-side checks do not cover. ``classify`` can only
         decline to build a fill; whether the fill it built moved anything is
         ``Position.apply``'s answer, and on a retried pass it is no — the key is
         the cycle's stamp, so the second run of one pass mints the first's
@@ -1296,139 +1394,3 @@ class LedgerReconciliation:
                 _healed(heal.divergence, event_id=heal.fill.event_id)
         if cash is not None:
             _healed(cash.divergence, event_id=cash.correction.event_id)
-
-    @staticmethod
-    def _cash_heal(
-        divergences: tuple[Divergence, ...], *, ts_ns: int, moved: frozenset[str]
-    ) -> _CashHeal | None:
-        """This pass's Tier-1 cash finding as the correction that closes it.
-
-        The target is the divergence's own venue side, so the figure the cycle
-        heals to is the figure it classified against — read again here, it could
-        be a second derivation of ``venue_cash`` off the same snapshot, and the
-        two disagreeing would heal toward a number the pass never reported.
-
-        ``None`` when the line agrees, which is what keeps an agreeing pass a
-        read: ``_cash`` reports on exact inequality, so a finding here always has
-        a real gap behind it.
-
-        ``None`` too when any fill landed inside the read (#330). A fill moves
-        the cash line by its fee and its realized PnL (ADR-0042 §4), and the
-        venue body was serialised before it. The gap that pass reads is the
-        engine's own fee. Healed, the next pass reads it the other way and heals
-        it back. So the finding is reported and not healed, the answer the size
-        arm gives. Any symbol in ``moved`` is enough, because the account has
-        one cash line and every fill lands on it.
-
-        There is at most one — the account has one collateral pool (ADR-0041 §2)
-        — and the search says so rather than assuming it: a second would mean
-        ``_cash`` had grown a grain, and silently healing to whichever came first
-        is the failure mode a ``next`` hides.
-
-        The one-element unpack is that statement and is **deliberately not** an
-        ``InvariantViolation``, on the idiom ``exchange.py``'s adjudicators
-        already use: a raise here would be a branch no input through this seam
-        can reach, since ``_cash`` compares one ledger figure against one venue
-        figure and can only ever emit one finding. The two would fault the run
-        identically anyway — the cadence catches nothing, so either aborts the
-        ``TaskGroup`` — and what a bare unpack costs by comparison is a line of
-        diagnosis, against an untestable line of code and a hole in this
-        module's coverage. If ``_cash`` ever does grow a grain, the rule to
-        restate is this one, not the exception type.
-        """
-        found = [
-            divergence
-            for divergence in divergences
-            if divergence.tier is DivergenceTier.TIER_1 and divergence.field is DivergenceField.CASH
-        ]
-        if not found or moved:
-            return None
-        (divergence,) = found
-        return _CashHeal(
-            divergence=divergence,
-            correction=CashCorrection(target=divergence.venue, ts_ns=ts_ns),
-        )
-
-    @staticmethod
-    def _size_heals(
-        state: VenueAccountState,
-        divergences: tuple[Divergence, ...],
-        *,
-        ts_ns: int,
-        moved: frozenset[str],
-    ) -> tuple[_SizeHeal, ...]:
-        """Turn this pass's Tier-1 size findings into the fills that correct them.
-
-        Each fill goes back **paired with the finding it closes** (``_SizeHeal``)
-        rather than alone. This is the one place that decides which findings heal
-        at all, and the announcement needs both halves; returning the fills bare
-        would leave the pairing to be reconstructed downstream off a second
-        statement of this predicate.
-
-        The delta is ``venue − ledger`` and the venue is authoritative
-        (ADR-0034), so the fill moves the ledger *to* the snapshot rather than
-        by some fraction of the way. Its magnitude and side come apart because
-        ``Position`` keeps a magnitude and takes a direction; a short heal is a
-        sell of the absolute gap.
-
-        **The price is the venue's own entry price**, and a symbol that has none
-        is not healed this pass. ADR-0034's synthetic needs a price to book
-        against, and there is no honest substitute for one: a size booked at an
-        invented price would put a real number on ``entry_price`` and make every
-        valuation derived from it wrong in a way no later cycle re-examines,
-        where an unhealed symbol simply diverges again at the next deadline and
-        stays visible as a finding. The venue omits the field on a position it
-        does not carry, so this is also what a *closing* heal falls under.
-
-        Classification runs before this, off the cycle's one fold, so a heal can
-        never feed the comparison that produced it — the Tier-2 findings on this
-        pass are about the book the cycle *found*, not the one it left behind.
-
-        The zero-delta arm is **unreachable from this pass's own input** and kept
-        anyway: ``_sizes`` reports on exact inequality, so a size finding it
-        emitted always has a gap. What it guards is the producer side of the rule
-        — a heal of zero is not a fact worth putting on the path, and the
-        alternative to refusing it here is a well-formed synthetic that
-        ``Position.apply``'s magnitude precondition faults the run over after the
-        saga has already moved. That makes it structurally untestable through
-        this seam, which is why the suite pins the priceless finding above
-        instead: same claim, reachable input.
-
-        ``ts_ns`` is the cycle's, handed in beside the cash correction's rather
-        than read here: both halves of one pass's heal are keyed on one stamp.
-
-        ``moved`` is the set of symbols a fill touched while the venue read was
-        in flight (#284, #324). Such a symbol's finding compares a fresh fold
-        against a stale snapshot. It is reported and not healed, the same
-        answer the priceless arm gives, and the next deadline reads a snapshot
-        that carries the fill. Which findings heal is decided here, the one
-        place that decides it. Which symbols moved is decided once by the
-        cycle, through ``LedgerReading.filled_since`` on the type that owns the
-        stamp, and handed to both halves of the heal. The cash arm defers on
-        the same set (#330).
-
-        A stamp and not a net compare, because the rule is "any fill touched
-        it" and net movement is a proxy for that. A fill and its reverse inside
-        one read window net to zero. Compared by net, that symbol was healed to
-        the venue's transient size, and the next pass healed it back (#324).
-        """
-        prices = {position.symbol: position.entry_price for position in state.positions}
-        return tuple(
-            _SizeHeal(
-                divergence=divergence,
-                fill=ReconciliationFill(
-                    symbol=divergence.symbol,
-                    side=Side.BUY if delta > _ZERO else Side.SELL,
-                    quantity=abs(delta),
-                    price=price,
-                    ts_ns=ts_ns,
-                ),
-            )
-            for divergence in divergences
-            if divergence.tier is DivergenceTier.TIER_1
-            and divergence.field is DivergenceField.SIGNED_SIZE
-            and divergence.symbol is not None
-            and divergence.symbol not in moved
-            and (price := prices.get(divergence.symbol)) is not None
-            and (delta := divergence.venue - divergence.ledger) != _ZERO
-        )

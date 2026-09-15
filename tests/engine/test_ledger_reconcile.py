@@ -1541,7 +1541,7 @@ def test_a_failed_read_never_un_heals_the_book_it_cannot_see() -> None:
     close writes a position the account never held, where a missed heal only
     waits a cadence interval.
 
-    Asserted against a sealed store, on ``_size_heals``'s rule above: the freeze
+    Asserted against a sealed store, on the heal's rule above: the freeze
     is an early return ahead of the checkpoint, so the claim is that the whole
     write surface stays untouched rather than that the numbers happen to match.
     The record says only that the pass froze — nothing was found, because
@@ -1685,7 +1685,7 @@ def test_a_fill_landing_inside_the_account_read_is_reported_but_not_healed() -> 
     The next pass heals it back, so the ledger oscillates instead of drifting,
     but it writes to the store each way.
 
-    The reducing direction is what makes it reachable. ``_size_heals`` needs the
+    The reducing direction is what makes it reachable. The size heal needs the
     venue's entry price, and the venue supplies one precisely because it still
     carries the symbol. A fill that opens a partition is safe by accident, since
     the snapshot omits a symbol it does not hold.
