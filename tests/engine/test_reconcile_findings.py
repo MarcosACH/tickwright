@@ -19,7 +19,10 @@ import pytest
 from tickwright.domain import (
     DEFAULT_LEVERAGE,
     AccountView,
+    CashCorrection,
     LeverageSpec,
+    ReconciliationFill,
+    Side,
     SymbolValuation,
     VenueAccountState,
     VenuePositionState,
@@ -823,3 +826,47 @@ def test_a_pass_with_a_fill_inside_the_read_reports_both_tier_1_findings_and_hea
     assert findings.cash is None
     assert findings.deferred == 2
     assert findings.unpriced == 0
+
+
+def test_a_quiet_pass_plans_both_heals_paired_with_their_findings_on_one_stamp() -> None:
+    """The same book with no fill inside the read heals both gaps.
+
+    The fill count stood at 2 before the read and BTC's last fill was the
+    second, so nothing moved. The size heal buys the 0.1 the ledger is short,
+    at the venue's own entry price, and the cash correction assigns the venue's
+    100,000. Each rides next to the finding it closes, and both carry the one
+    instant the classification was made at, so a retried pass mints the same
+    keys for both halves.
+    """
+    state = _missed_opening_fill()
+    reading = _fee_taken_reading(net="0.4", last_fills={"BTC": 2})
+
+    findings = ReconcileFindings.classify(
+        state, reading, band=ValuationBand(), now_ns=_NOW_NS, fills_before=2
+    )
+
+    (heal,) = findings.heals
+    assert heal.divergence == Divergence(
+        tier=DivergenceTier.TIER_1,
+        field=DivergenceField.SIGNED_SIZE,
+        symbol="BTC",
+        ledger=Decimal("0.4"),
+        venue=Decimal("0.5"),
+    )
+    assert heal.fill == ReconciliationFill(
+        symbol="BTC",
+        side=Side.BUY,
+        quantity=Decimal("0.1"),
+        price=Decimal("100000"),
+        ts_ns=_NOW_NS,
+    )
+    assert findings.cash is not None
+    assert findings.cash.divergence == Divergence(
+        tier=DivergenceTier.TIER_1,
+        field=DivergenceField.CASH,
+        symbol=None,
+        ledger=Decimal("99990"),
+        venue=Decimal("100000"),
+    )
+    assert findings.cash.correction == CashCorrection(target=Decimal("100000"), ts_ns=_NOW_NS)
+    assert (findings.deferred, findings.unpriced) == (0, 0)
