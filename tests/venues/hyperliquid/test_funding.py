@@ -399,7 +399,7 @@ def test_a_payment_this_process_cannot_read_refuses_like_the_body_around_it(
     and the runner's `TaskGroup` faults the run (ADR-0024). What it loses is the
     diagnostic: a bare `KeyError('time')` names no channel and quotes no body,
     where every other grain of this venue answers an unreadable body by leading
-    with what arrived (`reading.unreadable_body`). An operator meeting a venue
+    with what arrived (`reading.read`). An operator meeting a venue
     contract change on the money socket gets the least useful sentence of the
     three.
 
