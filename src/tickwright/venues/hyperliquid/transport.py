@@ -87,8 +87,8 @@ boot with SIGKILL as the only way out.
 
 The timeout surfaces as ``TimeoutError``, which is an ``OSError`` only because Python
 3.11 aliased it — the same load-bearing coincidence ``post_json``'s translation rests
-on, asserted for neither transport yet
-([#237](https://github.com/MarcosACH/tickwright/issues/237)).
+on. Both transports pin it against a real local socket that never answers
+(``tests/venues/hyperliquid/test_http_shim.py``, ``test_ws_shim.py``).
 """
 
 

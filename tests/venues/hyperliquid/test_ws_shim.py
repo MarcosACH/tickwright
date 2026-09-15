@@ -8,11 +8,13 @@ this suite pins the translation, with the client stubbed at its boundary.
 """
 
 import asyncio
+import time
 
 import pytest
 import websockets
 from websockets.exceptions import ConnectionClosedError, WebSocketException
 
+from tickwright.venues.hyperliquid import transport
 from tickwright.venues.hyperliquid.transport import (
     WS_OPEN_TIMEOUT_SECONDS,
     _RealWsConnection,
@@ -102,3 +104,34 @@ def test_the_handshake_is_bounded_by_a_timeout_this_repo_chose(
     asyncio.run(open_websocket("wss://api.hyperliquid.xyz/ws"))
 
     assert passed["open_timeout"] == WS_OPEN_TIMEOUT_SECONDS
+
+
+async def _open_to_a_silent_peer() -> None:
+    async def swallow(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        # Accept the TCP connection and read until the client gives up. Never
+        # answer the handshake.
+        await reader.read()
+        writer.close()
+
+    server = await asyncio.start_server(swallow, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    async with server:
+        await open_websocket(f"ws://127.0.0.1:{port}/ws")
+
+
+def test_a_handshake_that_never_completes_is_an_os_error_within_the_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half of the argument test above: the bound actually fires.
+
+    The real client runs against a real socket that never answers, so the
+    ``TimeoutError`` is ``websockets``' own. It reaches the backoff loop only
+    because Python 3.11 made ``TimeoutError`` an ``OSError``. That is the fact
+    the reconnect loops stand on, pinned here instead of stated in a comment.
+    """
+    monkeypatch.setattr(transport, "WS_OPEN_TIMEOUT_SECONDS", 0.1)
+
+    started = time.monotonic()
+    with pytest.raises(OSError):
+        asyncio.run(_open_to_a_silent_peer())
+    assert time.monotonic() - started < 5
