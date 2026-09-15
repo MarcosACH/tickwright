@@ -185,6 +185,7 @@ def _book_fill(
     strategy_id: str = "alpha",
     side: Side = Side.BUY,
     seq: int = 1,
+    fee: str = "0",
 ) -> None:
     """Fold one filled order into the ledger — the only way a partition exists.
 
@@ -210,7 +211,7 @@ def _book_fill(
             quantity=Decimal(quantity),
             price=Decimal(price),
             cum_qty=Decimal(quantity),
-            fee=Decimal("0"),
+            fee=Decimal(fee),
         ),
         side=side,
     )
@@ -1823,6 +1824,41 @@ def test_a_symbol_the_ledger_never_held_opened_during_the_read_is_not_healed() -
     ]
     assert ledger.account_net() == {"BTC": Decimal("0.001")}
     assert store.all_positions() == []
+
+
+def test_a_cash_finding_on_a_pass_where_a_fill_landed_inside_the_read_is_not_healed() -> None:
+    """The read-window deferral covers the cash line too (#330).
+
+    A fill inside the read moves more than the size. It accrues its fee and any
+    realized PnL to the cash line (ADR-0042 §4). The venue body was serialised
+    before the fill, so its implied cash does not carry them. Compared as-is,
+    the pass reads the engine's own fee as a gap and heals it away. The next
+    pass reads the venue with the fee booked and heals it back.
+
+    Reported and not healed, the answer the size arm gives. The fee lands at
+    the entry price, so the fill moves cash by the fee alone: the expected line
+    is the flat 100000 less 5, not a figure derived the way the ledger derives
+    it.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    ledger = keeper.portfolio
+
+    def a_fill_with_a_fee_lands() -> None:
+        _book_fill(ledger, quantity="0.001", price="64810", fee="5")
+
+    venue = _SlowAccountVenue(_held("100000"), during=a_fill_with_a_fee_lands)
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+
+    with capture_events() as logs:
+        divergences = asyncio.run(cycle.reconcile_account())
+
+    assert [(d.field, d.symbol, d.ledger, d.venue) for d in divergences or ()] == [
+        (DivergenceField.CASH, None, Decimal("99995"), Decimal("100000")),
+        (DivergenceField.SIGNED_SIZE, "BTC", Decimal("0.001"), Decimal("0")),
+    ]
+    assert ledger.account().cash == Decimal("99995")
+    assert [log for log in logs if log["event"] == NamedEvent.ACCOUNT_HEALED.value] == []
 
 
 _BTC_LIQUIDATION = Decimal("52522.4977")
