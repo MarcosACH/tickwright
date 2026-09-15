@@ -870,3 +870,39 @@ def test_a_quiet_pass_plans_both_heals_paired_with_their_findings_on_one_stamp()
     )
     assert findings.cash.correction == CashCorrection(target=Decimal("100000"), ts_ns=_NOW_NS)
     assert (findings.deferred, findings.unpriced) == (0, 0)
+
+
+def test_a_size_the_venue_posts_no_price_for_is_counted_unpriced_and_not_healed() -> None:
+    """A closing heal has no price to book at, and it says so apart from the read window.
+
+    The ledger holds 0.4 BTC the venue no longer carries, so the venue posts
+    no entry price for it. Nothing moved during the read. The finding is
+    reported, not healed, and counted as ``unpriced`` rather than
+    ``deferred``: a deferral clears on the next pass, and this one stays until
+    the venue prices the symbol again. Mixed into one count, a stuck symbol
+    would read like a busy one.
+    """
+    state = _venue(equity="100000", free_margin="100000", positions=())
+    reading = LedgerReading(
+        account=AccountView(
+            cash=Decimal("100000"),
+            equity=Decimal("100000"),
+            total_margin_used=Decimal("40000"),
+            total_maintenance_margin=Decimal("0"),
+            free_margin=Decimal("60000"),
+            effective_leverage=None,
+        ),
+        rows={"BTC": _row("BTC", net="0.4", unrealized_pnl="0", notional="40000")},
+        mark_observed={"BTC": _NOW_NS},
+        last_fills={"BTC": 2},
+    )
+
+    findings = ReconcileFindings.classify(
+        state, reading, band=ValuationBand(), now_ns=_NOW_NS, fills_before=2
+    )
+
+    tier_1 = [(d.field, d.symbol) for d in findings.divergences if d.tier is DivergenceTier.TIER_1]
+    assert tier_1 == [(DivergenceField.SIGNED_SIZE, "BTC")]
+    assert findings.heals == ()
+    assert findings.cash is None
+    assert (findings.deferred, findings.unpriced) == (0, 1)
