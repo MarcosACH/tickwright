@@ -1174,7 +1174,9 @@ class LedgerReconciliation:
         the two tier counts would otherwise hide: a Tier-2 figure the ledger
         cannot compute is dropped rather than reported (ADR-0041 §6), which is
         correct and leaves a pass that never looked indistinguishable from one
-        that agreed.
+        that agreed. ``deferred`` and ``unpriced`` are the Tier-1 half of the
+        same point: a finding held back is still counted in ``tier_1``, and
+        without them a pass that deferred reads like one that healed (#335).
         """
         # The fill count is read *before* the read, so the pass can tell which
         # symbols a fill touched while the read was in flight (#284, #324). A
@@ -1243,6 +1245,8 @@ class LedgerReconciliation:
             tier_2=tiers.count(DivergenceTier.TIER_2),
             unvalued=findings.unvalued,
             suppressed=findings.suppressed,
+            deferred=findings.deferred,
+            unpriced=findings.unpriced,
         )
         return divergences
 

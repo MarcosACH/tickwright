@@ -98,6 +98,14 @@ class NamedEvent(StrEnum):
     # is what lets an operator tell a book that was never valued from one whose
     # mark stream froze. Either count alone reads as the silence a healthy book
     # also produces.
+    #
+    # ``deferred`` and ``unpriced`` do the same for Tier-1 (#335). A finding
+    # the pass held back is still inside ``tier_1``, so a pass that deferred
+    # read like one that healed. ``deferred`` counts the findings a fill inside
+    # the venue read held back. It clears on the next pass. ``unpriced`` counts
+    # the size findings the venue posts no entry price for. It persists while
+    # the venue does not price the symbol. Two counts and not one, because a
+    # stuck symbol must not read like a busy one.
     ACCOUNT_RECONCILED = "account.reconciled"
     # The same grain's failed read: the account anchor came back empty, so
     # nothing was inferred from it rather than reading an outage as a flat book
@@ -132,7 +140,8 @@ class NamedEvent(StrEnum):
     # A finding the cycle could not heal emits nothing here — it stays a
     # Divergence on the pass's own count — because a record of a heal that never
     # landed is worse than the silence: it would close the audit question it
-    # exists to answer with the wrong answer.
+    # exists to answer with the wrong answer. What it was held back for is
+    # counted on ``account.reconciled`` (``deferred``, ``unpriced``) instead.
     ACCOUNT_HEALED = "account.healed"
     # The cash heal the cycle refused because the venue's account abstraction
     # mode could no longer be verified (ADR-0046 §4). The account grain's
