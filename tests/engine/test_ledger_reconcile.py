@@ -1835,8 +1835,8 @@ def test_a_cash_finding_on_a_pass_where_a_fill_landed_inside_the_read_is_not_hea
     the pass reads the engine's own fee as a gap and heals it away. The next
     pass reads the venue with the fee booked and heals it back.
 
-    Reported and not healed, the answer the size arm gives. The fee lands at
-    the entry price, so the fill moves cash by the fee alone: the expected line
+    Reported and not healed, the answer the size arm gives. The fill lands at
+    the entry price, so it moves cash by the fee alone: the expected line
     is the flat 100000 less 5, not a figure derived the way the ledger derives
     it.
     """

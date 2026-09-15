@@ -1401,11 +1401,11 @@ class LedgerReconciliation:
         in flight (#284, #324). Such a symbol's finding compares a fresh fold
         against a stale snapshot. It is reported and not healed, the same
         answer the priceless arm gives, and the next deadline reads a snapshot
-        that carries the fill. Judged here and not at the call site, because
-        this is the one place that decides which findings heal. Which symbols
-        moved is ``LedgerReading.filled_since``'s question, on the type that
-        owns the stamp. The cycle asks it once and hands the answer to both
-        halves of the heal, since the cash arm defers on the same set (#330).
+        that carries the fill. Which findings heal is decided here, the one
+        place that decides it. Which symbols moved is decided once by the
+        cycle, through ``LedgerReading.filled_since`` on the type that owns the
+        stamp, and handed to both halves of the heal. The cash arm defers on
+        the same set (#330).
 
         A stamp and not a net compare, because the rule is "any fill touched
         it" and net movement is a proxy for that. A fill and its reverse inside
