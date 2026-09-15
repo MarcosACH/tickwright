@@ -14,6 +14,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 from aiohttp.typedefs import Handler
+from local_peers import silent_peer
 
 from tickwright.venues.hyperliquid import transport
 from tickwright.venues.hyperliquid.transport import post_json
@@ -37,14 +38,7 @@ def test_an_http_error_status_is_a_connection_error_carrying_the_url() -> None:
 
 
 async def _post_to_a_silent_peer(payload: dict[str, object]) -> object:
-    async def swallow(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        # Accept the connection and read until the client gives up. Never reply.
-        await reader.read()
-        writer.close()
-
-    server = await asyncio.start_server(swallow, "127.0.0.1", 0)
-    port = server.sockets[0].getsockname()[1]
-    async with server:
+    async with silent_peer() as port:
         return await post_json(f"http://127.0.0.1:{port}/info", payload)
 
 
