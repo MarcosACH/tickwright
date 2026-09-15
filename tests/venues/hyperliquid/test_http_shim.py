@@ -27,6 +27,24 @@ async def _post_to(handler: Handler, payload: dict[str, object]) -> object:
         return await post_json(str(server.make_url("/info")), payload)
 
 
+def test_a_json_answer_is_posted_as_json_and_comes_back_decoded() -> None:
+    async def echo_the_query(request: web.Request) -> web.Response:
+        # The venue reads the body as JSON, so the shim has to send it that way.
+        return web.json_response({"answered": await request.json()})
+
+    assert asyncio.run(_post_to(echo_the_query, {"type": "meta"})) == {"answered": {"type": "meta"}}
+
+
+def test_a_body_that_is_not_json_is_a_connection_error_carrying_the_url() -> None:
+    async def html_error_page(request: web.Request) -> web.Response:
+        return web.Response(status=200, text="<html>upstream proxy</html>")
+
+    # A 200 with a non-JSON body is the "broken payload" the translation names:
+    # aiohttp raises ContentTypeError, and the guards must still see an OSError.
+    with pytest.raises(ConnectionError, match="/info"):
+        asyncio.run(_post_to(html_error_page, {"type": "meta"}))
+
+
 def test_an_http_error_status_is_a_connection_error_carrying_the_url() -> None:
     async def internal_error(request: web.Request) -> web.Response:
         return web.Response(status=500, text="venue down")
