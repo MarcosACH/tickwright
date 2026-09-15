@@ -1,0 +1,77 @@
+"""The real HTTP client shim: ``aiohttp``'s failures normalized to the seam.
+
+Every ``except OSError`` in the venue package keys on ``post_json`` turning a
+client failure into the one vocabulary the connectivity guard understands
+(ADR-0048). Every other test injects a fake through the ``post`` seam above it,
+so this suite is the only place the translation itself runs. The venue is a
+real local socket, one level below the seam, so ``aiohttp`` runs for real.
+"""
+
+import asyncio
+import time
+
+import pytest
+from aiohttp import web
+from aiohttp.test_utils import TestServer
+from aiohttp.typedefs import Handler
+from local_peers import silent_peer
+
+from tickwright.venues.hyperliquid import transport
+from tickwright.venues.hyperliquid.transport import post_json
+
+
+async def _post_to(handler: Handler, payload: dict[str, object]) -> object:
+    app = web.Application()
+    app.router.add_post("/info", handler)
+    async with TestServer(app) as server:
+        return await post_json(str(server.make_url("/info")), payload)
+
+
+def test_a_json_answer_is_posted_as_json_and_comes_back_decoded() -> None:
+    async def echo_the_query(request: web.Request) -> web.Response:
+        # The venue reads the body as JSON, so the shim has to send it that way.
+        return web.json_response({"answered": await request.json()})
+
+    assert asyncio.run(_post_to(echo_the_query, {"type": "meta"})) == {"answered": {"type": "meta"}}
+
+
+def test_a_body_that_is_not_json_is_a_connection_error_carrying_the_url() -> None:
+    async def html_error_page(request: web.Request) -> web.Response:
+        return web.Response(status=200, text="<html>upstream proxy</html>")
+
+    # A 200 with a non-JSON body is the "broken payload" the translation names:
+    # aiohttp raises ContentTypeError, and the guards must still see an OSError.
+    with pytest.raises(ConnectionError, match="/info"):
+        asyncio.run(_post_to(html_error_page, {"type": "meta"}))
+
+
+def test_an_http_error_status_is_a_connection_error_carrying_the_url() -> None:
+    async def internal_error(request: web.Request) -> web.Response:
+        return web.Response(status=500, text="venue down")
+
+    # An HTTP 500 is a failed read, not an engine fault: it has to arrive as the
+    # OSError the guards freeze on, not as aiohttp's own ClientResponseError.
+    with pytest.raises(ConnectionError, match="/info"):
+        asyncio.run(_post_to(internal_error, {"type": "meta"}))
+
+
+async def _post_to_a_silent_peer(payload: dict[str, object]) -> object:
+    async with silent_peer() as port:
+        return await post_json(f"http://127.0.0.1:{port}/info", payload)
+
+
+def test_a_venue_that_never_answers_is_an_os_error_within_the_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hung venue read must reach the connectivity guard, not stall its caller.
+
+    The bound is patched down so the test runs in milliseconds. The wall-clock
+    check is what makes the constant load-bearing: with the number hardcoded
+    elsewhere, the patch would do nothing and this would sit for the full 30s.
+    """
+    monkeypatch.setattr(transport, "HTTP_TIMEOUT_SECONDS", 0.1)
+
+    started = time.monotonic()
+    with pytest.raises(OSError):
+        asyncio.run(_post_to_a_silent_peer({"type": "meta"}))
+    assert time.monotonic() - started < 5

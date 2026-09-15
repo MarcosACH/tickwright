@@ -14,7 +14,7 @@ assert.
 import asyncio
 
 import pytest
-from hyperliquid_fakes import FakeWsConnection, RecordingClock
+from hyperliquid_fakes import FakeConnector, FakeWsConnection, RecordingClock
 
 from tickwright.venues.hyperliquid.config import HyperliquidConfig
 from tickwright.venues.hyperliquid.session import WsSession
@@ -45,25 +45,9 @@ class _Driver:
             self.consumed.append(frame)
 
 
-def _connector(
-    outcomes: list[FakeWsConnection | Exception],
-) -> tuple[object, list[str]]:
-    """A `Connect` handing back ``outcomes`` in order, recording the URLs asked."""
-    asked: list[str] = []
-
-    async def connect(url: str) -> WsConnection:
-        asked.append(url)
-        outcome = outcomes.pop(0)
-        if isinstance(outcome, Exception):
-            raise outcome
-        return outcome
-
-    return connect, asked
-
-
 def _drive(
     outcomes: list[FakeWsConnection | Exception], *, until_frames: int
-) -> tuple[_Driver, RecordingClock, list[str]]:
+) -> tuple[_Driver, RecordingClock, FakeConnector]:
     """Boot a session on the first of ``outcomes``, run it until ``until_frames``
     frames are read, then stop it and wait the loop out.
 
@@ -71,13 +55,13 @@ def _drive(
     first outcome has to be a connection. Refusals belong to the reconnects."""
     driver = _Driver()
     clock = RecordingClock()
-    connect, asked = _connector(outcomes)
+    connector = FakeConnector(outcomes)
 
     async def main() -> None:
         session = WsSession(
             config=CONFIG,
             clock=clock,
-            connect=connect,  # type: ignore[arg-type]
+            connect=connector,
             subscribe=driver.subscribe,
             consume=driver.consume,
         )
@@ -89,7 +73,7 @@ def _drive(
         await asyncio.wait_for(running, timeout=2)
 
     asyncio.run(main())
-    return driver, clock, asked
+    return driver, clock, connector
 
 
 def test_a_dropped_socket_reconnects_and_resubscribes_the_new_one() -> None:
@@ -102,12 +86,12 @@ def test_a_dropped_socket_reconnects_and_resubscribes_the_new_one() -> None:
     first = FakeWsConnection(["frame-1"], drop_when_drained=True)
     second = FakeWsConnection(["frame-2"])
 
-    driver, clock, asked = _drive([first, second], until_frames=2)
+    driver, clock, connector = _drive([first, second], until_frames=2)
 
     assert driver.consumed == ["frame-1", "frame-2"]
     assert driver.subscribed == [first, second]
     assert first.sent == second.sent == ["subscribe"]
-    assert asked == [CONFIG.ws_url, CONFIG.ws_url]
+    assert connector.asked == [CONFIG.ws_url, CONFIG.ws_url]
     # One hangup, so one backoff sleep before the reconnect — virtual time only.
     assert clock.sleeps == [1.0]
 
@@ -122,13 +106,13 @@ def test_a_refused_reconnect_paces_the_retry_and_doubles_until_one_lands() -> No
     first = FakeWsConnection(["frame-1"], drop_when_drained=True)
     landed = FakeWsConnection(["frame-2"])
 
-    driver, clock, asked = _drive(
+    driver, clock, connector = _drive(
         [first, ConnectionRefusedError("down"), ConnectionRefusedError("still down"), landed],
         until_frames=2,
     )
 
     assert driver.consumed == ["frame-1", "frame-2"]
-    assert len(asked) == 4
+    assert len(connector.asked) == 4
     # One hangup and two refusals, each paced on the same doubling delay.
     assert clock.sleeps == [1.0, 2.0, 4.0]
 
@@ -162,10 +146,10 @@ def test_a_stop_ends_the_run_without_reconnecting() -> None:
     connection = FakeWsConnection(["frame-1"])
     spare = FakeWsConnection(["frame-2"])
 
-    driver, clock, asked = _drive([connection, spare], until_frames=1)
+    driver, clock, connector = _drive([connection, spare], until_frames=1)
 
     assert driver.consumed == ["frame-1"]
-    assert len(asked) == 1  # the spare was never opened
+    assert len(connector.asked) == 1  # the spare was never opened
     assert clock.sleeps == []  # and nothing was paced on the way out
 
 
@@ -178,7 +162,7 @@ def test_stopping_a_session_that_never_connected_is_safe() -> None:
         session = WsSession(
             config=CONFIG,
             clock=RecordingClock(),
-            connect=_connector([])[0],  # type: ignore[arg-type]
+            connect=FakeConnector([]),
             subscribe=_Driver().subscribe,
             consume=_Driver().consume,
         )
@@ -206,13 +190,13 @@ def test_a_session_that_started_but_never_ran_still_closes_its_socket() -> None:
     """
     connection = FakeWsConnection([])
     driver = _Driver()
-    connect, asked = _connector([connection])
+    connector = FakeConnector([connection])
 
     async def main() -> None:
         session = WsSession(
             config=CONFIG,
             clock=RecordingClock(),
-            connect=connect,  # type: ignore[arg-type]
+            connect=connector,
             subscribe=driver.subscribe,
             consume=driver.consume,
         )
@@ -221,7 +205,7 @@ def test_a_session_that_started_but_never_ran_still_closes_its_socket() -> None:
 
     asyncio.run(main())
 
-    assert len(asked) == 1
+    assert len(connector.asked) == 1
     assert driver.subscribed == [connection]  # start() subscribes what it opens
     assert connection.sent == ["subscribe"]
     assert driver.consumed == [], "start() must not read the socket — that is run()'s half"
@@ -235,7 +219,7 @@ def test_a_subscribe_that_fails_in_start_closes_the_socket_it_opened() -> None:
     because the retry is the caller's to pace.
     """
     connection = FakeWsConnection([])
-    connect, asked = _connector([connection])
+    connector = FakeConnector([connection])
 
     async def refuse(connection: WsConnection) -> None:
         raise ConnectionResetError("reset during subscribe")
@@ -244,7 +228,7 @@ def test_a_subscribe_that_fails_in_start_closes_the_socket_it_opened() -> None:
         session = WsSession(
             config=CONFIG,
             clock=RecordingClock(),
-            connect=connect,  # type: ignore[arg-type]
+            connect=connector,
             subscribe=refuse,
             consume=_Driver().consume,
         )
@@ -253,7 +237,7 @@ def test_a_subscribe_that_fails_in_start_closes_the_socket_it_opened() -> None:
 
     asyncio.run(main())
 
-    assert len(asked) == 1
+    assert len(connector.asked) == 1
     assert connection.closed, "a socket whose subscribe failed must not outlive the attempt"
 
 
@@ -272,14 +256,14 @@ def test_a_run_without_a_start_refuses_rather_than_opening_its_own_socket() -> N
     pins. And a session stopped before it ever started still returns at once,
     which the teardown after a faulted boot relies on.
     """
-    connect, asked = _connector([FakeWsConnection([])])
+    connector = FakeConnector([FakeWsConnection([])])
     clock = RecordingClock()
 
     async def main() -> None:
         session = WsSession(
             config=CONFIG,
             clock=clock,
-            connect=connect,  # type: ignore[arg-type]
+            connect=connector,
             subscribe=_Driver().subscribe,
             consume=_Driver().consume,
         )
@@ -287,7 +271,7 @@ def test_a_run_without_a_start_refuses_rather_than_opening_its_own_socket() -> N
 
     with pytest.raises(RuntimeError, match="before start"):
         asyncio.run(main())
-    assert asked == [], "run() must not open the boot socket itself"
+    assert connector.asked == [], "run() must not open the boot socket itself"
     assert clock.sleeps == [], "and must not pace a retry either"
 
 
@@ -313,7 +297,7 @@ def test_a_reconnect_never_reuses_the_socket_the_boot_handed_over() -> None:
     first = FakeWsConnection([])
     second = FakeWsConnection([])
     clock = RecordingClock()
-    connect, asked = _connector([first, second])
+    connector = FakeConnector([first, second])
     subscribed: list[FakeWsConnection] = []
     consumed: list[FakeWsConnection] = []
 
@@ -330,7 +314,7 @@ def test_a_reconnect_never_reuses_the_socket_the_boot_handed_over() -> None:
     session = WsSession(
         config=CONFIG,
         clock=clock,
-        connect=connect,  # type: ignore[arg-type]
+        connect=connector,
         subscribe=subscribe,
         consume=consume,
     )
@@ -343,7 +327,7 @@ def test_a_reconnect_never_reuses_the_socket_the_boot_handed_over() -> None:
 
     assert consumed == [first, second], "the dead boot socket must not be consumed twice"
     assert subscribed == [first, second], "start() subscribed the first, run() the replacement"
-    assert len(asked) == 2, "the reconnect must open its own socket"
+    assert len(connector.asked) == 2, "the reconnect must open its own socket"
     assert clock.sleeps == [1.0]  # one hangup, paced once — virtual time only
 
 
@@ -356,7 +340,7 @@ def test_a_consumer_that_raises_faults_the_run_rather_than_reconnecting() -> Non
     can only ever send it again.
     """
     connection = FakeWsConnection(["frame-1"])
-    connect, asked = _connector([connection, FakeWsConnection(["frame-2"])])
+    connector = FakeConnector([connection, FakeWsConnection(["frame-2"])])
 
     async def consume(connection: WsConnection) -> None:
         async for _ in connection:
@@ -369,7 +353,7 @@ def test_a_consumer_that_raises_faults_the_run_rather_than_reconnecting() -> Non
         session = WsSession(
             config=CONFIG,
             clock=RecordingClock(),
-            connect=connect,  # type: ignore[arg-type]
+            connect=connector,
             subscribe=subscribe,
             consume=consume,
         )
@@ -378,4 +362,4 @@ def test_a_consumer_that_raises_faults_the_run_rather_than_reconnecting() -> Non
 
     with pytest.raises(RuntimeError, match="cannot represent"):
         asyncio.run(main())
-    assert len(asked) == 1
+    assert len(connector.asked) == 1
