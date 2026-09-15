@@ -20,15 +20,22 @@ raising ``OSError`` (``TimeoutError`` included) on transport failure.
 Defaults to the real client; tests inject fakes."""
 
 
+HTTP_TIMEOUT_SECONDS = 30.0
+"""A bounded total per request: a hung venue read must surface as the ``OSError``
+the connectivity guard keys on, not stall its caller.
+
+A per-call transport bound and a module constant, for the reasons
+``WS_OPEN_TIMEOUT_SECONDS`` gives below. Named rather than inlined so a test can
+patch it down and pin the timeout path without waiting the full budget."""
+
+
 async def post_json(url: str, payload: dict[str, Any]) -> object:
     """The real transport. Imported lazily so the package stays light until a
     live component is actually built (mirrors the feed's websockets import)."""
     import aiohttp
 
     try:
-        # A bounded total per request: a hung venue read must surface as the
-        # OSError the connectivity guard keys on, not stall its caller.
-        timeout = aiohttp.ClientTimeout(total=30)
+        timeout = aiohttp.ClientTimeout(total=HTTP_TIMEOUT_SECONDS)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(url, json=payload) as response:
                 response.raise_for_status()
