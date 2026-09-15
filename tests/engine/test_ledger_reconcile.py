@@ -1861,6 +1861,36 @@ def test_a_cash_finding_on_a_pass_where_a_fill_landed_inside_the_read_is_not_hea
     assert [log for log in logs if log["event"] == NamedEvent.ACCOUNT_HEALED.value] == []
 
 
+def test_a_cash_finding_deferred_by_the_read_window_never_asks_the_venue_for_its_mode() -> None:
+    """The mode gate hangs off the correction, not off the finding (#330).
+
+    ADR-0046 §4 buys its steady-state cost by asking the venue only when a
+    cash correction is about to be written. A finding the read window deferred
+    writes nothing, so the pass has nothing to guard and the ``userAbstraction``
+    read stays unspent. Pinned here because the deferral is a second way a cash
+    finding ends the pass without a correction, and the gate could as easily
+    have been wired to the finding.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    ledger = keeper.portfolio
+
+    def a_fill_with_a_fee_lands() -> None:
+        _book_fill(ledger, quantity="0.001", price="64810", fee="5")
+
+    venue = _SlowAccountVenue(_held("100000"), during=a_fill_with_a_fee_lands)
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+
+    divergences = asyncio.run(cycle.reconcile_account())
+
+    assert [d.field for d in divergences or ()] == [
+        DivergenceField.CASH,
+        DivergenceField.SIGNED_SIZE,
+    ]
+    assert venue.mode_reads == 0
+    assert venue.account_reads == 1
+
+
 _BTC_LIQUIDATION = Decimal("52522.4977")
 """The venue's own ``clearinghouseState.liquidationPx``, as measured by #142 and
 recorded in ADR-0040 §3 — the number live must read through rather than solve for."""
