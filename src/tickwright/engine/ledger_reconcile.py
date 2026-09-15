@@ -288,11 +288,14 @@ def _tier_1_grains(divergences: tuple[Divergence, ...]) -> frozenset[str | None]
     """The grains a Tier-1 finding already explains this cycle (ADR-0040 §6).
 
     A ``Divergence.symbol`` **is** the grain — a symbol for the per-symbol
-    checks, ``None`` for the account's own pool — so "for that symbol/account"
-    is one set membership rather than two rules that could disagree. A Tier-2
-    figure landing on a grain in here is the same missed fill restated in
-    dollars: Tier-1 alerts and heals it, so the second report is noise an
-    operator cannot act on, and it is loudest exactly when the ledger is worst.
+    checks, ``None`` for the account's own pool. A Tier-2 figure landing on a
+    grain in here is the same missed fill restated in dollars: Tier-1 alerts
+    and heals it, so the second report is noise an operator cannot act on, and
+    it is loudest exactly when the ledger is worst.
+
+    Grains only. A symbol in here also explains the account figures whose Σ
+    counts it, and that is ``_explained_by_tier_1``'s question, asked per
+    finding through ``_counted`` (#322).
 
     Read off the **findings** rather than the heal plan, which matters for the
     account grain: ADR-0046 §4 refuses a cash heal on an unverifiable account
@@ -350,10 +353,26 @@ def _terms(reading: LedgerReading, *, field: DivergenceField, symbol: str | None
         return frozenset((symbol,))
     return frozenset(
         candidate
-        for candidate, row in reading.rows.items()
-        if reading.holds(candidate)
-        and (field is not DivergenceField.MAINTENANCE_MARGIN or row.margin_mode == "cross")
+        for candidate in reading.rows
+        if reading.holds(candidate) and _counted(reading, candidate, field=field)
     )
+
+
+def _counted(reading: LedgerReading, symbol: str, *, field: DivergenceField) -> bool:
+    """Whether an account figure's Σ counts a symbol that is on the book.
+
+    The narrowing half of ``_terms``, on its own because rule (1) asks it
+    about a symbol the ledger may not hold (#322). Every account figure counts
+    every position, except ``maintenance_margin``, which counts the cross
+    subset alone (ADR-0046 §2.1). Cross-ness is read off the ledger's row and
+    nowhere else (#304). A symbol without a row has no mode to read, so it is
+    not counted there. That errs toward a maintenance alert, never toward
+    silencing one.
+    """
+    if field is not DivergenceField.MAINTENANCE_MARGIN:
+        return True
+    row = reading.rows.get(symbol)
+    return row is not None and row.margin_mode == "cross"
 
 
 def _sum(figures: Iterable[Decimal | None]) -> Decimal | None:
@@ -381,6 +400,37 @@ def _rests_on_stale(divergence: Divergence, stale: frozenset[str], reading: Ledg
     part of, and before #305 it silenced that alert anyway.
     """
     return not stale.isdisjoint(_terms(reading, field=divergence.field, symbol=divergence.symbol))
+
+
+def _explained_by_tier_1(
+    divergence: Divergence, explained: frozenset[str | None], reading: LedgerReading
+) -> bool:
+    """Whether a Tier-1 finding this cycle already explains the compared figure.
+
+    Two ways in. The finding's own grain is in ``explained``, which is how a
+    cash finding freezes the whole account grain (ADR-0046 §4) and how a size
+    finding covers its symbol's own figures. Or the figure is an account Σ and
+    a Tier-1 symbol is a term of it, which is how a size finding on BTC
+    reaches ``equity`` (#322).
+
+    Ranged over the Tier-1 symbols, not over what the ledger holds. A size
+    finding puts its symbol on at least one side by definition, and the
+    compared figure is the difference between the two sides' Σs. A missed
+    opening fill is a symbol the ledger is flat in, and its uPnL is the whole
+    equity gap. Ranging over held symbols, as the staleness rule does, would
+    miss exactly that case. The narrowing is still ``_counted``, the one the
+    staleness rule reads through ``_terms``, so the two rules cannot disagree
+    about which figures a symbol flows into.
+    """
+    if divergence.symbol in explained:
+        return True
+    if divergence.symbol is not None:
+        return False
+    return any(
+        _counted(reading, symbol, field=divergence.field)
+        for symbol in explained
+        if symbol is not None
+    )
 
 
 def _reference(divergence: Divergence, reading: LedgerReading) -> Decimal | None:
@@ -874,7 +924,7 @@ class ReconcileFindings:
         for divergence in divergences:
             if (
                 divergence.tier is not DivergenceTier.TIER_2
-                or divergence.symbol in explained
+                or _explained_by_tier_1(divergence, explained, reading)
                 or band.covers(divergence, reference=_reference(divergence, reading))
             ):
                 continue

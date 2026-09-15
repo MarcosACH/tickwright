@@ -3209,6 +3209,148 @@ def test_a_tier_1_size_finding_suppresses_that_symbols_tier_2_alert() -> None:
     ]
 
 
+def test_a_tier_1_size_finding_suppresses_the_account_figures_its_symbol_is_a_term_of() -> None:
+    """ADR-0040 §6 rule (1), as corrected by #322: a size finding on a symbol
+    explains every Tier-2 figure whose compared Σ contains that symbol.
+
+    The case above builds two opposite gaps so the account Σs agree by
+    construction. This is the case it stepped around. One symbol, one gap: the
+    ledger holds 0.002 BTC, the venue holds 0.003, and cash agrees. The equity
+    gap is then 50, which is the missed 0.001 BTC at the mark restated in
+    dollars. Tier-1 alerts and heals that fill, and the next pass finds the
+    cash gap as Tier-1, so an equity alert here is one an operator cannot act
+    on.
+
+    Before this fix the rule matched on the grain alone. The size finding
+    carries ``symbol="BTC"`` and equity carries ``symbol=None``, so the three
+    per-symbol figures were silenced and the equity alerted anyway.
+
+    Suppression by a Tier-1 finding is not counted, so ``suppressed`` stays 0.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _mark(projection, "BTC", "65000")
+    venue = _held("100050.382", ("BTC", "0.003", "50.382"))
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences is not None
+    assert [
+        (divergence.tier, divergence.field, divergence.symbol) for divergence in divergences
+    ] == [
+        (DivergenceTier.TIER_1, DivergenceField.SIGNED_SIZE, "BTC"),
+        (DivergenceTier.TIER_2, DivergenceField.EQUITY, None),
+        (DivergenceTier.TIER_2, DivergenceField.UNREALIZED_PNL, "BTC"),
+        (DivergenceTier.TIER_2, DivergenceField.NOTIONAL, "BTC"),
+        (DivergenceTier.TIER_2, DivergenceField.MARGIN_USED, "BTC"),
+    ]
+    assert _alerts(logs) == []
+    record = _recorded(logs)
+    assert (record["tier_1"], record["tier_2"], record["suppressed"]) == (1, 4, 0)
+
+
+def test_a_size_finding_on_an_isolated_symbol_does_not_silence_the_cross_maintenance_alert() -> (
+    None
+):
+    """The narrowing that makes rule (1) one decision with rule (2) (#322).
+
+    A size finding silences the figures whose compared Σ contains its symbol,
+    and ``maintenance_margin`` is compared over the cross subset only
+    (ADR-0046 §2.1). An isolated symbol is not a term of that Σ, so a size gap
+    on it explains nothing about the maintenance figure. A blanket "any size
+    finding silences the account grain" would pass the case above and fail
+    this one.
+
+    The book is the cross-subset case above: BTC at cross 5x with a real
+    maintenance gap of 1.625 against 1.600, and a large ETH leg at the isolated
+    default. The one change is the venue holding 101 ETH where the ledger
+    holds 100. ETH is entered and marked at 3000, so its uPnL is 0 on both
+    sides and the equity and cash lines still agree. The size gap silences
+    ETH's own exposure, and the maintenance alert still fires.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(
+        store,
+        equity="100000",
+        leverage=LeverageBook(entries={"BTC": _CROSS_5X, "ETH": DEFAULT_LEVERAGE}),
+        specs={"BTC": _BTC_SPEC, "ETH": _ETH_SPEC},
+    )
+    projection = keeper.portfolio
+    _book_fill(projection, quantity="0.002", price="64809")
+    _book_fill(projection, quantity="100", price="3000", symbol="ETH")
+    _mark(projection, "BTC", "65000")
+    _mark(projection, "ETH", "3000")
+    venue = _levered(
+        _held(
+            "100000.382",
+            ("BTC", "0.002", "0.382"),
+            ("ETH", "101", "0"),
+            entry={"ETH": "3000"},
+            free_margin="99974.382",
+            maintenance="1.600",
+        ),
+        _CROSS_5X,
+        symbol="BTC",
+    )
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences is not None
+    assert [(d.tier, d.field, d.symbol) for d in divergences] == [
+        (DivergenceTier.TIER_1, DivergenceField.SIGNED_SIZE, "ETH"),
+        (DivergenceTier.TIER_2, DivergenceField.MAINTENANCE_MARGIN, None),
+        (DivergenceTier.TIER_2, DivergenceField.NOTIONAL, "ETH"),
+    ]
+    assert _alerts(logs) == [
+        {
+            "field": "maintenance_margin",
+            "symbol": None,
+            "ledger": "1.6250000",
+            "venue": "1.600",
+        }
+    ]
+    record = _recorded(logs)
+    assert (record["tier_1"], record["tier_2"], record["suppressed"]) == (1, 2, 0)
+
+
+def test_a_missed_opening_fill_does_not_alert_its_own_unrealized_pnl_as_equity() -> None:
+    """Rule (1) reaches a symbol the ledger is flat in (#322, review R001).
+
+    The most common missed fill is an opening one. The ledger holds nothing,
+    the venue holds 0.001 BTC entered at 55,000 and marked at 65,000, so its
+    uPnL is 10 and the venue's equity is 10 over the ledger's. That gap is the
+    missed fill in dollars. The size finding heals it this cycle, so an equity
+    alert here is one an operator cannot act on.
+
+    The ledger never traded BTC, so its Σ has no BTC term. The rule ranges
+    over the Tier-1 symbols and not over what the ledger holds, because a size
+    finding puts its symbol on at least one side by definition.
+    """
+    store = SQLiteStore(":memory:")
+    keeper = _ledger(store, equity="100000")
+    _mark(keeper.portfolio, "BTC", "65000")
+    venue = _held("100010", ("BTC", "0.001", "10"), entry={"BTC": "55000"})
+    cycle = LedgerReconciliation(exchange=_AccountVenue(venue), checkpointer=keeper)
+
+    with capture_events() as logs:
+        divergences = asyncio.run(cycle.reconcile_account())
+
+    assert divergences is not None
+    assert [(d.tier, d.field, d.symbol) for d in divergences] == [
+        (DivergenceTier.TIER_1, DivergenceField.SIGNED_SIZE, "BTC"),
+        (DivergenceTier.TIER_2, DivergenceField.EQUITY, None),
+    ]
+    assert _alerts(logs) == []
+    record = _recorded(logs)
+    assert (record["tier_1"], record["tier_2"], record["suppressed"]) == (1, 1, 0)
+
+
 def test_a_cash_finding_the_mode_gate_refused_still_suppresses_the_account_grain() -> None:
     """The account half of ADR-0040 §6's first suppression, on the pass that
     makes the wording load-bearing (ADR-0046 §4).

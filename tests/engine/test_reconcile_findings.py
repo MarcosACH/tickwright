@@ -116,9 +116,11 @@ def test_classifies_both_tiers_off_one_hand_built_reading() -> None:
     cycle compares: a size it is 0.1 short on, a free margin 100 under, and a
     uPnL 2,000 under.
 
-    The uPnL finding is **classified and not alerted**: BTC already carries a
-    Tier-1 size finding this pass, and a Tier-2 figure on a grain Tier-1 already
-    explains is the same missed fill restated in dollars.
+    The two Tier-2 findings are **classified and not alerted**: BTC already
+    carries a Tier-1 size finding this pass, and a Tier-2 figure whose compared
+    Σ contains BTC is the same missed fill restated in dollars (#322). That is
+    BTC's own uPnL, and it is the account's free margin too, since the held
+    book is one symbol and BTC is a term of it.
     """
     state = _venue(
         equity="110000",
@@ -166,7 +168,7 @@ def test_classifies_both_tiers_off_one_hand_built_reading() -> None:
             venue=Decimal("10000"),
         ),
     )
-    assert findings.alerts == (findings.divergences[1],)  # the uPnL is Tier-1's to explain
+    assert findings.alerts == ()  # both Tier-2 figures are Tier-1's to explain
     assert findings.suppressed == 0
     assert findings.unvalued == 0
 
@@ -531,6 +533,168 @@ def test_a_stale_isolated_mark_leaves_the_cross_subset_maintenance_alert_alone()
     assert [(d.field, d.symbol) for d in findings.alerts] == [
         (DivergenceField.MAINTENANCE_MARGIN, None)
     ]
+    assert (findings.suppressed, findings.unvalued) == (0, 0)
+
+
+def test_a_size_finding_on_an_isolated_symbol_leaves_the_cross_subset_maintenance_alert_alone() -> (
+    None
+):
+    """A Tier-1 finding silences a Σ only through a term that Σ contains (#322).
+
+    Rule (1) now flows the way rule (2) does, and this is its narrowing case at
+    the classification seam. The case above is the same book under rule (2).
+    ``maintenance_margin`` is compared over the cross subset alone (ADR-0046
+    §2.1). An isolated symbol is not a term of it, so a size gap on that symbol
+    explains nothing about the maintenance figure. A blanket "any size finding
+    silences the account grain" would pass the containment case at the top of
+    this file and fail here.
+
+    BTC is cross and carries the real 100-unit maintenance gap. ETH is isolated,
+    and the venue holds 2 where the ledger holds 1, so ETH's notional gap is the
+    same missed fill in dollars and stays silent on its own grain. ETH's uPnL is
+    0 on both sides, so the cash, equity and free margin lines still agree. One
+    alert, nothing suppressed.
+    """
+    state = replace(
+        _venue(
+            equity="110000",
+            free_margin="50000",
+            positions=(
+                _position("BTC", signed_size="1", notional="60000", unrealized_pnl="10000"),
+                _position("ETH", signed_size="2", notional="80000", unrealized_pnl="0"),
+            ),
+        ),
+        cross_maintenance_margin=Decimal("900"),
+    )
+    reading = LedgerReading(
+        account=AccountView(
+            cash=Decimal("100000"),
+            equity=Decimal("110000"),
+            total_margin_used=Decimal("60000"),
+            total_maintenance_margin=Decimal("1500"),
+            free_margin=Decimal("50000"),
+            effective_leverage=None,
+        ),
+        rows={
+            "BTC": _row(
+                "BTC",
+                net="1",
+                unrealized_pnl="10000",
+                notional="60000",
+                maintenance_margin="1000",
+                leverage=_CROSS_1X,
+            ),
+            "ETH": _row(
+                "ETH", net="1", unrealized_pnl="0", notional="40000", maintenance_margin="500"
+            ),
+        },
+        mark_observed={"BTC": _NOW_NS, "ETH": _NOW_NS},
+        last_fills={},
+    )
+
+    findings = ReconcileFindings.classify(state, reading, band=ValuationBand(), now_ns=_NOW_NS)
+
+    assert [(d.tier, d.field, d.symbol) for d in findings.divergences] == [
+        (DivergenceTier.TIER_1, DivergenceField.SIGNED_SIZE, "ETH"),
+        (DivergenceTier.TIER_2, DivergenceField.MAINTENANCE_MARGIN, None),
+        (DivergenceTier.TIER_2, DivergenceField.NOTIONAL, "ETH"),
+    ]
+    assert [(d.field, d.symbol) for d in findings.alerts] == [
+        (DivergenceField.MAINTENANCE_MARGIN, None)
+    ]
+    assert (findings.suppressed, findings.unvalued) == (0, 0)
+
+
+def _missed_opening_fill() -> VenueAccountState:
+    """The venue holds 0.5 BTC the ledger never booked, at cross.
+
+    Entered at 100,000 and marked at 120,000, so its uPnL is 10,000. The
+    venue's equity of 110,000 implies a cash line of 100,000, which the ledger
+    agrees on. The venue posts 100 of cross maintenance for it.
+    """
+    return replace(
+        _venue(
+            equity="110000",
+            free_margin="50000",
+            positions=(
+                _position("BTC", signed_size="0.5", notional="60000", unrealized_pnl="10000"),
+            ),
+        ),
+        cross_maintenance_margin=Decimal("100"),
+    )
+
+
+def _flat_reading(rows: dict[str, SymbolValuation]) -> LedgerReading:
+    """A ledger holding nothing: cash, equity and free margin all 100,000."""
+    return LedgerReading(
+        account=AccountView(
+            cash=Decimal("100000"),
+            equity=Decimal("100000"),
+            total_margin_used=Decimal("0"),
+            total_maintenance_margin=Decimal("0"),
+            free_margin=Decimal("100000"),
+            effective_leverage=None,
+        ),
+        rows=rows,
+        mark_observed=dict.fromkeys(rows, _NOW_NS),
+        last_fills={},
+    )
+
+
+def test_a_size_finding_on_a_symbol_the_ledger_never_traded_still_explains_the_account_sums() -> (
+    None
+):
+    """Rule (1) ranges over the Tier-1 symbols, not over what the ledger holds (#322).
+
+    A missed opening fill is a size finding on a symbol the ledger is flat in.
+    The ledger's Σ has no BTC term, but the venue's does, and the compared
+    figure is the difference between the two. ``equity`` and ``free_margin``
+    sum every position on both sides, so BTC is a term of each and the gap is
+    the missed fill in dollars.
+
+    ``maintenance_margin`` narrows to the cross subset, and cross-ness is read
+    off the ledger's row (#304). A symbol the ledger never traded has no row,
+    so the mode cannot be read and the figure is left to alert. That errs
+    toward noise, never silence.
+    """
+    findings = ReconcileFindings.classify(
+        _missed_opening_fill(), _flat_reading({}), band=ValuationBand(), now_ns=_NOW_NS
+    )
+
+    assert [(d.tier, d.field, d.symbol) for d in findings.divergences] == [
+        (DivergenceTier.TIER_1, DivergenceField.SIGNED_SIZE, "BTC"),
+        (DivergenceTier.TIER_2, DivergenceField.EQUITY, None),
+        (DivergenceTier.TIER_2, DivergenceField.FREE_MARGIN, None),
+        (DivergenceTier.TIER_2, DivergenceField.MAINTENANCE_MARGIN, None),
+    ]
+    assert [(d.field, d.symbol) for d in findings.alerts] == [
+        (DivergenceField.MAINTENANCE_MARGIN, None)
+    ]
+    assert (findings.suppressed, findings.unvalued) == (0, 0)
+
+
+def test_a_size_finding_on_a_symbol_closed_to_flat_explains_the_cross_maintenance_too() -> None:
+    """The same missed fill on a symbol the ledger traded before (#322).
+
+    A closed position leaves its row behind at zero, and the row still carries
+    the mode the run holds the symbol at. BTC is cross, so it is a term of the
+    maintenance Σ as well, and nothing alerts.
+    """
+    rows = {
+        "BTC": _row("BTC", net="0", unrealized_pnl="0", notional="0", leverage=_CROSS_1X),
+    }
+
+    findings = ReconcileFindings.classify(
+        _missed_opening_fill(), _flat_reading(rows), band=ValuationBand(), now_ns=_NOW_NS
+    )
+
+    assert [(d.tier, d.field, d.symbol) for d in findings.divergences] == [
+        (DivergenceTier.TIER_1, DivergenceField.SIGNED_SIZE, "BTC"),
+        (DivergenceTier.TIER_2, DivergenceField.EQUITY, None),
+        (DivergenceTier.TIER_2, DivergenceField.FREE_MARGIN, None),
+        (DivergenceTier.TIER_2, DivergenceField.MAINTENANCE_MARGIN, None),
+    ]
+    assert findings.alerts == ()
     assert (findings.suppressed, findings.unvalued) == (0, 0)
 
 
