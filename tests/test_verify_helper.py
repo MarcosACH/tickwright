@@ -169,3 +169,75 @@ class TestCheck:
         lines = (helper.evidence("r1") / "checks.txt").read_text().splitlines()
 
         assert [line.split()[0:2] for line in lines] == [["PASS", "a"], ["FAIL", "b"]]
+
+
+def _run_with_one_fail(helper: ModuleType, run: Callable[..., tuple[int, str]]) -> None:
+    """A crash-recovery run the way the map leaves it today: one PASS, one FAIL."""
+    run("init", "r1", "--feature", "crash-recovery")
+    _finished_life(
+        helper,
+        "r1",
+        "first",
+        exit_code=-9,
+        events=[{"event": "order.filled"}, {"event": "engine.faulted", "error": "Boom()"}],
+        orders=[("0xabc", "filled")],
+    )
+    run("check", "r1", "first", "crash-durable", "--exit", "--expect", "-9")
+    run(
+        "check",
+        "r1",
+        "first",
+        "crash-converge",
+        "--sql",
+        "select signed_size from positions",
+        "--expect",
+        "1.000",
+    )
+
+
+class TestReport:
+    def test_init_records_the_feature(
+        self, helper: ModuleType, run: Callable[..., tuple[int, str]]
+    ) -> None:
+        run("init", "r1", "--feature", "crash-recovery")
+
+        assert helper.read_run_json("r1")["feature"] == "crash-recovery"
+
+    def test_report_opens_with_the_verdict_and_lists_only_the_fails(
+        self, helper: ModuleType, run: Callable[..., tuple[int, str]]
+    ) -> None:
+        _run_with_one_fail(helper, run)
+
+        code, out = run("report", "r1")
+        text = (helper.evidence("r1") / "REPORT.md").read_text()
+        failed_section = text.split("## Failed checks")[1].split("##")[0]
+
+        assert code == 1
+        assert text.startswith("# r1: crash-recovery FAIL (1 of 2 checks failed)")
+        assert "FAIL crash-converge first expected=1.000 got=0.500" in failed_section
+        assert "crash-durable" not in failed_section
+        assert text == out
+
+    def test_report_names_alarm_events_and_exit_codes(
+        self, helper: ModuleType, run: Callable[..., tuple[int, str]]
+    ) -> None:
+        _run_with_one_fail(helper, run)
+
+        run("report", "r1")
+        text = (helper.evidence("r1") / "REPORT.md").read_text()
+        alarms = text.split("## Alarm events")[1].split("##")[0]
+
+        assert "engine.faulted" in alarms
+        assert "order.filled" not in alarms
+        assert "first: -9" in text.split("## Exit codes")[1]
+
+    def test_report_with_no_checks_says_so(
+        self, helper: ModuleType, run: Callable[..., tuple[int, str]]
+    ) -> None:
+        run("init", "r1")
+        _finished_life(helper, "r1", "first", exit_code=0, events=[], orders=[])
+
+        code, out = run("report", "r1")
+
+        assert code == 1
+        assert out.startswith("# r1: (no feature) NO CHECKS")

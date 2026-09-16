@@ -313,6 +313,7 @@ def cmd_init(args: argparse.Namespace) -> int:
             "started_at": now_iso(),
             "sha": git("rev-parse", "HEAD"),
             "branch": git("rev-parse", "--abbrev-ref", "HEAD"),
+            "feature": args.feature,
             "infra": [],
         },
     )
@@ -552,6 +553,94 @@ def cmd_check(args: argparse.Namespace) -> int:
     return 0 if verdict == "PASS" else 1
 
 
+# An event whose presence is worth a reader's attention whatever the checks say.
+# ``order.rejected`` and ``order.denied`` are expected in the ghost and kill switch
+# features, so a listed alarm is a prompt to look, never a verdict on its own.
+ALARM_EVENTS = (
+    "engine.faulted",
+    "engine.stop_hook_failed",
+    "strategy.error",
+    "strategy.snapshot_incompatible",
+    "order.rejected",
+    "order.denied",
+    "order.failed",
+    "ghost.reconciled",
+    "reconcile.frozen",
+    "account.reconcile_frozen",
+    "account.healed",
+    "account.mode_unverified",
+    "valuation.divergence",
+    "leverage.divergence",
+    "exchange.request_failed",
+    "exchange.action_rejected",
+)
+
+
+def check_lines(run_id: str) -> list[str]:
+    path = evidence(run_id) / "checks.txt"
+    return path.read_text().splitlines() if path.exists() else []
+
+
+def verdict(run_id: str) -> tuple[str, int, int]:
+    """``(word, failed, total)`` over the run's recorded checks."""
+    lines = check_lines(run_id)
+    failed = sum(line.startswith("FAIL ") for line in lines)
+    if not lines:
+        return "NO CHECKS", 0, 0
+    return ("FAIL" if failed else "PASS"), failed, len(lines)
+
+
+def build_report(run_id: str) -> str:
+    data = read_run_json(run_id)
+    feature = data.get("feature") or "(no feature)"
+    word, failed, total = verdict(run_id)
+    headline = f"# {run_id}: {feature} {word}"
+    if total:
+        headline += f" ({failed} of {total} checks failed)"
+    lines = [
+        headline,
+        "",
+        f"sha {data.get('sha', '?')} on {data.get('branch', '?')}, started {data.get('started_at', '?')}",
+        "",
+    ]
+    lines += ["## Failed checks", ""]
+    fails = [line for line in check_lines(run_id) if line.startswith("FAIL ")]
+    lines += [f"- {line}" for line in fails] or ["- none"]
+    lines += ["", "## Alarm events", ""]
+    alarms: list[str] = []
+    for log in sorted(evidence(run_id).glob("*.stderr.jsonl")):
+        life = log.name.removesuffix(".stderr.jsonl")
+        for raw in log.read_text().splitlines():
+            for name in ALARM_EVENTS:
+                if f'"event": "{name}"' in raw:
+                    alarms.append(f"- {life}: {raw}")
+    lines += alarms or ["- none"]
+    lines += ["", "## Exit codes", ""]
+    exits = sorted(evidence(run_id).glob("*.exit"))
+    lines += [f"- {e.stem}: {e.read_text().strip()}" for e in exits] or ["- none"]
+    lines += ["", "## All checks", ""]
+    lines += [f"- {line}" for line in check_lines(run_id)] or ["- none"]
+    for store in sorted(evidence(run_id).glob("*.store.txt")):
+        lines += [
+            "",
+            f"## Store after {store.name.removesuffix('.store.txt')}",
+            "",
+            "```",
+            store.read_text().rstrip(),
+            "```",
+        ]
+    return "\n".join(lines) + "\n"
+
+
+def cmd_report(args: argparse.Namespace) -> int:
+    """Write and print evidence/REPORT.md. Exit 0 only on a PASS verdict."""
+    require_run(args.run_id)
+    text = build_report(args.run_id)
+    (evidence(args.run_id) / "REPORT.md").write_text(text)
+    print(text, end="")
+    return 0 if verdict(args.run_id)[0] == "PASS" else 1
+
+
 def cmd_cloid(args: argparse.Namespace) -> int:
     from tickwright.domain import derive_cloid
 
@@ -662,6 +751,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("init", help="create .agents/verify/<run-id>/{scratch,evidence}")
     p.add_argument("run_id")
+    p.add_argument("--feature", default=None, help="the feature file this run covers")
     p.set_defaults(fn=cmd_init)
 
     p = sub.add_parser("ticks", help="write a replay tick file into scratch/")
@@ -725,6 +815,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("run_id")
     p.add_argument("life")
     p.set_defaults(fn=cmd_dump)
+
+    p = sub.add_parser("report", help="write evidence/REPORT.md: verdict, fails, alarms, exits")
+    p.add_argument("run_id")
+    p.set_defaults(fn=cmd_report)
 
     p = sub.add_parser("cloid", help="the cloid a signal_id maps to")
     p.add_argument("signal_id", help="<strategy_id>:<symbol>:<seq>")
