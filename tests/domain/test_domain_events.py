@@ -8,12 +8,14 @@ reconciler-synthesized event and a venue-pushed duplicate collapse to one id.
 
 from decimal import Decimal
 
+import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
 from tickwright.domain import (
     AggressorSide,
     CancelSignal,
+    Event,
     FillReport,
     FundingAccrual,
     MarketTick,
@@ -27,7 +29,21 @@ from tickwright.domain import (
     PlaceSignal,
     Side,
     TimeInForce,
+    publishable_event_types,
 )
+
+
+@pytest.mark.parametrize("family", publishable_event_types(), ids=lambda cls: cls.__name__)
+def test_every_publishable_event_family_derives_its_own_keys(family: type[Event]) -> None:
+    """The base ``Event`` only declares the two keys. It raises on both.
+
+    Nothing at type-check time makes a subclass override them, so a new family
+    that forgets would pass mypy and raise on its first ``event_id`` read. For
+    market data that read is inside ``ConflatingIngress.offer``, where it would
+    fault the live feed. This is the gate the type checker does not give.
+    """
+    assert family.event_id is not Event.event_id
+    assert family.partition_key is not Event.partition_key
 
 
 def test_market_tick_event_id_and_partition_key() -> None:

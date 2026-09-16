@@ -57,12 +57,14 @@ class ConflatingIngress:
                 NamedEvent.FEED_LAGGED,
                 symbol=dropped.symbol,
                 # ``event_id`` is the one weak key both streams define, and it
-                # is built for audit and log use (ADR-0027, ADR-0039). Reading
-                # it off the ``Event`` base keeps the type checker on the
-                # access: a third stream widens ``MarketData`` and still has to
-                # provide it. ``stream`` is not redundant with it, because a
-                # live trade's key and a replay trade's key have different
-                # shapes, so the key alone does not say which stream thinned.
+                # is built for audit and log use (ADR-0027, ADR-0039). The type
+                # checker does not make a third stream provide it: the base
+                # ``Event`` property raises, and a family that forgets would
+                # fault the feed on its first drop. The domain's key gate over
+                # ``publishable_event_types`` is what catches that. ``stream``
+                # is not redundant with the key, because a live trade's key and
+                # a replay trade's key have different shapes, so the key alone
+                # does not say which stream thinned.
                 event_id=dropped.event_id,
                 stream=type(dropped).__name__,
             )

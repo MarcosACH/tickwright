@@ -52,6 +52,7 @@ from .events import (
     PlaceSignal,
     ReconciliationFill,
     Signal,
+    publishable_event_types,
 )
 from .figures import exact_figure
 from .ids import SignalId, derive_cloid
@@ -183,6 +184,7 @@ __all__ = [
     "VenueOrderView",
     "VenueReadFailure",
     "VenuePositionState",
+    "publishable_event_types",
     # id derivation
     "derive_cloid",
     "SignalId",

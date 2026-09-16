@@ -462,6 +462,29 @@ class OrderFailed(OrderEvent):
         return OrderState.FAILED
 
 
+def publishable_event_types() -> tuple[type[Event], ...]:
+    """The leaves of the ``Event`` tree, sorted by name.
+
+    The leaves are exactly the families that get built and published. The
+    interior nodes (``Signal``, ``ExecutionReport``, ``OrderEvent``, ...) are
+    bases, and some leave a key derivation to their leaves. Anything that must
+    hold for every event on the wire (a codec, a key gate) walks this list, so
+    a new family is covered the day it exists.
+
+    Read from the module namespace, not ``__subclasses__()``: ``slots=True``
+    recreates each class, and the abandoned pre-slots originals linger in
+    ``__subclasses__()`` until GC. The namespace and ``__bases__`` only ever
+    hold the final class objects.
+    """
+    classes = [
+        obj
+        for obj in globals().values()
+        if isinstance(obj, type) and issubclass(obj, Event) and obj is not Event
+    ]
+    bases = {base for cls in classes for base in cls.__bases__}
+    return tuple(sorted((cls for cls in classes if cls not in bases), key=lambda c: c.__name__))
+
+
 # --- The account grain's synthetic heal (not an event) ----------------------
 
 
