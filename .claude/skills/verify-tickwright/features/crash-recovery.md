@@ -46,11 +46,12 @@ Preconditions:
 
 ## Gotchas
 
-- **Known FAIL (2026-09-16).** After a `KILL` the shipped `single_shot_market` fires again on
-  restart. Life two shows `order.placed` for `shooter:BTC:2`, two filled orders, and
+- **Known FAIL, tracked as #348.** After a `KILL` the shipped `single_shot_market` fires again
+  on restart. Life two shows `order.placed` for `shooter:BTC:2`, two filled orders, and
   `positions` at `1.000`. Snapshots are only taken on graceful stop and a crash leaves none, so
   the strategy's `fired` flag is lost. The saga is correct (no order is filled twice) and the seq
   is correct (`shooter:BTC:2`, never `:1` again). ADR-0016 names a "periodic + on-stop"
-  snapshot cadence that the runner does not implement. File it from `$V issue-draft crash`.
+  snapshot cadence that the runner does not implement. When #348 is fixed, the check flips to
+  PASS and this note goes away.
 - The verification strategies in `portfolio-strategies.md` have the same property.
 - `KILL` leaves the pid file. `cleanup` handles it.

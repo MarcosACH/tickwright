@@ -56,7 +56,7 @@ Preconditions:
 
 ## Gotchas
 
-- **Known FAIL (2026-09-16), `tn-cash`.** Right after the opening fill the strategy read
+- **Known FAIL, `tn-cash`, tracked as #349.** Right after the opening fill the strategy read
   `account.cash 942.920480` while the ledger had opened at `929.16731` and the fill carried a
   `0.034336` fee and no realized PnL. Nothing in the trail explains the +13.79. The 60 second
   reconcile then reported `tier_1: 1` and healed cash to the venue's `929.076648`, which is the
@@ -64,6 +64,7 @@ Preconditions:
   event, and the first `verify.fill` line holds the wrong number. A second run the same day
   reproduced it: genesis `929.076648`, cash after the opening fill `942.829986`. The jump is
   `+13.753` both times, at two different fill prices, so it is not a function of the trade.
+  When #349 is fixed, the check flips to PASS and this note goes away.
 - The key is forwarded from the repo `.env` into the child environment only. Never write it with
   `--env`. The helper refuses.
 - `feed.lagged` lines are normal on testnet. The stream conflates.
