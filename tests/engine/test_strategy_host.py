@@ -338,6 +338,30 @@ def test_start_without_a_snapshot_leaves_the_strategy_fresh() -> None:
     assert alpha.state == b"untouched"
 
 
+class CountingStrategy(RecordingStrategy):
+    """A strategy whose state moves on every tick, so each tick is a change."""
+
+    async def on_tick(self, tick: MarketTick) -> None:
+        await super().on_tick(tick)
+        self.state = f"ticks={len(self.ticks)}".encode()
+
+
+def test_a_tick_that_changes_state_leaves_a_snapshot_without_stop() -> None:
+    """The crash half of ADR-0016's cadence (issue #348). A process killed after
+    a strategy fired must not lose what it did, so the state is durable as soon
+    as the callback that moved it returns, not only on a graceful stop."""
+    bus = InMemoryBus()
+    store = SQLiteStore(":memory:")
+    host = _host(bus=bus, store=store)
+    alpha = CountingStrategy("alpha")
+    host.register(alpha, symbols={"BTC"})
+    host.start()
+
+    asyncio.run(bus.publish(_tick("BTC")))
+
+    assert store.load_strategy_snapshot("alpha") == b"ticks=1"
+
+
 class IncompatibleRestoreStrategy(RecordingStrategy):
     """A strategy whose code changed shape between runs: restore() rejects."""
 

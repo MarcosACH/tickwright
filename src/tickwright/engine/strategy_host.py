@@ -59,6 +59,9 @@ class StrategyHost:
         self._tick_staleness_ns = tick_staleness_ns
         self._strategies: dict[str, Strategy] = {}
         self._symbols: dict[str, frozenset[str]] = {}
+        # The last bytes persisted per strategy. A callback that left the
+        # state where it was costs a ``snapshot()`` call and no store write.
+        self._persisted: dict[str, bytes] = {}
         # The inverse of ``_symbols``, which is what the disjointness gate
         # actually asks: not "what does this strategy trade" but "who already
         # owns this symbol". A ``domain`` value rather than a dict here because
@@ -150,6 +153,9 @@ class StrategyHost:
         data = self._store.load_strategy_snapshot(strategy.strategy_id)
         if data is None:
             return
+        # What the store holds is what ``_persist`` compares against, so a
+        # restart whose first tick changes nothing writes nothing.
+        self._persisted[strategy.strategy_id] = data
         try:
             strategy.restore(data)
         except InvariantViolation:
@@ -176,9 +182,22 @@ class StrategyHost:
         if not self._started:
             return
         for strategy in self._strategies.values():
-            self._store.save_strategy_snapshot(
-                strategy.strategy_id, strategy.snapshot(), ts_ns=self._clock.timestamp_ns()
-            )
+            self._persist(strategy)
+
+    def _persist(self, strategy: Strategy) -> None:
+        """Save ``strategy.snapshot()`` if it moved since the last save.
+
+        The crash half of ADR-0016's cadence (issue #348): a callback that
+        changed the state is followed by a write, so a ``KILL`` a moment later
+        cannot lose it. A strategy that fired once is still fired on restart.
+        """
+        data = strategy.snapshot()
+        if self._persisted.get(strategy.strategy_id) == data:
+            return
+        self._store.save_strategy_snapshot(
+            strategy.strategy_id, data, ts_ns=self._clock.timestamp_ns()
+        )
+        self._persisted[strategy.strategy_id] = data
 
     def _subscribe(self, strategy: Strategy) -> None:
         symbols = self._symbols[strategy.strategy_id]
@@ -206,6 +225,7 @@ class StrategyHost:
                 return
             high_water[tick.symbol] = mark
             await self._contained(strategy, strategy.on_tick, tick)
+            self._persist(strategy)
 
         async def on_order_event(event: OrderEvent) -> None:
             # Events return only to the owning strategy (ADR-0018): another
@@ -213,6 +233,7 @@ class StrategyHost:
             if event.strategy_id != strategy.strategy_id:
                 return
             await self._contained(strategy, strategy.on_order_event, event)
+            self._persist(strategy)
 
         self._bus.subscribe(MarketTick, on_tick)
         self._bus.subscribe(OrderEvent, on_order_event)
