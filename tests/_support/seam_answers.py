@@ -113,8 +113,7 @@ def assert_every_adapter_answers_its_gates(
         ]
         assert not unanswered, (
             f"{answered.adapter} ({seam.__name__} {value!r}) never answers {unanswered} in "
-            f"{answered.suite} — a {seam.__name__} owes every one of them, see "
-            f"docs/extending.md"
+            f"{answered.suite} — every {seam.__name__} owes each of them, see docs/extending.md"
         )
 
 

@@ -1,16 +1,49 @@
 """The gate over whether the seam gates were answered (#303).
 
-Every other caller of ``seam_answers`` is the real tree. The ``tmp_path``
-cases here are the ones that prove the assertion bites: a suite that answers
-nothing must fail, or the gate ships with the defect it exists to close.
+Two halves. The ``tmp_path`` cases prove the assertion bites: a suite that
+answers nothing must fail, or the gate ships with the defect it exists to
+close. The two real-tree tests at the end are the gate itself, over every
+adapter ``AppConfig`` can select. The map beside them is the one line a venue
+author adds here, and the gate names every answer still owed until the
+suite answers it.
 """
 
 from pathlib import Path
+from typing import get_args
 
 import pytest
 from seam_answers import Answered, assert_every_adapter_answers_its_gates
 
-from tickwright.domain import MarketFeed
+from tickwright.app import AppConfig
+from tickwright.domain import Exchange, MarketFeed
+
+TESTS = Path(__file__).parent.parent
+
+FEEDS = {
+    "replay": Answered("ReplayFeed", suite=TESTS / "adapters" / "feed"),
+    "hyperliquid": Answered("HyperliquidFeed", suite=TESTS / "venues" / "hyperliquid"),
+}
+EXCHANGES = {
+    "paper": Answered("PaperExchange", suite=TESTS / "adapters" / "paper"),
+    "hyperliquid": Answered("HyperliquidExchange", suite=TESTS / "venues" / "hyperliquid"),
+}
+
+
+def _configured(field: str) -> tuple[str, ...]:
+    """The values ``AppConfig.<field>``'s ``Literal`` admits, read off the model."""
+    return get_args(AppConfig.model_fields[field].annotation)
+
+
+def test_every_configurable_feed_answers_every_gate_a_feed_owes() -> None:
+    assert_every_adapter_answers_its_gates(
+        MarketFeed, configured=_configured("feed"), answers=FEEDS
+    )
+
+
+def test_every_configurable_exchange_answers_every_gate_an_exchange_owes() -> None:
+    assert_every_adapter_answers_its_gates(
+        Exchange, configured=_configured("exchange"), answers=EXCHANGES
+    )
 
 
 def _suite(root: Path, body: str) -> Path:
