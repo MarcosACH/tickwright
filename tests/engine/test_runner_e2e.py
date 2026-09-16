@@ -1241,6 +1241,83 @@ def test_the_ledger_is_recovered_before_the_order_cache_is_rebuilt(tmp_path: Pat
     assert timeline[:2] == ["ledger.load_account", "cache.all_orders"]
 
 
+class _SeqRecordingStrategy:
+    """Records the seq the host hands it and trades nothing."""
+
+    def __init__(self, strategy_id: str) -> None:
+        self.strategy_id = strategy_id
+        self.next_seq: int | None = None
+
+    async def on_tick(self, tick: MarketTick) -> None:
+        return None
+
+    async def on_order_event(self, event: OrderEvent) -> None:
+        return None
+
+    def set_next_seq(self, next_seq: int) -> None:
+        self.next_seq = next_seq
+
+    def snapshot(self) -> bytes:
+        return b""
+
+    def restore(self, data: bytes) -> None:
+        return None
+
+
+def test_a_start_deserializes_the_saga_history_once(tmp_path: Path) -> None:
+    """The boot reads the saga history one time (issue #233).
+
+    ``cache.rebuild()`` is that read. The strategy seq high-water (ADR-0016)
+    is folded from the read-model it rebuilt, not from a second pass over the
+    store. The cost grows with all the history the store holds, and it is paid
+    on the recovery path, so the count is the behavior.
+    """
+    timeline: list[str] = []
+    strategy = _SeqRecordingStrategy("trivial")
+
+    async def main() -> int:
+        store = _RecoveryOrderStore(tmp_path / "saga.db", timeline)
+        # The ledger the prior life opened, so #188 does not refuse the store
+        # before the reads this case counts (ADR-0043 §8).
+        store.checkpoint_ledger(
+            account=Account.restore(
+                account_id="paper-default",
+                genesis_collateral=GENESIS,
+                genesis_ts_ns=400,
+                cash=GENESIS,
+            ),
+            ts_ns=400,
+        )
+        store.checkpoint(_submitted_saga("0xabc"), ts_ns=500)
+        bus = InMemoryBus()
+        clock = ManualClock()
+        feed = _BlockingFeed()
+        engine = Engine(
+            bus=bus,
+            clock=clock,
+            store=store,
+            exchange=PaperExchange(
+                bus=bus,
+                clock=clock,
+                fill_model=ImmediateFillModel(),
+                genesis_collateral=GENESIS,
+                account_net=dict,
+            ),
+            feed=feed,
+        )
+        engine.register(strategy, symbols={"BTC"})
+        run = asyncio.create_task(engine.run())
+        await asyncio.wait_for(feed.started.wait(), timeout=5)
+        await asyncio.wait_for(engine.stop(), timeout=5)
+        return await asyncio.wait_for(run, timeout=5)
+
+    assert asyncio.run(main()) == 0
+
+    assert timeline.count("cache.all_orders") == 1
+    # The seeded saga consumed seq 1, so the strategy resumes at 2.
+    assert strategy.next_seq == 2
+
+
 def test_shutdown_is_bounded_a_hung_teardown_faults_instead_of_hanging(tmp_path: Path) -> None:
     """ADR-0024: the reverse shutdown is bounded by ``shutdown_timeout`` — a
     teardown that cannot finish must fault non-zero, never wedge the process."""

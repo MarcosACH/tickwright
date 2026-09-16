@@ -26,6 +26,7 @@ from tickwright.domain import (
     Strategy,
     SymbolOwnership,
 )
+from tickwright.engine.cache import Cache
 from tickwright.observability import NamedEvent, named_event
 
 
@@ -38,11 +39,18 @@ class StrategyHost:
         bus: EventBus,
         clock: Clock,
         store: Store,
+        cache: Cache,
         tick_staleness_ns: int | None = None,
     ) -> None:
         self._bus = bus
         self._clock = clock
+        # The store is for the two snapshot verbs only. The saga history the
+        # seq high-water folds over comes from the cache, which the runner has
+        # already rebuilt from that same store (issue #233). Required rather
+        # than built here, so the host reads the one projection the startup
+        # reconciliation drove and never a private second copy.
         self._store = store
+        self._cache = cache
         # The staleness gate (ADR-0025): a tick older than this against the
         # clock is a redelivered backlog — dropped, so a restart cannot trade
         # on pre-crash prices. ``None`` disables it; the live composition root
@@ -103,7 +111,9 @@ class StrategyHost:
 
         The seq high-water mark comes from the saga store, never the snapshot
         (ADR-0016): a stale snapshot restored a moment earlier can therefore
-        never re-emit a consumed ``signal_id``.
+        never re-emit a consumed ``signal_id``. It is read through the
+        ``Cache`` the runner rebuilt from that store, so the boot deserializes
+        the history once (issue #233).
         """
         high_water = self._seq_high_water()
         for strategy in self._strategies.values():
@@ -121,7 +131,7 @@ class StrategyHost:
         symbols, so this is a single max over the strategy's records.
         """
         high_water: dict[str, int] = {}
-        for order in self._store.all_orders():
+        for order in self._cache.all_orders():
             seqs = [SignalId.parse(order.signal_id).seq]
             if order.cancel_signal_id is not None:
                 seqs.append(SignalId.parse(order.cancel_signal_id).seq)
