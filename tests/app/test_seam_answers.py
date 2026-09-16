@@ -9,7 +9,7 @@ suite answers it.
 """
 
 from pathlib import Path
-from typing import get_args
+from typing import Literal
 
 import pytest
 from seam_answers import Answered, assert_every_adapter_answers_its_gates
@@ -29,9 +29,9 @@ EXCHANGES = {
 }
 
 
-def _configured(field: str) -> tuple[str, ...]:
-    """The values ``AppConfig.<field>``'s ``Literal`` admits, read off the model."""
-    return get_args(AppConfig.model_fields[field].annotation)
+def _configured(field: str) -> object:
+    """``AppConfig.<field>``'s ``Literal``, read off the model."""
+    return AppConfig.model_fields[field].annotation
 
 
 def test_every_configurable_feed_answers_every_gate_a_feed_owes() -> None:
@@ -66,7 +66,7 @@ def test_a_suite_that_answers_no_gate_fails_naming_the_adapter_and_every_gate(
     with pytest.raises(AssertionError) as failure:
         assert_every_adapter_answers_its_gates(
             MarketFeed,
-            configured=["fake"],
+            configured=Literal["fake"],
             answers={"fake": Answered("FakeFeed", suite=suite)},
         )
 
@@ -106,7 +106,7 @@ def test_a_suite_answering_every_gate_under_the_adapter_s_own_name_is_green(
     suite = _suite(tmp_path, _ANSWERS_ALL_THREE.format(protocol="MarketFeed", feed="FakeFeed"))
 
     assert_every_adapter_answers_its_gates(
-        MarketFeed, configured=["fake"], answers={"fake": Answered("FakeFeed", suite=suite)}
+        MarketFeed, configured=Literal["fake"], answers={"fake": Answered("FakeFeed", suite=suite)}
     )
 
 
@@ -122,7 +122,9 @@ def test_a_gate_answered_under_another_name_does_not_count(tmp_path: Path) -> No
 
     with pytest.raises(AssertionError) as failure:
         assert_every_adapter_answers_its_gates(
-            MarketFeed, configured=["fake"], answers={"fake": Answered("FakeFeed", suite=suite)}
+            MarketFeed,
+            configured=Literal["fake"],
+            answers={"fake": Answered("FakeFeed", suite=suite)},
         )
 
     message = str(failure.value)
@@ -143,7 +145,9 @@ def test_a_map_that_misses_a_configured_adapter_fails_before_any_suite_is_read()
     ``KeyError`` nobody wrote a message for.
     """
     with pytest.raises(AssertionError, match=r"'unmapped'"):
-        assert_every_adapter_answers_its_gates(MarketFeed, configured=["unmapped"], answers={})
+        assert_every_adapter_answers_its_gates(
+            MarketFeed, configured=Literal["unmapped"], answers={}
+        )
 
 
 def test_a_map_entry_for_an_adapter_no_longer_configured_fails(tmp_path: Path) -> None:
@@ -154,5 +158,10 @@ def test_a_map_entry_for_an_adapter_no_longer_configured_fails(tmp_path: Path) -
     """
     with pytest.raises(AssertionError, match=r"'gone'"):
         assert_every_adapter_answers_its_gates(
-            MarketFeed, configured=[], answers={"gone": Answered("GoneFeed", suite=tmp_path)}
+            MarketFeed,
+            configured=Literal["kept"],
+            answers={
+                "kept": Answered("KeptFeed", suite=tmp_path),
+                "gone": Answered("GoneFeed", suite=tmp_path),
+            },
         )

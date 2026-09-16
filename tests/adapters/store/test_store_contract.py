@@ -20,9 +20,9 @@ reachable (see ``conftest``), so ``uv run pytest`` stays hermetic by default.
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from decimal import Decimal
-from typing import get_protocol_members
 
 import pytest
+from closed_sets import assert_covers_exactly
 from store_backends import PostgresBackend, SQLiteBackend
 
 from tickwright.domain import (
@@ -685,7 +685,7 @@ def test_the_seams_error_contract_is_asserted_on_every_member() -> None:
     ``close()`` is the one deliberate exclusion (``_durability``): teardown that
     fails is a leaked resource the runner already records as a stop-hook failure,
     not a durability claim that proved false."""
-    assert set(_SEAM_CALLS) == get_protocol_members(Store) - {"close"}
+    assert_covers_exactly(Store, _SEAM_CALLS, what="_SEAM_CALLS", excluding={"close"})
 
 
 def test_the_funding_mark_is_absent_until_written_and_then_advances(

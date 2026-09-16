@@ -20,6 +20,7 @@ from dataclasses import replace
 from decimal import Decimal
 
 import pytest
+from closed_sets import assert_covers_exactly
 from hyperliquid_fakes import (
     TEST_SIGNING_KEY,
     FakeExchangeApi,
@@ -1036,4 +1037,4 @@ def test_the_walk_names_every_catalog_member() -> None:
     # The contract's teeth: a new NamedEvent with no scenario (hence no path and
     # no test) fails here — "a state-affecting path with no named event is a
     # defect", made executable (ADR-0020).
-    assert set(SCENARIOS) == set(NamedEvent)
+    assert_covers_exactly(NamedEvent, SCENARIOS, what="SCENARIOS")

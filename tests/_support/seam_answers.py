@@ -37,9 +37,11 @@ pytest does not rewrite its asserts and a bare comparison would fail blind.
 """
 
 import ast
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+
+from closed_sets import assert_covers_exactly
 
 from tickwright.domain import Exchange, MarketFeed
 
@@ -82,29 +84,24 @@ _OWED: Mapping[type, tuple[_Gate, ...]] = {
 
 
 def assert_every_adapter_answers_its_gates(
-    seam: type, *, configured: Iterable[str], answers: Mapping[str, Answered]
+    seam: type, *, configured: object, answers: Mapping[str, Answered]
 ) -> None:
     """Assert every ``configured`` adapter of ``seam`` answers every gate it owes.
 
-    ``configured`` is the ``Literal``'s values. ``answers`` maps each to where
-    its suite answers, and is checked against the ``Literal`` in both
-    directions first: a value with no row is the stale-map failure this guard
-    exists for, and a row with no value is a suite nobody can select any more.
-    Then a missing answer fails naming the adapter and the gate, which is what
-    an author adding a venue needs to read.
+    ``configured`` is the ``AppConfig`` field's ``Literal``. ``answers`` maps
+    each of its values to where that suite answers, and is checked against
+    the ``Literal`` in both directions first: a value with no row is the
+    stale-map failure this guard exists for, and a row with no value is a
+    suite nobody can select any more. Then a missing answer fails naming the
+    adapter and the gate, which is what an author adding a venue needs to read.
     """
-    configured = set(configured)
-    unmapped = configured - set(answers)
-    assert not unmapped, (
-        f"{seam.__name__} values in AppConfig with no row in the answers map: "
-        f"{sorted(unmapped)} — add where each adapter's suite answers its gates"
+    assert_covers_exactly(
+        configured,
+        answers,
+        what=f"the {seam.__name__} answers map",
+        hint="add where each adapter's suite answers its gates",
     )
-    stale = set(answers) - configured
-    assert not stale, (
-        f"rows in the answers map for {seam.__name__} values AppConfig no longer has: "
-        f"{sorted(stale)}"
-    )
-    for value in sorted(configured):
+    for value in sorted(answers):
         answered = answers[value]
         unanswered = [
             gate.function
