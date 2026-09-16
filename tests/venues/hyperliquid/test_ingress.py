@@ -31,11 +31,11 @@ def _tick(symbol: str, price: str, trade_id: str) -> MarketTick:
     )
 
 
-def _mark(symbol: str, price: str) -> MarkTick:
+def _mark(symbol: str, price: str, ts_event: int = 1_700_000_000_000_000_000) -> MarkTick:
     return MarkTick(
         symbol=symbol,
         price=Decimal(price),
-        ts_event=1_700_000_000_000_000_000,
+        ts_event=ts_event,
         ts_init=1_700_000_000_000_000_000,
     )
 
@@ -132,56 +132,37 @@ def test_a_marks_conflation_is_independent_of_the_trades_for_the_same_symbol() -
     assert lagged == []  # neither superseded the other, so nothing was dropped
 
 
-def test_a_superseded_mark_is_dropped_and_named_like_any_other_stale_tick() -> None:
-    """Within its own stream a mark conflates exactly as a trade does — it is a
-    latest-value by nature, so an unpublished one is the most droppable thing
-    the feed carries. The drop is still named, never silent."""
+def test_a_drop_names_the_superseded_value_the_same_way_on_both_streams() -> None:
+    """A drop happens inside ``offer``: the second value for a key supersedes an
+    unpublished first one, with no drain and no consumer involved. So the
+    record is tested here, on the sync interface, and the async tests below
+    only prove what survives to the bus.
 
-    async def main() -> tuple[list[MarkTick], list[EventDict]]:
-        bus = InMemoryBus()
-        seen: list[MarkTick] = []
-        release = asyncio.Event()
-        first_delivered = asyncio.Event()
+    This catalog entry is the only place a conflation drop is observable
+    (ADR-0020), so its field set is the operator contract. ``stream`` says
+    which of the two market-data streams thinned. ``event_id`` names the
+    dropped value by the one weak key both streams define (#229), so a mark
+    drop is as identifiable as a trade drop.
+    """
+    ingress = ConflatingIngress(bus=InMemoryBus())
+    trade = _tick("BTC", "100", "1")
+    # A live mark's weak key is its symbol and receipt instant, so the two
+    # marks need distinct instants for the record to name the dropped one.
+    mark = _mark("BTC", "100", ts_event=1_700_000_000_000_000_001)
 
-        async def slow_consumer(mark: MarkTick) -> None:
-            seen.append(mark)
-            if len(seen) == 1:
-                first_delivered.set()
-                await release.wait()
+    with capture_events() as logs:
+        ingress.offer(trade)
+        ingress.offer(_tick("BTC", "101", "2"))
+        ingress.offer(mark)
+        ingress.offer(_mark("BTC", "101", ts_event=1_700_000_000_000_000_002))
 
-        bus.subscribe(MarkTick, slow_consumer)
-        ingress = ConflatingIngress(bus=bus)
-
-        with capture_events() as logs:
-            drain = asyncio.create_task(ingress.drain())
-            ingress.offer(_mark("BTC", "100"))
-            await asyncio.wait_for(first_delivered.wait(), timeout=2)
-            ingress.offer(_mark("BTC", "101"))
-            ingress.offer(_mark("BTC", "102"))  # supersedes 101 → one drop
-            release.set()
-
-            async def rest_published() -> None:
-                while len(seen) < 2:
-                    await asyncio.sleep(0)
-
-            await asyncio.wait_for(rest_published(), timeout=2)
-            ingress.close()
-            await asyncio.wait_for(drain, timeout=2)
-        return seen, [log for log in logs if log["event"] == "feed.lagged"]
-
-    seen, lagged = asyncio.run(main())
-
-    assert [m.price for m in seen] == [Decimal("100"), Decimal("102")]
-    assert len(lagged) == 1
-    # The whole record, not just the symbol: this catalog entry is the *only*
-    # place a conflation drop is observable (ADR-0020), so its field set is the
-    # operator contract. ``stream`` is what tells an operator which of the two
-    # market-data streams thinned, and a mark carries no ``dropped_trade_id``
-    # to report — pinning both is what would catch a mark drop that started
-    # claiming a trade's id, or a ``stream`` silently lost.
-    assert lagged[0]["symbol"] == "BTC"
-    assert lagged[0]["stream"] == "MarkTick"
-    assert lagged[0]["dropped_trade_id"] is None
+    lagged = [log for log in logs if log["event"] == "feed.lagged"]
+    assert [(log["symbol"], log["stream"], log["event_id"]) for log in lagged] == [
+        ("BTC", "MarketTick", trade.event_id),
+        ("BTC", "MarkTick", mark.event_id),
+    ]
+    # One spelling for both streams: the trade-only field is gone (#229).
+    assert all("dropped_trade_id" not in log for log in lagged)
 
 
 def test_backpressure_keeps_only_the_latest_per_symbol_and_names_each_drop() -> None:
@@ -229,7 +210,5 @@ def test_backpressure_keeps_only_the_latest_per_symbol_and_names_each_drop() -> 
         ("BTC", Decimal("102")),
         ("ETH", Decimal("50")),
     ]
+    # One drop, one record. Its fields are pinned on the sync path above.
     assert len(lagged) == 1
-    assert lagged[0]["symbol"] == "BTC"
-    assert lagged[0]["stream"] == "MarketTick"
-    assert lagged[0]["dropped_trade_id"] == "2"

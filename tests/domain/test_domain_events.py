@@ -8,12 +8,15 @@ reconciler-synthesized event and a venue-pushed duplicate collapse to one id.
 
 from decimal import Decimal
 
+import pytest
+from event_instances import instances
 from hypothesis import given
 from hypothesis import strategies as st
 
 from tickwright.domain import (
     AggressorSide,
     CancelSignal,
+    Event,
     FillReport,
     FundingAccrual,
     MarketTick,
@@ -27,7 +30,30 @@ from tickwright.domain import (
     PlaceSignal,
     Side,
     TimeInForce,
+    publishable_event_types,
 )
+
+
+@given(data=st.data())
+@pytest.mark.parametrize("family", publishable_event_types(), ids=lambda cls: cls.__name__)
+def test_every_publishable_event_family_derives_its_own_keys(
+    family: type[Event], data: st.DataObject
+) -> None:
+    """The base ``Event`` only declares the two keys. It raises on both.
+
+    Nothing at type-check time makes a subclass override them, so a new family
+    that forgets would pass mypy and raise on its first ``event_id`` read. For
+    market data that read is inside ``ConflatingIngress.offer``, where it would
+    fault the live feed. This is the gate the type checker does not give.
+
+    Read on a built instance, not by property identity. ``OrderEvent`` owns
+    ``event_id`` but reads ``self.state`` inside it, and the base ``state``
+    raises. An identity check would pass a leaf that forgot ``state``.
+    """
+    event = data.draw(instances(family))
+
+    assert isinstance(event.event_id, str)
+    assert isinstance(event.partition_key, str)
 
 
 def test_market_tick_event_id_and_partition_key() -> None:
