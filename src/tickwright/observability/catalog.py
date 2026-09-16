@@ -239,3 +239,12 @@ class NamedEvent(StrEnum):
     # never again, so the absence of this name over a symbol in the book is what
     # says the venue was moved.
     EXCHANGE_LEVERAGE_UNCHANGED = "exchange.leverage_unchanged"
+
+
+# The field set each event carries, pinned beside its name (#338). The name
+# alone let a field's presence or spelling vary per call site with no test going
+# red. A field that is sometimes absent is declared and sent as ``None``: one
+# shape per event, so an operator can key on it.
+FIELDS: dict[NamedEvent, frozenset[str]] = {
+    NamedEvent.ENGINE_FAULTED: frozenset({"error"}),
+}

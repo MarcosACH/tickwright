@@ -14,7 +14,7 @@ by the processor chain — never passed as event fields.
 
 import structlog
 
-from .catalog import NamedEvent
+from .catalog import FIELDS, NamedEvent
 
 _log = structlog.get_logger("tickwright")
 
@@ -33,6 +33,12 @@ def named_event(name: NamedEvent | str, /, **fields: object) -> None:
     if name not in _CATALOG:
         raise ValueError(
             f"uncataloged named event {name!r}: add it to NamedEvent (ADR-0020) before emitting it"
+        )
+    declared = FIELDS.get(NamedEvent(name))
+    if declared is not None and set(fields) != declared:
+        raise ValueError(
+            f"named event {name!r} declares fields {sorted(declared)} "
+            f"but was given {sorted(fields)}: change FIELDS (ADR-0020) or the call site"
         )
     _log.info(str(name), **fields)
 

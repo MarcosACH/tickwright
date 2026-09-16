@@ -31,3 +31,15 @@ def test_every_catalog_member_is_a_dotted_lowercase_name() -> None:
     for event in NamedEvent:
         assert event.value == event.value.lower()
         assert "." in event.value
+
+
+def test_a_field_set_that_differs_from_the_declared_one_raises_rather_than_emitting() -> None:
+    # A declared field set is the other half of the contract (#338): a field
+    # whose name or presence varies per call site never ships silently either.
+    with structlog.testing.capture_logs() as logs:
+        with pytest.raises(ValueError, match="engine.faulted") as excinfo:
+            named_event(NamedEvent.ENGINE_FAULTED, reason="boom")
+
+    assert "error" in str(excinfo.value)
+    assert "reason" in str(excinfo.value)
+    assert logs == []
