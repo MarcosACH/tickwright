@@ -362,6 +362,27 @@ def test_a_tick_that_changes_state_leaves_a_snapshot_without_stop() -> None:
     assert store.load_strategy_snapshot("alpha") == b"ticks=1"
 
 
+class OrderCountingStrategy(RecordingStrategy):
+    """A strategy whose state moves on every order event it receives."""
+
+    async def on_order_event(self, event: OrderEvent) -> None:
+        await super().on_order_event(event)
+        self.state = f"orders={len(self.order_events)}".encode()
+
+
+def test_an_order_event_that_changes_state_leaves_a_snapshot_without_stop() -> None:
+    bus = InMemoryBus()
+    store = SQLiteStore(":memory:")
+    host = _host(bus=bus, store=store)
+    alpha = OrderCountingStrategy("alpha")
+    host.register(alpha, symbols={"BTC"})
+    host.start()
+
+    asyncio.run(bus.publish(_order_placed("alpha")))
+
+    assert store.load_strategy_snapshot("alpha") == b"orders=1"
+
+
 class IncompatibleRestoreStrategy(RecordingStrategy):
     """A strategy whose code changed shape between runs: restore() rejects."""
 
