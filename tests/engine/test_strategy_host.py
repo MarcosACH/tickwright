@@ -27,12 +27,14 @@ from tickwright.domain import (
     OrderPlaced,
     OrderType,
     Side,
+    Signal,
     SignalId,
     Store,
     derive_cloid,
 )
 from tickwright.engine.cache import Cache
 from tickwright.engine.strategy_host import StrategyHost
+from tickwright.strategies import SingleShotLimitStrategy
 
 
 def _host(
@@ -381,6 +383,44 @@ def test_an_order_event_that_changes_state_leaves_a_snapshot_without_stop() -> N
     asyncio.run(bus.publish(_order_placed("alpha")))
 
     assert store.load_strategy_snapshot("alpha") == b"orders=1"
+
+
+def test_a_single_shot_strategy_killed_after_firing_does_not_fire_again() -> None:
+    """The #348 shape end to end at the host seam: life one fires and dies with
+    no ``stop()``. Life two, over the same store, restores the fired state and
+    places nothing on its first tick."""
+    store = SQLiteStore(":memory:")
+    clock = ManualClock()
+
+    def life() -> tuple[EventBus, list[Signal]]:
+        bus = InMemoryBus()
+        host = _host(bus=bus, clock=clock, store=store)
+        shooter = SingleShotLimitStrategy(
+            strategy_id="shooter",
+            bus=bus,
+            clock=clock,
+            side=Side.BUY,
+            quantity=Decimal("0.5"),
+            price=Decimal("41000"),
+        )
+        host.register(shooter, symbols={"BTC"})
+        signals: list[Signal] = []
+
+        async def record(signal: Signal) -> None:
+            signals.append(signal)
+
+        bus.subscribe(Signal, record)
+        host.start()
+        return bus, signals
+
+    first_bus, first_signals = life()
+    asyncio.run(first_bus.publish(_tick("BTC", ts=1_000)))
+    assert len(first_signals) == 1  # life one fired, then the process died
+
+    second_bus, second_signals = life()
+    asyncio.run(second_bus.publish(_tick("BTC", ts=2_000, trade_id="b", seq=2)))
+
+    assert second_signals == []
 
 
 class IncompatibleRestoreStrategy(RecordingStrategy):
