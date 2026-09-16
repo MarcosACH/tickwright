@@ -11,7 +11,13 @@ the fill history is read by the ack's oid, and the fill heals the saga.
 import asyncio
 from decimal import Decimal
 
-from hyperliquid_fakes import TEST_SIGNING_KEY, FakeExchangeApi
+from hyperliquid_fakes import (
+    TEST_SIGNING_KEY,
+    FakeExchangeApi,
+    fill_entry,
+    filled_response,
+    request_type,
+)
 from ledgers import checkpointer
 from pydantic import SecretStr
 
@@ -25,10 +31,15 @@ from tickwright.domain import (
     OrderEvent,
     OrderFilled,
     OrderLive,
+    OrderPlaced,
     OrderRejected,
     OrderState,
+    OrderSubmitted,
     OrderType,
+    PlaceSignal,
     Side,
+    TimeInForce,
+    derive_cloid,
 )
 from tickwright.engine.execution import ExecutionManager
 from tickwright.engine.reconcile import ReconcileConfig, Reconciler
@@ -76,23 +87,8 @@ def _acked_saga() -> Order:
     return order
 
 
-def _fill_row(*, oid: int, tid: int, sz: str) -> dict:
-    return {
-        "coin": "BTC",
-        "px": "43250.0",
-        "sz": sz,
-        "side": "B",
-        "time": ACK_MS + 5_000,
-        "startPosition": "0.0",
-        "dir": "Open Long",
-        "closedPnl": "0.0",
-        "hash": "0x" + "00" * 32,
-        "oid": oid,
-        "crossed": True,
-        "fee": "0.0",
-        "feeToken": "USDC",
-        "tid": tid,
-    }
+FILL_MS = ACK_MS + 5_000
+"""When the venue filled the order: after the ack, inside the windowed read."""
 
 
 def _make_exchange(
@@ -118,8 +114,8 @@ def test_a_fill_behind_a_dropped_record_heals_the_saga_instead_of_rejecting_it()
             {
                 "orderStatus": {"status": "unknownOid"},
                 "userFillsByTime": [
-                    _fill_row(oid=90, tid=555, sz="1.0"),
-                    _fill_row(oid=91, tid=556, sz="0.5"),
+                    fill_entry(oid=90, tid=555, px="43250.0", sz="1.0", time=FILL_MS),
+                    fill_entry(oid=91, tid=556, px="43250.0", sz="0.5", time=FILL_MS),
                 ],
             }
         )
@@ -156,3 +152,83 @@ def test_a_fill_behind_a_dropped_record_heals_the_saga_instead_of_rejecting_it()
     assert recovered.cum_qty == Decimal("0.5")
     assert [type(e) for e in events] == [OrderFilled]
     assert not any(isinstance(e, OrderRejected) for e in events)
+
+
+def test_an_order_that_filled_on_placement_is_healed_by_its_oid_once_the_record_is_gone() -> None:
+    # Issue #328. The order fills on placement, but the fills read right after
+    # dies in transport. By the time reconcile looks, the venue has dropped the
+    # order record (about 2000 later orders). The saga must still hold the oid
+    # the placement gave it, so the fill history is read by that oid and the
+    # fill lands. Before the fix the saga sat SUBMITTED with no oid, reconcile
+    # read `unknownOid` as "never landed", and the fill was lost.
+    signal = PlaceSignal(
+        ts_event=ACK_MS * 1_000_000,
+        ts_init=ACK_MS * 1_000_000,
+        strategy_id="live",
+        symbol="BTC",
+        seq=1,
+        side=Side.BUY,
+        quantity=Decimal("0.5"),
+        order_type=OrderType.LIMIT,
+        time_in_force=TimeInForce.IOC,
+        price=Decimal("43250"),
+    )
+    cloid = derive_cloid(signal.signal_id)
+
+    async def main() -> tuple[SQLiteStore, list[OrderEvent], FakeExchangeApi]:
+        bus = InMemoryBus()
+        clock = ManualClock(start_ns=ACK_MS * 1_000_000)
+        post = FakeExchangeApi(
+            {
+                "order": filled_response(oid=91, total_sz="0.5", avg_px="43250.0"),
+                # The read right after placement is the whole recent history.
+                # It dies. The read reconcile makes is windowed from the ack
+                # time, and by then the record is gone.
+                "userFills": ConnectionError("connection refused"),
+                "orderStatus": {"status": "unknownOid"},
+                "userFillsByTime": [
+                    fill_entry(oid=91, tid=556, px="43250.0", sz="0.5", time=FILL_MS)
+                ],
+            }
+        )
+        exchange = _make_exchange(post, bus, clock)
+        store = SQLiteStore(":memory:")
+        checks = checkpointer(store, clock=clock)
+        manager = ExecutionManager(bus=bus, exchange=exchange, checkpointer=checks)
+        bus.subscribe(ExecutionReport, manager.on_execution_report)
+        events: list[OrderEvent] = []
+
+        async def collect(event: OrderEvent) -> None:
+            events.append(event)
+
+        bus.subscribe(OrderEvent, collect)
+        await manager.on_signal(signal)
+
+        placed = store.get_order(cloid)
+        assert placed is not None
+        assert (placed.state, placed.venue_oid) == (OrderState.LIVE, "91")
+        assert placed.acked_ts_ns == ACK_MS * 1_000_000
+
+        reconciler = Reconciler(
+            bus=bus, clock=clock, exchange=exchange, cache=checks.cache, config=ReconcileConfig()
+        )
+        assert await reconciler.reconcile_open_orders() is True
+        return store, events, post
+
+    store, events, post = asyncio.run(main())
+
+    # Reconcile read the fill history by the placement's oid, from the ack time
+    # less the skew allowance, and found the fill.
+    assert [request_type(url, q) for url, q in post.requests] == [
+        "order",
+        "userFills",
+        "orderStatus",
+        "userFillsByTime",
+    ]
+    assert post.requests[3][1]["startTime"] == ACK_MS - 60_000
+
+    healed = store.get_order(cloid)
+    assert healed is not None
+    assert healed.state is OrderState.FILLED
+    assert healed.cum_qty == Decimal("0.5")
+    assert [type(e) for e in events] == [OrderPlaced, OrderSubmitted, OrderLive, OrderFilled]

@@ -45,6 +45,16 @@ ADR-0009).
    an oid but no ack time is one that never checkpointed as `LIVE`. That case has no bound to
    read from, and it falls back to `userFills`, the venue's last 2000 fills.
    A failed fills read is the failure, never an empty view (inv 1). [#242]**)**
+   **(Amended by #328 — the ack is whichever placement answer carries an oid:**
+   Hyperliquid answers a placement with `resting` or `filled`, and both carry the venue's oid.
+   Only `resting` used to publish the `LIVE` ack. A `filled` answer went straight to the fills
+   read, so the saga never kept the oid. If that read failed, the saga sat `SUBMITTED` with no
+   oid. Once the venue dropped the record, the cross-check above had no key, and the inflight
+   budget resolved a filled order `FAILED`. Now a `filled` answer publishes the same `LIVE` ack
+   first, then its fills. `LIVE` means the venue acked the order with its oid, not that it
+   rested. A failed fills read leaves the saga `LIVE`, where the open-order cadence heals it by
+   the oid within one slow cycle. The adapter does not retry the read. Reconcile owns retries
+   (ADR-0008). The paper venue has no oid and keeps its direct `SUBMITTED → FILLED` path. [#328]**)**
 3. **Grace window.** An order must be **continuously absent across the grace window** (default
    ~90s ≈ 3 missed slow cycles) before it is ghost-resolved. Plus a **recent-order protection
    window** (default ~30s ≈ one slow cycle): skip ghost evaluation for orders whose last saga
