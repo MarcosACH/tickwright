@@ -212,10 +212,13 @@ def test_slow_consumer_gets_only_the_latest_tick_per_symbol_with_one_lagged_per_
         ("BTC", Decimal("102")),
         ("ETH", Decimal("50")),
     ]
-    # Exactly one drop, named per ADR-0020/0023, identifying the dropped tick.
+    # Exactly one drop, named per ADR-0020/0023, identifying the dropped tick
+    # by its weak key: a live trade's is ``{symbol}:{tid}`` (ADR-0027).
     assert len(lagged) == 1
     assert lagged[0]["symbol"] == "BTC"
-    assert lagged[0]["dropped_trade_id"] == "2"
+    assert lagged[0]["stream"] == "MarketTick"
+    assert lagged[0]["event_id"] == "BTC:2"
+    assert "dropped_trade_id" not in lagged[0]
 
 
 def test_a_publish_that_raises_tears_the_socket_reader_down_with_it() -> None:

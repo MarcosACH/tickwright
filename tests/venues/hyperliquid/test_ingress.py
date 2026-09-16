@@ -192,6 +192,8 @@ def test_backpressure_keeps_only_the_latest_per_symbol_and_names_each_drop() -> 
     superseded by BTC 102 (one drop → one feed.lagged), ETH 50 is kept. This is
     the slow-consumer contract of ADR-0023, exercised without a WebSocket."""
 
+    superseded = _tick("BTC", "101", "2")
+
     async def main() -> tuple[list[MarketTick], list[EventDict]]:
         bus = InMemoryBus()
         seen: list[MarketTick] = []
@@ -212,7 +214,7 @@ def test_backpressure_keeps_only_the_latest_per_symbol_and_names_each_drop() -> 
             ingress.offer(_tick("BTC", "100", "1"))
             await asyncio.wait_for(first_delivered.wait(), timeout=2)
             # The publish is stuck in the slow consumer; fold three more in.
-            ingress.offer(_tick("BTC", "101", "2"))
+            ingress.offer(superseded)
             ingress.offer(_tick("BTC", "102", "3"))  # supersedes 101 → one drop
             ingress.offer(_tick("ETH", "50", "4"))
             release.set()
@@ -235,4 +237,7 @@ def test_backpressure_keeps_only_the_latest_per_symbol_and_names_each_drop() -> 
     assert len(lagged) == 1
     assert lagged[0]["symbol"] == "BTC"
     assert lagged[0]["stream"] == "MarketTick"
-    assert lagged[0]["dropped_trade_id"] == "2"
+    # One spelling for both streams: the trade drop carries the same key the
+    # mark drop does, and the trade-only field is gone (#229).
+    assert lagged[0]["event_id"] == superseded.event_id
+    assert "dropped_trade_id" not in lagged[0]
