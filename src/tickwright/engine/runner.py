@@ -497,39 +497,40 @@ class Engine:
         await asyncio.gather(*self._cadence_tasks, return_exceptions=True)
 
     async def _stop_exchange(self) -> None:
-        """Release the venue, then end the long-lived half this runner supervises
-        — the ``_stop_feed`` shape one seam over, and one membership entry for
-        the same reason: a seam whose loop the runner owns is still *one* seam.
-
-        Cancelled and **waited out**, which the feed's task is not — and the
-        difference is *how each loop ends*, not what it publishes (both do).
-        ``MarketFeed.stop`` is a cooperative signal a live feed's loop reads and
-        returns on, so the cancel behind it is belt-and-braces; the generator has
-        no such signal, so cancellation is the only thing that ends it and the
-        wait is the only thing that proves it did. That proof is what this slot
-        owes the bus drain below it: anything still publishing keeps raising the
-        drain's high-water mark, so cancelling without waiting would leave the
-        guarantee to whichever turn the loop happened to be on. Exceptions are
-        absorbed here rather than raised: a task that died of its own accord
-        already reached the ``TaskGroup``, which is what faulted the run and is
-        where that failure belongs — reporting it a second time out of the
-        teardown would name a hook for a refusal that happened long before it.
-        On the fault path the group already cancelled it, and cancelling a done
-        task is a no-op.
-        """
-        await self._exchange.stop()
-        if self._exchange_task is not None:
-            self._exchange_task.cancel()
-            await asyncio.gather(self._exchange_task, return_exceptions=True)
+        """Release the venue, then end the long-lived half this runner supervises."""
+        await self._stop_supervised(self._exchange.stop, self._exchange_task)
 
     async def _stop_feed(self) -> None:
-        """Ask the feed to stop, then cancel a read loop that outlives the ask
-        (a live feed mid-read never returns on its own). On the fault path the
-        TaskGroup already cancelled the task; the venue connection still needs
-        the explicit ``stop`` so a live WS cannot leak."""
-        await self._feed.stop()
-        if self._feed_task is not None and not self._feed_task.done():
-            self._feed_task.cancel()
+        """Release the feed, then end the long-lived half this runner supervises."""
+        await self._stop_supervised(self._feed.stop, self._feed_task)
+
+    @staticmethod
+    async def _stop_supervised(
+        stop: Callable[[], Awaitable[None]], task: asyncio.Task[None] | None
+    ) -> None:
+        """Release one seam, then cancel its supervised ``run()`` and wait it out.
+
+        One shape for both seams (#277). The seam's ``stop()`` is a request.
+        Whether the loop returns on it is the adapter's own: a live ``WsSession``
+        does, a ``ReplayFeed`` never does, and a third adapter may do either. The
+        cancel is what ends the loop and the wait is what proves it ended. That
+        proof is what this slot owes the ``bus.drain`` below it. Anything still
+        publishing keeps raising the drain's high-water mark, so cancelling
+        without waiting would leave the guarantee to whichever turn the loop
+        happened to be on.
+
+        Exceptions are absorbed here rather than raised. A task that died of its
+        own accord already reached the ``TaskGroup``, which is what faulted the
+        run and is where that failure belongs. Reporting it a second time out of
+        the teardown would name a hook for a refusal that happened long before
+        it. On the fault path the group already cancelled the task, and
+        cancelling a done task is a no-op. ``stop()`` still runs there so a live
+        socket cannot leak.
+        """
+        await stop()
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
     @staticmethod
     async def _run_step(step: Callable[[], Awaitable[None] | None]) -> None:
