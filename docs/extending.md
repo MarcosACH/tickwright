@@ -59,6 +59,9 @@ rather than reconstructing it from a stream it never saw. The corollary discipli
 
 - **Keep state minimal and reconstructible.** Version your snapshot payload (`{"version": 1, …}`)
   and reject unknown shapes in `restore()` — the engine turns that into a clean start.
+- **Keep `snapshot()` cheap.** The engine calls it after every `on_tick` and `on_order_event`,
+  and writes it to the store when the bytes changed (ADR-0016). A state that moves on every tick
+  costs one store write per tick.
 - **Signal ids must be deterministic and gap-free**, driven only by the engine-set `seq` — replay or
   restart must produce the same `signal_id`, or idempotent recovery breaks (ADR-0006).
 - **Handler exceptions are contained, not fatal.** The `StrategyHost` catches them, emits a

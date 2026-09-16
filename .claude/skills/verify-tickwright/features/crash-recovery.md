@@ -29,7 +29,9 @@ Preconditions:
   `$V await crash first --exit`, `$V dump crash first`.
 - **Check life one.** Run `$V check crash first crash-durable --exit --expect -9`,
   `$V check crash first crash-durable --sql "select signed_size from positions" --expect 0.500`,
-  `$V check crash first crash-durable --sql "select count(*) from strategy_snapshots" --expect 0`.
+  `$V check crash first crash-durable --sql "select count(*) from strategy_snapshots" --expect 1`.
+  The snapshot row is there because the host saves state after each callback that changes it
+  (ADR-0016, #348), not only on a graceful stop.
 - **Life two, restart.** Run the same `start` line with life `second`,
   `$V await crash second --event engine.feed_started`, wait two seconds,
   `$V signal crash second TERM`, `$V await crash second --exit`, `$V dump crash second`.
@@ -39,19 +41,9 @@ Preconditions:
   `$V check crash second crash-converge --event order.placed --expect 0`,
   `$V check crash second crash-seq --sql "select count(*) from orders where signal_id='shooter:BTC:1'" --expect 1`,
   `$V check crash second crash-seq --exit --expect 0`.
-- **Report.** Run `$V report crash`. Expected verdict today: `FAIL (3 of 8 checks failed)`, all
-  three on `crash-converge`. See Gotchas. When the engine snapshots strategies on a cadence, the
-  verdict becomes `PASS`.
+- **Report.** Run `$V report crash`. Expected verdict: `PASS`.
 - **Cleanup.** Run `$V cleanup crash`.
 
 ## Gotchas
 
-- **Known FAIL, tracked as #348.** After a `KILL` the shipped `single_shot_market` fires again
-  on restart. Life two shows `order.placed` for `shooter:BTC:2`, two filled orders, and
-  `positions` at `1.000`. Snapshots are only taken on graceful stop and a crash leaves none, so
-  the strategy's `fired` flag is lost. The saga is correct (no order is filled twice) and the seq
-  is correct (`shooter:BTC:2`, never `:1` again). ADR-0016 names a "periodic + on-stop"
-  snapshot cadence that the runner does not implement. When #348 is fixed, the check flips to
-  PASS and this note goes away.
-- The verification strategies in `portfolio-strategies.md` have the same property.
 - `KILL` leaves the pid file. `cleanup` handles it.

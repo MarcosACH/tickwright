@@ -38,6 +38,15 @@ store, cadence only bounds how much *other* strategy state (indicators, counters
 reconstructed after a crash; `extending.md` tells authors to keep state minimal and
 reconstructible.
 
+**(Amended by [#348](https://github.com/MarcosACH/tickwright/issues/348): the cadence is
+per change, not periodic.** The `StrategyHost` saves a strategy's `snapshot()` after every
+`on_tick` and `on_order_event` whose bytes differ from the last save, and again on `stop()`. There
+is no timer and no config. A periodic cadence left a window: a single-shot strategy that fired and
+was killed before the next tick fired again on restart and doubled the position. Cost is one
+`snapshot()` call per callback and a store write only when the state moved, so a strategy whose
+state moves on every tick pays one write per tick. That is the price of durability for that
+strategy, and `extending.md` still tells authors to keep state small.**)**
+
 ## Restore failure is not an invariant violation
 
 An unreadable/incompatible snapshot (the strategy's code changed shape between runs) must not
