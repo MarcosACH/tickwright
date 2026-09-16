@@ -34,8 +34,10 @@ def named_event(name: NamedEvent | str, /, **fields: object) -> None:
         raise ValueError(
             f"uncataloged named event {name!r}: add it to NamedEvent (ADR-0020) before emitting it"
         )
-    declared = FIELDS.get(NamedEvent(name))
-    if declared is not None and set(fields) != declared:
+    # Indexed, not ``.get``: every member is declared (``test_catalog``), so a
+    # missing entry is a defect and never a reason to emit unchecked.
+    declared = FIELDS[NamedEvent(name)]
+    if set(fields) != declared:
         raise ValueError(
             f"named event {name!r} declares fields {sorted(declared)} "
             f"but was given {sorted(fields)}: change FIELDS (ADR-0020) or the call site"

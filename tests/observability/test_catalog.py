@@ -50,3 +50,17 @@ def test_a_field_set_that_differs_from_the_declared_one_raises_rather_than_emitt
     assert "error" in str(excinfo.value)
     assert "reason" in str(excinfo.value)
     assert logs == []
+
+
+def test_a_member_with_no_declared_field_set_raises_rather_than_emitting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The runtime check holds the same line the test above draws. A member
+    # that slipped past declaration must not fall back to the unchecked emit
+    # #338 removed.
+    monkeypatch.delitem(FIELDS, NamedEvent.ORDER_PLACED)
+    with structlog.testing.capture_logs() as logs:
+        with pytest.raises(KeyError):
+            named_event(NamedEvent.ORDER_PLACED)
+
+    assert logs == []
