@@ -21,6 +21,15 @@ symbols** (the `{symbol}` in the id is routing, not a second counter scope), so 
 single max over the strategy's records. This makes seq-safety robust even if the strategy
 snapshot is stale.
 
+**(Amended by [#233](https://github.com/MarcosACH/tickwright/issues/233): the read goes through
+the `Cache`.** The high-water is still the saga store's, not the snapshot's. What changed is where
+the bytes are read. The boot already deserializes every saga once, in `cache.rebuild()` (ADR-0024
+step 2). The `StrategyHost` used to read `Store.all_orders()` a second time at step 6, which paid
+the same mass read twice on the recovery path. It now folds over `Cache.all_orders()`, the
+projection that rebuild filled. The startup reconciliation between the two steps only transitions
+sagas the cache already holds and never touches `signal_id` or `cancel_signal_id`, so the fold sees
+the same records the store read would.**)**
+
 ## Cadence
 
 The engine snapshots strategy state on a configurable trigger (periodic + on `stop`, optionally
