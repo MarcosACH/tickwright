@@ -641,6 +641,49 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0 if verdict(args.run_id)[0] == "PASS" else 1
 
 
+def all_runs() -> list[str]:
+    if not VERIFY_HOME.exists():
+        return []
+    return sorted(p.name for p in VERIFY_HOME.iterdir() if (p / "evidence").is_dir())
+
+
+def cmd_runs(_: argparse.Namespace) -> int:
+    """One line per run: id, start, feature, sha, verdict. Newest last."""
+    rows = []
+    for run_id in all_runs():
+        data = read_run_json(run_id)
+        word, failed, total = verdict(run_id)
+        summary = word if not total else f"{word} {failed}/{total}"
+        rows.append(
+            (
+                data.get("started_at", ""),
+                f"{run_id:<14} {data.get('started_at', '?')[:19]}  {(data.get('feature') or '-'):<22} "
+                f"{data.get('sha', '?')[:7]}  {summary}",
+            )
+        )
+    for _, line in sorted(rows):
+        print(line)
+    if not rows:
+        print("no runs")
+    return 0
+
+
+def cmd_prune(args: argparse.Namespace) -> int:
+    """Delete the oldest runs past ``--keep`` per feature. Evidence goes with them,
+    which is the one verb here that removes proof, so it says what it removed."""
+    by_feature: dict[str, list[tuple[str, str]]] = {}
+    for run_id in all_runs():
+        data = read_run_json(run_id)
+        by_feature.setdefault(data.get("feature") or "-", []).append(
+            (data.get("started_at", ""), run_id)
+        )
+    for feature, runs in by_feature.items():
+        for _, run_id in sorted(runs)[: max(0, len(runs) - args.keep)]:
+            shutil.rmtree(run_dir(run_id))
+            print(f"removed {run_id} ({feature})")
+    return 0
+
+
 def cmd_cloid(args: argparse.Namespace) -> int:
     from tickwright.domain import derive_cloid
 
@@ -819,6 +862,12 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("report", help="write evidence/REPORT.md: verdict, fails, alarms, exits")
     p.add_argument("run_id")
     p.set_defaults(fn=cmd_report)
+
+    sub.add_parser("runs", help="one line per run with its verdict").set_defaults(fn=cmd_runs)
+
+    p = sub.add_parser("prune", help="delete the oldest runs past --keep per feature")
+    p.add_argument("--keep", type=int, default=5)
+    p.set_defaults(fn=cmd_prune)
 
     p = sub.add_parser("cloid", help="the cloid a signal_id maps to")
     p.add_argument("signal_id", help="<strategy_id>:<symbol>:<seq>")

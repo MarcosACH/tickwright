@@ -241,3 +241,40 @@ class TestReport:
 
         assert code == 1
         assert out.startswith("# r1: (no feature) NO CHECKS")
+
+
+class TestRuns:
+    def test_runs_lists_every_run_with_its_verdict(
+        self, helper: ModuleType, run: Callable[..., tuple[int, str]]
+    ) -> None:
+        _run_with_one_fail(helper, run)
+        run("init", "r2", "--feature", "kill-switch")
+        _finished_life(helper, "r2", "arm", exit_code=0, events=[], orders=[])
+        run("check", "r2", "arm", "ks-trip", "--exit", "--expect", "0")
+        run("init", "r3")
+
+        _, out = run("runs")
+        rows = {line.split()[0]: line for line in out.splitlines() if line.startswith("r")}
+
+        assert "crash-recovery" in rows["r1"] and "FAIL 1/2" in rows["r1"]
+        assert "kill-switch" in rows["r2"] and "PASS 0/1" in rows["r2"]
+        assert "NO CHECKS" in rows["r3"]
+
+    def test_prune_keeps_the_newest_n_runs_per_feature(
+        self, helper: ModuleType, run: Callable[..., tuple[int, str]]
+    ) -> None:
+        for run_id, started in (
+            ("a1", "2026-01-01T00:00:00+00:00"),
+            ("a2", "2026-01-02T00:00:00+00:00"),
+            ("a3", "2026-01-03T00:00:00+00:00"),
+        ):
+            run("init", run_id, "--feature", "kill-switch")
+            data = helper.read_run_json(run_id)
+            data["started_at"] = started
+            helper.write_run_json(run_id, data)
+        run("init", "b1", "--feature", "ghost-reconcile")
+
+        run("prune", "--keep", "2")
+        left = sorted(p.name for p in helper.VERIFY_HOME.iterdir())
+
+        assert left == ["a2", "a3", "b1"]
