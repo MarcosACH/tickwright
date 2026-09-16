@@ -22,12 +22,10 @@ sees that ``stop`` carries a claim, never that the claim covers every clause
 here. Read it as "nobody forgot this member entirely", not "this member is
 fully asserted" — widening a member is still a reviewer's job.
 
-The same gate serves a closed ``Enum`` the engine branches on. A member of
-``DivergenceField`` that no classifier produces fails as silently as a Protocol
-member no test claims, and it did once (#194, three Tier-2 figures). The claim
-there is the test that makes a classifier produce a finding carrying the
-member. The limit is the same too: the gate sees that the member is produced,
-never that every rule that branches on it has a case of its own.
+A closed ``Enum`` the engine branches on is not claimed this way. A name is
+not a proof that the named test produces the member, so ``DivergenceField``
+is walked like the named-event catalog instead, one producer per member
+(``tests/engine/test_reconcile_findings.py``, #303).
 
 Explicit assertion messages throughout: this module is not a test module, so
 pytest does not rewrite its asserts and a bare comparison would fail blind.
@@ -35,31 +33,26 @@ pytest does not rewrite its asserts and a bare comparison would fail blind.
 
 import ast
 from collections.abc import Mapping
-from enum import Enum
 from pathlib import Path
-from typing import get_protocol_members
+
+from closed_sets import assert_covers_exactly
 
 
 def assert_every_member_is_claimed(
-    closed_set: type, claims: Mapping[str, str], *, suite: Path
+    protocol: type, claims: Mapping[str, str], *, suite: Path
 ) -> None:
-    """Assert ``claims`` names an existing test in ``suite`` for every member of ``closed_set``.
+    """Assert ``claims`` names an existing test in ``suite`` for every ``protocol`` member.
 
-    ``closed_set`` is a Protocol or an ``Enum``. ``claims`` maps each member to
-    the test that asserts what that member does for this adapter, or that
-    makes a classifier produce it. Both directions fail loudly: an unclaimed
-    member (the stale-list failure the guard exists for) and a claim naming a
-    test that was renamed or deleted out from under it.
+    ``claims`` maps a Protocol member to the test that asserts what that member
+    does for this adapter. Both directions fail loudly: an unclaimed member (the
+    stale-list failure the guard exists for) and a claim naming a test that was
+    renamed or deleted out from under it.
     """
-    members = _members(closed_set)
-    unclaimed = members - set(claims)
-    assert not unclaimed, (
-        f"{closed_set.__name__} members with no claim in {suite}: {sorted(unclaimed)} — "
-        f"add the test that asserts what each does here, then name it in the claims map"
-    )
-    stale = set(claims) - members
-    assert not stale, (
-        f"claims in {suite} for members {closed_set.__name__} no longer has: {sorted(stale)}"
+    assert_covers_exactly(
+        protocol,
+        claims,
+        what=f"the claims in {suite}",
+        hint="add the test that asserts what each does here, then name it in the claims map",
     )
 
     declared = _test_names(suite)
@@ -67,13 +60,6 @@ def assert_every_member_is_claimed(
     assert not dangling, (
         f"claims in {suite} naming tests that do not exist there: {sorted(dangling.items())}"
     )
-
-
-def _members(closed_set: type) -> frozenset[str]:
-    """The member names of a Protocol or an ``Enum``, read the way each is walked."""
-    if issubclass(closed_set, Enum):
-        return frozenset(closed_set.__members__)
-    return get_protocol_members(closed_set)
 
 
 def _test_names(suite: Path) -> set[str]:
