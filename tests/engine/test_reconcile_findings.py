@@ -783,6 +783,103 @@ def test_one_broken_venue_figure_is_one_finding_naming_that_figure(
     assert per_symbol == [(field, "BTC")]
 
 
+def _agreeing_book() -> tuple[VenueAccountState, LedgerReading]:
+    """One BTC leg both sides agree on, at every figure of both grains."""
+    state = _venue(
+        equity="110000",
+        free_margin="50000",
+        positions=(_position("BTC", signed_size="0.5", notional="60000", unrealized_pnl="10000"),),
+    )
+    reading = LedgerReading(
+        account=AccountView(
+            cash=Decimal("100000"),
+            equity=Decimal("110000"),
+            total_margin_used=Decimal("0"),
+            total_maintenance_margin=Decimal("0"),
+            free_margin=Decimal("50000"),
+            effective_leverage=None,
+        ),
+        rows={"BTC": _row("BTC", net="0.5", unrealized_pnl="10000", notional="60000")},
+        mark_observed={"BTC": _NOW_NS},
+        last_fills={},
+    )
+    return state, reading
+
+
+@pytest.mark.parametrize(
+    ("field", "attribute"),
+    [
+        (DivergenceField.EQUITY, "equity"),
+        (DivergenceField.FREE_MARGIN, "free_margin"),
+        (DivergenceField.MAINTENANCE_MARGIN, "cross_maintenance_margin"),
+    ],
+)
+def test_one_broken_venue_account_figure_is_one_finding_naming_that_figure(
+    field: DivergenceField, attribute: str
+) -> None:
+    """Each account-grain figure is read off its own venue attribute and no other.
+
+    The per-symbol case above, one grain up. The account grain is one roster
+    of (field, ledger read, venue read) triples too. Nudge one venue figure on
+    an agreeing book and expect exactly one account-grain Tier-2 finding,
+    carrying that figure's name.
+
+    Only the Tier-2 account grain is asserted. The venue's cash line is
+    implied from equity minus open PnL (ADR-0040 §7), so the equity nudge
+    also moves cash, and that is the Tier-1 arm doing its job.
+    """
+    state, reading = _agreeing_book()
+    state = replace(state, **{attribute: getattr(state, attribute) + Decimal("1")})
+
+    findings = ReconcileFindings.classify(
+        state, reading, band=ValuationBand(), now_ns=_NOW_NS, fills_before=0
+    )
+
+    account_grain = [
+        (d.field, d.ledger, d.venue)
+        for d in findings.divergences
+        if d.symbol is None and d.tier is DivergenceTier.TIER_2
+    ]
+    assert account_grain == [
+        (field, getattr(state, attribute) - Decimal("1"), getattr(state, attribute))
+    ]
+
+
+def test_every_account_figure_the_pass_could_not_compute_counts_once_as_unvalued() -> None:
+    """The count ranges over the same roster the classification does.
+
+    All three account-grain figures unknown on one pass: equity and free
+    margin waiting on a mark, and the cross maintenance Σ on a rate. None of
+    the three is reported, since an unknown is not a disagreement (ADR-0041
+    §6), and each is counted once, so the pass says three figures went
+    unlooked-at and not one. The per-symbol figures stay known so the count is
+    the account grain's alone.
+    """
+    state, agreeing = _agreeing_book()
+    reading = LedgerReading(
+        account=replace(agreeing.account, equity=None, free_margin=None),
+        rows={
+            "BTC": _row(
+                "BTC",
+                net="0.5",
+                unrealized_pnl="10000",
+                notional="60000",
+                maintenance_margin=None,
+                leverage=_CROSS_1X,
+            )
+        },
+        mark_observed=agreeing.mark_observed,
+        last_fills={},
+    )
+
+    findings = ReconcileFindings.classify(
+        state, reading, band=ValuationBand(), now_ns=_NOW_NS, fills_before=0
+    )
+
+    assert [d for d in findings.divergences if d.symbol is None] == []
+    assert findings.unvalued == 3
+
+
 def _fee_taken_reading(*, net: str, last_fills: dict[str, int]) -> LedgerReading:
     """The ledger after a fill the venue body was serialised before.
 
