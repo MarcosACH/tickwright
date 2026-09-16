@@ -31,11 +31,11 @@ def _tick(symbol: str, price: str, trade_id: str) -> MarketTick:
     )
 
 
-def _mark(symbol: str, price: str) -> MarkTick:
+def _mark(symbol: str, price: str, ts_event: int = 1_700_000_000_000_000_000) -> MarkTick:
     return MarkTick(
         symbol=symbol,
         price=Decimal(price),
-        ts_event=1_700_000_000_000_000_000,
+        ts_event=ts_event,
         ts_init=1_700_000_000_000_000_000,
     )
 
@@ -137,6 +137,10 @@ def test_a_superseded_mark_is_dropped_and_named_like_any_other_stale_tick() -> N
     latest-value by nature, so an unpublished one is the most droppable thing
     the feed carries. The drop is still named, never silent."""
 
+    # A live mark's weak key is its symbol and receipt instant, so each mark
+    # gets its own instant: the record must name the one that was dropped.
+    superseded = _mark("BTC", "101", ts_event=1_700_000_000_000_000_001)
+
     async def main() -> tuple[list[MarkTick], list[EventDict]]:
         bus = InMemoryBus()
         seen: list[MarkTick] = []
@@ -156,8 +160,8 @@ def test_a_superseded_mark_is_dropped_and_named_like_any_other_stale_tick() -> N
             drain = asyncio.create_task(ingress.drain())
             ingress.offer(_mark("BTC", "100"))
             await asyncio.wait_for(first_delivered.wait(), timeout=2)
-            ingress.offer(_mark("BTC", "101"))
-            ingress.offer(_mark("BTC", "102"))  # supersedes 101 → one drop
+            ingress.offer(superseded)
+            ingress.offer(_mark("BTC", "102", ts_event=1_700_000_000_000_000_002))  # one drop
             release.set()
 
             async def rest_published() -> None:
@@ -175,13 +179,12 @@ def test_a_superseded_mark_is_dropped_and_named_like_any_other_stale_tick() -> N
     assert len(lagged) == 1
     # The whole record, not just the symbol: this catalog entry is the *only*
     # place a conflation drop is observable (ADR-0020), so its field set is the
-    # operator contract. ``stream`` is what tells an operator which of the two
-    # market-data streams thinned, and a mark carries no ``dropped_trade_id``
-    # to report — pinning both is what would catch a mark drop that started
-    # claiming a trade's id, or a ``stream`` silently lost.
+    # operator contract. ``stream`` says which of the two market-data streams
+    # thinned. ``event_id`` names the dropped value by the one weak key both
+    # streams define (#229), so a mark drop is as identifiable as a trade drop.
     assert lagged[0]["symbol"] == "BTC"
     assert lagged[0]["stream"] == "MarkTick"
-    assert lagged[0]["dropped_trade_id"] is None
+    assert lagged[0]["event_id"] == superseded.event_id
 
 
 def test_backpressure_keeps_only_the_latest_per_symbol_and_names_each_drop() -> None:

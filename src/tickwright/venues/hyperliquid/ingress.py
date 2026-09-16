@@ -56,6 +56,7 @@ class ConflatingIngress:
             named_event(
                 NamedEvent.FEED_LAGGED,
                 symbol=dropped.symbol,
+                event_id=dropped.event_id,
                 # Only a trade has one, and a mark carries no id of its own — it
                 # is a latest-value, so there is nothing to identify but the
                 # symbol and the stream it was dropped from. Narrowed rather
