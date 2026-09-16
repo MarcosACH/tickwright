@@ -3,13 +3,17 @@
 A named event is a stable, documented name emitted as a structured record with
 an ``event`` field — distinct from free-text logs. The catalog (``NamedEvent``)
 is a contract: a state-affecting path with no named event is a defect, and a name
-outside the catalog raises rather than emitting a silent record. Emission rides
-structlog, so records are structured in production and capturable in tests via
-``structlog.testing.capture_logs``.
+outside the catalog raises rather than emitting a silent record. Each name
+declares its field set (``FIELDS``, #338), and a call whose fields differ raises
+the same way. Emission rides structlog, so records are structured in production
+and capturable in tests via ``structlog.testing.capture_logs``.
 
 Correlation ids (a per-process run id, a per-operation ``cloid``/``signal_id``/
 reconcile ``cycle``) are ambient ``ContextVar``s auto-injected into every record
-by the processor chain — never passed as event fields.
+by the processor chain. The engine never passes them as event fields. A venue
+adapter sits below the seam and cannot know which scope its caller bound, so
+where its record is about one order it names that ``cloid`` as a field of its
+own.
 """
 
 import structlog
