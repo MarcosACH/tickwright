@@ -63,19 +63,26 @@ Kafka, not the suite: `docker compose up -d kafka`, then `TICKWRIGHT_BUS=kafka u
 ### Closed sets are walked
 
 A closed set the engine branches on gets a coverage gate over its hand-written list. A member
-nobody answers for fails silently, and that has happened once (#194). There are four instances:
+nobody answers for fails silently, and that has happened once (#194). The rule is written once, in
+[`tests/_support/closed_sets.py`](tests/_support/closed_sets.py): the list must cover the set
+exactly, both ways, and the failure names the side. It reads a Protocol, an `Enum` or a `Literal`.
+The instances:
 
 - The observability catalog, walked by
   [`tests/observability/test_catalog_walk.py`](tests/observability/test_catalog_walk.py).
+- `DivergenceField`, walked the same way from `tests/engine/test_reconcile_findings.py`: one
+  producer per member, and the member found among what the pass measured.
 - The seam Protocols, claimed member by member through
   [`tests/_support/seam_claims.py`](tests/_support/seam_claims.py).
-- `DivergenceField`, claimed the same way from `tests/engine/test_reconcile_findings.py`.
 - The adapters `AppConfig` can select, each of which must answer every shared gate its seam owes.
   [`tests/_support/seam_answers.py`](tests/_support/seam_answers.py) reads the answers from the
   suites, and [`tests/app/test_seam_answers.py`](tests/app/test_seam_answers.py) holds the map
   (#303).
+- The bus and store backends `AppConfig` can select, whose shared suites drive every name in
+  `BUS_BACKENDS` and `STORE_BACKENDS`. The same test file checks both lists against the `Literal`.
 
-A new closed vocabulary that the engine reads by member gets the same treatment.
+A new closed vocabulary that the engine reads by member gets the same treatment. Prefer the
+catalog's shape, a producer per member, over a name per member: a name is not a proof.
 
 ### Skill evals (agent tooling, not the engine)
 
