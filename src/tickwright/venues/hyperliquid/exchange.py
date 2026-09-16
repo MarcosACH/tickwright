@@ -274,14 +274,7 @@ class HyperliquidExchange:
                 self._placed.pop(order.cloid, None)
                 self._action_rejected("place", order.cloid, message)
             case _Resting(venue_oid=venue_oid):
-                await self._bus.publish(
-                    self._status_report(
-                        cloid=order.cloid,
-                        symbol=order.symbol,
-                        status=OrderState.LIVE,
-                        venue_oid=venue_oid,
-                    )
-                )
+                await self._ack(order, venue_oid=venue_oid)
             case _Rejected(reason=reason):
                 # Venue-adjudicated refusal: REJECTED, never DENIED (ADR-0010) —
                 # the order was sent and judged, and the venue's reason rides along.
@@ -309,14 +302,7 @@ class HyperliquidExchange:
                 # venue drops the order record (ADR-0011 inv 2). So the ack goes
                 # out before the fills read. A read that fails then still leaves
                 # the oid on the saga for reconcile to heal by (#328).
-                await self._bus.publish(
-                    self._status_report(
-                        cloid=order.cloid,
-                        symbol=order.symbol,
-                        status=OrderState.LIVE,
-                        venue_oid=str(oid),
-                    )
-                )
+                await self._ack(order, venue_oid=str(oid))
                 # A failed fills read is already named as a *fills* read, never
                 # as this placement: the placement succeeded, and calling it a
                 # place failure would point triage at the wrong request. Emit
@@ -337,6 +323,21 @@ class HyperliquidExchange:
                 # defect ADR-0048 §4 catalogues. Checked by the type checker, so
                 # growing the union fails the build rather than a live order.
                 assert_never(unreachable)
+
+    async def _ack(self, order: PlaceOrder, *, venue_oid: str) -> None:
+        """Publish the venue's ack: the order is LIVE at ``venue_oid``.
+
+        Both placement answers that carry an oid come here, ``resting`` and
+        ``filled``. LIVE means acked with an oid, not rested (ADR-0011 inv 2).
+        """
+        await self._bus.publish(
+            self._status_report(
+                cloid=order.cloid,
+                symbol=order.symbol,
+                status=OrderState.LIVE,
+                venue_oid=venue_oid,
+            )
+        )
 
     def _action_rejected(self, request: str, cloid: str, reason: str) -> None:
         # The venue refused the whole action (bad nonce/signature, an action
