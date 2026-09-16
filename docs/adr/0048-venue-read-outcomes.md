@@ -52,6 +52,8 @@ The verdict on reaching the runner is the ordinary one: `except Exception` → `
 
 **The cost is stated plainly:** a foreign-token fee kills a running process holding positions. That is intended. The condition means the ledger cannot account for money that has already left the account, and the remedy is an operator's, not a retry's. Likelihood is low — perp fees are USDC-settled (ADR-0036 §4), and spot is out of scope (ADR-0030).
 
+**(Which `repr`, since [#338](https://github.com/MarcosACH/tickwright/issues/338):** the `repr` above is the fault's own, never the wrapper's. A refusal raised inside a supervised task reaches the runner inside an `ExceptionGroup`. One raised in the inline start sequence arrives raw. Before #338 the `error` field read the group's `repr` in the first case and the fault's in the second, so one condition had two shapes and an operator could key on neither. The runner now unwraps to the first leaf before it emits. The group's first leaf is the exception that aborted the `TaskGroup`, and its siblings were cancelled, so nothing is lost. `Engine.fault` still holds the raw exception for code that needs the group.**)**
+
 ## 4. Why the venue owns the read and not just the vocabulary
 
 Before this, "one venue read" was three collaborators: `_info` sent, a per-caller `try`/`except` decided what a transport failure meant, and a normalizer decided what an unreadable body meant. **Which layer owned which failure was chosen freshly at every read site** — so the five in-package sites disagreed:
