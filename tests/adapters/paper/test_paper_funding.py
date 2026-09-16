@@ -20,6 +20,7 @@ from decimal import Decimal
 
 import pytest
 from ledgers import GENESIS
+from lifecycle_contract import assert_quiet_once_stopped, record_publishes
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
@@ -278,6 +279,34 @@ def test_a_position_the_venue_cannot_price_settles_nothing_however_far_time_move
     accruals = asyncio.run(_drive(held=_LONG, through=3.25, priced=False))
 
     assert accruals == []
+
+
+def test_paper_publishes_nothing_once_its_run_is_cancelled() -> None:
+    """The shared quiescence clause (``tests/_support/lifecycle_contract.py``,
+    #277), driven by the one ``Exchange`` adapter with a publishing loop.
+
+    Paper's ``stop()`` releases nothing, so the runner's cancel is the whole of
+    what ends the generator, exactly as it is for ``ReplayFeed``. The transcript
+    is subscribed after the opening tick so it holds the loop's own publishes
+    and nothing the driver put on the bus.
+    """
+
+    async def main() -> None:
+        bus = InMemoryBus()
+        clock = ManualClock(start_ns=_at(0.5))
+        venue = _venue(bus, clock, account_net=lambda: _LONG)
+        await bus.publish(_tick("50000", ts=_at(0.5)))
+        transcript = record_publishes(bus)
+        await venue.start()
+        task = asyncio.create_task(venue.run())
+        await _quiesce()
+        clock.advance_to(_at(1.25))
+        await _quiesce()
+        assert len(transcript.events) == 1, "one boundary crossed, one accrual expected"
+
+        await assert_quiet_once_stopped(transcript, adapter=venue, task=task, name="PaperExchange")
+
+    asyncio.run(main())
 
 
 def test_a_refused_ledger_write_raises_out_of_run_rather_than_dying_alone() -> None:

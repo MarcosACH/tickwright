@@ -16,7 +16,6 @@ import pytest
 from feed_contract import (
     MarketDataTranscript,
     assert_every_traded_symbol_is_marked,
-    assert_quiet_once_stopped,
     record_market_data,
 )
 from hyperliquid_fakes import (
@@ -27,6 +26,7 @@ from hyperliquid_fakes import (
     trade,
     trades_frame,
 )
+from lifecycle_contract import assert_quiet_once_stopped, record_publishes
 from seam_claims import assert_every_member_is_claimed
 from structlog.typing import EventDict
 
@@ -608,8 +608,8 @@ def test_the_live_feed_marks_every_symbol_it_trades() -> None:
 
 
 def test_the_live_feed_publishes_nothing_once_stopped_and_cancelled() -> None:
-    """The shared quiescence clause (``tests/_support/feed_contract.py``, #277),
-    driven over a socket that idles after its frames, as a live one does
+    """The shared quiescence clause (``tests/_support/lifecycle_contract.py``,
+    #277), driven over a socket that idles after its frames, as a live one does
     between trades.
 
     Ended while the reader is parked on an idle socket, which is where a real
@@ -620,7 +620,7 @@ def test_the_live_feed_publishes_nothing_once_stopped_and_cancelled() -> None:
 
     async def main() -> None:
         bus = InMemoryBus()
-        transcript = record_market_data(bus)
+        transcript = record_publishes(bus)
         connection = FakeWsConnection(frames)
         feed = HyperliquidFeed(
             config=HyperliquidConfig(symbols=["BTC"]),
@@ -631,8 +631,10 @@ def test_the_live_feed_publishes_nothing_once_stopped_and_cancelled() -> None:
         await feed.start()
         task = asyncio.create_task(feed.run())
         await asyncio.wait_for(connection.drained.wait(), timeout=2)
+        while not transcript.events:
+            await asyncio.sleep(0)
 
-        await assert_quiet_once_stopped(transcript, feed=feed, task=task, name="HyperliquidFeed")
+        await assert_quiet_once_stopped(transcript, adapter=feed, task=task, name="HyperliquidFeed")
 
     asyncio.run(main())
 

@@ -12,11 +12,8 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from feed_contract import (
-    assert_every_traded_symbol_is_marked,
-    assert_quiet_once_stopped,
-    record_market_data,
-)
+from feed_contract import assert_every_traded_symbol_is_marked, record_market_data
+from lifecycle_contract import assert_quiet_once_stopped, record_publishes
 from seam_claims import assert_every_member_is_claimed
 
 from tickwright.adapters.bus import InMemoryBus
@@ -247,8 +244,8 @@ def test_replay_marks_every_symbol_it_trades(tmp_path: Path) -> None:
 
 
 def test_replay_publishes_nothing_once_its_run_is_cancelled(tmp_path: Path) -> None:
-    """The shared quiescence clause (``tests/_support/feed_contract.py``, #277),
-    driven the one way a replay can be ended early: cancelled mid-file.
+    """The shared quiescence clause (``tests/_support/lifecycle_contract.py``,
+    #277), driven the one way a replay can be ended early: cancelled mid-file.
 
     Replay's ``stop()`` arms nothing, so the runner's cancel is the whole of
     what ends it. The file is longer than what gets delivered on purpose. A
@@ -262,15 +259,16 @@ def test_replay_publishes_nothing_once_its_run_is_cancelled(tmp_path: Path) -> N
 
     async def main() -> None:
         bus = InMemoryBus()
-        transcript = record_market_data(bus)
+        transcript = record_publishes(bus)
         feed = ReplayFeed(path=path, bus=bus, clock=ManualClock())
         task = asyncio.create_task(feed.run())
-        while not transcript.ticks:
+        while not transcript.events:
             await asyncio.sleep(0)
 
-        await assert_quiet_once_stopped(transcript, feed=feed, task=task, name="ReplayFeed")
+        await assert_quiet_once_stopped(transcript, adapter=feed, task=task, name="ReplayFeed")
 
-        assert len(transcript.ticks) < 50, "the cancel must land mid-file to say anything"
+        ticks = [event for event in transcript.events if isinstance(event, MarketTick)]
+        assert len(ticks) < 50, "the cancel must land mid-file to say anything"
 
     asyncio.run(main())
 
