@@ -195,6 +195,20 @@ the membership. **Two entries are both**: `feed.stop` and — since
 halves, and neither costs the membership an entry. An adapter's supervised half is not a separate
 teardown seam; it is the same seam's other end.**)**
 
+**(Corrected by [#277](https://github.com/MarcosACH/tickwright/issues/277):** the two entries now
+end their supervised half the same way. `feed.stop` used to cancel the feed's task and not wait for
+it, on the reading that `MarketFeed.stop()` was a cooperative signal the loop returned on. That
+reading held for the live feed and never for `ReplayFeed`, whose `stop()` arms nothing. So a third
+adapter that published once more after `stop()` returned could reach `bus.drain` and keep raising
+its high-water mark, with the Protocol promising nothing against it. Both entries now go through one
+helper, `Engine._stop_supervised`: release the seam, cancel its `run()`, wait it out. The wait is
+what proves the loop ended before the drain starts. It adds no second bound. The whole graceful
+teardown is already under `shutdown_timeout`, and the faulted pass bounds each step. The clause is
+executable in `tests/_support/feed_contract.py`, driven by both feed adapters: once cancelled,
+`run()` ends within a bound and nothing more reaches the bus. Whether a `run()` returns on the
+`stop()` alone stays the adapter's own. The live one does, the replay one does not, and the runner
+no longer depends on which.**)**
+
 - `SUBMITTED` orders in flight on the wire are **not** awaited — they stay `SUBMITTED`,
   checkpointed; restart reconciliation heals them (ADR-0008 residual risk).
 - A graceful stop **does not cancel resting `LIVE` orders.** Snapshot-plus-reconcile re-adopts them

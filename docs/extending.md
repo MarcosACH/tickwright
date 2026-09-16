@@ -215,6 +215,12 @@ auth, quirk translation — and importing no other adapter. It provides both a `
   worth parametrizing (one reads a finite file and returns, the other opens a socket and does not);
   the obligation is not yours to restate. Assert *how* you source the mark in your own suite —
   provenance is one per deployment by design (ADR-0039) and deliberately outside the contract.
+  The contract carries a second clause, and you drive it the same way
+  ([#277](https://github.com/MarcosACH/tickwright/issues/277)): run your feed as a task, get at
+  least one event onto the bus, then hand the transcript, the feed and the task to
+  `assert_quiet_once_stopped`. It ends the feed the way the runner does, `stop()` then cancel then
+  wait, and asserts `run()` ended within a bound and nothing more reached the bus. Whether your
+  `run()` returns on `stop()` alone is yours to decide. The live feed does, the replay one does not.
 - [ ] TDD the adapters at their own seam, and give the `Exchange` half a **claim per member**:
   `assert isinstance(exchange, Exchange)`, plus a `_SEAM_CLAIMS` map — member → the test that says
   what that member does on *your* venue — handed to `assert_every_member_is_claimed`
