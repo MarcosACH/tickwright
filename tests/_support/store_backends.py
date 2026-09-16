@@ -24,12 +24,16 @@ from tickwright.adapters.store.postgres import PostgresStore
 
 POSTGRES_DSN_ENV = "STORE_POSTGRES_DSN"
 
+# Every store AppConfig can select, checked against its Literal both ways in
+# tests/app/test_seam_answers.py (#303).
+STORE_BACKENDS = ["sqlite", "postgres"]
+
 # Parametrization for the contract suite: the Postgres arm carries the
 # ``postgres`` marker so ``-m "not postgres"`` deselects it wholesale, on top of
 # the fixture's DSN-availability auto-skip.
 STORE_BACKEND_PARAMS = [
-    "sqlite",
-    pytest.param("postgres", marks=pytest.mark.postgres),
+    pytest.param(backend, marks=pytest.mark.postgres) if backend == "postgres" else backend
+    for backend in STORE_BACKENDS
 ]
 
 

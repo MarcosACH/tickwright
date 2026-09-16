@@ -12,6 +12,8 @@ from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.bus.kafka import KafkaBus
 from tickwright.domain import EventBus
 
+# Every bus AppConfig can select, checked against its Literal both ways in
+# tests/app/test_seam_answers.py (#303).
 BUS_BACKENDS = ["in_memory", "kafka"]
 
 

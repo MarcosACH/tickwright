@@ -12,7 +12,10 @@ from pathlib import Path
 from typing import Literal
 
 import pytest
+from bus_backends import BUS_BACKENDS
+from closed_sets import assert_covers_exactly
 from seam_answers import Answered, assert_every_adapter_answers_its_gates
+from store_backends import STORE_BACKENDS
 
 from tickwright.app import AppConfig
 from tickwright.domain import Exchange, MarketFeed
@@ -43,6 +46,24 @@ def test_every_configurable_feed_answers_every_gate_a_feed_owes() -> None:
 def test_every_configurable_exchange_answers_every_gate_an_exchange_owes() -> None:
     assert_every_adapter_answers_its_gates(
         Exchange, configured=_configured("exchange"), answers=EXCHANGES
+    )
+
+
+def test_every_configurable_bus_is_driven_by_the_shared_suites() -> None:
+    """The other two seams answer by parametrization, and the list is the map.
+
+    ``EventBus`` and ``Store`` promise identical behaviour across backends, so
+    their suites drive one scenario through each name in a hand-written list
+    instead of a gate per adapter. A third backend added to the ``Literal``
+    and not to that list is selectable by ``build_bus`` and driven by nothing,
+    which is the same defect the two gates above close.
+    """
+    assert_covers_exactly(_configured("bus"), BUS_BACKENDS, what="bus_backends.BUS_BACKENDS")
+
+
+def test_every_configurable_store_is_driven_by_the_shared_suites() -> None:
+    assert_covers_exactly(
+        _configured("store"), STORE_BACKENDS, what="store_backends.STORE_BACKENDS"
     )
 
 
