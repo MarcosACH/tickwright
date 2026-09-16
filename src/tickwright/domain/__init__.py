@@ -184,6 +184,7 @@ __all__ = [
     "VenueOrderView",
     "VenueReadFailure",
     "VenuePositionState",
+    # the event tree's leaves, for gates that must cover every family
     "publishable_event_types",
     # id derivation
     "derive_cloid",

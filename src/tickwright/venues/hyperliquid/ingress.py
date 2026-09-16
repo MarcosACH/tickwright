@@ -62,9 +62,11 @@ class ConflatingIngress:
                 # ``Event`` property raises, and a family that forgets would
                 # fault the feed on its first drop. The domain's key gate over
                 # ``publishable_event_types`` is what catches that. ``stream``
-                # is not redundant with the key, because a live trade's key and
-                # a replay trade's key have different shapes, so the key alone
-                # does not say which stream thinned.
+                # is not redundant with the key. This buffer only sees the live
+                # path (ADR-0023), where a trade's key is ``symbol:tid`` and a
+                # mark's key is ``symbol:ts_event``. Both read as
+                # ``symbol:digits``, so the key alone does not say which
+                # stream thinned.
                 event_id=dropped.event_id,
                 stream=type(dropped).__name__,
             )
