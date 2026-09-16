@@ -17,7 +17,9 @@ Two exemptions, both structural rather than taste:
 
 - `.agents/plans/` is ignored *on purpose* and reading it is the entire point of the
   plan-file convention (`CLAUDE.md`, the `/tdd` pipeline). Ignored does not imply
-  unreadable, and this is where the two come apart.
+  unreadable, and this is where the two come apart. `.agents/verify/` is the same shape:
+  `/verify-tickwright` keeps its evidence there, and proof nobody can read is not proof
+  (#346).
 - The **executable position**. `.venv/bin/ruff` is ignored and running it is correct —
   calling the venv binaries directly rather than through `uv run` is a 150× difference
   in hook latency. A program being run is not a file being read.
@@ -59,7 +61,7 @@ _READERS = frozenset(
 # same name elsewhere on the filesystem is not covered by it. Named without a trailing
 # separator because `_readable` adds one for the sub-path test and compares the bare form
 # for the directory itself — the sibling `.agents/plans-old` must not inherit the pass.
-_READABLE_IGNORED = (".agents/plans",)
+_READABLE_IGNORED = (".agents/plans", ".agents/verify")
 
 # Readers whose first non-flag argument is a *pattern*, not a path. Offering it as a
 # candidate hands `check-ignore` a string that never named a file, and `.env` is a string
