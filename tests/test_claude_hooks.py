@@ -88,13 +88,17 @@ def repo(tmp_path: Path) -> Path:
     (root / ".venv" / "bin").mkdir(parents=True)
     (root / "logs").mkdir()
     (root / ".agents" / "plans").mkdir(parents=True)
+    (root / ".agents" / "verify" / "run-1").mkdir(parents=True)
 
-    (root / ".gitignore").write_text(".venv/\nlogs/\n*.log\n.agents/plans/\n.env\n")
+    (root / ".gitignore").write_text(
+        ".venv/\nlogs/\n*.log\n.agents/plans/\n.agents/verify/\n.env\n"
+    )
     (root / "src" / "tracked.py").write_text("x = 1\n")
     (root / "src" / "tracked_too.py").write_text("y = 1\n")
     (root / ".venv" / "bin" / "ruff").write_text("#!/bin/sh\n")
     (root / "logs" / "run.log").write_text("noise\n")
     (root / ".agents" / "plans" / "issue-1.md").write_text("- [ ] behavior\n")
+    (root / ".agents" / "verify" / "run-1" / "stderr.jsonl").write_text('{"event": "x"}\n')
     (root / ".env").write_text("TICKWRIGHT_HYPERLIQUID__SIGNING_KEY=0xdead\n")
 
     _git(root, "init", "-q", "-b", "main")
@@ -500,6 +504,11 @@ class TestNoExcludedReads:
             # match on `.agents/plans/` needs.
             "grep -rn 'behavior' .agents/plans",
             "grep -rn 'behavior' .agents/plans/",
+            # The verification evidence is the second tree ignored in order to be read:
+            # `/verify-tickwright` keeps its proof there, and an agent that cannot read
+            # its own proof cannot report it (#346).
+            "cat .agents/verify/run-1/stderr.jsonl",
+            "grep -rn 'order.filled' .agents/verify",
             # Repo source is the normal case and must stay cheap.
             "cat src/tracked.py",
             "grep -rn 'x' src/",

@@ -120,6 +120,11 @@ triggers.
    start. Recorded shas are hand-written, so check them against `git log`.
 6. One PR per issue, with `Closes #<N>` in the body.
 7. `/code-review` reports BLOCKING, WARN, and NIT. Label `ralph:ready` when it is clean.
+8. `/verify-tickwright` drives the real engine process the way an operator does and keeps the
+   proof in `.agents/verify/<run-id>/evidence/`. Each run ends in a `REPORT.md` with a PASS or
+   FAIL verdict. A new FAIL becomes a bug you file from its `ISSUE.md` draft, and the fix is a
+   `/tdd` session on that issue. `/maintain-verification-skill` keeps the feature map honest after
+   the engine changes.
 
 Conventions: `docs/workflow/labels.md`, `docs/agents/issue-tracker.md`.
 
@@ -131,8 +136,8 @@ Conventions: `docs/workflow/labels.md`, `docs/agents/issue-tracker.md`.
   truth. The prose above them is often the retired version, so reading in document order gives you
   the superseded decision. Canon: `docs/agents/adr-reading.md`.
 - Never read ignored paths such as `.venv/`, caches, `logs/`, or `*.pyc`. Membership is
-  `git check-ignore`, so `.gitignore` is the one list. `.agents/plans/` is ignored and readable by
-  design.
+  `git check-ignore`, so `.gitignore` is the one list. `.agents/plans/` and `.agents/verify/` are
+  ignored and readable by design.
 - For large source and test files, use `Read` with `offset` and `limit` on the symbol you need.
 - Read GitHub issues with `gh issue view <N>`.
 - **Edit a tracked file with `Edit`, not a Bash write.** A Bash write stales the harness's cached

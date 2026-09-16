@@ -34,6 +34,11 @@ evals/results/
 # policy and drift into a bug. Root-anchored, so eval fixtures may carry one.
 .agents/plans/
 
+# What /verify-tickwright captured (logs, store dumps, exit codes). Proof of one
+# run on one machine, kept after cleanup and never committed. Readable by the
+# no-excluded-reads hook for the same reason the plans are.
+.agents/verify/
+
 # Private working notes — NEVER committed
 docs/private/
 *.private.md
