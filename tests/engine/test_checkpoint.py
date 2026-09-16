@@ -13,6 +13,7 @@ from decimal import Decimal
 
 import pytest
 from ledgers import GENESIS
+from recovery_stores import RecoveryOrderStore
 from venue_doubles import venue_holding
 
 from tickwright.adapters.clock import ManualClock
@@ -452,28 +453,6 @@ def test_a_non_fill_transition_writes_the_order_row_and_no_ledger_row() -> None:
     assert checkpointer.cache.get_order(order.cloid) is order
 
 
-class _RecoveryOrderStore(SQLiteStore):
-    """The real store, recording the two recovery reads whose order is the
-    contract: the ledger's ``load_account`` and the ``Cache``'s ``all_orders``.
-
-    The ordering has no other observation port — neither step leaves a
-    distinguishing durable trace — so the seam they share is where it shows.
-    Recorded, not simulated: every call still reaches the real store underneath.
-    """
-
-    def __init__(self, timeline: list[str]) -> None:
-        super().__init__(":memory:")
-        self._timeline = timeline
-
-    def load_account(self) -> Account | None:
-        self._timeline.append("ledger.load_account")
-        return super().load_account()
-
-    def all_orders(self) -> list[Order]:
-        self._timeline.append("cache.all_orders")
-        return super().all_orders()
-
-
 def test_recovery_reads_the_ledger_before_it_rebuilds_the_order_cache() -> None:
     """The ledger recovers first, ahead of the order cache (ADR-0043 §6/§10).
 
@@ -488,7 +467,7 @@ def test_recovery_reads_the_ledger_before_it_rebuilds_the_order_cache() -> None:
     future runner refactor cannot lose the ordering without a red test naming it.
     """
     timeline: list[str] = []
-    checkpointer = _checkpointer(_RecoveryOrderStore(timeline))
+    checkpointer = _checkpointer(RecoveryOrderStore(timeline))
 
     checkpointer.recover()
 
@@ -505,7 +484,7 @@ def test_a_refused_store_is_never_mass_read_for_the_cache_it_will_not_use() -> N
     path, on a run that is about to exit non-zero.
     """
     timeline: list[str] = []
-    store = _RecoveryOrderStore(timeline)
+    store = RecoveryOrderStore(timeline)
     store.checkpoint_ledger(
         account=Account.restore(
             account_id="paper-other",

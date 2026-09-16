@@ -18,6 +18,7 @@ from pathlib import Path
 
 from kafka_fakes import FakeKafkaBroker
 from ledgers import GENESIS
+from recovery_stores import RecoveryOrderStore
 from structlog.typing import EventDict
 from venue_doubles import (
     DERIVED_GENESIS,
@@ -1176,28 +1177,6 @@ class _BlockingFeed:
         return None
 
 
-class _RecoveryOrderStore(SQLiteStore):
-    """The real store, recording the two recovery reads whose order is the
-    contract: the ledger's ``load_account`` and the ``Cache``'s ``all_orders``.
-
-    The ordering has no other observation port. Both steps are the runner's own
-    and neither leaves a distinguishing durable trace, so the seam they share is
-    where it shows — recorded, not simulated: every call still reaches the real
-    store underneath."""
-
-    def __init__(self, path: Path, timeline: list[str]) -> None:
-        super().__init__(path)
-        self._timeline = timeline
-
-    def load_account(self) -> Account | None:
-        self._timeline.append("ledger.load_account")
-        return super().load_account()
-
-    def all_orders(self) -> list[Order]:
-        self._timeline.append("cache.all_orders")
-        return super().all_orders()
-
-
 def test_the_ledger_is_recovered_before_the_order_cache_is_rebuilt(tmp_path: Path) -> None:
     """``PortfolioProjection.recover()`` runs immediately after the run-id bind
     and **before** ``cache.rebuild()`` (ADR-0043 §6/§10).
@@ -1214,7 +1193,7 @@ def test_the_ledger_is_recovered_before_the_order_cache_is_rebuilt(tmp_path: Pat
     timeline: list[str] = []
 
     async def main() -> int:
-        store = _RecoveryOrderStore(tmp_path / "saga.db", timeline)
+        store = RecoveryOrderStore(timeline, tmp_path / "saga.db")
         bus = InMemoryBus()
         clock = ManualClock()
         feed = _BlockingFeed()
@@ -1276,7 +1255,7 @@ def test_a_start_deserializes_the_saga_history_once(tmp_path: Path) -> None:
     strategy = _SeqRecordingStrategy("trivial")
 
     async def main() -> int:
-        store = _RecoveryOrderStore(tmp_path / "saga.db", timeline)
+        store = RecoveryOrderStore(timeline, tmp_path / "saga.db")
         # The ledger the prior life opened, so #188 does not refuse the store
         # before the reads this case counts (ADR-0043 §8).
         store.checkpoint_ledger(
