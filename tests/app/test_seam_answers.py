@@ -45,3 +45,27 @@ def test_a_suite_that_answers_no_gate_fails_naming_the_adapter_and_every_gate(
         "assert_quiet_once_stopped",
     ):
         assert gate in message
+
+
+def test_a_map_that_misses_a_configured_adapter_fails_before_any_suite_is_read() -> None:
+    """The stale-map failure the ``seam_claims`` guard exists for, one level up.
+
+    A venue added to the ``Literal`` and not to the map is the exact shape of
+    the defect: selectable by ``build_*``, owing every answer, and named
+    nowhere the gate would look. It must fail on the value, not on a
+    ``KeyError`` nobody wrote a message for.
+    """
+    with pytest.raises(AssertionError, match=r"'unmapped'"):
+        assert_every_adapter_answers_its_gates(MarketFeed, configured=["unmapped"], answers={})
+
+
+def test_a_map_entry_for_an_adapter_no_longer_configured_fails(tmp_path: Path) -> None:
+    """The other direction: a venue removed from the ``Literal`` leaves a stale row.
+
+    Left in place it would keep asserting answers for a suite that may be gone,
+    and a directory that no longer exists reads as one that answers nothing.
+    """
+    with pytest.raises(AssertionError, match=r"'gone'"):
+        assert_every_adapter_answers_its_gates(
+            MarketFeed, configured=[], answers={"gone": Answered("GoneFeed", suite=tmp_path)}
+        )

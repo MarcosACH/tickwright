@@ -87,10 +87,24 @@ def assert_every_adapter_answers_its_gates(
     """Assert every ``configured`` adapter of ``seam`` answers every gate it owes.
 
     ``configured`` is the ``Literal``'s values. ``answers`` maps each to where
-    its suite answers. A missing answer fails naming the adapter and the gate,
-    which is what an author adding a venue needs to read.
+    its suite answers, and is checked against the ``Literal`` in both
+    directions first: a value with no row is the stale-map failure this guard
+    exists for, and a row with no value is a suite nobody can select any more.
+    Then a missing answer fails naming the adapter and the gate, which is what
+    an author adding a venue needs to read.
     """
-    for value in configured:
+    configured = set(configured)
+    unmapped = configured - set(answers)
+    assert not unmapped, (
+        f"{seam.__name__} values in AppConfig with no row in the answers map: "
+        f"{sorted(unmapped)} — add where each adapter's suite answers its gates"
+    )
+    stale = set(answers) - configured
+    assert not stale, (
+        f"rows in the answers map for {seam.__name__} values AppConfig no longer has: "
+        f"{sorted(stale)}"
+    )
+    for value in sorted(configured):
         answered = answers[value]
         unanswered = [
             gate.function
