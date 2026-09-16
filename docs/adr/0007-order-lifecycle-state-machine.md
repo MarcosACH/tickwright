@@ -30,6 +30,13 @@ CANCELLED` with any in-flight cancel resolved by reconciliation, not a `CANCELLI
 An unfilled **IOC** never rests, so it cancels directly `SUBMITTED → CANCELLED` (folding the
 dropped `EXPIRED` into `CANCELLED`) rather than passing through a spurious `LIVE`.
 
+**(Amended by #328 — `LIVE` means acked with an oid, not rested:** the venue's ack is
+whichever placement answer carries its oid. On a live venue an order that fills on placement
+is acked `LIVE` first, then its fills move it to `FILLED`. So `SUBMITTED → LIVE → FILLED` is
+the live path for a marketable order too, and the "immediate" arrow above is the paper
+venue's. Paper has no oid and keeps `SUBMITTED → FILLED`. The reason is the reconcile
+cross-check, ADR-0011 inv 2 as amended by #328. [#328]**)**
+
 ## Load-bearing invariants
 
 1. **A timeout is never a direct transition.** A crash/timeout in `SUBMITTED` leaves the order
