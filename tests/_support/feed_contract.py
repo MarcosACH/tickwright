@@ -117,15 +117,18 @@ async def assert_quiet_once_stopped(
 
     The runner's ``_stop_supervised`` shape, stated once as an obligation
     (#277): ``stop()`` is a request, the cancel is what ends ``run()``, and the
-    wait is what proves it ended. Two things are owed. The cancel must come
-    through, so a ``run()`` that caught ``CancelledError`` and returned would
-    have hidden the one signal the teardown relies on. And once the task is
-    done, the transcript stops growing, so no publish of the feed's outlives its
-    supervised half and reaches the ``bus.drain`` behind it.
+    wait is what proves it ended. Two things are owed. ``run()`` ends under the
+    cancel, promptly. Whether it had already returned on the ``stop()`` alone
+    is the adapter's own, so nothing here asks which of the two ended it. And
+    once the task is done, the transcript stops growing, so no publish of the
+    feed's outlives its supervised half and reaches the ``bus.drain`` behind it.
 
-    The turns yielded after the wait are what make the second half sensitive.
-    A publish the feed handed to a task of its own would land on one of them,
-    where a check made on the same turn as the wait would miss it.
+    The bound on the wait is what makes the first half sensitive. A ``run()``
+    that caught ``CancelledError`` and kept looping would otherwise hang this
+    helper, and a hang reports nothing. The turns yielded after the wait are
+    what make the second half sensitive. A publish the feed handed to a task of
+    its own would land on one of them, where a check made on the same turn as
+    the wait would miss it.
 
     The driver ends the feed with at least one event already on the bus, and
     that is refused here for the reason the mark clause refuses an empty
@@ -138,12 +141,14 @@ async def assert_quiet_once_stopped(
     )
     await feed.stop()
     task.cancel()
-    await asyncio.gather(task, return_exceptions=True)
-    assert task.cancelled(), (
-        f"{name}.run() swallowed the runner's cancel — CancelledError is the ordinary "
-        f"end of run() and must come through, or the teardown cannot tell a stopped "
-        f"loop from one that is still publishing"
-    )
+    try:
+        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=2)
+    except TimeoutError:
+        raise AssertionError(
+            f"{name}.run() did not end once cancelled — CancelledError is the ordinary "
+            f"end of run() and must come through, or the runner's wait for it never "
+            f"returns and the graceful stop faults on its bound"
+        ) from None
     ticks, marks = len(transcript.ticks), len(transcript.marks)
     for _ in range(10):
         await asyncio.sleep(0)
