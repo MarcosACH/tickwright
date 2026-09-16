@@ -13,8 +13,10 @@ a recorded venue body already has, pointed at the other side of the comparison.
 
 from dataclasses import replace
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
+from seam_claims import assert_every_member_is_claimed
 
 from tickwright.domain import (
     DEFAULT_LEVERAGE,
@@ -1007,3 +1009,35 @@ def test_a_size_the_venue_posts_no_price_for_is_counted_unpriced_and_not_healed(
     assert findings.heals == ()
     assert findings.cash is None
     assert (findings.deferred, findings.unpriced) == (0, 1)
+
+
+_FIELD_CLAIMS = {
+    "CASH": "test_a_quiet_pass_plans_both_heals_paired_with_their_findings_on_one_stamp",
+    "SIGNED_SIZE": "test_classifies_both_tiers_off_one_hand_built_reading",
+    "UNREALIZED_PNL": "test_one_broken_venue_figure_is_one_finding_naming_that_figure",
+    "NOTIONAL": "test_one_broken_venue_figure_is_one_finding_naming_that_figure",
+    "MARGIN_USED": "test_one_broken_venue_figure_is_one_finding_naming_that_figure",
+    "EQUITY": "test_one_broken_venue_account_figure_is_one_finding_naming_that_figure",
+    "FREE_MARGIN": "test_one_broken_venue_account_figure_is_one_finding_naming_that_figure",
+    "MAINTENANCE_MARGIN": "test_one_broken_venue_account_figure_is_one_finding_naming_that_figure",
+}
+
+
+def test_every_divergence_field_is_claimed_by_a_test_that_makes_a_classifier_produce_it() -> None:
+    """The closed vocabulary is walked, member by member (#303).
+
+    ``DivergenceField`` argues its own closedness on the ground that a member
+    nothing answers for fails silently. It did, once: #194 landed the band over
+    three of six Tier-2 figures, and ``notional``, ``margin_used`` and the
+    account ``maintenance_margin`` were classified nowhere for a whole slice
+    with every check green. This is the same gate the seams answer, pointed at
+    the enum: each member names the test that makes a classifier produce a
+    finding carrying it, the map covers the enum exactly, and every named test
+    exists here.
+
+    Member-grained, like the seam gate. It sees that a member is produced and
+    never whether ``_reference`` scales it by the right notional. A member
+    that falls into the account-grain default by accident is still green here,
+    and that clause stays a reviewer's.
+    """
+    assert_every_member_is_claimed(DivergenceField, _FIELD_CLAIMS, suite=Path(__file__).parent)
