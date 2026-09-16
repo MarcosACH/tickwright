@@ -28,6 +28,10 @@ derives the last-trade proxy, live reads ``ctx.markPx`` — so *how* a mark was
 arrived at is each adapter's own assertion and differs by design. Only the
 obligation to publish one is shared.
 
+The clause a feed owes as a supervised loop, going quiet once its ``run()`` is
+cancelled and waited out, is not a feed clause. ``Exchange.run()`` owes the
+same one, so it lives in ``lifecycle_contract.py`` (#277).
+
 Explicit assertion messages throughout: this module is not a test module, so
 pytest does not rewrite its asserts and a bare comparison would fail blind.
 """

@@ -152,10 +152,10 @@ class WsSession:
         connect ever succeeded.
 
         Returning does **not** mean the consumer has observed the close. That
-        gap is the runner's to close and it does, by waiting the supervised task
-        out (`Engine._stop_exchange`) or cancelling it (`_stop_feed`); the
-        distinction is #277's to settle, and it now has one loop to settle it
-        against rather than two.
+        gap is the runner's to close, and the seam says how: `stop()` is a
+        request, and the cancel and wait behind it are what end `run()`
+        (`MarketFeed.run`, `Exchange.run`, #277). Whether `run()` had already
+        returned on the close by then is timing, and nothing depends on it.
         """
         self._stopping = True
         if self._connection is not None:

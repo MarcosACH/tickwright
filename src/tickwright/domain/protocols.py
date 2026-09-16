@@ -159,11 +159,25 @@ class MarketFeed(Protocol):
 
         Ending on its own ends the task, not the run: ``ReplayFeed`` returns at
         end-of-file and the engine keeps going until told to stop.
+
+        The runner ends it by cancelling the task and waiting it out (#277).
+        Let the cancel through: ``CancelledError`` is the ordinary end of this
+        loop, and nothing of yours may publish once it has passed. That is what
+        the ``bus.drain`` behind the wait relies on. Returning earlier, on the
+        ``stop()`` alone, is welcome and not required. The clause is executable
+        in ``tests/_support/lifecycle_contract.py``, and ``Exchange.run()``
+        owes the same one.
         """
         ...
 
     async def stop(self) -> None:
-        """Stop producing ticks.
+        """Release the venue. A request to ``run()``, not a proof it has ended.
+
+        Returning here does not have to mean the loop has stopped publishing.
+        The runner does not read it that way: it cancels ``run()``'s task and
+        waits for it right after, and that wait is the proof (#277). A live
+        feed closes its socket here, which its loop returns on. A replay holds
+        nothing and does nothing.
 
         The first step of the runner's one teardown membership, so it inherits
         that membership's property (ADR-0024, and ``Engine._teardown_steps``):
@@ -654,7 +668,10 @@ class Exchange(OrderAnchor, AccountAnchor, Protocol):
         Cancelled by the runner as part of ``stop``'s slot in the reverse
         shutdown, ahead of the bus drain — so nothing this publishes can keep
         raising the drain's high-water mark. Cancellation is the ordinary end of
-        this call and must not be caught.
+        this call and must not be caught. The runner waits the task out, and
+        nothing of yours may publish once it has ended (#277). The clause is
+        executable in ``tests/_support/lifecycle_contract.py``, the same one
+        ``MarketFeed.run()`` answers.
         """
         ...
 

@@ -43,6 +43,7 @@ from tickwright.domain import (
     InstrumentSpec,
     InvariantViolation,
     MarketTick,
+    MarkTick,
     Order,
     OrderDenied,
     OrderEvent,
@@ -1813,6 +1814,69 @@ def test_the_fault_path_stops_the_exchange_in_the_same_position_as_a_graceful_st
     assert exit_code != 0
     assert engine.state is ComponentState.FAULTED
     assert timeline == ["exchange.start", "feed.stop", "exchange.stop", "store.close"]
+
+
+class _LingeringFeed(_TimelineFeed):
+    """A feed that publishes once more after ``stop()`` has returned.
+
+    The third-adapter shape #277 names: ``stop()`` is a flag the loop never
+    waits on, and the loop's unwind takes longer than the in-memory steps
+    behind it. The unwind is wall-clock on purpose. Every other teardown step
+    here is pure and returns in microseconds, so a runner that cancels without
+    waiting reaches the drain long before this publish lands.
+    """
+
+    async def run(self) -> None:
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(0.05)
+            await self._bus.publish(
+                MarkTick(ts_event=1, ts_init=1, symbol="BTC", price=Decimal("50000"))
+            )
+
+    def attach(self, bus: InMemoryBus) -> None:
+        self._bus = bus
+
+
+def test_the_reverse_shutdown_waits_the_feed_out_before_the_bus_drains(tmp_path: Path) -> None:
+    """A feed still publishing during ``bus.drain`` keeps raising the drain's
+    high-water mark (ADR-0024), so ``feed.stop`` must prove the loop ended, not
+    just ask it to. ``exchange.stop`` is the first recorded step behind
+    ``feed.stop``, so the feed's last publish must land ahead of it."""
+    timeline: list[str] = []
+
+    async def main() -> int:
+        bus = InMemoryBus()
+        feed = _LingeringFeed(timeline)
+        feed.attach(bus)
+
+        async def record_mark(_: MarkTick) -> None:
+            timeline.append("feed.publish")
+
+        bus.subscribe(MarkTick, record_mark)
+        engine = Engine(
+            bus=bus,
+            clock=ManualClock(),
+            store=_TimelineStore(tmp_path / "saga.db", timeline),
+            exchange=_LifecycleRecordingVenue(timeline),
+            feed=feed,
+        )
+        run = asyncio.create_task(engine.run())
+        await asyncio.wait_for(feed.started.wait(), timeout=5)
+        await asyncio.wait_for(engine.stop(), timeout=5)
+        return await asyncio.wait_for(run, timeout=5)
+
+    assert asyncio.run(main()) == 0
+
+    assert timeline == [
+        "exchange.start",
+        "feed.stop",
+        "feed.publish",
+        "exchange.stop",
+        "store.close",
+    ]
 
 
 class _CadenceProbingLiveVenue(_CadenceWatchingLiveVenue):

@@ -462,9 +462,11 @@ The shared contract of every long-lived component (`MarketFeed`, `Strategy`, `Ex
 and `on_start`/`on_stop` hooks. `DEGRADED` is deferred. That pair is the shared *minimum*, not
 the whole of any one lifecycle: a component running a loop of its own also has a **supervised
 long-lived half** the engine's `TaskGroup` holds, so a failure in it faults the run instead of
-killing a task nobody watches. `MarketFeed`'s is `start()` itself, which the runner never awaits
-inline; `Exchange` declares a third verb, `run()`, because ADR-0024 step 4 *does* await
-`Exchange.start()` inline and it must return for the barrier to run. See ADR-0014, ADR-0024.
+killing a task nobody watches. Both `MarketFeed` and `Exchange` declare that half as a third
+verb, `run()`. The runner awaits `start()` inline for both, so `start()` must return. `stop()` is
+a request, not a proof: the runner ends every supervised half the same way, by cancelling its
+task and waiting it out before the bus drains. A `run()` must let that cancellation through and
+publish nothing after it. See ADR-0014, ADR-0024.
 _Avoid_: service lifecycle, daemon (those imply separate processes — see [[Engine]]).
 
 **Invariant violation** vs **handler error**:
