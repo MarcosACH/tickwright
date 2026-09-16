@@ -210,9 +210,11 @@ auth, quirk translation — and importing no other adapter. It provides both a `
 - [ ] Add one row per half to the maps in
   [`tests/app/test_seam_answers.py`](../tests/app/test_seam_answers.py): the config value, your
   adapter's class name, and the directory of its suite. That test reads your suite for the three
-  gates below and fails naming each one you have not answered yet. It also fails the moment your
-  value is in the `Literal` and not in the map, so nothing here can be skipped by not importing it
-  ([#303](https://github.com/MarcosACH/tickwright/issues/303)).
+  gates below and fails naming each one you have not answered yet. It reads the source, not a run,
+  so write the class name as a string literal in each gate call (`feed="MyFeed"`,
+  `name="MyExchange"`). A name passed through a variable reads as never answered. The test also
+  fails the moment your value is in the `Literal` and not in the map, so nothing here can be
+  skipped by not importing it ([#303](https://github.com/MarcosACH/tickwright/issues/303)).
 - [ ] Drive your `MarketFeed` half through the **shared feed contract**
   ([`tests/_support/feed_contract.py`](../tests/_support/feed_contract.py)): subscribe with
   `record_market_data(bus)`, drive your feed however your feed is driven — a file, recorded frames,

@@ -48,7 +48,7 @@ def assert_covers_exactly(
     name = _name(closed_set)
     missing = members - keys
     assert not missing, f"{name} members with no row in {what}: {_listed(missing)}" + (
-        f" — {hint}" if hint else ""
+        f". {hint}" if hint else ""
     )
     stale = keys - members
     assert not stale, f"rows in {what} for members {name} no longer has: {_listed(stale)}"

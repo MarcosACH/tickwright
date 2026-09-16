@@ -52,7 +52,9 @@ class Answered:
 
     ``adapter`` is the class name the behavioural gates are called with
     (``feed="ReplayFeed"``, ``name="PaperExchange"``). The gates take a free
-    string, and this map is what makes that string load-bearing.
+    string, and this map is what makes that string load-bearing. It must be
+    written as a string literal at the call. The suite is read by ``ast``, not
+    run, so a name passed through a variable reads as never answered.
     """
 
     adapter: str
@@ -110,7 +112,8 @@ def assert_every_adapter_answers_its_gates(
         ]
         assert not unanswered, (
             f"{answered.adapter} ({seam.__name__} {value!r}) never answers {unanswered} in "
-            f"{answered.suite} — every {seam.__name__} owes each of them, see docs/extending.md"
+            f"{answered.suite}. Every {seam.__name__} owes each of them, called with the "
+            f"adapter's name as a string literal. See docs/extending.md"
         )
 
 
