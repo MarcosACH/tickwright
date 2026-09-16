@@ -20,6 +20,7 @@ from hyperliquid_fakes import (
     FakeWsConnection,
     user_fundings_frame,
 )
+from lifecycle_contract import assert_quiet_once_stopped, record_publishes
 from pydantic import SecretStr
 
 from tickwright.adapters.bus import InMemoryBus
@@ -297,6 +298,37 @@ def test_the_live_adapter_publishes_the_venue_s_payments_on_the_bus() -> None:
     # ``ts_init`` is when this process built the object, off the injected clock —
     # distinct from the venue's settlement instant, which is ``ts_event``.
     assert {a.ts_init for a in seen} == {7}
+
+
+def test_the_live_venue_publishes_nothing_once_stopped_and_cancelled() -> None:
+    """The shared quiescence clause (``tests/_support/lifecycle_contract.py``,
+    #277), driven over a funding socket that idles after its frames, as a live
+    one does between settlements.
+
+    Ended while the reader is parked on an idle socket, which is where a real
+    stop lands: ``stop()`` closes the socket, and the cancel behind it is what
+    the runner sends whether or not the loop had observed the close yet.
+    """
+    frames = [user_fundings_frame(funding(time_ms=1681222254710, coin="ETH", usdc="-3"))]
+
+    async def main() -> None:
+        bus = InMemoryBus()
+        transcript = record_publishes(bus)
+        connection = FakeWsConnection(frames)
+        exchange = make_exchange(
+            aligned_venue(), bus=bus, clock=ManualClock(), connect=connection.connect
+        )
+        await exchange.start()
+        task = asyncio.create_task(exchange.run())
+        await asyncio.wait_for(connection.drained.wait(), timeout=2)
+        while not transcript.events:
+            await asyncio.sleep(0)
+
+        await assert_quiet_once_stopped(
+            transcript, adapter=exchange, task=task, name="HyperliquidExchange"
+        )
+
+    asyncio.run(main())
 
 
 LIVE_ACCOUNT = f"hyperliquid-testnet-{ANVIL_ADDRESS}"
