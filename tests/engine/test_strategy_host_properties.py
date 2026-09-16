@@ -34,6 +34,7 @@ from tickwright.domain import (
     TimeInForce,
     derive_cloid,
 )
+from tickwright.engine.cache import Cache
 from tickwright.engine.strategy_host import StrategyHost
 
 
@@ -131,9 +132,12 @@ def test_stale_snapshot_never_reuses_a_consumed_signal_id(
     # nothing of the consumed seqs.
     store.save_strategy_snapshot("alpha", b"stale", ts_ns=1)
 
-    # Second life over the surviving store.
+    # Second life over the surviving store. The cache rebuild is the one saga
+    # read the boot makes, and the high-water folds over it (issue #233).
     bus = InMemoryBus()
-    host = StrategyHost(bus=bus, clock=ManualClock(), store=store)
+    cache = Cache(store=store)
+    cache.rebuild()
+    host = StrategyHost(bus=bus, clock=ManualClock(), store=store, cache=cache)
     strategy = EveryTickStrategy("alpha", bus)
     host.register(strategy, symbols={"BTC"})
     host.start()
@@ -209,10 +213,12 @@ def test_on_tick_sees_only_fresh_strictly_increasing_per_symbol_ticks(
         replay_after.setdefault(pos, []).append(honest[src])
 
     bus = InMemoryBus()
+    store = SQLiteStore(":memory:")
     host = StrategyHost(
         bus=bus,
         clock=ManualClock(start_ns=_NOW_NS),
-        store=SQLiteStore(":memory:"),
+        store=store,
+        cache=Cache(store=store),
         tick_staleness_ns=threshold,
     )
     recorder = TickRecorder("recorder")

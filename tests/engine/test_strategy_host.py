@@ -18,6 +18,8 @@ from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     UNATTRIBUTED,
     AggressorSide,
+    Clock,
+    EventBus,
     InvariantViolation,
     MarketTick,
     Order,
@@ -26,9 +28,36 @@ from tickwright.domain import (
     OrderType,
     Side,
     SignalId,
+    Store,
     derive_cloid,
 )
+from tickwright.engine.cache import Cache
 from tickwright.engine.strategy_host import StrategyHost
+
+
+def _host(
+    *,
+    bus: EventBus | None = None,
+    clock: Clock | None = None,
+    store: Store | None = None,
+    tick_staleness_ns: int | None = None,
+) -> StrategyHost:
+    """A host over a cache rebuilt from ``store``, the way the runner wires it.
+
+    The rebuild is the one saga read the boot makes (issue #233). A test that
+    seeds sagas into the store before calling this sees them in the host's
+    seq high-water, as a restart would.
+    """
+    store = store if store is not None else SQLiteStore(":memory:")
+    cache = Cache(store=store)
+    cache.rebuild()
+    return StrategyHost(
+        bus=bus if bus is not None else InMemoryBus(),
+        clock=clock if clock is not None else ManualClock(),
+        store=store,
+        cache=cache,
+        tick_staleness_ns=tick_staleness_ns,
+    )
 
 
 class RecordingStrategy:
@@ -72,7 +101,7 @@ def _tick(symbol: str, *, ts: int = 1_000, trade_id: str = "a", seq: int = 1) ->
 
 def test_strategy_receives_only_ticks_for_its_declared_symbols() -> None:
     bus = InMemoryBus()
-    host = StrategyHost(bus=bus, clock=ManualClock(), store=SQLiteStore(":memory:"))
+    host = _host(bus=bus)
     strategy = RecordingStrategy("btc-strat")
     host.register(strategy, symbols={"BTC"})
     host.start()
@@ -97,7 +126,7 @@ def _order_placed(strategy_id: str, *, symbol: str = "BTC") -> OrderPlaced:
 
 def test_strategy_receives_only_its_own_order_events() -> None:
     bus = InMemoryBus()
-    host = StrategyHost(bus=bus, clock=ManualClock(), store=SQLiteStore(":memory:"))
+    host = _host(bus=bus)
     alpha = RecordingStrategy("alpha")
     beta = RecordingStrategy("beta")
     host.register(alpha, symbols={"BTC"})
@@ -113,7 +142,7 @@ def test_strategy_receives_only_its_own_order_events() -> None:
 
 def test_duplicate_and_out_of_order_ticks_never_reach_on_tick() -> None:
     bus = InMemoryBus()
-    host = StrategyHost(bus=bus, clock=ManualClock(), store=SQLiteStore(":memory:"))
+    host = _host(bus=bus)
     strategy = RecordingStrategy("gated")
     host.register(strategy, symbols={"BTC"})
     host.start()
@@ -128,7 +157,7 @@ def test_duplicate_and_out_of_order_ticks_never_reach_on_tick() -> None:
 
 def test_tick_gate_is_independent_per_symbol() -> None:
     bus = InMemoryBus()
-    host = StrategyHost(bus=bus, clock=ManualClock(), store=SQLiteStore(":memory:"))
+    host = _host(bus=bus)
     strategy = RecordingStrategy("multi")
     host.register(strategy, symbols={"BTC", "ETH"})
     host.start()
@@ -142,7 +171,7 @@ def test_tick_gate_is_independent_per_symbol() -> None:
 
 def test_same_ts_event_ticks_are_gated_by_seq_not_trade_id() -> None:
     bus = InMemoryBus()
-    host = StrategyHost(bus=bus, clock=ManualClock(), store=SQLiteStore(":memory:"))
+    host = _host(bus=bus)
     strategy = RecordingStrategy("same-ns")
     host.register(strategy, symbols={"BTC"})
     host.start()
@@ -162,9 +191,7 @@ def test_same_ts_event_ticks_are_gated_by_seq_not_trade_id() -> None:
 def test_stale_beyond_threshold_tick_is_dropped() -> None:
     bus = InMemoryBus()
     clock = ManualClock(start_ns=10_000)
-    host = StrategyHost(
-        bus=bus, clock=clock, store=SQLiteStore(":memory:"), tick_staleness_ns=1_000
-    )
+    host = _host(bus=bus, clock=clock, tick_staleness_ns=1_000)
     strategy = RecordingStrategy("live")
     host.register(strategy, symbols={"BTC"})
     host.start()
@@ -179,7 +206,7 @@ def test_stale_beyond_threshold_tick_is_dropped() -> None:
 
 def test_staleness_gate_is_off_by_default() -> None:
     bus = InMemoryBus()
-    host = StrategyHost(bus=bus, clock=ManualClock(start_ns=10_000), store=SQLiteStore(":memory:"))
+    host = _host(bus=bus, clock=ManualClock(start_ns=10_000))
     strategy = RecordingStrategy("replay")
     host.register(strategy, symbols={"BTC"})
     host.start()
@@ -205,7 +232,7 @@ class RaisingStrategy(RecordingStrategy):
 
 def test_raising_strategy_emits_strategy_error_and_others_keep_receiving() -> None:
     bus = InMemoryBus()
-    host = StrategyHost(bus=bus, clock=ManualClock(), store=SQLiteStore(":memory:"))
+    host = _host(bus=bus)
     bad = RaisingStrategy("bad", KeyError("third-party bug"))
     good = RecordingStrategy("good")
     host.register(bad, symbols={"BTC"})
@@ -229,7 +256,7 @@ def test_raising_strategy_emits_strategy_error_and_others_keep_receiving() -> No
 
 def test_raising_on_order_event_is_contained_too() -> None:
     bus = InMemoryBus()
-    host = StrategyHost(bus=bus, clock=ManualClock(), store=SQLiteStore(":memory:"))
+    host = _host(bus=bus)
     bad = RaisingStrategy("bad", ValueError("boom"))
     host.register(bad, symbols={"BTC"})
     host.start()
@@ -245,7 +272,7 @@ def test_raising_on_order_event_is_contained_too() -> None:
 
 def test_invariant_violation_pierces_containment() -> None:
     bus = InMemoryBus()
-    host = StrategyHost(bus=bus, clock=ManualClock(), store=SQLiteStore(":memory:"))
+    host = _host(bus=bus)
     host.register(
         RaisingStrategy("bad", InvariantViolation("broken engine assumption")), symbols={"BTC"}
     )
@@ -257,7 +284,7 @@ def test_invariant_violation_pierces_containment() -> None:
 
 def test_stop_persists_a_final_snapshot_per_strategy() -> None:
     store = SQLiteStore(":memory:")
-    host = StrategyHost(bus=InMemoryBus(), clock=ManualClock(), store=store)
+    host = _host(store=store)
     alpha = RecordingStrategy("alpha")
     beta = RecordingStrategy("beta")
     alpha.state = b"alpha-final"
@@ -278,7 +305,7 @@ def test_stop_before_start_writes_no_snapshot() -> None:
     would overwrite the previous life's snapshot with nothing this life did."""
     store = SQLiteStore(":memory:")
     store.save_strategy_snapshot("alpha", b"prior-life", ts_ns=1_000)
-    host = StrategyHost(bus=InMemoryBus(), clock=ManualClock(), store=store)
+    host = _host(store=store)
     alpha = RecordingStrategy("alpha")
     alpha.state = b"blank"
     host.register(alpha, symbols={"BTC"})
@@ -291,7 +318,7 @@ def test_stop_before_start_writes_no_snapshot() -> None:
 def test_start_restores_the_persisted_snapshot() -> None:
     store = SQLiteStore(":memory:")
     store.save_strategy_snapshot("alpha", b"prior-life", ts_ns=1_000)
-    host = StrategyHost(bus=InMemoryBus(), clock=ManualClock(), store=store)
+    host = _host(store=store)
     alpha = RecordingStrategy("alpha")
     host.register(alpha, symbols={"BTC"})
 
@@ -301,7 +328,7 @@ def test_start_restores_the_persisted_snapshot() -> None:
 
 
 def test_start_without_a_snapshot_leaves_the_strategy_fresh() -> None:
-    host = StrategyHost(bus=InMemoryBus(), clock=ManualClock(), store=SQLiteStore(":memory:"))
+    host = _host()
     alpha = RecordingStrategy("alpha")
     alpha.state = b"untouched"
     host.register(alpha, symbols={"BTC"})
@@ -322,7 +349,7 @@ def test_incompatible_snapshot_starts_fresh_with_a_named_event() -> None:
     store = SQLiteStore(":memory:")
     store.save_strategy_snapshot("alpha", b"old-shape", ts_ns=1_000)
     bus = InMemoryBus()
-    host = StrategyHost(bus=bus, clock=ManualClock(), store=store)
+    host = _host(bus=bus, store=store)
     alpha = IncompatibleRestoreStrategy("alpha")
     host.register(alpha, symbols={"BTC"})
 
@@ -347,7 +374,7 @@ class InvariantViolatingRestoreStrategy(RecordingStrategy):
 def test_invariant_violation_in_restore_pierces_and_faults_start() -> None:
     store = SQLiteStore(":memory:")
     store.save_strategy_snapshot("alpha", b"any", ts_ns=1_000)
-    host = StrategyHost(bus=InMemoryBus(), clock=ManualClock(), store=store)
+    host = _host(store=store)
     host.register(InvariantViolatingRestoreStrategy("alpha"), symbols={"BTC"})
 
     # Unlike an incompatible snapshot (start-fresh), an InvariantViolation is a
@@ -382,7 +409,7 @@ def test_start_recovers_next_seq_from_the_saga_high_water() -> None:
     # Another strategy's records never leak into alpha's high-water.
     _checkpointed_order(store, "other:SOL:9")
 
-    host = StrategyHost(bus=InMemoryBus(), clock=ManualClock(), store=store)
+    host = _host(store=store)
     alpha = RecordingStrategy("alpha")
     other = RecordingStrategy("other")
     host.register(alpha, symbols={"BTC", "ETH"})
@@ -394,7 +421,7 @@ def test_start_recovers_next_seq_from_the_saga_high_water() -> None:
 
 
 def test_start_with_no_saga_records_starts_seq_at_one() -> None:
-    host = StrategyHost(bus=InMemoryBus(), clock=ManualClock(), store=SQLiteStore(":memory:"))
+    host = _host()
     alpha = RecordingStrategy("alpha")
     host.register(alpha, symbols={"BTC"})
     host.start()
@@ -403,7 +430,7 @@ def test_start_with_no_saga_records_starts_seq_at_one() -> None:
 
 
 def test_duplicate_strategy_id_registration_fails_fast() -> None:
-    host = StrategyHost(bus=InMemoryBus(), clock=ManualClock(), store=SQLiteStore(":memory:"))
+    host = _host()
     host.register(RecordingStrategy("dup"), symbols={"BTC"})
 
     with pytest.raises(InvariantViolation, match="dup"):
@@ -417,7 +444,7 @@ def test_registering_the_reserved_unattributed_id_fails_fast() -> None:
     without going through a config — a test, an embedding host — never meets
     that validator, and this is where the id starts partitioning fills.
     """
-    host = StrategyHost(bus=InMemoryBus(), clock=ManualClock(), store=SQLiteStore(":memory:"))
+    host = _host()
 
     with pytest.raises(InvariantViolation, match=UNATTRIBUTED):
         host.register(RecordingStrategy(UNATTRIBUTED), symbols={"BTC"})
@@ -433,7 +460,7 @@ def test_a_second_strategy_may_not_claim_an_owned_symbol() -> None:
     error names both strategies and the symbol because the remedy is a separate
     account, and a reader cannot pick which strategy to move without them.
     """
-    host = StrategyHost(bus=InMemoryBus(), clock=ManualClock(), store=SQLiteStore(":memory:"))
+    host = _host()
     host.register(RecordingStrategy("alpha"), symbols={"BTC", "ETH"})
 
     with pytest.raises(InvariantViolation) as raised:
@@ -455,7 +482,7 @@ def test_strategies_on_disjoint_symbols_register_and_route_independently() -> No
     them would still register these three without complaint.
     """
     bus = InMemoryBus()
-    host = StrategyHost(bus=bus, clock=ManualClock(), store=SQLiteStore(":memory:"))
+    host = _host(bus=bus)
     alpha = RecordingStrategy("alpha")
     beta = RecordingStrategy("beta")
     gamma = RecordingStrategy("gamma")

@@ -161,7 +161,11 @@ class Engine:
             exchange=exchange, checkpointer=self._checkpointer, band=self._config.band
         )
         self._host = StrategyHost(
-            bus=bus, clock=clock, store=store, tick_staleness_ns=self._config.tick_staleness_ns
+            bus=bus,
+            clock=clock,
+            store=store,
+            cache=self._checkpointer.cache,
+            tick_staleness_ns=self._config.tick_staleness_ns,
         )
         self._state = ComponentState.READY
         self._fault: Exception | None = None

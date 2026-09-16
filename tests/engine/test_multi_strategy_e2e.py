@@ -72,7 +72,7 @@ def _life(
     checks.cache.rebuild()
     projection = checks.portfolio
     manager = ExecutionManager(bus=bus, exchange=venue, checkpointer=checks)
-    host = StrategyHost(bus=bus, clock=clock, store=store)
+    host = StrategyHost(bus=bus, clock=clock, store=store, cache=checks.cache)
     btc_strat = SingleShotMarketStrategy(
         strategy_id="btc-shot",
         bus=bus,
