@@ -303,14 +303,29 @@ class HyperliquidExchange:
                 # that filled is terminal, so drop the placed memory regardless of
                 # how the fills read resolves.
                 self._placed.pop(order.cloid, None)  # terminal: drop the placed memory
+                # A `filled` answer is an ack, the same as `resting`: it carries
+                # the venue's oid. The saga keeps the oid from the LIVE ack, and
+                # that oid is the only key the fill history answers to once the
+                # venue drops the order record (ADR-0011 inv 2). So the ack goes
+                # out before the fills read. A read that fails then still leaves
+                # the oid on the saga for reconcile to heal by (#328).
+                await self._bus.publish(
+                    self._status_report(
+                        cloid=order.cloid,
+                        symbol=order.symbol,
+                        status=OrderState.LIVE,
+                        venue_oid=str(oid),
+                    )
+                )
                 # A failed fills read is already named as a *fills* read, never
                 # as this placement: the placement succeeded, and calling it a
                 # place failure would point triage at the wrong request. Emit
-                # nothing and let reconcile's fetch_order re-read FILLED and heal
-                # the fills (ADR-0011). Which way it failed changes nothing here
-                # — there is no worklist behind this read to spare (ADR-0049) —
-                # but it is checked for explicitly rather than falsily, since a
-                # ``VenueReadFailure`` is truthy and would otherwise be iterated.
+                # nothing more and let reconcile's fetch_order re-read the fills
+                # and heal them (ADR-0011). Which way it failed changes nothing
+                # here — there is no worklist behind this read to spare
+                # (ADR-0049) — but it is checked for explicitly rather than
+                # falsily, since a ``VenueReadFailure`` is truthy and would
+                # otherwise be iterated.
                 fills = await self._fetch_fills(cloid=order.cloid, symbol=order.symbol, oid=oid)
                 if isinstance(fills, VenueReadFailure):
                     return

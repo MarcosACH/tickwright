@@ -369,7 +369,7 @@ def test_a_filled_placement_fetches_and_emits_the_real_venue_fills() -> None:
         "type": "userFills",
         "user": Account.from_key(TEST_SIGNING_KEY).address,
     }
-    first, second = reports
+    _ack, first, second = reports
     assert isinstance(first, FillReport) and isinstance(second, FillReport)
     assert (first.trade_id, first.price, first.quantity) == (
         "556",
@@ -383,6 +383,27 @@ def test_a_filled_placement_fetches_and_emits_the_real_venue_fills() -> None:
     )
     assert first.cloid == CLOID
     assert first.ts_event == 1_700_000_000_500 * _NS_PER_MS  # the venue's fill time
+
+
+def test_a_filled_placement_acks_the_order_live_with_its_oid_before_the_fills() -> None:
+    # A `filled` answer is an ack like `resting` is: it carries the venue's oid.
+    # The saga must keep that oid, or a dropped record later leaves the fill
+    # history with no key to read by (#328). It goes out before the fills read,
+    # so a failed read still leaves the oid on the saga.
+    post = FakeExchangeApi(
+        {
+            "order": filled_response(oid=91, total_sz="0.5", avg_px="43250.0"),
+            "userFills": [fill_entry(oid=91, tid=556, px="43250.0", sz="0.5")],
+        }
+    )
+    reports = asyncio.run(place_and_collect_reports(post, market_order(Side.BUY, "0.5")))
+
+    ack, fill = reports
+    assert isinstance(ack, OrderStatusReport)
+    assert ack.status is OrderState.LIVE
+    assert ack.cloid == CLOID
+    assert ack.venue_oid == "91"
+    assert isinstance(fill, FillReport)
 
 
 def test_a_live_fill_reports_the_fee_the_venue_charged_verbatim() -> None:
@@ -404,7 +425,7 @@ def test_a_live_fill_reports_the_fee_the_venue_charged_verbatim() -> None:
 
     reports = asyncio.run(place_and_collect_reports(post, market_order(Side.BUY, "0.002")))
 
-    (report,) = reports
+    (_ack, report) = reports
     assert isinstance(report, FillReport)
     assert report.fee == Decimal("0.019571")
 
@@ -457,8 +478,10 @@ def test_a_permanent_refusal_escapes_the_write_guard_that_catches_everything_els
 def test_a_filled_placement_whose_fills_read_fails_names_a_fills_failure_not_a_place() -> None:
     # The order filled, but the follow-up fills read dies in transport. The
     # placement itself succeeded, so naming it a *place* failure would mislead
-    # triage — name it a fills-read failure, emit nothing, and let
-    # reconciliation's fetch_order re-read FILLED and heal the fills (R004).
+    # triage — name it a fills-read failure, emit no fill, and let
+    # reconciliation's fetch_order re-read the fills and heal them (R004). The
+    # LIVE ack with the oid still goes out: it is what reconcile reads the fill
+    # history by once the venue drops the order record (#328).
     #
     # The label is the venue query, `userFills`, which is what the event catalog
     # documents and what the *unreadable* half of this same read always emitted.
@@ -476,7 +499,9 @@ def test_a_filled_placement_whose_fills_read_fails_names_a_fills_failure_not_a_p
     with capture_events() as events:
         reports = asyncio.run(place_and_collect_reports(post, market_order(Side.BUY, "0.5")))
 
-    assert reports == []
+    (ack,) = reports
+    assert isinstance(ack, OrderStatusReport)
+    assert (ack.status, ack.venue_oid) == (OrderState.LIVE, "91")
     failed = [e for e in events if e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED]
     assert failed and failed[0]["request"] == "userFills"
 
