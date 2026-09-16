@@ -79,6 +79,19 @@ class EngineConfig:
     """The correlation id for this run (ADR-0020); ``None`` generates one."""
 
 
+def _first_leaf(exc: BaseException) -> BaseException:
+    """The fault itself, out of the ``ExceptionGroup`` a ``TaskGroup`` wraps it in.
+
+    A fault from the inline start sequence arrives raw. One from a supervised
+    task arrives wrapped. ``engine.faulted`` names the fault the same way in
+    both cases (#338). The group keeps only the first leaf: the first raw-handler
+    exception is what aborted the group, and its siblings were cancelled.
+    """
+    while isinstance(exc, BaseExceptionGroup):
+        exc = exc.exceptions[0]
+    return exc
+
+
 class Engine:
     """The supervised host: ``run()`` drives the whole ADR-0024 lifecycle."""
 
@@ -280,7 +293,7 @@ class Engine:
             # readable trail and let waiters through before exiting non-zero.
             self._state = ComponentState.FAULTED
             self._fault = exc
-            named_event(NamedEvent.ENGINE_FAULTED, error=repr(exc))
+            named_event(NamedEvent.ENGINE_FAULTED, error=repr(_first_leaf(exc)))
             await self._run_best_effort_stop_hooks()
             self._stopped.set()
             return 1
