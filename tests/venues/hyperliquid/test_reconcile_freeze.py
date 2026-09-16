@@ -14,7 +14,12 @@ import asyncio
 from decimal import Decimal
 
 import pytest
-from hyperliquid_fakes import TEST_SIGNING_KEY, FakeExchangeApi
+from hyperliquid_fakes import (
+    TEST_SIGNING_KEY,
+    FakeExchangeApi,
+    fill_entry,
+    order_status_response,
+)
 from pydantic import SecretStr
 
 from tickwright.adapters.bus import InMemoryBus
@@ -72,22 +77,6 @@ def _submitted_saga() -> Order:
     return _saga("0x" + "ab" * 16, OrderState.SUBMITTED)
 
 
-def _order_status_body(*, oid: int, status: str, cloid: str) -> dict:
-    """The venue's ``orderStatus`` answer for a known order."""
-    return {
-        "status": "order",
-        "order": {
-            "order": {
-                "coin": "BTC",
-                "oid": oid,
-                "timestamp": 1_700_000_000_000,
-                "cloid": cloid,
-            },
-            "status": status,
-        },
-    }
-
-
 def _make_exchange(
     post: FakeExchangeApi, bus: InMemoryBus, clock: ManualClock
 ) -> HyperliquidExchange:
@@ -111,8 +100,8 @@ def _poisoned_book() -> FakeExchangeApi:
     second order's read is one ordinary round-trip away.
     """
     statuses = {
-        POISON: _order_status_body(oid=91, status="liquidatedByTheVenue", cloid=POISON),
-        HEALTHY: _order_status_body(oid=92, status="canceled", cloid=HEALTHY),
+        POISON: order_status_response(oid=91, status="liquidatedByTheVenue", cloid=POISON),
+        HEALTHY: order_status_response(oid=92, status="canceled", cloid=HEALTHY),
     }
     return FakeExchangeApi(
         {
@@ -275,18 +264,13 @@ def test_a_permanent_refusal_leaves_the_cycle_instead_of_spending_the_span() -> 
         clock = ManualClock(start_ns=0)
         post = FakeExchangeApi(
             {
-                "orderStatus": _order_status_body(oid=91, status="filled", cloid="0x" + "ab" * 16),
+                "orderStatus": order_status_response(
+                    oid=91, status="filled", cloid="0x" + "ab" * 16
+                ),
                 "userFillsByTime": [
-                    {
-                        "coin": "BTC",
-                        "px": "43250.0",
-                        "sz": "0.5",
-                        "time": 1_700_000_000_500,
-                        "oid": 91,
-                        "fee": "0.02",
-                        "feeToken": "HYPE",
-                        "tid": 556,
-                    }
+                    fill_entry(
+                        oid=91, tid=556, px="43250.0", sz="0.5", fee="0.02", fee_token="HYPE"
+                    )
                 ],
             }
         )

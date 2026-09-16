@@ -11,7 +11,13 @@ the fill history is read by the ack's oid, and the fill heals the saga.
 import asyncio
 from decimal import Decimal
 
-from hyperliquid_fakes import TEST_SIGNING_KEY, FakeExchangeApi, request_type
+from hyperliquid_fakes import (
+    TEST_SIGNING_KEY,
+    FakeExchangeApi,
+    fill_entry,
+    filled_response,
+    request_type,
+)
 from ledgers import checkpointer
 from pydantic import SecretStr
 
@@ -81,23 +87,8 @@ def _acked_saga() -> Order:
     return order
 
 
-def _fill_row(*, oid: int, tid: int, sz: str) -> dict:
-    return {
-        "coin": "BTC",
-        "px": "43250.0",
-        "sz": sz,
-        "side": "B",
-        "time": ACK_MS + 5_000,
-        "startPosition": "0.0",
-        "dir": "Open Long",
-        "closedPnl": "0.0",
-        "hash": "0x" + "00" * 32,
-        "oid": oid,
-        "crossed": True,
-        "fee": "0.0",
-        "feeToken": "USDC",
-        "tid": tid,
-    }
+FILL_MS = ACK_MS + 5_000
+"""When the venue filled the order: after the ack, inside the windowed read."""
 
 
 def _make_exchange(
@@ -123,8 +114,8 @@ def test_a_fill_behind_a_dropped_record_heals_the_saga_instead_of_rejecting_it()
             {
                 "orderStatus": {"status": "unknownOid"},
                 "userFillsByTime": [
-                    _fill_row(oid=90, tid=555, sz="1.0"),
-                    _fill_row(oid=91, tid=556, sz="0.5"),
+                    fill_entry(oid=90, tid=555, px="43250.0", sz="1.0", time=FILL_MS),
+                    fill_entry(oid=91, tid=556, px="43250.0", sz="0.5", time=FILL_MS),
                 ],
             }
         )
@@ -163,17 +154,6 @@ def test_a_fill_behind_a_dropped_record_heals_the_saga_instead_of_rejecting_it()
     assert not any(isinstance(e, OrderRejected) for e in events)
 
 
-def _placement_filled(oid: int) -> dict:
-    """The venue's answer to an order that filled on arrival: an oid, no trade ids."""
-    return {
-        "status": "ok",
-        "response": {
-            "type": "order",
-            "data": {"statuses": [{"filled": {"totalSz": "0.5", "avgPx": "43250.0", "oid": oid}}]},
-        },
-    }
-
-
 def test_an_order_that_filled_on_placement_is_healed_by_its_oid_once_the_record_is_gone() -> None:
     # Issue #328. The order fills on placement, but the fills read right after
     # dies in transport. By the time reconcile looks, the venue has dropped the
@@ -200,13 +180,15 @@ def test_an_order_that_filled_on_placement_is_healed_by_its_oid_once_the_record_
         clock = ManualClock(start_ns=ACK_MS * 1_000_000)
         post = FakeExchangeApi(
             {
-                "order": _placement_filled(91),
+                "order": filled_response(oid=91, total_sz="0.5", avg_px="43250.0"),
                 # The read right after placement is the whole recent history.
                 # It dies. The read reconcile makes is windowed from the ack
                 # time, and by then the record is gone.
                 "userFills": ConnectionError("connection refused"),
                 "orderStatus": {"status": "unknownOid"},
-                "userFillsByTime": [_fill_row(oid=91, tid=556, sz="0.5")],
+                "userFillsByTime": [
+                    fill_entry(oid=91, tid=556, px="43250.0", sz="0.5", time=FILL_MS)
+                ],
             }
         )
         exchange = _make_exchange(post, bus, clock)

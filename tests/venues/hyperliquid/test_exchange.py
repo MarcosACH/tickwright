@@ -18,7 +18,10 @@ from hyperliquid.utils.signing import recover_agent_or_user_from_l1_action
 from hyperliquid_fakes import (
     TEST_SIGNING_KEY,
     FakeExchangeApi,
+    fill_entry,
+    filled_response,
     idle_ws,
+    order_status_response,
     request_type,
     resting_response,
 )
@@ -301,51 +304,6 @@ def test_a_placement_error_reports_the_order_rejected_with_the_venue_reason() ->
     assert report.cloid == CLOID
 
 
-def filled_response(*, oid: int, total_sz: str, avg_px: str) -> dict:
-    """The venue's placement response for an order that filled on arrival."""
-    return {
-        "status": "ok",
-        "response": {
-            "type": "order",
-            "data": {"statuses": [{"filled": {"totalSz": total_sz, "avgPx": avg_px, "oid": oid}}]},
-        },
-    }
-
-
-def fill_entry(
-    *,
-    oid: int,
-    tid: int,
-    px: object,
-    sz: object,
-    time: int = 1_700_000_000_500,
-    fee: object = "0.0",
-    fee_token: str = "USDC",
-    crossed: bool = True,
-) -> dict:
-    """One venue ``userFills`` entry (the fields the docs pin, ADR-0011).
-
-    ``px``/``sz`` are ``object``: the venue reports both as decimal strings, so
-    building a re-typed one is how a contract change gets tested.
-    """
-    return {
-        "coin": "BTC",
-        "px": px,
-        "sz": sz,
-        "side": "B",
-        "time": time,
-        "startPosition": "0.0",
-        "dir": "Open Long",
-        "closedPnl": "0.0",
-        "hash": "0x" + "00" * 32,
-        "oid": oid,
-        "crossed": crossed,
-        "fee": fee,
-        "feeToken": fee_token,
-        "tid": tid,
-    }
-
-
 def test_a_filled_placement_fetches_and_emits_the_real_venue_fills() -> None:
     # The placement response carries no trade ids, and inventing one would
     # double-count against reconciliation's {cloid}:fill:{tid} dedup — so the
@@ -443,7 +401,7 @@ def test_a_live_fill_settled_in_another_token_escalates_instead_of_freezing() ->
     # (ADR-0036 §4).
     post = FakeExchangeApi(
         {
-            "orderStatus": order_status_response(status="filled", oid=91),
+            "orderStatus": order_status_response(cloid=CLOID, status="filled", oid=91),
             "userFillsByTime": [
                 fill_entry(oid=91, tid=556, px="43250.0", sz="0.5", fee="0.02", fee_token="HYPE")
             ],
@@ -548,36 +506,16 @@ def test_cancel_sends_a_signed_cancel_by_cloid_and_reports_cancelled() -> None:
     assert cancelled.cloid == CLOID
 
 
-def order_status_response(
-    *, coin: str = "BTC", status: str = "open", oid: int = 77, cloid: str | None = None
-) -> dict:
-    """The venue's orderStatus answer for a known order."""
-    return {
-        "status": "order",
-        "order": {
-            "order": {
-                "coin": coin,
-                "side": "B",
-                "limitPx": "42000.0",
-                "sz": "0.5",
-                "oid": oid,
-                "timestamp": 1_700_000_000_000,
-                "origSz": "0.5",
-                "cloid": cloid or CLOID,
-            },
-            "status": status,
-            "statusTimestamp": 1_700_000_000_100,
-        },
-    }
-
-
 def test_cancel_of_an_order_placed_before_a_crash_resolves_the_coin_from_venue_truth() -> None:
     # A restart empties the adapter's placed-order memory, but the engine still
     # cancels by cloid (ADR-0026) — so the adapter asks the venue whose order
     # this is (orderStatus) and cancels with the resolved asset index.
     async def main() -> FakeExchangeApi:
         post = FakeExchangeApi(
-            {"orderStatus": order_status_response(), "cancelByCloid": cancel_success_response()}
+            {
+                "orderStatus": order_status_response(cloid=CLOID),
+                "cancelByCloid": cancel_success_response(),
+            }
         )
         exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
         await exchange.cancel(CLOID)
@@ -625,7 +563,7 @@ async def fetch_view(
 def test_fetch_order_bundles_the_venue_status_and_fills_into_one_view() -> None:
     post = FakeExchangeApi(
         {
-            "orderStatus": order_status_response(status="filled", oid=91),
+            "orderStatus": order_status_response(cloid=CLOID, status="filled", oid=91),
             "userFillsByTime": [
                 fill_entry(oid=90, tid=555, px="43249.0", sz="1.0"),
                 fill_entry(oid=91, tid=556, px="43250.0", sz="0.5"),
@@ -756,7 +694,7 @@ def test_fetch_order_reports_a_failed_send_when_the_read_itself_fails() -> None:
             fetch_view(
                 FakeExchangeApi(
                     {
-                        "orderStatus": order_status_response(),
+                        "orderStatus": order_status_response(cloid=CLOID),
                         "userFillsByTime": ConnectionError("reset"),
                     }
                 )
@@ -815,7 +753,10 @@ def test_fetch_order_freezes_on_a_fills_body_it_cannot_parse() -> None:
     # orderStatus — never a partial view that reads as an empty book (ADR-0011
     # inv 1) — and name the shape change for triage.
     post = FakeExchangeApi(
-        {"orderStatus": order_status_response(status="open"), "userFillsByTime": {"unexpected": 1}}
+        {
+            "orderStatus": order_status_response(cloid=CLOID, status="open"),
+            "userFillsByTime": {"unexpected": 1},
+        }
     )
 
     with capture_events() as events:
@@ -839,7 +780,7 @@ def test_fetch_order_freezes_on_a_non_finite_fill_figure(figure: str) -> None:
     ):
         post = FakeExchangeApi(
             {
-                "orderStatus": order_status_response(status="filled", oid=91),
+                "orderStatus": order_status_response(cloid=CLOID, status="filled", oid=91),
                 "userFillsByTime": [entry],
             }
         )
@@ -868,7 +809,7 @@ def test_fetch_order_freezes_on_a_re_typed_fill_figure(figure: object) -> None:
     ):
         post = FakeExchangeApi(
             {
-                "orderStatus": order_status_response(status="filled", oid=91),
+                "orderStatus": order_status_response(cloid=CLOID, status="filled", oid=91),
                 "userFillsByTime": [entry],
             }
         )
@@ -895,7 +836,10 @@ def test_fetch_order_maps_the_venue_status_taxonomy_by_suffix(
     venue_status: str, state: OrderState
 ) -> None:
     post = FakeExchangeApi(
-        {"orderStatus": order_status_response(status=venue_status), "userFillsByTime": []}
+        {
+            "orderStatus": order_status_response(cloid=CLOID, status=venue_status),
+            "userFillsByTime": [],
+        }
     )
     view = asyncio.run(fetch_view(post))
 
@@ -912,7 +856,11 @@ def test_fetch_order_treats_a_status_it_cannot_map_as_a_named_failed_read() -> N
     # with a stalled cycle and nowhere to look.
     with capture_events() as events:
         view = asyncio.run(
-            fetch_view(FakeExchangeApi({"orderStatus": order_status_response(status="triggered")}))
+            fetch_view(
+                FakeExchangeApi(
+                    {"orderStatus": order_status_response(cloid=CLOID, status="triggered")}
+                )
+            )
         )
 
     # The unreadable body, not the failed send: this is issue #236's own case at
@@ -1398,7 +1346,7 @@ def test_a_terminal_fetch_prunes_the_placed_order_so_the_cache_stays_bounded() -
         post = FakeExchangeApi(
             {
                 "order": resting_response(oid=77),
-                "orderStatus": order_status_response(status="filled"),
+                "orderStatus": order_status_response(cloid=CLOID, status="filled"),
                 "userFillsByTime": [],
                 "cancelByCloid": cancel_success_response(),
             }

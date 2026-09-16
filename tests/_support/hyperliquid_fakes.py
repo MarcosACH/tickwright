@@ -1,7 +1,11 @@
 """Fakes for the Hyperliquid process boundaries (the only seams the venue
 suite mocks): a recorded-frame WS connection with frame builders shaped like
 the venue's ``trades``-channel payloads, and a canned-response HTTP POST for
-the exchange/info endpoints."""
+the exchange/info endpoints.
+
+The body builders below it (``resting_response``, ``filled_response``,
+``order_status_response``, ``fill_entry``) are the one place a test describes
+what the venue sends back. A suite that needs a venue body builds it here."""
 
 import asyncio
 import json
@@ -102,6 +106,74 @@ def resting_response(oid: int) -> dict:
     return {
         "status": "ok",
         "response": {"type": "order", "data": {"statuses": [{"resting": {"oid": oid}}]}},
+    }
+
+
+def filled_response(*, oid: int, total_sz: str, avg_px: str) -> dict:
+    """The venue's placement response for an order that filled on arrival."""
+    return {
+        "status": "ok",
+        "response": {
+            "type": "order",
+            "data": {"statuses": [{"filled": {"totalSz": total_sz, "avgPx": avg_px, "oid": oid}}]},
+        },
+    }
+
+
+def order_status_response(
+    *, cloid: str, status: str = "open", oid: int = 77, coin: str = "BTC"
+) -> dict:
+    """The venue's ``orderStatus`` answer for a known order."""
+    return {
+        "status": "order",
+        "order": {
+            "order": {
+                "coin": coin,
+                "side": "B",
+                "limitPx": "42000.0",
+                "sz": "0.5",
+                "oid": oid,
+                "timestamp": 1_700_000_000_000,
+                "origSz": "0.5",
+                "cloid": cloid,
+            },
+            "status": status,
+            "statusTimestamp": 1_700_000_000_100,
+        },
+    }
+
+
+def fill_entry(
+    *,
+    oid: int,
+    tid: int,
+    px: object,
+    sz: object,
+    time: int = 1_700_000_000_500,
+    fee: object = "0.0",
+    fee_token: str = "USDC",
+    crossed: bool = True,
+) -> dict:
+    """One venue ``userFills`` entry (the fields the docs pin, ADR-0011).
+
+    ``px``/``sz`` are ``object``: the venue reports both as decimal strings, so
+    building a re-typed one is how a contract change gets tested.
+    """
+    return {
+        "coin": "BTC",
+        "px": px,
+        "sz": sz,
+        "side": "B",
+        "time": time,
+        "startPosition": "0.0",
+        "dir": "Open Long",
+        "closedPnl": "0.0",
+        "hash": "0x" + "00" * 32,
+        "oid": oid,
+        "crossed": crossed,
+        "fee": fee,
+        "feeToken": fee_token,
+        "tid": tid,
     }
 
 
