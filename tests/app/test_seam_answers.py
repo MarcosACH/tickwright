@@ -47,6 +47,60 @@ def test_a_suite_that_answers_no_gate_fails_naming_the_adapter_and_every_gate(
         assert gate in message
 
 
+_ANSWERS_ALL_THREE = """
+from pathlib import Path
+
+from tickwright.domain import {protocol}
+
+
+def test_claims() -> None:
+    assert_every_member_is_claimed({protocol}, _SEAM_CLAIMS, suite=Path(__file__).parent)
+
+
+def test_marked() -> None:
+    assert_every_traded_symbol_is_marked(transcript, feed="{feed}")
+
+
+def test_quiet() -> None:
+    await_quiet = assert_quiet_once_stopped(transcript, adapter=feed, task=task, name="{feed}")
+"""
+
+
+def test_a_suite_answering_every_gate_under_the_adapter_s_own_name_is_green(
+    tmp_path: Path,
+) -> None:
+    """The shape both shipped feed suites have, in miniature."""
+    suite = _suite(tmp_path, _ANSWERS_ALL_THREE.format(protocol="MarketFeed", feed="FakeFeed"))
+
+    assert_every_adapter_answers_its_gates(
+        MarketFeed, configured=["fake"], answers={"fake": Answered("FakeFeed", suite=suite)}
+    )
+
+
+def test_a_gate_answered_under_another_name_does_not_count(tmp_path: Path) -> None:
+    """The answer is keyed on the adapter, not on the call being present.
+
+    ``tests/adapters/feed/test_feed_contract.py`` drives the mark gate with a
+    fake ``TradesOnlyFeed`` to prove the gate bites. A read that counted any
+    call would count that one for every feed. And a claims call over the other
+    seam's Protocol is a claims call for the other seam.
+    """
+    suite = _suite(tmp_path, _ANSWERS_ALL_THREE.format(protocol="Exchange", feed="OtherFeed"))
+
+    with pytest.raises(AssertionError) as failure:
+        assert_every_adapter_answers_its_gates(
+            MarketFeed, configured=["fake"], answers={"fake": Answered("FakeFeed", suite=suite)}
+        )
+
+    message = str(failure.value)
+    for gate in (
+        "assert_every_member_is_claimed",
+        "assert_every_traded_symbol_is_marked",
+        "assert_quiet_once_stopped",
+    ):
+        assert gate in message
+
+
 def test_a_map_that_misses_a_configured_adapter_fails_before_any_suite_is_read() -> None:
     """The stale-map failure the ``seam_claims`` guard exists for, one level up.
 
