@@ -511,6 +511,14 @@ declares its field set, so one name has one shape. Observability is a first-clas
 system. See ADR-0020.
 _Avoid_: log message, log line (a named event is structured and asserted-on).
 
+**Closed set**:
+A vocabulary the engine branches on by member, with no member added at runtime: a seam Protocol,
+the named-event catalog, `DivergenceField`, an `AppConfig` `Literal`. Each has a hand-written list
+on the test side. That list must cover the set exactly, both ways, or a member nobody answers for
+fails silently (#194). `tests/_support/closed_sets.py` is the one place the rule is written.
+_Avoid_: enum (a closed set is also a Protocol or a `Literal`), registry (nothing is added at
+runtime).
+
 **Composition root**:
 The single place that wires the engine: `build_engine(config)` reads the typed `*Config` objects and
 constructs the concrete impls, which the [[Engine]] then receives already-built (the engine never

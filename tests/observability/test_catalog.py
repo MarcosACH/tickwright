@@ -8,6 +8,7 @@ silently, it raises at the call site (ADR-0020).
 
 import pytest
 import structlog.testing
+from closed_sets import assert_covers_exactly
 
 from tickwright.observability import NamedEvent, named_event
 from tickwright.observability.catalog import FIELDS
@@ -37,7 +38,7 @@ def test_every_catalog_member_is_a_dotted_lowercase_name() -> None:
 def test_every_catalog_member_declares_its_field_set() -> None:
     # The declaration is as closed as the catalog: a name with no field set
     # would be back to the drift #338 removes.
-    assert set(FIELDS) == set(NamedEvent)
+    assert_covers_exactly(NamedEvent, FIELDS, what="catalog.FIELDS")
 
 
 def test_a_field_set_that_differs_from_the_declared_one_raises_rather_than_emitting() -> None:

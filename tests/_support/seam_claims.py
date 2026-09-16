@@ -22,6 +22,11 @@ sees that ``stop`` carries a claim, never that the claim covers every clause
 here. Read it as "nobody forgot this member entirely", not "this member is
 fully asserted" — widening a member is still a reviewer's job.
 
+A closed ``Enum`` the engine branches on is not claimed this way. A name is
+not a proof that the named test produces the member, so ``DivergenceField``
+is walked like the named-event catalog instead, one producer per member
+(``tests/engine/test_reconcile_findings.py``, #303).
+
 Explicit assertion messages throughout: this module is not a test module, so
 pytest does not rewrite its asserts and a bare comparison would fail blind.
 """
@@ -29,7 +34,8 @@ pytest does not rewrite its asserts and a bare comparison would fail blind.
 import ast
 from collections.abc import Mapping
 from pathlib import Path
-from typing import get_protocol_members
+
+from closed_sets import assert_covers_exactly
 
 
 def assert_every_member_is_claimed(
@@ -42,15 +48,11 @@ def assert_every_member_is_claimed(
     stale-list failure the guard exists for) and a claim naming a test that was
     renamed or deleted out from under it.
     """
-    members = get_protocol_members(protocol)
-    unclaimed = members - set(claims)
-    assert not unclaimed, (
-        f"{protocol.__name__} members with no claim in {suite}: {sorted(unclaimed)} — "
-        f"add the test that asserts what each does here, then name it in the claims map"
-    )
-    stale = set(claims) - members
-    assert not stale, (
-        f"claims in {suite} for members {protocol.__name__} no longer has: {sorted(stale)}"
+    assert_covers_exactly(
+        protocol,
+        claims,
+        what=f"the claims in {suite}",
+        hint="add the test that asserts what each does here, then name it in the claims map",
     )
 
     declared = _test_names(suite)

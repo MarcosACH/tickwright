@@ -11,10 +11,12 @@ A reading is built here by hand for exactly that reason. It is the same freedom
 a recorded venue body already has, pointed at the other side of the comparison.
 """
 
+from collections.abc import Callable
 from dataclasses import replace
 from decimal import Decimal
 
 import pytest
+from closed_sets import assert_covers_exactly
 
 from tickwright.domain import (
     DEFAULT_LEVERAGE,
@@ -732,14 +734,23 @@ def test_a_size_finding_on_a_symbol_closed_to_flat_explains_the_cross_maintenanc
     assert (findings.suppressed, findings.unvalued) == (0, 0)
 
 
-@pytest.mark.parametrize(
-    ("field", "attribute"),
-    [
-        (DivergenceField.UNREALIZED_PNL, "unrealized_pnl"),
-        (DivergenceField.NOTIONAL, "notional"),
-        (DivergenceField.MARGIN_USED, "margin_used"),
-    ],
-)
+# The per-symbol Tier-2 figures, each with the venue attribute it is read off.
+# Module-level so the walk at the end of this file composes it (#303).
+_VENUE_POSITION_FIGURES = {
+    DivergenceField.UNREALIZED_PNL: "unrealized_pnl",
+    DivergenceField.NOTIONAL: "notional",
+    DivergenceField.MARGIN_USED: "margin_used",
+}
+
+# The account-grain Tier-2 figures, likewise.
+_VENUE_ACCOUNT_FIGURES = {
+    DivergenceField.EQUITY: "equity",
+    DivergenceField.FREE_MARGIN: "free_margin",
+    DivergenceField.MAINTENANCE_MARGIN: "cross_maintenance_margin",
+}
+
+
+@pytest.mark.parametrize(("field", "attribute"), _VENUE_POSITION_FIGURES.items())
 def test_one_broken_venue_figure_is_one_finding_naming_that_figure(
     field: DivergenceField, attribute: str
 ) -> None:
@@ -806,14 +817,7 @@ def _agreeing_book() -> tuple[VenueAccountState, LedgerReading]:
     return state, reading
 
 
-@pytest.mark.parametrize(
-    ("field", "attribute"),
-    [
-        (DivergenceField.EQUITY, "equity"),
-        (DivergenceField.FREE_MARGIN, "free_margin"),
-        (DivergenceField.MAINTENANCE_MARGIN, "cross_maintenance_margin"),
-    ],
-)
+@pytest.mark.parametrize(("field", "attribute"), _VENUE_ACCOUNT_FIGURES.items())
 def test_one_broken_venue_account_figure_is_one_finding_naming_that_figure(
     field: DivergenceField, attribute: str
 ) -> None:
@@ -1007,3 +1011,79 @@ def test_a_size_the_venue_posts_no_price_for_is_counted_unpriced_and_not_healed(
     assert findings.heals == ()
     assert findings.cash is None
     assert (findings.deferred, findings.unpriced) == (0, 1)
+
+
+_Book = tuple[VenueAccountState, LedgerReading]
+
+
+def _venue_position_off_by_one(attribute: str) -> Callable[[_Book], _Book]:
+    def nudge(book: _Book) -> _Book:
+        state, reading = book
+        (position,) = state.positions
+        moved = replace(position, **{attribute: getattr(position, attribute) + Decimal("1")})
+        return replace(state, positions=(moved,)), reading
+
+    return nudge
+
+
+def _venue_account_off_by_one(attribute: str) -> Callable[[_Book], _Book]:
+    def nudge(book: _Book) -> _Book:
+        state, reading = book
+        return replace(state, **{attribute: getattr(state, attribute) + Decimal("1")}), reading
+
+    return nudge
+
+
+def _ledger_cash_off_by_one(book: _Book) -> _Book:
+    state, reading = book
+    account = replace(reading.account, cash=reading.account.cash + Decimal("1"))
+    return state, replace(reading, account=account)
+
+
+def _ledger_size_off_by_a_tenth(book: _Book) -> _Book:
+    state, reading = book
+    (row,) = reading.rows.values()
+    return state, replace(reading, rows={row.symbol: replace(row, net=row.net - Decimal("0.1"))})
+
+
+# One agreeing book, nudged so that the named figure disagrees. The Tier-1
+# pair is nudged on the ledger's side, since the venue's cash is implied and
+# its size is what the ledger is measured against. The six Tier-2 rows are
+# the isolation tests' own rosters, so a row deleted there is a member with
+# no producer here.
+_PRODUCED_BY: dict[DivergenceField, Callable[[_Book], _Book]] = {
+    DivergenceField.CASH: _ledger_cash_off_by_one,
+    DivergenceField.SIGNED_SIZE: _ledger_size_off_by_a_tenth,
+    **{f: _venue_position_off_by_one(a) for f, a in _VENUE_POSITION_FIGURES.items()},
+    **{f: _venue_account_off_by_one(a) for f, a in _VENUE_ACCOUNT_FIGURES.items()},
+}
+
+
+@pytest.mark.parametrize("field", list(DivergenceField), ids=lambda f: f.value)
+def test_every_divergence_field_is_produced_by_a_classifier(field: DivergenceField) -> None:
+    """The closed vocabulary is walked, member by member (#303).
+
+    ``DivergenceField`` argues its own closedness on the ground that a member
+    nothing answers for fails silently. It did, once: #194 landed the band over
+    three of six Tier-2 figures, and ``notional``, ``margin_used`` and the
+    account ``maintenance_margin`` were classified nowhere for a whole slice
+    with every check green. So this is the catalog walk's shape, pointed at
+    the enum: one producer per member, the pass run over it, and the member
+    found among what the pass measured.
+
+    Member-grained. It sees that a member is produced and never whether
+    ``_reference`` scales it by the right notional. A member that falls into
+    the account-grain default by accident is still green here, and that
+    clause stays a reviewer's.
+    """
+    state, reading = _PRODUCED_BY[field](_agreeing_book())
+
+    findings = ReconcileFindings.classify(
+        state, reading, band=ValuationBand(), now_ns=_NOW_NS, fills_before=0
+    )
+
+    assert field in {d.field for d in findings.divergences}
+
+
+def test_the_walk_names_every_divergence_field() -> None:
+    assert_covers_exactly(DivergenceField, _PRODUCED_BY, what="_PRODUCED_BY")
