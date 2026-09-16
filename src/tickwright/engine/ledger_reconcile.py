@@ -586,13 +586,14 @@ def _sizes(state: VenueAccountState, reading: LedgerReading) -> tuple[Divergence
 class _AccountGrain:
     """One account-grain Tier-2 figure the cycle compares (ADR-0040 §6).
 
-    ``_PerSymbol``'s sibling one grain up, and a sibling rather than the same
-    type because the two grains read different things (ADR-0041 §4): a row
-    against a venue position here, the whole reading against the whole
-    snapshot there. The classifier and the ``unvalued`` count both range over
-    ``_ACCOUNT_GRAIN``. Before it (#335), the three figures were three
-    classifiers of one shape and a fourth hand-kept tuple in the count, which
-    fell a figure short in silence when one was forgotten.
+    ``_PerSymbol``'s sibling one grain up. It is a sibling and not the same
+    type because the two grains read different things (ADR-0041 §4). A
+    per-symbol figure reads a row against a venue position. An account figure
+    reads the whole reading against the whole snapshot. The classifier and
+    the ``unvalued`` count both range over ``_ACCOUNT_GRAIN``. Before it
+    (#335), the three figures were three classifiers of one shape. The count
+    kept a fourth tuple by hand, and fell a figure short in silence when one
+    was forgotten.
     """
 
     field: DivergenceField
@@ -978,9 +979,6 @@ class ReconcileFindings:
             if divergence.field is DivergenceField.CASH:
                 cash_findings.append(divergence)
                 continue
-            # A Tier-1 size finding always carries its symbol; this narrows the type.
-            if divergence.symbol is None:
-                continue
             if divergence.symbol in moved:
                 deferred += 1
                 continue
@@ -993,20 +991,17 @@ class ReconcileFindings:
             # deadline and stays visible as a finding. The venue omits the
             # field on a position it does not carry, so a *closing* heal falls
             # under this too. Counted apart from ``deferred`` because it does
-            # not clear on its own.
-            price = prices.get(divergence.symbol)
-            if price is None:
+            # not clear on its own. A size finding always carries its symbol,
+            # and the ``None`` arm only narrows the type. A finding with no
+            # symbol has no price either, so it lands on the same count.
+            if divergence.symbol is None or (price := prices.get(divergence.symbol)) is None:
                 unpriced += 1
                 continue
             # The delta is ``venue − ledger`` and the venue is authoritative
-            # (ADR-0034), so the fill moves the ledger *to* the snapshot. The
-            # zero arm is unreachable from this pass's own input, since
-            # ``_sizes`` reports on exact inequality, and kept anyway: a heal of
-            # zero is not a fact worth putting on the path, and the alternative
-            # is a synthetic ``Position.apply`` faults the run over.
+            # (ADR-0034), so the fill moves the ledger *to* the snapshot. It is
+            # never zero here. ``_sizes`` reports on exact inequality, so a size
+            # finding always has a gap behind it.
             delta = divergence.venue - divergence.ledger
-            if delta == _ZERO:
-                continue
             heals.append(
                 _SizeHeal(
                     divergence=divergence,

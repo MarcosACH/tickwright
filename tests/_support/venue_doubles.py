@@ -276,9 +276,10 @@ def account_state(
 
 
 def venue_holding(**buckets: Decimal | None) -> VenueAccountState:
-    """A venue snapshot holding one position per symbol, each with the bucket
-    it posts. ``None`` is the venue's own claim that the position is cross
-    (ADR-0043 §3). No keyword is a venue holding nothing.
+    """A venue snapshot holding one position per symbol, each with its bucket.
+
+    ``None`` is the venue's own claim that the position is cross (ADR-0043
+    §3). No keyword is a venue holding nothing.
 
     The rest of each row is ``account_state``'s recorded fixture, since the
     collateral ingest reads the bucket and nothing else off the snapshot.

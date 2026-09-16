@@ -252,10 +252,10 @@ class Checkpointer:
         uncorrected positions, or the reverse. The fold that puts them in order
         is the projection's (``apply_heal``); what this owns is that they land
         together. The locked collateral on ``snapshot`` is the third part and
-        joins on the same terms: it is not a heal but a re-ingest of a Tier-1
-        field the venue authors on live (ADR-0043 §3), and it arrives on the
-        very snapshot the other two were read from, which is why the snapshot
-        itself is handed through rather than a map read off it.
+        joins on the same terms. It is not a heal but a re-ingest of a Tier-1
+        field the venue authors on live (ADR-0043 §3). It arrives on the very
+        snapshot the other two were read from. That is why the snapshot itself
+        is handed through and not a map read off it.
 
         The rows written are the **union** of what the fills moved and what the
         ingest moved, deduped by partition: one symbol can be in both, and the

@@ -507,10 +507,10 @@ class PortfolioProjection:
         the venue holding none, which releases the bucket rather than leaving
         the previous cycle's number standing on a position since closed.
 
-        The whole snapshot rather than a map of buckets, on
-        ``observe_venue_liquidation``'s argument: which venue field the bucket
-        is read from is this projection's knowledge, and a caller building the
-        map would be a second place that decides it (#335).
+        The whole snapshot comes through, not a map of buckets, on
+        ``observe_venue_liquidation``'s argument. Which venue field the bucket
+        is read from is this projection's knowledge. A caller building the map
+        would be a second place that decides it (#335).
 
         ``None`` when the fold moved nothing, as ``apply_funding``'s ``None`` is
         a dropped accrual: a cycle that corrected nothing must write *nothing*,
