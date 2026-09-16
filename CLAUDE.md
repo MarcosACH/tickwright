@@ -120,6 +120,9 @@ triggers.
    start. Recorded shas are hand-written, so check them against `git log`.
 6. One PR per issue, with `Closes #<N>` in the body.
 7. `/code-review` reports BLOCKING, WARN, and NIT. Label `ralph:ready` when it is clean.
+8. `/verify-tickwright` drives the real engine process the way an operator does and keeps the
+   proof in `.agents/verify/<run-id>/evidence/`. `/maintain-verification-skill` keeps its feature
+   map honest after the engine changes.
 
 Conventions: `docs/workflow/labels.md`, `docs/agents/issue-tracker.md`.
 
