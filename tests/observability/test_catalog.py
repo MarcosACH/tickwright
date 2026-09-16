@@ -60,7 +60,10 @@ def test_a_member_with_no_declared_field_set_raises_rather_than_emitting(
     # #338 removed.
     monkeypatch.delitem(FIELDS, NamedEvent.ORDER_PLACED)
     with structlog.testing.capture_logs() as logs:
-        with pytest.raises(KeyError):
+        with pytest.raises(ValueError, match="order.placed") as excinfo:
             named_event(NamedEvent.ORDER_PLACED)
 
+    # The refusal says what to change, as the other two refusals do.
+    assert "FIELDS" in str(excinfo.value)
+    assert isinstance(excinfo.value.__cause__, KeyError)
     assert logs == []

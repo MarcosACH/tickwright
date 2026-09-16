@@ -31,16 +31,23 @@ def named_event(name: NamedEvent | str, /, **fields: object) -> None:
     ``name`` must be a ``NamedEvent`` (or a string equal to one). An uncataloged
     name raises ``ValueError`` — the runtime half of "a state-affecting path with
     no named event is a defect": a typo or an undocumented name never ships as a
-    silent record. Correlation ids are not passed here; they ride the ambient
-    context and are merged in by the processor chain.
+    silent record. A call whose fields differ from the set ``FIELDS`` declares
+    for ``name`` raises the same way (#338). Correlation ids are not passed here;
+    they ride the ambient context and are merged in by the processor chain.
     """
     if name not in _CATALOG:
         raise ValueError(
             f"uncataloged named event {name!r}: add it to NamedEvent (ADR-0020) before emitting it"
         )
-    # Indexed, not ``.get``: every member is declared (``test_catalog``), so a
-    # missing entry is a defect and never a reason to emit unchecked.
-    declared = FIELDS[NamedEvent(name)]
+    # Every member is declared (``test_catalog``), so a missing entry is a
+    # defect and never a reason to emit unchecked. It is named like the other
+    # two refusals, so the message says what to change.
+    try:
+        declared = FIELDS[NamedEvent(name)]
+    except KeyError as exc:
+        raise ValueError(
+            f"named event {name!r} has no entry in FIELDS: declare its field set (ADR-0020)"
+        ) from exc
     if set(fields) != declared:
         raise ValueError(
             f"named event {name!r} declares fields {sorted(declared)} "
