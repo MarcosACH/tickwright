@@ -10,14 +10,15 @@ import pytest
 import structlog.testing
 
 from tickwright.observability import NamedEvent, named_event
+from tickwright.observability.catalog import FIELDS
 
 
 def test_cataloged_name_is_emitted_as_a_structured_record() -> None:
     with structlog.testing.capture_logs() as logs:
-        named_event(NamedEvent.ORDER_FILLED, quantity="0.5")
+        named_event(NamedEvent.ORDER_REJECTED, reason="post_only")
 
-    assert [log["event"] for log in logs] == ["order.filled"]
-    assert logs[0]["quantity"] == "0.5"
+    assert [log["event"] for log in logs] == ["order.rejected"]
+    assert logs[0]["reason"] == "post_only"
 
 
 def test_an_uncataloged_name_raises_rather_than_emitting() -> None:
@@ -31,6 +32,12 @@ def test_every_catalog_member_is_a_dotted_lowercase_name() -> None:
     for event in NamedEvent:
         assert event.value == event.value.lower()
         assert "." in event.value
+
+
+def test_every_catalog_member_declares_its_field_set() -> None:
+    # The declaration is as closed as the catalog: a name with no field set
+    # would be back to the drift #338 removes.
+    assert set(FIELDS) == set(NamedEvent)
 
 
 def test_a_field_set_that_differs_from_the_declared_one_raises_rather_than_emitting() -> None:

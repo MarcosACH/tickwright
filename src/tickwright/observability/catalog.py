@@ -215,9 +215,9 @@ class NamedEvent(StrEnum):
     # **transport** — outcome unknown, no report emitted — or a 200-OK body the
     # adapter cannot **parse**, which is a failed read and never venue truth
     # (ADR-0011 inv 1). ``request`` names the venue request (``place``,
-    # ``cancel``, ``userFills``, ``clearinghouseState``, …); ``cloid`` rides
-    # along only where the request has one, so the account-grain read carries
-    # none. Nothing is reported either way — reconcile-by-cloid resolves an
+    # ``cancel``, ``userFills``, ``clearinghouseState``, …); ``cloid`` is
+    # ``None`` where the request has no order, as on the account-grain read.
+    # Nothing is reported either way — reconcile-by-cloid resolves an
     # in-flight order (ADR-0008 rule 2) and the account-grain cycle freezes.
     EXCHANGE_REQUEST_FAILED = "exchange.request_failed"
     # Live-exchange write path: the venue refused the whole action envelope (bad
@@ -246,5 +246,55 @@ class NamedEvent(StrEnum):
 # red. A field that is sometimes absent is declared and sent as ``None``: one
 # shape per event, so an operator can key on it.
 FIELDS: dict[NamedEvent, frozenset[str]] = {
+    # Correlation ids (cloid, signal_id) ride the ambient context, so a saga
+    # transition carries nothing of its own but a terminal's ``reason``.
+    NamedEvent.ORDER_PLACED: frozenset(),
+    NamedEvent.ORDER_SUBMITTED: frozenset(),
+    NamedEvent.ORDER_LIVE: frozenset(),
+    NamedEvent.ORDER_PARTIALLY_FILLED: frozenset(),
+    NamedEvent.ORDER_FILLED: frozenset(),
+    NamedEvent.ORDER_DENIED: frozenset({"reason"}),
+    NamedEvent.ORDER_REJECTED: frozenset({"reason"}),
+    NamedEvent.ORDER_FAILED: frozenset({"reason"}),
+    NamedEvent.ORDER_CANCELLED: frozenset(),
+    # One shape for the fill path and the funding-accrual path alike.
+    NamedEvent.POSITION_OPENED: frozenset({"strategy_id", "symbol", "size", "funding"}),
+    NamedEvent.POSITION_CHANGED: frozenset({"strategy_id", "symbol", "size", "funding"}),
+    NamedEvent.POSITION_CLOSED: frozenset({"strategy_id", "symbol", "size", "funding"}),
+    NamedEvent.ACCOUNT_MATERIALISED: frozenset({"account_id", "genesis_collateral"}),
+    NamedEvent.FEED_LAGGED: frozenset({"symbol", "event_id", "stream"}),
+    NamedEvent.FEED_FRAME_DROPPED: frozenset({"frame", "row"}),
+    NamedEvent.ENGINE_BARRIER_CLEARED: frozenset(),
+    NamedEvent.ENGINE_FEED_STARTED: frozenset(),
     NamedEvent.ENGINE_FAULTED: frozenset({"error"}),
+    NamedEvent.ENGINE_STOP_HOOK_FAILED: frozenset({"hook", "error"}),
+    NamedEvent.GUARD_KILL_SWITCH_TRIPPED: frozenset({"reason"}),
+    NamedEvent.GUARD_KILL_SWITCH_RESET: frozenset(),
+    NamedEvent.STRATEGY_ERROR: frozenset({"strategy_id", "event_id", "error"}),
+    NamedEvent.STRATEGY_SNAPSHOT_INCOMPATIBLE: frozenset({"strategy_id", "error"}),
+    NamedEvent.INFLIGHT_RECONCILED: frozenset({"resolution"}),
+    NamedEvent.RECONCILE_RECENCY_SKIPPED: frozenset(),
+    NamedEvent.GHOST_RECONCILED: frozenset({"resolution"}),
+    NamedEvent.RECONCILE_FROZEN: frozenset({"scope"}),
+    NamedEvent.ACCOUNT_RECONCILED: frozenset(
+        {"tier_1", "tier_2", "unvalued", "suppressed", "deferred", "unpriced"}
+    ),
+    NamedEvent.ACCOUNT_RECONCILE_FROZEN: frozenset({"scope"}),
+    NamedEvent.ACCOUNT_HEALED: frozenset({"field", "symbol", "ledger", "venue", "event_id"}),
+    NamedEvent.ACCOUNT_MODE_UNVERIFIED: frozenset({"reason"}),
+    NamedEvent.VALUATION_DIVERGENCE: frozenset({"field", "symbol", "ledger", "venue"}),
+    NamedEvent.LEVERAGE_DIVERGENCE: frozenset(
+        {
+            "symbol",
+            "configured_mode",
+            "configured_leverage",
+            "declared",
+            "venue_mode",
+            "venue_leverage",
+        }
+    ),
+    # ``cloid`` is ``None`` on the account-grain read, which has no order.
+    NamedEvent.EXCHANGE_REQUEST_FAILED: frozenset({"request", "cloid", "error"}),
+    NamedEvent.EXCHANGE_ACTION_REJECTED: frozenset({"request", "cloid", "reason"}),
+    NamedEvent.EXCHANGE_LEVERAGE_UNCHANGED: frozenset({"symbol", "mode", "leverage"}),
 }

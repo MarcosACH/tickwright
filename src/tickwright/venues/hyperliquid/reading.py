@@ -175,16 +175,15 @@ def _failed_read(request: str, cloid: str | None, error: str) -> None:
 
     One event for both causes because the caller's verdict is one verdict — a
     frozen cycle, nothing healed — and ``error`` carries which it was. ``cloid``
-    rides along only where the request has one, so the account grain omits it
-    rather than logging a ``None`` that reads as a missing value.
+    is ``None`` on the account grain, which has no order. The key stays so the
+    record has one shape (#338).
 
     Private, and so are the two causes above since #237: ``read`` is the one way
     in. A caller that reached any of them directly would be choosing its own
     words for a failure the taxonomy already has words for, which is how the
     write path drifted from the read path in the first place.
     """
-    context = {"cloid": cloid} if cloid is not None else {}
-    named_event(NamedEvent.EXCHANGE_REQUEST_FAILED, request=request, error=error, **context)
+    named_event(NamedEvent.EXCHANGE_REQUEST_FAILED, request=request, cloid=cloid, error=error)
 
 
 _RENDER_LIMIT = 300
