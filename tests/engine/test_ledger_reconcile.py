@@ -1541,7 +1541,7 @@ def test_a_failed_read_never_un_heals_the_book_it_cannot_see() -> None:
     close writes a position the account never held, where a missed heal only
     waits a cadence interval.
 
-    Asserted against a sealed store, on ``_size_heals``'s rule above: the freeze
+    Asserted against a sealed store, on the heal's rule above: the freeze
     is an early return ahead of the checkpoint, so the claim is that the whole
     write surface stays untouched rather than that the numbers happen to match.
     The record says only that the pass froze — nothing was found, because
@@ -1685,7 +1685,7 @@ def test_a_fill_landing_inside_the_account_read_is_reported_but_not_healed() -> 
     The next pass heals it back, so the ledger oscillates instead of drifting,
     but it writes to the store each way.
 
-    The reducing direction is what makes it reachable. ``_size_heals`` needs the
+    The reducing direction is what makes it reachable. The size heal needs the
     venue's entry price, and the venue supplies one precisely because it still
     carries the symbol. A fill that opens a partition is safe by accident, since
     the snapshot omits a symbol it does not hold.
@@ -1753,7 +1753,8 @@ def test_a_fill_and_its_reverse_inside_the_read_still_defer_the_symbol() -> None
     )
     cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
 
-    divergences = asyncio.run(cycle.reconcile_account())
+    with capture_events() as logs:
+        divergences = asyncio.run(cycle.reconcile_account())
 
     assert [(d.field, d.symbol, d.ledger, d.venue) for d in divergences or ()] == [
         (DivergenceField.SIGNED_SIZE, "BTC", Decimal("0.002"), Decimal("0.003"))
@@ -1761,6 +1762,10 @@ def test_a_fill_and_its_reverse_inside_the_read_still_defer_the_symbol() -> None
     assert ledger.position("BTC", strategy_id=None) is None
     assert ledger.account_net() == {"BTC": Decimal("0.002")}
     assert store.all_positions() == []
+    # The pass says it held the finding back. Without the count, a deferred
+    # pass and a healed one both read ``tier_1=1`` (#335).
+    record = _recorded(logs)
+    assert (record["tier_1"], record["deferred"], record["unpriced"]) == (1, 1, 0)
 
 
 def test_a_symbol_that_did_not_move_during_the_read_still_heals_beside_one_that_did() -> None:
@@ -1881,7 +1886,8 @@ def test_a_cash_finding_deferred_by_the_read_window_never_asks_the_venue_for_its
     venue = _SlowAccountVenue(_held("100000"), during=a_fill_with_a_fee_lands)
     cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
 
-    divergences = asyncio.run(cycle.reconcile_account())
+    with capture_events() as logs:
+        divergences = asyncio.run(cycle.reconcile_account())
 
     assert [d.field for d in divergences or ()] == [
         DivergenceField.CASH,
@@ -1889,6 +1895,9 @@ def test_a_cash_finding_deferred_by_the_read_window_never_asks_the_venue_for_its
     ]
     assert venue.mode_reads == 0
     assert venue.account_reads == 1
+    # Both findings were held back, and the record says so (#335).
+    record = _recorded(logs)
+    assert (record["tier_1"], record["deferred"], record["unpriced"]) == (2, 2, 0)
 
 
 _BTC_LIQUIDATION = Decimal("52522.4977")

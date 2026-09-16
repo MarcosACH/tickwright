@@ -42,7 +42,6 @@ below, where the rule is stated on the borrow itself.
 """
 
 from collections.abc import Mapping, Sequence
-from decimal import Decimal
 
 from tickwright.domain import (
     EMPTY_LEVERAGE_BOOK,
@@ -58,6 +57,7 @@ from tickwright.domain import (
     ReconciliationFill,
     Side,
     Store,
+    VenueAccountState,
 )
 
 from .cache import Cache
@@ -225,7 +225,7 @@ class Checkpointer:
         fills: Sequence[ReconciliationFill],
         *,
         cash: CashCorrection | None = None,
-        collateral: Mapping[str, Decimal | None] | None = None,
+        snapshot: VenueAccountState | None = None,
     ) -> HealChange | None:
         """Make one reconcile cycle's Tier-1 heal durable — fold, write, project.
 
@@ -251,10 +251,11 @@ class Checkpointer:
         durable state the venue never held — a corrected line against
         uncorrected positions, or the reverse. The fold that puts them in order
         is the projection's (``apply_heal``); what this owns is that they land
-        together. ``collateral`` is the third part and joins on the same terms:
-        it is not a heal but a re-ingest of a Tier-1 field the venue authors on
-        live (ADR-0043 §3), and it arrives on the very snapshot the other two
-        were read from.
+        together. The locked collateral on ``snapshot`` is the third part and
+        joins on the same terms. It is not a heal but a re-ingest of a Tier-1
+        field the venue authors on live (ADR-0043 §3). It arrives on the very
+        snapshot the other two were read from. That is why the snapshot itself
+        is handed through and not a map read off it.
 
         The rows written are the **union** of what the fills moved and what the
         ingest moved, deduped by partition: one symbol can be in both, and the
@@ -277,7 +278,7 @@ class Checkpointer:
         aggregate refused carries no ``changes``. The caller announces off this
         rather than off what it asked for (``LedgerReconciliation._record_heals``).
         """
-        change = self._portfolio.apply_heal(fills, cash=cash, collateral=collateral)
+        change = self._portfolio.apply_heal(fills, cash=cash, snapshot=snapshot)
         if change is None:
             return None
         # Keyed rather than concatenated, so a symbol both healed and re-ingested

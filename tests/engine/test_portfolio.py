@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 from ledgers import book_fill
-from venue_doubles import account_state
+from venue_doubles import account_state, venue_holding
 
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.store import SQLiteStore
@@ -1757,7 +1757,7 @@ def test_the_venues_bucket_splits_across_partitions_and_sums_to_it_exactly() -> 
     )
     bucket = Decimal("12600.01")
 
-    change = projection.apply_heal((), collateral={"BTC": bucket})
+    change = projection.apply_heal((), snapshot=venue_holding(BTC=bucket))
 
     assert change is not None
     buckets = {p.strategy_id: p.isolated_collateral for p in change.collateral}
@@ -1777,9 +1777,9 @@ def test_a_venue_cross_position_releases_the_bucket_it_has_no_claim_on() -> None
     """
     projection = _live_isolated()
     book_fill(projection, _fill(trade_id="f1", quantity="1", price="42000"), side=Side.BUY)
-    projection.apply_heal((), collateral={"BTC": Decimal("4200")})
+    projection.apply_heal((), snapshot=venue_holding(BTC=Decimal("4200")))
 
-    change = projection.apply_heal((), collateral={"BTC": None})
+    change = projection.apply_heal((), snapshot=venue_holding(BTC=None))
 
     assert change is not None
     assert [p.isolated_collateral for p in change.collateral] == [Decimal("0")]
@@ -1795,9 +1795,9 @@ def test_a_symbol_the_snapshot_does_not_mention_releases_its_bucket() -> None:
     """
     projection = _live_isolated()
     book_fill(projection, _fill(trade_id="f1", quantity="1", price="42000"), side=Side.BUY)
-    projection.apply_heal((), collateral={"BTC": Decimal("4200")})
+    projection.apply_heal((), snapshot=venue_holding(BTC=Decimal("4200")))
 
-    change = projection.apply_heal((), collateral={})
+    change = projection.apply_heal((), snapshot=venue_holding())
 
     assert change is not None
     assert [p.isolated_collateral for p in change.collateral] == [Decimal("0")]
@@ -1815,6 +1815,6 @@ def test_a_cycle_with_nothing_new_to_ingest_writes_nothing() -> None:
     """
     projection = _live_isolated()
     book_fill(projection, _fill(trade_id="f1", quantity="1", price="42000"), side=Side.BUY)
-    assert projection.apply_heal((), collateral={"BTC": Decimal("4200")}) is not None
+    assert projection.apply_heal((), snapshot=venue_holding(BTC=Decimal("4200"))) is not None
 
-    assert projection.apply_heal((), collateral={"BTC": Decimal("4200")}) is None
+    assert projection.apply_heal((), snapshot=venue_holding(BTC=Decimal("4200"))) is None
