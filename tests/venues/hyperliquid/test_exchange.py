@@ -1012,6 +1012,16 @@ def test_a_filled_status_whose_oid_is_unreadable_names_it_instead_of_faulting(
         # The envelope parses, but the adjudication inside it is not one of the
         # three the adapter knows (`resting`, `error`, `filled`).
         {"status": "ok", "response": {"type": "order", "data": {"statuses": [{"queued": {}}]}}},
+        # A `resting` answer whose oid is not a number. The saga would keep it
+        # as its venue oid, and reconcile reads the fill history by `int()` of
+        # it once the record is gone. Refused at the read, like `filled` is.
+        {
+            "status": "ok",
+            "response": {
+                "type": "order",
+                "data": {"statuses": [{"resting": {"oid": "not-a-number"}}]},
+            },
+        },
     ],
 )
 def test_a_placement_adjudication_the_adapter_cannot_read_is_named_not_silent(body: dict) -> None:
