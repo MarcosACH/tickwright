@@ -32,9 +32,10 @@ Explicit assertion messages throughout: this module is not a test module, so
 pytest does not rewrite its asserts and a bare comparison would fail blind.
 """
 
+import asyncio
 from dataclasses import dataclass, field
 
-from tickwright.domain import EventBus, MarketTick, MarkTick
+from tickwright.domain import EventBus, MarketFeed, MarketTick, MarkTick
 
 
 @dataclass(frozen=True)
@@ -106,4 +107,47 @@ def assert_every_traded_symbol_is_marked(transcript: MarketDataTranscript, *, fe
         f"{feed} published trades for {sorted(unmarked)} and never a mark for them — "
         f"a MarketFeed owes a MarkTick per traded symbol (ADR-0039), or every "
         f"unrealized_pnl, notional and equity for those symbols reads None forever"
+    )
+
+
+async def assert_quiet_once_stopped(
+    transcript: MarketDataTranscript, *, feed: MarketFeed, task: asyncio.Task[None], name: str
+) -> None:
+    """End ``feed`` the way the runner does, then assert nothing more reaches the bus.
+
+    The runner's ``_stop_supervised`` shape, stated once as an obligation
+    (#277): ``stop()`` is a request, the cancel is what ends ``run()``, and the
+    wait is what proves it ended. Two things are owed. The cancel must come
+    through, so a ``run()`` that caught ``CancelledError`` and returned would
+    have hidden the one signal the teardown relies on. And once the task is
+    done, the transcript stops growing, so no publish of the feed's outlives its
+    supervised half and reaches the ``bus.drain`` behind it.
+
+    The turns yielded after the wait are what make the second half sensitive.
+    A publish the feed handed to a task of its own would land on one of them,
+    where a check made on the same turn as the wait would miss it.
+
+    The driver ends the feed with at least one event already on the bus, and
+    that is refused here for the reason the mark clause refuses an empty
+    transcript: a loop that never published proves the clause by proving
+    nothing.
+    """
+    assert transcript.ticks or transcript.marks, (
+        f"{name} published nothing before it was stopped, so this run says nothing "
+        f"about quiescence — drive the feed until something reaches the bus first"
+    )
+    await feed.stop()
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    assert task.cancelled(), (
+        f"{name}.run() swallowed the runner's cancel — CancelledError is the ordinary "
+        f"end of run() and must come through, or the teardown cannot tell a stopped "
+        f"loop from one that is still publishing"
+    )
+    ticks, marks = len(transcript.ticks), len(transcript.marks)
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert (len(transcript.ticks), len(transcript.marks)) == (ticks, marks), (
+        f"{name} published after its run() was cancelled and waited out — anything "
+        f"still publishing keeps raising bus.drain's high-water mark (ADR-0024)"
     )

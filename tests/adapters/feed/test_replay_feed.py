@@ -12,7 +12,11 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from feed_contract import assert_every_traded_symbol_is_marked, record_market_data
+from feed_contract import (
+    assert_every_traded_symbol_is_marked,
+    assert_quiet_once_stopped,
+    record_market_data,
+)
 from seam_claims import assert_every_member_is_claimed
 
 from tickwright.adapters.bus import InMemoryBus
@@ -240,6 +244,35 @@ def test_replay_marks_every_symbol_it_trades(tmp_path: Path) -> None:
     asyncio.run(ReplayFeed(path=path, bus=bus, clock=ManualClock()).run())
 
     assert_every_traded_symbol_is_marked(transcript, feed="ReplayFeed")
+
+
+def test_replay_publishes_nothing_once_its_run_is_cancelled(tmp_path: Path) -> None:
+    """The shared quiescence clause (``tests/_support/feed_contract.py``, #277),
+    driven the one way a replay can be ended early: cancelled mid-file.
+
+    Replay's ``stop()`` arms nothing, so the runner's cancel is the whole of
+    what ends it. The file is longer than what gets delivered on purpose. A
+    cancel that landed after end-of-file would prove the clause on a loop that
+    had already returned, which is proving nothing.
+    """
+    path = _write_jsonl(
+        tmp_path / "ticks.jsonl",
+        [_row("BTC", str(100 + i), 1_000 * (i + 1), f"t{i}") for i in range(50)],
+    )
+
+    async def main() -> None:
+        bus = InMemoryBus()
+        transcript = record_market_data(bus)
+        feed = ReplayFeed(path=path, bus=bus, clock=ManualClock())
+        task = asyncio.create_task(feed.run())
+        while not transcript.ticks:
+            await asyncio.sleep(0)
+
+        await assert_quiet_once_stopped(transcript, feed=feed, task=task, name="ReplayFeed")
+
+        assert len(transcript.ticks) < 50, "the cancel must land mid-file to say anything"
+
+    asyncio.run(main())
 
 
 def test_replay_advances_the_clock_to_each_tick_ts_event(tmp_path: Path) -> None:
