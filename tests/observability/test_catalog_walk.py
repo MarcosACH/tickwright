@@ -6,7 +6,8 @@ a test that drives its real path. This module *is* that walk: one scenario per
 ``NamedEvent``, each exercising the shipped path end-to-end (no mocks of our own
 classes), plus a coverage assertion that the walk names every catalog member —
 so a future slice that adds a name without a path-and-test fails here. Each
-scenario also checks that the record carries exactly its declared fields (#338).
+scenario also checks that the record carries exactly its declared fields, each
+holding a scalar value (#338).
 
 The scenarios deliberately re-drive the paths in miniature rather than lean on
 the layer suites, so the walk reads as a single, self-contained census of the
@@ -90,6 +91,10 @@ from tickwright.venues.hyperliquid import (
 # What the processor chain puts on a record beside the event's own fields: the
 # name, the level, and the ambient correlation ids (ADR-0020).
 _CHAIN_KEYS = frozenset({"event", "log_level", "run_id", "signal_id", "cloid", "cycle"})
+
+# The value types a declared field may carry: what every renderer prints the
+# same way. ``bool`` is an ``int`` to ``isinstance``, so it rides along.
+_SCALAR = (str, int, type(None))
 
 _SPEC = InstrumentSpec(
     symbol="BTC", sz_decimals=3, max_decimals=6, max_sig_figs=5, min_notional=Decimal("10")
@@ -1017,6 +1022,14 @@ def test_every_cataloged_event_is_emitted_by_its_path(event: NamedEvent) -> None
     for log in logs:
         if log["event"] == event.value:
             assert set(log) - added == FIELDS[event], f"{event.value} drifted: {sorted(log)}"
+            # A value's type is part of its shape. A Decimal or an enum member
+            # here renders however the renderer decides, so a figure an operator
+            # greps for would read differently per output. Emitters convert
+            # before they call, and this is where that stays true.
+            for field in FIELDS[event]:
+                assert isinstance(log[field], _SCALAR), (
+                    f"{event.value}.{field} is a {type(log[field]).__name__}, not a scalar"
+                )
 
 
 def test_the_walk_names_every_catalog_member() -> None:
