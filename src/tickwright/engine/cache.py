@@ -60,6 +60,16 @@ class Cache:
         """The saga for ``cloid`` as of the last checkpoint, or ``None`` if unknown."""
         return self._orders.get(cloid)
 
+    def all_orders(self) -> list[Order]:
+        """Every saga the projection holds, terminal or not, in no promised order.
+
+        The in-memory twin of ``Store.all_orders()``. It exists so the boot pays
+        the store's mass read once, in ``rebuild``, and every later fold over
+        the whole history (the strategy seq high-water, ADR-0016) reads the
+        records already here (issue #233). A fresh list, like ``open_orders``.
+        """
+        return list(self._orders.values())
+
     def last_event_ts(self, cloid: str) -> int | None:
         """The ``ts_ns`` of ``cloid``'s most recent checkpoint *this session*, or
         ``None`` if it has not been written since the last ``rebuild`` — the

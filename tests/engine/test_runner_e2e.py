@@ -18,6 +18,7 @@ from pathlib import Path
 
 from kafka_fakes import FakeKafkaBroker
 from ledgers import GENESIS
+from recovery_stores import RecoveryOrderStore
 from structlog.typing import EventDict
 from venue_doubles import (
     DERIVED_GENESIS,
@@ -1176,28 +1177,6 @@ class _BlockingFeed:
         return None
 
 
-class _RecoveryOrderStore(SQLiteStore):
-    """The real store, recording the two recovery reads whose order is the
-    contract: the ledger's ``load_account`` and the ``Cache``'s ``all_orders``.
-
-    The ordering has no other observation port. Both steps are the runner's own
-    and neither leaves a distinguishing durable trace, so the seam they share is
-    where it shows — recorded, not simulated: every call still reaches the real
-    store underneath."""
-
-    def __init__(self, path: Path, timeline: list[str]) -> None:
-        super().__init__(path)
-        self._timeline = timeline
-
-    def load_account(self) -> Account | None:
-        self._timeline.append("ledger.load_account")
-        return super().load_account()
-
-    def all_orders(self) -> list[Order]:
-        self._timeline.append("cache.all_orders")
-        return super().all_orders()
-
-
 def test_the_ledger_is_recovered_before_the_order_cache_is_rebuilt(tmp_path: Path) -> None:
     """``PortfolioProjection.recover()`` runs immediately after the run-id bind
     and **before** ``cache.rebuild()`` (ADR-0043 §6/§10).
@@ -1214,7 +1193,7 @@ def test_the_ledger_is_recovered_before_the_order_cache_is_rebuilt(tmp_path: Pat
     timeline: list[str] = []
 
     async def main() -> int:
-        store = _RecoveryOrderStore(tmp_path / "saga.db", timeline)
+        store = RecoveryOrderStore(timeline, tmp_path / "saga.db")
         bus = InMemoryBus()
         clock = ManualClock()
         feed = _BlockingFeed()
@@ -1239,6 +1218,83 @@ def test_the_ledger_is_recovered_before_the_order_cache_is_rebuilt(tmp_path: Pat
     assert asyncio.run(main()) == 0
 
     assert timeline[:2] == ["ledger.load_account", "cache.all_orders"]
+
+
+class _SeqRecordingStrategy:
+    """Records the seq the host hands it and trades nothing."""
+
+    def __init__(self, strategy_id: str) -> None:
+        self.strategy_id = strategy_id
+        self.next_seq: int | None = None
+
+    async def on_tick(self, tick: MarketTick) -> None:
+        return None
+
+    async def on_order_event(self, event: OrderEvent) -> None:
+        return None
+
+    def set_next_seq(self, next_seq: int) -> None:
+        self.next_seq = next_seq
+
+    def snapshot(self) -> bytes:
+        return b""
+
+    def restore(self, data: bytes) -> None:
+        return None
+
+
+def test_a_start_deserializes_the_saga_history_once(tmp_path: Path) -> None:
+    """The boot reads the saga history one time (issue #233).
+
+    ``cache.rebuild()`` is that read. The strategy seq high-water (ADR-0016)
+    is folded from the read-model it rebuilt, not from a second pass over the
+    store. The cost grows with all the history the store holds, and it is paid
+    on the recovery path, so the count is the behavior.
+    """
+    timeline: list[str] = []
+    strategy = _SeqRecordingStrategy("trivial")
+
+    async def main() -> int:
+        store = RecoveryOrderStore(timeline, tmp_path / "saga.db")
+        # The ledger the prior life opened, so #188 does not refuse the store
+        # before the reads this case counts (ADR-0043 §8).
+        store.checkpoint_ledger(
+            account=Account.restore(
+                account_id="paper-default",
+                genesis_collateral=GENESIS,
+                genesis_ts_ns=400,
+                cash=GENESIS,
+            ),
+            ts_ns=400,
+        )
+        store.checkpoint(_submitted_saga("0xabc"), ts_ns=500)
+        bus = InMemoryBus()
+        clock = ManualClock()
+        feed = _BlockingFeed()
+        engine = Engine(
+            bus=bus,
+            clock=clock,
+            store=store,
+            exchange=PaperExchange(
+                bus=bus,
+                clock=clock,
+                fill_model=ImmediateFillModel(),
+                genesis_collateral=GENESIS,
+                account_net=dict,
+            ),
+            feed=feed,
+        )
+        engine.register(strategy, symbols={"BTC"})
+        run = asyncio.create_task(engine.run())
+        await asyncio.wait_for(feed.started.wait(), timeout=5)
+        await asyncio.wait_for(engine.stop(), timeout=5)
+        return await asyncio.wait_for(run, timeout=5)
+
+    assert asyncio.run(main()) == 0
+
+    assert timeline.count("cache.all_orders") == 1
+    # The seeded saga consumed seq 1, so the strategy resumes at 2.
+    assert strategy.next_seq == 2
 
 
 def test_shutdown_is_bounded_a_hung_teardown_faults_instead_of_hanging(tmp_path: Path) -> None:

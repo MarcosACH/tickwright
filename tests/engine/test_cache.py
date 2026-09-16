@@ -119,6 +119,31 @@ def test_open_orders_are_the_non_terminal_sagas_filtered_by_strategy_and_symbol(
     assert cache.open_orders(strategy_id="trivial", symbol="BTC") == [live]
 
 
+def test_all_orders_is_every_saga_the_projection_holds_as_a_fresh_list() -> None:
+    """The in-memory twin of ``Store.all_orders()`` (issue #233).
+
+    Terminal sagas are in it, unlike ``open_orders``. A rebuilt record and a
+    record checkpointed this session are both in it. The list is a copy, so a
+    caller that mutates it cannot reach the projection.
+    """
+    store = SQLiteStore(":memory:")
+    store.checkpoint(_order("0xrebuilt"), ts_ns=1)
+    filled = _order("0xdone")
+    filled.state = OrderState.FILLED
+    store.checkpoint(filled, ts_ns=2)
+    cache = Cache(store=store)
+    cache.rebuild()
+    this_session = _order("0xnew")
+    cache.checkpoint(this_session, ts_ns=3)
+
+    orders = cache.all_orders()
+
+    assert {order.cloid for order in orders} == {"0xrebuilt", "0xdone", "0xnew"}
+    assert {order.cloid for order in cache.open_orders()} == {"0xrebuilt", "0xnew"}
+    orders.clear()
+    assert len(cache.all_orders()) == 3
+
+
 @st.composite
 def _saga_population(draw: st.DrawFn) -> list[Order]:
     """Arbitrary checkpointed sagas: every state, marker, and dedup-set shape."""
@@ -169,3 +194,4 @@ def test_rebuilt_cache_equals_the_stores_projection_for_any_population(
     for order in orders:
         assert cache.get_order(order.cloid) == store.get_order(order.cloid) == order
     assert {o.cloid for o in cache.open_orders()} == {o.cloid for o in orders if not o.is_terminal}
+    assert {o.cloid for o in cache.all_orders()} == {o.cloid for o in orders}

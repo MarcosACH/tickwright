@@ -444,7 +444,8 @@ def _drive_kill_switch(*, reset: bool) -> Callable[[], None]:
 
 def _drive_strategy_error() -> None:
     bus = InMemoryBus()
-    host = StrategyHost(bus=bus, clock=ManualClock(), store=SQLiteStore(":memory:"))
+    store = SQLiteStore(":memory:")
+    host = StrategyHost(bus=bus, clock=ManualClock(), store=store, cache=Cache(store=store))
     host.register(_Strategy(), symbols={"BTC"})
     host.start()
 
@@ -457,7 +458,9 @@ def _drive_strategy_error() -> None:
 def _drive_snapshot_incompatible() -> None:
     store = SQLiteStore(":memory:")
     store.save_strategy_snapshot("trivial", b"old-shape", ts_ns=1_000)
-    host = StrategyHost(bus=InMemoryBus(), clock=ManualClock(), store=store)
+    host = StrategyHost(
+        bus=InMemoryBus(), clock=ManualClock(), store=store, cache=Cache(store=store)
+    )
     host.register(_Strategy(), symbols={"BTC"})
     host.start()  # restore() raises → strategy.snapshot_incompatible
 
