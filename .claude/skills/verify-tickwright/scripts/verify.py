@@ -684,6 +684,66 @@ def cmd_prune(args: argparse.Namespace) -> int:
     return 0
 
 
+def build_issue_draft(run_id: str) -> str | None:
+    """A bug body in the shape of .github/ISSUE_TEMPLATE/bug_report.md, one per
+    run, filled from the FAIL lines. ``None`` when there is nothing to file."""
+    fails = [line for line in check_lines(run_id) if line.startswith("FAIL ")]
+    if not fails:
+        return None
+    data = read_run_json(run_id)
+    feature = data.get("feature") or "(no feature)"
+    rel = Path(".agents/verify") / run_id / "evidence"
+    lives = sorted({line.split()[2] for line in fails})
+    lines = ["## What happens", ""]
+    lines += [f"`/verify-tickwright` run `{run_id}` ({feature}) failed {len(fails)} check(s):", ""]
+    lines += [f"- `{line}`" for line in fails]
+    lines += ["", "<!-- Say what the number means in words, in one or two sentences. -->", ""]
+    lines += ["## What should happen", ""]
+    lines += [
+        f"The expected value is the one `.claude/skills/verify-tickwright/features/{feature}.md` "
+        "states for that check. Name the ADR or CONTEXT.md term behind it here.",
+        "",
+        "## Reproduction",
+        "",
+        f"1. Follow `.claude/skills/verify-tickwright/features/{feature}.md`.",
+        f"2. Run `verify report {run_id}` and read the FAIL line.",
+        "",
+        "Evidence from this run:",
+        "",
+        f"- `{rel / 'REPORT.md'}`",
+    ]
+    lines += [
+        f"- `{rel / (life + '.stderr.jsonl')}` and `{rel / (life + '.store.txt')}`"
+        for life in lives
+    ]
+    lines += ["", "## Environment", ""]
+    lines += [
+        f"- Path: <!-- read {rel}/<life>.env.txt: paper + in-memory (default) | Hyperliquid testnet | Kafka bus | Postgres store -->",
+        f"- Commit / branch: {data.get('sha', '?')[:7]} on {data.get('branch', '?')}",
+        "",
+        "## Notes",
+        "",
+        "<!-- If this reveals a deeper design problem, stop and escalate to a PRD instead of patching. -->",
+        "",
+        "<!-- Not filed. To file, after reading docs/agents/issue-tracker.md:",
+        f"  gh issue create -R MarcosACH/tickwright --title '<observed defect>' --label bug --assignee @me --body-file {rel / 'ISSUE.md'}",
+        "  then gh project item-add 2 --owner MarcosACH --url <issue-url>, set Status Todo, add domain labels. -->",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def cmd_issue_draft(args: argparse.Namespace) -> int:
+    """Print and save a bug draft for the run's FAILs. Never creates the issue."""
+    require_run(args.run_id)
+    text = build_issue_draft(args.run_id)
+    if text is None:
+        print(f"{args.run_id}: nothing to file, no FAIL lines")
+        return 1
+    (evidence(args.run_id) / "ISSUE.md").write_text(text)
+    print(text, end="")
+    return 0
+
+
 def cmd_cloid(args: argparse.Namespace) -> int:
     from tickwright.domain import derive_cloid
 
@@ -868,6 +928,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("prune", help="delete the oldest runs past --keep per feature")
     p.add_argument("--keep", type=int, default=5)
     p.set_defaults(fn=cmd_prune)
+
+    p = sub.add_parser("issue-draft", help="print a bug body for the run's FAIL lines")
+    p.add_argument("run_id")
+    p.set_defaults(fn=cmd_issue_draft)
 
     p = sub.add_parser("cloid", help="the cloid a signal_id maps to")
     p.add_argument("signal_id", help="<strategy_id>:<symbol>:<seq>")

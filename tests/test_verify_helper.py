@@ -278,3 +278,37 @@ class TestRuns:
         left = sorted(p.name for p in helper.VERIFY_HOME.iterdir())
 
         assert left == ["a2", "a3", "b1"]
+
+
+class TestIssueDraft:
+    def test_draft_follows_the_bug_template_and_names_the_evidence(
+        self, helper: ModuleType, run: Callable[..., tuple[int, str]]
+    ) -> None:
+        _run_with_one_fail(helper, run)
+
+        code, out = run("issue-draft", "r1")
+
+        assert code == 0
+        assert out.startswith("## What happens")
+        assert "crash-converge" in out and "expected=1.000 got=0.500" in out
+        assert "## What should happen" in out and "## Reproduction" in out
+        assert "features/crash-recovery.md" in out
+        assert "## Environment" in out and "Commit / branch:" in out
+        # The paths a reader chases, relative to the repo.
+        assert ".agents/verify/r1/evidence/REPORT.md" in out
+        assert ".agents/verify/r1/evidence/first.stderr.jsonl" in out
+        # Never files it, and says so.
+        assert "gh issue create" in out
+        assert (helper.evidence("r1") / "ISSUE.md").read_text() == out
+
+    def test_draft_on_a_passing_run_says_there_is_nothing_to_file(
+        self, helper: ModuleType, run: Callable[..., tuple[int, str]]
+    ) -> None:
+        run("init", "r2", "--feature", "kill-switch")
+        _finished_life(helper, "r2", "arm", exit_code=0, events=[], orders=[])
+        run("check", "r2", "arm", "ks-trip", "--exit", "--expect", "0")
+
+        code, out = run("issue-draft", "r2")
+
+        assert code == 1
+        assert "nothing to file" in out
