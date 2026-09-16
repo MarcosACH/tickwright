@@ -36,7 +36,7 @@ def test_an_operation_id_is_bound_for_its_scope_and_cleared_after() -> None:
 def test_operations_nest_so_a_cycle_and_a_cloid_can_both_ride_a_record() -> None:
     with capture_events() as events:
         with operation(cycle="startup"), operation(cloid="0xabc"):
-            named_event(NamedEvent.RECONCILE_FROZEN)
+            named_event(NamedEvent.RECONCILE_FROZEN, scope="cycle")
 
     assert events[0]["cycle"] == "startup"
     assert events[0]["cloid"] == "0xabc"

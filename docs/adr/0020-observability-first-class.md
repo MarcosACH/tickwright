@@ -44,6 +44,19 @@ coverage of state-affecting paths is a requirement, not optional.
   ([#191](https://github.com/MarcosACH/tickwright/issues/191)), while its roadmap sibling
   `account.reconciled` waits for the ledger cadence.
 
+**(The catalog pins fields too, since [#338](https://github.com/MarcosACH/tickwright/issues/338):**
+the shipped catalog is the `NamedEvent` enum plus `observability.catalog.FIELDS`, one field set per
+name. `named_event` refuses a call whose fields differ from the declared set, the same way it refuses
+an uncataloged name. Before this, only the name was checked. A field's presence and spelling could
+vary per call site, and `feed.lagged` and `engine.faulted` both drifted that way with no test going
+red. Three rules follow. A field that is sometimes absent is declared and sent as `None`, so one
+name has one shape and an operator can key on it. Every value is a scalar (`str`, `int`, `bool`,
+`None`). An emitter converts a `Decimal` or an enum member before the call, so a figure reads the
+same in every renderer. The catalog walk holds both. Correlation ids stay ambient and are not
+declared, with one exception: a venue adapter sits below the seam and cannot know which scope its
+caller bound, so `exchange.request_failed` and `exchange.action_rejected` carry the order's `cloid`
+as a field of their own.**)**
+
 ## Coverage requirement
 
 Every saga transition, every reconcile decision (including a failed-read freeze and the `scope`

@@ -950,6 +950,9 @@ class PortfolioProjection:
                 # change is observable (ADR-0045 §1), so there is nothing else a
                 # reader could reconcile that against.
                 size="0" if change_kind is PositionChange.CLOSED else str(position.signed_size),
+                # Unchanged by a fill, but the accrual path carries it, and one
+                # name has one shape (#338).
+                funding=str(position.funding),
             )
 
     def recover(self) -> None:

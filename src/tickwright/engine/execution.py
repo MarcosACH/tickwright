@@ -86,6 +86,8 @@ _SAGA_EVENTS: dict[type[OrderEvent], NamedEvent] = {
     OrderFailed: NamedEvent.ORDER_FAILED,
     OrderCancelled: NamedEvent.ORDER_CANCELLED,
 }
+# The terminals whose named event carries a ``reason`` (``FIELDS``, ADR-0020).
+_TERMINAL_WITH_REASON = (OrderDenied, OrderRejected, OrderFailed)
 
 
 class _SagaEnvelope(TypedDict):
@@ -380,8 +382,10 @@ class ExecutionManager:
         handled, the ``cloid`` while a venue fact is — never repeated here; only
         a terminal's ``reason``, which no correlation scope carries, is attached.
         """
-        reason = getattr(event, "reason", None)
-        named_event(_SAGA_EVENTS[type(event)], **({"reason": reason} if reason else {}))
+        # Keyed on the attribute and not its truth: an empty reason is still a
+        # reason, and dropping the key would change the record's shape (#338).
+        fields = {"reason": event.reason} if isinstance(event, _TERMINAL_WITH_REASON) else {}
+        named_event(_SAGA_EVENTS[type(event)], **fields)
         await self._bus.publish(event)
 
     def _event[E: (OrderPlaced, OrderSubmitted, OrderLive, OrderCancelled)](

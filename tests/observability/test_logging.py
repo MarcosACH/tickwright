@@ -9,6 +9,8 @@ every line — by its registered value and by any sensitive field name (ADR-0020
 import io
 import json
 
+import structlog
+
 from tickwright.observability import NamedEvent, named_event
 from tickwright.observability.correlation import bind_run_id, operation
 from tickwright.observability.logging import configure_logging
@@ -16,6 +18,13 @@ from tickwright.observability.logging import configure_logging
 
 def _lines(buffer: io.StringIO) -> list[dict]:
     return [json.loads(line) for line in buffer.getvalue().splitlines() if line.strip()]
+
+
+def _free_text_record(**fields: object) -> None:
+    # Redaction is a promise about every line, not only named events, and a
+    # named event carries only its declared fields (#338). A free-text record
+    # is the one place a secret-shaped field can still be put on the chain.
+    structlog.get_logger("tickwright").info("free text", **fields)
 
 
 def test_every_rendered_line_carries_the_run_id() -> None:
@@ -50,7 +59,7 @@ def test_a_registered_secret_value_never_appears_in_a_rendered_line() -> None:
     key = "0xdeadbeefcafe_fake_signing_key"
     configure_logging(stream=buffer, json_output=True, secrets=[key])
 
-    named_event(NamedEvent.ORDER_PLACED, note=f"loaded key {key} from env")
+    _free_text_record(note=f"loaded key {key} from env")
 
     rendered = buffer.getvalue()
     assert key not in rendered
@@ -62,8 +71,7 @@ def test_a_secret_nested_in_a_dict_or_list_field_is_scrubbed_recursively() -> No
     key = "0xfeedface_fake_signing_key"
     configure_logging(stream=buffer, json_output=True, secrets=[key])
 
-    named_event(
-        NamedEvent.ORDER_PLACED,
+    _free_text_record(
         context={"env": {"HYPERLIQUID_SIGNING_KEY": key}},
         notes=[f"key={key}"],
         attempt=1,  # a non-string scalar rides through untouched
@@ -80,7 +88,7 @@ def test_a_sensitive_field_name_is_redacted_by_name() -> None:
     buffer = io.StringIO()
     configure_logging(stream=buffer, json_output=True)
 
-    named_event(NamedEvent.ORDER_PLACED, signing_key="whatever-was-put-here")
+    _free_text_record(signing_key="whatever-was-put-here")
 
     (line,) = _lines(buffer)
     assert line["signing_key"] == "[REDACTED]"

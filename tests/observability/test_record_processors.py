@@ -8,7 +8,8 @@ other: the drift's worst case is a secret that a green test never sees leaking
 into a real line.
 """
 
-from tickwright.observability import NamedEvent, named_event
+import structlog
+
 from tickwright.observability.logging import RECORD_PROCESSORS, build_processors
 from tickwright.observability.redaction import register_secrets
 from tickwright.observability.testing import capture_events
@@ -28,7 +29,9 @@ def test_capture_events_redacts_a_registered_secret_like_production_does() -> No
     key = "0xc0ffee_fake_signing_key"
     register_secrets([key])
     with capture_events() as events:
-        named_event(NamedEvent.ORDER_PLACED, note=f"loaded {key}")
+        # A free-text record, because a named event carries only its declared
+        # fields (#338) and none of them is a note.
+        structlog.get_logger("tickwright").info("free text", note=f"loaded {key}")
 
     assert key not in events[0]["note"]
     assert "[REDACTED]" in events[0]["note"]

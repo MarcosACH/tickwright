@@ -504,8 +504,9 @@ _Avoid_: request id, trace id (fine informally), session id.
 **Named lifecycle event**:
 A stable, documented telemetry name emitted as a structured record (`order.placed`,
 `reconcile.frozen`, `ghost.reconciled`, …) — distinct from free-text logs. The catalog is a
-**test-assertable contract**: a state-affecting path with no named event is a defect.
-Observability is a first-class priority of this system. See ADR-0020.
+**test-assertable contract**: a state-affecting path with no named event is a defect. Each name
+declares its field set, so one name has one shape. Observability is a first-class priority of this
+system. See ADR-0020.
 _Avoid_: log message, log line (a named event is structured and asserted-on).
 
 **Composition root**:

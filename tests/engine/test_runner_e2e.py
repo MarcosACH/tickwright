@@ -1483,6 +1483,39 @@ def test_a_feed_the_venue_refuses_at_the_boot_connect_faults_the_run(tmp_path: P
     assert "ConnectionRefusedError" in faults[0]["error"]
 
 
+def test_a_fault_from_a_supervised_task_is_named_by_the_fault_itself(tmp_path: Path) -> None:
+    """A fault inside the ``TaskGroup`` reaches ``Engine.run()`` wrapped in an
+    ``ExceptionGroup``. A fault from the inline start sequence arrives raw.
+    ``engine.faulted`` carries the inner fault's ``repr`` in both cases, so an
+    operator can key on one shape (#338).
+    """
+
+    async def faulted_life() -> int:
+        bus = InMemoryBus()
+        clock = ManualClock()
+        exchange = PaperExchange(
+            bus=bus,
+            clock=clock,
+            fill_model=ImmediateFillModel(),
+            genesis_collateral=GENESIS,
+            account_net=dict,
+        )
+        engine = Engine(
+            bus=bus,
+            clock=clock,
+            store=SQLiteStore(tmp_path / "saga.db"),
+            exchange=exchange,
+            feed=_FaultingFeed(),
+        )
+        return await engine.run()
+
+    with capture_events() as logs:
+        assert asyncio.run(faulted_life()) != 0
+
+    (faulted,) = [log for log in logs if log["event"] == "engine.faulted"]
+    assert faulted["error"] == repr(InvariantViolation("the read loop broke an engine assumption"))
+
+
 def _kafka_bus(broker: FakeKafkaBroker) -> KafkaBus:
     return KafkaBus(
         bootstrap_servers="kafka:9092",

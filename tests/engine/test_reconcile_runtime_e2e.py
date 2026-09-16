@@ -350,10 +350,12 @@ def test_a_durably_unreadable_body_faults_the_composed_engine(tmp_path: Path) ->
     assert engine.state is ComponentState.FAULTED
 
     # No new named event (ADR-0045's catalog is closed): the ordinary
-    # `engine.faulted` carries the refusal's own words, cloid included.
+    # `engine.faulted` carries the refusal's own repr, cloid included. The
+    # refusal is raised inside a supervised task, so the repr is the fault's
+    # and not the TaskGroup wrapper's (#338).
     (faulted,) = [log for log in logs if log["event"] == "engine.faulted"]
-    assert "VenueReadUnresolvable" in str(faulted["error"])
-    assert _CLOID in str(faulted["error"])
+    assert faulted["error"].startswith("VenueReadUnresolvable(")
+    assert _CLOID in faulted["error"]
 
     # It escalated rather than freezing forever: the budget's freezes are there,
     # bounded by it, and never a fourth cycle's.
