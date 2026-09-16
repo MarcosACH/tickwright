@@ -60,6 +60,23 @@ To exercise the real `KafkaBus` end-to-end (rather than its fake-broker unit tes
 Kafka, not the suite: `docker compose up -d kafka`, then `TICKWRIGHT_BUS=kafka uv run tickwright`.
 [`.env.example`](.env.example) is the canonical reference for every backend's variables.
 
+### Closed sets are walked
+
+A closed set the engine branches on gets a coverage gate over its hand-written list. A member
+nobody answers for fails silently, and that has happened once (#194). There are four instances:
+
+- The observability catalog, walked by
+  [`tests/observability/test_catalog_walk.py`](tests/observability/test_catalog_walk.py).
+- The seam Protocols, claimed member by member through
+  [`tests/_support/seam_claims.py`](tests/_support/seam_claims.py).
+- `DivergenceField`, claimed the same way from `tests/engine/test_reconcile_findings.py`.
+- The adapters `AppConfig` can select, each of which must answer every shared gate its seam owes.
+  [`tests/_support/seam_answers.py`](tests/_support/seam_answers.py) reads the answers from the
+  suites, and [`tests/app/test_seam_answers.py`](tests/app/test_seam_answers.py) holds the map
+  (#303).
+
+A new closed vocabulary that the engine reads by member gets the same treatment.
+
 ### Skill evals (agent tooling, not the engine)
 
 One more tier sits outside `pytest` entirely: [`evals/`](evals/README.md) tests the skills in

@@ -207,6 +207,12 @@ auth, quirk translation — and importing no other adapter. It provides both a `
   feed drives virtual time (a live feed uses `LiveClock`).
 - [ ] Confirm the import boundary: `uv run lint-imports` must pass — the package imports `domain` and
   `observability` only, never `engine` or another adapter.
+- [ ] Add one row per half to the maps in
+  [`tests/app/test_seam_answers.py`](../tests/app/test_seam_answers.py): the config value, your
+  adapter's class name, and the directory of its suite. That test reads your suite for the three
+  gates below and fails naming each one you have not answered yet. It also fails the moment your
+  value is in the `Literal` and not in the map, so nothing here can be skipped by not importing it
+  ([#303](https://github.com/MarcosACH/tickwright/issues/303)).
 - [ ] Drive your `MarketFeed` half through the **shared feed contract**
   ([`tests/_support/feed_contract.py`](../tests/_support/feed_contract.py)): subscribe with
   `record_market_data(bus)`, drive your feed however your feed is driven — a file, recorded frames,
@@ -223,9 +229,10 @@ auth, quirk translation — and importing no other adapter. It provides both a `
   It ends the adapter the way the runner does, `stop()` then cancel then wait, and asserts `run()`
   ended within a bound and nothing more reached the bus once it had. All four shipped adapters
   drive it. Whether your `run()` returns on `stop()` alone is yours to decide. The live feed does,
-  the replay one does not. An adapter whose `run()` publishes nothing has nothing to drive here.
-  The helper refuses an empty transcript rather than pass on a loop that never ran.
-- [ ] TDD the adapters at their own seam, and give the `Exchange` half a **claim per member**:
+  the replay one does not. The helper refuses an empty transcript rather than pass on a loop that
+  never ran, so a `run()` that publishes nothing cannot answer it today. No shipped adapter is
+  silent, so that case is open. If yours is, the helper needs a clause for it, not an opt-out.
+- [ ] TDD the adapters at their own seam, and give **both** halves a **claim per member**:
   `assert isinstance(exchange, Exchange)`, plus a `_SEAM_CLAIMS` map — member → the test that says
   what that member does on *your* venue — handed to `assert_every_member_is_claimed`
   ([`tests/_support/seam_claims.py`](../tests/_support/seam_claims.py)), as both shipped adapters do.
