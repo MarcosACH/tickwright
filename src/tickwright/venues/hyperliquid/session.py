@@ -152,10 +152,10 @@ class WsSession:
         connect ever succeeded.
 
         Returning does **not** mean the consumer has observed the close. That
-        gap is the runner's to close and it does, the same way for both
-        subscriptions: it cancels the supervised task and waits it out
-        (`Engine._stop_supervised`, #277). Whether `run()` had already returned
-        on the close by then is timing, and nothing depends on it.
+        gap is the runner's to close, and the seam says how: `stop()` is a
+        request, and the cancel and wait behind it are what end `run()`
+        (`MarketFeed.run`, `Exchange.run`, #277). Whether `run()` had already
+        returned on the close by then is timing, and nothing depends on it.
         """
         self._stopping = True
         if self._connection is not None:

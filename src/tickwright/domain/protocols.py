@@ -165,7 +165,8 @@ class MarketFeed(Protocol):
         loop, and nothing of yours may publish once it has passed. That is what
         the ``bus.drain`` behind the wait relies on. Returning earlier, on the
         ``stop()`` alone, is welcome and not required. The clause is executable
-        in ``tests/_support/feed_contract.py``.
+        in ``tests/_support/lifecycle_contract.py``, and ``Exchange.run()``
+        owes the same one.
         """
         ...
 
@@ -667,7 +668,10 @@ class Exchange(OrderAnchor, AccountAnchor, Protocol):
         Cancelled by the runner as part of ``stop``'s slot in the reverse
         shutdown, ahead of the bus drain — so nothing this publishes can keep
         raising the drain's high-water mark. Cancellation is the ordinary end of
-        this call and must not be caught.
+        this call and must not be caught. The runner waits the task out, and
+        nothing of yours may publish once it has ended (#277). The clause is
+        executable in ``tests/_support/lifecycle_contract.py``, the same one
+        ``MarketFeed.run()`` answers.
         """
         ...
 

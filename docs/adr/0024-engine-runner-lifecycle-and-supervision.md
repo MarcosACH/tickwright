@@ -204,10 +204,11 @@ its high-water mark, with the Protocol promising nothing against it. Both entrie
 helper, `Engine._stop_supervised`: release the seam, cancel its `run()`, wait it out. The wait is
 what proves the loop ended before the drain starts. It adds no second bound. The whole graceful
 teardown is already under `shutdown_timeout`, and the faulted pass bounds each step. The clause is
-executable in `tests/_support/feed_contract.py`, driven by both feed adapters: once cancelled,
-`run()` ends within a bound and nothing more reaches the bus. Whether a `run()` returns on the
-`stop()` alone stays the adapter's own. The live one does, the replay one does not, and the runner
-no longer depends on which.**)**
+one lifecycle contract over both seams, executable in `tests/_support/lifecycle_contract.py` and
+driven by all four shipped adapters: once cancelled, `run()` ends within a bound and nothing more
+reaches the bus once it has ended. Whether a `run()` returns on the `stop()` alone stays the
+adapter's own. The live feed does, the replay one does not, and the runner no longer depends on
+which.**)**
 
 - `SUBMITTED` orders in flight on the wire are **not** awaited — they stay `SUBMITTED`,
   checkpointed; restart reconciliation heals them (ADR-0008 residual risk).
