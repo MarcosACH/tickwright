@@ -40,6 +40,7 @@ VERIFY_HOME = Path(os.environ.get("VERIFY_HOME") or ROOT / ".agents" / "verify")
 ENGINE_CMD = [sys.executable, "-m", "tickwright.app"]
 STRATEGY_RUNNER = SCRIPTS / "run_strategy.py"
 KEY_VARS = ("TICKWRIGHT_HYPERLIQUID__SIGNING_KEY", "TICKWRIGHT_HYPERLIQUID__ACCOUNT_ADDRESS")
+NO_DOCKER_PATHS = "kafka and postgres paths unavailable"
 SIGNALS = {
     "TERM": signal.SIGTERM,
     "INT": signal.SIGINT,
@@ -173,8 +174,11 @@ def pid_alive(pid: int) -> bool:
 
 
 def pid_is_ours(pid: int, run_id: str) -> bool:
-    """Only ever signal a process whose command line names this run's scratch dir
-    or the engine module. Never kill by name."""
+    """True when the recorded pid still runs the engine module or the strategy runner.
+
+    The pid file is the guard. This check only catches a pid the OS has reused
+    for something else since the life ended. The helper never searches for
+    engine processes by name."""
     out = subprocess.run(
         ["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True
     ).stdout
@@ -282,10 +286,13 @@ def cmd_doctor(_: argparse.Namespace) -> int:
         print(f"package   NOT importable: {exc!r}  -> run `uv sync`")
         ok = False
     print(f"sqlite3   {shutil.which('sqlite3') or 'missing (the helper uses the stdlib module)'}")
-    docker = subprocess.run(["docker", "info"], capture_output=True, text=True)
-    print(
-        f"docker    {'daemon up' if docker.returncode == 0 else 'daemon down (kafka and postgres paths unavailable)'}"
-    )
+    if shutil.which("docker") is None:
+        print(f"docker    missing ({NO_DOCKER_PATHS})")
+    else:
+        docker = subprocess.run(["docker", "info"], capture_output=True, text=True)
+        print(
+            f"docker    {'daemon up' if docker.returncode == 0 else f'daemon down ({NO_DOCKER_PATHS})'}"
+        )
     keys = repo_env_values(KEY_VARS)
     print(
         f"repo .env {'has a signing key (testnet path available)' if KEY_VARS[0] in keys else 'no signing key (testnet path unavailable)'}"
@@ -355,17 +362,33 @@ def cmd_ticks(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_start(args: argparse.Namespace) -> int:
-    require_run(args.run_id)
-    env_values: dict[str, str] = dict(PRESETS[args.preset]) if args.preset else {}
-    for pair in args.env:
+def life_env(preset: str | None, env: list[str], params: list[str]) -> tuple[str, str]:
+    """The ``.env`` a life runs with, and the copy kept in evidence.
+
+    The copy adds the ``--param`` knobs as comment lines. They reach the
+    strategy runner through the environment, not the file, and a reader of
+    the evidence still needs to see them."""
+    values: dict[str, str] = dict(PRESETS[preset]) if preset else {}
+    for pair in env:
         key, _, value = pair.partition("=")
         if "SIGNING_KEY" in key:
             sys.exit("never pass the signing key through --env: use --forward-key")
-        env_values[key] = value
-    env_text = "".join(f"{k}={v}\n" for k, v in env_values.items())
-    (scratch(args.run_id) / ".env").write_text(env_text)
-    (evidence(args.run_id) / f"{args.life}.env.txt").write_text(env_text)
+        values[key] = value
+    scratch_text = "".join(f"{k}={v}\n" for k, v in values.items())
+    evidence_text = scratch_text + "".join(f"# VERIFY_{p}\n" for p in params)
+    return scratch_text, evidence_text
+
+
+def cmd_start(args: argparse.Namespace) -> int:
+    require_run(args.run_id)
+    pid_file = scratch(args.run_id) / f"{args.life}.pid"
+    exit_file = evidence(args.run_id) / f"{args.life}.exit"
+    if pid_file.exists() or exit_file.exists():
+        sys.exit(f"life {args.life} already exists in run {args.run_id}: pick another name")
+
+    scratch_text, evidence_text = life_env(args.preset, args.env, args.param)
+    (scratch(args.run_id) / ".env").write_text(scratch_text)
+    (evidence(args.run_id) / f"{args.life}.env.txt").write_text(evidence_text)
 
     child_env = scrubbed_env()
     if args.forward_key:
@@ -381,11 +404,6 @@ def cmd_start(args: argparse.Namespace) -> int:
         command = [sys.executable, str(STRATEGY_RUNNER), args.strategy]
     else:
         command = list(ENGINE_CMD)
-
-    pid_file = scratch(args.run_id) / f"{args.life}.pid"
-    exit_file = evidence(args.run_id) / f"{args.life}.exit"
-    if pid_file.exists() or exit_file.exists():
-        sys.exit(f"life {args.life} already exists in run {args.run_id}: pick another name")
 
     supervisor = [
         sys.executable,
@@ -453,9 +471,10 @@ def cmd_await(args: argparse.Namespace) -> int:
                 return 0
         elif args.sql:
             rows = store_query(args.run_id, args.sql)
-            got = str(rows[0][0]) if rows else ""
-            if got == args.expect:
-                print(f"query returned {got!r}")
+            # No rows is "not yet", never a match. An empty store must not
+            # satisfy an empty expectation.
+            if rows and str(rows[0][0]) == args.expect:
+                print(f"query returned {args.expect!r}")
                 return 0
         elif args.exit:
             if exit_file.exists():
@@ -528,10 +547,15 @@ def cmd_dump(args: argparse.Namespace) -> int:
 
 
 def _observed(args: argparse.Namespace) -> str:
-    """What the life shows for one check: a store cell, an event count, or the exit."""
+    """What the life shows for one check: a store cell, an event count, a file, or the exit."""
     if args.sql:
         rows = store_query(args.run_id, args.sql)
         return str(rows[0][0]) if rows else ""
+    if args.file:
+        # A file the recipe put in evidence by other means, such as a Kafka
+        # offsets listing. Judged here so the proof is a recorded line.
+        path = evidence(args.run_id) / args.file
+        return path.read_text().strip() if path.exists() else ""
     if args.event:
         log = evidence(args.run_id) / f"{args.life}.stderr.jsonl"
         text = log.read_text() if log.exists() else ""
@@ -751,18 +775,30 @@ def cmd_cloid(args: argparse.Namespace) -> int:
     return 0
 
 
+def compose(*args: str, capture: bool = False) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["docker", "compose", *args], cwd=ROOT, text=True, capture_output=capture)
+
+
 def cmd_infra(args: argparse.Namespace) -> int:
     require_run(args.run_id)
     data = read_run_json(args.run_id)
+    if shutil.which("docker") is None:
+        if args.action == "up":
+            sys.exit(f"docker is missing ({NO_DOCKER_PATHS})")
+        return 0
     if args.action == "up":
-        result = subprocess.run(
-            ["docker", "compose", "up", "-d", "--wait", args.service], cwd=ROOT, text=True
-        )
-        if result.returncode != 0:
-            return result.returncode
-        if args.service not in data["infra"]:
-            data["infra"].append(args.service)
-        write_run_json(args.run_id, data)
+        # A service the operator already had up is theirs. This run uses it
+        # and never records it, so cleanup leaves it running.
+        already = compose("ps", "-q", "--status", "running", args.service, capture=True)
+        if already.stdout.strip():
+            print(f"{args.service} already running: not owned by this run, cleanup leaves it up")
+        else:
+            result = compose("up", "-d", "--wait", args.service)
+            if result.returncode != 0:
+                return result.returncode
+            if args.service not in data["infra"]:
+                data["infra"].append(args.service)
+            write_run_json(args.run_id, data)
         if args.service == "postgres":
             import psycopg
 
@@ -779,8 +815,8 @@ def cmd_infra(args: argparse.Namespace) -> int:
             )
         return 0
     for service in list(data.get("infra", [])):
-        subprocess.run(["docker", "compose", "stop", service], cwd=ROOT, text=True)
-        subprocess.run(["docker", "compose", "rm", "-f", service], cwd=ROOT, text=True)
+        compose("stop", service)
+        compose("rm", "-f", service)
         data["infra"].remove(service)
     write_run_json(args.run_id, data)
     return 0
@@ -893,7 +929,7 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument("--sql", help="a query whose first cell must equal --expect")
     group.add_argument("--exit", action="store_true", help="the process ended")
     p.add_argument("--count", type=int, default=1, help="with --event: the Nth occurrence")
-    p.add_argument("--expect", default="", help="with --sql: the expected first cell")
+    p.add_argument("--expect", default=None, help="with --sql: the expected first cell")
     p.add_argument("--timeout", type=float, default=30.0)
     p.set_defaults(fn=cmd_await)
 
@@ -910,6 +946,7 @@ def build_parser() -> argparse.ArgumentParser:
     group = p.add_mutually_exclusive_group(required=True)
     group.add_argument("--sql", help="a query whose first cell is compared")
     group.add_argument("--event", help="a named event whose count is compared")
+    group.add_argument("--file", help="an evidence file whose stripped content is compared")
     group.add_argument("--exit", action="store_true", help="the exit code is compared")
     p.add_argument("--expect", required=True, help="the value the feature file says")
     p.set_defaults(fn=cmd_check)
@@ -957,6 +994,8 @@ def main() -> int:
     args = build_parser().parse_args()
     if args.command == "infra" and args.action == "up" and not args.service:
         sys.exit("infra up needs a service: postgres or kafka")
+    if args.command == "await" and args.sql and args.expect is None:
+        sys.exit("await --sql needs --expect: say which value ends the wait")
     if args.command == "_supervise":
         args.command = [c for c in args.command if c != "--"]
     return args.fn(args)

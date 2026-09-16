@@ -17,7 +17,7 @@ bus. The proof is the fill in the store plus the messages counted on the run's o
 
 Preconditions:
 
-- `$V doctor` says the Docker daemon is up. On this machine that is OrbStack (`orb start`).
+- `$V doctor` says the Docker daemon is up. If not, start your Docker daemon first.
 - Run id `kafka` is unused.
 
 - **Infra.** Run `$V init kafka --feature kafka-bus` and `$V infra kafka up kafka`. It waits
@@ -34,11 +34,11 @@ Preconditions:
 - **Check.** Run `$V check kafka first kafka-boot --event engine.feed_started --expect 1`,
   `$V check kafka first kafka-boot --exit --expect 0`,
   `$V check kafka first kafka-fill --sql "select state from orders" --expect filled`,
-  `$V check kafka first kafka-fill --sql "select signed_size from positions" --expect 0.500`.
-  `kafka-topic` is the offsets file: a non-zero offset is the proof, checked by reading it.
-- **Report.** Run `$V report kafka`. Expected verdict: `PASS (0 of 4 checks failed)`.
-- **Cleanup.** Run `$V cleanup kafka`. It stops and removes the broker because this run started
-  it.
+  `$V check kafka first kafka-fill --sql "select signed_size from positions" --expect 0.500`,
+  `$V check kafka first kafka-topic --file first.offsets.txt --expect verify.kafka:0:9`.
+- **Report.** Run `$V report kafka`. Expected verdict: `PASS (0 of 5 checks failed)`.
+- **Cleanup.** Run `$V cleanup kafka`. It stops and removes the broker only when this run
+  started it. A broker you already had up is left running, and `infra up` says so.
 
 ## Gotchas
 

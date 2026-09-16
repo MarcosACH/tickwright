@@ -15,8 +15,6 @@ a log. Testnet only. Mainnet placement is out of scope for this skill.
 - `tn-cash` the ledger cash never needs a heal on a fresh account that only this run traded.
   `account.healed` must not fire.
 - `tn-redaction` the signing key appears nowhere in the evidence.
-- `tn-leverage-push` a configured leverage is pushed at boot (`updateLeverage`). Unverified by
-  this map so far, see Gotchas.
 
 ## How to get to it (user POV)
 
@@ -69,9 +67,12 @@ Preconditions:
 - The key is forwarded from the repo `.env` into the child environment only. Never write it with
   `--env`. The helper refuses.
 - `feed.lagged` lines are normal on testnet. The stream conflates.
-- `tn-leverage-push`: `--param 'LEVERAGE={"BTC": {"mode": "cross", "leverage": 5}}'` pushes at
-  boot. If the account holds a BTC position at a different leverage, the boot refuses to start
-  by design. Close the position first. This map has not exercised the push yet.
+- **Not in the map yet: the leverage push.**
+  `--param 'LEVERAGE={"BTC": {"mode": "cross", "leverage": 5}}'` pushes at boot. If the account
+  holds a BTC position at a different leverage, the boot refuses to start by design. Close the
+  position first. When you add it as a sub-feature, the check is
+  `--event exchange.leverage_unchanged --expect 0`: the catalog says a push that landed is the
+  absence of that event.
 - `HOLD_TICKS` counts real testnet trades. On a quiet market three ticks can take a minute.
 - A `verify.flat` read of `account.equity` can be `null` when no mark has arrived since the
   fill. That is the documented "unknown, not zero" rule, not a failure.

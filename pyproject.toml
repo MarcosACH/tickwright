@@ -67,7 +67,11 @@ warn_redundant_casts = true
 # it had never opened. Every call site therefore drops the `.` (ci.yml, .githooks/pre-push,
 # CONTRIBUTING.md, README.md, CLAUDE.md, the skills). Ruff has no such rule and reaches
 # these files under a bare `.`, which is what made the gap easy to miss.
-files = ["src", "tests", ".claude/hooks"]
+#
+# The verify-tickwright scripts are in for the same reason. `strategies.py` meets the
+# `Strategy` protocol by shape and `run_strategy.py` copies `build_engine` by hand, so a
+# seam change would break the verification path with no other signal.
+files = ["src", "tests", ".claude/hooks", ".claude/skills/verify-tickwright/scripts"]
 # Skill-eval fixtures are throwaway sandbox trees, not repo code, and several
 # carry the same module names on purpose (three `domain/leverage.py`). `files`
 # above already leaves them out; this keeps a hand-typed `mypy .` from erroring on the

@@ -63,8 +63,9 @@ verification strategies (`round_trip_then_flat`, `take_profit`, `margin_watch`, 
 Their knobs go in as `--param KEY=VALUE`. See `features/portfolio-strategies.md`.
 
 Kafka and Postgres need Docker. `$V infra <run-id> up kafka` or `up postgres` starts the compose
-service and records that this run owns it. Postgres gets a database per run and the helper prints
-the DSN to pass as `TICKWRIGHT_POSTGRES__DSN`.
+service and records that this run owns it. A service you already had running is used and never
+owned, so `cleanup` leaves it up. Postgres gets a database per run and the helper prints the DSN
+to pass as `TICKWRIGHT_POSTGRES__DSN`.
 
 Teardown is `$V cleanup <run-id>`. See Cleanup.
 
@@ -92,13 +93,15 @@ $V signal <run> <life> TERM                               # TERM INT KILL USR1 U
 $V await <run> <life> --exit                              # prints the exit code
 $V dump  <run> <life>                                     # store tables + event counts
 $V check <run> <life> <check-id> --sql "..." --expect X   # records PASS or FAIL
+$V check <run> <life> <check-id> --file first.offsets.txt --expect X   # an evidence file's content
 $V report <run>                                           # writes and prints REPORT.md
 ```
 
 - `cloid` turns a signal id (`<strategy_id>:<symbol>:<seq>`) into the order's cloid, so you can
   wait on the store row for a specific order.
 - `await` polls up to `--timeout` (default 30 s) and prints the matching log line or row. On
-  timeout it prints the last five log lines and exits 1.
+  timeout it prints the last five log lines and exits 1. `--sql` needs `--expect`, and a query
+  with no rows never matches.
 - A second life on the same run reuses `scratch/store.db`. That is how you verify a restart.
   Delete the file between lives when you want a fresh store.
 - Two tick files in one run: `$V ticks <run> second --base 2024-01-01T00:00:05+00:00 ...` and
@@ -115,8 +118,9 @@ Everything a life produced lands in `.agents/verify/<run-id>/evidence/`:
 | File | What it is |
 | --- | --- |
 | `run.json` | run id, sha, branch, start time, owned infra |
-| `<life>.env.txt` | the exact `.env` the life ran with |
+| `<life>.env.txt` | the exact `.env` the life ran with, plus each `--param` as a `# VERIFY_` comment |
 | `<life>.stderr.jsonl` | the engine's JSON log, complete |
+| `<life>.stdout.txt` | the engine's stdout, normally empty |
 | `<life>.exit` | the exit code |
 | `<life>.signals.txt` | every start, signal and exit, timestamped |
 | `<life>.store.txt` | `dump`: the store tables |
@@ -197,9 +201,10 @@ recipe reads `PASS` when the fix is right.
 $V cleanup <run-id>
 ```
 
-Sends TERM to every life this run started that is still alive (by recorded pid, checked against
-the process command line, never by name), waits 15 s, then KILL. Stops and removes only the
-compose services this run brought up. Scans evidence for the signing key. Deletes `scratch/`.
+Sends TERM to every life this run started that is still alive, waits 15 s, then KILL. It signals
+the recorded pid, after checking that pid still runs the engine module, so a pid the OS reused is
+skipped. It never searches for engine processes by name. Stops and removes only the compose
+services this run brought up. Scans evidence for the signing key. Deletes `scratch/`.
 Keeps `evidence/`. Run it after every failed attempt too, so nothing strands a process or a port.
 
 After cleanup, confirm the proof survived: `ls .agents/verify/<run-id>/evidence/`.

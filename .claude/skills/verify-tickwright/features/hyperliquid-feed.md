@@ -8,7 +8,6 @@ at a real market price.
 
 - `hlfeed-connect` the feed connects and `engine.feed_started` fires within seconds.
 - `hlfeed-fill` a market order fills at the latest mainnet trade price.
-- `hlfeed-lag` `feed.lagged` lines appear when the stream conflates. Informational.
 
 ## How to get to it (user POV)
 
@@ -41,6 +40,8 @@ Preconditions:
 ## Gotchas
 
 - The first tick can take up to a minute on a quiet market. `--timeout 90` on the fill.
+- `feed.lagged` lines are normal. The stream conflates when trades arrive faster than the
+  engine reads them. They are not a check and not an alarm.
 - This is mainnet data. It is read only. The preset never sets `TICKWRIGHT_EXCHANGE`, and you
   must not add it.
 - Reconciliation cadences run on the wall clock here. A resting limit left `LIVE` would be

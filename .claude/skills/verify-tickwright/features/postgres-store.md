@@ -37,7 +37,8 @@ Preconditions:
   `$V check pg second pg-restart --exit --expect 0`. Also `ls .agents/verify/pg/scratch` shows
   no `store.db`.
 - **Report.** Run `$V report pg`. Expected verdict: `PASS (0 of 6 checks failed)`.
-- **Cleanup.** Run `$V cleanup pg`. It removes the container, and the database with it.
+- **Cleanup.** Run `$V cleanup pg`. It removes the container only when this run started it. A
+  Postgres you already had up is left running, and the `verify_pg` database stays in it.
 
 ## Gotchas
 

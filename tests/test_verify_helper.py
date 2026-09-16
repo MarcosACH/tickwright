@@ -12,6 +12,7 @@ engine: a run directory is built by hand, the way a finished life leaves it.
 
 import importlib.util
 import json
+import shutil
 import sqlite3
 import sys
 from collections.abc import Callable
@@ -38,7 +39,10 @@ def helper(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ModuleType:
 def run(
     helper: ModuleType, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> Callable[..., tuple[int, str]]:
-    """Call the helper as the shell would: ``run("init", "r1")`` -> (exit code, stdout)."""
+    """Call the helper as the shell would: ``run("init", "r1")`` -> (exit code, output).
+
+    Output is stdout then stderr, so a refusal's reason is readable too.
+    """
 
     def _run(*argv: str) -> tuple[int, str]:
         monkeypatch.setattr(sys, "argv", ["verify", *argv])
@@ -46,9 +50,32 @@ def run(
             code = helper.main()
         except SystemExit as exc:
             code = int(exc.code) if isinstance(exc.code, int) else 1
-        return code, capsys.readouterr().out
+            if isinstance(exc.code, str):
+                print(exc.code, file=sys.stderr)
+        captured = capsys.readouterr()
+        return code, captured.out + captured.err
 
     return _run
+
+
+@pytest.fixture
+def bin_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A ``PATH`` holding only ``git``. Add a fake ``docker`` to it, or leave it missing."""
+    path = tmp_path / "bin"
+    path.mkdir()
+    git = shutil.which("git")
+    assert git is not None
+    (path / "git").symlink_to(git)
+    monkeypatch.setenv("PATH", str(path))
+    return path
+
+
+def _fake_docker(bin_dir: Path, *, running: bool) -> None:
+    """A ``docker`` that says a compose service is running, or not, and accepts the rest."""
+    script = bin_dir / "docker"
+    answer = "echo abc123" if running else ":"
+    script.write_text(f'#!/bin/sh\ncase "$*" in\n  *"ps -q --status running"*) {answer};;\nesac\n')
+    script.chmod(0o755)
 
 
 def _finished_life(
@@ -312,3 +339,133 @@ class TestIssueDraft:
 
         assert code == 1
         assert "nothing to file" in out
+
+
+class TestCheckFile:
+    def test_a_file_check_compares_the_files_content(
+        self, helper: ModuleType, run: Callable[..., tuple[int, str]]
+    ) -> None:
+        run("init", "r1")
+        _finished_life(helper, "r1", "first", exit_code=0, events=[], orders=[])
+        (helper.evidence("r1") / "first.offsets.txt").write_text("verify.kafka:0:9\n")
+
+        code, _ = run(
+            "check",
+            "r1",
+            "first",
+            "kafka-topic",
+            "--file",
+            "first.offsets.txt",
+            "--expect",
+            "verify.kafka:0:9",
+        )
+
+        assert code == 0
+        assert (
+            "PASS kafka-topic first expected=verify.kafka:0:9 got=verify.kafka:0:9"
+            in (helper.evidence("r1") / "checks.txt").read_text()
+        )
+
+
+class TestAwait:
+    def test_a_sql_await_without_expect_is_refused(
+        self, helper: ModuleType, run: Callable[..., tuple[int, str]]
+    ) -> None:
+        run("init", "r1")
+        _finished_life(helper, "r1", "first", exit_code=0, events=[], orders=[])
+
+        code, out = run(
+            "await", "r1", "first", "--sql", "select state from orders", "--timeout", "0"
+        )
+
+        assert code == 1
+        assert "needs --expect" in out
+
+    def test_a_sql_await_does_not_match_an_empty_expect_on_no_rows(
+        self, helper: ModuleType, run: Callable[..., tuple[int, str]]
+    ) -> None:
+        run("init", "r1")
+        _finished_life(helper, "r1", "first", exit_code=0, events=[], orders=[])
+
+        code, out = run(
+            "await",
+            "r1",
+            "first",
+            "--sql",
+            "select state from orders",
+            "--expect",
+            "",
+            "--timeout",
+            "0",
+        )
+
+        assert code == 1
+        assert "TIMEOUT" in out
+
+
+class TestStart:
+    def test_a_duplicate_life_is_refused_before_its_evidence_is_touched(
+        self, helper: ModuleType, run: Callable[..., tuple[int, str]]
+    ) -> None:
+        run("init", "r1")
+        _finished_life(helper, "r1", "first", exit_code=0, events=[], orders=[])
+
+        code, out = run("start", "r1", "first", "--preset", "paper-replay")
+
+        assert code == 1
+        assert "already exists" in out
+        assert not (helper.evidence("r1") / "first.env.txt").exists()
+
+    def test_params_are_recorded_in_the_evidence_env_only(self, helper: ModuleType) -> None:
+        scratch_text, evidence_text = helper.life_env(
+            "paper-replay", ["TICKWRIGHT_STRATEGIES=[]"], ["HOLD_TICKS=3"]
+        )
+
+        assert "TICKWRIGHT_STRATEGIES=[]\n" in scratch_text
+        assert "VERIFY_" not in scratch_text
+        assert evidence_text.startswith(scratch_text)
+        assert "# VERIFY_HOLD_TICKS=3\n" in evidence_text
+
+
+class TestDocker:
+    def test_doctor_reports_a_missing_docker_binary(
+        self, helper: ModuleType, run: Callable[..., tuple[int, str]], bin_dir: Path
+    ) -> None:
+        code, out = run("doctor")
+
+        assert code == 0
+        assert "docker    missing" in out
+
+    def test_infra_up_without_docker_is_refused(
+        self, helper: ModuleType, run: Callable[..., tuple[int, str]], bin_dir: Path
+    ) -> None:
+        run("init", "r1")
+
+        code, out = run("infra", "r1", "up", "kafka")
+
+        assert code == 1
+        assert "docker" in out and "missing" in out
+        assert helper.read_run_json("r1")["infra"] == []
+
+    def test_infra_up_on_a_running_service_is_not_owned(
+        self, helper: ModuleType, run: Callable[..., tuple[int, str]], bin_dir: Path
+    ) -> None:
+        _fake_docker(bin_dir, running=True)
+        run("init", "r1")
+
+        code, out = run("infra", "r1", "up", "kafka")
+
+        assert code == 0
+        assert "already running" in out
+        assert helper.read_run_json("r1")["infra"] == []
+
+    def test_infra_up_on_a_stopped_service_is_owned(
+        self, helper: ModuleType, run: Callable[..., tuple[int, str]], bin_dir: Path
+    ) -> None:
+        _fake_docker(bin_dir, running=False)
+        run("init", "r1")
+
+        code, _ = run("infra", "r1", "up", "kafka")
+
+        assert code == 0
+        assert helper.read_run_json("r1")["infra"] == ["kafka"]
