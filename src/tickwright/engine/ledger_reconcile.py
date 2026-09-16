@@ -893,6 +893,19 @@ class ReconcileFindings:
     unpriced: int
     """Tier-1 size findings the venue posts no entry price for. Persists while it does not."""
 
+    # The two tier counts are derived and not stored, so they cannot disagree
+    # with ``divergences``. They live here with the other four counts so the
+    # pass's record is a readout of one object.
+    @property
+    def tier_1(self) -> int:
+        """How many findings this pass made at Tier-1, healed or held back."""
+        return sum(1 for divergence in self.divergences if divergence.tier is DivergenceTier.TIER_1)
+
+    @property
+    def tier_2(self) -> int:
+        """How many findings this pass made at Tier-2, alerted or banded."""
+        return sum(1 for divergence in self.divergences if divergence.tier is DivergenceTier.TIER_2)
+
     @classmethod
     def classify(
         cls,
@@ -1238,11 +1251,11 @@ class LedgerReconciliation:
         for divergence in findings.alerts:
             _diverged(divergence)
         self._leverage_drift(state)
-        tiers = [divergence.tier for divergence in divergences]
+        # A readout of the findings. Every count on the record is theirs.
         named_event(
             NamedEvent.ACCOUNT_RECONCILED,
-            tier_1=tiers.count(DivergenceTier.TIER_1),
-            tier_2=tiers.count(DivergenceTier.TIER_2),
+            tier_1=findings.tier_1,
+            tier_2=findings.tier_2,
             unvalued=findings.unvalued,
             suppressed=findings.suppressed,
             deferred=findings.deferred,

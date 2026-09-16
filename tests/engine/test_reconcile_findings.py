@@ -176,6 +176,10 @@ def test_classifies_both_tiers_off_one_hand_built_reading() -> None:
     assert findings.alerts == ()  # both Tier-2 figures are Tier-1's to explain
     assert findings.suppressed == 0
     assert findings.unvalued == 0
+    # The pass's summary is read off the findings, tier counts included. The
+    # record on ``account.reconciled`` is a readout of these six, not a fifth
+    # walk over the tuple at the call site.
+    assert (findings.tier_1, findings.tier_2) == (1, 2)
 
 
 def test_a_per_symbol_figure_whose_notional_is_unknown_bands_on_atol_alone() -> None:
