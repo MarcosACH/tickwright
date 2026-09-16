@@ -460,7 +460,7 @@ class PortfolioProjection:
         fills: Sequence[ReconciliationFill],
         *,
         cash: CashCorrection | None = None,
-        collateral: Mapping[str, Decimal | None] | None = None,
+        snapshot: VenueAccountState | None = None,
     ) -> HealChange | None:
         """Fold one cycle's Tier-1 heals — the account grain's write verb.
 
@@ -480,8 +480,9 @@ class PortfolioProjection:
         divergence. Applied after, the target absorbs whatever the fills did
         (``Account.correct_cash``).
 
-        **``collateral`` is an ingest rather than a heal, and it rides here for
-        the reason the cash correction does** (ADR-0043 §3). On live the locked
+        **The locked collateral on ``snapshot`` is an ingest rather than a
+        heal, and it rides here for the reason the cash correction does**
+        (ADR-0043 §3). On live the locked
         bucket is the venue's to post — ``updateIsolatedMargin`` is an action
         this engine does not model, and ``_lock_isolated_collateral`` declines
         on the declared-versus-ingested predicate — so there are not two numbers
@@ -501,10 +502,15 @@ class PortfolioProjection:
         ``None`` is *no snapshot*, which is the paper answer and the only
         answer paper ever gives — the cadence is live-only (ADR-0034), so the
         default is what a caller with nothing to ingest passes rather than a
-        mode this verb chooses. A **mapping** replaces wholesale: it carries
+        mode this verb chooses. A **snapshot** replaces wholesale: it carries
         every position the venue holds, so a symbol of ours absent from it is
         the venue holding none, which releases the bucket rather than leaving
         the previous cycle's number standing on a position since closed.
+
+        The whole snapshot rather than a map of buckets, on
+        ``observe_venue_liquidation``'s argument: which venue field the bucket
+        is read from is this projection's knowledge, and a caller building the
+        map would be a second place that decides it (#335).
 
         ``None`` when the fold moved nothing, as ``apply_funding``'s ``None`` is
         a dropped accrual: a cycle that corrected nothing must write *nothing*,
@@ -546,7 +552,7 @@ class PortfolioProjection:
                 # and the cycle emits at most one size finding per symbol, so a
                 # set loses nothing a list would have kept.
                 applied.add(fill.event_id)
-        ingested = () if collateral is None else self._ingest_collateral(collateral)
+        ingested = () if snapshot is None else self._ingest_collateral(snapshot)
         if not applied and cash is None and not ingested:
             return None
         if cash is not None:
@@ -558,15 +564,16 @@ class PortfolioProjection:
             collateral=ingested,
         )
 
-    def _ingest_collateral(self, venue: Mapping[str, Decimal | None]) -> tuple[Position, ...]:
+    def _ingest_collateral(self, snapshot: VenueAccountState) -> tuple[Position, ...]:
         """Take the venue's locked buckets onto the partitions holding them.
 
-        Iterates **our** partitions rather than the venue's map, which is what
-        makes an absent symbol mean something: the snapshot carries every
+        Iterates **our** partitions rather than the venue's positions, which is
+        what makes an absent symbol mean something: the snapshot carries every
         position the venue holds, so a symbol of ours it does not mention is one
         the venue is backing from the pool or not holding at all, and either way
-        the bucket is released. Driving off the map instead would leave a closed
-        position's collateral standing until something else happened to it.
+        the bucket is released. Driving off the snapshot instead would leave a
+        closed position's collateral standing until something else happened to
+        it.
 
         A venue ``None`` is the same release, and it is a *positive* claim
         rather than a gap — the adapter refuses to guess a mode, so ``None``
@@ -583,6 +590,8 @@ class PortfolioProjection:
         every deadline, which is the same indistinguishable-from-a-correction
         write ``apply_funding``'s ``None`` refuses one grain up.
         """
+        # The one place that decides which venue field the bucket is read from.
+        venue = {position.symbol: position.isolated_collateral for position in snapshot.positions}
         by_symbol: dict[str, list[Position]] = {}
         for position in self._positions.values():
             by_symbol.setdefault(position.symbol, []).append(position)

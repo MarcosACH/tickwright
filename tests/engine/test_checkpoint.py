@@ -13,6 +13,7 @@ from decimal import Decimal
 
 import pytest
 from ledgers import GENESIS
+from venue_doubles import venue_holding
 
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.store import SQLiteStore
@@ -422,7 +423,7 @@ def test_a_refused_collateral_only_heal_names_the_symbols_whose_buckets_it_lost(
     )
 
     with pytest.raises(InvariantViolation, match="ledger heal checkpoint write failed") as exc:
-        checkpointer.checkpoint_heal((), collateral={"BTC": Decimal("4200")})
+        checkpointer.checkpoint_heal((), snapshot=venue_holding(BTC=Decimal("4200")))
 
     assert "BTC" in str(exc.value)
     assert isinstance(exc.value.__cause__, InvariantViolation)

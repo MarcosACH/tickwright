@@ -1228,10 +1228,10 @@ class LedgerReconciliation:
             # number — the venue posts it, and ``updateIsolatedMargin`` is an
             # action this engine does not model — so there is one figure rather
             # than two, and nothing to compare. What the band eventually watches
-            # is the ``margin_used`` computed *from* it (ADR-0040 §6).
-            collateral={
-                position.symbol: position.isolated_collateral for position in state.positions
-            },
+            # is the ``margin_used`` computed *from* it (ADR-0040 §6). The
+            # snapshot goes through whole. Which field the bucket is read from
+            # is the projection's knowledge, not the cycle's.
+            snapshot=state,
         )
         self._record_heals(findings.heals, cash=cash, booked=booked)
         # Ahead of the pass's own summary, as the heal records are: the summary

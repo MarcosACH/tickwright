@@ -275,6 +275,24 @@ def account_state(
     )
 
 
+def venue_holding(**buckets: Decimal | None) -> VenueAccountState:
+    """A venue snapshot holding one position per symbol, each with the bucket
+    it posts. ``None`` is the venue's own claim that the position is cross
+    (ADR-0043 §3). No keyword is a venue holding nothing.
+
+    The rest of each row is ``account_state``'s recorded fixture, since the
+    collateral ingest reads the bucket and nothing else off the snapshot.
+    """
+    (recorded,) = account_state("100000", "0").positions
+    return replace(
+        account_state("100000"),
+        positions=tuple(
+            replace(recorded, symbol=symbol, isolated_collateral=bucket)
+            for symbol, bucket in buckets.items()
+        ),
+    )
+
+
 def answerable(ref: OrderRef, view: VenueOrderView) -> VenueOrderView:
     """``view``, checked to be a shape the live adapter can answer for ``ref``.
 
