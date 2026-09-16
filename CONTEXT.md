@@ -54,6 +54,8 @@ PARTIALLY_FILLED → FILLED`, with terminals `CANCELLED`/`DENIED`/`REJECTED`/`FA
 A timeout never transitions it — only [[Reconciliation]] moves a stuck `SUBMITTED`. The
 `PENDING` record is written **before** the network send (write-ahead intent), and recovery
 **reconciles by cloid before any resend**. See ADR-0007, ADR-0008.
+`LIVE` means the venue acked the order with its oid. It does not mean the order rested. An
+order that fills on placement is acked `LIVE` first, then its fills move it on (#328).
 _Avoid_: order state machine (fine informally), workflow, process.
 
 **cancel_requested marker**:
