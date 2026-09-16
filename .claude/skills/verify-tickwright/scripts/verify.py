@@ -28,12 +28,15 @@ import subprocess
 import sys
 import time
 from collections import Counter
+from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent
 ROOT = SCRIPTS.parents[3]
-VERIFY_HOME = ROOT / ".agents" / "verify"
+# ``VERIFY_HOME`` is for the helper's own tests, which must never write into the
+# checkout's run tree. Nothing else sets it.
+VERIFY_HOME = Path(os.environ.get("VERIFY_HOME") or ROOT / ".agents" / "verify")
 ENGINE_CMD = [sys.executable, "-m", "tickwright.app"]
 STRATEGY_RUNNER = SCRIPTS / "run_strategy.py"
 KEY_VARS = ("TICKWRIGHT_HYPERLIQUID__SIGNING_KEY", "TICKWRIGHT_HYPERLIQUID__ACCOUNT_ADDRESS")
@@ -223,8 +226,10 @@ def store_query(run_id: str, sql: str) -> list[tuple]:
     db = scratch(run_id) / values.get("TICKWRIGHT_SQLITE__PATH", "store.db")
     if not db.exists():
         return []
+    # ``closing``, not the bare ``with``: a sqlite3 connection's context manager
+    # commits, it does not close, and an open handle is a ResourceWarning.
     try:
-        with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as conn:
+        with closing(sqlite3.connect(f"file:{db}?mode=ro", uri=True)) as conn:
             return list(conn.execute(sql).fetchall())
     except sqlite3.OperationalError as exc:
         if "no such table" in str(exc):
@@ -521,6 +526,32 @@ def cmd_dump(args: argparse.Namespace) -> int:
     return 0
 
 
+def _observed(args: argparse.Namespace) -> str:
+    """What the life shows for one check: a store cell, an event count, or the exit."""
+    if args.sql:
+        rows = store_query(args.run_id, args.sql)
+        return str(rows[0][0]) if rows else ""
+    if args.event:
+        log = evidence(args.run_id) / f"{args.life}.stderr.jsonl"
+        text = log.read_text() if log.exists() else ""
+        return str(sum(f'"event": "{args.event}"' in line for line in text.splitlines()))
+    exit_file = evidence(args.run_id) / f"{args.life}.exit"
+    return exit_file.read_text().strip() if exit_file.exists() else ""
+
+
+def cmd_check(args: argparse.Namespace) -> int:
+    """Record one PASS or FAIL line. The line is the verdict; the exit code just
+    mirrors it so a recipe can stop early."""
+    require_run(args.run_id)
+    got = _observed(args)
+    verdict = "PASS" if got == args.expect else "FAIL"
+    line = f"{verdict} {args.check_id} {args.life} expected={args.expect} got={got}"
+    with (evidence(args.run_id) / "checks.txt").open("a") as sink:
+        sink.write(line + "\n")
+    print(line)
+    return 0 if verdict == "PASS" else 1
+
+
 def cmd_cloid(args: argparse.Namespace) -> int:
     from tickwright.domain import derive_cloid
 
@@ -678,6 +709,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("life")
     p.add_argument("name", choices=sorted(SIGNALS))
     p.set_defaults(fn=cmd_signal)
+
+    p = sub.add_parser("check", help="record PASS or FAIL for one expected value")
+    p.add_argument("run_id")
+    p.add_argument("life")
+    p.add_argument("check_id", help="the sub-feature id from the feature file, e.g. paper-fill")
+    group = p.add_mutually_exclusive_group(required=True)
+    group.add_argument("--sql", help="a query whose first cell is compared")
+    group.add_argument("--event", help="a named event whose count is compared")
+    group.add_argument("--exit", action="store_true", help="the exit code is compared")
+    p.add_argument("--expect", required=True, help="the value the feature file says")
+    p.set_defaults(fn=cmd_check)
 
     p = sub.add_parser("dump", help="write the store and event summary into evidence/")
     p.add_argument("run_id")
