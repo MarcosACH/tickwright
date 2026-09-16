@@ -8,7 +8,7 @@ three are inputs the operator sets in `.env`, and the ledger shows their effect 
 
 - `econ-fees` a taker fee on every market fill lands on `positions.fees` and comes off cash.
 - `econ-funding` a boundary crossed by the tick stream pays `size × mark × rate`, longs pay.
-- `econ-stochastic` the same seed and ticks produce a byte-identical store.
+- `econ-stochastic` the same seed and ticks produce the same slipped fill price, pinned.
 - `econ-partial` a resting limit crossed by a tick fills in fractions and converges to `filled`.
 
 ## How to get to it (user POV)
@@ -21,33 +21,46 @@ three are inputs the operator sets in `.env`, and the ledger shows their effect 
 
 Preconditions:
 
-- Run ids `fees`, `fund`, `stoch` are unused.
+- Run ids `fees`, `fund`, `stoch` are unused. One run per sub-feature, so a FAIL names its own run.
 - `SPECS_FEES='{"BTC":{"symbol":"BTC","sz_decimals":3,"max_decimals":6,"max_sig_figs":5,"min_notional":"10","max_leverage":20,"margin_maint":"0.02","maker_fee":"0.00015","taker_fee":"0.00045"}}'`
 - `SPECS_FUND='{"BTC":{"symbol":"BTC","sz_decimals":3,"max_decimals":6,"max_sig_figs":5,"min_notional":"10","max_leverage":20,"margin_maint":"0.02","funding_rate":"0.0001"}}'`
 
-- **Fees.** Run `$V init fees`,
+- **Fees.** Run `$V init fees --feature paper-economics`,
   `$V ticks fees ticks --row BTC:42000@0 --row BTC:42100@1s --row BTC:42200@2s --row BTC:42300@3s`,
   `$V start fees rt --preset paper-replay --strategy round_trip_then_flat --param HOLD_TICKS=2 --env "TICKWRIGHT_PAPER__INSTRUMENT_SPECS=$SPECS_FEES"`,
   `$V await fees rt --event verify.flat`, `$V signal fees rt TERM`, `$V await fees rt --exit`,
-  `$V dump fees rt`. Buy 0.5 at 42000, sell 0.5 at 42200. `positions` reads
-  `realized_pnl 100.000`, `fees 18.94500000` (0.00045 × (21000 + 21100)). `account` cash reads
-  `100081.05500000`.
-- **Funding.** Run `$V init fund`,
+  `$V dump fees rt`. Buy 0.5 at 42000, sell 0.5 at 42200, taker 0.00045 on both notionals.
+  Check: `$V check fees rt econ-fees --sql "select realized_pnl from positions" --expect 100.000`,
+  `$V check fees rt econ-fees --sql "select fees from positions" --expect 18.94500000`,
+  `$V check fees rt econ-fees --sql "select cash from account" --expect 100081.05500000`.
+  Then `$V report fees`, expected `PASS (0 of 3 checks failed)`, and `$V cleanup fees`.
+- **Funding.** Run `$V init fund --feature paper-economics`,
   `$V ticks fund ticks --base 2024-01-01T00:59:00+00:00 --row BTC:40000@0 --row BTC:40000@30s --row BTC:40000@2m`,
   `$V start fund life --preset paper-replay --strategy margin_watch --param QUANTITY=1 --env "TICKWRIGHT_PAPER__INSTRUMENT_SPECS=$SPECS_FUND"`,
-  `$V await fund life --sql "select funding from positions where strategy_id='margin_watch'" --expect -4.0000000`,
-  `$V signal fund life TERM`, `$V await fund life --exit`, `$V dump fund life`. The 01:00 boundary
-  pays `1 × 40000 × 0.0001 = 4`, a long pays, so `funding -4.0000000` and cash `99996.0000000`.
-  `funding_marks` reads `BTC | 1704070800000000000` (01:00 UTC).
-- **Stochastic, twice.** Run `$V init stoch`,
+  `$V await fund life --sql "select funding from positions" --expect -4.0000000`,
+  `$V signal fund life TERM`, `$V await fund life --exit`, `$V dump fund life`. The 01:00
+  boundary pays `1 × 40000 × 0.0001 = 4`, a long pays. Check:
+  `$V check fund life econ-funding --sql "select funding from positions" --expect -4.0000000`,
+  `$V check fund life econ-funding --sql "select cash from account" --expect 99996.0000000`,
+  `$V check fund life econ-funding --sql "select last_funding_ts_ns from funding_marks" --expect 1704070800000000000`.
+  Then `$V report fund`, expected `PASS (0 of 3 checks failed)`, and `$V cleanup fund`.
+- **Stochastic.** Run `$V init stoch --feature paper-economics`,
   `$V ticks stoch ticks --row BTC:42050@0 --row BTC:42010@1s --row BTC:42000@2s --row BTC:41990@3s --row BTC:41980@4s --row BTC:41970@5s`.
-  Then for each life `a` and `b`: `$V start stoch <life> --preset paper-replay --env 'TICKWRIGHT_STRATEGIES=[{"kind":"single_shot_limit","strategy_id":"rester","symbol":"BTC","side":"buy","quantity":"1","price":"42020"}]' --env TICKWRIGHT_PAPER__FILL_MODEL=stochastic --env TICKWRIGHT_PAPER__SEED=7 --env TICKWRIGHT_PAPER__STOCHASTIC__PARTIAL_FILL_FRACTION=0.5`,
-  `$V await stoch <life> --order $($V cloid rester:BTC:1)=FILLED`, `$V signal stoch <life> TERM`,
-  `$V await stoch <life> --exit`, `$V dump stoch <life>`, and
-  `rm .agents/verify/stoch/scratch/store.db` between the two.
-- **Proof.** `diff .agents/verify/stoch/evidence/a.store.txt .agents/verify/stoch/evidence/b.store.txt`
-  is empty. `a.events.txt` has at least one `order.partially_filled` before `order.filled`.
-- **Cleanup.** Run `$V cleanup fees`, `$V cleanup fund`, `$V cleanup stoch`.
+  For each life `a` then `b`:
+  `$V start stoch <life> --preset paper-replay --env 'TICKWRIGHT_STRATEGIES=[{"kind":"single_shot_market","strategy_id":"shooter","symbol":"BTC","side":"buy","quantity":"1"}]' --env TICKWRIGHT_PAPER__FILL_MODEL=stochastic --env TICKWRIGHT_PAPER__SEED=7 --env TICKWRIGHT_PAPER__STOCHASTIC__PROB_SLIPPAGE=1.0 --env TICKWRIGHT_PAPER__STOCHASTIC__MAX_SLIPPAGE=0.01`,
+  `$V await stoch <life> --order $($V cloid shooter:BTC:1)=FILLED`, `$V signal stoch <life> TERM`,
+  `$V await stoch <life> --exit`, `$V dump stoch <life>`,
+  `$V check stoch <life> econ-stochastic --sql "select entry_price from positions" --expect 42113.4320776352530573600`,
+  then `rm .agents/verify/stoch/scratch/store.db`. The pinned price is seed 7's first draw on
+  42050, and it must come out the same in both lives and on any machine.
+- **Partial.** In the same run:
+  `$V start stoch partial --preset paper-replay --env 'TICKWRIGHT_STRATEGIES=[{"kind":"single_shot_limit","strategy_id":"rester","symbol":"BTC","side":"buy","quantity":"1","price":"42020"}]' --env TICKWRIGHT_PAPER__FILL_MODEL=stochastic --env TICKWRIGHT_PAPER__SEED=7 --env TICKWRIGHT_PAPER__STOCHASTIC__PARTIAL_FILL_FRACTION=0.5`,
+  `$V await stoch partial --order $($V cloid rester:BTC:1)=FILLED`, `$V signal stoch partial TERM`,
+  `$V await stoch partial --exit`, `$V dump stoch partial`. Check:
+  `$V check stoch partial econ-partial --event order.partially_filled --expect 1`,
+  `$V check stoch partial econ-partial --sql "select cum_qty from orders" --expect 1.0000`.
+- **Report.** Run `$V report stoch`. Expected verdict: `PASS (0 of 4 checks failed)`.
+- **Cleanup.** Run `$V cleanup stoch`.
 
 ## Gotchas
 

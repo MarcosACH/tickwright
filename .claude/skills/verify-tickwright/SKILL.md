@@ -38,10 +38,10 @@ Read `features/README.md` before driving. It is the map of what to prove.
 ## Launch
 
 There is no long-lived server. Each drive is one or more short-lived **lives** of the process in
-one **run**.
+one **run**. One run covers one feature file.
 
 ```bash
-$V init <run-id>                                  # .agents/verify/<run-id>/{scratch,evidence}
+$V init <run-id> --feature <feature>              # .agents/verify/<run-id>/{scratch,evidence}
 $V ticks <run-id> ticks --row BTC:42000@0 --row BTC:42100@1s   # scratch/ticks.jsonl
 $V start <run-id> first --preset paper-replay --env 'TICKWRIGHT_STRATEGIES=[...]'
 $V await <run-id> first --event engine.feed_started
@@ -91,6 +91,8 @@ $V await <run> <life> --sql "select cash from account" --expect 100081.05500000
 $V signal <run> <life> TERM                               # TERM INT KILL USR1 USR2
 $V await <run> <life> --exit                              # prints the exit code
 $V dump  <run> <life>                                     # store tables + event counts
+$V check <run> <life> <check-id> --sql "..." --expect X   # records PASS or FAIL
+$V report <run>                                           # writes and prints REPORT.md
 ```
 
 - `cloid` turns a signal id (`<strategy_id>:<symbol>:<seq>`) into the order's cloid, so you can
@@ -102,7 +104,9 @@ $V dump  <run> <life>                                     # store tables + event
 - Two tick files in one run: `$V ticks <run> second --base 2024-01-01T00:00:05+00:00 ...` and
   `--env TICKWRIGHT_REPLAY__PATH=second.jsonl`.
 
-Every recipe in `features/` uses only these verbs.
+Every recipe in `features/` uses only these verbs. `await` is how you wait. `check` is how you
+judge. Do not skip a `check` because the `await` already matched: the await proves timing, the
+check proves the value and writes it down.
 
 ## Evidence
 
@@ -118,6 +122,9 @@ Everything a life produced lands in `.agents/verify/<run-id>/evidence/`:
 | `<life>.store.txt` | `dump`: the store tables |
 | `<life>.events.txt` | `dump`: event counts and the order, position, account, engine trail |
 | `<name>.jsonl` | a copy of each tick file used |
+| `checks.txt` | one `PASS` or `FAIL` line per `check`, with `expected=` and `got=` |
+| `REPORT.md` | `report`: the verdict, the FAIL lines, alarm events, exit codes, store tables |
+| `ISSUE.md` | `issue-draft`: a bug body for the FAIL lines, when there are any |
 
 Proof standards:
 
@@ -133,6 +140,56 @@ Proof standards:
 - The testnet key never enters the evidence. `cleanup` and `secrets-check` scan for it.
 
 The evidence directory is gitignored and readable. Point the user at it in your report.
+
+## Report
+
+A run is read from one file. After the last `check`:
+
+```bash
+$V report <run-id>          # exit 0 on PASS, 1 on FAIL or NO CHECKS
+$V runs                     # every run: id, start, feature, sha, verdict
+```
+
+`REPORT.md` opens with `# <run-id>: <feature> PASS|FAIL (n of m checks failed)`, then the FAIL
+lines, then every alarm event found in the logs (`engine.faulted`, `order.rejected`,
+`order.denied`, `ghost.reconciled`, `account.healed`, `valuation.divergence`, and the rest of
+`ALARM_EVENTS` in `verify.py`), then exit codes, all checks, and the store tables.
+
+Reading it:
+
+- **FAIL lines are the verdict.** Each names its check id from the feature file's
+  `Sub-features`, the life, and both numbers.
+- **Alarm events are a prompt, not a verdict.** `ghost.reconciled` is the ghost feature working.
+  `engine.faulted` in `config-refusals` is the refusal working. An alarm with no check that
+  expects it is worth a look.
+- **Expected FAILs exist.** A feature file's Gotchas may name a known FAIL with a date. If the
+  FAIL line matches, it is already known. Say so and move on. If a FAIL is not named there, it is
+  new.
+- `NO CHECKS` means the recipe was not finished. It is not a pass.
+
+Comparing two runs of one feature, before and after a fix, is `$V runs` plus the two
+`REPORT.md` files. `$V prune --keep 5` drops the oldest runs per feature when the tree grows.
+
+## Filing
+
+A new FAIL becomes a bug the user files. The skill drafts, the user files.
+
+```bash
+$V issue-draft <run-id>     # writes evidence/ISSUE.md and prints it; exit 1 when nothing failed
+```
+
+The draft follows `.github/ISSUE_TEMPLATE/bug_report.md` and links the feature file, the
+commit, `REPORT.md`, and the failing life's log and store dump. Before handing it over:
+
+1. Say what the number means in one plain sentence under "What happens".
+2. Name the ADR or CONTEXT.md term the expected value comes from under "What should happen".
+   `/why` on the failing path finds it when you do not know.
+3. Hand the user the draft path and the `gh issue create` line at the bottom of it. The rest of
+   the filing rules (labels, assignee, project, Status) are in `docs/agents/issue-tracker.md`.
+
+Never run `gh issue create` yourself from this skill. Never edit engine code from this skill. The
+fix is a `/tdd` session on the issue, and the failing check is its acceptance test: the same
+recipe reads `PASS` when the fix is right.
 
 ## Cleanup
 

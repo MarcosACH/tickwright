@@ -26,7 +26,7 @@ Preconditions:
 - `S='[{"kind":"single_shot_limit","strategy_id":"rester","symbol":"BTC","side":"buy","quantity":"0.001","price":"20000"}]'`
   for the live feed, `ETH` at price `2000` and quantity `0.5` for replay.
 
-- **Wall clock, rest.** Run `$V init ghostlive`,
+- **Wall clock, rest.** Run `$V init ghostlive --feature ghost-reconcile`,
   `$V start ghostlive first --preset paper-livefeed --env "TICKWRIGHT_STRATEGIES=$S"`,
   `$V await ghostlive first --order $($V cloid rester:BTC:1)=LIVE --timeout 90`,
   `$V signal ghostlive first TERM`, `$V await ghostlive first --exit`.
@@ -34,18 +34,26 @@ Preconditions:
   `$V await ghostlive second --event engine.barrier_cleared --timeout 60`, then
   `$V await ghostlive second --event ghost.reconciled --timeout 200`. Compare the two
   `timestamp` fields: the gap is 90 seconds plus at most one 30 second cadence
-  (observed 90.0 s). Then `TERM`, `--exit`, `dump`.
-- **Replay, rest.** Run `$V init ghost`, `$V ticks ghost first --row ETH:2500@0`,
+  (observed 90.0 s). Then `TERM`, `--exit`, `dump`. Check:
+  `$V check ghostlive second ghost-armed --event engine.barrier_cleared --expect 1`,
+  `$V check ghostlive second ghost-wall-clock --event ghost.reconciled --expect 1`,
+  `$V check ghostlive second ghost-reject --sql "select state from orders" --expect rejected`,
+  `$V check ghostlive second ghost-reject --event order.placed --expect 0`.
+  Then `$V report ghostlive`, expected `PASS (0 of 4 checks failed)`, and `$V cleanup ghostlive`.
+- **Replay, rest.** Run `$V init ghost --feature ghost-reconcile`,
+  `$V ticks ghost first --row ETH:2500@0`,
   `$V ticks ghost second --base 2024-01-01T00:00:05+00:00 --row ETH:2502@0`,
   `$V start ghost first --preset paper-replay --env TICKWRIGHT_REPLAY__PATH=first.jsonl --env "TICKWRIGHT_STRATEGIES=$S"`,
   `$V await ghost first --order $($V cloid rester:ETH:1)=LIVE`, `TERM`, `--exit`.
 - **Replay, ghost.** Same `start` with life `second` and `TICKWRIGHT_REPLAY__PATH=second.jsonl`,
   then `$V await ghost second --event ghost.reconciled --timeout 10`. It lands on the first
-  tick. Then `TERM`, `--exit`, `dump`.
-- **Proof.** In both runs `second.store.txt` shows the cloid `rejected` with the ghost reason,
-  and `second.events.txt` has one `ghost.reconciled` with `"cycle": "open_order"` and no
-  `order.placed`.
-- **Cleanup.** Run `$V cleanup ghostlive` and `$V cleanup ghost`.
+  tick. Then `TERM`, `--exit`, `dump`. Check:
+  `$V check ghost second ghost-replay --event ghost.reconciled --expect 1`,
+  `$V check ghost second ghost-reject --sql "select state from orders" --expect rejected`,
+  `$V check ghost second ghost-reject --sql "select reason from orders" --expect "reconciliation: ghost: vanished from the venue"`.
+- **Report.** Run `$V report ghost`. Expected verdict: `PASS (0 of 3 checks failed)`. The
+  `ghost.reconciled` and `order.rejected` alarm lines are the feature, not a fault.
+- **Cleanup.** Run `$V cleanup ghost`.
 
 ## Gotchas
 

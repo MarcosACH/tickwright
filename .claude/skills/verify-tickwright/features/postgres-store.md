@@ -20,17 +20,23 @@ Preconditions:
 - `$V doctor` says the Docker daemon is up.
 - Run id `pg` is unused.
 
-- **Infra.** Run `$V init pg` and `$V infra pg up postgres`. It prints the run's DSN,
-  `postgresql://tickwright:tickwright@localhost:5432/verify_pg`. Export it as `DSN`.
+- **Infra.** Run `$V init pg --feature postgres-store` and `$V infra pg up postgres`. It prints
+  the run's DSN, `postgresql://tickwright:tickwright@localhost:5432/verify_pg`. Export it as `DSN`.
 - **Life one.** Run `$V ticks pg ticks --row BTC:42000@0 --row BTC:42100@1s`,
   `$V start pg first --preset paper-replay --env TICKWRIGHT_STORE=postgres --env TICKWRIGHT_POSTGRES__DSN=$DSN --env 'TICKWRIGHT_STRATEGIES=[{"kind":"single_shot_market","strategy_id":"shooter","symbol":"BTC","side":"buy","quantity":"0.5"}]'`,
   `$V await pg first --order $($V cloid shooter:BTC:1)=FILLED`, `$V signal pg first TERM`,
-  `$V await pg first --exit`.
+  `$V await pg first --exit`, `$V dump pg first`.
+- **Check life one.** Run `$V check pg first pg-fill --sql "select state from orders" --expect filled`,
+  `$V check pg first pg-fill --sql "select signed_size from positions" --expect 0.500`,
+  `$V check pg first pg-schema --exit --expect 0`.
 - **Life two.** Run the same `start` line with life `second`,
   `$V await pg second --event engine.feed_started`, wait one second, `$V signal pg second TERM`,
   `$V await pg second --exit`, `$V dump pg second`.
-- **Proof.** `ls .agents/verify/pg/scratch` has no `store.db`. `second.store.txt` shows the one
-  `filled` order and `shooter | BTC | 0.500`. `second.events.txt` has no `order.placed`.
+- **Check life two.** Run `$V check pg second pg-restart --event order.placed --expect 0`,
+  `$V check pg second pg-restart --sql "select count(*) from orders" --expect 1`,
+  `$V check pg second pg-restart --exit --expect 0`. Also `ls .agents/verify/pg/scratch` shows
+  no `store.db`.
+- **Report.** Run `$V report pg`. Expected verdict: `PASS (0 of 6 checks failed)`.
 - **Cleanup.** Run `$V cleanup pg`. It removes the container, and the database with it.
 
 ## Gotchas

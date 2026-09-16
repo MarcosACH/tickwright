@@ -24,6 +24,8 @@ index, then use the matching feature file as the recipe. `../SKILL.md` explains 
 
 ## Proof and skip reporting
 
+- Every `Sub-features` id has at least one `check` in the recipe. The recipe's `report` line
+  says the verdict the map expects today, including known FAILs named in Gotchas.
 - A fill is proven by the `orders` row, the `positions` row, and the `account` row together.
 - An exit code is proof. `0` is graceful, `1` is a refusal or a fault, `-9` is your `KILL`.
 - Report the number you expected next to the number the dump shows.

@@ -21,16 +21,21 @@ Preconditions:
 - Network access to `wss://api.hyperliquid.xyz/ws`.
 - Run id `livefeed` is unused.
 
-- **Run.** Run `$V init livefeed`,
+- **Run.** Run `$V init livefeed --feature hyperliquid-feed`,
   `$V start livefeed first --preset paper-livefeed --env 'TICKWRIGHT_STRATEGIES=[{"kind":"single_shot_market","strategy_id":"shooter","symbol":"BTC","side":"buy","quantity":"0.01"}]'`,
   `$V await livefeed first --event engine.feed_started --timeout 30`,
   `$V await livefeed first --order $($V cloid shooter:BTC:1)=FILLED --timeout 90`.
 - **Stop.** Run `$V signal livefeed first TERM`, `$V await livefeed first --exit`,
   `$V dump livefeed first`.
-- **Proof.** `positions` shows `shooter | BTC | 0.010 | <price>` where the price is the current
-  BTC market, and `ts_ns` is a real timestamp (about 1.79e18 in 2026), not `1704067200...`.
-  Exit code `0`. `first.env.txt` has `TICKWRIGHT_HYPERLIQUID__TESTNET=false` and no
+- **Check.** Run `$V check livefeed first hlfeed-connect --event engine.feed_started --expect 1`,
+  `$V check livefeed first hlfeed-fill --sql "select state from orders" --expect filled`,
+  `$V check livefeed first hlfeed-fill --sql "select signed_size from positions" --expect 0.010`,
+  `$V check livefeed first hlfeed-fill --sql "select ts_ns > 1700000000000000000 from positions" --expect 1`
+  (a real timestamp, not the replay epoch),
+  `$V check livefeed first hlfeed-fill --exit --expect 0`. The entry price in `positions` is
+  the current BTC market. `first.env.txt` has `TICKWRIGHT_HYPERLIQUID__TESTNET=false` and no
   `TICKWRIGHT_EXCHANGE` line, so the venue was paper.
+- **Report.** Run `$V report livefeed`. Expected verdict: `PASS (0 of 5 checks failed)`.
 - **Cleanup.** Run `$V cleanup livefeed`.
 
 ## Gotchas

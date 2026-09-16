@@ -20,19 +20,25 @@ Preconditions:
 
 - Run id `ks` is unused.
 
-- **Set up.** Run `$V init ks` and `$V ticks ks ticks --row BTC:42000@0 --row BTC:42100@1s`.
+- **Set up.** Run `$V init ks --feature kill-switch` and
+  `$V ticks ks ticks --row BTC:42000@0 --row BTC:42100@1s`.
 - **Arm.** Run `$V start ks arm --preset paper-replay`, `$V await ks arm --event engine.feed_started`,
   `$V signal ks arm USR1`, `$V await ks arm --event guard.kill_switch_tripped`,
-  `$V signal ks arm TERM`, `$V await ks arm --exit`, `$V dump ks arm`. `kill_switch` reads
-  `1 | 1 | SIGUSR1: operator kill switch | ...`.
+  `$V signal ks arm TERM`, `$V await ks arm --exit`, `$V dump ks arm`.
+- **Check arm.** Run `$V check ks arm ks-trip --event guard.kill_switch_tripped --expect 1`,
+  `$V check ks arm ks-trip --sql "select tripped from kill_switch" --expect 1`,
+  `$V check ks arm ks-trip --exit --expect 0`.
 - **Deny.** Run
   `$V start ks denied --preset paper-replay --env 'TICKWRIGHT_STRATEGIES=[{"kind":"single_shot_market","strategy_id":"shooter","symbol":"BTC","side":"buy","quantity":"0.5"}]'`
-  and `$V await ks denied --event order.denied`. The line carries `"reason": "kill switch tripped"`
-  and `"signal_id": "shooter:BTC:1"`.
+  and `$V await ks denied --event order.denied`.
 - **Reset.** Run `$V signal ks denied USR2`, `$V await ks denied --event guard.kill_switch_reset`,
   `$V signal ks denied TERM`, `$V await ks denied --exit`, `$V dump ks denied`.
-- **Proof.** `orders` has one row in state `denied` with reason `kill switch tripped`.
-  `kill_switch` reads `1 | 0 | None | ...`. `positions` is empty.
+- **Check denied.** Run `$V check ks denied ks-deny --event order.denied --expect 1`,
+  `$V check ks denied ks-durable --sql "select state from orders" --expect denied`,
+  `$V check ks denied ks-durable --sql "select count(*) from positions" --expect 0`,
+  `$V check ks denied ks-reset --event guard.kill_switch_reset --expect 1`,
+  `$V check ks denied ks-reset --sql "select tripped from kill_switch" --expect 0`.
+- **Report.** Run `$V report ks`. Expected verdict: `PASS (0 of 8 checks failed)`.
 - **Cleanup.** Run `$V cleanup ks`.
 
 ## Gotchas

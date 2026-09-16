@@ -2,15 +2,16 @@
 
 The quickstart path. An operator points the engine at a tick file, a market order fills on the
 first tick, a low limit order rests, `Ctrl-C` stops the process with exit 0, and a second start
-recovers the resting order without placing anything new.
+recovers the fill, places nothing new, and ghosts the resting order because the paper book died
+with the first process.
 
 ## Sub-features
 
 - `paper-fill` a `single_shot_market` fills on the first tick at the tick price.
 - `paper-rest` a `single_shot_limit` below the market rests `LIVE`.
 - `paper-stop` `TERM` exits 0, snapshots strategies, leaves the resting order alone.
-- `paper-restart` the second life clears the barrier with the order still `LIVE`, places
-  nothing, and ghosts the order on the first tick (the paper book died with life one).
+- `paper-restart` the second life places nothing and exits 0.
+- `paper-ghost` the second life rejects the resting order as a ghost on the first tick.
 
 ## How to get to it (user POV)
 
@@ -22,23 +23,27 @@ Preconditions:
 
 - `$V doctor` says the package imports.
 - Run id `rt` is unused.
+- `S='[{"kind":"single_shot_market","strategy_id":"shooter","symbol":"BTC","side":"buy","quantity":"0.5"},{"kind":"single_shot_limit","strategy_id":"rester","symbol":"ETH","side":"buy","quantity":"0.5","price":"2000"}]'`
+- `FILL=$($V cloid shooter:BTC:1)` and `REST=$($V cloid rester:ETH:1)`
 
-- **Set up.** Run `$V init rt` and
+- **Set up.** Run `$V init rt --feature paper-round-trip` and
   `$V ticks rt ticks --row BTC:42000@0 --row ETH:2500@1s --row BTC:42100@2s`.
-- **Start life one.** Run
-  `$V start rt first --preset paper-replay --env 'TICKWRIGHT_STRATEGIES=[{"kind":"single_shot_market","strategy_id":"shooter","symbol":"BTC","side":"buy","quantity":"0.5"},{"kind":"single_shot_limit","strategy_id":"rester","symbol":"ETH","side":"buy","quantity":"0.5","price":"2000"}]'`.
-- **Fill.** Run `$V await rt first --order $($V cloid shooter:BTC:1)=FILLED`. The row appears.
-- **Rest.** Run `$V await rt first --order $($V cloid rester:ETH:1)=LIVE`. The row appears.
-- **Stop.** Run `$V signal rt first TERM`, `$V await rt first --exit`, `$V dump rt first`. Exit
-  code `0`. `positions` shows `shooter | BTC | 0.500 | 42000`. `account` cash is `100000.000`
-  (frictionless). `orders` shows `filled` and `live`.
-- **Restart.** Run the same `start` line with life `second`, then
-  `$V await rt second --event engine.barrier_cleared`, `$V await rt second --event engine.feed_started`,
+- **Life one.** Run `$V start rt first --preset paper-replay --env "TICKWRIGHT_STRATEGIES=$S"`,
+  `$V await rt first --order $FILL=FILLED`, `$V await rt first --order $REST=LIVE`,
+  `$V signal rt first TERM`, `$V await rt first --exit`, `$V dump rt first`.
+- **Check life one.** Run
+  `$V check rt first paper-fill --sql "select state from orders where cloid='$FILL'" --expect filled`,
+  `$V check rt first paper-fill --sql "select signed_size from positions" --expect 0.500`,
+  `$V check rt first paper-rest --sql "select state from orders where cloid='$REST'" --expect live`,
+  `$V check rt first paper-stop --exit --expect 0`.
+- **Life two.** Run `$V start rt second --preset paper-replay --env "TICKWRIGHT_STRATEGIES=$S"`,
+  `$V await rt second --event engine.feed_started`, `$V await rt second --event ghost.reconciled --timeout 10`,
   `$V signal rt second TERM`, `$V await rt second --exit`, `$V dump rt second`.
-- **Proof.** `second.store.txt` has exactly the same two cloids. The market order is still
-  `filled` once. The limit order reads `rejected` with reason
-  `reconciliation: ghost: vanished from the venue`. `second.events.txt` has no `order.placed`,
-  one `engine.barrier_cleared`, one `ghost.reconciled`. `second.exit` is `0`.
+- **Check life two.** Run
+  `$V check rt second paper-restart --event order.placed --expect 0`,
+  `$V check rt second paper-restart --exit --expect 0`,
+  `$V check rt second paper-ghost --sql "select state from orders where cloid='$REST'" --expect rejected`.
+- **Report.** Run `$V report rt`. Expected verdict: `PASS (0 of 7 checks failed)`.
 - **Cleanup.** Run `$V cleanup rt`. Evidence stays in `.agents/verify/rt/evidence/`.
 
 ## Gotchas

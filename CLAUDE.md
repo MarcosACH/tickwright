@@ -121,8 +121,10 @@ triggers.
 6. One PR per issue, with `Closes #<N>` in the body.
 7. `/code-review` reports BLOCKING, WARN, and NIT. Label `ralph:ready` when it is clean.
 8. `/verify-tickwright` drives the real engine process the way an operator does and keeps the
-   proof in `.agents/verify/<run-id>/evidence/`. `/maintain-verification-skill` keeps its feature
-   map honest after the engine changes.
+   proof in `.agents/verify/<run-id>/evidence/`. Each run ends in a `REPORT.md` with a PASS or
+   FAIL verdict. A new FAIL becomes a bug you file from its `ISSUE.md` draft, and the fix is a
+   `/tdd` session on that issue. `/maintain-verification-skill` keeps the feature map honest after
+   the engine changes.
 
 Conventions: `docs/workflow/labels.md`, `docs/agents/issue-tracker.md`.
 
