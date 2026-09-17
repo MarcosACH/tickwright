@@ -789,8 +789,10 @@ class PortfolioProjection:
         payments into it. The `userFundings` snapshot re-delivers them on every
         subscribe, and a fresh ledger has no mark to stop them, so without this
         gate the first live boot folds months of history into cash a second
-        time (#349). Paper never reaches it, because its generator enumerates
-        only boundaries after the clock it opened at.
+        time (#349). Both sides of the comparison are venue time: the boundary
+        comes off the payment, and the genesis instant comes off the account
+        read that produced the number. Paper never reaches it, because its
+        generator enumerates only boundaries after the clock it opened at.
 
         The **gate is read before the split, never per partition**. A mark on the
         position row would be a value per row, and a row created *after* a
@@ -1128,12 +1130,12 @@ class PortfolioProjection:
                 f"ledger for {self._spec.account_id} is already open: genesis is "
                 "written once and never re-derived (ADR-0042 §3)"
             )
-        # One clock read for both: the opening instant the row is stamped with
-        # and the instant it was made durable are the same fact here, and two
-        # reads would let a live clock put them a tick apart for no reason.
-        ts_ns = self._clock.timestamp_ns()
-        self._account = Account.ingest(self._spec, state, ts_ns=ts_ns)
-        self._store.checkpoint_ledger(account=self._account, ts_ns=ts_ns)
+        # Two instants on purpose. The genesis instant is the venue's, carried
+        # on the state beside the number it dates, because the funding gate
+        # compares it to payment boundaries on that same clock (#349). The
+        # local clock stamps only when the row was made durable.
+        self._account = Account.ingest(self._spec, state)
+        self._store.checkpoint_ledger(account=self._account, ts_ns=self._clock.timestamp_ns())
         # Announced behind the write, as ``project`` is: a record naming an
         # opening balance a crash could still undo would be worse than none.
         named_event(

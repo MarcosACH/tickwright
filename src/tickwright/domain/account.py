@@ -331,7 +331,7 @@ class Account:
         )
 
     @classmethod
-    def ingest(cls, spec: AccountSpec, state: VenueAccountState, *, ts_ns: int) -> "Account":
+    def ingest(cls, spec: AccountSpec, state: VenueAccountState) -> "Account":
         """Open a fresh ledger at the genesis the *venue* reports (ADR-0042 §6).
 
         The third way an account comes into being, and the live path's: ``open``
@@ -355,11 +355,19 @@ class Account:
         — nothing cross-checks it, because there is no configured counterpart to
         check against — so re-deriving it on a later start would silently move a
         line that is supposed to have been written once.
+
+        The instant is the venue's own, off the same state as the number. The
+        two are one fact: the equity was true at that instant, and every
+        funding payment the venue had settled by then is inside it. The funding
+        gate compares the instant to each payment's boundary, which is venue
+        time too (#349). A local clock here would put a second clock in that
+        comparison, and a payment settled inside the read's own round trip, or
+        across any skew, would be counted twice or dropped.
         """
         return cls(
             account_id=spec.account_id,
             genesis_collateral=venue_cash(state),
-            genesis_ts_ns=ts_ns,
+            genesis_ts_ns=state.as_of_ts_ns,
         )
 
     def __repr__(self) -> str:
