@@ -63,10 +63,6 @@ _ACK_SKEW_ALLOWANCE_MS = 60_000
 
 _TIF_WIRE = {TimeInForce.GTC: "Gtc", TimeInForce.IOC: "Ioc"}
 
-# The saga-terminal states a venue read can resolve to (ADR-0010): once an order
-# reaches one, the adapter's placed-order memory for it is dead weight to drop.
-_TERMINAL_STATES = frozenset({OrderState.FILLED, OrderState.CANCELLED, OrderState.REJECTED})
-
 
 class HyperliquidExchange:
     """The live ``Exchange`` adapter for Hyperliquid perps."""
@@ -123,9 +119,6 @@ class HyperliquidExchange:
         # strictly increasing, and the ms-truncated clock would collide on two
         # sends inside one millisecond — this floor keeps them monotonic.
         self._last_nonce = 0
-        # Orders this process placed, by cloid: a cancel needs the symbol (the
-        # venue cancels by asset index) and the report needs it back.
-        self._placed: dict[str, PlaceOrder] = {}
         # The MARKET slippage bound needs the latest traded price, and the tick
         # stream is where prices live (ADR-0027) — subscribe like any consumer.
         bus.subscribe(MarketTick, self.on_tick)
@@ -230,7 +223,6 @@ class HyperliquidExchange:
             "orders": [self._order_wire(order)],
             "grouping": "na",
         }
-        self._placed[order.cloid] = order
         # The signed action goes through the same read as every query: ``read``
         # guards the send and the pure parse, and nothing else. What sits above
         # this line is our own construction (an unknown symbol, an unsigned
@@ -269,18 +261,16 @@ class HyperliquidExchange:
         match adjudication:
             case _ActionError(message=message):
                 # The venue refused the whole action (bad nonce/signature/
-                # rate-limit) — the order never entered the book. Drop the placed
-                # memory and name it, emitting no terminal: a transient refusal
-                # must leave the order resendable, and reconcile-by-cloid
-                # resolves it (ADR-0008 rule 2).
-                self._placed.pop(order.cloid, None)
+                # rate-limit) — the order never entered the book. Name it,
+                # emitting no terminal: a transient refusal must leave the order
+                # resendable, and reconcile-by-cloid resolves it (ADR-0008
+                # rule 2).
                 self._action_rejected("place", order.cloid, message)
             case _Resting(oid=oid):
                 await self._ack(order, oid=oid)
             case _Rejected(reason=reason):
                 # Venue-adjudicated refusal: REJECTED, never DENIED (ADR-0010) —
                 # the order was sent and judged, and the venue's reason rides along.
-                self._placed.pop(order.cloid, None)  # terminal: drop the placed memory
                 await self._bus.publish(
                     self._status_report(
                         cloid=order.cloid,
@@ -294,10 +284,7 @@ class HyperliquidExchange:
                 # would double-count against reconciliation's venue-tid fills under
                 # {cloid}:fill:{tid} dedup — so fetch the venue's own fill records
                 # and emit those. This is the read right after placement: the fills
-                # are the newest, so the whole-history read cannot miss them. An IOC
-                # that filled is terminal, so drop the placed memory regardless of
-                # how the fills read resolves.
-                self._placed.pop(order.cloid, None)  # terminal: drop the placed memory
+                # are the newest, so the whole-history read cannot miss them.
                 # A `filled` answer is an ack, the same as `resting`: it carries
                 # the venue's oid. The saga keeps the oid from the LIVE ack, and
                 # that oid is the only key the fill history answers to once the
@@ -392,7 +379,6 @@ class HyperliquidExchange:
                 # the durable cancel_requested marker leaves it to reconciliation.
                 self._action_rejected("cancel", cloid, message)
             case _CancelVerdict.CANCELLED:
-                self._placed.pop(cloid, None)  # terminal: drop the placed memory
                 await self._bus.publish(
                     self._status_report(cloid=cloid, symbol=symbol, status=OrderState.CANCELLED)
                 )
@@ -478,16 +464,11 @@ class HyperliquidExchange:
         if isinstance(fills, VenueReadFailure):
             return fills
         if record is None:
-            # The venue dropped the record, so the order is closed. Drop the
-            # placed-order memory a cancel would have used, as a terminal record
-            # does below, so the cache tracks only still-open orders.
-            self._placed.pop(ref.cloid, None)
+            # The venue dropped the record, so the order is closed.
             return VenueOrderView(status=None, fills=tuple(fills))
         # Cannot fail: ``_decode_order_view`` refused an unmappable status on
         # the way in, so the read would have failed above.
         state = _order_state(record.status)
-        if state in _TERMINAL_STATES:
-            self._placed.pop(ref.cloid, None)
         status = self._status_report(
             cloid=ref.cloid, symbol=record.coin, status=state, venue_oid=str(record.oid)
         )
