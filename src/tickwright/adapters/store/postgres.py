@@ -47,6 +47,7 @@ _SCHEMA: tuple[str, ...] = (
         cum_qty             TEXT NOT NULL,
         venue_oid           TEXT,
         acked_ts_ns         BIGINT,
+        created_ts_ns       BIGINT,
         reason              TEXT,
         cancel_requested    BOOLEAN NOT NULL DEFAULT FALSE,
         cancel_requested_ts BIGINT,
@@ -105,7 +106,7 @@ _SCHEMA: tuple[str, ...] = (
 
 # This dialect's type for each column in ``_records.ADDED_COLUMNS``. The
 # column is also in ``_SCHEMA`` for a fresh database.
-_ADDED_COLUMN_TYPES: dict[str, str] = {"acked_ts_ns": "BIGINT"}
+_ADDED_COLUMN_TYPES: dict[str, str] = {"acked_ts_ns": "BIGINT", "created_ts_ns": "BIGINT"}
 
 
 class PostgresStore(SqlStore):

@@ -47,6 +47,7 @@ RECORD_COLUMNS: tuple[str, ...] = (
     "cum_qty",
     "venue_oid",
     "acked_ts_ns",
+    "created_ts_ns",
     "reason",
     "cancel_requested",
     "cancel_requested_ts",
@@ -75,7 +76,10 @@ READ_COLUMN_LIST = ", ".join(READ_COLUMNS)
 # as it was, so a backend adds these with ``ALTER TABLE`` on open and a live
 # account's open sagas survive the upgrade (#242). Each is also in every
 # backend's DDL for a fresh database. The type is the backend's, per dialect.
-ADDED_COLUMNS: tuple[tuple[str, str], ...] = (("orders", "acked_ts_ns"),)
+ADDED_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("orders", "acked_ts_ns"),
+    ("orders", "created_ts_ns"),
+)
 
 
 def record_values(order: Order, *, history: Sequence[Any]) -> tuple[Any, ...]:
@@ -97,6 +101,7 @@ def record_values(order: Order, *, history: Sequence[Any]) -> tuple[Any, ...]:
         str(order.cum_qty),
         order.venue_oid,
         order.acked_ts_ns,
+        order.created_ts_ns,
         order.reason,
         order.cancel_requested,
         order.cancel_requested_ts,
@@ -136,6 +141,7 @@ def restore_order(row: Sequence[Any]) -> Order:
         cum_qty=Decimal(column["cum_qty"]),
         venue_oid=column["venue_oid"],
         acked_ts_ns=column["acked_ts_ns"],
+        created_ts_ns=column["created_ts_ns"],
         reason=column["reason"],
         cancel_requested=bool(column["cancel_requested"]),
         cancel_requested_ts=column["cancel_requested_ts"],
@@ -163,6 +169,18 @@ def acked_ts_from_history(history_json: str | None) -> int | None:
         if state is OrderState.LIVE:
             return ts_ns
     return None
+
+
+def created_ts_from_history(history_json: str | None) -> int | None:
+    """The first checkpoint's time, or ``None`` for a row with no history.
+
+    The backfill for ``created_ts_ns`` on a database written before the column
+    existed (#354). The first checkpoint is the engine's first durable knowledge
+    of the order, on the same clock the creation stamp uses, so it is the
+    creation time within the write latency.
+    """
+    history = restore_history(history_json)
+    return history[0][1] if history else None
 
 
 # The account row, in write order — the single row ADR-0043 §3 pins with

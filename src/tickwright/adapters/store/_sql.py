@@ -36,6 +36,7 @@ from ._records import (
     READ_COLUMN_LIST,
     account_values,
     acked_ts_from_history,
+    created_ts_from_history,
     funding_mark_values,
     next_history,
     position_values,
@@ -91,6 +92,8 @@ class SqlStore(ABC):
                     self._execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
                     if (table, column) == ("orders", "acked_ts_ns"):
                         self._backfill_ack_times()
+                    if (table, column) == ("orders", "created_ts_ns"):
+                        self._backfill_created_times()
 
     def _backfill_ack_times(self) -> None:
         """Fill ``acked_ts_ns`` for every existing row from its transition history.
@@ -109,6 +112,24 @@ class SqlStore(ABC):
         if updates:
             self._executemany(
                 f"UPDATE orders SET acked_ts_ns = {self._p} WHERE cloid = {self._p}", updates
+            )
+
+    def _backfill_created_times(self) -> None:
+        """Fill ``created_ts_ns`` for every existing row from its first checkpoint.
+
+        Runs once, when the column is added. Left at ``None``, a saga from
+        before the upgrade that has no oid yet would take any record the venue
+        answers under its cloid, including one from an earlier life (#354).
+        """
+        rows = self._execute("SELECT cloid, history FROM orders").fetchall()
+        updates = [
+            (created_ts_ns, cloid)
+            for cloid, history in rows
+            if (created_ts_ns := created_ts_from_history(history)) is not None
+        ]
+        if updates:
+            self._executemany(
+                f"UPDATE orders SET created_ts_ns = {self._p} WHERE cloid = {self._p}", updates
             )
 
     @abstractmethod

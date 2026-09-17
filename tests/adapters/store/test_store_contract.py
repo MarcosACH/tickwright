@@ -173,6 +173,7 @@ def test_every_saga_column_round_trips_under_a_distinct_value(store_backend: Bac
         cum_qty=Decimal("4"),
         venue_oid="oid-77",
         acked_ts_ns=7_777,
+        created_ts_ns=6_666,
         reason="reduce-only rejected leg",
         cancel_requested=True,
         cancel_requested_ts=5_555,
@@ -197,6 +198,7 @@ def test_every_saga_column_round_trips_under_a_distinct_value(store_backend: Bac
     assert loaded.cum_qty == Decimal("4")
     assert loaded.venue_oid == "oid-77"
     assert loaded.acked_ts_ns == 7_777
+    assert loaded.created_ts_ns == 6_666
     assert loaded.reason == "reduce-only rejected leg"
     assert loaded.cancel_requested is True
     assert loaded.cancel_requested_ts == 5_555
@@ -311,6 +313,27 @@ def test_a_database_from_before_the_ack_time_column_gains_it_on_open(
         loaded_new = reopened.get_order("0xdef")
         assert loaded_new is not None
         assert loaded_new.acked_ts_ns == 4_242
+
+
+def test_a_database_from_before_the_created_time_column_gains_it_on_open(
+    store_backend: Backend,
+) -> None:
+    # The first checkpoint is the engine's first durable knowledge of the
+    # order, on the same clock the creation stamp uses. An old row takes that
+    # time rather than None, so a venue read can still tell an earlier life's
+    # record under the same cloid from this order's (#354).
+    old = _order()
+    old.apply(_submitted())
+    with store_backend.open() as first:
+        first.checkpoint(old, ts_ns=1_000)
+        old.apply(_live())
+        first.checkpoint(old, ts_ns=2_000)
+    store_backend.drop_column("orders", "created_ts_ns")
+
+    with store_backend.open() as reopened:
+        loaded_old = reopened.get_order("0xabc")
+        assert loaded_old is not None
+        assert loaded_old.created_ts_ns == 1_000
 
 
 def test_close_is_idempotent(store_backend: Backend) -> None:
