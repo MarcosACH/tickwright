@@ -4,6 +4,10 @@ The Kafka client is faked at the process boundary (ADR-0022): ``FakeKafkaBroker`
 stands in for the cluster behind aiokafka's producer/consumer surface, with real
 partitioning by key hash and per-partition offsets; everything on our side of
 that line — serde, keying, dispatch, commits — is real ``KafkaBus`` code.
+
+The cascade rules both backends share are pinned once, in ``test_bus_parity.py``.
+This file keeps what only the topic can show: the wire record, offset commits,
+where a held record lands, and a send that fails.
 """
 
 import asyncio
@@ -107,99 +111,6 @@ def test_subscribed_handler_receives_events_consumed_from_the_topic() -> None:
     # Same symbol -> same partition -> delivered in publish order, and
     # `all_committed` returning proves offsets advanced only after dispatch.
     assert seen == [_tick(1), _tick(2)]
-
-
-def test_a_handler_fault_propagates_into_the_causing_publish_and_the_bus_survives() -> None:
-    # Containment parity (ADR-0024): on InMemoryBus a raw handler exception
-    # propagates into the publish that caused it, once, and the bus keeps
-    # working. Over Kafka dispatch happens in the poll loop, so the fault is
-    # handed to the publish draining that cascade; the record is dropped
-    # uncommitted (a restart would redeliver it) and later publishes deliver.
-    broker = FakeKafkaBroker()
-    bus = _wire(broker)
-    seen: list[MarketTick] = []
-
-    async def brittle(event: MarketTick) -> None:
-        if event.seq == 1:
-            raise RuntimeError("handler broke an engine assumption")
-        seen.append(event)
-
-    bus.subscribe(MarketTick, brittle)
-
-    async def scenario() -> None:
-        await bus.start()
-        with pytest.raises(RuntimeError, match="handler broke"):
-            await bus.publish(_tick(1))
-        await bus.publish(_tick(2))
-        await bus.drain()
-        await bus.close()  # teardown still works after a fault
-
-    # Bounded: a wrong implementation must fail loudly, not hang in drain.
-    asyncio.run(asyncio.wait_for(scenario(), timeout=5))
-
-    assert seen == [_tick(2)]
-
-
-def test_when_two_same_symbol_records_fault_the_first_is_the_one_that_surfaces() -> None:
-    # Containment parity, tightened (ADR-0024): InMemoryBus dispatches in FIFO
-    # order and aborts on the *first* fault, so the first-published exception is
-    # the one a caller sees. Two same-symbol records share a partition, so the
-    # poll loop dispatches them in publish order — and both are already produced
-    # (seeded reentrantly) before the draining publisher gets to re-raise, so
-    # the loop hits both faults in one pass. The fault slot must keep the first,
-    # not let the second overwrite it, or the two backends report different
-    # exceptions for the same input (a per-symbol-ordered parity break).
-    broker = FakeKafkaBroker()
-    bus = _wire(broker)
-
-    async def handler(event: MarketTick) -> None:
-        if event.symbol == "seed":
-            await bus.publish(_tick(1, symbol="BTC"))  # reentrant: produced, not dispatched
-            await bus.publish(_tick(2, symbol="BTC"))
-        elif event.seq == 1:
-            raise RuntimeError("first fault")
-        elif event.seq == 2:
-            raise RuntimeError("second fault")
-
-    bus.subscribe(MarketTick, handler)
-
-    async def scenario() -> None:
-        await bus.start()
-        with pytest.raises(RuntimeError, match="first fault"):
-            await bus.publish(_tick(seq=0, symbol="seed"))
-        await bus.close()  # teardown still works after the fault
-
-    asyncio.run(asyncio.wait_for(scenario(), timeout=5))
-
-
-def test_a_handler_fault_drops_the_undelivered_cascade_tail() -> None:
-    # Containment parity, completed (ADR-0024): InMemoryBus clears its FIFO on a
-    # fault, so an event a handler published reentrantly *before* the fault is
-    # never delivered. Over Kafka that event is a durable record already on the
-    # topic — the poll loop must drop the faulted cascade's tail to match, or
-    # the two backends deliver different streams for the same input.
-    broker = FakeKafkaBroker()
-    bus = _wire(broker)
-    delivered: list[MarketTick] = []
-
-    async def handler(event: MarketTick) -> None:
-        if event.symbol == "trigger":
-            await bus.publish(_tick(1, symbol="BTC"))  # reentrant tail, then fault
-            raise RuntimeError("boom")
-        delivered.append(event)
-
-    bus.subscribe(MarketTick, handler)
-
-    async def scenario() -> None:
-        await bus.start()
-        with pytest.raises(RuntimeError, match="boom"):
-            await bus.publish(_tick(seq=0, symbol="trigger"))
-        await bus.drain()  # the tail was dropped; drain is idle, it does not hang
-        await bus.close()
-
-    asyncio.run(asyncio.wait_for(scenario(), timeout=5))
-
-    assert delivered == []  # the reentrantly-published BTC tick was never delivered
 
 
 def test_a_dispatch_fault_drops_what_its_handlers_published_before_it_reaches_the_topic() -> None:
