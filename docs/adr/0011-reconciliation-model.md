@@ -55,6 +55,21 @@ ADR-0009).
    rested. A failed fills read leaves the saga `LIVE`, where the open-order cadence heals it by
    the oid within one slow cycle. The adapter does not retry the read. Reconcile owns retries
    (ADR-0008). The paper venue has no oid and keeps its direct `SUBMITTED → FILLED` path. [#328]**)**
+   **(Amended by #354 — a cloid can name more than one venue order, so every read and cancel
+   goes by the oid once there is one:**
+   The cloid is derived from the signal id (ADR-0006), and the signal seq restarts at 1 in a
+   fresh store. The venue remembers every cloid ever placed on the account. So a second life of
+   the account places the same cloid again, and `orderStatus` by cloid may answer with either
+   order. Which one it answers while the new one is still landing is not documented. The
+   engine adopted an earlier life's record and its fills as this saga's, then faulted when the
+   real fill arrived. Three rules close that. The saga stamps its own creation time
+   (`Order.created_ts_ns`, backfilled from the first checkpoint on an older database). Once the
+   saga holds an oid, the record read and the cancel go by that oid, which names exactly one
+   order. Before the ack there is no oid, so the read goes by cloid, and a record the venue
+   placed before the saga's creation time, less the same 60 s skew allowance, reads as no
+   record. Its fills are never read. To the in-flight budget that is one miss, not a landing.
+   A cancel before the ack still goes by cloid. Which order the venue cancels then is its
+   choice, and reconciliation is the backstop. [#354]**)**
 3. **Grace window.** An order must be **continuously absent across the grace window** (default
    ~90s ≈ 3 missed slow cycles) before it is ghost-resolved. Plus a **recent-order protection
    window** (default ~30s ≈ one slow cycle): skip ghost evaluation for orders whose last saga
