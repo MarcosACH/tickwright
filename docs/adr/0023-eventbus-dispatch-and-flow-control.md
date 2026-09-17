@@ -72,3 +72,20 @@ three things depth-first recursion does not:
 This does **not** contradict the "no internal queue" of the synchronous-dispatch decision above:
 that rejected *per-subscriber concurrent* queues. This is one central synchronous FIFO drained
 inline — no concurrency, no per-subscriber decoupling, backpressure intact. Different axis.
+
+**(Amended by [#350](https://github.com/MarcosACH/tickwright/issues/350): `KafkaBus` holds a
+handler's publish until that dispatch returns.** Before this, a publish from inside a handler
+went to the topic at once, so a `Signal` was durable before the handler's own writes, such as the
+strategy snapshot (ADR-0016). A crash in between refired the strategy on restart. Now a publish
+made from the poll task is held in order. When the dispatch returns, the bus sends the held
+records, then commits the offset. Three rules follow.
+
+- A dispatch fault drops the held records. None reach the topic. This is the Kafka face of the
+  in-memory FIFO clear on a fault (ADR-0024).
+- A send that fails after the handler returned is a dispatch fault. The record that caused the
+  dispatch stays uncommitted, so a restart redelivers it.
+- A top-level publish still sends at once and drains to quiescence. Only reentrant publishes
+  are held.
+
+The held list is the in-memory FIFO with one difference: it is flushed per dispatch, not drained
+to quiescence, because each hop of a Kafka cascade is its own record and its own drain step.**)**

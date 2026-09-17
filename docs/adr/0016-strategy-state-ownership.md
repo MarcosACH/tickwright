@@ -63,6 +63,15 @@ durable, which is the double above waiting for the next crash. So the host probe
 at `start()`, before any tick reaches the strategy, and a raise there or at any later save faults
 the engine as an `InvariantViolation` naming the strategy.**)**
 
+**(Amended by [#350](https://github.com/MarcosACH/tickwright/issues/350): the crash window
+above closes the same way on both buses.** The snapshot is on disk before the `Signal` it records
+is durable anywhere. On the in-memory bus that was already true. On Kafka the bus now holds a
+publish made inside a handler until that dispatch returns, and only then sends it (ADR-0023). So
+a crash anywhere inside one callback leaves either a strategy that remembers firing and no order,
+or a strategy that never fired. Never a Signal with no memory behind it. The snapshot and the
+`PENDING` checkpoint stay two writes. They no longer need to be one transaction, because the
+order between them is now fixed by the bus, not by luck.**)**
+
 ## Restore failure is not an invariant violation
 
 An unreadable/incompatible snapshot (the strategy's code changed shape between runs) must not

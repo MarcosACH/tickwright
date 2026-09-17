@@ -12,9 +12,12 @@ The poll loop is the delivery half of the parity story: it dispatches one
 decoded record at a time to every matching subscriber — the same inner loop as
 ``InMemoryBus``'s drain — and commits the offset only *after* the handlers
 finished, so a crash mid-dispatch redelivers (at-least-once) instead of losing
-the event. A handler publishing reentrantly just produces a later record: the
-poll loop reaches it after the current cascade generation, mirroring the
-in-memory FIFO's breadth-first order.
+the event. A handler publishing reentrantly does not produce at once. The
+bus holds the event until that dispatch returns, then sends it, then commits
+the offset (issue #350). So a handler's own durable writes land before
+anything it published is in the topic, and a dispatch fault drops what the
+handler published. The poll loop reaches the held records after the current
+cascade generation, mirroring the in-memory FIFO's breadth-first order.
 """
 
 import asyncio
