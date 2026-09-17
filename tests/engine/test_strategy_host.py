@@ -7,6 +7,7 @@ seam this host exists to serve — not a mock of an engine class.
 """
 
 import asyncio
+import json
 from decimal import Decimal
 
 import pytest
@@ -27,12 +28,14 @@ from tickwright.domain import (
     OrderPlaced,
     OrderType,
     Side,
+    Signal,
     SignalId,
     Store,
     derive_cloid,
 )
 from tickwright.engine.cache import Cache
 from tickwright.engine.strategy_host import StrategyHost
+from tickwright.strategies import SingleShotLimitStrategy
 
 
 def _host(
@@ -336,6 +339,209 @@ def test_start_without_a_snapshot_leaves_the_strategy_fresh() -> None:
     host.start()
 
     assert alpha.state == b"untouched"
+
+
+class CountingStrategy(RecordingStrategy):
+    """A strategy whose state moves on every tick, so each tick is a change."""
+
+    async def on_tick(self, tick: MarketTick) -> None:
+        await super().on_tick(tick)
+        self.state = f"ticks={len(self.ticks)}".encode()
+
+
+def test_a_tick_that_changes_state_leaves_a_snapshot_without_stop() -> None:
+    """The crash half of ADR-0016's cadence (issue #348). A process killed after
+    a strategy fired must not lose what it did, so the state is durable as soon
+    as the callback that moved it returns, not only on a graceful stop."""
+    bus = InMemoryBus()
+    store = SQLiteStore(":memory:")
+    host = _host(bus=bus, store=store)
+    alpha = CountingStrategy("alpha")
+    host.register(alpha, symbols={"BTC"})
+    host.start()
+
+    asyncio.run(bus.publish(_tick("BTC")))
+
+    assert store.load_strategy_snapshot("alpha") == b"ticks=1"
+
+
+class OrderCountingStrategy(RecordingStrategy):
+    """A strategy whose state moves on every order event it receives."""
+
+    async def on_order_event(self, event: OrderEvent) -> None:
+        await super().on_order_event(event)
+        self.state = f"orders={len(self.order_events)}".encode()
+
+
+def test_an_order_event_that_changes_state_leaves_a_snapshot_without_stop() -> None:
+    bus = InMemoryBus()
+    store = SQLiteStore(":memory:")
+    host = _host(bus=bus, store=store)
+    alpha = OrderCountingStrategy("alpha")
+    host.register(alpha, symbols={"BTC"})
+    host.start()
+
+    asyncio.run(bus.publish(_order_placed("alpha")))
+
+    assert store.load_strategy_snapshot("alpha") == b"orders=1"
+
+
+class CountingStore(SQLiteStore):
+    """A real SQLite store that counts snapshot writes, so a test can see
+    the ones the host skipped."""
+
+    def __init__(self) -> None:
+        super().__init__(":memory:")
+        self.snapshot_writes = 0
+
+    def save_strategy_snapshot(self, strategy_id: str, data: bytes, *, ts_ns: int) -> None:
+        self.snapshot_writes += 1
+        super().save_strategy_snapshot(strategy_id, data, ts_ns=ts_ns)
+
+
+def test_a_callback_that_leaves_state_where_it_was_writes_no_snapshot() -> None:
+    """The compare half of the per-change cadence (ADR-0016). A restart seeds
+    the compare from the store, so a first tick that changes nothing writes
+    nothing. Only a callback that moved the bytes costs a store write."""
+    store = CountingStore()
+    store.save_strategy_snapshot("alpha", b"ticks=1", ts_ns=1_000)
+    store.snapshot_writes = 0
+    bus = InMemoryBus()
+    host = _host(bus=bus, store=store)
+    alpha = CountingStrategy("alpha")
+    host.register(alpha, symbols={"BTC"})
+    host.start()
+
+    # ``CountingStrategy`` sets the bytes from its tick count, so the first
+    # tick after a restore lands on the same value it started with.
+    asyncio.run(bus.publish(_tick("BTC")))
+    assert store.snapshot_writes == 0
+
+    asyncio.run(bus.publish(_tick("BTC", ts=2_000, trade_id="b", seq=2)))
+    assert store.snapshot_writes == 1
+    assert store.load_strategy_snapshot("alpha") == b"ticks=2"
+
+
+def test_a_single_shot_strategy_killed_after_firing_does_not_fire_again() -> None:
+    """The #348 shape end to end at the host seam: life one fires and dies with
+    no ``stop()``. Life two, over the same store, restores the fired state and
+    places nothing on its first tick."""
+    store = SQLiteStore(":memory:")
+    clock = ManualClock()
+
+    def life() -> tuple[EventBus, list[Signal]]:
+        bus = InMemoryBus()
+        host = _host(bus=bus, clock=clock, store=store)
+        shooter = SingleShotLimitStrategy(
+            strategy_id="shooter",
+            bus=bus,
+            clock=clock,
+            side=Side.BUY,
+            quantity=Decimal("0.5"),
+            price=Decimal("41000"),
+        )
+        host.register(shooter, symbols={"BTC"})
+        signals: list[Signal] = []
+
+        async def record(signal: Signal) -> None:
+            signals.append(signal)
+
+        bus.subscribe(Signal, record)
+        host.start()
+        return bus, signals
+
+    first_bus, first_signals = life()
+    asyncio.run(first_bus.publish(_tick("BTC", ts=1_000)))
+    assert len(first_signals) == 1  # life one fired, then the process died
+
+    second_bus, second_signals = life()
+    asyncio.run(second_bus.publish(_tick("BTC", ts=2_000, trade_id="b", seq=2)))
+
+    assert second_signals == []
+
+
+def test_the_snapshot_is_on_disk_before_the_signal_it_records_is_dispatched() -> None:
+    """The in-memory ordering ADR-0016 documents. A Signal published from
+    inside ``on_tick`` waits in the bus FIFO until the callback returns, and
+    the host writes the snapshot before the drain reaches it. So a crash
+    between the two loses the order, never the strategy's memory of it."""
+    store = SQLiteStore(":memory:")
+    clock = ManualClock()
+    bus = InMemoryBus()
+    host = _host(bus=bus, clock=clock, store=store)
+    shooter = SingleShotLimitStrategy(
+        strategy_id="shooter",
+        bus=bus,
+        clock=clock,
+        side=Side.BUY,
+        quantity=Decimal("0.5"),
+        price=Decimal("41000"),
+    )
+    host.register(shooter, symbols={"BTC"})
+    seen_at_dispatch: list[bytes | None] = []
+
+    async def read_snapshot(signal: Signal) -> None:
+        seen_at_dispatch.append(store.load_strategy_snapshot("shooter"))
+
+    bus.subscribe(Signal, read_snapshot)
+    host.start()
+
+    asyncio.run(bus.publish(_tick("BTC")))
+
+    assert len(seen_at_dispatch) == 1
+    assert seen_at_dispatch[0] is not None
+    assert json.loads(seen_at_dispatch[0])["placed_signal_id"] == "shooter:BTC:1"
+
+
+class BrokenSnapshotStrategy(RecordingStrategy):
+    """A strategy whose ``snapshot()`` is a bug: it raises a plain exception."""
+
+    def snapshot(self) -> bytes:
+        raise TypeError("Object of type Decimal is not JSON serializable")
+
+
+def test_a_strategy_whose_snapshot_raises_cannot_start() -> None:
+    """A strategy the host cannot persist cannot recover from a crash, which
+    is the #348 double waiting to happen. ``start()`` probes ``snapshot()``
+    once and faults before any tick reaches the strategy (ADR-0016)."""
+    bus = InMemoryBus()
+    host = _host(bus=bus)
+    broken = BrokenSnapshotStrategy("alpha")
+    host.register(broken, symbols={"BTC"})
+
+    with pytest.raises(InvariantViolation, match="alpha.*snapshot"):
+        host.start()
+
+    asyncio.run(bus.publish(_tick("BTC")))
+    assert broken.ticks == []
+
+
+class SnapshotBreaksAfterTickStrategy(RecordingStrategy):
+    """A strategy whose ``snapshot()`` works at boot and breaks once its
+    state moved, the way a ``Decimal`` stored after a fill breaks json."""
+
+    async def on_tick(self, tick: MarketTick) -> None:
+        await super().on_tick(tick)
+        self.state = b"moved"
+
+    def snapshot(self) -> bytes:
+        if self.state == b"moved":
+            raise TypeError("Object of type Decimal is not JSON serializable")
+        return self.state
+
+
+def test_a_snapshot_that_raises_after_a_callback_faults_as_an_invariant() -> None:
+    """The failure is a broken checkpoint, not a contained strategy error
+    (ADR-0024): it pierces the net as an ``InvariantViolation`` that names
+    the strategy, so the engine faults instead of trading on without
+    durability."""
+    bus = InMemoryBus()
+    host = _host(bus=bus)
+    host.register(SnapshotBreaksAfterTickStrategy("alpha"), symbols={"BTC"})
+    host.start()
+
+    with pytest.raises(InvariantViolation, match="alpha.*snapshot"):
+        asyncio.run(bus.publish(_tick("BTC")))
 
 
 class IncompatibleRestoreStrategy(RecordingStrategy):

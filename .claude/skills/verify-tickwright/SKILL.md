@@ -30,7 +30,8 @@ Read `features/README.md` before driving. It is the map of what to prove.
   hour settles paper funding. When the file ends, time stops. Nothing paced by the clock fires
   again until the process is stopped.
 - Under the Hyperliquid feed, time is the wall clock and the cadences run for real.
-- Signals: `TERM` or `INT` stop gracefully (exit 0). `KILL` is a crash (exit -9, no snapshot).
+- Signals: `TERM` or `INT` stop gracefully (exit 0). `KILL` is a crash (exit -9, no final
+  snapshot, but the last per-callback snapshot is on disk).
   `USR1` trips the durable kill switch, `USR2` resets it. A config refusal or a fault exits 1.
 - Two instances never share a store, a Kafka topic, or a scratch dir. The helper gives each run
   its own. Never drive `tickwright.db` or `.env` at the repo root. Those are the operator's.
