@@ -56,14 +56,13 @@ Preconditions:
 
 ## Gotchas
 
-- **Known intermittent FAIL, `engine.faulted` with `illegal saga transition filled -> filled`.**
-  Not yet filed. The draft is `.agents/verify/testnet-349/evidence/ISSUE.md`. The cloid is
-  derived from `round_trip:BTC:2`, so every run places the same cloid on the venue. When the
-  inflight poll lands while the sell is still `SUBMITTED`, `orderStatus` by cloid can answer with
-  a previous run's order, and its fill is adopted. The real fill then faults the saga. The trail
-  shows `tn-round-trip` exit 1, `tn-fee` short by the old fill's fee, and `tn-reconcile` and
-  `tn-redaction` at 0 because the run never got that far. `tn-cash` still passes. Replace this
-  note with the issue number once filed.
+- **Known intermittent FAIL, `engine.faulted` with `illegal saga transition filled -> filled`,
+  tracked as #354.** The cloid is derived from `round_trip:BTC:2`, so every run places the same
+  cloid on the venue. When the inflight poll lands while the sell is still `SUBMITTED`,
+  `orderStatus` by cloid can answer with a previous run's order, and its fill is adopted. The
+  real fill then faults the saga. The trail shows `tn-round-trip` exit 1, `tn-fee` short by the
+  old fill's fee, and `tn-reconcile` and `tn-redaction` at 0 because the run never got that far.
+  `tn-cash` still passes. When #354 is fixed, this note goes away.
 - The key is forwarded from the repo `.env` into the child environment only. Never write it with
   `--env`. The helper refuses.
 - `feed.lagged` lines are normal on testnet. The stream conflates.
