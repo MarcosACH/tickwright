@@ -156,11 +156,14 @@ def test_a_live_ledger_ingests_its_genesis_net_of_unrealized_pnl() -> None:
     """
     spec = AccountSpec(account_id="hyperliquid-testnet-0xabc", genesis_collateral=None)
 
-    account = Account.ingest(spec, account_state("25.9264", "-0.034"), ts_ns=11)
+    account = Account.ingest(spec, account_state("25.9264", "-0.034", as_of_ts_ns=11))
 
     assert account.account_id == "hyperliquid-testnet-0xabc"
     assert account.genesis_collateral == Decimal("25.9604")
     assert account.cash == Decimal("25.9604")  # nothing has accrued away from it yet
+    # The instant is the venue's, read off the same state as the number. The
+    # funding gate compares it to each payment's venue time (#349), and a
+    # local clock here would be a second clock in that comparison.
     assert account.genesis_ts_ns == 11
 
 

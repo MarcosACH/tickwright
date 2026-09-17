@@ -33,6 +33,8 @@ type the comparison is made against. Through ``__value__`` because ``MarginMode`
 is a PEP 695 ``type`` statement — a ``TypeAliasType`` whose ``get_args`` is
 empty, which would make this an allowlist that refuses **every** mode."""
 
+_NS_PER_MS = 1_000_000
+
 
 def account_spec(config: HyperliquidConfig, *, address: str) -> AccountSpec:
     """The venue's static declaration about the account this process trades.
@@ -204,6 +206,13 @@ def normalize_account_state(response: object) -> VenueAccountState:
     Plus one row per open position — a coin the account is flat in is simply
     absent from ``assetPositions``, the venue running one-way net positions.
 
+    Plus the root ``time``, the venue's own clock in ms when it composed the
+    body. A live first boot stamps genesis from it, and the funding gate then
+    compares that instant to each payment's ``time`` on the same clock (#349).
+    It is refused when absent or re-typed for the same reason a leverage value
+    is: a ``True`` reads as ``1`` ms, which puts genesis at the epoch and lets
+    every historical payment through as new money.
+
     A body this cannot read **raises** into ``UNREADABLE``, and ``read`` turns
     that into the named ``VenueReadFailure`` the reconcile freezes on (collapsed
     to ``None`` by ``fetch_account_state``, this grain's caller): every branch
@@ -234,11 +243,15 @@ def normalize_account_state(response: object) -> VenueAccountState:
             },
             "crossMaintenanceMarginUsed": str(cross_maintenance),
             "assetPositions": list(entries),
+            "time": int(as_of_ms),
         }:
+            if isinstance(as_of_ms, bool):
+                raise TypeError(f"non-integer time {as_of_ms!r} in clearinghouseState")
             return VenueAccountState(
                 equity=figure(equity),
                 free_margin=figure(cross_equity) - figure(cross_margin_used),
                 cross_maintenance_margin=figure(cross_maintenance),
+                as_of_ts_ns=as_of_ms * _NS_PER_MS,
                 positions=tuple(_position(entry["position"]) for entry in entries),
             )
     raise ValueError("unrecognized clearinghouseState response")

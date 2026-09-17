@@ -50,21 +50,19 @@ Preconditions:
   `$V check testnet rt tn-cash --event account.healed --expect 0`,
   `$V check testnet rt tn-redaction --event verify.flat --expect 1` (the run reached the end)
   and read the `secrets-check` line: `no signing key in evidence`.
-- **Report.** Run `$V report testnet`. Expected verdict today: `FAIL (1 of 8 checks failed)`,
-  on `tn-cash`. See Gotchas. `$V issue-draft testnet` drafts it.
+- **Report.** Run `$V report testnet`. Expected verdict: `PASS`. A FAIL that matches a Gotcha
+  below is known. Any other FAIL is new, and `$V issue-draft testnet` drafts it.
 - **Cleanup.** Run `$V cleanup testnet`.
 
 ## Gotchas
 
-- **Known FAIL, `tn-cash`, tracked as #349.** Right after the opening fill the strategy read
-  `account.cash 942.920480` while the ledger had opened at `929.16731` and the fill carried a
-  `0.034336` fee and no realized PnL. Nothing in the trail explains the +13.79. The 60 second
-  reconcile then reported `tier_1: 1` and healed cash to the venue's `929.076648`, which is the
-  right number. The heal masks it in the final dump, so the check is on the `account.healed`
-  event, and the first `verify.fill` line holds the wrong number. A second run the same day
-  reproduced it: genesis `929.076648`, cash after the opening fill `942.829986`. The jump is
-  `+13.753` both times, at two different fill prices, so it is not a function of the trade.
-  When #349 is fixed, the check flips to PASS and this note goes away.
+- **Known intermittent FAIL, `engine.faulted` with `illegal saga transition filled -> filled`,
+  tracked as #354.** The cloid is derived from `round_trip:BTC:2`, so every run places the same
+  cloid on the venue. When the inflight poll lands while the sell is still `SUBMITTED`,
+  `orderStatus` by cloid can answer with a previous run's order, and its fill is adopted. The
+  real fill then faults the saga. The trail shows `tn-round-trip` exit 1, `tn-fee` short by the
+  old fill's fee, and `tn-reconcile` and `tn-redaction` at 0 because the run never got that far.
+  `tn-cash` still passes. When #354 is fixed, this note goes away.
 - The key is forwarded from the repo `.env` into the child environment only. Never write it with
   `--env`. The helper refuses.
 - `feed.lagged` lines are normal on testnet. The stream conflates.

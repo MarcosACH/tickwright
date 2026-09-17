@@ -1077,6 +1077,40 @@ def test_an_accrual_with_no_partition_to_attribute_to_still_moves_cash() -> None
     assert projection.for_strategy("alpha").position("BTC") is None
 
 
+def test_a_payment_settled_before_genesis_is_already_in_genesis_and_is_dropped() -> None:
+    """A live genesis is the venue's equity at the opening instant, and the venue
+    had already settled every earlier payment into it. The `userFundings`
+    snapshot re-delivers those payments on every subscribe, and a fresh ledger
+    has no watermark to stop them. Folding one again counts it twice, which is
+    the +13.75 the testnet run read after its first fill (#349).
+
+    So genesis is a second gate beside the mark: at or below it, the payment is
+    dropped whole. Above it, the payment is new money and applies as before.
+
+    The instant is the venue's own, read off the same state as the number, and
+    the local clock stays at 7 to prove it: a payment's boundary is venue time
+    too, so the gate compares one clock to itself. Stamped from the local
+    clock, the same case would have let every payment through.
+    """
+    read_at = 2 * _HOUR + 500
+    store = SQLiteStore(":memory:")
+    projection = _projection(None, store=store)
+    projection.recover()
+    projection.materialise(account_state("929.076648", "0", as_of_ts_ns=read_at))
+
+    before_genesis = projection.apply_funding(_accrual(amount="13.787506", boundary=_HOUR))
+    at_genesis = projection.apply_funding(_accrual(amount="13.787506", boundary=read_at))
+    after_genesis = projection.apply_funding(_accrual(amount="-0.5", boundary=3 * _HOUR))
+
+    row = store.load_account()
+    assert row is not None and row.genesis_ts_ns == read_at
+    assert before_genesis is None
+    assert at_genesis is None
+    assert after_genesis is not None
+    assert after_genesis.funding_mark == ("BTC", 3 * _HOUR)
+    assert projection.account().cash == Decimal("928.576648")
+
+
 def test_a_maker_rebate_credits_the_cash_line_rather_than_debiting_it() -> None:
     # The sign convention is the whole of what makes a fee a credit (ADR-0036):
     # a negative fee is a rebate, and cash moving by its negative therefore
@@ -1417,7 +1451,7 @@ def test_a_live_ledger_materialises_at_the_figures_the_venue_reported() -> None:
     projection.recover()
     assert projection.is_opened() is False  # nothing restored, and live seeds nothing
 
-    projection.materialise(account_state("25.9264", "-0.034"))
+    projection.materialise(account_state("25.9264", "-0.034", as_of_ts_ns=11))
 
     assert projection.is_opened() is True
     assert projection.account().cash == Decimal("25.9604")
@@ -1426,7 +1460,10 @@ def test_a_live_ledger_materialises_at_the_figures_the_venue_reported() -> None:
     assert row.account_id == "hyperliquid-testnet-0xabc"
     assert row.genesis_collateral == Decimal("25.9604")
     assert row.cash == Decimal("25.9604")
-    assert row.genesis_ts_ns == 7  # the run's clock, not the venue's own stamp
+    # The venue's own instant, not the run's clock at 7: the number and the
+    # instant it was true at are one read, and the funding gate compares
+    # that instant to payments dated on the venue's clock (#349).
+    assert row.genesis_ts_ns == 11
 
 
 def test_a_second_materialisation_is_refused_rather_than_moving_the_genesis() -> None:
