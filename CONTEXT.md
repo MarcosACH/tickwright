@@ -668,7 +668,9 @@ The periodic **cash adjustment** a perpetual [[Position]] accrues to its [[Accou
 a signed `Decimal` (negative = **paid**, positive = **received**, mirroring the venue's
 `userFunding.usdc`), settled hourly at epoch-aligned boundaries as **`FundingAccrual`** events
 `(account, symbol, boundary_ts, amount)`, keyed idempotent so catch-up, reconcile, and restart
-converge. Paper **generates** it on the [[Clock]] cadence (`amount = − signed_size × price ×
+converge. A payment settled at or before the [[Genesis collateral|genesis]] instant is dropped
+before the watermark is read, because the opening cash already holds it (ADR-0043 §5.2). Paper
+**generates** it on the [[Clock]] cadence (`amount = − signed_size × price ×
 funding_rate`, `funding_rate` a per-boundary rate on the instrument); live **ingests** the venue's
 reported payment. Its **own ledger line**, never entry price or realized PnL. See ADR-0037, ADR-0034.
 _Avoid_: interest, carry, funding **fee** (it is not a [[Fee]] — no trade, no maker/taker),
@@ -794,7 +796,9 @@ the stored one **fail-fasts** alongside the [[AccountSpec]] `account_id` check �
 is a different account history. Both raise `StoreAccountMismatch`, and so does a paper store that
 holds order history with no ledger behind it (ADR-0043 §10). That store predates the ledger. It is
 refused, never backfilled, because the fees and funding it never recorded cannot be rebuilt from
-its orders. Together with realized PnL, [[Fee|fees]] and [[Funding]] it closes
+its orders. The genesis instant is also a gate: a [[Funding]] payment settled at or before it is
+already inside the number and is dropped (ADR-0043 §5.2). On live that instant is the venue's own
+`time` off the account read, so the gate compares venue time to venue time. Together with realized PnL, [[Fee|fees]] and [[Funding]] it closes
 the cash line's write-set at four **accruing** inputs — three added and fees subtracted — while the
 reconciler's synthetic cash adjustment (ADR-0034) corrects that line on live but accrues nothing to
 it: deposits, withdrawals and transfers
