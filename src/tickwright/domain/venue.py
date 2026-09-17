@@ -59,12 +59,18 @@ class OrderRef:
     records by count but keeps fills for years, so the fill history is read by
     the ack's oid from the ack time (ADR-0011 inv 2). Both are ``None`` for a
     saga whose ack never arrived. That saga has no fill history to consult.
+
+    The creation time is for before the ack. A cloid can name more than one
+    venue order once an earlier life placed it too, and a read by cloid may
+    answer with either. A record placed before this saga was created is not
+    this saga's order (#354).
     """
 
     cloid: str
     symbol: str
     venue_oid: str | None = None
     acked_ts_ns: int | None = None
+    created_ts_ns: int | None = None
 
     @classmethod
     def of(cls, order: Order) -> "OrderRef":
@@ -74,6 +80,7 @@ class OrderRef:
             symbol=order.symbol,
             venue_oid=order.venue_oid,
             acked_ts_ns=order.acked_ts_ns,
+            created_ts_ns=order.created_ts_ns,
         )
 
 

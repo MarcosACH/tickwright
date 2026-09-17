@@ -55,6 +55,7 @@ from tickwright.domain import (
     OrderLive,
     OrderPartiallyFilled,
     OrderPlaced,
+    OrderRef,
     OrderRejected,
     OrderState,
     OrderStatusReport,
@@ -261,8 +262,7 @@ class ExecutionManager:
         # arms the in-flight grace clock.
         self._checkpointer.checkpoint(order)
 
-    @staticmethod
-    def _order_for(signal: PlaceSignal, *, quantity: Decimal) -> Order:
+    def _order_for(self, signal: PlaceSignal, *, quantity: Decimal) -> Order:
         """Build the saga record from a ``PlaceSignal`` at a given ``quantity`` —
         the quantized size for a placed order, the raw intent for a denial."""
         return Order(
@@ -273,6 +273,7 @@ class ExecutionManager:
             side=signal.side,
             quantity=quantity,
             order_type=signal.order_type,
+            created_ts_ns=self._clock.timestamp_ns(),
         )
 
     async def _cancel(self, signal: CancelSignal) -> None:
@@ -293,7 +294,7 @@ class ExecutionManager:
         # saga stays in its current state — the marker is metadata, not a state,
         # so the order can still fill (ADR-0026).
         self._checkpointer.checkpoint(order)
-        await self._exchange.cancel(cloid)
+        await self._exchange.cancel(OrderRef.of(order))
 
     async def _apply_status(self, report: OrderStatusReport) -> None:
         order = self._checkpointer.cache.get_order(report.cloid)

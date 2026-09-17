@@ -345,7 +345,7 @@ class _DarkVenue(VenueDouble):
     async def place(self, order: PlaceOrder) -> None:
         raise AssertionError("nothing may be placed before the barrier clears")
 
-    async def cancel(self, cloid: str) -> None:
+    async def cancel(self, ref: OrderRef) -> None:
         raise AssertionError("nothing may be cancelled before the barrier clears")
 
     async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
@@ -608,8 +608,11 @@ def test_the_reconciler_reads_the_venue_by_the_saga_s_full_identity() -> None:
     store = SQLiteStore(":memory:")
     # The cloid alone is not enough once the venue has dropped the record: the
     # fill history is keyed by the ack's oid and bounded by the ack time
-    # (ADR-0011 inv 2). Every read hands the venue all four.
+    # (ADR-0011 inv 2). And before the ack, the creation time is what tells an
+    # earlier life's record under the same cloid from ours (#354). Every read
+    # hands the venue all five.
     saga = _saga("0xabc", OrderState.SUBMITTED)
+    saga.created_ts_ns = 400
     saga.apply(
         OrderLive(
             ts_event=600,
@@ -633,7 +636,9 @@ def test_the_reconciler_reads_the_venue_by_the_saga_s_full_identity() -> None:
     )
     asyncio.run(reconciler.reconcile_startup())
 
-    assert venue.refs == [OrderRef(cloid="0xabc", symbol="BTC", venue_oid="777", acked_ts_ns=600)]
+    assert venue.refs == [
+        OrderRef(cloid="0xabc", symbol="BTC", venue_oid="777", acked_ts_ns=600, created_ts_ns=400)
+    ]
 
 
 def _live_saga(cloid: str) -> Order:

@@ -57,6 +57,7 @@ from tickwright.venues.hyperliquid import (
 )
 
 CLOID = "0x" + "ab" * 16
+UNACKED_REF = OrderRef(cloid=CLOID, symbol="BTC")
 
 BTC_SPEC = InstrumentSpec(
     symbol="BTC",
@@ -68,6 +69,9 @@ BTC_SPEC = InstrumentSpec(
 UNIVERSE = HyperliquidUniverse(specs={"BTC": BTC_SPEC}, asset_indices={"BTC": 3})
 
 _NS_PER_MS = 1_000_000
+# The minute the adapter grants between our clock and the venue's, on the
+# fills window and on whether a record predates the saga (ADR-0011 inv 2).
+SKEW_ALLOWANCE_MS = 60_000
 
 
 def make_exchange(
@@ -486,7 +490,7 @@ def test_cancel_sends_a_signed_cancel_by_cloid_and_reports_cancelled() -> None:
 
         bus.subscribe(ExecutionReport, collect)
         await exchange.place(limit_order(Side.BUY, "0.5", "42000"))
-        await exchange.cancel(CLOID)
+        await exchange.cancel(UNACKED_REF)
         return post, reports
 
     post, reports = asyncio.run(main())
@@ -506,51 +510,42 @@ def test_cancel_sends_a_signed_cancel_by_cloid_and_reports_cancelled() -> None:
     assert cancelled.cloid == CLOID
 
 
-def test_cancel_of_an_order_placed_before_a_crash_resolves_the_coin_from_venue_truth() -> None:
-    # A restart empties the adapter's placed-order memory, but the engine still
-    # cancels by cloid (ADR-0026) — so the adapter asks the venue whose order
-    # this is (orderStatus) and cancels with the resolved asset index.
+def test_cancel_of_an_unacked_order_after_a_restart_goes_by_cloid_with_no_venue_read() -> None:
+    # A restart empties whatever the adapter remembered, and the engine still
+    # has everything a cancel needs: the ref carries the symbol, so the asset
+    # index resolves locally and no orderStatus read goes out (ADR-0026).
     async def main() -> FakeExchangeApi:
-        post = FakeExchangeApi(
-            {
-                "orderStatus": order_status_response(cloid=CLOID),
-                "cancelByCloid": cancel_success_response(),
-            }
-        )
+        post = FakeExchangeApi({"cancelByCloid": cancel_success_response()})
         exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
-        await exchange.cancel(CLOID)
+        await exchange.cancel(UNACKED_REF)
         return post
 
     post = asyncio.run(main())
 
-    (status_url, status_query) = post.requests[0]
-    assert status_url == "https://api.hyperliquid-testnet.xyz/info"
-    assert status_query == {
-        "type": "orderStatus",
-        "user": Account.from_key(TEST_SIGNING_KEY).address,
-        "oid": CLOID,
-    }
-    (_, cancel_payload) = post.requests[1]
-    assert cancel_payload["action"] == {
+    ((_, payload),) = post.requests
+    assert payload["action"] == {
         "type": "cancelByCloid",
         "cancels": [{"asset": 3, "cloid": CLOID}],
     }
 
 
-def test_cancel_of_a_cloid_the_venue_never_saw_is_a_benign_no_op() -> None:
+def test_cancel_of_an_acked_order_goes_by_its_oid_after_a_restart() -> None:
+    # The venue keeps every order ever placed under a cloid, one per life of
+    # the account, so a cancel by cloid may land on an earlier life's order.
+    # The saga holds the oid the venue acked, and that names exactly one
+    # order, so the cancel goes by it and no venue read is needed to find
+    # the coin: the ref carries the symbol (#354).
     async def main() -> FakeExchangeApi:
-        post = FakeExchangeApi({"orderStatus": {"status": "unknownOid"}})
+        post = FakeExchangeApi({"cancel": cancel_success_response()})
         exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
-        await exchange.cancel(CLOID)
+        await exchange.cancel(OrderRef(cloid=CLOID, symbol="BTC", venue_oid="77"))
         return post
 
     post = asyncio.run(main())
-    # One venue read, no cancel action: nothing to cancel, nothing to report
-    # (ADR-0026) — the venue positively has no record of this cloid.
-    assert len(post.requests) == 1
 
-
-UNACKED_REF = OrderRef(cloid=CLOID, symbol="BTC")
+    ((url, payload),) = post.requests
+    assert url == "https://api.hyperliquid-testnet.xyz/exchange"
+    assert payload["action"] == {"type": "cancel", "cancels": [{"a": 3, "o": 77}]}
 
 
 async def fetch_view(
@@ -561,9 +556,12 @@ async def fetch_view(
 
 
 def test_fetch_order_bundles_the_venue_status_and_fills_into_one_view() -> None:
+    placed_ms = 1_700_000_000_000
     post = FakeExchangeApi(
         {
-            "orderStatus": order_status_response(cloid=CLOID, status="filled", oid=91),
+            "orderStatus": order_status_response(
+                cloid=CLOID, status="filled", oid=91, placed_ms=placed_ms
+            ),
             "userFillsByTime": [
                 fill_entry(oid=90, tid=555, px="43249.0", sz="1.0"),
                 fill_entry(oid=91, tid=556, px="43250.0", sz="0.5"),
@@ -589,8 +587,82 @@ def test_fetch_order_bundles_the_venue_status_and_fills_into_one_view() -> None:
     assert fills_query == {
         "type": "userFillsByTime",
         "user": Account.from_key(TEST_SIGNING_KEY).address,
-        "startTime": 1_700_000_000_000,
+        "startTime": placed_ms,
     }
+
+
+def test_fetch_order_asks_for_the_record_by_the_acked_oid_not_the_cloid() -> None:
+    # A cloid is derived from the signal id, and the venue keeps every order
+    # ever placed under it, one per life of the account. A read by cloid can
+    # answer with an earlier life's order and its fills. Once this saga holds
+    # an oid there is exactly one order it can mean, so the read goes by that
+    # oid and the cloid never enters the query (#354).
+    post = FakeExchangeApi(
+        {
+            "orderStatus": order_status_response(cloid=CLOID, status="filled", oid=91),
+            "userFillsByTime": [fill_entry(oid=91, tid=556, px="43250.0", sz="0.5")],
+        }
+    )
+    acked = OrderRef(cloid=CLOID, symbol="BTC", venue_oid="91")
+    view = asyncio.run(fetch_view(post, acked))
+
+    assert isinstance(view, VenueOrderView)
+    assert view.status is not None
+    assert view.status.venue_oid == "91"
+    (_, status_query) = post.requests[0]
+    assert status_query == {
+        "type": "orderStatus",
+        "user": Account.from_key(TEST_SIGNING_KEY).address,
+        "oid": 91,
+    }
+
+
+def test_fetch_order_refuses_a_record_placed_before_this_saga_existed() -> None:
+    # Before the ack there is no oid, so the read goes by cloid, and the venue
+    # may answer with an earlier life's order under it. That order was placed
+    # before this saga was created, so its record is not ours and its fills
+    # are never read. To the reconciler it is a miss, not a landing (#354).
+    placed_ms = 1_700_000_000_000
+    post = FakeExchangeApi(
+        {
+            "orderStatus": order_status_response(
+                cloid=CLOID, status="filled", oid=90, placed_ms=placed_ms
+            ),
+            "userFillsByTime": [fill_entry(oid=90, tid=555, px="43249.0", sz="1.0")],
+        }
+    )
+    # Created two minutes after the venue's placement time, past the minute of
+    # skew the read grants our clock.
+    created_ms = placed_ms + 2 * SKEW_ALLOWANCE_MS
+    unacked = OrderRef(cloid=CLOID, symbol="BTC", created_ts_ns=created_ms * _NS_PER_MS)
+    view = asyncio.run(fetch_view(post, unacked))
+
+    assert isinstance(view, VenueOrderView)
+    assert not view.has_record
+    assert view.fills == ()
+    assert [query["type"] for _, query in post.requests] == ["orderStatus"]
+
+
+def test_fetch_order_keeps_a_record_placed_within_the_skew_allowance() -> None:
+    # Our clock and the venue's are not the same clock. A record placed up to
+    # a minute before our own creation stamp is still this saga's order.
+    placed_ms = 1_700_000_000_000
+    post = FakeExchangeApi(
+        {
+            "orderStatus": order_status_response(
+                cloid=CLOID, status="filled", oid=91, placed_ms=placed_ms
+            ),
+            "userFillsByTime": [fill_entry(oid=91, tid=556, px="43250.0", sz="0.5")],
+        }
+    )
+    created_ms = placed_ms + SKEW_ALLOWANCE_MS // 2
+    unacked = OrderRef(cloid=CLOID, symbol="BTC", created_ts_ns=created_ms * _NS_PER_MS)
+    view = asyncio.run(fetch_view(post, unacked))
+
+    assert isinstance(view, VenueOrderView)
+    assert view.has_record
+    (fill,) = view.fills
+    assert fill.trade_id == "556"
 
 
 def test_fetch_order_returns_an_empty_view_when_the_venue_has_no_record() -> None:
@@ -622,9 +694,8 @@ def test_fetch_order_reads_the_fill_history_by_the_acked_oid_once_the_record_is_
             ],
         }
     )
-    acked = OrderRef(
-        cloid=CLOID, symbol="BTC", venue_oid="91", acked_ts_ns=1_700_000_060_000 * 1_000_000
-    )
+    acked_ms = 1_700_000_060_000
+    acked = OrderRef(cloid=CLOID, symbol="BTC", venue_oid="91", acked_ts_ns=acked_ms * _NS_PER_MS)
     view = asyncio.run(fetch_view(post, acked))
 
     assert isinstance(view, VenueOrderView)
@@ -635,7 +706,7 @@ def test_fetch_order_reads_the_fill_history_by_the_acked_oid_once_the_record_is_
     assert fills_query == {
         "type": "userFillsByTime",
         "user": Account.from_key(TEST_SIGNING_KEY).address,
-        "startTime": 1_700_000_000_000,
+        "startTime": acked_ms - SKEW_ALLOWANCE_MS,
     }
 
 
@@ -1090,7 +1161,7 @@ def test_a_handler_failure_on_the_cancel_publish_is_not_an_unreadable_body() -> 
             clock=ManualClock(),
         )
         await exchange.place(limit_order(Side.BUY, "0.5", "42000"))
-        await exchange.cancel(CLOID)
+        await exchange.cancel(UNACKED_REF)
 
     with capture_events() as events:
         with pytest.raises(_HandlerFailure):
@@ -1106,7 +1177,7 @@ def test_a_transport_failure_on_cancel_emits_no_report_and_does_not_raise() -> N
         )
         exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
         await exchange.place(limit_order(Side.BUY, "0.5", "42000"))
-        await exchange.cancel(CLOID)
+        await exchange.cancel(UNACKED_REF)
 
     with capture_events() as events:
         asyncio.run(main())
@@ -1162,7 +1233,7 @@ def test_a_top_level_action_error_on_cancel_emits_no_report_and_names_it() -> No
         bus.subscribe(ExecutionReport, collect)
         await exchange.place(limit_order(Side.BUY, "0.5", "42000"))
         with capture_events() as events:
-            await exchange.cancel(CLOID)
+            await exchange.cancel(UNACKED_REF)
         reasons = [
             str(e["reason"]) for e in events if e["event"] == NamedEvent.EXCHANGE_ACTION_REJECTED
         ]
@@ -1198,7 +1269,7 @@ def test_a_cancel_adjudication_the_adapter_cannot_read_is_a_named_no_op() -> Non
         bus.subscribe(ExecutionReport, collect)
         await exchange.place(limit_order(Side.BUY, "0.5", "42000"))
         with capture_events() as events:
-            await exchange.cancel(CLOID)
+            await exchange.cancel(UNACKED_REF)
         failed = [
             str(e["request"]) for e in events if e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED
         ]
@@ -1247,7 +1318,7 @@ def test_a_per_cancel_error_status_is_a_silent_benign_no_op() -> None:
         bus.subscribe(ExecutionReport, collect)
         await exchange.place(limit_order(Side.BUY, "0.5", "42000"))
         with capture_events() as events:
-            await exchange.cancel(CLOID)
+            await exchange.cancel(UNACKED_REF)
         return reports, [str(e["event"]) for e in events]
 
     reports, named = asyncio.run(main())
@@ -1295,7 +1366,7 @@ def test_a_cancel_status_outside_the_venue_vocabulary_is_a_failed_read_not_alrea
         bus.subscribe(ExecutionReport, collect)
         await exchange.place(limit_order(Side.BUY, "0.5", "42000"))
         with capture_events() as events:
-            await exchange.cancel(CLOID)
+            await exchange.cancel(UNACKED_REF)
         failed = [
             str(e["request"]) for e in events if e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED
         ]
@@ -1334,63 +1405,6 @@ def test_placements_within_one_millisecond_get_strictly_increasing_nonces() -> N
     second_nonce = post.requests[1][1]["nonce"]
     assert first_nonce == 42  # the clock's ms, unchanged
     assert second_nonce > first_nonce
-
-
-def test_a_terminal_fetch_prunes_the_placed_order_so_the_cache_stays_bounded() -> None:
-    # _placed lets a cancel resolve a still-open order's coin without a venue
-    # read. Once fetch_order sees the order terminate, that memory is dead
-    # weight — pruning it keeps the cache bounded by open orders, not by every
-    # order the process ever placed (R003). Observable: a later cancel of the
-    # pruned cloid falls back to an orderStatus read instead of the cache.
-    async def main() -> FakeExchangeApi:
-        post = FakeExchangeApi(
-            {
-                "order": resting_response(oid=77),
-                "orderStatus": order_status_response(cloid=CLOID, status="filled"),
-                "userFillsByTime": [],
-                "cancelByCloid": cancel_success_response(),
-            }
-        )
-        exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
-        await exchange.place(limit_order(Side.BUY, "0.5", "42000"))
-        # Sees FILLED → prunes _placed[CLOID].
-        await exchange.fetch_order(OrderRef(cloid=CLOID, symbol="BTC"))
-        await exchange.cancel(CLOID)
-        return post
-
-    post = asyncio.run(main())
-
-    # Two orderStatus reads: the fetch, then the cancel's fallback — which only
-    # happens because the terminal fetch pruned the placed-order memory.
-    reads = [query for (_, query) in post.requests if query.get("type") == "orderStatus"]
-    assert len(reads) == 2
-
-
-def test_a_dropped_record_prunes_the_placed_order_too() -> None:
-    # unknownOid for an order this process placed and the venue acked is the
-    # venue saying the order is closed and its record gone. That memory is as
-    # dead as after a terminal record, so it is pruned the same way. Observable
-    # the same way too: a later cancel falls back to an orderStatus read.
-    async def main() -> FakeExchangeApi:
-        post = FakeExchangeApi(
-            {
-                "order": resting_response(oid=77),
-                "orderStatus": {"status": "unknownOid"},
-                "userFillsByTime": [fill_entry(oid=77, tid=556, px="42000.0", sz="0.5")],
-                "cancelByCloid": cancel_success_response(),
-            }
-        )
-        exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
-        await exchange.place(limit_order(Side.BUY, "0.5", "42000"))
-        acked = OrderRef(cloid=CLOID, symbol="BTC", venue_oid="77", acked_ts_ns=1_000_000)
-        await exchange.fetch_order(acked)  # Record gone → prunes _placed[CLOID].
-        await exchange.cancel(CLOID)
-        return post
-
-    post = asyncio.run(main())
-
-    reads = [query for (_, query) in post.requests if query.get("type") == "orderStatus"]
-    assert len(reads) == 2
 
 
 def test_the_venue_link_is_released_without_a_start_having_run() -> None:
@@ -1460,7 +1474,7 @@ def test_the_released_venue_link_still_answers_a_place_and_a_cancel() -> None:
         await exchange.stop()
         # Behind the release, inside the drain the runner has not reached yet.
         await asyncio.wait_for(exchange.place(limit_order(Side.BUY, "0.5", "42000")), timeout=5)
-        await asyncio.wait_for(exchange.cancel(CLOID), timeout=5)
+        await asyncio.wait_for(exchange.cancel(UNACKED_REF), timeout=5)
         return post, reports
 
     post, reports = asyncio.run(main())
