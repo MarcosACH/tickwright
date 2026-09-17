@@ -74,5 +74,7 @@ Preconditions:
 - `max_leverage` in the preset specs is 20. A `LEVERAGE` above it refuses at `start()`.
 - The strategies are single-flight. A tick that arrives while an order is in flight is ignored
   by design, so count ticks from the fill, not from the file.
-- The mark is the last trade price. `unrealized_pnl` is `null` until the first tick after the
-  fill under the live feed, and `0` on the fill tick under replay.
+- Under replay the mark is the trade price, published just ahead of each trade, so
+  `unrealized_pnl` reads `0` on the fill tick. Under the Hyperliquid feed the mark is the venue's
+  `activeAssetCtx.markPx`, not the last trade (`venues/hyperliquid/feed.py`). `unrealized_pnl`
+  is `null` until the first mark frame after the fill, and its value is not the trade price.
