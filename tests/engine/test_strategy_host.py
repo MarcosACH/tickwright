@@ -7,6 +7,7 @@ seam this host exists to serve — not a mock of an engine class.
 """
 
 import asyncio
+import json
 from decimal import Decimal
 
 import pytest
@@ -421,6 +422,39 @@ def test_a_single_shot_strategy_killed_after_firing_does_not_fire_again() -> Non
     asyncio.run(second_bus.publish(_tick("BTC", ts=2_000, trade_id="b", seq=2)))
 
     assert second_signals == []
+
+
+def test_the_snapshot_is_on_disk_before_the_signal_it_records_is_dispatched() -> None:
+    """The in-memory ordering ADR-0016 documents. A Signal published from
+    inside ``on_tick`` waits in the bus FIFO until the callback returns, and
+    the host writes the snapshot before the drain reaches it. So a crash
+    between the two loses the order, never the strategy's memory of it."""
+    store = SQLiteStore(":memory:")
+    clock = ManualClock()
+    bus = InMemoryBus()
+    host = _host(bus=bus, clock=clock, store=store)
+    shooter = SingleShotLimitStrategy(
+        strategy_id="shooter",
+        bus=bus,
+        clock=clock,
+        side=Side.BUY,
+        quantity=Decimal("0.5"),
+        price=Decimal("41000"),
+    )
+    host.register(shooter, symbols={"BTC"})
+    seen_at_dispatch: list[bytes | None] = []
+
+    async def read_snapshot(signal: Signal) -> None:
+        seen_at_dispatch.append(store.load_strategy_snapshot("shooter"))
+
+    bus.subscribe(Signal, read_snapshot)
+    host.start()
+
+    asyncio.run(bus.publish(_tick("BTC")))
+
+    assert len(seen_at_dispatch) == 1
+    assert seen_at_dispatch[0] is not None
+    assert json.loads(seen_at_dispatch[0])["placed_signal_id"] == "shooter:BTC:1"
 
 
 class IncompatibleRestoreStrategy(RecordingStrategy):
