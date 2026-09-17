@@ -56,22 +56,27 @@ Set `TICKWRIGHT_HYPERLIQUID__TESTNET=false` and the same key to trade real money
 
 ## How a tick becomes an order
 
+Solid arrows are events on the `EventBus`. Dashed arrows are direct method calls.
+
 ```mermaid
 flowchart LR
-    Feed[MarketFeed] -->|ticks| Bus[EventBus]
-    Bus -->|ticks| Strategy
-    Strategy -->|signals| EM[ExecutionManager]
-    EM -->|check| Guard[PreTradeGuard]
-    EM -->|checkpoint| Store[(Store)]
-    EM -->|place / cancel| Exchange
-    Exchange -->|acks, fills| EM
-    EM -->|fills| Portfolio[PortfolioProjection]
-    Recon[Reconciliation] <-->|venue truth| Exchange
-    Recon -->|heal| EM
+    Feed[MarketFeed] -->|ticks, marks| Bus[EventBus]
+    Bus -->|ticks, order events| Strategy
+    Strategy -->|signals| Bus
+    Bus -->|signals, acks, fills| EM[ExecutionManager]
+    EM -->|order events| Bus
+    Bus -->|ticks| Exchange
+    Exchange -->|acks, fills, funding| Bus
+    Recon[Reconciliation] -->|acks, fills| Bus
+    EM -.->|check| Guard[PreTradeGuard]
+    EM -.->|checkpoint| Store[(Store)]
+    EM -.->|place, cancel| Exchange
+    Recon -.->|read orders| Exchange
+    EM -.->|fills| Portfolio[PortfolioProjection]
 ```
 
 - The `EventBus` is the only coupling between components. Everything publishes and subscribes by
-  event type.
+  event type. Reads are never bus messages. Reconciliation reads the venue by a direct call.
 - The `PreTradeGuard` runs before every placement. It checks size and price validity, min notional,
   and the kill switch. A failed check denies the order and nothing is sent.
 - The `ExecutionManager` writes every order state to the `Store` before it touches the network.
