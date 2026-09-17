@@ -386,6 +386,42 @@ def test_an_order_event_that_changes_state_leaves_a_snapshot_without_stop() -> N
     assert store.load_strategy_snapshot("alpha") == b"orders=1"
 
 
+class CountingStore(SQLiteStore):
+    """A real SQLite store that counts snapshot writes, so a test can see
+    the ones the host skipped."""
+
+    def __init__(self) -> None:
+        super().__init__(":memory:")
+        self.snapshot_writes = 0
+
+    def save_strategy_snapshot(self, strategy_id: str, data: bytes, *, ts_ns: int) -> None:
+        self.snapshot_writes += 1
+        super().save_strategy_snapshot(strategy_id, data, ts_ns=ts_ns)
+
+
+def test_a_callback_that_leaves_state_where_it_was_writes_no_snapshot() -> None:
+    """The compare half of the per-change cadence (ADR-0016). A restart seeds
+    the compare from the store, so a first tick that changes nothing writes
+    nothing. Only a callback that moved the bytes costs a store write."""
+    store = CountingStore()
+    store.save_strategy_snapshot("alpha", b"ticks=1", ts_ns=1_000)
+    store.snapshot_writes = 0
+    bus = InMemoryBus()
+    host = _host(bus=bus, store=store)
+    alpha = CountingStrategy("alpha")
+    host.register(alpha, symbols={"BTC"})
+    host.start()
+
+    # ``CountingStrategy`` sets the bytes from its tick count, so the first
+    # tick after a restore lands on the same value it started with.
+    asyncio.run(bus.publish(_tick("BTC")))
+    assert store.snapshot_writes == 0
+
+    asyncio.run(bus.publish(_tick("BTC", ts=2_000, trade_id="b", seq=2)))
+    assert store.snapshot_writes == 1
+    assert store.load_strategy_snapshot("alpha") == b"ticks=2"
+
+
 def test_a_single_shot_strategy_killed_after_firing_does_not_fire_again() -> None:
     """The #348 shape end to end at the host seam: life one fires and dies with
     no ``stop()``. Life two, over the same store, restores the fired state and
