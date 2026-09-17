@@ -619,6 +619,46 @@ def test_fetch_order_asks_for_the_record_by_the_acked_oid_not_the_cloid() -> Non
     }
 
 
+def test_fetch_order_refuses_a_record_placed_before_this_saga_existed() -> None:
+    # Before the ack there is no oid, so the read goes by cloid, and the venue
+    # may answer with an earlier life's order under it. That order was placed
+    # before this saga was created, so its record is not ours and its fills
+    # are never read. To the reconciler it is a miss, not a landing (#354).
+    post = FakeExchangeApi(
+        {
+            "orderStatus": order_status_response(cloid=CLOID, status="filled", oid=90),
+            "userFillsByTime": [fill_entry(oid=90, tid=555, px="43249.0", sz="1.0")],
+        }
+    )
+    # Created two minutes after the venue's placement time, past the skew
+    # allowance the read grants our clock.
+    unacked = OrderRef(cloid=CLOID, symbol="BTC", created_ts_ns=1_700_000_120_000 * 1_000_000)
+    view = asyncio.run(fetch_view(post, unacked))
+
+    assert isinstance(view, VenueOrderView)
+    assert not view.has_record
+    assert view.fills == ()
+    assert [query["type"] for _, query in post.requests] == ["orderStatus"]
+
+
+def test_fetch_order_keeps_a_record_placed_within_the_skew_allowance() -> None:
+    # Our clock and the venue's are not the same clock. A record placed up to
+    # a minute before our own creation stamp is still this saga's order.
+    post = FakeExchangeApi(
+        {
+            "orderStatus": order_status_response(cloid=CLOID, status="filled", oid=91),
+            "userFillsByTime": [fill_entry(oid=91, tid=556, px="43250.0", sz="0.5")],
+        }
+    )
+    unacked = OrderRef(cloid=CLOID, symbol="BTC", created_ts_ns=1_700_000_030_000 * 1_000_000)
+    view = asyncio.run(fetch_view(post, unacked))
+
+    assert isinstance(view, VenueOrderView)
+    assert view.has_record
+    (fill,) = view.fills
+    assert fill.trade_id == "556"
+
+
 def test_fetch_order_returns_an_empty_view_when_the_venue_has_no_record() -> None:
     # unknownOid is a *successful* read: positive proof the order never landed
     # (the ADR-0008 resend gate), categorically different from a failed read.

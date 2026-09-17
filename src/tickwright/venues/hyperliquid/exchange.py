@@ -57,6 +57,8 @@ _NS_PER_MS = 1_000_000
 # How far before our own ack time the fill-history read starts once the venue
 # has dropped the order record. Our ack time is our clock, and the venue's fill
 # time is theirs. The allowance covers the skew between the two (ADR-0011 inv 2).
+# The same allowance decides whether a record read by cloid was placed before
+# this saga was created, for the same reason (#354).
 _ACK_SKEW_ALLOWANCE_MS = 60_000
 
 _TIF_WIRE = {TimeInForce.GTC: "Gtc", TimeInForce.IOC: "Ioc"}
@@ -449,6 +451,12 @@ class HyperliquidExchange:
             if ref.venue_oid is None:
                 return VenueOrderView(status=None)
             return await self._cross_check(ref, record=None)
+        if ref.venue_oid is None and _placed_before(record, created_ts_ns=ref.created_ts_ns):
+            # A read by cloid answered with an order placed before this saga
+            # existed: an earlier life's, not ours. Its fills are not read, and
+            # to the reconciler this is a miss, which the in-flight budget
+            # already knows how to count (#354).
+            return VenueOrderView(status=None)
         return await self._cross_check(ref, record=record)
 
     async def _cross_check(
@@ -754,6 +762,15 @@ class _OrderStatusRead(Enum):
 # ``VenueReadFailure``: that is ``read``'s to return, and it means something else
 # entirely.
 _OrderDecode = _OrderRecord | _OrderStatusRead
+
+
+def _placed_before(record: "_OrderRecord", *, created_ts_ns: int | None) -> bool:
+    """Whether the venue placed ``record`` before the saga was created, by more
+    than the skew allowance between our clock and the venue's. A saga with no
+    stamp cannot tell, and keeps the record."""
+    if created_ts_ns is None:
+        return False
+    return record.timestamp < created_ts_ns // _NS_PER_MS - _ACK_SKEW_ALLOWANCE_MS
 
 
 def _decode_order_status(response: object) -> _OrderDecode:
