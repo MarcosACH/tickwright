@@ -184,6 +184,11 @@ class KafkaBus:
             except asyncio.CancelledError:
                 pass
             self._poll_task = None
+            # The cancel may have landed mid-dispatch. What that handler
+            # published was never sent, and its trigger was never committed,
+            # so a later start() redelivers the trigger and the handler
+            # publishes again. A stale copy here would land twice.
+            self._held.clear()
         if self._consumer is not None:
             await self._consumer.stop()
             self._consumer = None

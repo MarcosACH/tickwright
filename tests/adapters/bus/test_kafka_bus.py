@@ -218,6 +218,47 @@ def test_a_reentrant_publish_lands_after_its_dispatch_returns_and_before_its_com
     assert broker.committed[partition] == 2  # both delivered and committed in the end
 
 
+def test_close_during_a_dispatch_drops_what_that_handler_had_published() -> None:
+    """A cancel lands mid-dispatch, so the held record is neither sent nor
+    committed. It must not survive into a later life of the same bus: the
+    trigger redelivers there and the handler publishes again, so a stale
+    copy would double the record on the topic."""
+    broker = FakeKafkaBroker()
+    bus = _wire(broker)
+    trigger = _tick(seq=0, symbol="BTC")
+    inner = _tick(seq=1, symbol="BTC")
+    inside = asyncio.Event()
+    stall = True
+
+    async def handler(event: MarketTick) -> None:
+        if event == trigger:
+            await bus.publish(inner)
+            inside.set()
+            if stall:
+                await asyncio.Event().wait()  # blocks until close() cancels the poll task
+
+    bus.subscribe(MarketTick, handler)
+
+    async def scenario() -> None:
+        nonlocal stall
+        await bus.start()
+        publishing = asyncio.create_task(bus.publish(trigger))
+        await inside.wait()
+        await bus.close()
+        publishing.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await publishing
+        stall = False
+        await bus.start()  # the trigger was never committed, so it redelivers
+        await broker.all_committed()
+        await bus.close()
+
+    asyncio.run(asyncio.wait_for(scenario(), timeout=5))
+
+    on_topic = [decode_event(value) for p in broker.partitions for _, value in p]
+    assert on_topic.count(inner) == 1
+
+
 def test_a_malformed_record_surfaces_as_a_fault_instead_of_hanging_the_drain() -> None:
     # A payload that will not decode must not silently kill the poll loop and
     # hang drain forever (the fetch position advances, so a naive loop would
