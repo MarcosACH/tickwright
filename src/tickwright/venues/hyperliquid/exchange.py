@@ -418,7 +418,7 @@ class HyperliquidExchange:
         # The plain decode, not ``fetch_order``'s: a cancel goes by asset index
         # whatever the status, so a status the saga vocabulary cannot map is no
         # obstacle here and must not become one.
-        record = await self._order_status(cloid, normalize=_decode_order_status)
+        record = await self._order_status(cloid, cloid=cloid, normalize=_decode_order_status)
         return record.coin if isinstance(record, _OrderRecord) else None
 
     async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
@@ -427,7 +427,12 @@ class HyperliquidExchange:
         of no record (an empty view); a read that *failed* is a
         ``VenueReadFailure`` — an outage must never look like "no record"
         (inv 1)."""
-        record = await self._order_status(ref.cloid, normalize=_decode_order_view)
+        # By the oid once the saga holds one. The cloid is derived from the
+        # signal id, and the venue keeps every order ever placed under it, one
+        # per life of the account, so a read by cloid can answer with an
+        # earlier life's order. An oid names exactly one (#354).
+        key: int | str = ref.cloid if ref.venue_oid is None else int(ref.venue_oid)
+        record = await self._order_status(key, cloid=ref.cloid, normalize=_decode_order_view)
         if isinstance(record, VenueReadFailure):
             # The read failed and ``read`` already named which way. Which way is
             # carried out rather than collapsed: an outage says the venue is
@@ -529,10 +534,13 @@ class HyperliquidExchange:
         return await reverify_account_mode(info=self._info, address=self._user_address)
 
     async def _order_status(
-        self, cloid: str, *, normalize: "Callable[[object], _OrderDecode]"
+        self, key: int | str, *, cloid: str, normalize: "Callable[[object], _OrderDecode]"
     ) -> "_OrderDecode | VenueReadFailure":
-        """The venue's ``orderStatus`` answer for ``cloid`` — the one read both
+        """The venue's ``orderStatus`` answer for ``key`` — the one read both
         the reconciler's ``fetch_order`` and a post-restart ``cancel`` share.
+
+        ``key`` is the venue's integer oid or the cloid hex string. The venue
+        accepts either under the same field. ``cloid`` is for the log record.
 
         The query is shared and the ``normalize`` is not, because the two callers
         disagree about one thing only: ``fetch_order`` must map the status into
@@ -543,7 +551,7 @@ class HyperliquidExchange:
         """
         return await read(
             request="orderStatus",
-            query={"type": "orderStatus", "user": self._user_address, "oid": cloid},
+            query={"type": "orderStatus", "user": self._user_address, "oid": key},
             send=self._info,
             normalize=normalize,
             cloid=cloid,

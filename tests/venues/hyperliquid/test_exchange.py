@@ -593,6 +593,32 @@ def test_fetch_order_bundles_the_venue_status_and_fills_into_one_view() -> None:
     }
 
 
+def test_fetch_order_asks_for_the_record_by_the_acked_oid_not_the_cloid() -> None:
+    # A cloid is derived from the signal id, and the venue keeps every order
+    # ever placed under it, one per life of the account. A read by cloid can
+    # answer with an earlier life's order and its fills. Once this saga holds
+    # an oid there is exactly one order it can mean, so the read goes by that
+    # oid and the cloid never enters the query (#354).
+    post = FakeExchangeApi(
+        {
+            "orderStatus": order_status_response(cloid=CLOID, status="filled", oid=91),
+            "userFillsByTime": [fill_entry(oid=91, tid=556, px="43250.0", sz="0.5")],
+        }
+    )
+    acked = OrderRef(cloid=CLOID, symbol="BTC", venue_oid="91")
+    view = asyncio.run(fetch_view(post, acked))
+
+    assert isinstance(view, VenueOrderView)
+    assert view.status is not None
+    assert view.status.venue_oid == "91"
+    (_, status_query) = post.requests[0]
+    assert status_query == {
+        "type": "orderStatus",
+        "user": Account.from_key(TEST_SIGNING_KEY).address,
+        "oid": 91,
+    }
+
+
 def test_fetch_order_returns_an_empty_view_when_the_venue_has_no_record() -> None:
     # unknownOid is a *successful* read: positive proof the order never landed
     # (the ADR-0008 resend gate), categorically different from a failed read.
