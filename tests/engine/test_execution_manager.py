@@ -213,6 +213,25 @@ def test_pending_intent_is_durable_before_the_send_can_crash() -> None:
     assert store.history(cloid) == [(OrderState.PENDING, 1_000)]
 
 
+def test_a_new_order_is_stamped_with_the_time_the_engine_created_it() -> None:
+    # The stamp is what a venue read compares a record's placement time
+    # against, so a record from an earlier life under the same cloid is never
+    # taken for this order (#354). It is engine time, not the signal's.
+    wiring = _wiring(SQLiteStore(":memory:"))
+    wiring.clock.advance_to(1_500)
+    cloid = derive_cloid("trivial:BTC:1")
+
+    async def scenario() -> None:
+        with pytest.raises(ValueError):
+            await wiring.bus.publish(_market_signal())
+
+    asyncio.run(scenario())
+
+    order = wiring.cache.get_order(cloid)
+    assert order is not None
+    assert order.created_ts_ns == 1_500
+
+
 def test_every_transition_is_checkpointed_on_the_happy_path() -> None:
     bus, _, store, _ = _harness()
     cloid = derive_cloid("trivial:BTC:1")

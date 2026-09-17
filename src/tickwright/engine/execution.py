@@ -261,8 +261,7 @@ class ExecutionManager:
         # arms the in-flight grace clock.
         self._checkpointer.checkpoint(order)
 
-    @staticmethod
-    def _order_for(signal: PlaceSignal, *, quantity: Decimal) -> Order:
+    def _order_for(self, signal: PlaceSignal, *, quantity: Decimal) -> Order:
         """Build the saga record from a ``PlaceSignal`` at a given ``quantity`` —
         the quantized size for a placed order, the raw intent for a denial."""
         return Order(
@@ -273,6 +272,7 @@ class ExecutionManager:
             side=signal.side,
             quantity=quantity,
             order_type=signal.order_type,
+            created_ts_ns=self._clock.timestamp_ns(),
         )
 
     async def _cancel(self, signal: CancelSignal) -> None:

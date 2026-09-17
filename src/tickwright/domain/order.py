@@ -82,6 +82,10 @@ class Order:
     # When the venue first acked the order as resting. It bounds the fill-history
     # read once the venue has dropped the record itself (ADR-0011 inv 2).
     acked_ts_ns: int | None = None
+    # When the engine created the saga. A venue read by cloid can answer with an
+    # order from an earlier life under the same cloid. This stamp is how the
+    # read tells that record from ours before an oid exists (#354).
+    created_ts_ns: int | None = None
     reason: str | None = None
     cancel_requested: bool = False
     cancel_requested_ts: int | None = None
