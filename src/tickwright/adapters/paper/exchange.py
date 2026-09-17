@@ -356,8 +356,8 @@ class PaperExchange:
         self._book.rest(order)
         await self._bus.publish(self._status_report(order, OrderState.LIVE))
 
-    async def cancel(self, cloid: str) -> None:
-        order = self._book.remove(cloid)
+    async def cancel(self, ref: OrderRef) -> None:
+        order = self._book.remove(ref.cloid)
         if order is None:
             # Nothing resting under this cloid: already filled/cancelled or never
             # placed. A benign no-op — the venue has nothing to report (ADR-0026).

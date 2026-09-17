@@ -352,17 +352,17 @@ class HyperliquidExchange:
             NamedEvent.EXCHANGE_ACTION_REJECTED, request=request, cloid=cloid, reason=reason
         )
 
-    async def cancel(self, cloid: str) -> None:
-        symbol = await self._cancel_symbol(cloid)
-        if symbol is None:
-            # No usable venue record for this cloid: nothing to cancel,
-            # nothing to report — a benign no-op (ADR-0026). An ambiguous
-            # read is reconciliation's to resolve, not the adapter's.
-            return
-        action = {
-            "type": "cancelByCloid",
-            "cancels": [{"asset": self._universe.asset_indices[symbol], "cloid": cloid}],
-        }
+    async def cancel(self, ref: OrderRef) -> None:
+        cloid, symbol = ref.cloid, ref.symbol
+        asset = self._universe.asset_indices[symbol]
+        if ref.venue_oid is None:
+            # No ack yet, so the cloid is the only handle. The venue may hold
+            # an earlier life's order under it too. Which one this cancels is
+            # the venue's choice, and reconciliation is the backstop (#354).
+            action = {"type": "cancelByCloid", "cancels": [{"asset": asset, "cloid": cloid}]}
+        else:
+            # The oid names exactly one order, where a cloid may not (#354).
+            action = {"type": "cancel", "cancels": [{"a": asset, "o": int(ref.venue_oid)}]}
         adjudication = await read(
             request="cancel",
             query=action,
@@ -407,21 +407,6 @@ class HyperliquidExchange:
                 return
             case unreachable:
                 assert_never(unreachable)
-
-    async def _cancel_symbol(self, cloid: str) -> str | None:
-        """The coin to cancel ``cloid`` under (the venue cancels by asset
-        index): this process's own placement, or — after a restart emptied that
-        memory — the venue's order record. ``None`` when the venue has no
-        usable record (``unknownOid``, or a response we cannot parse):
-        reconciliation is the backstop for an ambiguous read (ADR-0026)."""
-        order = self._placed.get(cloid)
-        if order is not None:
-            return order.symbol
-        # The plain decode, not ``fetch_order``'s: a cancel goes by asset index
-        # whatever the status, so a status the saga vocabulary cannot map is no
-        # obstacle here and must not become one.
-        record = await self._order_status(cloid, cloid=cloid, normalize=_decode_order_status)
-        return record.coin if isinstance(record, _OrderRecord) else None
 
     async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
         """Venue truth for ``ref``: the order record plus its fill history,

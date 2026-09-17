@@ -345,7 +345,7 @@ class _DarkVenue(VenueDouble):
     async def place(self, order: PlaceOrder) -> None:
         raise AssertionError("nothing may be placed before the barrier clears")
 
-    async def cancel(self, cloid: str) -> None:
+    async def cancel(self, ref: OrderRef) -> None:
         raise AssertionError("nothing may be cancelled before the barrier clears")
 
     async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:

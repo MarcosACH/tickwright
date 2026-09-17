@@ -55,6 +55,7 @@ from tickwright.domain import (
     OrderLive,
     OrderPartiallyFilled,
     OrderPlaced,
+    OrderRef,
     OrderRejected,
     OrderState,
     OrderStatusReport,
@@ -293,7 +294,7 @@ class ExecutionManager:
         # saga stays in its current state — the marker is metadata, not a state,
         # so the order can still fill (ADR-0026).
         self._checkpointer.checkpoint(order)
-        await self._exchange.cancel(cloid)
+        await self._exchange.cancel(OrderRef.of(order))
 
     async def _apply_status(self, report: OrderStatusReport) -> None:
         order = self._checkpointer.cache.get_order(report.cloid)

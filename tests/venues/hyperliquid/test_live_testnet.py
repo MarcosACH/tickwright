@@ -119,7 +119,7 @@ def test_place_reconcile_cancel_round_trip_on_testnet() -> None:
         assert view.status.status is OrderState.LIVE
         assert view.fills == ()
 
-        await exchange.cancel(cloid)
+        await exchange.cancel(OrderRef(cloid=cloid, symbol=SYMBOL))
         cancelled = [
             r
             for r in reports
