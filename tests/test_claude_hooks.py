@@ -89,15 +89,17 @@ def repo(tmp_path: Path) -> Path:
     (root / "logs").mkdir()
     (root / ".agents" / "plans").mkdir(parents=True)
     (root / ".agents" / "verify" / "run-1").mkdir(parents=True)
+    (root / "prototypes").mkdir()
 
     (root / ".gitignore").write_text(
-        ".venv/\nlogs/\n*.log\n.agents/plans/\n.agents/verify/\n.env\n"
+        ".venv/\nlogs/\n*.log\n.agents/plans/\n.agents/verify/\nprototypes/\n.env\n"
     )
     (root / "src" / "tracked.py").write_text("x = 1\n")
     (root / "src" / "tracked_too.py").write_text("y = 1\n")
     (root / ".venv" / "bin" / "ruff").write_text("#!/bin/sh\n")
     (root / "logs" / "run.log").write_text("noise\n")
     (root / ".agents" / "plans" / "issue-1.md").write_text("- [ ] behavior\n")
+    (root / "prototypes" / "play.py").write_text("z = 1\n")
     (root / ".agents" / "verify" / "run-1" / "stderr.jsonl").write_text('{"event": "x"}\n')
     (root / ".env").write_text("TICKWRIGHT_HYPERLIQUID__SIGNING_KEY=0xdead\n")
 
@@ -509,6 +511,10 @@ class TestNoExcludedReads:
             # its own proof cannot report it (#346).
             "cat .agents/verify/run-1/stderr.jsonl",
             "grep -rn 'order.filled' .agents/verify",
+            # Playground scripts are ignored so they never get committed, not so they
+            # stay unread. The maintainer asks about them by name (#365).
+            "cat prototypes/play.py",
+            "grep -rn 'z' prototypes",
             # Repo source is the normal case and must stay cheap.
             "cat src/tracked.py",
             "grep -rn 'x' src/",

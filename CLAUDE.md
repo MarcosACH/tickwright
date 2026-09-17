@@ -136,8 +136,8 @@ Conventions: `docs/workflow/labels.md`, `docs/agents/issue-tracker.md`.
   truth. The prose above them is often the retired version, so reading in document order gives you
   the superseded decision. Canon: `docs/agents/adr-reading.md`.
 - Never read ignored paths such as `.venv/`, caches, `logs/`, or `*.pyc`. Membership is
-  `git check-ignore`, so `.gitignore` is the one list. `.agents/plans/` and `.agents/verify/` are
-  ignored and readable by design.
+  `git check-ignore`, so `.gitignore` is the one list. `.agents/plans/`, `.agents/verify/`, and
+  `prototypes/` are ignored and readable by design.
 - For large source and test files, use `Read` with `offset` and `limit` on the symbol you need.
 - Read GitHub issues with `gh issue view <N>`.
 - **Edit a tracked file with `Edit`, not a Bash write.** A Bash write stales the harness's cached
