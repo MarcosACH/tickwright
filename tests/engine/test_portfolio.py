@@ -111,6 +111,7 @@ def _projection(
     store: Store | None = None,
     leverage: LeverageBook = EMPTY_LEVERAGE_BOOK,
     specs: Mapping[str, InstrumentSpec] | None = None,
+    opened_at_ns: int = 7,
 ) -> PortfolioProjection:
     """A ledger on a paper-shaped account, unless ``genesis`` is ``None`` — which
     is the *live* shape, where the opening value is ingested from the venue
@@ -122,7 +123,10 @@ def _projection(
 
     ``specs`` is the venue universe the same root hands over, and a case with no
     opinion passes none: absent, every maintenance rate is unknown rather than
-    zero, which is the answer a specless projection owes (ADR-0041 §6)."""
+    zero, which is the answer a specless projection owes (ADR-0041 §6).
+
+    ``opened_at_ns`` is the clock the ledger opens at, so its genesis instant.
+    A case about payments settled before the ledger existed sets it late."""
     spec = AccountSpec(
         # Two segments on paper against live's three (ADR-0038/0042 §5), so a
         # row written by one shape is never confusable with the other's.
@@ -132,7 +136,7 @@ def _projection(
     return PortfolioProjection(
         spec=spec,
         store=store if store is not None else SQLiteStore(":memory:"),
-        clock=ManualClock(7),
+        clock=ManualClock(opened_at_ns),
         leverage=leverage,
         specs=specs,
     )
@@ -1075,6 +1079,33 @@ def test_an_accrual_with_no_partition_to_attribute_to_still_moves_cash() -> None
     assert change.funding_mark == ("BTC", _HOUR)  # still applied, so still marked
     assert projection.account().cash == Decimal("99990")
     assert projection.for_strategy("alpha").position("BTC") is None
+
+
+def test_a_payment_settled_before_genesis_is_already_in_genesis_and_is_dropped() -> None:
+    """A live genesis is the venue's equity at the opening instant, and the venue
+    had already settled every earlier payment into it. The `userFundings`
+    snapshot re-delivers those payments on every subscribe, and a fresh ledger
+    has no watermark to stop them. Folding one again counts it twice, which is
+    the +13.75 the testnet run read after its first fill (#349).
+
+    So genesis is a second gate beside the mark: at or below it, the payment is
+    dropped whole. Above it, the payment is new money and applies as before.
+    """
+    opened_at = 2 * _HOUR + 500
+    store = SQLiteStore(":memory:")
+    projection = _projection(None, store=store, opened_at_ns=opened_at)
+    projection.recover()
+    projection.materialise(account_state("929.076648", "0"))
+
+    before_genesis = projection.apply_funding(_accrual(amount="13.787506", boundary=_HOUR))
+    at_genesis = projection.apply_funding(_accrual(amount="13.787506", boundary=opened_at))
+    after_genesis = projection.apply_funding(_accrual(amount="-0.5", boundary=3 * _HOUR))
+
+    assert before_genesis is None
+    assert at_genesis is None
+    assert after_genesis is not None
+    assert after_genesis.funding_mark == ("BTC", 3 * _HOUR)
+    assert projection.account().cash == Decimal("928.576648")
 
 
 def test_a_maker_rebate_credits_the_cash_line_rather_than_debiting_it() -> None:

@@ -782,6 +782,16 @@ class PortfolioProjection:
         in-memory key set cannot be: paper's catch-up, live's reconcile
         re-ingest, and a replay rerun that re-derives every boundary in the file.
 
+        **Genesis is a second gate, and it covers the payments the mark cannot.**
+        The opening cash is the account at its genesis instant, and every payment
+        settled at or before that instant is already inside it. On live that is
+        literal: genesis is the venue's equity, and the venue had settled those
+        payments into it. The `userFundings` snapshot re-delivers them on every
+        subscribe, and a fresh ledger has no mark to stop them, so without this
+        gate the first live boot folds months of history into cash a second
+        time (#349). Paper never reaches it, because its generator enumerates
+        only boundaries after the clock it opened at.
+
         The **gate is read before the split, never per partition**. A mark on the
         position row would be a value per row, and a row created *after* a
         boundary starts with no mark — so anything reaching back past its
@@ -818,6 +828,8 @@ class PortfolioProjection:
         Returns rather than writes: the caller must make the change durable
         before the run goes on, exactly as ``apply_fill``'s does.
         """
+        if accrual.boundary_ts_ns <= self._account.genesis_ts_ns:
+            return None
         mark = self._store.funding_mark(accrual.symbol)
         if mark is not None and accrual.boundary_ts_ns <= mark:
             return None
