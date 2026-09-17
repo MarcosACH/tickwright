@@ -121,9 +121,19 @@ def filled_response(*, oid: int, total_sz: str, avg_px: str) -> dict:
 
 
 def order_status_response(
-    *, cloid: str, status: str = "open", oid: int = 77, coin: str = "BTC"
+    *,
+    cloid: str,
+    status: str = "open",
+    oid: int = 77,
+    coin: str = "BTC",
+    placed_ms: int = 1_700_000_000_000,
 ) -> dict:
-    """The venue's ``orderStatus`` answer for a known order."""
+    """The venue's ``orderStatus`` answer for a known order.
+
+    ``placed_ms`` is the venue's placement time. A test that asserts on the
+    fills window, or on whether the record predates the saga, passes it so
+    the assertion reads against the value it depends on.
+    """
     return {
         "status": "order",
         "order": {
@@ -133,12 +143,12 @@ def order_status_response(
                 "limitPx": "42000.0",
                 "sz": "0.5",
                 "oid": oid,
-                "timestamp": 1_700_000_000_000,
+                "timestamp": placed_ms,
                 "origSz": "0.5",
                 "cloid": cloid,
             },
             "status": status,
-            "statusTimestamp": 1_700_000_000_100,
+            "statusTimestamp": placed_ms + 100,
         },
     }
 

@@ -69,6 +69,9 @@ BTC_SPEC = InstrumentSpec(
 UNIVERSE = HyperliquidUniverse(specs={"BTC": BTC_SPEC}, asset_indices={"BTC": 3})
 
 _NS_PER_MS = 1_000_000
+# The minute the adapter grants between our clock and the venue's, on the
+# fills window and on whether a record predates the saga (ADR-0011 inv 2).
+SKEW_ALLOWANCE_MS = 60_000
 
 
 def make_exchange(
@@ -553,9 +556,12 @@ async def fetch_view(
 
 
 def test_fetch_order_bundles_the_venue_status_and_fills_into_one_view() -> None:
+    placed_ms = 1_700_000_000_000
     post = FakeExchangeApi(
         {
-            "orderStatus": order_status_response(cloid=CLOID, status="filled", oid=91),
+            "orderStatus": order_status_response(
+                cloid=CLOID, status="filled", oid=91, placed_ms=placed_ms
+            ),
             "userFillsByTime": [
                 fill_entry(oid=90, tid=555, px="43249.0", sz="1.0"),
                 fill_entry(oid=91, tid=556, px="43250.0", sz="0.5"),
@@ -581,7 +587,7 @@ def test_fetch_order_bundles_the_venue_status_and_fills_into_one_view() -> None:
     assert fills_query == {
         "type": "userFillsByTime",
         "user": Account.from_key(TEST_SIGNING_KEY).address,
-        "startTime": 1_700_000_000_000,
+        "startTime": placed_ms,
     }
 
 
@@ -616,15 +622,19 @@ def test_fetch_order_refuses_a_record_placed_before_this_saga_existed() -> None:
     # may answer with an earlier life's order under it. That order was placed
     # before this saga was created, so its record is not ours and its fills
     # are never read. To the reconciler it is a miss, not a landing (#354).
+    placed_ms = 1_700_000_000_000
     post = FakeExchangeApi(
         {
-            "orderStatus": order_status_response(cloid=CLOID, status="filled", oid=90),
+            "orderStatus": order_status_response(
+                cloid=CLOID, status="filled", oid=90, placed_ms=placed_ms
+            ),
             "userFillsByTime": [fill_entry(oid=90, tid=555, px="43249.0", sz="1.0")],
         }
     )
-    # Created two minutes after the venue's placement time, past the skew
-    # allowance the read grants our clock.
-    unacked = OrderRef(cloid=CLOID, symbol="BTC", created_ts_ns=1_700_000_120_000 * 1_000_000)
+    # Created two minutes after the venue's placement time, past the minute of
+    # skew the read grants our clock.
+    created_ms = placed_ms + 2 * SKEW_ALLOWANCE_MS
+    unacked = OrderRef(cloid=CLOID, symbol="BTC", created_ts_ns=created_ms * _NS_PER_MS)
     view = asyncio.run(fetch_view(post, unacked))
 
     assert isinstance(view, VenueOrderView)
@@ -636,13 +646,17 @@ def test_fetch_order_refuses_a_record_placed_before_this_saga_existed() -> None:
 def test_fetch_order_keeps_a_record_placed_within_the_skew_allowance() -> None:
     # Our clock and the venue's are not the same clock. A record placed up to
     # a minute before our own creation stamp is still this saga's order.
+    placed_ms = 1_700_000_000_000
     post = FakeExchangeApi(
         {
-            "orderStatus": order_status_response(cloid=CLOID, status="filled", oid=91),
+            "orderStatus": order_status_response(
+                cloid=CLOID, status="filled", oid=91, placed_ms=placed_ms
+            ),
             "userFillsByTime": [fill_entry(oid=91, tid=556, px="43250.0", sz="0.5")],
         }
     )
-    unacked = OrderRef(cloid=CLOID, symbol="BTC", created_ts_ns=1_700_000_030_000 * 1_000_000)
+    created_ms = placed_ms + SKEW_ALLOWANCE_MS // 2
+    unacked = OrderRef(cloid=CLOID, symbol="BTC", created_ts_ns=created_ms * _NS_PER_MS)
     view = asyncio.run(fetch_view(post, unacked))
 
     assert isinstance(view, VenueOrderView)
@@ -680,9 +694,8 @@ def test_fetch_order_reads_the_fill_history_by_the_acked_oid_once_the_record_is_
             ],
         }
     )
-    acked = OrderRef(
-        cloid=CLOID, symbol="BTC", venue_oid="91", acked_ts_ns=1_700_000_060_000 * 1_000_000
-    )
+    acked_ms = 1_700_000_060_000
+    acked = OrderRef(cloid=CLOID, symbol="BTC", venue_oid="91", acked_ts_ns=acked_ms * _NS_PER_MS)
     view = asyncio.run(fetch_view(post, acked))
 
     assert isinstance(view, VenueOrderView)
@@ -693,7 +706,7 @@ def test_fetch_order_reads_the_fill_history_by_the_acked_oid_once_the_record_is_
     assert fills_query == {
         "type": "userFillsByTime",
         "user": Account.from_key(TEST_SIGNING_KEY).address,
-        "startTime": 1_700_000_000_000,
+        "startTime": acked_ms - SKEW_ALLOWANCE_MS,
     }
 
 
