@@ -324,7 +324,8 @@ def _held(
     declares what its account would publish, there being no rate here to derive
     it from.
     """
-    recorded = account_state(equity, "-0.034").positions[0]
+    recorded_state = account_state(equity, "-0.034")
+    recorded = recorded_state.positions[0]
     entered = entry if entry is not None else {}
     return VenueAccountState(
         equity=Decimal(equity),
@@ -334,6 +335,7 @@ def _held(
         cross_maintenance_margin=(
             CROSSLESS_MAINTENANCE if maintenance is None else Decimal(maintenance)
         ),
+        as_of_ts_ns=recorded_state.as_of_ts_ns,
         positions=tuple(
             margined(
                 replace(

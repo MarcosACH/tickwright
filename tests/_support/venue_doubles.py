@@ -213,6 +213,7 @@ def account_state(
     *unrealized: str,
     free_margin: str | None = None,
     maintenance: str | None = None,
+    as_of_ts_ns: int = 0,
 ) -> VenueAccountState:
     """A successful venue account read holding one position per ``unrealized``.
 
@@ -238,6 +239,10 @@ def account_state(
     Those rows are isolated in **both** places that say so — an
     ``UNPOSTED_BUCKET`` beside the isolated ``leverage`` — so ``margined`` prices
     them off a bucket the row declares rather than one it invents.
+
+    ``as_of_ts_ns`` is the venue's own instant, and it defaults to the epoch so
+    that every boundary a case settles after materialising is after the read.
+    A case about payments the venue settled before the read passes its own.
     """
     return VenueAccountState(
         equity=Decimal(equity),
@@ -245,6 +250,7 @@ def account_state(
         cross_maintenance_margin=(
             CROSSLESS_MAINTENANCE if maintenance is None else Decimal(maintenance)
         ),
+        as_of_ts_ns=as_of_ts_ns,
         positions=tuple(
             margined(
                 VenuePositionState(

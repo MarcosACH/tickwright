@@ -51,6 +51,7 @@ def _venue(
         equity=Decimal(equity),
         free_margin=Decimal(free_margin),
         cross_maintenance_margin=Decimal("0"),
+        as_of_ts_ns=0,
         positions=positions,
     )
 

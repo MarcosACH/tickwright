@@ -383,6 +383,23 @@ def test_a_recorded_cross_snapshot_normalizes_to_the_measured_account_figures() 
     assert state.cross_maintenance_margin == Decimal("1.6198")
 
 
+def test_the_state_carries_the_venues_own_instant_in_ns() -> None:
+    """The root ``time`` is the venue's clock when it composed the figures, in
+    ms. It rides on the state as ns, the unit every other timestamp in the
+    engine uses.
+
+    It is load-bearing on a live first boot: the genesis instant is stamped
+    from it, and funding payments are gated against that instant on the same
+    venue clock (#349). Stamping from the local clock instead compared two
+    clocks, and a payment settled inside the read's own round trip, or across
+    any skew, was counted twice or dropped.
+    """
+    state = _fetch_state(CROSS_SNAPSHOT)
+
+    assert state is not None
+    assert state.as_of_ts_ns == 1_730_000_000_000 * 1_000_000
+
+
 def test_free_margin_ignores_withdrawable_once_an_order_is_resting() -> None:
     """The one snapshot where the two answers part company — and the state of a
     running engine, not a corner of one.
@@ -644,6 +661,13 @@ def test_a_transport_failure_reads_as_no_venue_truth_never_as_a_flat_book() -> N
         ),
         ("no positions list", _without(CROSS_SNAPSHOT, "assetPositions")),
         ("a position row missing a field", _position_without(CROSS_SNAPSHOT, "marginUsed")),
+        # The instant is what a live first boot stamps genesis from, and the
+        # funding gate reads it. A missing one would leave genesis at nothing,
+        # and a ``True`` reads as ``1`` ms, which puts genesis at the epoch and
+        # lets every historical payment through (#349).
+        ("no instant to stamp genesis from", _without(CROSS_SNAPSHOT, "time")),
+        ("an instant the venue re-typed", CROSS_SNAPSHOT | {"time": True}),
+        ("an instant the venue re-typed as a string", CROSS_SNAPSHOT | {"time": "1730000000000"}),
         # A margin mode outside the two the venue has ever reported. Every other
         # unreadable thing here freezes, and this must too: reading an
         # unrecognized mode as cross would report a position holding a locked

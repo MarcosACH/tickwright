@@ -166,11 +166,20 @@ class VenueAccountState:
     withdrawable figure, which additionally deducts margin reserved by resting
     orders — the normal state of a running engine, and a gap no tolerance
     absorbs (ADR-0046 §2).
+
+    ``as_of_ts_ns`` is the venue's own clock when it composed these figures,
+    not the local clock when the read returned. A live first boot stamps the
+    genesis instant from it, and the funding gate compares that instant to
+    each payment's boundary, which is also venue time (#349). It has no
+    default for the same reason ``VenuePositionState.leverage`` has none: a
+    state that claims an instant no venue was read for would put genesis at
+    a time of the test's choosing.
     """
 
     equity: Decimal
     free_margin: Decimal
     cross_maintenance_margin: Decimal
+    as_of_ts_ns: int
     positions: tuple[VenuePositionState, ...] = ()
 
 

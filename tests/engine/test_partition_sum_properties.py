@@ -257,6 +257,7 @@ def _venue_state(sizes: dict[str, Decimal]) -> VenueAccountState:
         equity=Decimal(_EQUITY),
         free_margin=Decimal("0.0096"),
         cross_maintenance_margin=Decimal("1.6198"),
+        as_of_ts_ns=0,
         positions=tuple(
             VenuePositionState(
                 symbol=symbol,
