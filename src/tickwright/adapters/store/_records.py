@@ -15,7 +15,7 @@ exponent (ADR-0043 §7).
 """
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from types import MappingProxyType
@@ -70,16 +70,6 @@ RECORD_UPDATE_COLUMNS: tuple[str, ...] = tuple(
 READ_COLUMNS: tuple[str, ...] = RECORD_COLUMNS[:-1]
 
 READ_COLUMN_LIST = ", ".join(READ_COLUMNS)
-
-# Columns that arrived after a database may already have been written, as
-# ``(table, column)``. ``CREATE TABLE IF NOT EXISTS`` leaves an existing table
-# as it was, so a backend adds these with ``ALTER TABLE`` on open and a live
-# account's open sagas survive the upgrade (#242). Each is also in every
-# backend's DDL for a fresh database. The type is the backend's, per dialect.
-ADDED_COLUMNS: tuple[tuple[str, str], ...] = (
-    ("orders", "acked_ts_ns"),
-    ("orders", "created_ts_ns"),
-)
 
 
 def record_values(order: Order, *, history: Sequence[Any]) -> tuple[Any, ...]:
@@ -163,7 +153,9 @@ def acked_ts_from_history(history_json: str | None) -> int | None:
     The backfill for ``acked_ts_ns`` on a database written before the column
     existed (#242). The checkpoint runs on the same clock as the ack it
     records, so the time is the ack's within the write latency, and well inside
-    the skew allowance the fill-history read subtracts.
+    the skew allowance the fill-history read subtracts. Left at ``None``, a
+    resting saga would read its fill history unbounded, and on an active
+    account the fill can already be past the venue's page.
     """
     for state, ts_ns in restore_history(history_json):
         if state is OrderState.LIVE:
@@ -177,10 +169,27 @@ def created_ts_from_history(history_json: str | None) -> int | None:
     The backfill for ``created_ts_ns`` on a database written before the column
     existed (#354). The first checkpoint is the engine's first durable knowledge
     of the order, on the same clock the creation stamp uses, so it is the
-    creation time within the write latency.
+    creation time within the write latency. Left at ``None``, a saga with no
+    oid yet would take any record the venue answers under its cloid, an
+    earlier life's included.
     """
     history = restore_history(history_json)
     return history[0][1] if history else None
+
+
+# Columns that arrived on ``orders`` after a database may already have been
+# written, each with what fills its existing rows from their transition
+# history. ``CREATE TABLE IF NOT EXISTS`` leaves an existing table as it was, so
+# a backend adds a missing one with ``ALTER TABLE`` on open and backfills it,
+# and a live account's open sagas survive the upgrade (#242). Each is also in
+# every backend's DDL for a fresh database. The type is the backend's, per
+# dialect.
+ADDED_ORDER_COLUMNS: Mapping[str, Callable[[str | None], int | None]] = MappingProxyType(
+    {
+        "acked_ts_ns": acked_ts_from_history,
+        "created_ts_ns": created_ts_from_history,
+    }
+)
 
 
 # The account row, in write order — the single row ADR-0043 §3 pins with

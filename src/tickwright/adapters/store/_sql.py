@@ -31,12 +31,10 @@ from tickwright.domain import (
 from ._durability import durable
 from ._records import (
     ACCOUNT_COLUMN_LIST,
-    ADDED_COLUMNS,
+    ADDED_ORDER_COLUMNS,
     POSITION_COLUMN_LIST,
     READ_COLUMN_LIST,
     account_values,
-    acked_ts_from_history,
-    created_ts_from_history,
     funding_mark_values,
     next_history,
     position_values,
@@ -85,52 +83,36 @@ class SqlStore(ABC):
             for statement in schema:
                 self._execute(statement)
             # ``_records`` says which columns may be missing from a database
-            # written before they existed. The backend only says their type.
-            for table, column in ADDED_COLUMNS:
-                if not self._has_column(table, column):
-                    declaration = added_column_types[column]
-                    self._execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
-                    if (table, column) == ("orders", "acked_ts_ns"):
-                        self._backfill_ack_times()
-                    if (table, column) == ("orders", "created_ts_ns"):
-                        self._backfill_created_times()
+            # written before they existed, and how to fill them. The backend
+            # only says their type.
+            missing = [
+                column for column in ADDED_ORDER_COLUMNS if not self._has_column("orders", column)
+            ]
+            for column in missing:
+                declaration = added_column_types[column]
+                self._execute(f"ALTER TABLE orders ADD COLUMN {column} {declaration}")
+            if missing:
+                self._backfill(missing)
 
-    def _backfill_ack_times(self) -> None:
-        """Fill ``acked_ts_ns`` for every existing row from its transition history.
+    def _backfill(self, columns: Sequence[str]) -> None:
+        """Fill ``columns`` on every existing row from its transition history.
 
-        Runs once, when the column is added. Left at ``None``, a resting saga
-        from before the upgrade would read its fill history unbounded, and on an
-        active account the fill can already be past the venue's page. The
-        history has the LIVE checkpoint time, so no row needs to start blind.
+        Runs once, when the columns are added. The history has the checkpoint
+        each column reads, so no row from before the upgrade starts blind.
+        What a blind row would cost is each extractor's docstring.
         """
         rows = self._execute("SELECT cloid, history FROM orders").fetchall()
-        updates = [
-            (acked_ts_ns, cloid)
-            for cloid, history in rows
-            if (acked_ts_ns := acked_ts_from_history(history)) is not None
-        ]
-        if updates:
-            self._executemany(
-                f"UPDATE orders SET acked_ts_ns = {self._p} WHERE cloid = {self._p}", updates
-            )
-
-    def _backfill_created_times(self) -> None:
-        """Fill ``created_ts_ns`` for every existing row from its first checkpoint.
-
-        Runs once, when the column is added. Left at ``None``, a saga from
-        before the upgrade that has no oid yet would take any record the venue
-        answers under its cloid, including one from an earlier life (#354).
-        """
-        rows = self._execute("SELECT cloid, history FROM orders").fetchall()
-        updates = [
-            (created_ts_ns, cloid)
-            for cloid, history in rows
-            if (created_ts_ns := created_ts_from_history(history)) is not None
-        ]
-        if updates:
-            self._executemany(
-                f"UPDATE orders SET created_ts_ns = {self._p} WHERE cloid = {self._p}", updates
-            )
+        for column in columns:
+            from_history = ADDED_ORDER_COLUMNS[column]
+            updates = [
+                (value, cloid)
+                for cloid, history in rows
+                if (value := from_history(history)) is not None
+            ]
+            if updates:
+                self._executemany(
+                    f"UPDATE orders SET {column} = {self._p} WHERE cloid = {self._p}", updates
+                )
 
     @abstractmethod
     def _has_column(self, table: str, column: str) -> bool:

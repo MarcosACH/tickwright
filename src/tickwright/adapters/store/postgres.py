@@ -104,7 +104,7 @@ _SCHEMA: tuple[str, ...] = (
     """,
 )
 
-# This dialect's type for each column in ``_records.ADDED_COLUMNS``. The
+# This dialect's type for each column in ``_records.ADDED_ORDER_COLUMNS``. The
 # column is also in ``_SCHEMA`` for a fresh database.
 _ADDED_COLUMN_TYPES: dict[str, str] = {"acked_ts_ns": "BIGINT", "created_ts_ns": "BIGINT"}
 

@@ -336,6 +336,26 @@ def test_a_database_from_before_the_created_time_column_gains_it_on_open(
         assert loaded_old.created_ts_ns == 1_000
 
 
+def test_a_database_from_before_both_added_columns_gains_both_on_open(
+    store_backend: Backend,
+) -> None:
+    # A database from before #242 is missing every added column at once. Each
+    # is backfilled from the same history on the same open.
+    old = _order()
+    old.apply(_submitted())
+    with store_backend.open() as first:
+        first.checkpoint(old, ts_ns=1_000)
+        old.apply(_live())
+        first.checkpoint(old, ts_ns=2_000)
+    store_backend.drop_column("orders", "acked_ts_ns")
+    store_backend.drop_column("orders", "created_ts_ns")
+
+    with store_backend.open() as reopened:
+        loaded_old = reopened.get_order("0xabc")
+        assert loaded_old is not None
+        assert (loaded_old.created_ts_ns, loaded_old.acked_ts_ns) == (1_000, 2_000)
+
+
 def test_close_is_idempotent(store_backend: Backend) -> None:
     store = store_backend.open()
     store.close()
