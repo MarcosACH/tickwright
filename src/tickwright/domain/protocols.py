@@ -48,7 +48,16 @@ class EventBus(Protocol):
         ...
 
     async def publish(self, event: Event) -> None:
-        """Publish ``event``, draining the whole reentrant cascade to quiescence."""
+        """Publish ``event``, draining the whole reentrant cascade to quiescence.
+
+        A publish made from inside a handler is held until that handler returns.
+        It is neither delivered nor durable before then. So a handler's own
+        durable writes land first, and a handler fault drops what it published
+        (ADR-0023, issue #350). ``StrategyHost`` relies on this: the strategy
+        snapshot is on disk before the Signal it records exists anywhere, on
+        both buses (ADR-0016). A handler exception surfaces in the top-level
+        publish that caused it, once, and the bus keeps working (ADR-0024).
+        """
         ...
 
     async def drain(self) -> None:

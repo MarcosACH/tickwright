@@ -34,7 +34,9 @@ for the runner's ordered startup and reverse shutdown, ADR-0024 — all no-ops i
 never query-shaped: reads (e.g. reconciliation reading the exchange) are direct Protocol
 method calls, not bus messages. Dispatch on the
 `InMemoryBus` is **synchronous and inline**, with a drain-to-quiescence FIFO for reentrant
-publishes (so a cascade mirrors `KafkaBus`'s poll-loop); [[Conflation]] of market data happens
+publishes (so a cascade mirrors `KafkaBus`'s poll-loop). On both backends a publish made inside a
+handler is neither delivered nor durable until that handler returns (ADR-0023, issue #350).
+[[Conflation]] of market data happens
 upstream at the feed, never in the bus. On the Kafka path all events ride **one topic keyed by
 `partition_key`** so a symbol's whole causal chain stays on one partition. See
 ADR-0001, ADR-0002, ADR-0003, ADR-0004, ADR-0023, ADR-0028.
