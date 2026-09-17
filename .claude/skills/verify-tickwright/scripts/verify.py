@@ -474,7 +474,7 @@ def cmd_await(args: argparse.Namespace) -> int:
             rows = store_query(args.run_id, args.sql)
             # No rows is "not yet", never a match. An empty store must not
             # satisfy an empty expectation.
-            if rows and str(rows[0][0]) == args.expect:
+            if rows and _same(str(rows[0][0]), args.expect):
                 print(f"query returned {args.expect!r}")
                 return 0
         elif args.exit:
@@ -566,8 +566,10 @@ def _observed(args: argparse.Namespace) -> str:
 
 
 def _same(got: str, expect: str) -> bool:
-    """Two numbers match by value, so a store column that gained decimals does
-    not fail a recipe written before it did. Anything else matches by text."""
+    """Match by value when both sides are numbers, else by text.
+
+    A store column can gain decimals between engine versions. A recipe written
+    before that must not fail on the same value."""
     if got == expect:
         return True
     try:

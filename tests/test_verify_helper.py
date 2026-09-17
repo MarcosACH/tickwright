@@ -448,6 +448,32 @@ class TestAwait:
         assert code == 1
         assert "TIMEOUT" in out
 
+    def test_a_numeric_sql_await_matches_on_equal_value_with_different_decimals(
+        self, helper: ModuleType, run: Callable[..., tuple[int, str]]
+    ) -> None:
+        # Same rule as check: a store column that gained decimals must not
+        # turn a correct await into a timeout.
+        run("init", "r1")
+        _finished_life(helper, "r1", "rt", exit_code=0, events=[], orders=[])
+        with closing(sqlite3.connect(helper.scratch("r1") / "store.db")) as conn:
+            conn.execute("update positions set signed_size = '0.00000'")
+            conn.commit()
+
+        code, out = run(
+            "await",
+            "r1",
+            "rt",
+            "--sql",
+            "select signed_size from positions",
+            "--expect",
+            "0.000",
+            "--timeout",
+            "0",
+        )
+
+        assert code == 0
+        assert "query returned '0.000'" in out
+
 
 class TestStart:
     def test_a_duplicate_life_is_refused_before_its_evidence_is_touched(
