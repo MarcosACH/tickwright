@@ -30,6 +30,7 @@ import time
 from collections import Counter
 from contextlib import closing
 from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent
@@ -564,12 +565,23 @@ def _observed(args: argparse.Namespace) -> str:
     return exit_file.read_text().strip() if exit_file.exists() else ""
 
 
+def _same(got: str, expect: str) -> bool:
+    """Two numbers match by value, so a store column that gained decimals does
+    not fail a recipe written before it did. Anything else matches by text."""
+    if got == expect:
+        return True
+    try:
+        return Decimal(got) == Decimal(expect)
+    except InvalidOperation:
+        return False
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     """Record one PASS or FAIL line. The line is the verdict; the exit code just
     mirrors it so a recipe can stop early."""
     require_run(args.run_id)
     got = _observed(args)
-    verdict = "PASS" if got == args.expect else "FAIL"
+    verdict = "PASS" if _same(got, args.expect) else "FAIL"
     line = f"{verdict} {args.check_id} {args.life} expected={args.expect} got={got}"
     with (evidence(args.run_id) / "checks.txt").open("a") as sink:
         sink.write(line + "\n")
