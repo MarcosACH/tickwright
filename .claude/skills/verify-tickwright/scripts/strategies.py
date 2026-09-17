@@ -7,9 +7,9 @@ registered by hand in ``run_strategy.py``. Each one logs what it read as a
 shows the strategy's view beside the engine's.
 
 Every one is single-flight: it never has two orders open at once. Its phase goes
-in the snapshot, so a restart after a graceful stop resumes instead of firing
-again. A crash takes no snapshot, so after one the strategy starts over (see
-features/crash-recovery.md).
+in the snapshot, and the engine saves that after every callback that changes it
+(ADR-0016, #348), so a restart resumes the phase after a graceful stop and after
+a crash alike (see features/crash-recovery.md).
 """
 
 from __future__ import annotations

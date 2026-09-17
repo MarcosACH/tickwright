@@ -214,7 +214,13 @@ class Strategy(Protocol):
 
         The engine persists them per ``strategy_id`` — the strategy owns what
         they mean, never where they live. Keep state minimal and
-        reconstructible; seq-safety never depends on it."""
+        reconstructible; seq-safety never depends on it.
+
+        Called once at start and after every ``on_tick`` and
+        ``on_order_event``. The bytes are compared to the last save, so a
+        state that did not move must return the same bytes. A raise here
+        faults the engine, since a strategy that cannot be persisted cannot
+        recover from a crash."""
         ...
 
     def restore(self, data: bytes) -> None:

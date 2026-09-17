@@ -199,7 +199,7 @@ class StrategyHost:
         FIFO until this returns, so the snapshot lands first and a crash in
         between loses the order, not the memory of it. On Kafka the Signal is
         in the topic before this runs, so the same crash refires on restart.
-        ADR-0016 names both.
+        ADR-0016 names both; the Kafka side is issue #350.
         """
         data = self._snapshot(strategy)
         if self._persisted.get(strategy.strategy_id) == data:
