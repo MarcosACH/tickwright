@@ -202,6 +202,37 @@ def test_a_handler_fault_drops_the_undelivered_cascade_tail() -> None:
     assert delivered == []  # the reentrantly-published BTC tick was never delivered
 
 
+def test_a_dispatch_fault_drops_what_its_handlers_published_before_it_reaches_the_topic() -> None:
+    """The Kafka face of InMemoryBus clearing its FIFO on a fault (ADR-0023).
+    A record a handler published is still held when a later step raises, so
+    it never lands, not even on the next dispatch."""
+    broker = FakeKafkaBroker()
+    bus = _wire(broker)
+    delivered: list[MarketTick] = []
+
+    async def handler(event: MarketTick) -> None:
+        if event.symbol == "trigger":
+            await bus.publish(_tick(1, symbol="BTC"))
+            raise RuntimeError("boom")
+        delivered.append(event)
+
+    bus.subscribe(MarketTick, handler)
+
+    async def scenario() -> None:
+        await bus.start()
+        with pytest.raises(RuntimeError, match="boom"):
+            await bus.publish(_tick(seq=0, symbol="trigger"))
+        await bus.publish(_tick(2, symbol="ETH"))  # a later dispatch must not flush it
+        await bus.drain()
+        await bus.close()
+
+    asyncio.run(asyncio.wait_for(scenario(), timeout=5))
+
+    assert delivered == [_tick(2, symbol="ETH")]
+    on_topic = [decode_event(value) for p in broker.partitions for _, value in p]
+    assert _tick(1, symbol="BTC") not in on_topic
+
+
 def test_a_reentrant_publish_lands_after_its_dispatch_returns_and_before_its_commit() -> None:
     """A record a handler publishes is held until the dispatch that published
     it returns, then sent, then the triggering offset is committed (issue

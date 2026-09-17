@@ -222,8 +222,11 @@ class KafkaBus:
                 # handler fault too. A malformed record surfaces here the same
                 # way instead of silently killing the poll loop. The record is
                 # *not* broker-committed (a restart redelivers it); local
-                # accounting still advances so the drain terminates.
+                # accounting still advances so the drain terminates. What the
+                # handlers published is still held, and it is dropped with the
+                # cascade: the in-memory FIFO clear (ADR-0023).
                 self._dispatch_fault = exc
+                self._held.clear()
                 self._ledger.record_committed(record.partition, record.offset)
                 continue
             await consumer.commit()
