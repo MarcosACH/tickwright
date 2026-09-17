@@ -195,11 +195,10 @@ class StrategyHost:
         cannot lose it. A strategy that fired once is still fired on restart.
 
         The write and the saga checkpoint are two writes, so one callback is
-        still a crash window. On the in-memory bus the Signal waits in the
-        FIFO until this returns, so the snapshot lands first and a crash in
-        between loses the order, not the memory of it. On Kafka the Signal is
-        in the topic before this runs, so the same crash refires on restart.
-        ADR-0016 names both; the Kafka side is issue #350.
+        still a crash window. On both buses the Signal the callback published
+        waits until the callback returns, so this write lands first. A crash
+        in between loses the order, not the memory of it. Never a double.
+        ADR-0016 names the window; the Kafka half is issue #350.
         """
         data = self._snapshot(strategy)
         if self._persisted.get(strategy.strategy_id) == data:

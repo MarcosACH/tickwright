@@ -8,6 +8,7 @@ dispatch, commits — is real ``KafkaBus`` code.
 
 import asyncio
 import zlib
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 
@@ -42,6 +43,9 @@ class FakeKafkaBroker:
         # boundary: connected during a run, disconnected after teardown.
         self.producers: list[FakeProducer] = []
         self.consumers: list[FakeConsumer] = []
+        # Called with each record as it lands, so a suite can observe what
+        # the broker looked like at that exact moment (issue #350).
+        self.on_produce: list[Callable[[Record], None]] = []
 
     def partition_for(self, key: bytes) -> int:
         return zlib.crc32(key) % self.partition_count
@@ -51,7 +55,10 @@ class FakeKafkaBroker:
         self.partitions[partition].append((key, value))
         self._notify()
         offset = len(self.partitions[partition]) - 1
-        return Record(value=value, key=key, partition=partition, offset=offset)
+        record = Record(value=value, key=key, partition=partition, offset=offset)
+        for observe in self.on_produce:
+            observe(record)
+        return record
 
     def _notify(self) -> None:
         self._changed.set()
@@ -80,6 +87,9 @@ class FakeProducer:
     def __init__(self, broker: FakeKafkaBroker) -> None:
         self._broker = broker
         self.started = False
+        # Set by a suite to make every later send fail, the way a broker that
+        # went away does. The record never lands.
+        self.failure: BaseException | None = None
 
     async def start(self) -> None:
         self.started = True
@@ -89,6 +99,8 @@ class FakeProducer:
 
     async def send_and_wait(self, topic: str, value: bytes, key: bytes) -> Record:
         assert self.started, "send before producer.start()"
+        if self.failure is not None:
+            raise self.failure
         return self._broker.produce(key, value)
 
 

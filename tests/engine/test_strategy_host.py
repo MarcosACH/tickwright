@@ -12,8 +12,11 @@ from decimal import Decimal
 
 import pytest
 import structlog.testing
+from kafka_fakes import FakeKafkaBroker, Record
 
 from tickwright.adapters.bus import InMemoryBus
+from tickwright.adapters.bus.kafka import KafkaBus
+from tickwright.adapters.bus.serde import decode_event
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
@@ -491,6 +494,53 @@ def test_the_snapshot_is_on_disk_before_the_signal_it_records_is_dispatched() ->
     assert len(seen_at_dispatch) == 1
     assert seen_at_dispatch[0] is not None
     assert json.loads(seen_at_dispatch[0])["placed_signal_id"] == "shooter:BTC:1"
+
+
+def test_on_kafka_the_snapshot_is_on_disk_before_the_signal_reaches_the_topic() -> None:
+    """The Kafka half of the same ordering (issue #350). The bus holds what a
+    callback published until the dispatch returns, and the host writes the
+    snapshot inside that dispatch. So when the Signal record lands in the
+    topic, the store already remembers it. A crash in between loses the
+    order, never the strategy's memory of it, on both buses."""
+    broker = FakeKafkaBroker()
+    store = SQLiteStore(":memory:")
+    clock = ManualClock()
+    bus = KafkaBus(
+        bootstrap_servers="kafka:9092",
+        topic="tickwright.events",
+        group_id="tickwright",
+        producer_factory=broker.producer,
+        consumer_factory=broker.consumer,
+    )
+    host = _host(bus=bus, clock=clock, store=store)
+    shooter = SingleShotLimitStrategy(
+        strategy_id="shooter",
+        bus=bus,
+        clock=clock,
+        side=Side.BUY,
+        quantity=Decimal("0.5"),
+        price=Decimal("41000"),
+    )
+    host.register(shooter, symbols={"BTC"})
+    seen_at_produce: list[bytes | None] = []
+
+    def read_snapshot(record: Record) -> None:
+        if isinstance(decode_event(record.value), Signal):
+            seen_at_produce.append(store.load_strategy_snapshot("shooter"))
+
+    broker.on_produce.append(read_snapshot)
+    host.start()
+
+    async def scenario() -> None:
+        await bus.start()
+        await bus.publish(_tick("BTC"))
+        await bus.close()
+
+    asyncio.run(asyncio.wait_for(scenario(), timeout=5))
+
+    assert len(seen_at_produce) == 1
+    assert seen_at_produce[0] is not None
+    assert json.loads(seen_at_produce[0])["placed_signal_id"] == "shooter:BTC:1"
 
 
 class BrokenSnapshotStrategy(RecordingStrategy):

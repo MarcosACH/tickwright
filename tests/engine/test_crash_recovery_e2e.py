@@ -19,6 +19,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from kafka_fakes import FakeKafkaBroker, Record
 from ledgers import GENESIS, checkpointer
 from store_backends import (
     STORE_BACKEND_PARAMS,
@@ -29,6 +30,8 @@ from store_backends import (
 from venue_doubles import VenueLink
 
 from tickwright.adapters.bus import InMemoryBus
+from tickwright.adapters.bus.kafka import KafkaBus
+from tickwright.adapters.bus.serde import decode_event
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.feed import ReplayFeed
 from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
@@ -58,6 +61,7 @@ from tickwright.domain import (
 from tickwright.engine.barrier import StartupBarrier
 from tickwright.engine.execution import ExecutionManager
 from tickwright.engine.reconcile import ReconcileConfig, Reconciler
+from tickwright.engine.strategy_host import StrategyHost
 from tickwright.strategies import SingleShotLimitStrategy
 
 _CLOID = derive_cloid("trivial:BTC:1")
@@ -402,3 +406,144 @@ def test_a_landed_fill_is_restored_and_a_redelivery_does_not_double_count_it(
     assert portfolio.account().cash == GENESIS
     assert [position.signed_size for position in store.all_positions()] == [Decimal("0.5")]
     store.close()
+
+
+class _Killed(BaseException):
+    """The process died. Raised by the broker the instant a record lands.
+
+    A ``BaseException``, like ``KeyboardInterrupt``, so no containment on the
+    way up mistakes it for a handler bug and swallows it.
+    """
+
+
+def _first_tick() -> MarketTick:
+    return MarketTick(
+        ts_event=1_000,
+        ts_init=1_000,
+        symbol="BTC",
+        price=Decimal("42000"),
+        size=Decimal("3"),
+        aggressor_side=AggressorSide.SELL,
+        trade_id="a",
+        seq=1,
+    )
+
+
+def _signals_in_topic(broker: FakeKafkaBroker) -> list[str]:
+    return [
+        event.signal_id
+        for partition in broker.partitions
+        for _, value in partition
+        if isinstance(event := decode_event(value), Signal)
+    ]
+
+
+def _kafka_life(
+    broker: FakeKafkaBroker, backend: Backend, venue: PaperExchange, clock: ManualClock
+) -> tuple[KafkaBus, Store]:
+    """One process life over Kafka, wired the way the runner wires it.
+
+    The store reopens on the same durable backing. The checkpointer restores
+    both read models from it. The host restores the strategy from its snapshot.
+    The venue is the remote that outlives every one of our crashes.
+    """
+    bus = KafkaBus(
+        bootstrap_servers="kafka:9092",
+        topic="tickwright.events",
+        group_id="tickwright",
+        producer_factory=broker.producer,
+        consumer_factory=broker.consumer,
+    )
+    store = backend.open()
+    checks = checkpointer(store, clock=clock)
+    checks.recover()
+    host = StrategyHost(bus=bus, clock=clock, store=store, cache=checks.cache)
+    host.register(
+        SingleShotLimitStrategy(
+            strategy_id="trivial",
+            bus=bus,
+            clock=clock,
+            side=Side.BUY,
+            quantity=Decimal("0.5"),
+            price=Decimal("41000"),
+        ),
+        symbols={"BTC"},
+    )
+    host.start()
+    manager = ExecutionManager(bus=bus, exchange=venue, checkpointer=checks)
+    # The venue reads ticks from each life's bus, so it can price the limit.
+    # Its reports go out on its own construction bus, which no life hears.
+    bus.subscribe(MarketTick, venue.on_tick)
+    bus.subscribe(Signal, manager.on_signal)
+    bus.subscribe(ExecutionReport, manager.on_execution_report)
+    return bus, store
+
+
+async def _run_until_committed(bus: KafkaBus, broker: FakeKafkaBroker) -> None:
+    await bus.start()
+    await broker.all_committed()
+    await bus.close()
+
+
+def test_on_kafka_a_kill_right_after_the_signal_lands_places_one_order_across_three_lives(
+    store_backend: Backend,
+) -> None:
+    """Issue #350. On Kafka a handler's publish used to reach the topic before
+    the handler's own writes. The bus now holds it until the dispatch returns,
+    so the snapshot is on disk first. This is the crash that used to double:
+    killed the instant the Signal record lands, with the tick still
+    uncommitted. Two restarts later, one order."""
+    broker = FakeKafkaBroker()
+    clock = ManualClock()
+    venue = PaperExchange(
+        bus=InMemoryBus(),
+        clock=clock,
+        fill_model=ImmediateFillModel(),
+        genesis_collateral=GENESIS,
+        account_net=dict,
+    )
+
+    def kill_on_signal(record: Record) -> None:
+        if isinstance(decode_event(record.value), Signal):
+            raise _Killed
+
+    # The broker outlives every life, so all three run on its one event loop.
+    async def scenario() -> None:
+        # Life 1: dies the instant the Signal record lands in the topic.
+        broker.on_produce.append(kill_on_signal)
+        bus, store = _kafka_life(broker, store_backend, venue, clock)
+        await bus.start()
+        with pytest.raises(_Killed):
+            await bus.publish(_first_tick())
+        await bus.close()
+        broker.on_produce.clear()
+        # What the crash left: the Signal in the topic, its tick uncommitted,
+        # and no saga yet. The strategy's snapshot is all that remembers.
+        assert _signals_in_topic(broker) == ["trivial:BTC:1"]
+        assert broker.committed == [0, 0, 0]
+        assert store.get_order(_CLOID) is None
+        store.close()
+
+        # Life 2: the tick and the Signal both redeliver. The strategy stays
+        # quiet, the manager places once.
+        bus, store = _kafka_life(broker, store_backend, venue, clock)
+        await _run_until_committed(bus, broker)
+        assert _signals_in_topic(broker) == ["trivial:BTC:1"]
+        assert store.get_order(_CLOID) is not None
+        store.close()
+
+        # Life 3: a restart from stale offsets, so the whole topic redelivers.
+        broker.committed = [0, 0, 0]
+        bus, store = _kafka_life(broker, store_backend, venue, clock)
+        await _run_until_committed(bus, broker)
+        assert _signals_in_topic(broker) == ["trivial:BTC:1"]
+        store.close()
+
+    asyncio.run(asyncio.wait_for(scenario(), timeout=5))
+
+    first = asyncio.run(venue.fetch_order(OrderRef(cloid=_CLOID, symbol="BTC")))
+    second = asyncio.run(
+        venue.fetch_order(OrderRef(cloid=derive_cloid("trivial:BTC:2"), symbol="BTC"))
+    )
+    assert isinstance(first, VenueOrderView) and first.has_record
+    assert isinstance(second, VenueOrderView) and not second.has_record
