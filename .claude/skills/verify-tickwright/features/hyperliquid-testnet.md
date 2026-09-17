@@ -39,7 +39,8 @@ Preconditions:
 - **Stop.** Run `$V signal testnet rt TERM` at once, then `$V await testnet rt --exit`,
   `$V dump testnet rt`, `$V secrets-check testnet`.
 - **Venue fees.** Run `FEES=$($V venue-fills testnet rt)`. It writes `rt.venue-fills.json` and
-  prints the fee sum over every fill whose cloid is one of the `orders` rows.
+  prints the fee sum over every fill whose oid is a `venue_oid` in the `orders` rows. Not the
+  cloid: every run places the same cloids, so a cloid cut would adopt the last run's fills.
 - **Check.** Run `$V check testnet rt tn-materialise --event account.materialised --expect 1`,
   `$V check testnet rt tn-round-trip --sql "select count(*) from orders where state='filled'" --expect 2`,
   `$V check testnet rt tn-round-trip --sql "select signed_size from positions" --expect 0.000`,

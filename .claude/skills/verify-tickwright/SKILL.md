@@ -100,10 +100,11 @@ $V report <run>                                           # writes and prints RE
 
 - `cloid` turns a signal id (`<strategy_id>:<symbol>:<seq>`) into the order's cloid, so you can
   wait on the store row for a specific order.
-- `venue-fills <run> <life>` asks the testnet venue for every fill whose cloid is one of the
-  life's `orders` rows, writes them to `<life>.venue-fills.json`, and prints the fee sum. The
-  venue splits one order into partial fills at will, so never count fill rows by hand. Run it
-  before `cleanup`, which drops the store it reads the cloids from.
+- `venue-fills <run> <life>` asks the testnet venue for every fill whose oid is the `venue_oid`
+  of one of the life's `orders` rows, writes them to `<life>.venue-fills.json`, and prints the
+  fee sum. The venue splits one order into partial fills at will, so never count fill rows by
+  hand. The cut is the oid and not the cloid, because every run places the same cloids. Run it
+  before `cleanup`, which drops the store it reads the oids from.
 - `await` polls up to `--timeout` (default 30 s) and prints the matching log line or row. On
   timeout it prints the last five log lines and exits 1. `--sql` needs `--expect`, and a query
   with no rows never matches.

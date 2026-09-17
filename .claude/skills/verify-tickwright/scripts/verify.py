@@ -887,10 +887,13 @@ def cmd_venue_fills(args: argparse.Namespace) -> int:
     """Sum the venue's fee over every fill this life's orders produced.
 
     The venue splits one order into partial fills at will, so the count of fill
-    rows is not a number a recipe can rely on. The cut is the cloid: a fill
-    belongs to this life when its cloid is an ``orders`` row. Time is not the
-    cut, because the laptop clock and the venue clock need not agree, and the
-    first fill lands within seconds of the first log line."""
+    rows is not a number a recipe can rely on. The cut is the venue oid: a fill
+    belongs to this life when its oid is an ``orders`` row's ``venue_oid``, the
+    same key the engine reads fills by. Time is not the cut, because the laptop
+    clock and the venue clock need not agree, and the first fill lands within
+    seconds of the first log line. The cloid is not the cut either, because it
+    is derived from the signal id, so every run places the same one and a past
+    run's fill carries it too."""
     require_run(args.run_id)
     log = evidence(args.run_id) / f"{args.life}.stderr.jsonl"
     lines = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
@@ -900,17 +903,21 @@ def cmd_venue_fills(args: argparse.Namespace) -> int:
     env = evidence_env_values(args.run_id, args.life)
     if env.get("TICKWRIGHT_HYPERLIQUID__TESTNET") != "true":
         sys.exit("venue-fills reads the testnet venue only")
-    cloids = sorted(str(row[0]) for row in store_query(args.run_id, "select cloid from orders"))
+    oids = sorted(
+        str(row[0])
+        for row in store_query(args.run_id, "select venue_oid from orders")
+        if row[0] is not None
+    )
     address = str(materialised["account_id"]).rsplit("-", 1)[-1]
-    fills = [f for f in fetch_user_fills(TESTNET_API_URL, address) if f.get("cloid") in cloids]
+    fills = [f for f in fetch_user_fills(TESTNET_API_URL, address) if str(f.get("oid")) in oids]
     fee_sum = sum((Decimal(str(f["fee"])) for f in fills), Decimal(0))
     (evidence(args.run_id) / f"{args.life}.venue-fills.json").write_text(
-        json.dumps({"cloids": cloids, "fee_sum": str(fee_sum), "fills": fills}, indent=1) + "\n"
+        json.dumps({"venue_oids": oids, "fee_sum": str(fee_sum), "fills": fills}, indent=1) + "\n"
     )
     if not fills:
-        sys.exit(f"no venue fill for {len(cloids)} orders of life {args.life}")
+        sys.exit(f"no venue fill for {len(oids)} orders of life {args.life}")
     print(fee_sum)
-    print(f"{len(fills)} fills over {len(cloids)} orders", file=sys.stderr)
+    print(f"{len(fills)} fills over {len(oids)} orders", file=sys.stderr)
     return 0
 
 
