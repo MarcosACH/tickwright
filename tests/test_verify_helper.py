@@ -541,3 +541,89 @@ class TestDocker:
 
         assert code == 0
         assert helper.read_run_json("r1")["infra"] == ["kafka"]
+
+
+def _testnet_life(helper: ModuleType, run_id: str, life: str, *, start: str) -> None:
+    """The log a testnet life leaves: a first line, then ``account.materialised``."""
+    evidence = helper.evidence(run_id)
+    events = [
+        {"event": "engine.starting", "timestamp": start},
+        {
+            "event": "account.materialised",
+            "account_id": "hyperliquid-testnet-0xAbC0000000000000000000000000000000000001",
+            "timestamp": start,
+        },
+    ]
+    (evidence / f"{life}.stderr.jsonl").write_text("".join(json.dumps(e) + "\n" for e in events))
+    (evidence / f"{life}.env.txt").write_text("TICKWRIGHT_HYPERLIQUID__TESTNET=true\n")
+
+
+class TestVenueFills:
+    """``venue-fills`` sums the venue's fee over every fill this life produced.
+
+    The venue splits one order into partial fills at will, so "the two fills"
+    is not a number a recipe can count on. The life's start time is the cut.
+    """
+
+    def test_sums_every_fill_since_the_life_started(
+        self,
+        helper: ModuleType,
+        run: Callable[..., tuple[int, str]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        run("init", "r1")
+        _testnet_life(helper, "r1", "rt", start="2026-09-17T18:19:13.773000Z")
+        start_ms = 1789669153773
+        venue = [
+            {"time": start_ms + 90_000, "fee": "0.018", "sz": "0.00052", "dir": "Close Long"},
+            {"time": start_ms + 90_000, "fee": "0.016614", "sz": "0.00048", "dir": "Close Long"},
+            {"time": start_ms + 2_000, "fee": "0.017999", "sz": "0.00052", "dir": "Open Long"},
+            {"time": start_ms + 2_000, "fee": "0.014539", "sz": "0.00042", "dir": "Open Long"},
+            {"time": start_ms + 2_000, "fee": "0.002076", "sz": "0.00006", "dir": "Open Long"},
+            {"time": start_ms - 60_000, "fee": "0.5", "sz": "0.001", "dir": "Close Long"},
+        ]
+        seen: dict[str, str] = {}
+
+        def fake_fetch(api_url: str, address: str) -> list[dict]:
+            seen.update(api_url=api_url, address=address)
+            return venue
+
+        monkeypatch.setattr(helper, "fetch_user_fills", fake_fetch)
+
+        code, out = run("venue-fills", "r1", "rt")
+
+        assert code == 0
+        assert out.splitlines()[0] == "0.069228"
+        assert seen == {
+            "api_url": "https://api.hyperliquid-testnet.xyz",
+            "address": "0xAbC0000000000000000000000000000000000001",
+        }
+        written = json.loads((helper.evidence("r1") / "rt.venue-fills.json").read_text())
+        assert written["fee_sum"] == "0.069228"
+        assert len(written["fills"]) == 5
+
+    def test_no_fill_since_start_is_a_failure(
+        self,
+        helper: ModuleType,
+        run: Callable[..., tuple[int, str]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        run("init", "r1")
+        _testnet_life(helper, "r1", "rt", start="2026-09-17T18:19:13.773000Z")
+        monkeypatch.setattr(helper, "fetch_user_fills", lambda *_: [])
+
+        code, out = run("venue-fills", "r1", "rt")
+
+        assert code == 1
+        assert "no venue fill since" in out
+
+    def test_refuses_a_life_that_never_materialised(
+        self, helper: ModuleType, run: Callable[..., tuple[int, str]]
+    ) -> None:
+        run("init", "r1")
+        _finished_life(helper, "r1", "rt", exit_code=0, events=[], orders=[])
+
+        code, out = run("venue-fills", "r1", "rt")
+
+        assert code == 1
+        assert "account.materialised" in out
