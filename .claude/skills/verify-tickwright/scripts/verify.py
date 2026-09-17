@@ -30,6 +30,7 @@ import time
 from collections import Counter
 from contextlib import closing
 from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent
@@ -473,7 +474,7 @@ def cmd_await(args: argparse.Namespace) -> int:
             rows = store_query(args.run_id, args.sql)
             # No rows is "not yet", never a match. An empty store must not
             # satisfy an empty expectation.
-            if rows and str(rows[0][0]) == args.expect:
+            if rows and _same(str(rows[0][0]), args.expect):
                 print(f"query returned {args.expect!r}")
                 return 0
         elif args.exit:
@@ -564,12 +565,25 @@ def _observed(args: argparse.Namespace) -> str:
     return exit_file.read_text().strip() if exit_file.exists() else ""
 
 
+def _same(got: str, expect: str) -> bool:
+    """Match by value when both sides are numbers, else by text.
+
+    A store column can gain decimals between engine versions. A recipe written
+    before that must not fail on the same value."""
+    if got == expect:
+        return True
+    try:
+        return Decimal(got) == Decimal(expect)
+    except InvalidOperation:
+        return False
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     """Record one PASS or FAIL line. The line is the verdict; the exit code just
     mirrors it so a recipe can stop early."""
     require_run(args.run_id)
     got = _observed(args)
-    verdict = "PASS" if got == args.expect else "FAIL"
+    verdict = "PASS" if _same(got, args.expect) else "FAIL"
     line = f"{verdict} {args.check_id} {args.life} expected={args.expect} got={got}"
     with (evidence(args.run_id) / "checks.txt").open("a") as sink:
         sink.write(line + "\n")

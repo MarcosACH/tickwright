@@ -110,7 +110,8 @@ $V report <run>                                           # writes and prints RE
 
 Every recipe in `features/` uses only these verbs. `await` is how you wait. `check` is how you
 judge. Do not skip a `check` because the `await` already matched: the await proves timing, the
-check proves the value and writes it down.
+check proves the value and writes it down. When both sides are numbers, `await --sql` and `check`
+compare by value, so `0.000` matches `0.00000`. Anything else is compared as text.
 
 ## Evidence
 
