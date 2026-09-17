@@ -255,8 +255,11 @@ class FundingIngest:
 
         `isSnapshot` is read past. The first message is the historical snapshot
         and later ones are the payments on the hour, but a payment is a payment
-        however it was delivered — and the watermark, not this flag, is what
-        decides which have already been applied.
+        however it was delivered — and the ledger, not this flag, is what
+        decides which have already been applied. It has two gates for that.
+        The watermark drops a payment this ledger already folded. The genesis
+        instant drops one the venue settled before the ledger opened, which is
+        the whole snapshot on a first boot (#349, ADR-0043 §5.2).
         """
         try:
             message = json.loads(frame)

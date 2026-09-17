@@ -157,6 +157,10 @@ The residual cost is the gate's usual one: an accrual that arrives *below* the m
 
 **One mark, both paths, read and written on the same terms.** Paper's generator advances it as it accrues and tests against it before applying, exactly as live's ingress does (§5.1). The two arguments for this are that the accrual writer needs no `if live:` — one code path settles one accrual, whichever side produced it — and that the read is what makes a replay rerun converge rather than compound (§5.1). Neither argument is about the *schema*: the DDL is unconditional either way (§8), so the only thing a "paper-free" variant would have removed is the argument passed to `checkpoint_ledger` and the lookup before it — and removing the lookup is precisely what leaves replay exposed.
 
+**(Amended by [#349](https://github.com/MarcosACH/tickwright/issues/349): the mark is not the only gate. The genesis instant is a second one, and it covers the case the mark cannot.** A fresh live ledger has no mark. Its genesis is the venue's equity at the opening instant, and the venue had already settled every earlier payment into that number. The `userFundings` snapshot then re-delivers those payments, and with no mark to drop them the first boot folded months of history into `cash` a second time. The testnet run read a `+13.75` jump after its first fill, and the Tier-1 heal was the only thing that put it back.
+
+So `apply_funding` drops a payment whose boundary is at or below `Account.genesis_ts_ns`, before it reads the mark. The rule is the definition of genesis and holds on both paths: opening cash is the account at that instant, so nothing settled at or before it is new money. Paper never reaches the gate, because its generator enumerates only boundaries after the clock it opened at. A restart keeps the original genesis, so the gate also never drops a payment the mark would have applied.**)**
+
 ## 6. The restart sequence, and the window that stays open
 
 Ledger recovery slots into ADR-0024's startup order as follows (new steps in bold):
