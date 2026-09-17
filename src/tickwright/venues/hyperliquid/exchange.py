@@ -12,7 +12,7 @@ bounded against is the tick stream's — the adapter subscribes itself, like
 every consumer of market data.
 """
 
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
@@ -319,7 +319,7 @@ class HyperliquidExchange:
         Both placement answers that carry an oid come here, ``resting`` and
         ``filled``. LIVE means acked with an oid, not rested (ADR-0011 inv 2).
         This is where the venue's integer oid becomes the saga's string
-        ``venue_oid``. ``_cross_check`` makes the reverse crossing.
+        ``venue_oid``. ``_order_status`` makes the reverse crossing.
         """
         await self._bus.publish(
             self._status_report(
@@ -399,13 +399,22 @@ class HyperliquidExchange:
         the ADR-0011 cross-check in one read. ``unknownOid`` is positive proof
         of no record (an empty view); a read that *failed* is a
         ``VenueReadFailure`` — an outage must never look like "no record"
-        (inv 1)."""
-        # By the oid once the saga holds one. The cloid is derived from the
-        # signal id, and the venue keeps every order ever placed under it, one
-        # per life of the account, so a read by cloid can answer with an
-        # earlier life's order. An oid names exactly one (#354).
-        key: int | str = ref.cloid if ref.venue_oid is None else int(ref.venue_oid)
-        record = await self._order_status(key, cloid=ref.cloid, normalize=_decode_order_view)
+        (inv 1).
+
+        The fills read is bounded to this order's own lifetime, so a busy
+        account's later fills can never push its own past the venue's page cap
+        and silently under-report through the ``{cloid}:fill:{tid}`` dedup.
+        Where the window starts depends on who still remembers the placement.
+        With a record it is the venue's own placement time, exact whatever our
+        clock skew. Once the venue has dropped the record it is our ack time
+        less a skew allowance. A saga that never checkpointed as LIVE has no
+        ack time either, so its read is the whole recent history.
+
+        A failed fills read fails the whole read and carries its own cause
+        out. Never a partial view: with a record that would read as "no
+        fills", and without one as "no record" (inv 1).
+        """
+        record = await self._order_status(ref)
         if isinstance(record, VenueReadFailure):
             # The read failed and ``read`` already named which way. Which way is
             # carried out rather than collapsed: an outage says the venue is
@@ -421,56 +430,30 @@ class HyperliquidExchange:
             # apart, and only the second has a history to read (ADR-0011 inv 2).
             if ref.venue_oid is None:
                 return VenueOrderView(status=None)
-            return await self._cross_check(ref, record=None)
+            since_ms = (
+                None
+                if ref.acked_ts_ns is None
+                else ref.acked_ts_ns // _NS_PER_MS - _ACK_SKEW_ALLOWANCE_MS
+            )
+            fills = await self._fetch_fills(
+                cloid=ref.cloid, symbol=ref.symbol, oid=int(ref.venue_oid), since_ms=since_ms
+            )
+            if isinstance(fills, VenueReadFailure):
+                return fills
+            return VenueOrderView(status=None, fills=tuple(fills))
         if ref.venue_oid is None and _placed_before(record, created_ts_ns=ref.created_ts_ns):
             # A read by cloid answered with an order placed before this saga
             # existed: an earlier life's, not ours. Its fills are not read, and
             # to the reconciler this is a miss, which the in-flight budget
             # already knows how to count (#354).
             return VenueOrderView(status=None)
-        return await self._cross_check(ref, record=record)
-
-    async def _cross_check(
-        self, ref: OrderRef, *, record: "_OrderRecord | None"
-    ) -> VenueOrderView | VenueReadFailure:
-        """The fill-history half of the ADR-0011 cross-check, joined to the
-        order record when the venue still has one.
-
-        The read is bounded to this order's own lifetime, so a busy account's
-        later fills can never push its own past the venue's page cap and
-        silently under-report through the ``{cloid}:fill:{tid}`` dedup. Where
-        the window starts depends on who still remembers the placement. With
-        a record it is the venue's own placement time, exact whatever our
-        clock skew. Without one it is our ack time less a skew allowance. With
-        no ack time either, which is a saga that never checkpointed as LIVE,
-        there is nothing to bound the read with, so it is the whole recent
-        history.
-
-        A failed fills read fails the whole read and carries its own cause
-        out. Never a partial view: with a record that would read as "no
-        fills", and without one as "no record" (inv 1).
-        """
-        if record is None:
-            assert ref.venue_oid is not None  # ``fetch_order`` routed on it
-            symbol, oid = ref.symbol, int(ref.venue_oid)
-            since_ms = (
-                None
-                if ref.acked_ts_ns is None
-                else ref.acked_ts_ns // _NS_PER_MS - _ACK_SKEW_ALLOWANCE_MS
-            )
-        else:
-            symbol, oid, since_ms = record.coin, record.oid, record.timestamp
-        fills = await self._fetch_fills(cloid=ref.cloid, symbol=symbol, oid=oid, since_ms=since_ms)
+        fills = await self._fetch_fills(
+            cloid=ref.cloid, symbol=record.coin, oid=record.oid, since_ms=record.timestamp
+        )
         if isinstance(fills, VenueReadFailure):
             return fills
-        if record is None:
-            # The venue dropped the record, so the order is closed.
-            return VenueOrderView(status=None, fills=tuple(fills))
-        # Cannot fail: ``_decode_order_view`` refused an unmappable status on
-        # the way in, so the read would have failed above.
-        state = _order_state(record.status)
         status = self._status_report(
-            cloid=ref.cloid, symbol=record.coin, status=state, venue_oid=str(record.oid)
+            cloid=ref.cloid, symbol=record.coin, status=record.state, venue_oid=str(record.oid)
         )
         return VenueOrderView(status=status, fills=tuple(fills))
 
@@ -507,28 +490,22 @@ class HyperliquidExchange:
         """
         return await reverify_account_mode(info=self._info, address=self._user_address)
 
-    async def _order_status(
-        self, key: int | str, *, cloid: str, normalize: "Callable[[object], _OrderDecode]"
-    ) -> "_OrderDecode | VenueReadFailure":
-        """The venue's ``orderStatus`` answer for ``key`` — the one read both
-        the reconciler's ``fetch_order`` and a post-restart ``cancel`` share.
+    async def _order_status(self, ref: OrderRef) -> "_OrderDecode | VenueReadFailure":
+        """The venue's ``orderStatus`` record for ``ref``, in saga vocabulary.
 
-        ``key`` is the venue's integer oid or the cloid hex string. The venue
-        accepts either under the same field. ``cloid`` is for the log record.
-
-        The query is shared and the ``normalize`` is not, because the two callers
-        disagree about one thing only: ``fetch_order`` must map the status into
-        saga vocabulary and freezes on one it cannot, while a cancel goes by asset
-        index whatever the status. Passing the decode in keeps that the *whole*
-        difference between them, rather than a second read site free to drift on
-        everything else too.
+        By the oid once the saga holds one. The cloid is derived from the
+        signal id, and the venue keeps every order ever placed under it, one
+        per life of the account, so a read by cloid can answer with an earlier
+        life's order. An oid names exactly one (#354). The venue takes either
+        key under the same field. The cloid still names the saga in the log.
         """
+        key: int | str = ref.cloid if ref.venue_oid is None else int(ref.venue_oid)
         return await read(
             request="orderStatus",
             query={"type": "orderStatus", "user": self._user_address, "oid": key},
             send=self._info,
-            normalize=normalize,
-            cloid=cloid,
+            normalize=_decode_order_status,
+            cloid=ref.cloid,
         )
 
     async def _fetch_fills(
@@ -699,16 +676,14 @@ class HyperliquidExchange:
 @dataclass(frozen=True, slots=True)
 class _OrderRecord:
     """The venue's decoded ``orderStatus`` order record: the coin it lives
-    under, the venue oid, its placement timestamp (ms), and the raw venue status
-    string. Each caller applies its own status policy — ``fetch_order`` maps the
-    status to saga vocabulary (freezing on one it cannot map) and bounds the
-    fills read at ``timestamp``, a post-restart ``cancel`` needs only the coin
-    (it cancels by asset index, whatever the status)."""
+    under, the venue oid, its placement timestamp (ms), and its status already
+    in saga vocabulary. ``fetch_order`` bounds the fills read at ``timestamp``
+    and reports ``state``."""
 
     coin: str
     oid: int
     timestamp: int
-    status: str
+    state: OrderState
 
 
 class _OrderStatusRead(Enum):
@@ -724,7 +699,7 @@ class _OrderStatusRead(Enum):
     NO_RECORD = "no_record"  # unknownOid — the venue positively has no record
 
 
-# What either ``orderStatus`` decode below answers with. Never a
+# What the ``orderStatus`` decode below answers with. Never a
 # ``VenueReadFailure``: that is ``read``'s to return, and it means something else
 # entirely.
 _OrderDecode = _OrderRecord | _OrderStatusRead
@@ -744,8 +719,10 @@ def _decode_order_status(response: object) -> _OrderDecode:
     venue's positive ``unknownOid``. Any shape outside those two raises into
     ``UNREADABLE`` — a failed read, never venue truth.
 
-    The decode a post-restart ``cancel`` reads the venue through: it needs the
-    coin to cancel by asset index, whatever status the order is in.
+    A status outside the saga taxonomy is a failed read like any unreadable
+    body, and refusing it *here* rather than after the read is what puts it
+    inside ``read``'s naming — the venue's own string reaches the operator,
+    which on a body that parsed cleanly is the entire triage.
     """
     match response:
         case {"status": "unknownOid"}:
@@ -757,23 +734,8 @@ def _decode_order_status(response: object) -> _OrderDecode:
                 "status": str(status),
             },
         }:
-            return _OrderRecord(coin=coin, oid=oid, timestamp=timestamp, status=status)
+            return _OrderRecord(coin=coin, oid=oid, timestamp=timestamp, state=_order_state(status))
     raise ValueError("unrecognized orderStatus response")
-
-
-def _decode_order_view(response: object) -> _OrderDecode:
-    """``_decode_order_status`` plus the one thing ``fetch_order`` needs of it:
-    that the record's status maps into saga vocabulary.
-
-    A status outside the taxonomy is a failed read like any unreadable body, and
-    refusing it *here* rather than after the read is what puts it inside
-    ``read``'s naming — the venue's own string reaches the operator, which on a
-    body that parsed cleanly is the entire triage.
-    """
-    decoded = _decode_order_status(response)
-    if isinstance(decoded, _OrderRecord):
-        _order_state(decoded.status)  # raises if the saga has no term for it
-    return decoded
 
 
 def _order_state(status: str) -> OrderState:
