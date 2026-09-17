@@ -543,44 +543,61 @@ class TestDocker:
         assert helper.read_run_json("r1")["infra"] == ["kafka"]
 
 
-def _testnet_life(helper: ModuleType, run_id: str, life: str, *, start: str) -> None:
-    """The log a testnet life leaves: a first line, then ``account.materialised``."""
+def _testnet_life(
+    helper: ModuleType,
+    run_id: str,
+    life: str,
+    *,
+    cloids: list[str],
+    testnet: bool = True,
+) -> None:
+    """What a testnet life leaves: a materialised log, an env copy, and its orders."""
+    _finished_life(
+        helper, run_id, life, exit_code=0, events=[], orders=[(c, "filled") for c in cloids]
+    )
     evidence = helper.evidence(run_id)
     events = [
-        {"event": "engine.starting", "timestamp": start},
+        {"event": "engine.starting", "timestamp": "2026-09-17T18:19:13.773000Z"},
         {
             "event": "account.materialised",
             "account_id": "hyperliquid-testnet-0xAbC0000000000000000000000000000000000001",
-            "timestamp": start,
+            "timestamp": "2026-09-17T18:19:13.773000Z",
         },
     ]
     (evidence / f"{life}.stderr.jsonl").write_text("".join(json.dumps(e) + "\n" for e in events))
-    (evidence / f"{life}.env.txt").write_text("TICKWRIGHT_HYPERLIQUID__TESTNET=true\n")
+    (evidence / f"{life}.env.txt").write_text(
+        f"TICKWRIGHT_HYPERLIQUID__TESTNET={'true' if testnet else 'false'}\n"
+    )
 
 
 class TestVenueFills:
-    """``venue-fills`` sums the venue's fee over every fill this life produced.
+    """``venue-fills`` sums the venue's fee over every fill this life's orders produced.
 
     The venue splits one order into partial fills at will, so "the two fills"
-    is not a number a recipe can count on. The life's start time is the cut.
+    is not a number a recipe can count on. The cut is the cloid: a fill belongs
+    to this life when its cloid is an ``orders`` row. Time is not the cut, so a
+    laptop clock ahead of the venue's cannot drop the first fill.
     """
 
-    def test_sums_every_fill_since_the_life_started(
+    def test_sums_every_partial_fill_of_this_lifes_orders(
         self,
         helper: ModuleType,
         run: Callable[..., tuple[int, str]],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         run("init", "r1")
-        _testnet_life(helper, "r1", "rt", start="2026-09-17T18:19:13.773000Z")
+        _testnet_life(helper, "r1", "rt", cloids=["0xbuy", "0xsell"])
         start_ms = 1789669153773
         venue = [
-            {"time": start_ms + 90_000, "fee": "0.018", "sz": "0.00052", "dir": "Close Long"},
-            {"time": start_ms + 90_000, "fee": "0.016614", "sz": "0.00048", "dir": "Close Long"},
-            {"time": start_ms + 2_000, "fee": "0.017999", "sz": "0.00052", "dir": "Open Long"},
-            {"time": start_ms + 2_000, "fee": "0.014539", "sz": "0.00042", "dir": "Open Long"},
-            {"time": start_ms + 2_000, "fee": "0.002076", "sz": "0.00006", "dir": "Open Long"},
-            {"time": start_ms - 60_000, "fee": "0.5", "sz": "0.001", "dir": "Close Long"},
+            {"time": start_ms + 90_000, "fee": "0.018", "cloid": "0xsell", "dir": "Close Long"},
+            {"time": start_ms + 90_000, "fee": "0.016614", "cloid": "0xsell", "dir": "Close Long"},
+            {"time": start_ms + 2_000, "fee": "0.017999", "cloid": "0xbuy", "dir": "Open Long"},
+            {"time": start_ms + 2_000, "fee": "0.014539", "cloid": "0xbuy", "dir": "Open Long"},
+            # The venue clock behind the laptop's: this fill is stamped before
+            # the life's first log line and still belongs to it.
+            {"time": start_ms - 2_000, "fee": "0.002076", "cloid": "0xbuy", "dir": "Open Long"},
+            {"time": start_ms + 5_000, "fee": "0.5", "cloid": "0xother", "dir": "Close Long"},
+            {"time": start_ms + 5_000, "fee": "0.5", "dir": "Close Long"},
         ]
         seen: dict[str, str] = {}
 
@@ -600,22 +617,23 @@ class TestVenueFills:
         }
         written = json.loads((helper.evidence("r1") / "rt.venue-fills.json").read_text())
         assert written["fee_sum"] == "0.069228"
-        assert len(written["fills"]) == 5
+        assert written["cloids"] == ["0xbuy", "0xsell"]
+        assert [f["cloid"] for f in written["fills"]] == ["0xsell"] * 2 + ["0xbuy"] * 3
 
-    def test_no_fill_since_start_is_a_failure(
+    def test_no_fill_for_this_lifes_orders_is_a_failure(
         self,
         helper: ModuleType,
         run: Callable[..., tuple[int, str]],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         run("init", "r1")
-        _testnet_life(helper, "r1", "rt", start="2026-09-17T18:19:13.773000Z")
-        monkeypatch.setattr(helper, "fetch_user_fills", lambda *_: [])
+        _testnet_life(helper, "r1", "rt", cloids=["0xbuy"])
+        monkeypatch.setattr(helper, "fetch_user_fills", lambda *_: [{"fee": "1", "cloid": "0xz"}])
 
         code, out = run("venue-fills", "r1", "rt")
 
         assert code == 1
-        assert "no venue fill since" in out
+        assert "no venue fill for" in out
 
     def test_refuses_a_life_that_never_materialised(
         self, helper: ModuleType, run: Callable[..., tuple[int, str]]
@@ -627,3 +645,25 @@ class TestVenueFills:
 
         assert code == 1
         assert "account.materialised" in out
+
+    def test_refuses_a_life_that_did_not_run_on_testnet(
+        self,
+        helper: ModuleType,
+        run: Callable[..., tuple[int, str]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        run("init", "r1")
+        _testnet_life(helper, "r1", "rt", cloids=["0xbuy"], testnet=False)
+        calls: list[str] = []
+
+        def fake_fetch(api_url: str, address: str) -> list[dict]:
+            calls.append(address)
+            return []
+
+        monkeypatch.setattr(helper, "fetch_user_fills", fake_fetch)
+
+        code, out = run("venue-fills", "r1", "rt")
+
+        assert code == 1
+        assert "testnet venue only" in out
+        assert calls == []

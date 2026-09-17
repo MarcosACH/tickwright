@@ -100,9 +100,10 @@ $V report <run>                                           # writes and prints RE
 
 - `cloid` turns a signal id (`<strategy_id>:<symbol>:<seq>`) into the order's cloid, so you can
   wait on the store row for a specific order.
-- `venue-fills <run> <life>` asks the testnet venue for every fill since the life's first log
-  line, writes them to `<life>.venue-fills.json`, and prints the fee sum. The venue splits one
-  order into partial fills at will, so never count fill rows by hand.
+- `venue-fills <run> <life>` asks the testnet venue for every fill whose cloid is one of the
+  life's `orders` rows, writes them to `<life>.venue-fills.json`, and prints the fee sum. The
+  venue splits one order into partial fills at will, so never count fill rows by hand. Run it
+  before `cleanup`, which drops the store it reads the cloids from.
 - `await` polls up to `--timeout` (default 30 s) and prints the matching log line or row. On
   timeout it prints the last five log lines and exits 1. `--sql` needs `--expect`, and a query
   with no rows never matches.
@@ -131,7 +132,7 @@ Everything a life produced lands in `.agents/verify/<run-id>/evidence/`:
 | `<life>.store.txt` | `dump`: the store tables |
 | `<life>.events.txt` | `dump`: event counts and the order, position, account, engine trail |
 | `<name>.jsonl` | a copy of each tick file used |
-| `<life>.venue-fills.json` | `venue-fills`: the testnet fills since the life started, with the fee sum |
+| `<life>.venue-fills.json` | `venue-fills`: the testnet fills of the life's orders, with the fee sum |
 | `checks.txt` | one `PASS` or `FAIL` line per `check`, with `expected=` and `got=` |
 | `REPORT.md` | `report`: the verdict, the FAIL lines, alarm events, exit codes, store tables |
 | `ISSUE.md` | `issue-draft`: a bug body for the FAIL lines, when there are any |

@@ -27,6 +27,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import urllib.request
 from collections import Counter
 from contextlib import closing
 from datetime import UTC, datetime
@@ -200,8 +201,8 @@ def parse_offset(text: str) -> int:
 # --- store access ---------------------------------------------------------------
 
 
-def env_file_values(run_id: str) -> dict[str, str]:
-    path = scratch(run_id) / ".env"
+def parse_env_file(path: Path) -> dict[str, str]:
+    """``KEY=value`` lines of one env file. Comments and a missing file read as empty."""
     values: dict[str, str] = {}
     if path.exists():
         for line in path.read_text().splitlines():
@@ -209,6 +210,16 @@ def env_file_values(run_id: str) -> dict[str, str]:
                 key, value = line.split("=", 1)
                 values[key] = value
     return values
+
+
+def env_file_values(run_id: str) -> dict[str, str]:
+    """The run's scratch ``.env``, the one the store lives in."""
+    return parse_env_file(scratch(run_id) / ".env")
+
+
+def evidence_env_values(run_id: str, life: str) -> dict[str, str]:
+    """The life's recorded ``.env``, readable after cleanup dropped scratch."""
+    return parse_env_file(evidence(run_id) / f"{life}.env.txt")
 
 
 def store_query(run_id: str, sql: str) -> list[tuple]:
@@ -864,8 +875,6 @@ TESTNET_API_URL = "https://api.hyperliquid-testnet.xyz"
 
 def fetch_user_fills(api_url: str, address: str) -> list[dict]:
     """The venue's fill rows for one account, newest first. The one HTTP call here."""
-    import urllib.request
-
     body = json.dumps({"type": "userFills", "user": address}).encode()
     request = urllib.request.Request(
         f"{api_url}/info", data=body, headers={"Content-Type": "application/json"}
@@ -875,45 +884,34 @@ def fetch_user_fills(api_url: str, address: str) -> list[dict]:
 
 
 def cmd_venue_fills(args: argparse.Namespace) -> int:
-    """Sum the venue's fee over every fill this life produced.
+    """Sum the venue's fee over every fill this life's orders produced.
 
     The venue splits one order into partial fills at will, so the count of fill
-    rows is not a number a recipe can rely on. The cut is the life's first log
-    line: every fill at or after it belongs to this life, and each partial fill
-    carries its own fee, which the engine adds up the same way."""
+    rows is not a number a recipe can rely on. The cut is the cloid: a fill
+    belongs to this life when its cloid is an ``orders`` row. Time is not the
+    cut, because the laptop clock and the venue clock need not agree, and the
+    first fill lands within seconds of the first log line."""
     require_run(args.run_id)
     log = evidence(args.run_id) / f"{args.life}.stderr.jsonl"
     lines = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
     materialised = next((e for e in lines if e.get("event") == "account.materialised"), None)
-    if not lines or materialised is None:
+    if materialised is None:
         sys.exit(f"{args.life} has no account.materialised line: not a testnet life")
     env = evidence_env_values(args.run_id, args.life)
     if env.get("TICKWRIGHT_HYPERLIQUID__TESTNET") != "true":
         sys.exit("venue-fills reads the testnet venue only")
-    start_ms = int(datetime.fromisoformat(lines[0]["timestamp"]).timestamp() * 1000)
+    cloids = sorted(str(row[0]) for row in store_query(args.run_id, "select cloid from orders"))
     address = str(materialised["account_id"]).rsplit("-", 1)[-1]
-    fills = [f for f in fetch_user_fills(TESTNET_API_URL, address) if int(f["time"]) >= start_ms]
+    fills = [f for f in fetch_user_fills(TESTNET_API_URL, address) if f.get("cloid") in cloids]
     fee_sum = sum((Decimal(str(f["fee"])) for f in fills), Decimal(0))
     (evidence(args.run_id) / f"{args.life}.venue-fills.json").write_text(
-        json.dumps({"start_ms": start_ms, "fee_sum": str(fee_sum), "fills": fills}, indent=1) + "\n"
+        json.dumps({"cloids": cloids, "fee_sum": str(fee_sum), "fills": fills}, indent=1) + "\n"
     )
     if not fills:
-        sys.exit(f"no venue fill since {lines[0]['timestamp']}")
+        sys.exit(f"no venue fill for {len(cloids)} orders of life {args.life}")
     print(fee_sum)
-    print(f"{len(fills)} fills since {lines[0]['timestamp']}", file=sys.stderr)
+    print(f"{len(fills)} fills over {len(cloids)} orders", file=sys.stderr)
     return 0
-
-
-def evidence_env_values(run_id: str, life: str) -> dict[str, str]:
-    """The life's recorded ``.env``, readable after cleanup dropped scratch."""
-    path = evidence(run_id) / f"{life}.env.txt"
-    values: dict[str, str] = {}
-    if path.exists():
-        for line in path.read_text().splitlines():
-            if "=" in line and not line.startswith("#"):
-                key, value = line.split("=", 1)
-                values[key] = value
-    return values
 
 
 def cmd_cleanup(args: argparse.Namespace) -> int:
