@@ -13,7 +13,7 @@ import msgspec
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
-from kafka_fakes import FakeKafkaBroker
+from kafka_fakes import FakeKafkaBroker, Record
 from ledgers import GENESIS, checkpointer
 
 from tickwright.adapters.bus.kafka import KafkaBus
@@ -200,6 +200,47 @@ def test_a_handler_fault_drops_the_undelivered_cascade_tail() -> None:
     asyncio.run(asyncio.wait_for(scenario(), timeout=5))
 
     assert delivered == []  # the reentrantly-published BTC tick was never delivered
+
+
+def test_a_reentrant_publish_lands_after_its_dispatch_returns_and_before_its_commit() -> None:
+    """A record a handler publishes is held until the dispatch that published
+    it returns, then sent, then the triggering offset is committed (issue
+    #350). Sending at once would make the record durable before the handler's
+    own durable writes, which is how a Signal outlived its snapshot on Kafka.
+    Sending after the commit would lose it on a crash in between, with the
+    trigger never redelivered."""
+    broker = FakeKafkaBroker()
+    bus = _wire(broker)
+    trigger = _tick(seq=0, symbol="BTC")
+    inner = _tick(seq=1, symbol="BTC")
+    on_topic_inside_handler: list[int] = []
+    committed_when_inner_landed: list[list[int]] = []
+
+    def observe(record: Record) -> None:
+        if decode_event(record.value) == inner:
+            committed_when_inner_landed.append(list(broker.committed))
+
+    broker.on_produce.append(observe)
+
+    async def handler(event: MarketTick) -> None:
+        if event == trigger:
+            await bus.publish(inner)
+            on_topic_inside_handler.append(sum(len(p) for p in broker.partitions))
+
+    bus.subscribe(MarketTick, handler)
+
+    async def scenario() -> None:
+        await bus.start()
+        await bus.publish(trigger)
+        await bus.drain()
+        await bus.close()
+
+    asyncio.run(asyncio.wait_for(scenario(), timeout=5))
+
+    assert on_topic_inside_handler == [1]  # only the trigger, the inner one is held
+    partition = broker.partition_for(b"BTC")
+    assert committed_when_inner_landed == [[0] * broker.partition_count]
+    assert broker.committed[partition] == 2  # both delivered and committed in the end
 
 
 def test_a_malformed_record_surfaces_as_a_fault_instead_of_hanging_the_drain() -> None:

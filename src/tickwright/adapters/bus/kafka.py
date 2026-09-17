@@ -90,6 +90,9 @@ class KafkaBus:
         # records are committed" is exactly "the topic went idle".
         self._ledger = DrainLedger()
         self._dispatch_fault: BaseException | None = None
+        # What the handlers of the record being dispatched published. Sent
+        # once the dispatch returns, before the record's offset is committed.
+        self._held: list[Event] = []
 
     def subscribe[E: Event](self, event_type: type[E], handler: Handler[E]) -> None:
         self._subscriptions.subscribe(event_type, handler)
@@ -111,19 +114,30 @@ class KafkaBus:
     async def publish(self, event: Event) -> None:
         if self._producer is None:
             raise RuntimeError("KafkaBus.publish before start()")
-        placed = await self._producer.send_and_wait(
-            self._topic, value=encode_event(event), key=event.partition_key.encode()
-        )
-        self._ledger.record_produced(placed.partition, placed.offset)
+        # A publish from inside a handler runs in the poll task. It is held
+        # until that dispatch returns (issue #350): a handler's own durable
+        # writes, such as the strategy snapshot, must land before anything it
+        # published becomes durable in the topic. Otherwise a crash in between
+        # leaves a Signal the restart consumes and a strategy that does not
+        # remember emitting it. Holding also mirrors the in-memory reentrant
+        # FIFO, where a fault clears what a handler published.
+        if asyncio.current_task() is self._poll_task:
+            self._held.append(event)
+            return
+        await self._send(event)
         # The parity trick (ADR-0023): a top-level publish returns only after
         # the whole cascade it began was delivered — exactly the in-memory
         # drain-to-quiescence contract, so callers observe one behavior on
         # both backends (and a handler exception surfaces *here*, in the
-        # publish that caused it). A publish from inside a handler runs in
-        # the poll task: it must enqueue-and-unwind (draining would deadlock
-        # the dispatcher on itself), mirroring the in-memory reentrant FIFO.
-        if asyncio.current_task() is not self._poll_task:
-            await self.drain()
+        # publish that caused it).
+        await self.drain()
+
+    async def _send(self, event: Event) -> None:
+        assert self._producer is not None
+        placed = await self._producer.send_and_wait(
+            self._topic, value=encode_event(event), key=event.partition_key.encode()
+        )
+        self._ledger.record_produced(placed.partition, placed.offset)
 
     async def drain(self) -> None:
         """Wait until every record this process produced was dispatched and committed.
@@ -152,6 +166,11 @@ class KafkaBus:
         if self._dispatch_fault is not None:
             fault, self._dispatch_fault = self._dispatch_fault, None
             raise fault
+
+    async def _flush_held(self) -> None:
+        for event in self._held:
+            await self._send(event)
+        self._held.clear()
 
     async def close(self) -> None:
         """Stop consuming, then flush and disconnect — buffered writes survive."""
@@ -194,6 +213,7 @@ class KafkaBus:
             try:
                 event = decode_event(record.value)
                 await self._subscriptions.dispatch(event)
+                await self._flush_held()
             except asyncio.CancelledError:
                 raise
             except BaseException as exc:
