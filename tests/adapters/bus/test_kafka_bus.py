@@ -233,6 +233,39 @@ def test_a_dispatch_fault_drops_what_its_handlers_published_before_it_reaches_th
     assert _tick(1, symbol="BTC") not in on_topic
 
 
+def test_a_send_that_fails_after_the_handler_returned_is_a_dispatch_fault() -> None:
+    """The held record is sent after the dispatch, so a broker that went
+    away surfaces in the poll loop, not inside a strategy callback where the
+    containment net would log it as a strategy bug. It is a dispatch fault:
+    the causing publish raises, the trigger stays uncommitted so a restart
+    redelivers it, and the bus keeps serving once the broker is back."""
+    broker = FakeKafkaBroker()
+    bus = _wire(broker)
+    delivered: list[MarketTick] = []
+
+    async def handler(event: MarketTick) -> None:
+        delivered.append(event)
+        if event.symbol == "trigger":
+            await bus.publish(_tick(1, symbol="BTC"))
+            broker.producers[-1].failure = ConnectionError("broker went away")
+
+    bus.subscribe(MarketTick, handler)
+
+    async def scenario() -> None:
+        await bus.start()
+        with pytest.raises(ConnectionError, match="broker went away"):
+            await bus.publish(_tick(seq=0, symbol="trigger"))
+        assert broker.committed == [0] * broker.partition_count
+        broker.producers[-1].failure = None
+        await bus.publish(_tick(2, symbol="ETH"))
+        await bus.drain()
+        await bus.close()
+
+    asyncio.run(asyncio.wait_for(scenario(), timeout=5))
+
+    assert delivered == [_tick(seq=0, symbol="trigger"), _tick(2, symbol="ETH")]
+
+
 def test_a_reentrant_publish_lands_after_its_dispatch_returns_and_before_its_commit() -> None:
     """A record a handler publishes is held until the dispatch that published
     it returns, then sent, then the triggering offset is committed (issue

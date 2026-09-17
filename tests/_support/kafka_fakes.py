@@ -87,6 +87,9 @@ class FakeProducer:
     def __init__(self, broker: FakeKafkaBroker) -> None:
         self._broker = broker
         self.started = False
+        # Set by a suite to make every later send fail, the way a broker that
+        # went away does. The record never lands.
+        self.failure: BaseException | None = None
 
     async def start(self) -> None:
         self.started = True
@@ -96,6 +99,8 @@ class FakeProducer:
 
     async def send_and_wait(self, topic: str, value: bytes, key: bytes) -> Record:
         assert self.started, "send before producer.start()"
+        if self.failure is not None:
+            raise self.failure
         return self._broker.produce(key, value)
 
 
