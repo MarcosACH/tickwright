@@ -121,6 +121,9 @@ class StrategyHost:
         high_water = self._seq_high_water()
         for strategy in self._strategies.values():
             self._restore(strategy)
+            # Probe once before any tick: a strategy the host cannot persist
+            # cannot recover, so it must not get to place an order first.
+            self._snapshot(strategy)
             strategy.set_next_seq(high_water.get(strategy.strategy_id, 0) + 1)
             self._subscribe(strategy)
         self._started = True
@@ -190,14 +193,39 @@ class StrategyHost:
         The crash half of ADR-0016's cadence (issue #348): a callback that
         changed the state is followed by a write, so a ``KILL`` a moment later
         cannot lose it. A strategy that fired once is still fired on restart.
+
+        The write and the saga checkpoint are two writes, so one callback is
+        still a crash window. On the in-memory bus the Signal waits in the
+        FIFO until this returns, so the snapshot lands first and a crash in
+        between loses the order, not the memory of it. On Kafka the Signal is
+        in the topic before this runs, so the same crash refires on restart.
+        ADR-0016 names both.
         """
-        data = strategy.snapshot()
+        data = self._snapshot(strategy)
         if self._persisted.get(strategy.strategy_id) == data:
             return
         self._store.save_strategy_snapshot(
             strategy.strategy_id, data, ts_ns=self._clock.timestamp_ns()
         )
         self._persisted[strategy.strategy_id] = data
+
+    @staticmethod
+    def _snapshot(strategy: Strategy) -> bytes:
+        """``strategy.snapshot()``, with a raise turned into a fault.
+
+        Third-party code, but not a contained handler (ADR-0024): a snapshot
+        the host cannot take is a failed checkpoint. Containing it would let
+        the strategy trade on with nothing durable, which is the #348 double
+        waiting for the next crash. So it pierces, named after the strategy.
+        """
+        try:
+            return strategy.snapshot()
+        except InvariantViolation:
+            raise
+        except Exception as exc:
+            raise InvariantViolation(
+                f"strategy {strategy.strategy_id} snapshot() failed: {exc!r}"
+            ) from exc
 
     def _subscribe(self, strategy: Strategy) -> None:
         symbols = self._symbols[strategy.strategy_id]

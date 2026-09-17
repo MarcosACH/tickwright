@@ -457,6 +457,57 @@ def test_the_snapshot_is_on_disk_before_the_signal_it_records_is_dispatched() ->
     assert json.loads(seen_at_dispatch[0])["placed_signal_id"] == "shooter:BTC:1"
 
 
+class BrokenSnapshotStrategy(RecordingStrategy):
+    """A strategy whose ``snapshot()`` is a bug: it raises a plain exception."""
+
+    def snapshot(self) -> bytes:
+        raise TypeError("Object of type Decimal is not JSON serializable")
+
+
+def test_a_strategy_whose_snapshot_raises_cannot_start() -> None:
+    """A strategy the host cannot persist cannot recover from a crash, which
+    is the #348 double waiting to happen. ``start()`` probes ``snapshot()``
+    once and faults before any tick reaches the strategy (ADR-0016)."""
+    bus = InMemoryBus()
+    host = _host(bus=bus)
+    broken = BrokenSnapshotStrategy("alpha")
+    host.register(broken, symbols={"BTC"})
+
+    with pytest.raises(InvariantViolation, match="alpha.*snapshot"):
+        host.start()
+
+    asyncio.run(bus.publish(_tick("BTC")))
+    assert broken.ticks == []
+
+
+class SnapshotBreaksAfterTickStrategy(RecordingStrategy):
+    """A strategy whose ``snapshot()`` works at boot and breaks once its
+    state moved, the way a ``Decimal`` stored after a fill breaks json."""
+
+    async def on_tick(self, tick: MarketTick) -> None:
+        await super().on_tick(tick)
+        self.state = b"moved"
+
+    def snapshot(self) -> bytes:
+        if self.state == b"moved":
+            raise TypeError("Object of type Decimal is not JSON serializable")
+        return self.state
+
+
+def test_a_snapshot_that_raises_after_a_callback_faults_as_an_invariant() -> None:
+    """The failure is a broken checkpoint, not a contained strategy error
+    (ADR-0024): it pierces the net as an ``InvariantViolation`` that names
+    the strategy, so the engine faults instead of trading on without
+    durability."""
+    bus = InMemoryBus()
+    host = _host(bus=bus)
+    host.register(SnapshotBreaksAfterTickStrategy("alpha"), symbols={"BTC"})
+    host.start()
+
+    with pytest.raises(InvariantViolation, match="alpha.*snapshot"):
+        asyncio.run(bus.publish(_tick("BTC")))
+
+
 class IncompatibleRestoreStrategy(RecordingStrategy):
     """A strategy whose code changed shape between runs: restore() rejects."""
 
