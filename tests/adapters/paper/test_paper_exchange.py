@@ -659,7 +659,7 @@ def test_cancel_removes_a_resting_order_and_reports_cancelled() -> None:
         await bus.publish(_tick("42000"))
         await exchange.place(_limit_order("41000"))  # rests
         statuses.clear()  # drop the LIVE report; we only care about the cancel
-        await exchange.cancel("0xabc")
+        await exchange.cancel(OrderRef(cloid="0xabc", symbol="BTC"))
         # After cancel it is off the book: a later crossing tick must not fill it.
         clock.advance_to(2_000)
         await bus.publish(_tick("41000", ts=2_000))
@@ -679,7 +679,7 @@ def test_cancel_of_an_unknown_order_is_a_benign_no_op() -> None:
         await bus.publish(_tick("42000"))
         # Nothing resting under this cloid (already filled/cancelled or never
         # placed): the venue reports nothing and nothing raises.
-        await exchange.cancel("0xdeadbeef")
+        await exchange.cancel(OrderRef(cloid="0xdeadbeef", symbol="BTC"))
 
     asyncio.run(scenario())
 
@@ -970,7 +970,7 @@ def test_the_released_paper_venue_still_answers_a_place_and_a_cancel() -> None:
         await exchange.place(_limit_order("41000"))  # rests, uncrossed
         await exchange.stop()
         # Behind the release, inside the drain the runner has not reached yet.
-        await asyncio.wait_for(exchange.cancel("0xabc"), timeout=5)
+        await asyncio.wait_for(exchange.cancel(OrderRef(cloid="0xabc", symbol="BTC")), timeout=5)
         await asyncio.wait_for(exchange.place(_market_order(qty="0.5", cloid="0xlate")), timeout=5)
 
     asyncio.run(scenario())

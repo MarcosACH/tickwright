@@ -100,6 +100,11 @@ $V report <run>                                           # writes and prints RE
 
 - `cloid` turns a signal id (`<strategy_id>:<symbol>:<seq>`) into the order's cloid, so you can
   wait on the store row for a specific order.
+- `venue-fills <run> <life>` asks the testnet venue for every fill whose oid is the `venue_oid`
+  of one of the life's `orders` rows, writes them to `<life>.venue-fills.json`, and prints the
+  fee sum. The venue splits one order into partial fills at will, so never count fill rows by
+  hand. The cut is the oid and not the cloid, because every run places the same cloids. Run it
+  before `cleanup`, which drops the store it reads the oids from.
 - `await` polls up to `--timeout` (default 30 s) and prints the matching log line or row. On
   timeout it prints the last five log lines and exits 1. `--sql` needs `--expect`, and a query
   with no rows never matches.
@@ -110,7 +115,8 @@ $V report <run>                                           # writes and prints RE
 
 Every recipe in `features/` uses only these verbs. `await` is how you wait. `check` is how you
 judge. Do not skip a `check` because the `await` already matched: the await proves timing, the
-check proves the value and writes it down.
+check proves the value and writes it down. When both sides are numbers, `await --sql` and `check`
+compare by value, so `0.000` matches `0.00000`. Anything else is compared as text.
 
 ## Evidence
 
@@ -127,6 +133,7 @@ Everything a life produced lands in `.agents/verify/<run-id>/evidence/`:
 | `<life>.store.txt` | `dump`: the store tables |
 | `<life>.events.txt` | `dump`: event counts and the order, position, account, engine trail |
 | `<name>.jsonl` | a copy of each tick file used |
+| `<life>.venue-fills.json` | `venue-fills`: the testnet fills of the life's orders, with the fee sum |
 | `checks.txt` | one `PASS` or `FAIL` line per `check`, with `expected=` and `got=` |
 | `REPORT.md` | `report`: the verdict, the FAIL lines, alarm events, exit codes, store tables |
 | `ISSUE.md` | `issue-draft`: a bug body for the FAIL lines, when there are any |

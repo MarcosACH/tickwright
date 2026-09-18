@@ -1,207 +1,230 @@
 # Tickwright
 
-> Apache-2.0 · a readable, event-driven algorithmic trading engine.
+A readable, event-driven algorithmic trading engine.
 
-Tickwright turns a market feed into orders through an event-driven pipeline —
-`MarketFeed → Strategy → Exchange`, coordinated by an `EventBus` — with a crash-safe
-order-lifecycle saga, idempotent recovery, and exchange reconciliation. It is a small,
-fully-typed, heavily-tested Python core, built to be **read, tested, and extended** — not a
-batteries-included trading product.
+[![ci](https://github.com/MarcosACH/tickwright/actions/workflows/ci.yml/badge.svg)](https://github.com/MarcosACH/tickwright/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-You bring a `MarketFeed`, a `Strategy`, and an `Exchange`. Tickwright gives you the event bus, the
-order-lifecycle state machine, crash-safe recovery, and exchange reconciliation — the hard middle
-that production trading systems get wrong.
+You bring a config and a strategy. Tickwright handles the rest: the market feed, the event flow,
+order execution, crash recovery, and reconciliation against the exchange. It runs one venue per
+process, on paper or on real money.
 
-## Why this exists
-
-The open-source trading landscape is polarized: fast HFT engines you can't read, and retail bots
-that are *products*, not architecture. There is no small, Python-native, **readable** engine that
-demonstrates *correct* event-driven trading-system architecture — sagas, idempotent recovery, order
-reconciliation — with a test suite you can trust and seams you can extend.
-
-Tickwright fills that gap. Its value is **clarity and correctness, not speed or breadth.** You
-should be able to read the whole core in an afternoon and understand exactly how a tick becomes an
-order, and how the system recovers when the process dies mid-placement.
-
-## v1 scope (deliberately narrow)
-
-- **One real venue:** [Hyperliquid](https://hyperliquid.gitbook.io/hyperliquid-docs) — market data
-  needs **no auth** (both WebSocket channels it reads — `trades` and `activeAssetCtx` — are
-  unauthenticated), so the repo runs end-to-end with zero API keys. The write path (placing orders)
-  needs a signing key; the paper default needs none.
-- **One simulated venue:** a deterministic, in-process **paper exchange** — the default and the star
-  of the MVP. It fills off the tick stream with a configurable fill model (slippage / partials /
-  latency), so the repo is runnable and fully testable by anyone with zero setup.
-- **Two event-bus backends:** `InMemoryBus` (instant, the default) and `KafkaBus` (the distributed
-  story). Same `EventBus` interface.
-- **Two durable stores:** `SQLiteStore` (file or in-memory, the default) and `PostgresStore`
-  (production parity). Same `Store` interface.
-- **Engine-only, live/paper execution.** Reference strategies (a one-shot market/limit order) exist
-  only to exercise the pipeline. No strategy library, no UI.
-- **A venue-agnostic accounting surface** (perps only). The engine keeps one `Position` per symbol
-  and one `Account` per process, updated on every fill, fee, and funding payment. A strategy reads
-  them through the `Portfolio` seam: realized and unrealized PnL, notional, margin used, liquidation
-  price, equity, and free margin. The same model runs on paper and on live. On live the numbers are
-  cross-checked against the venue's account snapshot, and a disagreement is alerted, never hidden.
-
-**Two implementations per seam — no more.** One looks hardcoded; three is scope creep. Two proves
-the abstraction is real.
-
-## Non-goals (this is a feature, not a limitation)
-
-- ❌ Not a universal "any exchange / any feed / build your platform" framework.
-- ❌ Not competing on latency or throughput (it's Python, proudly so).
-- ❌ **No backtesting.** v1 is live/paper execution only. The `ReplayFeed` is a *deterministic
-  test/dev feed*, not a backtester — no performance analytics.
-- ❌ **The accounting surface reports. It never acts.** There is no margin-gated rejection: an order
-  that would exceed free margin is placed. There is no liquidation: paper never closes a position
-  for you, and live leaves that to the venue. A negative free margin is reported without
-  consequence. It is the honest "underwater" signal, and what a strategy does with it is its own
-  business. Deferred follow-ups are listed in
-  [`docs/extending.md`](docs/extending.md#deferred-extension-points).
-- ❌ Not a strategy marketplace, indicator library, or research product.
-- ❌ Not a plugin system with registries or config-DSLs. Extensibility is via **implementing a
-  Protocol**, documented in [`docs/extending.md`](docs/extending.md) — nothing more.
-- ❌ No GUI, notifications, or broker integrations beyond the two venues above.
-- ❌ Not financial advice, and not certified for live money. Run it against real funds at your own
-  risk.
+The engine is a small, typed Python core. It is built to be read, tested, and extended.
 
 ## Quickstart
 
-Requires **Python 3.13** and [uv](https://github.com/astral-sh/uv). Every command below works
-verbatim on a fresh clone — the default stack (paper exchange + in-memory bus + SQLite + a
-file-backed replay feed) needs **no external services and no API keys**.
+You need Python 3.13 and [uv](https://github.com/astral-sh/uv). The default setup runs a paper
+exchange on a recorded tick file. It needs no external service and no API key.
 
 ```bash
-# 1. Create the project venv and install the locked dependencies.
-uv venv
-uv sync
-
-# 2. Run the test suite (unit + property tests; the hermetic default path).
-uv run pytest
-
-# 3. Run the paper engine on the bundled sample tick stream.
-cp .env.example .env
-uv run tickwright
+uv venv && uv sync      # create the venv and install locked dependencies
+uv run pytest           # run the hermetic test suite
+cp .env.example .env    # the sample config
+uv run tickwright       # run the engine
 ```
 
-Step 3 replays [`examples/ticks.jsonl`](examples/ticks.jsonl) through the demo `single_shot_market`
-strategy into the paper exchange, and you'll see the order lifecycle on stdout as structured JSON:
+The run replays [`examples/ticks.jsonl`](examples/ticks.jsonl) through the demo
+`single_shot_market` strategy into the paper exchange. The order lifecycle shows up on stdout as
+structured JSON:
 
 ```json
-{"event": "engine.barrier_cleared", "run_id": "run-…", "level": "info", …}
-{"event": "engine.feed_started", "run_id": "run-…", "level": "info", …}
-{"event": "order.placed", "signal_id": "demo:BTC:1", "level": "info", …}
-{"event": "order.submitted", "signal_id": "demo:BTC:1", "level": "info", …}
-{"event": "order.filled", "cloid": "0x…", "level": "info", …}
+{"event": "engine.barrier_cleared", "run_id": "run-…", "level": "info"}
+{"event": "engine.feed_started", "run_id": "run-…", "level": "info"}
+{"event": "order.placed", "signal_id": "demo:BTC:1", "level": "info"}
+{"event": "order.submitted", "signal_id": "demo:BTC:1", "level": "info"}
+{"event": "order.filled", "cloid": "0x…", "level": "info"}
 ```
 
-The engine keeps running after the replay drains (a live/paper engine waits for more work and its
-reconciliation cadence — it does not self-exit on end-of-file). Press **Ctrl-C** to stop it: it
-shuts down gracefully, takes final strategy snapshots, leaves resting orders alone, and exits `0`.
+The engine keeps running after the file drains. Press Ctrl-C to stop it. It shuts down cleanly,
+leaves resting orders alone, and exits `0`.
 
-A paper run has one required variable: `TICKWRIGHT_PAPER__GENESIS_COLLATERAL`, the collateral the
-paper account opens with. It has no default on purpose. Equity and free margin are measured against
-it, so the engine refuses to start against a number nobody chose. `.env.example` sets it to
-`100000`, which is why step 3 runs as is. A live run never needs it. Its genesis is read from the
-venue at startup.
+### Other setups
 
-Everything is configured through the environment / `.env` — [`.env.example`](.env.example) is the
-canonical variable reference, and every variable maps onto a field of `AppConfig`
-([`src/tickwright/app/config.py`](src/tickwright/app/config.py)) with the `TICKWRIGHT_` prefix. To
-switch the fill model to `stochastic`, swap in the Kafka bus or Postgres store, or point the live
-Hyperliquid feed at real market data, edit `.env` — no code changes.
+Every setting is an environment variable with the `TICKWRIGHT_` prefix. Edit `.env`, no code
+changes. [`.env.example`](.env.example) lists every variable, its default, and the decision
+behind it.
 
-## Architecture at a glance
+| Setup | Add to `.env` | Needs |
+| --- | --- | --- |
+| Live Hyperliquid market data, paper exchange | `TICKWRIGHT_FEED=hyperliquid`<br>`TICKWRIGHT_HYPERLIQUID__SYMBOLS=["BTC"]` | Nothing. The data channels are public. |
+| Hyperliquid testnet, real order flow | The two lines above, plus<br>`TICKWRIGHT_EXCHANGE=hyperliquid`<br>`TICKWRIGHT_HYPERLIQUID__TESTNET=true`<br>`TICKWRIGHT_HYPERLIQUID__SIGNING_KEY=0x…` | A funded testnet wallet. |
+| Kafka bus | `TICKWRIGHT_BUS=kafka` | `docker compose up -d kafka` |
+| Postgres store | `TICKWRIGHT_STORE=postgres` | `docker compose up -d postgres` |
 
+Set `TICKWRIGHT_HYPERLIQUID__TESTNET=false` and the same key to trade real money. Read the
+[risk note](#risk) first.
+
+## How a tick becomes an order
+
+Solid arrows are events on the `EventBus`. Dashed arrows are direct method calls.
+
+```mermaid
+flowchart LR
+    Feed[MarketFeed] -->|ticks, marks| Bus[EventBus]
+    Bus -->|ticks, order events| Strategy
+    Strategy -->|signals| Bus
+    Bus -->|signals, acks, fills| EM[ExecutionManager]
+    EM -->|order events| Bus
+    Bus -->|ticks| Exchange
+    Exchange -->|acks, fills, funding| Bus
+    Recon[Reconciliation] -->|acks, fills| Bus
+    EM -.->|check| Guard[PreTradeGuard]
+    EM -.->|checkpoint| Store[(Store)]
+    EM -.->|place, cancel| Exchange
+    Recon -.->|read orders| Exchange
+    EM -.->|fills| Portfolio[PortfolioProjection]
 ```
-   ticks              signals             orders / lifecycle
-MarketFeed ─────▶ Strategy ─────▶ Exchange ─────▶ (venue)
-    │                 │                │
-    └────────┬────────┴────────┬───────┘
-             ▼                  ▼
-        ┌──────────────────────────────────┐
-        │             EventBus              │   InMemoryBus | KafkaBus
-        └──────────────────────────────────┘
-                        │
-        ┌───────────────┴──────────────────┐
-        │  Engine core (the hard middle):   │
-        │  • order-lifecycle saga           │   ExecutionManager
-        │  • reconciliation loop            │   Reconciliation (+ ghost gate)
-        │  • idempotent recovery            │   Cache (write-through read-model)
-        │  • pre-trade guard + kill switch  │   PreTradeGuard
-        │  • positions, account, PnL        │   PortfolioProjection (+ ledger reconcile)
-        │  • durable checkpoints            │   Store   SQLite | Postgres
-        └───────────────────────────────────┘
+
+- The `EventBus` is the only coupling between components. Everything publishes and subscribes by
+  event type. Reads are never bus messages. Reconciliation reads the venue by a direct call.
+- The `PreTradeGuard` runs before every placement. It checks size and price validity, min notional,
+  and the kill switch. A failed check denies the order and nothing is sent.
+- The `ExecutionManager` writes every order state to the `Store` before it touches the network.
+- `Reconciliation` compares local order state with the venue on a schedule and heals the
+  difference. A failed venue read is never treated as an empty venue. On a failed read it freezes
+  and removes nothing.
+- The `PortfolioProjection` keeps one `Position` per symbol and one `Account` per process. Every
+  fill updates the position, the account cash line, and the order checkpoint in one transaction.
+
+The runtime is a single `asyncio` process. All time flows through an injected `Clock`, so tests
+never sleep.
+
+## Order lifecycle
+
+Every order is a small state machine keyed by its client order id. Each transition is checkpointed.
+
+```mermaid
+stateDiagram-v2
+    [*] --> PENDING: intent written to store
+    PENDING --> SUBMITTED: sent to venue
+    PENDING --> DENIED: guard failed
+    PENDING --> FAILED: recovery proved it never landed
+    SUBMITTED --> LIVE: venue acked
+    SUBMITTED --> REJECTED
+    SUBMITTED --> FAILED
+    LIVE --> PARTIALLY_FILLED
+    LIVE --> FILLED
+    LIVE --> CANCELLED
+    LIVE --> REJECTED: vanished, no fills
+    PARTIALLY_FILLED --> PARTIALLY_FILLED
+    PARTIALLY_FILLED --> FILLED
+    PARTIALLY_FILLED --> CANCELLED
+    FILLED --> [*]
+    CANCELLED --> [*]
+    DENIED --> [*]
+    REJECTED --> [*]
+    FAILED --> [*]
 ```
 
-The `EventBus` is the only coupling between components: everything publishes and subscribes by event
-type. The **order lifecycle** is a saga/state machine (`PENDING → SUBMITTED → LIVE → FILLED /
-CANCELLED / …`) whose transitions checkpoint to the `Store` **before** any network send, so a crash
-mid-placement is recoverable. **Reconciliation** periodically compares local saga state against
-venue truth, with a grace period and a connectivity-failure guard — a failed read is never a view
-and never `[]` — so an outage is never misread as "all orders vanished." **Recovery** replays from
-the store and rebuilds the `Cache` read-model; restarting converges to the same state — no
-double-fills, no orphaned orders. **Accounting** is a second projection beside the order cache.
-Every fill writes the position, the account cash line, and the order checkpoint in one store
-transaction, so a crash cannot leave a fill without its economics. Mark-dependent numbers
-(unrealized PnL, margin, liquidation price) are recomputed from the latest mark on every read, never
-stored. On live a **ledger reconciliation** loop compares them against the venue's account snapshot
-and heals the cash line toward venue truth.
+`SUBMITTED` can also go straight to `PARTIALLY_FILLED`, `FILLED`, or `CANCELLED` when the venue
+reports the fill with the ack. A timeout never moves an order. Only reconciliation moves a stuck
+`SUBMITTED`.
 
-The runtime is a **single `asyncio` process**. All time flows through an injected `Clock` (so the
-test suite never sleeps), and every state-affecting path emits a named observability event.
+## Crash recovery
 
-### Package layout
+The `PENDING` record is written before the network send. So a crash at any point leaves a record
+the engine can check against the venue on restart.
+
+```mermaid
+sequenceDiagram
+    participant E as Engine
+    participant S as Store
+    participant V as Venue
+    E->>S: restore orders, positions, account, kill switch
+    loop each non-terminal order
+        E->>V: read order by client order id
+        alt venue answers
+            V-->>E: current state
+            E->>S: apply the difference
+        else read fails
+            V-->>E: failure
+            E->>E: freeze, remove nothing
+        end
+    end
+    E->>E: barrier cleared, feed starts
+```
+
+Restarting converges to the same state. No double fill and no orphaned order. The kill switch is
+durable too. A halt outlives a crash and is cleared only by an explicit reset.
+
+## Operate it
+
+| Signal | Effect |
+| --- | --- |
+| `SIGINT` / `SIGTERM` | Graceful stop. Exit code `0`. |
+| `SIGUSR1` | Trip the kill switch. New orders are denied. Resting orders stay. |
+| `SIGUSR2` | Reset the kill switch. |
+
+A non-zero exit means the engine faulted. That is the restart signal for your supervisor.
+
+## What it does today
+
+- Venues: [Hyperliquid](https://hyperliquid.gitbook.io/hyperliquid-docs) (mainnet and testnet),
+  and a deterministic in-process paper exchange with a configurable fill model.
+- Feeds: live Hyperliquid WebSocket, and a JSONL replay feed for deterministic runs.
+- Buses: `InMemoryBus` and `KafkaBus`.
+- Stores: `SQLiteStore` and `PostgresStore`.
+- Accounting: positions, realized and unrealized PnL, fees, funding, margin, liquidation price,
+  equity, and free margin. Perps only. On live, the numbers are checked against the venue's
+  account snapshot and a disagreement is alerted.
+- Strategies: two reference strategies that place one market or one limit order. They exist to
+  exercise the pipeline.
+
+Each seam has exactly two implementations. One would look hardcoded. Three would be scope creep.
+
+## What it is not
+
+- Not a backtester. The replay feed is a test feed, with no performance analytics.
+- Not a risk engine. The accounting surface reports. It never rejects an order on margin and it
+  never liquidates.
+- Not a plugin system. You extend it by implementing a Protocol. See
+  [`docs/extending.md`](docs/extending.md).
+- Not fast. It is Python, and it competes on clarity, not latency.
+- No GUI, no notifications, no strategy library.
+
+## Package layout
 
 ```
 src/tickwright/
-  domain/         # events, seam Protocols, value types, the order FSM — depends on nothing
-  engine/         # ExecutionManager, Reconciliation, Cache, PreTradeGuard, StrategyHost, runner
-  adapters/       # bus/ (InMemory|Kafka), store/ (SQLite|Postgres), feed/ (Replay),
-                  #   paper/ (PaperExchange + FillModel), clock/ (Live|Manual)
-  venues/         # hyperliquid/ — the one self-contained live venue package
-  strategies/     # minimal reference Strategy impls
-  observability/  # named-event catalog, correlation ids, structured logging
-  app/            # the composition root: build_engine(config) + the CLI entry
+  domain/         # events, seam Protocols, value types, the order state machine
+  engine/         # ExecutionManager, Reconciliation, Cache, PreTradeGuard, runner
+  adapters/       # bus/, store/, feed/, paper/, clock/
+  venues/         # hyperliquid/
+  strategies/     # reference strategies
+  observability/  # named events, correlation ids, structured logging
+  app/            # composition root: build_engine(config) and the CLI
 ```
 
-Dependencies point one way: `app` knows every concrete; `engine` depends only on `domain` Protocols;
-adapters never import each other. The direction is enforced in CI by `import-linter`
-([ADR-0032](docs/adr/0032-package-topology-dependency-direction-composition-root.md)).
+Dependencies point one way. `import-linter` enforces the direction in CI.
+
+```mermaid
+flowchart TD
+    app --> engine
+    app --> adapters
+    app --> venues
+    app --> strategies
+    engine --> domain
+    adapters --> domain
+    venues --> domain
+    strategies --> domain
+    engine --> observability
+    adapters --> observability
+    venues --> observability
+```
 
 ## Learn more
 
-- **[`CONTEXT.md`](CONTEXT.md)** — the domain glossary; every term (Engine, Event, EventBus, saga,
-  reconciliation, ghost, …) resolved. Start here.
-- **[`docs/module-maps/v1-core-engine.md`](docs/module-maps/v1-core-engine.md)** — the architecture
-  anchor: each module's interface, responsibilities, seams, and why it earns its place.
-- **[`docs/extending.md`](docs/extending.md)** — the pull-then-subscribe strategy contract, and
-  checklists for adding a strategy, a venue, or a bus/store backend.
-- **[`docs/adr/`](docs/adr/)** — one Architecture Decision Record per load-bearing decision, with the
-  alternatives rejected and why.
-- **[`CONTRIBUTING.md`](CONTRIBUTING.md)** — setup, checks, git hooks, and how we work (TDD, vertical
-  slices, docs-sync).
+- [`CONTEXT.md`](CONTEXT.md): the domain glossary. Start here.
+- [`docs/module-maps/v1-core-engine.md`](docs/module-maps/v1-core-engine.md): each module, its
+  interface, and why it exists.
+- [`docs/extending.md`](docs/extending.md): how to add a strategy, a venue, or a backend.
+- [`docs/adr/`](docs/adr/): one record per design decision, with the alternatives rejected.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md): checks, test tiers, git hooks, and how we work.
 
-## Development
+## Risk
 
-```bash
-uv run pytest -v          # tests (property tests via hypothesis; ≥90% coverage on the core)
-uv run ruff check .       # lint
-uv run ruff format .      # format
-uv run mypy               # type-check (bare: `mypy .` skips the hidden .claude/hooks)
-uv run lint-imports       # dependency-direction boundaries (ADR-0032)
-```
-
-The non-default backends are opt-in and need infrastructure: `docker compose up -d postgres` for the
-`PostgresStore` path and `docker compose up -d kafka` to run the app on the `KafkaBus`. The
-`postgres`- and `live`-marked test tiers auto-skip when their service (a reachable Postgres, a funded
-Hyperliquid **testnet** key) isn't configured, so a bare `uv run pytest` stays green; the `KafkaBus`
-adapter runs against an in-process fake broker and needs no infrastructure. CI provides the Postgres
-service and runs that tier in the gate; the `live` tier is never part of it. See the test-tier
-breakdown in [`CONTRIBUTING.md`](CONTRIBUTING.md) and the variables in [`.env.example`](.env.example).
-The `live` tier is never in the merge gate; it runs on a weekly schedule of its own
-([`ci-live.yml`](.github/workflows/ci-live.yml)), which is what watches for venue drift.
+Tickwright is at version `0.x`. It is not certified for real money. Run it against real funds at
+your own risk. It is not financial advice.
 
 ## License
 
