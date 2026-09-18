@@ -161,3 +161,11 @@ Consumed by `/code-review` (any regression is BLOCKING) and `/python-codebase-ma
    abandoned with real exposure behind it, against a slower first ghost. Unchanged, and a
    different resolution: a `PENDING`/`SUBMITTED` saga the venue positively has no record of
    resolves `FAILED`.* (ADR-0011 inv 3, ADR-0010)
+12. **A venue read or cancel goes by the oid once the saga holds one.** A cloid is derived from
+   the signal id, and the venue remembers every cloid ever placed on the account. A fresh store
+   restarts the seq at 1, so a second life places the same cloid again, and a read by cloid can
+   answer with either order. The oid names exactly one. Before the ack there is no oid, so the
+   read goes by cloid, and the adapter must refuse a record the venue placed before the saga's
+   own creation time, less the skew allowance. Its fills are never read. A record adopted from
+   an earlier life moves money the venue never moved, and the real fill then faults the engine.
+   (ADR-0011 inv 2, #354)

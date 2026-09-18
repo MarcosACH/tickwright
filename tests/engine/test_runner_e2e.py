@@ -558,7 +558,7 @@ class _LiveShapedVenue(LiveVenueDouble):
     async def place(self, order: PlaceOrder) -> None:
         raise AssertionError("nothing is placed: no strategy is registered")
 
-    async def cancel(self, cloid: str) -> None:
+    async def cancel(self, ref: OrderRef) -> None:
         raise AssertionError("nothing is cancelled: no order exists")
 
     async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
@@ -723,7 +723,7 @@ class _PaperShapedVenue(VenueDouble):
     async def place(self, order: PlaceOrder) -> None:
         raise AssertionError("nothing is placed: no strategy is registered")
 
-    async def cancel(self, cloid: str) -> None:
+    async def cancel(self, ref: OrderRef) -> None:
         raise AssertionError("nothing is cancelled: no order exists")
 
     async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
@@ -1688,7 +1688,7 @@ class _LifecycleRecordingVenue(VenueDouble):
         # through the saga path, which is not what these tests are asking about.
         self._timeline.append("exchange.place")
 
-    async def cancel(self, cloid: str) -> None:
+    async def cancel(self, ref: OrderRef) -> None:
         self._timeline.append("exchange.cancel")
 
     async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:

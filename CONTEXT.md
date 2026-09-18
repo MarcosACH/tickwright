@@ -129,6 +129,10 @@ back*: one anchor, two halves of one loop. See ADR-0011, ADR-0015, ADR-0034.
 Since #242 `fetch_order` takes an `OrderRef` rather than a bare cloid. The ref adds the symbol,
 the venue's oid, and the ack time, which the read needs once the venue has dropped the order
 record and only the fill history is left (ADR-0011 inv 2).
+Since #354 `cancel` takes the same ref, and the ref also carries the saga's creation time. A
+cloid can name more than one venue order across lives of the account. So a read or a cancel
+goes by the oid once the saga holds one, and before that a read refuses a record the venue
+placed before the saga existed (ADR-0011 inv 2, invariant 12).
 _Avoid_: order API, order client (the anchor is what makes it one seam, not the verb shapes).
 
 **Account anchor** / `AccountAnchor` *(Protocol)*:

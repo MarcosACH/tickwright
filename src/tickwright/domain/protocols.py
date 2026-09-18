@@ -468,10 +468,12 @@ class OrderAnchor(Protocol):
         """Place ``order`` at the venue; emit the resulting raw ``ExecutionReport``(s)."""
         ...
 
-    async def cancel(self, cloid: str) -> None:
-        """Cancel the order identified by ``cloid``; emit the resulting raw
+    async def cancel(self, ref: OrderRef) -> None:
+        """Cancel the order ``ref`` names; emit the resulting raw
         ``ExecutionReport``. A cancel of an unknown/already-gone order is a
-        benign no-op (ADR-0026)."""
+        benign no-op (ADR-0026). The ref carries the saga's oid once the venue
+        has assigned one, and a venue that keeps more than one order under a
+        cloid cancels by that oid (#354)."""
         ...
 
     async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:

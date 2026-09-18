@@ -13,6 +13,10 @@ original order it cancels. The strategy references orders by the `signal_id` **i
 issues `exchange.cancel(cloid)`. Carrying `target_cloid` directly was rejected: it leaks the engine's
 `cloid` derivation into every strategy author's code. Idempotency falls out of ADR-0025 — a re-emitted
 `CancelSignal` has the same `signal_id` and dedupes; cancelling an already-terminal order is a no-op.
+**(Amended by #354 — the call is `exchange.cancel(OrderRef.of(order))`:** the ref carries the
+cloid, the symbol, and the oid once the venue acked one. A cloid can name more than one venue
+order across lives of the account, so the adapter cancels by oid when it has one. The strategy
+contract above is unchanged. [#354]**)**
 
 ## In-flight cancels resolve via a `cancel_requested` marker, not a `CANCELLING` state
 

@@ -94,7 +94,7 @@ class _CrashingTransport(VenueLink):
         await self._venue.place(order)
         raise ConnectionError("process died with the send in flight; ack lost")
 
-    async def cancel(self, cloid: str) -> None:
+    async def cancel(self, ref: OrderRef) -> None:
         raise AssertionError("first life never cancels")
 
     async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
