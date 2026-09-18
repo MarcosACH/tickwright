@@ -15,6 +15,7 @@ a log. Testnet only. Mainnet placement is out of scope for this skill.
 - `tn-cash` the ledger cash never needs a heal on a fresh account that only this run traded.
   `account.healed` must not fire.
 - `tn-redaction` the signing key appears nowhere in the evidence.
+- `tn-divergence` a clean round trip raises no `valuation.divergence`.
 
 ## How to get to it (user POV)
 
@@ -48,7 +49,8 @@ Preconditions:
   `$V check testnet rt tn-fee --sql "select fees from positions" --expect $FEES`,
   `$V check testnet rt tn-reconcile --event account.reconciled --expect 1`,
   `$V check testnet rt tn-cash --event account.healed --expect 0`,
-  `$V check testnet rt tn-redaction --event verify.flat --expect 1` (the run reached the end)
+  `$V check testnet rt tn-redaction --event verify.flat --expect 1` (the run reached the end),
+  `$V check testnet rt tn-divergence --event valuation.divergence --expect 0`
   and read the `secrets-check` line: `no signing key in evidence`.
 - **Report.** Run `$V report testnet`. Expected verdict: `PASS`. A FAIL that matches a Gotcha
   below is known. Any other FAIL is new, and `$V issue-draft testnet` drafts it.
@@ -79,3 +81,6 @@ Preconditions:
 - `HOLD_TICKS` counts real testnet trades. On a quiet market three ticks can take a minute.
 - A `verify.flat` read of `account.equity` can be `null` when no mark has arrived since the
   fill. That is the documented "unknown, not zero" rule, not a failure.
+- **Known FAIL since 2026-09-17 (#367): `tn-divergence`.** The first account reconcile after the
+  open classifies before it ingests the isolated position's collateral, so it always raises a
+  false `valuation.divergence` on `margin_used` and `free_margin`. Stays red until #367 lands.
