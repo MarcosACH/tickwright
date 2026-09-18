@@ -88,5 +88,5 @@ gh issue close <PRD#> --comment "Delivered in vX.Y.Z: <release-url>. All sub-iss
 - **v0.3.0** (2026-09-18). Trade economics and the live Hyperliquid exchange path. PRD #168 sets
   the MINOR floor: fees, funding, margin, mark price, the ledger, and reconcile heals. The seams
   grew (`Exchange` start/stop, `MarketFeed` owes a mark, the `Portfolio` read API, `Store` ledger
-  members) and 16 `TICKWRIGHT_*` variables were added. Also the agent hooks and the
+  members) and 15 `TICKWRIGHT_*` variables were added. Also the agent hooks and the
   `/verify-tickwright` skill. Bump PR backed by #371.
