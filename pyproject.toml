@@ -1,6 +1,6 @@
 [project]
 name = "tickwright"
-version = "0.2.0"
+version = "0.3.0"
 description = "A readable, event-driven algorithmic trading engine."
 requires-python = ">=3.13,<3.14"
 license = "Apache-2.0"

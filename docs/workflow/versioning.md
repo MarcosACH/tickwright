@@ -85,3 +85,8 @@ gh issue close <PRD#> --comment "Delivered in vX.Y.Z: <release-url>. All sub-iss
 
 - **v0.1.0** (2026-07-13) — first release; full v1 core-engine scope of PRD #9. Tag-only (scaffold already declared `0.1.0`).
 - **v0.2.0** (2026-07-21) — hardening release; the `AppConfig` config-contract split (#71) sets the MINOR floor, alongside git-hook fixes, test-hermeticity gating, workflow docs, and dependency bumps. First bump-PR release (#96 moved `pyproject.toml` `0.1.0` → `0.2.0`), in contrast to `v0.1.0`'s tag-only cut.
+- **v0.3.0** (2026-09-18). Trade economics and the live Hyperliquid exchange path. PRD #168 sets
+  the MINOR floor: fees, funding, margin, mark price, the ledger, and reconcile heals. The seams
+  grew (`Exchange` start/stop, `MarketFeed` owes a mark, the `Portfolio` read API, `Store` ledger
+  members) and 15 `TICKWRIGHT_*` variables were added. Also the agent hooks and the
+  `/verify-tickwright` skill. Bump PR backed by #371.
