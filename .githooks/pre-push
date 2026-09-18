@@ -36,8 +36,8 @@ done
 # clean tree so it never conflicts. Restore the real exit code so a type error blocks
 # push.
 #
-# Deliberately off the shared refs/stash stack (see CONTRIBUTING.md "Per-worktree vs
-# shared git state"): an unqualified `git stash pop` (== stash@{0}) could restore an
+# Deliberately off the shared refs/stash stack (see docs/agents/hooks.md "Per-worktree
+# and shared git state"): an unqualified `git stash pop` (== stash@{0}) could restore an
 # entry another worktree pushed while mypy ran, silently swapping uncommitted work.
 # Instead `git stash create` snapshots the dirty tree into a commit without touching
 # any stack; we park that commit under refs/worktree/ — git's per-worktree ref

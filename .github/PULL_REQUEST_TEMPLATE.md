@@ -1,5 +1,5 @@
 <!--
-One PR per change — no mixed-concern PRs. See CONTRIBUTING.md.
+One PR per issue. See CONTRIBUTING.md.
 The PR merge is what closes the issue; never close issues by hand.
 -->
 

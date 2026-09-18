@@ -219,7 +219,7 @@ flowchart TD
   interface, and why it exists.
 - [`docs/extending.md`](docs/extending.md): how to add a strategy, a venue, or a backend.
 - [`docs/adr/`](docs/adr/): one record per design decision, with the alternatives rejected.
-- [`CONTRIBUTING.md`](CONTRIBUTING.md): checks, test tiers, git hooks, and how we work.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md): setup, checks, test tiers, and how we work.
 
 ## Risk
 
