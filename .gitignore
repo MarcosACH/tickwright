@@ -39,6 +39,11 @@ evals/results/
 # no-excluded-reads hook for the same reason the plans are.
 .agents/verify/
 
+# Playground scripts the maintainer runs against the engine by hand. Not
+# maintained and not tested, so never committed. Readable by the
+# no-excluded-reads hook, since the maintainer asks about them by name (#365).
+prototypes/
+
 # Private working notes — NEVER committed
 docs/private/
 *.private.md

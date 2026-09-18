@@ -288,7 +288,7 @@ class _ForgetfulVenue(VenueDouble):
     async def place(self, order: PlaceOrder) -> None:
         raise AssertionError("the ghost cycle must never place")
 
-    async def cancel(self, cloid: str) -> None:
+    async def cancel(self, ref: OrderRef) -> None:
         raise AssertionError("the ghost cycle must never cancel")
 
     async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:

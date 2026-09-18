@@ -86,6 +86,7 @@ def _finished_life(
     exit_code: int,
     events: list[dict],
     orders: list[tuple[str, str]],
+    venue_oids: dict[str, str] | None = None,
 ) -> None:
     """Leave behind what one life leaves: a log, an exit file, a SQLite store."""
     evidence = helper.evidence(run_id)
@@ -94,8 +95,13 @@ def _finished_life(
     (evidence / f"{life}.exit").write_text(f"{exit_code}\n")
     (scratch / ".env").write_text("TICKWRIGHT_SQLITE__PATH=store.db\n")
     with closing(sqlite3.connect(scratch / "store.db")) as conn:
-        conn.execute("create table if not exists orders (cloid text primary key, state text)")
-        conn.executemany("insert or replace into orders values (?, ?)", orders)
+        conn.execute(
+            "create table if not exists orders (cloid text primary key, state text, venue_oid text)"
+        )
+        conn.executemany(
+            "insert or replace into orders values (?, ?, ?)",
+            [(cloid, state, (venue_oids or {}).get(cloid)) for cloid, state in orders],
+        )
         conn.execute(
             "create table if not exists positions (strategy_id text, symbol text, signed_size text)"
         )
@@ -147,6 +153,52 @@ class TestCheck:
         assert (
             helper.evidence("r1") / "checks.txt"
         ).read_text() == "FAIL crash-converge second expected=1.000 got=0.500\n"
+
+    def test_a_numeric_check_passes_on_equal_value_with_different_decimals(
+        self, helper: ModuleType, run: Callable[..., tuple[int, str]]
+    ) -> None:
+        # The store keeps a size at the instrument's decimals, and those can change
+        # between engine versions. A flat position is flat at 0.000 and at 0.00000.
+        run("init", "r1")
+        _finished_life(helper, "r1", "rt", exit_code=0, events=[], orders=[])
+        with closing(sqlite3.connect(helper.scratch("r1") / "store.db")) as conn:
+            conn.execute("update positions set signed_size = '0.00000'")
+            conn.commit()
+
+        code, _ = run(
+            "check",
+            "r1",
+            "rt",
+            "tn-round-trip",
+            "--sql",
+            "select signed_size from positions",
+            "--expect",
+            "0.000",
+        )
+
+        assert code == 0
+        assert (
+            helper.evidence("r1") / "checks.txt"
+        ).read_text() == "PASS tn-round-trip rt expected=0.000 got=0.00000\n"
+
+    def test_a_non_numeric_check_still_compares_the_text(
+        self, helper: ModuleType, run: Callable[..., tuple[int, str]]
+    ) -> None:
+        run("init", "r1")
+        _finished_life(helper, "r1", "first", exit_code=0, events=[], orders=[("0xabc", "live")])
+
+        code, _ = run(
+            "check",
+            "r1",
+            "first",
+            "paper-fill",
+            "--sql",
+            "select state from orders where cloid='0xabc'",
+            "--expect",
+            "filled",
+        )
+
+        assert code == 1
 
     def test_an_exit_check_reads_the_exit_file(
         self, helper: ModuleType, run: Callable[..., tuple[int, str]]
@@ -402,6 +454,32 @@ class TestAwait:
         assert code == 1
         assert "TIMEOUT" in out
 
+    def test_a_numeric_sql_await_matches_on_equal_value_with_different_decimals(
+        self, helper: ModuleType, run: Callable[..., tuple[int, str]]
+    ) -> None:
+        # Same rule as check: a store column that gained decimals must not
+        # turn a correct await into a timeout.
+        run("init", "r1")
+        _finished_life(helper, "r1", "rt", exit_code=0, events=[], orders=[])
+        with closing(sqlite3.connect(helper.scratch("r1") / "store.db")) as conn:
+            conn.execute("update positions set signed_size = '0.00000'")
+            conn.commit()
+
+        code, out = run(
+            "await",
+            "r1",
+            "rt",
+            "--sql",
+            "select signed_size from positions",
+            "--expect",
+            "0.000",
+            "--timeout",
+            "0",
+        )
+
+        assert code == 0
+        assert "query returned '0.000'" in out
+
 
 class TestStart:
     def test_a_duplicate_life_is_refused_before_its_evidence_is_touched(
@@ -469,3 +547,141 @@ class TestDocker:
 
         assert code == 0
         assert helper.read_run_json("r1")["infra"] == ["kafka"]
+
+
+def _testnet_life(
+    helper: ModuleType,
+    run_id: str,
+    life: str,
+    *,
+    orders: dict[str, str],
+    testnet: bool = True,
+) -> None:
+    """What a testnet life leaves: a materialised log, an env copy, and its orders.
+
+    ``orders`` maps each cloid to the venue oid the ack gave it."""
+    _finished_life(
+        helper,
+        run_id,
+        life,
+        exit_code=0,
+        events=[],
+        orders=[(c, "filled") for c in orders],
+        venue_oids=orders,
+    )
+    evidence = helper.evidence(run_id)
+    events = [
+        {"event": "engine.starting", "timestamp": "2026-09-17T18:19:13.773000Z"},
+        {
+            "event": "account.materialised",
+            "account_id": "hyperliquid-testnet-0xAbC0000000000000000000000000000000000001",
+            "timestamp": "2026-09-17T18:19:13.773000Z",
+        },
+    ]
+    (evidence / f"{life}.stderr.jsonl").write_text("".join(json.dumps(e) + "\n" for e in events))
+    (evidence / f"{life}.env.txt").write_text(
+        f"TICKWRIGHT_HYPERLIQUID__TESTNET={'true' if testnet else 'false'}\n"
+    )
+
+
+class TestVenueFills:
+    """``venue-fills`` sums the venue's fee over every fill this life's orders produced.
+
+    The venue splits one order into partial fills at will, so "the two fills"
+    is not a number a recipe can count on. The cut is the venue oid: a fill
+    belongs to this life when its oid is an ``orders`` row's ``venue_oid``.
+    Time is not the cut, so a laptop clock ahead of the venue's cannot drop the
+    first fill. The cloid is not the cut either, because every run derives the
+    same cloid from the same signal id, so a past run's fill carries it too.
+    """
+
+    def test_sums_every_partial_fill_of_this_lifes_orders(
+        self,
+        helper: ModuleType,
+        run: Callable[..., tuple[int, str]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        run("init", "r1")
+        _testnet_life(helper, "r1", "rt", orders={"0xbuy": "71", "0xsell": "72"})
+        start_ms = 1789669153773
+        venue = [
+            {"time": start_ms + 90_000, "fee": "0.018", "oid": 72, "cloid": "0xsell"},
+            {"time": start_ms + 90_000, "fee": "0.016614", "oid": 72, "cloid": "0xsell"},
+            {"time": start_ms + 2_000, "fee": "0.017999", "oid": 71, "cloid": "0xbuy"},
+            {"time": start_ms + 2_000, "fee": "0.014539", "oid": 71, "cloid": "0xbuy"},
+            # The venue clock behind the laptop's: this fill is stamped before
+            # the life's first log line and still belongs to it.
+            {"time": start_ms - 2_000, "fee": "0.002076", "oid": 71, "cloid": "0xbuy"},
+            # A past run placed the same cloid, so the cloid alone would adopt
+            # this fill. Its oid is another placement's.
+            {"time": start_ms - 600_000, "fee": "0.5", "oid": 50, "cloid": "0xbuy"},
+            {"time": start_ms + 5_000, "fee": "0.5", "oid": 73},
+        ]
+        seen: dict[str, str] = {}
+
+        def fake_fetch(api_url: str, address: str) -> list[dict]:
+            seen.update(api_url=api_url, address=address)
+            return venue
+
+        monkeypatch.setattr(helper, "fetch_user_fills", fake_fetch)
+
+        code, out = run("venue-fills", "r1", "rt")
+
+        assert code == 0
+        assert out.splitlines()[0] == "0.069228"
+        assert seen == {
+            "api_url": "https://api.hyperliquid-testnet.xyz",
+            "address": "0xAbC0000000000000000000000000000000000001",
+        }
+        written = json.loads((helper.evidence("r1") / "rt.venue-fills.json").read_text())
+        assert written["fee_sum"] == "0.069228"
+        assert written["venue_oids"] == ["71", "72"]
+        assert [f["oid"] for f in written["fills"]] == [72, 72, 71, 71, 71]
+
+    def test_no_fill_for_this_lifes_orders_is_a_failure(
+        self,
+        helper: ModuleType,
+        run: Callable[..., tuple[int, str]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        run("init", "r1")
+        _testnet_life(helper, "r1", "rt", orders={"0xbuy": "71"})
+        monkeypatch.setattr(helper, "fetch_user_fills", lambda *_: [{"fee": "1", "oid": 50}])
+
+        code, out = run("venue-fills", "r1", "rt")
+
+        assert code == 1
+        assert "no venue fill for" in out
+
+    def test_refuses_a_life_that_never_materialised(
+        self, helper: ModuleType, run: Callable[..., tuple[int, str]]
+    ) -> None:
+        run("init", "r1")
+        _finished_life(helper, "r1", "rt", exit_code=0, events=[], orders=[])
+
+        code, out = run("venue-fills", "r1", "rt")
+
+        assert code == 1
+        assert "account.materialised" in out
+
+    def test_refuses_a_life_that_did_not_run_on_testnet(
+        self,
+        helper: ModuleType,
+        run: Callable[..., tuple[int, str]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        run("init", "r1")
+        _testnet_life(helper, "r1", "rt", orders={"0xbuy": "71"}, testnet=False)
+        calls: list[str] = []
+
+        def fake_fetch(api_url: str, address: str) -> list[dict]:
+            calls.append(address)
+            return []
+
+        monkeypatch.setattr(helper, "fetch_user_fills", fake_fetch)
+
+        code, out = run("venue-fills", "r1", "rt")
+
+        assert code == 1
+        assert "testnet venue only" in out
+        assert calls == []

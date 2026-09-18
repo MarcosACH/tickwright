@@ -226,7 +226,7 @@ class _AccountVenue(LiveVenueDouble):
     async def place(self, order: PlaceOrder) -> None:
         raise AssertionError("the account cycle places nothing")
 
-    async def cancel(self, cloid: str) -> None:
+    async def cancel(self, ref: OrderRef) -> None:
         raise AssertionError("the account cycle cancels nothing")
 
     async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:

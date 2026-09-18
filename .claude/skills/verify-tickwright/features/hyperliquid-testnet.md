@@ -10,11 +10,12 @@ a log. Testnet only. Mainnet placement is out of scope for this skill.
 - `tn-materialise` the ledger opens at the venue's cash (`account.materialised`).
 - `tn-round-trip` buy 0.001 BTC at market, hold three ticks, sell. Flat at the end, on the venue
   too.
-- `tn-fee` `positions.fees` equals the sum of the two venue-reported fees.
+- `tn-fee` `positions.fees` equals the sum of every venue-reported fee, one per partial fill.
 - `tn-reconcile` `account.reconciled` fires on the cadence.
 - `tn-cash` the ledger cash never needs a heal on a fresh account that only this run traded.
   `account.healed` must not fire.
 - `tn-redaction` the signing key appears nowhere in the evidence.
+- `tn-divergence` a clean round trip raises no `valuation.divergence`.
 
 ## How to get to it (user POV)
 
@@ -34,21 +35,22 @@ Preconditions:
 - **Materialise.** Run `$V await testnet rt --event account.materialised --timeout 60`. The line
   carries the qualified `account_id` (`hyperliquid-testnet-0x...`) and the venue's cash as
   `genesis_collateral`.
-- **Round trip.** Run `$V await testnet rt --event verify.flat --timeout 240`. Then read the
-  two venue fills:
-  `curl -s -X POST https://api.hyperliquid-testnet.xyz/info -H 'Content-Type: application/json' -d '{"type":"userFills","user":"<account address>"}' | jq '.[0:2][] | {px, sz, closedPnl, fee, dir, cloid}' > .agents/verify/testnet/evidence/rt.venue-fills.json`.
-  The two cloids match the `orders` rows.
+- **Round trip.** Run `$V await testnet rt --event verify.flat --timeout 240`.
 - **Reconcile.** Run `$V await testnet rt --event account.reconciled --timeout 90`.
-- **Stop.** Run `$V signal testnet rt TERM`, `$V await testnet rt --exit`, `$V dump testnet rt`,
-  `$V secrets-check testnet`.
+- **Stop.** Run `$V signal testnet rt TERM` at once, then `$V await testnet rt --exit`,
+  `$V dump testnet rt`, `$V secrets-check testnet`.
+- **Venue fees.** Run `FEES=$($V venue-fills testnet rt)`. It writes `rt.venue-fills.json` and
+  prints the fee sum over every fill whose oid is a `venue_oid` in the `orders` rows. Not the
+  cloid: every run places the same cloids, so a cloid cut would adopt the last run's fills.
 - **Check.** Run `$V check testnet rt tn-materialise --event account.materialised --expect 1`,
   `$V check testnet rt tn-round-trip --sql "select count(*) from orders where state='filled'" --expect 2`,
   `$V check testnet rt tn-round-trip --sql "select signed_size from positions" --expect 0.000`,
   `$V check testnet rt tn-round-trip --exit --expect 0`,
-  `$V check testnet rt tn-fee --sql "select fees from positions" --expect <sum of the two venue fees>`,
+  `$V check testnet rt tn-fee --sql "select fees from positions" --expect $FEES`,
   `$V check testnet rt tn-reconcile --event account.reconciled --expect 1`,
   `$V check testnet rt tn-cash --event account.healed --expect 0`,
-  `$V check testnet rt tn-redaction --event verify.flat --expect 1` (the run reached the end)
+  `$V check testnet rt tn-redaction --event verify.flat --expect 1` (the run reached the end),
+  `$V check testnet rt tn-divergence --event valuation.divergence --expect 0`
   and read the `secrets-check` line: `no signing key in evidence`.
 - **Report.** Run `$V report testnet`. Expected verdict: `PASS`. A FAIL that matches a Gotcha
   below is known. Any other FAIL is new, and `$V issue-draft testnet` drafts it.
@@ -56,22 +58,29 @@ Preconditions:
 
 ## Gotchas
 
-- **Known intermittent FAIL, `engine.faulted` with `illegal saga transition filled -> filled`,
-  tracked as #354.** The cloid is derived from `round_trip:BTC:2`, so every run places the same
-  cloid on the venue. When the inflight poll lands while the sell is still `SUBMITTED`,
-  `orderStatus` by cloid can answer with a previous run's order, and its fill is adopted. The
-  real fill then faults the saga. The trail shows `tn-round-trip` exit 1, `tn-fee` short by the
-  old fill's fee, and `tn-reconcile` and `tn-redaction` at 0 because the run never got that far.
-  `tn-cash` still passes. When #354 is fixed, this note goes away.
+- Every run places the same cloids on the venue, because the cloid is derived from
+  `round_trip:BTC:2`. The engine reads and cancels by oid once it has one, and before the ack it
+  refuses a record placed before the saga was created (#354). A run should not adopt an older
+  run's fill. If one does, it is a new bug.
 - The key is forwarded from the repo `.env` into the child environment only. Never write it with
   `--env`. The helper refuses.
 - `feed.lagged` lines are normal on testnet. The stream conflates.
+- The venue fills one 0.001 BTC market order in several partial fills, each with its own fee.
+  `positions.fees` sums them all (`domain/position.py`). `venue-fills` does the same on the
+  venue side. A count of fill rows is never a check.
+- `tn-reconcile` expects exactly one `account.reconciled`. The cadence is 60 seconds and keeps
+  firing until the process stops, so send `TERM` right after the await. Anything you do in
+  between, such as a venue query, can let a second one land.
 - **Not in the map yet: the leverage push.**
   `--param 'LEVERAGE={"BTC": {"mode": "cross", "leverage": 5}}'` pushes at boot. If the account
   holds a BTC position at a different leverage, the boot refuses to start by design. Close the
   position first. When you add it as a sub-feature, the check is
-  `--event exchange.leverage_unchanged --expect 0`: the catalog says a push that landed is the
-  absence of that event.
+  `--event exchange.leverage_unchanged --expect 0`. The event only fires for a symbol the account
+  already holds at the same leverage (`venues/hyperliquid/preflight.py`). On a flat account the
+  push writes silently, so the check needs a held position to mean anything.
 - `HOLD_TICKS` counts real testnet trades. On a quiet market three ticks can take a minute.
 - A `verify.flat` read of `account.equity` can be `null` when no mark has arrived since the
   fill. That is the documented "unknown, not zero" rule, not a failure.
+- **Known FAIL since 2026-09-17 (#367): `tn-divergence`.** The first account reconcile after the
+  open classifies before it ingests the isolated position's collateral, so it always raises a
+  false `valuation.divergence` on `margin_used` and `free_margin`. Stays red until #367 lands.
