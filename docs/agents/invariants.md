@@ -169,3 +169,21 @@ Consumed by `/code-review` (any regression is BLOCKING) and `/python-codebase-ma
    own creation time, less the skew allowance. Its fills are never read. A record adopted from
    an earlier life moves money the venue never moved, and the real fill then faults the engine.
    (ADR-0011 inv 2, #354)
+13. **A closed set the engine branches on has a coverage test over its hand-written list.** A
+   member nobody answers for fails silently, and that has happened once (#194). The rule is
+   written once, in `tests/_support/closed_sets.py`: the list must cover the set exactly, both
+   ways, and the failure names the side. It reads a Protocol, an `Enum` or a `Literal`. The
+   instances today:
+   - The observability catalog, walked by `tests/observability/test_catalog_walk.py`, with its
+     field sets checked in `tests/observability/test_catalog.py`.
+   - `DivergenceField`, walked from `tests/engine/test_reconcile_findings.py`: one producer per
+     member, and the member found among what the pass measured.
+   - The seam Protocols, claimed member by member through `tests/_support/seam_claims.py`, and
+     the `Store` seam through `tests/adapters/store/test_store_contract.py`.
+   - The adapters `AppConfig` can select, each of which must answer every shared gate its seam
+     owes. `tests/_support/seam_answers.py` reads the answers. `tests/app/test_seam_answers.py`
+     holds the map (#303).
+   - The bus and store backends `AppConfig` can select, `BUS_BACKENDS` and `STORE_BACKENDS`,
+     checked against the `Literal` in the same file.
+   A new closed vocabulary the engine reads by member gets the same treatment. Prefer a producer
+   per member over a name per member. A name is not a proof. (#194, #303)

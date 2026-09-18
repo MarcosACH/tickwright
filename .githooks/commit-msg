@@ -5,9 +5,8 @@
 #
 # --git-common-dir, not --git-dir: the guard is shared state, resolved the same from
 # every worktree (see docs/agents/hooks.md "Per-worktree and shared git state"). `exec`
-# hands
-# the guard's own status to git, so the trailing `exit 0` — which makes "no guard" a
-# no-op rather than a rejection — is reached only when there is no guard to run.
+# hands the guard's own status to git, so the trailing `exit 0` — which makes "no guard"
+# a no-op rather than a rejection — is reached only when there is no guard to run.
 set -euo pipefail
 guard="$(git rev-parse --git-common-dir)/hooks-local/commit-msg"
 [ -x "$guard" ] && exec "$guard" "$@"

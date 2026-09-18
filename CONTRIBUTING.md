@@ -65,8 +65,8 @@ them when you change a skill.
 - **Vertical slices.** A change crosses every layer it touches in one PR.
 - **Docs stay in sync.** If a change makes another file wrong, fix it in the same PR.
 - **Closed lists get a coverage test.** The seams, the config backends, and the event catalog are
-  fixed lists. Each has a test that every member is exercised. See
-  [`tests/_support/closed_sets.py`](tests/_support/closed_sets.py).
+  fixed lists. Each has a test that every member is exercised. The rule and the list of tests
+  are in [`docs/agents/invariants.md`](docs/agents/invariants.md).
 
 ## Branches, commits, and PRs
 

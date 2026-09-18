@@ -41,7 +41,8 @@ one on purpose.
   looked up there, so one install serves every worktree.
 - **Per-worktree scratch** must stay private, or two concurrent hooks overwrite each other.
   `pre-commit` writes its unstaged patch under `--git-dir`. `pre-push` parks its autostash under
-  `refs/worktree/`, off the shared stash stack.
+  `refs/worktree/`, off the shared stash stack. `tests/test_githooks.py` fences the `pre-push`
+  case against a real linked worktree.
 
 ## Claude Code hooks
 
@@ -61,10 +62,15 @@ They run on `PreToolUse`. Exit `0` allows. Exit `2` blocks, with the reason on s
 | `no-unsliced-doc-reads` | `Read`, `Bash` | a whole read of `CONTEXT.md`, an ADR, a module map, or a research note, including through a glob | `head`, `tail`, `sed -n`, `grep`, `doc-slice`, a `Read` with `offset` and `limit`, a redirect target |
 | `no-unlinked-prs` | `Bash` | a `gh pr create` whose `--body` or `--body-file` has no `Closes #N` | any body it cannot see: `--fill`, `--web`, an editor, `-F -`, or an unexpanded `"$BODY"` |
 
+A heredoc body is visible, so `no-unlinked-prs` judges it. It reads the body the way the shell
+does: a terminator counts only in column 0, and the last one ends the body. A quoted `EOF` inside
+the body does not cut it short and drop the `Closes #N` after it.
+
 Two guards answer as well as refuse. `no-unsliced-doc-reads` returns the file's table of contents
-from `doc-slice`, with each section marked `(+N)` for its amendment blocks. `no-unlinked-prs`
-returns the `Closes #<N>` line the `ralph/issue-<N>` branch implies. Before that, the wrong path
-was the cheap one. Answering makes both paths cost the same.
+from `doc-slice`, with each section marked `(+N)` for its amendment blocks. For `CONTEXT.md` it
+returns the bold terms and their line numbers instead, since that file's units are not headings.
+`no-unlinked-prs` returns the `Closes #<N>` line the `ralph/issue-<N>` branch implies. Before
+that, the wrong path was the cheap one. Answering makes both paths cost the same.
 
 ### Two hooks answer
 
