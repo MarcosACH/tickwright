@@ -2,8 +2,8 @@
 
 ``.githooks/pre-commit`` and ``.githooks/commit-msg`` both end by handing off to a
 private guard kept outside the repo, so it is never published. The contract these
-tests fence — location, arming, authority — is stated in ``CONTRIBUTING.md``
-("Local hook guards"); this file pins it, it does not redefine it.
+tests fence — location, arming, authority — is stated in ``docs/agents/hooks.md``
+("Local hook guard"); this file pins it, it does not redefine it.
 
 ``CONTRIBUTING.md`` tells every contributor to enable ``core.hooksPath .githooks``
 and almost none of them have that guard — "no guard on this clone" is the common

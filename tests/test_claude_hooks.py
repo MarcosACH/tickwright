@@ -375,7 +375,7 @@ class TestNoTrackedWrites:
             "grep -n 'x' src/tracked.py",
             # `tee` in the *argument* position is a word being searched for, not a program
             # being run — and it is an ordinary word to search this repo for, since the
-            # hook, its test and CONTRIBUTING.md all document the `tee` clause.
+            # hook, its test and docs/agents/hooks.md all document the `tee` clause.
             "grep -n 'tee' src/tracked.py",
             "rg tee src/tracked.py",
             # The descriptor-duplicating forms name no file: the token after `>&` is a
@@ -1181,7 +1181,7 @@ class TestNoUnlinkedPrs:
         ``-b=…`` and ``-b…`` are the two shorthand spellings ``pflag`` accepts beside the
         separated one, so ``gh`` reads all three as one flag with one value. A guard that
         reads only some of them is not fail-open on an ambiguity — it is blind to a body
-        that is fully visible, which is the shape ``CONTRIBUTING.md`` rules out.
+        that is fully visible, which is the shape ``docs/agents/hooks.md`` rules out.
         """
         assert run_hook("no-unlinked-prs.py", command, ralph_repo).returncode == BLOCK
 

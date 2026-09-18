@@ -144,7 +144,7 @@ Conventions: `docs/workflow/labels.md`, `docs/agents/issue-tracker.md`.
   copy and costs a full re-read.
 - Hooks in `.claude/hooks/` enforce the rules above at the call, and they answer with the right
   invocation instead of a bare refusal. They are why none of this has to be remembered. See
-  [`CONTRIBUTING.md` → Agent-loop hooks](CONTRIBUTING.md#agent-loop-hooks-claude-code).
+  [`docs/agents/hooks.md`](docs/agents/hooks.md).
 
 ## Setup and checks
 
@@ -159,8 +159,7 @@ uv run lint-imports   # dependency-direction boundaries (ADR-0032)
 
 The default paper-exchange and in-memory-bus path needs no external service and no API key. Test
 tiers, the `postgres` and `live` markers, skill evals, and the Docker services are all documented in
-[`CONTRIBUTING.md` → Running checks](CONTRIBUTING.md#running-checks). Read it before you reach for
-one.
+[`CONTRIBUTING.md` → Test tiers](CONTRIBUTING.md#test-tiers). Read it before you reach for one.
 
 Two things about tests are easy to get wrong, so they are here too:
 
