@@ -181,7 +181,7 @@ def test_a_non_positive_paper_genesis_is_a_typo_not_a_scenario() -> None:
         PaperExchangeConfig(genesis_collateral=Decimal("0"))
 
 
-@pytest.mark.parametrize("name", ["max_order_size", "max_position"])
+@pytest.mark.parametrize("name", ["max_order_size", "max_order_value", "max_position"])
 @pytest.mark.parametrize("cap", ["0", "-0.5"])
 def test_a_non_positive_cap_is_refused_at_load(tmp_path: Path, name: str, cap: str) -> None:
     (tmp_path / "ticks.jsonl").touch()

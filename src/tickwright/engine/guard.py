@@ -14,7 +14,7 @@ outlives a crash and is cleared only by an explicit reset.
 """
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from decimal import Decimal
 from typing import Final
 
@@ -49,11 +49,13 @@ class SymbolLimits:
 
     def __post_init__(self) -> None:
         # A cap of zero or less would deny every order. That is a typo, not a
-        # policy, so it stops the boot instead (ADR-0051).
-        for name in ("max_order_size", "max_position"):
-            cap = getattr(self, name)
+        # policy, so it stops the boot instead (ADR-0051). Every field here is a
+        # cap, so a new cap is checked without being listed. If a field that is
+        # not a cap ever joins, go back to a named list.
+        for cap_field in fields(self):
+            cap = getattr(self, cap_field.name)
             if cap is not None and cap <= 0:
-                raise ValueError(f"{name} must be positive, got {cap}")
+                raise ValueError(f"{cap_field.name} must be positive, got {cap}")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
