@@ -13,7 +13,7 @@ We add four optional caps to the real `PreTradeGuard`. Each one is off unless th
 | --- | --- | --- | --- |
 | Max order size | per symbol | coins | the quantized quantity is above the cap |
 | Max order value | per symbol | USD | quantity times price is above the cap |
-| Max position | per symbol | coins | the worst-case position on the order's side is above the cap, and the order does not shrink it |
+| Max position | per symbol | coins | the worst-case position on the order's side is above the cap, and the order does not move it toward zero without crossing zero |
 | Max orders per window | whole engine | placements | the window already holds the maximum |
 
 **Off unless set.** A symbol with no entry has no per-symbol caps. An unset rate cap never denies.
