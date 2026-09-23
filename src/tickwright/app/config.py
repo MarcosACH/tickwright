@@ -250,6 +250,18 @@ class AppConfig(BaseModel):
             )
         return self
 
+    @model_validator(mode="after")
+    def _every_limits_entry_must_name_a_traded_symbol(self) -> Self:
+        # A typo in a symbol name leaves the traded symbol with no cap, and a
+        # limit that is set but not enforced is worse than no limit (ADR-0051).
+        dead = sorted(set(self.limits.symbols) - set(self.traded_symbols))
+        if dead:
+            raise ValueError(
+                f"limits name symbols no configured strategy trades: {', '.join(dead)}. "
+                "Set TICKWRIGHT_LIMITS to traded symbols only"
+            )
+        return self
+
     def secrets(self) -> tuple[str, ...]:
         """Every secret value this config carries, for log redaction (ADR-0020).
 

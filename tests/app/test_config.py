@@ -134,6 +134,9 @@ def test_the_documented_limits_line_loads_through_the_env_skin(
     (tmp_path / ".env").write_text(
         "TICKWRIGHT_REPLAY__PATH=ticks.jsonl\n"
         "TICKWRIGHT_PAPER__GENESIS_COLLATERAL=100000\n"
+        # A limits entry must name a traded symbol, so BTC needs a strategy.
+        'TICKWRIGHT_STRATEGIES=[{"kind": "single_shot_market", "strategy_id": "demo", '
+        '"symbol": "BTC", "side": "buy", "quantity": "0.5"}]\n'
         f"{documented}\n"
     )
     monkeypatch.chdir(tmp_path)
@@ -208,6 +211,29 @@ def test_limits_with_the_noop_guard_are_refused_at_load(
                 "paper": PaperExchangeConfig(genesis_collateral=Decimal("100000")),
                 "guard": "noop",
                 "limits": {"symbols": {"BTC": symbol_limits}},
+            }
+        )
+
+
+def test_a_limits_entry_for_an_untraded_symbol_is_refused_at_load(tmp_path: Path) -> None:
+    # A typo in the symbol name would leave the traded symbol with no cap, and
+    # a limit that is set but not enforced is worse than no limit (ADR-0051).
+    (tmp_path / "ticks.jsonl").touch()
+    with pytest.raises(ValidationError, match="limits name symbols no configured strategy"):
+        AppConfig.model_validate(
+            {
+                "replay": ReplayFeedConfig(path=tmp_path / "ticks.jsonl"),
+                "paper": PaperExchangeConfig(genesis_collateral=Decimal("100000")),
+                "strategies": [
+                    StrategyConfig(
+                        kind="single_shot_market",
+                        strategy_id="demo",
+                        symbol="BTC",
+                        side=Side.BUY,
+                        quantity=Decimal("0.5"),
+                    )
+                ],
+                "limits": {"symbols": {"XBT": {"max_order_size": "0.5"}}},
             }
         )
 

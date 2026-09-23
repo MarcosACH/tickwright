@@ -19,6 +19,10 @@ We add four optional caps to the real `PreTradeGuard`. Each one is off unless th
 **Off unless set.** A symbol with no entry has no per-symbol caps. An unset rate cap never denies.
 The user is responsible for reading the docs and setting the caps they need. The engine does not
 force a cap on real money.
+**(Amended by [#379](https://github.com/MarcosACH/tickwright/issues/379) — an entry must name a
+traded symbol:** the engine refuses to start when a symbol entry names a symbol no strategy
+trades. Such an entry is nearly always a typo. The symbol the user meant would then run with no
+cap. `leverage` refuses the same case (ADR-0044 §3).**)**
 
 **A breach denies that one order.** The order goes to `DENIED` with a reason that names the cap.
 Nothing else changes. The kill switch is not tripped, so ADR-0026's "tripped manually only" still

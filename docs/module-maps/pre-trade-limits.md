@@ -162,6 +162,10 @@ counts:** validation compares `limits` to `NO_LIMITS`, so an empty symbol entry 
 refuses to start. A new cap needs no edit to this check. See ADR-0051 §Limits need the real
 guard.**)**
 
+**(Amended by [#379](https://github.com/MarcosACH/tickwright/issues/379) — an entry must name a
+traded symbol:** validation refuses a `limits.symbols` key outside `traded_symbols`, like
+`leverage`. See ADR-0051 §Off unless set.**)**
+
 **Responsibilities:** Map settings onto `PreTradeLimits`, and refuse a limit that would not be
 enforced. `build_guard` hands the limits to `RealGuard`.
 
