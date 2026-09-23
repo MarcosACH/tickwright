@@ -35,12 +35,14 @@ from tickwright.domain import (
     OrderState,
     PlaceSignal,
     PreTradeGuard,
+    ReconciliationFill,
     Side,
     Signal,
     TimeInForce,
     derive_cloid,
 )
 from tickwright.domain.enums import OrderType
+from tickwright.engine.checkpoint import Checkpointer
 from tickwright.engine.execution import ExecutionManager
 from tickwright.engine.guard import (
     NO_LIMITS,
@@ -97,7 +99,7 @@ def _harness(
     guard: PreTradeGuard | None = None,
     limits: PreTradeLimits = NO_LIMITS,
     partial_fill_fraction: str | None = None,
-) -> tuple[InMemoryBus, ManualClock, SQLiteStore, PreTradeGuard, list[OrderEvent]]:
+) -> tuple[InMemoryBus, Checkpointer, SQLiteStore, PreTradeGuard, list[OrderEvent]]:
     bus = InMemoryBus()
     clock = ManualClock(start_ns=1_000)
     store = SQLiteStore(":memory:")
@@ -128,7 +130,7 @@ def _harness(
 
     order_events: list[OrderEvent] = []
     bus.subscribe(OrderEvent, lambda ev: _record(order_events, ev))
-    return bus, clock, store, guard, order_events
+    return bus, checks, store, guard, order_events
 
 
 def _market_signal(*, quantity: str, seq: int = 1) -> PlaceSignal:
@@ -258,6 +260,32 @@ def test_the_max_position_counts_open_buys_by_their_unfilled_remainder() -> None
     first = store.get_order(partly_filled)
     assert first is not None
     assert (first.state, first.cum_qty) == (OrderState.PARTIALLY_FILLED, Decimal("0.2"))
+    assert store.get_order(at_cap).state is OrderState.LIVE  # type: ignore[union-attr]
+    assert store.get_order(past_cap).state is OrderState.DENIED  # type: ignore[union-attr]
+
+
+def test_the_max_position_counts_size_placed_by_hand() -> None:
+    # Cap 1. A user bought 0.8 by hand on the venue. Paper holds no position of
+    # its own, so the size arrives the one way it can: the reconciler books it
+    # as a heal into the unattributed partition. A buy of 0.2 lands exactly on
+    # the cap. A buy of 0.1 after it would reach 1.1, so it is denied.
+    limits = PreTradeLimits(symbols={"BTC": SymbolLimits(max_position=Decimal("1"))})
+    bus, checks, store, _, _ = _harness(limits=limits)
+    by_hand = ReconciliationFill(
+        symbol="BTC", side=Side.BUY, quantity=Decimal("0.8"), price=Decimal("42000"), ts_ns=1_000
+    )
+    checks.checkpoint_heal((by_hand,))
+    at_cap = derive_cloid("trivial:BTC:1")
+    past_cap = derive_cloid("trivial:BTC:2")
+
+    async def scenario() -> None:
+        await bus.publish(_tick("42000"))
+        # Both rest below the market, so neither fills.
+        await bus.publish(_limit_signal("40000", quantity="0.2", seq=1))
+        await bus.publish(_limit_signal("40000", quantity="0.1", seq=2))
+
+    asyncio.run(scenario())
+
     assert store.get_order(at_cap).state is OrderState.LIVE  # type: ignore[union-attr]
     assert store.get_order(past_cap).state is OrderState.DENIED  # type: ignore[union-attr]
 
