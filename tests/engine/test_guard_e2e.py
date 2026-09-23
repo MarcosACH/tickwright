@@ -35,7 +35,13 @@ from tickwright.domain import (
 )
 from tickwright.domain.enums import OrderType
 from tickwright.engine.execution import ExecutionManager
-from tickwright.engine.guard import NoopGuard, RealGuard
+from tickwright.engine.guard import (
+    NO_LIMITS,
+    NoopGuard,
+    PreTradeLimits,
+    RealGuard,
+    SymbolLimits,
+)
 from tickwright.observability.testing import capture_events
 
 _SPEC = InstrumentSpec(
@@ -80,7 +86,7 @@ def _limit_signal(price: str, *, quantity: str = "0.5", seq: int = 1) -> PlaceSi
 
 
 def _harness(
-    *, guard: PreTradeGuard | None = None
+    *, guard: PreTradeGuard | None = None, limits: PreTradeLimits = NO_LIMITS
 ) -> tuple[InMemoryBus, ManualClock, SQLiteStore, PreTradeGuard, list[OrderEvent]]:
     bus = InMemoryBus()
     clock = ManualClock(start_ns=1_000)
@@ -93,7 +99,7 @@ def _harness(
         account_net=dict,
     )
     checks = checkpointer(store, clock=clock)
-    guard = guard or RealGuard(specs={"BTC": _SPEC}, store=store, clock=clock)
+    guard = guard or RealGuard(specs={"BTC": _SPEC}, store=store, clock=clock, limits=limits)
     manager = ExecutionManager(
         bus=bus,
         exchange=exchange,
@@ -188,6 +194,29 @@ def test_below_min_notional_signal_is_denied_and_never_sent() -> None:
     record = store.get_order(cloid)
     assert record is not None
     assert record.state is OrderState.DENIED
+
+
+def test_an_order_above_the_max_order_size_is_never_sent_and_a_smaller_one_passes() -> None:
+    limits = PreTradeLimits(symbols={"BTC": SymbolLimits(max_order_size=Decimal("0.2"))})
+    bus, _, store, _, order_events = _harness(limits=limits)
+    too_big = derive_cloid("trivial:BTC:1")
+    fits = derive_cloid("trivial:BTC:2")
+
+    async def scenario() -> None:
+        await bus.publish(_tick("42000"))
+        # Both rest below the market, so the second one ends LIVE, not FILLED.
+        await bus.publish(_limit_signal("100", quantity="0.3", seq=1))
+        await bus.publish(_limit_signal("100", quantity="0.2", seq=2))
+
+    asyncio.run(scenario())
+
+    assert [type(ev) for ev in order_events if ev.cloid == too_big] == [OrderDenied]
+    denied = store.get_order(too_big)
+    assert denied is not None
+    assert denied.state is OrderState.DENIED
+    passed = store.get_order(fits)
+    assert passed is not None
+    assert passed.state is OrderState.LIVE
 
 
 def test_a_denial_emits_the_order_denied_named_event() -> None:
