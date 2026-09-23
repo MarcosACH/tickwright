@@ -13,6 +13,7 @@ state is persisted through the ``Store`` and restored on construction, so a halt
 outlives a crash and is cleared only by an explicit reset.
 """
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
 from decimal import Decimal
@@ -70,6 +71,14 @@ class PreTradeLimits:
     mark_max_age_seconds: float = 10.0
     """How old a mark may be and still value a market order against a max order
     value. Its own setting, not the reconcile band's, which does another job."""
+
+    def __post_init__(self) -> None:
+        # Zero or less would call every mark stale, so it stops the boot too.
+        # NaN and infinity load as floats but cannot become a count of
+        # nanoseconds, so the guard would raise on the first market order.
+        age = self.mark_max_age_seconds
+        if not (math.isfinite(age) and age > 0):
+            raise ValueError(f"mark_max_age_seconds must be a positive number, got {age}")
 
 
 _NS_PER_SECOND: Final = 1_000_000_000
