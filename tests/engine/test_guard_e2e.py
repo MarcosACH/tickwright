@@ -332,7 +332,7 @@ def test_noop_guard_lets_a_would_be_denied_order_through_unmodified() -> None:
 
 
 def _revived_manager(
-    store: SQLiteStore,
+    store: SQLiteStore, *, limits: PreTradeLimits = NO_LIMITS
 ) -> tuple[InMemoryBus, RealGuard, list[OrderEvent]]:
     """A fresh engine over a surviving store — the restart the barrier gates."""
     bus = InMemoryBus()
@@ -345,9 +345,10 @@ def _revived_manager(
         account_net=dict,
     )
     checks = checkpointer(store, clock=clock)
-    cache = checks.cache
-    cache.rebuild()
-    guard = RealGuard(specs={"BTC": _SPEC}, store=store, clock=clock)
+    # The runner's boot step: the ledger first, then the order cache. Rebuilding
+    # the cache alone would bring the open orders back without the position.
+    checks.recover()
+    guard = RealGuard(specs={"BTC": _SPEC}, store=store, clock=clock, limits=limits)
     manager = ExecutionManager(
         bus=bus,
         exchange=exchange,
@@ -386,6 +387,34 @@ def test_kill_switch_survives_restart_and_reset_re_enables_placement() -> None:
 
     asyncio.run(placement_restored())
     assert any(isinstance(ev, OrderLive) for ev in events2)
+
+
+def test_after_a_restart_the_max_position_denies_the_same_order_again() -> None:
+    # First life, cap 1: a buy of 0.5 fills 0.2 and rests 0.3, and a buy of 0.5
+    # rests. The worst case is +1, so a further buy of 0.1 is denied.
+    limits = PreTradeLimits(symbols={"BTC": SymbolLimits(max_position=Decimal("1"))})
+    bus, _, store, _, _ = _harness(limits=limits, partial_fill_fraction="0.4")
+
+    async def first_life() -> None:
+        await bus.publish(_tick("42000"))
+        await bus.publish(_limit_signal("41000", quantity="0.5", seq=1))
+        await bus.publish(_tick("41000"))  # crosses the first buy: one partial fill
+        await bus.publish(_limit_signal("40000", quantity="0.5", seq=2))
+        await bus.publish(_limit_signal("40000", quantity="0.1", seq=3))
+
+    asyncio.run(first_life())
+    assert store.get_order(derive_cloid("trivial:BTC:3")).state is OrderState.DENIED  # type: ignore[union-attr]
+
+    # Second life: only the store survives. The same order, under a new signal
+    # so it is judged again rather than dropped as a re-seen one, is denied too.
+    bus2, _, _ = _revived_manager(store, limits=limits)
+
+    async def second_life() -> None:
+        await bus2.publish(_tick("42000"))
+        await bus2.publish(_limit_signal("40000", quantity="0.1", seq=4))
+
+    asyncio.run(second_life())
+    assert store.get_order(derive_cloid("trivial:BTC:4")).state is OrderState.DENIED  # type: ignore[union-attr]
 
 
 def test_kill_switch_denies_new_orders_while_resting_orders_keep_filling() -> None:
