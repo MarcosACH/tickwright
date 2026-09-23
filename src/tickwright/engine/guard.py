@@ -23,6 +23,7 @@ from tickwright.domain import (
     InstrumentSpec,
     InvariantViolation,
     PlaceSignal,
+    PreTradeReading,
     Store,
     below_min_notional,
     quantize_price,
@@ -66,7 +67,7 @@ class RealGuard:
         )
         self._tripped = tripped
 
-    def check(self, signal: PlaceSignal) -> GuardDecision:
+    def check(self, signal: PlaceSignal, reading: PreTradeReading) -> GuardDecision:
         if self._tripped:
             # Halt-only: every new placement is DENIED while resting LIVE orders
             # are left untouched (ADR-0026). Checked first — a halt overrides all.
@@ -110,7 +111,7 @@ class NoopGuard:
     def kill_switch_tripped(self) -> bool:
         return False
 
-    def check(self, signal: PlaceSignal) -> GuardDecision:
+    def check(self, signal: PlaceSignal, reading: PreTradeReading) -> GuardDecision:
         return Approved(quantity=signal.quantity, price=signal.price)
 
     def trip_kill_switch(self, reason: str) -> None:

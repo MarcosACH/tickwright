@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from decimal import ROUND_DOWN, ROUND_UP, Decimal
 
 from .enums import Side
+from .events import MarkTick
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -95,6 +96,28 @@ class Denied:
 
 type GuardDecision = Approved | Denied
 """A ``PreTradeGuard`` verdict (ADR-0017): quantized ``Approved`` or ``Denied``."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class PreTradeReading:
+    """The account state a ``PreTradeGuard`` judges one placement against.
+
+    The guard is built before the read-models exist, so it cannot hold them.
+    The ``Checkpointer`` builds this snapshot in the same synchronous call as
+    the check, so its parts cannot disagree. It holds no clock and no verdict.
+    """
+
+    symbol: str
+    side: Side
+    account_net_size: Decimal
+    """Signed, over every partition of ``symbol``, the unattributed one included.
+    The venue holds one position per symbol, so this is the size it sees."""
+    open_remainder: Decimal
+    """The unfilled part of every open order on ``side``, summed. A ``PENDING``
+    order counts: it may already be at the venue (ADR-0008)."""
+    mark: MarkTick | None
+    """The latest mark for ``symbol``, or ``None`` when none was ever seen. One
+    field, so the price and its time are always present or absent together."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

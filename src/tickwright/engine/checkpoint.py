@@ -42,6 +42,7 @@ below, where the rule is stated on the borrow itself.
 """
 
 from collections.abc import Mapping, Sequence
+from decimal import Decimal
 
 from tickwright.domain import (
     EMPTY_LEVERAGE_BOOK,
@@ -54,6 +55,7 @@ from tickwright.domain import (
     LeverageBook,
     Order,
     OrderFillEvent,
+    PreTradeReading,
     ReconciliationFill,
     Side,
     Store,
@@ -132,6 +134,27 @@ class Checkpointer:
         with no store behind it at all. The ordering they *do* have is the
         barrier's and the subscription's, which is the runner's to keep."""
         return self._portfolio
+
+    def pre_trade_reading(self, symbol: str, side: Side) -> PreTradeReading:
+        """The account state the guard judges a placement on ``symbol`` against.
+
+        It lives here because this type owns both read-models it folds. A second
+        place that folded them would be a second definition to drift (ADR-0051).
+        """
+        return PreTradeReading(
+            symbol=symbol,
+            side=side,
+            account_net_size=self._portfolio.account_net().get(symbol, Decimal("0")),
+            open_remainder=sum(
+                (
+                    order.quantity - order.cum_qty
+                    for order in self._cache.open_orders(symbol=symbol)
+                    if order.side is side
+                ),
+                Decimal("0"),
+            ),
+            mark=self._portfolio.latest_mark(symbol),
+        )
 
     def recover(self) -> None:
         """Restore both read-models from the store — the ledger first.

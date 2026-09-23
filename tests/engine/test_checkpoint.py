@@ -10,6 +10,7 @@ two.
 
 from collections.abc import Sequence
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from ledgers import GENESIS
@@ -23,10 +24,12 @@ from tickwright.domain import (
     AccountSpec,
     FundingAccrual,
     InvariantViolation,
+    MarkTick,
     Order,
     OrderFillEvent,
     OrderState,
     Position,
+    ReconciliationFill,
     Side,
     StoreAccountMismatch,
 )
@@ -500,3 +503,95 @@ def test_a_refused_store_is_never_mass_read_for_the_cache_it_will_not_use() -> N
         _checkpointer(store).recover()
 
     assert timeline == ["ledger.load_account"]  # the rebuild was never reached
+
+
+# --- the pre-trade reading (ADR-0051) ---------------------------------------
+
+
+def test_a_reading_shows_the_net_size_over_every_partition_unattributed_included() -> None:
+    checkpointer = _checkpointer(SQLiteStore(":memory:"))
+    checkpointer.recover()
+    order = _submitted_order(quantity="0.5")
+    checkpointer.checkpoint_fill(order, _fill(order, trade_id="f1", quantity="0.5"), side=Side.BUY)
+    # Foreign flow the venue reported: it lands in the unattributed partition.
+    heal = ReconciliationFill(
+        symbol="BTC", side=Side.SELL, quantity=Decimal("0.2"), price=Decimal("42000"), ts_ns=2_000
+    )
+    checkpointer.checkpoint_heal((heal,))
+
+    reading = checkpointer.pre_trade_reading("BTC", Side.BUY)
+
+    assert reading.account_net_size == Decimal("0.3")
+
+
+def test_a_reading_shows_the_unfilled_remainder_of_open_orders_on_its_side_only() -> None:
+    checkpointer = _checkpointer(SQLiteStore(":memory:"))
+    checkpointer.recover()
+    pending = _submitted_order(quantity="0.4", seq=1)
+    pending.state = OrderState.PENDING  # the write-ahead intent, not yet sent
+    checkpointer.checkpoint(pending)
+    partly_filled = _submitted_order(quantity="1", seq=2)
+    fill = _fill(partly_filled, trade_id="f2", quantity="0.25")
+    checkpointer.checkpoint_fill(partly_filled, fill, side=Side.BUY)
+    filled = _submitted_order(quantity="0.5", seq=3)
+    checkpointer.checkpoint_fill(
+        filled, _fill(filled, trade_id="f3", quantity="0.5"), side=Side.BUY
+    )
+    other_side = _submitted_order(quantity="2", side=Side.SELL, seq=4)
+    checkpointer.checkpoint(other_side)
+
+    buy = checkpointer.pre_trade_reading("BTC", Side.BUY)
+    sell = checkpointer.pre_trade_reading("BTC", Side.SELL)
+
+    # 0.4 pending + 0.75 left of the partly filled one. The filled order is closed.
+    assert buy.open_remainder == Decimal("1.15")
+    assert sell.open_remainder == Decimal("2")
+
+
+def test_a_reading_shows_the_latest_mark_and_no_mark_before_the_first_one() -> None:
+    checkpointer = _checkpointer(SQLiteStore(":memory:"))
+    checkpointer.recover()
+    assert checkpointer.pre_trade_reading("BTC", Side.BUY).mark is None
+
+    eth = MarkTick(ts_event=1_500, ts_init=1_500, symbol="ETH", price=Decimal("2500"))
+    checkpointer.portfolio.observe_mark(eth)
+    assert checkpointer.pre_trade_reading("BTC", Side.BUY).mark is None
+
+    first = MarkTick(ts_event=2_000, ts_init=2_000, symbol="BTC", price=Decimal("42000"))
+    latest = MarkTick(ts_event=3_000, ts_init=3_000, symbol="BTC", price=Decimal("42100"))
+    checkpointer.portfolio.observe_mark(first)
+    checkpointer.portfolio.observe_mark(latest)
+
+    mark = checkpointer.pre_trade_reading("BTC", Side.BUY).mark
+    assert mark is not None
+    assert (mark.price, mark.ts_event) == (Decimal("42100"), 3_000)
+
+
+def test_a_reading_after_a_restart_matches_the_one_before_it(tmp_path: Path) -> None:
+    path = tmp_path / "engine.db"
+    store = SQLiteStore(path)
+    before = _checkpointer(store)
+    before.recover()
+    partly_filled = _submitted_order(quantity="1", seq=1)
+    fill = _fill(partly_filled, trade_id="f1", quantity="0.25")
+    before.checkpoint_fill(partly_filled, fill, side=Side.BUY)
+    before.checkpoint(_submitted_order(quantity="2", side=Side.SELL, seq=2))
+    heal = ReconciliationFill(
+        symbol="BTC", side=Side.SELL, quantity=Decimal("0.1"), price=Decimal("42000"), ts_ns=2_000
+    )
+    before.checkpoint_heal((heal,))
+    readings_before = [before.pre_trade_reading("BTC", side) for side in Side]
+    store.close()
+
+    after = _checkpointer(SQLiteStore(path))
+    after.recover()
+    readings_after = [after.pre_trade_reading("BTC", side) for side in Side]
+
+    # A mark is never stored (ADR-0039), so only position and open orders survive.
+    assert [(r.account_net_size, r.open_remainder) for r in readings_before] == [
+        (Decimal("0.15"), Decimal("0.75")),
+        (Decimal("0.15"), Decimal("2")),
+    ]
+    assert [(r.account_net_size, r.open_remainder) for r in readings_after] == [
+        (r.account_net_size, r.open_remainder) for r in readings_before
+    ]
