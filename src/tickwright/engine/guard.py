@@ -65,8 +65,12 @@ class PreTradeLimits:
 
     symbols: Mapping[str, SymbolLimits] = field(default_factory=dict)
     """A symbol with no entry has no per-symbol caps."""
+    mark_max_age_seconds: float = 10.0
+    """How old a mark may be and still value a market order against a max order
+    value. Its own setting, not the reconcile band's, which does another job."""
 
 
+_NS_PER_SECOND: Final = 1_000_000_000
 NO_LIMITS: Final = PreTradeLimits()
 _NO_SYMBOL_LIMITS: Final = SymbolLimits()
 
@@ -158,6 +162,11 @@ class RealGuard:
                 if reading.mark is None:
                     # With no mark the guard cannot prove the order fits.
                     return Denied(reason=f"no mark for max order value {cap}")
+                # The guard's clock is the replay clock on replay, so a recorded
+                # file is judged in its own time, not the wall clock's.
+                age_ns = self._clock.timestamp_ns() - reading.mark.ts_event
+                if age_ns > int(self._limits.mark_max_age_seconds * _NS_PER_SECOND):
+                    return Denied(reason=f"stale mark for max order value {cap}")
                 value_price = reading.mark.price
             if quantity * value_price > cap:
                 return Denied(reason=f"above max order value {cap}")

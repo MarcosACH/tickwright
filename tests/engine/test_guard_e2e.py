@@ -371,6 +371,31 @@ def test_a_market_order_with_no_mark_passes_when_no_max_order_value_is_set() -> 
     assert _state(engine.store, derive_cloid("trivial:BTC:1")) is OrderState.FILLED
 
 
+def test_a_stale_mark_denies_a_market_order_until_a_fresh_mark_arrives() -> None:
+    # Cap 1000 and the default mark max age of 10 seconds. Every order is worth
+    # 40 at the mark, far under the cap, so only the mark's age can deny it.
+    limits = PreTradeLimits(symbols={"BTC": SymbolLimits(max_order_value=Decimal("1000"))})
+    engine = _engine(limits=limits, start_ns=1_000)
+    ten_seconds = 10_000_000_000
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))
+        await engine.bus.publish(_mark("40000", ts_ns=1_000))
+        engine.clock.advance_to(1_000 + ten_seconds)  # exactly the max age
+        await engine.bus.publish(_market_signal(quantity="0.001", seq=1))
+        engine.clock.advance_to(1_000 + ten_seconds + 1)  # one nanosecond past it
+        await engine.bus.publish(_market_signal(quantity="0.001", seq=2))
+        fresh = engine.clock.timestamp_ns()
+        await engine.bus.publish(_mark("40000", ts_ns=fresh))
+        await engine.bus.publish(_market_signal(quantity="0.001", seq=3))
+
+    asyncio.run(scenario())
+
+    assert _state(engine.store, derive_cloid("trivial:BTC:1")) is OrderState.FILLED
+    _assert_denied_by(engine, derive_cloid("trivial:BTC:2"), "stale mark for max order value 1000")
+    assert _state(engine.store, derive_cloid("trivial:BTC:3")) is OrderState.FILLED
+
+
 def test_the_max_position_counts_open_buys_by_their_unfilled_remainder() -> None:
     # Cap 1. The first buy of 0.5 fills 0.2 and rests 0.3, so the worst case is
     # +0.5 before the next order. A buy of 0.5 lands exactly on the cap. A buy
