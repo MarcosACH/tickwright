@@ -90,9 +90,9 @@ another cap never takes a slot. Every cap denial carries a reason that names the
   market order. A missing mark, or one older than the max age on the guard's clock, denies the
   market order.
 - Max position: the worst-case net size on the order's side, from the reading plus the new order.
-  An order that moves this worst case toward zero passes. A sell that shrinks a long position can
-  still be denied when open sells push the worst case past the cap. A flip is judged on the new
-  side.
+  An order that moves this worst case toward zero passes, even when the result is still above the
+  cap. A sell that shrinks a long position can still be denied when open sells push the worst case
+  past the cap. A flip is judged on the new side.
 - Rate cap: a sliding window of approved placement times, in memory, empty at boot.
 
 **Seams:** None new.

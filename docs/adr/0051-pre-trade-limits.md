@@ -13,7 +13,7 @@ We add four optional caps to the real `PreTradeGuard`. Each one is off unless th
 | --- | --- | --- | --- |
 | Max order size | per symbol | coins | the quantized quantity is above the cap |
 | Max order value | per symbol | USD | quantity times price is above the cap |
-| Max position | per symbol | coins | the worst-case position on the order's side is above the cap |
+| Max position | per symbol | coins | the worst-case position on the order's side is above the cap, and the order does not shrink it |
 | Max orders per window | whole engine | placements | the window already holds the maximum |
 
 **Off unless set.** A symbol with no entry has no per-symbol caps. An unset rate cap never denies.
@@ -35,10 +35,14 @@ than the mark, so this cap is close for market orders, not exact.
 position if every open order on that side fills, and then the new order fills too. For a buy, it is
 the net position, plus the unfilled remainder of open buys, plus the new buy. For a sell, it is the
 net position, minus the unfilled remainder of open sells, minus the new sell. The order is denied
-when the size of that worst case is above the cap. An order that moves this worst case toward zero
-always passes. A sell that shrinks a long position can still be denied. For example, with a net of
-+5, open sells of 20, and a new sell of 3, the worst case is -18. An order that flips long to short
-is checked on the new short side. The cap is in coins so a missing mark never blocks it.
+when the size of that worst case is above the cap. There is one exception. An order that moves this
+worst case toward zero always passes, even when the result is still above the cap. This lets a user
+reduce a position that is already too big. A position can pass the cap after the cap is lowered, or
+after a fill the engine did not place. For example, with a cap of 15, a net of -20, and no open
+buys, a new buy of 3 passes. The worst case moves from -20 to -17. A sell that shrinks a long
+position can still be denied. For example, with a cap of 15, a net of +5, open sells of 20, and a
+new sell of 3, the worst case moves from -15 to -18. The sell is denied. An order that flips long to
+short is checked on the new short side. The cap is in coins so a missing mark never blocks it.
 
 **Max orders per window.** N approved placements per S seconds, as a sliding window on the injected
 `Clock`. The scope is the whole engine, because a venue rate-limits the account and one process is
