@@ -27,6 +27,7 @@ from tickwright.domain import (
     InvariantViolation,
     PlaceSignal,
     PreTradeReading,
+    Side,
     Store,
     below_min_notional,
     quantize_price,
@@ -41,6 +42,8 @@ class SymbolLimits:
 
     max_order_size: Decimal | None = None
     """In coins, checked against the quantized quantity."""
+    max_position: Decimal | None = None
+    """In coins, checked against the worst-case position on the order's side."""
 
     def __post_init__(self) -> None:
         # A cap of zero or less would deny every order. That is a typo, not a
@@ -142,6 +145,14 @@ class RealGuard:
         cap = symbol_limits.max_order_size
         if cap is not None and quantity > cap:
             return Denied(reason=f"above max order size {cap}")
+        cap = symbol_limits.max_position
+        if cap is not None:
+            # The position if every open order on this side fills, and then this
+            # one too (ADR-0051).
+            direction = 1 if signal.side is Side.BUY else -1
+            worst_case = reading.account_net_size + direction * (reading.open_remainder + quantity)
+            if abs(worst_case) > cap:
+                return Denied(reason=f"above max position {cap}")
         return Approved(quantity=quantity, price=price)
 
 
