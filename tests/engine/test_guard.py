@@ -162,6 +162,18 @@ def test_denies_a_market_order_above_the_max_order_size() -> None:
     assert "max order size" in decision.reason
 
 
+def test_approves_an_order_at_the_max_order_size() -> None:
+    guard = _guard(limits=_max_order_size("0.5"))
+    decision = _check(guard, _limit_signal(quantity="0.5"))
+    assert decision == Approved(quantity=Decimal("0.5"), price=Decimal("100"))
+
+
+def test_a_symbol_with_no_entry_has_no_max_order_size() -> None:
+    limits = PreTradeLimits(symbols={"ETH": SymbolLimits(max_order_size=Decimal("0.5"))})
+    guard = _guard(limits=limits)
+    assert isinstance(_check(guard, _limit_signal(symbol="BTC", quantity="1000")), Approved)
+
+
 def test_a_market_order_under_the_cap_skips_min_notional() -> None:
     # A market order has no price to value, so min notional stays with the
     # venue (ADR-0017) even though market orders now reach the caps.
