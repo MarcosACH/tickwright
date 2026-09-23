@@ -162,7 +162,8 @@ enforced. `build_guard` hands the limits to `RealGuard`.
 ```
 app.AppConfig → engine.PreTradeLimits
 app.build_guard → engine.RealGuard
-engine.ExecutionManager → engine.Checkpointer → engine.Cache, engine.PortfolioProjectionengine.ExecutionManager → domain.PreTradeGuard → domain.PreTradeReading
+engine.ExecutionManager → engine.Checkpointer → engine.Cache, engine.PortfolioProjection
+engine.ExecutionManager → domain.PreTradeGuard → domain.PreTradeReading
 engine.RealGuard → engine.PreTradeLimits, domain.PreTradeReading, domain.Clock
 ```
 
