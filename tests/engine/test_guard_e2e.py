@@ -8,13 +8,20 @@ orders keep filling; the halt survives a restart. The same suite stays green wit
 """
 
 import asyncio
+import random
 from decimal import Decimal
 
 from ledgers import GENESIS, checkpointer
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
-from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
+from tickwright.adapters.paper import (
+    FillModel,
+    ImmediateFillModel,
+    PaperExchange,
+    StochasticFillModel,
+    StochasticParams,
+)
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     AggressorSide,
@@ -86,15 +93,24 @@ def _limit_signal(price: str, *, quantity: str = "0.5", seq: int = 1) -> PlaceSi
 
 
 def _harness(
-    *, guard: PreTradeGuard | None = None, limits: PreTradeLimits = NO_LIMITS
+    *,
+    guard: PreTradeGuard | None = None,
+    limits: PreTradeLimits = NO_LIMITS,
+    partial_fill_fraction: str | None = None,
 ) -> tuple[InMemoryBus, ManualClock, SQLiteStore, PreTradeGuard, list[OrderEvent]]:
     bus = InMemoryBus()
     clock = ManualClock(start_ns=1_000)
     store = SQLiteStore(":memory:")
+    fill_model: FillModel = ImmediateFillModel()
+    if partial_fill_fraction is not None:
+        # With its other knobs inert, the seeded model fills like the immediate
+        # one, except that a crossing limit fills only this fraction per tick.
+        params = StochasticParams(partial_fill_fraction=Decimal(partial_fill_fraction))
+        fill_model = StochasticFillModel(rng=random.Random(0), clock=clock, params=params)
     exchange = PaperExchange(
         bus=bus,
         clock=clock,
-        fill_model=ImmediateFillModel(),
+        fill_model=fill_model,
         genesis_collateral=GENESIS,
         account_net=dict,
     )
@@ -217,6 +233,33 @@ def test_an_order_above_the_max_order_size_is_never_sent_and_a_smaller_one_passe
     passed = store.get_order(fits)
     assert passed is not None
     assert passed.state is OrderState.LIVE
+
+
+def test_the_max_position_counts_open_buys_by_their_unfilled_remainder() -> None:
+    # Cap 1. The first buy of 0.5 fills 0.2 and rests 0.3, so the worst case is
+    # +0.5 before the next order. A buy of 0.5 lands exactly on the cap. A buy
+    # of 0.1 after it would reach 1.1, so it is denied.
+    limits = PreTradeLimits(symbols={"BTC": SymbolLimits(max_position=Decimal("1"))})
+    bus, _, store, _, _ = _harness(limits=limits, partial_fill_fraction="0.4")
+    partly_filled = derive_cloid("trivial:BTC:1")
+    at_cap = derive_cloid("trivial:BTC:2")
+    past_cap = derive_cloid("trivial:BTC:3")
+
+    async def scenario() -> None:
+        await bus.publish(_tick("42000"))
+        await bus.publish(_limit_signal("41000", quantity="0.5", seq=1))
+        await bus.publish(_tick("41000"))  # crosses the first buy: one partial fill
+        # Both rest below the market, so neither fills.
+        await bus.publish(_limit_signal("40000", quantity="0.5", seq=2))
+        await bus.publish(_limit_signal("40000", quantity="0.1", seq=3))
+
+    asyncio.run(scenario())
+
+    first = store.get_order(partly_filled)
+    assert first is not None
+    assert (first.state, first.cum_qty) == (OrderState.PARTIALLY_FILLED, Decimal("0.2"))
+    assert store.get_order(at_cap).state is OrderState.LIVE  # type: ignore[union-attr]
+    assert store.get_order(past_cap).state is OrderState.DENIED  # type: ignore[union-attr]
 
 
 def test_a_denial_emits_the_order_denied_named_event() -> None:
