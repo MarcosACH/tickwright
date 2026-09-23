@@ -1240,8 +1240,10 @@ class PortfolioProjection:
         The cycle itself now takes that side off ``ledger_reading().net``, the
         same fold one row per symbol (#304). It read this once more before the
         venue read as a movement detector (#284) until #324 replaced that with
-        the reading's fill stamps. What remains public is the one-call answer
-        the suites read the book back through.
+        the reading's fill stamps. The ``Checkpointer`` reads it for the guard's
+        ``PreTradeReading``. The venue caps one position per symbol, so the cap
+        is judged at this grain (ADR-0051). The suites also read the book back
+        through it.
         """
         return account_net_size(self._positions.values())
 
