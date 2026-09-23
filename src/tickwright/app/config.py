@@ -24,6 +24,7 @@ from tickwright.adapters.feed import ReplayFeedConfig
 from tickwright.adapters.paper import PaperExchangeConfig
 from tickwright.adapters.store import PostgresStoreConfig, SQLiteStoreConfig
 from tickwright.domain import UNATTRIBUTED, LeverageSpec, Side, SymbolOwnership
+from tickwright.engine.guard import NO_LIMITS, PreTradeLimits
 from tickwright.engine.runner import EngineConfig
 from tickwright.venues.hyperliquid import HyperliquidConfig
 
@@ -102,6 +103,9 @@ class AppConfig(BaseModel):
     root resolves it against the strategy-declared set into the *complete* map
     both consumers receive, so neither can invent its own reading of an
     unconfigured symbol."""
+
+    limits: PreTradeLimits = NO_LIMITS
+    """The pre-trade caps the real guard enforces (ADR-0051). Off unless set."""
 
     @model_validator(mode="after")
     def _the_selected_feed_needs_its_config(self) -> Self:

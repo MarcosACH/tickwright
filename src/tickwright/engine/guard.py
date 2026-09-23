@@ -42,6 +42,12 @@ class SymbolLimits:
     max_order_size: Decimal | None = None
     """In coins, checked against the quantized quantity."""
 
+    def __post_init__(self) -> None:
+        # A cap of zero or less would deny every order. That is a typo, not a
+        # policy, so it stops the boot instead (ADR-0051).
+        if self.max_order_size is not None and self.max_order_size <= 0:
+            raise ValueError(f"max_order_size must be positive, got {self.max_order_size}")
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class PreTradeLimits:

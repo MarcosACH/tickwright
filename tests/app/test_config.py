@@ -147,6 +147,19 @@ def test_a_non_positive_paper_genesis_is_a_typo_not_a_scenario() -> None:
         PaperExchangeConfig(genesis_collateral=Decimal("0"))
 
 
+@pytest.mark.parametrize("cap", ["0", "-0.5"])
+def test_a_non_positive_max_order_size_is_refused_at_load(tmp_path: Path, cap: str) -> None:
+    (tmp_path / "ticks.jsonl").touch()
+    with pytest.raises(ValidationError, match="max_order_size must be positive"):
+        AppConfig.model_validate(
+            {
+                "replay": ReplayFeedConfig(path=tmp_path / "ticks.jsonl"),
+                "paper": PaperExchangeConfig(genesis_collateral=Decimal("100000")),
+                "limits": {"symbols": {"BTC": {"max_order_size": cap}}},
+            }
+        )
+
+
 @pytest.mark.parametrize("label", ["Main", "paper-main", "a" * 33, ""])
 def test_the_paper_account_label_is_slug_constrained(label: str) -> None:
     """No hyphen, so ``paper-<label>`` stays unambiguously two segments against
