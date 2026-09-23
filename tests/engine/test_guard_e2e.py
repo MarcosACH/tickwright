@@ -342,6 +342,35 @@ def test_a_market_order_is_valued_at_the_mark_against_the_max_order_value() -> N
     assert _state(engine.store, fits) is OrderState.FILLED
 
 
+def test_a_market_order_with_no_mark_is_denied_when_a_max_order_value_is_set() -> None:
+    # The guard cannot prove the order fits the cap, so it refuses (ADR-0051).
+    limits = PreTradeLimits(symbols={"BTC": SymbolLimits(max_order_value=Decimal("1000"))})
+    engine = _engine(limits=limits)
+    cloid = derive_cloid("trivial:BTC:1")
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))  # a trade, but no mark yet
+        await engine.bus.publish(_market_signal(quantity="0.001"))
+
+    asyncio.run(scenario())
+
+    _assert_denied_by(engine, cloid, "no mark for max order value 1000")
+
+
+def test_a_market_order_with_no_mark_passes_when_no_max_order_value_is_set() -> None:
+    # A symbol with other caps but no value cap never needs a mark.
+    limits = PreTradeLimits(symbols={"BTC": SymbolLimits(max_order_size=Decimal("1"))})
+    engine = _engine(limits=limits)
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))
+        await engine.bus.publish(_market_signal(quantity="0.001"))
+
+    asyncio.run(scenario())
+
+    assert _state(engine.store, derive_cloid("trivial:BTC:1")) is OrderState.FILLED
+
+
 def test_the_max_position_counts_open_buys_by_their_unfilled_remainder() -> None:
     # Cap 1. The first buy of 0.5 fills 0.2 and rests 0.3, so the worst case is
     # +0.5 before the next order. A buy of 0.5 lands exactly on the cap. A buy
