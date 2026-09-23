@@ -60,6 +60,9 @@ class SymbolLimits:
                 raise ValueError(f"{cap_field.name} must be positive, got {cap}")
 
 
+_NS_PER_SECOND: Final = 1_000_000_000
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class PreTradeLimits:
     """The pre-trade caps ``RealGuard`` enforces (ADR-0051). Empty means no limits.
@@ -75,14 +78,14 @@ class PreTradeLimits:
 
     def __post_init__(self) -> None:
         # Zero or less would call every mark stale, so it stops the boot too.
-        # NaN and infinity load as floats but cannot become a count of
-        # nanoseconds, so the guard would raise on the first market order.
+        # NaN, infinity, and a finite age too large for nanoseconds all load as
+        # floats. The guard could not turn them into nanoseconds, so it would
+        # raise on the first market order. Checking the product catches all three.
         age = self.mark_max_age_seconds
-        if not (math.isfinite(age) and age > 0):
+        if not (math.isfinite(age * _NS_PER_SECOND) and age > 0):
             raise ValueError(f"mark_max_age_seconds must be a positive number, got {age}")
 
 
-_NS_PER_SECOND: Final = 1_000_000_000
 NO_LIMITS: Final = PreTradeLimits()
 _NO_SYMBOL_LIMITS: Final = SymbolLimits()
 
@@ -102,6 +105,7 @@ class RealGuard:
         self._store = store
         self._clock = clock
         self._limits = limits
+        self._mark_max_age_ns = int(limits.mark_max_age_seconds * _NS_PER_SECOND)
         # Restore the sticky halt before anything can place (ADR-0026): a tripped
         # engine comes back tripped. ``None`` means never tripped.
         restored = store.load_kill_switch()
@@ -177,7 +181,7 @@ class RealGuard:
                 # The guard's clock is the replay clock on replay, so a recorded
                 # file is judged in its own time, not the wall clock's.
                 age_ns = self._clock.timestamp_ns() - reading.mark.ts_event
-                if age_ns > int(self._limits.mark_max_age_seconds * _NS_PER_SECOND):
+                if age_ns > self._mark_max_age_ns:
                     return Denied(reason=f"stale mark for max order value {cap}")
                 value_price = reading.mark.price
             if quantity * value_price > cap:

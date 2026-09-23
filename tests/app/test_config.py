@@ -197,13 +197,14 @@ def test_a_non_positive_cap_is_refused_at_load(tmp_path: Path, name: str, cap: s
         )
 
 
-@pytest.mark.parametrize("age", ["0", "-1", "nan", "inf"])
+@pytest.mark.parametrize("age", ["0", "-1", "nan", "inf", "1e300"])
 def test_a_mark_max_age_that_is_not_a_positive_number_is_refused_at_load(
     tmp_path: Path, age: str
 ) -> None:
     # Zero would call every mark stale and deny every market order under a
     # value cap. That is a typo, not a policy (ADR-0051). NaN and infinity
-    # load as floats, but no age can be compared against them.
+    # load as floats, but no age can be compared against them. 1e300 is
+    # finite, but in nanoseconds it overflows to infinity.
     (tmp_path / "ticks.jsonl").touch()
     with pytest.raises(ValidationError, match="mark_max_age_seconds must be a positive number"):
         AppConfig.model_validate(
