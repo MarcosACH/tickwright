@@ -150,8 +150,11 @@ class RealGuard:
             # The position if every open order on this side fills, and then this
             # one too (ADR-0051).
             direction = 1 if signal.side is Side.BUY else -1
-            worst_case = reading.account_net_size + direction * (reading.open_remainder + quantity)
-            if abs(worst_case) > cap:
+            before = reading.account_net_size + direction * reading.open_remainder
+            worst_case = before + direction * quantity
+            # An order that shrinks the worst case always passes, so a user can
+            # reduce a position that is already past the cap.
+            if abs(worst_case) > cap and abs(worst_case) >= abs(before):
                 return Denied(reason=f"above max position {cap}")
         return Approved(quantity=quantity, price=price)
 

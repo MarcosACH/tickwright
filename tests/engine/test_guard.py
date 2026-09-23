@@ -203,6 +203,14 @@ def test_denies_a_buy_that_takes_the_worst_case_past_the_max_position() -> None:
     assert "max position" in decision.reason
 
 
+def test_the_oversized_short_that_shrinks_passes_the_max_position() -> None:
+    # ADR-0051's first example. The short is already past the cap, and the buy
+    # moves the worst case from -20 to -17. A user can always reduce.
+    guard = _guard(limits=_max_position("15"))
+    decision = _check(guard, _limit_signal(quantity="3"), net="-20")
+    assert isinstance(decision, Approved)
+
+
 def test_a_market_order_under_the_cap_skips_min_notional() -> None:
     # A market order has no price to value, so min notional stays with the
     # venue (ADR-0017) even though market orders now reach the caps.
