@@ -174,6 +174,13 @@ def test_a_symbol_with_no_entry_has_no_max_order_size() -> None:
     assert isinstance(_check(guard, _limit_signal(symbol="BTC", quantity="1000")), Approved)
 
 
+def test_tripped_kill_switch_denies_before_the_max_order_size() -> None:
+    guard = _guard(limits=_max_order_size("0.5"))
+    guard.trip_kill_switch("halt")
+    decision = _check(guard, _limit_signal(quantity="0.501"))
+    assert decision == Denied(reason="kill switch tripped")
+
+
 def test_a_market_order_under_the_cap_skips_min_notional() -> None:
     # A market order has no price to value, so min notional stays with the
     # venue (ADR-0017) even though market orders now reach the caps.
