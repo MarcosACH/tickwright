@@ -81,6 +81,10 @@ def _tick(price: str = "42000") -> MarketTick:
     )
 
 
+def _mark(price: str, *, ts_ns: int = 1_000) -> MarkTick:
+    return MarkTick(ts_event=ts_ns, ts_init=ts_ns, symbol="BTC", price=Decimal(price))
+
+
 def _limit_signal(
     price: str, *, quantity: str = "0.5", seq: int = 1, side: Side = Side.BUY
 ) -> PlaceSignal:
@@ -315,6 +319,27 @@ def test_a_limit_order_worth_more_than_the_max_order_value_is_never_sent() -> No
 
     _assert_denied_by(engine, too_big, "above max order value 1000")
     assert _state(engine.store, fits) is OrderState.LIVE
+
+
+def test_a_market_order_is_valued_at_the_mark_against_the_max_order_value() -> None:
+    # Cap 1000 USD, mark 40000. A buy of 0.03 is worth 1200 and a buy of 0.02
+    # is worth 800. The last trade at 42000 would value 0.02 at 840, still
+    # under the cap, so the pass does not depend on which price is used.
+    limits = PreTradeLimits(symbols={"BTC": SymbolLimits(max_order_value=Decimal("1000"))})
+    engine = _engine(limits=limits)
+    too_big = derive_cloid("trivial:BTC:1")
+    fits = derive_cloid("trivial:BTC:2")
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))
+        await engine.bus.publish(_mark("40000"))
+        await engine.bus.publish(_market_signal(quantity="0.03", seq=1))
+        await engine.bus.publish(_market_signal(quantity="0.02", seq=2))
+
+    asyncio.run(scenario())
+
+    _assert_denied_by(engine, too_big, "above max order value 1000")
+    assert _state(engine.store, fits) is OrderState.FILLED
 
 
 def test_the_max_position_counts_open_buys_by_their_unfilled_remainder() -> None:

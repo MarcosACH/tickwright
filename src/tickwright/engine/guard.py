@@ -150,8 +150,14 @@ class RealGuard:
         if cap is not None and quantity > cap:
             return Denied(reason=f"above max order size {cap}")
         cap = symbol_limits.max_order_value
-        if cap is not None and price is not None and quantity * price > cap:
-            return Denied(reason=f"above max order value {cap}")
+        if cap is not None:
+            value_price = price
+            if value_price is None and reading.mark is not None:
+                # A market order has no price, so it is valued at the mark. It
+                # can fill worse, so this cap is close, not exact (ADR-0051).
+                value_price = reading.mark.price
+            if value_price is not None and quantity * value_price > cap:
+                return Denied(reason=f"above max order value {cap}")
         cap = symbol_limits.max_position
         if cap is not None:
             # The position if every open order on this side fills, and then this
