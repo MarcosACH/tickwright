@@ -149,6 +149,25 @@ def _market_signal(*, quantity: str, seq: int = 1) -> PlaceSignal:
     )
 
 
+def _state(store: SQLiteStore, cloid: str) -> OrderState:
+    order = store.get_order(cloid)
+    assert order is not None, f"no order {cloid} in the store"
+    return order.state
+
+
+def _assert_denied_by_max_position(
+    store: SQLiteStore, order_events: list[OrderEvent], cloid: str
+) -> None:
+    """Assert the max position denied the order before it reached the exchange."""
+    # With OrderDenied as its only event, the order never got an OrderPlaced.
+    events = [ev for ev in order_events if ev.cloid == cloid]
+    assert [type(ev) for ev in events] == [OrderDenied]
+    denied = events[0]
+    assert isinstance(denied, OrderDenied)
+    assert "max position" in denied.reason
+    assert _state(store, cloid) is OrderState.DENIED
+
+
 def test_market_below_min_notional_is_rejected_by_the_venue_via_sourced_specs() -> None:
     # The full ADR-0031 path: the paper exchange authors the specs, the guard is
     # wired from exchange.instrument_specs() (venue-agnostic), and a too-small
@@ -244,7 +263,7 @@ def test_the_max_position_counts_open_buys_by_their_unfilled_remainder() -> None
     # +0.5 before the next order. A buy of 0.5 lands exactly on the cap. A buy
     # of 0.1 after it would reach 1.1, so it is denied.
     limits = PreTradeLimits(symbols={"BTC": SymbolLimits(max_position=Decimal("1"))})
-    bus, _, store, _, _ = _harness(limits=limits, partial_fill_fraction="0.4")
+    bus, _, store, _, order_events = _harness(limits=limits, partial_fill_fraction="0.4")
     partly_filled = derive_cloid("trivial:BTC:1")
     at_cap = derive_cloid("trivial:BTC:2")
     past_cap = derive_cloid("trivial:BTC:3")
@@ -262,8 +281,8 @@ def test_the_max_position_counts_open_buys_by_their_unfilled_remainder() -> None
     first = store.get_order(partly_filled)
     assert first is not None
     assert (first.state, first.cum_qty) == (OrderState.PARTIALLY_FILLED, Decimal("0.2"))
-    assert store.get_order(at_cap).state is OrderState.LIVE  # type: ignore[union-attr]
-    assert store.get_order(past_cap).state is OrderState.DENIED  # type: ignore[union-attr]
+    assert _state(store, at_cap) is OrderState.LIVE
+    _assert_denied_by_max_position(store, order_events, past_cap)
 
 
 def test_the_max_position_counts_size_placed_by_hand() -> None:
@@ -272,7 +291,7 @@ def test_the_max_position_counts_size_placed_by_hand() -> None:
     # as a heal into the unattributed partition. A buy of 0.2 lands exactly on
     # the cap. A buy of 0.1 after it would reach 1.1, so it is denied.
     limits = PreTradeLimits(symbols={"BTC": SymbolLimits(max_position=Decimal("1"))})
-    bus, checks, store, _, _ = _harness(limits=limits)
+    bus, checks, store, _, order_events = _harness(limits=limits)
     by_hand = ReconciliationFill(
         symbol="BTC", side=Side.BUY, quantity=Decimal("0.8"), price=Decimal("42000"), ts_ns=1_000
     )
@@ -288,8 +307,8 @@ def test_the_max_position_counts_size_placed_by_hand() -> None:
 
     asyncio.run(scenario())
 
-    assert store.get_order(at_cap).state is OrderState.LIVE  # type: ignore[union-attr]
-    assert store.get_order(past_cap).state is OrderState.DENIED  # type: ignore[union-attr]
+    assert _state(store, at_cap) is OrderState.LIVE
+    _assert_denied_by_max_position(store, order_events, past_cap)
 
 
 def test_a_denial_emits_the_order_denied_named_event() -> None:
@@ -395,7 +414,7 @@ def test_after_a_restart_the_max_position_denies_the_same_order_again() -> None:
     # First life, cap 1: a buy of 0.5 fills 0.2 and rests 0.3, and a buy of 0.5
     # rests. The worst case is +1, so a further buy of 0.1 is denied.
     limits = PreTradeLimits(symbols={"BTC": SymbolLimits(max_position=Decimal("1"))})
-    bus, _, store, _, _ = _harness(limits=limits, partial_fill_fraction="0.4")
+    bus, _, store, _, order_events = _harness(limits=limits, partial_fill_fraction="0.4")
 
     async def first_life() -> None:
         await bus.publish(_tick("42000"))
@@ -405,21 +424,21 @@ def test_after_a_restart_the_max_position_denies_the_same_order_again() -> None:
         await bus.publish(_limit_signal("40000", quantity="0.1", seq=3))
 
     asyncio.run(first_life())
-    assert store.get_order(derive_cloid("trivial:BTC:3")).state is OrderState.DENIED  # type: ignore[union-attr]
+    _assert_denied_by_max_position(store, order_events, derive_cloid("trivial:BTC:3"))
 
     # Second life: only the store survives. The same order, under a new signal
     # so it is judged again rather than dropped as a re-seen one, is denied too.
-    bus2, _, _ = _revived_manager(store, limits=limits)
+    bus2, _, events2 = _revived_manager(store, limits=limits)
 
     async def second_life() -> None:
         await bus2.publish(_tick("42000"))
         await bus2.publish(_limit_signal("40000", quantity="0.1", seq=4))
 
     asyncio.run(second_life())
-    assert store.get_order(derive_cloid("trivial:BTC:4")).state is OrderState.DENIED  # type: ignore[union-attr]
+    _assert_denied_by_max_position(store, events2, derive_cloid("trivial:BTC:4"))
 
 
-def _a_short_of_20_under_a_lowered_cap_of_15() -> tuple[InMemoryBus, SQLiteStore]:
+def _a_short_of_20_under_a_lowered_cap_of_15() -> tuple[InMemoryBus, SQLiteStore, list[OrderEvent]]:
     """The engine one restart after it sold 20 with no cap, now with a cap of 15.
 
     A lowered cap is one way a position ends up past its cap (ADR-0051). The
@@ -432,37 +451,37 @@ def _a_short_of_20_under_a_lowered_cap_of_15() -> tuple[InMemoryBus, SQLiteStore
         await bus.publish(_limit_signal("41000", quantity="20", seq=1, side=Side.SELL))
 
     asyncio.run(first_life())
-    assert store.get_order(derive_cloid("trivial:BTC:1")).state is OrderState.FILLED  # type: ignore[union-attr]
+    assert _state(store, derive_cloid("trivial:BTC:1")) is OrderState.FILLED
 
     limits = PreTradeLimits(symbols={"BTC": SymbolLimits(max_position=Decimal("15"))})
-    bus2, _, _ = _revived_manager(store, limits=limits)
-    return bus2, store
+    bus2, _, events2 = _revived_manager(store, limits=limits)
+    return bus2, store, events2
 
 
 def test_the_oversized_short_that_shrinks_passes_the_max_position_on_paper() -> None:
     # ADR-0051's first example. Net -20 and no open buys, so a buy of 3 moves
     # the worst case from -20 to -17. That is still past 15, but it passes.
-    bus, store = _a_short_of_20_under_a_lowered_cap_of_15()
+    bus, store, _ = _a_short_of_20_under_a_lowered_cap_of_15()
 
     async def scenario() -> None:
         await bus.publish(_tick("42000"))
         await bus.publish(_limit_signal("40000", quantity="3", seq=2))  # rests
 
     asyncio.run(scenario())
-    assert store.get_order(derive_cloid("trivial:BTC:2")).state is OrderState.LIVE  # type: ignore[union-attr]
+    assert _state(store, derive_cloid("trivial:BTC:2")) is OrderState.LIVE
 
 
 def test_the_buy_that_crosses_zero_is_denied_on_the_new_side_on_paper() -> None:
     # ADR-0051's third example. A buy of 36 moves the worst case from -20 to
     # +16. It crosses zero, so it is judged as a +16 long, past 15.
-    bus, store = _a_short_of_20_under_a_lowered_cap_of_15()
+    bus, store, order_events = _a_short_of_20_under_a_lowered_cap_of_15()
 
     async def scenario() -> None:
         await bus.publish(_tick("42000"))
         await bus.publish(_limit_signal("40000", quantity="36", seq=2))
 
     asyncio.run(scenario())
-    assert store.get_order(derive_cloid("trivial:BTC:2")).state is OrderState.DENIED  # type: ignore[union-attr]
+    _assert_denied_by_max_position(store, order_events, derive_cloid("trivial:BTC:2"))
 
 
 def test_the_shrinking_sell_is_denied_by_open_sells_on_paper() -> None:
@@ -470,7 +489,7 @@ def test_the_shrinking_sell_is_denied_by_open_sells_on_paper() -> None:
     # rests. The worst case on the sell side is -15, right on the cap. A sell
     # of 3 shrinks the +5 long, but it moves the worst case to -18.
     limits = PreTradeLimits(symbols={"BTC": SymbolLimits(max_position=Decimal("15"))})
-    bus, _, store, _, _ = _harness(limits=limits)
+    bus, _, store, _, order_events = _harness(limits=limits)
 
     async def scenario() -> None:
         await bus.publish(_tick("42000"))
@@ -481,9 +500,9 @@ def test_the_shrinking_sell_is_denied_by_open_sells_on_paper() -> None:
         await bus.publish(_limit_signal("44000", quantity="3", seq=3, side=Side.SELL))
 
     asyncio.run(scenario())
-    assert store.get_order(derive_cloid("trivial:BTC:1")).state is OrderState.FILLED  # type: ignore[union-attr]
-    assert store.get_order(derive_cloid("trivial:BTC:2")).state is OrderState.LIVE  # type: ignore[union-attr]
-    assert store.get_order(derive_cloid("trivial:BTC:3")).state is OrderState.DENIED  # type: ignore[union-attr]
+    assert _state(store, derive_cloid("trivial:BTC:1")) is OrderState.FILLED
+    assert _state(store, derive_cloid("trivial:BTC:2")) is OrderState.LIVE
+    _assert_denied_by_max_position(store, order_events, derive_cloid("trivial:BTC:3"))
 
 
 def test_kill_switch_denies_new_orders_while_resting_orders_keep_filling() -> None:
@@ -506,7 +525,7 @@ def test_kill_switch_denies_new_orders_while_resting_orders_keep_filling() -> No
     asyncio.run(scenario())
 
     assert any(isinstance(ev, OrderDenied) and ev.cloid == halted for ev in order_events)
-    assert store.get_order(halted).state is OrderState.DENIED  # type: ignore[union-attr]
+    assert _state(store, halted) is OrderState.DENIED
     # The resting order rode through the halt: it went LIVE and then FILLED.
     assert any(isinstance(ev, OrderLive) and ev.cloid == resting for ev in order_events)
-    assert store.get_order(resting).state is OrderState.FILLED  # type: ignore[union-attr]
+    assert _state(store, resting) is OrderState.FILLED
