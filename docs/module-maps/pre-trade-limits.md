@@ -157,6 +157,11 @@ set as one JSON value, `TICKWRIGHT_LIMITS={"symbols": {...}}`, not as `TICKWRIGH
 inside one, so the `__SYMBOLS` form fails at boot. This is the same shape as `TICKWRIGHT_LEVERAGE`.
 A test loads the `.env.example` line through `AppSettings`, so the docs and the code cannot drift.**)**
 
+**(Amended by [#379](https://github.com/MarcosACH/tickwright/issues/379) — any limits block
+counts:** validation compares `limits` to `NO_LIMITS`, so an empty symbol entry with `noop` also
+refuses to start. A new cap needs no edit to this check. See ADR-0051 §Limits need the real
+guard.**)**
+
 **Responsibilities:** Map settings onto `PreTradeLimits`, and refuse a limit that would not be
 enforced. `build_guard` hands the limits to `RealGuard`.
 

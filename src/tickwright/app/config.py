@@ -137,9 +137,10 @@ class AppConfig(BaseModel):
 
     @model_validator(mode="after")
     def _limits_need_the_real_guard(self) -> Self:
-        if self.guard == "noop" and self.limits.any_set:
+        if self.guard == "noop" and self.limits != NO_LIMITS:
             # A limit that is set but never enforced is worse than no limit
-            # (ADR-0051), so the run does not start.
+            # (ADR-0051), so the run does not start. Any limits block counts,
+            # even an empty one, so a cap added later needs no edit here.
             raise ValueError(
                 "limits need guard='real': set TICKWRIGHT_GUARD=real or remove TICKWRIGHT_LIMITS"
             )

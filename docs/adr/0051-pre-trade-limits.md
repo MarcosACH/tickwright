@@ -61,6 +61,11 @@ never takes a slot.
 
 **Limits need the real guard.** If any limit is set and `guard` is `noop`, the engine refuses to
 start with a clear error. A limit that is set but not enforced is worse than no limit.
+**(Amended by [#379](https://github.com/MarcosACH/tickwright/issues/379) — any limits block
+counts:** the engine refuses `noop` whenever the limits differ from the empty default. An empty
+symbol entry counts too, even though it sets no cap. The check then needs no edit when a later
+slice adds a cap. A hand-kept list of caps could miss one, and that cap would never be
+enforced.**)**
 
 **Same checks on paper and live.** The guard stays venue-agnostic. Positions come from the
 `PortfolioProjection`, open orders from the `Cache`, and marks from the projection's mark map.

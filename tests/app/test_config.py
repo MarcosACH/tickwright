@@ -190,9 +190,16 @@ def test_a_non_positive_max_order_size_is_refused_at_load(tmp_path: Path, cap: s
         )
 
 
-def test_limits_with_the_noop_guard_are_refused_at_load(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "symbol_limits",
+    [{"max_order_size": "0.5"}, {}],
+    ids=["a cap", "an empty entry"],
+)
+def test_limits_with_the_noop_guard_are_refused_at_load(
+    tmp_path: Path, symbol_limits: dict[str, str]
+) -> None:
     # The noop guard enforces nothing, so a cap set beside it would only look
-    # like protection (ADR-0051).
+    # like protection (ADR-0051). Any limits block counts, even an empty one.
     (tmp_path / "ticks.jsonl").touch()
     with pytest.raises(ValidationError, match="limits need guard='real'"):
         AppConfig.model_validate(
@@ -200,7 +207,7 @@ def test_limits_with_the_noop_guard_are_refused_at_load(tmp_path: Path) -> None:
                 "replay": ReplayFeedConfig(path=tmp_path / "ticks.jsonl"),
                 "paper": PaperExchangeConfig(genesis_collateral=Decimal("100000")),
                 "guard": "noop",
-                "limits": {"symbols": {"BTC": {"max_order_size": "0.5"}}},
+                "limits": {"symbols": {"BTC": symbol_limits}},
             }
         )
 
