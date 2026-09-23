@@ -102,13 +102,19 @@ def _max_order_size(coins: str) -> PreTradeLimits:
     return PreTradeLimits(symbols={"BTC": SymbolLimits(max_order_size=Decimal(coins))})
 
 
-def _check(guard: PreTradeGuard, signal: PlaceSignal) -> GuardDecision:
-    """Check ``signal`` against an empty book: no position, no open orders, no mark."""
+def _max_position(coins: str) -> PreTradeLimits:
+    return PreTradeLimits(symbols={"BTC": SymbolLimits(max_position=Decimal(coins))})
+
+
+def _check(
+    guard: PreTradeGuard, signal: PlaceSignal, *, net: str = "0", open_remainder: str = "0"
+) -> GuardDecision:
+    """Check ``signal`` with no mark. The book is empty unless a test says otherwise."""
     reading = PreTradeReading(
         symbol=signal.symbol,
         side=signal.side,
-        account_net_size=Decimal("0"),
-        open_remainder=Decimal("0"),
+        account_net_size=Decimal(net),
+        open_remainder=Decimal(open_remainder),
         mark=None,
     )
     return guard.check(signal, reading)
@@ -187,6 +193,42 @@ def test_tripped_kill_switch_denies_before_the_max_order_size() -> None:
     guard.trip_kill_switch("halt")
     decision = _check(guard, _limit_signal(quantity="0.501"))
     assert decision == Denied(reason="kill switch tripped")
+
+
+def test_denies_a_buy_that_takes_the_worst_case_past_the_max_position() -> None:
+    # Net +10 and a new buy of 6: if it fills, the position is +16, above 15.
+    guard = _guard(limits=_max_position("15"))
+    decision = _check(guard, _limit_signal(quantity="6"), net="10")
+    assert isinstance(decision, Denied)
+    assert "max position" in decision.reason
+
+
+def test_the_oversized_short_that_shrinks_passes_the_max_position() -> None:
+    # ADR-0051's first example. The short is already past the cap, and the buy
+    # moves the worst case from -20 to -17. A user can always reduce.
+    guard = _guard(limits=_max_position("15"))
+    decision = _check(guard, _limit_signal(quantity="3"), net="-20")
+    assert isinstance(decision, Approved)
+
+
+def test_the_shrinking_sell_is_denied_by_open_sells() -> None:
+    # ADR-0051's second example. The sell shrinks the +5 long, but with 20 in
+    # open sells the worst case moves from -15 to -18, past the cap.
+    guard = _guard(limits=_max_position("15"))
+    decision = _check(
+        guard, _limit_signal(quantity="3", side=Side.SELL), net="5", open_remainder="20"
+    )
+    assert isinstance(decision, Denied)
+    assert "max position" in decision.reason
+
+
+def test_the_buy_that_crosses_zero_is_denied_on_the_new_side() -> None:
+    # ADR-0051's third example. The worst case moves from -20 to +16. That is
+    # smaller in size, but it crosses zero, so it is judged as a +16 long.
+    guard = _guard(limits=_max_position("15"))
+    decision = _check(guard, _limit_signal(quantity="36"), net="-20")
+    assert isinstance(decision, Denied)
+    assert "max position" in decision.reason
 
 
 def test_a_market_order_under_the_cap_skips_min_notional() -> None:
