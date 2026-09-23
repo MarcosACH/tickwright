@@ -65,6 +65,10 @@ max order value in USD, max position in coins. An optional engine-wide rate cap 
 S seconds. A mark max age, default 10 seconds. Construction refuses a non-positive cap, and a rate
 cap with only one of N and S set. An empty value means no limits.
 
+**(Amended by [#381](https://github.com/MarcosACH/tickwright/issues/381):** construction also
+refuses a mark max age that is zero, negative, NaN, or infinite. NaN and infinity load as floats,
+but the guard cannot turn them into nanoseconds, so it would raise on the first market order.**)**
+
 **Responsibilities:** Hold the caps and reject nonsense at boot. It holds no state and does no
 checking of orders.
 
