@@ -31,7 +31,9 @@ The projection is fed the mark by **subscribing to `MarkTick` on the `EventBus`*
   order if the mark is missing or older than its own max age, default 10 seconds. This keeps the
   read path free of a clock. The guard already holds one, like the reconcile cycle. The age is a
   separate setting from the band's `mark_max_age_seconds`. The band asks whether a comparison is
-  still meaningful. The guard asks whether it can prove an order fits a cap.**)**
+  still meaningful. The guard asks whether it can prove an order fits a cap. The projection is no
+  longer the only reader of its mark map. It lends the latest mark and its time to the
+  `Checkpointer`, which puts them in the guard's `PreTradeReading`.**)**
 
 How `None` **surfaces through the `Portfolio` Protocol** (per-field nullability, whether the seam hides it) is the read-API ticket's call (#135 — **now fixed by ADR-0041 §6**); this ADR fixes only the underlying policy. Full-disconnect staleness — the reconcile stream *also* down — is the recovery / "freeze-never-flat" window owned by the read-seam (#135 — read-seam reporting **fixed by ADR-0041 §7**) and durability (#137) tickets.
 

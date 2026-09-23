@@ -31,20 +31,26 @@ the order fits, so it refuses. The max age is its own setting, default 10 second
 reconcile band's `mark_max_age_seconds`, which does a different job. A market order can fill worse
 than the mark, so this cap is close for market orders, not exact.
 
-**Max position.** The worst-case position on the order's side is the current net position, plus the
-unfilled remainder of every open order on the same side, plus the new order. For a sell, the short
-side is measured the same way. An order that shrinks the position always passes this cap, because
-it moves the worst case toward zero. An order that flips long to short is checked on the new short
-side. The cap is in coins so a missing mark never blocks it.
+**Max position.** The cap measures the worst-case position on the order's side. That is the
+position if every open order on that side fills, and then the new order fills too. For a buy, it is
+the net position, plus the unfilled remainder of open buys, plus the new buy. For a sell, it is the
+net position, minus the unfilled remainder of open sells, minus the new sell. The order is denied
+when the size of that worst case is above the cap. An order that moves this worst case toward zero
+always passes. A sell that shrinks a long position can still be denied. For example, with a net of
++5, open sells of 20, and a new sell of 3, the worst case is -18. An order that flips long to short
+is checked on the new short side. The cap is in coins so a missing mark never blocks it.
 
 **Max orders per window.** N approved placements per S seconds, as a sliding window on the injected
 `Clock`. The scope is the whole engine, because a venue rate-limits the account and one process is
 one account (ADR-0038). Only approved placements count. Cancels are never blocked and never counted,
 because a cancel reduces risk. Denied orders do not count, because they never reach the venue. The
-window lives in memory and starts empty on boot. The window is seconds long, and so is a restart.
+window lives in memory and starts empty on boot. A restart empties the window, so up to N orders
+may pass right after a boot. We accept this.
 
 **Check order.** The kill switch comes first, then quantization, then min notional, then the caps.
-The rate cap is checked last, so an order denied by another cap never takes a slot.
+Min notional applies to limit orders only, because a market order has no price. Every cap applies
+to both limit and market orders. The rate cap is checked last, so an order denied by another cap
+never takes a slot.
 
 **Limits need the real guard.** If any limit is set and `guard` is `noop`, the engine refuses to
 start with a clear error. A limit that is set but not enforced is worse than no limit.

@@ -16,6 +16,7 @@ src/tickwright/
   engine/
     guard.py                  # + PreTradeLimits, and the caps on RealGuard
     checkpoint.py             # + the read that builds a PreTradeReading
+    portfolio.py              # + a read of the latest mark and its time
     execution.py              # fetches the reading, passes it to check
   app/
     config.py                 # + top-level limits, and the noop refusal
@@ -77,9 +78,10 @@ own users.
 ### RealGuard (`engine`, existing)
 
 **Interface:** Built with its specs, store, clock, and a `PreTradeLimits`. Checks run in a fixed
-order: kill switch, spec lookup, quantization, size rounds to zero, min notional, then the caps. The
-rate cap is last, so an order denied by another cap never takes a slot. Every cap denial carries a
-reason that names the cap.
+order: kill switch, spec lookup, quantization, size rounds to zero, min notional, then the caps.
+Min notional applies to limit orders only. Every cap applies to both limit and market orders, so a
+market order no longer returns before the checks end. The rate cap is last, so an order denied by
+another cap never takes a slot. Every cap denial carries a reason that names the cap.
 
 **Responsibilities:**
 
@@ -88,7 +90,9 @@ reason that names the cap.
   market order. A missing mark, or one older than the max age on the guard's clock, denies the
   market order.
 - Max position: the worst-case net size on the order's side, from the reading plus the new order.
-  An order that shrinks the position passes. A flip is judged on the new side.
+  An order that moves this worst case toward zero passes. A sell that shrinks a long position can
+  still be denied when open sells push the worst case past the cap. A flip is judged on the new
+  side.
 - Rate cap: a sliding window of approved placement times, in memory, empty at boot.
 
 **Seams:** None new.
@@ -110,6 +114,21 @@ the data.
 
 **Depth note:** It already owns both read-models (ADR-0043 §4). A second place that folds them would
 be a second definition to drift.
+
+---
+
+### PortfolioProjection (`engine`, existing)
+
+**Interface:** Gains one read: the latest mark price and its time for a symbol, or nothing when no
+mark was ever seen.
+
+**Responsibilities:** Lend out the private mark map for the `PreTradeReading`. The read path still
+never checks the mark's age. The guard does that.
+
+**Seams:** None new.
+
+**Depth note:** The mark map lives here (ADR-0039). The `Checkpointer` is its second reader. See the
+ADR-0039 amendment.
 
 ---
 
@@ -143,8 +162,7 @@ enforced. `build_guard` hands the limits to `RealGuard`.
 ```
 app.AppConfig → engine.PreTradeLimits
 app.build_guard → engine.RealGuard
-engine.ExecutionManager → engine.Checkpointer → engine.Cache, engine.PortfolioProjection
-engine.ExecutionManager → domain.PreTradeGuard → domain.PreTradeReading
+engine.ExecutionManager → engine.Checkpointer → engine.Cache, engine.PortfolioProjectionengine.ExecutionManager → domain.PreTradeGuard → domain.PreTradeReading
 engine.RealGuard → engine.PreTradeLimits, domain.PreTradeReading, domain.Clock
 ```
 
