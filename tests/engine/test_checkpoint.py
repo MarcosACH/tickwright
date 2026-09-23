@@ -520,3 +520,27 @@ def test_a_reading_shows_the_net_size_over_every_partition_unattributed_included
     reading = checkpointer.pre_trade_reading("BTC", Side.BUY)
 
     assert reading.account_net_size == Decimal("0.3")
+
+
+def test_a_reading_shows_the_unfilled_remainder_of_open_orders_on_its_side_only() -> None:
+    checkpointer = _checkpointer(SQLiteStore(":memory:"))
+    checkpointer.recover()
+    pending = _submitted_order(quantity="0.4", seq=1)
+    pending.state = OrderState.PENDING  # the write-ahead intent, not yet sent
+    checkpointer.checkpoint(pending)
+    partly_filled = _submitted_order(quantity="1", seq=2)
+    fill = _fill(partly_filled, trade_id="f2", quantity="0.25")
+    checkpointer.checkpoint_fill(partly_filled, fill, side=Side.BUY)
+    filled = _submitted_order(quantity="0.5", seq=3)
+    checkpointer.checkpoint_fill(
+        filled, _fill(filled, trade_id="f3", quantity="0.5"), side=Side.BUY
+    )
+    other_side = _submitted_order(quantity="2", side=Side.SELL, seq=4)
+    checkpointer.checkpoint(other_side)
+
+    buy = checkpointer.pre_trade_reading("BTC", Side.BUY)
+    sell = checkpointer.pre_trade_reading("BTC", Side.SELL)
+
+    # 0.4 pending + 0.75 left of the partly filled one. The filled order is closed.
+    assert buy.open_remainder == Decimal("1.15")
+    assert sell.open_remainder == Decimal("2")

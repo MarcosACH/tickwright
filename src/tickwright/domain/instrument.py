@@ -111,6 +111,9 @@ class PreTradeReading:
     account_net_size: Decimal
     """Signed, over every partition of ``symbol``, the unattributed one included.
     The venue holds one position per symbol, so this is the size it sees."""
+    open_remainder: Decimal
+    """The unfilled part of every open order on ``side``, summed. A ``PENDING``
+    order counts: it may already be at the venue (ADR-0008)."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

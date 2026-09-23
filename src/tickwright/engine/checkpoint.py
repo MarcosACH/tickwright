@@ -145,6 +145,14 @@ class Checkpointer:
             symbol=symbol,
             side=side,
             account_net_size=self._portfolio.account_net().get(symbol, Decimal("0")),
+            open_remainder=sum(
+                (
+                    order.quantity - order.cum_qty
+                    for order in self._cache.open_orders(symbol=symbol)
+                    if order.side is side
+                ),
+                Decimal("0"),
+            ),
         )
 
     def recover(self) -> None:

@@ -80,7 +80,12 @@ def _guard(spec: InstrumentSpec | None = None, *, store: SQLiteStore | None = No
 
 def _check(guard: PreTradeGuard, signal: PlaceSignal) -> GuardDecision:
     """Check ``signal`` against an empty book: no position, no open orders, no mark."""
-    reading = PreTradeReading(symbol=signal.symbol, side=signal.side, account_net_size=Decimal("0"))
+    reading = PreTradeReading(
+        symbol=signal.symbol,
+        side=signal.side,
+        account_net_size=Decimal("0"),
+        open_remainder=Decimal("0"),
+    )
     return guard.check(signal, reading)
 
 
