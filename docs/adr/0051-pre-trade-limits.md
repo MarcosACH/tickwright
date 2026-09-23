@@ -41,8 +41,11 @@ reduce a position that is already too big. A position can pass the cap after the
 after a fill the engine did not place. For example, with a cap of 15, a net of -20, and no open
 buys, a new buy of 3 passes. The worst case moves from -20 to -17. A sell that shrinks a long
 position can still be denied. For example, with a cap of 15, a net of +5, open sells of 20, and a
-new sell of 3, the worst case moves from -15 to -18. The sell is denied. An order that flips long to
-short is checked on the new short side. The cap is in coins so a missing mark never blocks it.
+new sell of 3, the worst case moves from -15 to -18. The sell is denied. Toward zero means the worst
+case gets smaller and does not cross zero. An order that crosses zero gets no exception. It is
+checked on the new side, like any other order. For example, with a cap of 15, a net of -20, and no
+open buys, a new buy of 36 moves the worst case from -20 to +16. The buy is denied, because 16 is
+above the cap. The cap is in coins so a missing mark never blocks it.
 
 **Max orders per window.** N approved placements per S seconds, as a sliding window on the injected
 `Clock`. The scope is the whole engine, because a venue rate-limits the account and one process is
