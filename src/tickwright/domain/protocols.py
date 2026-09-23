@@ -14,7 +14,7 @@ from typing import Protocol, runtime_checkable
 from .account import Account, AccountSpec, AccountView
 from .enums import OrderState
 from .events import Event, MarketTick, OrderEvent, PlaceSignal
-from .instrument import GuardDecision, InstrumentSpec, KillSwitchState
+from .instrument import GuardDecision, InstrumentSpec, KillSwitchState, PreTradeReading
 from .order import Order
 from .position import Position, PositionView
 from .venue import (
@@ -754,16 +754,20 @@ class Exchange(OrderAnchor, AccountAnchor, Protocol):
 @runtime_checkable
 class PreTradeGuard(Protocol):
     """The thin pre-trade boundary the ``ExecutionManager`` runs before any send
-    (ADR-0017): check → quantize → verdict. Not a RiskEngine — no positions,
-    exposure, or portfolio risk (those are deferred).
+    (ADR-0017): check → quantize → verdict. Not a RiskEngine — no portfolio
+    risk.
 
     Two impls satisfy it: a ``RealGuard`` (min-notional, quantization, kill
     switch) and a ``NoopGuard`` passthrough. Users may plug their own — the
     Protocol-extensibility story.
     """
 
-    def check(self, signal: PlaceSignal) -> GuardDecision:
+    def check(self, signal: PlaceSignal, reading: PreTradeReading) -> GuardDecision:
         """Verdict on ``signal``: approve with quantized values, or ``DENIED``.
+
+        ``reading`` is the account state for the signal's symbol and side, taken
+        just before this call. The guard holds no read-model of its own, so this
+        is the only account state it sees (ADR-0051).
 
         Failure — a size that rounds to zero, a below-min-notional order, or a
         tripped kill switch — is ``DENIED`` (ADR-0010): never sent, safe to

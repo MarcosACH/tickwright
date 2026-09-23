@@ -30,9 +30,11 @@ from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     Account,
     AggressorSide,
+    Approved,
     CancelSignal,
     ExecutionReport,
     FillReport,
+    GuardDecision,
     InvariantViolation,
     MarketTick,
     Order,
@@ -48,6 +50,8 @@ from tickwright.domain import (
     OrderSubmitted,
     PlaceSignal,
     Position,
+    PreTradeGuard,
+    PreTradeReading,
     Side,
     Signal,
     TimeInForce,
@@ -142,7 +146,7 @@ class _Wiring:
         return self.checkpointer.portfolio
 
 
-def _wiring(store: SQLiteStore) -> _Wiring:
+def _wiring(store: SQLiteStore, *, guard: PreTradeGuard | None = None) -> _Wiring:
     """The manager over its real collaborators, on the ``store`` handed in — so a
     case can substitute one that fails at a chosen seam.
 
@@ -164,7 +168,7 @@ def _wiring(store: SQLiteStore) -> _Wiring:
     # that skipped this step would leave behind the one shape #188 refuses —
     # order history with no ledger — for whatever life reopens the store next.
     checks.recover()
-    manager = ExecutionManager(bus=bus, exchange=exchange, checkpointer=checks)
+    manager = ExecutionManager(bus=bus, exchange=exchange, checkpointer=checks, guard=guard)
 
     bus.subscribe(Signal, manager.on_signal)
     bus.subscribe(ExecutionReport, manager.on_execution_report)
@@ -747,6 +751,41 @@ def test_duplicate_signal_does_not_place_a_second_order() -> None:
 
     # Only the first signal produces a saga; the resent one is a no-op.
     assert [type(ev) for ev in order_events] == [OrderPlaced, OrderSubmitted, OrderFilled]
+
+
+class _ReadingRecorder:
+    """A user's own guard: it approves everything and keeps each reading it gets."""
+
+    def __init__(self) -> None:
+        self.readings: list[PreTradeReading] = []
+
+    @property
+    def kill_switch_tripped(self) -> bool:
+        return False
+
+    def check(self, signal: PlaceSignal, reading: PreTradeReading) -> GuardDecision:
+        self.readings.append(reading)
+        return Approved(quantity=signal.quantity, price=signal.price)
+
+    def trip_kill_switch(self, reason: str) -> None:
+        pass
+
+    def reset_kill_switch(self) -> None:
+        pass
+
+
+def test_the_guard_gets_a_reading_for_the_signals_symbol_and_side() -> None:
+    guard = _ReadingRecorder()
+    bus = _wiring(SQLiteStore(":memory:"), guard=guard).bus
+
+    async def scenario() -> None:
+        await bus.publish(_tick())
+        await bus.publish(_market_signal(seq=1))
+        await bus.publish(_market_signal(seq=1))  # re-seen: dedup runs before the guard
+
+    asyncio.run(scenario())
+
+    assert [(r.symbol, r.side) for r in guard.readings] == [("BTC", Side.BUY)]
 
 
 # --- LIMIT resting, cancel, and status handling (issue #13) -----------------

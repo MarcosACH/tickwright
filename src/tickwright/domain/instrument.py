@@ -98,6 +98,19 @@ type GuardDecision = Approved | Denied
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class PreTradeReading:
+    """The account state a ``PreTradeGuard`` judges one placement against.
+
+    The guard is built before the read-models exist, so it cannot hold them.
+    The ``Checkpointer`` builds this snapshot in the same synchronous call as
+    the check, so its parts cannot disagree. It holds no clock and no verdict.
+    """
+
+    symbol: str
+    side: Side
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class KillSwitchState:
     """The persisted global kill-switch state (ADR-0026).
 

@@ -19,10 +19,13 @@ from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     Approved,
     Denied,
+    GuardDecision,
     InstrumentSpec,
     InvariantViolation,
     OrderType,
     PlaceSignal,
+    PreTradeGuard,
+    PreTradeReading,
     Side,
     TimeInForce,
 )
@@ -75,9 +78,14 @@ def _guard(spec: InstrumentSpec | None = None, *, store: SQLiteStore | None = No
     )
 
 
+def _check(guard: PreTradeGuard, signal: PlaceSignal) -> GuardDecision:
+    """Check ``signal`` against an empty book: no position, no open orders, no mark."""
+    return guard.check(signal, PreTradeReading(symbol=signal.symbol, side=signal.side))
+
+
 def test_approves_a_valid_limit_with_quantized_size_and_price() -> None:
     guard = _guard(_spec(sz_decimals=3, max_decimals=6))
-    decision = guard.check(_limit_signal(price="100.1237", quantity="1.23456", side=Side.BUY))
+    decision = _check(guard, _limit_signal(price="100.1237", quantity="1.23456", side=Side.BUY))
     assert isinstance(decision, Approved)
     # Size rounds down to sz_decimals; a BUY price rounds down (passive side).
     assert decision.quantity == Decimal("1.234")
@@ -88,7 +96,7 @@ def test_denies_a_size_that_rounds_to_zero() -> None:
     guard = _guard(_spec(sz_decimals=3))
     # 0.0004 below the 0.001 size tick quantizes to zero — a phantom order that
     # must never be sent (ADR-0017). DENIED, with a reason.
-    decision = guard.check(_limit_signal(quantity="0.0004"))
+    decision = _check(guard, _limit_signal(quantity="0.0004"))
     assert isinstance(decision, Denied)
     assert decision.reason
 
@@ -98,7 +106,7 @@ def test_denies_a_limit_below_min_notional() -> None:
     # min_notional of 10. The guard has the exact price (LIMIT) so it denies
     # locally — never sent (contrast the venue-adjudicated MARKET path).
     guard = _guard(_spec(sz_decimals=3, min_notional="10"))
-    decision = guard.check(_limit_signal(price="100", quantity="0.05"))
+    decision = _check(guard, _limit_signal(price="100", quantity="0.05"))
     assert isinstance(decision, Denied)
     assert decision.reason
 
@@ -106,17 +114,17 @@ def test_denies_a_limit_below_min_notional() -> None:
 def test_approves_a_limit_at_or_above_min_notional() -> None:
     # notional = 100 × 0.2 = 20, at/above min_notional 10 → approved.
     guard = _guard(_spec(sz_decimals=3, min_notional="10"))
-    assert isinstance(guard.check(_limit_signal(price="100", quantity="0.2")), Approved)
+    assert isinstance(_check(guard, _limit_signal(price="100", quantity="0.2")), Approved)
 
 
 def test_tripped_kill_switch_denies_every_new_placement() -> None:
     guard = _guard()
-    assert isinstance(guard.check(_limit_signal()), Approved)  # ok before the halt
+    assert isinstance(_check(guard, _limit_signal()), Approved)  # ok before the halt
 
     guard.trip_kill_switch("manual halt")
 
     assert guard.kill_switch_tripped
-    decision = guard.check(_limit_signal(seq=2))
+    decision = _check(guard, _limit_signal(seq=2))
     assert isinstance(decision, Denied)
     assert decision.reason
 
@@ -127,7 +135,7 @@ def test_reset_kill_switch_re_enables_placement() -> None:
     guard.reset_kill_switch()
 
     assert not guard.kill_switch_tripped
-    assert isinstance(guard.check(_limit_signal()), Approved)
+    assert isinstance(_check(guard, _limit_signal()), Approved)
 
 
 def test_tripped_kill_switch_is_restored_on_a_fresh_guard() -> None:
@@ -140,7 +148,7 @@ def test_tripped_kill_switch_is_restored_on_a_fresh_guard() -> None:
     revived = _guard(store=store)
 
     assert revived.kill_switch_tripped
-    assert isinstance(revived.check(_limit_signal()), Denied)
+    assert isinstance(_check(revived, _limit_signal()), Denied)
 
 
 def test_reset_is_restored_on_a_fresh_guard() -> None:
@@ -154,7 +162,7 @@ def test_reset_is_restored_on_a_fresh_guard() -> None:
     revived = _guard(store=store)
 
     assert not revived.kill_switch_tripped
-    assert isinstance(revived.check(_limit_signal()), Approved)
+    assert isinstance(_check(revived, _limit_signal()), Approved)
 
 
 def test_trip_and_reset_emit_named_events() -> None:
@@ -179,7 +187,7 @@ def test_check_for_an_unspecced_symbol_fails_fast() -> None:
     # silently mishandle. The symbol is named so the misconfiguration is diagnosable.
     guard = _guard()  # specs = {"BTC": ...}
     with pytest.raises(InvariantViolation, match="ETH"):
-        guard.check(_limit_signal(symbol="ETH"))
+        _check(guard, _limit_signal(symbol="ETH"))
 
 
 def test_tripped_kill_switch_denies_an_unspecced_symbol_without_raising() -> None:
@@ -188,13 +196,13 @@ def test_tripped_kill_switch_denies_an_unspecced_symbol_without_raising() -> Non
     # never surfaces as an InvariantViolation.
     guard = _guard()
     guard.trip_kill_switch("halt")
-    assert isinstance(guard.check(_limit_signal(symbol="ETH")), Denied)
+    assert isinstance(_check(guard, _limit_signal(symbol="ETH")), Denied)
 
 
 def test_noop_guard_passes_a_signal_through_unmodified() -> None:
     # The passthrough twin: no quantization, always approved — the seam is real.
     guard = NoopGuard()
-    decision = guard.check(_limit_signal(price="100.1237", quantity="1.23456"))
+    decision = _check(guard, _limit_signal(price="100.1237", quantity="1.23456"))
     assert isinstance(decision, Approved)
     assert decision.quantity == Decimal("1.23456")
     assert decision.price == Decimal("100.1237")
