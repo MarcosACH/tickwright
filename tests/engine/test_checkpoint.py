@@ -27,6 +27,7 @@ from tickwright.domain import (
     OrderFillEvent,
     OrderState,
     Position,
+    ReconciliationFill,
     Side,
     StoreAccountMismatch,
 )
@@ -500,3 +501,22 @@ def test_a_refused_store_is_never_mass_read_for_the_cache_it_will_not_use() -> N
         _checkpointer(store).recover()
 
     assert timeline == ["ledger.load_account"]  # the rebuild was never reached
+
+
+# --- the pre-trade reading (ADR-0051) ---------------------------------------
+
+
+def test_a_reading_shows_the_net_size_over_every_partition_unattributed_included() -> None:
+    checkpointer = _checkpointer(SQLiteStore(":memory:"))
+    checkpointer.recover()
+    order = _submitted_order(quantity="0.5")
+    checkpointer.checkpoint_fill(order, _fill(order, trade_id="f1", quantity="0.5"), side=Side.BUY)
+    # Foreign flow the venue reported: it lands in the unattributed partition.
+    heal = ReconciliationFill(
+        symbol="BTC", side=Side.SELL, quantity=Decimal("0.2"), price=Decimal("42000"), ts_ns=2_000
+    )
+    checkpointer.checkpoint_heal((heal,))
+
+    reading = checkpointer.pre_trade_reading("BTC", Side.BUY)
+
+    assert reading.account_net_size == Decimal("0.3")

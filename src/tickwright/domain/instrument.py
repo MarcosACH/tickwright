@@ -108,6 +108,9 @@ class PreTradeReading:
 
     symbol: str
     side: Side
+    account_net_size: Decimal
+    """Signed, over every partition of ``symbol``, the unattributed one included.
+    The venue holds one position per symbol, so this is the size it sees."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

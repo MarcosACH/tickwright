@@ -42,6 +42,7 @@ below, where the rule is stated on the borrow itself.
 """
 
 from collections.abc import Mapping, Sequence
+from decimal import Decimal
 
 from tickwright.domain import (
     EMPTY_LEVERAGE_BOOK,
@@ -140,7 +141,11 @@ class Checkpointer:
         It lives here because this type owns both read-models it folds. A second
         place that folded them would be a second definition to drift (ADR-0051).
         """
-        return PreTradeReading(symbol=symbol, side=side)
+        return PreTradeReading(
+            symbol=symbol,
+            side=side,
+            account_net_size=self._portfolio.account_net().get(symbol, Decimal("0")),
+        )
 
     def recover(self) -> None:
         """Restore both read-models from the store — the ledger first.

@@ -80,7 +80,8 @@ def _guard(spec: InstrumentSpec | None = None, *, store: SQLiteStore | None = No
 
 def _check(guard: PreTradeGuard, signal: PlaceSignal) -> GuardDecision:
     """Check ``signal`` against an empty book: no position, no open orders, no mark."""
-    return guard.check(signal, PreTradeReading(symbol=signal.symbol, side=signal.side))
+    reading = PreTradeReading(symbol=signal.symbol, side=signal.side, account_net_size=Decimal("0"))
+    return guard.check(signal, reading)
 
 
 def test_approves_a_valid_limit_with_quantized_size_and_price() -> None:
