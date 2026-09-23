@@ -9,6 +9,7 @@ orders keep filling; the halt survives a restart. The same suite stays green wit
 
 import asyncio
 import random
+from dataclasses import dataclass
 from decimal import Decimal
 
 from ledgers import GENESIS, checkpointer
@@ -28,6 +29,7 @@ from tickwright.domain import (
     ExecutionReport,
     InstrumentSpec,
     MarketTick,
+    MarkTick,
     OrderDenied,
     OrderEvent,
     OrderLive,
@@ -79,6 +81,10 @@ def _tick(price: str = "42000") -> MarketTick:
     )
 
 
+def _mark(price: str, *, ts_ns: int = 1_000) -> MarkTick:
+    return MarkTick(ts_event=ts_ns, ts_init=ts_ns, symbol="BTC", price=Decimal(price))
+
+
 def _limit_signal(
     price: str, *, quantity: str = "0.5", seq: int = 1, side: Side = Side.BUY
 ) -> PlaceSignal:
@@ -96,15 +102,29 @@ def _limit_signal(
     )
 
 
-def _harness(
+@dataclass(frozen=True, slots=True)
+class _Engine:
+    bus: InMemoryBus
+    clock: ManualClock
+    store: SQLiteStore
+    checks: Checkpointer
+    guard: PreTradeGuard
+    events: list[OrderEvent]
+
+
+def _engine(
     *,
+    store: SQLiteStore | None = None,
     guard: PreTradeGuard | None = None,
     limits: PreTradeLimits = NO_LIMITS,
     partial_fill_fraction: str | None = None,
-) -> tuple[InMemoryBus, Checkpointer, SQLiteStore, PreTradeGuard, list[OrderEvent]]:
+    start_ns: int = 1_000,
+) -> _Engine:
+    """One engine life, booted in the runner's order. Pass a surviving store for
+    a restart, so the second life is built the same way as the first."""
     bus = InMemoryBus()
-    clock = ManualClock(start_ns=1_000)
-    store = SQLiteStore(":memory:")
+    clock = ManualClock(start_ns=start_ns)
+    store = store or SQLiteStore(":memory:")
     fill_model: FillModel = ImmediateFillModel()
     if partial_fill_fraction is not None:
         # With its other knobs inert, the seeded model fills like the immediate
@@ -119,6 +139,9 @@ def _harness(
         account_net=dict,
     )
     checks = checkpointer(store, clock=clock)
+    # The runner's boot step: the ledger first, then the order cache. Rebuilding
+    # the cache alone would bring the open orders back without the position.
+    checks.recover()
     guard = guard or RealGuard(specs={"BTC": _SPEC}, store=store, clock=clock, limits=limits)
     manager = ExecutionManager(
         bus=bus,
@@ -130,9 +153,16 @@ def _harness(
     bus.subscribe(Signal, manager.on_signal)
     bus.subscribe(ExecutionReport, manager.on_execution_report)
 
+    # The runner hands each mark to the projection, which lends it to the
+    # guard's reading. Without this a mark published here would reach nobody.
+    async def observe_mark(mark: MarkTick) -> None:
+        checks.portfolio.observe_mark(mark)
+
+    bus.subscribe(MarkTick, observe_mark)
+
     order_events: list[OrderEvent] = []
     bus.subscribe(OrderEvent, lambda ev: _record(order_events, ev))
-    return bus, checks, store, guard, order_events
+    return _Engine(bus, clock, store, checks, guard, order_events)
 
 
 def _market_signal(*, quantity: str, seq: int = 1) -> PlaceSignal:
@@ -166,6 +196,17 @@ def _assert_denied_by_max_position(
     assert isinstance(denied, OrderDenied)
     assert "max position" in denied.reason
     assert _state(store, cloid) is OrderState.DENIED
+
+
+def _assert_denied_by(engine: _Engine, cloid: str, reason: str) -> None:
+    """Assert the guard denied the order with ``reason``, before the exchange."""
+    # With OrderDenied as its only event, the order never got an OrderPlaced.
+    events = [ev for ev in engine.events if ev.cloid == cloid]
+    assert [type(ev) for ev in events] == [OrderDenied]
+    denied = events[0]
+    assert isinstance(denied, OrderDenied)
+    assert denied.reason == reason
+    assert _state(engine.store, cloid) is OrderState.DENIED
 
 
 def test_market_below_min_notional_is_rejected_by_the_venue_via_sourced_specs() -> None:
@@ -214,7 +255,8 @@ def test_market_below_min_notional_is_rejected_by_the_venue_via_sourced_specs() 
 
 
 def test_below_min_notional_signal_is_denied_and_never_sent() -> None:
-    bus, _, store, _, order_events = _harness()
+    engine = _engine()
+    bus, store, order_events = engine.bus, engine.store, engine.events
     cloid = derive_cloid("trivial:BTC:1")
 
     async def scenario() -> None:
@@ -237,7 +279,8 @@ def test_below_min_notional_signal_is_denied_and_never_sent() -> None:
 
 def test_an_order_above_the_max_order_size_is_never_sent_and_a_smaller_one_passes() -> None:
     limits = PreTradeLimits(symbols={"BTC": SymbolLimits(max_order_size=Decimal("0.2"))})
-    bus, _, store, _, order_events = _harness(limits=limits)
+    engine = _engine(limits=limits)
+    bus, store, order_events = engine.bus, engine.store, engine.events
     too_big = derive_cloid("trivial:BTC:1")
     fits = derive_cloid("trivial:BTC:2")
 
@@ -258,12 +301,108 @@ def test_an_order_above_the_max_order_size_is_never_sent_and_a_smaller_one_passe
     assert passed.state is OrderState.LIVE
 
 
+def test_a_limit_order_worth_more_than_the_max_order_value_is_never_sent() -> None:
+    # Cap 1000 USD. At 40000, a buy of 0.03 is worth 1200 and a buy of 0.02 is
+    # worth 800.
+    limits = PreTradeLimits(symbols={"BTC": SymbolLimits(max_order_value=Decimal("1000"))})
+    engine = _engine(limits=limits)
+    too_big = derive_cloid("trivial:BTC:1")
+    fits = derive_cloid("trivial:BTC:2")
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))
+        # Both rest below the market, so the second one ends LIVE, not FILLED.
+        await engine.bus.publish(_limit_signal("40000", quantity="0.03", seq=1))
+        await engine.bus.publish(_limit_signal("40000", quantity="0.02", seq=2))
+
+    asyncio.run(scenario())
+
+    _assert_denied_by(engine, too_big, "above max order value 1000")
+    assert _state(engine.store, fits) is OrderState.LIVE
+
+
+def test_a_market_order_is_valued_at_the_mark_against_the_max_order_value() -> None:
+    # Cap 1000 USD, mark 40000. A buy of 0.03 is worth 1200 and a buy of 0.02
+    # is worth 800. The last trade at 42000 would value 0.02 at 840, still
+    # under the cap, so the pass does not depend on which price is used.
+    limits = PreTradeLimits(symbols={"BTC": SymbolLimits(max_order_value=Decimal("1000"))})
+    engine = _engine(limits=limits)
+    too_big = derive_cloid("trivial:BTC:1")
+    fits = derive_cloid("trivial:BTC:2")
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))
+        await engine.bus.publish(_mark("40000"))
+        await engine.bus.publish(_market_signal(quantity="0.03", seq=1))
+        await engine.bus.publish(_market_signal(quantity="0.02", seq=2))
+
+    asyncio.run(scenario())
+
+    _assert_denied_by(engine, too_big, "above max order value 1000")
+    assert _state(engine.store, fits) is OrderState.FILLED
+
+
+def test_a_market_order_with_no_mark_is_denied_when_a_max_order_value_is_set() -> None:
+    # The guard cannot prove the order fits the cap, so it refuses (ADR-0051).
+    limits = PreTradeLimits(symbols={"BTC": SymbolLimits(max_order_value=Decimal("1000"))})
+    engine = _engine(limits=limits)
+    cloid = derive_cloid("trivial:BTC:1")
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))  # a trade, but no mark yet
+        await engine.bus.publish(_market_signal(quantity="0.001"))
+
+    asyncio.run(scenario())
+
+    _assert_denied_by(engine, cloid, "no mark for max order value 1000")
+
+
+def test_a_market_order_with_no_mark_passes_when_no_max_order_value_is_set() -> None:
+    # A symbol with other caps but no value cap never needs a mark.
+    limits = PreTradeLimits(symbols={"BTC": SymbolLimits(max_order_size=Decimal("1"))})
+    engine = _engine(limits=limits)
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))
+        await engine.bus.publish(_market_signal(quantity="0.001"))
+
+    asyncio.run(scenario())
+
+    assert _state(engine.store, derive_cloid("trivial:BTC:1")) is OrderState.FILLED
+
+
+def test_a_stale_mark_denies_a_market_order_until_a_fresh_mark_arrives() -> None:
+    # Cap 1000 and the default mark max age of 10 seconds. Every order is worth
+    # 40 at the mark, far under the cap, so only the mark's age can deny it.
+    limits = PreTradeLimits(symbols={"BTC": SymbolLimits(max_order_value=Decimal("1000"))})
+    engine = _engine(limits=limits, start_ns=1_000)
+    ten_seconds = 10_000_000_000
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))
+        await engine.bus.publish(_mark("40000", ts_ns=1_000))
+        engine.clock.advance_to(1_000 + ten_seconds)  # exactly the max age
+        await engine.bus.publish(_market_signal(quantity="0.001", seq=1))
+        engine.clock.advance_to(1_000 + ten_seconds + 1)  # one nanosecond past it
+        await engine.bus.publish(_market_signal(quantity="0.001", seq=2))
+        fresh = engine.clock.timestamp_ns()
+        await engine.bus.publish(_mark("40000", ts_ns=fresh))
+        await engine.bus.publish(_market_signal(quantity="0.001", seq=3))
+
+    asyncio.run(scenario())
+
+    assert _state(engine.store, derive_cloid("trivial:BTC:1")) is OrderState.FILLED
+    _assert_denied_by(engine, derive_cloid("trivial:BTC:2"), "stale mark for max order value 1000")
+    assert _state(engine.store, derive_cloid("trivial:BTC:3")) is OrderState.FILLED
+
+
 def test_the_max_position_counts_open_buys_by_their_unfilled_remainder() -> None:
     # Cap 1. The first buy of 0.5 fills 0.2 and rests 0.3, so the worst case is
     # +0.5 before the next order. A buy of 0.5 lands exactly on the cap. A buy
     # of 0.1 after it would reach 1.1, so it is denied.
     limits = PreTradeLimits(symbols={"BTC": SymbolLimits(max_position=Decimal("1"))})
-    bus, _, store, _, order_events = _harness(limits=limits, partial_fill_fraction="0.4")
+    engine = _engine(limits=limits, partial_fill_fraction="0.4")
+    bus, store, order_events = engine.bus, engine.store, engine.events
     partly_filled = derive_cloid("trivial:BTC:1")
     at_cap = derive_cloid("trivial:BTC:2")
     past_cap = derive_cloid("trivial:BTC:3")
@@ -291,7 +430,8 @@ def test_the_max_position_counts_size_placed_by_hand() -> None:
     # as a heal into the unattributed partition. A buy of 0.2 lands exactly on
     # the cap. A buy of 0.1 after it would reach 1.1, so it is denied.
     limits = PreTradeLimits(symbols={"BTC": SymbolLimits(max_position=Decimal("1"))})
-    bus, checks, store, _, order_events = _harness(limits=limits)
+    engine = _engine(limits=limits)
+    bus, checks, store, order_events = engine.bus, engine.checks, engine.store, engine.events
     by_hand = ReconciliationFill(
         symbol="BTC", side=Side.BUY, quantity=Decimal("0.8"), price=Decimal("42000"), ts_ns=1_000
     )
@@ -316,7 +456,7 @@ def test_a_denial_emits_the_order_denied_named_event() -> None:
     # silent (ADR-0020): order.denied carries the refusal reason, and the
     # ambient signal_id (bound for the span of signal handling) rides the record
     # rather than being repeated as a field.
-    bus, _, _, _, _ = _harness()
+    bus = _engine().bus
 
     async def scenario() -> None:
         await bus.publish(_tick("42000"))
@@ -335,7 +475,8 @@ def test_noop_guard_lets_a_would_be_denied_order_through_unmodified() -> None:
     # The same below-min-notional signal the RealGuard denies passes straight
     # through NoopGuard — proving the seam is real, not hardcoded: swapping the
     # impl swaps the behavior. The order reaches the exchange and rests LIVE.
-    bus, _, store, _, order_events = _harness(guard=NoopGuard())
+    engine = _engine(guard=NoopGuard())
+    bus, store, order_events = engine.bus, engine.store, engine.events
     cloid = derive_cloid("trivial:BTC:1")
 
     async def scenario() -> None:
@@ -352,45 +493,15 @@ def test_noop_guard_lets_a_would_be_denied_order_through_unmodified() -> None:
     assert record.quantity == Decimal("0.05")
 
 
-def _revived_manager(
-    store: SQLiteStore, *, limits: PreTradeLimits = NO_LIMITS
-) -> tuple[InMemoryBus, RealGuard, list[OrderEvent]]:
-    """A fresh engine over a surviving store — the restart the barrier gates."""
-    bus = InMemoryBus()
-    clock = ManualClock(start_ns=2_000)
-    exchange = PaperExchange(
-        bus=bus,
-        clock=clock,
-        fill_model=ImmediateFillModel(),
-        genesis_collateral=GENESIS,
-        account_net=dict,
-    )
-    checks = checkpointer(store, clock=clock)
-    # The runner's boot step: the ledger first, then the order cache. Rebuilding
-    # the cache alone would bring the open orders back without the position.
-    checks.recover()
-    guard = RealGuard(specs={"BTC": _SPEC}, store=store, clock=clock, limits=limits)
-    manager = ExecutionManager(
-        bus=bus,
-        exchange=exchange,
-        checkpointer=checks,
-        guard=guard,
-    )
-    bus.subscribe(Signal, manager.on_signal)
-    bus.subscribe(ExecutionReport, manager.on_execution_report)
-    events: list[OrderEvent] = []
-    bus.subscribe(OrderEvent, lambda ev: _record(events, ev))
-    return bus, guard, events
-
-
 def test_kill_switch_survives_restart_and_reset_re_enables_placement() -> None:
     # First life: halt the engine, then crash. Only the store survives.
-    _, _, store, guard, _ = _harness()
-    guard.trip_kill_switch("halt before crash")
+    first = _engine()
+    first.guard.trip_kill_switch("halt before crash")
 
     # Second life: the revived guard restores the sticky halt before trading, so
     # a placement is still DENIED — a crash never silently un-halts (ADR-0026).
-    bus2, guard2, events2 = _revived_manager(store)
+    second = _engine(store=first.store, start_ns=2_000)
+    bus2, guard2, events2 = second.bus, second.guard, second.events
     assert guard2.kill_switch_tripped
 
     async def still_halted() -> None:
@@ -414,7 +525,8 @@ def test_after_a_restart_the_max_position_denies_the_same_order_again() -> None:
     # First life, cap 1: a buy of 0.5 fills 0.2 and rests 0.3, and a buy of 0.5
     # rests. The worst case is +1, so a further buy of 0.1 is denied.
     limits = PreTradeLimits(symbols={"BTC": SymbolLimits(max_position=Decimal("1"))})
-    bus, _, store, _, order_events = _harness(limits=limits, partial_fill_fraction="0.4")
+    engine = _engine(limits=limits, partial_fill_fraction="0.4")
+    bus, store, order_events = engine.bus, engine.store, engine.events
 
     async def first_life() -> None:
         await bus.publish(_tick("42000"))
@@ -428,7 +540,8 @@ def test_after_a_restart_the_max_position_denies_the_same_order_again() -> None:
 
     # Second life: only the store survives. The same order, under a new signal
     # so it is judged again rather than dropped as a re-seen one, is denied too.
-    bus2, _, events2 = _revived_manager(store, limits=limits)
+    second = _engine(store=store, limits=limits, start_ns=2_000)
+    bus2, events2 = second.bus, second.events
 
     async def second_life() -> None:
         await bus2.publish(_tick("42000"))
@@ -443,7 +556,8 @@ def _a_short_of_20_under_a_lowered_cap_of_15() -> tuple[InMemoryBus, SQLiteStore
 
     A lowered cap is one way a position ends up past its cap (ADR-0051). The
     short comes from a real fill, and the second life reads it back at boot."""
-    bus, _, store, _, _ = _harness()
+    first = _engine()
+    bus, store = first.bus, first.store
 
     async def first_life() -> None:
         await bus.publish(_tick("42000"))
@@ -454,8 +568,8 @@ def _a_short_of_20_under_a_lowered_cap_of_15() -> tuple[InMemoryBus, SQLiteStore
     assert _state(store, derive_cloid("trivial:BTC:1")) is OrderState.FILLED
 
     limits = PreTradeLimits(symbols={"BTC": SymbolLimits(max_position=Decimal("15"))})
-    bus2, _, events2 = _revived_manager(store, limits=limits)
-    return bus2, store, events2
+    second = _engine(store=store, limits=limits, start_ns=2_000)
+    return second.bus, store, second.events
 
 
 def test_the_oversized_short_that_shrinks_passes_the_max_position_on_paper() -> None:
@@ -489,7 +603,8 @@ def test_the_shrinking_sell_is_denied_by_open_sells_on_paper() -> None:
     # rests. The worst case on the sell side is -15, right on the cap. A sell
     # of 3 shrinks the +5 long, but it moves the worst case to -18.
     limits = PreTradeLimits(symbols={"BTC": SymbolLimits(max_position=Decimal("15"))})
-    bus, _, store, _, order_events = _harness(limits=limits)
+    engine = _engine(limits=limits)
+    bus, store, order_events = engine.bus, engine.store, engine.events
 
     async def scenario() -> None:
         await bus.publish(_tick("42000"))
@@ -506,7 +621,8 @@ def test_the_shrinking_sell_is_denied_by_open_sells_on_paper() -> None:
 
 
 def test_kill_switch_denies_new_orders_while_resting_orders_keep_filling() -> None:
-    bus, _, store, guard, order_events = _harness()
+    engine = _engine()
+    bus, store, guard, order_events = engine.bus, engine.store, engine.guard, engine.events
     resting = derive_cloid("trivial:BTC:1")
     halted = derive_cloid("trivial:BTC:2")
 

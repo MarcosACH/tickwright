@@ -393,6 +393,32 @@ def test_build_engine_hands_the_limits_to_the_guard(tmp_path: Path) -> None:
     assert _run_until_states(build_engine(config), db, wanted) == 0
 
 
+def test_on_replay_a_recorded_mark_is_judged_by_the_replay_clock(tmp_path: Path) -> None:
+    # The row is from November 2023. On the wall clock its mark would be years
+    # past the 10 second max age, and the market order would be denied. The
+    # replay clock stands at the row's own time, so the mark is fresh. The
+    # order is worth 0.5 x 42000 = 21000, under the 50000 cap.
+    ticks = tmp_path / "ticks.jsonl"
+    ticks.write_text(
+        '{"symbol": "BTC", "price": "42000", "size": "3", '
+        '"aggressor_side": "buy", "trade_id": "a", "ts_event": 1700000000000000000}\n'
+    )
+    db = tmp_path / "saga.db"
+    config = AppConfig.model_validate(
+        {
+            "replay": ReplayFeedConfig(path=ticks),
+            "sqlite": SQLiteStoreConfig(path=db),
+            "paper": PaperExchangeConfig(
+                instrument_specs={"BTC": _SPEC}, genesis_collateral=GENESIS
+            ),
+            "strategies": [_strategy("BTC")],
+            "limits": {"symbols": {"BTC": {"max_order_value": "50000"}}},
+        }
+    )
+    wanted = {derive_cloid("demo:BTC:1"): OrderState.FILLED}
+    assert _run_until_states(build_engine(config), db, wanted) == 0
+
+
 def test_a_limit_strategy_config_requires_a_price() -> None:
     with pytest.raises(ValidationError, match="price"):
         StrategyConfig(

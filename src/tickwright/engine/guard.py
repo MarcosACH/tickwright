@@ -13,8 +13,9 @@ state is persisted through the ``Store`` and restored on construction, so a halt
 outlives a crash and is cleared only by an explicit reset.
 """
 
+import math
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from decimal import Decimal
 from typing import Final
 
@@ -42,16 +43,24 @@ class SymbolLimits:
 
     max_order_size: Decimal | None = None
     """In coins, checked against the quantized quantity."""
+    max_order_value: Decimal | None = None
+    """In USD, checked against the quantized quantity times a price. A limit order
+    uses its quantized limit price. A market order uses the latest mark."""
     max_position: Decimal | None = None
     """In coins, checked against the worst-case position on the order's side."""
 
     def __post_init__(self) -> None:
         # A cap of zero or less would deny every order. That is a typo, not a
-        # policy, so it stops the boot instead (ADR-0051).
-        for name in ("max_order_size", "max_position"):
-            cap = getattr(self, name)
+        # policy, so it stops the boot instead (ADR-0051). Every field here is a
+        # cap, so a new cap is checked without being listed. If a field that is
+        # not a cap ever joins, go back to a named list.
+        for cap_field in fields(self):
+            cap = getattr(self, cap_field.name)
             if cap is not None and cap <= 0:
-                raise ValueError(f"{name} must be positive, got {cap}")
+                raise ValueError(f"{cap_field.name} must be positive, got {cap}")
+
+
+_NS_PER_SECOND: Final = 1_000_000_000
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -63,6 +72,18 @@ class PreTradeLimits:
 
     symbols: Mapping[str, SymbolLimits] = field(default_factory=dict)
     """A symbol with no entry has no per-symbol caps."""
+    mark_max_age_seconds: float = 10.0
+    """How old a mark may be and still value a market order against a max order
+    value. Its own setting, not the reconcile band's, which does another job."""
+
+    def __post_init__(self) -> None:
+        # Zero or less would call every mark stale, so it stops the boot too.
+        # NaN, infinity, and a finite age too large for nanoseconds all load as
+        # floats. The guard could not turn them into nanoseconds, so it would
+        # raise on the first market order. Checking the product catches all three.
+        age = self.mark_max_age_seconds
+        if not (math.isfinite(age * _NS_PER_SECOND) and age > 0):
+            raise ValueError(f"mark_max_age_seconds must be a positive number, got {age}")
 
 
 NO_LIMITS: Final = PreTradeLimits()
@@ -84,6 +105,7 @@ class RealGuard:
         self._store = store
         self._clock = clock
         self._limits = limits
+        self._mark_max_age_ns = int(limits.mark_max_age_seconds * _NS_PER_SECOND)
         # Restore the sticky halt before anything can place (ADR-0026): a tripped
         # engine comes back tripped. ``None`` means never tripped.
         restored = store.load_kill_switch()
@@ -147,6 +169,23 @@ class RealGuard:
         cap = symbol_limits.max_order_size
         if cap is not None and quantity > cap:
             return Denied(reason=f"above max order size {cap}")
+        cap = symbol_limits.max_order_value
+        if cap is not None:
+            value_price = price
+            if value_price is None:
+                # A market order has no price, so it is valued at the mark. It
+                # can fill worse, so this cap is close, not exact (ADR-0051).
+                if reading.mark is None:
+                    # With no mark the guard cannot prove the order fits.
+                    return Denied(reason=f"no mark for max order value {cap}")
+                # The guard's clock is the replay clock on replay, so a recorded
+                # file is judged in its own time, not the wall clock's.
+                age_ns = self._clock.timestamp_ns() - reading.mark.ts_event
+                if age_ns > self._mark_max_age_ns:
+                    return Denied(reason=f"stale mark for max order value {cap}")
+                value_price = reading.mark.price
+            if quantity * value_price > cap:
+                return Denied(reason=f"above max order value {cap}")
         cap = symbol_limits.max_position
         if cap is not None:
             # The position if every open order on this side fills, and then this

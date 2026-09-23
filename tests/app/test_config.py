@@ -144,7 +144,9 @@ def test_the_documented_limits_line_loads_through_the_env_skin(
     limits = AppSettings().limits
 
     assert limits.symbols["BTC"].max_order_size == Decimal("0.5")
+    assert limits.symbols["BTC"].max_order_value == Decimal("25000")
     assert limits.symbols["BTC"].max_position == Decimal("2")
+    assert limits.mark_max_age_seconds == 5
 
 
 def test_a_paper_run_without_a_genesis_collateral_is_rejected_at_load(tmp_path: Path) -> None:
@@ -181,7 +183,7 @@ def test_a_non_positive_paper_genesis_is_a_typo_not_a_scenario() -> None:
         PaperExchangeConfig(genesis_collateral=Decimal("0"))
 
 
-@pytest.mark.parametrize("name", ["max_order_size", "max_position"])
+@pytest.mark.parametrize("name", ["max_order_size", "max_order_value", "max_position"])
 @pytest.mark.parametrize("cap", ["0", "-0.5"])
 def test_a_non_positive_cap_is_refused_at_load(tmp_path: Path, name: str, cap: str) -> None:
     (tmp_path / "ticks.jsonl").touch()
@@ -191,6 +193,25 @@ def test_a_non_positive_cap_is_refused_at_load(tmp_path: Path, name: str, cap: s
                 "replay": ReplayFeedConfig(path=tmp_path / "ticks.jsonl"),
                 "paper": PaperExchangeConfig(genesis_collateral=Decimal("100000")),
                 "limits": {"symbols": {"BTC": {name: cap}}},
+            }
+        )
+
+
+@pytest.mark.parametrize("age", ["0", "-1", "nan", "inf", "1e300"])
+def test_a_mark_max_age_that_is_not_a_positive_number_is_refused_at_load(
+    tmp_path: Path, age: str
+) -> None:
+    # Zero would call every mark stale and deny every market order under a
+    # value cap. That is a typo, not a policy (ADR-0051). NaN and infinity
+    # load as floats, but no age can be compared against them. 1e300 is
+    # finite, but in nanoseconds it overflows to infinity.
+    (tmp_path / "ticks.jsonl").touch()
+    with pytest.raises(ValidationError, match="mark_max_age_seconds must be a positive number"):
+        AppConfig.model_validate(
+            {
+                "replay": ReplayFeedConfig(path=tmp_path / "ticks.jsonl"),
+                "paper": PaperExchangeConfig(genesis_collateral=Decimal("100000")),
+                "limits": {"mark_max_age_seconds": age},
             }
         )
 
