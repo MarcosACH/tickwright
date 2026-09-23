@@ -42,6 +42,8 @@ class SymbolLimits:
 
     max_order_size: Decimal | None = None
     """In coins, checked against the quantized quantity."""
+    max_order_value: Decimal | None = None
+    """In USD, checked against the quantized quantity times the quantized price."""
     max_position: Decimal | None = None
     """In coins, checked against the worst-case position on the order's side."""
 
@@ -147,6 +149,9 @@ class RealGuard:
         cap = symbol_limits.max_order_size
         if cap is not None and quantity > cap:
             return Denied(reason=f"above max order size {cap}")
+        cap = symbol_limits.max_order_value
+        if cap is not None and price is not None and quantity * price > cap:
+            return Denied(reason=f"above max order value {cap}")
         cap = symbol_limits.max_position
         if cap is not None:
             # The position if every open order on this side fills, and then this

@@ -194,6 +194,17 @@ def _assert_denied_by_max_position(
     assert _state(store, cloid) is OrderState.DENIED
 
 
+def _assert_denied_by(engine: _Engine, cloid: str, reason: str) -> None:
+    """Assert the guard denied the order with ``reason``, before the exchange."""
+    # With OrderDenied as its only event, the order never got an OrderPlaced.
+    events = [ev for ev in engine.events if ev.cloid == cloid]
+    assert [type(ev) for ev in events] == [OrderDenied]
+    denied = events[0]
+    assert isinstance(denied, OrderDenied)
+    assert denied.reason == reason
+    assert _state(engine.store, cloid) is OrderState.DENIED
+
+
 def test_market_below_min_notional_is_rejected_by_the_venue_via_sourced_specs() -> None:
     # The full ADR-0031 path: the paper exchange authors the specs, the guard is
     # wired from exchange.instrument_specs() (venue-agnostic), and a too-small
@@ -284,6 +295,26 @@ def test_an_order_above_the_max_order_size_is_never_sent_and_a_smaller_one_passe
     passed = store.get_order(fits)
     assert passed is not None
     assert passed.state is OrderState.LIVE
+
+
+def test_a_limit_order_worth_more_than_the_max_order_value_is_never_sent() -> None:
+    # Cap 1000 USD. At 40000, a buy of 0.03 is worth 1200 and a buy of 0.02 is
+    # worth 800.
+    limits = PreTradeLimits(symbols={"BTC": SymbolLimits(max_order_value=Decimal("1000"))})
+    engine = _engine(limits=limits)
+    too_big = derive_cloid("trivial:BTC:1")
+    fits = derive_cloid("trivial:BTC:2")
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))
+        # Both rest below the market, so the second one ends LIVE, not FILLED.
+        await engine.bus.publish(_limit_signal("40000", quantity="0.03", seq=1))
+        await engine.bus.publish(_limit_signal("40000", quantity="0.02", seq=2))
+
+    asyncio.run(scenario())
+
+    _assert_denied_by(engine, too_big, "above max order value 1000")
+    assert _state(engine.store, fits) is OrderState.LIVE
 
 
 def test_the_max_position_counts_open_buys_by_their_unfilled_remainder() -> None:
