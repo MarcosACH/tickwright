@@ -160,6 +160,21 @@ def test_a_non_positive_max_order_size_is_refused_at_load(tmp_path: Path, cap: s
         )
 
 
+def test_limits_with_the_noop_guard_are_refused_at_load(tmp_path: Path) -> None:
+    # The noop guard enforces nothing, so a cap set beside it would only look
+    # like protection (ADR-0051).
+    (tmp_path / "ticks.jsonl").touch()
+    with pytest.raises(ValidationError, match="limits need guard='real'"):
+        AppConfig.model_validate(
+            {
+                "replay": ReplayFeedConfig(path=tmp_path / "ticks.jsonl"),
+                "paper": PaperExchangeConfig(genesis_collateral=Decimal("100000")),
+                "guard": "noop",
+                "limits": {"symbols": {"BTC": {"max_order_size": "0.5"}}},
+            }
+        )
+
+
 @pytest.mark.parametrize("label", ["Main", "paper-main", "a" * 33, ""])
 def test_the_paper_account_label_is_slug_constrained(label: str) -> None:
     """No hyphen, so ``paper-<label>`` stays unambiguously two segments against

@@ -59,6 +59,11 @@ class PreTradeLimits:
     symbols: Mapping[str, SymbolLimits] = field(default_factory=dict)
     """A symbol with no entry has no per-symbol caps."""
 
+    @property
+    def any_set(self) -> bool:
+        """True when at least one cap would deny an order."""
+        return any(limits.max_order_size is not None for limits in self.symbols.values())
+
 
 NO_LIMITS: Final = PreTradeLimits()
 _NO_SYMBOL_LIMITS: Final = SymbolLimits()
