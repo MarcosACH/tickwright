@@ -24,6 +24,7 @@ from tickwright.adapters.feed import ReplayFeedConfig
 from tickwright.adapters.paper import PaperExchangeConfig
 from tickwright.adapters.store import PostgresStoreConfig, SQLiteStoreConfig
 from tickwright.domain import UNATTRIBUTED, LeverageSpec, Side, SymbolOwnership
+from tickwright.engine.guard import NO_LIMITS, PreTradeLimits
 from tickwright.engine.runner import EngineConfig
 from tickwright.venues.hyperliquid import HyperliquidConfig
 
@@ -103,6 +104,9 @@ class AppConfig(BaseModel):
     both consumers receive, so neither can invent its own reading of an
     unconfigured symbol."""
 
+    limits: PreTradeLimits = NO_LIMITS
+    """The pre-trade caps the real guard enforces (ADR-0051). Off unless set."""
+
     @model_validator(mode="after")
     def _the_selected_feed_needs_its_config(self) -> Self:
         if self.feed == "replay" and self.replay is None:
@@ -128,6 +132,17 @@ class AppConfig(BaseModel):
             raise ValueError(
                 "exchange='paper' needs a starting collateral: "
                 "set TICKWRIGHT_PAPER__GENESIS_COLLATERAL"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _limits_need_the_real_guard(self) -> Self:
+        if self.guard == "noop" and self.limits != NO_LIMITS:
+            # A limit that is set but never enforced is worse than no limit
+            # (ADR-0051), so the run does not start. Any limits block counts,
+            # even an empty one, so a cap added later needs no edit here.
+            raise ValueError(
+                "limits need guard='real': set TICKWRIGHT_GUARD=real or remove TICKWRIGHT_LIMITS"
             )
         return self
 
@@ -232,6 +247,18 @@ class AppConfig(BaseModel):
             raise ValueError(
                 "leverage names symbols no configured strategy trades: "
                 f"{', '.join(dead)} — set TICKWRIGHT_LEVERAGE to traded symbols only"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _every_limits_entry_must_name_a_traded_symbol(self) -> Self:
+        # A typo in a symbol name leaves the traded symbol with no cap, and a
+        # limit that is set but not enforced is worse than no limit (ADR-0051).
+        dead = sorted(set(self.limits.symbols) - set(self.traded_symbols))
+        if dead:
+            raise ValueError(
+                f"limits name symbols no configured strategy trades: {', '.join(dead)}. "
+                "Set TICKWRIGHT_LIMITS to traded symbols only"
             )
         return self
 

@@ -84,7 +84,7 @@ def test_app_settings_resolves_the_documented_precedence_chain(
     ``__main__`` builds this class and nothing else does, so its resolution
     order is worth pinning where it can be read.
 
-    This is the one test in the suite that reads ambient state on purpose, so
+    This is one of two tests in the suite that read ambient state on purpose, so
     it must own *all* of it: every ``TICKWRIGHT_*`` var goes, and the test puts
     back only the rungs it is asserting on. Controlling just the vars it sets
     would leave the rest — ``feed`` and ``store`` below — reading whatever the
@@ -111,6 +111,39 @@ def test_app_settings_resolves_the_documented_precedence_chain(
     assert settings.store == "postgres"  # .env file beats the class default
     assert settings.feed == "replay"  # class default, unmentioned by either
     assert settings.replay is not None and settings.replay.path == Path("ticks.jsonl")
+
+
+def test_the_documented_limits_line_loads_through_the_env_skin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ``.env.example`` limits line, uncommented, must set the cap it shows.
+
+    The other tests build ``AppConfig`` and never read env vars, so they missed
+    a documented line that pydantic-settings could not decode (#379). Like the
+    precedence test above, this one owns all ambient state.
+    """
+    for name in [k for k in os.environ if k.startswith("TICKWRIGHT_")]:
+        monkeypatch.delenv(name)
+    example = Path(__file__).parents[2] / ".env.example"
+    [documented] = [
+        line.removeprefix("#")
+        for line in example.read_text().splitlines()
+        if line.startswith("#TICKWRIGHT_LIMITS")
+    ]
+    (tmp_path / "ticks.jsonl").touch()
+    (tmp_path / ".env").write_text(
+        "TICKWRIGHT_REPLAY__PATH=ticks.jsonl\n"
+        "TICKWRIGHT_PAPER__GENESIS_COLLATERAL=100000\n"
+        # A limits entry must name a traded symbol, so BTC needs a strategy.
+        'TICKWRIGHT_STRATEGIES=[{"kind": "single_shot_market", "strategy_id": "demo", '
+        '"symbol": "BTC", "side": "buy", "quantity": "0.5"}]\n'
+        f"{documented}\n"
+    )
+    monkeypatch.chdir(tmp_path)
+
+    limits = AppSettings().limits
+
+    assert limits.symbols["BTC"].max_order_size == Decimal("0.5")
 
 
 def test_a_paper_run_without_a_genesis_collateral_is_rejected_at_load(tmp_path: Path) -> None:
@@ -145,6 +178,64 @@ def test_a_non_positive_paper_genesis_is_a_typo_not_a_scenario() -> None:
     negative freely at runtime."""
     with pytest.raises(ValidationError):
         PaperExchangeConfig(genesis_collateral=Decimal("0"))
+
+
+@pytest.mark.parametrize("cap", ["0", "-0.5"])
+def test_a_non_positive_max_order_size_is_refused_at_load(tmp_path: Path, cap: str) -> None:
+    (tmp_path / "ticks.jsonl").touch()
+    with pytest.raises(ValidationError, match="max_order_size must be positive"):
+        AppConfig.model_validate(
+            {
+                "replay": ReplayFeedConfig(path=tmp_path / "ticks.jsonl"),
+                "paper": PaperExchangeConfig(genesis_collateral=Decimal("100000")),
+                "limits": {"symbols": {"BTC": {"max_order_size": cap}}},
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "symbol_limits",
+    [{"max_order_size": "0.5"}, {}],
+    ids=["a cap", "an empty entry"],
+)
+def test_limits_with_the_noop_guard_are_refused_at_load(
+    tmp_path: Path, symbol_limits: dict[str, str]
+) -> None:
+    # The noop guard enforces nothing, so a cap set beside it would only look
+    # like protection (ADR-0051). Any limits block counts, even an empty one.
+    (tmp_path / "ticks.jsonl").touch()
+    with pytest.raises(ValidationError, match="limits need guard='real'"):
+        AppConfig.model_validate(
+            {
+                "replay": ReplayFeedConfig(path=tmp_path / "ticks.jsonl"),
+                "paper": PaperExchangeConfig(genesis_collateral=Decimal("100000")),
+                "guard": "noop",
+                "limits": {"symbols": {"BTC": symbol_limits}},
+            }
+        )
+
+
+def test_a_limits_entry_for_an_untraded_symbol_is_refused_at_load(tmp_path: Path) -> None:
+    # A typo in the symbol name would leave the traded symbol with no cap, and
+    # a limit that is set but not enforced is worse than no limit (ADR-0051).
+    (tmp_path / "ticks.jsonl").touch()
+    with pytest.raises(ValidationError, match="limits name symbols no configured strategy"):
+        AppConfig.model_validate(
+            {
+                "replay": ReplayFeedConfig(path=tmp_path / "ticks.jsonl"),
+                "paper": PaperExchangeConfig(genesis_collateral=Decimal("100000")),
+                "strategies": [
+                    StrategyConfig(
+                        kind="single_shot_market",
+                        strategy_id="demo",
+                        symbol="BTC",
+                        side=Side.BUY,
+                        quantity=Decimal("0.5"),
+                    )
+                ],
+                "limits": {"symbols": {"XBT": {"max_order_size": "0.5"}}},
+            }
+        )
 
 
 @pytest.mark.parametrize("label", ["Main", "paper-main", "a" * 33, ""])

@@ -14,6 +14,9 @@ outlives a crash and is cleared only by an explicit reset.
 """
 
 from collections.abc import Mapping
+from dataclasses import dataclass, field
+from decimal import Decimal
+from typing import Final
 
 from tickwright.domain import (
     Approved,
@@ -32,13 +35,50 @@ from tickwright.domain import (
 from tickwright.observability import NamedEvent, named_event
 
 
-class RealGuard:
-    """The real pre-trade boundary: quantize, min-notional, durable kill switch."""
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SymbolLimits:
+    """One symbol's caps (ADR-0051). ``None`` means that cap is off."""
 
-    def __init__(self, *, specs: Mapping[str, InstrumentSpec], store: Store, clock: Clock) -> None:
+    max_order_size: Decimal | None = None
+    """In coins, checked against the quantized quantity."""
+
+    def __post_init__(self) -> None:
+        # A cap of zero or less would deny every order. That is a typo, not a
+        # policy, so it stops the boot instead (ADR-0051).
+        if self.max_order_size is not None and self.max_order_size <= 0:
+            raise ValueError(f"max_order_size must be positive, got {self.max_order_size}")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class PreTradeLimits:
+    """The pre-trade caps ``RealGuard`` enforces (ADR-0051). Empty means no limits.
+
+    It lives in ``engine`` beside its only reader, so ``AppConfig`` has a typed
+    target without the engine importing ``app``."""
+
+    symbols: Mapping[str, SymbolLimits] = field(default_factory=dict)
+    """A symbol with no entry has no per-symbol caps."""
+
+
+NO_LIMITS: Final = PreTradeLimits()
+_NO_SYMBOL_LIMITS: Final = SymbolLimits()
+
+
+class RealGuard:
+    """The real pre-trade boundary: quantize, min-notional, caps, durable kill switch."""
+
+    def __init__(
+        self,
+        *,
+        specs: Mapping[str, InstrumentSpec],
+        store: Store,
+        clock: Clock,
+        limits: PreTradeLimits = NO_LIMITS,
+    ) -> None:
         self._specs = dict(specs)
         self._store = store
         self._clock = clock
+        self._limits = limits
         # Restore the sticky halt before anything can place (ADR-0026): a tripped
         # engine comes back tripped. ``None`` means never tripped.
         restored = store.load_kill_switch()
@@ -88,15 +128,20 @@ class RealGuard:
             # A size that rounds to nothing is a phantom order (ADR-0017): never
             # sent, safe for the strategy to recreate at a valid size.
             return Denied(reason="size rounds to zero")
-        if signal.price is None:
-            # MARKET has no pre-trade price: only the venue knows the fill price,
-            # so min-notional is adjudicated there (→ REJECTED), not here (ADR-0017).
-            return Approved(quantity=quantity, price=None)
-        price = quantize_price(signal.price, signal.side, spec)
-        if below_min_notional(price, quantity, spec):
-            # A LIMIT carries its own price, so notional is exact: deny locally
-            # rather than emit an order the venue will reject (ADR-0017).
-            return Denied(reason="below min notional")
+        # MARKET has no pre-trade price: only the venue knows the fill price, so
+        # min-notional is adjudicated there (→ REJECTED), not here (ADR-0017).
+        # It still falls through to the caps below (ADR-0051).
+        price = None
+        if signal.price is not None:
+            price = quantize_price(signal.price, signal.side, spec)
+            if below_min_notional(price, quantity, spec):
+                # A LIMIT carries its own price, so notional is exact: deny locally
+                # rather than emit an order the venue will reject (ADR-0017).
+                return Denied(reason="below min notional")
+        symbol_limits = self._limits.symbols.get(signal.symbol, _NO_SYMBOL_LIMITS)
+        cap = symbol_limits.max_order_size
+        if cap is not None and quantity > cap:
+            return Denied(reason=f"above max order size {cap}")
         return Approved(quantity=quantity, price=price)
 
 

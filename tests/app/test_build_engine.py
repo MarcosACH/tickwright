@@ -323,6 +323,11 @@ def test_build_engine_wires_a_tradable_paper_engine(tmp_path: Path) -> None:
         derive_cloid("demo:BTC:1"): OrderState.FILLED,
         derive_cloid("rester:ETH:1"): OrderState.LIVE,
     }
+    assert _run_until_states(engine, db, wanted) == 0
+
+
+def _run_until_states(engine: Engine, db: Path, wanted: dict[str, OrderState]) -> int:
+    """Run ``engine`` until every order in ``wanted`` reaches its state, then stop it."""
 
     async def run_until_settled() -> int:
         run = asyncio.create_task(engine.run())
@@ -343,7 +348,49 @@ def test_build_engine_wires_a_tradable_paper_engine(tmp_path: Path) -> None:
         await engine.stop()
         return await run
 
-    assert asyncio.run(run_until_settled()) == 0
+    return asyncio.run(run_until_settled())
+
+
+def test_build_engine_hands_the_limits_to_the_guard(tmp_path: Path) -> None:
+    # Both orders are 0.5 coins against a 0.4 cap, one market and one limit.
+    # DENIED is only reachable before the send (ADR-0017), so neither order
+    # ever reached the paper exchange.
+    ticks = tmp_path / "ticks.jsonl"
+    ticks.write_text(
+        '{"symbol": "BTC", "price": "42000", "size": "3", '
+        '"aggressor_side": "buy", "trade_id": "a", "ts_event": 1000}\n'
+        '{"symbol": "ETH", "price": "42000", "size": "3", '
+        '"aggressor_side": "buy", "trade_id": "b", "ts_event": 1001}\n'
+    )
+    db = tmp_path / "saga.db"
+    config = AppConfig.model_validate(
+        {
+            "replay": ReplayFeedConfig(path=ticks),
+            "sqlite": SQLiteStoreConfig(path=db),
+            "paper": PaperExchangeConfig(
+                instrument_specs={"BTC": _SPEC, "ETH": _SPEC}, genesis_collateral=GENESIS
+            ),
+            "strategies": [
+                _strategy("BTC", "demo"),
+                StrategyConfig(
+                    kind="single_shot_limit",
+                    strategy_id="rester",
+                    symbol="ETH",
+                    side=Side.BUY,
+                    quantity=Decimal("0.5"),
+                    price=Decimal("41000"),
+                ),
+            ],
+            "limits": {
+                "symbols": {"BTC": {"max_order_size": "0.4"}, "ETH": {"max_order_size": "0.4"}}
+            },
+        }
+    )
+    wanted = {
+        derive_cloid("demo:BTC:1"): OrderState.DENIED,
+        derive_cloid("rester:ETH:1"): OrderState.DENIED,
+    }
+    assert _run_until_states(build_engine(config), db, wanted) == 0
 
 
 def test_a_limit_strategy_config_requires_a_price() -> None:

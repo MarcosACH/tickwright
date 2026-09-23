@@ -29,7 +29,7 @@ from tickwright.domain import (
     Side,
     TimeInForce,
 )
-from tickwright.engine.guard import NoopGuard, RealGuard
+from tickwright.engine.guard import NoopGuard, PreTradeLimits, RealGuard, SymbolLimits
 
 
 def _spec(
@@ -70,12 +70,36 @@ def _limit_signal(
     )
 
 
-def _guard(spec: InstrumentSpec | None = None, *, store: SQLiteStore | None = None) -> RealGuard:
+def _market_signal(*, quantity: str = "1") -> PlaceSignal:
+    return PlaceSignal(
+        ts_event=1_000,
+        ts_init=1_000,
+        strategy_id="trivial",
+        symbol="BTC",
+        seq=1,
+        side=Side.BUY,
+        quantity=Decimal(quantity),
+        order_type=OrderType.MARKET,
+        time_in_force=TimeInForce.IOC,
+    )
+
+
+def _guard(
+    spec: InstrumentSpec | None = None,
+    *,
+    store: SQLiteStore | None = None,
+    limits: PreTradeLimits | None = None,
+) -> RealGuard:
     return RealGuard(
         specs={"BTC": spec or _spec()},
         store=store or SQLiteStore(":memory:"),
         clock=ManualClock(start_ns=1_000),
+        limits=limits or PreTradeLimits(),
     )
+
+
+def _max_order_size(coins: str) -> PreTradeLimits:
+    return PreTradeLimits(symbols={"BTC": SymbolLimits(max_order_size=Decimal(coins))})
 
 
 def _check(guard: PreTradeGuard, signal: PlaceSignal) -> GuardDecision:
@@ -122,6 +146,55 @@ def test_approves_a_limit_at_or_above_min_notional() -> None:
     # notional = 100 × 0.2 = 20, at/above min_notional 10 → approved.
     guard = _guard(_spec(sz_decimals=3, min_notional="10"))
     assert isinstance(_check(guard, _limit_signal(price="100", quantity="0.2")), Approved)
+
+
+def test_denies_a_limit_above_the_max_order_size() -> None:
+    guard = _guard(limits=_max_order_size("0.5"))
+    decision = _check(guard, _limit_signal(quantity="0.501"))
+    assert isinstance(decision, Denied)
+    assert "max order size" in decision.reason
+
+
+def test_denies_a_market_order_above_the_max_order_size() -> None:
+    guard = _guard(limits=_max_order_size("0.5"))
+    decision = _check(guard, _market_signal(quantity="0.501"))
+    assert isinstance(decision, Denied)
+    assert "max order size" in decision.reason
+
+
+def test_approves_an_order_at_the_max_order_size() -> None:
+    guard = _guard(limits=_max_order_size("0.5"))
+    decision = _check(guard, _limit_signal(quantity="0.5"))
+    assert decision == Approved(quantity=Decimal("0.5"), price=Decimal("100"))
+
+
+def test_the_max_order_size_judges_the_quantized_size() -> None:
+    # 0.5009 rounds down to 0.500, which is what would be sent, and that fits
+    # the cap (ADR-0051).
+    guard = _guard(limits=_max_order_size("0.5"))
+    decision = _check(guard, _limit_signal(quantity="0.5009"))
+    assert decision == Approved(quantity=Decimal("0.5"), price=Decimal("100"))
+
+
+def test_a_symbol_with_no_entry_has_no_max_order_size() -> None:
+    limits = PreTradeLimits(symbols={"ETH": SymbolLimits(max_order_size=Decimal("0.5"))})
+    guard = _guard(limits=limits)
+    assert isinstance(_check(guard, _limit_signal(symbol="BTC", quantity="1000")), Approved)
+
+
+def test_tripped_kill_switch_denies_before_the_max_order_size() -> None:
+    guard = _guard(limits=_max_order_size("0.5"))
+    guard.trip_kill_switch("halt")
+    decision = _check(guard, _limit_signal(quantity="0.501"))
+    assert decision == Denied(reason="kill switch tripped")
+
+
+def test_a_market_order_under_the_cap_skips_min_notional() -> None:
+    # A market order has no price to value, so min notional stays with the
+    # venue (ADR-0017) even though market orders now reach the caps.
+    guard = _guard(_spec(min_notional="1000000"), limits=_max_order_size("0.5"))
+    decision = _check(guard, _market_signal(quantity="0.1"))
+    assert decision == Approved(quantity=Decimal("0.1"), price=None)
 
 
 def test_tripped_kill_switch_denies_every_new_placement() -> None:
