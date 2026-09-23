@@ -70,6 +70,20 @@ def _limit_signal(
     )
 
 
+def _market_signal(*, quantity: str = "1") -> PlaceSignal:
+    return PlaceSignal(
+        ts_event=1_000,
+        ts_init=1_000,
+        strategy_id="trivial",
+        symbol="BTC",
+        seq=1,
+        side=Side.BUY,
+        quantity=Decimal(quantity),
+        order_type=OrderType.MARKET,
+        time_in_force=TimeInForce.IOC,
+    )
+
+
 def _guard(
     spec: InstrumentSpec | None = None,
     *,
@@ -139,6 +153,21 @@ def test_denies_a_limit_above_the_max_order_size() -> None:
     decision = _check(guard, _limit_signal(quantity="0.501"))
     assert isinstance(decision, Denied)
     assert "max order size" in decision.reason
+
+
+def test_denies_a_market_order_above_the_max_order_size() -> None:
+    guard = _guard(limits=_max_order_size("0.5"))
+    decision = _check(guard, _market_signal(quantity="0.501"))
+    assert isinstance(decision, Denied)
+    assert "max order size" in decision.reason
+
+
+def test_a_market_order_under_the_cap_skips_min_notional() -> None:
+    # A market order has no price to value, so min notional stays with the
+    # venue (ADR-0017) even though market orders now reach the caps.
+    guard = _guard(_spec(min_notional="1000000"), limits=_max_order_size("0.5"))
+    decision = _check(guard, _market_signal(quantity="0.1"))
+    assert decision == Approved(quantity=Decimal("0.1"), price=None)
 
 
 def test_tripped_kill_switch_denies_every_new_placement() -> None:

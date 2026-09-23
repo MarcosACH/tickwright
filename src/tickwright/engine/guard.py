@@ -122,15 +122,16 @@ class RealGuard:
             # A size that rounds to nothing is a phantom order (ADR-0017): never
             # sent, safe for the strategy to recreate at a valid size.
             return Denied(reason="size rounds to zero")
-        if signal.price is None:
-            # MARKET has no pre-trade price: only the venue knows the fill price,
-            # so min-notional is adjudicated there (→ REJECTED), not here (ADR-0017).
-            return Approved(quantity=quantity, price=None)
-        price = quantize_price(signal.price, signal.side, spec)
-        if below_min_notional(price, quantity, spec):
-            # A LIMIT carries its own price, so notional is exact: deny locally
-            # rather than emit an order the venue will reject (ADR-0017).
-            return Denied(reason="below min notional")
+        # MARKET has no pre-trade price: only the venue knows the fill price, so
+        # min-notional is adjudicated there (→ REJECTED), not here (ADR-0017).
+        # It still falls through to the caps below (ADR-0051).
+        price = None
+        if signal.price is not None:
+            price = quantize_price(signal.price, signal.side, spec)
+            if below_min_notional(price, quantity, spec):
+                # A LIMIT carries its own price, so notional is exact: deny locally
+                # rather than emit an order the venue will reject (ADR-0017).
+                return Denied(reason="below min notional")
         symbol_limits = self._limits.symbols.get(signal.symbol, _NO_SYMBOL_LIMITS)
         cap = symbol_limits.max_order_size
         if cap is not None and quantity > cap:
