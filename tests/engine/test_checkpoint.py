@@ -10,6 +10,7 @@ two.
 
 from collections.abc import Sequence
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from ledgers import GENESIS
@@ -564,3 +565,33 @@ def test_a_reading_shows_the_latest_mark_and_no_mark_before_the_first_one() -> N
     mark = checkpointer.pre_trade_reading("BTC", Side.BUY).mark
     assert mark is not None
     assert (mark.price, mark.ts_event) == (Decimal("42100"), 3_000)
+
+
+def test_a_reading_after_a_restart_matches_the_one_before_it(tmp_path: Path) -> None:
+    path = tmp_path / "engine.db"
+    store = SQLiteStore(path)
+    before = _checkpointer(store)
+    before.recover()
+    partly_filled = _submitted_order(quantity="1", seq=1)
+    fill = _fill(partly_filled, trade_id="f1", quantity="0.25")
+    before.checkpoint_fill(partly_filled, fill, side=Side.BUY)
+    before.checkpoint(_submitted_order(quantity="2", side=Side.SELL, seq=2))
+    heal = ReconciliationFill(
+        symbol="BTC", side=Side.SELL, quantity=Decimal("0.1"), price=Decimal("42000"), ts_ns=2_000
+    )
+    before.checkpoint_heal((heal,))
+    readings_before = [before.pre_trade_reading("BTC", side) for side in Side]
+    store.close()
+
+    after = _checkpointer(SQLiteStore(path))
+    after.recover()
+    readings_after = [after.pre_trade_reading("BTC", side) for side in Side]
+
+    # A mark is never stored (ADR-0039), so only position and open orders survive.
+    assert [(r.account_net_size, r.open_remainder) for r in readings_before] == [
+        (Decimal("0.15"), Decimal("0.75")),
+        (Decimal("0.15"), Decimal("2")),
+    ]
+    assert [(r.account_net_size, r.open_remainder) for r in readings_after] == [
+        (r.account_net_size, r.open_remainder) for r in readings_before
+    ]
