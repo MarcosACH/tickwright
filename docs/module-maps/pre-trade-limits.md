@@ -151,6 +151,12 @@ ADR-0039 amendment.
 **Interface:** Gains a top-level `limits` field, `TICKWRIGHT_LIMITS__*`, next to `guard`. Validation
 refuses any limit together with `guard = "noop"`, with a clear error.
 
+**(Amended by [#379](https://github.com/MarcosACH/tickwright/issues/379):** the per-symbol map is
+set as one JSON value, `TICKWRIGHT_LIMITS={"symbols": {...}}`, not as `TICKWRIGHT_LIMITS__SYMBOLS`.
+`PreTradeLimits` is a stdlib dataclass. pydantic-settings does not decode JSON for a field nested
+inside one, so the `__SYMBOLS` form fails at boot. This is the same shape as `TICKWRIGHT_LEVERAGE`.
+A test loads the `.env.example` line through `AppSettings`, so the docs and the code cannot drift.**)**
+
 **Responsibilities:** Map settings onto `PreTradeLimits`, and refuse a limit that would not be
 enforced. `build_guard` hands the limits to `RealGuard`.
 

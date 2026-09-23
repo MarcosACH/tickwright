@@ -79,6 +79,8 @@ flowchart LR
   event type. Reads are never bus messages. Reconciliation reads the venue by a direct call.
 - The `PreTradeGuard` runs before every placement. It checks size and price validity, min notional,
   and the kill switch. A failed check denies the order and nothing is sent.
+- Pre-trade limits are optional caps the guard also checks, such as a max order size per symbol.
+  They are off by default. Set the ones you need (see `.env.example` and ADR-0051).
 - The `ExecutionManager` writes every order state to the `Store` before it touches the network.
 - `Reconciliation` compares local order state with the venue on a schedule and heals the
   difference. A failed venue read is never treated as an empty venue. On a failed read it freezes
