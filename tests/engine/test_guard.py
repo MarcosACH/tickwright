@@ -168,6 +168,14 @@ def test_approves_an_order_at_the_max_order_size() -> None:
     assert decision == Approved(quantity=Decimal("0.5"), price=Decimal("100"))
 
 
+def test_the_max_order_size_judges_the_quantized_size() -> None:
+    # 0.5009 rounds down to 0.500, which is what would be sent, and that fits
+    # the cap (ADR-0051).
+    guard = _guard(limits=_max_order_size("0.5"))
+    decision = _check(guard, _limit_signal(quantity="0.5009"))
+    assert decision == Approved(quantity=Decimal("0.5"), price=Decimal("100"))
+
+
 def test_a_symbol_with_no_entry_has_no_max_order_size() -> None:
     limits = PreTradeLimits(symbols={"ETH": SymbolLimits(max_order_size=Decimal("0.5"))})
     guard = _guard(limits=limits)
