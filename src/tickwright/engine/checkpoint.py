@@ -153,6 +153,7 @@ class Checkpointer:
                 ),
                 Decimal("0"),
             ),
+            mark=self._portfolio.latest_mark(symbol),
         )
 
     def recover(self) -> None:

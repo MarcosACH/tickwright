@@ -23,6 +23,7 @@ from tickwright.domain import (
     AccountSpec,
     FundingAccrual,
     InvariantViolation,
+    MarkTick,
     Order,
     OrderFillEvent,
     OrderState,
@@ -544,3 +545,22 @@ def test_a_reading_shows_the_unfilled_remainder_of_open_orders_on_its_side_only(
     # 0.4 pending + 0.75 left of the partly filled one. The filled order is closed.
     assert buy.open_remainder == Decimal("1.15")
     assert sell.open_remainder == Decimal("2")
+
+
+def test_a_reading_shows_the_latest_mark_and_no_mark_before_the_first_one() -> None:
+    checkpointer = _checkpointer(SQLiteStore(":memory:"))
+    checkpointer.recover()
+    assert checkpointer.pre_trade_reading("BTC", Side.BUY).mark is None
+
+    eth = MarkTick(ts_event=1_500, ts_init=1_500, symbol="ETH", price=Decimal("2500"))
+    checkpointer.portfolio.observe_mark(eth)
+    assert checkpointer.pre_trade_reading("BTC", Side.BUY).mark is None
+
+    first = MarkTick(ts_event=2_000, ts_init=2_000, symbol="BTC", price=Decimal("42000"))
+    latest = MarkTick(ts_event=3_000, ts_init=3_000, symbol="BTC", price=Decimal("42100"))
+    checkpointer.portfolio.observe_mark(first)
+    checkpointer.portfolio.observe_mark(latest)
+
+    mark = checkpointer.pre_trade_reading("BTC", Side.BUY).mark
+    assert mark is not None
+    assert (mark.price, mark.ts_event) == (Decimal("42100"), 3_000)

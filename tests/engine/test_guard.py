@@ -85,6 +85,7 @@ def _check(guard: PreTradeGuard, signal: PlaceSignal) -> GuardDecision:
         side=signal.side,
         account_net_size=Decimal("0"),
         open_remainder=Decimal("0"),
+        mark=None,
     )
     return guard.check(signal, reading)
 

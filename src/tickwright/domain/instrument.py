@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from decimal import ROUND_DOWN, ROUND_UP, Decimal
 
 from .enums import Side
+from .events import MarkTick
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -114,6 +115,9 @@ class PreTradeReading:
     open_remainder: Decimal
     """The unfilled part of every open order on ``side``, summed. A ``PENDING``
     order counts: it may already be at the venue (ADR-0008)."""
+    mark: MarkTick | None
+    """The latest mark for ``symbol``, or ``None`` when none was ever seen. One
+    field, so the price and its time are always present or absent together."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

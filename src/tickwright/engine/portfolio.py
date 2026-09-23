@@ -430,6 +430,15 @@ class PortfolioProjection:
         """
         self._marks[mark.symbol] = mark
 
+    def latest_mark(self, symbol: str) -> MarkTick | None:
+        """The last mark taken for ``symbol``, or ``None`` before the first one.
+
+        The ``Checkpointer`` reads it for the guard's ``PreTradeReading``. Its
+        age is not checked here. The guard holds the clock, so it judges that
+        (ADR-0051).
+        """
+        return self._marks.get(symbol)
+
     def observe_venue_liquidation(self, state: VenueAccountState) -> None:
         """Take the venue's own liquidation prices — Tier-2's other write verb.
 
