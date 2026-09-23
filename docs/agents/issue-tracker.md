@@ -160,7 +160,6 @@ Provision required labels (one-shot, idempotent):
 The Status field on the project needs three IDs (project, field, option). Constants for the project (`https://github.com/users/MarcosACH/projects/2`):
 
 ```sh
-PROJECT_NUMBER=2
 PROJECT_ID=PVT_kwHOCO3Woc4BcODC
 STATUS_FIELD=PVTSSF_lAHOCO3Woc4BcODCzhW4djE
 
@@ -172,12 +171,16 @@ IN_REVIEW=b35df904
 DONE=4b33f99e
 ```
 
-Find the project item id for an issue and update the field:
+Find the project item id for an issue and update the field. Read the item from the issue, not from
+`gh project item-list`. On 2026-09-23 that list missed every item added after 2026-09-18, so it
+could not find a new issue (#386).
 
 ```sh
 ISSUE=92                                    # the issue number
-ITEM_ID=$(gh project item-list "$PROJECT_NUMBER" --owner MarcosACH --format json --limit 200 \
-  | jq -r ".items[] | select(.content.number==$ISSUE) | .id")
+ITEM_ID=$(gh api graphql -F issue="$ISSUE" -f query='
+  query($issue: Int!) { repository(owner: "MarcosACH", name: "tickwright") {
+    issue(number: $issue) { projectItems(first: 10) { nodes { id project { id } } } } } }' \
+  --jq ".data.repository.issue.projectItems.nodes[] | select(.project.id==\"$PROJECT_ID\") | .id")
 
 gh project item-edit \
   --project-id "$PROJECT_ID" \
@@ -206,7 +209,9 @@ Used by [`/wayfinder`](../../.claude/skills/wayfinder/SKILL.md) to plan a huge, 
   # for each, an open blocker disqualifies it:
   gh api repos/MarcosACH/tickwright/issues/<child>/dependencies/blocked_by --jq '[.[] | select(.state=="open")] | length'
   ```
-  (Read each candidate's project Status via the `item-list` query in *Moving Status* to skip the `In Progress` ones.)
+  (Read each candidate's Status from the issue to skip the `In Progress` ones:
+  `gh issue view <child> -R MarcosACH/tickwright --json projectItems --jq '.projectItems[].status.name'`.
+  Do not use `gh project item-list`, which can miss new items. See *Moving Status*.)
 - **Resolve**: `gh issue comment <n> --body "<answer>"`, then `gh issue close <n>` (its Status auto-moves to `Done` on close — the same automation as a merged PR), then append a one-line context pointer (gist + link) to the map's Decisions-so-far. A wayfinder ticket closes on **resolution**, not via a PR `Closes #N`; it has no code merge of its own, so this deliberate close is legitimate (it is not a child slice issue — the "never close manually" rule targets those).
 - **Land**: when the frontier empties, the effort's research notes move onto `main` in one docs-only PR and every `blob/<branch>/…` URL in the map body and in the research tickets' resolution comments is repointed at a `main` path. Edit the map body with `gh issue edit <map> --body-file`; correct a resolution comment by **appending** a new comment rather than editing the original, so the record of what was answered when stays intact. Procedure and the verbatim-bodies rule are canonical in the [`wayfinder` skill](../../.claude/skills/wayfinder/SKILL.md), *Work through the map* step 6.
 - **Close the map**: once the destination's artifact exists and the notes have landed, the map is done — `gh issue comment <map>` then `gh issue close <map> --reason completed` (Status auto-moves to `Done`, as for a ticket). Close it on the **map's own** lifecycle, not the effort's: a map whose destination was a PRD closes when that PRD is filed and sliced, and the PRD then tracks execution on its own (it is the one issue closed deliberately at release — see [`versioning.md`](../workflow/versioning.md)). Leaving an emptied map open is board noise — it advertises a frontier that no longer exists. The closing comment is the part that matters: name where the effort continues — the PRD, the module map, the slice range — because ADRs cite the map for *why* a decision went the way it did, and a reader arriving from one must not dead-end. The map body itself stays untouched; it is the readable record. Like a ticket, a map has no code merge of its own, so this deliberate close is legitimate — the "never close manually" rule targets child slice issues. Worked example: [#107](https://github.com/MarcosACH/tickwright/issues/107).
