@@ -222,6 +222,15 @@ def test_the_shrinking_sell_is_denied_by_open_sells() -> None:
     assert "max position" in decision.reason
 
 
+def test_the_buy_that_crosses_zero_is_denied_on_the_new_side() -> None:
+    # ADR-0051's third example. The worst case moves from -20 to +16. That is
+    # smaller in size, but it crosses zero, so it is judged as a +16 long.
+    guard = _guard(limits=_max_position("15"))
+    decision = _check(guard, _limit_signal(quantity="36"), net="-20")
+    assert isinstance(decision, Denied)
+    assert "max position" in decision.reason
+
+
 def test_a_market_order_under_the_cap_skips_min_notional() -> None:
     # A market order has no price to value, so min notional stays with the
     # venue (ADR-0017) even though market orders now reach the caps.

@@ -153,8 +153,11 @@ class RealGuard:
             before = reading.account_net_size + direction * reading.open_remainder
             worst_case = before + direction * quantity
             # An order that shrinks the worst case always passes, so a user can
-            # reduce a position that is already past the cap.
-            if abs(worst_case) > cap and abs(worst_case) >= abs(before):
+            # reduce a position that is already past the cap. An order that
+            # crosses zero opens a new side, so it gets no such pass.
+            same_side = (worst_case > 0) == (before > 0)
+            toward_zero = abs(worst_case) < abs(before) and same_side
+            if abs(worst_case) > cap and not toward_zero:
                 return Denied(reason=f"above max position {cap}")
         return Approved(quantity=quantity, price=price)
 
