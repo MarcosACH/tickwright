@@ -29,7 +29,7 @@ from tickwright.domain import (
     Side,
     TimeInForce,
 )
-from tickwright.engine.guard import NoopGuard, RealGuard
+from tickwright.engine.guard import NoopGuard, PreTradeLimits, RealGuard, SymbolLimits
 
 
 def _spec(
@@ -70,12 +70,22 @@ def _limit_signal(
     )
 
 
-def _guard(spec: InstrumentSpec | None = None, *, store: SQLiteStore | None = None) -> RealGuard:
+def _guard(
+    spec: InstrumentSpec | None = None,
+    *,
+    store: SQLiteStore | None = None,
+    limits: PreTradeLimits | None = None,
+) -> RealGuard:
     return RealGuard(
         specs={"BTC": spec or _spec()},
         store=store or SQLiteStore(":memory:"),
         clock=ManualClock(start_ns=1_000),
+        limits=limits or PreTradeLimits(),
     )
+
+
+def _max_order_size(coins: str) -> PreTradeLimits:
+    return PreTradeLimits(symbols={"BTC": SymbolLimits(max_order_size=Decimal(coins))})
 
 
 def _check(guard: PreTradeGuard, signal: PlaceSignal) -> GuardDecision:
@@ -122,6 +132,13 @@ def test_approves_a_limit_at_or_above_min_notional() -> None:
     # notional = 100 × 0.2 = 20, at/above min_notional 10 → approved.
     guard = _guard(_spec(sz_decimals=3, min_notional="10"))
     assert isinstance(_check(guard, _limit_signal(price="100", quantity="0.2")), Approved)
+
+
+def test_denies_a_limit_above_the_max_order_size() -> None:
+    guard = _guard(limits=_max_order_size("0.5"))
+    decision = _check(guard, _limit_signal(quantity="0.501"))
+    assert isinstance(decision, Denied)
+    assert "max order size" in decision.reason
 
 
 def test_tripped_kill_switch_denies_every_new_placement() -> None:
