@@ -235,7 +235,7 @@ def build_guard(
 ) -> PreTradeGuard:
     match config.guard:
         case "real":
-            return RealGuard(specs=specs, store=store, clock=clock)
+            return RealGuard(specs=specs, store=store, clock=clock, limits=config.limits)
         case "noop":
             return NoopGuard()
         case unreachable:
