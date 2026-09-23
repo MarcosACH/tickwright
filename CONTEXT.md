@@ -395,7 +395,8 @@ Four optional caps the real [[PreTradeGuard]] checks before an order is sent. Ma
 coins, max order value in USD, and max position in coins are set per symbol. Max orders per time
 window is set for the whole engine. Each cap is off unless the user sets it. An order that breaks a
 cap is `DENIED` with a reason that names the cap, and nothing else happens. The position cap
-measures [[Account net size]], plus same-side open orders, plus the new order. See ADR-0051.
+measures the worst-case position if same-side open orders and the new order all fill. ADR-0051
+holds the formula.
 _Avoid_: risk limits (implies the deferred RiskEngine), circuit breaker (a breach never trips the
 [[Kill-switch]]).
 
