@@ -788,6 +788,25 @@ def test_the_guard_gets_a_reading_for_the_signals_symbol_and_side() -> None:
     assert [(r.symbol, r.side) for r in guard.readings] == [("BTC", Side.BUY)]
 
 
+def test_the_reading_holds_the_book_before_the_order_being_checked() -> None:
+    guard = _ReadingRecorder()
+    bus = _wiring(SQLiteStore(":memory:"), guard=guard).bus
+
+    async def scenario() -> None:
+        await bus.publish(_tick())
+        await bus.publish(_market_signal(seq=1))  # fills 0.5 on the paper exchange
+        await bus.publish(_market_signal(seq=2))
+
+    asyncio.run(scenario())
+
+    # The position cap adds the new order on top of the reading (ADR-0051). A
+    # reading that already held the order's own PENDING intent would count it twice.
+    assert [(r.account_net_size, r.open_remainder) for r in guard.readings] == [
+        (Decimal("0"), Decimal("0")),
+        (Decimal("0.5"), Decimal("0")),
+    ]
+
+
 # --- LIMIT resting, cancel, and status handling (issue #13) -----------------
 
 
