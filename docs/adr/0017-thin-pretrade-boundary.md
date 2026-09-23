@@ -26,6 +26,12 @@ guard venue-agnostic. This sourcing/wiring path is specified in ADR-0031.
 
 - **Full RiskEngine** — exposure/max-position/aggregate-notional, pre/post-trade portfolio risk.
   Needs positions/PnL, which v1 makes frictionless (ADR-0013).
+
+  **(Partly lifted by [ADR-0051](./0051-pre-trade-limits.md): positions now exist, so the guard
+  gains four optional caps.** They are max order size, max order value, max position per symbol,
+  and max orders per window. Each is off unless set, and a breach denies only that order. Aggregate
+  exposure across symbols, margin checks, and loss limits stay deferred. The guard is still not a
+  RiskEngine.**)**
 - **Portfolio / positions tracker** (Open Q#17) — deferred. The engine is order-lifecycle only; a
   `Strategy` keeps whatever position view it needs in its own state. RiskEngine and Portfolio are
   additive seams atop a future accounting layer, not v1 concerns.

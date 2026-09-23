@@ -26,6 +26,15 @@ The projection is fed the mark by **subscribing to `MarkTick` on the `EventBus`*
 
   What this **corrects** above is the mechanism, not the safety net. A dead or frozen mark stream no longer surfaces as a growing divergence that fires the Tier-2 alert. Past the horizon that alert is exactly what is withheld, since a gap explained by staleness reports our own frozen input as the venue's disagreement. It surfaces instead as a rising **`suppressed`** count on `account.reconciled`, beside the `unvalued` count carrying the absence case (ADR-0041 §6 drops an unmarked figure at classification, so it never reaches the band). The cross-check is still the net. What it emits over a mark stream that died is a count rather than an alert, and that count is the whole difference between suppressing the alert and forfeiting the job this bullet gives it.**)**
 
+  **(A second age gate, added by [ADR-0051](./0051-pre-trade-limits.md): the pre-trade guard.**
+  When a symbol has a max order value, the guard values a market order at the mark. It denies the
+  order if the mark is missing or older than its own max age, default 10 seconds. This keeps the
+  read path free of a clock. The guard already holds one, like the reconcile cycle. The age is a
+  separate setting from the band's `mark_max_age_seconds`. The band asks whether a comparison is
+  still meaningful. The guard asks whether it can prove an order fits a cap. The projection is no
+  longer the only reader of its mark map. It lends the latest mark and its time to the
+  `Checkpointer`, which puts them in the guard's `PreTradeReading`.**)**
+
 How `None` **surfaces through the `Portfolio` Protocol** (per-field nullability, whether the seam hides it) is the read-API ticket's call (#135 — **now fixed by ADR-0041 §6**); this ADR fixes only the underlying policy. Full-disconnect staleness — the reconcile stream *also* down — is the recovery / "freeze-never-flat" window owned by the read-seam (#135 — read-seam reporting **fixed by ADR-0041 §7**) and durability (#137) tickets.
 
 ## Paper and replay: the last-trade proxy, one provenance per deployment
