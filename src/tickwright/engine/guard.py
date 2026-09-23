@@ -44,7 +44,8 @@ class SymbolLimits:
     max_order_size: Decimal | None = None
     """In coins, checked against the quantized quantity."""
     max_order_value: Decimal | None = None
-    """In USD, checked against the quantized quantity times the quantized price."""
+    """In USD, checked against the quantized quantity times a price. A limit order
+    uses its quantized limit price. A market order uses the latest mark."""
     max_position: Decimal | None = None
     """In coins, checked against the worst-case position on the order's side."""
 
