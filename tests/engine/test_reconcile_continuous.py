@@ -885,6 +885,7 @@ def test_a_config_with_a_timing_knob_that_is_not_a_positive_number_is_rejected(
     # knows what to fix. This check runs before the budget rule, so a zero
     # ghost_grace_seconds fails here, not in the budget comparison.
     with pytest.raises(ValueError, match=f"{field} must be a positive number"):
+        # mypy checks the float against every field, and inflight_max_attempts is an int.
         ReconcileConfig(**{field: value})  # type: ignore[arg-type]
 
 
