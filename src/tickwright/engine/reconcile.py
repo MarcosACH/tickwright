@@ -57,9 +57,8 @@ from tickwright.observability.correlation import operation
 
 from .absence import ConsecutiveMisses, GraceWindow
 from .cache import Cache
+from .duration import duration_ns
 from .ghost_gate import GhostGate, GhostVerdict
-
-_NS_PER_SECOND = 1_000_000_000
 
 # The per-cadence state filters gating which sagas each continuous cycle reads.
 # Startup filters nothing — it reconciles every non-terminal saga.
@@ -136,17 +135,18 @@ class ReconcileConfig:
     unreadable_grace_seconds: float = 90.0
 
     def __post_init__(self) -> None:
+        # A bad value stops the boot, not the reconciler's build or a cadence.
         for name in (
             "inflight_interval_seconds",
-            "inflight_max_attempts",
             "open_order_interval_seconds",
             "account_interval_seconds",
             "ghost_grace_seconds",
             "recent_order_protection_seconds",
             "unreadable_grace_seconds",
         ):
-            if getattr(self, name) <= 0:
-                raise ValueError(f"{name} must be positive")
+            duration_ns(getattr(self, name), name=name)
+        if self.inflight_max_attempts <= 0:
+            raise ValueError("inflight_max_attempts must be positive")
         budget = self.inflight_interval_seconds * self.inflight_max_attempts
         if budget >= self.ghost_grace_seconds:
             raise ValueError(
@@ -202,12 +202,15 @@ class Reconciler:
         # not in reads because its three drivers poll six times apart and the
         # barrier not on a cadence at all, so a read count would mean a
         # different amount of waiting under each of them (ADR-0049 §4).
+        config = self._config
         self._unreadable_run = GraceWindow(
-            span_ns=int(self._config.unreadable_grace_seconds * _NS_PER_SECOND)
+            span_ns=duration_ns(config.unreadable_grace_seconds, name="unreadable_grace_seconds")
         )
         self._ghost_gate = GhostGate(
-            grace_span_ns=int(self._config.ghost_grace_seconds * _NS_PER_SECOND),
-            protection_span_ns=int(self._config.recent_order_protection_seconds * _NS_PER_SECOND),
+            grace_span_ns=duration_ns(config.ghost_grace_seconds, name="ghost_grace_seconds"),
+            protection_span_ns=duration_ns(
+                config.recent_order_protection_seconds, name="recent_order_protection_seconds"
+            ),
         )
 
     async def reconcile_startup(self) -> bool:

@@ -10,6 +10,7 @@ precedence chain: kwargs > environment > ``.env`` > class default.
 import os
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pytest
 from pydantic import SecretStr, ValidationError
@@ -197,14 +198,15 @@ def test_a_non_positive_cap_is_refused_at_load(tmp_path: Path, name: str, cap: s
         )
 
 
-@pytest.mark.parametrize("age", ["0", "-1", "nan", "inf", "1e300"])
+@pytest.mark.parametrize("age", ["0", "-1", "nan", "inf", "1e300", "1e-10"])
 def test_a_mark_max_age_that_is_not_a_positive_number_is_refused_at_load(
     tmp_path: Path, age: str
 ) -> None:
     # Zero would call every mark stale and deny every market order under a
     # value cap. That is a typo, not a policy (ADR-0051). NaN and infinity
     # load as floats, but no age can be compared against them. 1e300 is
-    # finite, but in nanoseconds it overflows to infinity.
+    # finite, but in nanoseconds it overflows to infinity. 1e-10 is under one
+    # nanosecond, so it rounds to zero.
     (tmp_path / "ticks.jsonl").touch()
     with pytest.raises(ValidationError, match="mark_max_age_seconds must be a positive number"):
         AppConfig.model_validate(
@@ -214,6 +216,68 @@ def test_a_mark_max_age_that_is_not_a_positive_number_is_refused_at_load(
                 "limits": {"mark_max_age_seconds": age},
             }
         )
+
+
+@pytest.mark.parametrize("age", ["0", "-1", "nan", "inf", "1e300", "1e-10"])
+def test_a_band_mark_max_age_that_is_not_a_positive_number_is_refused_at_load(
+    tmp_path: Path, age: str
+) -> None:
+    # Zero or less would call every mark stale, so every Tier-2 alert on a held
+    # symbol would be withheld with no error. 1e-10 rounds to zero nanoseconds,
+    # so it does the same. NaN, infinity, and 1e300 would raise in the reconcile
+    # pass instead of at boot.
+    (tmp_path / "ticks.jsonl").touch()
+    with pytest.raises(ValidationError, match="mark_max_age_seconds must be a positive number"):
+        AppConfig.model_validate(
+            {
+                "replay": ReplayFeedConfig(path=tmp_path / "ticks.jsonl"),
+                "paper": PaperExchangeConfig(genesis_collateral=Decimal("100000")),
+                "engine": {"band": {"mark_max_age_seconds": age}},
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "name", ["startup_reconciliation_timeout_seconds", "shutdown_timeout_seconds"]
+)
+@pytest.mark.parametrize("seconds", ["0", "-1", "nan", "inf", "1e300", "1e-10"])
+def test_an_engine_timeout_that_is_not_a_positive_number_is_refused_at_load(
+    tmp_path: Path, name: str, seconds: str
+) -> None:
+    # A timeout of zero or less runs out at once, so boot or shutdown gives up
+    # before it tries. These had no check at all.
+    (tmp_path / "ticks.jsonl").touch()
+    with pytest.raises(ValidationError, match=f"{name} must be a positive number"):
+        AppConfig.model_validate(
+            {
+                "replay": ReplayFeedConfig(path=tmp_path / "ticks.jsonl"),
+                "paper": PaperExchangeConfig(genesis_collateral=Decimal("100000")),
+                "engine": {name: seconds},
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "setting",
+    [
+        {"guard": "real", "limits": {"mark_max_age_seconds": "1e-9"}},
+        {"engine": {"band": {"mark_max_age_seconds": "1e-9"}}},
+        {"engine": {"startup_reconciliation_timeout_seconds": "1e-9"}},
+        {"engine": {"shutdown_timeout_seconds": "1e-9"}},
+        {"engine": {"reconcile": {"unreadable_grace_seconds": "1e-9"}}},
+    ],
+    ids=["guard mark max age", "band mark max age", "startup", "shutdown", "reconcile"],
+)
+def test_a_seconds_setting_of_one_nanosecond_loads(tmp_path: Path, setting: dict[str, Any]) -> None:
+    # .env.example promises that 1e-9 is the smallest value each of these takes.
+    (tmp_path / "ticks.jsonl").touch()
+    AppConfig.model_validate(
+        {
+            "replay": ReplayFeedConfig(path=tmp_path / "ticks.jsonl"),
+            "paper": PaperExchangeConfig(genesis_collateral=Decimal("100000")),
+            **setting,
+        }
+    )
 
 
 @pytest.mark.parametrize(

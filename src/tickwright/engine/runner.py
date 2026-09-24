@@ -49,6 +49,7 @@ from tickwright.observability.correlation import bind_run_id
 from .barrier import StartupBarrier
 from .cadence import run_cadence
 from .checkpoint import Checkpointer
+from .duration import duration_ns
 from .execution import ExecutionManager
 from .guard import NoopGuard
 from .ledger_reconcile import LedgerReconciliation, ValuationBand
@@ -77,6 +78,11 @@ class EngineConfig:
 
     run_id: str | None = None
     """The correlation id for this run (ADR-0020); ``None`` generates one."""
+
+    def __post_init__(self) -> None:
+        # A bad timeout stops the boot, not the startup barrier or the teardown.
+        for name in ("startup_reconciliation_timeout_seconds", "shutdown_timeout_seconds"):
+            duration_ns(getattr(self, name), name=name)
 
 
 def _first_leaf(exc: BaseException) -> BaseException:

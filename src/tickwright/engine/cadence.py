@@ -15,14 +15,14 @@ from collections.abc import Awaitable, Callable
 
 from tickwright.domain import Clock
 
-_NS_PER_SECOND = 1_000_000_000
+from .duration import duration_ns
 
 
 async def run_cadence(
     *, clock: Clock, interval_seconds: float, cycle: Callable[[], Awaitable[object]]
 ) -> None:
     """Run ``cycle`` every ``interval_seconds`` of clock time, forever."""
-    interval_ns = int(interval_seconds * _NS_PER_SECOND)
+    interval_ns = duration_ns(interval_seconds, name="interval_seconds")
     while True:
         await clock.sleep_until(clock.timestamp_ns() + interval_ns)
         await cycle()
