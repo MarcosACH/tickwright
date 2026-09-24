@@ -12,6 +12,7 @@ one would be the second internal projection ADR-0035 rejects, agreeing only ever
 with itself. What paper has in its place is the atomic ledger write.
 """
 
+import math
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal
@@ -175,6 +176,13 @@ class ValuationBand:
     silently tolerate an older mark, coupling how often we look to how stale a
     price may be — two decisions with no reason to move together.
     """
+
+    def __post_init__(self) -> None:
+        # Zero or less would call every mark stale and withhold every alert.
+        # NaN, infinity, and 1e300 would raise in the reconcile pass instead.
+        age = self.mark_max_age_seconds
+        if not (math.isfinite(age * _NS_PER_SECOND) and age > 0):
+            raise ValueError(f"mark_max_age_seconds must be a positive number, got {age}")
 
     def stale(self, *, age_ns: int) -> bool:
         """Whether a mark that old puts its figures past the band's evidence."""

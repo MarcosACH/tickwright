@@ -216,6 +216,24 @@ def test_a_mark_max_age_that_is_not_a_positive_number_is_refused_at_load(
         )
 
 
+@pytest.mark.parametrize("age", ["0", "-1", "nan", "inf", "1e300"])
+def test_a_band_mark_max_age_that_is_not_a_positive_number_is_refused_at_load(
+    tmp_path: Path, age: str
+) -> None:
+    # Zero or less would call every mark stale, so every Tier-2 alert on a held
+    # symbol would be withheld with no error. The other three would raise in
+    # the reconcile pass instead of at boot.
+    (tmp_path / "ticks.jsonl").touch()
+    with pytest.raises(ValidationError, match="mark_max_age_seconds must be a positive number"):
+        AppConfig.model_validate(
+            {
+                "replay": ReplayFeedConfig(path=tmp_path / "ticks.jsonl"),
+                "paper": PaperExchangeConfig(genesis_collateral=Decimal("100000")),
+                "engine": {"band": {"mark_max_age_seconds": age}},
+            }
+        )
+
+
 @pytest.mark.parametrize(
     "symbol_limits",
     [{"max_order_size": "0.5"}, {}],
