@@ -237,6 +237,26 @@ def test_a_band_mark_max_age_that_is_not_a_positive_number_is_refused_at_load(
 
 
 @pytest.mark.parametrize(
+    "name", ["startup_reconciliation_timeout_seconds", "shutdown_timeout_seconds"]
+)
+@pytest.mark.parametrize("seconds", ["0", "-1", "nan", "inf", "1e300", "1e-10"])
+def test_an_engine_timeout_that_is_not_a_positive_number_is_refused_at_load(
+    tmp_path: Path, name: str, seconds: str
+) -> None:
+    # A timeout of zero or less runs out at once, so boot or shutdown gives up
+    # before it tries. These had no check at all.
+    (tmp_path / "ticks.jsonl").touch()
+    with pytest.raises(ValidationError, match=f"{name} must be a positive number"):
+        AppConfig.model_validate(
+            {
+                "replay": ReplayFeedConfig(path=tmp_path / "ticks.jsonl"),
+                "paper": PaperExchangeConfig(genesis_collateral=Decimal("100000")),
+                "engine": {name: seconds},
+            }
+        )
+
+
+@pytest.mark.parametrize(
     "symbol_limits",
     [{"max_order_size": "0.5"}, {}],
     ids=["a cap", "an empty entry"],
