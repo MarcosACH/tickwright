@@ -1,7 +1,7 @@
 """The rule for an engine setting given in seconds.
 
-Every such setting becomes nanoseconds on the engine clock. One rule decides
-which values can, so a bad value stops the boot the same way for each of them.
+One rule decides which values each such setting can take. A bad value then
+stops the boot the same way for all of them.
 """
 
 import math
