@@ -10,6 +10,7 @@ precedence chain: kwargs > environment > ``.env`` > class default.
 import os
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pytest
 from pydantic import SecretStr, ValidationError
@@ -254,6 +255,29 @@ def test_an_engine_timeout_that_is_not_a_positive_number_is_refused_at_load(
                 "engine": {name: seconds},
             }
         )
+
+
+@pytest.mark.parametrize(
+    "setting",
+    [
+        {"guard": "real", "limits": {"mark_max_age_seconds": "1e-9"}},
+        {"engine": {"band": {"mark_max_age_seconds": "1e-9"}}},
+        {"engine": {"startup_reconciliation_timeout_seconds": "1e-9"}},
+        {"engine": {"shutdown_timeout_seconds": "1e-9"}},
+        {"engine": {"reconcile": {"unreadable_grace_seconds": "1e-9"}}},
+    ],
+    ids=["guard mark max age", "band mark max age", "startup", "shutdown", "reconcile"],
+)
+def test_a_seconds_setting_of_one_nanosecond_loads(tmp_path: Path, setting: dict[str, Any]) -> None:
+    # .env.example promises that 1e-9 is the smallest value each of these takes.
+    (tmp_path / "ticks.jsonl").touch()
+    AppConfig.model_validate(
+        {
+            "replay": ReplayFeedConfig(path=tmp_path / "ticks.jsonl"),
+            "paper": PaperExchangeConfig(genesis_collateral=Decimal("100000")),
+            **setting,
+        }
+    )
 
 
 @pytest.mark.parametrize(
