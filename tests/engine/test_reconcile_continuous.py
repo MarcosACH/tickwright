@@ -873,15 +873,17 @@ def test_a_config_whose_protection_window_reaches_the_ghost_grace_is_rejected() 
         "unreadable_grace_seconds",
     ],
 )
-@pytest.mark.parametrize("value", [0, -1, float("nan"), float("inf"), 1e300])
+@pytest.mark.parametrize("value", [0, -1, float("nan"), float("inf"), 1e300, 1e-10])
 def test_a_config_with_a_timing_knob_that_is_not_a_positive_number_is_rejected(
     field: str, value: float
 ) -> None:
     # NaN, infinity, and 1e300 load as floats, but none can become nanoseconds.
     # Without this check, they fail when the reconciler is built or when a
-    # cadence starts, not when the config loads. The message names the field so
-    # the operator knows what to fix. This check runs before the budget rule, so
-    # a zero ghost_grace_seconds fails here, not in the budget comparison.
+    # cadence starts, not when the config loads. 1e-10 is under one nanosecond,
+    # so it rounds to zero. A zero interval never waits, and a zero grace window
+    # gives up on the first read. The message names the field so the operator
+    # knows what to fix. This check runs before the budget rule, so a zero
+    # ghost_grace_seconds fails here, not in the budget comparison.
     with pytest.raises(ValueError, match=f"{field} must be a positive number"):
         ReconcileConfig(**{field: value})  # type: ignore[arg-type]
 
