@@ -45,8 +45,9 @@ class SymbolLimits:
     max_order_size: Decimal | None = None
     """In coins, checked against the quantized quantity."""
     max_order_value: Decimal | None = None
-    """In USD, checked against the quantized quantity times a price. A limit order
-    uses its quantized limit price. A market order uses the latest mark."""
+    """In USD, checked against the quantized quantity times a price. A buy limit
+    uses its quantized limit price. A sell limit uses that price or the latest
+    mark, whichever is higher. A market order uses the latest mark."""
     max_position: Decimal | None = None
     """In coins, checked against the worst-case position on the order's side."""
 
@@ -71,8 +72,9 @@ class PreTradeLimits:
     symbols: Mapping[str, SymbolLimits] = field(default_factory=dict)
     """A symbol with no entry has no per-symbol caps."""
     mark_max_age_seconds: float = 10.0
-    """How old a mark may be and still value a market order against a max order
-    value. Its own setting, not the reconcile band's, which does another job."""
+    """How old a mark may be and still value a market order or a sell limit
+    against a max order value. Its own setting, not the reconcile band's, which
+    does another job."""
 
     def __post_init__(self) -> None:
         # A bad age stops the boot, not the first market order.
