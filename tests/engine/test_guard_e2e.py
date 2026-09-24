@@ -342,6 +342,27 @@ def test_a_market_order_is_valued_at_the_mark_against_the_max_order_value() -> N
     assert _state(engine.store, fits) is OrderState.FILLED
 
 
+def test_a_sell_limit_below_the_mark_is_valued_at_the_mark() -> None:
+    # Cap 1000 USD, mark 40000. A sell of 0.03 at a limit of 1000 is worth 30 at
+    # its own price, but a real venue fills it near the bid, about 1200 (#391).
+    # A sell of 0.02 is worth 800 at the mark, so it still passes.
+    limits = PreTradeLimits(symbols={"BTC": SymbolLimits(max_order_value=Decimal("1000"))})
+    engine = _engine(limits=limits)
+    too_big = derive_cloid("trivial:BTC:1")
+    fits = derive_cloid("trivial:BTC:2")
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))
+        await engine.bus.publish(_mark("40000"))
+        await engine.bus.publish(_limit_signal("1000", quantity="0.03", seq=1, side=Side.SELL))
+        await engine.bus.publish(_limit_signal("1000", quantity="0.02", seq=2, side=Side.SELL))
+
+    asyncio.run(scenario())
+
+    _assert_denied_by(engine, too_big, "above max order value 1000")
+    assert _state(engine.store, fits) is OrderState.FILLED
+
+
 def test_a_market_order_with_no_mark_is_denied_when_a_max_order_value_is_set() -> None:
     # The guard cannot prove the order fits the cap, so it refuses (ADR-0051).
     limits = PreTradeLimits(symbols={"BTC": SymbolLimits(max_order_value=Decimal("1000"))})

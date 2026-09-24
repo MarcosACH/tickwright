@@ -179,6 +179,10 @@ class RealGuard:
                 if age_ns > self._mark_max_age_ns:
                     return Denied(reason=f"stale mark for max order value {cap}")
                 value_price = reading.mark.price
+            elif signal.side is Side.SELL and reading.mark is not None:
+                # A sell limit below the bid fills near the bid on a real venue,
+                # so its own price can hide most of its value (#391).
+                value_price = max(value_price, reading.mark.price)
             if quantity * value_price > cap:
                 return Denied(reason=f"above max order value {cap}")
         cap = symbol_limits.max_position
