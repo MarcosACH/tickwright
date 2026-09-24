@@ -13,7 +13,6 @@ state is persisted through the ``Store`` and restored on construction, so a halt
 outlives a crash and is cleared only by an explicit reset.
 """
 
-import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
 from decimal import Decimal
@@ -35,6 +34,8 @@ from tickwright.domain import (
     quantize_size,
 )
 from tickwright.observability import NamedEvent, named_event
+
+from .mark_age import mark_max_age_ns
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -60,9 +61,6 @@ class SymbolLimits:
                 raise ValueError(f"{cap_field.name} must be positive, got {cap}")
 
 
-_NS_PER_SECOND: Final = 1_000_000_000
-
-
 @dataclass(frozen=True, slots=True, kw_only=True)
 class PreTradeLimits:
     """The pre-trade caps ``RealGuard`` enforces (ADR-0051). Empty means no limits.
@@ -77,13 +75,8 @@ class PreTradeLimits:
     value. Its own setting, not the reconcile band's, which does another job."""
 
     def __post_init__(self) -> None:
-        # Zero or less would call every mark stale, so it stops the boot too.
-        # NaN, infinity, and a finite age too large for nanoseconds all load as
-        # floats. The guard could not turn them into nanoseconds, so it would
-        # raise on the first market order. Checking the product catches all three.
-        age = self.mark_max_age_seconds
-        if not (math.isfinite(age * _NS_PER_SECOND) and age > 0):
-            raise ValueError(f"mark_max_age_seconds must be a positive number, got {age}")
+        # A bad age stops the boot, not the first market order.
+        mark_max_age_ns(self.mark_max_age_seconds)
 
 
 NO_LIMITS: Final = PreTradeLimits()
@@ -105,7 +98,7 @@ class RealGuard:
         self._store = store
         self._clock = clock
         self._limits = limits
-        self._mark_max_age_ns = int(limits.mark_max_age_seconds * _NS_PER_SECOND)
+        self._mark_max_age_ns = mark_max_age_ns(limits.mark_max_age_seconds)
         # Restore the sticky halt before anything can place (ADR-0026): a tripped
         # engine comes back tripped. ``None`` means never tripped.
         restored = store.load_kill_switch()

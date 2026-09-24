@@ -12,7 +12,6 @@ one would be the second internal projection ADR-0035 rejects, agreeing only ever
 with itself. What paper has in its place is the atomic ledger write.
 """
 
-import math
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal
@@ -32,10 +31,10 @@ from tickwright.domain import (
 from tickwright.observability import NamedEvent, named_event
 
 from .checkpoint import Checkpointer
+from .mark_age import mark_max_age_ns
 from .portfolio import HealChange, LedgerReading
 
 _ZERO = Decimal("0")
-_NS_PER_SECOND = 1_000_000_000
 
 
 class _FreezeCaller(Enum):
@@ -178,15 +177,12 @@ class ValuationBand:
     """
 
     def __post_init__(self) -> None:
-        # Zero or less would call every mark stale and withhold every alert.
-        # NaN, infinity, and 1e300 would raise in the reconcile pass instead.
-        age = self.mark_max_age_seconds
-        if not (math.isfinite(age * _NS_PER_SECOND) and age > 0):
-            raise ValueError(f"mark_max_age_seconds must be a positive number, got {age}")
+        # A bad age stops the boot, not the reconcile pass.
+        mark_max_age_ns(self.mark_max_age_seconds)
 
     def stale(self, *, age_ns: int) -> bool:
         """Whether a mark that old puts its figures past the band's evidence."""
-        return age_ns > int(self.mark_max_age_seconds * _NS_PER_SECOND)
+        return age_ns > mark_max_age_ns(self.mark_max_age_seconds)
 
     def covers(self, divergence: Divergence, *, reference: Decimal | None) -> bool:
         """Whether the band absorbs ``divergence``, leaving it unalerted.
