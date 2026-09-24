@@ -866,18 +866,27 @@ def test_a_config_whose_protection_window_reaches_the_ghost_grace_is_rejected() 
     "field",
     [
         "inflight_interval_seconds",
-        "inflight_max_attempts",
         "open_order_interval_seconds",
+        "account_interval_seconds",
         "ghost_grace_seconds",
         "recent_order_protection_seconds",
         "unreadable_grace_seconds",
     ],
 )
+@pytest.mark.parametrize("value", [0, -1, float("nan"), float("inf"), 1e300])
+def test_a_config_with_a_timing_knob_that_is_not_a_positive_number_is_rejected(
+    field: str, value: float
+) -> None:
+    # NaN, infinity, and 1e300 load as floats, but none can become nanoseconds.
+    # Without this check, they fail when the reconciler is built or when a
+    # cadence starts, not when the config loads. The message names the field so
+    # the operator knows what to fix. This check runs before the budget rule, so
+    # a zero ghost_grace_seconds fails here, not in the budget comparison.
+    with pytest.raises(ValueError, match=f"{field} must be a positive number"):
+        ReconcileConfig(**{field: value})  # type: ignore[arg-type]
+
+
 @pytest.mark.parametrize("value", [0, -1])
-def test_a_config_with_a_non_positive_timing_knob_is_rejected(field: str, value: int) -> None:
-    # Every timing knob must be strictly positive; the guard names the offending
-    # field so a misconfiguration is diagnosable. Checked before the budget rule,
-    # so a zero ghost_grace_seconds fails positivity, not the budget comparison.
-    kwargs: dict[str, int] = {field: value}
-    with pytest.raises(ValueError, match=f"{field} must be positive"):
-        ReconcileConfig(**kwargs)
+def test_a_config_with_a_non_positive_retry_count_is_rejected(value: int) -> None:
+    with pytest.raises(ValueError, match="inflight_max_attempts must be positive"):
+        ReconcileConfig(inflight_max_attempts=value)

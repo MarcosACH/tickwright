@@ -57,6 +57,7 @@ from tickwright.observability.correlation import operation
 
 from .absence import ConsecutiveMisses, GraceWindow
 from .cache import Cache
+from .duration import duration_ns
 from .ghost_gate import GhostGate, GhostVerdict
 
 _NS_PER_SECOND = 1_000_000_000
@@ -136,17 +137,18 @@ class ReconcileConfig:
     unreadable_grace_seconds: float = 90.0
 
     def __post_init__(self) -> None:
+        # A bad value stops the boot, not the reconciler's build or a cadence.
         for name in (
             "inflight_interval_seconds",
-            "inflight_max_attempts",
             "open_order_interval_seconds",
             "account_interval_seconds",
             "ghost_grace_seconds",
             "recent_order_protection_seconds",
             "unreadable_grace_seconds",
         ):
-            if getattr(self, name) <= 0:
-                raise ValueError(f"{name} must be positive")
+            duration_ns(getattr(self, name), name=name)
+        if self.inflight_max_attempts <= 0:
+            raise ValueError("inflight_max_attempts must be positive")
         budget = self.inflight_interval_seconds * self.inflight_max_attempts
         if budget >= self.ghost_grace_seconds:
             raise ValueError(

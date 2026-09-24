@@ -35,7 +35,7 @@ from tickwright.domain import (
 )
 from tickwright.observability import NamedEvent, named_event
 
-from .mark_age import mark_max_age_ns
+from .duration import duration_ns
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -76,7 +76,7 @@ class PreTradeLimits:
 
     def __post_init__(self) -> None:
         # A bad age stops the boot, not the first market order.
-        mark_max_age_ns(self.mark_max_age_seconds)
+        duration_ns(self.mark_max_age_seconds, name="mark_max_age_seconds")
 
 
 NO_LIMITS: Final = PreTradeLimits()
@@ -98,7 +98,9 @@ class RealGuard:
         self._store = store
         self._clock = clock
         self._limits = limits
-        self._mark_max_age_ns = mark_max_age_ns(limits.mark_max_age_seconds)
+        self._mark_max_age_ns = duration_ns(
+            limits.mark_max_age_seconds, name="mark_max_age_seconds"
+        )
         # Restore the sticky halt before anything can place (ADR-0026): a tripped
         # engine comes back tripped. ``None`` means never tripped.
         restored = store.load_kill_switch()

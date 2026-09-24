@@ -31,7 +31,7 @@ from tickwright.domain import (
 from tickwright.observability import NamedEvent, named_event
 
 from .checkpoint import Checkpointer
-from .mark_age import mark_max_age_ns
+from .duration import duration_ns
 from .portfolio import HealChange, LedgerReading
 
 _ZERO = Decimal("0")
@@ -178,11 +178,11 @@ class ValuationBand:
 
     def __post_init__(self) -> None:
         # A bad age stops the boot, not the reconcile pass.
-        mark_max_age_ns(self.mark_max_age_seconds)
+        duration_ns(self.mark_max_age_seconds, name="mark_max_age_seconds")
 
     def stale(self, *, age_ns: int) -> bool:
         """Whether a mark that old puts its figures past the band's evidence."""
-        return age_ns > mark_max_age_ns(self.mark_max_age_seconds)
+        return age_ns > duration_ns(self.mark_max_age_seconds, name="mark_max_age_seconds")
 
     def covers(self, divergence: Divergence, *, reference: Decimal | None) -> bool:
         """Whether the band absorbs ``divergence``, leaving it unalerted.
