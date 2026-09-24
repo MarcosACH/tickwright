@@ -60,8 +60,6 @@ from .cache import Cache
 from .duration import duration_ns
 from .ghost_gate import GhostGate, GhostVerdict
 
-_NS_PER_SECOND = 1_000_000_000
-
 # The per-cadence state filters gating which sagas each continuous cycle reads.
 # Startup filters nothing — it reconciles every non-terminal saga.
 _INFLIGHT_STATES = frozenset({OrderState.SUBMITTED})
@@ -204,12 +202,15 @@ class Reconciler:
         # not in reads because its three drivers poll six times apart and the
         # barrier not on a cadence at all, so a read count would mean a
         # different amount of waiting under each of them (ADR-0049 §4).
+        config = self._config
         self._unreadable_run = GraceWindow(
-            span_ns=int(self._config.unreadable_grace_seconds * _NS_PER_SECOND)
+            span_ns=duration_ns(config.unreadable_grace_seconds, name="unreadable_grace_seconds")
         )
         self._ghost_gate = GhostGate(
-            grace_span_ns=int(self._config.ghost_grace_seconds * _NS_PER_SECOND),
-            protection_span_ns=int(self._config.recent_order_protection_seconds * _NS_PER_SECOND),
+            grace_span_ns=duration_ns(config.ghost_grace_seconds, name="ghost_grace_seconds"),
+            protection_span_ns=duration_ns(
+                config.recent_order_protection_seconds, name="recent_order_protection_seconds"
+            ),
         )
 
     async def reconcile_startup(self) -> bool:
