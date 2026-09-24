@@ -167,9 +167,11 @@ class RealGuard:
         cap = symbol_limits.max_order_value
         if cap is not None:
             value_price = price
-            if value_price is None:
-                # A market order has no price, so it is valued at the mark. It
-                # can fill worse, so this cap is close, not exact (ADR-0051).
+            # A buy limit fills at its price or better, so its price is the value.
+            # A market order has no price. A sell limit below the bid fills near
+            # the bid on a real venue, so its own price can hide most of its
+            # value (#391). Both need the mark (ADR-0051).
+            if value_price is None or signal.side is Side.SELL:
                 if reading.mark is None:
                     # With no mark the guard cannot prove the order fits.
                     return Denied(reason=f"no mark for max order value {cap}")
@@ -178,11 +180,10 @@ class RealGuard:
                 age_ns = self._clock.timestamp_ns() - reading.mark.ts_event
                 if age_ns > self._mark_max_age_ns:
                     return Denied(reason=f"stale mark for max order value {cap}")
-                value_price = reading.mark.price
-            elif signal.side is Side.SELL and reading.mark is not None:
-                # A sell limit below the bid fills near the bid on a real venue,
-                # so its own price can hide most of its value (#391).
-                value_price = max(value_price, reading.mark.price)
+                # A market order can fill worse than the mark, so this cap is
+                # close for it, not exact.
+                mark_price = reading.mark.price
+                value_price = mark_price if value_price is None else max(value_price, mark_price)
             if quantity * value_price > cap:
                 return Denied(reason=f"above max order value {cap}")
         cap = symbol_limits.max_position

@@ -385,6 +385,54 @@ def test_a_sell_limit_above_the_mark_is_valued_at_its_limit_price() -> None:
     assert _state(engine.store, fits) is OrderState.LIVE
 
 
+def test_a_sell_limit_with_no_mark_is_denied_when_a_max_order_value_is_set() -> None:
+    # Without a mark the guard cannot prove a sell limit fits, because it may
+    # fill far above its own price (#391). A buy limit needs no mark.
+    limits = PreTradeLimits(symbols={"BTC": SymbolLimits(max_order_value=Decimal("1000"))})
+    engine = _engine(limits=limits)
+    sell = derive_cloid("trivial:BTC:1")
+    buy = derive_cloid("trivial:BTC:2")
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))  # a trade, but no mark yet
+        await engine.bus.publish(_limit_signal("60000", quantity="0.001", seq=1, side=Side.SELL))
+        await engine.bus.publish(_limit_signal("40000", quantity="0.001", seq=2, side=Side.BUY))
+
+    asyncio.run(scenario())
+
+    _assert_denied_by(engine, sell, "no mark for max order value 1000")
+    assert _state(engine.store, buy) is OrderState.LIVE
+
+
+def test_a_stale_mark_denies_a_sell_limit_until_a_fresh_mark_arrives() -> None:
+    # Cap 1000 and the default mark max age of 10 seconds. Every sell is worth
+    # 60 at its limit price, far under the cap, so only the mark's age can deny it.
+    limits = PreTradeLimits(symbols={"BTC": SymbolLimits(max_order_value=Decimal("1000"))})
+    engine = _engine(limits=limits, start_ns=1_000)
+    ten_seconds = 10_000_000_000
+
+    def sell(seq: int) -> PlaceSignal:
+        # Above the market, so it rests LIVE when it passes.
+        return _limit_signal("60000", quantity="0.001", seq=seq, side=Side.SELL)
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))
+        await engine.bus.publish(_mark("40000", ts_ns=1_000))
+        engine.clock.advance_to(1_000 + ten_seconds)  # exactly the max age
+        await engine.bus.publish(sell(1))
+        engine.clock.advance_to(1_000 + ten_seconds + 1)  # one nanosecond past it
+        await engine.bus.publish(sell(2))
+        fresh = engine.clock.timestamp_ns()
+        await engine.bus.publish(_mark("40000", ts_ns=fresh))
+        await engine.bus.publish(sell(3))
+
+    asyncio.run(scenario())
+
+    assert _state(engine.store, derive_cloid("trivial:BTC:1")) is OrderState.LIVE
+    _assert_denied_by(engine, derive_cloid("trivial:BTC:2"), "stale mark for max order value 1000")
+    assert _state(engine.store, derive_cloid("trivial:BTC:3")) is OrderState.LIVE
+
+
 def test_a_market_order_with_no_mark_is_denied_when_a_max_order_value_is_set() -> None:
     # The guard cannot prove the order fits the cap, so it refuses (ADR-0051).
     limits = PreTradeLimits(symbols={"BTC": SymbolLimits(max_order_value=Decimal("1000"))})
