@@ -34,6 +34,15 @@ mark is missing, or older than its own max age, the market order is denied. The 
 the order fits, so it refuses. The max age is its own setting, default 10 seconds. It is not the
 reconcile band's `mark_max_age_seconds`, which does a different job. A market order can fill worse
 than the mark, so this cap is close for market orders, not exact.
+**(Amended by [#391](https://github.com/MarcosACH/tickwright/issues/391) — a sell limit is valued
+at the higher of its limit price and the mark:** a limit price is an upper bound for a buy, but only
+a lower bound for a sell. A sell limit below the bid crosses on arrival, and a real venue fills it
+near the bid. Valued at its own price, a sell of 10 BTC at a limit of 1 checks as 10 USD and fills
+near 420,000 USD. So a sell limit is valued at its limit price or the mark, whichever is higher. The
+mark rules for market orders apply to it too. With a value cap set, a sell limit is denied when the
+mark is missing or older than the max age. Falling back to the limit price was rejected, because it
+keeps the gap open. A buy limit is still valued at its limit price and needs no mark. Paper hides
+the gap, because the paper exchange fills a crossing limit at its own limit price.**)**
 
 **Max position.** The cap measures the worst-case position on the order's side. That is the
 position if every open order on that side fills, and then the new order fills too. For a buy, it is

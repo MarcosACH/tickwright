@@ -94,6 +94,10 @@ another cap never takes a slot. Every cap denial carries a reason that names the
 - Max order value: quantity times the quantized limit price, or times the reading's mark for a
   market order. A missing mark, or one older than the max age on the guard's clock, denies the
   market order.
+  **(Amended by [#391](https://github.com/MarcosACH/tickwright/issues/391):** a sell limit is
+  valued at the higher of its limit price and the mark, because a real venue fills a sell limit
+  below the bid near the bid. The same missing or stale mark denies it. A buy limit still needs no
+  mark.**)**
 - Max position: the worst-case net size on the order's side, from the reading plus the new order.
   An order that moves this worst case toward zero passes, even when the result is still above the
   cap. A sell that shrinks a long position can still be denied when open sells push the worst case
