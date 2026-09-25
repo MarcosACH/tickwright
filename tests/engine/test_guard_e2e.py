@@ -711,6 +711,42 @@ def test_the_shrinking_sell_is_denied_by_open_sells_on_paper() -> None:
     _assert_denied_by_max_position(store, order_events, derive_cloid("trivial:BTC:3"))
 
 
+def _holding(quantity: str, *, side: Side, limits: PreTradeLimits) -> _Engine:
+    """The engine one restart after it filled ``quantity`` on ``side`` with no caps.
+
+    The caps arrive with the second life, so the position can be bigger than
+    any single order they allow."""
+    first = _engine()
+
+    async def first_life() -> None:
+        await first.bus.publish(_tick("42000"))
+        # Priced through the market, so the order fills on arrival.
+        price = "43000" if side is Side.BUY else "41000"
+        await first.bus.publish(_limit_signal(price, quantity=quantity, seq=1, side=side))
+
+    asyncio.run(first_life())
+    assert _state(first.store, derive_cloid("trivial:BTC:1")) is OrderState.FILLED
+    return _engine(store=first.store, limits=limits, start_ns=2_000)
+
+
+def test_a_sell_that_reduces_a_long_skips_the_max_order_size() -> None:
+    # Cap 0.01 and a long of 0.03. A sell of 0.04 crosses zero, so the cap
+    # applies. A sell of 0.03 closes the long in one order.
+    limits = PreTradeLimits(symbols={"BTC": SymbolLimits(max_order_size=Decimal("0.01"))})
+    engine = _holding("0.03", side=Side.BUY, limits=limits)
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))
+        # Above the market, so a sell that passes rests LIVE.
+        await engine.bus.publish(_limit_signal("44000", quantity="0.04", seq=2, side=Side.SELL))
+        await engine.bus.publish(_limit_signal("44000", quantity="0.03", seq=3, side=Side.SELL))
+
+    asyncio.run(scenario())
+
+    _assert_denied_by(engine, derive_cloid("trivial:BTC:2"), "above max order size 0.01")
+    assert _state(engine.store, derive_cloid("trivial:BTC:3")) is OrderState.LIVE
+
+
 def test_kill_switch_denies_new_orders_while_resting_orders_keep_filling() -> None:
     engine = _engine()
     bus, store, guard, order_events = engine.bus, engine.store, engine.guard, engine.events
