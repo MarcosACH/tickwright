@@ -169,15 +169,15 @@ class RealGuard:
         before = reading.account_net_size + direction * reading.open_remainder
         worst_case = before + direction * quantity
         # An order that shrinks the worst case without crossing zero cannot add
-        # exposure, so no cap on order size may stop it. Ending at zero is a
-        # full close, not a cross, for a long and a short alike.
+        # exposure, so no cap on order size or value may stop it. Ending at zero
+        # is a full close, not a cross, for a long and a short alike.
         same_side = (worst_case > 0) == (before > 0)
         toward_zero = abs(worst_case) < abs(before) and (worst_case == 0 or same_side)
         cap = symbol_limits.max_order_size
         if cap is not None and quantity > cap and not toward_zero:
             return Denied(reason=f"above max order size {cap}")
         cap = symbol_limits.max_order_value
-        if cap is not None:
+        if cap is not None and not toward_zero:
             value_price = price
             # A buy limit fills at its price or better, so its price is the value.
             # A market order has no price. A sell limit below the bid fills near

@@ -747,6 +747,26 @@ def test_a_sell_that_reduces_a_long_skips_the_max_order_size() -> None:
     assert _state(engine.store, derive_cloid("trivial:BTC:3")) is OrderState.LIVE
 
 
+def test_an_order_that_closes_a_position_skips_the_max_order_value() -> None:
+    # Cap 1000 and a mark of 40000. Closing 0.03 is worth 1320 as a sell at
+    # 44000 and 1200 as a buy at 40000. Both close the position in one order.
+    limits = PreTradeLimits(symbols={"BTC": SymbolLimits(max_order_value=Decimal("1000"))})
+    long = _holding("0.03", side=Side.BUY, limits=limits)
+    short = _holding("0.03", side=Side.SELL, limits=limits)
+
+    async def scenario(engine: _Engine, close: PlaceSignal) -> None:
+        await engine.bus.publish(_tick("42000"))
+        await engine.bus.publish(_mark("40000"))
+        await engine.bus.publish(close)
+
+    # Both rest on their own side of the market, so a close that passes is LIVE.
+    asyncio.run(scenario(long, _limit_signal("44000", quantity="0.03", seq=2, side=Side.SELL)))
+    asyncio.run(scenario(short, _limit_signal("40000", quantity="0.03", seq=2, side=Side.BUY)))
+
+    assert _state(long.store, derive_cloid("trivial:BTC:2")) is OrderState.LIVE
+    assert _state(short.store, derive_cloid("trivial:BTC:2")) is OrderState.LIVE
+
+
 def test_kill_switch_denies_new_orders_while_resting_orders_keep_filling() -> None:
     engine = _engine()
     bus, store, guard, order_events = engine.bus, engine.store, engine.guard, engine.events
