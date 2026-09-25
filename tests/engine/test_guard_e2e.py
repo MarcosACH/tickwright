@@ -767,6 +767,43 @@ def test_an_order_that_closes_a_position_skips_the_max_order_value() -> None:
     assert _state(short.store, derive_cloid("trivial:BTC:2")) is OrderState.LIVE
 
 
+def test_a_sell_limit_that_reduces_a_long_needs_no_mark_under_a_max_order_value() -> None:
+    # A long of 0.03 and no mark. A sell of 0.04 crosses zero, so it still needs
+    # the mark. A sell of 0.03 closes the long, so it does not.
+    limits = PreTradeLimits(symbols={"BTC": SymbolLimits(max_order_value=Decimal("1000"))})
+    engine = _holding("0.03", side=Side.BUY, limits=limits)
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))  # a trade, but no mark
+        # Above the market, so a sell that passes rests LIVE.
+        await engine.bus.publish(_limit_signal("44000", quantity="0.04", seq=2, side=Side.SELL))
+        await engine.bus.publish(_limit_signal("44000", quantity="0.03", seq=3, side=Side.SELL))
+
+    asyncio.run(scenario())
+
+    _assert_denied_by(engine, derive_cloid("trivial:BTC:2"), "no mark for max order value 1000")
+    assert _state(engine.store, derive_cloid("trivial:BTC:3")) is OrderState.LIVE
+
+
+def test_a_sell_limit_that_reduces_a_long_passes_with_a_stale_mark() -> None:
+    # The same two sells, with a mark one nanosecond past the default max age.
+    limits = PreTradeLimits(symbols={"BTC": SymbolLimits(max_order_value=Decimal("1000"))})
+    engine = _holding("0.03", side=Side.BUY, limits=limits)
+    ten_seconds = 10_000_000_000
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))
+        await engine.bus.publish(_mark("40000", ts_ns=2_000))
+        engine.clock.advance_to(2_000 + ten_seconds + 1)
+        await engine.bus.publish(_limit_signal("44000", quantity="0.04", seq=2, side=Side.SELL))
+        await engine.bus.publish(_limit_signal("44000", quantity="0.03", seq=3, side=Side.SELL))
+
+    asyncio.run(scenario())
+
+    _assert_denied_by(engine, derive_cloid("trivial:BTC:2"), "stale mark for max order value 1000")
+    assert _state(engine.store, derive_cloid("trivial:BTC:3")) is OrderState.LIVE
+
+
 def test_kill_switch_denies_new_orders_while_resting_orders_keep_filling() -> None:
     engine = _engine()
     bus, store, guard, order_events = engine.bus, engine.store, engine.guard, engine.events
