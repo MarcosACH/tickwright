@@ -44,6 +44,8 @@ Each file has an H1, one paragraph, then exactly four H2 sections in this order:
 - [Crash recovery](./crash-recovery.md): `KILL` mid-run, restart, the saga and ledger converge.
 - [Kill switch](./kill-switch.md): `USR1` denies every new order, survives a restart, `USR2`
   clears it.
+- [Pre-trade limits](./pre-trade-limits.md): the size, value, position, and rate caps each deny
+  one order, and a close bigger than the size and value caps still fills.
 - [Ghost reconcile](./ghost-reconcile.md): a resting order the venue no longer holds is rejected
   after the 90 second grace window on the wall clock, and at the first tick on replay.
 - [Paper economics](./paper-economics.md): taker fees, hourly funding, the seeded stochastic fill
