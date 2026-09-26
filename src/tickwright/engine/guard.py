@@ -43,11 +43,13 @@ class SymbolLimits:
     """One symbol's caps (ADR-0051). ``None`` means that cap is off."""
 
     max_order_size: Decimal | None = None
-    """In coins, checked against the quantized quantity."""
+    """In coins, checked against the quantized quantity. An order that only
+    reduces the position skips it."""
     max_order_value: Decimal | None = None
     """In USD, checked against the quantized quantity times a price. A buy limit
     uses its quantized limit price. A sell limit uses that price or the latest
-    mark, whichever is higher. A market order uses the latest mark."""
+    mark, whichever is higher. A market order uses the latest mark. An order that
+    only reduces the position skips it and needs no mark."""
     max_position: Decimal | None = None
     """In coins, checked against the worst-case position on the order's side."""
 
@@ -163,11 +165,21 @@ class RealGuard:
                 # rather than emit an order the venue will reject (ADR-0017).
                 return Denied(reason="below min notional")
         symbol_limits = self._limits.symbols.get(signal.symbol, _NO_SYMBOL_LIMITS)
+        # The position if every open order on this side fills, and then this
+        # one too (ADR-0051).
+        direction = 1 if signal.side is Side.BUY else -1
+        before = reading.account_net_size + direction * reading.open_remainder
+        worst_case = before + direction * quantity
+        # An order that shrinks the worst case without crossing zero cannot add
+        # exposure, so no cap on order size or value may stop it. Ending at zero
+        # is a full close, not a cross, for a long and a short alike.
+        same_side = (worst_case > 0) == (before > 0)
+        reduces = abs(worst_case) < abs(before) and (worst_case == 0 or same_side)
         cap = symbol_limits.max_order_size
-        if cap is not None and quantity > cap:
+        if cap is not None and quantity > cap and not reduces:
             return Denied(reason=f"above max order size {cap}")
         cap = symbol_limits.max_order_value
-        if cap is not None:
+        if cap is not None and not reduces:
             value_price = price
             # A buy limit fills at its price or better, so its price is the value.
             # A market order has no price. A sell limit below the bid fills near
@@ -190,17 +202,10 @@ class RealGuard:
                 return Denied(reason=f"above max order value {cap}")
         cap = symbol_limits.max_position
         if cap is not None:
-            # The position if every open order on this side fills, and then this
-            # one too (ADR-0051).
-            direction = 1 if signal.side is Side.BUY else -1
-            before = reading.account_net_size + direction * reading.open_remainder
-            worst_case = before + direction * quantity
-            # An order that shrinks the worst case always passes, so a user can
-            # reduce a position that is already past the cap. An order that
-            # crosses zero opens a new side, so it gets no such pass.
-            same_side = (worst_case > 0) == (before > 0)
-            toward_zero = abs(worst_case) < abs(before) and same_side
-            if abs(worst_case) > cap and not toward_zero:
+            # A reducing order always passes, so a user can shrink a position
+            # that is already past the cap. An order that crosses zero opens a
+            # new side, so it gets no such pass.
+            if abs(worst_case) > cap and not reduces:
                 return Denied(reason=f"above max position {cap}")
         return Approved(quantity=quantity, price=price)
 

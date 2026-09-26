@@ -16,6 +16,21 @@ We add four optional caps to the real `PreTradeGuard`. Each one is off unless th
 | Max position | per symbol | coins | the worst-case position on the order's side is above the cap, and the order does not move it toward zero without crossing zero |
 | Max orders per window | whole engine | placements | the window already holds the maximum |
 
+**(Amended by [#397](https://github.com/MarcosACH/tickwright/issues/397), an order that only
+reduces skips max order size and max order value:** before this, a strategy could not close a
+position bigger than those caps in one order. It had to split the close, and each part took a rate
+cap slot. "Only reduces" uses the worst case from §Max position below. The order reduces when that
+worst case gets smaller and does not cross zero. Ending at exactly zero counts as reducing, for a
+long and a short alike. Such an order also skips the value cap's mark checks. It passes with a
+missing or stale mark. Without that, a mark outage would let a long-only strategy open a position
+but not close it. Every other check still applies. That means the kill switch, quantization, min
+notional, max position, and the rate cap. An order from a flat position, or one that crosses zero,
+gets no exemption. Denial reasons do not change. Reducing orders keep the rate cap. A full close
+now takes one order, and the rate cap also protects the account from venue rate limits. The
+trade-off is on a thin book. A whole reducing order can fill far below the mark, and the value cap
+no longer limits that. The exemption trusts the engine's own position view when the order is sent.
+A `reduce_only` flag that the venue enforces would be stronger. It stays deferred (ADR-0030).**)**
+
 **Off unless set.** A symbol with no entry has no per-symbol caps. An unset rate cap never denies.
 The user is responsible for reading the docs and setting the caps they need. The engine does not
 force a cap on real money.

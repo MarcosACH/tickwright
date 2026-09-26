@@ -40,6 +40,11 @@ The projection is fed the mark by **subscribing to `MarkTick` on the `EventBus`*
   the same missing or stale mark denies a sell limit, not only a market order. A buy limit still
   needs no mark. The rule lives in [ADR-0051](./0051-pre-trade-limits.md) §Max order value.**)**
 
+  **(Amended by [#397](https://github.com/MarcosACH/tickwright/issues/397), a reducing order needs
+  no mark:** a market order or sell limit that only reduces the position skips the value cap. So a
+  missing or stale mark no longer denies it. The rule lives in
+  [ADR-0051](./0051-pre-trade-limits.md) §Decision.**)**
+
 How `None` **surfaces through the `Portfolio` Protocol** (per-field nullability, whether the seam hides it) is the read-API ticket's call (#135 — **now fixed by ADR-0041 §6**); this ADR fixes only the underlying policy. Full-disconnect staleness — the reconcile stream *also* down — is the recovery / "freeze-never-flat" window owned by the read-seam (#135 — read-seam reporting **fixed by ADR-0041 §7**) and durability (#137) tickets.
 
 ## Paper and replay: the last-trade proxy, one provenance per deployment

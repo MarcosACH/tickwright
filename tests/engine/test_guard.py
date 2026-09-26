@@ -231,6 +231,28 @@ def test_the_buy_that_crosses_zero_is_denied_on_the_new_side() -> None:
     assert "max position" in decision.reason
 
 
+def test_open_orders_on_the_same_side_can_take_away_the_reducing_exemption() -> None:
+    # Cap 1 and a long of 10. Alone, a sell of 5 reduces the long, so it skips
+    # the cap. With open sells of 8, the worst case moves from 2 to -3. That
+    # crosses zero, so the cap applies.
+    guard = _guard(limits=_max_order_size("1"))
+    sell = _limit_signal(quantity="5", side=Side.SELL)
+    assert isinstance(_check(guard, sell, net="10"), Approved)
+    decision = _check(guard, sell, net="10", open_remainder="8")
+    assert decision == Denied(reason="above max order size 1")
+
+
+@pytest.mark.parametrize(("side", "net"), [(Side.SELL, "3"), (Side.BUY, "-3")])
+def test_an_order_that_ends_the_position_at_exactly_zero_skips_the_cap(
+    side: Side, net: str
+) -> None:
+    # Cap 1. Closing a position of 3 in full is a close, not a cross, for a
+    # long and a short alike.
+    guard = _guard(limits=_max_order_size("1"))
+    decision = _check(guard, _limit_signal(quantity="3", side=side), net=net)
+    assert isinstance(decision, Approved)
+
+
 def test_a_market_order_under_the_cap_skips_min_notional() -> None:
     # A market order has no price to value, so min notional stays with the
     # venue (ADR-0017) even though market orders now reach the caps.

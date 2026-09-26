@@ -105,6 +105,12 @@ another cap never takes a slot. Every cap denial carries a reason that names the
   crosses zero gets no exception and is judged on the new side.
 - Rate cap: a sliding window of approved placement times, in memory, empty at boot.
 
+**(Amended by [#397](https://github.com/MarcosACH/tickwright/issues/397):** an order that only
+reduces the position skips max order size and max order value, including the value cap's mark
+checks. It reduces when the max position worst case gets smaller and does not cross zero. Ending
+at exactly zero counts, for a long and a short alike. The kill switch, quantization, min notional,
+max position, and the rate cap still apply. ADR-0051 §Decision holds the rule.**)**
+
 **Seams:** None new.
 
 **Depth note:** All cap rules live here and nowhere else. The check is a pure function of the

@@ -165,14 +165,14 @@ def _engine(
     return _Engine(bus, clock, store, checks, guard, order_events)
 
 
-def _market_signal(*, quantity: str, seq: int = 1) -> PlaceSignal:
+def _market_signal(*, quantity: str, seq: int = 1, side: Side = Side.BUY) -> PlaceSignal:
     return PlaceSignal(
         ts_event=1_000,
         ts_init=1_000,
         strategy_id="trivial",
         symbol="BTC",
         seq=seq,
-        side=Side.BUY,
+        side=side,
         quantity=Decimal(quantity),
         order_type=OrderType.MARKET,
         time_in_force=TimeInForce.IOC,
@@ -709,6 +709,129 @@ def test_the_shrinking_sell_is_denied_by_open_sells_on_paper() -> None:
     assert _state(store, derive_cloid("trivial:BTC:1")) is OrderState.FILLED
     assert _state(store, derive_cloid("trivial:BTC:2")) is OrderState.LIVE
     _assert_denied_by_max_position(store, order_events, derive_cloid("trivial:BTC:3"))
+
+
+def _holding(quantity: str, *, side: Side, limits: PreTradeLimits) -> _Engine:
+    """The engine one restart after it filled ``quantity`` on ``side`` with no caps.
+
+    The caps arrive with the second life, so the position can be bigger than
+    any single order they allow."""
+    first = _engine()
+
+    async def first_life() -> None:
+        await first.bus.publish(_tick("42000"))
+        # Priced through the market, so the order fills on arrival.
+        price = "43000" if side is Side.BUY else "41000"
+        await first.bus.publish(_limit_signal(price, quantity=quantity, seq=1, side=side))
+
+    asyncio.run(first_life())
+    assert _state(first.store, derive_cloid("trivial:BTC:1")) is OrderState.FILLED
+    return _engine(store=first.store, limits=limits, start_ns=2_000)
+
+
+def test_a_sell_that_reduces_a_long_skips_the_max_order_size() -> None:
+    # Cap 0.01 and a long of 0.03. A sell of 0.04 crosses zero, so the cap
+    # applies. A sell of 0.03 closes the long in one order.
+    limits = PreTradeLimits(symbols={"BTC": SymbolLimits(max_order_size=Decimal("0.01"))})
+    engine = _holding("0.03", side=Side.BUY, limits=limits)
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))
+        # Above the market, so a sell that passes rests LIVE.
+        await engine.bus.publish(_limit_signal("44000", quantity="0.04", seq=2, side=Side.SELL))
+        await engine.bus.publish(_limit_signal("44000", quantity="0.03", seq=3, side=Side.SELL))
+
+    asyncio.run(scenario())
+
+    _assert_denied_by(engine, derive_cloid("trivial:BTC:2"), "above max order size 0.01")
+    assert _state(engine.store, derive_cloid("trivial:BTC:3")) is OrderState.LIVE
+
+
+def test_an_order_that_closes_a_position_skips_the_max_order_value() -> None:
+    # Cap 1000 and a mark of 40000. Closing 0.03 is worth 1320 as a sell at
+    # 44000 and 1200 as a buy at 40000. Both close the position in one order.
+    limits = PreTradeLimits(symbols={"BTC": SymbolLimits(max_order_value=Decimal("1000"))})
+    long = _holding("0.03", side=Side.BUY, limits=limits)
+    short = _holding("0.03", side=Side.SELL, limits=limits)
+
+    async def scenario(engine: _Engine, close: PlaceSignal) -> None:
+        await engine.bus.publish(_tick("42000"))
+        await engine.bus.publish(_mark("40000"))
+        await engine.bus.publish(close)
+
+    # Both rest on their own side of the market, so a close that passes is LIVE.
+    asyncio.run(scenario(long, _limit_signal("44000", quantity="0.03", seq=2, side=Side.SELL)))
+    asyncio.run(scenario(short, _limit_signal("40000", quantity="0.03", seq=2, side=Side.BUY)))
+
+    assert _state(long.store, derive_cloid("trivial:BTC:2")) is OrderState.LIVE
+    assert _state(short.store, derive_cloid("trivial:BTC:2")) is OrderState.LIVE
+
+
+def test_a_sell_limit_that_reduces_a_long_needs_no_mark_under_a_max_order_value() -> None:
+    # A long of 0.03 and no mark. A sell of 0.04 crosses zero, so it still needs
+    # the mark. A sell of 0.03 closes the long, so it does not.
+    limits = PreTradeLimits(symbols={"BTC": SymbolLimits(max_order_value=Decimal("1000"))})
+    engine = _holding("0.03", side=Side.BUY, limits=limits)
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))  # a trade, but no mark
+        # Above the market, so a sell that passes rests LIVE.
+        await engine.bus.publish(_limit_signal("44000", quantity="0.04", seq=2, side=Side.SELL))
+        await engine.bus.publish(_limit_signal("44000", quantity="0.03", seq=3, side=Side.SELL))
+
+    asyncio.run(scenario())
+
+    _assert_denied_by(engine, derive_cloid("trivial:BTC:2"), "no mark for max order value 1000")
+    assert _state(engine.store, derive_cloid("trivial:BTC:3")) is OrderState.LIVE
+
+
+def test_a_sell_limit_that_reduces_a_long_passes_with_a_stale_mark() -> None:
+    # The same two sells, with a mark one nanosecond past the default max age.
+    limits = PreTradeLimits(symbols={"BTC": SymbolLimits(max_order_value=Decimal("1000"))})
+    engine = _holding("0.03", side=Side.BUY, limits=limits)
+    ten_seconds = 10_000_000_000
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))
+        await engine.bus.publish(_mark("40000", ts_ns=2_000))
+        engine.clock.advance_to(2_000 + ten_seconds + 1)
+        await engine.bus.publish(_limit_signal("44000", quantity="0.04", seq=2, side=Side.SELL))
+        await engine.bus.publish(_limit_signal("44000", quantity="0.03", seq=3, side=Side.SELL))
+
+    asyncio.run(scenario())
+
+    _assert_denied_by(engine, derive_cloid("trivial:BTC:2"), "stale mark for max order value 1000")
+    assert _state(engine.store, derive_cloid("trivial:BTC:3")) is OrderState.LIVE
+
+
+def test_a_market_order_that_closes_a_long_needs_no_mark_under_a_max_order_value() -> None:
+    # A long of 0.03 and no mark. A market sell of 0.03 closes it.
+    limits = PreTradeLimits(symbols={"BTC": SymbolLimits(max_order_value=Decimal("1000"))})
+    engine = _holding("0.03", side=Side.BUY, limits=limits)
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))  # a trade, but no mark
+        await engine.bus.publish(_market_signal(quantity="0.03", seq=2, side=Side.SELL))
+
+    asyncio.run(scenario())
+
+    assert _state(engine.store, derive_cloid("trivial:BTC:2")) is OrderState.FILLED
+
+
+def test_a_tripped_kill_switch_still_denies_an_order_that_closes_a_long() -> None:
+    # The exemption skips only the size and value caps. A halt stops every new
+    # order, closes included (ADR-0026).
+    limits = PreTradeLimits(symbols={"BTC": SymbolLimits(max_order_size=Decimal("0.01"))})
+    engine = _holding("0.03", side=Side.BUY, limits=limits)
+    engine.guard.trip_kill_switch("operator halt")
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))
+        await engine.bus.publish(_limit_signal("44000", quantity="0.03", seq=2, side=Side.SELL))
+
+    asyncio.run(scenario())
+
+    _assert_denied_by(engine, derive_cloid("trivial:BTC:2"), "kill switch tripped")
 
 
 def test_kill_switch_denies_new_orders_while_resting_orders_keep_filling() -> None:
