@@ -13,9 +13,7 @@ the next deadline.
 
 from collections.abc import Awaitable, Callable
 
-from tickwright.domain import Clock
-
-from .duration import duration_ns
+from tickwright.domain import Clock, duration_ns
 
 
 async def run_cadence(

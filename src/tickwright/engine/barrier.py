@@ -27,6 +27,11 @@ from tickwright.domain import Backoff, Clock, Deadline, StartupReconciliationTim
 BarrierStep = Callable[[], Awaitable[bool]]
 """One proof the gate holds: ``True`` cleared, ``False`` froze (never guessed)."""
 
+# Fixed, not settings: no caller ever needed another pace. The Hyperliquid boot
+# guards match these values (``preflight.py``).
+_INITIAL_BACKOFF_SECONDS = 1.0
+_MAX_BACKOFF_SECONDS = 30.0
+
 
 class StartupBarrier:
     """The ordered proofs startup is gated on, and the retry policy they share."""
@@ -35,13 +40,7 @@ class StartupBarrier:
         self._clock = clock
         self._steps = steps
 
-    async def run(
-        self,
-        *,
-        timeout_seconds: float,
-        initial_backoff_seconds: float = 1.0,
-        max_backoff_seconds: float = 30.0,
-    ) -> None:
+    async def run(self, *, timeout_seconds: float) -> None:
         """Drive every step to a clear, or fault (ADR-0024).
 
         Retries with exponential backoff so a transient boot-time venue blip
@@ -72,7 +71,7 @@ class StartupBarrier:
         retryable failure, which is different for every caller.
         """
         deadline = Deadline.opening(clock=self._clock, budget_seconds=timeout_seconds)
-        backoff = Backoff(initial=initial_backoff_seconds, maximum=max_backoff_seconds)
+        backoff = Backoff(initial=_INITIAL_BACKOFF_SECONDS, maximum=_MAX_BACKOFF_SECONDS)
         while not await self._attempt():
             if deadline.spent(self._clock):
                 raise StartupReconciliationTimeout(

@@ -2,13 +2,26 @@
 (ADR-0032); only the composition root reads them all."""
 
 from decimal import Decimal
+from typing import Self
 
-from pydantic import BaseModel, Field, SecretStr
+from pydantic import (
+    BaseModel,
+    Field,
+    SecretStr,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
+
+from tickwright.domain import duration_ns
 
 _MAINNET_WS_URL = "wss://api.hyperliquid.xyz/ws"
 _TESTNET_WS_URL = "wss://api.hyperliquid-testnet.xyz/ws"
 _MAINNET_API_URL = "https://api.hyperliquid.xyz"
 _TESTNET_API_URL = "https://api.hyperliquid-testnet.xyz"
+# The longest wait between reconnect tries. Past this the feed is dead in all
+# but name while the engine reads RUNNING, so a larger max is refused.
+_RECONNECT_BACKOFF_CEILING_SECONDS = 300.0
 
 
 class HyperliquidConfig(BaseModel):
@@ -29,8 +42,41 @@ class HyperliquidConfig(BaseModel):
     slippage_bound: Decimal = Field(default=Decimal("0.05"), ge=0)
     # Reconnect pacing (ADR-0021): doubling from initial, capped at max, always
     # slept on the injected Clock — a reconnect storm can never hammer the venue.
-    reconnect_initial_backoff_seconds: float = Field(default=1.0, gt=0)
-    reconnect_max_backoff_seconds: float = Field(default=60.0, gt=0)
+    reconnect_initial_backoff_seconds: float = 1.0
+    reconnect_max_backoff_seconds: float = 60.0
+
+    @field_validator("reconnect_initial_backoff_seconds", "reconnect_max_backoff_seconds")
+    @classmethod
+    def _usable_seconds(cls, value: float, info: ValidationInfo) -> float:
+        # Infinity loads as a float, and the reconnect loop would sleep on it
+        # forever. The feed then stops with no error, so refuse it at boot.
+        assert info.field_name is not None
+        duration_ns(value, name=info.field_name)
+        return value
+
+    @field_validator("reconnect_max_backoff_seconds")
+    @classmethod
+    def _max_within_ceiling(cls, value: float) -> float:
+        # A huge max is still finite, so the seconds rule lets it through.
+        # Once the doubling reaches it, the feed waits for years.
+        if value > _RECONNECT_BACKOFF_CEILING_SECONDS:
+            raise ValueError(
+                "reconnect_max_backoff_seconds must be at most "
+                f"{_RECONNECT_BACKOFF_CEILING_SECONDS}, got {value}"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _initial_within_max(self) -> Self:
+        # The max caps only the doubling, so a larger initial would still be
+        # slept once in full, past the most the operator allowed.
+        if self.reconnect_initial_backoff_seconds > self.reconnect_max_backoff_seconds:
+            raise ValueError(
+                "reconnect_initial_backoff_seconds must be at most "
+                "reconnect_max_backoff_seconds, got "
+                f"{self.reconnect_initial_backoff_seconds} > {self.reconnect_max_backoff_seconds}"
+            )
+        return self
 
     @property
     def ws_url(self) -> str:

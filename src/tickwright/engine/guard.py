@@ -30,12 +30,11 @@ from tickwright.domain import (
     Side,
     Store,
     below_min_notional,
+    duration_ns,
     quantize_price,
     quantize_size,
 )
 from tickwright.observability import NamedEvent, named_event
-
-from .duration import duration_ns
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

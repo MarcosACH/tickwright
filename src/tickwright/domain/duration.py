@@ -1,7 +1,8 @@
-"""The rule for an engine setting given in seconds.
+"""The rule for a setting given in seconds.
 
 One rule decides which values each such setting can take. A bad value then
-stops the boot the same way for all of them.
+stops the boot the same way for all of them. It lives in ``domain`` so the
+engine and a venue's own config can both use it.
 """
 
 import math
