@@ -19,6 +19,7 @@ from tickwright.adapters.feed import ReplayFeedConfig
 from tickwright.adapters.paper import PaperExchangeConfig
 from tickwright.app.config import AppConfig, AppSettings, StrategyConfig
 from tickwright.domain import UNATTRIBUTED, LeverageSpec, Side
+from tickwright.engine.guard import RateCap
 from tickwright.engine.ledger_reconcile import ValuationBand
 from tickwright.venues.hyperliquid import HyperliquidConfig
 
@@ -148,6 +149,7 @@ def test_the_documented_limits_line_loads_through_the_env_skin(
     assert limits.symbols["BTC"].max_order_value == Decimal("25000")
     assert limits.symbols["BTC"].max_position == Decimal("2")
     assert limits.mark_max_age_seconds == 5
+    assert limits.rate_cap == RateCap(max_orders=10, window_seconds=1)
 
 
 def test_a_paper_run_without_a_genesis_collateral_is_rejected_at_load(tmp_path: Path) -> None:
@@ -214,6 +216,59 @@ def test_a_mark_max_age_that_is_not_a_positive_number_is_refused_at_load(
                 "replay": ReplayFeedConfig(path=tmp_path / "ticks.jsonl"),
                 "paper": PaperExchangeConfig(genesis_collateral=Decimal("100000")),
                 "limits": {"mark_max_age_seconds": age},
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    ("rate_cap", "missing"),
+    [({"max_orders": 3}, "window_seconds"), ({"window_seconds": 1.0}, "max_orders")],
+    ids=["only-n", "only-s"],
+)
+def test_a_rate_cap_with_only_one_of_its_two_settings_is_refused_at_load(
+    tmp_path: Path, rate_cap: dict[str, float], missing: str
+) -> None:
+    # Half a rate cap cannot be enforced. Running without it would look like a
+    # cap to the user while none is there (ADR-0051). The error names the
+    # setting the user left out.
+    (tmp_path / "ticks.jsonl").touch()
+    with pytest.raises(ValidationError, match=rf"limits\.rate_cap\.{missing}\n  Field required"):
+        AppConfig.model_validate(
+            {
+                "replay": ReplayFeedConfig(path=tmp_path / "ticks.jsonl"),
+                "paper": PaperExchangeConfig(genesis_collateral=Decimal("100000")),
+                "limits": {"rate_cap": rate_cap},
+            }
+        )
+
+
+@pytest.mark.parametrize("orders", ["0", "-1"])
+def test_a_rate_cap_of_zero_orders_or_fewer_is_refused_at_load(tmp_path: Path, orders: str) -> None:
+    # Zero would deny every placement. That is a typo, not a policy (ADR-0051).
+    (tmp_path / "ticks.jsonl").touch()
+    with pytest.raises(ValidationError, match="max_orders must be positive"):
+        AppConfig.model_validate(
+            {
+                "replay": ReplayFeedConfig(path=tmp_path / "ticks.jsonl"),
+                "paper": PaperExchangeConfig(genesis_collateral=Decimal("100000")),
+                "limits": {"rate_cap": {"max_orders": orders, "window_seconds": 1.0}},
+            }
+        )
+
+
+@pytest.mark.parametrize("window", ["0", "-1", "nan", "inf", "1e300", "1e-10"])
+def test_a_rate_cap_window_that_is_not_a_positive_number_is_refused_at_load(
+    tmp_path: Path, window: str
+) -> None:
+    # The same float traps as the mark max age. The guard turns the window into
+    # nanoseconds, so a bad one must stop the boot, not the first placement.
+    (tmp_path / "ticks.jsonl").touch()
+    with pytest.raises(ValidationError, match="window_seconds must be a positive number"):
+        AppConfig.model_validate(
+            {
+                "replay": ReplayFeedConfig(path=tmp_path / "ticks.jsonl"),
+                "paper": PaperExchangeConfig(genesis_collateral=Decimal("100000")),
+                "limits": {"rate_cap": {"max_orders": 3, "window_seconds": window}},
             }
         )
 

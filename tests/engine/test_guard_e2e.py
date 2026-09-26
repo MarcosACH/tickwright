@@ -26,6 +26,7 @@ from tickwright.adapters.paper import (
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     AggressorSide,
+    CancelSignal,
     ExecutionReport,
     InstrumentSpec,
     MarketTick,
@@ -50,6 +51,7 @@ from tickwright.engine.guard import (
     NO_LIMITS,
     NoopGuard,
     PreTradeLimits,
+    RateCap,
     RealGuard,
     SymbolLimits,
 )
@@ -62,17 +64,24 @@ _SPEC = InstrumentSpec(
     max_sig_figs=5,
     min_notional=Decimal("10"),
 )
+_ETH_SPEC = InstrumentSpec(
+    symbol="ETH",
+    sz_decimals=4,
+    max_decimals=6,
+    max_sig_figs=5,
+    min_notional=Decimal("10"),
+)
 
 
 async def _record(sink: list, event: object) -> None:
     sink.append(event)
 
 
-def _tick(price: str = "42000") -> MarketTick:
+def _tick(price: str = "42000", *, symbol: str = "BTC") -> MarketTick:
     return MarketTick(
         ts_event=1_000,
         ts_init=1_000,
-        symbol="BTC",
+        symbol=symbol,
         price=Decimal(price),
         size=Decimal("10"),
         aggressor_side=AggressorSide.BUY,
@@ -86,13 +95,18 @@ def _mark(price: str, *, ts_ns: int = 1_000) -> MarkTick:
 
 
 def _limit_signal(
-    price: str, *, quantity: str = "0.5", seq: int = 1, side: Side = Side.BUY
+    price: str,
+    *,
+    quantity: str = "0.5",
+    seq: int = 1,
+    side: Side = Side.BUY,
+    symbol: str = "BTC",
 ) -> PlaceSignal:
     return PlaceSignal(
         ts_event=1_000,
         ts_init=1_000,
         strategy_id="trivial",
-        symbol="BTC",
+        symbol=symbol,
         seq=seq,
         side=side,
         quantity=Decimal(quantity),
@@ -142,7 +156,8 @@ def _engine(
     # The runner's boot step: the ledger first, then the order cache. Rebuilding
     # the cache alone would bring the open orders back without the position.
     checks.recover()
-    guard = guard or RealGuard(specs={"BTC": _SPEC}, store=store, clock=clock, limits=limits)
+    specs = {"BTC": _SPEC, "ETH": _ETH_SPEC}
+    guard = guard or RealGuard(specs=specs, store=store, clock=clock, limits=limits)
     manager = ExecutionManager(
         bus=bus,
         exchange=exchange,
@@ -859,3 +874,162 @@ def test_kill_switch_denies_new_orders_while_resting_orders_keep_filling() -> No
     # The resting order rode through the halt: it went LIVE and then FILLED.
     assert any(isinstance(ev, OrderLive) and ev.cloid == resting for ev in order_events)
     assert _state(store, resting) is OrderState.FILLED
+
+
+_THREE_PER_SECOND = PreTradeLimits(rate_cap=RateCap(max_orders=3, window_seconds=1.0))
+_RATE_CAP_REASON = "above max orders per window 3 in 1.0s"
+
+
+def test_the_fourth_placement_inside_one_second_is_denied_by_the_rate_cap() -> None:
+    engine = _engine(limits=_THREE_PER_SECOND)
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))
+        # All four rest below the market, so the first three end LIVE.
+        for seq in range(1, 5):
+            await engine.bus.publish(_limit_signal("100", seq=seq))
+
+    asyncio.run(scenario())
+
+    for seq in range(1, 4):
+        assert _state(engine.store, derive_cloid(f"trivial:BTC:{seq}")) is OrderState.LIVE
+    _assert_denied_by(engine, derive_cloid("trivial:BTC:4"), _RATE_CAP_REASON)
+
+
+def test_a_placement_passes_again_once_the_oldest_slot_leaves_the_window() -> None:
+    engine = _engine(limits=_THREE_PER_SECOND)
+    one_second = 1_000_000_000
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))
+        await engine.bus.publish(_limit_signal("100", seq=1))
+        engine.clock.advance_to(1_000 + 500_000_000)
+        await engine.bus.publish(_limit_signal("100", seq=2))
+        await engine.bus.publish(_limit_signal("100", seq=3))
+        engine.clock.advance_to(1_000 + one_second - 1)  # the first slot is still inside
+        await engine.bus.publish(_limit_signal("100", seq=4))
+        engine.clock.advance_to(1_000 + one_second)  # the first slot has just left
+        await engine.bus.publish(_limit_signal("100", seq=5))
+        # Only the first slot left. The other two still fill the window with seq 5.
+        await engine.bus.publish(_limit_signal("100", seq=6))
+
+    asyncio.run(scenario())
+
+    _assert_denied_by(engine, derive_cloid("trivial:BTC:4"), _RATE_CAP_REASON)
+    assert _state(engine.store, derive_cloid("trivial:BTC:5")) is OrderState.LIVE
+    _assert_denied_by(engine, derive_cloid("trivial:BTC:6"), _RATE_CAP_REASON)
+
+
+def test_orders_on_two_symbols_share_one_rate_cap_window() -> None:
+    # A venue rate-limits the account, not a symbol, so the window is engine-wide.
+    engine = _engine(limits=_THREE_PER_SECOND)
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))
+        await engine.bus.publish(_tick("2500", symbol="ETH"))
+        await engine.bus.publish(_limit_signal("100", seq=1))
+        await engine.bus.publish(_limit_signal("100", seq=2))
+        await engine.bus.publish(_limit_signal("100", seq=1, symbol="ETH"))
+        await engine.bus.publish(_limit_signal("100", seq=2, symbol="ETH"))
+
+    asyncio.run(scenario())
+
+    for cloid in ("trivial:BTC:1", "trivial:BTC:2", "trivial:ETH:1"):
+        assert _state(engine.store, derive_cloid(cloid)) is OrderState.LIVE
+    _assert_denied_by(engine, derive_cloid("trivial:ETH:2"), _RATE_CAP_REASON)
+
+
+def test_an_order_denied_by_another_cap_takes_no_rate_cap_slot() -> None:
+    limits = PreTradeLimits(
+        symbols={"BTC": SymbolLimits(max_order_size=Decimal("0.5"))},
+        rate_cap=RateCap(max_orders=3, window_seconds=1.0),
+    )
+    engine = _engine(limits=limits)
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))
+        await engine.bus.publish(_limit_signal("100", seq=1))
+        await engine.bus.publish(_limit_signal("100", quantity="0.6", seq=2))  # too big
+        await engine.bus.publish(_limit_signal("100", seq=3))
+        await engine.bus.publish(_limit_signal("100", seq=4))
+        await engine.bus.publish(_limit_signal("100", seq=5))
+
+    asyncio.run(scenario())
+
+    _assert_denied_by(engine, derive_cloid("trivial:BTC:2"), "above max order size 0.5")
+    # The size denial left its slot free, so the fourth order still fits.
+    for seq in (1, 3, 4):
+        assert _state(engine.store, derive_cloid(f"trivial:BTC:{seq}")) is OrderState.LIVE
+    _assert_denied_by(engine, derive_cloid("trivial:BTC:5"), _RATE_CAP_REASON)
+
+
+def test_an_order_that_only_reduces_still_takes_a_rate_cap_slot() -> None:
+    # A long of 0.03 and one slot per second. Both sells reduce, so neither
+    # meets the size cap, but the second one finds the window full.
+    limits = PreTradeLimits(
+        symbols={"BTC": SymbolLimits(max_order_size=Decimal("0.01"))},
+        rate_cap=RateCap(max_orders=1, window_seconds=1.0),
+    )
+    engine = _holding("0.03", side=Side.BUY, limits=limits)
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))
+        # Above the market, so a sell that passes rests LIVE.
+        await engine.bus.publish(_limit_signal("44000", quantity="0.02", seq=2, side=Side.SELL))
+        await engine.bus.publish(_limit_signal("44000", quantity="0.01", seq=3, side=Side.SELL))
+
+    asyncio.run(scenario())
+
+    assert _state(engine.store, derive_cloid("trivial:BTC:2")) is OrderState.LIVE
+    reason = "above max orders per window 1 in 1.0s"
+    _assert_denied_by(engine, derive_cloid("trivial:BTC:3"), reason)
+
+
+def test_a_cancel_goes_through_while_the_rate_cap_window_is_full() -> None:
+    # A cancel reduces risk, so a full window must never block it (ADR-0051).
+    limits = PreTradeLimits(rate_cap=RateCap(max_orders=1, window_seconds=1.0))
+    engine = _engine(limits=limits)
+    placed = _limit_signal("100", seq=1)
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))
+        await engine.bus.publish(placed)
+        cancel = CancelSignal(
+            ts_event=1_000,
+            ts_init=1_000,
+            strategy_id="trivial",
+            symbol="BTC",
+            seq=2,
+            target_signal_id=placed.signal_id,
+        )
+        await engine.bus.publish(cancel)
+
+    asyncio.run(scenario())
+
+    assert _state(engine.store, derive_cloid("trivial:BTC:1")) is OrderState.CANCELLED
+
+
+def test_the_rate_cap_window_starts_empty_after_a_restart() -> None:
+    # The window lives in memory, so up to N orders may pass right after a
+    # boot. ADR-0051 accepts this.
+    limits = PreTradeLimits(rate_cap=RateCap(max_orders=1, window_seconds=1.0))
+    first = _engine(limits=limits)
+
+    async def first_life() -> None:
+        await first.bus.publish(_tick("42000"))
+        await first.bus.publish(_limit_signal("100", seq=1))
+        await first.bus.publish(_limit_signal("100", seq=2))
+
+    asyncio.run(first_life())
+    reason = "above max orders per window 1 in 1.0s"
+    _assert_denied_by(first, derive_cloid("trivial:BTC:2"), reason)
+
+    # The same instant on the clock, so only the restart can have freed the slot.
+    second = _engine(store=first.store, limits=limits)
+
+    async def second_life() -> None:
+        await second.bus.publish(_tick("42000"))
+        await second.bus.publish(_limit_signal("100", seq=3))
+
+    asyncio.run(second_life())
+    assert _state(second.store, derive_cloid("trivial:BTC:3")) is OrderState.LIVE

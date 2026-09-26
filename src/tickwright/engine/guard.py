@@ -13,6 +13,7 @@ state is persisted through the ``Store`` and restored on construction, so a halt
 outlives a crash and is cleared only by an explicit reset.
 """
 
+from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
 from decimal import Decimal
@@ -64,6 +65,32 @@ class SymbolLimits:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class RateCap:
+    """The engine-wide rate cap (ADR-0051): at most ``max_orders`` approved
+    placements in any ``window_seconds``.
+
+    Both settings are required, so half a cap cannot be written down. Half a
+    cap could not be enforced, and dropping it would leave the user thinking a
+    cap is on."""
+
+    max_orders: int
+    """How many placements the whole engine may approve inside one window."""
+    window_seconds: float
+    """The length of the sliding window."""
+
+    def __post_init__(self) -> None:
+        # Zero orders would deny every placement. That is a typo, not a policy.
+        if self.max_orders <= 0:
+            raise ValueError(f"max_orders must be positive, got {self.max_orders}")
+        # A bad window stops the boot, not the first placement.
+        duration_ns(self.window_seconds, name="window_seconds")
+
+    @property
+    def window_ns(self) -> int:
+        return duration_ns(self.window_seconds, name="window_seconds")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class PreTradeLimits:
     """The pre-trade caps ``RealGuard`` enforces (ADR-0051). Empty means no limits.
 
@@ -76,6 +103,8 @@ class PreTradeLimits:
     """How old a mark may be and still value a market order or a sell limit
     against a max order value. Its own setting, not the reconcile band's, which
     does another job."""
+    rate_cap: RateCap | None = None
+    """The engine-wide rate cap. ``None`` means it is off."""
 
     def __post_init__(self) -> None:
         # A bad age stops the boot, not the first market order.
@@ -108,6 +137,9 @@ class RealGuard:
         # engine comes back tripped. ``None`` means never tripped.
         restored = store.load_kill_switch()
         self._tripped = restored.tripped if restored is not None else False
+        # The times of approved placements inside the rate cap's window. It
+        # lives in memory, so a restart starts it empty (ADR-0051).
+        self._approved_ns: deque[int] = deque()
 
     @property
     def kill_switch_tripped(self) -> bool:
@@ -206,6 +238,20 @@ class RealGuard:
             # new side, so it gets no such pass.
             if abs(worst_case) > cap and not reduces:
                 return Denied(reason=f"above max position {cap}")
+        rate_cap = self._limits.rate_cap
+        if rate_cap is not None:
+            now_ns = self._clock.timestamp_ns()
+            window_ns = rate_cap.window_ns
+            # A slot counts for exactly one window after its placement. If the
+            # wall clock steps back, slots stay longer. That only denies more.
+            while self._approved_ns and now_ns - self._approved_ns[0] >= window_ns:
+                self._approved_ns.popleft()
+            if len(self._approved_ns) >= rate_cap.max_orders:
+                return Denied(
+                    reason=f"above max orders per window {rate_cap.max_orders} "
+                    f"in {rate_cap.window_seconds}s"
+                )
+            self._approved_ns.append(now_ns)
         return Approved(quantity=quantity, price=price)
 
 
