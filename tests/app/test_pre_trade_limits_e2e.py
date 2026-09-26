@@ -52,7 +52,7 @@ from tickwright.engine.runner import Engine
 from tickwright.strategies.emitter import SignalEmitter
 
 SECOND_NS = 1_000_000_000
-PRICE = Decimal("50000")
+PRICES = {"BTC": Decimal("50000"), "ETH": Decimal("3000")}
 GENESIS = Decimal("1000000")
 
 SPEC = InstrumentSpec(
@@ -98,12 +98,13 @@ def sell(quantity: str) -> Order:
 
 @dataclass(frozen=True, slots=True)
 class Step:
-    """One BTC trade tick at ``seconds``, the orders sent on it in list order,
-    and the outcome each order must get."""
+    """One trade tick on ``symbol`` at ``seconds``, the orders sent on it in
+    list order, and the outcome each order must get."""
 
     seconds: int
     orders: list[Order]
     expected: list[str]
+    symbol: str = "BTC"
 
 
 # Ticks are two seconds apart, so each tick opens a fresh rate cap window.
@@ -130,6 +131,16 @@ CAPS = [
 # 0.6 * 50000 = 30000 is above the 20000 value cap. It only reduces, so it
 # fills in one order. The mark is this tick's own trade, so it is fresh.
 FRESH_CLOSE = Step(10, [sell("0.6")], [FILLED])
+
+# An ETH tick moves the clock to 20s while the BTC mark stays at 10s. That mark
+# is 10s old, past the 5s limit. A 0.1 buy needs the mark for its value, so it
+# is denied. The 0.6 sell closes the long and needs no mark, so it fills.
+STALE_CLOSE = Step(
+    20,
+    [buy("0.1"), sell("0.6")],
+    ["stale mark for max order value 20000", FILLED],
+    symbol="ETH",
+)
 
 
 class ScriptedStrategy:
@@ -193,8 +204,8 @@ class ScriptedStrategy:
 def _write_ticks(path: Path, steps: Sequence[Step]) -> Path:
     rows = [
         {
-            "symbol": "BTC",
-            "price": str(PRICE),
+            "symbol": step.symbol,
+            "price": str(PRICES[step.symbol]),
             "size": "10",
             "aggressor_side": "buy",
             "trade_id": f"t{i}",
@@ -253,7 +264,7 @@ def _wire(config: AppConfig, steps: Sequence[Step], *, bus: EventBus | None = No
     strategy = ScriptedStrategy(
         strategy_id="scripted", bus=bus, clock=clock, script=[step.orders for step in steps]
     )
-    engine.register(strategy, symbols={"BTC"})
+    engine.register(strategy, symbols={"BTC", "ETH"})
     return _Life(engine=engine, strategy=strategy, portfolio=engine.portfolio_for("scripted"))
 
 
@@ -307,3 +318,12 @@ def test_a_close_bigger_than_the_size_and_value_caps_fills_in_one_order(tmp_path
 
     # 1.2 - 0.6
     assert _position(life.portfolio) == Decimal("0.6")
+
+
+def test_a_close_bigger_than_the_size_and_value_caps_fills_with_a_stale_mark(
+    tmp_path: Path,
+) -> None:
+    life = _scenario(tmp_path, [*CAPS, FRESH_CLOSE, STALE_CLOSE])
+
+    # 0.6 - 0.6
+    assert _position(life.portfolio) == Decimal("0")
