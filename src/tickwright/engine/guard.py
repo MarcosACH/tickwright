@@ -242,7 +242,8 @@ class RealGuard:
         if rate_cap is not None:
             now_ns = self._clock.timestamp_ns()
             window_ns = rate_cap.window_ns
-            # A slot counts for exactly one window after its placement.
+            # A slot counts for exactly one window after its placement. If the
+            # wall clock steps back, slots stay longer. That only denies more.
             while self._approved_ns and now_ns - self._approved_ns[0] >= window_ns:
                 self._approved_ns.popleft()
             if len(self._approved_ns) >= rate_cap.max_orders:
