@@ -100,6 +100,8 @@ src/tickwright/
 **Interface:** The `PreTradeGuard` **Protocol lives in `domain`**; the two adapters live here: `RealGuard` and `NoopGuard`. Callers (the `ExecutionManager`) must know: check → quantize → verdict; failure means `DENIED` — the order is never sent and is safe to recreate. Quantization rules: size rounds **down** to `sz_decimals` (rounds-to-zero → `DENIED`); price rounds toward the passive side under the sig-figs ∧ decimals rule. The kill switch is global, halt-only, durable/sticky (persisted via `Store`, restored before the feed starts), tripped/reset manually (`SIGUSR1`/`SIGUSR2` wired by the runner); tripped ⇒ every new `PlaceSignal` is `DENIED`, resting `LIVE` orders untouched.
 
 **Responsibilities:** Min-notional and quantity/price validity; quantization against `InstrumentSpec` (wired venue-agnostically by the composition root at startup); kill-switch state and persistence.
+`RealGuard` also enforces the optional pre-trade caps (ADR-0051). Their map is
+[`pre-trade-limits.md`](pre-trade-limits.md).
 
 **Seams:** `PreTradeGuard` — two real adapters (`RealGuard`, `NoopGuard`).
 

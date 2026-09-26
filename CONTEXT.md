@@ -386,8 +386,11 @@ _Avoid_: matching engine (fine informally), execution model.
 **PreTradeGuard** *(seam)*:
 The thin pre-trade check the [[ExecutionManager]] runs before placing: min-notional,
 quantity/price validity, [[Kill-switch]]. Failure → `DENIED`. Impls: a real guard + `NoopGuard`.
-**Not** a RiskEngine (no exposure/position limits — deferred). See ADR-0017, ADR-0026.
-(ADR-0051 adds optional [[Pre-trade limits]] to the real guard. It is still not a RiskEngine.)
+The real guard also checks the optional [[Pre-trade limits]]: max order size, max order value,
+max position, and the rate cap. `NoopGuard` checks none of them, so any limit with it refuses to
+start. It is **not** a RiskEngine. It judges one order at a time. It never closes a position, and a
+broken cap never trips the kill switch. Portfolio risk is deferred. See ADR-0017, ADR-0026,
+ADR-0051.
 _Avoid_: risk engine, risk manager (those imply the deferred portfolio-risk surface).
 
 **Pre-trade limits**:
