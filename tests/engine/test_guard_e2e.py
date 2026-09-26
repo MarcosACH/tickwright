@@ -26,6 +26,7 @@ from tickwright.adapters.paper import (
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     AggressorSide,
+    CancelSignal,
     ExecutionReport,
     InstrumentSpec,
     MarketTick,
@@ -983,3 +984,27 @@ def test_an_order_that_only_reduces_still_takes_a_rate_cap_slot() -> None:
     assert _state(engine.store, derive_cloid("trivial:BTC:2")) is OrderState.LIVE
     reason = "above max orders per window 1 in 1.0s"
     _assert_denied_by(engine, derive_cloid("trivial:BTC:3"), reason)
+
+
+def test_a_cancel_goes_through_while_the_rate_cap_window_is_full() -> None:
+    # A cancel reduces risk, so a full window must never block it (ADR-0051).
+    limits = PreTradeLimits(max_orders_per_window=1, window_seconds=1.0)
+    engine = _engine(limits=limits)
+    placed = _limit_signal("100", seq=1)
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))
+        await engine.bus.publish(placed)
+        cancel = CancelSignal(
+            ts_event=1_000,
+            ts_init=1_000,
+            strategy_id="trivial",
+            symbol="BTC",
+            seq=2,
+            target_signal_id=placed.signal_id,
+        )
+        await engine.bus.publish(cancel)
+
+    asyncio.run(scenario())
+
+    assert _state(engine.store, derive_cloid("trivial:BTC:1")) is OrderState.CANCELLED
