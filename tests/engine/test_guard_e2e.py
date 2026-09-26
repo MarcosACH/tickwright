@@ -879,3 +879,27 @@ def test_the_fourth_placement_inside_one_second_is_denied_by_the_rate_cap() -> N
     for seq in range(1, 4):
         assert _state(engine.store, derive_cloid(f"trivial:BTC:{seq}")) is OrderState.LIVE
     _assert_denied_by(engine, derive_cloid("trivial:BTC:4"), _RATE_CAP_REASON)
+
+
+def test_a_placement_passes_again_once_the_oldest_slot_leaves_the_window() -> None:
+    engine = _engine(limits=_THREE_PER_SECOND)
+    one_second = 1_000_000_000
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))
+        await engine.bus.publish(_limit_signal("100", seq=1))
+        engine.clock.advance_to(1_000 + 500_000_000)
+        await engine.bus.publish(_limit_signal("100", seq=2))
+        await engine.bus.publish(_limit_signal("100", seq=3))
+        engine.clock.advance_to(1_000 + one_second - 1)  # the first slot is still inside
+        await engine.bus.publish(_limit_signal("100", seq=4))
+        engine.clock.advance_to(1_000 + one_second)  # the first slot has just left
+        await engine.bus.publish(_limit_signal("100", seq=5))
+        # Only the first slot left. The other two still fill the window with seq 5.
+        await engine.bus.publish(_limit_signal("100", seq=6))
+
+    asyncio.run(scenario())
+
+    _assert_denied_by(engine, derive_cloid("trivial:BTC:4"), _RATE_CAP_REASON)
+    assert _state(engine.store, derive_cloid("trivial:BTC:5")) is OrderState.LIVE
+    _assert_denied_by(engine, derive_cloid("trivial:BTC:6"), _RATE_CAP_REASON)

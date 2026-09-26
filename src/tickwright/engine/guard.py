@@ -116,6 +116,9 @@ class RealGuard:
         # The times of approved placements inside the rate cap's window. It
         # lives in memory, so a restart starts it empty (ADR-0051).
         self._approved_ns: deque[int] = deque()
+        self._window_ns = None
+        if limits.window_seconds is not None:
+            self._window_ns = duration_ns(limits.window_seconds, name="window_seconds")
 
     @property
     def kill_switch_tripped(self) -> bool:
@@ -215,13 +218,17 @@ class RealGuard:
             if abs(worst_case) > cap and not reduces:
                 return Denied(reason=f"above max position {cap}")
         limits = self._limits
-        if limits.max_orders_per_window is not None:
+        if limits.max_orders_per_window is not None and self._window_ns is not None:
+            now_ns = self._clock.timestamp_ns()
+            # A slot counts for exactly one window after its placement.
+            while self._approved_ns and now_ns - self._approved_ns[0] >= self._window_ns:
+                self._approved_ns.popleft()
             if len(self._approved_ns) >= limits.max_orders_per_window:
                 return Denied(
                     reason=f"above max orders per window {limits.max_orders_per_window} "
                     f"in {limits.window_seconds}s"
                 )
-            self._approved_ns.append(self._clock.timestamp_ns())
+            self._approved_ns.append(now_ns)
         return Approved(quantity=quantity, price=price)
 
 
