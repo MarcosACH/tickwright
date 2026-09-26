@@ -935,3 +935,28 @@ def test_orders_on_two_symbols_share_one_rate_cap_window() -> None:
     for cloid in ("trivial:BTC:1", "trivial:BTC:2", "trivial:ETH:1"):
         assert _state(engine.store, derive_cloid(cloid)) is OrderState.LIVE
     _assert_denied_by(engine, derive_cloid("trivial:ETH:2"), _RATE_CAP_REASON)
+
+
+def test_an_order_denied_by_another_cap_takes_no_rate_cap_slot() -> None:
+    limits = PreTradeLimits(
+        symbols={"BTC": SymbolLimits(max_order_size=Decimal("0.5"))},
+        max_orders_per_window=3,
+        window_seconds=1.0,
+    )
+    engine = _engine(limits=limits)
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))
+        await engine.bus.publish(_limit_signal("100", seq=1))
+        await engine.bus.publish(_limit_signal("100", quantity="0.6", seq=2))  # too big
+        await engine.bus.publish(_limit_signal("100", seq=3))
+        await engine.bus.publish(_limit_signal("100", seq=4))
+        await engine.bus.publish(_limit_signal("100", seq=5))
+
+    asyncio.run(scenario())
+
+    _assert_denied_by(engine, derive_cloid("trivial:BTC:2"), "above max order size 0.5")
+    # The size denial left its slot free, so the fourth order still fits.
+    for seq in (1, 3, 4):
+        assert _state(engine.store, derive_cloid(f"trivial:BTC:{seq}")) is OrderState.LIVE
+    _assert_denied_by(engine, derive_cloid("trivial:BTC:5"), _RATE_CAP_REASON)
