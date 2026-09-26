@@ -818,6 +818,22 @@ def test_a_market_order_that_closes_a_long_needs_no_mark_under_a_max_order_value
     assert _state(engine.store, derive_cloid("trivial:BTC:2")) is OrderState.FILLED
 
 
+def test_a_tripped_kill_switch_still_denies_an_order_that_closes_a_long() -> None:
+    # The exemption skips only the size and value caps. A halt stops every new
+    # order, closes included (ADR-0026).
+    limits = PreTradeLimits(symbols={"BTC": SymbolLimits(max_order_size=Decimal("0.01"))})
+    engine = _holding("0.03", side=Side.BUY, limits=limits)
+    engine.guard.trip_kill_switch("operator halt")
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))
+        await engine.bus.publish(_limit_signal("44000", quantity="0.03", seq=2, side=Side.SELL))
+
+    asyncio.run(scenario())
+
+    _assert_denied_by(engine, derive_cloid("trivial:BTC:2"), "kill switch tripped")
+
+
 def test_kill_switch_denies_new_orders_while_resting_orders_keep_filling() -> None:
     engine = _engine()
     bus, store, guard, order_events = engine.bus, engine.store, engine.guard, engine.events
