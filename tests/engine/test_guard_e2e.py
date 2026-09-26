@@ -960,3 +960,26 @@ def test_an_order_denied_by_another_cap_takes_no_rate_cap_slot() -> None:
     for seq in (1, 3, 4):
         assert _state(engine.store, derive_cloid(f"trivial:BTC:{seq}")) is OrderState.LIVE
     _assert_denied_by(engine, derive_cloid("trivial:BTC:5"), _RATE_CAP_REASON)
+
+
+def test_an_order_that_only_reduces_still_takes_a_rate_cap_slot() -> None:
+    # A long of 0.03 and one slot per second. Both sells reduce, so neither
+    # meets the size cap, but the second one finds the window full.
+    limits = PreTradeLimits(
+        symbols={"BTC": SymbolLimits(max_order_size=Decimal("0.01"))},
+        max_orders_per_window=1,
+        window_seconds=1.0,
+    )
+    engine = _holding("0.03", side=Side.BUY, limits=limits)
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))
+        # Above the market, so a sell that passes rests LIVE.
+        await engine.bus.publish(_limit_signal("44000", quantity="0.02", seq=2, side=Side.SELL))
+        await engine.bus.publish(_limit_signal("44000", quantity="0.01", seq=3, side=Side.SELL))
+
+    asyncio.run(scenario())
+
+    assert _state(engine.store, derive_cloid("trivial:BTC:2")) is OrderState.LIVE
+    reason = "above max orders per window 1 in 1.0s"
+    _assert_denied_by(engine, derive_cloid("trivial:BTC:3"), reason)
