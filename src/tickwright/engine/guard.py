@@ -127,7 +127,7 @@ class RealGuard:
         # The times of approved placements inside the rate cap's window. It
         # lives in memory, so a restart starts it empty (ADR-0051).
         self._approved_ns: deque[int] = deque()
-        self._window_ns = None
+        self._window_ns: int | None = None
         if limits.window_seconds is not None:
             self._window_ns = duration_ns(limits.window_seconds, name="window_seconds")
 
