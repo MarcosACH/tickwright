@@ -89,6 +89,13 @@ class PreTradeLimits:
         # leave the user thinking a cap is on.
         if (self.max_orders_per_window is None) != (self.window_seconds is None):
             raise ValueError("set both max_orders_per_window and window_seconds, or neither")
+        # Zero orders would deny every placement. That is a typo, not a policy.
+        if self.max_orders_per_window is not None and self.max_orders_per_window <= 0:
+            raise ValueError(
+                f"max_orders_per_window must be positive, got {self.max_orders_per_window}"
+            )
+        if self.window_seconds is not None:
+            duration_ns(self.window_seconds, name="window_seconds")
 
 
 NO_LIMITS: Final = PreTradeLimits()

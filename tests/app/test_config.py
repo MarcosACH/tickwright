@@ -239,6 +239,37 @@ def test_a_rate_cap_with_only_one_of_its_two_settings_is_refused_at_load(
         )
 
 
+@pytest.mark.parametrize("orders", ["0", "-1"])
+def test_a_rate_cap_of_zero_orders_or_fewer_is_refused_at_load(tmp_path: Path, orders: str) -> None:
+    # Zero would deny every placement. That is a typo, not a policy (ADR-0051).
+    (tmp_path / "ticks.jsonl").touch()
+    with pytest.raises(ValidationError, match="max_orders_per_window must be positive"):
+        AppConfig.model_validate(
+            {
+                "replay": ReplayFeedConfig(path=tmp_path / "ticks.jsonl"),
+                "paper": PaperExchangeConfig(genesis_collateral=Decimal("100000")),
+                "limits": {"max_orders_per_window": orders, "window_seconds": 1.0},
+            }
+        )
+
+
+@pytest.mark.parametrize("window", ["0", "-1", "nan", "inf", "1e300", "1e-10"])
+def test_a_rate_cap_window_that_is_not_a_positive_number_is_refused_at_load(
+    tmp_path: Path, window: str
+) -> None:
+    # The same float traps as the mark max age. The guard turns the window into
+    # nanoseconds, so a bad one must stop the boot, not the first placement.
+    (tmp_path / "ticks.jsonl").touch()
+    with pytest.raises(ValidationError, match="window_seconds must be a positive number"):
+        AppConfig.model_validate(
+            {
+                "replay": ReplayFeedConfig(path=tmp_path / "ticks.jsonl"),
+                "paper": PaperExchangeConfig(genesis_collateral=Decimal("100000")),
+                "limits": {"max_orders_per_window": 3, "window_seconds": window},
+            }
+        )
+
+
 @pytest.mark.parametrize("age", ["0", "-1", "nan", "inf", "1e300", "1e-10"])
 def test_a_band_mark_max_age_that_is_not_a_positive_number_is_refused_at_load(
     tmp_path: Path, age: str
