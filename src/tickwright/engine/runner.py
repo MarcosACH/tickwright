@@ -42,6 +42,7 @@ from tickwright.domain import (
     Signal,
     Store,
     Strategy,
+    duration_ns,
 )
 from tickwright.observability import NamedEvent, named_event
 from tickwright.observability.correlation import bind_run_id
@@ -49,7 +50,6 @@ from tickwright.observability.correlation import bind_run_id
 from .barrier import StartupBarrier
 from .cadence import run_cadence
 from .checkpoint import Checkpointer
-from .duration import duration_ns
 from .execution import ExecutionManager
 from .guard import NoopGuard
 from .ledger_reconcile import LedgerReconciliation, ValuationBand

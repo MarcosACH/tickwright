@@ -6,6 +6,7 @@ It is the stable contract of the system; keep it log-free and dependency-free.
 """
 
 from .account import Account, AccountSpec, AccountView, venue_cash
+from .duration import duration_ns
 from .economics import fill_fee, funding_amount, funding_boundaries
 from .enums import (
     AggressorSide,
@@ -215,6 +216,8 @@ __all__ = [
     # retry pacing
     "Backoff",
     "Deadline",
+    # the one rule for a setting given in seconds
+    "duration_ns",
     # seam Protocols — ``Exchange`` composes the two anchors beside it
     "AccountAnchor",
     "Clock",

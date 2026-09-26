@@ -51,13 +51,13 @@ from tickwright.domain import (
     VenueOrderView,
     VenueReadFailure,
     VenueReadUnresolvable,
+    duration_ns,
 )
 from tickwright.observability import NamedEvent, named_event
 from tickwright.observability.correlation import operation
 
 from .absence import ConsecutiveMisses, GraceWindow
 from .cache import Cache
-from .duration import duration_ns
 from .ghost_gate import GhostGate, GhostVerdict
 
 # The per-cadence state filters gating which sagas each continuous cycle reads.

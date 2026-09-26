@@ -3,7 +3,9 @@
 
 from decimal import Decimal
 
-from pydantic import BaseModel, Field, SecretStr
+from pydantic import BaseModel, Field, SecretStr, ValidationInfo, field_validator
+
+from tickwright.domain import duration_ns
 
 _MAINNET_WS_URL = "wss://api.hyperliquid.xyz/ws"
 _TESTNET_WS_URL = "wss://api.hyperliquid-testnet.xyz/ws"
@@ -29,8 +31,17 @@ class HyperliquidConfig(BaseModel):
     slippage_bound: Decimal = Field(default=Decimal("0.05"), ge=0)
     # Reconnect pacing (ADR-0021): doubling from initial, capped at max, always
     # slept on the injected Clock — a reconnect storm can never hammer the venue.
-    reconnect_initial_backoff_seconds: float = Field(default=1.0, gt=0)
-    reconnect_max_backoff_seconds: float = Field(default=60.0, gt=0)
+    reconnect_initial_backoff_seconds: float = 1.0
+    reconnect_max_backoff_seconds: float = 60.0
+
+    @field_validator("reconnect_initial_backoff_seconds", "reconnect_max_backoff_seconds")
+    @classmethod
+    def _usable_seconds(cls, value: float, info: ValidationInfo) -> float:
+        # Infinity loads as a float, and the reconnect loop would sleep on it
+        # forever. The feed then stops with no error, so refuse it at boot.
+        assert info.field_name is not None
+        duration_ns(value, name=info.field_name)
+        return value
 
     @property
     def ws_url(self) -> str:
