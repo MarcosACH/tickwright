@@ -21,6 +21,19 @@ def test_a_reconnect_backoff_that_is_not_a_usable_number_of_seconds_is_refused(
         HyperliquidConfig.model_validate({field: value})
 
 
+@pytest.mark.parametrize("value", ["301", "1e12", "1e200"])
+def test_a_max_backoff_over_five_minutes_is_refused(value: str) -> None:
+    # A huge but finite max still passes the seconds rule. Once the doubling
+    # reaches it, the feed waits for years with the engine RUNNING.
+    with pytest.raises(ValidationError, match="reconnect_max_backoff_seconds"):
+        HyperliquidConfig.model_validate({"reconnect_max_backoff_seconds": value})
+
+
+def test_a_max_backoff_of_exactly_five_minutes_loads() -> None:
+    config = HyperliquidConfig.model_validate({"reconnect_max_backoff_seconds": "300"})
+    assert config.reconnect_max_backoff_seconds == 300
+
+
 def test_an_initial_backoff_larger_than_the_max_is_refused() -> None:
     # The max caps only the doubling. So the first reconnect would wait the
     # full initial 100 seconds, not the 10 the operator set as the most.

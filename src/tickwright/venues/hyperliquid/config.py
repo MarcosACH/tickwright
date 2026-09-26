@@ -19,6 +19,9 @@ _MAINNET_WS_URL = "wss://api.hyperliquid.xyz/ws"
 _TESTNET_WS_URL = "wss://api.hyperliquid-testnet.xyz/ws"
 _MAINNET_API_URL = "https://api.hyperliquid.xyz"
 _TESTNET_API_URL = "https://api.hyperliquid-testnet.xyz"
+# The longest wait between reconnect tries. Past this the feed is dead in all
+# but name while the engine reads RUNNING, so a larger max is refused.
+_RECONNECT_BACKOFF_CEILING_SECONDS = 300.0
 
 
 class HyperliquidConfig(BaseModel):
@@ -49,6 +52,18 @@ class HyperliquidConfig(BaseModel):
         # forever. The feed then stops with no error, so refuse it at boot.
         assert info.field_name is not None
         duration_ns(value, name=info.field_name)
+        return value
+
+    @field_validator("reconnect_max_backoff_seconds")
+    @classmethod
+    def _max_within_ceiling(cls, value: float) -> float:
+        # A huge max is still finite, so the seconds rule lets it through.
+        # Once the doubling reaches it, the feed waits for years.
+        if value > _RECONNECT_BACKOFF_CEILING_SECONDS:
+            raise ValueError(
+                "reconnect_max_backoff_seconds must be at most "
+                f"{_RECONNECT_BACKOFF_CEILING_SECONDS}, got {value}"
+            )
         return value
 
     @model_validator(mode="after")
