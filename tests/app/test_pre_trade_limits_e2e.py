@@ -101,7 +101,7 @@ class Step:
     """One trade tick on ``symbol`` at ``seconds``, the orders sent on it in
     list order, and the outcome each order must get."""
 
-    seconds: int
+    seconds: float
     orders: list[Order]
     expected: list[str]
     symbol: str = "BTC"
@@ -132,12 +132,23 @@ CAPS = [
 # fills in one order. The mark is this tick's own trade, so it is fresh.
 FRESH_CLOSE = Step(10, [sell("0.6")], [FILLED])
 
-# An ETH tick moves the clock to 20s while the BTC mark stays at 10s. That mark
-# is 10s old, past the 5s limit. A 0.1 buy needs the mark for its value, so it
-# is denied. The 0.6 sell closes the long and needs no mark, so it fills.
+# Both ticks sit inside the 1s window of the close above, which still holds one
+# of the two slots. The 0.1 buy takes the other one. Position 0.7. The 0.7 sell
+# would close the long, but the window is full, so it is denied. The sell has
+# its own tick so the buy's fill has landed: a sell checked beside an unfilled
+# buy is a flip, not a close, and the size cap would deny it first.
+FULL_WINDOW = [
+    Step(10.3, [buy("0.1")], [FILLED]),
+    Step(10.6, [sell("0.7")], ["above max orders per window 2 in 1s"]),
+]
+
+# An ETH tick moves the clock to 20s while the BTC mark stays at 10.6s. That
+# mark is 9.4s old, past the 5s limit. A 0.1 buy needs the mark for its value,
+# so it is denied. The 0.7 sell closes the long and needs no mark, so it fills.
+# It is above the 0.5 size cap, and 0.7 * 50000 = 35000 is above the value cap.
 STALE_CLOSE = Step(
     20,
-    [buy("0.1"), sell("0.6")],
+    [buy("0.1"), sell("0.7")],
     ["stale mark for max order value 20000", FILLED],
     symbol="ETH",
 )
@@ -209,7 +220,7 @@ def _write_ticks(path: Path, steps: Sequence[Step]) -> Path:
             "size": "10",
             "aggressor_side": "buy",
             "trade_id": f"t{i}",
-            "ts_event": step.seconds * SECOND_NS,
+            "ts_event": int(step.seconds * SECOND_NS),
         }
         for i, step in enumerate(steps)
     ]
@@ -320,10 +331,19 @@ def test_a_close_bigger_than_the_size_and_value_caps_fills_in_one_order(tmp_path
     assert _position(life.portfolio) == Decimal("0.6")
 
 
+def test_a_close_takes_a_rate_cap_slot_and_is_denied_when_the_window_is_full(
+    tmp_path: Path,
+) -> None:
+    life = _scenario(tmp_path, [*CAPS, FRESH_CLOSE, *FULL_WINDOW])
+
+    # 0.6 + 0.1. The denied close moved nothing.
+    assert _position(life.portfolio) == Decimal("0.7")
+
+
 def test_a_close_bigger_than_the_size_and_value_caps_fills_with_a_stale_mark(
     tmp_path: Path,
 ) -> None:
-    life = _scenario(tmp_path, [*CAPS, FRESH_CLOSE, STALE_CLOSE])
+    life = _scenario(tmp_path, [*CAPS, FRESH_CLOSE, *FULL_WINDOW, STALE_CLOSE])
 
-    # 0.6 - 0.6
+    # 0.7 - 0.7
     assert _position(life.portfolio) == Decimal("0")
