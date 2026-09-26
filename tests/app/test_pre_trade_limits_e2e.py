@@ -23,6 +23,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from bus_backends import BUS_BACKENDS, make_bus
 from store_backends import POSTGRES_DSN_ENV, STORE_BACKEND_PARAMS, resolve_backend
 
 from tickwright.adapters.feed import ReplayFeedConfig
@@ -161,6 +162,8 @@ STALE_CLOSE = Step(
     ["stale mark for max order value 20000", FILLED],
     symbol="ETH",
 )
+
+WHOLE_SCENARIO = [*CAPS, FRESH_CLOSE, *FULL_WINDOW, STALE_CLOSE]
 
 
 class ScriptedStrategy:
@@ -329,10 +332,11 @@ def _scenario(
     *,
     crash: bool = False,
     overrides: Mapping[str, object] | None = None,
+    bus: EventBus | None = None,
 ) -> _Life:
     """Run ``steps`` as one life and check every order got its expected outcome."""
     expected = [outcome for step in steps for outcome in step.expected]
-    life = _wire(_config(tmp_path, steps, **(overrides or {})), steps)
+    life = _wire(_config(tmp_path, steps, **(overrides or {})), steps, bus=bus)
     _run(life, expected, crash=crash)
     assert life.strategy.outcomes == expected
     return life
@@ -380,9 +384,22 @@ def test_a_close_takes_a_rate_cap_slot_and_is_denied_when_the_window_is_full(
 def test_a_close_bigger_than_the_size_and_value_caps_fills_with_a_stale_mark(
     tmp_path: Path,
 ) -> None:
-    life = _scenario(tmp_path, [*CAPS, FRESH_CLOSE, *FULL_WINDOW, STALE_CLOSE])
+    life = _scenario(tmp_path, WHOLE_SCENARIO)
 
     # 0.7 - 0.7
+    assert _position(life.portfolio) == Decimal("0")
+
+
+@pytest.mark.parametrize("store", STORE_BACKEND_PARAMS)
+@pytest.mark.parametrize("bus", BUS_BACKENDS)
+def test_the_whole_scenario_gets_the_same_outcomes_on_every_bus_and_store(
+    tmp_path: Path, bus: str, store: str
+) -> None:
+    """Swapping a backend changes durability, never an outcome (ADR-0023/0019)."""
+    life = _scenario(
+        tmp_path, WHOLE_SCENARIO, bus=make_bus(bus), overrides=_store_fields(store, tmp_path)
+    )
+
     assert _position(life.portfolio) == Decimal("0")
 
 
