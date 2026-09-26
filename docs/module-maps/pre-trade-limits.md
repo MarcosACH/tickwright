@@ -70,6 +70,11 @@ refuses a mark max age that is zero, negative, NaN, or infinite. It also refuses
 count in nanoseconds, such as `1e300`. These all load as floats, but the guard cannot turn them into
 nanoseconds, so it would raise on the first market order.**)**
 
+**(Amended by [#382](https://github.com/MarcosACH/tickwright/issues/382):** the rate cap is one
+optional `RateCap` value with two required fields, `max_orders` and `window_seconds`. Half a cap is
+a missing field, so it cannot be written down. `RateCap` holds settings only. The window of
+placement times stays in `RealGuard`, so this is not the rate-window class in §Out of scope.**)**
+
 **Responsibilities:** Hold the caps and reject nonsense at boot. It holds no state and does no
 checking of orders.
 

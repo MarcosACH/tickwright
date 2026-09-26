@@ -393,7 +393,7 @@ _Avoid_: risk engine, risk manager (those imply the deferred portfolio-risk surf
 **Pre-trade limits**:
 Four optional caps the real [[PreTradeGuard]] checks before an order is sent. Max order size in
 coins, max order value in USD, and max position in coins are set per symbol. Max orders per time
-window is set for the whole engine. Each cap is off unless the user sets it. An order that breaks a
+window, the rate cap, is set for the whole engine. Each cap is off unless the user sets it. An order that breaks a
 cap is `DENIED` with a reason that names the cap, and nothing else happens. The position cap
 measures the worst-case position if same-side open orders and the new order all fill. ADR-0051
 holds the formula. An order that only reduces that worst case, without crossing zero, skips max
