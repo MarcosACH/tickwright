@@ -54,6 +54,12 @@ class Backoff:
         # This check makes a caller that forgets fail loudly instead.
         duration_ns(initial, name="backoff initial")
         duration_ns(maximum, name="backoff maximum")
+        # The maximum caps only the doubling, so a larger initial would still be
+        # slept once in full.
+        if initial > maximum:
+            raise ValueError(
+                f"backoff initial must be at most backoff maximum, got {initial} > {maximum}"
+            )
         self._initial = initial
         self._maximum = maximum
         self._current = initial

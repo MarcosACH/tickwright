@@ -81,6 +81,25 @@ def test_a_backoff_delay_that_is_not_a_usable_number_of_seconds_is_refused(
         Backoff(**delays)
 
 
+def test_an_initial_delay_larger_than_the_maximum_is_refused() -> None:
+    # The maximum caps only the doubling, so the first sleep would be the full
+    # initial delay, past the most the caller allowed.
+    with pytest.raises(ValueError, match="backoff initial must be at most backoff maximum"):
+        Backoff(initial=100.0, maximum=10.0)
+
+
+def test_an_initial_delay_equal_to_the_maximum_sleeps_a_fixed_delay() -> None:
+    async def main() -> RecordingClock:
+        clock = RecordingClock()
+        backoff = Backoff(initial=10.0, maximum=10.0)
+        await backoff.sleep_on(clock)
+        await backoff.sleep_on(clock)
+        return clock
+
+    clock = asyncio.run(main())
+    assert clock.sleeps == [10.0, 10.0]
+
+
 def test_a_deadline_is_not_spent_before_its_budget_elapses() -> None:
     clock = ManualClock()
     deadline = Deadline.opening(clock=clock, budget_seconds=60.0)
