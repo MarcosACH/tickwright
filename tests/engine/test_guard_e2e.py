@@ -1008,3 +1008,29 @@ def test_a_cancel_goes_through_while_the_rate_cap_window_is_full() -> None:
     asyncio.run(scenario())
 
     assert _state(engine.store, derive_cloid("trivial:BTC:1")) is OrderState.CANCELLED
+
+
+def test_the_rate_cap_window_starts_empty_after_a_restart() -> None:
+    # The window lives in memory, so up to N orders may pass right after a
+    # boot. ADR-0051 accepts this.
+    limits = PreTradeLimits(max_orders_per_window=1, window_seconds=1.0)
+    first = _engine(limits=limits)
+
+    async def first_life() -> None:
+        await first.bus.publish(_tick("42000"))
+        await first.bus.publish(_limit_signal("100", seq=1))
+        await first.bus.publish(_limit_signal("100", seq=2))
+
+    asyncio.run(first_life())
+    reason = "above max orders per window 1 in 1.0s"
+    _assert_denied_by(first, derive_cloid("trivial:BTC:2"), reason)
+
+    # The same instant on the clock, so only the restart can have freed the slot.
+    second = _engine(store=first.store, limits=limits)
+
+    async def second_life() -> None:
+        await second.bus.publish(_tick("42000"))
+        await second.bus.publish(_limit_signal("100", seq=3))
+
+    asyncio.run(second_life())
+    assert _state(second.store, derive_cloid("trivial:BTC:3")) is OrderState.LIVE
