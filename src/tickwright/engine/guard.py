@@ -174,12 +174,12 @@ class RealGuard:
         # exposure, so no cap on order size or value may stop it. Ending at zero
         # is a full close, not a cross, for a long and a short alike.
         same_side = (worst_case > 0) == (before > 0)
-        toward_zero = abs(worst_case) < abs(before) and (worst_case == 0 or same_side)
+        reduces = abs(worst_case) < abs(before) and (worst_case == 0 or same_side)
         cap = symbol_limits.max_order_size
-        if cap is not None and quantity > cap and not toward_zero:
+        if cap is not None and quantity > cap and not reduces:
             return Denied(reason=f"above max order size {cap}")
         cap = symbol_limits.max_order_value
-        if cap is not None and not toward_zero:
+        if cap is not None and not reduces:
             value_price = price
             # A buy limit fills at its price or better, so its price is the value.
             # A market order has no price. A sell limit below the bid fills near
@@ -202,10 +202,10 @@ class RealGuard:
                 return Denied(reason=f"above max order value {cap}")
         cap = symbol_limits.max_position
         if cap is not None:
-            # An order that shrinks the worst case always passes, so a user can
-            # reduce a position that is already past the cap. An order that
-            # crosses zero opens a new side, so it gets no such pass.
-            if abs(worst_case) > cap and not toward_zero:
+            # A reducing order always passes, so a user can shrink a position
+            # that is already past the cap. An order that crosses zero opens a
+            # new side, so it gets no such pass.
+            if abs(worst_case) > cap and not reduces:
                 return Denied(reason=f"above max position {cap}")
         return Approved(quantity=quantity, price=price)
 
