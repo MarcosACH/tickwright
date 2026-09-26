@@ -65,6 +65,32 @@ class SymbolLimits:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class RateCap:
+    """The engine-wide rate cap (ADR-0051): at most ``max_orders`` approved
+    placements in any ``window_seconds``.
+
+    Both settings are required, so half a cap cannot be written down. Half a
+    cap could not be enforced, and dropping it would leave the user thinking a
+    cap is on."""
+
+    max_orders: int
+    """How many placements the whole engine may approve inside one window."""
+    window_seconds: float
+    """The length of the sliding window."""
+
+    def __post_init__(self) -> None:
+        # Zero orders would deny every placement. That is a typo, not a policy.
+        if self.max_orders <= 0:
+            raise ValueError(f"max_orders must be positive, got {self.max_orders}")
+        # A bad window stops the boot, not the first placement.
+        duration_ns(self.window_seconds, name="window_seconds")
+
+    @property
+    def window_ns(self) -> int:
+        return duration_ns(self.window_seconds, name="window_seconds")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class PreTradeLimits:
     """The pre-trade caps ``RealGuard`` enforces (ADR-0051). Empty means no limits.
 
@@ -77,25 +103,12 @@ class PreTradeLimits:
     """How old a mark may be and still value a market order or a sell limit
     against a max order value. Its own setting, not the reconcile band's, which
     does another job."""
-    max_orders_per_window: int | None = None
-    """How many placements the whole engine may approve inside one window."""
-    window_seconds: float | None = None
-    """The length of the rate cap's sliding window."""
+    rate_cap: RateCap | None = None
+    """The engine-wide rate cap. ``None`` means it is off."""
 
     def __post_init__(self) -> None:
         # A bad age stops the boot, not the first market order.
         duration_ns(self.mark_max_age_seconds, name="mark_max_age_seconds")
-        # Half a rate cap cannot be enforced, and silently dropping it would
-        # leave the user thinking a cap is on.
-        if (self.max_orders_per_window is None) != (self.window_seconds is None):
-            raise ValueError("set both max_orders_per_window and window_seconds, or neither")
-        # Zero orders would deny every placement. That is a typo, not a policy.
-        if self.max_orders_per_window is not None and self.max_orders_per_window <= 0:
-            raise ValueError(
-                f"max_orders_per_window must be positive, got {self.max_orders_per_window}"
-            )
-        if self.window_seconds is not None:
-            duration_ns(self.window_seconds, name="window_seconds")
 
 
 NO_LIMITS: Final = PreTradeLimits()
@@ -127,9 +140,6 @@ class RealGuard:
         # The times of approved placements inside the rate cap's window. It
         # lives in memory, so a restart starts it empty (ADR-0051).
         self._approved_ns: deque[int] = deque()
-        self._window_ns: int | None = None
-        if limits.window_seconds is not None:
-            self._window_ns = duration_ns(limits.window_seconds, name="window_seconds")
 
     @property
     def kill_switch_tripped(self) -> bool:
@@ -228,16 +238,17 @@ class RealGuard:
             # new side, so it gets no such pass.
             if abs(worst_case) > cap and not reduces:
                 return Denied(reason=f"above max position {cap}")
-        limits = self._limits
-        if limits.max_orders_per_window is not None and self._window_ns is not None:
+        rate_cap = self._limits.rate_cap
+        if rate_cap is not None:
             now_ns = self._clock.timestamp_ns()
+            window_ns = rate_cap.window_ns
             # A slot counts for exactly one window after its placement.
-            while self._approved_ns and now_ns - self._approved_ns[0] >= self._window_ns:
+            while self._approved_ns and now_ns - self._approved_ns[0] >= window_ns:
                 self._approved_ns.popleft()
-            if len(self._approved_ns) >= limits.max_orders_per_window:
+            if len(self._approved_ns) >= rate_cap.max_orders:
                 return Denied(
-                    reason=f"above max orders per window {limits.max_orders_per_window} "
-                    f"in {limits.window_seconds}s"
+                    reason=f"above max orders per window {rate_cap.max_orders} "
+                    f"in {rate_cap.window_seconds}s"
                 )
             self._approved_ns.append(now_ns)
         return Approved(quantity=quantity, price=price)

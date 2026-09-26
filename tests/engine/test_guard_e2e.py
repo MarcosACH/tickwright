@@ -51,6 +51,7 @@ from tickwright.engine.guard import (
     NO_LIMITS,
     NoopGuard,
     PreTradeLimits,
+    RateCap,
     RealGuard,
     SymbolLimits,
 )
@@ -875,7 +876,7 @@ def test_kill_switch_denies_new_orders_while_resting_orders_keep_filling() -> No
     assert _state(store, resting) is OrderState.FILLED
 
 
-_THREE_PER_SECOND = PreTradeLimits(max_orders_per_window=3, window_seconds=1.0)
+_THREE_PER_SECOND = PreTradeLimits(rate_cap=RateCap(max_orders=3, window_seconds=1.0))
 _RATE_CAP_REASON = "above max orders per window 3 in 1.0s"
 
 
@@ -941,8 +942,7 @@ def test_orders_on_two_symbols_share_one_rate_cap_window() -> None:
 def test_an_order_denied_by_another_cap_takes_no_rate_cap_slot() -> None:
     limits = PreTradeLimits(
         symbols={"BTC": SymbolLimits(max_order_size=Decimal("0.5"))},
-        max_orders_per_window=3,
-        window_seconds=1.0,
+        rate_cap=RateCap(max_orders=3, window_seconds=1.0),
     )
     engine = _engine(limits=limits)
 
@@ -968,8 +968,7 @@ def test_an_order_that_only_reduces_still_takes_a_rate_cap_slot() -> None:
     # meets the size cap, but the second one finds the window full.
     limits = PreTradeLimits(
         symbols={"BTC": SymbolLimits(max_order_size=Decimal("0.01"))},
-        max_orders_per_window=1,
-        window_seconds=1.0,
+        rate_cap=RateCap(max_orders=1, window_seconds=1.0),
     )
     engine = _holding("0.03", side=Side.BUY, limits=limits)
 
@@ -988,7 +987,7 @@ def test_an_order_that_only_reduces_still_takes_a_rate_cap_slot() -> None:
 
 def test_a_cancel_goes_through_while_the_rate_cap_window_is_full() -> None:
     # A cancel reduces risk, so a full window must never block it (ADR-0051).
-    limits = PreTradeLimits(max_orders_per_window=1, window_seconds=1.0)
+    limits = PreTradeLimits(rate_cap=RateCap(max_orders=1, window_seconds=1.0))
     engine = _engine(limits=limits)
     placed = _limit_signal("100", seq=1)
 
@@ -1013,7 +1012,7 @@ def test_a_cancel_goes_through_while_the_rate_cap_window_is_full() -> None:
 def test_the_rate_cap_window_starts_empty_after_a_restart() -> None:
     # The window lives in memory, so up to N orders may pass right after a
     # boot. ADR-0051 accepts this.
-    limits = PreTradeLimits(max_orders_per_window=1, window_seconds=1.0)
+    limits = PreTradeLimits(rate_cap=RateCap(max_orders=1, window_seconds=1.0))
     first = _engine(limits=limits)
 
     async def first_life() -> None:
