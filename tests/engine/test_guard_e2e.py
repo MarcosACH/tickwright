@@ -859,3 +859,23 @@ def test_kill_switch_denies_new_orders_while_resting_orders_keep_filling() -> No
     # The resting order rode through the halt: it went LIVE and then FILLED.
     assert any(isinstance(ev, OrderLive) and ev.cloid == resting for ev in order_events)
     assert _state(store, resting) is OrderState.FILLED
+
+
+_THREE_PER_SECOND = PreTradeLimits(max_orders_per_window=3, window_seconds=1.0)
+_RATE_CAP_REASON = "above max orders per window 3 in 1.0s"
+
+
+def test_the_fourth_placement_inside_one_second_is_denied_by_the_rate_cap() -> None:
+    engine = _engine(limits=_THREE_PER_SECOND)
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))
+        # All four rest below the market, so the first three end LIVE.
+        for seq in range(1, 5):
+            await engine.bus.publish(_limit_signal("100", seq=seq))
+
+    asyncio.run(scenario())
+
+    for seq in range(1, 4):
+        assert _state(engine.store, derive_cloid(f"trivial:BTC:{seq}")) is OrderState.LIVE
+    _assert_denied_by(engine, derive_cloid("trivial:BTC:4"), _RATE_CAP_REASON)

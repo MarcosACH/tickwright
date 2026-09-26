@@ -13,6 +13,7 @@ state is persisted through the ``Store`` and restored on construction, so a halt
 outlives a crash and is cleared only by an explicit reset.
 """
 
+from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
 from decimal import Decimal
@@ -76,6 +77,10 @@ class PreTradeLimits:
     """How old a mark may be and still value a market order or a sell limit
     against a max order value. Its own setting, not the reconcile band's, which
     does another job."""
+    max_orders_per_window: int | None = None
+    """How many placements the whole engine may approve inside one window."""
+    window_seconds: float | None = None
+    """The length of the rate cap's sliding window."""
 
     def __post_init__(self) -> None:
         # A bad age stops the boot, not the first market order.
@@ -108,6 +113,9 @@ class RealGuard:
         # engine comes back tripped. ``None`` means never tripped.
         restored = store.load_kill_switch()
         self._tripped = restored.tripped if restored is not None else False
+        # The times of approved placements inside the rate cap's window. It
+        # lives in memory, so a restart starts it empty (ADR-0051).
+        self._approved_ns: deque[int] = deque()
 
     @property
     def kill_switch_tripped(self) -> bool:
@@ -206,6 +214,14 @@ class RealGuard:
             # new side, so it gets no such pass.
             if abs(worst_case) > cap and not reduces:
                 return Denied(reason=f"above max position {cap}")
+        limits = self._limits
+        if limits.max_orders_per_window is not None:
+            if len(self._approved_ns) >= limits.max_orders_per_window:
+                return Denied(
+                    reason=f"above max orders per window {limits.max_orders_per_window} "
+                    f"in {limits.window_seconds}s"
+                )
+            self._approved_ns.append(self._clock.timestamp_ns())
         return Approved(quantity=quantity, price=price)
 
 
