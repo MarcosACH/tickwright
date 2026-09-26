@@ -25,6 +25,7 @@ primitives are shared and the verdict stays with the caller.
 
 from dataclasses import dataclass
 
+from .duration import duration_ns
 from .protocols import Clock
 
 _NS_PER_SECOND = 1_000_000_000
@@ -48,6 +49,11 @@ class Backoff:
     """
 
     def __init__(self, *, initial: float, maximum: float) -> None:
+        # Sleeping on infinity never returns, so the loop would stop with no
+        # error. A caller's config refuses this at load with the setting's name.
+        # This check makes a caller that forgets fail loudly instead.
+        duration_ns(initial, name="backoff initial")
+        duration_ns(maximum, name="backoff maximum")
         self._initial = initial
         self._maximum = maximum
         self._current = initial

@@ -9,6 +9,9 @@ rather than a rule three loops each wrote for themselves.
 """
 
 import asyncio
+import math
+
+import pytest
 
 from tickwright.adapters.clock import ManualClock
 from tickwright.domain import Backoff, Deadline
@@ -63,6 +66,19 @@ def test_reset_returns_to_the_initial_delay() -> None:
 
     clock = asyncio.run(main())
     assert clock.sleeps == [1.0, 2.0, 1.0]
+
+
+@pytest.mark.parametrize("field", ["initial", "maximum"])
+@pytest.mark.parametrize("value", [0.0, -1.0, math.nan, math.inf, 1e300, 1e-10])
+def test_a_backoff_delay_that_is_not_a_usable_number_of_seconds_is_refused(
+    field: str, value: float
+) -> None:
+    # Sleeping on infinity or 1e300 never returns, so a reconnect loop would stop
+    # with no error. Each caller's config checks this too, but a caller that
+    # forgets should fail loudly here, not hang.
+    delays = {"initial": 1.0, "maximum": 60.0} | {field: value}
+    with pytest.raises(ValueError, match=f"backoff {field} must be a positive number"):
+        Backoff(**delays)
 
 
 def test_a_deadline_is_not_spent_before_its_budget_elapses() -> None:
