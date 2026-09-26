@@ -2,8 +2,16 @@
 (ADR-0032); only the composition root reads them all."""
 
 from decimal import Decimal
+from typing import Self
 
-from pydantic import BaseModel, Field, SecretStr, ValidationInfo, field_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    SecretStr,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from tickwright.domain import duration_ns
 
@@ -42,6 +50,18 @@ class HyperliquidConfig(BaseModel):
         assert info.field_name is not None
         duration_ns(value, name=info.field_name)
         return value
+
+    @model_validator(mode="after")
+    def _initial_within_max(self) -> Self:
+        # The max caps only the doubling, so a larger initial would still be
+        # slept once in full, past the most the operator allowed.
+        if self.reconnect_initial_backoff_seconds > self.reconnect_max_backoff_seconds:
+            raise ValueError(
+                "reconnect_initial_backoff_seconds must be at most "
+                "reconnect_max_backoff_seconds, got "
+                f"{self.reconnect_initial_backoff_seconds} > {self.reconnect_max_backoff_seconds}"
+            )
+        return self
 
     @property
     def ws_url(self) -> str:
