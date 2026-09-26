@@ -62,17 +62,24 @@ _SPEC = InstrumentSpec(
     max_sig_figs=5,
     min_notional=Decimal("10"),
 )
+_ETH_SPEC = InstrumentSpec(
+    symbol="ETH",
+    sz_decimals=4,
+    max_decimals=6,
+    max_sig_figs=5,
+    min_notional=Decimal("10"),
+)
 
 
 async def _record(sink: list, event: object) -> None:
     sink.append(event)
 
 
-def _tick(price: str = "42000") -> MarketTick:
+def _tick(price: str = "42000", *, symbol: str = "BTC") -> MarketTick:
     return MarketTick(
         ts_event=1_000,
         ts_init=1_000,
-        symbol="BTC",
+        symbol=symbol,
         price=Decimal(price),
         size=Decimal("10"),
         aggressor_side=AggressorSide.BUY,
@@ -86,13 +93,18 @@ def _mark(price: str, *, ts_ns: int = 1_000) -> MarkTick:
 
 
 def _limit_signal(
-    price: str, *, quantity: str = "0.5", seq: int = 1, side: Side = Side.BUY
+    price: str,
+    *,
+    quantity: str = "0.5",
+    seq: int = 1,
+    side: Side = Side.BUY,
+    symbol: str = "BTC",
 ) -> PlaceSignal:
     return PlaceSignal(
         ts_event=1_000,
         ts_init=1_000,
         strategy_id="trivial",
-        symbol="BTC",
+        symbol=symbol,
         seq=seq,
         side=side,
         quantity=Decimal(quantity),
@@ -142,7 +154,8 @@ def _engine(
     # The runner's boot step: the ledger first, then the order cache. Rebuilding
     # the cache alone would bring the open orders back without the position.
     checks.recover()
-    guard = guard or RealGuard(specs={"BTC": _SPEC}, store=store, clock=clock, limits=limits)
+    specs = {"BTC": _SPEC, "ETH": _ETH_SPEC}
+    guard = guard or RealGuard(specs=specs, store=store, clock=clock, limits=limits)
     manager = ExecutionManager(
         bus=bus,
         exchange=exchange,
@@ -903,3 +916,22 @@ def test_a_placement_passes_again_once_the_oldest_slot_leaves_the_window() -> No
     _assert_denied_by(engine, derive_cloid("trivial:BTC:4"), _RATE_CAP_REASON)
     assert _state(engine.store, derive_cloid("trivial:BTC:5")) is OrderState.LIVE
     _assert_denied_by(engine, derive_cloid("trivial:BTC:6"), _RATE_CAP_REASON)
+
+
+def test_orders_on_two_symbols_share_one_rate_cap_window() -> None:
+    # A venue rate-limits the account, not a symbol, so the window is engine-wide.
+    engine = _engine(limits=_THREE_PER_SECOND)
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))
+        await engine.bus.publish(_tick("2500", symbol="ETH"))
+        await engine.bus.publish(_limit_signal("100", seq=1))
+        await engine.bus.publish(_limit_signal("100", seq=2))
+        await engine.bus.publish(_limit_signal("100", seq=1, symbol="ETH"))
+        await engine.bus.publish(_limit_signal("100", seq=2, symbol="ETH"))
+
+    asyncio.run(scenario())
+
+    for cloid in ("trivial:BTC:1", "trivial:BTC:2", "trivial:ETH:1"):
+        assert _state(engine.store, derive_cloid(cloid)) is OrderState.LIVE
+    _assert_denied_by(engine, derive_cloid("trivial:ETH:2"), _RATE_CAP_REASON)
