@@ -218,6 +218,27 @@ def test_a_mark_max_age_that_is_not_a_positive_number_is_refused_at_load(
         )
 
 
+@pytest.mark.parametrize(
+    "rate_cap", [{"max_orders_per_window": 3}, {"window_seconds": 1.0}], ids=["only-n", "only-s"]
+)
+def test_a_rate_cap_with_only_one_of_its_two_settings_is_refused_at_load(
+    tmp_path: Path, rate_cap: dict[str, float]
+) -> None:
+    # Half a rate cap cannot be enforced. Running without it would look like a
+    # cap to the user while none is there (ADR-0051).
+    (tmp_path / "ticks.jsonl").touch()
+    with pytest.raises(
+        ValidationError, match="set both max_orders_per_window and window_seconds, or neither"
+    ):
+        AppConfig.model_validate(
+            {
+                "replay": ReplayFeedConfig(path=tmp_path / "ticks.jsonl"),
+                "paper": PaperExchangeConfig(genesis_collateral=Decimal("100000")),
+                "limits": rate_cap,
+            }
+        )
+
+
 @pytest.mark.parametrize("age", ["0", "-1", "nan", "inf", "1e300", "1e-10"])
 def test_a_band_mark_max_age_that_is_not_a_positive_number_is_refused_at_load(
     tmp_path: Path, age: str

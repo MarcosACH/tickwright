@@ -85,6 +85,10 @@ class PreTradeLimits:
     def __post_init__(self) -> None:
         # A bad age stops the boot, not the first market order.
         duration_ns(self.mark_max_age_seconds, name="mark_max_age_seconds")
+        # Half a rate cap cannot be enforced, and silently dropping it would
+        # leave the user thinking a cap is on.
+        if (self.max_orders_per_window is None) != (self.window_seconds is None):
+            raise ValueError("set both max_orders_per_window and window_seconds, or neither")
 
 
 NO_LIMITS: Final = PreTradeLimits()
