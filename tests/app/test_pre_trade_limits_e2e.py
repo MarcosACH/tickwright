@@ -16,14 +16,18 @@ is spelled out beside each step.
 
 import asyncio
 import json
-from collections.abc import Callable, Sequence
+import os
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+from store_backends import POSTGRES_DSN_ENV, STORE_BACKEND_PARAMS, resolve_backend
+
 from tickwright.adapters.feed import ReplayFeedConfig
 from tickwright.adapters.paper import PaperExchangeConfig
-from tickwright.adapters.store import SQLiteStoreConfig
+from tickwright.adapters.store import PostgresStoreConfig, SQLiteStoreConfig
 from tickwright.app.build import (
     build_bus,
     build_clock,
@@ -42,6 +46,7 @@ from tickwright.domain import (
     OrderDenied,
     OrderEvent,
     OrderFilled,
+    OrderState,
     OrderType,
     Portfolio,
     Side,
@@ -106,6 +111,10 @@ class Step:
     expected: list[str]
     symbol: str = "BTC"
 
+    @property
+    def ts_ns(self) -> int:
+        return int(self.seconds * SECOND_NS)
+
 
 # Ticks are two seconds apart, so each tick opens a fresh rate cap window.
 CAPS = [
@@ -155,7 +164,10 @@ STALE_CLOSE = Step(
 
 
 class ScriptedStrategy:
-    """Sends the orders a script lists for each tick it sees, at market.
+    """Sends, at market, the orders its script lists for a tick's time.
+
+    The script is keyed by time, not by tick count, so a restarted strategy
+    picks up where the feed is without needing its snapshot.
 
     ``outcomes`` records, in send order, ``"filled"`` or the denial reason."""
 
@@ -165,12 +177,11 @@ class ScriptedStrategy:
         strategy_id: str,
         bus: EventBus,
         clock: Clock,
-        script: Sequence[Sequence[Order]],
+        script: Mapping[int, Sequence[Order]],
     ) -> None:
         self.strategy_id = strategy_id
         self._emitter = SignalEmitter(strategy_id=strategy_id, bus=bus, clock=clock)
         self._script = script
-        self._ticks_seen = 0
         self._sent: list[str] = []
         self._results: dict[str, str] = {}
 
@@ -179,11 +190,7 @@ class ScriptedStrategy:
         return [self._results.get(signal_id) for signal_id in self._sent]
 
     async def on_tick(self, tick: MarketTick) -> None:
-        index = self._ticks_seen
-        self._ticks_seen += 1
-        if index >= len(self._script):
-            return
-        for order in self._script[index]:
+        for order in self._script.get(tick.ts_event, []):
             signal_id = await self._emitter.place(
                 symbol=order.symbol,
                 side=order.side,
@@ -203,13 +210,12 @@ class ScriptedStrategy:
         self._emitter.set_next_seq(next_seq)
 
     def snapshot(self) -> bytes:
-        return json.dumps({"version": 1, "ticks_seen": self._ticks_seen}).encode()
+        return json.dumps({"version": 1}).encode()
 
     def restore(self, data: bytes) -> None:
         state = json.loads(data)
         if state.get("version") != 1:
             raise ValueError(f"unknown snapshot version: {state.get('version')!r}")
-        self._ticks_seen = int(state["ticks_seen"])
 
 
 def _write_ticks(path: Path, steps: Sequence[Step]) -> Path:
@@ -219,24 +225,25 @@ def _write_ticks(path: Path, steps: Sequence[Step]) -> Path:
             "price": str(PRICES[step.symbol]),
             "size": "10",
             "aggressor_side": "buy",
-            "trade_id": f"t{i}",
-            "ts_event": int(step.seconds * SECOND_NS),
+            "trade_id": f"{step.symbol}-{step.ts_ns}",
+            "ts_event": step.ts_ns,
         }
-        for i, step in enumerate(steps)
+        for step in steps
     ]
     path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
     return path
 
 
-def _config(tmp_path: Path, steps: Sequence[Step]) -> AppConfig:
-    return AppConfig(
-        replay=ReplayFeedConfig(path=_write_ticks(tmp_path / "ticks.jsonl", steps)),
-        sqlite=SQLiteStoreConfig(path=tmp_path / "ledger.db"),
-        paper=PaperExchangeConfig(instrument_specs={"BTC": SPEC}, genesis_collateral=GENESIS),
-        limits=LIMITS,
+def _config(tmp_path: Path, steps: Sequence[Step], **overrides: object) -> AppConfig:
+    """The scenario's config over ``tmp_path``. Overrides poke one field."""
+    fields: dict[str, object] = {
+        "replay": ReplayFeedConfig(path=_write_ticks(tmp_path / "ticks.jsonl", steps)),
+        "sqlite": SQLiteStoreConfig(path=tmp_path / "ledger.db"),
+        "paper": PaperExchangeConfig(instrument_specs={"BTC": SPEC}, genesis_collateral=GENESIS),
+        "limits": LIMITS,
         # Declares what this process trades, which the limits must name. The
         # engine below runs the scripted strategy under this id instead.
-        strategies=[
+        "strategies": [
             StrategyConfig(
                 kind="single_shot_market",
                 strategy_id="scripted",
@@ -245,7 +252,8 @@ def _config(tmp_path: Path, steps: Sequence[Step]) -> AppConfig:
                 quantity=Decimal("0.1"),
             )
         ],
-    )
+    }
+    return AppConfig(**{**fields, **overrides})  # type: ignore[arg-type]
 
 
 @dataclass
@@ -273,7 +281,10 @@ def _wire(config: AppConfig, steps: Sequence[Step], *, bus: EventBus | None = No
         leverage=leverage,
     )
     strategy = ScriptedStrategy(
-        strategy_id="scripted", bus=bus, clock=clock, script=[step.orders for step in steps]
+        strategy_id="scripted",
+        bus=bus,
+        clock=clock,
+        script={step.ts_ns: step.orders for step in steps},
     )
     engine.register(strategy, symbols={"BTC", "ETH"})
     return _Life(engine=engine, strategy=strategy, portfolio=engine.portfolio_for("scripted"))
@@ -287,29 +298,55 @@ async def _until(condition: Callable[[], bool]) -> None:
     await asyncio.wait_for(poll(), timeout=5)
 
 
-def _run(life: _Life, expected: Sequence[str]) -> None:
-    """Run until every expected order has an outcome, then stop gracefully."""
+def _run(life: _Life, expected: Sequence[str], *, crash: bool = False) -> None:
+    """Run until every expected order has an outcome, then stop gracefully.
+
+    ``crash`` cancels the run instead. Nothing is torn down, which is what a
+    killed process leaves behind for the next life."""
 
     def settled() -> bool:
         outcomes = life.strategy.outcomes
         return len(outcomes) == len(expected) and None not in outcomes
 
-    async def go() -> int:
+    async def go() -> int | None:
         run = asyncio.create_task(life.engine.run())
         await _until(settled)
+        if crash:
+            run.cancel()
+            await asyncio.gather(run, return_exceptions=True)
+            return None
         await life.engine.stop()
         return await run
 
-    assert asyncio.run(go()) == 0
+    exit_code = asyncio.run(go())
+    if not crash:
+        assert exit_code == 0
 
 
-def _scenario(tmp_path: Path, steps: Sequence[Step]) -> _Life:
+def _scenario(
+    tmp_path: Path,
+    steps: Sequence[Step],
+    *,
+    crash: bool = False,
+    overrides: Mapping[str, object] | None = None,
+) -> _Life:
     """Run ``steps`` as one life and check every order got its expected outcome."""
     expected = [outcome for step in steps for outcome in step.expected]
-    life = _wire(_config(tmp_path, steps), steps)
-    _run(life, expected)
+    life = _wire(_config(tmp_path, steps, **(overrides or {})), steps)
+    _run(life, expected, crash=crash)
     assert life.strategy.outcomes == expected
     return life
+
+
+def _store_fields(backend: str, tmp_path: Path) -> dict[str, object]:
+    """The ``AppConfig`` fields that select ``backend``. Postgres skips without a server."""
+    resolve_backend(backend, tmp_path / "ledger.db")
+    if backend == "postgres":
+        return {
+            "store": "postgres",
+            "postgres": PostgresStoreConfig(dsn=os.environ[POSTGRES_DSN_ENV]),
+        }
+    return {}
 
 
 def _position(portfolio: Portfolio) -> Decimal:
@@ -347,3 +384,38 @@ def test_a_close_bigger_than_the_size_and_value_caps_fills_with_a_stale_mark(
 
     # 0.7 - 0.7
     assert _position(life.portfolio) == Decimal("0")
+
+
+# The first life builds the long to 1.2 and is killed before the t=8 order.
+# The second life sends that order: 1.2 + 0.35 = 1.55 > 1.3, so it is denied
+# only if the cap reads the recovered position.
+BEFORE_CRASH = CAPS[:4]
+AFTER_RESTART = CAPS[4:]
+
+
+@pytest.mark.parametrize("backend", STORE_BACKEND_PARAMS)
+def test_after_a_crash_the_max_position_holds_against_the_recovered_position(
+    tmp_path: Path, backend: str
+) -> None:
+    store_fields = _store_fields(backend, tmp_path)
+    _scenario(tmp_path, BEFORE_CRASH, crash=True, overrides=store_fields)
+
+    life = _scenario(tmp_path, AFTER_RESTART, overrides=store_fields)
+
+    # 0.3 + 0.1 + 0.1 + 0.35 + 0.35, all from the first life.
+    assert _position(life.portfolio) == Decimal("1.2")
+    store = build_store(_config(tmp_path, AFTER_RESTART, **store_fields))
+    try:
+        orders = store.all_orders()
+    finally:
+        store.close()
+    signal_ids = [order.signal_id for order in orders]
+    assert len(signal_ids) == len(set(signal_ids))
+    # The five fills of the first life, each placed once and none again.
+    assert sorted(o.quantity for o in orders if o.state is OrderState.FILLED) == [
+        Decimal("0.1"),
+        Decimal("0.1"),
+        Decimal("0.3"),
+        Decimal("0.35"),
+        Decimal("0.35"),
+    ]
