@@ -402,11 +402,10 @@ def test_backoff_is_capped_so_faulting_never_overshoots_the_window_by_much() -> 
     )
 
     with pytest.raises(StartupReconciliationTimeout):
-        asyncio.run(
-            _barrier(clock, reconciler).run(timeout_seconds=300.0, max_backoff_seconds=30.0)
-        )
+        asyncio.run(_barrier(clock, reconciler).run(timeout_seconds=300.0))
 
     # Fault lands within one capped backoff of the deadline — not ~2x the window.
+    # The barrier caps its backoff at 30 seconds.
     faulted_at_seconds = clock.timestamp_ns() / 1_000_000_000
     assert 300.0 <= faulted_at_seconds <= 330.0
 
