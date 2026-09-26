@@ -148,6 +148,8 @@ def test_the_documented_limits_line_loads_through_the_env_skin(
     assert limits.symbols["BTC"].max_order_value == Decimal("25000")
     assert limits.symbols["BTC"].max_position == Decimal("2")
     assert limits.mark_max_age_seconds == 5
+    assert limits.max_orders_per_window == 10
+    assert limits.window_seconds == 1
 
 
 def test_a_paper_run_without_a_genesis_collateral_is_rejected_at_load(tmp_path: Path) -> None:
