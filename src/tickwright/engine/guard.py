@@ -43,11 +43,13 @@ class SymbolLimits:
     """One symbol's caps (ADR-0051). ``None`` means that cap is off."""
 
     max_order_size: Decimal | None = None
-    """In coins, checked against the quantized quantity."""
+    """In coins, checked against the quantized quantity. An order that only
+    reduces the position skips it."""
     max_order_value: Decimal | None = None
     """In USD, checked against the quantized quantity times a price. A buy limit
     uses its quantized limit price. A sell limit uses that price or the latest
-    mark, whichever is higher. A market order uses the latest mark."""
+    mark, whichever is higher. A market order uses the latest mark. An order that
+    only reduces the position skips it and needs no mark."""
     max_position: Decimal | None = None
     """In coins, checked against the worst-case position on the order's side."""
 

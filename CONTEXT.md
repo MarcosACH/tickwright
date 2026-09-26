@@ -396,7 +396,8 @@ coins, max order value in USD, and max position in coins are set per symbol. Max
 window is set for the whole engine. Each cap is off unless the user sets it. An order that breaks a
 cap is `DENIED` with a reason that names the cap, and nothing else happens. The position cap
 measures the worst-case position if same-side open orders and the new order all fill. ADR-0051
-holds the formula.
+holds the formula. An order that only reduces that worst case, without crossing zero, skips max
+order size and max order value. It is still checked against max position and the rate cap.
 _Avoid_: risk limits (implies the deferred RiskEngine), circuit breaker (a breach never trips the
 [[Kill-switch]]).
 
