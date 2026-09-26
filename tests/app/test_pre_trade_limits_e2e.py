@@ -92,30 +92,44 @@ def buy(quantity: str) -> Order:
     return Order(Side.BUY, Decimal(quantity))
 
 
-# One BTC trade tick every two seconds, so each tick opens a fresh rate cap
-# window. The orders in a tick are sent in list order at that tick's time.
-SCRIPT: list[tuple[int, list[Order]]] = [
+def sell(quantity: str) -> Order:
+    return Order(Side.SELL, Decimal(quantity))
+
+
+@dataclass(frozen=True, slots=True)
+class Step:
+    """One BTC trade tick at ``seconds``, the orders sent on it in list order,
+    and the outcome each order must get."""
+
+    seconds: int
+    orders: list[Order]
+    expected: list[str]
+
+
+# Ticks are two seconds apart, so each tick opens a fresh rate cap window.
+CAPS = [
     # 0.6 > 0.5 size cap. 0.45 * 50000 = 22500 > 20000 value cap. 0.3 fills.
-    (0, [buy("0.6"), buy("0.45"), buy("0.3")]),
+    Step(
+        0,
+        [buy("0.6"), buy("0.45"), buy("0.3")],
+        ["above max order size 0.5", "above max order value 20000", FILLED],
+    ),
     # A burst of three. Two fill, the third finds the window full. Position 0.5.
-    (2, [buy("0.1"), buy("0.1"), buy("0.1")]),
+    Step(
+        2,
+        [buy("0.1"), buy("0.1"), buy("0.1")],
+        [FILLED, FILLED, "above max orders per window 2 in 1s"],
+    ),
     # A position-building run: 0.85, then 1.2, then 1.55 > 1.3 is denied.
-    (4, [buy("0.35")]),
-    (6, [buy("0.35")]),
-    (8, [buy("0.35")]),
+    Step(4, [buy("0.35")], [FILLED]),
+    Step(6, [buy("0.35")], [FILLED]),
+    Step(8, [buy("0.35")], ["above max position 1.3"]),
 ]
 
-EXPECTED = [
-    "above max order size 0.5",
-    "above max order value 20000",
-    FILLED,
-    FILLED,
-    FILLED,
-    "above max orders per window 2 in 1s",
-    FILLED,
-    FILLED,
-    "above max position 1.3",
-]
+# Position 1.2 -> 0.6. The sell of 0.6 is above the 0.5 size cap, and
+# 0.6 * 50000 = 30000 is above the 20000 value cap. It only reduces, so it
+# fills in one order. The mark is this tick's own trade, so it is fresh.
+FRESH_CLOSE = Step(10, [sell("0.6")], [FILLED])
 
 
 class ScriptedStrategy:
@@ -176,7 +190,7 @@ class ScriptedStrategy:
         self._ticks_seen = int(state["ticks_seen"])
 
 
-def _write_ticks(path: Path, script: list[tuple[int, list[Order]]]) -> Path:
+def _write_ticks(path: Path, steps: Sequence[Step]) -> Path:
     rows = [
         {
             "symbol": "BTC",
@@ -184,17 +198,17 @@ def _write_ticks(path: Path, script: list[tuple[int, list[Order]]]) -> Path:
             "size": "10",
             "aggressor_side": "buy",
             "trade_id": f"t{i}",
-            "ts_event": seconds * SECOND_NS,
+            "ts_event": step.seconds * SECOND_NS,
         }
-        for i, (seconds, _) in enumerate(script)
+        for i, step in enumerate(steps)
     ]
     path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
     return path
 
 
-def _config(tmp_path: Path) -> AppConfig:
+def _config(tmp_path: Path, steps: Sequence[Step]) -> AppConfig:
     return AppConfig(
-        replay=ReplayFeedConfig(path=_write_ticks(tmp_path / "ticks.jsonl", SCRIPT)),
+        replay=ReplayFeedConfig(path=_write_ticks(tmp_path / "ticks.jsonl", steps)),
         sqlite=SQLiteStoreConfig(path=tmp_path / "ledger.db"),
         paper=PaperExchangeConfig(instrument_specs={"BTC": SPEC}, genesis_collateral=GENESIS),
         limits=LIMITS,
@@ -219,7 +233,7 @@ class _Life:
     portfolio: Portfolio
 
 
-def _wire(config: AppConfig, *, bus: EventBus | None = None) -> _Life:
+def _wire(config: AppConfig, steps: Sequence[Step], *, bus: EventBus | None = None) -> _Life:
     """``build_engine`` with the scripted strategy registered and the bus swappable."""
     bus = bus if bus is not None else build_bus(config)
     clock = build_clock(config)
@@ -237,7 +251,7 @@ def _wire(config: AppConfig, *, bus: EventBus | None = None) -> _Life:
         leverage=leverage,
     )
     strategy = ScriptedStrategy(
-        strategy_id="scripted", bus=bus, clock=clock, script=[orders for _, orders in SCRIPT]
+        strategy_id="scripted", bus=bus, clock=clock, script=[step.orders for step in steps]
     )
     engine.register(strategy, symbols={"BTC"})
     return _Life(engine=engine, strategy=strategy, portfolio=engine.portfolio_for("scripted"))
@@ -251,7 +265,7 @@ async def _until(condition: Callable[[], bool]) -> None:
     await asyncio.wait_for(poll(), timeout=5)
 
 
-def _run(life: _Life, expected: Sequence[object]) -> None:
+def _run(life: _Life, expected: Sequence[str]) -> None:
     """Run until every expected order has an outcome, then stop gracefully."""
 
     def settled() -> bool:
@@ -267,15 +281,29 @@ def _run(life: _Life, expected: Sequence[object]) -> None:
     assert asyncio.run(go()) == 0
 
 
+def _scenario(tmp_path: Path, steps: Sequence[Step]) -> _Life:
+    """Run ``steps`` as one life and check every order got its expected outcome."""
+    expected = [outcome for step in steps for outcome in step.expected]
+    life = _wire(_config(tmp_path, steps), steps)
+    _run(life, expected)
+    assert life.strategy.outcomes == expected
+    return life
+
+
 def _position(portfolio: Portfolio) -> Decimal:
     view = portfolio.position("BTC")
     return Decimal(0) if view is None else view.size
 
 
 def test_each_cap_denies_by_name_and_orders_inside_every_cap_fill(tmp_path: Path) -> None:
-    life = _wire(_config(tmp_path))
-    _run(life, EXPECTED)
+    life = _scenario(tmp_path, CAPS)
 
-    assert life.strategy.outcomes == EXPECTED
     # 0.3 + 0.1 + 0.1 + 0.35 + 0.35
     assert _position(life.portfolio) == Decimal("1.2")
+
+
+def test_a_close_bigger_than_the_size_and_value_caps_fills_in_one_order(tmp_path: Path) -> None:
+    life = _scenario(tmp_path, [*CAPS, FRESH_CLOSE])
+
+    # 1.2 - 0.6
+    assert _position(life.portfolio) == Decimal("0.6")
