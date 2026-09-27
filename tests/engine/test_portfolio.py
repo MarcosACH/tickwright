@@ -365,7 +365,7 @@ def test_the_reconcile_cycles_ledger_side_comes_off_one_read() -> None:
     )
     projection.observe_mark(_mark(price="110", ts_event=9_000))
 
-    reading = projection.ledger_reading()
+    reading = projection.ledger_reading(snapshot=venue_holding())
 
     assert reading.net == {"BTC": Decimal("5"), "ETH": Decimal("1")}
     assert {s: r.unrealized_pnl for s, r in reading.rows.items()} == {
@@ -425,7 +425,7 @@ def test_one_reading_folds_the_book_once(monkeypatch: pytest.MonkeyPatch) -> Non
     projection.observe_mark(_mark(price="110", ts_event=9_000))
     counts.clear()
 
-    projection.ledger_reading()
+    projection.ledger_reading(snapshot=venue_holding())
 
     traversals = {name: n for name, n in counts.items() if name != "account_view"}
     assert traversals == {"account_net_size": 1, "account_valuation": 1}
@@ -454,7 +454,7 @@ def test_the_reading_stamps_each_symbol_with_the_fill_that_last_moved_it() -> No
     book_fill(projection, reduce, side=Side.SELL)
     book_fill(projection, reduce, side=Side.SELL)  # redelivered: accepted once
 
-    reading = projection.ledger_reading()
+    reading = projection.ledger_reading(snapshot=venue_holding())
 
     assert projection.fills_applied == 3
     assert reading.last_fills == {"BTC": 3, "ETH": 2}
@@ -479,7 +479,7 @@ def test_the_reading_names_the_symbols_a_fill_touched_since_a_count() -> None:
     )
     book_fill(projection, _fill(trade_id="f3", quantity="2", price="100"), side=Side.SELL)
 
-    reading = projection.ledger_reading()
+    reading = projection.ledger_reading(snapshot=venue_holding())
 
     # BTC is back at flat and still named: the question is "any fill", not net.
     assert reading.filled_since(0) == frozenset({"BTC", "ETH"})
@@ -561,7 +561,10 @@ def test_the_one_read_carries_both_margin_folds_at_the_grain_the_venue_publishes
     projection.observe_mark(_mark(price="3300", ts_event=9_000, symbol="ETH"))
     projection.observe_mark(_mark(price="21", ts_event=9_000, symbol="SOL"))
 
-    reading = projection.ledger_reading()
+    # The venue posts the bucket the open locked, so ledger and venue agree.
+    reading = projection.ledger_reading(
+        snapshot=venue_holding(BTC=None, ETH=Decimal("1500"), SOL=None)
+    )
 
     assert {s: r.margin_used for s, r in reading.rows.items()} == {
         "BTC": Decimal("110"),

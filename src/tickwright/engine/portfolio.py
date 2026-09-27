@@ -1199,7 +1199,7 @@ class PortfolioProjection:
             if owner == strategy_id and not position.is_flat
         )
 
-    def ledger_reading(self, snapshot: VenueAccountState | None = None) -> LedgerReading:
+    def ledger_reading(self, *, snapshot: VenueAccountState) -> LedgerReading:
         """The ledger's whole side of one reconcile pass, folded in one call.
 
         The one read the account cadence takes, and the reason ``_rows`` is
@@ -1224,20 +1224,21 @@ class PortfolioProjection:
         symbols a fill touched while the read was in flight. The venue
         comparison still runs off this one reading.
 
-        A ``snapshot`` values each partition at the bucket the venue posts in
+        The ``snapshot`` values each partition at the bucket the venue posts in
         it, not the one on the row. Live never computes the bucket. It takes it
         from this snapshot, in the same pass, after the comparison. Compared
         against the row instead, a bucket not yet ingested showed up as a false
         ``margin_used`` and ``free_margin`` divergence (#402). No row moves
         here. The ingest stays in the heal's one transaction.
+
+        The snapshot is required because a reading without it is that bug.
         """
-        positions: Iterable[Position] = self._positions.values()
-        if snapshot is not None:
-            positions = [
+        rows = self._rows(
+            [
                 replace(position, isolated_collateral=share)
                 for position, share in self._venue_shares(snapshot)
             ]
-        rows = self._rows(positions)
+        )
         return LedgerReading(
             account=account_view(self._account, rows),
             rows=rows,
