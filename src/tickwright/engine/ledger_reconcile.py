@@ -1199,7 +1199,7 @@ class LedgerReconciliation:
         # divergence input: we report the venue's own number, so there is
         # nothing here to diverge against.
         self._portfolio.observe_venue_liquidation(state)
-        reading = self._portfolio.ledger_reading()
+        reading = self._portfolio.ledger_reading(state)
         findings = ReconcileFindings.classify(
             state,
             reading,

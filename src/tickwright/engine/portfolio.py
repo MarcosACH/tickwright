@@ -15,8 +15,8 @@ those reads (ADR-0041 §8). The scoped facade ``for_strategy`` hands out is what
 implements the seam.
 """
 
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from decimal import Decimal
 
 from tickwright.domain import (
@@ -599,25 +599,39 @@ class PortfolioProjection:
         every deadline, which is the same indistinguishable-from-a-correction
         write ``apply_funding``'s ``None`` refuses one grain up.
         """
+        moved: list[Position] = []
+        for position, share in self._venue_shares(snapshot):
+            if position.isolated_collateral != share:
+                position.isolated_collateral = share
+                moved.append(position)
+        return tuple(moved)
+
+    def _venue_shares(self, snapshot: VenueAccountState) -> list[tuple[Position, Decimal]]:
+        """Each partition beside its share of the bucket the venue posts.
+
+        Shared by the ingest and by ``ledger_reading``, so the reconcile
+        compares against the same bucket the ingest is about to write (#402).
+        """
         # The one place that decides which venue field the bucket is read from.
         venue = {position.symbol: position.isolated_collateral for position in snapshot.positions}
         by_symbol: dict[str, list[Position]] = {}
         for position in self._positions.values():
             by_symbol.setdefault(position.symbol, []).append(position)
-        moved: list[Position] = []
+        shares: list[tuple[Position, Decimal]] = []
         for symbol, partitions in by_symbol.items():
             bucket = venue.get(symbol)
             across = tuple(partitions)
             # ``strict``: one share per partition is ``_share``'s own invariant,
             # and a silent truncation here would leave a partition holding the
             # previous cycle's bucket while the Σ still looked right.
-            for position, share in zip(
-                across, self._share(_ZERO if bucket is None else bucket, across=across), strict=True
-            ):
-                if position.isolated_collateral != share:
-                    position.isolated_collateral = share
-                    moved.append(position)
-        return tuple(moved)
+            shares.extend(
+                zip(
+                    across,
+                    self._share(_ZERO if bucket is None else bucket, across=across),
+                    strict=True,
+                )
+            )
+        return shares
 
     @staticmethod
     def _share(bucket: Decimal, *, across: tuple[Position, ...]) -> tuple[Decimal, ...]:
@@ -1185,7 +1199,7 @@ class PortfolioProjection:
             if owner == strategy_id and not position.is_flat
         )
 
-    def ledger_reading(self) -> LedgerReading:
+    def ledger_reading(self, snapshot: VenueAccountState | None = None) -> LedgerReading:
         """The ledger's whole side of one reconcile pass, folded in one call.
 
         The one read the account cadence takes, and the reason ``_rows`` is
@@ -1209,8 +1223,21 @@ class PortfolioProjection:
         compared against it. It exists so ``filled_since`` can tell which
         symbols a fill touched while the read was in flight. The venue
         comparison still runs off this one reading.
+
+        A ``snapshot`` values each partition at the bucket the venue posts in
+        it, not the one on the row. Live never computes the bucket. It takes it
+        from this snapshot, in the same pass, after the comparison. Compared
+        against the row instead, a bucket not yet ingested showed up as a false
+        ``margin_used`` and ``free_margin`` divergence (#402). No row moves
+        here. The ingest stays in the heal's one transaction.
         """
-        rows = self._rows()
+        positions: Iterable[Position] = self._positions.values()
+        if snapshot is not None:
+            positions = [
+                replace(position, isolated_collateral=share)
+                for position, share in self._venue_shares(snapshot)
+            ]
+        rows = self._rows(positions)
         return LedgerReading(
             account=account_view(self._account, rows),
             rows=rows,
@@ -1255,7 +1282,7 @@ class PortfolioProjection:
         """
         return {symbol: mark.price for symbol, mark in self._marks.items()}
 
-    def _rows(self) -> dict[str, SymbolValuation]:
+    def _rows(self, positions: Iterable[Position] | None = None) -> dict[str, SymbolValuation]:
         """Every symbol's account-grain row, folded once over the book (#304).
 
         The one traversal behind every read: ``account()``, ``position()``,
@@ -1269,7 +1296,7 @@ class PortfolioProjection:
         disagree with the ``PositionView`` a strategy reads for it.
         """
         return account_valuation(
-            self._positions.values(),
+            self._positions.values() if positions is None else positions,
             self._mark_prices(),
             leverage=self._leverage,
             specs=self._specs,
