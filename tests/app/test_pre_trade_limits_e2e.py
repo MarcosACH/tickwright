@@ -81,7 +81,7 @@ LIMITS = PreTradeLimits(
         )
     },
     mark_max_age_seconds=5,
-    rate_cap=RateCap(max_orders=2, window_seconds=1),
+    rate_cap=RateCap(max_orders=2, window_seconds=1.0),
 )
 
 FILLED = "filled"
@@ -129,7 +129,7 @@ CAPS = [
     Step(
         2,
         [buy("0.1"), buy("0.1"), buy("0.1")],
-        [FILLED, FILLED, "above max orders per window 2 in 1s"],
+        [FILLED, FILLED, "above max orders per window 2 in 1.0s"],
     ),
     # A position-building run: 0.85, then 1.2, then 1.55 > 1.3 is denied.
     Step(4, [buy("0.35")], [FILLED]),
@@ -149,7 +149,7 @@ FRESH_CLOSE = Step(10, [sell("0.6")], [FILLED])
 # buy is a flip, not a close, and the size cap would deny it first.
 FULL_WINDOW = [
     Step(10.3, [buy("0.1")], [FILLED]),
-    Step(10.6, [sell("0.7")], ["above max orders per window 2 in 1s"]),
+    Step(10.6, [sell("0.7")], ["above max orders per window 2 in 1.0s"]),
 ]
 
 # An ETH tick moves the clock to 20s while the BTC mark stays at 10.6s. That
