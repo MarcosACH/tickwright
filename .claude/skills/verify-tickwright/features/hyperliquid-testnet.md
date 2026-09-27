@@ -87,5 +87,5 @@ Preconditions:
   `margin_used` and `free_margin`. A round trip that closes within 60 seconds of
   `account.materialised` passes. So a PASS here does not prove the fix. To prove it, raise
   `HOLD_TICKS` until the hold outlasts 60 seconds. Then confirm that `account.reconciled` comes
-  before `position.closed` in `rt.stderr.jsonl`. A hold past 120 seconds adds a second reconcile,
-  so `tn-reconcile` then fails by design.
+  before `position.closed` in `rt.stderr.jsonl`. If the close comes more than 120 seconds after
+  `account.materialised`, a second reconcile lands, so `tn-reconcile` then fails by design.
