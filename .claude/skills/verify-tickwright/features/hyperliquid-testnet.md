@@ -81,6 +81,11 @@ Preconditions:
 - `HOLD_TICKS` counts real testnet trades. On a quiet market three ticks can take a minute.
 - A `verify.flat` read of `account.equity` can be `null` when no mark has arrived since the
   fill. That is the documented "unknown, not zero" rule, not a failure.
-- **Known FAIL since 2026-09-17 (#367): `tn-divergence`.** The first account reconcile after the
-  open classifies before it ingests the isolated position's collateral, so it always raises a
-  false `valuation.divergence` on `margin_used` and `free_margin`. Stays red until #367 lands.
+- **Known FAIL since 2026-09-17 (#402): `tn-divergence`.** Until #402 lands, it fails whenever
+  an account reconcile runs while the position is open. The ledger then reads the isolated
+  `margin_used` as 0 against the venue's collateral, and raises a false `valuation.divergence` on
+  `margin_used` and `free_margin`. A round trip that closes within 60 seconds of
+  `account.materialised` passes. So a PASS here does not prove the fix. To prove it, raise
+  `HOLD_TICKS` until the hold outlasts 60 seconds. Then confirm that `account.reconciled` comes
+  before `position.closed` in `rt.stderr.jsonl`. If the close comes more than 120 seconds after
+  `account.materialised`, a second reconcile lands, so `tn-reconcile` then fails by design.
