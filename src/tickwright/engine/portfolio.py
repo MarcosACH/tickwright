@@ -15,8 +15,8 @@ those reads (ADR-0041 §8). The scoped facade ``for_strategy`` hands out is what
 implements the seam.
 """
 
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from decimal import Decimal
 
 from tickwright.domain import (
@@ -599,25 +599,39 @@ class PortfolioProjection:
         every deadline, which is the same indistinguishable-from-a-correction
         write ``apply_funding``'s ``None`` refuses one grain up.
         """
+        moved: list[Position] = []
+        for position, share in self._venue_shares(snapshot):
+            if position.isolated_collateral != share:
+                position.isolated_collateral = share
+                moved.append(position)
+        return tuple(moved)
+
+    def _venue_shares(self, snapshot: VenueAccountState) -> list[tuple[Position, Decimal]]:
+        """Each partition beside its share of the bucket the venue posts.
+
+        Shared by the ingest and by ``ledger_reading``, so the reconcile
+        compares against the same bucket the ingest is about to write (#402).
+        """
         # The one place that decides which venue field the bucket is read from.
         venue = {position.symbol: position.isolated_collateral for position in snapshot.positions}
         by_symbol: dict[str, list[Position]] = {}
         for position in self._positions.values():
             by_symbol.setdefault(position.symbol, []).append(position)
-        moved: list[Position] = []
+        shares: list[tuple[Position, Decimal]] = []
         for symbol, partitions in by_symbol.items():
             bucket = venue.get(symbol)
             across = tuple(partitions)
             # ``strict``: one share per partition is ``_share``'s own invariant,
             # and a silent truncation here would leave a partition holding the
             # previous cycle's bucket while the Σ still looked right.
-            for position, share in zip(
-                across, self._share(_ZERO if bucket is None else bucket, across=across), strict=True
-            ):
-                if position.isolated_collateral != share:
-                    position.isolated_collateral = share
-                    moved.append(position)
-        return tuple(moved)
+            shares.extend(
+                zip(
+                    across,
+                    self._share(_ZERO if bucket is None else bucket, across=across),
+                    strict=True,
+                )
+            )
+        return shares
 
     @staticmethod
     def _share(bucket: Decimal, *, across: tuple[Position, ...]) -> tuple[Decimal, ...]:
@@ -733,13 +747,13 @@ class PortfolioProjection:
         an add on the same side reports ``CHANGED``, and recomputing there would
         silently top the bucket up.
 
-        **The close is the half paper has to write itself.** Live's release is
-        the reconcile ingest dropping a symbol the venue no longer holds, and
-        that cadence never runs here (ADR-0034), so a bucket left standing on a
-        flat partition is permanent — and not inert, since isolated
-        ``margin_used`` is ``isolated_collateral + unrealized_pnl``: the whole of
-        it would keep reporting through ``total_margin_used`` and coming off
-        ``free_margin`` for an account holding nothing.
+        **The close releases on both paths.** A flat position holds no isolated
+        margin on the venue, so zero is a fact and not a guess. Isolated
+        ``margin_used`` is ``isolated_collateral + unrealized_pnl``, so a bucket
+        left on a flat partition reports the whole of it through
+        ``total_margin_used``. On paper no reconcile ever clears it (ADR-0034).
+        On live the next ingest would, but the reconcile compares before it
+        ingests, so that pass raised a false ``free_margin`` divergence (#402).
 
         The two are written as release-then-lock rather than as exclusive
         branches, because a flip through zero announces ``(CLOSED, OPENED)`` and
@@ -754,7 +768,9 @@ class PortfolioProjection:
         deriving it again from a leverage the run may since have been
         reconfigured with.
         """
-        if not changes:
+        if PositionChange.CLOSED in changes:
+            position.isolated_collateral = _ZERO
+        if PositionChange.OPENED not in changes:
             return
         if not self._spec.declares_genesis:
             # The declared-versus-ingested predicate, the same one recovery's
@@ -763,13 +779,8 @@ class PortfolioProjection:
             # unrealizedPnl``, ADR-0043 §3). Computing one here would put a
             # number on the ledger the venue never posted, and would be wrong
             # from the first ``updateIsolatedMargin`` top-up — which live has
-            # and paper does not model (ADR-0040 §1). The release below is
-            # declined on the same predicate and for the same reason: the venue
-            # authors both ends of the field, and the ingest performs both.
-            return
-        if PositionChange.CLOSED in changes:
-            position.isolated_collateral = _ZERO
-        if PositionChange.OPENED not in changes:
+            # and paper does not model (ADR-0040 §1). A live flip therefore
+            # holds 0 until the next ingest takes the residual's bucket.
             return
         leverage = self.leverage_for(position.symbol)
         if leverage.mode != "isolated":
@@ -1188,7 +1199,7 @@ class PortfolioProjection:
             if owner == strategy_id and not position.is_flat
         )
 
-    def ledger_reading(self) -> LedgerReading:
+    def ledger_reading(self, *, snapshot: VenueAccountState) -> LedgerReading:
         """The ledger's whole side of one reconcile pass, folded in one call.
 
         The one read the account cadence takes, and the reason ``_rows`` is
@@ -1204,16 +1215,30 @@ class PortfolioProjection:
         cycle just moved (ADR-0034).
 
         ``observe_venue_liquidation`` is deliberately **not** folded in. It is a
-        write, and one that must precede this read; hiding it inside a read verb
-        would make the ordering invisible at the call site that depends on it.
+        write, and this is a read. The reading never uses the liquidation
+        prices, so the comparison does not depend on when that write runs.
 
         The cadence reads one integer beside this: ``fills_applied``, before
         the venue read (#284, #324). It is not a reading and no venue figure is
         compared against it. It exists so ``filled_since`` can tell which
         symbols a fill touched while the read was in flight. The venue
         comparison still runs off this one reading.
+
+        The ``snapshot`` values each partition at the bucket the venue posts in
+        it, not the one on the row. Live never computes the bucket. It takes it
+        from this snapshot, in the same pass, after the comparison. Compared
+        against the row instead, a bucket not yet ingested showed up as a false
+        ``margin_used`` and ``free_margin`` divergence (#402). No row moves
+        here. The ingest stays in the heal's one transaction.
+
+        The snapshot is required because a reading without it is that bug.
         """
-        rows = self._rows()
+        rows = self._rows(
+            [
+                replace(position, isolated_collateral=share)
+                for position, share in self._venue_shares(snapshot)
+            ]
+        )
         return LedgerReading(
             account=account_view(self._account, rows),
             rows=rows,
@@ -1258,7 +1283,7 @@ class PortfolioProjection:
         """
         return {symbol: mark.price for symbol, mark in self._marks.items()}
 
-    def _rows(self) -> dict[str, SymbolValuation]:
+    def _rows(self, positions: Iterable[Position] | None = None) -> dict[str, SymbolValuation]:
         """Every symbol's account-grain row, folded once over the book (#304).
 
         The one traversal behind every read: ``account()``, ``position()``,
@@ -1272,7 +1297,7 @@ class PortfolioProjection:
         disagree with the ``PositionView`` a strategy reads for it.
         """
         return account_valuation(
-            self._positions.values(),
+            self._positions.values() if positions is None else positions,
             self._mark_prices(),
             leverage=self._leverage,
             specs=self._specs,

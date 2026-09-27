@@ -2236,8 +2236,8 @@ def _levered(
     The **bucket** moves with the setting for the same reason and is the other
     half of that steady state: a row's mode is written on it twice, and a cross
     position posts no bucket at all while an isolated one posts the bucket its
-    margin is computed from (``UNPOSTED_BUCKET`` here, these rows being the
-    pre-ingest shape ``account_state`` builds). Left where it was, a snapshot
+    margin is computed from (``UNPOSTED_BUCKET`` here, the bucket
+    ``account_state`` builds). Left where it was, a snapshot
     re-margined to cross would carry an isolated position's bucket beside a
     cross setting, which ``margined`` now refuses rather than silently pricing
     off whichever field it read first.
@@ -2544,9 +2544,8 @@ def _isolated(
     the ``margin_used`` that bucket backs.
 
     A real venue's isolated position locks a positive bucket, and this is what
-    posts one: ``account_state``'s rows carry ``UNPOSTED_BUCKET`` instead,
-    modelling the ledger's pre-ingest ``0`` so that cases about something else
-    are not all reporting a margin divergence.
+    posts one: ``account_state``'s rows carry ``UNPOSTED_BUCKET`` instead, so
+    that cases about something else need no bucket arithmetic.
 
     A ``Decimal`` and not ``Decimal | None``. This used to take ``None`` for
     "the venue says **cross**, backed by the account pool" — the claim the
@@ -2561,13 +2560,22 @@ def _isolated(
     ``margin_used`` takes precedence and is the escape hatch, the one
     ``implied_free_margin`` holds for its own field: a case whose subject is the
     disagreement passes the figure it wants compared.
+
+    ``free_margin`` moves with the posted margin. The venue takes the bucket
+    out of it (#402 measured `843.53 = 928.27 − 84.73`), so a snapshot that
+    posted a bucket and kept the unbucketed figure is one no venue returns.
     """
 
     def bucketed(position: VenuePositionState) -> VenuePositionState:
         posted = margined(replace(position, isolated_collateral=collateral))
         return posted if margin_used is None else replace(posted, margin_used=Decimal(margin_used))
 
-    return replace(state, positions=tuple(bucketed(p) for p in state.positions))
+    positions = tuple(bucketed(p) for p in state.positions)
+    return replace(
+        state,
+        positions=positions,
+        free_margin=state.equity - sum((p.margin_used for p in positions), Decimal("0")),
+    )
 
 
 def test_the_isolated_snapshot_carries_the_margin_a_venue_would_have_published() -> None:
@@ -2644,15 +2652,8 @@ def test_a_cycle_ingests_the_venues_locked_collateral_onto_the_partition() -> No
     the position's mark-to-market where a reader expects its collateral.
 
     The snapshot agrees with the ledger on every Tier-1 line, so the cycle heals
-    nothing and the ingest is the only thing it leaves behind.
-
-    It does not agree at Tier-2, and the finding is honest rather than
-    incidental: the reading is taken before the ingest, so the pass really did
-    compare a ledger margin of ``0 + uPnL`` against the bucket the venue posts.
-    A first cycle of a life reports it once and the ingest ends it — the same
-    pass, in the same transaction — which is why nothing suppresses it. Silence
-    would be the cycle deciding on its own behalf that a figure it *knows* is
-    degraded need not be said out loud.
+    nothing and the ingest is the only thing it leaves behind. That the pass
+    raises no margin finding over the missing bucket is #402's case below.
     """
     store = SQLiteStore(":memory:")
     keeper = _ledger(store, equity="25.9144", leverage=_BTC_ISOLATED_5X, specs={"BTC": _BTC_SPEC})
@@ -2670,17 +2671,8 @@ def test_a_cycle_ingests_the_venues_locked_collateral_onto_the_partition() -> No
     # position reporting five figures of leverage, on a book that is fine.
     assert before.effective_leverage == Decimal("10802.5")
 
-    divergences = asyncio.run(cycle.reconcile_account())
+    asyncio.run(cycle.reconcile_account())
 
-    assert divergences == (
-        Divergence(
-            tier=DivergenceTier.TIER_2,
-            field=DivergenceField.MARGIN_USED,
-            symbol="BTC",
-            ledger=Decimal("0.012"),
-            venue=_BTC_BUCKET + Decimal("0.012"),
-        ),
-    )
     after = projection.position("BTC", strategy_id="alpha")
     assert after is not None
     assert after.margin_used == _BTC_BUCKET + Decimal("0.012")
@@ -2720,6 +2712,32 @@ def test_the_ingested_collateral_lands_in_the_cycles_own_transaction() -> None:
     assert [(p.symbol, p.isolated_collateral) for p in store.all_positions()] == [
         ("BTC", _BTC_BUCKET)
     ]
+
+
+def test_a_bucket_the_ledger_has_not_ingested_yet_is_not_a_margin_divergence() -> None:
+    """The first cycle over an isolated position agrees with the venue (#402).
+
+    Live never computes the bucket. It learns it from this same snapshot. So a
+    ledger that has not ingested it yet is not disagreeing with the venue. It
+    is waiting for the number the pass is about to take. Compared before the
+    ingest, `margin_used` and `free_margin` both diverged by the whole bucket,
+    on every isolated position held across a reconcile.
+
+    Ledger and venue agree on size, cash and uPnL, so the bucket is the only
+    thing that could make this pass report anything.
+    """
+    keeper = _ledger(
+        SQLiteStore(":memory:"),
+        equity="25.9144",
+        leverage=_BTC_ISOLATED_5X,
+        specs={"BTC": _BTC_SPEC},
+    )
+    _book_fill(keeper.portfolio, quantity="0.002", price="64809")
+    _mark(keeper.portfolio, "BTC", "64815")
+    venue = _AccountVenue(_isolated(account_state("25.9264", "0.012"), _BTC_BUCKET))
+    cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+
+    assert asyncio.run(cycle.reconcile_account()) == ()
 
 
 def _alerts(logs: Sequence[Mapping[str, object]]) -> list[Mapping[str, object]]:

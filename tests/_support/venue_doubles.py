@@ -170,13 +170,10 @@ UNPOSTED_BUCKET = Decimal("0")
 is the **ledger's** shape rather than a venue's.
 
 A real venue's isolated position always locks a positive bucket, so a venue
-returning this row is not what it models. What it models is the pre-ingest state
-the cadence actually compares against: live never computes the bucket
-(``_lock_isolated_collateral`` declines on the declared-versus-ingested
-predicate), the reading is taken *before* the pass ingests it, and our own
-``Position.isolated_collateral`` opens at the ``0`` the dataclass gives it. So a
-ledger holding one of these symbols computes ``0 + uPnL``, and the row that
-agrees with it is this one.
+returning this row is not what it models. It keeps the margin at the bare uPnL,
+so ``free_margin`` stays ``equity − Σ uPnL`` and cases about something else need
+no bucket arithmetic. The reconcile values the ledger at the snapshot's own
+bucket (#402), so this row agrees with the ledger whatever the ledger holds.
 
 Declared rather than left at ``None``, which is what it used to be, and the
 difference is the point: ``None`` is how ``VenuePositionState`` says **cross**,
@@ -185,8 +182,7 @@ resolved the contradiction by inventing the zero. Written down, the same numbers
 come out of a row whose two mode signals agree, and ``margined`` can refuse the
 ones that do not.
 
-A case whose subject *is* the bucket posts a real one with ``_isolated`` and gets
-the ``MARGIN_USED`` divergence a first cycle of a life genuinely reports."""
+A case whose subject *is* the bucket posts a real one with ``_isolated``."""
 
 
 CROSSLESS_MAINTENANCE = Decimal("0")

@@ -810,10 +810,9 @@ def _unvalued(state: VenueAccountState, reading: LedgerReading) -> int:
 
     ``margin_used`` is counted on the predicate it is *dropped* on and not on
     the mark behind it, which is the same reason ``free_margin`` is asked for
-    separately below: at isolated 1x with no bucket ingested the figure is the
-    uPnL over again, so the two go unknown together — an equivalence between two
-    derivations rather than a rule either states, and one the cross arm does not
-    share.
+    separately below: an isolated figure is its bucket plus the uPnL, so the two
+    go unknown together — an equivalence between two derivations rather than a
+    rule either states, and one the cross arm does not share.
 
     ``maintenance_margin`` is asked for by **recomputing the Σ**, not read off
     ``reading.account.total_maintenance_margin`` beside the other two account
@@ -1199,7 +1198,7 @@ class LedgerReconciliation:
         # divergence input: we report the venue's own number, so there is
         # nothing here to diverge against.
         self._portfolio.observe_venue_liquidation(state)
-        reading = self._portfolio.ledger_reading()
+        reading = self._portfolio.ledger_reading(snapshot=state)
         findings = ReconcileFindings.classify(
             state,
             reading,
