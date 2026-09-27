@@ -13,6 +13,7 @@ state is persisted through the ``Store`` and restored on construction, so a halt
 outlives a crash and is cleared only by an explicit reset.
 """
 
+from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
 from decimal import Decimal
@@ -30,12 +31,11 @@ from tickwright.domain import (
     Side,
     Store,
     below_min_notional,
+    duration_ns,
     quantize_price,
     quantize_size,
 )
 from tickwright.observability import NamedEvent, named_event
-
-from .duration import duration_ns
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -43,10 +43,13 @@ class SymbolLimits:
     """One symbol's caps (ADR-0051). ``None`` means that cap is off."""
 
     max_order_size: Decimal | None = None
-    """In coins, checked against the quantized quantity."""
+    """In coins, checked against the quantized quantity. An order that only
+    reduces the position skips it."""
     max_order_value: Decimal | None = None
-    """In USD, checked against the quantized quantity times a price. A limit order
-    uses its quantized limit price. A market order uses the latest mark."""
+    """In USD, checked against the quantized quantity times a price. A buy limit
+    uses its quantized limit price. A sell limit uses that price or the latest
+    mark, whichever is higher. A market order uses the latest mark. An order that
+    only reduces the position skips it and needs no mark."""
     max_position: Decimal | None = None
     """In coins, checked against the worst-case position on the order's side."""
 
@@ -62,6 +65,32 @@ class SymbolLimits:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class RateCap:
+    """The engine-wide rate cap (ADR-0051): at most ``max_orders`` approved
+    placements in any ``window_seconds``.
+
+    Both settings are required, so half a cap cannot be written down. Half a
+    cap could not be enforced, and dropping it would leave the user thinking a
+    cap is on."""
+
+    max_orders: int
+    """How many placements the whole engine may approve inside one window."""
+    window_seconds: float
+    """The length of the sliding window."""
+
+    def __post_init__(self) -> None:
+        # Zero orders would deny every placement. That is a typo, not a policy.
+        if self.max_orders <= 0:
+            raise ValueError(f"max_orders must be positive, got {self.max_orders}")
+        # A bad window stops the boot, not the first placement.
+        duration_ns(self.window_seconds, name="window_seconds")
+
+    @property
+    def window_ns(self) -> int:
+        return duration_ns(self.window_seconds, name="window_seconds")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class PreTradeLimits:
     """The pre-trade caps ``RealGuard`` enforces (ADR-0051). Empty means no limits.
 
@@ -71,8 +100,11 @@ class PreTradeLimits:
     symbols: Mapping[str, SymbolLimits] = field(default_factory=dict)
     """A symbol with no entry has no per-symbol caps."""
     mark_max_age_seconds: float = 10.0
-    """How old a mark may be and still value a market order against a max order
-    value. Its own setting, not the reconcile band's, which does another job."""
+    """How old a mark may be and still value a market order or a sell limit
+    against a max order value. Its own setting, not the reconcile band's, which
+    does another job."""
+    rate_cap: RateCap | None = None
+    """The engine-wide rate cap. ``None`` means it is off."""
 
     def __post_init__(self) -> None:
         # A bad age stops the boot, not the first market order.
@@ -105,6 +137,9 @@ class RealGuard:
         # engine comes back tripped. ``None`` means never tripped.
         restored = store.load_kill_switch()
         self._tripped = restored.tripped if restored is not None else False
+        # The times of approved placements inside the rate cap's window. It
+        # lives in memory, so a restart starts it empty (ADR-0051).
+        self._approved_ns: deque[int] = deque()
 
     @property
     def kill_switch_tripped(self) -> bool:
@@ -161,15 +196,27 @@ class RealGuard:
                 # rather than emit an order the venue will reject (ADR-0017).
                 return Denied(reason="below min notional")
         symbol_limits = self._limits.symbols.get(signal.symbol, _NO_SYMBOL_LIMITS)
+        # The position if every open order on this side fills, and then this
+        # one too (ADR-0051).
+        direction = 1 if signal.side is Side.BUY else -1
+        before = reading.account_net_size + direction * reading.open_remainder
+        worst_case = before + direction * quantity
+        # An order that shrinks the worst case without crossing zero cannot add
+        # exposure, so no cap on order size or value may stop it. Ending at zero
+        # is a full close, not a cross, for a long and a short alike.
+        same_side = (worst_case > 0) == (before > 0)
+        reduces = abs(worst_case) < abs(before) and (worst_case == 0 or same_side)
         cap = symbol_limits.max_order_size
-        if cap is not None and quantity > cap:
+        if cap is not None and quantity > cap and not reduces:
             return Denied(reason=f"above max order size {cap}")
         cap = symbol_limits.max_order_value
-        if cap is not None:
+        if cap is not None and not reduces:
             value_price = price
-            if value_price is None:
-                # A market order has no price, so it is valued at the mark. It
-                # can fill worse, so this cap is close, not exact (ADR-0051).
+            # A buy limit fills at its price or better, so its price is the value.
+            # A market order has no price. A sell limit below the bid fills near
+            # the bid on a real venue, so its own price can hide most of its
+            # value (#391). Both need the mark (ADR-0051).
+            if value_price is None or signal.side is Side.SELL:
                 if reading.mark is None:
                     # With no mark the guard cannot prove the order fits.
                     return Denied(reason=f"no mark for max order value {cap}")
@@ -178,23 +225,33 @@ class RealGuard:
                 age_ns = self._clock.timestamp_ns() - reading.mark.ts_event
                 if age_ns > self._mark_max_age_ns:
                     return Denied(reason=f"stale mark for max order value {cap}")
-                value_price = reading.mark.price
+                # A market order can fill worse than the mark, so this cap is
+                # close for it, not exact.
+                mark_price = reading.mark.price
+                value_price = mark_price if value_price is None else max(value_price, mark_price)
             if quantity * value_price > cap:
                 return Denied(reason=f"above max order value {cap}")
         cap = symbol_limits.max_position
         if cap is not None:
-            # The position if every open order on this side fills, and then this
-            # one too (ADR-0051).
-            direction = 1 if signal.side is Side.BUY else -1
-            before = reading.account_net_size + direction * reading.open_remainder
-            worst_case = before + direction * quantity
-            # An order that shrinks the worst case always passes, so a user can
-            # reduce a position that is already past the cap. An order that
-            # crosses zero opens a new side, so it gets no such pass.
-            same_side = (worst_case > 0) == (before > 0)
-            toward_zero = abs(worst_case) < abs(before) and same_side
-            if abs(worst_case) > cap and not toward_zero:
+            # A reducing order always passes, so a user can shrink a position
+            # that is already past the cap. An order that crosses zero opens a
+            # new side, so it gets no such pass.
+            if abs(worst_case) > cap and not reduces:
                 return Denied(reason=f"above max position {cap}")
+        rate_cap = self._limits.rate_cap
+        if rate_cap is not None:
+            now_ns = self._clock.timestamp_ns()
+            window_ns = rate_cap.window_ns
+            # A slot counts for exactly one window after its placement. If the
+            # wall clock steps back, slots stay longer. That only denies more.
+            while self._approved_ns and now_ns - self._approved_ns[0] >= window_ns:
+                self._approved_ns.popleft()
+            if len(self._approved_ns) >= rate_cap.max_orders:
+                return Denied(
+                    reason=f"above max orders per window {rate_cap.max_orders} "
+                    f"in {rate_cap.window_seconds}s"
+                )
+            self._approved_ns.append(now_ns)
         return Approved(quantity=quantity, price=price)
 
 

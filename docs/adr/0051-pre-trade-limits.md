@@ -16,6 +16,21 @@ We add four optional caps to the real `PreTradeGuard`. Each one is off unless th
 | Max position | per symbol | coins | the worst-case position on the order's side is above the cap, and the order does not move it toward zero without crossing zero |
 | Max orders per window | whole engine | placements | the window already holds the maximum |
 
+**(Amended by [#397](https://github.com/MarcosACH/tickwright/issues/397), an order that only
+reduces skips max order size and max order value:** before this, a strategy could not close a
+position bigger than those caps in one order. It had to split the close, and each part took a rate
+cap slot. "Only reduces" uses the worst case from §Max position below. The order reduces when that
+worst case gets smaller and does not cross zero. Ending at exactly zero counts as reducing, for a
+long and a short alike. Such an order also skips the value cap's mark checks. It passes with a
+missing or stale mark. Without that, a mark outage would let a long-only strategy open a position
+but not close it. Every other check still applies. That means the kill switch, quantization, min
+notional, max position, and the rate cap. An order from a flat position, or one that crosses zero,
+gets no exemption. Denial reasons do not change. Reducing orders keep the rate cap. A full close
+now takes one order, and the rate cap also protects the account from venue rate limits. The
+trade-off is on a thin book. A whole reducing order can fill far below the mark, and the value cap
+no longer limits that. The exemption trusts the engine's own position view when the order is sent.
+A `reduce_only` flag that the venue enforces would be stronger. It stays deferred (ADR-0030).**)**
+
 **Off unless set.** A symbol with no entry has no per-symbol caps. An unset rate cap never denies.
 The user is responsible for reading the docs and setting the caps they need. The engine does not
 force a cap on real money.
@@ -34,6 +49,15 @@ mark is missing, or older than its own max age, the market order is denied. The 
 the order fits, so it refuses. The max age is its own setting, default 10 seconds. It is not the
 reconcile band's `mark_max_age_seconds`, which does a different job. A market order can fill worse
 than the mark, so this cap is close for market orders, not exact.
+**(Amended by [#391](https://github.com/MarcosACH/tickwright/issues/391) — a sell limit is valued
+at the higher of its limit price and the mark:** a limit price is an upper bound for a buy, but only
+a lower bound for a sell. A sell limit below the bid crosses on arrival, and a real venue fills it
+near the bid. Valued at its own price, a sell of 10 BTC at a limit of 1 checks as 10 USD and fills
+near 420,000 USD. So a sell limit is valued at its limit price or the mark, whichever is higher. The
+mark rules for market orders apply to it too. With a value cap set, a sell limit is denied when the
+mark is missing or older than the max age. Falling back to the limit price was rejected, because it
+keeps the gap open. A buy limit is still valued at its limit price and needs no mark. Paper hides
+the gap, because the paper exchange fills a crossing limit at its own limit price.**)**
 
 **Max position.** The cap measures the worst-case position on the order's side. That is the
 position if every open order on that side fills, and then the new order fills too. For a buy, it is
