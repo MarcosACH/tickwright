@@ -1215,8 +1215,8 @@ class PortfolioProjection:
         cycle just moved (ADR-0034).
 
         ``observe_venue_liquidation`` is deliberately **not** folded in. It is a
-        write, and one that must precede this read; hiding it inside a read verb
-        would make the ordering invisible at the call site that depends on it.
+        write, and this is a read. The reading never uses the liquidation
+        prices, so the comparison does not depend on when that write runs.
 
         The cadence reads one integer beside this: ``fills_applied``, before
         the venue read (#284, #324). It is not a reading and no venue figure is
