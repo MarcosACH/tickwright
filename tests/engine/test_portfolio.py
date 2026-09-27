@@ -769,10 +769,9 @@ def test_adding_to_an_isolated_position_does_not_top_its_bucket_up() -> None:
 def test_closing_an_isolated_position_releases_the_bucket_it_locked() -> None:
     """The margin moved in at open comes back out at the close (ADR-0040 §1).
 
-    Paper is the path this has to be written on: live's bucket is released by
-    the reconcile ingest, which drops a symbol the venue no longer holds, and
-    that cadence never runs here (ADR-0034). A bucket left standing on a flat
-    partition is therefore permanent, and it is not inert — `margin_used` for
+    On paper no reconcile ingest ever runs to clear it (ADR-0034), so a bucket
+    left standing on a flat partition would be permanent. Live releases on the
+    close too (#402). It is not inert — `margin_used` for
     isolated is `isolated_collateral + unrealized_pnl`, so the whole of it keeps
     reporting through `total_margin_used` and comes back off `free_margin`
     (ADR-0040 §2) on an account that holds nothing, for the rest of the run and
@@ -1838,6 +1837,31 @@ def test_a_symbol_the_snapshot_does_not_mention_releases_its_bucket() -> None:
 
     assert change is not None
     assert [p.isolated_collateral for p in change.collateral] == [Decimal("0")]
+
+
+def test_live_closing_an_isolated_position_releases_the_ingested_bucket() -> None:
+    """A flat position holds no isolated margin on the venue (#402).
+
+    Before the fix, live kept the bucket until the next reconcile ingest. For up
+    to one cadence the flat symbol reported the whole bucket as `margin_used`.
+    The next reconcile then compared that against the venue's 0 and raised a
+    false `free_margin` divergence.
+
+    The close is at the entry, so no PnL moves and the account is back to its
+    opening cash with nothing posted against it.
+    """
+    projection = _live_isolated()
+    book_fill(projection, _fill(trade_id="f1", quantity="1", price="42000"), side=Side.BUY)
+    projection.apply_heal((), snapshot=venue_holding(BTC=Decimal("4200")))
+    projection.observe_mark(_mark(price="42000", ts_event=9_000))
+    assert projection.account().total_margin_used == Decimal("4200")
+
+    change = projection.apply_fill(
+        _fill(trade_id="f2", quantity="1", price="42000"), side=Side.SELL
+    )
+
+    assert change.position.isolated_collateral == Decimal("0")
+    assert projection.account().total_margin_used == Decimal("0")
 
 
 def test_a_cycle_with_nothing_new_to_ingest_writes_nothing() -> None:

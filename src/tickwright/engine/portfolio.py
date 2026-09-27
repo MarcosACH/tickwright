@@ -733,13 +733,13 @@ class PortfolioProjection:
         an add on the same side reports ``CHANGED``, and recomputing there would
         silently top the bucket up.
 
-        **The close is the half paper has to write itself.** Live's release is
-        the reconcile ingest dropping a symbol the venue no longer holds, and
-        that cadence never runs here (ADR-0034), so a bucket left standing on a
-        flat partition is permanent — and not inert, since isolated
-        ``margin_used`` is ``isolated_collateral + unrealized_pnl``: the whole of
-        it would keep reporting through ``total_margin_used`` and coming off
-        ``free_margin`` for an account holding nothing.
+        **The close releases on both paths.** A flat position holds no isolated
+        margin on the venue, so zero is a fact and not a guess. Isolated
+        ``margin_used`` is ``isolated_collateral + unrealized_pnl``, so a bucket
+        left on a flat partition reports the whole of it through
+        ``total_margin_used``. On paper no reconcile ever clears it (ADR-0034).
+        On live the next ingest would, but the reconcile compares before it
+        ingests, so that pass raised a false ``free_margin`` divergence (#402).
 
         The two are written as release-then-lock rather than as exclusive
         branches, because a flip through zero announces ``(CLOSED, OPENED)`` and
@@ -754,7 +754,9 @@ class PortfolioProjection:
         deriving it again from a leverage the run may since have been
         reconfigured with.
         """
-        if not changes:
+        if PositionChange.CLOSED in changes:
+            position.isolated_collateral = _ZERO
+        if PositionChange.OPENED not in changes:
             return
         if not self._spec.declares_genesis:
             # The declared-versus-ingested predicate, the same one recovery's
@@ -763,13 +765,8 @@ class PortfolioProjection:
             # unrealizedPnl``, ADR-0043 §3). Computing one here would put a
             # number on the ledger the venue never posted, and would be wrong
             # from the first ``updateIsolatedMargin`` top-up — which live has
-            # and paper does not model (ADR-0040 §1). The release below is
-            # declined on the same predicate and for the same reason: the venue
-            # authors both ends of the field, and the ingest performs both.
-            return
-        if PositionChange.CLOSED in changes:
-            position.isolated_collateral = _ZERO
-        if PositionChange.OPENED not in changes:
+            # and paper does not model (ADR-0040 §1). A live flip therefore
+            # holds 0 until the next ingest takes the residual's bucket.
             return
         leverage = self.leverage_for(position.symbol)
         if leverage.mode != "isolated":
