@@ -15,7 +15,7 @@ A release is a **deliberate, maintainer-approved cut**, never automatic and neve
 
 SemVer is a promise about a *public API*. For Tickwright that surface is:
 
-- the **seam Protocols** a user implements or swaps — `Strategy`, `MarketFeed`, `Exchange`, `EventBus`, `Store`, `Clock`, fill models (ADR-0032);
+- the **seam Protocols** a user implements or swaps — `Strategy`, `MarketFeed`, `Exchange`, `EventBus`, `Store`, `Clock`, `PreTradeGuard`, fill models (ADR-0032);
 - the **config contract** — `AppConfig` / the `TICKWRIGHT_*` environment variables (`.env.example` is canonical);
 - the **CLI** — `tickwright` / `python -m tickwright.app`.
 
@@ -90,3 +90,9 @@ gh issue close <PRD#> --comment "Delivered in vX.Y.Z: <release-url>. All sub-iss
   grew (`Exchange` start/stop, `MarketFeed` owes a mark, the `Portfolio` read API, `Store` ledger
   members) and 15 `TICKWRIGHT_*` variables were added. Also the agent hooks and the
   `/verify-tickwright` skill. Bump PR backed by #371.
+- **v0.4.0** (2026-09-27). Pre-trade limits. PRD #377 sets the MINOR floor. The real guard gains
+  four optional caps: order size, order value, position, and order rate. They are off unless set,
+  through the new `TICKWRIGHT_LIMITS` variable. `PreTradeGuard.check` now takes a
+  `PreTradeReading`, so a custom guard must change. Boot now refuses a non-positive reconcile band
+  mark max age (#389). Fixes: the Hyperliquid socket reconnects again (#393). An isolated position
+  no longer raises a false margin divergence (#402). Bump PR backed by #406.
