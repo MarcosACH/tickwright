@@ -70,6 +70,11 @@ refuses a mark max age that is zero, negative, NaN, or infinite. It also refuses
 count in nanoseconds, such as `1e300`. These all load as floats, but the guard cannot turn them into
 nanoseconds, so it would raise on the first market order.**)**
 
+**(Amended by [#382](https://github.com/MarcosACH/tickwright/issues/382):** the rate cap is one
+optional `RateCap` value with two required fields, `max_orders` and `window_seconds`. Half a cap is
+a missing field, so it cannot be written down. `RateCap` holds settings only. The window of
+placement times stays in `RealGuard`, so this is not the rate-window class in §Out of scope.**)**
+
 **Responsibilities:** Hold the caps and reject nonsense at boot. It holds no state and does no
 checking of orders.
 
@@ -94,12 +99,22 @@ another cap never takes a slot. Every cap denial carries a reason that names the
 - Max order value: quantity times the quantized limit price, or times the reading's mark for a
   market order. A missing mark, or one older than the max age on the guard's clock, denies the
   market order.
+  **(Amended by [#391](https://github.com/MarcosACH/tickwright/issues/391):** a sell limit is
+  valued at the higher of its limit price and the mark, because a real venue fills a sell limit
+  below the bid near the bid. The same missing or stale mark denies it. A buy limit still needs no
+  mark.**)**
 - Max position: the worst-case net size on the order's side, from the reading plus the new order.
   An order that moves this worst case toward zero passes, even when the result is still above the
   cap. A sell that shrinks a long position can still be denied when open sells push the worst case
   past the cap. Toward zero means the worst case shrinks without crossing zero. An order that
   crosses zero gets no exception and is judged on the new side.
 - Rate cap: a sliding window of approved placement times, in memory, empty at boot.
+
+**(Amended by [#397](https://github.com/MarcosACH/tickwright/issues/397):** an order that only
+reduces the position skips max order size and max order value, including the value cap's mark
+checks. It reduces when the max position worst case gets smaller and does not cross zero. Ending
+at exactly zero counts, for a long and a short alike. The kill switch, quantization, min notional,
+max position, and the rate cap still apply. ADR-0051 §Decision holds the rule.**)**
 
 **Seams:** None new.
 

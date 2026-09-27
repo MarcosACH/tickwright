@@ -1,6 +1,6 @@
 ---
 name: verify-tickwright
-description: "Use when asked to verify, prove, or smoke-test the real tickwright engine (the CLI process) the way an operator runs it: paper replay, crash recovery, kill switch, reconciliation, fees and funding, Kafka, Postgres, the Hyperliquid feed, and the Hyperliquid testnet exchange. Drives real processes and keeps evidence. Not for unit tests, use `uv run pytest` for those."
+description: "Use when asked to verify, prove, or smoke-test the real tickwright engine (the CLI process) the way an operator runs it: paper replay, crash recovery, kill switch, pre-trade limits, reconciliation, fees and funding, Kafka, Postgres, the Hyperliquid feed, and the Hyperliquid testnet exchange. Drives real processes and keeps evidence. Not for unit tests, use `uv run pytest` for those."
 ---
 
 # Verify tickwright

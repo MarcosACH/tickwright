@@ -26,12 +26,12 @@ from tickwright.domain import (
     SymbolValuation,
     VenueAccountState,
     VenuePositionState,
+    duration_ns,
     venue_cash,
 )
 from tickwright.observability import NamedEvent, named_event
 
 from .checkpoint import Checkpointer
-from .duration import duration_ns
 from .portfolio import HealChange, LedgerReading
 
 _ZERO = Decimal("0")
