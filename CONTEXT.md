@@ -14,6 +14,11 @@ the [[EventBus]] backend never changes it. See ADR-0001.
 _Avoid_: runner, node, worker, service (the prior system's multi-process "workers" are not
 this).
 
+**Operator**:
+The person who runs the [[Engine]] process: starts it, watches its logs, and sends it signals.
+One person may also be the strategy author and a contributor, but the roles stay distinct.
+_Avoid_: user (ambiguous across the three roles), admin.
+
 **Event**:
 An immutable fact published on the [[EventBus]] (`MarketTick`, `Signal`, `OrderPlaced`,
 `OrderFilled`, `OrderRejected`, `OrderCancelled`, …). The system's only currency; never
@@ -413,12 +418,27 @@ _Avoid_: exposure, risk view.
 
 **Kill-switch**:
 A **global, halt-only** flag on the [[PreTradeGuard]]: tripped, every new `PlaceSignal` is `DENIED`
-(never sent) while resting `LIVE` orders are left untouched (flatten is a separate, deferred operator
-action). Tripped **manually only** (`trip_kill_switch(reason)` wired to `SIGUSR1`, reset to `SIGUSR2`;
+(never sent) while resting `LIVE` orders are left untouched ([[Cancel all]] and [[Flatten]] are
+separate operator actions). Tripped **manually only** (`trip_kill_switch(reason)` wired to `SIGUSR1`, reset to `SIGUSR2`;
 automatic
 circuit-breakers deferred), and **durable/sticky** — persisted to the [[Store]] and restored on
 restart, cleared only by an explicit reset, so a halt outlives a crash. See ADR-0026.
 _Avoid_: circuit breaker (implies the deferred automatic-trip policy), panic button (it does not flatten).
+
+**Cancel all**:
+An action that cancels every resting order in its scope and sends no trade. The operator's scope
+is the whole engine. A strategy's scope is its own orders.
+_Avoid_: flatten (that closes positions), mass-cancel.
+
+**Flatten**:
+An operator action that closes every open position in the account to zero size. It runs after
+[[Cancel all]], so no resting order can fill and reopen exposure. A strategy never flattens. It
+exits its own position with a [[Reduce-only order]].
+_Avoid_: close out, liquidate (that is the venue's forced close), panic sell.
+
+**Reduce-only order**:
+An order that may only shrink a position toward zero, never grow it or flip its side.
+_Avoid_: close order, exit order.
 
 **Figure**:
 One numeric value as an outside source *reports* it — a venue response body, a replay row —
@@ -874,3 +894,5 @@ funded), seed capital.
   (→ [[Margin]], [[Leverage]]), and the account's *opening cash line* (→ [[Genesis collateral]]).
   Each sense is owned by the term it belongs to — a fourth, generic definition would overlap all
   three and have to be kept in sync with each (ADR-0045). Always say which.
+- "flatten" was used in ADR-0026 to mean mass-cancel resting orders. Traders use it to mean close
+  the position. Resolved: [[Flatten]] closes positions, and [[Cancel all]] cancels resting orders.
