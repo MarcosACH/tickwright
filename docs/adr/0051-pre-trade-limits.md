@@ -115,6 +115,8 @@ enforced.**)**
 
 - The guard is still not a RiskEngine. There is no margin check, no loss limit, no aggregate
   exposure across symbols, and no flatten. Those stay deferred (ADR-0017, ADR-0026).
+  **(Terms corrected by #418:** ADR-0026 deferred mass-cancel, which `CONTEXT.md` now calls cancel
+  all. Flatten now means closing positions. The guard does neither.**)**
 - The guard now reads positions, open orders, and marks. It already held a clock.
 - ADR-0039 rejected a max age on the mark *read path*. This ADR adds one in the guard, which holds a
   clock. See the amendment in ADR-0039.
