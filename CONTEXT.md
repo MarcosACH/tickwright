@@ -15,7 +15,8 @@ _Avoid_: runner, node, worker, service (the prior system's multi-process "worker
 this).
 
 **Operator**:
-The person who runs the [[Engine]] process: starts it, watches its logs, and sends it signals.
+The person who runs the [[Engine]] process: starts it, watches its logs, and sends it OS
+signals (`SIGUSR1`, `SIGUSR2`, `SIGTERM`).
 One person may also be the strategy author and a contributor, but the roles stay distinct.
 _Avoid_: user (ambiguous across the three roles), admin.
 
@@ -419,10 +420,10 @@ _Avoid_: exposure, risk view.
 **Kill-switch**:
 A **global, halt-only** flag on the [[PreTradeGuard]]: tripped, every new `PlaceSignal` is `DENIED`
 (never sent) while resting `LIVE` orders are left untouched ([[Cancel all]] and [[Flatten]] are
-separate operator actions). Tripped **manually only** (`trip_kill_switch(reason)` wired to `SIGUSR1`, reset to `SIGUSR2`;
-automatic
-circuit-breakers deferred), and **durable/sticky** — persisted to the [[Store]] and restored on
-restart, cleared only by an explicit reset, so a halt outlives a crash. See ADR-0026.
+separate operator actions). Tripped **manually only** (`trip_kill_switch(reason)` wired to
+`SIGUSR1`, reset to `SIGUSR2`; automatic circuit-breakers deferred), and **durable/sticky** —
+persisted to the [[Store]] and restored on restart, cleared only by an explicit reset, so a halt
+outlives a crash. See ADR-0026.
 _Avoid_: circuit breaker (implies the deferred automatic-trip policy), panic button (it does not flatten).
 
 **Cancel all**:

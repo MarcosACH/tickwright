@@ -56,8 +56,10 @@ Flatten (mass-cancel) is a louder, riskier operator action that already has a cl
 under multi-strategy, ADR-0018) is a cheap additive extension — the guard already runs per-signal and
 knows `strategy_id` — but ships deferred.
 
-**(Renamed. "Flatten (mass-cancel)" above is now two terms in `CONTEXT.md`. Cancel all cancels
-resting orders. Flatten closes positions to zero. Both stay separate from the kill switch.**)**
+**(Renamed.** The action called "Flatten (mass-cancel)" above is now called cancel all in
+`CONTEXT.md`. Flatten now means closing positions to zero. That action sends orders, so the
+`CancelSignal` reasoning above does not cover it. This ADR never decided flatten (see #408). Both
+actions stay separate from the kill switch.**)**
 
 **Tripped manually only.** `trip_kill_switch(reason)` / `reset_kill_switch()` are callable
 programmatically (tests) and wired by the runner to `SIGUSR1` (trip) / `SIGUSR2` (reset), alongside
