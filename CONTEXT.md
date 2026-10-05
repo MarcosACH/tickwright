@@ -420,25 +420,26 @@ _Avoid_: exposure, risk view.
 **Kill-switch**:
 A **global, halt-only** flag on the [[PreTradeGuard]]: tripped, every new `PlaceSignal` is `DENIED`
 (never sent) while resting `LIVE` orders are left untouched ([[Cancel all]] and [[Flatten]] are
-separate operator actions). Tripped **manually only** (`trip_kill_switch(reason)` wired to
-`SIGUSR1`, reset to `SIGUSR2`; automatic circuit-breakers deferred), and **durable/sticky** —
-persisted to the [[Store]] and restored on restart, cleared only by an explicit reset, so a halt
-outlives a crash. See ADR-0026.
+separate operator actions, both deferred to #408). Tripped **manually only**
+(`trip_kill_switch(reason)` wired to `SIGUSR1`, reset to `SIGUSR2`; automatic circuit-breakers
+deferred), and **durable/sticky** — persisted to the [[Store]] and restored on restart, cleared only
+by an explicit reset, so a halt outlives a crash. See ADR-0026.
 _Avoid_: circuit breaker (implies the deferred automatic-trip policy), panic button (it does not flatten).
 
 **Cancel all**:
 An action that cancels every resting order in its scope and sends no trade. The operator's scope
-is the whole engine. A strategy's scope is its own orders.
+is the whole engine. A strategy's scope is its own orders. Not built yet (#408).
 _Avoid_: flatten (that closes positions), mass-cancel.
 
 **Flatten**:
 An operator action that closes every open position in the account to zero size. It runs after
 [[Cancel all]], so no resting order can fill and reopen exposure. A strategy never flattens. It
-exits its own position with a [[Reduce-only order]].
+exits its own position with a [[Reduce-only order]]. Not built yet (#408).
 _Avoid_: close out, liquidate (that is the venue's forced close), panic sell.
 
 **Reduce-only order**:
-An order that may only shrink a position toward zero, never grow it or flip its side.
+An order that may only shrink a position toward zero, never grow it or flip its side. Not built
+yet. ADR-0030 defers it, and #408 plans it.
 _Avoid_: close order, exit order.
 
 **Figure**:
