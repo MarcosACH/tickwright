@@ -431,8 +431,9 @@ _Avoid_: circuit breaker (implies the deferred automatic-trip policy), panic but
 **Cancel all**:
 An action that cancels every resting order in its scope and sends no trade. The operator's scope
 is the whole account, including orders placed by hand at the venue. A strategy's scope is its own
-orders. The operator runs it as a one-shot command with the engine stopped (ADR-0052). Not built
-yet (#408).
+orders. The operator runs it as a one-shot command with the engine stopped (ADR-0052). A strategy
+sends one cancel all per symbol. It cancels only the orders it sent before that signal
+(ADR-0055). Not built yet (#408).
 _Avoid_: flatten (that closes positions), mass-cancel.
 
 **Flatten**:

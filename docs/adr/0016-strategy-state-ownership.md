@@ -30,6 +30,11 @@ projection that rebuild filled. The startup reconciliation between the two steps
 sagas the cache already holds and never touches `signal_id` or `cancel_signal_id`, so the fold sees
 the same records the store read would.**)**
 
+**(Extended by ADR-0055:** a cancel all stores its `signal_id` on every order it marks, so the
+same high-water fold covers it. A cancel that marks nothing, single or cancel all, leaves no trace,
+and a restart can reuse its seq. That is safe, because no durable record carries the id. Decided in
+[#415](https://github.com/MarcosACH/tickwright/issues/415).**)**
+
 ## Cadence
 
 The engine snapshots strategy state on a configurable trigger (periodic + on `stop`, optionally

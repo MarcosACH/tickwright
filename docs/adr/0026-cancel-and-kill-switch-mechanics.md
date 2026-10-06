@@ -18,6 +18,11 @@ cloid, the symbol, and the oid once the venue acked one. A cloid can name more t
 order across lives of the account, so the adapter cancels by oid when it has one. The strategy
 contract above is unchanged. [#354]**)**
 
+**(Extended by ADR-0055:** a third signal type, `CancelAllSignal`, cancels every open order of the
+strategy on one symbol with a lower seq. Each order takes the marker below with the cancel all's
+`signal_id`. The seam call becomes `exchange.cancel(refs)`, a list, and a single cancel sends a
+list of one. Decided in [#415](https://github.com/MarcosACH/tickwright/issues/415).**)**
+
 ## In-flight cancels resolve via a `cancel_requested` marker, not a `CANCELLING` state
 
 ADR-0007 models cancel as `LIVE → CANCELLED` with **no `CANCELLING` state**. But a cancelled order
