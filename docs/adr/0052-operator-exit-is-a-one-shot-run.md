@@ -18,7 +18,9 @@ operator asks for cancel all and flatten, and what each one touches. The terms a
   partition (ADR-0038). This is an exception to ADR-0011. See its correction block.
 - **A store lock.** A running engine holds an exclusive lock on its store. For SQLite this is a
   file lock. For Postgres it is an advisory lock. A one-shot run takes the same lock. It refuses to
-  start while another process holds it.
+  start while another process holds it. The lock must end when the process that holds it dies. A
+  crash must never block the exit run, because that is when the operator needs it most. So on
+  SQLite it is an OS file lock, never a marker file.
 
 ## Considered options
 
@@ -35,8 +37,8 @@ operator asks for cancel all and flatten, and what each one touches. The terms a
 - **Engine orders only.** This keeps ADR-0011 whole. But a hand-placed order that still rests after
   flatten can fill and reopen exposure. Cancel first exists to stop exactly that case.
 - **A documented rule instead of a lock.** Nothing would catch an operator who forgets to stop the
-  engine. Both runs read the same config, so they always point at the same store. The lock catches
-  exactly this mistake.
+  engine. The lock catches this mistake when both runs open the same store. It cannot catch a run
+  that opens a different store. See Consequences.
 
 ## Consequences
 
@@ -44,5 +46,16 @@ operator asks for cancel all and flatten, and what each one touches. The terms a
 - The lock also refuses two engines that share one store by accident. Before this, that case passed
   the account binding check (ADR-0038). Two engines on one account with separate stores stay
   undetectable.
+- The lock does not catch an exit run that opens a different store. The default SQLite path
+  `tickwright.db` is relative, and `.env` is read from the current directory. So a run started from
+  another directory opens another store and takes another lock. It then runs while the engine still
+  trades, and a strategy can reopen what flatten closed.
+- On Postgres, the advisory lock ends with the database session. If the engine host dies, the
+  server can keep a half-open session, and its lock, for a while. An exit run can be refused during
+  that time.
+- On paper, a market order fails when no price is cached. So a paper flatten cannot fill unless
+  the feed runs. A replay feed restarts from the top of its file (ADR-0043 §5.1).
 - Still open in #408: how an exit run meets the kill switch, who owns a flatten order and its
-  fills, how far a flatten order may slip, and what the operator sees.
+  fills, how far a flatten order may slip, and what the operator sees. Also open: how to guard an
+  exit run that opens a different store, how long a dead Postgres session may hold the lock, and
+  whether an exit run starts the feed and at what price a paper flatten fills.
