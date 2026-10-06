@@ -17,10 +17,18 @@ it. Decided in [#415](https://github.com/MarcosACH/tickwright/issues/415), part 
   orders on that symbol whose seq is lower than the cancel all's seq. The seq only goes up, across
   all of a strategy's symbols, so "lower seq" means "sent earlier". The result never depends on
   delivery timing. A redelivered or replayed cancel all can never cancel an order sent after it.
+- **Its seq is always durable.** Before it marks anything, the manager writes the cancel all's
+  seq to a per-strategy seq record in the store. The ADR-0016 high-water fold reads that record
+  too. So a restart never reuses the seq, even when the cancel all found nothing to cancel.
+  Without this, a restart could give a new order a lower seq than an old cancel all still on the
+  Kafka topic. A redelivery of that cancel all would then cancel the new order.
 - **Each order goes through the single-cancel path.** The manager sets the `cancel_requested`
   marker on each order, with the cancel all's `signal_id`, and checkpoints it before the send.
-  An order already marked or already terminal is skipped. So a redelivered cancel all sends
-  nothing twice. Reconciliation settles every marked order the same way it does today (ADR-0026).
+  A terminal order is skipped. An order whose marker already has this seq or a higher one is
+  skipped too. So a redelivered cancel all sends nothing twice. An order marked by an earlier
+  cancel takes the new marker and is sent again. That earlier cancel may never have reached the
+  venue, after a crash in the send window or a venue error. So a new cancel all is how a strategy
+  retries. Reconciliation settles every marked order the same way it does today (ADR-0026).
 - **The exchange seam cancels a list.** `cancel(ref)` becomes `cancel(refs)`. A single cancel sends
   a list of one. Hyperliquid has batch cancel actions, so a cancel all is one venue request. A
   batch that holds orders with and without an oid becomes two requests, `cancel` and
@@ -43,11 +51,15 @@ it. Decided in [#415](https://github.com/MarcosACH/tickwright/issues/415), part 
 
 ## Consequences
 
-- A cancel all that finds nothing to cancel leaves no trace. Its seq can be reused after a
-  restart. This is safe, because no durable record carries that id. A single cancel that does
-  nothing already behaves this way (ADR-0016).
+- The store gets one new per-strategy seq record, on SQLite and on Postgres.
+- A single cancel that marks nothing still leaves no trace, and a restart can reuse its seq. That
+  stays safe, because it names one fixed target. A reused seq cannot change what it cancels.
 - Many orders can carry the same `cancel_signal_id`. The seq high-water reads the same max.
 - The Hyperliquid adapter needs a reader for one status per cancel. It must also handle one error
-  for the whole batch. Like today, an error leaves the marked orders to reconciliation.
+  for the whole batch. An error leaves every order in the batch marked and still resting.
+  Reconciliation settles an order only once it leaves the venue. It never sends a cancel. So the
+  order rests until the strategy sends another cancel all, or the operator runs theirs.
+- A single `CancelSignal` on an order that is already marked still does nothing. Only a cancel
+  all sends again.
 - Hyperliquid documents no maximum batch size. The testnet probe in #408 measures it.
 - The operator's cancel all (ADR-0052) can use the same `cancel(refs)` call.

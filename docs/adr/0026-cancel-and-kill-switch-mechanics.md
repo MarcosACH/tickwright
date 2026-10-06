@@ -20,8 +20,9 @@ contract above is unchanged. [#354]**)**
 
 **(Extended by ADR-0055:** a third signal type, `CancelAllSignal`, cancels every open order of the
 strategy on one symbol with a lower seq. Each order takes the marker below with the cancel all's
-`signal_id`. The seam call becomes `exchange.cancel(refs)`, a list, and a single cancel sends a
-list of one. Decided in [#415](https://github.com/MarcosACH/tickwright/issues/415).**)**
+`signal_id`. An order already marked with a lower seq takes the new marker and is sent again, so a
+cancel that never reached the venue can be retried. The seam call becomes `exchange.cancel(refs)`,
+a list, and a single cancel sends a list of one. Decided in [#415](https://github.com/MarcosACH/tickwright/issues/415).**)**
 
 ## In-flight cancels resolve via a `cancel_requested` marker, not a `CANCELLING` state
 
