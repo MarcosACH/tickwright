@@ -15,7 +15,8 @@ the two meet. Decided in [#411](https://github.com/MarcosACH/tickwright/issues/4
   example `"flatten: operator exit"`. Flatten trips it even when the account has nothing to close.
   The trip records what the operator meant, not what flatten found.
 - **Flatten never resets the kill switch.** After a flatten, the next normal boot comes back
-  halted. Strategies run, but every new order is denied until the operator sends `SIGUSR2`.
+  halted. Strategies run, but every new order is denied until the operator sends `SIGUSR2`. The
+  operator flattened because something went wrong. Trading again should be a separate choice.
 - **Cancel all does not trip the kill switch.** An operator who cancels before a news event wants
   to quote again after it.
 - **A tripped kill switch denies every strategy order, reduce-only included.** Strategy cancels
@@ -29,6 +30,8 @@ the two meet. Decided in [#411](https://github.com/MarcosACH/tickwright/issues/4
 
 - **Cancel all trips the kill switch too.** One rule for both commands. But it would force a halted
   restart on an operator who only paused quoting.
+- **Flatten resets the kill switch when it is done.** The next boot would trade right away. But the
+  operator may not have fixed what went wrong yet.
 - **Allow strategy reduce-only orders during a halt.** A strategy could exit its own position. But
   the halt is often caused by a strategy. A buggy one could churn reduce-only orders, pay fees, and
   close positions at bad prices.
@@ -42,3 +45,5 @@ the two meet. Decided in [#411](https://github.com/MarcosACH/tickwright/issues/4
 - Flatten needs a way to place orders that skip the kill switch check. How it does that depends on
   who owns a flatten order. That is still open in #408.
 - Which pre-trade caps still apply to a flatten order is also still open in #408.
+- The halted restart needs `GUARD=real` on the next boot too. `NoopGuard` never reads the stored
+  kill switch. So a flatten under `GUARD=real` followed by a boot under `GUARD=noop` trades at once.
