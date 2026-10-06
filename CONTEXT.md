@@ -428,13 +428,17 @@ _Avoid_: circuit breaker (implies the deferred automatic-trip policy), panic but
 
 **Cancel all**:
 An action that cancels every resting order in its scope and sends no trade. The operator's scope
-is the whole engine. A strategy's scope is its own orders. Not built yet (#408).
+is the whole account, including orders placed by hand at the venue. A strategy's scope is its own
+orders. The operator runs it as a one-shot command with the engine stopped (ADR-0052). Not built
+yet (#408).
 _Avoid_: flatten (that closes positions), mass-cancel.
 
 **Flatten**:
-An operator action that closes every open position in the account to zero size. It runs after
-[[Cancel all]], so no resting order can fill and reopen exposure. A strategy never flattens. It
-exits its own position with a [[Reduce-only order]]. Not built yet (#408).
+An operator action that closes every open position in the account to zero size, including
+positions the engine did not open. It runs after [[Cancel all]], so no resting order can fill and
+reopen exposure. Like cancel all, it is a one-shot command with the engine stopped (ADR-0052). A
+strategy never flattens. It exits its own position with a [[Reduce-only order]]. Not built yet
+(#408).
 _Avoid_: close out, liquidate (that is the venue's forced close), panic sell.
 
 **Reduce-only order**:

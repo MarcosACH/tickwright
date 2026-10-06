@@ -135,6 +135,11 @@ strategy. The cloid is the ownership boundary. A claimable-external-order
 mechanism is deferred — meaningless without a multi-strategy ownership model (out of v1 scope).
 This case cannot arise on the paper exchange; it is a live-path-only concern.
 
+**(Narrowed by ADR-0052:** an explicit operator command is the one exception. `tickwright
+cancel-all` and `tickwright flatten` cancel every resting order in the account, external orders
+included. The engine still never acts on an external order by itself. Decided in
+[#410](https://github.com/MarcosACH/tickwright/issues/410).**)**
+
 This reflects established live-reconciliation practice (startup mass-status + continuous in-flight
 monitoring, query-failure-vs-empty distinction, single-order re-query before terminal
 resolution, recent-order protection) and the author's prior ghost-reconciler + fill-history
