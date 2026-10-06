@@ -96,3 +96,5 @@ the gap was before flatten.
   the order was placed. The stored sizes do not include it. The next flatten order covers what is
   left. The flatten saga prototype in #408 checks this case.
 - Which pre-trade caps apply to an `__operator__` order is still open in #408.
+- How long flatten waits for the books to match the venue is still open in #408. So is what
+  flatten does when they never match.
