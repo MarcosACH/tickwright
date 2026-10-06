@@ -47,3 +47,7 @@ the two meet. Decided in [#411](https://github.com/MarcosACH/tickwright/issues/4
 - Which pre-trade caps still apply to a flatten order is also still open in #408.
 - The halted restart needs `GUARD=real` on the next boot too. `NoopGuard` never reads the stored
   kill switch. So a flatten under `GUARD=real` followed by a boot under `GUARD=noop` trades at once.
+
+**(Resolved by ADR-0054:** how a flatten order skips the kill switch. A flatten order is owned by
+the reserved id `__operator__`, and the guard skips the kill switch check for that owner. Decided in
+[#412](https://github.com/MarcosACH/tickwright/issues/412).**)**

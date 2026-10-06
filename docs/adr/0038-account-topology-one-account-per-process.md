@@ -66,6 +66,12 @@ Exclusivity is an invariant, not a guarantee: a human can trade the account in t
 
 ADR-0034's bridging invariant **Σ(per-strategy signed size per symbol) = account net size = venue `szi`** thereby holds *by construction*, and the residual becomes one inspectable number rather than a silent failure of the invariant. The alternative — leaving the anchor to heal while the overlay stands still — creates pressure to attribute foreign flow to whichever strategy owns the symbol, which would both corrupt that strategy's PnL and let its close-my-position logic act on exposure it never opened. The synthetic heal needs a price to book against either way (ADR-0034), so the partition costs a key, not a mechanism.
 
+**(Extended by ADR-0054:** a flatten fill is the one order fill that books into this partition, and
+the one fill that books into more than one partition. A flatten order is sized to the account net
+and owned by the reserved id `__operator__`, which never owns a partition. Each fill is split pro
+rata over every partition of the symbol, this one included, so all of them read flat when the order
+fills. Decided in [#412](https://github.com/MarcosACH/tickwright/issues/412).**)**
+
 ## Reaching a second account on Hyperliquid
 
 The isolation primitive ADR-0034 requires must actually be addressable. Hyperliquid sub-accounts and vaults **have no private key** — the venue is explicit: *"Subaccounts and vaults do not have private keys. To perform actions on behalf of a subaccount or vault signing should be done by the master account and the vaultAddress field should be set to the address of the subaccount or vault"*, that field being *"its Onchain address in 42-character hexadecimal format"* ([exchange endpoint](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/exchange-endpoint)). The master key signs and the sub-account address travels in the action; because `/info` reads and WS user subscriptions are unsigned reads keyed **by address** (R1, [#108](https://github.com/MarcosACH/tickwright/issues/108)), that same onchain address is also the read address. Today `exchange.py` passes `None` into the `active_pool` slot of `sign_l1_action(wallet, action, active_pool, nonce, expires_after, is_mainnet)` (SDK 0.24.0) and sends no `vaultAddress`, so a sub-account is unreachable.

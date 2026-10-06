@@ -16,6 +16,12 @@ idempotent recovery impossible. Content-hashing order fields was rejected: two l
 identical intents (e.g. two equal safety orders at one price) would collide and silently drop a
 real order.
 
+**(Extended by ADR-0054:** a flatten order is the one order no strategy emits. Its id uses the
+reserved owner `__operator__` in the strategy slot, as `__operator__:<symbol>:<seq>`. The seq comes
+from the saga high-water for `__operator__`, so the id stays deterministic and a crashed flatten run
+resumes its saga. Config and registration refuse `__operator__` as a strategy id. Decided in
+[#412](https://github.com/MarcosACH/tickwright/issues/412).**)**
+
 ## Consequences
 
 - Strategy authors owe one contract, documented loudly in `extending.md`: **signal ids must be
