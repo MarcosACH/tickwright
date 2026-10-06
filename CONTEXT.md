@@ -179,10 +179,12 @@ saga transition (`OrderPlaced`/`OrderSubmitted`/`OrderLive`/`OrderPartiallyFille
 _Avoid_: using them interchangeably — one is venue truth, one is engine state.
 
 **Signal**:
-An [[Event]] a [[Strategy]] emits expressing an order intent. A typed pair: **`PlaceSignal`**
+An [[Event]] a [[Strategy]] emits expressing an order intent. Typed variants: **`PlaceSignal`**
 (side, qty, price, MARKET/LIMIT, GTC/IOC, `post_only`) and **`CancelSignal`** (its own seq'd
 [[signal_id]] plus a `target_signal_id` naming the order to cancel — the strategy references the
-`signal_id` it emitted, and the engine re-derives the [[Client order id|cloid]]). Carries a
+`signal_id` it emitted, and the engine re-derives the [[Client order id|cloid]]). ADR-0055 adds
+**`CancelAllSignal`**, which cancels the strategy's earlier orders on one symbol. Not built yet
+(#408). Each carries a
 deterministic [[signal_id]] so replays converge; the [[ExecutionManager]] consumes signals and
 turns each into an order saga. See ADR-0026.
 _Avoid_: order request, command (the bus has no command pattern — a signal is just an event).
