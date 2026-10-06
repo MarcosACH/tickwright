@@ -31,7 +31,8 @@ sagas the cache already holds and never touches `signal_id` or `cancel_signal_id
 the same records the store read would.**)**
 
 **(Extended by ADR-0055:** a cancel all writes its seq to a per-strategy seq record in the store
-before it marks anything. It does this even when it marks nothing. The high-water fold takes the
+before it marks anything. It does this even when it marks nothing. The write only raises the
+record, so an older cancel all that arrives late never lowers it. The high-water fold takes the
 max of that record and the saga seqs, so a cancel all seq is never reused. A single cancel that
 marks nothing still leaves no trace, and a restart can reuse its seq. That is safe, because it
 names one fixed target. Decided in [#415](https://github.com/MarcosACH/tickwright/issues/415).**)**

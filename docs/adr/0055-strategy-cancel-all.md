@@ -22,6 +22,9 @@ it. Decided in [#415](https://github.com/MarcosACH/tickwright/issues/415), part 
   too. So a restart never reuses the seq, even when the cancel all found nothing to cancel.
   Without this, a restart could give a new order a lower seq than an old cancel all still on the
   Kafka topic. A redelivery of that cancel all would then cancel the new order.
+  The write only raises the record. It keeps the higher of the stored seq and the new one. Each
+  symbol has its own partition, so an older cancel all on one symbol can arrive after a newer one
+  on another. If it lowered the record, a restart could reuse the newer seq.
 - **Each order goes through the single-cancel path.** The manager sets the `cancel_requested`
   marker on each order, with the cancel all's `signal_id`, and checkpoints it before the send.
   A terminal order is skipped. An order whose marker already has this seq or a higher one is
