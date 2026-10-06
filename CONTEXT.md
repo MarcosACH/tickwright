@@ -443,7 +443,8 @@ strategy never flattens. It exits its own position with a [[Reduce-only order]].
 reduce-only order per symbol for the venue's position, once the books match it. The order is owned
 by the reserved id `__operator__`, not by a strategy. Its fills split pro rata over every
 [[Position]] partition of the symbol, so each strategy reads flat (ADR-0054). When no order can
-close a strategy's leftover, it moves into the unattributed partition at the strategy's entry price. Not built yet (#408).
+close a strategy's leftover, it moves into the unattributed partition at the strategy's entry price.
+Not built yet (#408).
 _Avoid_: close out, liquidate (that is the venue's forced close), panic sell.
 
 **Reduce-only order**:

@@ -70,8 +70,9 @@ ADR-0034's bridging invariant **Σ(per-strategy signed size per symbol) = accoun
 the one fill that books into more than one partition. A flatten order is sized to the venue's
 position and owned by the reserved id `__operator__`, which never owns a partition. Each fill is
 split pro rata over every partition of the symbol, this one included, so all of them read flat when
-the order fills. When no order can close a strategy's leftover, the leftover moves into this partition at the
-strategy's own entry price. Decided in [#412](https://github.com/MarcosACH/tickwright/issues/412).**)**
+the order fills. When no order can close a strategy's leftover, the leftover moves into this
+partition at the strategy's own entry price. Decided in
+[#412](https://github.com/MarcosACH/tickwright/issues/412).**)**
 
 ## Reaching a second account on Hyperliquid
 
