@@ -72,6 +72,6 @@ first and its orders skip it. Cancel all leaves the kill switch alone. Decided i
 [#411](https://github.com/MarcosACH/tickwright/issues/411).**)**
 
 **(Resolved by ADR-0054:** who owns a flatten order and its fills. Flatten sends one reduce-only
-order per symbol for the account net, owned by the reserved id `__operator__`. Its fills split pro
-rata over every partition, so each one reads flat. Decided in
+order per symbol for the venue's position, owned by the reserved id `__operator__`. Its fills split
+pro rata over every partition, so each strategy reads flat. Decided in
 [#412](https://github.com/MarcosACH/tickwright/issues/412).**)**

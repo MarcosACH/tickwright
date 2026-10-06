@@ -8,12 +8,18 @@ Decided in [#412](https://github.com/MarcosACH/tickwright/issues/412), part of
 
 ## Decision
 
-- **Every partition reads flat after flatten.** That includes each strategy's partition and the
-  unattributed one. If all fills landed in one partition, a strategy would still read a position on
-  a flat account. Its PnL would be wrong. On the next boot, its exit logic would send a reduce-only
-  order into a flat account.
-- **One flatten order per symbol, sized to the account net.** It is reduce-only. Its owner is the
-  reserved id `__operator__`.
+- **Every strategy partition reads flat after flatten.** If all fills landed in one partition, a
+  strategy would still read a position on a flat account. Its PnL would be wrong. On the next boot,
+  its exit logic would send a reduce-only order into a flat account. The unattributed partition
+  reads flat too, unless the venue still holds dust or the books disagree with a flat venue. Both
+  cases are below.
+- **One flatten order per symbol, sized to the venue's position.** The size is read from the venue
+  when the order is placed. It is reduce-only. Its owner is the reserved id `__operator__`.
+- **The order is placed only when the books match the venue.** The split moves the partitions by
+  the filled size in total. So the partition sizes must sum to the venue size, or the books drift
+  from the venue. If they differ, flatten waits for reconciliation to heal the gap into the
+  unattributed partition (ADR-0038). A flat venue is the exception. There is no order to place, so
+  the leftover rule below applies.
 - **Fills are split pro rata.** Each partition of the symbol moves the same share of the way to
   zero. Each split piece uses the real fill price.
 - **Fees split by the absolute size each partition books.** Partitions can have opposite signs. A
@@ -31,9 +37,9 @@ Decided in [#412](https://github.com/MarcosACH/tickwright/issues/412), part of
 - **When no venue order can close a strategy's leftover, it moves into the unattributed
   partition.** This happens when the venue holds no position in the symbol, or when the venue
   refuses the order as too small. The leftover moves at the strategy's own average entry price, so its
-  realized PnL does not change. No trade happens at the venue, and no fee is booked. The
-  unattributed partition keeps any dust the venue still holds, so the sum still equals the venue
-  size.
+  realized PnL does not change. No trade happens at the venue, and no fee is booked. When the
+  venue refuses a too-small order, the unattributed partition keeps that dust. So the sum still
+  equals the venue size.
 - **`__operator__` is reserved like `__unattributed__`.** Config and strategy registration refuse
   it as a strategy id. It never owns a partition. Its fills only feed the split.
 - **The guard skips the kill switch only for an `__operator__` order that is reduce-only.**
@@ -55,6 +61,8 @@ the gap was before flatten.
 
 ## Considered options
 
+- **Size the order to the sum of the book partitions.** When the books hold less than the venue,
+  the order leaves venue exposure open while every partition reads flat.
 - **All fills land in one partition**, either `__unattributed__` or an operator partition. The
   account net reads zero, but each strategy keeps reading its old position.
 - **One order per partition**, each owned by the partition it closes. Fills land the normal way.

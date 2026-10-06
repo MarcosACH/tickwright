@@ -67,10 +67,10 @@ Exclusivity is an invariant, not a guarantee: a human can trade the account in t
 ADR-0034's bridging invariant **Σ(per-strategy signed size per symbol) = account net size = venue `szi`** thereby holds *by construction*, and the residual becomes one inspectable number rather than a silent failure of the invariant. The alternative — leaving the anchor to heal while the overlay stands still — creates pressure to attribute foreign flow to whichever strategy owns the symbol, which would both corrupt that strategy's PnL and let its close-my-position logic act on exposure it never opened. The synthetic heal needs a price to book against either way (ADR-0034), so the partition costs a key, not a mechanism.
 
 **(Extended by ADR-0054:** a flatten fill is the one order fill that books into this partition, and
-the one fill that books into more than one partition. A flatten order is sized to the account net
-and owned by the reserved id `__operator__`, which never owns a partition. Each fill is split pro
-rata over every partition of the symbol, this one included, so all of them read flat when the order
-fills. When no order can close a strategy's leftover, the leftover moves into this partition at the
+the one fill that books into more than one partition. A flatten order is sized to the venue's
+position and owned by the reserved id `__operator__`, which never owns a partition. Each fill is
+split pro rata over every partition of the symbol, this one included, so all of them read flat when
+the order fills. When no order can close a strategy's leftover, the leftover moves into this partition at the
 strategy's own entry price. Decided in [#412](https://github.com/MarcosACH/tickwright/issues/412).**)**
 
 ## Reaching a second account on Hyperliquid
