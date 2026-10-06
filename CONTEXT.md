@@ -439,8 +439,12 @@ _Avoid_: flatten (that closes positions), mass-cancel.
 An operator action that closes every open position in the account to zero size, including
 positions the engine did not open. It runs after [[Cancel all]], so no resting order can fill and
 reopen exposure. Like cancel all, it is a one-shot command with the engine stopped (ADR-0052). A
-strategy never flattens. It exits its own position with a [[Reduce-only order]]. Not built yet
-(#408).
+strategy never flattens. It exits its own position with a [[Reduce-only order]]. Flatten sends one
+reduce-only order per symbol for the venue's position, once the books match it. The order is owned
+by the reserved id `__operator__`, not by a strategy. Its fills split pro rata over every
+[[Position]] partition of the symbol, so each strategy reads flat (ADR-0054). When no order can
+close a strategy's leftover, it moves into the unattributed partition at the strategy's entry price.
+Not built yet (#408).
 _Avoid_: close out, liquidate (that is the venue's forced close), panic sell.
 
 **Reduce-only order**:
@@ -599,6 +603,8 @@ Tier-1 "ledger" it accumulates through an idempotent `apply`) — with unrealize
 `strategy` is nullable: **`None` is the reserved unattributed partition** holding flow the engine
 never placed. A pure `domain` aggregate, the economic sibling of the [[Order saga]]. See ADR-0035,
 ADR-0034, ADR-0038.
+A [[Flatten]] fill is the one fill that books into more than one partition, the unattributed one
+included. It is split pro rata so every partition of the symbol reaches zero (ADR-0054).
 _Avoid_: holding, lot, order (the FSM saga is the [[Order saga]]).
 
 **Account net size**:
@@ -873,7 +879,8 @@ funded), seed capital.
   Protocols; the [[Composition root]] is the one place that knows every concrete
   ([[Dependency direction]]).
 - A **Position** belongs to one **Account** and one **Strategy** — or to the unattributed partition
-  when the engine did not place the flow; on a `NET` venue
+  when the engine did not place the flow. A [[Flatten]] fill is split across all of them
+  (ADR-0054). On a `NET` venue
   `Σ(Position size per symbol) = Account net size = venue szi` holds by construction
   (per-strategy attribution bridged to the reconciliation anchor, ADR-0034/0038).
 - Each **Venue adapter** declares its **AccountSpec**; the **Engine** wires it in at startup, the
