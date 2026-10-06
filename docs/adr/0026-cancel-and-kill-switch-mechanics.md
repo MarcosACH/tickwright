@@ -61,6 +61,11 @@ knows `strategy_id` — but ships deferred.
 `CancelSignal` reasoning above does not cover it. This ADR never decided flatten (see #408). Both
 actions stay separate from the kill switch.**)**
 
+**(Narrowed by ADR-0052:** operator cancel all is a one-shot run that also cancels orders placed by
+hand at the venue. A `CancelSignal` names an order by the `signal_id` a strategy minted, and a
+hand-placed order has none. So the `CancelSignal` path covers a strategy's own orders only.
+Decided in [#410](https://github.com/MarcosACH/tickwright/issues/410).**)**
+
 **Tripped manually only.** `trip_kill_switch(reason)` / `reset_kill_switch()` are callable
 programmatically (tests) and wired by the runner to `SIGUSR1` (trip) / `SIGUSR2` (reset), alongside
 the `SIGINT`/`SIGTERM` handlers of ADR-0024 — a dependency-free operator interface, no HTTP admin surface in v1. Each
