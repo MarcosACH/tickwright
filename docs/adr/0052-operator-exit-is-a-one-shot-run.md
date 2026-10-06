@@ -66,3 +66,7 @@ operator asks for cancel all and flatten, and what each one touches. The terms a
   - How to guard an exit run that opens a different store.
   - How long a dead Postgres session may hold the lock.
   - Whether an exit run starts the feed, and at what price a paper flatten fills.
+
+**(Resolved by ADR-0053:** how an exit run meets the kill switch. Flatten trips the kill switch
+first and its orders skip it. Cancel all leaves the kill switch alone. Decided in
+[#411](https://github.com/MarcosACH/tickwright/issues/411).**)**

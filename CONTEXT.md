@@ -420,7 +420,9 @@ _Avoid_: exposure, risk view.
 **Kill-switch**:
 A **global, halt-only** flag on the [[PreTradeGuard]]: tripped, every new `PlaceSignal` is `DENIED`
 (never sent) while resting `LIVE` orders are left untouched ([[Cancel all]] and [[Flatten]] are
-separate operator actions, both deferred to #408). Tripped **manually only**
+separate operator actions). A strategy's [[Reduce-only order]] is denied too. A flatten order is
+never denied by it. Flatten trips it before it sends anything, so the next boot comes back halted
+(ADR-0053). Tripped **manually only**
 (`trip_kill_switch(reason)` wired to `SIGUSR1`, reset to `SIGUSR2`; automatic circuit-breakers
 deferred), and **durable/sticky** — persisted to the [[Store]] and restored on restart, cleared only
 by an explicit reset, so a halt outlives a crash. See ADR-0026.
