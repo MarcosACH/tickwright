@@ -66,6 +66,12 @@ hand at the venue. A `CancelSignal` names an order by the `signal_id` a strategy
 hand-placed order has none. So the `CancelSignal` path covers a strategy's own orders only.
 Decided in [#410](https://github.com/MarcosACH/tickwright/issues/410).**)**
 
+**(Narrowed by ADR-0053:** a flatten order skips the kill switch, because it can only shrink a
+position. Every strategy order is still denied while tripped, reduce-only included. Flatten trips
+the kill switch before it sends anything and never resets it. That trip still comes from an
+operator command, so the switch stays tripped manually only. Decided in
+[#411](https://github.com/MarcosACH/tickwright/issues/411).**)**
+
 **Tripped manually only.** `trip_kill_switch(reason)` / `reset_kill_switch()` are callable
 programmatically (tests) and wired by the runner to `SIGUSR1` (trip) / `SIGUSR2` (reset), alongside
 the `SIGINT`/`SIGTERM` handlers of ADR-0024 — a dependency-free operator interface, no HTTP admin surface in v1. Each
