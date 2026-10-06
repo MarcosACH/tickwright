@@ -31,6 +31,10 @@ So the canonical pairings are **InMemoryBus + SQLite** (zero-setup, deterministi
 The last three are current-state rows, not an event log: recovery is a `SELECT`, and "snapshot"
 means the current row state (ADR-0043 §1, extending ADR-0009 from orders to accounting).
 
+**(Extended by ADR-0055:** the store also holds **a seq record**, one row per `strategy_id`. It
+keeps the highest seq of any cancel all the manager handled. A write only raises it. It is a
+current-state row too. Decided in [#415](https://github.com/MarcosACH/tickwright/issues/415).**)**
+
 ## One error contract for the seam
 
 **Every member of the Protocol either reaches durable storage or raises `InvariantViolation`** —
@@ -68,3 +72,9 @@ arrived as foreign flow — rather than by history (ADR-0043 §5.2). **Both path
 read it**: it gates live's re-delivered history and a replay rerun's re-derived boundaries alike,
 and is simply inert under live-wall-clock paper, whose generator only moves forward (ADR-0043 §5.1).
 The store location is per-process configuration, never shared between engine instances (ADR-0028).
+
+**(Extended by ADR-0055:** the seq high-water is no longer derived from saga records alone. A
+cancel all that cancels nothing leaves no saga record, so its seq goes in the per-strategy seq
+record. The fold takes the max of that record and the saga seqs. The record is not the banned
+kind. Like `funding_marks`, it is one overwritten row per strategy and does not grow with the
+event stream. Decided in [#415](https://github.com/MarcosACH/tickwright/issues/415).**)**

@@ -196,7 +196,8 @@ never the snapshot (ADR-0016). The engine's saga and dedup are keyed on it. **Mu
 pure function of strategy state — never random.** The `SignalId` value object (`domain/ids.py`)
 is the single owner of this format: `Signal.signal_id` composes it (`render`) and seq
 high-water recovery reads it back (`parse`), so the wire form and the recovery read can never
-drift. See ADR-0006.
+drift. See ADR-0006. ADR-0055 adds a per-strategy seq record for cancel all seqs. The high-water
+also reads it. Not built yet (#408).
 _Avoid_: signal uuid, request id.
 
 **SignalEmitter**:
