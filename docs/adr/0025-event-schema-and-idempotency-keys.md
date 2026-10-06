@@ -51,6 +51,10 @@ the reference (ADR-0010's explicit goal).
   separately (ADR-0011 inv 4).
 - **`Signal`** = `PlaceSignal` + `CancelSignal` (see ADR-0026).
 
+**(Extended by ADR-0055:** `Signal` gains a third variant, `CancelAllSignal`. It carries its own
+seq'd `signal_id` and a symbol, and no target. Its `event_id` is its `signal_id`, like the other
+two. Decided in [#415](https://github.com/MarcosACH/tickwright/issues/415).**)**
+
 ## Catalog closure: the accounting surface contributes exactly one variant
 
 _Added by ADR-0045 (D12), closing the question ADR-0037's Consequences "Event schema" bullet left

@@ -91,6 +91,10 @@ those components.
    is folded from the `Cache`, not from a second store read.** Step 2 is the one mass read of the
    saga history. This step reads `Cache.all_orders()`, the projection step 2 filled, so a boot
    deserializes every saga once. See ADR-0016's amendment for why the two reads agree.**)**
+
+   **(Extended by ADR-0055:** the fold also reads the per-strategy seq record from the store. It
+   is one row per strategy, so it does not repeat the mass read. The `Cache` does not hold it.
+   Decided in [#415](https://github.com/MarcosACH/tickwright/issues/415).**)**
 7. Start the `MarketFeed` **last** — the first tick is only possible after the barrier clears, so
    no order can be placed before reconciliation completes (ADR-0011 inv 5).
 

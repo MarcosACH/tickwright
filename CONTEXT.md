@@ -179,10 +179,12 @@ saga transition (`OrderPlaced`/`OrderSubmitted`/`OrderLive`/`OrderPartiallyFille
 _Avoid_: using them interchangeably — one is venue truth, one is engine state.
 
 **Signal**:
-An [[Event]] a [[Strategy]] emits expressing an order intent. A typed pair: **`PlaceSignal`**
+An [[Event]] a [[Strategy]] emits expressing an order intent. Typed variants: **`PlaceSignal`**
 (side, qty, price, MARKET/LIMIT, GTC/IOC, `post_only`) and **`CancelSignal`** (its own seq'd
 [[signal_id]] plus a `target_signal_id` naming the order to cancel — the strategy references the
-`signal_id` it emitted, and the engine re-derives the [[Client order id|cloid]]). Carries a
+`signal_id` it emitted, and the engine re-derives the [[Client order id|cloid]]). ADR-0055 adds
+**`CancelAllSignal`**, which cancels the strategy's earlier orders on one symbol. Not built yet
+(#408). Each carries a
 deterministic [[signal_id]] so replays converge; the [[ExecutionManager]] consumes signals and
 turns each into an order saga. See ADR-0026.
 _Avoid_: order request, command (the bus has no command pattern — a signal is just an event).
@@ -194,7 +196,8 @@ never the snapshot (ADR-0016). The engine's saga and dedup are keyed on it. **Mu
 pure function of strategy state — never random.** The `SignalId` value object (`domain/ids.py`)
 is the single owner of this format: `Signal.signal_id` composes it (`render`) and seq
 high-water recovery reads it back (`parse`), so the wire form and the recovery read can never
-drift. See ADR-0006.
+drift. See ADR-0006. ADR-0055 adds a per-strategy seq record for cancel all seqs. The high-water
+also reads it. Not built yet (#408).
 _Avoid_: signal uuid, request id.
 
 **SignalEmitter**:
@@ -431,8 +434,9 @@ _Avoid_: circuit breaker (implies the deferred automatic-trip policy), panic but
 **Cancel all**:
 An action that cancels every resting order in its scope and sends no trade. The operator's scope
 is the whole account, including orders placed by hand at the venue. A strategy's scope is its own
-orders. The operator runs it as a one-shot command with the engine stopped (ADR-0052). Not built
-yet (#408).
+orders. The operator runs it as a one-shot command with the engine stopped (ADR-0052). A strategy
+sends one cancel all per symbol. It cancels only the orders it sent before that signal
+(ADR-0055). Not built yet (#408).
 _Avoid_: flatten (that closes positions), mass-cancel.
 
 **Flatten**:
