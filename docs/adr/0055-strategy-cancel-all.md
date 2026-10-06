@@ -17,9 +17,11 @@ it. Decided in [#415](https://github.com/MarcosACH/tickwright/issues/415), part 
   orders on that symbol whose seq is lower than the cancel all's seq. The seq only goes up, across
   all of a strategy's symbols, so "lower seq" means "sent earlier". The result never depends on
   delivery timing. A redelivered or replayed cancel all can never cancel an order sent after it.
-- **Its seq is always durable.** Before it marks anything, the manager writes the cancel all's
-  seq to a per-strategy seq record in the store. The ADR-0016 high-water fold reads that record
-  too. So a restart never reuses the seq, even when the cancel all found nothing to cancel.
+  One gap remains, for a cancel all sent but not handled before a crash. See Consequences.
+- **Its seq is durable once handled.** Before it marks anything, the manager writes the cancel
+  all's seq to a per-strategy seq record in the store. The ADR-0016 high-water fold reads that
+  record too. So a restart never reuses the seq of a handled cancel all, even one that found
+  nothing to cancel.
   Without this, a restart could give a new order a lower seq than an old cancel all still on the
   Kafka topic. A redelivery of that cancel all would then cancel the new order.
   The write only raises the record. It keeps the higher of the stored seq and the new one. Each
@@ -55,6 +57,14 @@ it. Decided in [#415](https://github.com/MarcosACH/tickwright/issues/415), part 
 ## Consequences
 
 - The store gets one new per-strategy seq record, on SQLite and on Postgres.
+- The record covers a cancel all the manager handled, not one the strategy only sent. On Kafka, a
+  sent cancel all can still be on the topic at a crash. The restart's high-water fold does not
+  wait for it, so the strategy can get a seq at or below it. Its first handling is still safe.
+  Places sent after it on that symbol are behind it in the partition. But a second redelivery,
+  after one of those places was handled, would cancel an order sent after it. Places already have
+  this gap, because the ADR-0016 fold reads handled seqs, not sent ones. Writing the record when
+  the strategy sends would close it. That would give `SignalEmitter` the store, which is a larger
+  change. Tracked under "Not yet specified" on #408.
 - A single cancel that marks nothing still leaves no trace, and a restart can reuse its seq. That
   stays safe, because it names one fixed target. A reused seq cannot change what it cancels.
 - Many orders can carry the same `cancel_signal_id`. The seq high-water reads the same max.
