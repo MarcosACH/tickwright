@@ -15,7 +15,10 @@ Decided in [#412](https://github.com/MarcosACH/tickwright/issues/412), part of
 - **One flatten order per symbol, sized to the account net.** It is reduce-only. Its owner is the
   reserved id `__operator__`.
 - **Fills are split pro rata.** Each partition of the symbol moves the same share of the way to
-  zero. Fees split the same way. Each split piece uses the real fill price.
+  zero. Each split piece uses the real fill price.
+- **Fees split by the absolute size each partition books.** Partitions can have opposite signs. A
+  split by signed size would give one of them a negative fee. The absolute weights still sum to the
+  real fee.
 - **The split runs on the total filled so far.** For each fill, the engine computes every
   partition's share of the order's cumulative fill, then books the change since the last fill. So
   rounding never leaves dust once the order is fully filled.
@@ -25,14 +28,30 @@ Decided in [#412](https://github.com/MarcosACH/tickwright/issues/412), part of
   The seq comes from the saga high-water for `__operator__`, the same way a strategy's does
   (ADR-0016). After a crash, the next flatten run finds the open saga by its id and resumes it. Only
   then does it place the next seq for what is left.
+- **When no venue order can close a strategy's leftover, it moves into the unattributed
+  partition.** This happens when the venue holds no position in the symbol, or when the venue
+  refuses the order as too small. The leftover moves at the strategy's own average entry price, so its
+  realized PnL does not change. No trade happens at the venue, and no fee is booked. The
+  unattributed partition keeps any dust the venue still holds, so the sum still equals the venue
+  size.
 - **`__operator__` is reserved like `__unattributed__`.** Config and strategy registration refuse
   it as a strategy id. It never owns a partition. Its fills only feed the split.
-- **The guard tells a flatten order by its owner.** An `__operator__` order skips the kill switch
-  (ADR-0053).
+- **The guard skips the kill switch only for an `__operator__` order that is reduce-only.**
+  ADR-0053 lets flatten skip it because a flatten order can only shrink a position. That comes from
+  reduce-only, not from the owner. So the guard checks both, and a tripped kill switch denies any
+  other `__operator__` order.
 
 Example. Strategy S holds BTC +2. The unattributed partition holds -1. The venue shows +1. Flatten
 sends one reduce-only sell of 1. A fill of 0.5 books S selling 1 and the unattributed partition
-buying 0.5, both at the fill price. The full fill leaves both at zero.
+buying 0.5, both at the fill price. The fill pays a fee of 0.03. S books 1 of the 1.5 total, so it
+pays 0.02. The unattributed partition pays 0.01. The full fill leaves both at zero.
+
+Example with a flat venue. Strategy S buys BTC +1. The operator sells 1 by hand in the venue UI,
+so the venue shows 0. Reconciliation cannot book that sale. Its size heal is priced at the venue's
+entry price, and the venue gives none for a flat position. So the books still hold S at +1, and
+flatten has no order to send. S's +1 moves into the unattributed partition at S's entry price. S
+reads flat, and its realized PnL is unchanged. The unattributed +1 stays a visible size finding, as
+the gap was before flatten.
 
 ## Considered options
 
@@ -47,11 +66,22 @@ buying 0.5, both at the fill price. The full fill leaves both at zero.
 - **A new owner type on the order**, such as `Strategy | Operator`. It is more explicit. But it
   changes every reader of `Order.strategy_id`, where a reserved id follows a pattern the code
   already has.
+- **For a leftover no order can close, leave the partitions and warn.** The strategy would wake up
+  holding a position the venue does not have. This is the failure this ADR exists to stop.
+- **For a leftover no order can close, move every partition to zero at the mark.** It is simple,
+  but it books a price no one paid. Moving the leftover at the strategy's own entry price invents
+  no price.
+- **For a leftover no order can close, send one venue order per partition.** On a flat account,
+  closing S's +1 means a real sell that opens a short, then a buy that closes it. That is two fees,
+  real exposure in between, and orders that cannot be reduce-only.
 
 ## Consequences
 
 - A flatten fill is the one fill that books into more than one partition. Every other fill still
   lands in the partition its order names.
+- The leftover move is a new ledger write. It touches two positions of one symbol and no order.
+- The split and the move keep the book's cost basis, so they open no cash gap of their own. The
+  next reconcile still sets cash to the venue's figure, so any drift heals there (ADR-0034).
 - A fresh store restarts the `__operator__` seq at 1, so a flatten cloid can repeat an earlier
   life's cloid. The rules from #354 already cover this (ADR-0011).
 - Foreign flow that arrives during a flatten run is healed into the unattributed partition after

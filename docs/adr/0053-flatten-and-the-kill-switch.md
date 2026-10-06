@@ -49,5 +49,6 @@ the two meet. Decided in [#411](https://github.com/MarcosACH/tickwright/issues/4
   kill switch. So a flatten under `GUARD=real` followed by a boot under `GUARD=noop` trades at once.
 
 **(Resolved by ADR-0054:** how a flatten order skips the kill switch. A flatten order is owned by
-the reserved id `__operator__`, and the guard skips the kill switch check for that owner. Decided in
+the reserved id `__operator__`. The guard skips the kill switch check only for an `__operator__`
+order that is reduce-only. Decided in
 [#412](https://github.com/MarcosACH/tickwright/issues/412).**)**

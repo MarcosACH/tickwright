@@ -23,6 +23,13 @@ The attribution footgun (handing a strategy account-level realized PnL that secr
 
 v1 exposes **no separately addressable account-net `PositionView`**: the account net per symbol already exists internally (ADR-0034/0035's reconciliation anchor) and feeds the position-grain fields of §4, but a *whole-position* view — account-net `size`/`entry_price`/`realized_pnl` beside the strategy's own — is a `HEDGE`-era additive accessor, not v1 code. In disjoint-`NET` without foreign flow its attribution fields would be a redundant alias of the own-overlay; under foreign flow they are exactly the decomposition §5 deliberately withholds from a strategy.
 
+**(Extended by ADR-0054:** a flatten fill is the one fill a strategy did not place that still
+moves its own-attribution slice. Flatten splits each fill over every partition of the symbol, so the
+strategy's slice reads flat with the rest of the account. Its realized PnL and fees include its
+share of the flatten. When no order can close the strategy's leftover, the leftover moves out of
+its slice at its own entry price, so its realized PnL does not change. Decided in
+[#412](https://github.com/MarcosACH/tickwright/issues/412).**)**
+
 ## 3. The method set
 
 A three-method `domain` Protocol, all synchronous (§7), no mark argument (the projection holds the latest mark internally, ADR-0039):
