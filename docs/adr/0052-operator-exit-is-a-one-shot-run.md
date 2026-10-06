@@ -20,7 +20,10 @@ operator asks for cancel all and flatten, and what each one touches. The terms a
   file lock. For Postgres it is an advisory lock. A one-shot run takes the same lock. It refuses to
   start while another process holds it. The lock must end when the process that holds it dies. A
   crash must never block the exit run, because that is when the operator needs it most. So on
-  SQLite it is an OS file lock, never a marker file.
+  SQLite it is an OS lock on a separate file next to the database, such as `tickwright.db.lock`.
+  The file existing means nothing. Only a held lock counts, so a crash leaves no stale lock. The
+  lock is never on the database file itself. SQLite takes its own POSIX locks there, and POSIX
+  drops all of a process's locks on a file when any handle to it closes.
 
 ## Considered options
 
@@ -55,7 +58,11 @@ operator asks for cancel all and flatten, and what each one touches. The terms a
   that time.
 - On paper, a market order fails when no price is cached. So a paper flatten cannot fill unless
   the feed runs. A replay feed restarts from the top of its file (ADR-0043 §5.1).
-- Still open in #408: how an exit run meets the kill switch, who owns a flatten order and its
-  fills, how far a flatten order may slip, and what the operator sees. Also open: how to guard an
-  exit run that opens a different store, how long a dead Postgres session may hold the lock, and
-  whether an exit run starts the feed and at what price a paper flatten fills.
+- Still open in #408:
+  - How an exit run meets the kill switch.
+  - Who owns a flatten order and its fills.
+  - How far a flatten order may slip.
+  - What the operator sees.
+  - How to guard an exit run that opens a different store.
+  - How long a dead Postgres session may hold the lock.
+  - Whether an exit run starts the feed, and at what price a paper flatten fills.
