@@ -37,6 +37,11 @@ Decided in [#413](https://github.com/MarcosACH/tickwright/issues/413), part of
   constant, not a setting. After an attempt with any fill, the next one goes at once. A retry
   helps only if the price moves, so the exit run needs a price that updates between attempts.
   That is still open in #408, with the feed during an exit run.**)**
+  **(Resolved by ADR-0059:** flatten starts the feed, so the price updates between attempts. A
+  missing price counts as an attempt that fills nothing. The price is now also capped by the mark.
+  A buy never goes above mark × (1 + `SLIPPAGE_BOUND`), and a sell never goes below
+  mark × (1 − `SLIPPAGE_BOUND`). This holds for every market order. Decided in
+  [#438](https://github.com/MarcosACH/tickwright/issues/438).**)**
 - **The count lives in memory.** A crash resets it. A new run is a new choice by the operator, so it
   gets its full tries.
 - **On boot, an open flatten saga is resumed first.** The engine finds it at the venue by its id. It

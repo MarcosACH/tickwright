@@ -43,3 +43,9 @@ Surfacing the slippage bound as an engine-level `PlaceSignal` field was rejected
 venue-specific execution detail into the order model the `PaperExchange` never needs. On the paper
 path MARKET remains a direct fill at the latest tick (ADR-0027); the aggressive-IOC translation is a
 live-adapter concern only.
+
+**(Amended by ADR-0059:** the MARKET price is also capped by the mark. A buy goes out at the lower
+of `latest_price × (1 + slippage_bound)` and `mark × (1 + slippage_bound)`. A sell goes out at the
+higher of the two, with `(1 − slippage_bound)`. A stale last trade can no longer widen the bound.
+A missing mark fails the order like a missing trade price. Paper is unchanged. Not built yet.
+Decided in [#438](https://github.com/MarcosACH/tickwright/issues/438).**)**
