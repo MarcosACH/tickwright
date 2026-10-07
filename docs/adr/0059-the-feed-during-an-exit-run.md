@@ -59,8 +59,8 @@ of [#408](https://github.com/MarcosACH/tickwright/issues/408).
   the order within `SLIPPAGE_BOUND` of the market. An old trade on the far side of the mark makes
   the order tighter, so the attempt may fill nothing. No new trade means no new price, so flatten
   gives up. The operator can run it again.
-- A strategy's market order also gets the clamp. Its fills can only get closer to the mark. It now
-  also fails when no mark is cached.
+- A strategy's market order also gets the clamp. Its limit price can only get closer to the mark.
+  It now also fails when no mark is cached.
 - Not built yet. The build updates the `SLIPPAGE_BOUND` line in `.env.example` and the adapter's
   docstring, which still say last trade × (1 ± bound).
 - Under replay, a missing price cannot hang the run. `ManualClock.sleep` returns at once and moves
