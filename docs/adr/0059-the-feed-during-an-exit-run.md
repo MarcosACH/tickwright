@@ -1,0 +1,56 @@
+# The feed during an exit run
+
+A market order needs a cached trade price, on paper and on Hyperliquid. Without one, both adapters
+raise. An exit run (ADR-0052) starts no strategy, so it was open whether it starts the feed at all.
+Flatten sends market orders and retries after a miss (ADR-0056). So it needs a price, and the price
+must update between attempts. This ADR decides when an exit run starts the feed, and at what price
+a paper flatten fills. Decided in [#438](https://github.com/MarcosACH/tickwright/issues/438), part
+of [#408](https://github.com/MarcosACH/tickwright/issues/408).
+
+## Decision
+
+- **`tickwright flatten` starts the feed.** The price rule stays the one in ADR-0056: the last
+  trade × (1 ± `SLIPPAGE_BOUND`).
+- **The live feed also subscribes to every symbol the account holds.** Flatten covers positions the
+  engine did not open (ADR-0052). Those can be on coins the operator never configured. The run
+  reads the venue position at boot, so it knows these symbols before the feed starts.
+- **Under replay, the exit run plays the whole file first.** Flatten then fills at the last row's
+  price. The fill is dated at the end of the file. A live feed never ends, so flatten places as
+  soon as each symbol has a price.
+- **`tickwright cancel-all` starts no feed.** A cancel needs no price. Flatten runs cancel all as
+  its first step, before the feed starts.
+- **A missing price counts as an attempt that fills nothing.** Flatten waits 2 seconds and tries
+  again. After 3 in a row, it gives up and exits with an error (ADR-0056). This covers a replay
+  file with no rows for a held symbol, and a WebSocket that cannot connect.
+
+## Considered options
+
+- **Read the price over REST before each attempt.** It works for any coin with no feed. But the read
+  gives the mid, not the last trade. That would give flatten a second price rule, which #431 chose
+  not to have.
+- **Place as soon as a price arrives, under replay too.** Replay plays the file as fast as it can.
+  The fill would land on whatever row the feed had reached, which depends on task timing. Tests
+  could not pin the price.
+- **Store how far the replay got, and resume from there.** It gives a closer price. It adds a new
+  stored value and new code for a paper-only gain.
+- **Refuse flatten under replay.** Replay is the default paper path. The hermetic path would have
+  no flatten, and paper and live would differ.
+- **Wait for a price with no time limit.** A dead connection would hang the run until the operator
+  stops it by hand. The give-up rule already ends a run that cannot fill.
+
+## Consequences
+
+- On subscribe, the Hyperliquid trades stream sends the last 30 trades at once. A public mainnet
+  check on 2026-10-07 showed this for BTC and for ZETA. So a live flatten normally has a price in
+  under a second.
+- A quiet coin's first price can be minutes old. The ZETA snapshot was 5 minutes old. If the market
+  has moved past the slippage bound since, the attempt fills nothing. No new trade means no new
+  price, so flatten gives up. The operator can run it again.
+- Under replay, a missing price cannot hang the run. `ManualClock.sleep` returns at once and moves
+  virtual time forward. So the 3 attempts end at once, and so does a stochastic fill's latency.
+- A paper flatten under replay fills at the last price in the file, not at a current price. This is
+  a known gap of paper replay.
+- A replay exit run plays the whole file. On a long recording, the run takes longer to start
+  flatten.
+- Paper with the live Hyperliquid feed behaves like live. It places as soon as each symbol has a
+  price.

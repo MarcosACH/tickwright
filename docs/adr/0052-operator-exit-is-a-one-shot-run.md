@@ -75,3 +75,8 @@ first and its orders skip it. Cancel all leaves the kill switch alone. Decided i
 order per symbol for the venue's position, owned by the reserved id `__operator__`. Its fills split
 pro rata over every partition, so each strategy reads flat. Decided in
 [#412](https://github.com/MarcosACH/tickwright/issues/412).**)**
+
+**(Resolved by ADR-0059:** whether an exit run starts the feed, and at what price a paper flatten
+fills. Flatten starts the feed, and live it also subscribes to every symbol the account holds.
+Under replay, the run plays the whole file first, so a paper flatten fills at the last row's price.
+Cancel all starts no feed. Decided in [#438](https://github.com/MarcosACH/tickwright/issues/438).**)**
