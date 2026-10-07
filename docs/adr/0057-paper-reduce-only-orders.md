@@ -58,8 +58,8 @@ decides how paper copies them. Decided in
   probes show Hyperliquid rejects any order under $10 that leaves part of the position open,
   reduce-only or not, IOC or GTC. It accepts an order that covers the whole position, and a
   reduce-only order larger than the position. So paper skips the minimum for a reduce-only order
-  only when its size is at least the account net. Any other reduce-only order under $10 is
-  rejected. A plain order keeps today's check. Decided in
+  only when its size is at least the account net. Any other reduce-only order under the minimum
+  is rejected. A plain order keeps today's check. Decided in
   [#435](https://github.com/MarcosACH/tickwright/issues/435).**)**
 
 ## Considered options
@@ -90,7 +90,7 @@ decides how paper copies them. Decided in
   the account net only. Whether the guard stops this belongs to the question below.
   **(Corrected by ADR-0058:** two strategies cannot trade one symbol (ADR-0038), so the A and B
   example cannot happen. The flip is still possible against the unattributed partition. The guard
-  now denies a strategy's reduce-only order that would flip its own position.**)**
+  now denies a strategy's reduce-only order unless it shrinks the strategy's own position.**)**
 - How the pre-trade guard treats a reduce-only order is still open in
   [#408](https://github.com/MarcosACH/tickwright/issues/408). That includes the guard's own minimum
   check for limit orders.

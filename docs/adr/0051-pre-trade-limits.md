@@ -32,7 +32,7 @@ no longer limits that. The exemption trusts the engine's own position view when 
 A `reduce_only` flag that the venue enforces would be stronger. It stays deferred (ADR-0030).**)**
 **(Extended by ADR-0058, reduce-only and flatten orders:** a reduce-only order skips max order
 size, max order value, and max position. A strategy's reduce-only order keeps the rate cap and the
-$10 minimum, unless it closes the whole account net. It is denied when it would flip the
+min notional, unless it closes the whole account net. It is denied unless it shrinks the
 strategy's own position. A flatten order skips every cap and the rate cap. Decided in
 [#435](https://github.com/MarcosACH/tickwright/issues/435).**)**
 

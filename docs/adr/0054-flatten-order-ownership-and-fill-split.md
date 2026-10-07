@@ -47,6 +47,10 @@ Decided in [#412](https://github.com/MarcosACH/tickwright/issues/412), part of
   realized PnL does not change. No trade happens at the venue, and no fee is booked. When the
   venue refuses a too-small order, the unattributed partition keeps that dust. So the sum still
   equals the venue size.
+  **(Narrowed by ADR-0058:** the venue minimum never refuses a flatten order, because each attempt
+  closes the whole venue position. No other venue check is known to refuse one as too small. So
+  the too-small case is a fallback only. Decided in
+  [#435](https://github.com/MarcosACH/tickwright/issues/435).**)**
 - **`__operator__` is reserved like `__unattributed__`.** Config and strategy registration refuse
   it as a strategy id. It never owns a partition. Its fills only feed the split.
 - **The guard skips the kill switch only for an `__operator__` order that is reduce-only.**
