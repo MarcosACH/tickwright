@@ -41,9 +41,11 @@ decides how paper copies them. Decided in
 - **Paper reads the store net plus its own fills the store has not applied yet.** Paper publishes a
   fill from inside a bus handler. Both buses queue it, and the store moves only after that handler
   returns. Without the list, two reduce-only sells of 1 against a long 1 both fill, and the account
-  ends short 1. A fill leaves the list when paper sees the saga's fill event with the same
-  `trade_id`. The ledger moves before that event is published (ADR-0045 §1). The list is empty when
-  the engine is idle. The store stays the only authority for the position (ADR-0043 §4).
+  ends short 1. Paper asks the store which fills it has applied, in the same read as the net. A fill
+  counts only while its order row lacks `{cloid}:fill:{trade_id}`. The order row and the position
+  move in one transaction (ADR-0043 §4), so no fill is counted twice. Paper drops a fill from the
+  list once the store shows it applied. The list is empty when the engine is idle. The store stays
+  the only authority for the position (ADR-0043 §4).
 - **A reduce-only order skips the minimum notional.** Hyperliquid applies its $10 minimum to opening
   orders only (P7). A plain order keeps today's check, even when it would close a position. That is
   stricter than the venue, so paper never accepts an order the venue would refuse. A strategy that
@@ -61,12 +63,14 @@ decides how paper copies them. Decided in
   is work with no effect.
 - **Paper keeps its own net, seeded from the store at start.** No list of in-flight fills is needed.
   But it is a second copy of the position, the drift ADR-0043 §4 rules out.
+- **Drop a fill from the list when paper sees the saga's fill event.** The store applies the fill
+  before that event is published. The in-memory bus can deliver a new order in that gap. Paper would
+  then count the fill twice, once in the store and once on the list.
 
 ## Consequences
 
-- Paper subscribes to the saga's fill events, not only to ticks.
-- Every paper fill belongs to an order the engine placed, so every fill on the list gets its event.
-  A fill the saga dedups as a redelivery was already applied once, so its event was already seen.
+- Paper needs a read of the store's applied fills. The composition root injects it, the way it
+  injects `account_net` today.
 - How the pre-trade guard treats a reduce-only order is still open in
   [#408](https://github.com/MarcosACH/tickwright/issues/408). That includes the guard's own minimum
   check for limit orders.
