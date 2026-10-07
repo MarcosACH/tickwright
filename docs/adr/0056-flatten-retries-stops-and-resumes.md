@@ -35,11 +35,20 @@ Decided in [#413](https://github.com/MarcosACH/tickwright/issues/413), part of
 - **Then the run starts its job from the top.** It trips the kill switch, which is already tripped.
   It runs cancel all, reconciles, and places the next seq. This matches the engine's boot order,
   where open sagas are resolved before positions are reconciled.
-- **The split books the fill exactly.** Each partition's share is rounded down to the lot size. The
-  lots left over go one at a time to the partitions with the largest remainder. So the moves sum to
-  the fill, even when an attempt ends partly filled. Otherwise a rounding lot would open a gap
-  between the books and the venue, and the next attempt could not be placed until reconcile healed
-  it.
+- **The split never takes a lot back.** It depends on the cumulative fill only, so a resume after a
+  crash books the same moves. First the fill splits by side. Say the venue is long. Long partitions
+  hold L lots, and short ones hold S lots. After f lots fill, the long side has moved
+  `floor(L * f / (L - S))` lots in total. The short side has moved that, minus f. Then each side
+  hands out its total one lot at a time. Each lot goes to the partition furthest behind its exact
+  share at that point. Ties go to the partition id that sorts first.
+- **So the split books the fill exactly.** A later fill only moves a partition further toward zero.
+  The moves sum to the fill after every fill, even when an attempt ends partly filled. A full fill
+  moves every partition to exactly zero. Otherwise a rounding lot would open a gap between the books
+  and the venue. The next attempt could not be placed until reconcile healed it.
+
+Example. A holds BTC +0.6, B holds +0.6, and C holds +0.2. The lot is 0.1. After 1.0 fills, the
+moves are A -0.4, B -0.4, and C -0.2. After 1.1 fills, they are A -0.5, B -0.4, and C -0.2. The
+second fill moves only A.
 
 ## Considered options
 
@@ -53,6 +62,10 @@ Decided in [#413](https://github.com/MarcosACH/tickwright/issues/413), part of
   next run. That run is a new decision, so it starts at zero.
 - **Let reconcile book a fill missed in a crash.** Reconcile heals a gap into the unattributed
   partition only. The strategies would not read flat.
+- **Largest remainder on the cumulative fill.** The prototype used it. Each share rounds down to the
+  lot, and the leftover lots go to the largest remainders. A larger fill can then take a lot back.
+  In the example above, C moves -0.2 after 1.0 fills, then -0.1 after 1.1 fills. The second fill
+  would book C buying on a sell order.
 
 ## Consequences
 

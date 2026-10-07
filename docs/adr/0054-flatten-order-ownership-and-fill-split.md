@@ -32,6 +32,9 @@ Decided in [#412](https://github.com/MarcosACH/tickwright/issues/412), part of
 - **The split runs on the total filled so far.** For each fill, the engine computes every
   partition's share of the order's cumulative fill, then books the change since the last fill. So
   rounding never leaves dust once the order is fully filled.
+  **(Amended by ADR-0056:** an attempt is IOC, so it often ends partly filled. ADR-0056 sets the
+  rounding rule. The moves sum to the fill after every fill, and a later fill never takes a lot
+  back. Decided in [#413](https://github.com/MarcosACH/tickwright/issues/413).**)**
 - **The partition sizes are read once, when the order is placed.** They are stored with the saga.
   A fill that arrives after a crash and restart splits against the same sizes.
 - **The id is `__operator__:<symbol>:<seq>`.** The cloid is derived from it as usual (ADR-0006).
