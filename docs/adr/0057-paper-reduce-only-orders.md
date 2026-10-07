@@ -41,11 +41,12 @@ decides how paper copies them. Decided in
 - **Paper reads the store net plus its own fills the store has not applied yet.** Paper publishes a
   fill from inside a bus handler. Both buses queue it, and the store moves only after that handler
   returns. Without the list, two reduce-only sells of 1 against a long 1 both fill, and the account
-  ends short 1. Paper asks the store which fills it has applied, in the same read as the net. A fill
-  counts only while its order row lacks `{cloid}:fill:{trade_id}`. The order row and the position
-  move in one transaction (ADR-0043 §4), so no fill is counted twice. Paper drops a fill from the
-  list once the store shows it applied. The list is empty when the engine is idle. The store stays
-  the only authority for the position (ADR-0043 §4).
+  ends short 1. Paper reads the applied fills and the net with no await between them. So no store
+  write can land between the two reads. A fill counts only while its order row lacks
+  `{cloid}:fill:{trade_id}`. The order row and the position move in one transaction (ADR-0043
+  §4), so no fill is counted twice. Paper drops a fill from the list once the store shows it
+  applied. The list is empty when the engine is idle. The store stays the only authority for the
+  position (ADR-0043 §4).
 - **A reduce-only order skips the minimum notional.** Hyperliquid applies its $10 minimum to opening
   orders only (P7). A plain order keeps today's check, even when it would close a position. That is
   stricter than the venue, so paper never accepts an order the venue would refuse. A strategy that
