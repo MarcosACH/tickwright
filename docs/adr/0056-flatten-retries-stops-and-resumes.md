@@ -29,6 +29,14 @@ Decided in [#413](https://github.com/MarcosACH/tickwright/issues/413), part of
   flatten is done.
 - **Flatten gives up after 3 attempts in a row that fill nothing.** Any fill resets the count. When
   it gives up, the kill switch stays tripped and the run exits with an error.
+  **(Extended in [#431](https://github.com/MarcosACH/tickwright/issues/431):** a flatten order
+  is priced like any market order. On Hyperliquid that is the last trade × (1 ± `SLIPPAGE_BOUND`),
+  5% by default (ADR-0030). It is the last trade, not the mark. Paper still fills at the last tick.
+  Flatten has no price rule of its own, so the adapter keeps the one bound. After an attempt that
+  fills nothing, flatten waits 2 seconds on the engine clock before the next one. The wait is a
+  constant, not a setting. After an attempt with any fill, the next one goes at once. A retry
+  helps only if the price moves, so the exit run needs a price that updates between attempts.
+  That is still open in #408, with the feed during an exit run.**)**
 - **The count lives in memory.** A crash resets it. A new run is a new choice by the operator, so it
   gets its full tries.
 - **On boot, an open flatten saga is resumed first.** The engine finds it at the venue by its id. It
@@ -80,5 +88,8 @@ second fill moves only A.
 - The exit code and the named events of a run that gives up are still open in #408.
 - How far a flatten order's price may be from the mark, and how long to wait between attempts, are
   still open in #408. Both decide how often an attempt fills nothing.
+  **(Resolved in [#431](https://github.com/MarcosACH/tickwright/issues/431):** the normal market
+  order bound, and a 2 second wait after a dry attempt. See the block under the give-up rule
+  above.**)**
 - Flatten across many symbols is still open in #408.
 - Each attempt takes a new seq. A flatten of one symbol can use several `__operator__` seqs.
