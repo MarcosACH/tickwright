@@ -21,6 +21,11 @@ v1 default target has no positions). Adding a flag that does nothing on the defa
 unmodeled by the engine is scope creep; it is a trivial passthrough to add when a positions surface
 arrives.
 
+**(Amended by ADR-0057:** positions shipped in v0.3.0, so the flag is no longer inert on paper.
+Paper shrinks or rejects a reduce-only order against the account net, the way Hyperliquid does.
+It is not a plain passthrough on the live path either. A shrunk order must end `CANCELLED` there
+too. Decided in [#414](https://github.com/MarcosACH/tickwright/issues/414).**)**
+
 ## MARKET maps to an aggressive IOC limit — in the thin adapter, not the engine
 
 Hyperliquid has **no native market order**: execution types are limit orders with TIF **ALO**
