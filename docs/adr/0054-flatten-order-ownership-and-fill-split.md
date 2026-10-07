@@ -15,6 +15,10 @@ Decided in [#412](https://github.com/MarcosACH/tickwright/issues/412), part of
   cases are below.
 - **One flatten order per symbol, sized to the venue's position.** The size is read from the venue
   when the order is placed. It is reduce-only. Its owner is the reserved id `__operator__`.
+  **(Amended by ADR-0056:** one order at a time per symbol, not one in total. Each attempt is a
+  market order. When it ends and the venue still holds a position, flatten reconciles and places
+  the next seq for what is left. Decided in
+  [#413](https://github.com/MarcosACH/tickwright/issues/413).**)**
 - **The order is placed only when the books match the venue.** The split moves the partitions by
   the filled size in total. So the partition sizes must sum to the venue size, or the books drift
   from the venue. If they differ, flatten waits for reconciliation to heal the gap into the
@@ -95,6 +99,13 @@ the gap was before flatten.
 - Foreign flow that arrives during a flatten run is healed into the unattributed partition after
   the order was placed. The stored sizes do not include it. The next flatten order covers what is
   left. The flatten saga prototype in #408 checks this case.
+  **(Resolved by ADR-0056:** the prototype confirmed it. A hand trade that grows the position is
+  closed by the next attempt. One that closes the venue ends flatten, and the leftover rule keeps
+  the gap in the unattributed partition. Decided in
+  [#413](https://github.com/MarcosACH/tickwright/issues/413).**)**
 - Which pre-trade caps apply to an `__operator__` order is still open in #408.
 - How long flatten waits for the books to match the venue is still open in #408. So is what
   flatten does when they never match.
+  **(Resolved by ADR-0056:** flatten never waits. After reconcile, the books match the venue,
+  unless the venue is flat. Then the leftover rule applies. A venue read that fails is still open
+  in #408. Decided in [#413](https://github.com/MarcosACH/tickwright/issues/413).**)**
