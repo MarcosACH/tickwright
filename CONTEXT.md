@@ -81,7 +81,8 @@ landed** (recovery resolves a never-landed `PENDING`/`SUBMITTED` here, never a b
 _Avoid_: error, cancelled (a cancel is none of these).
 
 **MarketFeed** *(Protocol)*:
-Produces [[MarketTick]] events for configured symbols. Impls: `HyperliquidFeed`, `ReplayFeed`
+Produces [[MarketTick]] events for configured symbols. A live [[Flatten]] run also covers every
+symbol the account holds (ADR-0059). Impls: `HyperliquidFeed`, `ReplayFeed`
 (deterministic, file-backed — for tests/dev, not a backtester). See ADR-0015.
 _Avoid_: data source, provider, feed handler.
 
@@ -449,11 +450,12 @@ reduce-only market order per symbol at a time, sized to the venue's position, on
 it. After each one, it reconciles and sends another until the venue is flat. It gives up after 3
 attempts in a row that fill nothing (ADR-0056). After an attempt that fills nothing, it waits 2
 seconds. The order is priced like any market order, with the same slippage bound (ADR-0056). The
-run starts the feed for its prices. Under replay, it plays the whole file first, so a paper flatten
-fills at the last row's price (ADR-0059). It is
-owned by the reserved id `__operator__`, not by a strategy. Its fills split pro rata over every
-[[Position]] partition of the symbol, so each strategy reads flat (ADR-0054). When no order can
-close a strategy's leftover, it moves into the unattributed partition at the strategy's entry price.
+run starts the feed for its prices. Live, the feed also subscribes to every symbol the account
+holds. Under replay, it plays the whole file first, so a paper flatten fills at the last row's price
+(ADR-0059). It is owned by the reserved id `__operator__`, not by a strategy. Its fills split pro
+rata over every [[Position]] partition of the symbol, so each strategy reads flat (ADR-0054). When
+no order can close a strategy's leftover, it moves into the unattributed partition at the
+strategy's entry price.
 Not built yet (#408).
 _Avoid_: close out, liquidate (that is the venue's forced close), panic sell.
 

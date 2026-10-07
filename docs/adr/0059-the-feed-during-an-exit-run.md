@@ -52,5 +52,11 @@ of [#408](https://github.com/MarcosACH/tickwright/issues/408).
   a known gap of paper replay.
 - A replay exit run plays the whole file. On a long recording, the run takes longer to start
   flatten.
+- The positions stay open while the file plays, so paper funding charges them up to the end of the
+  file. The watermark in ADR-0043 §5.1 skips every hour a past run already charged. So nothing is
+  charged twice. Only a run that stopped mid-file gets new charges.
+- Under replay, `tickwright cancel-all` starts no feed, so virtual time never leaves 0. Its cancel
+  records are dated 1970-01-01. Boot reconcile in a normal replay run is dated the same way. Flatten
+  runs cancel all at the same point, so its cancels carry this date too.
 - Paper with the live Hyperliquid feed behaves like live. It places as soon as each symbol has a
   price.
