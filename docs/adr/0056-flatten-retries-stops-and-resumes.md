@@ -41,7 +41,9 @@ Decided in [#413](https://github.com/MarcosACH/tickwright/issues/413), part of
   hold L lots, and short ones hold S lots. After f lots fill, the long side has moved
   `floor(L * f / (L - S))` lots in total. The short side has moved that, minus f. Then each side
   hands out its total one lot at a time. Each lot goes to the partition furthest behind its exact
-  share at that point. Ties go to the partition id that sorts first.
+  share at that point. A partition's exact share is its size times the lots handed out so far,
+  divided by the side's size, L or S. Behind is measured in lots. It is that share minus the lots
+  the partition already got. Ties go to the partition id that sorts first.
 - **So the split books the fill exactly.** A later fill only moves a partition further toward zero.
   The moves sum to the fill after every fill, even when an attempt ends partly filled. A full fill
   moves every partition to exactly zero. Otherwise a rounding lot would open a gap between the books
