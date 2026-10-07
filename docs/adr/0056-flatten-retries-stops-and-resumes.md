@@ -14,7 +14,8 @@ Decided in [#413](https://github.com/MarcosACH/tickwright/issues/413), part of
   fills, fills partly, or fills nothing (P6 in the testnet probes,
   [#416](https://github.com/MarcosACH/tickwright/issues/416)). Flatten never leaves its own order
   resting. An attempt is sized to the venue position when it is placed. If the position shrank
-  since, the venue shrinks the order to it (P1).
+  since, Hyperliquid shrinks the order to it (P1). What paper does is decided in
+  [#414](https://github.com/MarcosACH/tickwright/issues/414).
 - **One attempt at a time per symbol.** When an attempt ends, flatten reconciles, then decides
   again. If the venue still holds a position, it places the next seq for what is left.
 - **Foreign flow is covered by the next attempt.** A hand trade that grows the position is healed
