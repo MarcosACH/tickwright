@@ -71,6 +71,9 @@ decides how paper copies them. Decided in
 
 - Paper needs a read of the store's applied fills. The composition root injects it, the way it
   injects `account_net` today.
+- The reasons "reduce-only shrink" and "reduce-only cancelled" live on paper's status report only.
+  The saga's `OrderCancelled` has no reason field, so a strategy cannot tell these cancels from any
+  other. Giving `OrderCancelled` a reason is a separate decision.
 - How the pre-trade guard treats a reduce-only order is still open in
   [#408](https://github.com/MarcosACH/tickwright/issues/408). That includes the guard's own minimum
   check for limit orders.
