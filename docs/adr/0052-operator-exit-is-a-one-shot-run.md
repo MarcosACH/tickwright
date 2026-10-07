@@ -79,4 +79,5 @@ pro rata over every partition, so each strategy reads flat. Decided in
 **(Resolved by ADR-0059:** whether an exit run starts the feed, and at what price a paper flatten
 fills. Flatten starts the feed, and live it also subscribes to every symbol the account holds.
 Under replay, the run plays the whole file first, so a paper flatten fills at the last row's price.
-Cancel all starts no feed. Decided in [#438](https://github.com/MarcosACH/tickwright/issues/438).**)**
+Cancel all starts no feed. A market order's price is now also capped by the mark. Decided in
+[#438](https://github.com/MarcosACH/tickwright/issues/438).**)**
