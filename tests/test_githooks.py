@@ -654,3 +654,33 @@ def test_pre_commit_leaves_the_dirty_lockfile_unstaged_and_uncommitted(
     assert _git(repo, "diff", "--cached", "--name-only").stdout == "", (
         "the hook left changes staged after the commit"
     )
+
+
+# --- A file staged with `git add -f` under an ignored path (#432) ---------------------
+#
+# The `/prototype` skill commits prototypes under the ignored `prototypes/` path, staged
+# with `git add -f`. After ruff runs, the hook stages its files again. A plain `git add`
+# checks `.gitignore` there and fails, so the commit stopped and only `--no-verify` got
+# through, which skips the local guard too.
+
+
+def test_pre_commit_lands_a_force_staged_file_under_an_ignored_path(tmp_path: Path) -> None:
+    """The commit lands, and it carries ruff's change to the force-staged file."""
+    repo = _repo(tmp_path / "repo")
+    (repo / ".gitignore").write_text("scratch/\n")
+    _git(repo, "add", ".gitignore")
+    _git(repo, "commit", "-q", "-m", "ignore scratch", "--no-verify")
+    (repo / "scratch").mkdir()
+    (repo / "scratch" / "mod.py").write_text("a=2\n")  # ruff format rewrites it to `a = 2`
+    _git(repo, "add", "-f", "scratch/mod.py")
+    env = _install_stub_uv(tmp_path / "bin", _stub_uv_reformatting())
+
+    result = _commit_under(repo, env)
+
+    assert result.returncode == 0, (
+        f"a force-staged file under an ignored path aborted the commit:\n"
+        f"{result.stdout}\n{result.stderr}"
+    )
+    assert _git(repo, "show", "HEAD:scratch/mod.py").stdout == "a = 2\n", (
+        "the commit did not carry ruff's change to the force-staged file"
+    )
