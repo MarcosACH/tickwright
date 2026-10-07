@@ -37,7 +37,7 @@ decides how paper copies them. Decided in
   probes did not test this on the venue. No outcome depends on it, because the first order to close
   the position cancels the rest.
 - **A shrunk order never grows back.** If the position grows again, the working size stays where it
-  was shrunk to.
+  was shrunk to. The probes did not test this on the venue either.
 - **Paper reads the store net plus its own fills the store has not applied yet.** Paper publishes a
   fill from inside a bus handler. Both buses queue it, and the store moves only after that handler
   returns. Without the list, two reduce-only sells of 1 against a long 1 both fill, and the account
