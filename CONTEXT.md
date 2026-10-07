@@ -409,7 +409,8 @@ window, the rate cap, is set for the whole engine. Each cap is off unless the us
 cap is `DENIED` with a reason that names the cap, and nothing else happens. The position cap
 measures the worst-case position if same-side open orders and the new order all fill. ADR-0051
 holds the formula. An order that only reduces that worst case, without crossing zero, skips max
-order size and max order value. It is still checked against max position and the rate cap.
+order size and max order value. It is still checked against max position and the rate cap. A
+[[Reduce-only order]] skips max position too, and a [[Flatten]] order skips every cap (ADR-0058).
 _Avoid_: risk limits (implies the deferred RiskEngine), circuit breaker (a breach never trips the
 [[Kill-switch]]).
 
@@ -456,11 +457,13 @@ _Avoid_: close out, liquidate (that is the venue's forced close), panic sell.
 
 **Reduce-only order**:
 An order that may only shrink the account's net position toward zero, never grow it or flip its
-side. It is checked against the account net, not a strategy's partition. So it can still flip one
-strategy's partition. An order larger than the net is shrunk to it, and the cut part ends
-`CANCELLED`. With nothing to reduce, it is rejected. A resting one shrinks as the position shrinks
-and is cancelled when the position closes. Paper copies the Hyperliquid rules (ADR-0057). Not built
-yet. ADR-0030 defers it, and #408 plans it.
+side. The venue checks it against the account net, not a strategy's partition. The guard denies a
+strategy's reduce-only order unless it shrinks that strategy's own position. An order larger than
+the net is shrunk to it, and the cut part ends `CANCELLED`. With nothing to reduce, it is rejected.
+A resting one shrinks as the position shrinks and is cancelled when the position closes. Under the
+min notional, $10 on Hyperliquid, it is rejected unless it closes the whole net. Paper copies the Hyperliquid rules (ADR-0057). It
+skips the size, value, and position caps, but not the rate cap (ADR-0058). Not built yet. ADR-0030
+defers it, and #408 plans it.
 _Avoid_: close order, exit order.
 
 **Figure**:

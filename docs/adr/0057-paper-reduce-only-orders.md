@@ -13,6 +13,9 @@ decides how paper copies them. Decided in
   knows nothing about strategy partitions. So paper reads the account net, not the partition of
   the strategy that sent the order. Strategy A long 1 and strategy B short 1 make a flat account.
   A reduce-only sell from A is then rejected, on paper and on the venue.
+  **(Corrected by ADR-0058:** two strategies cannot trade one symbol (ADR-0038). The other
+  partition in a symbol is the unattributed one. Strategy A long 1 and an unattributed short 1 make
+  the flat account here. The rule does not change.**)**
 - **At placement, paper copies the venue table.**
 
   | Account net vs order | Paper and Hyperliquid |
@@ -51,6 +54,13 @@ decides how paper copies them. Decided in
   orders only (P7). A plain order keeps today's check, even when it would close a position. That is
   stricter than the venue, so paper never accepts an order the venue would refuse. A strategy that
   wants to close dust sends it reduce-only.
+  **(Corrected by ADR-0058:** P7 only tested an order that closes the whole position. The P9
+  probes show Hyperliquid rejects any order under $10 that leaves part of the position open,
+  reduce-only or not, IOC or GTC. It accepts an order that covers the whole position, and a
+  reduce-only order larger than the position. So paper skips the minimum for a reduce-only order
+  only when its size is at least the account net. Any other reduce-only order under the minimum
+  is rejected. A plain order keeps today's check. Decided in
+  [#435](https://github.com/MarcosACH/tickwright/issues/435).**)**
 
 ## Considered options
 
@@ -78,7 +88,12 @@ decides how paper copies them. Decided in
 - A reduce-only order can still flip one strategy's partition. With A long 1 and B long 1, a
   reduce-only sell of 2 from A is accepted, and A ends short 1. The "never flip" promise holds for
   the account net only. Whether the guard stops this belongs to the question below.
+  **(Corrected by ADR-0058:** two strategies cannot trade one symbol (ADR-0038), so the A and B
+  example cannot happen. The flip is still possible against the unattributed partition. The guard
+  now denies a strategy's reduce-only order unless it shrinks the strategy's own position.**)**
 - How the pre-trade guard treats a reduce-only order is still open in
   [#408](https://github.com/MarcosACH/tickwright/issues/408). That includes the guard's own minimum
   check for limit orders.
+  **(Resolved by ADR-0058**, decided in
+  [#435](https://github.com/MarcosACH/tickwright/issues/435).**)**
 - The `reduce_only` field on `PlaceSignal` lands with the #408 PRD.

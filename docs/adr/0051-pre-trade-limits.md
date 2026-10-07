@@ -30,6 +30,11 @@ now takes one order, and the rate cap also protects the account from venue rate 
 trade-off is on a thin book. A whole reducing order can fill far below the mark, and the value cap
 no longer limits that. The exemption trusts the engine's own position view when the order is sent.
 A `reduce_only` flag that the venue enforces would be stronger. It stays deferred (ADR-0030).**)**
+**(Extended by ADR-0058, reduce-only and flatten orders:** a reduce-only order skips max order
+size, max order value, and max position. A strategy's reduce-only order keeps the rate cap and the
+min notional, unless it closes the whole account net. It is denied unless it shrinks the
+strategy's own position. A flatten order skips every cap and the rate cap. Decided in
+[#435](https://github.com/MarcosACH/tickwright/issues/435).**)**
 
 **Off unless set.** A symbol with no entry has no per-symbol caps. An unset rate cap never denies.
 The user is responsible for reading the docs and setting the caps they need. The engine does not
