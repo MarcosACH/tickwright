@@ -65,6 +65,8 @@ it. Decided in [#415](https://github.com/MarcosACH/tickwright/issues/415), part 
   this gap, because the ADR-0016 fold reads handled seqs, not sent ones. Writing the record when
   the strategy sends would close it. That would give `SignalEmitter` the store, which is a larger
   change. Tracked under "Not yet specified" on #408.
+  **(Corrected:** the gap hits places too, so it is out of scope for #408. It is now the bug
+  [#442](https://github.com/MarcosACH/tickwright/issues/442).**)**
 - A single cancel that marks nothing still leaves no trace, and a restart can reuse its seq. That
   stays safe, because it names one fixed target. A reused seq cannot change what it cancels.
 - Many orders can carry the same `cancel_signal_id`. The seq high-water reads the same max.
