@@ -444,8 +444,10 @@ An operator action that closes every open position in the account to zero size, 
 positions the engine did not open. It runs after [[Cancel all]], so no resting order can fill and
 reopen exposure. Like cancel all, it is a one-shot command with the engine stopped (ADR-0052). A
 strategy never flattens. It exits its own position with a [[Reduce-only order]]. Flatten sends one
-reduce-only order per symbol for the venue's position, once the books match it. The order is owned
-by the reserved id `__operator__`, not by a strategy. Its fills split pro rata over every
+reduce-only market order per symbol at a time, sized to the venue's position, once the books match
+it. After each one, it reconciles and sends another until the venue is flat. It gives up after 3
+attempts in a row that fill nothing (ADR-0056). The order is owned by the reserved id
+`__operator__`, not by a strategy. Its fills split pro rata over every
 [[Position]] partition of the symbol, so each strategy reads flat (ADR-0054). When no order can
 close a strategy's leftover, it moves into the unattributed partition at the strategy's entry price.
 Not built yet (#408).
