@@ -64,7 +64,9 @@ py=$(echo "$staged" | grep -E '\.py$' || true)
 if [ -n "$py" ]; then
   echo "$py" | xargs uv run ruff check --fix
   echo "$py" | xargs uv run ruff format
-  echo "$py" | xargs git add
+  # -u re-stages only what is already staged. A plain add checks .gitignore and refuses a
+  # file staged with `git add -f`, such as a prototype under prototypes/ (#432).
+  echo "$py" | xargs git add -u --
 fi
 
 # Local hook guard (e.g. a private reference scrub) — kept outside the repo, so it
