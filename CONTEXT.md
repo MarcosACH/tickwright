@@ -446,8 +446,9 @@ reopen exposure. Like cancel all, it is a one-shot command with the engine stopp
 strategy never flattens. It exits its own position with a [[Reduce-only order]]. Flatten sends one
 reduce-only market order per symbol at a time, sized to the venue's position, once the books match
 it. After each one, it reconciles and sends another until the venue is flat. It gives up after 3
-attempts in a row that fill nothing (ADR-0056). The order is owned by the reserved id
-`__operator__`, not by a strategy. Its fills split pro rata over every
+attempts in a row that fill nothing (ADR-0056). After an attempt that fills nothing, it waits 2
+seconds. The order is priced like any market order, with the same slippage bound (#431). It is
+owned by the reserved id `__operator__`, not by a strategy. Its fills split pro rata over every
 [[Position]] partition of the symbol, so each strategy reads flat (ADR-0054). When no order can
 close a strategy's leftover, it moves into the unattributed partition at the strategy's entry price.
 Not built yet (#408).
