@@ -74,6 +74,9 @@ decides how paper copies them. Decided in
 - The reasons "reduce-only shrink" and "reduce-only cancelled" live on paper's status report only.
   The saga's `OrderCancelled` has no reason field, so a strategy cannot tell these cancels from any
   other. Giving `OrderCancelled` a reason is a separate decision.
+- A reduce-only order can still flip one strategy's partition. With A long 1 and B long 1, a
+  reduce-only sell of 2 from A is accepted, and A ends short 1. The "never flip" promise holds for
+  the account net only. Whether the guard stops this belongs to the question below.
 - How the pre-trade guard treats a reduce-only order is still open in
   [#408](https://github.com/MarcosACH/tickwright/issues/408). That includes the guard's own minimum
   check for limit orders.

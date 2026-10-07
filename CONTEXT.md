@@ -454,8 +454,9 @@ Not built yet (#408).
 _Avoid_: close out, liquidate (that is the venue's forced close), panic sell.
 
 **Reduce-only order**:
-An order that may only shrink a position toward zero, never grow it or flip its side. It is
-checked against the account net, not a strategy's partition. An order larger than the net is
+An order that may only shrink the account's net position toward zero, never grow it or flip its
+side. It is checked against the account net, not a strategy's partition. So it can still flip one
+strategy's partition. An order larger than the net is
 shrunk to it, and the cut part ends `CANCELLED`. With nothing to reduce, it is rejected. A resting
 one shrinks as the position shrinks and is cancelled when the position closes. Paper copies the
 Hyperliquid rules (ADR-0057). Not built yet. ADR-0030 defers it, and #408 plans it.
