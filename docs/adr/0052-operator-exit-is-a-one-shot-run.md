@@ -42,9 +42,10 @@ operator asks for cancel all and flatten, and what each one touches. The terms a
   the engine stops before it can place another order. A separate lock connection would let the
   engine keep trading without its lock. The refusal reads the holder from `pg_stat_activity`. It
   prints its pid, client address, and start time. It tells the operator to retry in about 30
-  seconds if that engine is dead, or to run `SELECT pg_terminate_backend(<pid>)`. The Postgres DSN must be a direct connection. A pooler in
-  transaction mode breaks a session advisory lock. In session mode, the keepalives reach only the
-  pooler. Code does not detect a pooler, so `.env.example` states the rule.**)**
+  seconds if that engine is dead, or to run `SELECT pg_terminate_backend(<pid>)`. The Postgres DSN
+  must be a direct connection. A pooler in transaction mode breaks a session advisory lock. In
+  session mode, the keepalives reach only the pooler. Code does not detect a pooler, so
+  `.env.example` states the rule.**)**
 
 ## Considered options
 
