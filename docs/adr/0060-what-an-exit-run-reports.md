@@ -50,6 +50,11 @@ when a venue read fails, and which named events an exit run emits. Decided in
   the address limit skips them (ADR-0044). A rate-limited read takes the ADR-0056 rate limit path.
   The count does not move. Flatten emits `flatten.rate_limited` with `limit` as `ip`. It waits 10
   seconds, then reads again. Waiting makes progress here, so the wait has no cap, like an order's.
+  **(Extended by the [safe exit module map](../module-maps/safe-exit.md),
+  [#457](https://github.com/MarcosACH/tickwright/issues/457):** a read reports this as
+  `VenueReadFailure.RATE_LIMITED_IP`. So `fetch_open_orders()` and `fetch_positions()` return a
+  `VenueReadFailure` rather than `None`. With `None`, flatten could not tell a rate-limited read
+  from a failed one. ADR-0056 holds the rest of the refusal report.**)**
 - **Named events.** The `order.*` events already cover each order. An exit run adds these:
 
   | Event | When | Fields |
