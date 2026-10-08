@@ -11,6 +11,11 @@ operator asks for cancel all and flatten, and what each one touches. The terms a
 - **Two commands.** `tickwright cancel-all` cancels every resting order in the account and exits.
   `tickwright flatten` runs cancel all first, then closes every position, then exits. Flatten can
   never skip cancel all, because the command runs it itself.
+  **(Extended in [#441](https://github.com/MarcosACH/tickwright/issues/441):** a run exits 0 when
+  a final venue read confirms the job is done. It exits 1 when it stopped partway. It exits 2 when
+  it never booted, such as when the store check refused it. Cancel all reads open orders again
+  after its cancels, and flatten never starts while an order still rests. The exit codes and named
+  events are in ADR-0060.**)**
 - **The engine is stopped first.** Each command is a one-shot run. It boots, recovers, and
   reconciles like a normal run. It starts no strategy. Then it does its one job and exits.
 - **Account scope.** Operator cancel all also cancels orders the engine did not place, such as
@@ -125,3 +130,8 @@ Cancel all starts no feed. A market order's price is now also capped by the mark
 run that opens a different store, and how long a dead Postgres session may hold the lock. An exit
 run refuses a store no engine has used, unless the operator passes `--new-store`. On Postgres a
 dead session frees the lock in about 25 seconds. See the block under the store lock above.**)**
+
+**(Resolved by ADR-0060:** what the operator sees. A run exits 0 when a final venue read confirms
+the job is done. It exits 1 when it stopped partway, and 2 when it never booted. Each run that
+booted ends with the named event `exit.finished`, and there is no separate summary. Decided in
+[#441](https://github.com/MarcosACH/tickwright/issues/441).**)**

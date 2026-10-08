@@ -116,3 +116,6 @@ the gap was before flatten.
   **(Resolved by ADR-0056:** flatten never waits. After reconcile, the books match the venue,
   unless the venue is flat. Then the leftover rule applies. A venue read that fails is still open
   in #408. Decided in [#413](https://github.com/MarcosACH/tickwright/issues/413).**)**
+  **(Resolved by ADR-0060:** a failed venue read counts as a dry attempt toward the 3-in-a-row
+  stop. Flatten never sends an order it could not size. Decided in
+  [#441](https://github.com/MarcosACH/tickwright/issues/441).**)**

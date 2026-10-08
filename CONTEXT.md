@@ -438,7 +438,8 @@ An action that cancels every resting order in its scope and sends no trade. The 
 is the whole account, including orders placed by hand at the venue. A strategy's scope is its own
 orders. The operator runs it as a one-shot command with the engine stopped (ADR-0052). A strategy
 sends one cancel all per symbol. It cancels only the orders it sent before that signal
-(ADR-0055). Not built yet (#408).
+(ADR-0055). Operator cancel all is done when a final venue read finds no resting order. If orders
+remain, it cancels them once more, then exits 1 if any still rest (ADR-0060). Not built yet (#408).
 _Avoid_: flatten (that closes positions), mass-cancel.
 
 **Flatten**:
@@ -463,8 +464,9 @@ the account holds. Under replay, it plays the whole file first, so a paper flatt
 last row's price (ADR-0059). It is owned by the reserved id `__operator__`, not by a strategy.
 Its fills split pro rata over every [[Position]] partition of the symbol, so each strategy reads
 flat (ADR-0054). When no order can close a strategy's leftover, it moves into the unattributed
-partition at the strategy's entry price.
-Not built yet (#408).
+partition at the strategy's entry price. A failed venue read also counts as an attempt that fills
+nothing (ADR-0060). A read refused for a rate limit does not count. It waits like an order.
+Flatten is done only when the venue holds no resting order and no position. Not built yet (#408).
 _Avoid_: close out, liquidate (that is the venue's forced close), panic sell.
 
 **Reduce-only order**:
