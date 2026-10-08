@@ -480,6 +480,20 @@ skips the size, value, and position caps, but not the rate cap (ADR-0058). Not b
 defers it, and #408 plans it.
 _Avoid_: close order, exit order.
 
+**Exit run**:
+A one-shot run of `tickwright cancel-all` or `tickwright flatten`, with the engine stopped
+(ADR-0052). It is the same [[Engine]] process with an exit job in place of the strategies. It takes
+the store lock, boots and reconciles like a normal run, does its one job, and exits 0, 1, or 2
+(ADR-0060). The job is `OperatorCancelAll` or `Flatten`. See `docs/module-maps/safe-exit.md`. Not
+built yet (#408).
+_Avoid_: exit mode, maintenance run.
+
+**Split basis**:
+The partition sizes of a symbol, read when a [[Flatten]] order is placed and stored on that order
+in its `PENDING` write. Every fill of the order splits pro rata against it, including a fill
+booked by [[Reconciliation]] after a crash (ADR-0054, ADR-0056). Not built yet (#408).
+_Avoid_: snapshot (that is a strategy's state bytes).
+
 **Figure**:
 One numeric value as an outside source *reports* it — a venue response body, a replay row —
 before it is a domain quantity. A figure is unreadable, and therefore a failed read at whatever
