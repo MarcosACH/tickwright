@@ -51,11 +51,13 @@ Decided in [#413](https://github.com/MarcosACH/tickwright/issues/413), part of
   and a send that dies without a 429. So the 3 attempt stop still bounds every failure flatten
   cannot name. A send that dies may still have reached the venue. So before a refused or dead
   attempt counts, flatten resolves its saga by cloid (ADR-0008 rule 2). If the venue has the
-  order, flatten books its fill with the split above. A fill resets the count. If the venue has no
-  record, the saga ends as `failed` and books nothing. A rate limit takes the same path. The next
-  attempt then takes a new seq, sized and priced when it is placed. So a retry never resends an old
-  cloid, and a symbol never has two attempts open. If the read by cloid fails, that is the venue
-  read that fails, still open in #408. Each
+  order, flatten books its fill with the split above. A fill resets the count. One read with no
+  record is not proof, because the send may still be on the wire. The saga ends as `failed` only
+  when the in-flight miss budget runs out (ADR-0011 inv 7). It then books nothing. A rate limit
+  takes the same path. The next attempt waits for that verdict, then takes a new seq, sized and
+  priced when it is placed. So a retry never resends an old cloid, and a symbol never has two
+  attempts open. If the read by cloid fails, that is the venue read that fails, still open in
+  #408. Each
   refusal emits a named event. Its name is still open in #408, with the other flatten events. A
   thin book and a rate limit mean different things. A thin book may never fill, so the count stops
   the run. The address limit always lets one request through every 10 seconds, and each fill
