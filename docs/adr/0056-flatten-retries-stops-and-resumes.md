@@ -79,6 +79,17 @@ Decided in [#413](https://github.com/MarcosACH/tickwright/issues/413), part of
   move. A rate limit emits `flatten.rate_limited`. Every dry attempt emits `flatten.dry_attempt`,
   with `refused` as the reason for any other refusal. Decided in
   [#441](https://github.com/MarcosACH/tickwright/issues/441).**)**
+  **(Resolved in [#452](https://github.com/MarcosACH/tickwright/issues/452):** a refused request
+  does not restart the 10 seconds, and it does not use the address budget. A testnet probe sent one
+  order a second, and one still got through about every 11 seconds. So waiting makes progress, and
+  the rate limit wait from #439 stands. The slot is not shared fairly. With three loops out of
+  step, one loop got nothing in 90 seconds while the account got 10 orders through. Flatten accepts
+  this. The account as a whole still makes progress, and each fill raises the budget. A symbol that
+  gets no turn keeps emitting `flatten.rate_limited`, so the operator sees it is stuck. The #439
+  line that no symbol waits behind another is about the design. Flatten never queues one symbol
+  behind another. It does not promise each symbol a turn at the venue. The venue answers a refusal
+  with HTTP 200 and `"status": "err"`. Evidence:
+  [`hyperliquid-rate-limit-window-probe.md`](../research/hyperliquid-rate-limit-window-probe.md).**)**
 - **The count lives in memory.** A crash resets it. A new run is a new choice by the operator, so it
   gets its full tries.
 - **On boot, an open flatten saga is resumed first.** The engine finds it at the venue by its id. It
