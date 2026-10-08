@@ -85,7 +85,7 @@ Decided in [#413](https://github.com/MarcosACH/tickwright/issues/413), part of
   the rule above stands. The slot is not shared fairly. With three loops out of step, one loop got
   nothing in 90 seconds while the account got 10 orders through. The venue answers a refusal with
   HTTP 200 and `"status": "err"`. Evidence:
-  [`hyperliquid-rate-limit-window-probe.md`](https://github.com/MarcosACH/tickwright/blob/research/hyperliquid-reduce-only-cancel-market/docs/research/hyperliquid-rate-limit-window-probe.md).**)**
+  [`hyperliquid-rate-limit-window-probe.md`](../research/hyperliquid-rate-limit-window-probe.md).**)**
 - **The count lives in memory.** A crash resets it. A new run is a new choice by the operator, so it
   gets its full tries.
 - **On boot, an open flatten saga is resumed first.** The engine finds it at the venue by its id. It
