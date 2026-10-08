@@ -77,4 +77,8 @@ it. Decided in [#415](https://github.com/MarcosACH/tickwright/issues/415), part 
 - A single `CancelSignal` on an order that is already marked still does nothing. Only a cancel
   all sends again.
 - Hyperliquid documents no maximum batch size. The testnet probe in #408 measures it.
+  **(Resolved in [#416](https://github.com/MarcosACH/tickwright/issues/416):** at most 200
+  cancels fit in one action. At 201 the venue refuses the whole action, with no status per order.
+  So the Hyperliquid adapter must split a longer list. Evidence: P4 in
+  [`hyperliquid-reduce-only-cancel-market-probes.md`](../research/hyperliquid-reduce-only-cancel-market-probes.md).**)**
 - The operator's cancel all (ADR-0052) can use the same `cancel(refs)` call.
