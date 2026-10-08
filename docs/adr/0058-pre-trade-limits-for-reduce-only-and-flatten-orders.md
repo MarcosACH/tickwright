@@ -93,3 +93,5 @@ ADR-0054.
   order. No other venue check is known to refuse a whole close as too small. ADR-0054 keeps its
   leftover rule for that case as a fallback.
 - Venue rate limits for a flatten across many symbols stay open in #408.
+  **(Resolved in [#439](https://github.com/MarcosACH/tickwright/issues/439):** a venue rate limit
+  does not count as a dry attempt, and flatten waits 10 seconds. See ADR-0056.**)**

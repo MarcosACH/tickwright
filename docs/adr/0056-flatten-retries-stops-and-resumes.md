@@ -42,6 +42,13 @@ Decided in [#413](https://github.com/MarcosACH/tickwright/issues/413), part of
   A buy never goes above mark × (1 + `SLIPPAGE_BOUND`), and a sell never goes below
   mark × (1 − `SLIPPAGE_BOUND`). This holds for every market order. Decided in
   [#438](https://github.com/MarcosACH/tickwright/issues/438).**)**
+  **(Extended in [#439](https://github.com/MarcosACH/tickwright/issues/439):** a venue rate limit
+  is not a dry attempt. The venue may refuse an order because the address is over its limit. It
+  may also answer HTTP 429 for the IP limit. Either way, the count does not move, and flatten waits
+  10 seconds before it tries again. Each refusal emits a named event. A thin book and a rate limit
+  mean different things. A thin book may never fill, so the count stops the run. A rate limit
+  always lets one request through every 10 seconds, and each fill raises the address budget. So
+  waiting still makes progress. Paper has no rate limit, so this never happens on paper.**)**
 - **The count lives in memory.** A crash resets it. A new run is a new choice by the operator, so it
   gets its full tries.
 - **On boot, an open flatten saga is resumed first.** The engine finds it at the venue by its id. It
@@ -97,4 +104,11 @@ second fill moves only A.
   order bound, and a 2 second wait after a dry attempt. See the block under the give-up rule
   above.**)**
 - Flatten across many symbols is still open in #408.
+  **(Resolved in [#439](https://github.com/MarcosACH/tickwright/issues/439):** every symbol closes
+  at the same time. Each symbol runs its own loop from this ADR, one attempt at a time. Each order
+  goes out as its own action, never in a batch. The address limit counts a batch of n orders as n
+  requests, so a batch saves nothing there. It would only save IP weight, and it would need a new
+  place-a-list seam method. One after another would leave the last symbol open longest. ADR-0054
+  already sends one order per symbol, and ADR-0055 batches cancels only. Neither changes. The
+  limit of 1000 open orders does not reach flatten, because cancel all runs first.**)**
 - Each attempt takes a new seq. A flatten of one symbol can use several `__operator__` seqs.
