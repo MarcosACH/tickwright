@@ -45,10 +45,19 @@ Decided in [#413](https://github.com/MarcosACH/tickwright/issues/413), part of
   **(Extended in [#439](https://github.com/MarcosACH/tickwright/issues/439):** a venue rate limit
   is not a dry attempt. The venue may refuse an order because the address is over its limit. It
   may also answer HTTP 429 for the IP limit. Either way, the count does not move, and flatten waits
-  10 seconds before it tries again. Each refusal emits a named event. A thin book and a rate limit
-  mean different things. A thin book may never fill, so the count stops the run. A rate limit
-  always lets one request through every 10 seconds, and each fill raises the address budget. So
-  waiting still makes progress. Paper has no rate limit, so this never happens on paper.**)**
+  10 seconds before it tries again. The Hyperliquid adapter tells a rate limit apart from other
+  refusals. It reports the rate limit without venue text, so the engine never reads Hyperliquid
+  messages. Every other refusal counts as a dry attempt. That covers a bad nonce, a bad signature,
+  and a send that dies without a 429. So the 3 attempt stop still bounds every failure flatten
+  cannot name. If such an order did fill, reconcile finds the fill and the count resets. Each
+  refusal emits a named event. Its name is still open in #408, with the other flatten events. A
+  thin book and a rate limit mean different things. A thin book may never fill, so the count stops
+  the run. The address limit always lets one request through every 10 seconds, and each fill
+  raises its budget. The IP limit refills within a minute when nothing else on the IP uses it. So
+  waiting still makes progress, and the wait has no cap on purpose. This is not the rejected retry
+  forever below. The named events show the operator a rate limit, so it cannot pass for progress.
+  The operator can stop the run with Ctrl-C. The next run resumes any open saga, as below. Paper
+  has no rate limit, so this never happens on paper.**)**
 - **The count lives in memory.** A crash resets it. A new run is a new choice by the operator, so it
   gets its full tries.
 - **On boot, an open flatten saga is resumed first.** The engine finds it at the venue by its id. It
@@ -110,5 +119,9 @@ second fill moves only A.
   requests, so a batch saves nothing there. It would only save IP weight, and it would need a new
   place-a-list seam method. One after another would leave the last symbol open longest. ADR-0054
   already sends one order per symbol, and ADR-0055 batches cancels only. Neither changes. The
-  limit of 1000 open orders does not reach flatten, because cancel all runs first.**)**
+  limit of 1000 open orders does not reach flatten, because cancel all runs first. Closing all
+  symbols at once puts IP limit pressure on reads too. Each filled attempt reads the fill history,
+  which weighs 20. With about 50 symbols, one round of reads alone reaches 1200 weight. That 429
+  lands on a read, which the rate limit rule above does not cover. It belongs with the venue read
+  that fails, still open in #408. We accept this so that no symbol waits behind another.**)**
 - Each attempt takes a new seq. A flatten of one symbol can use several `__operator__` seqs.
