@@ -72,6 +72,12 @@ Decided in [#413](https://github.com/MarcosACH/tickwright/issues/413), part of
   forever below. The named events show the operator a rate limit, so it cannot pass for progress.
   The operator can stop the run with Ctrl-C. The next run resumes any open saga, as below. Paper
   has no rate limit, so this never happens on paper.**)**
+  **(Resolved by ADR-0060:** a failed venue read counts as a dry attempt. That covers the read by
+  cloid and the position read. Flatten never sends an order it could not size. After 3 in a row it
+  exits 1, and the open saga is resumed on the next boot. Giving up also exits 1. A rate limit
+  emits `flatten.rate_limited`. Every dry attempt emits `flatten.dry_attempt`, with `refused` as
+  the reason for any other refusal. Decided in
+  [#441](https://github.com/MarcosACH/tickwright/issues/441).**)**
 - **The count lives in memory.** A crash resets it. A new run is a new choice by the operator, so it
   gets its full tries.
 - **On boot, an open flatten saga is resumed first.** The engine finds it at the venue by its id. It
