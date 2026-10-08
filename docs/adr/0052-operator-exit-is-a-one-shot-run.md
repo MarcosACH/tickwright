@@ -130,3 +130,8 @@ Cancel all starts no feed. A market order's price is now also capped by the mark
 run that opens a different store, and how long a dead Postgres session may hold the lock. An exit
 run refuses a store no engine has used, unless the operator passes `--new-store`. On Postgres a
 dead session frees the lock in about 25 seconds. See the block under the store lock above.**)**
+
+**(Resolved by ADR-0060:** what the operator sees. A run exits 0 when a final venue read confirms
+the job is done. It exits 1 when it stopped partway, and 2 when it never booted. Each run that
+booted ends with the named event `exit.finished`, and there is no separate summary. Decided in
+[#441](https://github.com/MarcosACH/tickwright/issues/441).**)**
