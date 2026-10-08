@@ -26,16 +26,21 @@ operator asks for cancel all and flatten, and what each one touches. The terms a
   drops all of a process's locks on a file when any handle to it closes.
   **(Extended in [#440](https://github.com/MarcosACH/tickwright/issues/440):** an exit run refuses
   a store with no account row, because no engine ever ran there. That is almost always the wrong
-  directory. The error prints the store's absolute path. The flag `--new-store` lets the run go
-  anyway. It is for a lost host, where every store is new. The run then warns that it cannot see an
-  engine on another store. Reconcile puts the venue's positions in the unattributed partition, and
-  flatten closes those. A held lock is refused at once, with no wait and no flag to break it. On
-  SQLite the engine writes its pid into the lock file, and the refusal prints the path and that
-  pid. The pid is only for the message. The held lock still decides. On Postgres the engine's
-  session sets short server-side keepalives: `tcp_keepalives_idle` 10 seconds,
-  `tcp_keepalives_interval` 5 seconds, `tcp_keepalives_count` 3, and a matching
-  `tcp_user_timeout`. The server then drops a dead session in about 25 seconds. The refusal reads
-  the holder from `pg_stat_activity`. It prints its pid, client address, and start time. It tells
+  directory. Boot creates the account row, so the run checks before it writes anything. The error
+  prints the store's absolute path. The flag `--new-store` lets the run go anyway. It is for a lost
+  host, where every store is new. The run then warns that it cannot see an engine on another store.
+  A `--new-store` run leaves an account row behind. A later exit run on that store is not refused.
+  Reconcile puts the venue's positions in the unattributed partition, and flatten closes those. A
+  held lock is refused at once, with no wait and no flag to break it. On SQLite the engine writes
+  its pid into the lock file, and the refusal prints the path and that pid. The pid is only for the
+  message. The held lock still decides. On Postgres the engine's session sets short server-side
+  keepalives: `tcp_keepalives_idle` 10 seconds, `tcp_keepalives_interval` 5 seconds,
+  `tcp_keepalives_count` 3, and `tcp_user_timeout` 25000 milliseconds. The server then drops a dead
+  session in about 25 seconds. It also drops a live engine that loses its network for that long.
+  So the engine takes the lock on the same connection it writes through, and it never reconnects.
+  A lost session then fails the engine's next write. The saga writes `PENDING` before it sends, so
+  the engine stops before it can place another order. A separate lock connection would let the
+  engine keep trading without its lock. The refusal reads the holder from `pg_stat_activity`. It prints its pid, client address, and start time. It tells
   the operator to retry in about 30 seconds if that engine is dead, or to run
   `SELECT pg_terminate_backend(<pid>)`. The Postgres DSN must be a direct connection. A pooler in
   transaction mode breaks a session advisory lock. In session mode, the keepalives reach only the
@@ -86,7 +91,8 @@ operator asks for cancel all and flatten, and what each one touches. The terms a
   **(Resolved in [#440](https://github.com/MarcosACH/tickwright/issues/440):** without keepalives,
   a Linux server notices a dead client after about 2 hours and 11 minutes. The engine's session now
   sets short server-side keepalives, so the wait drops to about 25 seconds. A refusal names the
-  holder and how to end its session. These settings were not yet tested against a real server.
+  holder and how to end its session. A live engine cut off for 25 seconds also loses its lock. It
+  then stops at its next write. These settings were not yet tested against a real server.
   The slice's Postgres test confirms them. See the block under the store lock above.**)**
 - On paper, a market order fails when no price is cached. So a paper flatten cannot fill unless
   the feed runs. A replay feed restarts from the top of its file (ADR-0043 §5.1).
@@ -113,3 +119,8 @@ fills. Flatten starts the feed, and live it also subscribes to every symbol the 
 Under replay, the run plays the whole file first, so a paper flatten fills at the last row's price.
 Cancel all starts no feed. A market order's price is now also capped by the mark. Decided in
 [#438](https://github.com/MarcosACH/tickwright/issues/438).**)**
+
+**(Resolved in [#440](https://github.com/MarcosACH/tickwright/issues/440):** how to guard an exit
+run that opens a different store, and how long a dead Postgres session may hold the lock. An exit
+run refuses a store no engine has used, unless the operator passes `--new-store`. On Postgres a
+dead session frees the lock in about 25 seconds. See the block under the store lock above.**)**
