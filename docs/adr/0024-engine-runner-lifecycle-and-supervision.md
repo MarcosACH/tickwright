@@ -95,6 +95,12 @@ those components.
    **(Extended by ADR-0055:** the fold also reads the per-strategy seq record from the store. It
    is one row per strategy, so it does not repeat the mass read. The `Cache` does not hold it.
    Decided in [#415](https://github.com/MarcosACH/tickwright/issues/415).**)**
+
+   **(Corrected by [#417](https://github.com/MarcosACH/tickwright/issues/417), a strategy does not
+   pull open orders:** the `Cache` lives in `engine`, and a strategy may import only `domain`. No
+   `domain` Protocol exposes open orders. So a stateful strategy tracks its own open orders from
+   `on_order_event` and keeps them in its snapshot. After a restart, that set can be stale.
+   `extending.md` says this to strategy authors.**)**
 7. Start the `MarketFeed` **last** — the first tick is only possible after the barrier clears, so
    no order can be placed before reconciliation completes (ADR-0011 inv 5).
 
