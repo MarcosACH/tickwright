@@ -40,9 +40,9 @@ operator asks for cancel all and flatten, and what each one touches. The terms a
   So the engine takes the lock on the same connection it writes through, and it never reconnects.
   A lost session then fails the engine's next write. The saga writes `PENDING` before it sends, so
   the engine stops before it can place another order. A separate lock connection would let the
-  engine keep trading without its lock. The refusal reads the holder from `pg_stat_activity`. It prints its pid, client address, and start time. It tells
-  the operator to retry in about 30 seconds if that engine is dead, or to run
-  `SELECT pg_terminate_backend(<pid>)`. The Postgres DSN must be a direct connection. A pooler in
+  engine keep trading without its lock. The refusal reads the holder from `pg_stat_activity`. It
+  prints its pid, client address, and start time. It tells the operator to retry in about 30
+  seconds if that engine is dead, or to run `SELECT pg_terminate_backend(<pid>)`. The Postgres DSN must be a direct connection. A pooler in
   transaction mode breaks a session advisory lock. In session mode, the keepalives reach only the
   pooler. Code does not detect a pooler, so `.env.example` states the rule.**)**
 
@@ -92,8 +92,8 @@ operator asks for cancel all and flatten, and what each one touches. The terms a
   a Linux server notices a dead client after about 2 hours and 11 minutes. The engine's session now
   sets short server-side keepalives, so the wait drops to about 25 seconds. A refusal names the
   holder and how to end its session. A live engine cut off for 25 seconds also loses its lock. It
-  then stops at its next write. These settings were not yet tested against a real server.
-  The slice's Postgres test confirms them. See the block under the store lock above.**)**
+  then stops at its next write. These settings are not yet tested against a real server. The slice
+  must confirm them with a `postgres`-marked test. See the block under the store lock above.**)**
 - On paper, a market order fails when no price is cached. So a paper flatten cannot fill unless
   the feed runs. A replay feed restarts from the top of its file (ADR-0043 §5.1).
 - Still open in #408:
