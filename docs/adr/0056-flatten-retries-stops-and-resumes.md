@@ -127,7 +127,12 @@ second fill moves only A.
 - After reconcile, the books match the venue, unless the venue is flat. Then the leftover rule
   applies. So flatten never waits for the books to match. A venue read that fails is not covered
   here. It belongs with what the operator sees when flatten cannot finish, still open in #408.
+  **(Resolved by ADR-0060:** a failed venue read counts as a dry attempt. A read refused for a
+  rate limit waits 10 seconds and does not count. Decided in
+  [#441](https://github.com/MarcosACH/tickwright/issues/441).**)**
 - The exit code and the named events of a run that gives up are still open in #408.
+  **(Resolved by ADR-0060:** a run that gives up emits `flatten.gave_up`, then `exit.finished`,
+  and exits 1. Decided in [#441](https://github.com/MarcosACH/tickwright/issues/441).**)**
 - How far a flatten order's price may be from the mark, and how long to wait between attempts, are
   still open in #408. Both decide how often an attempt fills nothing.
   **(Resolved in [#431](https://github.com/MarcosACH/tickwright/issues/431):** the normal market
@@ -145,4 +150,7 @@ second fill moves only A.
   which weighs 20. With about 50 symbols, one round of reads alone reaches 1200 weight. That 429
   lands on a read, which the rate limit rule above does not cover. It belongs with the venue read
   that fails, still open in #408. We accept this so that no symbol waits behind another.**)**
+  **(Resolved by ADR-0060:** a read refused for a rate limit takes the rate limit path above. The
+  count does not move, and flatten waits 10 seconds. Decided in
+  [#441](https://github.com/MarcosACH/tickwright/issues/441).**)**
 - Each attempt takes a new seq. A flatten of one symbol can use several `__operator__` seqs.
