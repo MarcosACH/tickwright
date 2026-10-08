@@ -438,7 +438,8 @@ An action that cancels every resting order in its scope and sends no trade. The 
 is the whole account, including orders placed by hand at the venue. A strategy's scope is its own
 orders. The operator runs it as a one-shot command with the engine stopped (ADR-0052). A strategy
 sends one cancel all per symbol. It cancels only the orders it sent before that signal
-(ADR-0055). Not built yet (#408).
+(ADR-0055). Operator cancel all is done when a final venue read finds no resting order. If orders
+remain, it cancels them once more, then exits 1 if any still rest (ADR-0060). Not built yet (#408).
 _Avoid_: flatten (that closes positions), mass-cancel.
 
 **Flatten**:
