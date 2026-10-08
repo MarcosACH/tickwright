@@ -21,7 +21,7 @@
 > | Q4: no max batch size documented | **Measured: 200 cancels per action** (P4). See [ADR-0055](../adr/0055-strategy-cancel-all.md). |
 > | Section 7: when limited, 1 request every 10 seconds | **Confirmed.** A refused request does not restart the window and uses no budget. [ADR-0056](../adr/0056-flatten-retries-stops-and-resumes.md). |
 > | Section 8 lead: is a dust close under $10 exempt? | **Refined.** A whole-position close is exempt. A partial close under $10 is rejected, reduce-only or not (P7, P9). [ADR-0058](../adr/0058-pre-trade-limits-for-reduce-only-and-flatten-orders.md). |
-> | "None of these were run" | All probes ran on testnet on 2026-10-06 and 2026-10-07. |
+> | "None of these were run" | All probes ran on testnet between 2026-10-06 and 2026-10-08. |
 
 Scope: facts only. This note does not choose a design. Nothing was sent to testnet or mainnet.
 
