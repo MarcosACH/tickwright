@@ -450,7 +450,9 @@ reduce-only market order per symbol at a time, sized to the venue's position, on
 it. After each one, it reconciles and sends another until the venue is flat. It gives up after 3
 attempts in a row that fill nothing (ADR-0056). After an attempt that fills nothing, it waits 2
 seconds. A venue rate limit does not count as such an attempt. Flatten waits 10 seconds and tries
-again, with no cap. Any other refusal counts as an attempt that fills nothing. All symbols close
+again, with no cap. Any other refusal counts as an attempt that fills nothing. Before a refused or
+dead attempt counts, flatten looks up its order by cloid, and the next attempt takes a new seq.
+All symbols close
 at the same time, each with its own order (ADR-0056). The order is priced like any market order,
 with the same slippage bound (ADR-0056). On
 Hyperliquid that bound is capped by the mark, so a stale trade cannot widen it (ADR-0059). The
