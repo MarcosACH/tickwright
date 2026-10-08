@@ -57,18 +57,21 @@ Decided in [#413](https://github.com/MarcosACH/tickwright/issues/413), part of
   takes the same path. The next attempt waits for that verdict and for any wait above, 2 seconds
   after a dry attempt or 10 after a rate limit. Both start when the attempt ends and run at the
   same time. The next attempt goes when both are done. With the defaults the verdict takes about
-  15 seconds, so it is the longer one. Waiting 10 more seconds after it would gain nothing,
-  because the address limit counts from the refused request. The next attempt takes a new seq,
-  sized and priced when it is placed. So a retry never resends an old cloid, and a symbol never
-  has two attempts open. If the read by cloid fails, that is the venue read that fails, still open
-  in #408. Each refusal emits a named event. Its name is still open in #408, with the other flatten
-  events. A thin book and a rate limit mean different things. A thin book may never fill, so the
-  count stops the run. The address limit always lets one request through every 10 seconds, and
-  each fill raises its budget. The IP limit refills within a minute when nothing else on the IP
-  uses it. So waiting still makes progress, and the wait has no cap on purpose. This is not the
-  rejected retry forever below. The named events show the operator a rate limit, so it cannot
-  pass for progress. The operator can stop the run with Ctrl-C. The next run resumes any open
-  saga, as below. Paper has no rate limit, so this never happens on paper.**)**
+  15 seconds, so it is the longer one. The 10 seconds count from the refused request, not from the
+  verdict. The next attempt takes a new seq, sized and priced when it is placed. So a retry never
+  resends an old cloid, and a symbol never has two attempts open. If the read by cloid fails, that
+  is the venue read that fails, still open in #408. Each refusal emits a named event. Its name is
+  still open in #408, with the other flatten events. A thin book and a rate limit mean different
+  things. A thin book may never fill, so the count stops the run. When the address is limited, the
+  venue lets one request through every 10 seconds, and each fill raises the budget. That one slot
+  is shared by every symbol's loop. It is not known yet whether a refused request restarts the 10
+  seconds. If it does, loops that retry out of step could keep restarting it, and no order would
+  get through. A testnet probe for this is still open in #408. The IP limit refills within a minute
+  when nothing else on the IP uses it. So waiting makes progress, unless the probe finds that a
+  refusal restarts the window. The wait has no cap on purpose. This is not the rejected retry
+  forever below. The named events show the operator a rate limit, so it cannot pass for progress.
+  The operator can stop the run with Ctrl-C. The next run resumes any open saga, as below. Paper
+  has no rate limit, so this never happens on paper.**)**
 - **The count lives in memory.** A crash resets it. A new run is a new choice by the operator, so it
   gets its full tries.
 - **On boot, an open flatten saga is resumed first.** The engine finds it at the venue by its id. It
