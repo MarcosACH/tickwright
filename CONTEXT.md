@@ -452,17 +452,15 @@ attempts in a row that fill nothing (ADR-0056). After an attempt that fills noth
 seconds. A venue rate limit does not count as such an attempt. Flatten waits 10 seconds and tries
 again, with no cap. Any other refusal counts as an attempt that fills nothing. Before a refused or
 dead attempt counts, flatten looks up its order by cloid. One read with no record is not proof, so
-the next attempt waits for the in-flight verdict (ADR-0011), then takes a new seq.
-All symbols close
-at the same time, each with its own order (ADR-0056). The order is priced like any market order,
-with the same slippage bound (ADR-0056). On
-Hyperliquid that bound is capped by the mark, so a stale trade cannot widen it (ADR-0059). The
-run starts the feed for its prices. Live, the feed also subscribes to every symbol the account
-holds. Under replay, it plays the whole file first, so a paper flatten fills at the last row's price
-(ADR-0059). It is owned by the reserved id `__operator__`, not by a strategy. Its fills split pro
-rata over every [[Position]] partition of the symbol, so each strategy reads flat (ADR-0054). When
-no order can close a strategy's leftover, it moves into the unattributed partition at the
-strategy's entry price.
+the next attempt waits for the in-flight verdict (ADR-0011), then takes a new seq. All symbols
+close at the same time, each with its own order (ADR-0056). The order is priced like any market
+order, with the same slippage bound (ADR-0056). On Hyperliquid that bound is capped by the mark,
+so a stale trade cannot widen it (ADR-0059). The run starts the feed for its prices. Live, the
+feed also subscribes to every symbol the account holds. Under replay, it plays the whole file
+first, so a paper flatten fills at the last row's price (ADR-0059). It is owned by the reserved id
+`__operator__`, not by a strategy. Its fills split pro rata over every [[Position]] partition of
+the symbol, so each strategy reads flat (ADR-0054). When no order can close a strategy's leftover,
+it moves into the unattributed partition at the strategy's entry price.
 Not built yet (#408).
 _Avoid_: close out, liquidate (that is the venue's forced close), panic sell.
 
