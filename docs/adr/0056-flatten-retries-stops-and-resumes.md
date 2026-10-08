@@ -54,10 +54,14 @@ Decided in [#413](https://github.com/MarcosACH/tickwright/issues/413), part of
   order, flatten books its fill with the split above. A fill resets the count. One read with no
   record is not proof, because the send may still be on the wire. The saga ends as `failed` only
   when the in-flight miss budget runs out (ADR-0011 inv 7). It then books nothing. A rate limit
-  takes the same path. The next attempt waits for that verdict, then takes a new seq, sized and
-  priced when it is placed. So a retry never resends an old cloid, and a symbol never has two
-  attempts open. If the read by cloid fails, that is the venue read that fails, still open in
-  #408. Each refusal emits a named event. Its name is still open in #408, with the other flatten
+  takes the same path. The next attempt waits for that verdict and for any wait above, 2 seconds
+  after a dry attempt or 10 after a rate limit. Both start when the attempt ends and run at the
+  same time. The next attempt goes when both are done. With the defaults the verdict takes about
+  15 seconds, so it is the longer one. Waiting 10 more seconds after it would gain nothing,
+  because the address limit counts from the refused request. The next attempt takes a new seq,
+  sized and priced when it is placed. So a retry never resends an old cloid, and a symbol never
+  has two attempts open. If the read by cloid fails, that is the venue read that fails, still open
+  in #408. Each refusal emits a named event. Its name is still open in #408, with the other flatten
   events. A thin book and a rate limit mean different things. A thin book may never fill, so the
   count stops the run. The address limit always lets one request through every 10 seconds, and
   each fill raises its budget. The IP limit refills within a minute when nothing else on the IP
