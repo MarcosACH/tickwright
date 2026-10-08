@@ -465,8 +465,8 @@ last row's price (ADR-0059). It is owned by the reserved id `__operator__`, not 
 Its fills split pro rata over every [[Position]] partition of the symbol, so each strategy reads
 flat (ADR-0054). When no order can close a strategy's leftover, it moves into the unattributed
 partition at the strategy's entry price. A failed venue read also counts as an attempt that fills
-nothing (ADR-0060). Flatten is done only when the venue holds no resting order and no position.
-Not built yet (#408).
+nothing (ADR-0060). A read refused for a rate limit does not count. It waits like an order.
+Flatten is done only when the venue holds no resting order and no position. Not built yet (#408).
 _Avoid_: close out, liquidate (that is the venue's forced close), panic sell.
 
 **Reduce-only order**:

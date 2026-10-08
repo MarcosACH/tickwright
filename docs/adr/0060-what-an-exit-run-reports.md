@@ -16,7 +16,7 @@ when a venue read fails, and which named events an exit run emits. Decided in
   | --- | --- |
   | 0 | Done. A final venue read confirms it. |
   | 1 | Stopped partway. The account may still hold orders or positions. |
-  | 2 | Refused before it touched the venue. |
+  | 2 | Never booted. Nothing at the venue moved. |
 
 - **Done is what the venue says at the end.** Cancel all is done when the venue holds no resting
   order. Flatten is done when it holds no resting order and no position.
@@ -46,6 +46,10 @@ when a venue read fails, and which named events an exit run emits. Decided in
   more. So a refused attempt whose first cloid read fails counts twice. After 3 in a row it exits 1.
   The kill switch stays tripped. The open saga stays in the store, and the next run resumes it on
   boot (ADR-0056).
+- **A read refused for a rate limit is not a failed read.** The IP limit covers reads too. Only
+  the address limit skips them (ADR-0044). A rate-limited read takes the ADR-0056 rate limit path.
+  The count does not move. Flatten emits `flatten.rate_limited` with `limit` as `ip`. It waits 10
+  seconds, then reads again. Waiting makes progress here, so the wait has no cap, like an order's.
 - **Named events.** The `order.*` events already cover each order. An exit run adds these:
 
   | Event | When | Fields |
@@ -79,6 +83,8 @@ when a venue read fails, and which named events an exit run emits. Decided in
 - **Retry a failed read with its own budget.** It is a second count beside the 3 attempts. The 3
   attempts already end a run that cannot make progress.
 - **Wait for a failed read with no limit.** A dead connection would hang the run.
+- **Count a rate-limited read like any failed read.** Under the IP limit, three refused reads would
+  end the run in about 6 seconds. ADR-0056 already decided that a rate limit is waited out.
 - **Print a summary table to stdout.** It is a second output to keep in step with the events.
 
 ## Consequences
