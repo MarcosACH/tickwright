@@ -318,7 +318,7 @@ class HyperliquidExchange:
                 # reason it waits until the read holds every fill the venue
                 # reported. A short read leaves the saga open for reconcile.
                 read_sz = sum((fill.quantity for fill in fills), Decimal("0"))
-                if order.reduce_only and read_sz == total_sz < order.quantity:
+                if order.reduce_only and read_sz == total_sz and total_sz < order.quantity:
                     await self._bus.publish(
                         self._status_report(
                             cloid=order.cloid,
