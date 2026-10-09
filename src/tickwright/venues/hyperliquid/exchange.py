@@ -12,7 +12,7 @@ bounded against is the tick stream's — the adapter subscribes itself, like
 every consumer of market data.
 """
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
@@ -339,7 +339,11 @@ class HyperliquidExchange:
             NamedEvent.EXCHANGE_ACTION_REJECTED, request=request, cloid=cloid, reason=reason
         )
 
-    async def cancel(self, ref: OrderRef) -> None:
+    async def cancel(self, refs: Sequence[OrderRef]) -> None:
+        for ref in refs:
+            await self._cancel_one(ref)
+
+    async def _cancel_one(self, ref: OrderRef) -> None:
         cloid, symbol = ref.cloid, ref.symbol
         asset = self._universe.asset_indices[symbol]
         if ref.venue_oid is None:

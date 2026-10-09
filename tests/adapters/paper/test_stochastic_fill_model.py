@@ -277,7 +277,7 @@ def test_a_queue_miss_emits_no_fill_and_leaves_the_order_resting() -> None:
         await exchange.place(_limit_order("41000", qty="1"))
         for _ in range(3):
             await bus.publish(_tick("41000"))  # crosses, but always a queue miss
-        await exchange.cancel(OrderRef(cloid="0xabc", symbol="BTC"))
+        await exchange.cancel([OrderRef(cloid="0xabc", symbol="BTC")])
 
     asyncio.run(scenario())
 

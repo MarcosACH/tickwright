@@ -490,7 +490,7 @@ def test_cancel_sends_a_signed_cancel_by_cloid_and_reports_cancelled() -> None:
 
         bus.subscribe(ExecutionReport, collect)
         await exchange.place(limit_order(Side.BUY, "0.5", "42000"))
-        await exchange.cancel(UNACKED_REF)
+        await exchange.cancel([UNACKED_REF])
         return post, reports
 
     post, reports = asyncio.run(main())
@@ -517,7 +517,7 @@ def test_cancel_of_an_unacked_order_after_a_restart_goes_by_cloid_with_no_venue_
     async def main() -> FakeExchangeApi:
         post = FakeExchangeApi({"cancelByCloid": cancel_success_response()})
         exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
-        await exchange.cancel(UNACKED_REF)
+        await exchange.cancel([UNACKED_REF])
         return post
 
     post = asyncio.run(main())
@@ -538,7 +538,7 @@ def test_cancel_of_an_acked_order_goes_by_its_oid_after_a_restart() -> None:
     async def main() -> FakeExchangeApi:
         post = FakeExchangeApi({"cancel": cancel_success_response()})
         exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
-        await exchange.cancel(OrderRef(cloid=CLOID, symbol="BTC", venue_oid="77"))
+        await exchange.cancel([OrderRef(cloid=CLOID, symbol="BTC", venue_oid="77")])
         return post
 
     post = asyncio.run(main())
@@ -1161,7 +1161,7 @@ def test_a_handler_failure_on_the_cancel_publish_is_not_an_unreadable_body() -> 
             clock=ManualClock(),
         )
         await exchange.place(limit_order(Side.BUY, "0.5", "42000"))
-        await exchange.cancel(UNACKED_REF)
+        await exchange.cancel([UNACKED_REF])
 
     with capture_events() as events:
         with pytest.raises(_HandlerFailure):
@@ -1177,7 +1177,7 @@ def test_a_transport_failure_on_cancel_emits_no_report_and_does_not_raise() -> N
         )
         exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
         await exchange.place(limit_order(Side.BUY, "0.5", "42000"))
-        await exchange.cancel(UNACKED_REF)
+        await exchange.cancel([UNACKED_REF])
 
     with capture_events() as events:
         asyncio.run(main())
@@ -1233,7 +1233,7 @@ def test_a_top_level_action_error_on_cancel_emits_no_report_and_names_it() -> No
         bus.subscribe(ExecutionReport, collect)
         await exchange.place(limit_order(Side.BUY, "0.5", "42000"))
         with capture_events() as events:
-            await exchange.cancel(UNACKED_REF)
+            await exchange.cancel([UNACKED_REF])
         reasons = [
             str(e["reason"]) for e in events if e["event"] == NamedEvent.EXCHANGE_ACTION_REJECTED
         ]
@@ -1269,7 +1269,7 @@ def test_a_cancel_adjudication_the_adapter_cannot_read_is_a_named_no_op() -> Non
         bus.subscribe(ExecutionReport, collect)
         await exchange.place(limit_order(Side.BUY, "0.5", "42000"))
         with capture_events() as events:
-            await exchange.cancel(UNACKED_REF)
+            await exchange.cancel([UNACKED_REF])
         failed = [
             str(e["request"]) for e in events if e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED
         ]
@@ -1318,7 +1318,7 @@ def test_a_per_cancel_error_status_is_a_silent_benign_no_op() -> None:
         bus.subscribe(ExecutionReport, collect)
         await exchange.place(limit_order(Side.BUY, "0.5", "42000"))
         with capture_events() as events:
-            await exchange.cancel(UNACKED_REF)
+            await exchange.cancel([UNACKED_REF])
         return reports, [str(e["event"]) for e in events]
 
     reports, named = asyncio.run(main())
@@ -1366,7 +1366,7 @@ def test_a_cancel_status_outside_the_venue_vocabulary_is_a_failed_read_not_alrea
         bus.subscribe(ExecutionReport, collect)
         await exchange.place(limit_order(Side.BUY, "0.5", "42000"))
         with capture_events() as events:
-            await exchange.cancel(UNACKED_REF)
+            await exchange.cancel([UNACKED_REF])
         failed = [
             str(e["request"]) for e in events if e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED
         ]
@@ -1474,7 +1474,7 @@ def test_the_released_venue_link_still_answers_a_place_and_a_cancel() -> None:
         await exchange.stop()
         # Behind the release, inside the drain the runner has not reached yet.
         await asyncio.wait_for(exchange.place(limit_order(Side.BUY, "0.5", "42000")), timeout=5)
-        await asyncio.wait_for(exchange.cancel(UNACKED_REF), timeout=5)
+        await asyncio.wait_for(exchange.cancel([UNACKED_REF]), timeout=5)
         return post, reports
 
     post, reports = asyncio.run(main())

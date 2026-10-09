@@ -468,9 +468,11 @@ class OrderAnchor(Protocol):
         """Place ``order`` at the venue; emit the resulting raw ``ExecutionReport``(s)."""
         ...
 
-    async def cancel(self, ref: OrderRef) -> None:
-        """Cancel the order ``ref`` names; emit the resulting raw
-        ``ExecutionReport``. A cancel of an unknown/already-gone order is a
+    async def cancel(self, refs: Sequence[OrderRef]) -> None:
+        """Cancel every order ``refs`` names; emit the resulting raw
+        ``ExecutionReport`` for each. A list, so a cancel all is one venue
+        request where the venue can batch. A single cancel sends a list of one
+        (ADR-0055). A cancel of an unknown/already-gone order is a
         benign no-op (ADR-0026). The ref carries the saga's oid once the venue
         has assigned one, and a venue that keeps more than one order under a
         cloid cancels by that oid (#354)."""
