@@ -591,10 +591,10 @@ def cancel_statuses_response(*statuses: object) -> dict:
 
 def cancel_and_collect(
     post: FakeExchangeApi, refs: list[OrderRef]
-) -> tuple[list[ExecutionReport], list[str]]:
-    """Cancel ``refs`` and return the reports emitted and the events named."""
+) -> tuple[list[ExecutionReport], list[tuple[str, object]]]:
+    """Cancel ``refs`` and return the reports emitted and each event named, with its cloid."""
 
-    async def main() -> tuple[list[ExecutionReport], list[str]]:
+    async def main() -> tuple[list[ExecutionReport], list[tuple[str, object]]]:
         bus = InMemoryBus()
         exchange = make_exchange(post, bus=bus, clock=ManualClock())
         reports: list[ExecutionReport] = []
@@ -605,7 +605,7 @@ def cancel_and_collect(
         bus.subscribe(ExecutionReport, collect)
         with capture_events() as events:
             await exchange.cancel(refs)
-        return reports, [str(e["event"]) for e in events]
+        return reports, [(str(e["event"]), e["cloid"]) for e in events]
 
     return asyncio.run(main())
 
@@ -644,7 +644,7 @@ def test_a_cancel_answer_with_the_wrong_status_count_reports_no_order() -> None:
     reports, named = cancel_and_collect(post, refs)
 
     assert reports == []
-    assert named == [NamedEvent.EXCHANGE_REQUEST_FAILED]
+    assert named == [(NamedEvent.EXCHANGE_REQUEST_FAILED, None)]
 
 
 def test_a_cancel_list_with_and_without_oids_goes_as_cancel_and_cancel_by_cloid() -> None:
@@ -665,6 +665,24 @@ def test_a_cancel_list_with_and_without_oids_goes_as_cancel_and_cancel_by_cloid(
     assert actions["cancel"]["cancels"] == [{"a": 3, "o": 78}]
     assert actions["cancelByCloid"]["cancels"] == [{"asset": 3, "cloid": CLOID}]
     assert sorted(r.cloid for r in reports) == sorted([CLOID, CLOID_2])
+
+
+def test_a_refused_cancel_batch_names_each_order_and_reports_none() -> None:
+    # One action error refuses every order in the batch. Each order stays
+    # marked and resting, so each one is named for the operator (ADR-0055).
+    post = FakeExchangeApi({"cancel": action_error_response("Invalid nonce")})
+    refs = [
+        OrderRef(cloid=CLOID, symbol="BTC", venue_oid="77"),
+        OrderRef(cloid=CLOID_2, symbol="BTC", venue_oid="78"),
+    ]
+
+    reports, named = cancel_and_collect(post, refs)
+
+    assert reports == []
+    assert named == [
+        (NamedEvent.EXCHANGE_ACTION_REJECTED, CLOID),
+        (NamedEvent.EXCHANGE_ACTION_REJECTED, CLOID_2),
+    ]
 
 
 async def fetch_view(
