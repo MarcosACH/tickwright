@@ -1153,3 +1153,78 @@ def test_a_reduce_only_sell_that_does_not_shrink_the_strategy_position_is_denied
         derive_cloid("trivial:BTC:2"),
         "reduce-only order would not reduce strategy position",
     )
+
+
+def _holding_eth(quantity: str, *, side: Side) -> _Engine:
+    """The engine one restart after it filled ``quantity`` ETH on ``side`` at 3000.
+
+    0.004 ETH is worth more than the $10 minimum at 3000, so it can open. The
+    tests then drop the market to 1500, where closing it is worth less."""
+    first = _engine()
+
+    async def first_life() -> None:
+        await first.bus.publish(_tick("3000", symbol="ETH"))
+        # Priced through the market, so the order fills on arrival.
+        price = "3100" if side is Side.BUY else "2900"
+        await first.bus.publish(
+            _limit_signal(price, quantity=quantity, seq=1, side=side, symbol="ETH")
+        )
+
+    asyncio.run(first_life())
+    assert _state(first.store, derive_cloid("trivial:ETH:1")) is OrderState.FILLED
+    return _engine(store=first.store, start_ns=2_000)
+
+
+def test_a_reduce_only_limit_under_the_min_notional_passes_only_when_it_closes_the_net() -> None:
+    # Long 0.004 ETH. Each sell rests above the market at 1600, so it is worth
+    # under $10. Hyperliquid takes an order under $10 only when it covers the
+    # whole position (ADR-0058).
+    engine = _holding_eth("0.004", side=Side.BUY)
+
+    def sell(quantity: str, seq: int, *, reduce_only: bool) -> PlaceSignal:
+        return _limit_signal(
+            "1600",
+            quantity=quantity,
+            seq=seq,
+            side=Side.SELL,
+            symbol="ETH",
+            reduce_only=reduce_only,
+        )
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("1500", symbol="ETH"))
+        await engine.bus.publish(sell("0.004", 2, reduce_only=False))
+        await engine.bus.publish(sell("0.002", 3, reduce_only=True))
+        await engine.bus.publish(sell("0.004", 4, reduce_only=True))
+
+    asyncio.run(scenario())
+
+    # A plain order keeps the minimum, even for a whole close.
+    _assert_denied_by(engine, derive_cloid("trivial:ETH:2"), "below min notional")
+    # It leaves 0.002 open.
+    _assert_denied_by(engine, derive_cloid("trivial:ETH:3"), "below min notional")
+    assert _state(engine.store, derive_cloid("trivial:ETH:4")) is OrderState.LIVE
+
+
+def test_a_reduce_only_limit_on_the_side_of_the_account_net_keeps_the_min_notional() -> None:
+    # The strategy is short 0.004 ETH and a hand buy of 0.006 leaves the account
+    # long 0.002. A buy of 0.002 shrinks the strategy's short and is as large as
+    # the account net. But a buy cannot close a long, so it closes nothing.
+    engine = _holding_eth("0.004", side=Side.SELL)
+    by_hand = ReconciliationFill(
+        symbol="ETH", side=Side.BUY, quantity=Decimal("0.006"), price=Decimal("3000"), ts_ns=1_000
+    )
+    engine.checks.checkpoint_heal((by_hand,))
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("1500", symbol="ETH"))
+        # Below the market, worth 2.8.
+        await engine.bus.publish(
+            _limit_signal(
+                "1400", quantity="0.002", seq=2, side=Side.BUY, symbol="ETH", reduce_only=True
+            )
+        )
+
+    asyncio.run(scenario())
+
+    _assert_denied_by(engine, derive_cloid("trivial:ETH:2"), "below min notional")
