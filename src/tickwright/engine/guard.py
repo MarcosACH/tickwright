@@ -115,6 +115,14 @@ NO_LIMITS: Final = PreTradeLimits()
 _NO_SYMBOL_LIMITS: Final = SymbolLimits()
 
 
+def _shrinks(before: Decimal, after: Decimal) -> bool:
+    """Whether a position moves closer to zero without crossing it (#397).
+
+    Ending at zero is a full close, not a cross, for a long and a short alike."""
+    same_side = (after > 0) == (before > 0)
+    return abs(after) < abs(before) and (after == 0 or same_side)
+
+
 class RealGuard:
     """The real pre-trade boundary: quantize, min-notional, caps, durable kill switch."""
 
@@ -201,11 +209,18 @@ class RealGuard:
         direction = 1 if signal.side is Side.BUY else -1
         before = reading.account_net_size + direction * reading.open_remainder
         worst_case = before + direction * quantity
-        # An order that shrinks the worst case without crossing zero cannot add
-        # exposure, so no cap on order size or value may stop it. Ending at zero
-        # is a full close, not a cross, for a long and a short alike.
-        same_side = (worst_case > 0) == (before > 0)
-        reduces = abs(worst_case) < abs(before) and (worst_case == 0 or same_side)
+        # An order that shrinks the worst case cannot add exposure, so no cap on
+        # order size or value may stop it.
+        reduces = _shrinks(before, worst_case)
+        if signal.reduce_only:
+            # The venue checks only the account net, so it can take an order that
+            # flips or grows the strategy's own position when the unattributed
+            # partition holds size. So the own worst case must shrink, built like
+            # the account one above. Open orders on a symbol are all its one
+            # strategy's (ADR-0038), so the open remainder is already its own.
+            own_before = reading.strategy_net_size + direction * reading.open_remainder
+            if not _shrinks(own_before, own_before + direction * quantity):
+                return Denied(reason="reduce-only order would not reduce strategy position")
         # The venue never lets a reduce-only order grow the account net, so these
         # caps could only stop an exit (ADR-0058).
         skips_caps = reduces or signal.reduce_only

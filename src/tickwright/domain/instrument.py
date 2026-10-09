@@ -112,6 +112,9 @@ class PreTradeReading:
     account_net_size: Decimal
     """Signed, over every partition of ``symbol``, the unattributed one included.
     The venue holds one position per symbol, so this is the size it sees."""
+    strategy_net_size: Decimal
+    """Signed, the placing strategy's own partition of ``symbol`` only. A
+    reduce-only order must shrink this, not just the account net (ADR-0058)."""
     open_remainder: Decimal
     """The unfilled part of every open order on ``side``, summed. A ``PENDING``
     order counts: it may already be at the venue (ADR-0008)."""

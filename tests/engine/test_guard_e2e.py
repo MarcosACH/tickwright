@@ -1108,3 +1108,48 @@ def test_a_reduce_only_sell_passes_a_mark_outage_that_denies_a_plain_sell(outage
 
     _assert_denied_by(engine, derive_cloid("trivial:BTC:2"), f"{outage} for max order value 1000")
     assert _state(engine.store, derive_cloid("trivial:BTC:3")) is OrderState.LIVE
+
+
+@pytest.mark.parametrize(
+    ("strategy_side", "strategy_size", "hand_long", "sell"),
+    [
+        # ADR-0058's first example: a sell of 2 flips the strategy to short 1.
+        (Side.BUY, "1", "1", "2"),
+        # ADR-0058's second example: a sell of 1 grows the strategy short to 2.
+        (Side.SELL, "1", "3", "1"),
+        # A strategy with no position has nothing to reduce.
+        (None, None, "1", "0.5"),
+    ],
+    ids=["flips-the-strategy", "grows-the-strategy-short", "strategy-has-no-position"],
+)
+def test_a_reduce_only_sell_that_does_not_shrink_the_strategy_position_is_denied(
+    strategy_side: Side | None, strategy_size: str | None, hand_long: str, sell: str
+) -> None:
+    # The hand buy leaves the account long, so the venue would take every one
+    # of these sells. Only the guard sees the strategy's own position.
+    if strategy_side is None or strategy_size is None:
+        engine = _engine(start_ns=2_000)
+    else:
+        engine = _holding(strategy_size, side=strategy_side, limits=NO_LIMITS)
+    by_hand = ReconciliationFill(
+        symbol="BTC",
+        side=Side.BUY,
+        quantity=Decimal(hand_long),
+        price=Decimal("42000"),
+        ts_ns=1_000,
+    )
+    engine.checks.checkpoint_heal((by_hand,))
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))
+        await engine.bus.publish(
+            _limit_signal("44000", quantity=sell, seq=2, side=Side.SELL, reduce_only=True)
+        )
+
+    asyncio.run(scenario())
+
+    _assert_denied_by(
+        engine,
+        derive_cloid("trivial:BTC:2"),
+        "reduce-only order would not reduce strategy position",
+    )

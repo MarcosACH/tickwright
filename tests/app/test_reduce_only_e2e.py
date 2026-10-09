@@ -187,6 +187,11 @@ def _wire(
         replay=ReplayFeedConfig(path=ticks),
         sqlite=SQLiteStoreConfig(path=tmp_path / "ledger.db"),
         paper=PaperExchangeConfig(instrument_specs={"BTC": SPEC}, genesis_collateral=GENESIS),
+        # The real guard denies most of these orders on the strategy's own
+        # position before paper sees them (ADR-0058). This file pins paper's
+        # own table, so the guard steps aside. tests/engine/test_guard_e2e.py
+        # covers the guard.
+        guard="noop",
     )
     bus = build_bus(config)
     clock = build_clock(config)
