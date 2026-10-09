@@ -30,8 +30,8 @@ from tickwright.domain import (
     PreTradeReading,
     Side,
     Store,
-    below_min_notional,
     duration_ns,
+    min_notional_refuses,
     quantize_price,
     quantize_size,
 )
@@ -196,23 +196,25 @@ class RealGuard:
         # MARKET has no pre-trade price: only the venue knows the fill price, so
         # min-notional is adjudicated there (→ REJECTED), not here (ADR-0017).
         # It still falls through to the caps below (ADR-0051).
-        direction = 1 if signal.side is Side.BUY else -1
-        net = reading.account_net_size
-        # The venue takes an order under the minimum when it covers the whole
-        # account net, so a reduce-only close may skip it (ADR-0058). Only an
-        # order against the net can cover it. A plain order keeps the minimum.
-        closes_net = signal.reduce_only and direction * net < 0 and quantity >= abs(net)
         price = None
         if signal.price is not None:
             price = quantize_price(signal.price, signal.side, spec)
-            if below_min_notional(price, quantity, spec) and not closes_net:
+            if min_notional_refuses(
+                price,
+                quantity,
+                spec,
+                side=signal.side,
+                reduce_only=signal.reduce_only,
+                account_net=reading.account_net_size,
+            ):
                 # A LIMIT carries its own price, so notional is exact: deny locally
                 # rather than emit an order the venue will reject (ADR-0017).
                 return Denied(reason="below min notional")
         symbol_limits = self._limits.symbols.get(signal.symbol, _NO_SYMBOL_LIMITS)
         # The position if every open order on this side fills, and then this
         # one too (ADR-0051).
-        before = net + direction * reading.open_remainder
+        direction = 1 if signal.side is Side.BUY else -1
+        before = reading.account_net_size + direction * reading.open_remainder
         worst_case = before + direction * quantity
         # An order that shrinks the worst case cannot add exposure, so no cap on
         # order size or value may stop it.

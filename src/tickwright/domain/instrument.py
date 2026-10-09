@@ -166,14 +166,38 @@ def quantize_price(price: Decimal, side: Side, spec: InstrumentSpec) -> Decimal:
 def below_min_notional(price: Decimal, quantity: Decimal, spec: InstrumentSpec) -> bool:
     """True if ``price × quantity`` falls **below** ``spec.min_notional`` (ADR-0017).
 
-    The one home for the min-notional boundary rule — a peer of the quantizers,
-    shared by the pre-trade guard (a LIMIT, before send → ``DENIED``) and every
-    ``Exchange`` adapter (a MARKET, at the venue-known fill price → ``REJECTED``),
-    so the two halves of the pre-trade/at-fill split can never disagree on what
-    "min notional" means. Strictly below: a notional exactly equal to
-    ``min_notional`` clears.
+    The one home for the min-notional boundary rule — a peer of the quantizers.
+    Strictly below: a notional exactly equal to ``min_notional`` clears. To judge
+    an order, use ``min_notional_refuses``, which adds the whole-close exception.
     """
     return price * quantity < spec.min_notional
+
+
+def min_notional_refuses(
+    price: Decimal,
+    quantity: Decimal,
+    spec: InstrumentSpec,
+    *,
+    side: Side,
+    reduce_only: bool,
+    account_net: Decimal,
+) -> bool:
+    """Whether the min notional refuses this order (ADR-0017, ADR-0058).
+
+    The guard asks it for a LIMIT before send (``DENIED``). An ``Exchange``
+    adapter asks it for a MARKET at the fill price (``REJECTED``). One rule, so
+    the two halves can never disagree.
+
+    The venue takes an order under the minimum when it covers the whole
+    position. Only a reduce-only order gets that exception. A plain order keeps
+    the minimum even for a whole close, which is stricter than the venue.
+    ``account_net`` is signed, and only an order against it can cover it.
+    """
+    if not below_min_notional(price, quantity, spec):
+        return False
+    direction = 1 if side is Side.BUY else -1
+    closes_net = reduce_only and direction * account_net < 0 and quantity >= abs(account_net)
+    return not closes_net
 
 
 def _allowed_decimals(price: Decimal, spec: InstrumentSpec) -> int:

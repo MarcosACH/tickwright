@@ -54,8 +54,8 @@ from tickwright.domain import (
     VenueAccountState,
     VenueOrderView,
     VenueReadFailure,
-    below_min_notional,
     fill_fee,
+    min_notional_refuses,
 )
 
 from .book import RestingBook
@@ -327,15 +327,13 @@ class PaperExchange:
             raise ValueError(f"no market tick cached for {order.symbol!r}; cannot fill MARKET")
 
         spec = self._specs.get(order.symbol)
-        # The venue takes an order under the minimum when it covers the whole
-        # position (ADR-0058). ``place`` already refused a reduce-only order on
-        # the net's own side, and shrank a larger one to the net.
-        net = abs(self._account_net().get(order.symbol, Decimal("0")))
-        closes_net = order.reduce_only and order.quantity >= net
-        if (
-            spec is not None
-            and below_min_notional(tick.price, order.quantity, spec)
-            and not closes_net
+        if spec is not None and min_notional_refuses(
+            tick.price,
+            order.quantity,
+            spec,
+            side=order.side,
+            reduce_only=order.reduce_only,
+            account_net=self._account_net().get(order.symbol, Decimal("0")),
         ):
             # Only the venue knows a MARKET's fill price, so it is the one that
             # can judge min-notional (ADR-0017): a too-small order is REJECTED

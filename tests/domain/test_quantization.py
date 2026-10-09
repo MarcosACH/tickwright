@@ -9,10 +9,13 @@ live where both can import them.
 
 from decimal import Decimal
 
+import pytest
+
 from tickwright.domain import (
     InstrumentSpec,
     Side,
     below_min_notional,
+    min_notional_refuses,
     quantize_price,
     quantize_size,
 )
@@ -89,3 +92,49 @@ def test_exactly_at_min_notional_is_not_below() -> None:
 def test_above_min_notional_is_not_below() -> None:
     # notional = 100 × 0.2 = 20, above min_notional 10 → not below.
     assert not below_min_notional(Decimal("100"), Decimal("0.2"), _spec(min_notional="10"))
+
+
+@pytest.mark.parametrize(
+    ("side", "quantity", "reduce_only", "account_net", "refused"),
+    [
+        # At or above the minimum, nothing is refused.
+        (Side.SELL, "0.1", False, "0", False),
+        # A plain order keeps the minimum, even for a whole close.
+        (Side.SELL, "0.05", False, "0.05", True),
+        # A reduce-only order that covers the whole net may go under it.
+        (Side.SELL, "0.05", True, "0.05", False),
+        (Side.BUY, "0.05", True, "-0.05", False),
+        (Side.SELL, "0.08", True, "0.05", False),
+        # One that leaves part of the net open may not.
+        (Side.SELL, "0.02", True, "0.05", True),
+        # An order on the net's own side, or on a flat net, closes nothing.
+        (Side.BUY, "0.05", True, "0.05", True),
+        (Side.SELL, "0.05", True, "0", True),
+    ],
+    ids=[
+        "at-the-minimum",
+        "plain-whole-close",
+        "reduce-only-closes-a-long",
+        "reduce-only-closes-a-short",
+        "reduce-only-larger-than-the-net",
+        "reduce-only-leaves-part-open",
+        "reduce-only-on-the-net-side",
+        "reduce-only-on-a-flat-net",
+    ],
+)
+def test_min_notional_refuses_unless_a_reduce_only_order_closes_the_whole_net(
+    side: Side, quantity: str, reduce_only: bool, account_net: str, refused: bool
+) -> None:
+    # The guard and paper both ask this one question, so they cannot disagree on
+    # when an order under the minimum may still go (ADR-0058).
+    assert (
+        min_notional_refuses(
+            Decimal("100"),
+            Decimal(quantity),
+            _spec(min_notional="10"),
+            side=side,
+            reduce_only=reduce_only,
+            account_net=Decimal(account_net),
+        )
+        is refused
+    )
