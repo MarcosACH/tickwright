@@ -95,6 +95,12 @@ those components.
    **(Extended by ADR-0055:** the fold also reads the per-strategy seq record from the store. It
    is one row per strategy, so it does not repeat the mass read. The `Cache` does not hold it.
    Decided in [#415](https://github.com/MarcosACH/tickwright/issues/415).**)**
+
+   **(Corrected by [#417](https://github.com/MarcosACH/tickwright/issues/417), a strategy does not
+   pull open orders:** the `Cache` lives in `engine`, and a strategy may import only `domain`. No
+   `domain` Protocol exposes open orders. So a stateful strategy tracks its own open orders from
+   `on_order_event` and keeps them in its snapshot. After a restart, that set can be stale.
+   `extending.md` says this to strategy authors.**)**
 7. Start the `MarketFeed` **last** — the first tick is only possible after the barrier clears, so
    no order can be placed before reconciliation completes (ADR-0011 inv 5).
 
@@ -282,6 +288,10 @@ room for a missed-propagation bug.
   deliberately indistinguishable from any other crash.
 - **Exit-code contract** (what the external supervisor keys on): **0 = graceful, non-zero =
   `FAULTED` → restart.**
+  **(Extended in [#441](https://github.com/MarcosACH/tickwright/issues/441):** an exit run
+  (`tickwright cancel-all` or `tickwright flatten`, ADR-0052) has its own codes. 0 means done, 1
+  means stopped partway, and 2 means it never booted, so nothing at the venue moved. SIGINT and
+  SIGTERM give 1 there. No supervisor should restart an exit run. See ADR-0060.**)**
 
 **The two ADR-0014 error classes are drawn by handler origin, not by exception type.** The Engine
 wraps **third-party** handlers (`Strategy.on_tick`/`on_order_event`, `MarketFeed` parse callbacks) in
