@@ -31,7 +31,8 @@ Decided in [#413](https://github.com/MarcosACH/tickwright/issues/413), part of
   in-flight pass only covers `SUBMITTED` orders. An acked saga, such as a partly filled IOC whose
   cancel push was lost, ends only in the open-order pass. With both, every wait for a verdict
   ends. It ends at the miss budget, at the venue's terminal status, at the ghost grace window, or
-  at 3 failed reads (ADR-0060).**)**
+  at 3 failed reads (ADR-0060). A failed pass counts as a dry attempt for every symbol loop that
+  waits on it, because a pass has one result for all symbols.**)**
 - **Foreign flow is covered by the next attempt.** A hand trade that grows the position is healed
   into the unattributed partition, and the next attempt closes it. A hand trade that flips the
   position makes the next attempt go the other way.

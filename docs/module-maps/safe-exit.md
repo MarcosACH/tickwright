@@ -181,6 +181,10 @@ context. Starts the feed through the `FeedHandle`.
   (ADR-0011). An acked saga ends at the venue's terminal status, or at the ghost grace window if it
   vanished (ADR-0026). A failed read counts as a dry attempt (ADR-0060). So 3 failed reads stop
   the run, and the next boot resumes the saga.
+- A pass returns one result for all symbols. So a failed pass counts as a dry attempt for every
+  loop that waits on it, even when the failed read was another symbol's saga. This can stop the
+  run early, but it never hangs it. A per-symbol result would need a new `Reconciler` return
+  shape, and a dead send fails every symbol's read anyway.
 - Count dry attempts: no fill, no price, a failed read, or a refusal (ADR-0056, ADR-0060). A fill
   resets the count. Stop after 3 in a row with `flatten.gave_up`.
 - On an `OrderRefusedReport` or a dead send, resolve the saga by cloid before the next attempt.
