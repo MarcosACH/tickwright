@@ -1228,3 +1228,39 @@ def test_a_reduce_only_limit_on_the_side_of_the_account_net_keeps_the_min_notion
     asyncio.run(scenario())
 
     _assert_denied_by(engine, derive_cloid("trivial:ETH:2"), "below min notional")
+
+
+def test_a_tripped_kill_switch_still_denies_a_reduce_only_order() -> None:
+    # Reduce-only skips the caps, not the halt (ADR-0026).
+    engine = _holding("0.03", side=Side.BUY, limits=NO_LIMITS)
+    engine.guard.trip_kill_switch("operator halt")
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))
+        await engine.bus.publish(
+            _limit_signal("44000", quantity="0.03", seq=2, side=Side.SELL, reduce_only=True)
+        )
+
+    asyncio.run(scenario())
+
+    _assert_denied_by(engine, derive_cloid("trivial:BTC:2"), "kill switch tripped")
+
+
+def test_a_reduce_only_order_still_takes_a_rate_cap_slot() -> None:
+    # The venue counts a reduce-only order like any other, so the cap does too.
+    limits = PreTradeLimits(rate_cap=RateCap(max_orders=1, window_seconds=1.0))
+    engine = _holding("0.03", side=Side.BUY, limits=limits)
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))
+        # Above the market, so a sell that passes rests LIVE.
+        for seq, quantity in ((2, "0.02"), (3, "0.01")):
+            await engine.bus.publish(
+                _limit_signal("44000", quantity=quantity, seq=seq, side=Side.SELL, reduce_only=True)
+            )
+
+    asyncio.run(scenario())
+
+    assert _state(engine.store, derive_cloid("trivial:BTC:2")) is OrderState.LIVE
+    reason = "above max orders per window 1 in 1.0s"
+    _assert_denied_by(engine, derive_cloid("trivial:BTC:3"), reason)
