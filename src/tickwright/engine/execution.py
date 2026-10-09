@@ -257,6 +257,7 @@ class ExecutionManager:
                 time_in_force=signal.time_in_force,
                 price=decision.price,
                 post_only=signal.post_only,
+                reduce_only=signal.reduce_only,
             )
         )
         # SUBMITTED is checkpointed only after the send returns: until then the

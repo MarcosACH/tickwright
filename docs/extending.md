@@ -84,6 +84,20 @@ A strategy consumes ticks and lifecycle events and emits `PlaceSignal`/`CancelSi
 - [ ] Emit signals through a composed `SignalEmitter`
   ([`strategies/emitter.py`](../src/tickwright/strategies/emitter.py)) — it owns the `seq`,
   clock-stamps each signal, and publishes it. Never build a `signal_id` by hand.
+- [ ] Close a position with a reduce-only order. It can only shrink the account net, never grow it
+  or flip it. An order larger than the net is shrunk to it, and the cut part ends `CANCELLED`
+  (ADR-0057):
+
+  ```python
+  await self._emitter.place(
+      symbol="BTC",
+      side=Side.SELL,
+      quantity=Decimal("1"),
+      order_type=OrderType.MARKET,
+      time_in_force=TimeInForce.IOC,
+      reduce_only=True,
+  )
+  ```
 - [ ] Make `snapshot()`/`restore()` a versioned, minimal payload; raise on an unknown version.
 - [ ] Read your own economics through the [`Portfolio`](../src/tickwright/domain/protocols.py)
   seam, if the strategy needs them. Take it as a constructor argument. The composition root hands

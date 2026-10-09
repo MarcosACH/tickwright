@@ -195,6 +195,7 @@ def limit_order(
     *,
     tif: TimeInForce = TimeInForce.GTC,
     post_only: bool = False,
+    reduce_only: bool = False,
 ) -> PlaceOrder:
     return PlaceOrder(
         cloid=CLOID,
@@ -205,6 +206,7 @@ def limit_order(
         time_in_force=tif,
         price=Decimal(price),
         post_only=post_only,
+        reduce_only=reduce_only,
     )
 
 
@@ -253,6 +255,18 @@ def test_limit_passes_through_with_its_own_time_in_force() -> None:
     assert ioc["t"] == {"limit": {"tif": "Ioc"}}
     assert ioc["p"] == "42000.5"
     assert ioc["b"] is False
+
+
+@pytest.mark.parametrize("reduce_only", [True, False])
+def test_the_order_action_carries_the_reduce_only_flag(reduce_only: bool) -> None:
+    async def main() -> FakeExchangeApi:
+        post = FakeExchangeApi({"order": resting_response(oid=82)})
+        exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
+        await exchange.place(limit_order(Side.SELL, "0.5", "42000", reduce_only=reduce_only))
+        return post
+
+    # The venue enforces reduce-only itself, so the flag must reach the wire.
+    assert placed_wire(asyncio.run(main()))["r"] is reduce_only
 
 
 async def place_and_collect_reports(
@@ -365,6 +379,65 @@ def test_a_filled_placement_acks_the_order_live_with_its_oid_before_the_fills() 
     assert ack.status is OrderState.LIVE
     assert ack.cloid == CLOID
     assert ack.venue_oid == "91"
+    assert isinstance(fill, FillReport)
+
+
+@pytest.mark.parametrize("reduce_only", [True, False])
+def test_a_reduce_only_order_filled_for_less_than_asked_ends_cancelled(reduce_only: bool) -> None:
+    # Against a short 0.3, the venue shrinks a reduce-only buy of 0.5 to 0.3
+    # and answers `filled` (probe P1). The saga keeps the 0.5 it asked for, so
+    # without a CANCELLED for the cut part it stays open forever (ADR-0057).
+    # A plain order keeps today's reports.
+    post = FakeExchangeApi(
+        {
+            "order": filled_response(oid=91, total_sz="0.3", avg_px="43250.0"),
+            "userFills": [fill_entry(oid=91, tid=556, px="43250.0", sz="0.3")],
+        }
+    )
+    order = limit_order(Side.BUY, "0.5", "43300", tif=TimeInForce.IOC, reduce_only=reduce_only)
+    reports = asyncio.run(place_and_collect_reports(post, order))
+
+    if not reduce_only:
+        _ack, _fill = reports
+        return
+    _ack, fill, cancelled = reports
+    assert isinstance(fill, FillReport)
+    assert isinstance(cancelled, OrderStatusReport)
+    assert cancelled.status is OrderState.CANCELLED
+    assert cancelled.reason == "reduce-only shrink"
+    assert cancelled.cloid == CLOID
+
+
+def test_a_reduce_only_order_filled_in_full_sends_no_cancel() -> None:
+    # Against a short 0.5 or more, a reduce-only buy of 0.5 is not shrunk. Its
+    # fills reach the asked size, so the saga ends FILLED with no cut part.
+    post = FakeExchangeApi(
+        {
+            "order": filled_response(oid=92, total_sz="0.5", avg_px="43250.0"),
+            "userFills": [fill_entry(oid=92, tid=557, px="43250.0", sz="0.5")],
+        }
+    )
+    order = limit_order(Side.BUY, "0.5", "43300", tif=TimeInForce.IOC, reduce_only=True)
+    reports = asyncio.run(place_and_collect_reports(post, order))
+
+    _ack, fill = reports
+    assert isinstance(fill, FillReport)
+
+
+def test_a_shrunk_reduce_only_order_stays_open_when_the_fills_read_comes_back_short() -> None:
+    # The venue filled 0.3 of a reduce-only 0.5, but the fills read holds only
+    # 0.1 of it. A CANCELLED now would end the saga, and reconcile would never
+    # heal the missing 0.2 onto this order. So the saga stays open for it.
+    post = FakeExchangeApi(
+        {
+            "order": filled_response(oid=93, total_sz="0.3", avg_px="43250.0"),
+            "userFills": [fill_entry(oid=93, tid=558, px="43250.0", sz="0.1")],
+        }
+    )
+    order = limit_order(Side.BUY, "0.5", "43300", tif=TimeInForce.IOC, reduce_only=True)
+    reports = asyncio.run(place_and_collect_reports(post, order))
+
+    _ack, fill = reports
     assert isinstance(fill, FillReport)
 
 

@@ -231,6 +231,9 @@ class PlaceOrder:
     Carries the engine-assigned ``cloid`` (the venue-facing identity) plus the
     order parameters; unlike a ``Signal`` it carries no strategy sequence, and
     unlike an ``Event`` it is never published on the bus.
+
+    A ``reduce_only`` order may only shrink the account net. The venue shrinks
+    it to the net or rejects it (ADR-0057).
     """
 
     cloid: str
@@ -241,3 +244,4 @@ class PlaceOrder:
     time_in_force: TimeInForce
     price: Decimal | None = None
     post_only: bool = False
+    reduce_only: bool = False

@@ -50,12 +50,16 @@ class SignalEmitter:
         time_in_force: TimeInForce,
         price: Decimal | None = None,
         post_only: bool = False,
+        reduce_only: bool = False,
     ) -> str:
         """Publish a ``PlaceSignal`` for the next ``seq``; return its ``signal_id``.
 
         The returned id is the handle the strategy references its own order by —
         e.g. to target it in a later ``cancel`` (the strategy never sees a
-        ``cloid``, ADR-0026)."""
+        ``cloid``, ADR-0026).
+
+        A ``reduce_only`` order can only shrink the account's net position. The
+        venue shrinks it to the net or rejects it (ADR-0057)."""
         seq, now = self._next()
         signal = PlaceSignal(
             ts_event=now,
@@ -69,6 +73,7 @@ class SignalEmitter:
             time_in_force=time_in_force,
             price=price,
             post_only=post_only,
+            reduce_only=reduce_only,
         )
         await self._bus.publish(signal)
         return signal.signal_id

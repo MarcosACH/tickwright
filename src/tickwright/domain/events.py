@@ -208,7 +208,10 @@ class Signal(Event):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class PlaceSignal(Signal):
-    """Intent to place an order (side, qty, type, TIF; ``price`` for LIMIT)."""
+    """Intent to place an order (side, qty, type, TIF; ``price`` for LIMIT).
+
+    ``reduce_only`` asks the venue to only shrink the account net, never grow or
+    flip it (ADR-0057)."""
 
     side: Side
     quantity: Decimal
@@ -216,6 +219,7 @@ class PlaceSignal(Signal):
     time_in_force: TimeInForce
     price: Decimal | None = None
     post_only: bool = False
+    reduce_only: bool = False
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
