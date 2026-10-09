@@ -408,6 +408,22 @@ def test_a_reduce_only_order_filled_for_less_than_asked_ends_cancelled(reduce_on
     assert cancelled.cloid == CLOID
 
 
+def test_a_reduce_only_order_filled_in_full_sends_no_cancel() -> None:
+    # Against a short 0.5 or more, a reduce-only buy of 0.5 is not shrunk. Its
+    # fills reach the asked size, so the saga ends FILLED with no cut part.
+    post = FakeExchangeApi(
+        {
+            "order": filled_response(oid=92, total_sz="0.5", avg_px="43250.0"),
+            "userFills": [fill_entry(oid=92, tid=557, px="43250.0", sz="0.5")],
+        }
+    )
+    order = limit_order(Side.BUY, "0.5", "43300", tif=TimeInForce.IOC, reduce_only=True)
+    reports = asyncio.run(place_and_collect_reports(post, order))
+
+    _ack, fill = reports
+    assert isinstance(fill, FillReport)
+
+
 def test_a_live_fill_reports_the_fee_the_venue_charged_verbatim() -> None:
     # The venue is the fee's authority on this path, so the adapter reads its
     # number rather than reconstructing one from a tier schedule (ADR-0036): the
