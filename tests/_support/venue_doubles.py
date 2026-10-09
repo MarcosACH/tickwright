@@ -37,7 +37,7 @@ Doubling here is legitimate under ADR-0022 — a venue is a process boundary, th
 one place a double is allowed.
 """
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import replace
 from decimal import Decimal
 
@@ -422,8 +422,8 @@ class VenueLink:
     async def place(self, order: PlaceOrder) -> None:
         await self._venue.place(order)
 
-    async def cancel(self, ref: OrderRef) -> None:
-        await self._venue.cancel(ref)
+    async def cancel(self, refs: Sequence[OrderRef]) -> None:
+        await self._venue.cancel(refs)
 
     async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
         return await self._venue.fetch_order(ref)

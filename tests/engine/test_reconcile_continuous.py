@@ -8,6 +8,7 @@ through the ``ExecutionManager`` so dedup makes every cycle idempotent.
 """
 
 import asyncio
+from collections.abc import Sequence
 from dataclasses import replace
 from decimal import Decimal
 
@@ -288,7 +289,7 @@ class _ForgetfulVenue(VenueDouble):
     async def place(self, order: PlaceOrder) -> None:
         raise AssertionError("the ghost cycle must never place")
 
-    async def cancel(self, ref: OrderRef) -> None:
+    async def cancel(self, refs: Sequence[OrderRef]) -> None:
         raise AssertionError("the ghost cycle must never cancel")
 
     async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:

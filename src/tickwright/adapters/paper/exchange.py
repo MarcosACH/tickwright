@@ -29,7 +29,7 @@ nothing, the ``Store`` remains the sole authority for the paper ledger, and
 ``fetch_account_state`` still has no account truth to answer with.
 """
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from decimal import Decimal
 
 from tickwright.domain import (
@@ -356,13 +356,14 @@ class PaperExchange:
         self._book.rest(order)
         await self._bus.publish(self._status_report(order, OrderState.LIVE))
 
-    async def cancel(self, ref: OrderRef) -> None:
-        order = self._book.remove(ref.cloid)
-        if order is None:
-            # Nothing resting under this cloid: already filled/cancelled or never
-            # placed. A benign no-op — the venue has nothing to report (ADR-0026).
-            return
-        await self._bus.publish(self._status_report(order, OrderState.CANCELLED))
+    async def cancel(self, refs: Sequence[OrderRef]) -> None:
+        for ref in refs:
+            order = self._book.remove(ref.cloid)
+            if order is None:
+                # Nothing resting under this cloid: already filled/cancelled or never
+                # placed. A benign no-op — the venue has nothing to report (ADR-0026).
+                continue
+            await self._bus.publish(self._status_report(order, OrderState.CANCELLED))
 
     def _crosses(self, order: PlaceOrder, tick: MarketTick) -> bool:
         """Whether a trade at ``tick.price`` matches ``order``'s LIMIT price.

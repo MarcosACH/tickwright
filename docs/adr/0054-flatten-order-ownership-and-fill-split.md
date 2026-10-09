@@ -24,6 +24,17 @@ Decided in [#412](https://github.com/MarcosACH/tickwright/issues/412), part of
   from the venue. If they differ, flatten waits for reconciliation to heal the gap into the
   unattributed partition (ADR-0038). A flat venue is the exception. There is no order to place, so
   the leftover rule below applies.
+  **(Extended by the [safe exit module map](../module-maps/safe-exit.md),
+  [#457](https://github.com/MarcosACH/tickwright/issues/457):** the venue size comes from a new
+  `AccountAnchor.fetch_positions()`, a signed size per symbol or a `VenueReadFailure`. Hyperliquid
+  answers it from its `clearinghouseState` read. Paper answers the store net plus its own fills the
+  store has not applied yet, the number ADR-0057 already makes it compute. Paper still answers
+  `fetch_account_state()` with `None`, which means it has no account truth. So flatten has no
+  paper branch. When the sizes differ, flatten first drains the bus, so every published fill is
+  applied. On paper that closes the gap, because the gap is only unapplied fills. On a venue with
+  account truth, flatten then runs the account pass, which heals the gap into the unattributed
+  partition. A gap that is still there counts as a dry attempt, so the ADR-0056 stop bounds the
+  wait.**)**
 - **Fills are split pro rata.** Each partition of the symbol moves the same share of the way to
   zero. Each split piece uses the real fill price.
 - **Fees split by the absolute size each partition books.** Partitions can have opposite signs. A
@@ -37,6 +48,12 @@ Decided in [#412](https://github.com/MarcosACH/tickwright/issues/412), part of
   back. Decided in [#413](https://github.com/MarcosACH/tickwright/issues/413).**)**
 - **The partition sizes are read once, when the order is placed.** They are stored with the saga.
   A fill that arrives after a crash and restart splits against the same sizes.
+  **(Extended by the [safe exit module map](../module-maps/safe-exit.md),
+  [#457](https://github.com/MarcosACH/tickwright/issues/457):** the sizes are a field on the order,
+  `split_basis`. The `ExecutionManager` writes it in the `PENDING` write, before the send. The split
+  runs in `Checkpointer.checkpoint_fill`, which every fill passes through, including one booked by
+  reconcile after a crash. It books every partition's move in one `checkpoint_ledger` transaction.
+  The split rule is a pure function in `engine`. The flatten job never books a fill itself.**)**
 - **The id is `__operator__:<symbol>:<seq>`.** The cloid is derived from it as usual (ADR-0006).
   The seq comes from the saga high-water for `__operator__`, the same way a strategy's does
   (ADR-0016). After a crash, the next flatten run finds the open saga by its id and resumes it. Only
@@ -116,3 +133,6 @@ the gap was before flatten.
   **(Resolved by ADR-0056:** flatten never waits. After reconcile, the books match the venue,
   unless the venue is flat. Then the leftover rule applies. A venue read that fails is still open
   in #408. Decided in [#413](https://github.com/MarcosACH/tickwright/issues/413).**)**
+  **(Resolved by ADR-0060:** a failed venue read counts as a dry attempt toward the 3-in-a-row
+  stop. Flatten never sends an order it could not size. Decided in
+  [#441](https://github.com/MarcosACH/tickwright/issues/441).**)**

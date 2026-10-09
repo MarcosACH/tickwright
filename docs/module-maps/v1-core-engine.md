@@ -85,9 +85,9 @@ src/tickwright/
 
 ### Cache (`engine/cache.py`)
 
-**Interface:** The in-memory read-model of current order state — a write-through projection of the `Store`, **never** the source of truth. Callers must know: rebuilt from the `Store` on startup (recovery step 2); reads are direct method calls (pull-then-subscribe — strategies pull open-order state at `on_start` because startup events predate their subscription); writes flow only through the `ExecutionManager`'s checkpoint path.
+**Interface:** The in-memory read-model of current order state — a write-through projection of the `Store`, **never** the source of truth. Callers must know: rebuilt from the `Store` on startup (recovery step 2); reads are direct method calls, and a strategy cannot make them because it imports only `domain` (#417); writes flow only through the `ExecutionManager`'s checkpoint path.
 
-**Responsibilities:** Projecting saga records into "what is true now" queries (open orders per strategy/symbol, saga lookup by cloid, last-event recency per cloid for the ghost cycle's protection window) for strategies, the reconciler, and the manager.
+**Responsibilities:** Projecting saga records into "what is true now" queries (open orders per strategy/symbol, saga lookup by cloid, last-event recency per cloid for the ghost cycle's protection window) for the reconciler and the manager.
 
 **Seams:** None — one concrete class. Backed by the `Store` seam.
 
