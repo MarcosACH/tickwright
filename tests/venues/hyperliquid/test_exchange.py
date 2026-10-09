@@ -548,6 +548,40 @@ def test_cancel_of_an_acked_order_goes_by_its_oid_after_a_restart() -> None:
     assert payload["action"] == {"type": "cancel", "cancels": [{"a": 3, "o": 77}]}
 
 
+def every_cancel_succeeds(payload: dict) -> dict:
+    # The venue answers one status per cancel in the action, in order.
+    statuses = ["success"] * len(payload["action"]["cancels"])
+    return {"status": "ok", "response": {"type": "cancel", "data": {"statuses": statuses}}}
+
+
+def test_a_cancel_of_201_orders_goes_as_two_requests_of_200_and_1() -> None:
+    # A cancel all is one request where it fits. The venue takes at most 200
+    # cancels per action, so a longer list is split (ADR-0055).
+    refs = [
+        OrderRef(cloid=f"0x{i:032x}", symbol="BTC", venue_oid=str(1000 + i)) for i in range(201)
+    ]
+
+    async def main() -> tuple[FakeExchangeApi, list[ExecutionReport]]:
+        bus = InMemoryBus()
+        post = FakeExchangeApi({"cancel": every_cancel_succeeds})
+        exchange = make_exchange(post, bus=bus, clock=ManualClock())
+        reports: list[ExecutionReport] = []
+
+        async def collect(report: ExecutionReport) -> None:
+            reports.append(report)
+
+        bus.subscribe(ExecutionReport, collect)
+        await exchange.cancel(refs)
+        return post, reports
+
+    post, reports = asyncio.run(main())
+
+    first, second = (payload["action"]["cancels"] for _, payload in post.requests)
+    assert (len(first), len(second)) == (200, 1)
+    assert second == [{"a": 3, "o": 1200}]
+    assert [r.cloid for r in reports] == [ref.cloid for ref in refs]
+
+
 async def fetch_view(
     post: FakeExchangeApi, ref: OrderRef = UNACKED_REF
 ) -> VenueOrderView | VenueReadFailure:

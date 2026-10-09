@@ -12,6 +12,7 @@ bounded against is the tick stream's — the adapter subscribes itself, like
 every consumer of market data.
 """
 
+import functools
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
@@ -60,6 +61,9 @@ _NS_PER_MS = 1_000_000
 # The same allowance decides whether a record read by cloid was placed before
 # this saga was created, for the same reason (#354).
 _ACK_SKEW_ALLOWANCE_MS = 60_000
+
+# The most cancels one venue action carries. A longer list is split (ADR-0055).
+_CANCEL_BATCH_LIMIT = 200
 
 _TIF_WIRE = {TimeInForce.GTC: "Gtc", TimeInForce.IOC: "Ioc"}
 
@@ -340,36 +344,63 @@ class HyperliquidExchange:
         )
 
     async def cancel(self, refs: Sequence[OrderRef]) -> None:
-        for ref in refs:
-            await self._cancel_one(ref)
+        # The oid names exactly one order, where a cloid may not (#354). A ref
+        # with no ack yet has only its cloid. The venue may hold an earlier
+        # life's order under it too. Which one that cancels is the venue's
+        # choice, and reconciliation is the backstop. The two go in separate
+        # actions because each venue action takes one kind of key (ADR-0055).
+        by_oid = [ref for ref in refs if ref.venue_oid is not None]
+        by_cloid = [ref for ref in refs if ref.venue_oid is None]
+        for group in (by_oid, by_cloid):
+            for start in range(0, len(group), _CANCEL_BATCH_LIMIT):
+                await self._cancel_batch(group[start : start + _CANCEL_BATCH_LIMIT])
 
-    async def _cancel_one(self, ref: OrderRef) -> None:
-        cloid, symbol = ref.cloid, ref.symbol
-        asset = self._universe.asset_indices[symbol]
-        if ref.venue_oid is None:
-            # No ack yet, so the cloid is the only handle. The venue may hold
-            # an earlier life's order under it too. Which one this cancels is
-            # the venue's choice, and reconciliation is the backstop (#354).
-            action = {"type": "cancelByCloid", "cancels": [{"asset": asset, "cloid": cloid}]}
+    async def _cancel_batch(self, refs: Sequence[OrderRef]) -> None:
+        """One venue cancel action for ``refs``, which all share one kind of key."""
+        if refs[0].venue_oid is None:
+            action = {
+                "type": "cancelByCloid",
+                "cancels": [
+                    {"asset": self._universe.asset_indices[ref.symbol], "cloid": ref.cloid}
+                    for ref in refs
+                ],
+            }
         else:
-            # The oid names exactly one order, where a cloid may not (#354).
-            action = {"type": "cancel", "cancels": [{"a": asset, "o": int(ref.venue_oid)}]}
-        adjudication = await read(
+            action = {
+                "type": "cancel",
+                "cancels": [
+                    {"a": self._universe.asset_indices[ref.symbol], "o": int(ref.venue_oid)}
+                    for ref in refs
+                    if ref.venue_oid is not None
+                ],
+            }
+        adjudications = await read(
             request="cancel",
             query=action,
             send=self._send_action,
-            normalize=_cancel_adjudication,
-            cloid=cloid,
+            normalize=functools.partial(_cancel_adjudications, count=len(refs)),
+            # A failure names the order when there is just one. A batch has no
+            # single cloid to name, and reconciliation covers each order anyway.
+            cloid=refs[0].cloid if len(refs) == 1 else None,
         )
-        if isinstance(adjudication, VenueReadFailure):
+        if isinstance(adjudications, VenueReadFailure):
             # An ack-lost cancel and an adjudication we cannot read prove the
             # same nothing, and get the same verdict: ``read`` named it, and
             # nothing is emitted. The cancel_requested marker was durable before
-            # the send (ADR-0026), so reconciliation resolves this order either
+            # the send (ADR-0026), so reconciliation resolves these orders either
             # way. Faulting the engine over the *shape* of the answer would
             # discard a run that was covered regardless.
             return
-        await self._apply_cancellation(cloid=cloid, symbol=symbol, adjudication=adjudication)
+        # A refused action refuses every order in it.
+        per_order: Sequence[_CancelAdjudication] = (
+            [adjudications] * len(refs)
+            if isinstance(adjudications, _ActionError)
+            else adjudications
+        )
+        for ref, adjudication in zip(refs, per_order, strict=True):
+            await self._apply_cancellation(
+                cloid=ref.cloid, symbol=ref.symbol, adjudication=adjudication
+            )
 
     async def _apply_cancellation(
         self, *, cloid: str, symbol: str, adjudication: "_CancelAdjudication"
@@ -871,9 +902,14 @@ def _placement_adjudication(response: object) -> _Adjudication:
     raise ValueError(f"unrecognized placement status: {status!r}")
 
 
-def _cancel_adjudication(response: object) -> _CancelAdjudication:
-    """Read a venue cancel response — the peer of ``_placement_adjudication``
-    on the other write verb, pure for the same reason.
+def _cancel_adjudications(response: object, *, count: int) -> _ActionError | list[_CancelVerdict]:
+    """Read a venue cancel response for a batch of ``count`` cancels — the peer
+    of ``_placement_adjudication`` on the other write verb, pure for the same
+    reason.
+
+    The venue answers one status per cancel, in the order sent. A status count
+    that differs from ``count`` raises into ``UNREADABLE``. Pairing them by
+    position anyway could report one order's outcome under another's cloid.
 
     The venue adjudicates a cancel two ways and both are matched, rather than
     one matched and everything else swept into the other. ``ALREADY_GONE`` is a
@@ -889,7 +925,12 @@ def _cancel_adjudication(response: object) -> _CancelAdjudication:
     outcome = _action_outcome(response)
     if isinstance(outcome, _ActionError):
         return outcome
-    (status,) = outcome
+    if len(outcome) != count:
+        raise ValueError(f"{len(outcome)} cancel statuses for {count} cancels: {outcome!r}")
+    return [_cancel_verdict(status) for status in outcome]
+
+
+def _cancel_verdict(status: object) -> _CancelVerdict:
     if status == "success":
         return _CancelVerdict.CANCELLED
     if isinstance(status, Mapping) and "error" in status:
