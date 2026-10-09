@@ -647,6 +647,26 @@ def test_a_cancel_answer_with_the_wrong_status_count_reports_no_order() -> None:
     assert named == [NamedEvent.EXCHANGE_REQUEST_FAILED]
 
 
+def test_a_cancel_list_with_and_without_oids_goes_as_cancel_and_cancel_by_cloid() -> None:
+    # One venue action takes one kind of key. An acked order goes by its oid,
+    # and an unacked one by its cloid (ADR-0055, #354).
+    post = FakeExchangeApi(
+        {"cancel": every_cancel_succeeds, "cancelByCloid": every_cancel_succeeds}
+    )
+    refs = [UNACKED_REF, OrderRef(cloid=CLOID_2, symbol="BTC", venue_oid="78")]
+
+    reports, _ = cancel_and_collect(post, refs)
+
+    assert sorted(payload["action"]["type"] for _, payload in post.requests) == [
+        "cancel",
+        "cancelByCloid",
+    ]
+    actions = {payload["action"]["type"]: payload["action"] for _, payload in post.requests}
+    assert actions["cancel"]["cancels"] == [{"a": 3, "o": 78}]
+    assert actions["cancelByCloid"]["cancels"] == [{"asset": 3, "cloid": CLOID}]
+    assert sorted(r.cloid for r in reports) == sorted([CLOID, CLOID_2])
+
+
 async def fetch_view(
     post: FakeExchangeApi, ref: OrderRef = UNACKED_REF
 ) -> VenueOrderView | VenueReadFailure:
