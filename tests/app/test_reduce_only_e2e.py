@@ -243,10 +243,29 @@ def _size(life: _Life) -> Decimal:
     return view.size if view is not None else Decimal("0")
 
 
-def test_a_reduce_only_sell_smaller_than_the_long_fills_in_full(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("order_type", "price"),
+    [
+        (OrderType.MARKET, None),
+        # Below the 50000 trade, so the sell crosses on arrival.
+        (OrderType.LIMIT, Decimal("49000")),
+    ],
+    ids=["market", "ioc-limit"],
+)
+def test_a_reduce_only_sell_smaller_than_the_long_fills_in_full(
+    tmp_path: Path, order_type: OrderType, price: Decimal | None
+) -> None:
     # Long 3, sell 1 reduce-only. The net covers the order, so it is accepted
     # as sent. 3 - 1 = 2 left.
-    life = _wire(tmp_path, {0: [buy("3")], 2: [reduce_only_sell("1")]})
+    sell = Send(
+        Side.SELL,
+        Decimal("1"),
+        reduce_only=True,
+        order_type=order_type,
+        time_in_force=TimeInForce.IOC,
+        price=price,
+    )
+    life = _wire(tmp_path, {0: [buy("3")], 2: [sell]})
 
     _run(life, lambda: len(life.strategy.sent) == 2 and life.strategy.all_terminal())
 
@@ -255,10 +274,44 @@ def test_a_reduce_only_sell_smaller_than_the_long_fills_in_full(tmp_path: Path) 
     assert _size(life) == Decimal("2")
 
 
+def test_a_resting_reduce_only_gtc_smaller_than_the_long_fills_in_full(tmp_path: Path) -> None:
+    # Long 3. A GTC sell of 1 at 51000 rests above the 50000 trade at its full
+    # size. The 51000 trade at 4s fills it, and no cut part is cancelled.
+    sell = Send(
+        Side.SELL,
+        Decimal("1"),
+        reduce_only=True,
+        order_type=OrderType.LIMIT,
+        time_in_force=TimeInForce.GTC,
+        price=Decimal("51000"),
+    )
+    life = _wire(
+        tmp_path,
+        {0: [buy("3")], 2: [sell], 4: []},
+        prices={4: Decimal("51000")},
+    )
+
+    _run(life, lambda: len(life.strategy.sent) == 2 and life.strategy.all_terminal())
+
+    assert life.strategy.states(1)[-2:] == [OrderState.LIVE, OrderState.FILLED]
+    assert life.strategy.filled(1) == Decimal("1")
+    assert _size(life) == Decimal("2")
+    assert [r for r in life.reports if r.status is OrderState.CANCELLED] == []
+
+
 @pytest.mark.parametrize(
     "send",
     [
         reduce_only_sell("1"),
+        # Below the 50000 trade, so a plain one would cross and fill.
+        Send(
+            Side.SELL,
+            Decimal("1"),
+            reduce_only=True,
+            order_type=OrderType.LIMIT,
+            time_in_force=TimeInForce.IOC,
+            price=Decimal("49000"),
+        ),
         # Above the 50000 trade, so a plain one would rest.
         Send(
             Side.SELL,
@@ -269,7 +322,7 @@ def test_a_reduce_only_sell_smaller_than_the_long_fills_in_full(tmp_path: Path) 
             price=Decimal("51000"),
         ),
     ],
-    ids=["market", "gtc"],
+    ids=["market", "ioc-limit", "gtc"],
 )
 def test_a_reduce_only_order_against_a_flat_account_is_rejected(tmp_path: Path, send: Send) -> None:
     # Flat, so there is nothing to reduce. A plain sell would open a short.
