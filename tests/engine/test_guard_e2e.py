@@ -1083,3 +1083,28 @@ def test_a_reduce_only_sell_that_closes_the_strategy_long_skips_the_caps(
 
     _assert_denied_by(engine, derive_cloid("trivial:BTC:2"), reason)
     assert _state(engine.store, derive_cloid("trivial:BTC:3")) is OrderState.LIVE
+
+
+@pytest.mark.parametrize("outage", ["no mark", "stale mark"])
+def test_a_reduce_only_sell_passes_a_mark_outage_that_denies_a_plain_sell(outage: str) -> None:
+    # A mark outage must never block an exit (ADR-0058). The plain twin needs
+    # the mark to value itself, so the outage denies it.
+    limits = PreTradeLimits(symbols={"BTC": SymbolLimits(max_order_value=Decimal("1000"))})
+    engine = _long_against_a_hand_short(limits)
+    ten_seconds = 10_000_000_000
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))  # a trade, which is not a mark
+        if outage == "stale mark":
+            await engine.bus.publish(_mark("40000", ts_ns=2_000))
+            engine.clock.advance_to(2_000 + ten_seconds + 1)
+        # Above the market, so a sell that passes rests LIVE.
+        await engine.bus.publish(_limit_signal("44000", quantity="0.05", seq=2, side=Side.SELL))
+        await engine.bus.publish(
+            _limit_signal("44000", quantity="0.05", seq=3, side=Side.SELL, reduce_only=True)
+        )
+
+    asyncio.run(scenario())
+
+    _assert_denied_by(engine, derive_cloid("trivial:BTC:2"), f"{outage} for max order value 1000")
+    assert _state(engine.store, derive_cloid("trivial:BTC:3")) is OrderState.LIVE
