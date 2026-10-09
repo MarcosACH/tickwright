@@ -25,6 +25,8 @@ the two meet. Decided in [#411](https://github.com/MarcosACH/tickwright/issues/4
 - **Under `GUARD=noop`, flatten runs anyway and warns.** `NoopGuard` has no kill switch, so it has
   nothing to trip. Flatten still closes positions. It emits a named event and a warning that the
   engine will trade as soon as it restarts.
+  **(Resolved by ADR-0060:** the event is `exit.unguarded`. Decided in
+  [#441](https://github.com/MarcosACH/tickwright/issues/441).**)**
 
 ## Considered options
 

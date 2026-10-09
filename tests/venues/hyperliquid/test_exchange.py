@@ -490,7 +490,7 @@ def test_cancel_sends_a_signed_cancel_by_cloid_and_reports_cancelled() -> None:
 
         bus.subscribe(ExecutionReport, collect)
         await exchange.place(limit_order(Side.BUY, "0.5", "42000"))
-        await exchange.cancel(UNACKED_REF)
+        await exchange.cancel([UNACKED_REF])
         return post, reports
 
     post, reports = asyncio.run(main())
@@ -517,7 +517,7 @@ def test_cancel_of_an_unacked_order_after_a_restart_goes_by_cloid_with_no_venue_
     async def main() -> FakeExchangeApi:
         post = FakeExchangeApi({"cancelByCloid": cancel_success_response()})
         exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
-        await exchange.cancel(UNACKED_REF)
+        await exchange.cancel([UNACKED_REF])
         return post
 
     post = asyncio.run(main())
@@ -538,7 +538,7 @@ def test_cancel_of_an_acked_order_goes_by_its_oid_after_a_restart() -> None:
     async def main() -> FakeExchangeApi:
         post = FakeExchangeApi({"cancel": cancel_success_response()})
         exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
-        await exchange.cancel(OrderRef(cloid=CLOID, symbol="BTC", venue_oid="77"))
+        await exchange.cancel([OrderRef(cloid=CLOID, symbol="BTC", venue_oid="77")])
         return post
 
     post = asyncio.run(main())
@@ -546,6 +546,164 @@ def test_cancel_of_an_acked_order_goes_by_its_oid_after_a_restart() -> None:
     ((url, payload),) = post.requests
     assert url == "https://api.hyperliquid-testnet.xyz/exchange"
     assert payload["action"] == {"type": "cancel", "cancels": [{"a": 3, "o": 77}]}
+
+
+def every_cancel_succeeds(payload: dict) -> dict:
+    # The venue answers one status per cancel in the action, in order.
+    statuses = ["success"] * len(payload["action"]["cancels"])
+    return {"status": "ok", "response": {"type": "cancel", "data": {"statuses": statuses}}}
+
+
+def test_a_cancel_of_201_orders_goes_as_two_requests_of_200_and_1() -> None:
+    # A cancel all is one request where it fits. The venue takes at most 200
+    # cancels per action, so a longer list is split (ADR-0055).
+    refs = [
+        OrderRef(cloid=f"0x{i:032x}", symbol="BTC", venue_oid=str(1000 + i)) for i in range(201)
+    ]
+
+    async def main() -> tuple[FakeExchangeApi, list[ExecutionReport]]:
+        bus = InMemoryBus()
+        post = FakeExchangeApi({"cancel": every_cancel_succeeds})
+        exchange = make_exchange(post, bus=bus, clock=ManualClock())
+        reports: list[ExecutionReport] = []
+
+        async def collect(report: ExecutionReport) -> None:
+            reports.append(report)
+
+        bus.subscribe(ExecutionReport, collect)
+        await exchange.cancel(refs)
+        return post, reports
+
+    post, reports = asyncio.run(main())
+
+    first, second = (payload["action"]["cancels"] for _, payload in post.requests)
+    assert (len(first), len(second)) == (200, 1)
+    assert second == [{"a": 3, "o": 1200}]
+    assert [r.cloid for r in reports] == [ref.cloid for ref in refs]
+
+
+CLOID_2 = "0x" + "cd" * 16
+
+
+def cancel_statuses_response(*statuses: object) -> dict:
+    return {"status": "ok", "response": {"type": "cancel", "data": {"statuses": list(statuses)}}}
+
+
+def cancel_and_collect(
+    post: FakeExchangeApi, refs: list[OrderRef]
+) -> tuple[list[ExecutionReport], list[tuple[str, object]]]:
+    """Cancel ``refs`` and return the reports emitted and each event named, with its cloid."""
+
+    async def main() -> tuple[list[ExecutionReport], list[tuple[str, object]]]:
+        bus = InMemoryBus()
+        exchange = make_exchange(post, bus=bus, clock=ManualClock())
+        reports: list[ExecutionReport] = []
+
+        async def collect(report: ExecutionReport) -> None:
+            reports.append(report)
+
+        bus.subscribe(ExecutionReport, collect)
+        with capture_events() as events:
+            await exchange.cancel(refs)
+        return reports, [(str(e["event"]), e["cloid"]) for e in events]
+
+    return asyncio.run(main())
+
+
+def test_each_order_in_a_cancel_batch_gets_the_status_at_its_own_position() -> None:
+    # The venue answers one status per cancel, in the order sent. The first
+    # order was cancelled. The second was already gone, which emits nothing.
+    post = FakeExchangeApi(
+        {"cancel": cancel_statuses_response("success", {"error": "Order was never placed"})}
+    )
+    refs = [
+        OrderRef(cloid=CLOID, symbol="BTC", venue_oid="77"),
+        OrderRef(cloid=CLOID_2, symbol="BTC", venue_oid="78"),
+    ]
+
+    reports, named = cancel_and_collect(post, refs)
+
+    ((_, payload),) = post.requests
+    assert payload["action"]["cancels"] == [{"a": 3, "o": 77}, {"a": 3, "o": 78}]
+    (cancelled,) = reports
+    assert isinstance(cancelled, OrderStatusReport)
+    assert (cancelled.cloid, cancelled.status) == (CLOID, OrderState.CANCELLED)
+    assert named == []
+
+
+def test_a_cancel_answer_with_the_wrong_status_count_reports_no_order() -> None:
+    # One status for two cancels cannot be paired by position. Guessing could
+    # report one order's outcome under another's cloid. It is an unreadable
+    # answer, and reconciliation resolves both orders (ADR-0026).
+    post = FakeExchangeApi({"cancel": cancel_statuses_response("success")})
+    refs = [
+        OrderRef(cloid=CLOID, symbol="BTC", venue_oid="77"),
+        OrderRef(cloid=CLOID_2, symbol="BTC", venue_oid="78"),
+    ]
+
+    reports, named = cancel_and_collect(post, refs)
+
+    assert reports == []
+    # Each order may still rest, and reconciliation never resends a cancel.
+    # So the failure names every order in the batch (ADR-0055).
+    assert named == [
+        (NamedEvent.EXCHANGE_REQUEST_FAILED, CLOID),
+        (NamedEvent.EXCHANGE_REQUEST_FAILED, CLOID_2),
+    ]
+
+
+def test_a_cancel_batch_whose_send_fails_names_each_order() -> None:
+    post = FakeExchangeApi({"cancel": TimeoutError("venue timed out")})
+    refs = [
+        OrderRef(cloid=CLOID, symbol="BTC", venue_oid="77"),
+        OrderRef(cloid=CLOID_2, symbol="BTC", venue_oid="78"),
+    ]
+
+    reports, named = cancel_and_collect(post, refs)
+
+    assert reports == []
+    assert named == [
+        (NamedEvent.EXCHANGE_REQUEST_FAILED, CLOID),
+        (NamedEvent.EXCHANGE_REQUEST_FAILED, CLOID_2),
+    ]
+
+
+def test_a_cancel_list_with_and_without_oids_goes_as_cancel_and_cancel_by_cloid() -> None:
+    # One venue action takes one kind of key. An acked order goes by its oid,
+    # and an unacked one by its cloid (ADR-0055, #354).
+    post = FakeExchangeApi(
+        {"cancel": every_cancel_succeeds, "cancelByCloid": every_cancel_succeeds}
+    )
+    refs = [UNACKED_REF, OrderRef(cloid=CLOID_2, symbol="BTC", venue_oid="78")]
+
+    reports, _ = cancel_and_collect(post, refs)
+
+    assert sorted(payload["action"]["type"] for _, payload in post.requests) == [
+        "cancel",
+        "cancelByCloid",
+    ]
+    actions = {payload["action"]["type"]: payload["action"] for _, payload in post.requests}
+    assert actions["cancel"]["cancels"] == [{"a": 3, "o": 78}]
+    assert actions["cancelByCloid"]["cancels"] == [{"asset": 3, "cloid": CLOID}]
+    assert sorted(r.cloid for r in reports) == sorted([CLOID, CLOID_2])
+
+
+def test_a_refused_cancel_batch_names_each_order_and_reports_none() -> None:
+    # One action error refuses every order in the batch. Each order stays
+    # marked and resting, so each one is named for the operator (ADR-0055).
+    post = FakeExchangeApi({"cancel": action_error_response("Invalid nonce")})
+    refs = [
+        OrderRef(cloid=CLOID, symbol="BTC", venue_oid="77"),
+        OrderRef(cloid=CLOID_2, symbol="BTC", venue_oid="78"),
+    ]
+
+    reports, named = cancel_and_collect(post, refs)
+
+    assert reports == []
+    assert named == [
+        (NamedEvent.EXCHANGE_ACTION_REJECTED, CLOID),
+        (NamedEvent.EXCHANGE_ACTION_REJECTED, CLOID_2),
+    ]
 
 
 async def fetch_view(
@@ -1161,7 +1319,7 @@ def test_a_handler_failure_on_the_cancel_publish_is_not_an_unreadable_body() -> 
             clock=ManualClock(),
         )
         await exchange.place(limit_order(Side.BUY, "0.5", "42000"))
-        await exchange.cancel(UNACKED_REF)
+        await exchange.cancel([UNACKED_REF])
 
     with capture_events() as events:
         with pytest.raises(_HandlerFailure):
@@ -1177,7 +1335,7 @@ def test_a_transport_failure_on_cancel_emits_no_report_and_does_not_raise() -> N
         )
         exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
         await exchange.place(limit_order(Side.BUY, "0.5", "42000"))
-        await exchange.cancel(UNACKED_REF)
+        await exchange.cancel([UNACKED_REF])
 
     with capture_events() as events:
         asyncio.run(main())
@@ -1233,7 +1391,7 @@ def test_a_top_level_action_error_on_cancel_emits_no_report_and_names_it() -> No
         bus.subscribe(ExecutionReport, collect)
         await exchange.place(limit_order(Side.BUY, "0.5", "42000"))
         with capture_events() as events:
-            await exchange.cancel(UNACKED_REF)
+            await exchange.cancel([UNACKED_REF])
         reasons = [
             str(e["reason"]) for e in events if e["event"] == NamedEvent.EXCHANGE_ACTION_REJECTED
         ]
@@ -1269,7 +1427,7 @@ def test_a_cancel_adjudication_the_adapter_cannot_read_is_a_named_no_op() -> Non
         bus.subscribe(ExecutionReport, collect)
         await exchange.place(limit_order(Side.BUY, "0.5", "42000"))
         with capture_events() as events:
-            await exchange.cancel(UNACKED_REF)
+            await exchange.cancel([UNACKED_REF])
         failed = [
             str(e["request"]) for e in events if e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED
         ]
@@ -1318,7 +1476,7 @@ def test_a_per_cancel_error_status_is_a_silent_benign_no_op() -> None:
         bus.subscribe(ExecutionReport, collect)
         await exchange.place(limit_order(Side.BUY, "0.5", "42000"))
         with capture_events() as events:
-            await exchange.cancel(UNACKED_REF)
+            await exchange.cancel([UNACKED_REF])
         return reports, [str(e["event"]) for e in events]
 
     reports, named = asyncio.run(main())
@@ -1366,7 +1524,7 @@ def test_a_cancel_status_outside_the_venue_vocabulary_is_a_failed_read_not_alrea
         bus.subscribe(ExecutionReport, collect)
         await exchange.place(limit_order(Side.BUY, "0.5", "42000"))
         with capture_events() as events:
-            await exchange.cancel(UNACKED_REF)
+            await exchange.cancel([UNACKED_REF])
         failed = [
             str(e["request"]) for e in events if e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED
         ]
@@ -1474,7 +1632,7 @@ def test_the_released_venue_link_still_answers_a_place_and_a_cancel() -> None:
         await exchange.stop()
         # Behind the release, inside the drain the runner has not reached yet.
         await asyncio.wait_for(exchange.place(limit_order(Side.BUY, "0.5", "42000")), timeout=5)
-        await asyncio.wait_for(exchange.cancel(UNACKED_REF), timeout=5)
+        await asyncio.wait_for(exchange.cancel([UNACKED_REF]), timeout=5)
         return post, reports
 
     post, reports = asyncio.run(main())

@@ -32,7 +32,7 @@ ADR-0054.
   Hyperliquid rejects any order under $10 that leaves part of the position open. That holds for
   reduce-only and plain orders, IOC and GTC alike. It accepts an order that covers the whole
   position, and a reduce-only order larger than the position (P9a to P9e in
-  [`hyperliquid-min-notional-reduce-only-probes.md`](https://github.com/MarcosACH/tickwright/blob/research/hyperliquid-reduce-only-cancel-market/docs/research/hyperliquid-min-notional-reduce-only-probes.md)).
+  [`hyperliquid-min-notional-reduce-only-probes.md`](../research/hyperliquid-min-notional-reduce-only-probes.md)).
   So the guard skips the minimum for a reduce-only limit only when its size is at least the size of
   the account net. A plain order keeps today's check, even for a whole close. That is stricter than
   the venue.

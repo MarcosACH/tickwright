@@ -140,6 +140,8 @@ Since #354 `cancel` takes the same ref, and the ref also carries the saga's crea
 cloid can name more than one venue order across lives of the account. So a read or a cancel
 goes by the oid once the saga holds one, and before that a read refuses a record the venue
 placed before the saga existed (ADR-0011 inv 2, invariant 12).
+Since #460 `cancel` takes a list of refs. A single cancel sends a list of one, and a cancel all
+is one call that a venue can send as one batch (ADR-0055).
 _Avoid_: order API, order client (the anchor is what makes it one seam, not the verb shapes).
 
 **Account anchor** / `AccountAnchor` *(Protocol)*:
@@ -438,7 +440,8 @@ An action that cancels every resting order in its scope and sends no trade. The 
 is the whole account, including orders placed by hand at the venue. A strategy's scope is its own
 orders. The operator runs it as a one-shot command with the engine stopped (ADR-0052). A strategy
 sends one cancel all per symbol. It cancels only the orders it sent before that signal
-(ADR-0055). Not built yet (#408).
+(ADR-0055). Operator cancel all is done when a final venue read finds no resting order. If orders
+remain, it cancels them once more, then exits 1 if any still rest (ADR-0060). Not built yet (#408).
 _Avoid_: flatten (that closes positions), mass-cancel.
 
 **Flatten**:
@@ -463,8 +466,9 @@ the account holds. Under replay, it plays the whole file first, so a paper flatt
 last row's price (ADR-0059). It is owned by the reserved id `__operator__`, not by a strategy.
 Its fills split pro rata over every [[Position]] partition of the symbol, so each strategy reads
 flat (ADR-0054). When no order can close a strategy's leftover, it moves into the unattributed
-partition at the strategy's entry price.
-Not built yet (#408).
+partition at the strategy's entry price. A failed venue read also counts as an attempt that fills
+nothing (ADR-0060). A read refused for a rate limit does not count. It waits like an order.
+Flatten is done only when the venue holds no resting order and no position. Not built yet (#408).
 _Avoid_: close out, liquidate (that is the venue's forced close), panic sell.
 
 **Reduce-only order**:
@@ -477,6 +481,20 @@ min notional, $10 on Hyperliquid, it is rejected unless it closes the whole net.
 skips the size, value, and position caps, but not the rate cap (ADR-0058). Not built yet. ADR-0030
 defers it, and #408 plans it.
 _Avoid_: close order, exit order.
+
+**Exit run**:
+A one-shot run of `tickwright cancel-all` or `tickwright flatten`, with the engine stopped
+(ADR-0052). It is the same [[Engine]] process with an exit job in place of the strategies. It takes
+the store lock, boots and reconciles like a normal run, does its one job, and exits 0, 1, or 2
+(ADR-0060). The job is `OperatorCancelAll` or `Flatten`. See `docs/module-maps/safe-exit.md`. Not
+built yet (#408).
+_Avoid_: exit mode, maintenance run.
+
+**Split basis**:
+The partition sizes of a symbol, read when a [[Flatten]] order is placed and stored on that order
+in its `PENDING` write. Every fill of the order splits pro rata against it, including a fill
+booked by [[Reconciliation]] after a crash (ADR-0054, ADR-0056). Not built yet (#408).
+_Avoid_: snapshot (that is a strategy's state bytes).
 
 **Figure**:
 One numeric value as an outside source *reports* it — a venue response body, a replay row —
