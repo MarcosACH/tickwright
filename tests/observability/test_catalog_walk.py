@@ -15,7 +15,7 @@ engine's observable surface.
 """
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from decimal import Decimal
 
@@ -174,7 +174,7 @@ class _SilentExchange(VenueDouble):
     async def place(self, order: PlaceOrder) -> None:
         return None
 
-    async def cancel(self, ref: OrderRef) -> None:
+    async def cancel(self, refs: Sequence[OrderRef]) -> None:
         return None
 
     async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
@@ -187,7 +187,7 @@ class _ForgetfulVenue(VenueDouble):
     async def place(self, order: PlaceOrder) -> None:
         raise AssertionError("the reconcile walk never places")
 
-    async def cancel(self, ref: OrderRef) -> None:
+    async def cancel(self, refs: Sequence[OrderRef]) -> None:
         raise AssertionError("the reconcile walk never cancels")
 
     async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
@@ -201,7 +201,7 @@ class _LiveShapedVenue(LiveVenueDouble):
     async def place(self, order: PlaceOrder) -> None:
         raise AssertionError("the materialisation walk never places")
 
-    async def cancel(self, ref: OrderRef) -> None:
+    async def cancel(self, refs: Sequence[OrderRef]) -> None:
         raise AssertionError("the materialisation walk never cancels")
 
     async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
@@ -214,7 +214,7 @@ class _DarkVenue(VenueDouble):
     async def place(self, order: PlaceOrder) -> None:
         raise AssertionError("the frozen cycle never places")
 
-    async def cancel(self, ref: OrderRef) -> None:
+    async def cancel(self, refs: Sequence[OrderRef]) -> None:
         raise AssertionError("the frozen cycle never cancels")
 
     async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:

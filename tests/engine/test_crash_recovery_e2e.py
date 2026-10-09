@@ -14,7 +14,7 @@ the original signal thrown in.
 
 import asyncio
 import json
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from decimal import Decimal
 from pathlib import Path
 
@@ -94,7 +94,7 @@ class _CrashingTransport(VenueLink):
         await self._venue.place(order)
         raise ConnectionError("process died with the send in flight; ack lost")
 
-    async def cancel(self, ref: OrderRef) -> None:
+    async def cancel(self, refs: Sequence[OrderRef]) -> None:
         raise AssertionError("first life never cancels")
 
     async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:

@@ -140,6 +140,8 @@ Since #354 `cancel` takes the same ref, and the ref also carries the saga's crea
 cloid can name more than one venue order across lives of the account. So a read or a cancel
 goes by the oid once the saga holds one, and before that a read refuses a record the venue
 placed before the saga existed (ADR-0011 inv 2, invariant 12).
+Since #460 `cancel` takes a list of refs. A single cancel sends a list of one, and a cancel all
+is one call that a venue can send as one batch (ADR-0055).
 _Avoid_: order API, order client (the anchor is what makes it one seam, not the verb shapes).
 
 **Account anchor** / `AccountAnchor` *(Protocol)*:
