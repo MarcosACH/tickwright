@@ -582,6 +582,71 @@ def test_a_cancel_of_201_orders_goes_as_two_requests_of_200_and_1() -> None:
     assert [r.cloid for r in reports] == [ref.cloid for ref in refs]
 
 
+CLOID_2 = "0x" + "cd" * 16
+
+
+def cancel_statuses_response(*statuses: object) -> dict:
+    return {"status": "ok", "response": {"type": "cancel", "data": {"statuses": list(statuses)}}}
+
+
+def cancel_and_collect(
+    post: FakeExchangeApi, refs: list[OrderRef]
+) -> tuple[list[ExecutionReport], list[str]]:
+    """Cancel ``refs`` and return the reports emitted and the events named."""
+
+    async def main() -> tuple[list[ExecutionReport], list[str]]:
+        bus = InMemoryBus()
+        exchange = make_exchange(post, bus=bus, clock=ManualClock())
+        reports: list[ExecutionReport] = []
+
+        async def collect(report: ExecutionReport) -> None:
+            reports.append(report)
+
+        bus.subscribe(ExecutionReport, collect)
+        with capture_events() as events:
+            await exchange.cancel(refs)
+        return reports, [str(e["event"]) for e in events]
+
+    return asyncio.run(main())
+
+
+def test_each_order_in_a_cancel_batch_gets_the_status_at_its_own_position() -> None:
+    # The venue answers one status per cancel, in the order sent. The first
+    # order was cancelled. The second was already gone, which emits nothing.
+    post = FakeExchangeApi(
+        {"cancel": cancel_statuses_response("success", {"error": "Order was never placed"})}
+    )
+    refs = [
+        OrderRef(cloid=CLOID, symbol="BTC", venue_oid="77"),
+        OrderRef(cloid=CLOID_2, symbol="BTC", venue_oid="78"),
+    ]
+
+    reports, named = cancel_and_collect(post, refs)
+
+    ((_, payload),) = post.requests
+    assert payload["action"]["cancels"] == [{"a": 3, "o": 77}, {"a": 3, "o": 78}]
+    (cancelled,) = reports
+    assert isinstance(cancelled, OrderStatusReport)
+    assert (cancelled.cloid, cancelled.status) == (CLOID, OrderState.CANCELLED)
+    assert named == []
+
+
+def test_a_cancel_answer_with_the_wrong_status_count_reports_no_order() -> None:
+    # One status for two cancels cannot be paired by position. Guessing could
+    # report one order's outcome under another's cloid. It is an unreadable
+    # answer, and reconciliation resolves both orders (ADR-0026).
+    post = FakeExchangeApi({"cancel": cancel_statuses_response("success")})
+    refs = [
+        OrderRef(cloid=CLOID, symbol="BTC", venue_oid="77"),
+        OrderRef(cloid=CLOID_2, symbol="BTC", venue_oid="78"),
+    ]
+
+    reports, named = cancel_and_collect(post, refs)
+
+    assert reports == []
+    assert named == [NamedEvent.EXCHANGE_REQUEST_FAILED]
+
+
 async def fetch_view(
     post: FakeExchangeApi, ref: OrderRef = UNACKED_REF
 ) -> VenueOrderView | VenueReadFailure:
