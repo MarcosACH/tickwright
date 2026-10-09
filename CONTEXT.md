@@ -478,8 +478,11 @@ strategy's reduce-only order unless it shrinks that strategy's own position. An 
 the net is shrunk to it, and the cut part ends `CANCELLED`. With nothing to reduce, it is rejected.
 A resting one shrinks as the position shrinks and is cancelled when the position closes. Under the
 min notional, $10 on Hyperliquid, it is rejected unless it closes the whole net. Paper copies the Hyperliquid rules (ADR-0057). It
-skips the size, value, and position caps, but not the rate cap (ADR-0058). Not built yet. ADR-0030
-defers it, and #408 plans it.
+skips the size, value, and position caps, but not the rate cap (ADR-0058). A strategy sets it with
+`reduce_only=True` on `SignalEmitter.place()`. Both venues get the flag. Paper applies the
+placement table. Both venues end an order shrunk at placement `CANCELLED`. Not built yet: the paper
+re-check of resting orders after a fill (#462), the guard rules and the min notional exception
+(#463), and the Hyperliquid cases in #478 and #479.
 _Avoid_: close order, exit order.
 
 **Exit run**:
