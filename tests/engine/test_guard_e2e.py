@@ -605,6 +605,26 @@ def test_noop_guard_lets_a_would_be_denied_order_through_unmodified() -> None:
     assert record.quantity == Decimal("0.05")
 
 
+def test_noop_guard_sends_a_reduce_only_order_on_for_the_venue_to_judge() -> None:
+    # The strategy holds nothing, so the real guard would deny this sell. The
+    # noop guard sends it on, still reduce-only. Paper then refuses it against
+    # the flat account. A plain sell would rest LIVE instead.
+    engine = _engine(guard=NoopGuard())
+    cloid = derive_cloid("trivial:BTC:1")
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))
+        await engine.bus.publish(
+            _limit_signal("44000", quantity="0.05", side=Side.SELL, reduce_only=True)
+        )
+
+    asyncio.run(scenario())
+
+    rejected = [ev for ev in engine.events if isinstance(ev, OrderRejected) and ev.cloid == cloid]
+    assert [ev.reason for ev in rejected] == ["reduce-only order would increase position"]
+    assert _state(engine.store, cloid) is OrderState.REJECTED
+
+
 def test_kill_switch_survives_restart_and_reset_re_enables_placement() -> None:
     # First life: halt the engine, then crash. Only the store survives.
     first = _engine()
