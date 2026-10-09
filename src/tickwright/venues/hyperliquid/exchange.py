@@ -283,7 +283,7 @@ class HyperliquidExchange:
                         reason=reason,
                     )
                 )
-            case _Filled(oid=oid):
+            case _Filled(oid=oid, total_sz=total_sz):
                 # The placement response carries no trade ids, and a synthetic one
                 # would double-count against reconciliation's venue-tid fills under
                 # {cloid}:fill:{tid} dedup — so fetch the venue's own fill records
@@ -310,6 +310,20 @@ class HyperliquidExchange:
                     return
                 for fill in fills:
                     await self._bus.publish(fill)
+                # The venue shrank a reduce-only order to the position. The saga
+                # keeps the size it asked for, so it would stay open forever. The
+                # cut part ends CANCELLED, as on paper (ADR-0057). It goes out
+                # after the fills, because reconcile stops watching a terminal
+                # saga and would never heal fills that came later.
+                if order.reduce_only and total_sz < order.quantity:
+                    await self._bus.publish(
+                        self._status_report(
+                            cloid=order.cloid,
+                            symbol=order.symbol,
+                            status=OrderState.CANCELLED,
+                            reason="reduce-only shrink",
+                        )
+                    )
             case unreachable:
                 # An adjudication the reader can produce and this cannot carry
                 # out would otherwise be a silent no-op — the exact shape of the
@@ -844,11 +858,16 @@ class _Rejected:
 
 @dataclass(frozen=True, slots=True)
 class _Filled:
-    """The order filled on arrival. Carries only the oid, because the placement
-    response has no trade ids and the fills must be read from the venue's own
-    records (ADR-0011)."""
+    """The order filled on arrival. The fills themselves are not here, because
+    the placement response has no trade ids and the fills must be read from the
+    venue's own records (ADR-0011).
+
+    ``total_sz`` is what the venue filled. It is less than the order's size when
+    the venue shrank a reduce-only order to the position (ADR-0057).
+    """
 
     oid: int
+    total_sz: Decimal
 
 
 # One placement adjudication, read. Four members for the three per-order
@@ -898,7 +917,8 @@ def _placement_adjudication(response: object) -> _Adjudication:
     if "error" in status:
         return _Rejected(reason=str(status["error"]))
     if "filled" in status:
-        return _Filled(oid=int(status["filled"]["oid"]))
+        filled = status["filled"]
+        return _Filled(oid=int(filled["oid"]), total_sz=figure(filled["totalSz"]))
     raise ValueError(f"unrecognized placement status: {status!r}")
 
 

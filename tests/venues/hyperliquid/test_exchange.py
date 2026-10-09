@@ -382,6 +382,32 @@ def test_a_filled_placement_acks_the_order_live_with_its_oid_before_the_fills() 
     assert isinstance(fill, FillReport)
 
 
+@pytest.mark.parametrize("reduce_only", [True, False])
+def test_a_reduce_only_order_filled_for_less_than_asked_ends_cancelled(reduce_only: bool) -> None:
+    # Against a short 0.3, the venue shrinks a reduce-only buy of 0.5 to 0.3
+    # and answers `filled` (probe P1). The saga keeps the 0.5 it asked for, so
+    # without a CANCELLED for the cut part it stays open forever (ADR-0057).
+    # A plain order keeps today's reports.
+    post = FakeExchangeApi(
+        {
+            "order": filled_response(oid=91, total_sz="0.3", avg_px="43250.0"),
+            "userFills": [fill_entry(oid=91, tid=556, px="43250.0", sz="0.3")],
+        }
+    )
+    order = limit_order(Side.BUY, "0.5", "43300", tif=TimeInForce.IOC, reduce_only=reduce_only)
+    reports = asyncio.run(place_and_collect_reports(post, order))
+
+    if not reduce_only:
+        _ack, _fill = reports
+        return
+    _ack, fill, cancelled = reports
+    assert isinstance(fill, FillReport)
+    assert isinstance(cancelled, OrderStatusReport)
+    assert cancelled.status is OrderState.CANCELLED
+    assert cancelled.reason == "reduce-only shrink"
+    assert cancelled.cloid == CLOID
+
+
 def test_a_live_fill_reports_the_fee_the_venue_charged_verbatim() -> None:
     # The venue is the fee's authority on this path, so the adapter reads its
     # number rather than reconstructing one from a tier schedule (ADR-0036): the
