@@ -12,6 +12,7 @@ import random
 from dataclasses import dataclass
 from decimal import Decimal
 
+import pytest
 from ledgers import GENESIS, checkpointer
 
 from tickwright.adapters.bus import InMemoryBus
@@ -42,6 +43,7 @@ from tickwright.domain import (
     Side,
     Signal,
     TimeInForce,
+    account_net_size,
     derive_cloid,
 )
 from tickwright.domain.enums import OrderType
@@ -101,6 +103,7 @@ def _limit_signal(
     seq: int = 1,
     side: Side = Side.BUY,
     symbol: str = "BTC",
+    reduce_only: bool = False,
 ) -> PlaceSignal:
     return PlaceSignal(
         ts_event=1_000,
@@ -113,6 +116,7 @@ def _limit_signal(
         order_type=OrderType.LIMIT,
         time_in_force=TimeInForce.GTC,
         price=Decimal(price),
+        reduce_only=reduce_only,
     )
 
 
@@ -150,7 +154,9 @@ def _engine(
         clock=clock,
         fill_model=fill_model,
         genesis_collateral=GENESIS,
-        account_net=dict,
+        # Wired as the composition root wires it, so paper judges a reduce-only
+        # order against the same net the guard reads.
+        account_net=lambda: account_net_size(store.all_positions()),
     )
     checks = checkpointer(store, clock=clock)
     # The runner's boot step: the ledger first, then the order cache. Rebuilding
@@ -1033,3 +1039,47 @@ def test_the_rate_cap_window_starts_empty_after_a_restart() -> None:
 
     asyncio.run(second_life())
     assert _state(second.store, derive_cloid("trivial:BTC:3")) is OrderState.LIVE
+
+
+def _long_against_a_hand_short(limits: PreTradeLimits) -> _Engine:
+    """The strategy holds a long of 0.05. A hand sell of 0.02 sits in the
+    unattributed partition, so the account is long 0.03.
+
+    A plain sell of 0.05 crosses zero on the account, so every cap applies to
+    it. A reduce-only sell of 0.05 only closes the strategy's own long."""
+    engine = _holding("0.05", side=Side.BUY, limits=limits)
+    by_hand = ReconciliationFill(
+        symbol="BTC", side=Side.SELL, quantity=Decimal("0.02"), price=Decimal("42000"), ts_ns=1_000
+    )
+    engine.checks.checkpoint_heal((by_hand,))
+    return engine
+
+
+@pytest.mark.parametrize(
+    ("symbol_limits", "reason"),
+    [
+        (SymbolLimits(max_order_size=Decimal("0.01")), "above max order size 0.01"),
+        (SymbolLimits(max_order_value=Decimal("1000")), "above max order value 1000"),
+        (SymbolLimits(max_position=Decimal("0.01")), "above max position 0.01"),
+    ],
+)
+def test_a_reduce_only_sell_that_closes_the_strategy_long_skips_the_caps(
+    symbol_limits: SymbolLimits, reason: str
+) -> None:
+    # The plain twin is denied by the cap. The reduce-only sell is not.
+    engine = _long_against_a_hand_short(PreTradeLimits(symbols={"BTC": symbol_limits}))
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))
+        await engine.bus.publish(_mark("40000"))
+        # Above the market, so a sell that passes rests LIVE. 0.05 at 44000 is
+        # worth 2200.
+        await engine.bus.publish(_limit_signal("44000", quantity="0.05", seq=2, side=Side.SELL))
+        await engine.bus.publish(
+            _limit_signal("44000", quantity="0.05", seq=3, side=Side.SELL, reduce_only=True)
+        )
+
+    asyncio.run(scenario())
+
+    _assert_denied_by(engine, derive_cloid("trivial:BTC:2"), reason)
+    assert _state(engine.store, derive_cloid("trivial:BTC:3")) is OrderState.LIVE

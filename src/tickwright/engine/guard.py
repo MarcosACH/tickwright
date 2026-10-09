@@ -206,11 +206,14 @@ class RealGuard:
         # is a full close, not a cross, for a long and a short alike.
         same_side = (worst_case > 0) == (before > 0)
         reduces = abs(worst_case) < abs(before) and (worst_case == 0 or same_side)
+        # The venue never lets a reduce-only order grow the account net, so these
+        # caps could only stop an exit (ADR-0058).
+        skips_caps = reduces or signal.reduce_only
         cap = symbol_limits.max_order_size
-        if cap is not None and quantity > cap and not reduces:
+        if cap is not None and quantity > cap and not skips_caps:
             return Denied(reason=f"above max order size {cap}")
         cap = symbol_limits.max_order_value
-        if cap is not None and not reduces:
+        if cap is not None and not skips_caps:
             value_price = price
             # A buy limit fills at its price or better, so its price is the value.
             # A market order has no price. A sell limit below the bid fills near
@@ -236,7 +239,7 @@ class RealGuard:
             # A reducing order always passes, so a user can shrink a position
             # that is already past the cap. An order that crosses zero opens a
             # new side, so it gets no such pass.
-            if abs(worst_case) > cap and not reduces:
+            if abs(worst_case) > cap and not skips_caps:
                 return Denied(reason=f"above max position {cap}")
         rate_cap = self._limits.rate_cap
         if rate_cap is not None:
