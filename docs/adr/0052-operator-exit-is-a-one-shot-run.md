@@ -20,10 +20,14 @@ operator asks for cancel all and flatten, and what each one touches. The terms a
   reconciles like a normal run. It starts no strategy. Then it does its one job and exits.
   **(Extended by the [safe exit module map](../module-maps/safe-exit.md),
   [#457](https://github.com/MarcosACH/tickwright/issues/457):** the run is the same `Engine`, not
-  a second host. `Engine` takes an optional exit job and runs it where it would start the
-  strategies. So there is one boot path, and recovery cannot drift between two. The startup
-  reconcile already resolves an open flatten saga by cloid, so the resume ADR-0056 asks for is the
-  boot itself. The host maps the job's outcome, a signal, or a fault to the ADR-0060 exit code.**)**
+  a second host. `Engine` takes an optional exit job. It boots as usual and skips the strategies.
+  Then it runs the job as a task in its own task group. So there is one boot path, and recovery
+  cannot drift between two. The startup reconcile already resolves an open flatten saga by cloid,
+  so the resume ADR-0056 asks for is the boot itself. The host maps the job's outcome, a signal, or
+  a fault to the ADR-0060 exit code. The `Engine` builds its own internals, so the composition root
+  cannot hand them to the job. The engine passes them to the job's `run` in an `ExitContext`
+  instead. That context also holds a feed handle, so the feed still runs under the engine's
+  supervision. An exit run starts no reconcile cadence. The job runs every pass itself.**)**
 - **Account scope.** Operator cancel all also cancels orders the engine did not place, such as
   orders placed by hand in the venue UI. Flatten also closes positions in the unattributed
   partition (ADR-0038). This is an exception to ADR-0011. See its correction block.
@@ -35,7 +39,11 @@ operator asks for cancel all and flatten, and what each one touches. The terms a
   its own resting book. Cancel all uses this read for its first list and for the final check. For
   an order with a saga, the run sets the `cancel_requested` marker and checkpoints it before the
   send. Without it, reconcile would judge the vanished order a ghost and end it `REJECTED`
-  (ADR-0026). An external order has no saga. It is cancelled by oid alone.**)**
+  (ADR-0026). The operator mark sets the marker even when it is already set. It leaves
+  `cancel_signal_id` alone and consumes no seq, so the seq fold of ADR-0016 does not change. The
+  run sends a cancel for every order the read shows resting, marked or not, because an earlier
+  cancel may have been lost. An external order has no saga. It is cancelled by oid alone, as an
+  `ExternalOrderRef` (ADR-0055).**)**
 - **A store lock.** A running engine holds an exclusive lock on its store. For SQLite this is a
   file lock. For Postgres it is an advisory lock. A one-shot run takes the same lock. It refuses to
   start while another process holds it. The lock must end when the process that holds it dies. A

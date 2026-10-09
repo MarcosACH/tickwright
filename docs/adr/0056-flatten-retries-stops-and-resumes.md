@@ -22,9 +22,12 @@ Decided in [#413](https://github.com/MarcosACH/tickwright/issues/413), part of
   again. If the venue still holds a position, it places the next seq for what is left.
   **(Extended by the [safe exit module map](../module-maps/safe-exit.md),
   [#457](https://github.com/MarcosACH/tickwright/issues/457):** flatten runs reconcile itself
-  after each attempt. It does not wait for the reconcile cadences. After a replay ends, nothing
+  after each attempt. An exit run starts no reconcile cadence. After a replay ends, nothing
   moves the replay clock, so a cadence would never fire again. The 2 and 10 second waits use
-  `clock.sleep`, which does move virtual time.**)**
+  `clock.sleep`, which does move virtual time. Flatten runs one pass at a time, under one lock,
+  and a pass covers every symbol. A symbol loop that needs a pass waits for the one in progress,
+  then runs its own. So two passes never overlap, and a loop never trusts a pass that started
+  before its attempt ended.**)**
 - **Foreign flow is covered by the next attempt.** A hand trade that grows the position is healed
   into the unattributed partition, and the next attempt closes it. A hand trade that flips the
   position makes the next attempt go the other way.

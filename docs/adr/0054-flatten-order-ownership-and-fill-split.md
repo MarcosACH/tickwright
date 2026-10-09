@@ -30,7 +30,11 @@ Decided in [#412](https://github.com/MarcosACH/tickwright/issues/412), part of
   answers it from its `clearinghouseState` read. Paper answers the store net plus its own fills the
   store has not applied yet, the number ADR-0057 already makes it compute. Paper still answers
   `fetch_account_state()` with `None`, which means it has no account truth. So flatten has no
-  paper branch.**)**
+  paper branch. When the sizes differ, flatten first drains the bus, so every published fill is
+  applied. On paper that closes the gap, because the gap is only unapplied fills. On a venue with
+  account truth, flatten then runs the account pass, which heals the gap into the unattributed
+  partition. A gap that is still there counts as a dry attempt, so the ADR-0056 stop bounds the
+  wait.**)**
 - **Fills are split pro rata.** Each partition of the symbol moves the same share of the way to
   zero. Each split piece uses the real fill price.
 - **Fees split by the absolute size each partition books.** Partitions can have opposite signs. A

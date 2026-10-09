@@ -39,9 +39,11 @@ it. Decided in [#415](https://github.com/MarcosACH/tickwright/issues/415), part 
   batch that holds orders with and without an oid becomes two requests, `cancel` and
   `cancelByCloid`. The paper exchange cancels each ref in turn.
   **(Extended by the [safe exit module map](../module-maps/safe-exit.md),
-  [#457](https://github.com/MarcosACH/tickwright/issues/457):** `OrderRef.cloid` becomes optional.
-  Operator cancel all also cancels hand-placed orders, which have an oid and no cloid of ours
-  (ADR-0052). Every engine order still carries its cloid.**)**
+  [#457](https://github.com/MarcosACH/tickwright/issues/457):** `cancel` takes a list of
+  `OrderRef | ExternalOrderRef`. Operator cancel all also cancels hand-placed orders, which have an
+  oid and no cloid of ours (ADR-0052). `ExternalOrderRef` holds a symbol and a required oid, and
+  Hyperliquid cancels it with `cancel`. `OrderRef` keeps its required cloid. So `fetch_order` and
+  every reconcile read stay keyed by cloid, and a ref with neither key cannot be built.**)**
 - **The kill switch does not block it.** The guard only checks places (ADR-0053).
 - **No "all done" event.** The strategy gets one `OrderCancelled`, or a fill, per order.
 

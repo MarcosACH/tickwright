@@ -13,17 +13,18 @@ Additions to the [v1 core-engine map](./v1-core-engine.md) and the
 src/tickwright/
   domain/
     events.py                 # + CancelAllSignal, reduce_only, OrderRefusedReport
-    venue.py                  # + VenueOpenOrder, RATE_LIMITED_IP, OrderRef.cloid optional
-    order.py                  # + split_basis on Order
+    venue.py                  # + VenueOpenOrder, ExternalOrderRef, RATE_LIMITED_IP
+    order.py                  # + split_basis, the operator cancel mark, request_cancel by seq
     position.py               # + OPERATOR, beside UNATTRIBUTED
     instrument.py             # + the strategy's own position on PreTradeReading
     protocols.py              # Exchange: cancel(refs), fetch_open_orders, fetch_positions
                               # MarketFeed: add_symbols. Store: lock, seq record
   engine/
-    exit_job.py               # ExitJob, ExitOutcome, OperatorCancelAll        NEW
+    exit_job.py               # ExitJob, ExitContext, FeedHandle, ExitOutcome,  NEW
+                              # OperatorCancelAll
     flatten.py                # Flatten and its private per-symbol loop        NEW
     flatten_split.py          # the pure pro rata split                        NEW
-    runner.py                 # Engine takes an optional ExitJob
+    runner.py                 # Engine takes an optional ExitJob, no cadences on it
     execution.py              # CancelAllSignal, __operator__ orders
     checkpoint.py             # the split on the fill write, own position read
     guard.py                  # the ADR-0058 table
@@ -59,26 +60,41 @@ for callers. With a job, `run()` returns 0, 1, or 2 (ADR-0060) instead of the AD
 - Boot as today: recover, bus, exchange, barrier. The barrier's startup reconcile resolves any open
   flatten saga by cloid. Its fills split by their stored `split_basis`. So "resume first" is the
   boot itself (ADR-0056).
-- On an exit run, run the job where it would start the `StrategyHost`. Start the feed only when the
-  job asks for it, and only through the handle it gives the job.
-- Map the job's `ExitOutcome`, a signal, or a fault to the exit code. SIGINT and SIGTERM give 1.
-  Emit `exit.finished` as the last event of every exit run that booted.
+- On an exit run, skip `host.start()`. Build an `ExitContext` from the parts the engine already
+  owns. Then open the `TaskGroup` as today, with three changes:
+  - No reconcile cadences. The job runs every pass itself, so two passes never overlap.
+  - No feed task at the start. The job starts the feed through the `FeedHandle` in its context.
+    The handle runs `feed.run()` as a task in this group, so a feed fault still faults the run.
+  - The job runs as a task in this group. `exchange.run()` runs beside it as today.
+- When the job returns, request the stop and run the reverse shutdown as today.
+- Map the job's `ExitOutcome`, a signal, or a fault to the exit code. SIGINT and SIGTERM cancel
+  the job and give 1. A fault in any task of the group gives 1. Emit `exit.finished` as the last
+  event of every exit run that booted.
 
 **Seams:** None new.
 
 **Depth note:** One host keeps one boot path. A second host would copy the wiring, and two boot
-paths could drift on recovery.
+paths could drift on recovery. The engine builds its internals itself, so it hands them to the job
+at run time. The composition root never sees them.
 
 ---
 
 ### ExitJob (`engine`, new Protocol)
 
 **Interface:** `admit(store)` returns a refusal or nothing. It refuses a store with no account row
-unless `--new-store` was passed (ADR-0052). With the flag, it emits `exit.new_store`. `run()`
-returns an `ExitOutcome`: the job name, done or stopped, and what the last venue read left. A
-property says whether the job needs the feed.
+unless `--new-store` was passed (ADR-0052). With the flag, it emits `exit.new_store`.
+`run(context)` returns an `ExitOutcome`: the job name, done or stopped, and what the last venue
+read left.
 
-**Responsibilities:** The contract between the host and one operator job.
+`ExitContext` is a frozen value the `Engine` builds after the barrier. It holds the order and
+account anchors, the guard, the `Checkpointer`, the `Reconciler`, the `LedgerReconciliation`, the
+bus, the clock, and a `FeedHandle`. The handle has `start(symbols)`, which calls
+`feed.add_symbols()` and `feed.start()` and then supervises `feed.run()`. It also has `ended()`,
+which waits for `feed.run()` to return.
+
+**Responsibilities:** The contract between the host and one operator job. A job is built by the
+composition root with only the facts the root owns: the `--new-store` flag, and for `Flatten`
+whether the feed ends. Everything the engine owns arrives in the context.
 
 **Seams:** Two real implementations, `OperatorCancelAll` and `Flatten`.
 
@@ -88,15 +104,22 @@ property says whether the job needs the feed.
 
 ### OperatorCancelAll (`engine`, new)
 
-**Interface:** An `ExitJob`. Built with the `OrderAnchor`, the `AccountAnchor` read, and the
-`Checkpointer`. Needs no feed. Leaves the kill switch alone (ADR-0053).
+**Interface:** An `ExitJob`. Built with the `--new-store` flag. Uses the anchors and the
+`Checkpointer` from its context. Never starts the feed. Leaves the kill switch alone (ADR-0053).
 
 **Responsibilities:**
 
 - Read every resting order in the account with `fetch_open_orders()`.
-- For an order with a saga, set the `cancel_requested` marker and checkpoint it before the send.
+- For an order with a saga, set the operator cancel mark and checkpoint it before the send.
   Without the marker, reconcile would judge it a ghost and mark it `REJECTED`.
-- Send an external order by oid. It has no saga (the ADR-0011 exception in ADR-0052).
+- The operator mark sets `cancel_requested` even when it is already set. It leaves
+  `cancel_signal_id` as it was and consumes no seq. So the seq fold is unchanged, and a later
+  strategy cancel all still resends. `request_cancel` is not used here, because it skips an order
+  that is already marked.
+- Send a cancel for every order the read shows resting, marked or not. An earlier cancel may never
+  have reached the venue.
+- Send an external order as an `ExternalOrderRef`, by oid. It has no saga (the ADR-0011 exception
+  in ADR-0052).
 - Send every cancel through one `cancel(refs)` call.
 - Read again. Trust the read, not the cancel statuses. If orders remain, cancel once more and read
   again. If any still remain, emit `cancel_all.orders_remain` and stop (ADR-0060).
@@ -109,19 +132,21 @@ property says whether the job needs the feed.
 
 ### Flatten (`engine`, new)
 
-**Interface:** An `ExitJob`. Built with the exchange anchors, the guard, the `Checkpointer`, the
-`Reconciler`, the bus, the clock, a feed handle, and a flag that says whether the feed ends. The
-composition root sets the flag. It is true for replay. Needs the feed.
+**Interface:** An `ExitJob`. Built with the `--new-store` flag and a flag that says whether the
+feed ends. The composition root sets that flag. It is true for replay. Uses the rest from its
+context. Starts the feed through the `FeedHandle`.
 
 **Responsibilities:**
 
 - Trip the kill switch first, even when there is nothing to close (ADR-0053). Under `NoopGuard`,
   emit `exit.unguarded` and go on.
-- Run `OperatorCancelAll`. Stop if orders remain (ADR-0060).
-- Read the held symbols with `fetch_positions()`. Pass them to `feed.add_symbols()`, then start the
-  feed.
-- If the feed ends, wait for `feed.run()` to return, so replay fills at the last row (ADR-0059).
+- Run `OperatorCancelAll` with the same context. Stop if orders remain (ADR-0060).
+- Read the held symbols with `fetch_positions()`. Pass them to `FeedHandle.start()`.
+- If the feed ends, wait for `FeedHandle.ended()`, so replay fills at the last row (ADR-0059).
   Otherwise wait for each symbol's first price.
+- Run one reconcile pass at a time, under one lock. A pass covers every symbol. A loop that needs
+  a pass waits for the one in progress, then runs its own, so it never reads a pass that started
+  before its attempt ended.
 - Run one private per-symbol loop for each held symbol, all at the same time. Wait for all of them.
 - Do the final venue read. Done means no resting order and no position.
 - Keep the `__operator__` seq counter. Start it from the same saga high-water fold the
@@ -129,12 +154,23 @@ composition root sets the flag. It is true for replay. Needs the feed.
 
 **The per-symbol loop (private):**
 
-- Place only when the partition sizes sum to the venue size. If they differ, run reconcile and
-  check again (ADR-0054). A flat venue moves each leftover into the unattributed partition instead.
+- Before the first attempt, wait for the verdict on any open `__operator__` saga for the symbol
+  that the boot left open. A symbol never has two attempts open.
+- Place only when the partition sizes sum to the venue size from `fetch_positions()` (ADR-0054).
+  If they differ, call `bus.drain()` first, so every fill already published is applied. If they
+  still differ and the venue has account truth, run `LedgerReconciliation.reconcile_account()`.
+  It heals the gap into the unattributed partition (ADR-0038). "Account truth" is the
+  `declares_genesis` test the runner already uses for the account cadence. Then check again.
+- On paper the gap is only fills the store has not applied yet. Paper has no account truth, so the
+  drain alone closes it.
+- A gap that is still there counts as a dry attempt. So a gap that never heals ends in
+  `flatten.gave_up`, not in a loop.
+- A flat venue moves each leftover into the unattributed partition instead.
 - Place one reduce-only market IOC order, as a `PlaceSignal` from `__operator__` on the bus. Size it
   from `fetch_positions()`.
-- Run reconcile itself after each attempt. It does not wait for the cadences. After a replay ends,
-  nothing moves the replay clock, so the cadences never fire again.
+- After each attempt, run the in-flight pass, `Reconciler.reconcile_inflight()`, until the saga has
+  a verdict. Wait the in-flight interval between passes with `clock.sleep`. No cadence runs in an
+  exit run. After a replay ends, nothing moves the replay clock, so a cadence would never fire.
 - Count dry attempts: no fill, no price, a failed read, or a refusal (ADR-0056, ADR-0060). A fill
   resets the count. Stop after 3 in a row with `flatten.gave_up`.
 - On an `OrderRefusedReport` or a dead send, resolve the saga by cloid before the next attempt.
@@ -238,8 +274,10 @@ a handled cancel all's seq (ADR-0055).
 
 **Interface:**
 
-- `OrderAnchor.cancel(refs)` takes a list. A single cancel sends a list of one. `OrderRef.cloid`
-  becomes optional, so a ref can name an external order by oid only.
+- `OrderAnchor.cancel(refs)` takes a list of `OrderRef | ExternalOrderRef`. A single cancel sends
+  a list of one. `ExternalOrderRef` names an order the engine did not place: a symbol and a
+  required oid. `OrderRef` keeps its required cloid, so `fetch_order` and every reconcile read stay
+  keyed by cloid.
 - `AccountAnchor.fetch_open_orders()` returns every resting order in the account as
   `VenueOpenOrder` values (symbol, oid, cloid if any), or a `VenueReadFailure`.
 - `AccountAnchor.fetch_positions()` returns a signed size per symbol, or a `VenueReadFailure`.
@@ -249,6 +287,12 @@ a handled cancel all's seq (ADR-0055).
 
 **Responsibilities:** Both new reads answer for the account, so they sit on `AccountAnchor`. That
 is the placement rule in `protocols.py`.
+
+The slice that changes the seam also fixes two docstrings in `protocols.py`:
+
+- `OrderAnchor` says a cancel takes the cloid. An `ExternalOrderRef` cancel takes an oid.
+- `AccountAnchor` says it has one live-only caller. The two new reads add flatten, operator cancel
+  all, and paper as callers.
 
 **Seams:** Two real adapters, `PaperExchange` and `HyperliquidExchange`. A third-party adapter
 breaks on `cancel(refs)` and the two new reads. That is allowed on `0.x`, and the release notes
@@ -347,7 +391,9 @@ that true.
 
 **Responsibilities:**
 
-- Build the job and pass it to the `Engine`. Set the feed-ends flag from `config.feed`.
+- Build the job from the command, `--new-store`, and the feed-ends flag, and pass it to the
+  `Engine`. Set the feed-ends flag from `config.feed`. The root passes no engine internals. The
+  `Engine` hands those to the job in its `ExitContext`.
 - Refuse `__operator__` as a strategy id at config time (ADR-0054).
 - An invalid config or command line exits 2, prints its message, and emits no event (ADR-0060).
 
@@ -373,11 +419,12 @@ that true.
 
 ```
 app.__main__ → app.build → engine.Engine, engine.OperatorCancelAll, engine.Flatten
-engine.Engine → engine.ExitJob, domain.Store (lock), domain.MarketFeed
-engine.Flatten → engine.OperatorCancelAll
-engine.Flatten → engine.Reconciler, engine.Checkpointer, domain.PreTradeGuard (trip)
-engine.Flatten → domain.OrderAnchor, domain.AccountAnchor, domain.EventBus, domain.Clock
-engine.OperatorCancelAll → domain.OrderAnchor, domain.AccountAnchor, engine.Checkpointer
+engine.Engine → engine.ExitJob, engine.ExitContext, domain.Store (lock), domain.MarketFeed
+engine.ExitContext → engine.Checkpointer, engine.Reconciler, engine.LedgerReconciliation
+engine.ExitContext → domain.OrderAnchor, domain.AccountAnchor, domain.PreTradeGuard
+engine.ExitContext → domain.EventBus, domain.Clock, engine.FeedHandle
+engine.Flatten → engine.OperatorCancelAll, engine.ExitContext
+engine.OperatorCancelAll → engine.ExitContext
 engine.ExecutionManager → engine.Checkpointer → engine.flatten_split
 engine.RealGuard → domain.PreTradeReading
 adapters.paper, venues.hyperliquid → domain.Exchange, domain.MarketFeed
@@ -391,6 +438,12 @@ No cycles. `Flatten` places through the bus, not through the `ExecutionManager`.
 
 - **A separate `ExitRun` host.** It would copy the `Engine` wiring. Two boot paths could drift on
   recovery.
+- **Engine properties that expose its internals to the root.** The root would wire parts the
+  `Engine` owns. The `ExitContext` keeps them inside `engine`.
+- **Reconcile cadences during an exit run.** They would overlap the passes flatten runs itself.
+  Under replay they never fire after the file ends anyway.
+- **An optional `OrderRef.cloid`.** Every read keyed by cloid would have to handle a ref without
+  one. A ref with no cloid and no oid would type-check. `ExternalOrderRef` keeps the two apart.
 - **The split inside the flatten job.** A fill booked by reconcile after a crash would skip it.
 - **A separate read for external orders only.** Cancel all would need two reads and two paths.
 - **Paper answering `fetch_account_state` with positions.** Its `None` means "no account truth",
