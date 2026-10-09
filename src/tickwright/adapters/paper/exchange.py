@@ -283,10 +283,10 @@ class PaperExchange:
         return complete
 
     async def place(self, order: PlaceOrder) -> None:
-        if order.reduce_only and self._account_net().get(order.symbol, Decimal("0")) == 0:
+        if order.reduce_only and not self._reduces(order):
             # The venue checks a reduce-only order against the account net, not
-            # a strategy's partition. With nothing to reduce it refuses it
-            # (ADR-0057).
+            # a strategy's partition. A flat net, or a net on the order's own
+            # side, has nothing to reduce, so it refuses the order (ADR-0057).
             await self._bus.publish(
                 self._status_report(
                     order,
@@ -376,6 +376,11 @@ class PaperExchange:
                 # placed. A benign no-op — the venue has nothing to report (ADR-0026).
                 continue
             await self._bus.publish(self._status_report(order, OrderState.CANCELLED))
+
+    def _reduces(self, order: PlaceOrder) -> bool:
+        """Whether the account net lies on the other side of ``order``."""
+        net = self._account_net().get(order.symbol, Decimal("0"))
+        return net > 0 if order.side is Side.SELL else net < 0
 
     def _crosses(self, order: PlaceOrder, tick: MarketTick) -> bool:
         """Whether a trade at ``tick.price`` matches ``order``'s LIMIT price.

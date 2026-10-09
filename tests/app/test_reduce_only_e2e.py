@@ -241,3 +241,15 @@ def test_a_reduce_only_order_against_a_flat_account_is_rejected(tmp_path: Path) 
     assert life.strategy.states(0)[-1] is OrderState.REJECTED
     assert life.strategy.reason(0) == "reduce-only order would increase position"
     assert _size(life) == Decimal("0")
+
+
+def test_a_reduce_only_order_on_the_side_of_the_net_is_rejected(tmp_path: Path) -> None:
+    # Long 3. A reduce-only buy would grow the long, so it is refused and the
+    # long stays 3.
+    life = _wire(tmp_path, {0: [buy("3")], 2: [Send(Side.BUY, Decimal("1"), reduce_only=True)]})
+
+    _run(life, lambda: len(life.strategy.sent) == 2 and life.strategy.all_terminal())
+
+    assert life.strategy.states(1)[-1] is OrderState.REJECTED
+    assert life.strategy.reason(1) == "reduce-only order would increase position"
+    assert _size(life) == Decimal("3")
