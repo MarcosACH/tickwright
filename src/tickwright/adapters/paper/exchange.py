@@ -283,6 +283,18 @@ class PaperExchange:
         return complete
 
     async def place(self, order: PlaceOrder) -> None:
+        if order.reduce_only and self._account_net().get(order.symbol, Decimal("0")) == 0:
+            # The venue checks a reduce-only order against the account net, not
+            # a strategy's partition. With nothing to reduce it refuses it
+            # (ADR-0057).
+            await self._bus.publish(
+                self._status_report(
+                    order,
+                    OrderState.REJECTED,
+                    reason="reduce-only order would increase position",
+                )
+            )
+            return
         if order.order_type is OrderType.MARKET:
             await self._place_market(order)
         else:

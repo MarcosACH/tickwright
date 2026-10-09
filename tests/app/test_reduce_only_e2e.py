@@ -125,6 +125,10 @@ class ScriptedStrategy:
         fills = [e for e in self.events.get(self.sent[index], []) if isinstance(e, OrderFillEvent)]
         return fills[-1].cum_qty if fills else Decimal("0")
 
+    def reason(self, index: int) -> str | None:
+        last = self.events[self.sent[index]][-1]
+        return getattr(last, "reason", None)
+
     def all_terminal(self) -> bool:
         return all(
             any(state in TERMINAL for state in self.states(i)) for i in range(len(self.sent))
@@ -226,3 +230,14 @@ def test_a_reduce_only_sell_smaller_than_the_long_fills_in_full(tmp_path: Path) 
     assert life.strategy.states(1)[-1] is OrderState.FILLED
     assert life.strategy.filled(1) == Decimal("1")
     assert _size(life) == Decimal("2")
+
+
+def test_a_reduce_only_order_against_a_flat_account_is_rejected(tmp_path: Path) -> None:
+    # Flat, so there is nothing to reduce. A plain sell would open a short.
+    life = _wire(tmp_path, {0: [reduce_only_sell("1")]})
+
+    _run(life, lambda: len(life.strategy.sent) == 1 and life.strategy.all_terminal())
+
+    assert life.strategy.states(0)[-1] is OrderState.REJECTED
+    assert life.strategy.reason(0) == "reduce-only order would increase position"
+    assert _size(life) == Decimal("0")
