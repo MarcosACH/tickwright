@@ -18,9 +18,32 @@ operator asks for cancel all and flatten, and what each one touches. The terms a
   events are in ADR-0060.**)**
 - **The engine is stopped first.** Each command is a one-shot run. It boots, recovers, and
   reconciles like a normal run. It starts no strategy. Then it does its one job and exits.
+  **(Extended by the [safe exit module map](../module-maps/safe-exit.md),
+  [#457](https://github.com/MarcosACH/tickwright/issues/457):** the run is the same `Engine`, not
+  a second host. `Engine` takes an optional exit job. It boots as usual and skips the strategies.
+  Then it runs the job as a task in its own task group. So there is one boot path, and recovery
+  cannot drift between two. The startup reconcile already resolves an open flatten saga by cloid,
+  so the resume ADR-0056 asks for is the boot itself. The host maps the job's outcome, a signal, or
+  a fault to the ADR-0060 exit code. The `Engine` builds its own internals, so the composition root
+  cannot hand them to the job. The engine passes them to the job's `run` in an `ExitContext`
+  instead. That context also holds a feed handle, so the feed still runs under the engine's
+  supervision. An exit run starts no reconcile cadence. The job runs every pass itself.**)**
 - **Account scope.** Operator cancel all also cancels orders the engine did not place, such as
   orders placed by hand in the venue UI. Flatten also closes positions in the unattributed
   partition (ADR-0038). This is an exception to ADR-0011. See its correction block.
+  **(Extended by the [safe exit module map](../module-maps/safe-exit.md),
+  [#457](https://github.com/MarcosACH/tickwright/issues/457):** the engine could read the venue
+  only one order at a time, by cloid. A hand-placed order has no cloid of ours. So `AccountAnchor`
+  gains `fetch_open_orders()`, which lists every resting order in the account with its symbol, its
+  oid, and its cloid if it has one. A failed read returns a `VenueReadFailure`. Paper answers from
+  its own resting book. Cancel all uses this read for its first list and for the final check. For
+  an order with a saga, the run sets the `cancel_requested` marker and checkpoints it before the
+  send. Without it, reconcile would judge the vanished order a ghost and end it `REJECTED`
+  (ADR-0026). The operator mark sets the marker even when it is already set. It leaves
+  `cancel_signal_id` alone and consumes no seq, so the seq fold of ADR-0016 does not change. The
+  run sends a cancel for every order the read shows resting, marked or not, because an earlier
+  cancel may have been lost. An external order has no saga. It is cancelled by oid alone, as an
+  `ExternalOrderRef` (ADR-0055).**)**
 - **A store lock.** A running engine holds an exclusive lock on its store. For SQLite this is a
   file lock. For Postgres it is an advisory lock. A one-shot run takes the same lock. It refuses to
   start while another process holds it. The lock must end when the process that holds it dies. A
@@ -51,6 +74,15 @@ operator asks for cancel all and flatten, and what each one touches. The terms a
   must be a direct connection. A pooler in transaction mode breaks a session advisory lock. In
   session mode, the keepalives reach only the pooler. Code does not detect a pooler, so
   `.env.example` states the rule.**)**
+  **(Extended by the [safe exit module map](../module-maps/safe-exit.md),
+  [#457](https://github.com/MarcosACH/tickwright/issues/457):** the lock is a `Store` member,
+  because on Postgres it must sit on the connection the store writes through. Only the adapter can
+  make that true. `lock()` returns nothing when it gets the lock, or the holder when another
+  process has it. The lock ends at `close()`. The engine takes it first, before `recover()` writes
+  anything. A normal run that finds it held faults and exits 1, with `engine.faulted` naming the
+  holder. Under a supervisor it is restarted, so it retries until the exit run ends. An exit run
+  that finds it held exits 2 with `exit.refused`. The new-store check belongs to the exit job. It
+  runs after the lock and before `recover()`, because boot creates the account row.**)**
 
 ## Considered options
 

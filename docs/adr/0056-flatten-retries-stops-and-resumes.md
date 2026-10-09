@@ -20,6 +20,19 @@ Decided in [#413](https://github.com/MarcosACH/tickwright/issues/413), part of
   as `CANCELLED`. Decided in [#414](https://github.com/MarcosACH/tickwright/issues/414).**)**
 - **One attempt at a time per symbol.** When an attempt ends, flatten reconciles, then decides
   again. If the venue still holds a position, it places the next seq for what is left.
+  **(Extended by the [safe exit module map](../module-maps/safe-exit.md),
+  [#457](https://github.com/MarcosACH/tickwright/issues/457):** flatten runs reconcile itself
+  after each attempt. An exit run starts no reconcile cadence. After a replay ends, nothing
+  moves the replay clock, so a cadence would never fire again. The 2 and 10 second waits use
+  `clock.sleep`, which does move virtual time. Flatten runs one pass at a time, under one lock,
+  and a pass covers every symbol. A symbol loop that needs a pass waits for the one in progress,
+  then runs its own. So two passes never overlap, and a loop never trusts a pass that started
+  before its attempt ended. A pass runs the in-flight pass and then the open-order pass. The
+  in-flight pass only covers `SUBMITTED` orders. An acked saga, such as a partly filled IOC whose
+  cancel push was lost, ends only in the open-order pass. With both, every wait for a verdict
+  ends. It ends at the miss budget, at the venue's terminal status, at the ghost grace window, or
+  at 3 failed reads (ADR-0060). A failed pass counts as a dry attempt for every symbol loop that
+  waits on it, because a pass has one result for all symbols.**)**
 - **Foreign flow is covered by the next attempt.** A hand trade that grows the position is healed
   into the unattributed partition, and the next attempt closes it. A hand trade that flips the
   position makes the next attempt go the other way.
@@ -90,6 +103,16 @@ Decided in [#413](https://github.com/MarcosACH/tickwright/issues/413), part of
   behind another. It does not promise each symbol a turn at the venue. The venue answers a refusal
   with HTTP 200 and `"status": "err"`. Evidence:
   [`hyperliquid-rate-limit-window-probe.md`](../research/hyperliquid-rate-limit-window-probe.md).**)**
+  **(Extended by the [safe exit module map](../module-maps/safe-exit.md),
+  [#457](https://github.com/MarcosACH/tickwright/issues/457):** the adapter reports a refusal with
+  a new raw report, `OrderRefusedReport`. Its `refusal` is `rate_limited_address`,
+  `rate_limited_ip`, or `refused`. Hyperliquid emits it on a refused action and on a send that
+  dies. It moves no saga, so reconcile still resolves the order by cloid. The flatten job
+  subscribes to it for its own orders. Paper never emits it. A `place()` that returned the outcome
+  was rejected, because a flatten order goes through the `ExecutionManager` and the value would
+  never reach the job. For reads, `VenueReadFailure` gains `RATE_LIMITED_IP`. The reconciler
+  treats it like `SEND_FAILED` and stops the pass, because every other read would be refused
+  too.**)**
 - **The count lives in memory.** A crash resets it. A new run is a new choice by the operator, so it
   gets its full tries.
 - **On boot, an open flatten saga is resumed first.** The engine finds it at the venue by its id. It
