@@ -424,6 +424,23 @@ def test_a_reduce_only_order_filled_in_full_sends_no_cancel() -> None:
     assert isinstance(fill, FillReport)
 
 
+def test_a_shrunk_reduce_only_order_stays_open_when_the_fills_read_comes_back_short() -> None:
+    # The venue filled 0.3 of a reduce-only 0.5, but the fills read holds only
+    # 0.1 of it. A CANCELLED now would end the saga, and reconcile would never
+    # heal the missing 0.2 onto this order. So the saga stays open for it.
+    post = FakeExchangeApi(
+        {
+            "order": filled_response(oid=93, total_sz="0.3", avg_px="43250.0"),
+            "userFills": [fill_entry(oid=93, tid=558, px="43250.0", sz="0.1")],
+        }
+    )
+    order = limit_order(Side.BUY, "0.5", "43300", tif=TimeInForce.IOC, reduce_only=True)
+    reports = asyncio.run(place_and_collect_reports(post, order))
+
+    _ack, fill = reports
+    assert isinstance(fill, FillReport)
+
+
 def test_a_live_fill_reports_the_fee_the_venue_charged_verbatim() -> None:
     # The venue is the fee's authority on this path, so the adapter reads its
     # number rather than reconstructing one from a tier schedule (ADR-0036): the
