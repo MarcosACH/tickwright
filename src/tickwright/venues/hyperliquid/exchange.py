@@ -662,7 +662,7 @@ class HyperliquidExchange:
             "b": order.side is Side.BUY,
             "p": _wire_decimal(self._limit_price(order)),
             "s": _wire_decimal(order.quantity),
-            "r": False,  # reduce_only is deferred (ADR-0030)
+            "r": order.reduce_only,
             "t": {"limit": {"tif": self._wire_tif(order)}},
             "c": order.cloid,
         }

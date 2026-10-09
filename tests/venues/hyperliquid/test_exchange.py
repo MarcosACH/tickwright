@@ -195,6 +195,7 @@ def limit_order(
     *,
     tif: TimeInForce = TimeInForce.GTC,
     post_only: bool = False,
+    reduce_only: bool = False,
 ) -> PlaceOrder:
     return PlaceOrder(
         cloid=CLOID,
@@ -205,6 +206,7 @@ def limit_order(
         time_in_force=tif,
         price=Decimal(price),
         post_only=post_only,
+        reduce_only=reduce_only,
     )
 
 
@@ -253,6 +255,18 @@ def test_limit_passes_through_with_its_own_time_in_force() -> None:
     assert ioc["t"] == {"limit": {"tif": "Ioc"}}
     assert ioc["p"] == "42000.5"
     assert ioc["b"] is False
+
+
+@pytest.mark.parametrize("reduce_only", [True, False])
+def test_the_order_action_carries_the_reduce_only_flag(reduce_only: bool) -> None:
+    async def main() -> FakeExchangeApi:
+        post = FakeExchangeApi({"order": resting_response(oid=82)})
+        exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
+        await exchange.place(limit_order(Side.SELL, "0.5", "42000", reduce_only=reduce_only))
+        return post
+
+    # The venue enforces reduce-only itself, so the flag must reach the wire.
+    assert placed_wire(asyncio.run(main()))["r"] is reduce_only
 
 
 async def place_and_collect_reports(
