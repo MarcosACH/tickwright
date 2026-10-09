@@ -156,16 +156,23 @@ class _Life:
     reports: list[OrderStatusReport]
 
 
-def _wire(tmp_path: Path, script: Mapping[float, Sequence[Send]]) -> _Life:
+def _wire(
+    tmp_path: Path,
+    script: Mapping[float, Sequence[Send]],
+    *,
+    prices: Mapping[float, Decimal] | None = None,
+) -> _Life:
     """``build_engine`` with the scripted strategy registered in place of a
-    configured one. One trade tick at ``PRICE`` per script time."""
+    configured one. One trade tick per script time, at ``PRICE`` unless
+    ``prices`` names another."""
+    prices = prices or {}
     ticks = tmp_path / "ticks.jsonl"
     ticks.write_text(
         "".join(
             json.dumps(
                 {
                     "symbol": "BTC",
-                    "price": str(PRICE),
+                    "price": str(prices.get(seconds, PRICE)),
                     "size": "10",
                     "aggressor_side": "buy",
                     "trade_id": f"t{i}",
@@ -248,9 +255,25 @@ def test_a_reduce_only_sell_smaller_than_the_long_fills_in_full(tmp_path: Path) 
     assert _size(life) == Decimal("2")
 
 
-def test_a_reduce_only_order_against_a_flat_account_is_rejected(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "send",
+    [
+        reduce_only_sell("1"),
+        # Above the 50000 trade, so a plain one would rest.
+        Send(
+            Side.SELL,
+            Decimal("1"),
+            reduce_only=True,
+            order_type=OrderType.LIMIT,
+            time_in_force=TimeInForce.GTC,
+            price=Decimal("51000"),
+        ),
+    ],
+    ids=["market", "gtc"],
+)
+def test_a_reduce_only_order_against_a_flat_account_is_rejected(tmp_path: Path, send: Send) -> None:
     # Flat, so there is nothing to reduce. A plain sell would open a short.
-    life = _wire(tmp_path, {0: [reduce_only_sell("1")]})
+    life = _wire(tmp_path, {0: [send]})
 
     _run(life, lambda: len(life.strategy.sent) == 1 and life.strategy.all_terminal())
 
@@ -299,6 +322,38 @@ def test_a_reduce_only_sell_larger_than_the_long_is_shrunk_to_it(
     _run(life, lambda: len(life.strategy.sent) == 2 and life.strategy.all_terminal())
 
     assert life.strategy.states(1)[-2:] == [OrderState.PARTIALLY_FILLED, OrderState.CANCELLED]
+    assert life.strategy.filled(1) == Decimal("3")
+    assert _size(life) == Decimal("0")
+    assert [r.reason for r in life.reports if r.status is OrderState.CANCELLED] == [
+        "reduce-only shrink"
+    ]
+
+
+def test_a_resting_reduce_only_gtc_is_shrunk_to_the_long(tmp_path: Path) -> None:
+    # Long 3. A GTC sell of 5 at 51000 sits above the 50000 trade, so it rests,
+    # shrunk to 3. The 51000 trade at 4s fills those 3, and the cut 2 end
+    # CANCELLED. The account ends flat, not short 2.
+    sell = Send(
+        Side.SELL,
+        Decimal("5"),
+        reduce_only=True,
+        order_type=OrderType.LIMIT,
+        time_in_force=TimeInForce.GTC,
+        price=Decimal("51000"),
+    )
+    life = _wire(
+        tmp_path,
+        {0: [buy("3")], 2: [sell], 4: []},
+        prices={4: Decimal("51000")},
+    )
+
+    _run(life, lambda: len(life.strategy.sent) == 2 and life.strategy.all_terminal())
+
+    assert life.strategy.states(1)[-3:] == [
+        OrderState.LIVE,
+        OrderState.PARTIALLY_FILLED,
+        OrderState.CANCELLED,
+    ]
     assert life.strategy.filled(1) == Decimal("3")
     assert _size(life) == Decimal("0")
     assert [r.reason for r in life.reports if r.status is OrderState.CANCELLED] == [
