@@ -32,6 +32,7 @@ Everything is real: ``SQLiteStore(":memory:")``, the ``Checkpointer``, the
 """
 
 import asyncio
+from collections.abc import Sequence
 from decimal import Decimal
 
 from hypothesis import given, settings
@@ -226,7 +227,7 @@ class _AccountVenue(LiveVenueDouble):
     async def place(self, order: PlaceOrder) -> None:
         raise AssertionError("the account cycle places nothing")
 
-    async def cancel(self, ref: OrderRef) -> None:
+    async def cancel(self, refs: Sequence[OrderRef]) -> None:
         raise AssertionError("the account cycle cancels nothing")
 
     async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:

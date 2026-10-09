@@ -20,6 +20,19 @@ Decided in [#413](https://github.com/MarcosACH/tickwright/issues/413), part of
   as `CANCELLED`. Decided in [#414](https://github.com/MarcosACH/tickwright/issues/414).**)**
 - **One attempt at a time per symbol.** When an attempt ends, flatten reconciles, then decides
   again. If the venue still holds a position, it places the next seq for what is left.
+  **(Extended by the [safe exit module map](../module-maps/safe-exit.md),
+  [#457](https://github.com/MarcosACH/tickwright/issues/457):** flatten runs reconcile itself
+  after each attempt. An exit run starts no reconcile cadence. After a replay ends, nothing
+  moves the replay clock, so a cadence would never fire again. The 2 and 10 second waits use
+  `clock.sleep`, which does move virtual time. Flatten runs one pass at a time, under one lock,
+  and a pass covers every symbol. A symbol loop that needs a pass waits for the one in progress,
+  then runs its own. So two passes never overlap, and a loop never trusts a pass that started
+  before its attempt ended. A pass runs the in-flight pass and then the open-order pass. The
+  in-flight pass only covers `SUBMITTED` orders. An acked saga, such as a partly filled IOC whose
+  cancel push was lost, ends only in the open-order pass. With both, every wait for a verdict
+  ends. It ends at the miss budget, at the venue's terminal status, at the ghost grace window, or
+  at 3 failed reads (ADR-0060). A failed pass counts as a dry attempt for every symbol loop that
+  waits on it, because a pass has one result for all symbols.**)**
 - **Foreign flow is covered by the next attempt.** A hand trade that grows the position is healed
   into the unattributed partition, and the next attempt closes it. A hand trade that flips the
   position makes the next attempt go the other way.
@@ -72,6 +85,34 @@ Decided in [#413](https://github.com/MarcosACH/tickwright/issues/413), part of
   forever below. The named events show the operator a rate limit, so it cannot pass for progress.
   The operator can stop the run with Ctrl-C. The next run resumes any open saga, as below. Paper
   has no rate limit, so this never happens on paper.**)**
+  **(Resolved by ADR-0060:** a failed venue read counts as a dry attempt. That covers the read by
+  cloid and the position read. Flatten never sends an order it could not size. After 3 in a row it
+  exits 1, and the open saga is resumed on the next boot. Giving up also exits 1. A read refused
+  for a rate limit is not a failed read. It waits 10 seconds like an order, and the count does not
+  move. A rate limit emits `flatten.rate_limited`. Every dry attempt emits `flatten.dry_attempt`,
+  with `refused` as the reason for any other refusal. Decided in
+  [#441](https://github.com/MarcosACH/tickwright/issues/441).**)**
+  **(Resolved in [#452](https://github.com/MarcosACH/tickwright/issues/452):** a refused request
+  does not restart the 10 seconds, and it does not use the address budget. A testnet probe sent one
+  order a second, and one still got through about every 11 seconds. So waiting makes progress, and
+  the rate limit wait from #439 stands. The slot is not shared fairly. With three loops out of
+  step, one loop got nothing in 90 seconds while the account got 10 orders through. Flatten accepts
+  this. The account as a whole still makes progress, and each fill raises the budget. A symbol that
+  gets no turn keeps emitting `flatten.rate_limited`, so the operator sees it is stuck. The #439
+  line that no symbol waits behind another is about the design. Flatten never queues one symbol
+  behind another. It does not promise each symbol a turn at the venue. The venue answers a refusal
+  with HTTP 200 and `"status": "err"`. Evidence:
+  [`hyperliquid-rate-limit-window-probe.md`](../research/hyperliquid-rate-limit-window-probe.md).**)**
+  **(Extended by the [safe exit module map](../module-maps/safe-exit.md),
+  [#457](https://github.com/MarcosACH/tickwright/issues/457):** the adapter reports a refusal with
+  a new raw report, `OrderRefusedReport`. Its `refusal` is `rate_limited_address`,
+  `rate_limited_ip`, or `refused`. Hyperliquid emits it on a refused action and on a send that
+  dies. It moves no saga, so reconcile still resolves the order by cloid. The flatten job
+  subscribes to it for its own orders. Paper never emits it. A `place()` that returned the outcome
+  was rejected, because a flatten order goes through the `ExecutionManager` and the value would
+  never reach the job. For reads, `VenueReadFailure` gains `RATE_LIMITED_IP`. The reconciler
+  treats it like `SEND_FAILED` and stops the pass, because every other read would be refused
+  too.**)**
 - **The count lives in memory.** A crash resets it. A new run is a new choice by the operator, so it
   gets its full tries.
 - **On boot, an open flatten saga is resumed first.** The engine finds it at the venue by its id. It
@@ -120,7 +161,12 @@ second fill moves only A.
 - After reconcile, the books match the venue, unless the venue is flat. Then the leftover rule
   applies. So flatten never waits for the books to match. A venue read that fails is not covered
   here. It belongs with what the operator sees when flatten cannot finish, still open in #408.
+  **(Resolved by ADR-0060:** a failed venue read counts as a dry attempt. A read refused for a
+  rate limit waits 10 seconds and does not count. Decided in
+  [#441](https://github.com/MarcosACH/tickwright/issues/441).**)**
 - The exit code and the named events of a run that gives up are still open in #408.
+  **(Resolved by ADR-0060:** a run that gives up emits `flatten.gave_up`, then `exit.finished`,
+  and exits 1. Decided in [#441](https://github.com/MarcosACH/tickwright/issues/441).**)**
 - How far a flatten order's price may be from the mark, and how long to wait between attempts, are
   still open in #408. Both decide how often an attempt fills nothing.
   **(Resolved in [#431](https://github.com/MarcosACH/tickwright/issues/431):** the normal market
@@ -138,4 +184,7 @@ second fill moves only A.
   which weighs 20. With about 50 symbols, one round of reads alone reaches 1200 weight. That 429
   lands on a read, which the rate limit rule above does not cover. It belongs with the venue read
   that fails, still open in #408. We accept this so that no symbol waits behind another.**)**
+  **(Resolved by ADR-0060:** a read refused for a rate limit takes the rate limit path above. The
+  count does not move, and flatten waits 10 seconds. Decided in
+  [#441](https://github.com/MarcosACH/tickwright/issues/441).**)**
 - Each attempt takes a new seq. A flatten of one symbol can use several `__operator__` seqs.
