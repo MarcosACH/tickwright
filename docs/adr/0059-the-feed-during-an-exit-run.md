@@ -18,9 +18,19 @@ of [#408](https://github.com/MarcosACH/tickwright/issues/408).
 - **The live feed also subscribes to every symbol the account holds.** Flatten covers positions the
   engine did not open (ADR-0052). Those can be on coins the operator never configured. The run
   reads the venue position at boot, so it knows these symbols before the feed starts.
+  **(Extended by the [safe exit module map](../module-maps/safe-exit.md),
+  [#457](https://github.com/MarcosACH/tickwright/issues/457):** `MarketFeed` gains
+  `add_symbols(symbols)`, called before `start()`. The feed is built before boot, so it cannot
+  know these symbols when it is built. `HyperliquidFeed` adds them to its subscription.
+  `ReplayFeed` does nothing, because the file decides which symbols it plays.**)**
 - **Under replay, the exit run plays the whole file first.** Flatten then fills at the last row's
   price. The fill is dated at the end of the file. A live feed never ends, so flatten places as
   soon as each symbol has a price.
+  **(Extended by the [safe exit module map](../module-maps/safe-exit.md),
+  [#457](https://github.com/MarcosACH/tickwright/issues/457):** the composition root tells
+  flatten whether its feed ends. The flag is true for replay. With it on, flatten waits for
+  `feed.run()` to return before its first attempt. With it off, flatten waits for each symbol's
+  first price. Only the root needs this fact, so `MarketFeed` gains no `finite` property.**)**
 - **`tickwright cancel-all` starts no feed.** A cancel needs no price. Flatten runs cancel all as
   its first step, before the feed starts.
 - **A missing price counts as an attempt that fills nothing.** Flatten waits 2 seconds and tries

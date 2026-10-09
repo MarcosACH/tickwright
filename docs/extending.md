@@ -53,9 +53,11 @@ Concretely, the engine does the pulling **for** you before it subscribes you (in
    `signal_id` (ADR-0006/0016). Both place *and* cancel intents consume a `seq`.
 3. Only then are your `on_tick` / `on_order_event` handlers subscribed, and the feed starts.
 
-Because current open-order truth lives in the `Cache` read-model (a write-through projection of the
-`Store`, rebuilt during recovery — never the source of truth), a *stateful* strategy reads it there
-rather than reconstructing it from a stream it never saw. The corollary discipline:
+A strategy cannot read its open orders. The engine keeps them in its `Cache`, but that lives in
+`engine`, and a strategy may import only `domain`. No `domain` Protocol exposes open orders.
+`Portfolio` gives positions and the account only. So a *stateful* strategy tracks its own open
+orders from `on_order_event` and keeps them in its snapshot. After a restart, that set can be stale.
+Startup may have resolved an order before your handlers were subscribed. The corollary discipline:
 
 - **Keep state minimal and reconstructible.** Version your snapshot payload (`{"version": 1, …}`)
   and reject unknown shapes in `restore()` — the engine turns that into a clean start.

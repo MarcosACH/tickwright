@@ -17,7 +17,7 @@ this delegates to. Same discipline as ``ingress.py``: a second venue is the
 signal to promote something here to a shared home, not before.
 """
 
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from decimal import Decimal
 from typing import Any, NoReturn
 
@@ -66,7 +66,7 @@ async def read[T](
     query: dict[str, Any],
     send: Callable[[dict[str, Any]], Awaitable[object]],
     normalize: Callable[[object], T],
-    cloid: str | None = None,
+    cloids: Sequence[str] = (),
 ) -> T | VenueReadFailure:
     """One in-flight venue read: send ``query``, and answer the three ways it
     can come back other than an answer.
@@ -141,22 +141,22 @@ async def read[T](
     try:
         response = await send(query)
     except OSError as exc:
-        _failed_send(request=request, cloid=cloid, error=exc)
+        _failed_send(request=request, cloids=cloids, error=exc)
         return VenueReadFailure.SEND_FAILED
     try:
         return normalize(response)
     except UNREADABLE as exc:
-        _unreadable_body(request=request, cloid=cloid, error=exc, response=response)
+        _unreadable_body(request=request, cloids=cloids, error=exc, response=response)
         return VenueReadFailure.UNREADABLE_BODY
 
 
-def _failed_send(*, request: str, cloid: str | None = None, error: OSError) -> None:
+def _failed_send(*, request: str, cloids: Sequence[str], error: OSError) -> None:
     """Name a request whose send died: no body arrived, so nothing was parsed."""
-    _failed_read(request, cloid, str(error))
+    _failed_read(request, cloids, str(error))
 
 
 def _unreadable_body(
-    *, request: str, cloid: str | None = None, error: Exception, response: object
+    *, request: str, cloids: Sequence[str], error: Exception, response: object
 ) -> None:
     """Name a body that arrived and could not be read, quoting what arrived.
 
@@ -167,10 +167,10 @@ def _unreadable_body(
     name their half without it — the same failure, diagnosable on one path and
     not the other.
     """
-    _failed_read(request, cloid, f"{error!r} in {request} response {rendered(response)}")
+    _failed_read(request, cloids, f"{error!r} in {request} response {rendered(response)}")
 
 
-def _failed_read(request: str, cloid: str | None, error: str) -> None:
+def _failed_read(request: str, cloids: Sequence[str], error: str) -> None:
     """Name a read that yielded no usable answer, either way it failed.
 
     One event for both causes because the caller's verdict is one verdict — a
@@ -178,12 +178,18 @@ def _failed_read(request: str, cloid: str | None, error: str) -> None:
     is ``None`` on the account grain, which has no order. The key stays so the
     record has one shape (#338).
 
+    A cancel batch names one event per order. Each order may still rest, and
+    reconciliation never resends a cancel, so the operator needs every cloid
+    (ADR-0055).
+
     Private, and so are the two causes above since #237: ``read`` is the one way
     in. A caller that reached any of them directly would be choosing its own
     words for a failure the taxonomy already has words for, which is how the
     write path drifted from the read path in the first place.
     """
-    named_event(NamedEvent.EXCHANGE_REQUEST_FAILED, request=request, cloid=cloid, error=error)
+    named: Sequence[str | None] = cloids or [None]
+    for cloid in named:
+        named_event(NamedEvent.EXCHANGE_REQUEST_FAILED, request=request, cloid=cloid, error=error)
 
 
 _RENDER_LIMIT = 300
