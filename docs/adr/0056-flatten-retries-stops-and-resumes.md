@@ -27,7 +27,11 @@ Decided in [#413](https://github.com/MarcosACH/tickwright/issues/413), part of
   `clock.sleep`, which does move virtual time. Flatten runs one pass at a time, under one lock,
   and a pass covers every symbol. A symbol loop that needs a pass waits for the one in progress,
   then runs its own. So two passes never overlap, and a loop never trusts a pass that started
-  before its attempt ended.**)**
+  before its attempt ended. A pass runs the in-flight pass and then the open-order pass. The
+  in-flight pass only covers `SUBMITTED` orders. An acked saga, such as a partly filled IOC whose
+  cancel push was lost, ends only in the open-order pass. With both, every wait for a verdict
+  ends. It ends at the miss budget, at the venue's terminal status, at the ghost grace window, or
+  at 3 failed reads (ADR-0060).**)**
 - **Foreign flow is covered by the next attempt.** A hand trade that grows the position is healed
   into the unattributed partition, and the next attempt closes it. A hand trade that flips the
   position makes the next attempt go the other way.

@@ -144,9 +144,10 @@ context. Starts the feed through the `FeedHandle`.
 - Read the held symbols with `fetch_positions()`. Pass them to `FeedHandle.start()`.
 - If the feed ends, wait for `FeedHandle.ended()`, so replay fills at the last row (ADR-0059).
   Otherwise wait for each symbol's first price.
-- Run one reconcile pass at a time, under one lock. A pass covers every symbol. A loop that needs
-  a pass waits for the one in progress, then runs its own, so it never reads a pass that started
-  before its attempt ended.
+- Run one reconcile pass at a time, under one lock. A pass is `reconcile_inflight()` and then
+  `reconcile_open_orders()`, and it covers every symbol. A loop that needs a pass waits for the
+  one in progress, then runs its own, so it never reads a pass that started before its attempt
+  ended.
 - Run one private per-symbol loop for each held symbol, all at the same time. Wait for all of them.
 - Do the final venue read. Done means no resting order and no position.
 - Keep the `__operator__` seq counter. Start it from the same saga high-water fold the
@@ -155,12 +156,14 @@ context. Starts the feed through the `FeedHandle`.
 **The per-symbol loop (private):**
 
 - Before the first attempt, wait for the verdict on any open `__operator__` saga for the symbol
-  that the boot left open. A symbol never has two attempts open.
+  that the boot left open. It waits the same way as after an attempt, below. A symbol never has
+  two attempts open.
 - Place only when the partition sizes sum to the venue size from `fetch_positions()` (ADR-0054).
   If they differ, call `bus.drain()` first, so every fill already published is applied. If they
   still differ and the venue has account truth, run `LedgerReconciliation.reconcile_account()`.
-  It heals the gap into the unattributed partition (ADR-0038). "Account truth" is the
-  `declares_genesis` test the runner already uses for the account cadence. Then check again.
+  It heals the gap into the unattributed partition (ADR-0038). A venue that does not declare
+  genesis has account truth. The runner uses the same test for the account cadence. Then check
+  again.
 - On paper the gap is only fills the store has not applied yet. Paper has no account truth, so the
   drain alone closes it.
 - A gap that is still there counts as a dry attempt. So a gap that never heals ends in
@@ -168,9 +171,16 @@ context. Starts the feed through the `FeedHandle`.
 - A flat venue moves each leftover into the unattributed partition instead.
 - Place one reduce-only market IOC order, as a `PlaceSignal` from `__operator__` on the bus. Size it
   from `fetch_positions()`.
-- After each attempt, run the in-flight pass, `Reconciler.reconcile_inflight()`, until the saga has
-  a verdict. Wait the in-flight interval between passes with `clock.sleep`. No cadence runs in an
-  exit run. After a replay ends, nothing moves the replay clock, so a cadence would never fire.
+- After each attempt, run passes until the saga has a verdict. Wait the in-flight interval between
+  passes with `clock.sleep`. No cadence runs in an exit run. After a replay ends, nothing moves the
+  replay clock, so a cadence would never fire.
+- The pass needs both halves. `reconcile_inflight()` only covers `SUBMITTED` orders. A saga the
+  venue already acked needs `reconcile_open_orders()`. One case is an IOC that partly fills and
+  whose cancel push for the rest is lost.
+- The wait always ends. A `SUBMITTED` saga ends when the in-flight miss budget runs out
+  (ADR-0011). An acked saga ends at the venue's terminal status, or at the ghost grace window if it
+  vanished (ADR-0026). A failed read counts as a dry attempt (ADR-0060). So 3 failed reads stop
+  the run, and the next boot resumes the saga.
 - Count dry attempts: no fill, no price, a failed read, or a refusal (ADR-0056, ADR-0060). A fill
   resets the count. Stop after 3 in a row with `flatten.gave_up`.
 - On an `OrderRefusedReport` or a dead send, resolve the saga by cloid before the next attempt.
