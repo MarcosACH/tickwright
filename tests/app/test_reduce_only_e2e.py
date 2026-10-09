@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
 from tickwright.adapters.feed import ReplayFeedConfig
 from tickwright.adapters.paper import PaperExchangeConfig
 from tickwright.adapters.store import SQLiteStoreConfig
@@ -37,6 +39,7 @@ from tickwright.domain import (
     OrderEvent,
     OrderFillEvent,
     OrderState,
+    OrderStatusReport,
     OrderType,
     Portfolio,
     Side,
@@ -149,6 +152,8 @@ class _Life:
     engine: Engine
     strategy: ScriptedStrategy
     portfolio: Portfolio
+    # The venue's own status reports, which carry its reason for a cancel.
+    reports: list[OrderStatusReport]
 
 
 def _wire(tmp_path: Path, script: Mapping[float, Sequence[Send]]) -> _Life:
@@ -197,7 +202,18 @@ def _wire(tmp_path: Path, script: Mapping[float, Sequence[Send]]) -> _Life:
         script={int(seconds * SECOND_NS): sends for seconds, sends in script.items()},
     )
     engine.register(strategy, symbols={"BTC"})
-    return _Life(engine=engine, strategy=strategy, portfolio=engine.portfolio_for("scripted"))
+    reports: list[OrderStatusReport] = []
+
+    async def record(report: OrderStatusReport) -> None:
+        reports.append(report)
+
+    bus.subscribe(OrderStatusReport, record)
+    return _Life(
+        engine=engine,
+        strategy=strategy,
+        portfolio=engine.portfolio_for("scripted"),
+        reports=reports,
+    )
 
 
 def _run(life: _Life, settled: Callable[[], bool]) -> None:
@@ -253,3 +269,38 @@ def test_a_reduce_only_order_on_the_side_of_the_net_is_rejected(tmp_path: Path) 
     assert life.strategy.states(1)[-1] is OrderState.REJECTED
     assert life.strategy.reason(1) == "reduce-only order would increase position"
     assert _size(life) == Decimal("3")
+
+
+@pytest.mark.parametrize(
+    ("order_type", "price"),
+    [
+        (OrderType.MARKET, None),
+        # Below the 50000 trade, so the sell crosses on arrival.
+        (OrderType.LIMIT, Decimal("49000")),
+    ],
+    ids=["market", "ioc-limit"],
+)
+def test_a_reduce_only_sell_larger_than_the_long_is_shrunk_to_it(
+    tmp_path: Path, order_type: OrderType, price: Decimal | None
+) -> None:
+    # Long 3, sell 5 reduce-only. The venue shrinks the order to the net, so 3
+    # fill and the account ends flat. The saga still asks for 5, so the cut 2
+    # end CANCELLED (ADR-0057).
+    sell = Send(
+        Side.SELL,
+        Decimal("5"),
+        reduce_only=True,
+        order_type=order_type,
+        time_in_force=TimeInForce.IOC,
+        price=price,
+    )
+    life = _wire(tmp_path, {0: [buy("3")], 2: [sell]})
+
+    _run(life, lambda: len(life.strategy.sent) == 2 and life.strategy.all_terminal())
+
+    assert life.strategy.states(1)[-2:] == [OrderState.PARTIALLY_FILLED, OrderState.CANCELLED]
+    assert life.strategy.filled(1) == Decimal("3")
+    assert _size(life) == Decimal("0")
+    assert [r.reason for r in life.reports if r.status is OrderState.CANCELLED] == [
+        "reduce-only shrink"
+    ]

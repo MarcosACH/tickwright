@@ -30,6 +30,7 @@ nothing, the ``Store`` remains the sole authority for the paper ledger, and
 """
 
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 from decimal import Decimal
 
 from tickwright.domain import (
@@ -125,6 +126,10 @@ class PaperExchange:
         # a real venue remembers the orders it saw; so does the paper one.
         self._statuses: dict[str, OrderStatusReport] = {}
         self._fills: dict[str, list[FillReport]] = {}
+        # Reduce-only orders shrunk to the net at placement. The saga still
+        # asks for the full size, so once the shrunk size fills, the venue must
+        # cancel the cut part or the saga never ends (ADR-0057).
+        self._shrunk: set[str] = set()
         # Filling off the tick stream *is* what a paper venue is (ADR-0012), so
         # it wires its own tick subscription here rather than leaving a line for
         # the composition root and every test to repeat (and be able to forget).
@@ -280,6 +285,8 @@ class PaperExchange:
         await self._bus.publish(
             self._fill_report(order, Fill(quantity=quantity, price=fill.price), maker=maker)
         )
+        if complete:
+            await self._filled(order)
         return complete
 
     async def place(self, order: PlaceOrder) -> None:
@@ -295,10 +302,24 @@ class PaperExchange:
                 )
             )
             return
+        if order.reduce_only:
+            net = abs(self._account_net().get(order.symbol, Decimal("0")))
+            if order.quantity > net:
+                # Larger than the net: the venue works only the net's size.
+                order = replace(order, quantity=net)
+                self._shrunk.add(order.cloid)
         if order.order_type is OrderType.MARKET:
             await self._place_market(order)
         else:
             await self._place_limit(order)
+
+    async def _filled(self, order: PlaceOrder) -> None:
+        """End a shrunk order once its working size has filled in full."""
+        if order.cloid in self._shrunk:
+            self._shrunk.discard(order.cloid)
+            await self._bus.publish(
+                self._status_report(order, OrderState.CANCELLED, reason="reduce-only shrink")
+            )
 
     async def _place_market(self, order: PlaceOrder) -> None:
         tick = self._latest_tick.get(order.symbol)
@@ -319,6 +340,7 @@ class PaperExchange:
         # A MARKET fills on arrival against the price the venue already holds: it
         # takes liquidity by definition, so there is no maker branch (ADR-0036).
         await self._bus.publish(self._fill_report(order, fill, maker=False))
+        await self._filled(order)
 
     async def _place_limit(self, order: PlaceOrder) -> None:
         tick = self._latest_tick.get(order.symbol)
@@ -349,6 +371,7 @@ class PaperExchange:
             if order.time_in_force is TimeInForce.IOC:
                 # IOC never rests: drop whatever remainder didn't fill now.
                 self._book.remove(order.cloid)
+                self._shrunk.discard(order.cloid)
                 await self._bus.publish(self._status_report(order, OrderState.CANCELLED))
                 return
             # GTC keeps the remainder resting for a later crossing tick. Announce
@@ -375,6 +398,7 @@ class PaperExchange:
                 # Nothing resting under this cloid: already filled/cancelled or never
                 # placed. A benign no-op — the venue has nothing to report (ADR-0026).
                 continue
+            self._shrunk.discard(ref.cloid)
             await self._bus.publish(self._status_report(order, OrderState.CANCELLED))
 
     def _reduces(self, order: PlaceOrder) -> bool:
