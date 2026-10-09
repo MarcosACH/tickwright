@@ -644,7 +644,28 @@ def test_a_cancel_answer_with_the_wrong_status_count_reports_no_order() -> None:
     reports, named = cancel_and_collect(post, refs)
 
     assert reports == []
-    assert named == [(NamedEvent.EXCHANGE_REQUEST_FAILED, None)]
+    # Each order may still rest, and reconciliation never resends a cancel.
+    # So the failure names every order in the batch (ADR-0055).
+    assert named == [
+        (NamedEvent.EXCHANGE_REQUEST_FAILED, CLOID),
+        (NamedEvent.EXCHANGE_REQUEST_FAILED, CLOID_2),
+    ]
+
+
+def test_a_cancel_batch_whose_send_fails_names_each_order() -> None:
+    post = FakeExchangeApi({"cancel": TimeoutError("venue timed out")})
+    refs = [
+        OrderRef(cloid=CLOID, symbol="BTC", venue_oid="77"),
+        OrderRef(cloid=CLOID_2, symbol="BTC", venue_oid="78"),
+    ]
+
+    reports, named = cancel_and_collect(post, refs)
+
+    assert reports == []
+    assert named == [
+        (NamedEvent.EXCHANGE_REQUEST_FAILED, CLOID),
+        (NamedEvent.EXCHANGE_REQUEST_FAILED, CLOID_2),
+    ]
 
 
 def test_a_cancel_list_with_and_without_oids_goes_as_cancel_and_cancel_by_cloid() -> None:

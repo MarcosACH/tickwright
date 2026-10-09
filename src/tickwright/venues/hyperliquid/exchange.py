@@ -236,7 +236,7 @@ class HyperliquidExchange:
             query=action,
             send=self._send_action,
             normalize=_placement_adjudication,
-            cloid=order.cloid,
+            cloids=[order.cloid],
         )
         if isinstance(adjudication, VenueReadFailure):
             # Either way it failed, we hold no fact worth reporting: a dead send
@@ -379,9 +379,9 @@ class HyperliquidExchange:
             query=action,
             send=self._send_action,
             normalize=functools.partial(_cancel_adjudications, count=len(refs)),
-            # A failure names the order when there is just one. A batch has no
-            # single cloid to name, and reconciliation covers each order anyway.
-            cloid=refs[0].cloid if len(refs) == 1 else None,
+            # A failure names every order in the batch. Each may still rest, and
+            # reconciliation never resends a cancel (ADR-0055).
+            cloids=[ref.cloid for ref in refs],
         )
         if isinstance(adjudications, VenueReadFailure):
             # An ack-lost cancel and an adjudication we cannot read prove the
@@ -540,7 +540,7 @@ class HyperliquidExchange:
             query={"type": "orderStatus", "user": self._user_address, "oid": key},
             send=self._info,
             normalize=_decode_order_status,
-            cloid=ref.cloid,
+            cloids=[ref.cloid],
         )
 
     async def _fetch_fills(
@@ -617,7 +617,7 @@ class HyperliquidExchange:
             ]
 
         return await read(
-            request="userFills", query=query, send=self._info, normalize=rows, cloid=cloid
+            request="userFills", query=query, send=self._info, normalize=rows, cloids=[cloid]
         )
 
     def instrument_specs(self) -> Mapping[str, InstrumentSpec]:
