@@ -86,7 +86,9 @@ A strategy consumes ticks and lifecycle events and emits `PlaceSignal`/`CancelSi
   clock-stamps each signal, and publishes it. Never build a `signal_id` by hand.
 - [ ] Close a position with a reduce-only order. It can only shrink the account net, never grow it
   or flip it. An order larger than the net is shrunk to it, and the cut part ends `CANCELLED`
-  (ADR-0057):
+  (ADR-0057). The real guard denies it unless it shrinks your own position. Under the min
+  notional, it must close the whole net. It skips the size, value, and position caps, but not the
+  rate cap or the kill switch (ADR-0058):
 
   ```python
   await self._emitter.place(
