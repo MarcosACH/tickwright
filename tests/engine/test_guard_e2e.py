@@ -1175,6 +1175,34 @@ def test_a_reduce_only_sell_that_does_not_shrink_the_strategy_position_is_denied
     )
 
 
+def test_a_second_reduce_only_sell_counts_the_first_one_still_resting() -> None:
+    # Strategy long 1 and a hand buy of 1, so the account is long 2. Each sell
+    # of 1 closes the strategy alone. The venue sees long 2 and would fill both,
+    # which leaves the strategy short 1. So the second must count the first.
+    engine = _holding("1", side=Side.BUY, limits=NO_LIMITS)
+    by_hand = ReconciliationFill(
+        symbol="BTC", side=Side.BUY, quantity=Decimal("1"), price=Decimal("42000"), ts_ns=1_000
+    )
+    engine.checks.checkpoint_heal((by_hand,))
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))
+        # Above the market, so a sell that passes rests LIVE.
+        for seq in (2, 3):
+            await engine.bus.publish(
+                _limit_signal("44000", quantity="1", seq=seq, side=Side.SELL, reduce_only=True)
+            )
+
+    asyncio.run(scenario())
+
+    assert _state(engine.store, derive_cloid("trivial:BTC:2")) is OrderState.LIVE
+    _assert_denied_by(
+        engine,
+        derive_cloid("trivial:BTC:3"),
+        "reduce-only order would not reduce strategy position",
+    )
+
+
 def _holding_eth(quantity: str, *, side: Side) -> _Engine:
     """The engine one restart after it filled ``quantity`` ETH on ``side`` at 3000.
 
