@@ -52,7 +52,7 @@ _HOLDER_QUERY = """
 """
 
 
-def _holder_of(pid: int, client: object, started: datetime | None) -> StoreLockHolder:
+def _holder_of(store: str, pid: int, client: object, started: datetime | None) -> StoreLockHolder:
     """The refusal the operator reads. It says how to end the holder (ADR-0052)."""
     source = "a local socket" if client is None else str(client)
     return StoreLockHolder(
@@ -62,6 +62,7 @@ def _holder_of(pid: int, client: object, started: datetime | None) -> StoreLockH
             f"It started at {started}. If that engine is dead, the server frees the lock "
             f"once it notices. To end it now, run SELECT pg_terminate_backend({pid})."
         ),
+        store=store,
     )
 
 
@@ -168,7 +169,9 @@ class PostgresStore(SqlStore):
                 return None
             holder = self._conn.execute(_HOLDER_QUERY, (_LOCK_KEY,)).fetchone()
             if holder is not None:
-                return _holder_of(*holder)
+                # Built from the live connection, which never shows the password.
+                info = self._conn.info
+                return _holder_of(f"{info.host}:{info.port}/{info.dbname}", *holder)
             # The holder let go between the two reads, so the lock may be free.
 
     def _has_column(self, table: str, column: str) -> bool:

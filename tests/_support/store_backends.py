@@ -67,6 +67,10 @@ class PostgresBackend:
     def __init__(self, dsn: str) -> None:
         self._dsn = dsn
 
+    @property
+    def dsn(self) -> str:
+        return self._dsn
+
     def open(self) -> PostgresStore:
         return PostgresStore(self._dsn)
 
