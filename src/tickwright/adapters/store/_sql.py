@@ -17,8 +17,9 @@ import weakref
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager
+from functools import wraps
 from types import TracebackType
-from typing import Any, ClassVar, Protocol, Self
+from typing import Any, ClassVar, Concatenate, Protocol, Self
 
 from tickwright.domain import (
     Account,
@@ -53,14 +54,32 @@ class _Rows(Protocol):
     def fetchall(self) -> Sequence[Sequence[Any]]: ...
 
 
+def _member[S: "SqlStore", **P, R](
+    method: Callable[Concatenate[S, P], R],
+) -> Callable[Concatenate[S, P], R]:
+    """A ``Store`` member: the schema first, then the body, both under ``durable``.
+
+    A decorator rather than a line in each body, so a new member cannot forget
+    the schema. It would only show on an older store, where no test looks first.
+    """
+
+    @wraps(method)
+    def body(store: S, /, *args: P.args, **kwargs: P.kwargs) -> R:
+        store._ready()
+        return method(store, *args, **kwargs)
+
+    return durable(body)
+
+
 class SqlStore(ABC):
     """The ``Store`` members, over four driver hooks an adapter fills in.
 
-    Every member is decorated ``@durable`` here, so the seam's error contract
+    Every member is decorated ``@_member`` here, so the seam's error contract
     (ADR-0019) holds for both backends by construction. ``close()`` is the one
     deliberate exception, for the reason ``_durability`` states. ``lock()`` is
-    the one member each adapter writes itself, also ``@durable``. The two
-    backends lock in ways that share no SQL (ADR-0052).
+    the one member each adapter writes itself, with plain ``@durable``. The two
+    backends lock in ways that share no SQL, and the lock must come before the
+    schema (ADR-0052).
     """
 
     _driver_error: ClassVar[type[Exception]]
@@ -81,8 +100,20 @@ class SqlStore(ABC):
         # failing that, when the store is collected — so a store that outlives its
         # explicit close (e.g. a hypothesis example) never leaks a connection.
         self._finalizer = weakref.finalize(self, release)
+        # The schema waits for the store's first use, not its open. An upgrade
+        # writes, and an engine's first call is ``lock()``, which needs no
+        # schema. So an engine refused the lock leaves an older store's tables
+        # as it found them (ADR-0052).
+        self._schema = tuple(schema)
+        self._added_column_types = added_column_types
+        self._schema_ready = False
+
+    def _ready(self) -> None:
+        """Bring the schema up to date, once, before this store's first real use."""
+        if self._schema_ready:
+            return
         with self._transaction():
-            for statement in schema:
+            for statement in self._schema:
                 self._execute(statement)
             # ``_records`` says which columns may be missing from a database
             # written before they existed, and how to fill them. The backend
@@ -91,10 +122,11 @@ class SqlStore(ABC):
                 column for column in ADDED_ORDER_COLUMNS if not self._has_column("orders", column)
             ]
             for column in missing:
-                declaration = added_column_types[column]
+                declaration = self._added_column_types[column]
                 self._execute(f"ALTER TABLE orders ADD COLUMN {column} {declaration}")
             if missing:
                 self._backfill(missing)
+        self._schema_ready = True
 
     def _backfill(self, columns: Sequence[str]) -> None:
         """Fill ``columns`` on every existing row from its transition history.
@@ -136,7 +168,7 @@ class SqlStore(ABC):
         rows = self._execute(sql, params).fetchall()
         return rows[0] if rows else None
 
-    @durable
+    @_member
     def checkpoint(self, order: Order, *, ts_ns: int) -> None:
         """Durably record ``order``'s full saga state as of ``ts_ns``.
 
@@ -157,7 +189,7 @@ class SqlStore(ABC):
         history = next_history(row[0] if row else None, order.state, ts_ns)
         self._execute(self._upserts.order, record_values(order, history=history))
 
-    @durable
+    @_member
     def get_order(self, cloid: str) -> Order | None:
         """Rebuild the checkpointed saga for ``cloid``, or ``None`` if unknown."""
         row = self._one(f"SELECT {READ_COLUMN_LIST} FROM orders WHERE cloid = {self._p}", (cloid,))
@@ -165,19 +197,19 @@ class SqlStore(ABC):
             return None
         return restore_order(row)
 
-    @durable
+    @_member
     def all_orders(self) -> list[Order]:
         """Rebuild every checkpointed saga — the recovery mass-read (ADR-0009)."""
         rows = self._execute(f"SELECT {READ_COLUMN_LIST} FROM orders ORDER BY cloid").fetchall()
         return [restore_order(row) for row in rows]
 
-    @durable
+    @_member
     def save_strategy_snapshot(self, strategy_id: str, data: bytes, *, ts_ns: int) -> None:
         """Durably record ``strategy_id``'s opaque state bytes; latest wins (ADR-0016)."""
         with self._transaction():
             self._execute(self._upserts.snapshot, (strategy_id, data, ts_ns))
 
-    @durable
+    @_member
     def load_strategy_snapshot(self, strategy_id: str) -> bytes | None:
         """The last persisted snapshot for ``strategy_id``, or ``None`` if never saved."""
         row = self._one(
@@ -185,7 +217,7 @@ class SqlStore(ABC):
         )
         return None if row is None else bytes(row[0])
 
-    @durable
+    @_member
     def save_kill_switch(self, *, tripped: bool, reason: str | None, ts_ns: int) -> None:
         """Durably record the single-row kill-switch state (ADR-0026).
 
@@ -196,7 +228,7 @@ class SqlStore(ABC):
         with self._transaction():
             self._execute(self._upserts.kill_switch, (tripped, reason, ts_ns))
 
-    @durable
+    @_member
     def load_kill_switch(self) -> KillSwitchState | None:
         """The persisted kill-switch state, or ``None`` if never written."""
         row = self._one("SELECT tripped, reason, ts_ns FROM kill_switch WHERE id = 1")
@@ -204,7 +236,7 @@ class SqlStore(ABC):
             return None
         return KillSwitchState(tripped=bool(row[0]), reason=row[1], ts_ns=row[2])
 
-    @durable
+    @_member
     def checkpoint_ledger(
         self,
         *,
@@ -240,7 +272,7 @@ class SqlStore(ABC):
                     self._upserts.funding_mark, funding_mark_values(funding_mark, ts_ns=ts_ns)
                 )
 
-    @durable
+    @_member
     def all_positions(self) -> list[Position]:
         """Every persisted partition — the recovery mass-read (ADR-0043 §9)."""
         rows = self._execute(
@@ -248,7 +280,7 @@ class SqlStore(ABC):
         ).fetchall()
         return [restore_position(row) for row in rows]
 
-    @durable
+    @_member
     def has_orders(self) -> bool:
         """Whether any saga history exists at all — the existence question the
         startup refusal asks before ``cache.rebuild()`` (ADR-0043 §9). Answering
@@ -256,7 +288,7 @@ class SqlStore(ABC):
         on every start, on the recovery path."""
         return self._one("SELECT 1 FROM orders LIMIT 1") is not None
 
-    @durable
+    @_member
     def funding_mark(self, symbol: str) -> int | None:
         """The last funding boundary applied to ``symbol``, or ``None`` if none
         ever was — the "never accrued" state ADR-0043 §3 encodes as row absence,
@@ -267,13 +299,13 @@ class SqlStore(ABC):
         )
         return None if row is None else int(row[0])
 
-    @durable
+    @_member
     def load_account(self) -> Account | None:
         """The persisted account, or ``None`` if the ledger was never opened."""
         row = self._one(f"SELECT {ACCOUNT_COLUMN_LIST} FROM account WHERE id = 1")
         return None if row is None else restore_account(row)
 
-    @durable
+    @_member
     def history(self, cloid: str) -> list[tuple[OrderState, int]]:
         """The durable transition trail: one ``(state, ts_ns)`` per checkpoint.
 

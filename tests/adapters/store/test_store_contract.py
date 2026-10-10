@@ -819,6 +819,24 @@ def test_a_lock_is_free_again_after_close(store_backend: Backend) -> None:
         assert second.lock() is None
 
 
+def test_a_store_refused_its_lock_leaves_an_older_schema_as_it_found_it(
+    store_backend: Backend,
+) -> None:
+    """An upgrade adds columns to an older store and fills them in. That is a
+    write, so it must wait for the lock (ADR-0052). Otherwise a newer engine
+    started beside a running older one would change the older one's tables
+    before it was refused."""
+    with store_backend.open() as holder:
+        assert holder.lock() is None
+        holder.checkpoint(_order(), ts_ns=1_000)
+        store_backend.drop_column("orders", "created_ts_ns")
+
+        with store_backend.open() as refused:
+            assert refused.lock() is not None
+
+        assert not store_backend.has_column("orders", "created_ts_ns")
+
+
 def test_a_postgres_holder_pid_is_the_session_that_holds_the_lock(
     store_backend: Backend,
 ) -> None:

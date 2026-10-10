@@ -19,6 +19,7 @@ from pathlib import Path
 from kafka_fakes import FakeKafkaBroker
 from ledgers import GENESIS
 from recovery_stores import RecoveryOrderStore
+from store_backends import SQLiteBackend
 from structlog.typing import EventDict
 from venue_doubles import (
     DERIVED_GENESIS,
@@ -305,11 +306,15 @@ def test_an_engine_on_a_store_another_process_holds_faults_and_writes_nothing(
     the engine takes the store lock first, before ``recover()`` writes the account
     row. A held lock faults the run, and the trail names the holder.
 
-    A strategy is registered so that a teardown would snapshot it. The store is
-    the other engine's, so not even that write may land."""
+    A strategy is registered so that a teardown would snapshot it. The holder's
+    schema is older, so a schema upgrade would write too. The store is the other
+    engine's, so neither write may land."""
     db = tmp_path / "saga.db"
     holder = SQLiteStore(db)
     assert holder.lock() is None
+    assert holder.has_orders() is False  # the holder's first use creates its schema
+    backing = SQLiteBackend(db)
+    backing.drop_column("orders", "created_ts_ns")
     bus = InMemoryBus()
     clock = ManualClock()
     engine = Engine(
@@ -346,6 +351,7 @@ def test_an_engine_on_a_store_another_process_holds_faults_and_writes_nothing(
     faults = [log for log in logs if log["event"] == "engine.faulted"]
     assert len(faults) == 1
     assert f"Process {os.getpid()} holds" in faults[0]["error"]
+    assert not backing.has_column("orders", "created_ts_ns")
     try:
         assert holder.load_account() is None
         assert holder.load_strategy_snapshot("trivial") is None
