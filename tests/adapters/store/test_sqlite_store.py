@@ -7,7 +7,9 @@ has: the ``:memory:`` default, the zero-setup in-process store the hermetic
 paper + in-memory-bus path recovers from with nothing installed.
 """
 
+import os
 from decimal import Decimal
+from pathlib import Path
 
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import Order, OrderState, OrderSubmitted, OrderType, Side
@@ -47,3 +49,23 @@ def test_in_memory_default_round_trips_a_checkpoint_within_the_session() -> None
     assert loaded is not None
     assert loaded.state is OrderState.SUBMITTED
     store.close()
+
+
+def test_a_held_lock_names_the_holder_pid_and_the_lock_file(tmp_path: Path) -> None:
+    """The lock is an OS lock on ``<db>.lock``, never on the database file
+    (ADR-0052). The pid is written there only so the refusal can name it."""
+    db = tmp_path / "tickwright.db"
+    with SQLiteStore(db) as first, SQLiteStore(db) as second:
+        assert first.lock() is None
+
+        holder = second.lock()
+
+        assert holder is not None
+        assert holder.pid == os.getpid()
+        assert str(tmp_path / "tickwright.db.lock") in holder.detail
+
+
+def test_an_in_memory_store_always_gets_the_lock() -> None:
+    """No other process can open a ``:memory:`` database, so nothing can contend."""
+    with SQLiteStore() as store:
+        assert store.lock() is None

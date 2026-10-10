@@ -22,13 +22,35 @@ placeholders, the column types the DDL needs, and how sqlite3 scopes a
 transaction.
 """
 
+import fcntl
+import os
 import sqlite3
 from collections.abc import Sequence
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, ExitStack
 from pathlib import Path
 from typing import Any
 
+from tickwright.domain import StoreLockHolder
+
+from ._durability import durable
 from ._sql import SqlStore
+
+
+def _holder_of(path: str, written: str) -> StoreLockHolder:
+    """The holder of the lock at ``path``, from the pid it wrote there.
+
+    The pid can be missing for a moment, between the holder taking the lock and
+    writing it. The lock still decides, so this is still a refusal.
+    """
+    if not written.isdigit():
+        return StoreLockHolder(
+            pid=None, detail=f"Another engine holds {path}. Stop it first, then try again."
+        )
+    return StoreLockHolder(
+        pid=int(written),
+        detail=f"Process {written} holds {path}. Stop that engine first, then try again.",
+    )
+
 
 _SCHEMA: tuple[str, ...] = (
     """
@@ -115,10 +137,44 @@ class SQLiteStore(SqlStore):
     _placeholder = "?"
 
     def __init__(self, path: str | Path = ":memory:") -> None:
-        self._conn = sqlite3.connect(str(path))
-        super().__init__(
-            schema=_SCHEMA, added_column_types=_ADDED_COLUMN_TYPES, release=self._conn.close
-        )
+        conn = sqlite3.connect(str(path))
+        # Holds the open lock file once ``lock()`` succeeds. Closing it is what
+        # frees the lock.
+        lock_file = ExitStack()
+
+        def release() -> None:
+            # The connection goes first, so no write can follow the release.
+            conn.close()
+            lock_file.close()
+
+        self._conn = conn
+        self._lock_file = lock_file
+        super().__init__(schema=_SCHEMA, added_column_types=_ADDED_COLUMN_TYPES, release=release)
+
+    @durable
+    def lock(self) -> StoreLockHolder | None:
+        # Asking the connection for its file also makes a closed store refuse.
+        # The name is empty for ":memory:", which no other process can open.
+        database = self._conn.execute("PRAGMA database_list").fetchone()[2]
+        if not database:
+            return None
+        # Never the database file itself. SQLite takes its own POSIX locks there,
+        # and closing any handle to it drops all of them (ADR-0052). ``flock``
+        # also ends when the process dies, so a crash leaves nothing stuck.
+        path = f"{database}.lock"
+        file = open(path, "a+")  # stays open for as long as the lock is held
+        try:
+            fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            file.seek(0)
+            written = file.read().strip()
+            file.close()
+            return _holder_of(path, written)
+        file.truncate(0)
+        file.write(str(os.getpid()))
+        file.flush()
+        self._lock_file.enter_context(file)
+        return None
 
     def _has_column(self, table: str, column: str) -> bool:
         rows = self._conn.execute(f"PRAGMA table_info({table})").fetchall()

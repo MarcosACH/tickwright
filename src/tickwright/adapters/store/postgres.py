@@ -25,11 +25,43 @@ the explicit transaction blocks wrap exactly the read-modify-write checkpoints.
 
 from collections.abc import Sequence
 from contextlib import AbstractContextManager
+from datetime import datetime
 from typing import Any
 
 import psycopg
 
+from tickwright.domain import StoreLockHolder
+
+from ._durability import durable
 from ._sql import SqlStore
+
+# The store lock's advisory key. An advisory lock is per database, so two stores
+# on one database are one store. The key is below 2**31, so ``pg_locks`` shows
+# it whole in ``objid`` with ``classid`` 0.
+_LOCK_KEY = 0x7477_6C6B  # "twlk"
+
+# The session that holds the store lock, if any still does.
+_HOLDER_QUERY = """
+    SELECT a.pid, a.client_addr, a.backend_start
+    FROM pg_locks AS l JOIN pg_stat_activity AS a ON a.pid = l.pid
+    WHERE l.locktype = 'advisory' AND l.granted
+      AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
+      AND l.classid = 0 AND l.objid::bigint = %s AND l.objsubid = 1
+"""
+
+
+def _holder_of(pid: int, client: object, started: datetime | None) -> StoreLockHolder:
+    """The refusal the operator reads. It says how to end the holder (ADR-0052)."""
+    source = "a local socket" if client is None else str(client)
+    return StoreLockHolder(
+        pid=pid,
+        detail=(
+            f"Postgres session {pid} from {source} holds this store's lock. "
+            f"It started at {started}. If that engine is dead, the server frees the lock "
+            f"once it notices. To end it now, run SELECT pg_terminate_backend({pid})."
+        ),
+    )
+
 
 # Individual DDL statements: psycopg's extended protocol runs one command per
 # ``execute``, so the schema is applied statement by statement.
@@ -122,6 +154,20 @@ class PostgresStore(SqlStore):
         super().__init__(
             schema=_SCHEMA, added_column_types=_ADDED_COLUMN_TYPES, release=self._conn.close
         )
+
+    @durable
+    def lock(self) -> StoreLockHolder | None:
+        # On the connection the store writes through, never a second one. A lost
+        # session then fails the next write, so the engine cannot keep trading
+        # without its lock (ADR-0052).
+        while True:
+            row = self._conn.execute("SELECT pg_try_advisory_lock(%s)", (_LOCK_KEY,)).fetchone()
+            if row is not None and row[0]:
+                return None
+            holder = self._conn.execute(_HOLDER_QUERY, (_LOCK_KEY,)).fetchone()
+            if holder is not None:
+                return _holder_of(*holder)
+            # The holder let go between the two reads, so the lock may be free.
 
     def _has_column(self, table: str, column: str) -> bool:
         row = self._conn.execute(

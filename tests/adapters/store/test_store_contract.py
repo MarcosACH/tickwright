@@ -124,6 +124,7 @@ _SEAM_CALLS: Mapping[str, Callable[[Store], object]] = {
     "all_positions": lambda store: store.all_positions(),
     "load_account": lambda store: store.load_account(),
     "funding_mark": lambda store: store.funding_mark("BTC"),
+    "lock": lambda store: store.lock(),
 }
 
 
@@ -793,3 +794,35 @@ def test_a_store_with_order_history_and_no_ledger_opens_and_reads_it_empty(
         assert reopened.load_account() is None
         assert reopened.all_positions() == []
         assert reopened.funding_mark("BTC") is None
+
+
+def test_a_second_lock_on_the_same_store_returns_the_holder(store_backend: Backend) -> None:
+    """Two engines on one store would each believe they own every saga in it
+    (ADR-0052). So the first ``lock()`` wins and each later one is told who has
+    it. The pid is in the detail because the operator acts on it."""
+    with store_backend.open() as first, store_backend.open() as second:
+        assert first.lock() is None
+
+        holder = second.lock()
+
+        assert holder is not None
+        assert str(holder.pid) in holder.detail
+
+
+def test_a_postgres_holder_pid_is_the_session_that_holds_the_lock(
+    store_backend: Backend,
+) -> None:
+    """The refusal tells the operator to run ``pg_terminate_backend(<pid>)``
+    (ADR-0052). That only works if the pid is the holder's own session, so ending
+    that session must free the lock."""
+    if not isinstance(store_backend, PostgresBackend):
+        pytest.skip("only a Postgres holder is a server session")
+    with store_backend.open() as first, store_backend.open() as second:
+        assert first.lock() is None
+        holder = second.lock()
+        assert holder is not None
+        assert holder.pid is not None
+
+        store_backend.terminate(holder.pid)
+
+        assert second.lock() is None

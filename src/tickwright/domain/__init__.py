@@ -100,6 +100,7 @@ from .protocols import (
     Store,
     Strategy,
 )
+from .store_lock import StoreLockHolder
 from .valuation import (
     LiquidationSource,
     SymbolValuation,
@@ -183,6 +184,7 @@ __all__ = [
     "PreTradeReading",
     "ReconciliationFill",
     "Signal",
+    "StoreLockHolder",
     "SymbolOwnership",
     "VenueAccountState",
     "VenueOrderView",

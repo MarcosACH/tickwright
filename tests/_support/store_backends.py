@@ -72,6 +72,11 @@ class PostgresBackend:
                 )
             )
 
+    def terminate(self, pid: int) -> None:
+        """End the server session ``pid``, the way the operator would."""
+        with psycopg.connect(self._dsn, autocommit=True) as conn:
+            conn.execute("SELECT pg_terminate_backend(%s)", (pid,))
+
     def reset(self) -> None:
         """Create the schema (a store open runs the DDL) and truncate every table,
         so each test starts from a clean, isolated slate against the shared server.
