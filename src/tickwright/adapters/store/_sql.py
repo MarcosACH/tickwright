@@ -58,7 +58,9 @@ class SqlStore(ABC):
 
     Every member is decorated ``@durable`` here, so the seam's error contract
     (ADR-0019) holds for both backends by construction. ``close()`` is the one
-    deliberate exception, for the reason ``_durability`` states.
+    deliberate exception, for the reason ``_durability`` states. ``lock()`` is
+    the one member each adapter writes itself, also ``@durable``. The two
+    backends lock in ways that share no SQL (ADR-0052).
     """
 
     _driver_error: ClassVar[type[Exception]]
