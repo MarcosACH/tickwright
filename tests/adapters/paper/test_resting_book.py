@@ -45,7 +45,7 @@ def test_apply_fill_caps_to_the_working_remainder_and_reports_incomplete() -> No
     book = RestingBook()
     book.rest(_limit(qty="1"))
 
-    filled, complete = book.apply_fill("0xabc", Decimal("0.4"))
+    filled, complete, _ = book.apply_fill("0xabc", Decimal("0.4"))
 
     assert filled == Decimal("0.4")
     assert complete is False
@@ -57,7 +57,7 @@ def test_a_fill_offering_more_than_remains_is_capped_to_the_remainder() -> None:
     book.rest(_limit(qty="1"))
     book.apply_fill("0xabc", Decimal("0.8"))  # remainder now 0.2
 
-    filled, complete = book.apply_fill("0xabc", Decimal("0.5"))  # model offers 0.5
+    filled, complete, _ = book.apply_fill("0xabc", Decimal("0.5"))  # model offers 0.5
 
     assert filled == Decimal("0.2")  # only the remainder fills
     assert complete is True
@@ -67,7 +67,7 @@ def test_apply_fill_that_exhausts_the_remainder_completes_and_lifts_the_order() 
     book = RestingBook()
     book.rest(_limit(qty="1"))
 
-    filled, complete = book.apply_fill("0xabc", Decimal("1"))
+    filled, complete, _ = book.apply_fill("0xabc", Decimal("1"))
 
     assert filled == Decimal("1")
     assert complete is True
@@ -80,9 +80,9 @@ def test_partial_fills_converge_to_exactly_the_order_size() -> None:
 
     filled = [book.apply_fill("0xabc", Decimal("0.4")) for _ in range(3)]
 
-    assert [qty for qty, _ in filled] == [Decimal("0.4"), Decimal("0.4"), Decimal("0.2")]
-    assert [complete for _, complete in filled] == [False, False, True]
-    assert sum((qty for qty, _ in filled), Decimal(0)) == Decimal("1")
+    assert [qty for qty, _, _ in filled] == [Decimal("0.4"), Decimal("0.4"), Decimal("0.2")]
+    assert [complete for _, complete, _ in filled] == [False, False, True]
+    assert sum((qty for qty, _, _ in filled), Decimal(0)) == Decimal("1")
 
 
 def test_has_partial_is_false_until_a_fill_reduces_the_remainder() -> None:
@@ -125,7 +125,7 @@ def test_a_shrink_lowers_the_size_the_book_hands_out_and_never_raises_it() -> No
     book.shrink("0xabc", Decimal("2"))  # the position grew back: no effect
 
     assert [order.quantity for order in book.resting()] == [Decimal("1")]
-    assert book.apply_fill("0xabc", Decimal("5")) == (Decimal("1"), True)
+    assert book.apply_fill("0xabc", Decimal("5")) == (Decimal("1"), True, True)
 
 
 def test_a_shrink_does_not_make_an_untouched_order_look_partly_filled() -> None:
@@ -147,18 +147,43 @@ def test_a_shrink_caps_what_is_still_working_after_a_partial() -> None:
     book.shrink("0xabc", Decimal("1"))
 
     assert [order.quantity for order in book.resting()] == [Decimal("2")]
-    assert book.apply_fill("0xabc", Decimal("5")) == (Decimal("1"), True)
+    assert book.apply_fill("0xabc", Decimal("5")) == (Decimal("1"), True, True)
 
 
-def test_the_book_says_an_order_is_shrunk_only_once_it_works_below_the_asked_size() -> None:
-    # The venue reads this to end a shrunk order with CANCELLED once its working
-    # size has filled, so the saga is not left waiting for the cut part.
+def test_only_the_fill_that_completes_a_shrunk_order_says_it_ended_shrunk() -> None:
+    # The venue then ends the order with CANCELLED for its cut part, so the saga
+    # is not left waiting for it. The completing fill must say so, because that
+    # fill also lifts the order off the book.
     book = RestingBook()
     book.rest(_limit(qty="3"))
-    assert book.shrunk("0xabc") is False
-
-    book.shrink("0xabc", Decimal("3"))  # the whole order still fits the position
-    assert book.shrunk("0xabc") is False
-
     book.shrink("0xabc", Decimal("2"))
-    assert book.shrunk("0xabc") is True
+
+    assert book.apply_fill("0xabc", Decimal("1")) == (Decimal("1"), False, False)
+    assert book.apply_fill("0xabc", Decimal("1")) == (Decimal("1"), True, True)
+
+
+def test_an_order_that_still_fits_the_position_completes_unshrunk() -> None:
+    book = RestingBook()
+    book.rest(_limit(qty="3"))
+    book.shrink("0xabc", Decimal("3"))  # the whole order still fits the position
+
+    assert book.apply_fill("0xabc", Decimal("3")) == (Decimal("3"), True, False)
+
+
+def test_an_order_rested_at_a_working_size_is_handed_out_at_that_size() -> None:
+    book = RestingBook()
+
+    working = book.rest(_limit(qty="3"), working=Decimal("1"))
+
+    assert working.quantity == Decimal("1")
+    assert book.resting() == [working]
+    assert book.has_partial("0xabc") is False
+
+
+def test_rest_never_works_an_order_above_the_size_it_asked_for() -> None:
+    # Working more than the asked size would over-fill the order.
+    book = RestingBook()
+
+    working = book.rest(_limit(qty="3"), working=Decimal("5"))
+
+    assert working.quantity == Decimal("3")

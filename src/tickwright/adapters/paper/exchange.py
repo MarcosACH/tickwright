@@ -291,13 +291,11 @@ class PaperExchange:
         fill = await self._fill_model.limit_fill(order, tick)
         if fill is None:
             return False  # queue miss (ADR-0012): nothing fills this tick.
-        # Read before the fill: a completing fill lifts the order off the book.
-        shrunk = self._book.shrunk(order.cloid)
-        quantity, complete = self._book.apply_fill(order.cloid, fill.quantity)
+        quantity, complete, shrunk = self._book.apply_fill(order.cloid, fill.quantity)
         await self._bus.publish(
             self._fill_report(order, Fill(quantity=quantity, price=fill.price), maker=maker)
         )
-        if complete and shrunk:
+        if shrunk:
             await self._end_shrunk(order)
         await self._recheck_reduce_only(order.symbol)
         return complete
@@ -329,13 +327,6 @@ class PaperExchange:
         if not order.reduce_only:
             return order.quantity
         return min(order.quantity, abs(self._net(order.symbol)))
-
-    def _rest(self, order: PlaceOrder) -> PlaceOrder:
-        """Rest ``order`` on the book and return it at the size the venue works."""
-        working = self._working_size(order)
-        self._book.rest(order)
-        self._book.shrink(order.cloid, working)
-        return replace(order, quantity=working)
 
     async def _end_shrunk(self, order: PlaceOrder) -> None:
         """End a shrunk order once its working size has filled in full.
@@ -420,7 +411,7 @@ class PaperExchange:
             # remainder, then fill: a full fill lifts it right back off; the
             # model may only partial-fill, and the remainder is then handled
             # exactly like a resting order's — GTC keeps it, IOC cancels it.
-            working = self._rest(order)
+            working = self._book.rest(order, working=self._working_size(order))
             # Marketable on arrival: it crossed the moment it landed, so this
             # fill took liquidity exactly as a MARKET's does (ADR-0036). A
             # remainder that survives to a later tick is a *different* fill and
@@ -446,7 +437,7 @@ class PaperExchange:
 
         # Not marketable on arrival: rest on the book and report it working (LIVE).
         # A later tick that crosses it fills it (see ``on_tick``).
-        self._rest(order)
+        self._book.rest(order, working=self._working_size(order))
         await self._bus.publish(self._status_report(order, OrderState.LIVE))
 
     async def cancel(self, refs: Sequence[OrderRef]) -> None:
