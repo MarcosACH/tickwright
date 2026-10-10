@@ -1,4 +1,4 @@
-"""A strategy's reduce-only order on the paper venue (issue #461, ADR-0057).
+"""A strategy's reduce-only order on the paper venue (issues #461 and #462, ADR-0057).
 
 The engine is wired from a pure ``AppConfig`` with the public ``app``
 builders: ``ReplayFeed`` -> scripted strategy -> ``ExecutionManager`` ->
@@ -444,3 +444,18 @@ def test_a_resting_reduce_only_gtc_is_shrunk_to_the_long(tmp_path: Path) -> None
     assert [r.reason for r in life.reports if r.status is OrderState.CANCELLED] == [
         "reduce-only shrink"
     ]
+
+
+def test_two_quick_reduce_only_sells_cannot_both_close_the_same_long(tmp_path: Path) -> None:
+    # Long 1. Two reduce-only market sells of 1 go out on one tick, so the
+    # second reaches paper before the store applies the first fill. Paper
+    # counts its own unapplied fill, sees a flat net, and rejects the second.
+    # Without that, both fill and the account ends short 1 (ADR-0057).
+    life = _wire(tmp_path, {0: [buy("1")], 2: [reduce_only_sell("1"), reduce_only_sell("1")]})
+
+    _run(life, lambda: len(life.strategy.sent) == 3 and life.strategy.all_terminal())
+
+    assert life.strategy.states(1)[-1] is OrderState.FILLED
+    assert life.strategy.states(2)[-1] is OrderState.REJECTED
+    assert life.strategy.reason(2) == "reduce-only order would increase position"
+    assert _size(life) == Decimal("0")

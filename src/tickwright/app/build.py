@@ -129,6 +129,10 @@ def build_exchange(
                 # an hour, so there is nothing to buy by holding a copy and a
                 # drift to own if we did.
                 account_net=lambda: account_net_size(store.all_positions()),
+                # The fill ids the store has applied to one order. Paper counts
+                # its own fills on top of the net until they show up here
+                # (ADR-0057).
+                applied_fills=lambda cloid: _applied_fills(store, cloid),
                 # The resolved book, the same object the margin model receives
                 # below — paper validates its bounds in ``start()`` and writes
                 # nothing (ADR-0044 §9).
@@ -158,6 +162,15 @@ def build_exchange(
             )
         case unreachable:
             assert_never(unreachable)
+
+
+def _applied_fills(store: Store, cloid: str) -> frozenset[str]:
+    """The fill ids the store has applied to the order ``cloid``.
+
+    No row means no fill applied yet.
+    """
+    order = store.get_order(cloid)
+    return order.applied_event_ids if order is not None else frozenset()
 
 
 def resolve_leverage(config: AppConfig) -> LeverageBook:

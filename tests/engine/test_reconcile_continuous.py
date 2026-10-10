@@ -107,6 +107,7 @@ def _surviving_venue(clock: ManualClock) -> tuple[PaperExchange, InMemoryBus]:
         fill_model=ImmediateFillModel(),
         genesis_collateral=GENESIS,
         account_net=dict,
+        applied_fills=lambda cloid: (),
     )
     return exchange, dead_bus
 

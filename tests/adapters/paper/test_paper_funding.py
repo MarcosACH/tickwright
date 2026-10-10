@@ -84,6 +84,7 @@ def _venue(
         genesis_collateral=GENESIS,
         instrument_specs={"BTC": _spec(funding_rate)},
         account_net=account_net,
+        applied_fills=lambda cloid: (),
     )
 
 

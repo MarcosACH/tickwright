@@ -161,6 +161,7 @@ def _wiring(store: SQLiteStore, *, guard: PreTradeGuard | None = None) -> _Wirin
         fill_model=ImmediateFillModel(),
         genesis_collateral=GENESIS,
         account_net=dict,
+        applied_fills=lambda cloid: (),
     )
     checks = checkpointer(store, clock=clock)
     # Recovered before a signal can reach it, exactly as the runner starts it
@@ -1029,6 +1030,7 @@ def test_a_restart_rebuilt_cache_dedups_a_redelivered_place_signal() -> None:
         fill_model=ImmediateFillModel(),
         genesis_collateral=GENESIS,
         account_net=dict,
+        applied_fills=lambda cloid: (),
     )
     checkpointer2 = checkpointer(store, clock=clock2)
     checkpointer2.recover()
@@ -1167,6 +1169,7 @@ def _stochastic_harness(
         fill_model=fill_model,  # type: ignore[arg-type]
         genesis_collateral=GENESIS,
         account_net=dict,
+        applied_fills=lambda cloid: (),
     )
     manager = ExecutionManager(
         bus=bus, exchange=exchange, checkpointer=checkpointer(store, clock=clock)

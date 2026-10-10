@@ -296,6 +296,7 @@ def _drive_market_fill() -> None:
         fill_model=ImmediateFillModel(),
         genesis_collateral=GENESIS,
         account_net=dict,
+        applied_fills=lambda cloid: (),
     )
     _manager(bus, clock, exchange)
 
@@ -344,6 +345,7 @@ def _drive_position_changes(*, closing: bool) -> Callable[[], None]:
             fill_model=ImmediateFillModel(),
             genesis_collateral=GENESIS,
             account_net=dict,
+            applied_fills=lambda cloid: (),
         )
         _manager(bus, clock, exchange)
 
@@ -369,6 +371,7 @@ def _drive_position_changed() -> None:
         fill_model=ImmediateFillModel(),
         genesis_collateral=GENESIS,
         account_net=dict,
+        applied_fills=lambda cloid: (),
     )
     _manager(bus, clock, exchange)
 
@@ -670,6 +673,7 @@ def _drive_engine_faulted() -> None:
                 fill_model=ImmediateFillModel(),
                 genesis_collateral=GENESIS,
                 account_net=dict,
+                applied_fills=lambda cloid: (),
             ),
             feed=_PoisonedFeed(),
         )
@@ -703,6 +707,7 @@ def _drive_engine_stop_hook_failed() -> None:
                 fill_model=ImmediateFillModel(),
                 genesis_collateral=GENESIS,
                 account_net=dict,
+                applied_fills=lambda cloid: (),
             ),
             feed=_PoisonedFeed(),
         )
@@ -727,6 +732,7 @@ def _drive_engine_lifecycle() -> None:
                 fill_model=ImmediateFillModel(),
                 genesis_collateral=GENESIS,
                 account_net=dict,
+                applied_fills=lambda cloid: (),
             ),
             feed=_IdleFeed(),
         )

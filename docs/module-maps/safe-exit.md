@@ -318,7 +318,9 @@ say so.
 
 ### PaperExchange (`adapters/paper`, existing)
 
-**Interface:** Unchanged constructor. It already gets `account_net`.
+**Interface:** The constructor gains a required `applied_fills(cloid)`. It returns the fill ids
+the store has applied to that order. `app/build.py` reads them from `store.get_order`. Paper
+already gets `account_net`.
 
 **Responsibilities:**
 

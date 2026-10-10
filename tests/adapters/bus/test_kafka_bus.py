@@ -370,6 +370,7 @@ def _saga_pipeline(broker: FakeKafkaBroker) -> tuple[KafkaBus, SQLiteStore, list
         fill_model=ImmediateFillModel(),
         genesis_collateral=GENESIS,
         account_net=dict,
+        applied_fills=lambda cloid: (),
     )
     manager = ExecutionManager(
         bus=bus, exchange=exchange, checkpointer=checkpointer(store, clock=clock)

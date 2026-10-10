@@ -27,9 +27,13 @@ injected ``account_net``. So this venue **holds no position state at all**,
 which is ADR-0043 §4 verbatim rather than narrowed: after a crash it reports
 nothing, the ``Store`` remains the sole authority for the paper ledger, and
 ``fetch_account_state`` still has no account truth to answer with.
+
+The one thing it keeps is short-lived. A fill it published is not in the store
+until the bus delivers it, so the venue counts its own unapplied fills on top of
+the store net. It drops each one once the store shows it applied (ADR-0057).
 """
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import replace
 from decimal import Decimal
 
@@ -76,6 +80,7 @@ class PaperExchange:
         genesis_collateral: Decimal,
         account_label: str = DEFAULT_ACCOUNT_LABEL,
         account_net: Callable[[], Mapping[str, Decimal]],
+        applied_fills: Callable[[str], Collection[str]],
         instrument_specs: Mapping[str, InstrumentSpec] | None = None,
         leverage: LeverageBook = EMPTY_LEVERAGE_BOOK,
         funding_interval_ns: int = HOUR_NS,
@@ -91,6 +96,13 @@ class PaperExchange:
         # charge no funding, which is indistinguishable from a correct run right
         # up until it isn't.
         self._account_net = account_net
+        # The fill ids the store has applied to one order. Required for the
+        # same reason as ``account_net``: a default would let two quick
+        # reduce-only orders both fill past the position (ADR-0057).
+        self._applied_fills = applied_fills
+        # Fills this venue published that the store has not applied yet, each
+        # with the side of its order.
+        self._unapplied: list[tuple[FillReport, Side]] = []
         self._funding_interval_ns = funding_interval_ns
         # The account's opening cash is the operator's declaration, never the
         # venue's: the paper exchange has nobody to ask, and the engine supplies
@@ -313,7 +325,7 @@ class PaperExchange:
         """
         if not order.reduce_only:
             return order.quantity
-        return min(order.quantity, abs(self._account_net().get(order.symbol, Decimal("0"))))
+        return min(order.quantity, abs(self._net(order.symbol)))
 
     def _rest(self, order: PlaceOrder) -> PlaceOrder:
         """Rest ``order`` on the book and return it at the size the venue works."""
@@ -346,7 +358,7 @@ class PaperExchange:
             spec,
             side=order.side,
             reduce_only=order.reduce_only,
-            account_net=self._account_net().get(order.symbol, Decimal("0")),
+            account_net=self._net(order.symbol),
         ):
             # Only the venue knows a MARKET's fill price, so it is the one that
             # can judge min-notional (ADR-0017): a too-small order is REJECTED
@@ -424,8 +436,30 @@ class PaperExchange:
 
     def _reduces(self, order: PlaceOrder) -> bool:
         """Whether the account net lies on the other side of ``order``."""
-        net = self._account_net().get(order.symbol, Decimal("0"))
+        net = self._net(order.symbol)
         return net > 0 if order.side is Side.SELL else net < 0
+
+    def _net(self, symbol: str) -> Decimal:
+        """The account net in ``symbol``: the store net plus this venue's own
+        fills the store has not applied yet (ADR-0057).
+
+        Paper publishes a fill from inside a bus handler, and the store applies
+        it only after that handler returns. Without the unapplied fills, two
+        quick reduce-only orders could both close the same position. Both reads
+        run with no await between them, so no store write lands in between. The
+        order row and the position move in one transaction (ADR-0043 §4), so no
+        fill is counted twice.
+        """
+        self._unapplied = [
+            (fill, side)
+            for fill, side in self._unapplied
+            if fill.event_id not in self._applied_fills(fill.cloid)
+        ]
+        net = self._account_net().get(symbol, Decimal("0"))
+        for fill, side in self._unapplied:
+            if fill.symbol == symbol:
+                net += fill.quantity if side is Side.BUY else -fill.quantity
+        return net
 
     def _crosses(self, order: PlaceOrder, tick: MarketTick) -> bool:
         """Whether a trade at ``tick.price`` matches ``order``'s LIMIT price.
@@ -538,6 +572,7 @@ class PaperExchange:
             fee=self._fee(order.symbol, fill, maker=maker),
         )
         self._fills.setdefault(order.cloid, []).append(report)
+        self._unapplied.append((report, order.side))
         return report
 
     def _fee(self, symbol: str, fill: Fill, *, maker: bool) -> Decimal:
