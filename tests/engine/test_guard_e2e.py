@@ -157,6 +157,9 @@ def _engine(
         # Wired as the composition root wires it, so paper judges a reduce-only
         # order against the same net the guard reads.
         account_net=lambda: account_net_size(store.all_positions()),
+        applied_fills=lambda cloid: (
+            order.applied_event_ids if (order := store.get_order(cloid)) else ()
+        ),
     )
     checks = checkpointer(store, clock=clock)
     # The runner's boot step: the ledger first, then the order cache. Rebuilding
@@ -245,6 +248,7 @@ def test_market_below_min_notional_is_rejected_by_the_venue_via_sourced_specs() 
         genesis_collateral=GENESIS,
         instrument_specs={"BTC": _SPEC},
         account_net=dict,
+        applied_fills=lambda cloid: (),
     )
     checks = checkpointer(store, clock=clock)
     guard = RealGuard(specs=exchange.instrument_specs(), store=store, clock=clock)

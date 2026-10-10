@@ -194,6 +194,9 @@ async def _run(
         # under test across two lives is precisely that the venue's notional
         # basis is the ledger's and not a tally of its own.
         account_net=lambda: account_net_size(store.all_positions()),
+        applied_fills=lambda cloid: (
+            order.applied_event_ids if (order := store.get_order(cloid)) else ()
+        ),
     )
     feed = ReplayFeed(path=ticks, bus=bus, clock=clock)
     engine = Engine(bus=bus, clock=clock, store=store, exchange=exchange, feed=feed)

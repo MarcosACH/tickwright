@@ -2524,6 +2524,7 @@ def test_a_paper_run_checks_no_leverage_because_it_has_no_venue_to_check() -> No
         fill_model=ImmediateFillModel(),
         genesis_collateral=Decimal("100000"),
         account_net=dict,
+        applied_fills=lambda cloid: (),
     )
     cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
 

@@ -1,4 +1,4 @@
-"""A strategy's reduce-only order on the paper venue (issue #461, ADR-0057).
+"""A strategy's reduce-only order on the paper venue (issues #461 and #462, ADR-0057).
 
 The engine is wired from a pure ``AppConfig`` with the public ``app``
 builders: ``ReplayFeed`` -> scripted strategy -> ``ExecutionManager`` ->
@@ -444,3 +444,105 @@ def test_a_resting_reduce_only_gtc_is_shrunk_to_the_long(tmp_path: Path) -> None
     assert [r.reason for r in life.reports if r.status is OrderState.CANCELLED] == [
         "reduce-only shrink"
     ]
+
+
+def test_two_quick_reduce_only_sells_cannot_both_close_the_same_long(tmp_path: Path) -> None:
+    # Long 1. Two reduce-only market sells of 1 go out on one tick, so the
+    # second reaches paper before the store applies the first fill. Paper
+    # counts its own unapplied fill, sees a flat net, and rejects the second.
+    # Without that, both fill and the account ends short 1 (ADR-0057).
+    life = _wire(tmp_path, {0: [buy("1")], 2: [reduce_only_sell("1"), reduce_only_sell("1")]})
+
+    _run(life, lambda: len(life.strategy.sent) == 3 and life.strategy.all_terminal())
+
+    assert life.strategy.states(1)[-1] is OrderState.FILLED
+    assert life.strategy.states(2)[-1] is OrderState.REJECTED
+    assert life.strategy.reason(2) == "reduce-only order would increase position"
+    assert _size(life) == Decimal("0")
+
+
+def test_a_later_reduce_only_order_sees_only_the_store_net(tmp_path: Path) -> None:
+    # Long 3, then a reduce-only sell of 1 leaves 2. By 4s the store has
+    # applied every fill, so paper must count none of its own on top. A sell
+    # of 5 then shrinks to 2 and the account ends flat. If paper still counted
+    # the applied fills, it would see a net of 4 and end short 2.
+    life = _wire(
+        tmp_path,
+        {0: [buy("3")], 2: [reduce_only_sell("1")], 4: [reduce_only_sell("5")]},
+    )
+
+    _run(life, lambda: len(life.strategy.sent) == 3 and life.strategy.all_terminal())
+
+    assert life.strategy.filled(2) == Decimal("2")
+    assert life.strategy.states(2)[-1] is OrderState.CANCELLED
+    assert [r.reason for r in life.reports if r.status is OrderState.CANCELLED] == [
+        "reduce-only shrink"
+    ]
+    assert _size(life) == Decimal("0")
+
+
+def test_a_resting_reduce_only_order_is_cancelled_once_another_closes_the_long(
+    tmp_path: Path,
+) -> None:
+    # Long 1. Two GTC reduce-only sells of 1 at 51000 rest, each covered by the
+    # long. The 51000 trade at 4s crosses both. The first fill closes the long,
+    # so paper cancels the second instead of filling it. Without that, the
+    # account ends short 1 (ADR-0057).
+    sell = Send(
+        Side.SELL,
+        Decimal("1"),
+        reduce_only=True,
+        order_type=OrderType.LIMIT,
+        time_in_force=TimeInForce.GTC,
+        price=Decimal("51000"),
+    )
+    life = _wire(
+        tmp_path,
+        {0: [buy("1")], 2: [sell, sell], 4: []},
+        prices={4: Decimal("51000")},
+    )
+
+    _run(life, lambda: len(life.strategy.sent) == 3 and life.strategy.all_terminal())
+
+    assert life.strategy.states(1)[-1] is OrderState.FILLED
+    assert life.strategy.states(2)[-2:] == [OrderState.LIVE, OrderState.CANCELLED]
+    assert life.strategy.filled(2) == Decimal("0")
+    assert [r.reason for r in life.reports if r.status is OrderState.CANCELLED] == [
+        "reduce-only cancelled"
+    ]
+    assert _size(life) == Decimal("0")
+
+
+def test_a_resting_reduce_only_order_shrinks_when_another_fill_cuts_the_long(
+    tmp_path: Path,
+) -> None:
+    # Long 3. A GTC reduce-only sell of 3 at 51000 rests at its full size. A
+    # plain market sell of 2 at 3s leaves a long of 1, so paper shrinks the
+    # resting sell to 1. The 51000 trade at 4s fills that 1, and the cut 2 end
+    # CANCELLED. Without the shrink, the account ends short 2 (ADR-0057).
+    resting = Send(
+        Side.SELL,
+        Decimal("3"),
+        reduce_only=True,
+        order_type=OrderType.LIMIT,
+        time_in_force=TimeInForce.GTC,
+        price=Decimal("51000"),
+    )
+    life = _wire(
+        tmp_path,
+        {0: [buy("3")], 2: [resting], 3: [Send(Side.SELL, Decimal("2"))], 4: []},
+        prices={4: Decimal("51000")},
+    )
+
+    _run(life, lambda: len(life.strategy.sent) == 3 and life.strategy.all_terminal())
+
+    assert life.strategy.states(1)[-3:] == [
+        OrderState.LIVE,
+        OrderState.PARTIALLY_FILLED,
+        OrderState.CANCELLED,
+    ]
+    assert life.strategy.filled(1) == Decimal("1")
+    assert [r.reason for r in life.reports if r.status is OrderState.CANCELLED] == [
+        "reduce-only shrink"
+    ]
+    assert _size(life) == Decimal("0")

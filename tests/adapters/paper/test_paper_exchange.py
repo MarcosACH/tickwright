@@ -105,6 +105,7 @@ def _harness() -> tuple[PaperExchange, InMemoryBus, ManualClock, list[FillReport
         fill_model=ImmediateFillModel(),
         genesis_collateral=GENESIS,
         account_net=dict,
+        applied_fills=lambda cloid: (),
     )
     reports: list[FillReport] = []
     bus.subscribe(FillReport, lambda r: _record(reports, r))
@@ -126,6 +127,7 @@ def test_the_paper_venue_consumes_ticks_off_its_bus_with_no_external_wiring() ->
         fill_model=ImmediateFillModel(),
         genesis_collateral=GENESIS,
         account_net=dict,
+        applied_fills=lambda cloid: (),
     )
     fills: list[FillReport] = []
     bus.subscribe(FillReport, lambda r: _record(fills, r))
@@ -188,6 +190,7 @@ def _specced_harness(
         genesis_collateral=GENESIS,
         instrument_specs={spec.symbol: spec},
         account_net=dict,
+        applied_fills=lambda cloid: (),
     )
     fills: list[FillReport] = []
     statuses: list[OrderStatusReport] = []
@@ -339,6 +342,7 @@ def test_one_order_filling_on_arrival_and_again_off_the_book_pays_both_rates() -
         genesis_collateral=GENESIS,
         instrument_specs={"BTC": _FEE_SPEC},
         account_net=dict,
+        applied_fills=lambda cloid: (),
     )
     fills: list[FillReport] = []
     bus.subscribe(FillReport, lambda r: _record(fills, r))
@@ -430,6 +434,7 @@ def test_configured_rates_change_no_fill_the_matching_path_produces() -> None:
             genesis_collateral=GENESIS,
             instrument_specs={"BTC": spec},
             account_net=dict,
+            applied_fills=lambda cloid: (),
         )
         fills: list[FillReport] = []
         bus.subscribe(FillReport, lambda r: _record(fills, r))
@@ -844,6 +849,7 @@ def test_the_paper_venue_declares_a_two_segment_account_id_and_its_genesis() -> 
         genesis_collateral=Decimal("250000"),
         account_label="momentum_v2",
         account_net=dict,
+        applied_fills=lambda cloid: (),
     )
 
     spec = exchange.account_spec()
@@ -866,6 +872,7 @@ def test_the_paper_account_label_defaults_to_the_same_label_the_config_does() ->
         fill_model=ImmediateFillModel(),
         genesis_collateral=GENESIS,
         account_net=dict,
+        applied_fills=lambda cloid: (),
     )
 
     assert exchange.account_spec().account_id == "paper-default"
@@ -1066,6 +1073,7 @@ def test_a_leverage_above_the_instruments_cap_refuses_to_start_on_paper() -> Non
         fill_model=ImmediateFillModel(),
         genesis_collateral=GENESIS,
         account_net=dict,
+        applied_fills=lambda cloid: (),
         instrument_specs={
             "BTC": replace(_BTC_SPEC, max_leverage=40),
             "ETH": replace(_BTC_SPEC, symbol="ETH", max_leverage=25),
@@ -1107,6 +1115,7 @@ def test_a_traded_symbol_with_no_configured_spec_refuses_to_start_on_paper() -> 
         fill_model=ImmediateFillModel(),
         genesis_collateral=GENESIS,
         account_net=dict,
+        applied_fills=lambda cloid: (),
         leverage=LeverageBook.resolve({}, traded=["BTC"]),
     )
 
@@ -1150,6 +1159,7 @@ def test_the_paper_venue_writes_nothing_to_a_venue_at_boot(
         fill_model=ImmediateFillModel(),
         genesis_collateral=GENESIS,
         account_net=dict,
+        applied_fills=lambda cloid: (),
         instrument_specs={"BTC": replace(_BTC_SPEC, max_leverage=50)},
         leverage=LeverageBook(entries={"BTC": LeverageSpec(mode="cross", leverage=50)}),
     )
@@ -1157,3 +1167,41 @@ def test_the_paper_venue_writes_nothing_to_a_venue_at_boot(
     asyncio.run(exchange.start())
 
     assert exchange.account_spec().account_id == "paper-default"
+
+
+def test_the_next_tick_drops_a_fill_the_store_has_applied() -> None:
+    """Paper counts its own fills until the store applies them (ADR-0057). A
+    plain order never reads the net, so without a drain on the tick the list
+    would grow with every fill of a run. Watched through the injected store
+    read: the fill is asked about once on the next tick, then never again."""
+    bus = InMemoryBus()
+    clock = ManualClock()
+    applied: set[str] = set()
+    asked: list[str] = []
+
+    def applied_fills(cloid: str) -> set[str]:
+        asked.append(cloid)
+        return applied
+
+    exchange = PaperExchange(
+        bus=bus,
+        clock=clock,
+        fill_model=ImmediateFillModel(),
+        genesis_collateral=GENESIS,
+        account_net=dict,
+        applied_fills=applied_fills,
+    )
+    fills: list[FillReport] = []
+    bus.subscribe(FillReport, lambda r: _record(fills, r))
+
+    async def scenario() -> None:
+        await bus.publish(_tick("42000", ts=1_000))
+        await exchange.place(_market_order())
+        applied.add(fills[0].event_id)  # the store applies the fill
+        asked.clear()
+        await bus.publish(_tick("42000", ts=2_000))
+        await bus.publish(_tick("42000", ts=3_000))
+
+    asyncio.run(scenario())
+
+    assert asked == ["0xabc"]

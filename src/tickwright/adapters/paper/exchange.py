@@ -27,9 +27,13 @@ injected ``account_net``. So this venue **holds no position state at all**,
 which is ADR-0043 §4 verbatim rather than narrowed: after a crash it reports
 nothing, the ``Store`` remains the sole authority for the paper ledger, and
 ``fetch_account_state`` still has no account truth to answer with.
+
+The one thing it keeps is short-lived. A fill it published is not in the store
+until the bus delivers it, so the venue counts its own unapplied fills on top of
+the store net. It drops each one once the store shows it applied (ADR-0057).
 """
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import replace
 from decimal import Decimal
 
@@ -62,6 +66,7 @@ from .book import RestingBook
 from .config import DEFAULT_ACCOUNT_LABEL
 from .fill_model import Fill, FillModel
 from .funding import HOUR_NS, FundingBasis, run_funding
+from .unapplied import UnappliedFills
 
 
 class PaperExchange:
@@ -76,6 +81,7 @@ class PaperExchange:
         genesis_collateral: Decimal,
         account_label: str = DEFAULT_ACCOUNT_LABEL,
         account_net: Callable[[], Mapping[str, Decimal]],
+        applied_fills: Callable[[str], Collection[str]],
         instrument_specs: Mapping[str, InstrumentSpec] | None = None,
         leverage: LeverageBook = EMPTY_LEVERAGE_BOOK,
         funding_interval_ns: int = HOUR_NS,
@@ -91,6 +97,10 @@ class PaperExchange:
         # charge no funding, which is indistinguishable from a correct run right
         # up until it isn't.
         self._account_net = account_net
+        # ``applied_fills`` is required for the same reason as ``account_net``:
+        # a default would let two quick reduce-only orders both fill past the
+        # position (ADR-0057).
+        self._unapplied = UnappliedFills(applied=applied_fills)
         self._funding_interval_ns = funding_interval_ns
         # The account's opening cash is the operator's declaration, never the
         # venue's: the paper exchange has nobody to ask, and the engine supplies
@@ -126,10 +136,6 @@ class PaperExchange:
         # a real venue remembers the orders it saw; so does the paper one.
         self._statuses: dict[str, OrderStatusReport] = {}
         self._fills: dict[str, list[FillReport]] = {}
-        # Reduce-only orders shrunk to the net at placement. The saga still
-        # asks for the full size, so once the shrunk size fills, the venue must
-        # cancel the cut part or the saga never ends (ADR-0057).
-        self._shrunk: set[str] = set()
         # Filling off the tick stream *is* what a paper venue is (ADR-0012), so
         # it wires its own tick subscription here rather than leaving a line for
         # the composition root and every test to repeat (and be able to forget).
@@ -248,12 +254,20 @@ class PaperExchange:
     async def on_tick(self, tick: MarketTick) -> None:
         # Cache the latest price per symbol; MARKET fills read it (ADR-0027).
         self._latest_tick[tick.symbol] = tick
+        # A plain order never reads the net, so nothing else drains the fills
+        # the store has applied since the last tick (ADR-0057).
+        self._unapplied.drain()
         await self._match_book(tick)
 
     async def _match_book(self, tick: MarketTick) -> None:
         # Re-check resting LIMITs for this symbol: any the tick now crosses fills.
         # The book lifts a fully-filled order off itself, so a partial just stays.
-        for order in self._book.resting():
+        for snapshot in self._book.resting():
+            # An earlier fill on this tick can cancel or shrink this order, so
+            # read it again. The fill model must see the size it works now.
+            order = self._book.working(snapshot.cloid)
+            if order is None:
+                continue
             if order.symbol == tick.symbol and self._crosses(order, tick):
                 # Off the book on a later tick: this order was the resting side,
                 # so it *made* liquidity (ADR-0036). ``post_only`` reaches a fill
@@ -281,12 +295,13 @@ class PaperExchange:
         fill = await self._fill_model.limit_fill(order, tick)
         if fill is None:
             return False  # queue miss (ADR-0012): nothing fills this tick.
-        quantity, complete = self._book.apply_fill(order.cloid, fill.quantity)
+        quantity, complete, shrunk = self._book.apply_fill(order.cloid, fill.quantity)
         await self._bus.publish(
             self._fill_report(order, Fill(quantity=quantity, price=fill.price), maker=maker)
         )
-        if complete:
-            await self._filled(order)
+        if shrunk:
+            await self._end_shrunk(order)
+        await self._recheck_reduce_only(order.symbol)
         return complete
 
     async def place(self, order: PlaceOrder) -> None:
@@ -302,30 +317,38 @@ class PaperExchange:
                 )
             )
             return
-        if order.reduce_only:
-            net = abs(self._account_net().get(order.symbol, Decimal("0")))
-            if order.quantity > net:
-                # Larger than the net: the venue works only the net's size.
-                order = replace(order, quantity=net)
-                self._shrunk.add(order.cloid)
         if order.order_type is OrderType.MARKET:
             await self._place_market(order)
         else:
             await self._place_limit(order)
 
-    async def _filled(self, order: PlaceOrder) -> None:
-        """End a shrunk order once its working size has filled in full."""
-        if order.cloid in self._shrunk:
-            self._shrunk.discard(order.cloid)
-            await self._bus.publish(
-                self._status_report(order, OrderState.CANCELLED, reason="reduce-only shrink")
-            )
+    def _working_size(self, order: PlaceOrder) -> Decimal:
+        """The size the venue works ``order`` at.
+
+        A reduce-only order larger than the net works only the net's size
+        (ADR-0057). Any other order works the size it asked for.
+        """
+        if not order.reduce_only:
+            return order.quantity
+        return min(order.quantity, abs(self._net(order.symbol)))
+
+    async def _end_shrunk(self, order: PlaceOrder) -> None:
+        """End a shrunk order once its working size has filled in full.
+
+        The saga still asks for the full size, so the venue cancels the cut
+        part, or the saga never ends (ADR-0057).
+        """
+        await self._bus.publish(
+            self._status_report(order, OrderState.CANCELLED, reason="reduce-only shrink")
+        )
 
     async def _place_market(self, order: PlaceOrder) -> None:
         tick = self._latest_tick.get(order.symbol)
         if tick is None:
             raise ValueError(f"no market tick cached for {order.symbol!r}; cannot fill MARKET")
 
+        asked = order.quantity
+        order = replace(order, quantity=self._working_size(order))
         spec = self._specs.get(order.symbol)
         if spec is not None and min_notional_refuses(
             tick.price,
@@ -333,7 +356,7 @@ class PaperExchange:
             spec,
             side=order.side,
             reduce_only=order.reduce_only,
-            account_net=self._account_net().get(order.symbol, Decimal("0")),
+            account_net=self._net(order.symbol),
         ):
             # Only the venue knows a MARKET's fill price, so it is the one that
             # can judge min-notional (ADR-0017): a too-small order is REJECTED
@@ -347,7 +370,31 @@ class PaperExchange:
         # A MARKET fills on arrival against the price the venue already holds: it
         # takes liquidity by definition, so there is no maker branch (ADR-0036).
         await self._bus.publish(self._fill_report(order, fill, maker=False))
-        await self._filled(order)
+        if order.quantity < asked:
+            # A MARKET always fills in full, in both fill models. So a shrunk
+            # one ends right here, and the book never has to hold it.
+            await self._end_shrunk(order)
+        await self._recheck_reduce_only(order.symbol)
+
+    async def _recheck_reduce_only(self, symbol: str) -> None:
+        """Fit each resting reduce-only order in ``symbol`` to the net a fill
+        left behind.
+
+        An order with nothing left to reduce is cancelled. One larger than the
+        net shrinks to it. Only paper's own fills move the net, so right after
+        one is the only moment to check. The venue cancels in the closing
+        fill's message too (ADR-0057).
+        """
+        for order in self._book.resting():
+            if order.symbol != symbol or not order.reduce_only:
+                continue
+            if not self._reduces(order):
+                self._book.remove(order.cloid)
+                await self._bus.publish(
+                    self._status_report(order, OrderState.CANCELLED, reason="reduce-only cancelled")
+                )
+            else:
+                self._book.shrink(order.cloid, abs(self._net(symbol)))
 
     async def _place_limit(self, order: PlaceOrder) -> None:
         tick = self._latest_tick.get(order.symbol)
@@ -368,17 +415,16 @@ class PaperExchange:
             # remainder, then fill: a full fill lifts it right back off; the
             # model may only partial-fill, and the remainder is then handled
             # exactly like a resting order's — GTC keeps it, IOC cancels it.
-            self._book.rest(order)
+            working = self._book.rest(order, working=self._working_size(order))
             # Marketable on arrival: it crossed the moment it landed, so this
             # fill took liquidity exactly as a MARKET's does (ADR-0036). A
             # remainder that survives to a later tick is a *different* fill and
             # comes back down ``_match_book`` as a maker.
-            if await self._fill_crossing_limit(order, tick, maker=False):
+            if await self._fill_crossing_limit(working, tick, maker=False):
                 return  # fully filled on arrival: the book already lifted it off.
             if order.time_in_force is TimeInForce.IOC:
                 # IOC never rests: drop whatever remainder didn't fill now.
                 self._book.remove(order.cloid)
-                self._shrunk.discard(order.cloid)
                 await self._bus.publish(self._status_report(order, OrderState.CANCELLED))
                 return
             # GTC keeps the remainder resting for a later crossing tick. Announce
@@ -395,7 +441,7 @@ class PaperExchange:
 
         # Not marketable on arrival: rest on the book and report it working (LIVE).
         # A later tick that crosses it fills it (see ``on_tick``).
-        self._book.rest(order)
+        self._book.rest(order, working=self._working_size(order))
         await self._bus.publish(self._status_report(order, OrderState.LIVE))
 
     async def cancel(self, refs: Sequence[OrderRef]) -> None:
@@ -405,13 +451,23 @@ class PaperExchange:
                 # Nothing resting under this cloid: already filled/cancelled or never
                 # placed. A benign no-op — the venue has nothing to report (ADR-0026).
                 continue
-            self._shrunk.discard(ref.cloid)
             await self._bus.publish(self._status_report(order, OrderState.CANCELLED))
 
     def _reduces(self, order: PlaceOrder) -> bool:
         """Whether the account net lies on the other side of ``order``."""
-        net = self._account_net().get(order.symbol, Decimal("0"))
+        net = self._net(order.symbol)
         return net > 0 if order.side is Side.SELL else net < 0
+
+    def _net(self, symbol: str) -> Decimal:
+        """The account net in ``symbol``: the store net plus this venue's own
+        fills the store has not applied yet (ADR-0057).
+
+        Both reads run with no await between them, so no store write lands in
+        between. The order row and the position move in one transaction
+        (ADR-0043 §4), so no fill is counted twice.
+        """
+        unapplied = self._unapplied.signed_size(symbol)
+        return self._account_net().get(symbol, Decimal("0")) + unapplied
 
     def _crosses(self, order: PlaceOrder, tick: MarketTick) -> bool:
         """Whether a trade at ``tick.price`` matches ``order``'s LIMIT price.
@@ -524,6 +580,7 @@ class PaperExchange:
             fee=self._fee(order.symbol, fill, maker=maker),
         )
         self._fills.setdefault(order.cloid, []).append(report)
+        self._unapplied.record(report, order.side)
         return report
 
     def _fee(self, symbol: str, fill: Fill, *, maker: bool) -> Decimal:

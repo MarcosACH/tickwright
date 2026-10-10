@@ -318,14 +318,17 @@ say so.
 
 ### PaperExchange (`adapters/paper`, existing)
 
-**Interface:** Unchanged constructor. It already gets `account_net`.
+**Interface:** The constructor gains a required `applied_fills(cloid)`. It returns the fill ids
+the store has applied to that order. `app/build.py` reads them from `store.get_order`. Paper
+already gets `account_net`.
 
 **Responsibilities:**
 
 - The ADR-0057 table at placement: accept, shrink to the net, or reject. A shrunk order ends with
   `CANCELLED` for the cut part.
 - After every fill, shrink or cancel its resting reduce-only orders in that symbol.
-- Count its own fills the store has not applied yet.
+- Count its own fills the store has not applied yet. Drop each one at the next tick or net read
+  after the store applies it, so the list stays empty when the engine is idle.
 - Skip the min notional for a reduce-only order that covers the whole net.
 - `fetch_open_orders()` reads its own resting book.
 - `fetch_positions()` answers the store net plus the unapplied fills. That is the number the

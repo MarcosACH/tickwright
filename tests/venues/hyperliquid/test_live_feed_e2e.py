@@ -40,6 +40,7 @@ def test_mocked_frames_reach_a_paper_fill_through_the_whole_pipeline() -> None:
             fill_model=ImmediateFillModel(),
             genesis_collateral=GENESIS,
             account_net=dict,
+            applied_fills=lambda cloid: (),
         )
         checks = checkpointer(SQLiteStore(":memory:"), clock=clock)
         manager = ExecutionManager(bus=bus, exchange=exchange, checkpointer=checks)
