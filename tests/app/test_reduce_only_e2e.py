@@ -511,3 +511,38 @@ def test_a_resting_reduce_only_order_is_cancelled_once_another_closes_the_long(
         "reduce-only cancelled"
     ]
     assert _size(life) == Decimal("0")
+
+
+def test_a_resting_reduce_only_order_shrinks_when_another_fill_cuts_the_long(
+    tmp_path: Path,
+) -> None:
+    # Long 3. A GTC reduce-only sell of 3 at 51000 rests at its full size. A
+    # plain market sell of 2 at 3s leaves a long of 1, so paper shrinks the
+    # resting sell to 1. The 51000 trade at 4s fills that 1, and the cut 2 end
+    # CANCELLED. Without the shrink, the account ends short 2 (ADR-0057).
+    resting = Send(
+        Side.SELL,
+        Decimal("3"),
+        reduce_only=True,
+        order_type=OrderType.LIMIT,
+        time_in_force=TimeInForce.GTC,
+        price=Decimal("51000"),
+    )
+    life = _wire(
+        tmp_path,
+        {0: [buy("3")], 2: [resting], 3: [Send(Side.SELL, Decimal("2"))], 4: []},
+        prices={4: Decimal("51000")},
+    )
+
+    _run(life, lambda: len(life.strategy.sent) == 3 and life.strategy.all_terminal())
+
+    assert life.strategy.states(1)[-3:] == [
+        OrderState.LIVE,
+        OrderState.PARTIALLY_FILLED,
+        OrderState.CANCELLED,
+    ]
+    assert life.strategy.filled(1) == Decimal("1")
+    assert [r.reason for r in life.reports if r.status is OrderState.CANCELLED] == [
+        "reduce-only shrink"
+    ]
+    assert _size(life) == Decimal("0")

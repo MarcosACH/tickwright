@@ -382,19 +382,24 @@ class PaperExchange:
         await self._recheck_reduce_only(order.symbol)
 
     async def _recheck_reduce_only(self, symbol: str) -> None:
-        """Cancel each resting reduce-only order in ``symbol`` that a fill left
-        with nothing to reduce.
+        """Fit each resting reduce-only order in ``symbol`` to the net a fill
+        left behind.
 
-        Only paper's own fills move the net, so right after one is the only
-        moment to check. The venue does the same in the closing fill's message
-        (ADR-0057).
+        An order with nothing left to reduce is cancelled. One larger than the
+        net shrinks to it. Only paper's own fills move the net, so right after
+        one is the only moment to check. The venue cancels in the closing
+        fill's message too (ADR-0057).
         """
         for order in self._book.resting():
-            if order.symbol == symbol and order.reduce_only and not self._reduces(order):
+            if order.symbol != symbol or not order.reduce_only:
+                continue
+            if not self._reduces(order):
                 self._book.remove(order.cloid)
                 await self._bus.publish(
                     self._status_report(order, OrderState.CANCELLED, reason="reduce-only cancelled")
                 )
+            else:
+                self._book.shrink(order.cloid, abs(self._net(symbol)))
 
     async def _place_limit(self, order: PlaceOrder) -> None:
         tick = self._latest_tick.get(order.symbol)
