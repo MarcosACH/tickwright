@@ -163,18 +163,19 @@ class SQLiteStore(SqlStore):
         # and closing any handle to it drops all of them (ADR-0052). ``flock``
         # also ends when the process dies, so a crash leaves nothing stuck.
         path = f"{database}.lock"
-        file = open(path, "a+")  # stays open for as long as the lock is held
-        try:
-            fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            file.seek(0)
-            written = file.read().strip()
-            file.close()
-            return _holder_of(path, written)
-        file.truncate(0)
-        file.write(str(os.getpid()))
-        file.flush()
-        self._lock_file.enter_context(file)
+        # Any way out of this block but success closes the file. On success the
+        # store takes it over, and it stays open for as long as the lock is held.
+        with ExitStack() as opened:
+            file = opened.enter_context(open(path, "a+"))
+            try:
+                fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                file.seek(0)
+                return _holder_of(path, file.read().strip())
+            file.truncate(0)
+            file.write(str(os.getpid()))
+            file.flush()
+            self._lock_file.enter_context(opened.pop_all())
         # A second ``flock`` from this store would open a new file and refuse
         # itself. Postgres advisory locks let the same session in again.
         self._holds_lock = True

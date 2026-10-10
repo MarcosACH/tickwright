@@ -7,9 +7,15 @@ has: the ``:memory:`` default, the zero-setup in-process store the hermetic
 paper + in-memory-bus path recovers from with nothing installed.
 """
 
+import errno
+import fcntl
+import gc
 import os
+import warnings
 from decimal import Decimal
 from pathlib import Path
+
+import pytest
 
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import Order, OrderState, OrderSubmitted, OrderType, Side
@@ -69,3 +75,28 @@ def test_an_in_memory_store_always_gets_the_lock() -> None:
     """No other process can open a ``:memory:`` database, so nothing can contend."""
     with SQLiteStore() as store:
         assert store.lock() is None
+
+
+def test_a_failed_flock_leaves_no_lock_file_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Some filesystems refuse ``flock`` outright, for example with ``ENOLCK`` on
+    NFS. The engine faults on that error, and the file it opened must not stay
+    open behind it. The OS call is the process boundary, so it is the one faked."""
+
+    def refuse(file: object, operation: int) -> None:
+        raise OSError(errno.ENOLCK, "No locks available")
+
+    monkeypatch.setattr(fcntl, "flock", refuse)
+    with SQLiteStore(tmp_path / "tickwright.db") as store:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", ResourceWarning)
+            try:
+                store.lock()
+            except OSError as exc:
+                assert exc.errno == errno.ENOLCK
+            else:
+                raise AssertionError("lock() must not succeed when flock fails")
+            gc.collect()
+
+    assert not [w for w in caught if issubclass(w.category, ResourceWarning)]
