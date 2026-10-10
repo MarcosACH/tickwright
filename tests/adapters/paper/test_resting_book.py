@@ -148,3 +148,17 @@ def test_a_shrink_caps_what_is_still_working_after_a_partial() -> None:
 
     assert [order.quantity for order in book.resting()] == [Decimal("2")]
     assert book.apply_fill("0xabc", Decimal("5")) == (Decimal("1"), True)
+
+
+def test_the_book_says_an_order_is_shrunk_only_once_it_works_below_the_asked_size() -> None:
+    # The venue reads this to end a shrunk order with CANCELLED once its working
+    # size has filled, so the saga is not left waiting for the cut part.
+    book = RestingBook()
+    book.rest(_limit(qty="3"))
+    assert book.shrunk("0xabc") is False
+
+    book.shrink("0xabc", Decimal("3"))  # the whole order still fits the position
+    assert book.shrunk("0xabc") is False
+
+    book.shrink("0xabc", Decimal("2"))
+    assert book.shrunk("0xabc") is True

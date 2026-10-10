@@ -126,10 +126,6 @@ class PaperExchange:
         # a real venue remembers the orders it saw; so does the paper one.
         self._statuses: dict[str, OrderStatusReport] = {}
         self._fills: dict[str, list[FillReport]] = {}
-        # Reduce-only orders shrunk to the net at placement. The saga still
-        # asks for the full size, so once the shrunk size fills, the venue must
-        # cancel the cut part or the saga never ends (ADR-0057).
-        self._shrunk: set[str] = set()
         # Filling off the tick stream *is* what a paper venue is (ADR-0012), so
         # it wires its own tick subscription here rather than leaving a line for
         # the composition root and every test to repeat (and be able to forget).
@@ -281,12 +277,14 @@ class PaperExchange:
         fill = await self._fill_model.limit_fill(order, tick)
         if fill is None:
             return False  # queue miss (ADR-0012): nothing fills this tick.
+        # Read before the fill: a completing fill lifts the order off the book.
+        shrunk = self._book.shrunk(order.cloid)
         quantity, complete = self._book.apply_fill(order.cloid, fill.quantity)
         await self._bus.publish(
             self._fill_report(order, Fill(quantity=quantity, price=fill.price), maker=maker)
         )
-        if complete:
-            await self._filled(order)
+        if complete and shrunk:
+            await self._end_shrunk(order)
         return complete
 
     async def place(self, order: PlaceOrder) -> None:
@@ -302,30 +300,45 @@ class PaperExchange:
                 )
             )
             return
-        if order.reduce_only:
-            net = abs(self._account_net().get(order.symbol, Decimal("0")))
-            if order.quantity > net:
-                # Larger than the net: the venue works only the net's size.
-                order = replace(order, quantity=net)
-                self._shrunk.add(order.cloid)
         if order.order_type is OrderType.MARKET:
             await self._place_market(order)
         else:
             await self._place_limit(order)
 
-    async def _filled(self, order: PlaceOrder) -> None:
-        """End a shrunk order once its working size has filled in full."""
-        if order.cloid in self._shrunk:
-            self._shrunk.discard(order.cloid)
-            await self._bus.publish(
-                self._status_report(order, OrderState.CANCELLED, reason="reduce-only shrink")
-            )
+    def _working_size(self, order: PlaceOrder) -> Decimal:
+        """The size the venue works ``order`` at.
+
+        A reduce-only order larger than the net works only the net's size
+        (ADR-0057). Any other order works the size it asked for.
+        """
+        if not order.reduce_only:
+            return order.quantity
+        return min(order.quantity, abs(self._account_net().get(order.symbol, Decimal("0"))))
+
+    def _rest(self, order: PlaceOrder) -> PlaceOrder:
+        """Rest ``order`` on the book and return it at the size the venue works."""
+        working = self._working_size(order)
+        self._book.rest(order)
+        self._book.shrink(order.cloid, working)
+        return replace(order, quantity=working)
+
+    async def _end_shrunk(self, order: PlaceOrder) -> None:
+        """End a shrunk order once its working size has filled in full.
+
+        The saga still asks for the full size, so the venue cancels the cut
+        part, or the saga never ends (ADR-0057).
+        """
+        await self._bus.publish(
+            self._status_report(order, OrderState.CANCELLED, reason="reduce-only shrink")
+        )
 
     async def _place_market(self, order: PlaceOrder) -> None:
         tick = self._latest_tick.get(order.symbol)
         if tick is None:
             raise ValueError(f"no market tick cached for {order.symbol!r}; cannot fill MARKET")
 
+        asked = order.quantity
+        order = replace(order, quantity=self._working_size(order))
         spec = self._specs.get(order.symbol)
         if spec is not None and min_notional_refuses(
             tick.price,
@@ -347,7 +360,10 @@ class PaperExchange:
         # A MARKET fills on arrival against the price the venue already holds: it
         # takes liquidity by definition, so there is no maker branch (ADR-0036).
         await self._bus.publish(self._fill_report(order, fill, maker=False))
-        await self._filled(order)
+        if order.quantity < asked:
+            # A MARKET always fills in full, in both fill models. So a shrunk
+            # one ends right here, and the book never has to hold it.
+            await self._end_shrunk(order)
 
     async def _place_limit(self, order: PlaceOrder) -> None:
         tick = self._latest_tick.get(order.symbol)
@@ -368,17 +384,16 @@ class PaperExchange:
             # remainder, then fill: a full fill lifts it right back off; the
             # model may only partial-fill, and the remainder is then handled
             # exactly like a resting order's — GTC keeps it, IOC cancels it.
-            self._book.rest(order)
+            working = self._rest(order)
             # Marketable on arrival: it crossed the moment it landed, so this
             # fill took liquidity exactly as a MARKET's does (ADR-0036). A
             # remainder that survives to a later tick is a *different* fill and
             # comes back down ``_match_book`` as a maker.
-            if await self._fill_crossing_limit(order, tick, maker=False):
+            if await self._fill_crossing_limit(working, tick, maker=False):
                 return  # fully filled on arrival: the book already lifted it off.
             if order.time_in_force is TimeInForce.IOC:
                 # IOC never rests: drop whatever remainder didn't fill now.
                 self._book.remove(order.cloid)
-                self._shrunk.discard(order.cloid)
                 await self._bus.publish(self._status_report(order, OrderState.CANCELLED))
                 return
             # GTC keeps the remainder resting for a later crossing tick. Announce
@@ -395,7 +410,7 @@ class PaperExchange:
 
         # Not marketable on arrival: rest on the book and report it working (LIVE).
         # A later tick that crosses it fills it (see ``on_tick``).
-        self._book.rest(order)
+        self._rest(order)
         await self._bus.publish(self._status_report(order, OrderState.LIVE))
 
     async def cancel(self, refs: Sequence[OrderRef]) -> None:
@@ -405,7 +420,6 @@ class PaperExchange:
                 # Nothing resting under this cloid: already filled/cancelled or never
                 # placed. A benign no-op — the venue has nothing to report (ADR-0026).
                 continue
-            self._shrunk.discard(ref.cloid)
             await self._bus.publish(self._status_report(order, OrderState.CANCELLED))
 
     def _reduces(self, order: PlaceOrder) -> bool:

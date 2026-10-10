@@ -63,6 +63,15 @@ class RestingBook:
         resting = self._orders[cloid]
         resting.working = resting.filled + min(resting.remaining, remaining)
 
+    def shrunk(self, cloid: str) -> bool:
+        """Whether a resting order works less than the size the strategy asked for.
+
+        The venue reads it before the fill that completes the order. A shrunk
+        order then ends ``CANCELLED`` for its cut part (ADR-0057).
+        """
+        resting = self._orders[cloid]
+        return resting.working < resting.order.quantity
+
     def apply_fill(self, cloid: str, quantity: Decimal) -> tuple[Decimal, bool]:
         """Fill ``quantity`` against the working remainder of a resting order.
 
