@@ -173,13 +173,7 @@ def _run(
         return await run
 
     exit_code = asyncio.run(life())
-    if crash:
-        # A killed process loses its connections and its file locks, which is
-        # what frees the store lock for the next life (ADR-0052). Collecting
-        # the engine does the same here, through the store's finalizer.
-        del engine, life
-        gc.collect()
-    else:
+    if not crash:
         assert exit_code == 0
     return portfolio
 
@@ -269,6 +263,11 @@ def test_a_killed_run_restarts_onto_the_same_book_without_double_counting(
     watermark. The barrier then heals nothing for a filled order, and a funding
     epoch already on the watermark is dropped rather than paid twice."""
     _run(_config(tmp_path), crash=True)
+    # A killed process loses its connections and its file locks, which is what
+    # frees the store lock for the next life (ADR-0052). Collecting the first
+    # life does the same here, through the store's finalizer. It must come after
+    # the returned portfolio is dropped, because that portfolio reaches the store.
+    gc.collect()
 
     second = tmp_path / "second.jsonl"
     second.write_text("\n".join(json.dumps(r) for r in SECOND_LIFE_ROWS) + "\n")
