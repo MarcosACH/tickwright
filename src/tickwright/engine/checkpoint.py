@@ -135,16 +135,18 @@ class Checkpointer:
         barrier's and the subscription's, which is the runner's to keep."""
         return self._portfolio
 
-    def pre_trade_reading(self, symbol: str, side: Side) -> PreTradeReading:
+    def pre_trade_reading(self, symbol: str, side: Side, *, strategy_id: str) -> PreTradeReading:
         """The account state the guard judges a placement on ``symbol`` against.
 
         It lives here because this type owns both read-models it folds. A second
         place that folded them would be a second definition to drift (ADR-0051).
         """
+        own = self._portfolio.position(symbol, strategy_id=strategy_id)
         return PreTradeReading(
             symbol=symbol,
             side=side,
             account_net_size=self._portfolio.account_net().get(symbol, Decimal("0")),
+            strategy_net_size=own.size if own is not None else Decimal("0"),
             open_remainder=sum(
                 (
                     order.quantity - order.cum_qty

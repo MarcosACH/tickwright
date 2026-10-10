@@ -114,6 +114,7 @@ def _check(
         symbol=signal.symbol,
         side=signal.side,
         account_net_size=Decimal(net),
+        strategy_net_size=Decimal(net),
         open_remainder=Decimal(open_remainder),
         mark=None,
     )

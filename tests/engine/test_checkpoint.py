@@ -508,7 +508,7 @@ def test_a_refused_store_is_never_mass_read_for_the_cache_it_will_not_use() -> N
 # --- the pre-trade reading (ADR-0051) ---------------------------------------
 
 
-def test_a_reading_shows_the_net_size_over_every_partition_unattributed_included() -> None:
+def test_a_reading_shows_the_account_net_and_the_strategy_own_size_apart() -> None:
     checkpointer = _checkpointer(SQLiteStore(":memory:"))
     checkpointer.recover()
     order = _submitted_order(quantity="0.5")
@@ -519,9 +519,14 @@ def test_a_reading_shows_the_net_size_over_every_partition_unattributed_included
     )
     checkpointer.checkpoint_heal((heal,))
 
-    reading = checkpointer.pre_trade_reading("BTC", Side.BUY)
+    reading = checkpointer.pre_trade_reading("BTC", Side.BUY, strategy_id="trivial")
+    no_position = checkpointer.pre_trade_reading("BTC", Side.BUY, strategy_id="other")
 
+    # Every partition, the unattributed one included, for the account net.
     assert reading.account_net_size == Decimal("0.3")
+    # The placing strategy's own partition only, for a reduce-only order.
+    assert reading.strategy_net_size == Decimal("0.5")
+    assert no_position.strategy_net_size == Decimal("0")
 
 
 def test_a_reading_shows_the_unfilled_remainder_of_open_orders_on_its_side_only() -> None:
@@ -540,8 +545,8 @@ def test_a_reading_shows_the_unfilled_remainder_of_open_orders_on_its_side_only(
     other_side = _submitted_order(quantity="2", side=Side.SELL, seq=4)
     checkpointer.checkpoint(other_side)
 
-    buy = checkpointer.pre_trade_reading("BTC", Side.BUY)
-    sell = checkpointer.pre_trade_reading("BTC", Side.SELL)
+    buy = checkpointer.pre_trade_reading("BTC", Side.BUY, strategy_id="trivial")
+    sell = checkpointer.pre_trade_reading("BTC", Side.SELL, strategy_id="trivial")
 
     # 0.4 pending + 0.75 left of the partly filled one. The filled order is closed.
     assert buy.open_remainder == Decimal("1.15")
@@ -551,18 +556,18 @@ def test_a_reading_shows_the_unfilled_remainder_of_open_orders_on_its_side_only(
 def test_a_reading_shows_the_latest_mark_and_no_mark_before_the_first_one() -> None:
     checkpointer = _checkpointer(SQLiteStore(":memory:"))
     checkpointer.recover()
-    assert checkpointer.pre_trade_reading("BTC", Side.BUY).mark is None
+    assert checkpointer.pre_trade_reading("BTC", Side.BUY, strategy_id="trivial").mark is None
 
     eth = MarkTick(ts_event=1_500, ts_init=1_500, symbol="ETH", price=Decimal("2500"))
     checkpointer.portfolio.observe_mark(eth)
-    assert checkpointer.pre_trade_reading("BTC", Side.BUY).mark is None
+    assert checkpointer.pre_trade_reading("BTC", Side.BUY, strategy_id="trivial").mark is None
 
     first = MarkTick(ts_event=2_000, ts_init=2_000, symbol="BTC", price=Decimal("42000"))
     latest = MarkTick(ts_event=3_000, ts_init=3_000, symbol="BTC", price=Decimal("42100"))
     checkpointer.portfolio.observe_mark(first)
     checkpointer.portfolio.observe_mark(latest)
 
-    mark = checkpointer.pre_trade_reading("BTC", Side.BUY).mark
+    mark = checkpointer.pre_trade_reading("BTC", Side.BUY, strategy_id="trivial").mark
     assert mark is not None
     assert (mark.price, mark.ts_event) == (Decimal("42100"), 3_000)
 
@@ -580,12 +585,14 @@ def test_a_reading_after_a_restart_matches_the_one_before_it(tmp_path: Path) -> 
         symbol="BTC", side=Side.SELL, quantity=Decimal("0.1"), price=Decimal("42000"), ts_ns=2_000
     )
     before.checkpoint_heal((heal,))
-    readings_before = [before.pre_trade_reading("BTC", side) for side in Side]
+    readings_before = [
+        before.pre_trade_reading("BTC", side, strategy_id="trivial") for side in Side
+    ]
     store.close()
 
     after = _checkpointer(SQLiteStore(path))
     after.recover()
-    readings_after = [after.pre_trade_reading("BTC", side) for side in Side]
+    readings_after = [after.pre_trade_reading("BTC", side, strategy_id="trivial") for side in Side]
 
     # A mark is never stored (ADR-0039), so only position and open orders survive.
     assert [(r.account_net_size, r.open_remainder) for r in readings_before] == [

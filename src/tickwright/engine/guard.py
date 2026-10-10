@@ -30,8 +30,8 @@ from tickwright.domain import (
     PreTradeReading,
     Side,
     Store,
-    below_min_notional,
     duration_ns,
+    min_notional_refuses,
     quantize_price,
     quantize_size,
 )
@@ -115,6 +115,14 @@ NO_LIMITS: Final = PreTradeLimits()
 _NO_SYMBOL_LIMITS: Final = SymbolLimits()
 
 
+def _shrinks(before: Decimal, after: Decimal) -> bool:
+    """Whether a position moves closer to zero without crossing it (#397).
+
+    Ending at zero is a full close, not a cross, for a long and a short alike."""
+    same_side = (after > 0) == (before > 0)
+    return abs(after) < abs(before) and (after == 0 or same_side)
+
+
 class RealGuard:
     """The real pre-trade boundary: quantize, min-notional, caps, durable kill switch."""
 
@@ -191,7 +199,14 @@ class RealGuard:
         price = None
         if signal.price is not None:
             price = quantize_price(signal.price, signal.side, spec)
-            if below_min_notional(price, quantity, spec):
+            if min_notional_refuses(
+                price,
+                quantity,
+                spec,
+                side=signal.side,
+                reduce_only=signal.reduce_only,
+                account_net=reading.account_net_size,
+            ):
                 # A LIMIT carries its own price, so notional is exact: deny locally
                 # rather than emit an order the venue will reject (ADR-0017).
                 return Denied(reason="below min notional")
@@ -201,16 +216,26 @@ class RealGuard:
         direction = 1 if signal.side is Side.BUY else -1
         before = reading.account_net_size + direction * reading.open_remainder
         worst_case = before + direction * quantity
-        # An order that shrinks the worst case without crossing zero cannot add
-        # exposure, so no cap on order size or value may stop it. Ending at zero
-        # is a full close, not a cross, for a long and a short alike.
-        same_side = (worst_case > 0) == (before > 0)
-        reduces = abs(worst_case) < abs(before) and (worst_case == 0 or same_side)
+        # An order that shrinks the worst case cannot add exposure, so no cap on
+        # order size or value may stop it.
+        reduces = _shrinks(before, worst_case)
+        if signal.reduce_only:
+            # The venue checks only the account net, so it can take an order that
+            # flips or grows the strategy's own position when the unattributed
+            # partition holds size. So the own worst case must shrink, built like
+            # the account one above. Open orders on a symbol are all its one
+            # strategy's (ADR-0038), so the open remainder is already its own.
+            own_before = reading.strategy_net_size + direction * reading.open_remainder
+            if not _shrinks(own_before, own_before + direction * quantity):
+                return Denied(reason="reduce-only order would not reduce strategy position")
+        # The venue never lets a reduce-only order grow the account net, so these
+        # caps could only stop an exit (ADR-0058).
+        skips_caps = reduces or signal.reduce_only
         cap = symbol_limits.max_order_size
-        if cap is not None and quantity > cap and not reduces:
+        if cap is not None and quantity > cap and not skips_caps:
             return Denied(reason=f"above max order size {cap}")
         cap = symbol_limits.max_order_value
-        if cap is not None and not reduces:
+        if cap is not None and not skips_caps:
             value_price = price
             # A buy limit fills at its price or better, so its price is the value.
             # A market order has no price. A sell limit below the bid fills near
@@ -236,7 +261,7 @@ class RealGuard:
             # A reducing order always passes, so a user can shrink a position
             # that is already past the cap. An order that crosses zero opens a
             # new side, so it gets no such pass.
-            if abs(worst_case) > cap and not reduces:
+            if abs(worst_case) > cap and not skips_caps:
                 return Denied(reason=f"above max position {cap}")
         rate_cap = self._limits.rate_cap
         if rate_cap is not None:

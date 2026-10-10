@@ -481,8 +481,7 @@ min notional, $10 on Hyperliquid, it is rejected unless it closes the whole net.
 skips the size, value, and position caps, but not the rate cap (ADR-0058). A strategy sets it with
 `reduce_only=True` on `SignalEmitter.place()`. Both venues get the flag. Paper applies the
 placement table. Both venues end an order shrunk at placement `CANCELLED`. Not built yet: the paper
-re-check of resting orders after a fill (#462), the guard rules and the min notional exception
-(#463), and the Hyperliquid cases in #478 and #479.
+re-check of resting orders after a fill (#462), and the Hyperliquid cases in #478 and #479.
 _Avoid_: close order, exit order.
 
 **Exit run**:

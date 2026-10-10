@@ -187,6 +187,11 @@ def _wire(
         replay=ReplayFeedConfig(path=ticks),
         sqlite=SQLiteStoreConfig(path=tmp_path / "ledger.db"),
         paper=PaperExchangeConfig(instrument_specs={"BTC": SPEC}, genesis_collateral=GENESIS),
+        # The real guard denies most of these orders on the strategy's own
+        # position before paper sees them (ADR-0058). This file pins paper's
+        # own table, so the guard steps aside. tests/engine/test_guard_e2e.py
+        # covers the guard.
+        guard="noop",
     )
     bus = build_bus(config)
     clock = build_clock(config)
@@ -380,6 +385,33 @@ def test_a_reduce_only_sell_larger_than_the_long_is_shrunk_to_it(
     assert [r.reason for r in life.reports if r.status is OrderState.CANCELLED] == [
         "reduce-only shrink"
     ]
+
+
+@pytest.mark.parametrize(
+    ("long", "state", "size_after"),
+    [
+        # Hyperliquid takes an order under $10 that covers the whole position.
+        ("0.001", OrderState.FILLED, "0"),
+        # It rejects one that leaves part of the position open (ADR-0058).
+        ("0.002", OrderState.REJECTED, "0.002"),
+    ],
+    ids=["closes-the-whole-long", "leaves-part-open"],
+)
+def test_a_reduce_only_market_sell_under_the_min_notional_needs_to_close_the_whole_long(
+    tmp_path: Path, long: str, state: OrderState, size_after: str
+) -> None:
+    # The long opens at 50000. The price then drops to 5000, so a sell of 0.001
+    # is worth 5, under the $10 minimum.
+    life = _wire(
+        tmp_path,
+        {0: [buy(long)], 2: [reduce_only_sell("0.001")]},
+        prices={2: Decimal("5000")},
+    )
+
+    _run(life, lambda: len(life.strategy.sent) == 2 and life.strategy.all_terminal())
+
+    assert life.strategy.states(1)[-1] is state
+    assert _size(life) == Decimal(size_after)
 
 
 def test_a_resting_reduce_only_gtc_is_shrunk_to_the_long(tmp_path: Path) -> None:

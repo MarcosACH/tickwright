@@ -65,6 +65,7 @@ from .instrument import (
     KillSwitchState,
     PreTradeReading,
     below_min_notional,
+    min_notional_refuses,
     quantize_price,
     quantize_size,
 )
@@ -196,6 +197,7 @@ __all__ = [
     "exact_figure",
     # quantization
     "below_min_notional",
+    "min_notional_refuses",
     "quantize_price",
     "quantize_size",
     # boundary economics

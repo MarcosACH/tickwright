@@ -12,6 +12,7 @@ import random
 from dataclasses import dataclass
 from decimal import Decimal
 
+import pytest
 from ledgers import GENESIS, checkpointer
 
 from tickwright.adapters.bus import InMemoryBus
@@ -42,6 +43,7 @@ from tickwright.domain import (
     Side,
     Signal,
     TimeInForce,
+    account_net_size,
     derive_cloid,
 )
 from tickwright.domain.enums import OrderType
@@ -101,6 +103,7 @@ def _limit_signal(
     seq: int = 1,
     side: Side = Side.BUY,
     symbol: str = "BTC",
+    reduce_only: bool = False,
 ) -> PlaceSignal:
     return PlaceSignal(
         ts_event=1_000,
@@ -113,6 +116,7 @@ def _limit_signal(
         order_type=OrderType.LIMIT,
         time_in_force=TimeInForce.GTC,
         price=Decimal(price),
+        reduce_only=reduce_only,
     )
 
 
@@ -150,7 +154,9 @@ def _engine(
         clock=clock,
         fill_model=fill_model,
         genesis_collateral=GENESIS,
-        account_net=dict,
+        # Wired as the composition root wires it, so paper judges a reduce-only
+        # order against the same net the guard reads.
+        account_net=lambda: account_net_size(store.all_positions()),
     )
     checks = checkpointer(store, clock=clock)
     # The runner's boot step: the ledger first, then the order cache. Rebuilding
@@ -599,6 +605,26 @@ def test_noop_guard_lets_a_would_be_denied_order_through_unmodified() -> None:
     assert record.quantity == Decimal("0.05")
 
 
+def test_noop_guard_sends_a_reduce_only_order_on_for_the_venue_to_judge() -> None:
+    # The strategy holds nothing, so the real guard would deny this sell. The
+    # noop guard sends it on, still reduce-only. Paper then refuses it against
+    # the flat account. A plain sell would rest LIVE instead.
+    engine = _engine(guard=NoopGuard())
+    cloid = derive_cloid("trivial:BTC:1")
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))
+        await engine.bus.publish(
+            _limit_signal("44000", quantity="0.05", side=Side.SELL, reduce_only=True)
+        )
+
+    asyncio.run(scenario())
+
+    rejected = [ev for ev in engine.events if isinstance(ev, OrderRejected) and ev.cloid == cloid]
+    assert [ev.reason for ev in rejected] == ["reduce-only order would increase position"]
+    assert _state(engine.store, cloid) is OrderState.REJECTED
+
+
 def test_kill_switch_survives_restart_and_reset_re_enables_placement() -> None:
     # First life: halt the engine, then crash. Only the store survives.
     first = _engine()
@@ -1033,3 +1059,256 @@ def test_the_rate_cap_window_starts_empty_after_a_restart() -> None:
 
     asyncio.run(second_life())
     assert _state(second.store, derive_cloid("trivial:BTC:3")) is OrderState.LIVE
+
+
+def _long_against_a_hand_short(limits: PreTradeLimits) -> _Engine:
+    """The strategy holds a long of 0.05. A hand sell of 0.02 sits in the
+    unattributed partition, so the account is long 0.03.
+
+    A plain sell of 0.05 crosses zero on the account, so every cap applies to
+    it. A reduce-only sell of 0.05 only closes the strategy's own long."""
+    engine = _holding("0.05", side=Side.BUY, limits=limits)
+    by_hand = ReconciliationFill(
+        symbol="BTC", side=Side.SELL, quantity=Decimal("0.02"), price=Decimal("42000"), ts_ns=1_000
+    )
+    engine.checks.checkpoint_heal((by_hand,))
+    return engine
+
+
+@pytest.mark.parametrize(
+    ("symbol_limits", "reason"),
+    [
+        (SymbolLimits(max_order_size=Decimal("0.01")), "above max order size 0.01"),
+        (SymbolLimits(max_order_value=Decimal("1000")), "above max order value 1000"),
+        (SymbolLimits(max_position=Decimal("0.01")), "above max position 0.01"),
+    ],
+)
+def test_a_reduce_only_sell_that_closes_the_strategy_long_skips_the_caps(
+    symbol_limits: SymbolLimits, reason: str
+) -> None:
+    # The plain twin is denied by the cap. The reduce-only sell is not.
+    engine = _long_against_a_hand_short(PreTradeLimits(symbols={"BTC": symbol_limits}))
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))
+        await engine.bus.publish(_mark("40000"))
+        # Above the market, so a sell that passes rests LIVE. 0.05 at 44000 is
+        # worth 2200.
+        await engine.bus.publish(_limit_signal("44000", quantity="0.05", seq=2, side=Side.SELL))
+        await engine.bus.publish(
+            _limit_signal("44000", quantity="0.05", seq=3, side=Side.SELL, reduce_only=True)
+        )
+
+    asyncio.run(scenario())
+
+    _assert_denied_by(engine, derive_cloid("trivial:BTC:2"), reason)
+    assert _state(engine.store, derive_cloid("trivial:BTC:3")) is OrderState.LIVE
+
+
+@pytest.mark.parametrize("outage", ["no mark", "stale mark"])
+def test_a_reduce_only_sell_passes_a_mark_outage_that_denies_a_plain_sell(outage: str) -> None:
+    # A mark outage must never block an exit (ADR-0058). The plain twin needs
+    # the mark to value itself, so the outage denies it.
+    limits = PreTradeLimits(symbols={"BTC": SymbolLimits(max_order_value=Decimal("1000"))})
+    engine = _long_against_a_hand_short(limits)
+    ten_seconds = 10_000_000_000
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))  # a trade, which is not a mark
+        if outage == "stale mark":
+            await engine.bus.publish(_mark("40000", ts_ns=2_000))
+            engine.clock.advance_to(2_000 + ten_seconds + 1)
+        # Above the market, so a sell that passes rests LIVE.
+        await engine.bus.publish(_limit_signal("44000", quantity="0.05", seq=2, side=Side.SELL))
+        await engine.bus.publish(
+            _limit_signal("44000", quantity="0.05", seq=3, side=Side.SELL, reduce_only=True)
+        )
+
+    asyncio.run(scenario())
+
+    _assert_denied_by(engine, derive_cloid("trivial:BTC:2"), f"{outage} for max order value 1000")
+    assert _state(engine.store, derive_cloid("trivial:BTC:3")) is OrderState.LIVE
+
+
+@pytest.mark.parametrize(
+    ("strategy_side", "strategy_size", "hand_long", "sell"),
+    [
+        # ADR-0058's first example: a sell of 2 flips the strategy to short 1.
+        (Side.BUY, "1", "1", "2"),
+        # ADR-0058's second example: a sell of 1 grows the strategy short to 2.
+        (Side.SELL, "1", "3", "1"),
+        # A strategy with no position has nothing to reduce.
+        (None, None, "1", "0.5"),
+    ],
+    ids=["flips-the-strategy", "grows-the-strategy-short", "strategy-has-no-position"],
+)
+def test_a_reduce_only_sell_that_does_not_shrink_the_strategy_position_is_denied(
+    strategy_side: Side | None, strategy_size: str | None, hand_long: str, sell: str
+) -> None:
+    # The hand buy leaves the account long, so the venue would take every one
+    # of these sells. Only the guard sees the strategy's own position.
+    if strategy_side is None or strategy_size is None:
+        engine = _engine(start_ns=2_000)
+    else:
+        engine = _holding(strategy_size, side=strategy_side, limits=NO_LIMITS)
+    by_hand = ReconciliationFill(
+        symbol="BTC",
+        side=Side.BUY,
+        quantity=Decimal(hand_long),
+        price=Decimal("42000"),
+        ts_ns=1_000,
+    )
+    engine.checks.checkpoint_heal((by_hand,))
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))
+        await engine.bus.publish(
+            _limit_signal("44000", quantity=sell, seq=2, side=Side.SELL, reduce_only=True)
+        )
+
+    asyncio.run(scenario())
+
+    _assert_denied_by(
+        engine,
+        derive_cloid("trivial:BTC:2"),
+        "reduce-only order would not reduce strategy position",
+    )
+
+
+def test_a_second_reduce_only_sell_counts_the_first_one_still_resting() -> None:
+    # Strategy long 1 and a hand buy of 1, so the account is long 2. Each sell
+    # of 1 closes the strategy alone. The venue sees long 2 and would fill both,
+    # which leaves the strategy short 1. So the second must count the first.
+    engine = _holding("1", side=Side.BUY, limits=NO_LIMITS)
+    by_hand = ReconciliationFill(
+        symbol="BTC", side=Side.BUY, quantity=Decimal("1"), price=Decimal("42000"), ts_ns=1_000
+    )
+    engine.checks.checkpoint_heal((by_hand,))
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))
+        # Above the market, so a sell that passes rests LIVE.
+        for seq in (2, 3):
+            await engine.bus.publish(
+                _limit_signal("44000", quantity="1", seq=seq, side=Side.SELL, reduce_only=True)
+            )
+
+    asyncio.run(scenario())
+
+    assert _state(engine.store, derive_cloid("trivial:BTC:2")) is OrderState.LIVE
+    _assert_denied_by(
+        engine,
+        derive_cloid("trivial:BTC:3"),
+        "reduce-only order would not reduce strategy position",
+    )
+
+
+def _holding_eth(quantity: str, *, side: Side) -> _Engine:
+    """The engine one restart after it filled ``quantity`` ETH on ``side`` at 3000.
+
+    0.004 ETH is worth more than the $10 minimum at 3000, so it can open. The
+    tests then drop the market to 1500, where closing it is worth less."""
+    first = _engine()
+
+    async def first_life() -> None:
+        await first.bus.publish(_tick("3000", symbol="ETH"))
+        # Priced through the market, so the order fills on arrival.
+        price = "3100" if side is Side.BUY else "2900"
+        await first.bus.publish(
+            _limit_signal(price, quantity=quantity, seq=1, side=side, symbol="ETH")
+        )
+
+    asyncio.run(first_life())
+    assert _state(first.store, derive_cloid("trivial:ETH:1")) is OrderState.FILLED
+    return _engine(store=first.store, start_ns=2_000)
+
+
+def test_a_reduce_only_limit_under_the_min_notional_passes_only_when_it_closes_the_net() -> None:
+    # Long 0.004 ETH. Each sell rests above the market at 1600, so it is worth
+    # under $10. Hyperliquid takes an order under $10 only when it covers the
+    # whole position (ADR-0058).
+    engine = _holding_eth("0.004", side=Side.BUY)
+
+    def sell(quantity: str, seq: int, *, reduce_only: bool) -> PlaceSignal:
+        return _limit_signal(
+            "1600",
+            quantity=quantity,
+            seq=seq,
+            side=Side.SELL,
+            symbol="ETH",
+            reduce_only=reduce_only,
+        )
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("1500", symbol="ETH"))
+        await engine.bus.publish(sell("0.004", 2, reduce_only=False))
+        await engine.bus.publish(sell("0.002", 3, reduce_only=True))
+        await engine.bus.publish(sell("0.004", 4, reduce_only=True))
+
+    asyncio.run(scenario())
+
+    # A plain order keeps the minimum, even for a whole close.
+    _assert_denied_by(engine, derive_cloid("trivial:ETH:2"), "below min notional")
+    # It leaves 0.002 open.
+    _assert_denied_by(engine, derive_cloid("trivial:ETH:3"), "below min notional")
+    assert _state(engine.store, derive_cloid("trivial:ETH:4")) is OrderState.LIVE
+
+
+def test_a_reduce_only_limit_on_the_side_of_the_account_net_keeps_the_min_notional() -> None:
+    # The strategy is short 0.004 ETH and a hand buy of 0.006 leaves the account
+    # long 0.002. A buy of 0.002 shrinks the strategy's short and is as large as
+    # the account net. But a buy cannot close a long, so it closes nothing.
+    engine = _holding_eth("0.004", side=Side.SELL)
+    by_hand = ReconciliationFill(
+        symbol="ETH", side=Side.BUY, quantity=Decimal("0.006"), price=Decimal("3000"), ts_ns=1_000
+    )
+    engine.checks.checkpoint_heal((by_hand,))
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("1500", symbol="ETH"))
+        # Below the market, worth 2.8.
+        await engine.bus.publish(
+            _limit_signal(
+                "1400", quantity="0.002", seq=2, side=Side.BUY, symbol="ETH", reduce_only=True
+            )
+        )
+
+    asyncio.run(scenario())
+
+    _assert_denied_by(engine, derive_cloid("trivial:ETH:2"), "below min notional")
+
+
+def test_a_tripped_kill_switch_still_denies_a_reduce_only_order() -> None:
+    # Reduce-only skips the caps, not the halt (ADR-0026).
+    engine = _holding("0.03", side=Side.BUY, limits=NO_LIMITS)
+    engine.guard.trip_kill_switch("operator halt")
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))
+        await engine.bus.publish(
+            _limit_signal("44000", quantity="0.03", seq=2, side=Side.SELL, reduce_only=True)
+        )
+
+    asyncio.run(scenario())
+
+    _assert_denied_by(engine, derive_cloid("trivial:BTC:2"), "kill switch tripped")
+
+
+def test_a_reduce_only_order_still_takes_a_rate_cap_slot() -> None:
+    # The venue counts a reduce-only order like any other, so the cap does too.
+    limits = PreTradeLimits(rate_cap=RateCap(max_orders=1, window_seconds=1.0))
+    engine = _holding("0.03", side=Side.BUY, limits=limits)
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))
+        # Above the market, so a sell that passes rests LIVE.
+        for seq, quantity in ((2, "0.02"), (3, "0.01")):
+            await engine.bus.publish(
+                _limit_signal("44000", quantity=quantity, seq=seq, side=Side.SELL, reduce_only=True)
+            )
+
+    asyncio.run(scenario())
+
+    assert _state(engine.store, derive_cloid("trivial:BTC:2")) is OrderState.LIVE
+    reason = "above max orders per window 1 in 1.0s"
+    _assert_denied_by(engine, derive_cloid("trivial:BTC:3"), reason)

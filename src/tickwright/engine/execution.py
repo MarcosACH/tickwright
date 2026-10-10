@@ -220,7 +220,9 @@ class ExecutionManager:
         # never sent, so there is no in-flight intent to protect. The reading is
         # taken here, after the dedup and with no await before the check, so the
         # guard judges the book as it stands at this call (ADR-0051).
-        reading = self._checkpointer.pre_trade_reading(signal.symbol, signal.side)
+        reading = self._checkpointer.pre_trade_reading(
+            signal.symbol, signal.side, strategy_id=signal.strategy_id
+        )
         decision = self._guard.check(signal, reading)
 
         if isinstance(decision, Denied):
