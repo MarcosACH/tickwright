@@ -41,6 +41,7 @@ from tickwright.domain import (
     PreTradeGuard,
     Signal,
     Store,
+    StoreLockHeld,
     Strategy,
     duration_ns,
 )
@@ -230,6 +231,15 @@ class Engine:
         Returns the process exit-code contract (ADR-0024): 0 = graceful stop,
         non-zero = ``FAULTED`` — the external supervisor's restart signal.
         """
+        # The store lock comes before anything that writes, ``recover()`` first
+        # among them (ADR-0052). A refusal also skips the teardown, because its
+        # ``host.stop`` snapshots strategies and this store is another engine's.
+        try:
+            holder = self._store.lock()
+            if holder is not None:
+                raise StoreLockHeld(holder.detail)
+        except Exception as exc:
+            return self._fault_before_boot(exc)
         self._install_signal_handlers()
         try:
             await self._start_sequence()
@@ -312,6 +322,21 @@ class Engine:
         self._state = ComponentState.STOPPED
         self._stopped.set()
         return 0
+
+    def _fault_before_boot(self, exc: Exception) -> int:
+        """Fault with nothing started, so there is nothing to tear down. Closing
+        the store's own connection is the one step left, and it writes nothing."""
+        self._state = ComponentState.FAULTED
+        self._fault = exc
+        named_event(NamedEvent.ENGINE_FAULTED, error=repr(exc))
+        try:
+            self._store.close()
+        except Exception as close_exc:
+            named_event(
+                NamedEvent.ENGINE_STOP_HOOK_FAILED, hook="store.close", error=repr(close_exc)
+            )
+        self._stopped.set()
+        return 1
 
     async def stop(self) -> None:
         """Request the graceful stop and wait for the reverse shutdown to finish."""

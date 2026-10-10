@@ -15,6 +15,7 @@ is spelled out beside each step.
 """
 
 import asyncio
+import gc
 import json
 import os
 from collections.abc import Callable, Mapping, Sequence
@@ -416,6 +417,10 @@ def test_after_a_crash_the_max_position_holds_against_the_recovered_position(
 ) -> None:
     store_fields = _store_fields(backend, tmp_path)
     _scenario(tmp_path, BEFORE_CRASH, crash=True, overrides=store_fields)
+    # A killed process loses its connections and its file locks, which is what
+    # frees the store lock for the next life (ADR-0052). Collecting the first
+    # life does the same here, through the store's finalizer.
+    gc.collect()
 
     life = _scenario(tmp_path, AFTER_RESTART, overrides=store_fields)
 

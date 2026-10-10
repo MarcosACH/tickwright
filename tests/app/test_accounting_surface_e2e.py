@@ -11,6 +11,7 @@ from the code. The arithmetic is spelled out beside each constant.
 
 import asyncio
 import contextlib
+import gc
 import json
 import os
 import sqlite3
@@ -172,7 +173,13 @@ def _run(
         return await run
 
     exit_code = asyncio.run(life())
-    if not crash:
+    if crash:
+        # A killed process loses its connections and its file locks, which is
+        # what frees the store lock for the next life (ADR-0052). Collecting
+        # the engine does the same here, through the store's finalizer.
+        del engine, life
+        gc.collect()
+    else:
         assert exit_code == 0
     return portfolio
 
