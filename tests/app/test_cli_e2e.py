@@ -98,7 +98,7 @@ def _export_hostile_config(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TICKWRIGHT_HYPERLIQUID__SIGNING_KEY", "0xdeadbeef")
 
 
-def _spawn(cwd: Path, log: Path) -> subprocess.Popen[bytes]:
+def _spawn(cwd: Path, log: Path, *args: str) -> subprocess.Popen[bytes]:
     """The CLI under test, configured only by the ``.env`` in ``cwd``.
 
     The child inherits the shell otherwise, and exported ``TICKWRIGHT_*`` vars
@@ -120,7 +120,7 @@ def _spawn(cwd: Path, log: Path) -> subprocess.Popen[bytes]:
     # the parent holding it open buys nothing and leaks a handle per life.
     with log.open("wb") as sink:
         return subprocess.Popen(
-            [sys.executable, "-m", "tickwright.app"],
+            [sys.executable, "-m", "tickwright.app", *args],
             cwd=cwd,
             env={k: v for k, v in os.environ.items() if not k.startswith("TICKWRIGHT_")},
             stdout=subprocess.DEVNULL,
@@ -263,3 +263,70 @@ def test_a_second_engine_on_the_same_store_exits_1_until_the_first_is_killed(
             third.kill()
             raise AssertionError(f"restart failed; stderr:\n{third_log.read_text()}") from None
         assert _terminate(third) == 0
+
+
+def _run_to_exit(cwd: Path, log: Path, *args: str, timeout: float = 15.0) -> int:
+    """Run a one-shot CLI command and return its exit code."""
+    with _spawn(cwd, log, *args) as process:
+        try:
+            return process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            raise AssertionError(f"{args} never exited; stderr:\n{log.read_text()}") from None
+
+
+def _events(log: Path) -> list[dict[str, object]]:
+    """Every JSON event in a child's log, in order."""
+    lines = log.read_text().splitlines()
+    return [json.loads(line) for line in lines if line.startswith("{")]
+
+
+def test_cancel_all_on_an_empty_paper_account_exits_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_workspace(tmp_path)
+    _export_hostile_config(monkeypatch)
+    log = tmp_path / "cancel_all.log"
+
+    assert _run_to_exit(tmp_path, log, "cancel-all") == 0, log.read_text()
+
+    events = _events(log)
+    assert events[-1]["event"] == "exit.finished"
+    assert events[-1]["job"] == "cancel_all"
+    assert events[-1]["left"] == "none"
+    # The configured strategies belong to normal runs. This run places nothing.
+    assert not any(str(event["event"]).startswith("order.") for event in events)
+
+
+def test_cancel_all_on_a_store_another_engine_holds_exits_two(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_workspace(tmp_path)
+    _export_hostile_config(monkeypatch)
+    log = tmp_path / "cancel_all.log"
+    with SQLiteStore(tmp_path / "saga.db") as holder:
+        assert holder.lock() is None
+
+        assert _run_to_exit(tmp_path, log, "cancel-all") == 2, log.read_text()
+
+    assert [event["event"] for event in _events(log)] == ["exit.refused"]
+
+
+def test_cancel_all_on_hyperliquid_exits_two_before_it_boots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hyperliquid cannot list every resting order yet (#470). So the run
+    refuses before it connects, and nothing at the venue moves."""
+    _write_workspace(tmp_path)
+    with (tmp_path / ".env").open("a") as env:
+        env.write(
+            "TICKWRIGHT_EXCHANGE=hyperliquid\n"
+            'TICKWRIGHT_HYPERLIQUID__SYMBOLS=["BTC"]\n'
+            "TICKWRIGHT_HYPERLIQUID__SIGNING_KEY=0x" + "11" * 32 + "\n"
+        )
+    log = tmp_path / "cancel_all.log"
+
+    assert _run_to_exit(tmp_path, log, "cancel-all") == 2, log.read_text()
+
+    assert "#470" in log.read_text()
+    assert _events(log) == []

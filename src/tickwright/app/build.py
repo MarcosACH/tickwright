@@ -37,6 +37,7 @@ from tickwright.domain import (
     Strategy,
     account_net_size,
 )
+from tickwright.engine.exit_run import ExitJob, OperatorCancelAll
 from tickwright.engine.guard import NoopGuard, RealGuard
 from tickwright.engine.runner import Engine
 from tickwright.strategies import SingleShotLimitStrategy, SingleShotMarketStrategy
@@ -268,6 +269,28 @@ def build_engine(config: AppConfig) -> Engine:
     argument, exactly as it receives its ``Clock`` — and now *resolves* that
     facade off the engine rather than off a projection of its own.
     """
+    return _build_engine(config, exit_job=None)
+
+
+class UnsupportedExitRun(ValueError):
+    """The config names a venue this exit run cannot work on yet.
+
+    Raised before anything is built, so nothing at the venue moved (ADR-0060).
+    """
+
+
+def build_exit_job(config: AppConfig) -> Engine:
+    """The engine for ``tickwright cancel-all``: the same stack as ``build_engine``,
+    with the job in place of the strategies (ADR-0052)."""
+    if config.exchange != "paper":
+        # Hyperliquid cannot list the account's resting orders yet (#470).
+        raise UnsupportedExitRun(
+            f"cancel-all does not support exchange={config.exchange} yet. See issue #470."
+        )
+    return _build_engine(config, exit_job=OperatorCancelAll())
+
+
+def _build_engine(config: AppConfig, *, exit_job: ExitJob | None) -> Engine:
     bus = build_bus(config)
     clock = build_clock(config)
     store = build_store(config)
@@ -288,7 +311,11 @@ def build_engine(config: AppConfig) -> Engine:
         guard=guard,
         config=config.engine,
         leverage=leverage,
+        exit_job=exit_job,
     )
+    # An exit run trades nothing, so it builds no strategy.
+    if exit_job is not None:
+        return engine
     for strategy_config in config.strategies:
         engine.register(
             _build_strategy(
