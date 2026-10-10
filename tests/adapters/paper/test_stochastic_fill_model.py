@@ -9,6 +9,7 @@ nondeterminism-shaped decisions it owns behind the same interface the default
 
 import asyncio
 import random
+from dataclasses import replace
 from decimal import Decimal
 
 import pytest
@@ -254,6 +255,40 @@ def test_a_marketable_ioc_limit_partial_fill_cancels_its_remainder() -> None:
 
     assert [f.quantity for f in fills] == [Decimal("0.4")]  # only the arrival fill
     assert [s.status for s in statuses] == [OrderState.CANCELLED]
+
+
+def test_a_partial_is_sized_from_a_shrink_made_earlier_on_the_same_tick() -> None:
+    """Long 3. Two resting reduce-only sells, A of 2 and B of 3, cross on one
+    tick. A fills 1 first, which shrinks B to 2. The model sizes a partial from
+    the order it is handed, so B must reach it at 2, not 3 (ADR-0057)."""
+    bus = InMemoryBus()
+    clock = ManualClock()
+    exchange = PaperExchange(
+        bus=bus,
+        clock=clock,
+        fill_model=_partial_model(fraction="0.5"),
+        genesis_collateral=GENESIS,
+        account_net=lambda: {"BTC": Decimal("3")},
+        applied_fills=lambda cloid: (),
+    )
+    fills: list[FillReport] = []
+    bus.subscribe(FillReport, lambda r: _record(fills, r))
+
+    def reduce_only_sell(cloid: str, qty: str) -> PlaceOrder:
+        return replace(
+            _limit_order("51000", qty=qty, cloid=cloid), side=Side.SELL, reduce_only=True
+        )
+
+    async def scenario() -> None:
+        clock.advance_to(1_000)
+        await bus.publish(_tick("50000"))  # below both limits: they rest
+        await exchange.place(reduce_only_sell("A", "2"))
+        await exchange.place(reduce_only_sell("B", "3"))
+        await bus.publish(_tick("51000"))
+
+    asyncio.run(scenario())
+
+    assert [(f.cloid, f.quantity) for f in fills] == [("A", Decimal("1")), ("B", Decimal("1"))]
 
 
 def test_a_queue_miss_emits_no_fill_and_leaves_the_order_resting() -> None:

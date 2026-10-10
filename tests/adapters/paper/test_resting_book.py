@@ -187,3 +187,18 @@ def test_rest_never_works_an_order_above_the_size_it_asked_for() -> None:
     working = book.rest(_limit(qty="3"), working=Decimal("5"))
 
     assert working.quantity == Decimal("3")
+
+
+def test_working_reads_one_order_at_its_size_now() -> None:
+    # A snapshot goes stale once a fill shrinks or cancels an order. This read
+    # does not, so the venue can check an order again mid-loop.
+    book = RestingBook()
+    snapshot = book.rest(_limit(qty="3"))
+
+    book.shrink("0xabc", Decimal("1"))
+
+    assert snapshot.quantity == Decimal("3")
+    order = book.working("0xabc")
+    assert order is not None and order.quantity == Decimal("1")
+    book.remove("0xabc")
+    assert book.working("0xabc") is None

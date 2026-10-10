@@ -262,9 +262,12 @@ class PaperExchange:
     async def _match_book(self, tick: MarketTick) -> None:
         # Re-check resting LIMITs for this symbol: any the tick now crosses fills.
         # The book lifts a fully-filled order off itself, so a partial just stays.
-        for order in self._book.resting():
-            if order.cloid not in self._book:
-                continue  # an earlier fill on this tick cancelled it.
+        for snapshot in self._book.resting():
+            # An earlier fill on this tick can cancel or shrink this order, so
+            # read it again. The fill model must see the size it works now.
+            order = self._book.working(snapshot.cloid)
+            if order is None:
+                continue
             if order.symbol == tick.symbol and self._crosses(order, tick):
                 # Off the book on a later tick: this order was the resting side,
                 # so it *made* liquidity (ADR-0036). ``post_only`` reaches a fill

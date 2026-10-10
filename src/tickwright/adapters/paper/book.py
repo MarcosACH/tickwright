@@ -68,8 +68,11 @@ class RestingBook:
         self._orders[order.cloid] = resting
         return resting.at_working_size()
 
-    def __contains__(self, cloid: object) -> bool:
-        return cloid in self._orders
+    def working(self, cloid: str) -> PlaceOrder | None:
+        """One resting order at its working size now, or ``None`` if it has
+        left the book."""
+        resting = self._orders.get(cloid)
+        return resting.at_working_size() if resting is not None else None
 
     def resting(self) -> list[PlaceOrder]:
         """A snapshot of the resting orders at their working size — safe to
