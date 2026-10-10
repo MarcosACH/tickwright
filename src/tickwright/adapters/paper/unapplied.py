@@ -35,14 +35,15 @@ class UnappliedFills:
         It first drops every fill the store has applied. Counting one of those
         would count it twice.
         """
-        self._drain()
+        self.drain()
         size = Decimal("0")
         for fill, side in self._fills:
             if fill.symbol == symbol:
                 size += fill.quantity if side is Side.BUY else -fill.quantity
         return size
 
-    def _drain(self) -> None:
+    def drain(self) -> None:
+        """Drop every fill the store has applied."""
         self._fills = [
             (fill, side)
             for fill, side in self._fills

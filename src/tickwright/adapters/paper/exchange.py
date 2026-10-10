@@ -254,6 +254,9 @@ class PaperExchange:
     async def on_tick(self, tick: MarketTick) -> None:
         # Cache the latest price per symbol; MARKET fills read it (ADR-0027).
         self._latest_tick[tick.symbol] = tick
+        # A plain order never reads the net, so nothing else drains the fills
+        # the store has applied since the last tick (ADR-0057).
+        self._unapplied.drain()
         await self._match_book(tick)
 
     async def _match_book(self, tick: MarketTick) -> None:
