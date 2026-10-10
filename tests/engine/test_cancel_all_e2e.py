@@ -7,6 +7,7 @@ run, then does its one job and exits with the ADR-0060 code.
 
 import asyncio
 import json
+import os
 from collections.abc import Callable, Sequence
 from decimal import Decimal
 from pathlib import Path
@@ -118,6 +119,46 @@ def test_an_exit_run_on_an_empty_account_starts_nothing_and_exits_done(tmp_path:
     assert logs[-1]["outcome"] == "done"
     assert logs[-1]["exit_code"] == 0
     assert logs[-1]["left"] == "none"
+
+
+def test_an_exit_run_on_a_store_another_engine_holds_exits_two_and_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "saga.db"
+    holder = SQLiteStore(db)
+    assert holder.lock() is None
+    bus = InMemoryBus()
+    clock = ManualClock()
+    engine = Engine(
+        bus=bus,
+        clock=clock,
+        store=SQLiteStore(db),
+        exchange=PaperExchange(
+            bus=bus,
+            clock=clock,
+            fill_model=ImmediateFillModel(),
+            genesis_collateral=GENESIS,
+            account_net=dict,
+            applied_fills=lambda cloid: (),
+        ),
+        feed=ReplayFeed(path=_ticks(tmp_path / "ticks.jsonl"), bus=bus, clock=clock),
+        exit_job=OperatorCancelAll(),
+    )
+
+    with capture_events() as logs:
+        exit_code = asyncio.run(asyncio.wait_for(engine.run(), timeout=5))
+
+    # Code 2 is "never booted": nothing moved, so the operator fixes the lock
+    # and runs it again (ADR-0060).
+    assert exit_code == 2
+    assert [log["event"] for log in logs] == ["exit.refused"]
+    assert logs[0]["reason"] == "lock_held"
+    assert logs[0]["store"] == str(db)
+    assert f"Process {os.getpid()} holds" in logs[0]["holder"]
+    try:
+        assert holder.load_account() is None
+    finally:
+        holder.close()
 
 
 async def _rest(exchange: PaperExchange, sagas: Checkpointer, *, seq: int, price: str) -> str:

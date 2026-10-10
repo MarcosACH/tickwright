@@ -60,6 +60,8 @@ class NamedEvent(StrEnum):
 
     # Operator exit runs (``Engine`` with an ``ExitJob``, ADR-0060).
     # ``exit.finished`` is the last event of every exit run that booted.
+    # ``exit.refused`` is the only event of one the store check turned away.
+    EXIT_REFUSED = "exit.refused"
     EXIT_FINISHED = "exit.finished"
     CANCEL_ALL_ORDERS_REMAIN = "cancel_all.orders_remain"
 
@@ -273,6 +275,7 @@ FIELDS: dict[NamedEvent, frozenset[str]] = {
     NamedEvent.ENGINE_FEED_STARTED: frozenset(),
     NamedEvent.ENGINE_FAULTED: frozenset({"error"}),
     NamedEvent.ENGINE_STOP_HOOK_FAILED: frozenset({"hook", "error"}),
+    NamedEvent.EXIT_REFUSED: frozenset({"reason", "store", "holder"}),
     NamedEvent.EXIT_FINISHED: frozenset({"job", "outcome", "exit_code", "left"}),
     NamedEvent.CANCEL_ALL_ORDERS_REMAIN: frozenset({"orders"}),
     NamedEvent.GUARD_KILL_SWITCH_TRIPPED: frozenset({"reason"}),

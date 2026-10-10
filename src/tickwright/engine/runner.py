@@ -42,6 +42,7 @@ from tickwright.domain import (
     Signal,
     Store,
     StoreLockHeld,
+    StoreLockHolder,
     Strategy,
     VenueReadFailure,
     duration_ns,
@@ -260,10 +261,12 @@ class Engine:
         # ``host.stop`` snapshots strategies and this store is another engine's.
         try:
             holder = self._store.lock()
-            if holder is not None:
-                raise StoreLockHeld(holder.detail)
         except Exception as exc:
             return self._fault_before_boot(exc)
+        if holder is not None:
+            if self._exit_job is not None:
+                return self._refuse_exit_run(holder)
+            return self._fault_before_boot(StoreLockHeld(holder.detail))
         self._install_signal_handlers()
         try:
             await self._start_sequence()
@@ -396,12 +399,31 @@ class Engine:
         )
         return exit_code
 
+    def _refuse_exit_run(self, holder: StoreLockHolder) -> int:
+        """Turn an exit run away from a store another engine holds (ADR-0060).
+
+        Code 2 tells the operator nothing moved, so they can end the holder and
+        run the job again. A normal run faults instead, so its supervisor retries.
+        """
+        self._state = ComponentState.FAULTED
+        self._fault = StoreLockHeld(holder.detail)
+        named_event(
+            NamedEvent.EXIT_REFUSED, reason="lock_held", store=holder.store, holder=holder.detail
+        )
+        self._close_before_boot()
+        return 2
+
     def _fault_before_boot(self, exc: Exception) -> int:
-        """Fault with nothing started, so there is nothing to tear down. Closing
-        the store's own connection is the one step left, and it writes nothing."""
+        """Fault with nothing started, so there is nothing to tear down."""
         self._state = ComponentState.FAULTED
         self._fault = exc
         named_event(NamedEvent.ENGINE_FAULTED, error=repr(exc))
+        self._close_before_boot()
+        return 1
+
+    def _close_before_boot(self) -> None:
+        """Closing the store's own connection is the one step left, and it
+        writes nothing."""
         try:
             self._store.close()
         except Exception as close_exc:
@@ -409,7 +431,6 @@ class Engine:
                 NamedEvent.ENGINE_STOP_HOOK_FAILED, hook="store.close", error=repr(close_exc)
             )
         self._stopped.set()
-        return 1
 
     async def stop(self) -> None:
         """Request the graceful stop and wait for the reverse shutdown to finish."""
