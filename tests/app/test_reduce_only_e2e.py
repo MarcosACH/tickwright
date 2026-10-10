@@ -479,3 +479,35 @@ def test_a_later_reduce_only_order_sees_only_the_store_net(tmp_path: Path) -> No
         "reduce-only shrink"
     ]
     assert _size(life) == Decimal("0")
+
+
+def test_a_resting_reduce_only_order_is_cancelled_once_another_closes_the_long(
+    tmp_path: Path,
+) -> None:
+    # Long 1. Two GTC reduce-only sells of 1 at 51000 rest, each covered by the
+    # long. The 51000 trade at 4s crosses both. The first fill closes the long,
+    # so paper cancels the second instead of filling it. Without that, the
+    # account ends short 1 (ADR-0057).
+    sell = Send(
+        Side.SELL,
+        Decimal("1"),
+        reduce_only=True,
+        order_type=OrderType.LIMIT,
+        time_in_force=TimeInForce.GTC,
+        price=Decimal("51000"),
+    )
+    life = _wire(
+        tmp_path,
+        {0: [buy("1")], 2: [sell, sell], 4: []},
+        prices={4: Decimal("51000")},
+    )
+
+    _run(life, lambda: len(life.strategy.sent) == 3 and life.strategy.all_terminal())
+
+    assert life.strategy.states(1)[-1] is OrderState.FILLED
+    assert life.strategy.states(2)[-2:] == [OrderState.LIVE, OrderState.CANCELLED]
+    assert life.strategy.filled(2) == Decimal("0")
+    assert [r.reason for r in life.reports if r.status is OrderState.CANCELLED] == [
+        "reduce-only cancelled"
+    ]
+    assert _size(life) == Decimal("0")

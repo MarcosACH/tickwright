@@ -43,6 +43,9 @@ class RestingBook:
         """Put ``order`` on the book with its full quantity still working."""
         self._orders[order.cloid] = _Resting(order=order, working=order.quantity)
 
+    def __contains__(self, cloid: object) -> bool:
+        return cloid in self._orders
+
     def resting(self) -> list[PlaceOrder]:
         """A snapshot of the resting orders — safe to fill or remove entries
         (which mutate the book) while iterating over it.

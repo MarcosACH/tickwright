@@ -262,6 +262,8 @@ class PaperExchange:
         # Re-check resting LIMITs for this symbol: any the tick now crosses fills.
         # The book lifts a fully-filled order off itself, so a partial just stays.
         for order in self._book.resting():
+            if order.cloid not in self._book:
+                continue  # an earlier fill on this tick cancelled it.
             if order.symbol == tick.symbol and self._crosses(order, tick):
                 # Off the book on a later tick: this order was the resting side,
                 # so it *made* liquidity (ADR-0036). ``post_only`` reaches a fill
@@ -297,6 +299,7 @@ class PaperExchange:
         )
         if complete and shrunk:
             await self._end_shrunk(order)
+        await self._recheck_reduce_only(order.symbol)
         return complete
 
     async def place(self, order: PlaceOrder) -> None:
@@ -376,6 +379,22 @@ class PaperExchange:
             # A MARKET always fills in full, in both fill models. So a shrunk
             # one ends right here, and the book never has to hold it.
             await self._end_shrunk(order)
+        await self._recheck_reduce_only(order.symbol)
+
+    async def _recheck_reduce_only(self, symbol: str) -> None:
+        """Cancel each resting reduce-only order in ``symbol`` that a fill left
+        with nothing to reduce.
+
+        Only paper's own fills move the net, so right after one is the only
+        moment to check. The venue does the same in the closing fill's message
+        (ADR-0057).
+        """
+        for order in self._book.resting():
+            if order.symbol == symbol and order.reduce_only and not self._reduces(order):
+                self._book.remove(order.cloid)
+                await self._bus.publish(
+                    self._status_report(order, OrderState.CANCELLED, reason="reduce-only cancelled")
+                )
 
     async def _place_limit(self, order: PlaceOrder) -> None:
         tick = self._latest_tick.get(order.symbol)
