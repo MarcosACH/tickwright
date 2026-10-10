@@ -7,10 +7,13 @@ run, then does its one job and exits with the ADR-0060 code.
 
 import asyncio
 import json
+from collections.abc import Callable, Sequence
 from decimal import Decimal
 from pathlib import Path
 
 from ledgers import GENESIS, checkpointer
+from structlog.typing import EventDict
+from venue_doubles import VenueLink
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
@@ -19,9 +22,11 @@ from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     AggressorSide,
+    Exchange,
     MarketTick,
     Order,
     OrderEvent,
+    OrderRef,
     OrderState,
     OrderType,
     PlaceOrder,
@@ -113,7 +118,7 @@ def test_an_exit_run_on_an_empty_account_starts_nothing_and_exits_done(tmp_path:
     assert logs[-1]["left"] == "none"
 
 
-async def _rest(exchange: PaperExchange, sagas: Checkpointer, *, seq: int) -> str:
+async def _rest(exchange: PaperExchange, sagas: Checkpointer, *, seq: int, price: str) -> str:
     """One engine order resting on paper, with its saga in the store.
 
     Seeded through the two seams rather than by an earlier engine run. Paper keeps
@@ -132,7 +137,7 @@ async def _rest(exchange: PaperExchange, sagas: Checkpointer, *, seq: int) -> st
             quantity=Decimal("0.1"),
             order_type=OrderType.LIMIT,
             time_in_force=TimeInForce.GTC,
-            price=Decimal("30000"),
+            price=Decimal(price),
         )
     )
     sagas.checkpoint(
@@ -151,12 +156,34 @@ async def _rest(exchange: PaperExchange, sagas: Checkpointer, *, seq: int) -> st
     return cloid
 
 
-def test_an_exit_run_cancels_every_resting_order_and_leaves_none(tmp_path: Path) -> None:
+def _trade(price: str, *, aggressor: AggressorSide, ts: int) -> MarketTick:
+    return MarketTick(
+        ts_event=ts,
+        ts_init=ts,
+        symbol="BTC",
+        price=Decimal(price),
+        size=Decimal("1"),
+        aggressor_side=aggressor,
+        trade_id=f"t{ts}",
+        seq=0,
+    )
+
+
+def _cancel_all(
+    tmp_path: Path,
+    *,
+    prices: Sequence[str],
+    link: Callable[[PaperExchange, InMemoryBus], Exchange] | None = None,
+) -> tuple[int, list[str], list[EventDict]]:
+    """Rest one BUY per price on paper, then run cancel all over it.
+
+    ``link`` puts a venue double in front of paper. Returns the exit code, the
+    cloids in price order, and every event the run emitted.
+    """
     bus = InMemoryBus()
     clock = ManualClock()
-    db = tmp_path / "saga.db"
-    store = SQLiteStore(db)
-    exchange = PaperExchange(
+    store = SQLiteStore(tmp_path / "saga.db")
+    paper = PaperExchange(
         bus=bus,
         clock=clock,
         fill_model=ImmediateFillModel(),
@@ -167,27 +194,19 @@ def test_an_exit_run_cancels_every_resting_order_and_leaves_none(tmp_path: Path)
 
     async def go() -> tuple[int, list[str]]:
         # Paper prices a LIMIT against the last tick, so it needs one first.
-        await bus.publish(
-            MarketTick(
-                ts_event=500,
-                ts_init=500,
-                symbol="BTC",
-                price=Decimal("42000"),
-                size=Decimal("1"),
-                aggressor_side=AggressorSide.BUY,
-                trade_id="seed",
-                seq=0,
-            )
-        )
+        await bus.publish(_trade("42000", aggressor=AggressorSide.BUY, ts=500))
         # The engine's own write path opens the ledger row a store with orders needs.
         sagas = checkpointer(store, clock=clock)
         sagas.recover()
-        cloids = [await _rest(exchange, sagas, seq=seq) for seq in (1, 2, 3)]
+        cloids = [
+            await _rest(paper, sagas, seq=seq, price=price)
+            for seq, price in enumerate(prices, start=1)
+        ]
         engine = Engine(
             bus=bus,
             clock=clock,
             store=store,
-            exchange=exchange,
+            exchange=paper if link is None else link(paper, bus),
             feed=ReplayFeed(path=_ticks(tmp_path / "ticks.jsonl"), bus=bus, clock=clock),
             exit_job=OperatorCancelAll(),
         )
@@ -195,18 +214,56 @@ def test_an_exit_run_cancels_every_resting_order_and_leaves_none(tmp_path: Path)
 
     with capture_events() as logs:
         exit_code, cloids = asyncio.run(go())
+    return exit_code, cloids, logs
+
+
+def _sagas(tmp_path: Path, cloids: Sequence[str]) -> list[Order]:
+    """Each saga as the run left it in the store."""
+    store = SQLiteStore(tmp_path / "saga.db")
+    try:
+        orders = [store.get_order(cloid) for cloid in cloids]
+    finally:
+        store.close()
+    assert all(order is not None for order in orders)
+    return [order for order in orders if order is not None]
+
+
+def test_an_exit_run_cancels_every_resting_order_and_leaves_none(tmp_path: Path) -> None:
+    exit_code, cloids, logs = _cancel_all(tmp_path, prices=["30000", "30000", "30000"])
 
     assert exit_code == 0
     assert logs[-1]["event"] == "exit.finished"
     assert logs[-1]["left"] == "none"
-    reopened = SQLiteStore(db)
-    try:
-        for cloid in cloids:
-            order = reopened.get_order(cloid)
-            assert order is not None
-            assert order.state is OrderState.CANCELLED
-            # The operator's intent was durable before the send, so a crash
-            # between the two never lets reconcile call the order a ghost.
-            assert order.cancel_requested
-    finally:
-        reopened.close()
+    for order in _sagas(tmp_path, cloids):
+        assert order.state is OrderState.CANCELLED
+        # The operator's intent was durable before the send, so a crash
+        # between the two never lets reconcile call the order a ghost.
+        assert order.cancel_requested
+
+
+class _FillsBeforeTheCancel(VenueLink):
+    """The market trades through one order after the read and before the cancel.
+
+    So the cancel reaches the venue for an order that is already gone. A live
+    venue answers that with an error status (ADR-0060). Paper ignores it.
+    """
+
+    def __init__(self, venue: PaperExchange, bus: InMemoryBus) -> None:
+        super().__init__(venue)
+        self._bus = bus
+
+    async def cancel(self, refs: Sequence[OrderRef]) -> None:
+        await self._bus.publish(_trade("34000", aggressor=AggressorSide.SELL, ts=900))
+        await super().cancel(refs)
+
+
+def test_an_order_already_gone_at_the_venue_does_not_fail_the_run(tmp_path: Path) -> None:
+    exit_code, cloids, logs = _cancel_all(
+        tmp_path, prices=["35000", "30000", "30000"], link=_FillsBeforeTheCancel
+    )
+
+    assert exit_code == 0
+    assert logs[-1]["left"] == "none"
+    filled, *cancelled = _sagas(tmp_path, cloids)
+    assert filled.state is OrderState.FILLED
+    assert [order.state for order in cancelled] == [OrderState.CANCELLED] * 2
