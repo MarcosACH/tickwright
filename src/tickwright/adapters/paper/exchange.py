@@ -66,6 +66,7 @@ from .book import RestingBook
 from .config import DEFAULT_ACCOUNT_LABEL
 from .fill_model import Fill, FillModel
 from .funding import HOUR_NS, FundingBasis, run_funding
+from .unapplied import UnappliedFills
 
 
 class PaperExchange:
@@ -96,13 +97,10 @@ class PaperExchange:
         # charge no funding, which is indistinguishable from a correct run right
         # up until it isn't.
         self._account_net = account_net
-        # The fill ids the store has applied to one order. Required for the
-        # same reason as ``account_net``: a default would let two quick
-        # reduce-only orders both fill past the position (ADR-0057).
-        self._applied_fills = applied_fills
-        # Fills this venue published that the store has not applied yet, each
-        # with the side of its order.
-        self._unapplied: list[tuple[FillReport, Side]] = []
+        # ``applied_fills`` is required for the same reason as ``account_net``:
+        # a default would let two quick reduce-only orders both fill past the
+        # position (ADR-0057).
+        self._unapplied = UnappliedFills(applied=applied_fills)
         self._funding_interval_ns = funding_interval_ns
         # The account's opening cash is the operator's declaration, never the
         # venue's: the paper exchange has nobody to ask, and the engine supplies
@@ -458,23 +456,12 @@ class PaperExchange:
         """The account net in ``symbol``: the store net plus this venue's own
         fills the store has not applied yet (ADR-0057).
 
-        Paper publishes a fill from inside a bus handler, and the store applies
-        it only after that handler returns. Without the unapplied fills, two
-        quick reduce-only orders could both close the same position. Both reads
-        run with no await between them, so no store write lands in between. The
-        order row and the position move in one transaction (ADR-0043 §4), so no
-        fill is counted twice.
+        Both reads run with no await between them, so no store write lands in
+        between. The order row and the position move in one transaction
+        (ADR-0043 §4), so no fill is counted twice.
         """
-        self._unapplied = [
-            (fill, side)
-            for fill, side in self._unapplied
-            if fill.event_id not in self._applied_fills(fill.cloid)
-        ]
-        net = self._account_net().get(symbol, Decimal("0"))
-        for fill, side in self._unapplied:
-            if fill.symbol == symbol:
-                net += fill.quantity if side is Side.BUY else -fill.quantity
-        return net
+        unapplied = self._unapplied.signed_size(symbol)
+        return self._account_net().get(symbol, Decimal("0")) + unapplied
 
     def _crosses(self, order: PlaceOrder, tick: MarketTick) -> bool:
         """Whether a trade at ``tick.price`` matches ``order``'s LIMIT price.
@@ -587,7 +574,7 @@ class PaperExchange:
             fee=self._fee(order.symbol, fill, maker=maker),
         )
         self._fills.setdefault(order.cloid, []).append(report)
-        self._unapplied.append((report, order.side))
+        self._unapplied.record(report, order.side)
         return report
 
     def _fee(self, symbol: str, fill: Fill, *, maker: bool) -> Decimal:
