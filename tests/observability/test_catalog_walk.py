@@ -74,6 +74,7 @@ from tickwright.domain.enums import OrderType, TimeInForce
 from tickwright.engine.cache import Cache
 from tickwright.engine.checkpoint import Checkpointer
 from tickwright.engine.execution import ExecutionManager
+from tickwright.engine.exit_run import OperatorCancelAll
 from tickwright.engine.guard import RealGuard
 from tickwright.engine.ledger_reconcile import LedgerReconciliation
 from tickwright.engine.reconcile import ReconcileConfig, Reconciler
@@ -743,6 +744,28 @@ def _drive_engine_lifecycle() -> None:
     asyncio.run(go())
 
 
+def _drive_exit_finished() -> None:
+    """One operator cancel all on an empty paper account (ADR-0060)."""
+    bus = InMemoryBus()
+    clock = ManualClock()
+    engine = Engine(
+        bus=bus,
+        clock=clock,
+        store=SQLiteStore(":memory:"),
+        exchange=PaperExchange(
+            bus=bus,
+            clock=clock,
+            fill_model=ImmediateFillModel(),
+            genesis_collateral=GENESIS,
+            account_net=dict,
+            applied_fills=lambda cloid: (),
+        ),
+        feed=_IdleFeed(),
+        exit_job=OperatorCancelAll(),
+    )
+    assert asyncio.run(engine.run()) == 0
+
+
 def _drive_feed_lagged() -> None:
     """A stalled consumer while more BTC trades arrive: the live feed conflates
     at ingress — keep-latest-per-symbol — and names the drop (ADR-0023)."""
@@ -997,6 +1020,7 @@ SCENARIOS: dict[NamedEvent, Callable[[], None]] = {
     NamedEvent.ENGINE_FEED_STARTED: _drive_engine_lifecycle,
     NamedEvent.ENGINE_FAULTED: _drive_engine_faulted,
     NamedEvent.ENGINE_STOP_HOOK_FAILED: _drive_engine_stop_hook_failed,
+    NamedEvent.EXIT_FINISHED: _drive_exit_finished,
     NamedEvent.GUARD_KILL_SWITCH_TRIPPED: _drive_kill_switch(reset=False),
     NamedEvent.GUARD_KILL_SWITCH_RESET: _drive_kill_switch(reset=True),
     NamedEvent.STRATEGY_ERROR: _drive_strategy_error,
