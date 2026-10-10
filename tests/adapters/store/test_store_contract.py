@@ -819,6 +819,15 @@ def test_a_lock_is_free_again_after_close(store_backend: Backend) -> None:
         assert second.lock() is None
 
 
+def test_a_store_that_holds_its_lock_gets_it_again(store_backend: Backend) -> None:
+    """A store that already holds the lock is not another process. Asking again
+    must not refuse it, on either backend, or the two would answer differently."""
+    with store_backend.open() as store:
+        assert store.lock() is None
+
+        assert store.lock() is None
+
+
 def test_a_store_refused_its_lock_leaves_an_older_schema_as_it_found_it(
     store_backend: Backend,
 ) -> None:

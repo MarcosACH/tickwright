@@ -149,6 +149,7 @@ class SQLiteStore(SqlStore):
 
         self._conn = conn
         self._lock_file = lock_file
+        self._holds_lock = False
         super().__init__(schema=_SCHEMA, added_column_types=_ADDED_COLUMN_TYPES, release=release)
 
     @durable
@@ -156,7 +157,7 @@ class SQLiteStore(SqlStore):
         # Asking the connection for its file also makes a closed store refuse.
         # The name is empty for ":memory:", which no other process can open.
         database = self._conn.execute("PRAGMA database_list").fetchone()[2]
-        if not database:
+        if not database or self._holds_lock:
             return None
         # Never the database file itself. SQLite takes its own POSIX locks there,
         # and closing any handle to it drops all of them (ADR-0052). ``flock``
@@ -174,6 +175,9 @@ class SQLiteStore(SqlStore):
         file.write(str(os.getpid()))
         file.flush()
         self._lock_file.enter_context(file)
+        # A second ``flock`` from this store would open a new file and refuse
+        # itself. Postgres advisory locks let the same session in again.
+        self._holds_lock = True
         return None
 
     def _has_column(self, table: str, column: str) -> bool:

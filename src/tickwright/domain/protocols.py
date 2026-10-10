@@ -438,7 +438,8 @@ class Store(Protocol):
         """Take this store's exclusive lock, or say who holds it (ADR-0052).
 
         Returns ``None`` when the lock is now held by this store, and the holder
-        when another process has it. It never waits. The lock ends at ``close()``
+        when another process has it. A store that already holds it gets ``None``
+        again. It never waits. The lock ends at ``close()``
         or when the holding process dies, so a crash never leaves it stuck.
         """
         ...
