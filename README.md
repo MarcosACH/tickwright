@@ -164,6 +164,20 @@ One engine owns a store at a time. A second engine on the same store exits `1` a
 process that holds it. The lock ends when that process stops or dies, so a crash never leaves it
 stuck.
 
+### Cancel every resting order
+
+Stop the engine, then run `uv run tickwright cancel-all`. It reads the same config as a normal
+run. It cancels every order resting in the account, including orders placed by hand, and exits. It
+works on paper today. On Hyperliquid it exits `2` before it touches anything, until #470.
+
+| Exit code | Meaning |
+| --- | --- |
+| `0` | Done. A final venue read found no resting order. |
+| `1` | Stopped partway, by a signal, a fault, or orders that survived two cancels. |
+| `2` | Never started. Another engine holds the store, or the config is not usable. |
+
+The kill switch stays as it was. The last log line is `exit.finished`, which says what is left.
+
 ## What it does today
 
 - Venues: [Hyperliquid](https://hyperliquid.gitbook.io/hyperliquid-docs) (mainnet and testnet),
@@ -176,6 +190,7 @@ stuck.
   account snapshot and a disagreement is alerted.
 - Strategies: two reference strategies that place one market or one limit order. They exist to
   exercise the pipeline.
+- Operator commands: `tickwright cancel-all`, on paper.
 
 Each seam has exactly two implementations. One would look hardcoded. Three would be scope creep.
 
