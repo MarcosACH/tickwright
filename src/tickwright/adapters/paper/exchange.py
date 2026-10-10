@@ -56,6 +56,7 @@ from tickwright.domain import (
     Side,
     TimeInForce,
     VenueAccountState,
+    VenueOpenOrder,
     VenueOrderView,
     VenueReadFailure,
     fill_fee,
@@ -511,6 +512,13 @@ class PaperExchange:
             status=self._statuses.get(ref.cloid),
             fills=tuple(self._fills.get(ref.cloid, [])),
         )
+
+    async def fetch_open_orders(self) -> list[VenueOpenOrder] | VenueReadFailure:
+        """The resting book. Paper places only engine orders and assigns no oid,
+        and an in-process read cannot fail."""
+        return [
+            VenueOpenOrder(symbol=order.symbol, cloid=order.cloid) for order in self._book.resting()
+        ]
 
     async def fetch_account_state(self) -> VenueAccountState | None:
         """``None`` **always — by construction, not by failure**.
