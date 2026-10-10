@@ -9,8 +9,9 @@ already-built dependencies. Adding an impl is one ``Literal`` value in
 
 import asyncio
 import random
-from collections.abc import Mapping
-from typing import assert_never
+from collections.abc import Callable, Mapping
+from decimal import Decimal
+from typing import NamedTuple, assert_never
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import LiveClock, ManualClock
@@ -118,6 +119,7 @@ def build_exchange(
             # paper run without one, and this arm is the single reader of
             # ``config.paper`` (ADR-0042 §1).
             assert config.paper.genesis_collateral is not None
+            reads = paper_store_reads(store)
             return PaperExchange(
                 bus=bus,
                 clock=clock,
@@ -125,15 +127,8 @@ def build_exchange(
                 genesis_collateral=config.paper.genesis_collateral,
                 account_label=config.paper.account_label,
                 instrument_specs=config.paper.instrument_specs,
-                # Read per funding span, never cached: the mass-read is the
-                # ledger's own recovery read (ADR-0043 §9) and this asks it once
-                # an hour, so there is nothing to buy by holding a copy and a
-                # drift to own if we did.
-                account_net=lambda: account_net_size(store.all_positions()),
-                # The fill ids the store has applied to one order. Paper counts
-                # its own fills on top of the net until they show up here
-                # (ADR-0057).
-                applied_fills=lambda cloid: _applied_fills(store, cloid),
+                account_net=reads.account_net,
+                applied_fills=reads.applied_fills,
                 # The resolved book, the same object the margin model receives
                 # below — paper validates its bounds in ``start()`` and writes
                 # nothing (ADR-0044 §9).
@@ -163,6 +158,30 @@ def build_exchange(
             )
         case unreachable:
             assert_never(unreachable)
+
+
+class PaperStoreReads(NamedTuple):
+    """The two store reads the paper venue needs, in its own parameter names."""
+
+    account_net: Callable[[], Mapping[str, Decimal]]
+    applied_fills: Callable[[str], frozenset[str]]
+
+
+def paper_store_reads(store: Store) -> PaperStoreReads:
+    """Wire paper to the ledger.
+
+    Tests that build ``PaperExchange`` by hand call this too. A hand copy would
+    keep testing the old wiring after this one changes (issue #468).
+    """
+    return PaperStoreReads(
+        # Read per funding span, never cached: the mass-read is the ledger's own
+        # recovery read (ADR-0043 §9) and this asks it once an hour, so there is
+        # nothing to buy by holding a copy and a drift to own if we did.
+        account_net=lambda: account_net_size(store.all_positions()),
+        # The fill ids the store has applied to one order. Paper counts its own
+        # fills on top of the net until they show up here (ADR-0057).
+        applied_fills=lambda cloid: _applied_fills(store, cloid),
+    )
 
 
 def _applied_fills(store: Store, cloid: str) -> frozenset[str]:
