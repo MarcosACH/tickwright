@@ -113,3 +113,38 @@ def test_applying_a_fill_to_an_unrested_order_is_an_invariant_violation() -> Non
     # The book's contract: fills only ever land on a resting order.
     with pytest.raises(InvariantViolation):
         RestingBook().apply_fill("0xghost", Decimal("1"))
+
+
+def test_a_shrink_lowers_the_size_the_book_hands_out_and_never_raises_it() -> None:
+    # The fill model sizes a partial from the order it is handed, so that order
+    # must carry the working size, not the size the strategy asked for.
+    book = RestingBook()
+    book.rest(_limit(qty="3"))
+
+    book.shrink("0xabc", Decimal("1"))
+    book.shrink("0xabc", Decimal("2"))  # the position grew back: no effect
+
+    assert [order.quantity for order in book.resting()] == [Decimal("1")]
+    assert book.apply_fill("0xabc", Decimal("5")) == (Decimal("1"), True)
+
+
+def test_a_shrink_does_not_make_an_untouched_order_look_partly_filled() -> None:
+    book = RestingBook()
+    book.rest(_limit(qty="3"))
+
+    book.shrink("0xabc", Decimal("1"))
+
+    assert book.has_partial("0xabc") is False
+
+
+def test_a_shrink_caps_what_is_still_working_after_a_partial() -> None:
+    # Filled 1 of 3, so 2 still work. A shrink to 1 leaves 1 working, and the
+    # order now works 2 in total.
+    book = RestingBook()
+    book.rest(_limit(qty="3"))
+    book.apply_fill("0xabc", Decimal("1"))
+
+    book.shrink("0xabc", Decimal("1"))
+
+    assert [order.quantity for order in book.resting()] == [Decimal("2")]
+    assert book.apply_fill("0xabc", Decimal("5")) == (Decimal("1"), True)
