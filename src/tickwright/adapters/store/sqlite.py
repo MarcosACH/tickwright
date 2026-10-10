@@ -20,6 +20,9 @@ The members themselves are ``SqlStore``'s (``_sql``), shared with
 ``PostgresStore``. What lives here is this backend's dialect: ``?``
 placeholders, the column types the DDL needs, and how sqlite3 scopes a
 transaction.
+
+The one member written here is ``lock()``. It is an OS lock on ``<db>.lock``
+(ADR-0052).
 """
 
 import fcntl

@@ -11,6 +11,9 @@ What an adapter still owns is its dialect, and nothing else: the driver's
 error base (``_durability``), the parameter marker, the DDL column types, the
 catalog query behind ``_has_column``, the connection, and how that driver
 scopes a transaction and runs a batch write.
+
+One member is the exception. Each adapter writes its own ``lock()``, for the
+reason the ``SqlStore`` docstring gives.
 """
 
 import weakref

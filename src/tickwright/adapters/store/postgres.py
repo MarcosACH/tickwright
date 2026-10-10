@@ -8,7 +8,9 @@ table), and no processed-event table: dedup is ``Order.apply``'s job (ADR-0025).
 The members themselves are ``SqlStore``'s (``_sql``), shared with
 ``SQLiteStore``. What lives here is this backend's dialect: ``%s``
 placeholders, the column types the DDL needs (``BIGINT``, ``BYTEA``,
-``BOOLEAN``) and this driver's transaction and cursor handling.
+``BOOLEAN``) and this driver's transaction and cursor handling. The one member
+written here is ``lock()``. It is an advisory lock on the write connection
+(ADR-0052).
 
 Money stays ``TEXT`` here rather than ``NUMERIC`` (ADR-0043 §7). ``NUMERIC``
 normalises representation — ``1000`` for ``1E+3``, ``0.00000000`` for ``0E-8`` —
