@@ -41,6 +41,13 @@ class StoreAccountMismatch(InvariantViolation):
     """
 
 
+class StoreLockHeld(InvariantViolation):
+    """Another process holds this store's lock, so this engine must not touch it
+    (ADR-0052). The message is the holder's detail, which says how to end it.
+    Under a supervisor the engine is restarted, so it retries until the holder
+    is gone."""
+
+
 class VenueFactUnsupported(InvariantViolation):
     """The venue said something this engine cannot act on and will say it
     identically forever (ADR-0048). Two conditions qualify:

@@ -13,6 +13,7 @@ so a test can checkpoint, close, reopen, and prove the record survived.
 
 import os
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import psycopg
@@ -49,8 +50,15 @@ class SQLiteBackend:
     def drop_column(self, table: str, column: str) -> None:
         """Age the backing file: remove a column a newer schema added, so a
         reopen sees a database written before that column existed."""
-        with sqlite3.connect(self._path) as conn:
+        # ``closing`` because a sqlite3 connection's own ``with`` only commits.
+        with closing(sqlite3.connect(self._path)) as conn, conn:
             conn.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+
+    def has_column(self, table: str, column: str) -> bool:
+        """Whether the backing file's ``table`` carries ``column``, read past the store."""
+        with closing(sqlite3.connect(self._path)) as conn:
+            rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        return any(row[1] == column for row in rows)
 
 
 class PostgresBackend:
@@ -72,8 +80,23 @@ class PostgresBackend:
                 )
             )
 
+    def has_column(self, table: str, column: str) -> bool:
+        """Whether the database's ``table`` carries ``column``, read past the store."""
+        with psycopg.connect(self._dsn, autocommit=True) as conn:
+            row = conn.execute(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_schema = current_schema() AND table_name = %s AND column_name = %s",
+                (table, column),
+            ).fetchone()
+        return row is not None
+
+    def terminate(self, pid: int) -> None:
+        """End the server session ``pid``, the way the operator would."""
+        with psycopg.connect(self._dsn, autocommit=True) as conn:
+            conn.execute("SELECT pg_terminate_backend(%s)", (pid,))
+
     def reset(self) -> None:
-        """Create the schema (a store open runs the DDL) and truncate every table,
+        """Create the schema (a store's first use runs the DDL) and truncate every table,
         so each test starts from a clean, isolated slate against the shared server.
 
         The table list comes from the server's own catalog rather than a literal
@@ -93,7 +116,8 @@ class PostgresBackend:
         while a too-wide one can only destroy data the suite was already told to
         treat as disposable.
         """
-        PostgresStore(self._dsn).close()
+        with PostgresStore(self._dsn) as store:
+            store.has_orders()
         with psycopg.connect(self._dsn, autocommit=True) as conn:
             tables = [
                 name

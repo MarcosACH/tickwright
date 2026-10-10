@@ -17,6 +17,7 @@ from .events import Event, MarketTick, OrderEvent, PlaceSignal
 from .instrument import GuardDecision, InstrumentSpec, KillSwitchState, PreTradeReading
 from .order import Order
 from .position import Position, PositionView
+from .store_lock import StoreLockHolder
 from .venue import (
     AccountModeVerdict,
     OrderRef,
@@ -431,6 +432,16 @@ class Store(Protocol):
         surface is a seam a conforming implementation cannot actually be swapped
         into. Recovery still rebuilds from the current record alone; this is the
         audit half, and audit is a real audience, not an accident."""
+        ...
+
+    def lock(self) -> StoreLockHolder | None:
+        """Take this store's exclusive lock, or say who holds it (ADR-0052).
+
+        Returns ``None`` when the lock is now held by this store, and the holder
+        when another process has it. A store that already holds it gets ``None``
+        again. It never waits. The lock ends at ``close()``
+        or when the holding process dies, so a crash never leaves it stuck.
+        """
         ...
 
     def close(self) -> None:

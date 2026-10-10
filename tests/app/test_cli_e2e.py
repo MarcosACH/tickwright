@@ -225,3 +225,41 @@ def test_cli_replays_trades_and_exits_zero_on_sigterm(
         assert reader.get_order(derive_cloid("rester:ETH:2")) is None
     finally:
         reader.close()
+
+
+def test_a_second_engine_on_the_same_store_exits_1_until_the_first_is_killed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One engine owns a store at a time (ADR-0052). A second one exits 1 and
+    names the first one's pid, and the first keeps running. The lock dies with
+    its process, so after a SIGKILL a new engine starts on the same store."""
+    _write_workspace(tmp_path)
+    _export_hostile_config(monkeypatch)
+
+    with _spawn(tmp_path, tmp_path / "first.log") as first:
+        try:
+            _await_event(tmp_path / "first.log", "engine.barrier_cleared")
+
+            second_log = tmp_path / "second.log"
+            with _spawn(tmp_path, second_log) as second:
+                try:
+                    exit_code = second.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    second.kill()
+                    raise AssertionError("the second engine ran on a held store") from None
+                assert exit_code == 1
+            assert "engine.faulted" in second_log.read_text()
+            assert f"Process {first.pid} holds" in second_log.read_text()
+            assert first.poll() is None, "the first engine must keep running"
+        finally:
+            first.kill()
+        first.wait(timeout=15)
+
+    third_log = tmp_path / "third.log"
+    with _spawn(tmp_path, third_log) as third:
+        try:
+            _await_event(third_log, "engine.barrier_cleared")
+        except BaseException:
+            third.kill()
+            raise AssertionError(f"restart failed; stderr:\n{third_log.read_text()}") from None
+        assert _terminate(third) == 0

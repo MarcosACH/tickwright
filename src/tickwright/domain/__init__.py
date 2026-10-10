@@ -22,6 +22,7 @@ from .errors import (
     LeverageOutOfBounds,
     StartupReconciliationTimeout,
     StoreAccountMismatch,
+    StoreLockHeld,
     VenueAccountModeUnsupported,
     VenueFactUnsupported,
     VenueLeverageMismatch,
@@ -100,6 +101,7 @@ from .protocols import (
     Store,
     Strategy,
 )
+from .store_lock import StoreLockHolder
 from .valuation import (
     LiquidationSource,
     SymbolValuation,
@@ -131,6 +133,7 @@ __all__ = [
     "LeverageOutOfBounds",
     "StartupReconciliationTimeout",
     "StoreAccountMismatch",
+    "StoreLockHeld",
     "VenueAccountModeUnsupported",
     "VenueFactUnsupported",
     "VenueLeverageMismatch",
@@ -183,6 +186,7 @@ __all__ = [
     "PreTradeReading",
     "ReconciliationFill",
     "Signal",
+    "StoreLockHolder",
     "SymbolOwnership",
     "VenueAccountState",
     "VenueOrderView",

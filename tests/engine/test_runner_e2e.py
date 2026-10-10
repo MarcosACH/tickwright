@@ -19,6 +19,7 @@ from pathlib import Path
 from kafka_fakes import FakeKafkaBroker
 from ledgers import GENESIS
 from recovery_stores import RecoveryOrderStore
+from store_backends import SQLiteBackend
 from structlog.typing import EventDict
 from venue_doubles import (
     DERIVED_GENESIS,
@@ -296,6 +297,66 @@ def test_a_restart_on_a_changed_genesis_refuses_before_a_tick_is_ever_replayed(
         assert row.genesis_collateral == GENESIS  # the first life's, unrewritten
     finally:
         reopened.close()
+
+
+def test_an_engine_on_a_store_another_process_holds_faults_and_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    """Two engines on one store would each trade every saga in it (ADR-0052). So
+    the engine takes the store lock first, before ``recover()`` writes the account
+    row. A held lock faults the run, and the trail names the holder.
+
+    A strategy is registered so that a teardown would snapshot it. The holder's
+    schema is older, so a schema upgrade would write too. The store is the other
+    engine's, so neither write may land."""
+    db = tmp_path / "saga.db"
+    holder = SQLiteStore(db)
+    assert holder.lock() is None
+    assert holder.has_orders() is False  # the holder's first use creates its schema
+    backing = SQLiteBackend(db)
+    backing.drop_column("orders", "created_ts_ns")
+    bus = InMemoryBus()
+    clock = ManualClock()
+    engine = Engine(
+        bus=bus,
+        clock=clock,
+        store=SQLiteStore(db),
+        exchange=PaperExchange(
+            bus=bus,
+            clock=clock,
+            fill_model=ImmediateFillModel(),
+            genesis_collateral=GENESIS,
+            account_net=dict,
+        ),
+        feed=ReplayFeed(path=_write_ticks(tmp_path / "ticks.jsonl"), bus=bus, clock=clock),
+    )
+    engine.register(
+        SingleShotMarketStrategy(
+            strategy_id="trivial",
+            bus=bus,
+            clock=clock,
+            portfolio=engine.portfolio_for("trivial"),
+            side=Side.BUY,
+            quantity=Decimal("0.5"),
+        ),
+        symbols={"BTC"},
+    )
+
+    with capture_events() as logs:
+        # Bounded, because an engine that ignores the lock runs until stopped.
+        exit_code = asyncio.run(asyncio.wait_for(engine.run(), timeout=5))
+
+    assert exit_code == 1
+    assert engine.state is ComponentState.FAULTED
+    faults = [log for log in logs if log["event"] == "engine.faulted"]
+    assert len(faults) == 1
+    assert f"Process {os.getpid()} holds" in faults[0]["error"]
+    assert not backing.has_column("orders", "created_ts_ns")
+    try:
+        assert holder.load_account() is None
+        assert holder.load_strategy_snapshot("trivial") is None
+    finally:
+        holder.close()
 
 
 def test_a_strategy_reads_back_the_fill_the_engine_wrote(tmp_path: Path) -> None:

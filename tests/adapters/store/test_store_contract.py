@@ -124,6 +124,7 @@ _SEAM_CALLS: Mapping[str, Callable[[Store], object]] = {
     "all_positions": lambda store: store.all_positions(),
     "load_account": lambda store: store.load_account(),
     "funding_mark": lambda store: store.funding_mark("BTC"),
+    "lock": lambda store: store.lock(),
 }
 
 
@@ -793,3 +794,72 @@ def test_a_store_with_order_history_and_no_ledger_opens_and_reads_it_empty(
         assert reopened.load_account() is None
         assert reopened.all_positions() == []
         assert reopened.funding_mark("BTC") is None
+
+
+def test_a_second_lock_on_the_same_store_returns_the_holder(store_backend: Backend) -> None:
+    """Two engines on one store would each believe they own every saga in it
+    (ADR-0052). So the first ``lock()`` wins and each later one is told who has
+    it. The pid is in the detail because the operator acts on it."""
+    with store_backend.open() as first, store_backend.open() as second:
+        assert first.lock() is None
+
+        holder = second.lock()
+
+        assert holder is not None
+        assert str(holder.pid) in holder.detail
+
+
+def test_a_lock_is_free_again_after_close(store_backend: Backend) -> None:
+    """A stopped engine must not keep the next one out. ``close()`` is the last
+    step of the engine's shutdown, so it is where the lock ends (ADR-0052)."""
+    with store_backend.open() as first:
+        assert first.lock() is None
+
+    with store_backend.open() as second:
+        assert second.lock() is None
+
+
+def test_a_store_that_holds_its_lock_gets_it_again(store_backend: Backend) -> None:
+    """A store that already holds the lock is not another process. Asking again
+    must not refuse it, on either backend, or the two would answer differently."""
+    with store_backend.open() as store:
+        assert store.lock() is None
+
+        assert store.lock() is None
+
+
+def test_a_store_refused_its_lock_leaves_an_older_schema_as_it_found_it(
+    store_backend: Backend,
+) -> None:
+    """An upgrade adds columns to an older store and fills them in. That is a
+    write, so it must wait for the lock (ADR-0052). Otherwise a newer engine
+    started beside a running older one would change the older one's tables
+    before it was refused."""
+    with store_backend.open() as holder:
+        assert holder.lock() is None
+        holder.checkpoint(_order(), ts_ns=1_000)
+        store_backend.drop_column("orders", "created_ts_ns")
+
+        with store_backend.open() as refused:
+            assert refused.lock() is not None
+
+        assert not store_backend.has_column("orders", "created_ts_ns")
+
+
+def test_a_postgres_holder_pid_is_the_session_that_holds_the_lock(
+    store_backend: Backend,
+) -> None:
+    """The refusal tells the operator to run ``pg_terminate_backend(<pid>)``
+    (ADR-0052). That only works if the pid is the holder's own session, so ending
+    that session must free the lock."""
+    if not isinstance(store_backend, PostgresBackend):
+        pytest.skip("only a Postgres holder is a server session")
+    with store_backend.open() as first, store_backend.open() as second:
+        assert first.lock() is None
+        holder = second.lock()
+        assert holder is not None
+        assert holder.pid is not None
+
+        store_backend.terminate(holder.pid)
+
+        assert second.lock() is None
