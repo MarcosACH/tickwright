@@ -459,3 +459,23 @@ def test_two_quick_reduce_only_sells_cannot_both_close_the_same_long(tmp_path: P
     assert life.strategy.states(2)[-1] is OrderState.REJECTED
     assert life.strategy.reason(2) == "reduce-only order would increase position"
     assert _size(life) == Decimal("0")
+
+
+def test_a_later_reduce_only_order_sees_only_the_store_net(tmp_path: Path) -> None:
+    # Long 3, then a reduce-only sell of 1 leaves 2. By 4s the store has
+    # applied every fill, so paper must count none of its own on top. A sell
+    # of 5 then shrinks to 2 and the account ends flat. If paper still counted
+    # the applied fills, it would see a net of 4 and end short 2.
+    life = _wire(
+        tmp_path,
+        {0: [buy("3")], 2: [reduce_only_sell("1")], 4: [reduce_only_sell("5")]},
+    )
+
+    _run(life, lambda: len(life.strategy.sent) == 3 and life.strategy.all_terminal())
+
+    assert life.strategy.filled(2) == Decimal("2")
+    assert life.strategy.states(2)[-1] is OrderState.CANCELLED
+    assert [r.reason for r in life.reports if r.status is OrderState.CANCELLED] == [
+        "reduce-only shrink"
+    ]
+    assert _size(life) == Decimal("0")
