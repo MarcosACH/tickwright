@@ -809,6 +809,16 @@ def test_a_second_lock_on_the_same_store_returns_the_holder(store_backend: Backe
         assert str(holder.pid) in holder.detail
 
 
+def test_a_lock_is_free_again_after_close(store_backend: Backend) -> None:
+    """A stopped engine must not keep the next one out. ``close()`` is the last
+    step of the engine's shutdown, so it is where the lock ends (ADR-0052)."""
+    with store_backend.open() as first:
+        assert first.lock() is None
+
+    with store_backend.open() as second:
+        assert second.lock() is None
+
+
 def test_a_postgres_holder_pid_is_the_session_that_holds_the_lock(
     store_backend: Backend,
 ) -> None:
