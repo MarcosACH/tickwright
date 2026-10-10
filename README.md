@@ -132,6 +132,7 @@ sequenceDiagram
     participant E as Engine
     participant S as Store
     participant V as Venue
+    E->>S: take the store lock
     E->>S: restore orders, positions, account, kill switch
     loop each non-terminal order
         E->>V: read order by client order id
@@ -158,6 +159,10 @@ durable too. A halt outlives a crash and is cleared only by an explicit reset.
 | `SIGUSR2` | Reset the kill switch. |
 
 A non-zero exit means the engine faulted. That is the restart signal for your supervisor.
+
+One engine owns a store at a time. A second engine on the same store exits `1` and names the
+process that holds it. The lock ends when that process stops or dies, so a crash never leaves it
+stuck.
 
 ## What it does today
 

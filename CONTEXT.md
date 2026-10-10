@@ -234,6 +234,9 @@ row, and one funding watermark per symbol. Ledger rows are **current-state, upse
 (recovery is a read, never a replay), and a ledger mutation is written in **one transaction with
 the order checkpoint** it belongs to. Impls: `SQLiteStore` (default, zero-setup) +
 `PostgresStore` (production parity).
+One engine owns a store at a time. The engine takes the store's exclusive lock before it writes
+anything, and a held lock faults the run. The lock ends at `close()` or when the holding process
+dies, so a crash never leaves it stuck. See ADR-0052.
 Paired with the [[EventBus]] backend — InMemory+SQLite or Kafka+Postgres. See ADR-0019, ADR-0043.
 _Avoid_: database, persistence layer (fine informally), repository.
 
