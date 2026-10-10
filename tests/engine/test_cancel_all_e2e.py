@@ -11,6 +11,7 @@ from collections.abc import Callable, Sequence
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
 from ledgers import GENESIS, checkpointer
 from structlog.typing import EventDict
 from venue_doubles import VenueLink
@@ -36,6 +37,7 @@ from tickwright.domain import (
 )
 from tickwright.engine.checkpoint import Checkpointer
 from tickwright.engine.exit_run import OperatorCancelAll
+from tickwright.engine.guard import RealGuard
 from tickwright.engine.runner import Engine
 from tickwright.observability.testing import capture_events
 
@@ -174,11 +176,14 @@ def _cancel_all(
     *,
     prices: Sequence[str],
     link: Callable[[PaperExchange, InMemoryBus], Exchange] | None = None,
+    kill_switch: bool | None = None,
 ) -> tuple[int, list[str], list[EventDict]]:
     """Rest one BUY per price on paper, then run cancel all over it.
 
-    ``link`` puts a venue double in front of paper. Returns the exit code, the
-    cloids in price order, and every event the run emitted.
+    ``link`` puts a venue double in front of paper. ``kill_switch`` stores that
+    state before the run and gives the engine a real guard to restore it.
+    Returns the exit code, the cloids in price order, and every event the run
+    emitted.
     """
     bus = InMemoryBus()
     clock = ManualClock()
@@ -202,12 +207,17 @@ def _cancel_all(
             await _rest(paper, sagas, seq=seq, price=price)
             for seq, price in enumerate(prices, start=1)
         ]
+        guard = None
+        if kill_switch is not None:
+            store.save_kill_switch(tripped=kill_switch, reason="operator halt", ts_ns=0)
+            guard = RealGuard(specs=paper.instrument_specs(), store=store, clock=clock)
         engine = Engine(
             bus=bus,
             clock=clock,
             store=store,
             exchange=paper if link is None else link(paper, bus),
             feed=ReplayFeed(path=_ticks(tmp_path / "ticks.jsonl"), bus=bus, clock=clock),
+            guard=guard,
             exit_job=OperatorCancelAll(),
         )
         return await asyncio.wait_for(engine.run(), timeout=5), cloids
@@ -239,6 +249,26 @@ def test_an_exit_run_cancels_every_resting_order_and_leaves_none(tmp_path: Path)
         # The operator's intent was durable before the send, so a crash
         # between the two never lets reconcile call the order a ghost.
         assert order.cancel_requested
+
+
+@pytest.mark.parametrize("tripped", [True, False])
+def test_cancel_all_leaves_the_kill_switch_as_it_found_it(tmp_path: Path, tripped: bool) -> None:
+    exit_code, cloids, logs = _cancel_all(tmp_path, prices=["30000"], kill_switch=tripped)
+
+    # A tripped switch halts new orders only. The cancels still go out.
+    assert exit_code == 0
+    assert [order.state for order in _sagas(tmp_path, cloids)] == [OrderState.CANCELLED]
+    events = [log["event"] for log in logs]
+    assert "guard.kill_switch_tripped" not in events
+    assert "guard.kill_switch_reset" not in events
+    store = SQLiteStore(tmp_path / "saga.db")
+    try:
+        state = store.load_kill_switch()
+    finally:
+        store.close()
+    assert state is not None
+    assert state.tripped is tripped
+    assert state.reason == "operator halt"
 
 
 class _FillsBeforeTheCancel(VenueLink):
