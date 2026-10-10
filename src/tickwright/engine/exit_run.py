@@ -6,6 +6,7 @@ because the engine builds those parts itself and the composition root never
 sees them.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
@@ -18,6 +19,7 @@ from tickwright.domain import (
     VenueOpenOrder,
     VenueReadFailure,
 )
+from tickwright.observability import NamedEvent, named_event
 
 from .checkpoint import Checkpointer
 
@@ -66,14 +68,38 @@ class OperatorCancelAll:
     name = "cancel_all"
 
     async def run(self, context: ExitContext) -> ExitOutcome:
-        resting = await context.account.fetch_open_orders()
-        if isinstance(resting, VenueReadFailure):
-            return ExitOutcome(status=ExitStatus.STOPPED, left=resting)
-        refs = [_mark(order, context.checkpointer) for order in resting]
-        if refs:
-            await context.orders.cancel(refs)
         left = await context.account.fetch_open_orders()
+        # One cancel, then one more for whatever the read still shows (ADR-0060).
+        for _ in range(2):
+            left = await _cancel_round(left, context)
+        if isinstance(left, VenueReadFailure):
+            return ExitOutcome(status=ExitStatus.STOPPED, left=left)
+        if left:
+            named_event(NamedEvent.CANCEL_ALL_ORDERS_REMAIN, orders=describe_orders(left))
+            return ExitOutcome(status=ExitStatus.STOPPED, left=left)
         return ExitOutcome(status=ExitStatus.DONE, left=left)
+
+
+def describe_orders(orders: Sequence[VenueOpenOrder]) -> str:
+    """Name each order by its oid, or by its cloid where the venue gives no oid.
+
+    One string, because every catalog field is a scalar.
+    """
+    return ",".join(order.venue_oid or order.cloid or "?" for order in orders)
+
+
+async def _cancel_round(
+    resting: list[VenueOpenOrder] | VenueReadFailure, context: ExitContext
+) -> list[VenueOpenOrder] | VenueReadFailure:
+    """Cancel what ``resting`` shows, then read again.
+
+    A failed read or an empty book is returned as it is, with nothing sent. The
+    cancel statuses are never read. Only the next read says what is left.
+    """
+    if isinstance(resting, VenueReadFailure) or not resting:
+        return resting
+    await context.orders.cancel([_mark(order, context.checkpointer) for order in resting])
+    return await context.account.fetch_open_orders()
 
 
 def _mark(order: VenueOpenOrder, checkpointer: Checkpointer) -> OrderRef:

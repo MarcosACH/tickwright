@@ -53,7 +53,7 @@ from .barrier import StartupBarrier
 from .cadence import run_cadence
 from .checkpoint import Checkpointer
 from .execution import ExecutionManager
-from .exit_run import ExitContext, ExitJob, ExitOutcome, ExitStatus
+from .exit_run import ExitContext, ExitJob, ExitOutcome, ExitStatus, describe_orders
 from .guard import NoopGuard
 from .ledger_reconcile import LedgerReconciliation, ValuationBand
 from .portfolio import PortfolioProjection
@@ -104,8 +104,7 @@ def _first_leaf(exc: BaseException) -> BaseException:
 def _describe_left(outcome: ExitOutcome | None) -> str:
     """What the job's last venue read left, for ``exit.finished`` (ADR-0060).
 
-    One string, because every catalog field is a scalar. Each order is named by
-    its oid, or by its cloid where the venue gives no oid.
+    One string, because every catalog field is a scalar.
     """
     if outcome is None:
         return "unread"
@@ -113,7 +112,7 @@ def _describe_left(outcome: ExitOutcome | None) -> str:
         return f"read_failed: {outcome.left.value}"
     if not outcome.left:
         return "none"
-    return ",".join(order.venue_oid or order.cloid or "?" for order in outcome.left)
+    return describe_orders(outcome.left)
 
 
 class Engine:

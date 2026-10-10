@@ -267,3 +267,43 @@ def test_an_order_already_gone_at_the_venue_does_not_fail_the_run(tmp_path: Path
     filled, *cancelled = _sagas(tmp_path, cloids)
     assert filled.state is OrderState.FILLED
     assert [order.state for order in cancelled] == [OrderState.CANCELLED] * 2
+
+
+_STUCK = derive_cloid("resting:BTC:1")
+"""The first order ``_cancel_all`` rests, by the cloid ``_rest`` derives for it."""
+
+
+class _LosesEveryCancelForOne(VenueLink):
+    """Every cancel for ``_STUCK`` is lost on the way, so it stays resting."""
+
+    def __init__(self, venue: PaperExchange, bus: InMemoryBus) -> None:
+        super().__init__(venue)
+        self.sends_for_stuck = 0
+
+    async def cancel(self, refs: Sequence[OrderRef]) -> None:
+        self.sends_for_stuck += sum(ref.cloid == _STUCK for ref in refs)
+        await super().cancel([ref for ref in refs if ref.cloid != _STUCK])
+
+
+def test_an_order_resting_through_both_cancels_stops_the_run_with_exit_one(
+    tmp_path: Path,
+) -> None:
+    links: list[_LosesEveryCancelForOne] = []
+
+    def link(paper: PaperExchange, bus: InMemoryBus) -> Exchange:
+        links.append(_LosesEveryCancelForOne(paper, bus))
+        return links[-1]
+
+    exit_code, cloids, logs = _cancel_all(tmp_path, prices=["30000", "30000", "30000"], link=link)
+
+    assert exit_code == 1
+    # One cancel, then one more for what the second read still showed.
+    assert links[0].sends_for_stuck == 2
+    remain = [log for log in logs if log["event"] == "cancel_all.orders_remain"]
+    assert [log["orders"] for log in remain] == [_STUCK]
+    assert logs[-1]["event"] == "exit.finished"
+    assert logs[-1]["outcome"] == "stopped"
+    assert logs[-1]["left"] == _STUCK
+    stuck, *cancelled = _sagas(tmp_path, cloids)
+    assert stuck.state is OrderState.LIVE
+    assert [order.state for order in cancelled] == [OrderState.CANCELLED] * 2

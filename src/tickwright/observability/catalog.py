@@ -61,6 +61,7 @@ class NamedEvent(StrEnum):
     # Operator exit runs (``Engine`` with an ``ExitJob``, ADR-0060).
     # ``exit.finished`` is the last event of every exit run that booted.
     EXIT_FINISHED = "exit.finished"
+    CANCEL_ALL_ORDERS_REMAIN = "cancel_all.orders_remain"
 
     # Pre-trade kill switch (``PreTradeGuard``).
     GUARD_KILL_SWITCH_TRIPPED = "guard.kill_switch_tripped"
@@ -273,6 +274,7 @@ FIELDS: dict[NamedEvent, frozenset[str]] = {
     NamedEvent.ENGINE_FAULTED: frozenset({"error"}),
     NamedEvent.ENGINE_STOP_HOOK_FAILED: frozenset({"hook", "error"}),
     NamedEvent.EXIT_FINISHED: frozenset({"job", "outcome", "exit_code", "left"}),
+    NamedEvent.CANCEL_ALL_ORDERS_REMAIN: frozenset({"orders"}),
     NamedEvent.GUARD_KILL_SWITCH_TRIPPED: frozenset({"reason"}),
     NamedEvent.GUARD_KILL_SWITCH_RESET: frozenset(),
     NamedEvent.STRATEGY_ERROR: frozenset({"strategy_id", "event_id", "error"}),

@@ -36,6 +36,7 @@ from venue_doubles import (
     RECORDED_ENTRY_PRICE,
     LiveVenueDouble,
     VenueDouble,
+    VenueLink,
     account_state,
 )
 
@@ -766,6 +767,52 @@ def _drive_exit_finished() -> None:
     assert asyncio.run(engine.run()) == 0
 
 
+class _DeafToCancels(VenueLink):
+    """A venue that never receives a cancel, so its orders stay resting."""
+
+    async def cancel(self, refs: Sequence[OrderRef]) -> None:
+        return None
+
+
+def _drive_cancel_all_orders_remain() -> None:
+    """One resting order survives both cancels of an operator cancel all (ADR-0060)."""
+    bus = InMemoryBus()
+    clock = ManualClock()
+    paper = PaperExchange(
+        bus=bus,
+        clock=clock,
+        fill_model=ImmediateFillModel(),
+        genesis_collateral=GENESIS,
+        account_net=dict,
+        applied_fills=lambda cloid: (),
+    )
+    engine = Engine(
+        bus=bus,
+        clock=clock,
+        store=SQLiteStore(":memory:"),
+        exchange=_DeafToCancels(paper),
+        feed=_IdleFeed(),
+        exit_job=OperatorCancelAll(),
+    )
+
+    async def go() -> int:
+        await bus.publish(_tick())
+        await paper.place(
+            PlaceOrder(
+                cloid="0xabc",
+                symbol="BTC",
+                side=Side.BUY,
+                quantity=Decimal("0.1"),
+                order_type=OrderType.LIMIT,
+                time_in_force=TimeInForce.GTC,
+                price=Decimal("30000"),
+            )
+        )
+        return await engine.run()
+
+    assert asyncio.run(go()) == 1
+
+
 def _drive_feed_lagged() -> None:
     """A stalled consumer while more BTC trades arrive: the live feed conflates
     at ingress — keep-latest-per-symbol — and names the drop (ADR-0023)."""
@@ -1021,6 +1068,7 @@ SCENARIOS: dict[NamedEvent, Callable[[], None]] = {
     NamedEvent.ENGINE_FAULTED: _drive_engine_faulted,
     NamedEvent.ENGINE_STOP_HOOK_FAILED: _drive_engine_stop_hook_failed,
     NamedEvent.EXIT_FINISHED: _drive_exit_finished,
+    NamedEvent.CANCEL_ALL_ORDERS_REMAIN: _drive_cancel_all_orders_remain,
     NamedEvent.GUARD_KILL_SWITCH_TRIPPED: _drive_kill_switch(reset=False),
     NamedEvent.GUARD_KILL_SWITCH_RESET: _drive_kill_switch(reset=True),
     NamedEvent.STRATEGY_ERROR: _drive_strategy_error,
