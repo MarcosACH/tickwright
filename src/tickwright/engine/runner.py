@@ -202,6 +202,7 @@ class Engine:
         self._stopped = asyncio.Event()
         self._feed_task: asyncio.Task[None] | None = None
         self._exchange_task: asyncio.Task[None] | None = None
+        self._exit_task: asyncio.Task[None] | None = None
         self._cadence_tasks: list[asyncio.Task[None]] = []
 
     @property
@@ -280,7 +281,7 @@ class Engine:
                 if self._exit_job is None:
                     await self._start_feed(tg)
                 else:
-                    tg.create_task(self._run_exit_job(self._exit_job))
+                    self._exit_task = tg.create_task(self._run_exit_job(self._exit_job))
                 tg.create_task(self._stop_when_requested())
         except Exception as exc:
             # The first raw-handler exception aborted the TaskGroup and
@@ -601,9 +602,9 @@ class Engine:
         second call as an error, in the one window where nothing can act on it.
         The five that cross a seam say so at that seam — ``MarketFeed.stop``,
         ``Exchange.stop``, ``EventBus.drain``, ``EventBus.close``,
-        ``Store.close``; the other two are the engine's own and answer for it
-        here (``_stop_cadences`` re-cancels tasks already done, a no-op, and
-        ``StrategyHost.stop`` retakes the final snapshots into the same
+        ``Store.close``; the other three are the engine's own and answer for it
+        here (``_stop_cadences`` and ``_stop_exit_job`` re-cancel tasks already
+        done, a no-op, and ``StrategyHost.stop`` retakes the final snapshots into the same
         latest-wins row per strategy — a rewrite, not a second effect). The two
         entries that are both — ``feed.stop`` and ``exchange.stop`` wrap a seam
         call *and* a task cancellation — inherit the property from each half.
@@ -616,6 +617,7 @@ class Engine:
         return (
             ("feed.stop", self._stop_feed),
             ("reconcile.stop", self._stop_cadences),
+            ("exit_job.stop", self._stop_exit_job),
             ("exchange.stop", self._stop_exchange),
             ("bus.drain", self._bus.drain),
             *host_stop,
@@ -631,6 +633,16 @@ class Engine:
         for task in self._cadence_tasks:
             task.cancel()
         await asyncio.gather(*self._cadence_tasks, return_exceptions=True)
+
+    async def _stop_exit_job(self) -> None:
+        """End an exit job a signal interrupted, before the venue it reads is
+        released. A job that already returned is done, so this is a no-op. A
+        cancel it was sending may or may not land. Its saga mark is already
+        durable, so restart reconciliation reads the truth either way."""
+        if self._exit_task is None:
+            return
+        self._exit_task.cancel()
+        await asyncio.gather(self._exit_task, return_exceptions=True)
 
     async def _stop_exchange(self) -> None:
         """Release the venue, then end the long-lived half this runner supervises."""

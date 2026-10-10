@@ -8,6 +8,7 @@ run, then does its one job and exits with the ADR-0060 code.
 import asyncio
 import json
 import os
+import signal
 from collections.abc import Callable, Sequence
 from decimal import Decimal
 from pathlib import Path
@@ -34,6 +35,8 @@ from tickwright.domain import (
     PlaceOrder,
     Side,
     TimeInForce,
+    VenueOpenOrder,
+    VenueReadFailure,
     derive_cloid,
 )
 from tickwright.engine.checkpoint import Checkpointer
@@ -159,6 +162,56 @@ def test_an_exit_run_on_a_store_another_engine_holds_exits_two_and_writes_nothin
         assert holder.load_account() is None
     finally:
         holder.close()
+
+
+class _ReadThatNeverAnswers(VenueLink):
+    """The account read hangs, as on a venue that stopped answering."""
+
+    def __init__(self, venue: PaperExchange) -> None:
+        super().__init__(venue)
+        self.reading = asyncio.Event()
+
+    async def fetch_open_orders(self) -> list[VenueOpenOrder] | VenueReadFailure:
+        self.reading.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+
+def test_sigterm_during_cancel_all_stops_the_run_with_exit_one(tmp_path: Path) -> None:
+    async def go() -> int:
+        bus = InMemoryBus()
+        clock = ManualClock()
+        venue = _ReadThatNeverAnswers(
+            PaperExchange(
+                bus=bus,
+                clock=clock,
+                fill_model=ImmediateFillModel(),
+                genesis_collateral=GENESIS,
+                account_net=dict,
+                applied_fills=lambda cloid: (),
+            )
+        )
+        engine = Engine(
+            bus=bus,
+            clock=clock,
+            store=SQLiteStore(tmp_path / "saga.db"),
+            exchange=venue,
+            feed=ReplayFeed(path=_ticks(tmp_path / "ticks.jsonl"), bus=bus, clock=clock),
+            exit_job=OperatorCancelAll(),
+        )
+        run = asyncio.create_task(engine.run())
+        await asyncio.wait_for(venue.reading.wait(), timeout=5)
+        os.kill(os.getpid(), signal.SIGTERM)
+        return await asyncio.wait_for(run, timeout=5)
+
+    with capture_events() as logs:
+        exit_code = asyncio.run(go())
+
+    # The job never said the venue is clear, so the run is not done (ADR-0060).
+    assert exit_code == 1
+    assert logs[-1]["event"] == "exit.finished"
+    assert logs[-1]["outcome"] == "stopped"
+    assert logs[-1]["exit_code"] == 1
 
 
 async def _rest(exchange: PaperExchange, sagas: Checkpointer, *, seq: int, price: str) -> str:
