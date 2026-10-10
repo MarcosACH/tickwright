@@ -5,6 +5,9 @@ reopen, upserts, kill-switch — lives in ``test_store_contract.py`` and runs
 against both adapters. What remains here is the one thing only ``SQLiteStore``
 has: the ``:memory:`` default, the zero-setup in-process store the hermetic
 paper + in-memory-bus path recovers from with nothing installed.
+
+The lock file is here too. It is an OS lock on ``<db>.lock``, and only SQLite has
+one (ADR-0052).
 """
 
 import errno
@@ -69,6 +72,21 @@ def test_a_held_lock_names_the_holder_pid_and_the_lock_file(tmp_path: Path) -> N
         assert holder is not None
         assert holder.pid == os.getpid()
         assert str(tmp_path / "tickwright.db.lock") in holder.detail
+
+
+def test_a_lock_held_before_its_pid_is_written_is_still_a_refusal(tmp_path: Path) -> None:
+    """A holder takes the lock first and writes its pid after. A store that
+    asks in between finds no pid. The lock still decides, so it is refused, and
+    the message still names the lock file."""
+    db = tmp_path / "tickwright.db"
+    with open(f"{db}.lock", "a+") as pidless:
+        fcntl.flock(pidless, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with SQLiteStore(db) as store:
+            holder = store.lock()
+
+    assert holder is not None
+    assert holder.pid is None
+    assert f"{db}.lock" in holder.detail
 
 
 def test_an_in_memory_store_always_gets_the_lock() -> None:
