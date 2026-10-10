@@ -374,7 +374,10 @@ class Engine:
 
     async def _run_exit_job(self, job: ExitJob) -> None:
         """Run the job, keep its outcome, then ask for the usual stop."""
-        self._exit_outcome = await job.run(ExitContext(account=self._exchange))
+        context = ExitContext(
+            account=self._exchange, orders=self._exchange, checkpointer=self._checkpointer
+        )
+        self._exit_outcome = await job.run(context)
         self._stop_requested.set()
 
     def _finish_exit_run(self, exit_code: int) -> int:

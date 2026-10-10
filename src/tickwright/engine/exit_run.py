@@ -10,7 +10,16 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
 
-from tickwright.domain import AccountAnchor, VenueOpenOrder, VenueReadFailure
+from tickwright.domain import (
+    AccountAnchor,
+    InvariantViolation,
+    OrderAnchor,
+    OrderRef,
+    VenueOpenOrder,
+    VenueReadFailure,
+)
+
+from .checkpoint import Checkpointer
 
 
 class ExitStatus(StrEnum):
@@ -34,6 +43,8 @@ class ExitContext:
     """The engine's own parts that a job may use, built after the barrier."""
 
     account: AccountAnchor
+    orders: OrderAnchor
+    checkpointer: Checkpointer
 
 
 class ExitJob(Protocol):
@@ -55,5 +66,28 @@ class OperatorCancelAll:
     name = "cancel_all"
 
     async def run(self, context: ExitContext) -> ExitOutcome:
+        resting = await context.account.fetch_open_orders()
+        if isinstance(resting, VenueReadFailure):
+            return ExitOutcome(status=ExitStatus.STOPPED, left=resting)
+        refs = [_mark(order, context.checkpointer) for order in resting]
+        if refs:
+            await context.orders.cancel(refs)
         left = await context.account.fetch_open_orders()
         return ExitOutcome(status=ExitStatus.DONE, left=left)
+
+
+def _mark(order: VenueOpenOrder, checkpointer: Checkpointer) -> OrderRef:
+    """The ref to cancel ``order`` by, with its saga marked first if it has one.
+
+    The mark is durable before the send. Without it, a crash after the send
+    leaves reconcile to judge the order a ghost and mark it ``REJECTED``.
+    """
+    if order.cloid is None:
+        # Only a live venue lists an order the engine did not place (#470).
+        raise InvariantViolation(f"cannot cancel an order with no cloid on {order.symbol}")
+    saga = checkpointer.cache.get_order(order.cloid)
+    if saga is None:
+        return OrderRef(cloid=order.cloid, symbol=order.symbol, venue_oid=order.venue_oid)
+    saga.mark_operator_cancel(ts_ns=checkpointer.clock.timestamp_ns())
+    checkpointer.checkpoint(saga)
+    return OrderRef.of(saga)
