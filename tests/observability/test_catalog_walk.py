@@ -16,7 +16,7 @@ engine's observable surface.
 
 import asyncio
 import tempfile
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
@@ -638,6 +638,9 @@ class _IdleFeed:
     """A feed with nothing to say — the lifecycle walk needs the ordered
     startup, not ticks. A ``MarketFeed`` double at the venue boundary."""
 
+    def add_symbols(self, symbols: Iterable[str]) -> None:
+        return None
+
     async def start(self) -> None:
         return None
 
@@ -650,6 +653,9 @@ class _IdleFeed:
 
 class _PoisonedFeed:
     """A feed whose read loop breaks an engine assumption — the fail-fast class."""
+
+    def add_symbols(self, symbols: Iterable[str]) -> None:
+        return None
 
     async def start(self) -> None:
         return None

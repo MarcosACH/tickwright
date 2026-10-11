@@ -7,6 +7,8 @@ The real paper path, with no strategy: ``PaperExchange`` over ``InMemoryBus`` an
 
 import asyncio
 import json
+from collections.abc import Callable
+from decimal import Decimal
 from pathlib import Path
 
 from ledgers import GENESIS
@@ -17,56 +19,151 @@ from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.feed import ReplayFeed
 from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.adapters.store import SQLiteStore
+from tickwright.app.build import paper_store_reads
+from tickwright.domain import (
+    AggressorSide,
+    Exchange,
+    ExecutionReport,
+    InstrumentSpec,
+    MarketTick,
+    OrderType,
+    PlaceSignal,
+    Side,
+    Signal,
+    TimeInForce,
+)
+from tickwright.engine.checkpoint import Checkpointer
+from tickwright.engine.execution import ExecutionManager
 from tickwright.engine.exit_run import Flatten
-from tickwright.engine.guard import RealGuard
+from tickwright.engine.guard import NoopGuard, RealGuard
 from tickwright.engine.runner import Engine
 from tickwright.observability.testing import capture_events
 
+_SPECS = {
+    symbol: InstrumentSpec(symbol=symbol, sz_decimals=3, max_decimals=6, min_notional=Decimal("0"))
+    for symbol in ("BTC", "ETH")
+}
+
+# Each symbol's replay rows, in file order. Paper fills a market order at the last one.
+_ROWS = {"BTC": ("42000", "43000", "44000"), "ETH": ("3000", "3100", "3200")}
+
 
 def _ticks(path: Path) -> Path:
-    row = {
-        "symbol": "BTC",
-        "price": "42000",
-        "size": "1",
-        "aggressor_side": "buy",
-        "trade_id": "a",
-        "ts_event": 1_000,
-    }
-    path.write_text(json.dumps(row) + "\n")
+    rows = [
+        {
+            "symbol": symbol,
+            "price": price,
+            "size": "1",
+            "aggressor_side": "buy",
+            "trade_id": f"{symbol}-{n}",
+            "ts_event": 1_000 * n,
+        }
+        for n, (symbol, price) in enumerate(
+            ((symbol, price) for symbol, prices in _ROWS.items() for price in prices), start=1
+        )
+    ]
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
     return path
 
 
-def _flatten(tmp_path: Path, *, guarded: bool = True) -> tuple[int, list[EventDict]]:
-    """Run flatten over paper. ``guarded`` gives the engine a real guard.
-
-    Returns the exit code and every event the run emitted.
-    """
-    bus = InMemoryBus()
-    clock = ManualClock()
-    store = SQLiteStore(tmp_path / "saga.db")
-    paper = PaperExchange(
+def _paper(bus: InMemoryBus, clock: ManualClock, store: SQLiteStore) -> PaperExchange:
+    reads = paper_store_reads(store)
+    return PaperExchange(
         bus=bus,
         clock=clock,
         fill_model=ImmediateFillModel(),
         genesis_collateral=GENESIS,
-        account_net=dict,
-        applied_fills=lambda cloid: (),
+        instrument_specs=_SPECS,
+        account_net=reads.account_net,
+        applied_fills=reads.applied_fills,
     )
+
+
+def _hold(path: Path, sizes: dict[str, str]) -> None:
+    """Open each signed size as the strategy ``trivial``, at the symbol's first row price.
+
+    Seeded through the engine's own order path on a separate bus, as an earlier run would.
+    """
+    bus = InMemoryBus()
+    clock = ManualClock()
+    with SQLiteStore(path) as store:
+        paper = _paper(bus, clock, store)
+        checks = Checkpointer(spec=paper.account_spec(), store=store, clock=clock, specs=_SPECS)
+        checks.recover()
+        manager = ExecutionManager(bus=bus, exchange=paper, checkpointer=checks, guard=NoopGuard())
+        bus.subscribe(Signal, manager.on_signal)
+        bus.subscribe(ExecutionReport, manager.on_execution_report)
+
+        async def go() -> None:
+            for seq, (symbol, size) in enumerate(sizes.items(), start=1):
+                await bus.publish(_tick(symbol, _ROWS[symbol][0]))
+                await bus.publish(
+                    PlaceSignal(
+                        ts_event=0,
+                        ts_init=0,
+                        strategy_id="trivial",
+                        symbol=symbol,
+                        seq=seq,
+                        side=Side.BUY if Decimal(size) > 0 else Side.SELL,
+                        quantity=abs(Decimal(size)),
+                        order_type=OrderType.MARKET,
+                        time_in_force=TimeInForce.IOC,
+                    )
+                )
+
+        asyncio.run(go())
+
+
+def _tick(symbol: str, price: str) -> MarketTick:
+    return MarketTick(
+        ts_event=0,
+        ts_init=0,
+        symbol=symbol,
+        price=Decimal(price),
+        size=Decimal("1"),
+        aggressor_side=AggressorSide.BUY,
+        trade_id=f"seed-{symbol}",
+        seq=0,
+    )
+
+
+def _flatten(
+    tmp_path: Path,
+    *,
+    guarded: bool = True,
+    link: Callable[[PaperExchange], Exchange] | None = None,
+) -> tuple[int, list[EventDict]]:
+    """Run flatten over paper and the ``_ROWS`` replay file.
+
+    ``guarded`` gives the engine a real guard. ``link`` puts a venue double in
+    front of paper. Returns the exit code and every event the run emitted.
+    """
+    bus = InMemoryBus()
+    clock = ManualClock()
+    store = SQLiteStore(tmp_path / "saga.db")
+    paper = _paper(bus, clock, store)
     engine = Engine(
         bus=bus,
         clock=clock,
         store=store,
-        exchange=paper,
+        exchange=paper if link is None else link(paper),
         feed=ReplayFeed(path=_ticks(tmp_path / "ticks.jsonl"), bus=bus, clock=clock),
-        guard=RealGuard(specs=paper.instrument_specs(), store=store, clock=clock)
-        if guarded
-        else None,
+        guard=RealGuard(specs=_SPECS, store=store, clock=clock) if guarded else None,
         exit_job=Flatten(),
     )
 
     with capture_events() as logs:
         exit_code = asyncio.run(asyncio.wait_for(engine.run(), timeout=5))
     return exit_code, logs
+
+
+def _partitions(tmp_path: Path) -> dict[tuple[str | None, str], tuple[Decimal, Decimal]]:
+    """Each partition's signed size and realized P&L, as the run left them in the store."""
+    with SQLiteStore(tmp_path / "saga.db") as store:
+        return {
+            (row.strategy_id, row.symbol): (row.signed_size, row.realized_pnl)
+            for row in store.all_positions()
+        }
 
 
 def test_flatten_with_nothing_to_close_still_trips_the_kill_switch(tmp_path: Path) -> None:
@@ -101,3 +198,19 @@ def test_flatten_under_a_noop_guard_warns_and_still_finishes(tmp_path: Path) -> 
     assert "restart" in unguarded[0]["warning"]
     assert logs[-1]["event"] == "exit.finished"
     assert logs[-1]["outcome"] == "done"
+
+
+def test_flatten_closes_a_long_at_the_last_replay_row_and_the_partition_reads_flat(
+    tmp_path: Path,
+) -> None:
+    # Opened at 42000. The replay ends at 44000, so 0.02 realizes exactly 40 (ADR-0059).
+    # The run trips the kill switch first, and the close still goes out (ADR-0053).
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+
+    exit_code, logs = _flatten(tmp_path)
+
+    assert exit_code == 0
+    assert logs[-1]["event"] == "exit.finished"
+    assert logs[-1]["outcome"] == "done"
+    assert logs[-1]["left"] == "none"
+    assert _partitions(tmp_path) == {("trivial", "BTC"): (Decimal("0"), Decimal("40"))}

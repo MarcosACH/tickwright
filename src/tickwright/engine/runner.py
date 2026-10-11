@@ -53,7 +53,7 @@ from .barrier import StartupBarrier
 from .cadence import run_cadence
 from .checkpoint import Checkpointer
 from .execution import ExecutionManager
-from .exit_run import ExitContext, ExitJob, ExitOutcome, ExitStatus
+from .exit_run import ExitContext, ExitJob, ExitOutcome, ExitStatus, FeedHandle
 from .guard import NoopGuard
 from .ledger_reconcile import LedgerReconciliation, ValuationBand
 from .portfolio import PortfolioProjection
@@ -186,6 +186,7 @@ class Engine:
         self._stop_requested = asyncio.Event()
         self._stopped = asyncio.Event()
         self._feed_task: asyncio.Task[None] | None = None
+        self._feed_handle: FeedHandle | None = None
         self._exchange_task: asyncio.Task[None] | None = None
         self._exit_task: asyncio.Task[None] | None = None
         self._cadence_tasks: list[asyncio.Task[None]] = []
@@ -267,7 +268,7 @@ class Engine:
                 if self._exit_job is None:
                     await self._start_feed(tg)
                 else:
-                    self._exit_task = tg.create_task(self._run_exit_job(self._exit_job))
+                    self._exit_task = tg.create_task(self._run_exit_job(self._exit_job, tg))
                 tg.create_task(self._stop_when_requested())
         except Exception as exc:
             # The first raw-handler exception aborted the TaskGroup and
@@ -361,17 +362,21 @@ class Engine:
         named_event(NamedEvent.ENGINE_FEED_STARTED)
         self._feed_task = tg.create_task(self._feed.run())
 
-    async def _run_exit_job(self, job: ExitJob) -> None:
+    async def _run_exit_job(self, job: ExitJob, tg: asyncio.TaskGroup) -> None:
         """Run the job, keep its outcome, then ask for the usual stop."""
         # A signal during boot means the operator changed their mind. The job
         # never starts, so nothing reaches the venue after it (ADR-0060).
         if self._stop_requested.is_set():
             return
+        self._feed_handle = FeedHandle(self._feed, tg)
         context = ExitContext(
             account=self._exchange,
             orders=self._exchange,
             checkpointer=self._checkpointer,
             guard=self._guard,
+            bus=self._bus,
+            clock=self._clock,
+            feed=self._feed_handle,
         )
         self._exit_outcome = await job.run(context)
         self._stop_requested.set()
@@ -645,7 +650,9 @@ class Engine:
 
     async def _stop_feed(self) -> None:
         """Release the feed, then end the long-lived half this runner supervises."""
-        await self._stop_supervised(self._feed.stop, self._feed_task)
+        # An exit job starts the feed through its handle, if it starts it at all.
+        task = self._feed_task if self._feed_handle is None else self._feed_handle.task
+        await self._stop_supervised(self._feed.stop, task)
 
     @staticmethod
     async def _stop_supervised(

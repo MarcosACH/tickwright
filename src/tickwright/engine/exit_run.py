@@ -6,17 +6,27 @@ because the engine builds those parts itself and the composition root never
 sees them.
 """
 
-from collections.abc import Sequence
+import asyncio
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from decimal import Decimal
 from enum import StrEnum
 from typing import Protocol
 
 from tickwright.domain import (
+    OPERATOR,
     AccountAnchor,
+    Clock,
+    EventBus,
     InvariantViolation,
+    MarketFeed,
     OrderAnchor,
     OrderRef,
+    OrderType,
+    PlaceSignal,
     PreTradeGuard,
+    Side,
+    TimeInForce,
     VenueOpenOrder,
     VenueReadFailure,
 )
@@ -52,6 +62,35 @@ class ExitContext:
     orders: OrderAnchor
     checkpointer: Checkpointer
     guard: PreTradeGuard
+    bus: EventBus
+    clock: Clock
+    feed: "FeedHandle"
+
+
+class FeedHandle:
+    """Lets a job start the feed for the symbols it needs.
+
+    The engine builds it over its own task group, so the feed loop stays
+    supervised the same way it is in a normal run.
+    """
+
+    def __init__(self, feed: MarketFeed, tasks: asyncio.TaskGroup) -> None:
+        self._feed = feed
+        self._tasks = tasks
+        self.task: asyncio.Task[None] | None = None
+        """The feed loop, for the engine's teardown. ``None`` until started."""
+
+    async def start(self, symbols: Iterable[str]) -> None:
+        """Add ``symbols`` to the feed, connect it, and run its loop."""
+        self._feed.add_symbols(symbols)
+        await self._feed.start()
+        named_event(NamedEvent.ENGINE_FEED_STARTED)
+        self.task = self._tasks.create_task(self._feed.run())
+
+    async def ended(self) -> None:
+        """Wait for the feed loop to return. A feed that fails faults the run instead."""
+        if self.task is not None:
+            await asyncio.wait([self.task])
 
 
 class ExitJob(Protocol):
@@ -99,7 +138,36 @@ class Flatten:
                 NamedEvent.EXIT_UNGUARDED,
                 warning="no kill switch under GUARD=noop: the engine trades as soon as it restarts",
             )
+        positions = await context.account.fetch_positions()
+        if isinstance(positions, VenueReadFailure):
+            return ExitOutcome(status=ExitStatus.STOPPED, left=describe_failure(positions))
+        if positions:
+            await context.feed.start(positions)
+            # Only a replay ends, and it plays the whole file first. So each close
+            # fills at the last row (ADR-0059). The CLI refuses a live feed until #475.
+            await context.feed.ended()
+            for symbol, size in positions.items():
+                await _close(symbol, size, context)
         return await _final_read(context)
+
+
+async def _close(symbol: str, size: Decimal, context: ExitContext) -> None:
+    """Send one reduce-only market IOC order for the whole of ``size`` (ADR-0054)."""
+    now = context.clock.timestamp_ns()
+    await context.bus.publish(
+        PlaceSignal(
+            ts_event=now,
+            ts_init=now,
+            strategy_id=OPERATOR,
+            symbol=symbol,
+            seq=1,
+            side=Side.SELL if size > 0 else Side.BUY,
+            quantity=abs(size),
+            order_type=OrderType.MARKET,
+            time_in_force=TimeInForce.IOC,
+            reduce_only=True,
+        )
+    )
 
 
 async def _final_read(context: ExitContext) -> ExitOutcome:

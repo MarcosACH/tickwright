@@ -7,7 +7,7 @@ tracer slice; later slices widen them (``Exchange.cancel``/``fetch_*``,
 ``Clock`` timers, strategy snapshots) as their behaviors land.
 """
 
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from datetime import datetime
 from decimal import Decimal
 from typing import Protocol, runtime_checkable
@@ -143,6 +143,15 @@ class MarketFeed(Protocol):
     because a feed that omitted the mark would otherwise satisfy this Protocol,
     type-check, run, and pass a suite of its own.
     """
+
+    def add_symbols(self, symbols: Iterable[str]) -> None:
+        """Also produce ticks for ``symbols``. Called before ``start()``.
+
+        Flatten must price every held symbol, including one the operator never
+        configured (ADR-0059). A feed whose source decides its own symbols, as a
+        replay file does, does nothing here.
+        """
+        ...
 
     async def start(self) -> None:
         """Reach the venue and return — never the producing loop itself.

@@ -12,7 +12,7 @@ import asyncio
 import json
 import os
 import signal
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from decimal import Decimal
 from pathlib import Path
 
@@ -1216,6 +1216,9 @@ class _HangingFeed:
     """A feed whose ``stop()`` never returns — a wedged venue connection at
     teardown. A ``MarketFeed`` double at the venue boundary."""
 
+    def add_symbols(self, symbols: Iterable[str]) -> None:
+        return None
+
     async def start(self) -> None:
         return None
 
@@ -1233,6 +1236,9 @@ class _BlockingFeed:
 
     def __init__(self) -> None:
         self.started = asyncio.Event()
+
+    def add_symbols(self, symbols: Iterable[str]) -> None:
+        return None
 
     async def start(self) -> None:
         return None
@@ -1540,6 +1546,9 @@ class _FaultingFeed:
     def __init__(self, timeline: list[str] | None = None) -> None:
         self._timeline = timeline if timeline is not None else []
 
+    def add_symbols(self, symbols: Iterable[str]) -> None:
+        return None
+
     async def start(self) -> None:
         return None
 
@@ -1559,6 +1568,9 @@ class _UnreachableFeed:
 
     def __init__(self) -> None:
         self.ran = False
+
+    def add_symbols(self, symbols: Iterable[str]) -> None:
+        return None
 
     async def start(self) -> None:
         raise ConnectionRefusedError("the venue refused the market-data socket")

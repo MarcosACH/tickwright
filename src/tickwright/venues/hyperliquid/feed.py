@@ -18,6 +18,7 @@ through the real parse/publish path with no network.
 
 import asyncio
 import json
+from collections.abc import Iterable
 from typing import Any
 
 from tickwright.domain import AggressorSide, Clock, EventBus, MarketTick, MarkTick
@@ -57,6 +58,11 @@ class HyperliquidFeed:
             subscribe=self._subscribe,
             consume=self._consume,
         )
+
+    def add_symbols(self, symbols: Iterable[str]) -> None:
+        # The CLI refuses flatten on a live feed before boot until #475 builds
+        # this, so a call here is a wiring bug and must fail loudly.
+        raise NotImplementedError("Hyperliquid subscribes to added symbols from #475 on")
 
     async def start(self) -> None:
         await self._session.start()

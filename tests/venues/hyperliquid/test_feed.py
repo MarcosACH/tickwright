@@ -862,7 +862,19 @@ def test_the_live_feed_satisfies_the_market_feed_seam() -> None:
 # Which test claims each ``MarketFeed`` member for *this* adapter. Not a second
 # copy of the seam: the gate below asserts it against the Protocol itself, so a
 # new member cannot arrive without someone naming what asserts it here.
+def test_the_live_feed_refuses_to_add_symbols_until_it_can_subscribe_to_them() -> None:
+    # #475 builds this. Until then the CLI refuses flatten on a live feed before
+    # boot, so a call here is a wiring bug and must fail loudly.
+    feed = HyperliquidFeed(
+        config=HyperliquidConfig(symbols=["BTC"]), bus=InMemoryBus(), clock=ManualClock()
+    )
+
+    with pytest.raises(NotImplementedError, match="#475"):
+        feed.add_symbols(["ETH"])
+
+
 _SEAM_CLAIMS = {
+    "add_symbols": "test_the_live_feed_refuses_to_add_symbols_until_it_can_subscribe_to_them",
     "start": "test_the_live_feed_connects_in_start_and_leaves_the_loop_to_run",
     "run": "test_ws_drop_reconnects_with_backoff_resubscribes_and_resumes",
     "stop": "test_stop_does_not_trigger_a_reconnect",

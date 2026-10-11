@@ -13,7 +13,7 @@ changes) and then the ``MarketTick`` itself.
 
 import asyncio
 import json
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from decimal import Decimal
 from pathlib import Path
 from typing import TypedDict
@@ -48,6 +48,9 @@ class ReplayFeed:
         self._clock = clock
         # Per-symbol source sequence, disambiguating the weak replay dedup key.
         self._seq_by_symbol: dict[str, int] = {}
+
+    def add_symbols(self, symbols: Iterable[str]) -> None:
+        """No-op: the file decides which symbols play (ADR-0059)."""
 
     async def start(self) -> None:  # noqa: B027 - a file needs no connecting.
         """No-op: replay has no venue to reach, so there is nothing to fail on.

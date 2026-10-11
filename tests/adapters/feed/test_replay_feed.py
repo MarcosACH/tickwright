@@ -367,7 +367,25 @@ def test_the_replay_feed_satisfies_the_market_feed_seam(tmp_path: Path) -> None:
 # Which test claims each ``MarketFeed`` member for *this* adapter. Not a second
 # copy of the seam: the gate below asserts it against the Protocol itself, so a
 # new member cannot arrive without someone naming what asserts it here.
+def test_replay_plays_only_the_files_symbols_after_add_symbols(tmp_path: Path) -> None:
+    # Flatten adds every held symbol. A file cannot price a symbol it lacks (ADR-0059).
+    path = _write_jsonl(tmp_path / "ticks.jsonl", [_row("BTC", "42000", 1_000, "a")])
+    bus = InMemoryBus()
+    seen: list[MarketTick] = []
+
+    async def record(tick: MarketTick) -> None:
+        seen.append(tick)
+
+    bus.subscribe(MarketTick, record)
+    feed = ReplayFeed(path=path, bus=bus, clock=ManualClock())
+    feed.add_symbols(["ETH"])
+    asyncio.run(feed.run())
+
+    assert [tick.symbol for tick in seen] == ["BTC"]
+
+
 _SEAM_CLAIMS = {
+    "add_symbols": "test_replay_plays_only_the_files_symbols_after_add_symbols",
     "start": "test_replay_holds_its_rows_until_run",
     "run": "test_replay_publishes_every_tick_in_file_order",
     "stop": "test_replay_releases_nothing_and_never_interrupts_a_drain",
