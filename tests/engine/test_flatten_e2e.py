@@ -24,10 +24,12 @@ from tickwright.app.build import paper_store_reads
 from tickwright.domain import (
     OPERATOR,
     AggressorSide,
+    Clock,
     Exchange,
     ExecutionReport,
     InstrumentSpec,
     MarketTick,
+    Order,
     OrderRef,
     OrderState,
     OrderType,
@@ -141,11 +143,13 @@ def _flatten(
     guarded: bool = True,
     link: Callable[[PaperExchange], Exchange] | None = None,
     replayed: Iterable[str] = tuple(_ROWS),
+    resting: bool = False,
 ) -> tuple[int, list[EventDict]]:
     """Run flatten over paper and the ``_ROWS`` replay file.
 
     ``guarded`` gives the engine a real guard. ``link`` puts a venue double in
     front of paper. ``replayed`` picks the symbols the file has rows for.
+    ``resting`` rests one BTC buy far below the replay, as ``_RESTING``.
     Returns the exit code and every event the run emitted.
     """
     bus = InMemoryBus()
@@ -162,9 +166,52 @@ def _flatten(
         exit_job=Flatten(),
     )
 
+    async def go() -> int:
+        if resting:
+            await _rest(bus, paper, store, clock)
+        return await asyncio.wait_for(engine.run(), timeout=5)
+
     with capture_events() as logs:
-        exit_code = asyncio.run(asyncio.wait_for(engine.run(), timeout=5))
+        exit_code = asyncio.run(go())
     return exit_code, logs
+
+
+_RESTING = derive_cloid("resting:BTC:1")
+
+
+async def _rest(bus: InMemoryBus, paper: PaperExchange, store: SQLiteStore, clock: Clock) -> None:
+    """Rest ``_RESTING`` on paper, with its saga in the store.
+
+    Paper keeps its book in memory only (#484), so the order goes on the run's own
+    exchange. The saga is left ``SUBMITTED``, and the boot barrier heals it to ``LIVE``.
+    """
+    # Paper prices a LIMIT against the last tick, so it needs one first.
+    await bus.publish(_tick("BTC", "42000"))
+    order = PlaceOrder(
+        cloid=_RESTING,
+        symbol="BTC",
+        side=Side.BUY,
+        quantity=Decimal("0.01"),
+        order_type=OrderType.LIMIT,
+        time_in_force=TimeInForce.GTC,
+        price=Decimal("30000"),
+    )
+    await paper.place(order)
+    checks = Checkpointer(spec=paper.account_spec(), store=store, clock=clock, specs=_SPECS)
+    checks.recover()
+    checks.checkpoint(
+        Order(
+            cloid=_RESTING,
+            strategy_id="resting",
+            signal_id="resting:BTC:1",
+            symbol="BTC",
+            side=Side.BUY,
+            quantity=order.quantity,
+            order_type=OrderType.LIMIT,
+            state=OrderState.SUBMITTED,
+            created_ts_ns=0,
+        )
+    )
 
 
 def _partitions(tmp_path: Path) -> dict[tuple[str | None, str], tuple[Decimal, Decimal]]:
@@ -239,6 +286,36 @@ def test_a_held_symbol_the_replay_never_prices_stops_the_run_with_its_size_left(
     assert logs[-1]["outcome"] == "stopped"
     assert logs[-1]["left"] == "BTC=0.02"
     assert _partitions(tmp_path) == {("trivial", "BTC"): (Decimal("0.02"), Decimal("0"))}
+
+
+def test_flatten_cancels_a_resting_order_before_it_closes_a_long_and_a_short(
+    tmp_path: Path,
+) -> None:
+    # A resting order could fill after the close and reopen exposure (ADR-0060).
+    # The short opened at 3000 and closes at 3200, so 0.5 realizes exactly -100.
+    _hold(tmp_path / "saga.db", {"BTC": "0.02", "ETH": "-0.5"})
+
+    exit_code, logs = _flatten(tmp_path, resting=True)
+
+    assert exit_code == 0
+    assert logs[-1]["event"] == "exit.finished"
+    assert logs[-1]["outcome"] == "done"
+    assert logs[-1]["left"] == "none"
+    events = [log["event"] for log in logs]
+    first_close = next(
+        n
+        for n, log in enumerate(logs)
+        if log["event"] == "order.placed" and log["signal_id"].startswith(OPERATOR)
+    )
+    assert events.index("order.cancelled") < first_close
+    assert _partitions(tmp_path) == {
+        ("trivial", "BTC"): (Decimal("0"), Decimal("40")),
+        ("trivial", "ETH"): (Decimal("0"), Decimal("-100")),
+    }
+    with SQLiteStore(tmp_path / "saga.db") as store:
+        resting = store.get_order(_RESTING)
+    assert resting is not None
+    assert resting.state is OrderState.CANCELLED
 
 
 class _DropsEveryPlace(VenueLink):

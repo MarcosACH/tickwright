@@ -145,6 +145,11 @@ class Flatten:
                 NamedEvent.EXIT_UNGUARDED,
                 warning="no kill switch under GUARD=noop: the engine trades as soon as it restarts",
             )
+        # A resting order could fill after the close and reopen exposure. So the
+        # cancel all step runs first, and flatten stops where it stops (ADR-0060).
+        cancelled = await OperatorCancelAll().run(context)
+        if cancelled.status is ExitStatus.STOPPED:
+            return cancelled
         positions = await context.account.fetch_positions()
         if isinstance(positions, VenueReadFailure):
             return ExitOutcome(status=ExitStatus.STOPPED, left=describe_failure(positions))
