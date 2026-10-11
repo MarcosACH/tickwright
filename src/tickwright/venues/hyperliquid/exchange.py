@@ -516,6 +516,11 @@ class HyperliquidExchange:
         # exit run boot and exit 1 when it should never have started.
         raise NotImplementedError("Hyperliquid lists open orders from #470 on")
 
+    async def fetch_positions(self) -> dict[str, Decimal] | VenueReadFailure:
+        # The CLI refuses flatten on this venue before boot until #475 builds
+        # this read, for the same reason as ``fetch_open_orders`` above.
+        raise NotImplementedError("Hyperliquid reads positions from #475 on")
+
     async def fetch_account_state(self) -> VenueAccountState | None:
         """Venue truth for the account: one ``clearinghouseState`` read, the
         whole account-and-positions snapshot in one response.

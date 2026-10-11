@@ -9,6 +9,7 @@ tracer slice; later slices widen them (``Exchange.cancel``/``fetch_*``,
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import datetime
+from decimal import Decimal
 from typing import Protocol, runtime_checkable
 
 from .account import Account, AccountSpec, AccountView
@@ -529,8 +530,9 @@ class AccountAnchor(Protocol):
     ability to place an order, which is a claim its constructor now makes and
     its docstring used to have to.
 
-    Operator cancel all is a second caller, on both paths. It reads only
-    ``fetch_open_orders``, which answers for the whole account (ADR-0052).
+    Operator cancel all and flatten are two more callers, on both paths. They read
+    ``fetch_open_orders`` and ``fetch_positions``, which answer for the whole
+    account (ADR-0052, ADR-0054).
 
     The two account-cycle members are answered by **both** adapters even so. The account cycle is
     constructed on every path and scheduled on one (``engine/runner.py``), so
@@ -546,6 +548,16 @@ class AccountAnchor(Protocol):
         Operator cancel all reads it for its list and again for its final check.
         A failed read returns a ``VenueReadFailure`` and never an empty list,
         because an empty list says the account holds no order (ADR-0011 inv 1).
+        """
+        ...
+
+    async def fetch_positions(self) -> dict[str, Decimal] | VenueReadFailure:
+        """The signed size of every symbol the account holds (ADR-0054).
+
+        A flat symbol is left out. Flatten sizes each close from this read and
+        reads it again to prove it is done. A failed read returns a
+        ``VenueReadFailure`` and never an empty dict, because an empty dict says
+        the account is flat (ADR-0011 inv 1).
         """
         ...
 

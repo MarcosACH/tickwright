@@ -42,6 +42,11 @@ class UnappliedFills:
                 size += fill.quantity if side is Side.BUY else -fill.quantity
         return size
 
+    def symbols(self) -> set[str]:
+        """Every symbol with a fill the store has not applied yet."""
+        self.drain()
+        return {fill.symbol for fill, _side in self._fills}
+
     def drain(self) -> None:
         """Drop every fill the store has applied."""
         self._fills = [

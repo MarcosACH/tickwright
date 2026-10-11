@@ -108,6 +108,9 @@ class _AccountVenue:
     async def fetch_open_orders(self) -> list[VenueOpenOrder] | VenueReadFailure:
         return []
 
+    async def fetch_positions(self) -> dict[str, Decimal] | VenueReadFailure:
+        return {}
+
     async def fetch_account_state(self) -> VenueAccountState | None:
         self.account_reads += 1
         return self._answers.pop(0) if len(self._answers) > 1 else self._answers[0]
@@ -2460,8 +2463,8 @@ def test_a_cycle_that_finds_only_leverage_drift_writes_nothing_and_cannot_re_pus
 
     The refusal to re-push is asserted as the **shape of the seam** rather than
     as an uncalled method: the cycle is constructed against ``AccountAnchor``,
-    whose members are a snapshot read, a mode verdict, and an open-order list
-    (ADR-0052). All three are reads, so there is no write
+    whose members are a snapshot read, a mode verdict, an open-order list
+    (ADR-0052), and a position read (ADR-0054). All four are reads, so there is no write
     to leave uncalled and a case cannot fail by forgetting to check. Pinning the
     member set is what keeps that true — a later ``update_leverage`` added here
     for a caller elsewhere would hand this cycle the revert it must not have.
@@ -2469,6 +2472,7 @@ def test_a_cycle_that_finds_only_leverage_drift_writes_nothing_and_cannot_re_pus
     assert {name for name in dir(AccountAnchor) if not name.startswith("_")} == {
         "fetch_account_state",
         "fetch_open_orders",
+        "fetch_positions",
         "verify_account_mode",
     }
 
