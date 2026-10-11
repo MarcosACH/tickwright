@@ -44,7 +44,6 @@ from tickwright.domain import (
     StoreLockHeld,
     StoreLockHolder,
     Strategy,
-    VenueReadFailure,
     duration_ns,
 )
 from tickwright.observability import NamedEvent, named_event
@@ -54,7 +53,7 @@ from .barrier import StartupBarrier
 from .cadence import run_cadence
 from .checkpoint import Checkpointer
 from .execution import ExecutionManager
-from .exit_run import ExitContext, ExitJob, ExitOutcome, ExitStatus, describe_orders
+from .exit_run import ExitContext, ExitJob, ExitOutcome, ExitStatus
 from .guard import NoopGuard
 from .ledger_reconcile import LedgerReconciliation, ValuationBand
 from .portfolio import PortfolioProjection
@@ -100,20 +99,6 @@ def _first_leaf(exc: BaseException) -> BaseException:
     while isinstance(exc, BaseExceptionGroup):
         exc = exc.exceptions[0]
     return exc
-
-
-def _describe_left(outcome: ExitOutcome | None) -> str:
-    """What the job's last venue read left, for ``exit.finished`` (ADR-0060).
-
-    One string, because every catalog field is a scalar.
-    """
-    if outcome is None:
-        return "unread"
-    if isinstance(outcome.left, VenueReadFailure):
-        return f"read_failed: {outcome.left.value}"
-    if not outcome.left:
-        return "none"
-    return describe_orders(outcome.left)
 
 
 class Engine:
@@ -401,7 +386,8 @@ class Engine:
             job=self._exit_job.name,
             outcome=outcome.status.value if outcome is not None else ExitStatus.STOPPED.value,
             exit_code=exit_code,
-            left=_describe_left(outcome),
+            # Only the engine knows the job never returned (ADR-0060).
+            left=outcome.left if outcome is not None else "unread",
         )
         return exit_code
 

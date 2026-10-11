@@ -36,8 +36,11 @@ class ExitOutcome:
     """What a job reports back to the engine when it returns."""
 
     status: ExitStatus
-    left: tuple[VenueOpenOrder, ...] | VenueReadFailure
-    """What the last venue read left, or how that read failed."""
+    left: str
+    """What the last venue read left, or how that read failed, for ``exit.finished``.
+
+    The job writes it, because only the job knows what its last read covered.
+    """
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -73,11 +76,20 @@ class OperatorCancelAll:
         for _ in range(2):
             left = await _cancel_round(left, context)
         if isinstance(left, VenueReadFailure):
-            return ExitOutcome(status=ExitStatus.STOPPED, left=left)
+            return ExitOutcome(status=ExitStatus.STOPPED, left=describe_failure(left))
         if left:
             named_event(NamedEvent.CANCEL_ALL_ORDERS_REMAIN, orders=describe_orders(left))
-            return ExitOutcome(status=ExitStatus.STOPPED, left=tuple(left))
-        return ExitOutcome(status=ExitStatus.DONE, left=())
+            return ExitOutcome(status=ExitStatus.STOPPED, left=describe_orders(left))
+        return ExitOutcome(status=ExitStatus.DONE, left=NOTHING_LEFT)
+
+
+NOTHING_LEFT = "none"
+"""``left`` when the last read found nothing to act on."""
+
+
+def describe_failure(failure: VenueReadFailure) -> str:
+    """``left`` when the last read failed."""
+    return f"read_failed: {failure.value}"
 
 
 def describe_orders(orders: Sequence[VenueOpenOrder]) -> str:
