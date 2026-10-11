@@ -887,21 +887,44 @@ def test_a_tripped_kill_switch_still_denies_an_order_that_closes_a_long() -> Non
     _assert_denied_by(engine, derive_cloid("trivial:BTC:2"), "kill switch tripped")
 
 
-def test_an_operator_order_that_is_not_reduce_only_meets_the_kill_switch() -> None:
-    # Only a reduce-only operator order is a flatten. Without reduce-only the
-    # venue could let it grow the account, so a halt stops it (ADR-0054).
+@pytest.mark.parametrize("tripped", [False, True])
+def test_an_operator_order_that_is_not_reduce_only_is_always_denied(tripped: bool) -> None:
+    # Only a reduce-only operator order is a flatten. A buy that grows the long
+    # could not split: the split would book the strategy as selling. So the
+    # order is denied before the guard, halt or not (ADR-0054).
     engine = _holding("0.03", side=Side.BUY, limits=NO_LIMITS)
-    engine.guard.trip_kill_switch("operator halt")
+    if tripped:
+        engine.guard.trip_kill_switch("operator halt")
 
     async def scenario() -> None:
         await engine.bus.publish(_tick("42000"))
         await engine.bus.publish(
-            _market_signal(quantity="0.03", seq=1, side=Side.SELL, strategy_id=OPERATOR)
+            _market_signal(quantity="0.03", seq=1, side=Side.BUY, strategy_id=OPERATOR)
         )
 
     asyncio.run(scenario())
 
-    _assert_denied_by(engine, derive_cloid(f"{OPERATOR}:BTC:1"), "kill switch tripped")
+    _assert_denied_by(
+        engine, derive_cloid(f"{OPERATOR}:BTC:1"), "an operator order must be reduce-only"
+    )
+
+
+def test_an_operator_order_that_is_not_reduce_only_is_denied_without_a_guard() -> None:
+    # The refusal belongs to the ExecutionManager, not the guard. NoopGuard
+    # passes everything, and the order must still never reach the venue.
+    engine = _engine(guard=NoopGuard())
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))
+        await engine.bus.publish(
+            _market_signal(quantity="0.03", seq=1, side=Side.BUY, strategy_id=OPERATOR)
+        )
+
+    asyncio.run(scenario())
+
+    _assert_denied_by(
+        engine, derive_cloid(f"{OPERATOR}:BTC:1"), "an operator order must be reduce-only"
+    )
 
 
 def test_kill_switch_denies_new_orders_while_resting_orders_keep_filling() -> None:

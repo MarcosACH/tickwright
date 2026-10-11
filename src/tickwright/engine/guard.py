@@ -21,7 +21,6 @@ from enum import Enum, auto
 from typing import Final
 
 from tickwright.domain import (
-    OPERATOR,
     Approved,
     Clock,
     Denied,
@@ -33,6 +32,7 @@ from tickwright.domain import (
     Side,
     Store,
     duration_ns,
+    is_flatten,
     min_notional_refuses,
     quantize_price,
     quantize_size,
@@ -129,13 +129,14 @@ class _OrderKind(Enum):
 
 
 def _order_kind(signal: PlaceSignal) -> _OrderKind:
-    if not signal.reduce_only:
-        # An operator order that is not reduce-only could grow the account, so
-        # it gets no flatten pass and meets the kill switch (ADR-0054).
-        return _OrderKind.PLAIN
-    if signal.strategy_id == OPERATOR:
+    if is_flatten(signal):
         return _OrderKind.FLATTEN
-    return _OrderKind.REDUCE_ONLY
+    # The ExecutionManager denies an operator order that is not reduce-only
+    # before it gets here (ADR-0054). Called on its own, the guard still gives
+    # it no flatten pass, so it meets the kill switch.
+    if signal.reduce_only:
+        return _OrderKind.REDUCE_ONLY
+    return _OrderKind.PLAIN
 
 
 def _shrinks(before: Decimal, after: Decimal) -> bool:

@@ -18,7 +18,7 @@ from enum import StrEnum
 
 from .enums import Side
 from .errors import InvariantViolation
-from .events import OrderFillEvent, ReconciliationFill
+from .events import OrderFillEvent, PlaceSignal, ReconciliationFill
 from .leverage import MarginMode
 
 _ZERO = Decimal("0")
@@ -38,6 +38,14 @@ UNATTRIBUTED = "__unattributed__"
 # The owner of a flatten order (ADR-0054). It never owns a partition. Its fills only feed the
 # split. A reduce-only order from it skips the kill switch, so a strategy may not take the name.
 OPERATOR = "__operator__"
+
+
+def is_flatten(signal: PlaceSignal) -> bool:
+    """Whether ``signal`` places a flatten order: reduce-only and from ``OPERATOR`` (ADR-0054).
+
+    The guard and the ``ExecutionManager`` both read this, so they agree on which orders split.
+    Reduce-only is what lets the split assume the order closes the net."""
+    return signal.strategy_id == OPERATOR and signal.reduce_only
 
 
 def reserved_id_refusal(strategy_id: str) -> str | None:

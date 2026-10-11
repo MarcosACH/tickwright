@@ -384,6 +384,18 @@ def test_a_flatten_order_passes_the_kill_switch_every_cap_and_the_rate_cap() -> 
     assert decision == Approved(quantity=Decimal("3"), price=None)
 
 
+def test_an_operator_order_that_is_not_reduce_only_meets_the_kill_switch() -> None:
+    # The ExecutionManager denies this order before the guard. Called on its
+    # own, the guard still gives it no flatten pass (ADR-0054).
+    guard = _guard()
+    guard.trip_kill_switch("halt")
+
+    plain = _market_signal(quantity="3", side=Side.SELL, strategy_id=OPERATOR)
+    decision = _check(guard, plain, net="3", own="0")
+
+    assert decision == Denied(reason="kill switch tripped")
+
+
 def test_noop_guard_passes_a_signal_through_unmodified() -> None:
     # The passthrough twin: no quantization, always approved — the seam is real.
     guard = NoopGuard()

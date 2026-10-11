@@ -88,6 +88,7 @@ from .position import (
     PositionChange,
     PositionView,
     account_net_size,
+    is_flatten,
     reserved_id_refusal,
 )
 from .protocols import (
@@ -219,6 +220,8 @@ __all__ = [
     "account_net_size",
     # the one rule for the reserved owner ids, read by config and StrategyHost
     "reserved_id_refusal",
+    # the one rule for which orders are flatten orders, read by the guard and ExecutionManager
+    "is_flatten",
     # the cash line a venue snapshot implies — the genesis and the reconcile
     # anchor read it from one place
     "venue_cash",

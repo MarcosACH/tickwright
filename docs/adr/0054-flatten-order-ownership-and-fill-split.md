@@ -74,6 +74,14 @@ Decided in [#412](https://github.com/MarcosACH/tickwright/issues/412), part of
   ADR-0053 lets flatten skip it because a flatten order can only shrink a position. That comes from
   reduce-only, not from the owner. So the guard checks both, and a tripped kill switch denies any
   other `__operator__` order.
+  **(Narrowed by [#471](https://github.com/MarcosACH/tickwright/issues/471):** an `__operator__`
+  order that is not reduce-only is always `DENIED`, with or without a halt. The `ExecutionManager`
+  denies it before the guard runs, so the rule holds whatever guard is wired. Such an order has no
+  place to book its fills. The split assumes the order closes the net, and a buy that grows a long
+  would book the strategy as selling. An `__operator__` partition must not exist either. So every
+  `__operator__` order that reaches the guard is a flatten order. Called on its own, the guard
+  still gives any other one no flatten pass. The guard and the `ExecutionManager` read one rule for what a flatten order
+  is.**)**
 
 Example. Strategy S holds BTC +2. The unattributed partition holds -1. The venue shows +1. Flatten
 sends one reduce-only sell of 1. A fill of 0.5 books S selling 1 and the unattributed partition
