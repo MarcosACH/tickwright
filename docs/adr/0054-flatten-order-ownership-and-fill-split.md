@@ -35,6 +35,11 @@ Decided in [#412](https://github.com/MarcosACH/tickwright/issues/412), part of
   account truth, flatten then runs the account pass, which heals the gap into the unattributed
   partition. A gap that is still there counts as a dry attempt, so the ADR-0056 stop bounds the
   wait.**)**
+
+  **(Deferred by [#472](https://github.com/MarcosACH/tickwright/issues/472):** the size check
+  and the drain moved to #475. On paper the sizes always match when flatten places, because a
+  fresh run has no unapplied fills. So no paper test can show the gap. It needs a venue with
+  account truth.**)**
 - **Fills are split pro rata.** Each partition of the symbol moves the same share of the way to
   zero. Each split piece uses the real fill price.
 - **Fees split by the absolute size each partition books.** Partitions can have opposite signs. A

@@ -476,7 +476,9 @@ flat (ADR-0054). When no order can close a strategy's leftover, it moves into th
 partition at the strategy's entry price. A failed venue read also counts as an attempt that fills
 nothing (ADR-0060). A read refused for a rate limit does not count. It waits like an order.
 Flatten is done only when the venue holds no resting order and no position. The fill split is built
-(#471). The rest is not built yet (#408).
+(#471). #472 built one attempt per symbol on paper replay. A symbol the feed never priced gets no
+order, and the final read reports it. The size check before an order moved to #475. The rest is
+not built yet (#408).
 _Avoid_: close out, liquidate (that is the venue's forced close), panic sell.
 
 **Reduce-only order**:
@@ -497,7 +499,7 @@ A one-shot run of `tickwright cancel-all` or `tickwright flatten`, with the engi
 (ADR-0052). It is the same [[Engine]] process with an exit job in place of the strategies. It takes
 the store lock, boots and reconciles like a normal run, does its one job, and exits 0, 1, or 2
 (ADR-0060). The job is `OperatorCancelAll` or `Flatten`. See `docs/module-maps/safe-exit.md`.
-`OperatorCancelAll` is built on paper (#468). `Flatten` is not built yet (#408).
+`OperatorCancelAll` is built on paper (#468). `Flatten` is built on paper replay (#472).
 _Avoid_: exit mode, maintenance run.
 
 **Split basis**:

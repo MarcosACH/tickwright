@@ -90,6 +90,11 @@ when a venue read fails, and which named events an exit run emits. Decided in
   `read_failed: <reason>` when that read failed. It is `unread` when the job never returned, as
   after a signal or a fault. Each is one string because every catalog field is a scalar
   (ADR-0020).**)**
+
+  **(Extended by [#472](https://github.com/MarcosACH/tickwright/issues/472):** each job writes
+  its own `left`, because only the job knows what its last read covered. The engine writes only
+  `unread`. Flatten's `left` lists the resting orders first, then each position as `SYMBOL=size`
+  with the signed size, in one comma list. For example `8812,BTC=0.5`.**)**
 - **No separate summary.** `exit.finished` is the summary. It goes through the same logger as every
   other event, so it is the last line the operator sees.
 
@@ -118,3 +123,7 @@ when a venue read fails, and which named events an exit run emits. Decided in
   `tickwright cancel-all` runs on paper. The catalog has `exit.refused`, `exit.finished`, and
   `cancel_all.orders_remain`. `exit.new_store` comes with #469. `exit.unguarded` and the three
   `flatten.*` events come with the flatten slices.**)**
+
+  **(Partly built, since [#472](https://github.com/MarcosACH/tickwright/issues/472):**
+  `tickwright flatten` runs on paper with the replay feed. Any other exchange or feed exits 2
+  before boot, until #475. The catalog has `exit.unguarded`.**)**

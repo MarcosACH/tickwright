@@ -166,6 +166,9 @@ context. Starts the feed through the `FeedHandle`.
   again.
 - On paper the gap is only fills the store has not applied yet. Paper has no account truth, so the
   drain alone closes it.
+- **(Deferred by #472:** this size check and the drain moved to #475. On paper the sizes always
+  match when flatten places. #472 also sends no order for a symbol the feed never priced, and the
+  final read reports it. Under replay no later price can come.**)**
 - A gap that is still there counts as a dry attempt. So a gap that never heals ends in
   `flatten.gave_up`, not in a loop.
 - A flat venue moves each leftover into the unattributed partition instead.
