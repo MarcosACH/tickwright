@@ -93,6 +93,12 @@ class Flatten:
     async def run(self, context: ExitContext) -> ExitOutcome:
         # First, so a crash mid-flatten still leaves the store halted (ADR-0053).
         context.guard.trip_kill_switch("flatten: operator exit")
+        # A guard with no kill switch reads untripped right after the trip.
+        if not context.guard.kill_switch_tripped:
+            named_event(
+                NamedEvent.EXIT_UNGUARDED,
+                warning="no kill switch under GUARD=noop: the engine trades as soon as it restarts",
+            )
         return await _final_read(context)
 
 
