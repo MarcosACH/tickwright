@@ -17,8 +17,8 @@ layers refuse it and they cannot share an exception. ``AppConfig`` refuses a
 the fail-fast class is ``InvariantViolation``. What must not differ between them
 is the rule and the sentence it refuses with — so those live here and each
 caller raises its own type. Without it the index, the sort and the wording exist
-twice, in two layers, which is the state the reserved-``UNATTRIBUTED`` gate is
-in one module over. The same split ``LeverageBook`` already makes between its
+twice, in two layers. The reserved owner ids follow the same pattern through
+``reserved_id_refusal``. The same split ``LeverageBook`` already makes between its
 config-load dead-entry check and its ``Exchange.start()`` bound.
 """
 

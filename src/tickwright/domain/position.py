@@ -18,7 +18,7 @@ from enum import StrEnum
 
 from .enums import Side
 from .errors import InvariantViolation
-from .events import OrderFillEvent, ReconciliationFill
+from .events import OrderFillEvent, PlaceSignal, ReconciliationFill
 from .leverage import MarginMode
 
 _ZERO = Decimal("0")
@@ -34,6 +34,48 @@ _ZERO = Decimal("0")
 # ``__unattributed__`` would merge its book with flow the engine never placed,
 # and nothing narrower than the collision itself needs forbidding.
 UNATTRIBUTED = "__unattributed__"
+
+# The owner of a flatten order (ADR-0054). It never owns a partition. Its fills only feed the
+# split. A reduce-only order from it skips the kill switch, so a strategy may not take the name.
+OPERATOR = "__operator__"
+
+
+def is_flatten(signal: PlaceSignal) -> bool:
+    """Whether ``signal`` places a flatten order: reduce-only and from ``OPERATOR`` (ADR-0054).
+
+    The guard and the ``ExecutionManager`` both read this, so they agree on which orders split.
+    Reduce-only is what lets the split assume the order closes the net."""
+    return signal.strategy_id == OPERATOR and signal.reduce_only
+
+
+def reserved_id_refusal(strategy_id: str) -> str | None:
+    """The sentence refusing a reserved ``strategy_id``, or ``None`` if the id is free.
+
+    ``StrategyConfig`` and ``StrategyHost.register`` both refuse these ids, each with its own
+    exception type. The rule and its wording live here, so the two gates cannot drift apart."""
+    if strategy_id == UNATTRIBUTED:
+        # A strategy with this id would merge its book with flow the engine never placed.
+        return f"{UNATTRIBUTED} is the reserved unattributed partition, not a strategy id"
+    if strategy_id == OPERATOR:
+        # A reduce-only order from this id skips the kill switch (ADR-0054).
+        return f"{OPERATOR} is reserved for operator orders, not a strategy id"
+    return None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class PartitionFill:
+    """One partition's piece of a flatten order's fill (ADR-0054, ADR-0056).
+
+    A flatten fill has no single owner, so the ``Checkpointer`` books it as one piece per
+    partition. Each piece carries only what ``Position.apply`` reads."""
+
+    event_id: str
+    """The fill's ``event_id`` and the owner, so a replayed fill dedups in each partition."""
+    strategy_id: str | None
+    symbol: str
+    quantity: Decimal
+    price: Decimal
+    fee: Decimal
 
 
 class PositionChange(StrEnum):
@@ -261,7 +303,7 @@ class Position:
         return self.signed_size * (mark - self.entry_price)
 
     def apply(
-        self, event: OrderFillEvent | ReconciliationFill, *, side: Side
+        self, event: OrderFillEvent | ReconciliationFill | PartitionFill, *, side: Side
     ) -> tuple[PositionChange, ...]:
         """Fold ``event`` into this partition; idempotent and checked.
 
@@ -270,13 +312,15 @@ class Position:
         lets every producer — venue ingress, reconciler synthetics, replay —
         inherit the precondition instead of each honouring it unstated.
 
-        **Two fill shapes, and this is the seam they are peers at** (ADR-0034's
+        **Three fill shapes, and this is the seam they are peers at** (ADR-0034's
         "the same idempotent ``apply()`` path"). A ``ReconciliationFill`` has no
         order behind it, so it shares no base class with one — what it shares is
         exactly the surface read below: a partition, a magnitude, a price and a
-        dedup key. A union of the two concretes rather than a Protocol over
-        them, on the map's two-implementations bar: a third producer is what
-        would make the abstraction earn its name.
+        dedup key. A ``PartitionFill`` is one partition's piece of a flatten
+        order's fill (ADR-0054). It is the third producer, and the union still
+        names all three. A Protocol would let any object with these fields book
+        into the ledger. The union keeps the list of what may book a fill short
+        and visible here.
 
         ``side`` rides the saga rather than the event: ``OrderFillEvent`` carries
         the trade (quantity, price, ids) and the ``Order`` carries the direction,

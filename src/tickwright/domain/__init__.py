@@ -81,11 +81,15 @@ from .order import Order
 from .ownership import SymbolOwnership
 from .pacing import Backoff, Deadline
 from .position import (
+    OPERATOR,
     UNATTRIBUTED,
+    PartitionFill,
     Position,
     PositionChange,
     PositionView,
     account_net_size,
+    is_flatten,
+    reserved_id_refusal,
 )
 from .protocols import (
     AccountAnchor,
@@ -144,6 +148,7 @@ __all__ = [
     # events + value types
     "DEFAULT_LEVERAGE",
     "EMPTY_LEVERAGE_BOOK",
+    "OPERATOR",
     "UNATTRIBUTED",
     "Account",
     "AccountModeVerdict",
@@ -179,6 +184,7 @@ __all__ = [
     "OrderRejected",
     "OrderStatusReport",
     "OrderSubmitted",
+    "PartitionFill",
     "PlaceOrder",
     "PlaceSignal",
     "Position",
@@ -212,6 +218,10 @@ __all__ = [
     "funding_boundaries",
     # the Σ-invariant's left-hand side
     "account_net_size",
+    # the one rule for the reserved owner ids, read by config and StrategyHost
+    "reserved_id_refusal",
+    # the one rule for which orders are flatten orders, read by the guard and ExecutionManager
+    "is_flatten",
     # the cash line a venue snapshot implies — the genesis and the reconcile
     # anchor read it from one place
     "venue_cash",

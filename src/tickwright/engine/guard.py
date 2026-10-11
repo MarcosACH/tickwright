@@ -17,6 +17,7 @@ from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
 from decimal import Decimal
+from enum import Enum, auto
 from typing import Final
 
 from tickwright.domain import (
@@ -31,6 +32,7 @@ from tickwright.domain import (
     Side,
     Store,
     duration_ns,
+    is_flatten,
     min_notional_refuses,
     quantize_price,
     quantize_size,
@@ -115,6 +117,28 @@ NO_LIMITS: Final = PreTradeLimits()
 _NO_SYMBOL_LIMITS: Final = SymbolLimits()
 
 
+class _OrderKind(Enum):
+    """The columns of ADR-0058's table. Each check reads this one value, so the
+    table stays readable in the code."""
+
+    PLAIN = auto()
+    REDUCE_ONLY = auto()
+    """A strategy's reduce-only order."""
+    FLATTEN = auto()
+    """A reduce-only order from ``OPERATOR`` (ADR-0054)."""
+
+
+def _order_kind(signal: PlaceSignal) -> _OrderKind:
+    if is_flatten(signal):
+        return _OrderKind.FLATTEN
+    # The ExecutionManager denies an operator order that is not reduce-only
+    # before it gets here (ADR-0054). Called on its own, the guard still gives
+    # it no flatten pass, so it meets the kill switch.
+    if signal.reduce_only:
+        return _OrderKind.REDUCE_ONLY
+    return _OrderKind.PLAIN
+
+
 def _shrinks(before: Decimal, after: Decimal) -> bool:
     """Whether a position moves closer to zero without crossing it (#397).
 
@@ -173,9 +197,11 @@ class RealGuard:
         self._tripped = tripped
 
     def check(self, signal: PlaceSignal, reading: PreTradeReading) -> GuardDecision:
-        if self._tripped:
+        kind = _order_kind(signal)
+        if self._tripped and kind is not _OrderKind.FLATTEN:
             # Halt-only: every new placement is DENIED while resting LIVE orders
             # are left untouched (ADR-0026). Checked first — a halt overrides all.
+            # Flatten is the operator's exit from a halt, so it passes (ADR-0054).
             return Denied(reason="kill switch tripped")
         spec = self._specs.get(signal.symbol)
         if spec is None:
@@ -204,7 +230,7 @@ class RealGuard:
                 quantity,
                 spec,
                 side=signal.side,
-                reduce_only=signal.reduce_only,
+                reduce_only=kind is not _OrderKind.PLAIN,
                 account_net=reading.account_net_size,
             ):
                 # A LIMIT carries its own price, so notional is exact: deny locally
@@ -219,18 +245,20 @@ class RealGuard:
         # An order that shrinks the worst case cannot add exposure, so no cap on
         # order size or value may stop it.
         reduces = _shrinks(before, worst_case)
-        if signal.reduce_only:
+        if kind is _OrderKind.REDUCE_ONLY:
             # The venue checks only the account net, so it can take an order that
             # flips or grows the strategy's own position when the unattributed
             # partition holds size. So the own worst case must shrink, built like
             # the account one above. Open orders on a symbol are all its one
             # strategy's (ADR-0038), so the open remainder is already its own.
+            # Flatten skips this. The operator owns no partition, so its own
+            # size always reads 0, and its fills split over every partition.
             own_before = reading.strategy_net_size + direction * reading.open_remainder
             if not _shrinks(own_before, own_before + direction * quantity):
                 return Denied(reason="reduce-only order would not reduce strategy position")
         # The venue never lets a reduce-only order grow the account net, so these
         # caps could only stop an exit (ADR-0058).
-        skips_caps = reduces or signal.reduce_only
+        skips_caps = reduces or kind is not _OrderKind.PLAIN
         cap = symbol_limits.max_order_size
         if cap is not None and quantity > cap and not skips_caps:
             return Denied(reason=f"above max order size {cap}")
@@ -264,7 +292,9 @@ class RealGuard:
             if abs(worst_case) > cap and not skips_caps:
                 return Denied(reason=f"above max position {cap}")
         rate_cap = self._limits.rate_cap
-        if rate_cap is not None:
+        # Flatten paces itself, one order at a time per symbol (ADR-0056). A
+        # rate cap denial would fail the exit when it matters most (ADR-0058).
+        if rate_cap is not None and kind is not _OrderKind.FLATTEN:
             now_ns = self._clock.timestamp_ns()
             window_ns = rate_cap.window_ns
             # A slot counts for exactly one window after its placement. If the

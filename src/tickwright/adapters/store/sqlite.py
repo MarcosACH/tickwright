@@ -78,6 +78,7 @@ _SCHEMA: tuple[str, ...] = (
         cancel_requested    INTEGER NOT NULL DEFAULT 0,
         cancel_requested_ts INTEGER,
         cancel_signal_id    TEXT,
+        split_basis         TEXT,
         applied_event_ids TEXT NOT NULL,
         history           TEXT NOT NULL
     )
@@ -132,7 +133,11 @@ _SCHEMA: tuple[str, ...] = (
 
 # This dialect's type for each column in ``_records.ADDED_ORDER_COLUMNS``. The
 # column is also in ``_SCHEMA`` for a fresh database.
-_ADDED_COLUMN_TYPES: dict[str, str] = {"acked_ts_ns": "INTEGER", "created_ts_ns": "INTEGER"}
+_ADDED_COLUMN_TYPES: dict[str, str] = {
+    "acked_ts_ns": "INTEGER",
+    "created_ts_ns": "INTEGER",
+    "split_basis": "TEXT",
+}
 
 
 class SQLiteStore(SqlStore):

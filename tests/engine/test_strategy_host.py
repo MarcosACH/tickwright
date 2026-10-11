@@ -20,6 +20,7 @@ from tickwright.adapters.bus.serde import decode_event
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
+    OPERATOR,
     UNATTRIBUTED,
     AggressorSide,
     Clock,
@@ -704,6 +705,15 @@ def test_registering_the_reserved_unattributed_id_fails_fast() -> None:
 
     with pytest.raises(InvariantViolation, match=UNATTRIBUTED):
         host.register(RecordingStrategy(UNATTRIBUTED), symbols={"BTC"})
+
+
+def test_registering_the_reserved_operator_id_fails_fast() -> None:
+    # A strategy built without a config meets only this gate. As __operator__ its orders would
+    # skip the kill switch (ADR-0054).
+    host = _host()
+
+    with pytest.raises(InvariantViolation, match=f"{OPERATOR} is reserved for operator orders"):
+        host.register(RecordingStrategy(OPERATOR), symbols={"BTC"})
 
 
 def test_a_second_strategy_may_not_claim_an_owned_symbol() -> None:

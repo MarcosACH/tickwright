@@ -18,7 +18,7 @@ from pydantic import SecretStr, ValidationError
 from tickwright.adapters.feed import ReplayFeedConfig
 from tickwright.adapters.paper import PaperExchangeConfig
 from tickwright.app.config import AppConfig, AppSettings, StrategyConfig
-from tickwright.domain import UNATTRIBUTED, LeverageSpec, Side
+from tickwright.domain import OPERATOR, UNATTRIBUTED, LeverageSpec, Side
 from tickwright.engine.guard import RateCap
 from tickwright.engine.ledger_reconcile import ValuationBand
 from tickwright.venues.hyperliquid import HyperliquidConfig
@@ -475,6 +475,19 @@ def test_a_strategy_may_not_claim_the_reserved_unattributed_id() -> None:
         StrategyConfig(
             kind="single_shot_market",
             strategy_id=UNATTRIBUTED,
+            symbol="BTC",
+            side=Side.BUY,
+            quantity=Decimal("0.5"),
+        )
+
+
+def test_a_strategy_may_not_claim_the_reserved_operator_id() -> None:
+    # Flatten orders are placed as __operator__ and skip the kill switch (ADR-0054). A strategy
+    # with that id would get the same pass.
+    with pytest.raises(ValidationError, match=f"{OPERATOR} is reserved for operator orders"):
+        StrategyConfig(
+            kind="single_shot_market",
+            strategy_id=OPERATOR,
             symbol="BTC",
             side=Side.BUY,
             quantity=Decimal("0.5"),

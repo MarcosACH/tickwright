@@ -40,11 +40,13 @@ from decimal import Decimal
 from typing import TypedDict
 
 from tickwright.domain import (
+    OPERATOR,
     CancelSignal,
     Denied,
     EventBus,
     ExecutionReport,
     FillReport,
+    GuardDecision,
     Order,
     OrderAnchor,
     OrderCancelled,
@@ -65,11 +67,13 @@ from tickwright.domain import (
     PreTradeGuard,
     Signal,
     derive_cloid,
+    is_flatten,
 )
 from tickwright.observability import NamedEvent, named_event
 from tickwright.observability.correlation import operation
 
 from .checkpoint import Checkpointer
+from .flatten_split import split_refusal
 from .guard import NoopGuard
 
 # The saga transition → named event map (ADR-0020): every canonical ``OrderEvent``
@@ -216,14 +220,34 @@ class ExecutionManager:
             # before a crash — never place twice (ADR-0006).
             return
 
-        # The pre-trade boundary runs before write-ahead (ADR-0017): a denial is
-        # never sent, so there is no in-flight intent to protect. The reading is
-        # taken here, after the dedup and with no await before the check, so the
-        # guard judges the book as it stands at this call (ADR-0051).
-        reading = self._checkpointer.pre_trade_reading(
-            signal.symbol, signal.side, strategy_id=signal.strategy_id
-        )
-        decision = self._guard.check(signal, reading)
+        decision: GuardDecision
+        if signal.strategy_id == OPERATOR and not is_flatten(signal):
+            # Every operator fill splits over the partitions, and the split is
+            # right only for an order that closes the net. So an operator order
+            # that is not reduce-only is denied here, whatever guard is wired
+            # (ADR-0054).
+            decision = Denied(reason="an operator order must be reduce-only")
+        else:
+            # The pre-trade boundary runs before write-ahead (ADR-0017): a denial is
+            # never sent, so there is no in-flight intent to protect. The reading is
+            # taken here, after the dedup and with no await before the check, so the
+            # guard judges the book as it stands at this call (ADR-0051).
+            reading = self._checkpointer.pre_trade_reading(
+                signal.symbol, signal.side, strategy_id=signal.strategy_id
+            )
+            decision = self._guard.check(signal, reading)
+
+        split_basis = None
+        if is_flatten(signal) and not isinstance(decision, Denied):
+            # The operator owns no partition, so its fills split over all of
+            # them. The sizes ride the PENDING write below, so a fill booked
+            # after a crash splits against the same basis (ADR-0054). An order
+            # the split cannot book is denied now, while no saga exists that a
+            # restart would have to book.
+            split_basis = self._checkpointer.split_basis(signal.symbol)
+            refusal = split_refusal(split_basis, signal.side, decision.quantity)
+            if refusal is not None:
+                decision = Denied(reason=refusal)
 
         if isinstance(decision, Denied):
             # DENIED (ADR-0010): a durable terminal that was never sent. No
@@ -239,6 +263,7 @@ class ExecutionManager:
         # The quantized quantity is what actually gets placed and filled, so the
         # saga records it, not the strategy's raw intent.
         order = self._order_for(signal, quantity=decision.quantity)
+        order.split_basis = split_basis
 
         # PENDING is the write-ahead intent: durable before anything else
         # happens (ADR-0008 rule 1), then announced.

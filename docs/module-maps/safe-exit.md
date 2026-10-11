@@ -201,18 +201,19 @@ loop never books a fill. Booking stays on the fill path, so a fill after a crash
 
 ### flatten_split (`engine`, new, pure)
 
-**Interface:** A pure function. It takes the partition sizes, the lot size, and the cumulative
-fill. It returns each partition's total move toward zero. It also splits a fee by the absolute
-size each partition books.
+**Interface:** A pure function. It takes the partition sizes, the lot size, and one fill: its
+cumulative size, its own size, and its fee. It returns the move and the fee share of each partition
+that fill moves. The fee splits by the absolute size each partition books.
 
 **Responsibilities:** The ADR-0056 rule. Split by side, then hand out lots one at a time to the
 partition furthest behind its exact share. Ties go to the partition id that sorts first. The moves
-sum to the fill after every fill. A later fill never takes a lot back.
+sum to the fill after every fill. A later fill never takes a lot back. A basis with no net, or a
+fill past the net, raises `InvariantViolation`. `split_refusal` keeps such an order from going out.
 
 **Seams:** None.
 
 **Depth note:** A small interface over a subtle rule. It knows nothing about orders, so property
-tests reach it directly.
+tests reach it directly. They feed it fills one at a time, the way the `Checkpointer` does.
 
 ---
 
@@ -221,9 +222,9 @@ tests reach it directly.
 **Interface:** `checkpoint_fill` is unchanged for callers. `pre_trade_reading` gains the strategy's
 own position. It also gains a read of every partition's size in a symbol, for `split_basis`.
 
-**Responsibilities:** When an order has a `split_basis`, the fill write calls `flatten_split` on
-the cumulative fill. It books each partition's change since the last fill, in one
-`checkpoint_ledger` transaction. The `Store` seam already takes a tuple of positions.
+**Responsibilities:** When an order has a `split_basis`, the fill write calls `flatten_split` with
+the fill. It books each partition's move as its own fill, in one `checkpoint_ledger` transaction.
+The `Store` seam already takes a tuple of positions.
 
 **Seams:** None new.
 
@@ -244,6 +245,13 @@ split is safe only on this path.
   (ADR-0055).
 - An `__operator__` place reads the partition sizes from the `Checkpointer`. It stores them as
   `split_basis` in the same `PENDING` write that comes before the send (ADR-0054).
+- An `__operator__` order that is not reduce-only ends `DENIED` before the guard. Its fills could
+  not split (ADR-0054). The guard and this module read one rule, `is_flatten`, for what a flatten
+  order is.
+- A flatten order the split cannot book ends `DENIED` before the `PENDING` write. That is a basis
+  with no net, a side that does not close the net, or a size past the net. `split_refusal` in
+  `flatten_split` names the reason. A fill like that would flip a partition, and on reconcile it
+  would fault every boot (#471).
 - `reduce_only` flows from the signal to the order and to the `PlaceOrder`.
 
 **Seams:** None new.
@@ -262,7 +270,9 @@ in the symbol.
 position caps. It keeps the rate cap and the kill switch. It keeps the min notional unless it
 closes the whole account net. It is denied unless it shrinks the strategy's own worst case. A
 flatten order is reduce-only from `__operator__`. It skips the kill switch and every cap. Any other
-`__operator__` order meets the kill switch (ADR-0054).
+`__operator__` order is denied by the `ExecutionManager` before the guard. Called on its own, the
+guard still gives it no flatten pass (ADR-0054). A flatten order also skips the own-position
+check. `__operator__` owns no partition, so that check would deny every flatten (ADR-0058).
 
 **Seams:** No new seam. `NoopGuard` ignores the new field.
 

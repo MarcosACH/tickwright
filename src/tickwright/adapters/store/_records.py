@@ -52,6 +52,7 @@ RECORD_COLUMNS: tuple[str, ...] = (
     "cancel_requested",
     "cancel_requested_ts",
     "cancel_signal_id",
+    "split_basis",
     "applied_event_ids",
     "history",
 )
@@ -96,9 +97,23 @@ def record_values(order: Order, *, history: Sequence[Any]) -> tuple[Any, ...]:
         order.cancel_requested,
         order.cancel_requested_ts,
         order.cancel_signal_id,
+        _encode_split_basis(order.split_basis),
         json.dumps(sorted(order.applied_event_ids)),
         json.dumps(list(history)),
     )
+
+
+def _encode_split_basis(basis: tuple[tuple[str, Decimal], ...] | None) -> str | None:
+    # Sizes as text, like every other money column, so the exact representation survives.
+    if basis is None:
+        return None
+    return json.dumps([[owner, str(size)] for owner, size in basis])
+
+
+def _decode_split_basis(text: str | None) -> tuple[tuple[str, Decimal], ...] | None:
+    if text is None:
+        return None
+    return tuple((owner, Decimal(size)) for owner, size in json.loads(text))
 
 
 def next_history(existing_json: str | None, state: OrderState, ts_ns: int) -> list[list[Any]]:
@@ -137,6 +152,7 @@ def restore_order(row: Sequence[Any]) -> Order:
         cancel_requested_ts=column["cancel_requested_ts"],
         cancel_signal_id=column["cancel_signal_id"],
         applied_event_ids=json.loads(column["applied_event_ids"]),
+        split_basis=_decode_split_basis(column["split_basis"]),
     )
 
 
@@ -177,6 +193,11 @@ def created_ts_from_history(history_json: str | None) -> int | None:
     return history[0][1] if history else None
 
 
+def no_split_basis(history_json: str | None) -> None:
+    """Always ``None``. No order written before the column existed was a flatten order."""
+    return None
+
+
 # Columns that arrived on ``orders`` after a database may already have been
 # written, each with what fills its existing rows from their transition
 # history. ``CREATE TABLE IF NOT EXISTS`` leaves an existing table as it was, so
@@ -188,6 +209,7 @@ ADDED_ORDER_COLUMNS: Mapping[str, Callable[[str | None], int | None]] = MappingP
     {
         "acked_ts_ns": acked_ts_from_history,
         "created_ts_ns": created_ts_from_history,
+        "split_basis": no_split_basis,
     }
 )
 
