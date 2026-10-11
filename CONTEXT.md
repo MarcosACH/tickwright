@@ -475,7 +475,8 @@ Its fills split pro rata over every [[Position]] partition of the symbol, so eac
 flat (ADR-0054). When no order can close a strategy's leftover, it moves into the unattributed
 partition at the strategy's entry price. A failed venue read also counts as an attempt that fills
 nothing (ADR-0060). A read refused for a rate limit does not count. It waits like an order.
-Flatten is done only when the venue holds no resting order and no position. Not built yet (#408).
+Flatten is done only when the venue holds no resting order and no position. The fill split is built
+(#471). The rest is not built yet (#408).
 _Avoid_: close out, liquidate (that is the venue's forced close), panic sell.
 
 **Reduce-only order**:
@@ -502,7 +503,7 @@ _Avoid_: exit mode, maintenance run.
 **Split basis**:
 The partition sizes of a symbol, read when a [[Flatten]] order is placed and stored on that order
 in its `PENDING` write. Every fill of the order splits pro rata against it, including a fill
-booked by [[Reconciliation]] after a crash (ADR-0054, ADR-0056). Not built yet (#408).
+booked by [[Reconciliation]] after a crash (ADR-0054, ADR-0056).
 _Avoid_: snapshot (that is a strategy's state bytes).
 
 **Figure**:

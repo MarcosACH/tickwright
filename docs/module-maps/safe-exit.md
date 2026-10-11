@@ -262,7 +262,8 @@ in the symbol.
 position caps. It keeps the rate cap and the kill switch. It keeps the min notional unless it
 closes the whole account net. It is denied unless it shrinks the strategy's own worst case. A
 flatten order is reduce-only from `__operator__`. It skips the kill switch and every cap. Any other
-`__operator__` order meets the kill switch (ADR-0054).
+`__operator__` order meets the kill switch (ADR-0054). A flatten order also skips the own-position
+check. `__operator__` owns no partition, so that check would deny every flatten (ADR-0058).
 
 **Seams:** No new seam. `NoopGuard` ignores the new field.
 
