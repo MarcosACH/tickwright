@@ -212,6 +212,8 @@ def test_sigterm_during_cancel_all_stops_the_run_with_exit_one(tmp_path: Path) -
     assert logs[-1]["event"] == "exit.finished"
     assert logs[-1]["outcome"] == "stopped"
     assert logs[-1]["exit_code"] == 1
+    # The job never returned, so no venue read says what is left.
+    assert logs[-1]["left"] == "unread"
 
 
 async def _rest(exchange: PaperExchange, sagas: Checkpointer, *, seq: int, price: str) -> str:
