@@ -65,7 +65,7 @@ from tickwright.domain import (
 )
 
 from .cache import Cache
-from .flatten_split import flatten_split, split_fee
+from .flatten_split import flatten_split
 from .portfolio import HealChange, PortfolioProjection
 
 
@@ -274,9 +274,8 @@ class Checkpointer:
     ) -> list[tuple[PartitionFill, Side]]:
         """One flatten fill as one piece per partition it moves (ADR-0054, ADR-0056).
 
-        Each piece is the partition's move up to this fill's ``cum_qty`` minus its
-        move before it. The split reads only the cumulative fill, so a fill booked
-        again after a crash gives the same pieces."""
+        ``flatten_split`` decides each move and fee. This turns them into fills
+        the ledger books, one per partition."""
         spec = self._specs.get(event.symbol)
         if spec is None:
             # Without the lot size the split cannot be computed, and a guess
@@ -284,29 +283,30 @@ class Checkpointer:
             raise InvariantViolation(
                 f"no InstrumentSpec for {event.symbol!r}; a flatten fill needs its lot size"
             )
-        lot_size = Decimal(1).scaleb(-spec.sz_decimals)
-        before = flatten_split(basis, lot_size, event.cum_qty - event.quantity)
-        after = flatten_split(basis, lot_size, event.cum_qty)
-        moves = {owner: after[owner] - before[owner] for owner in after}
-        moves = {owner: move for owner, move in moves.items() if move != 0}
+        moves = flatten_split(
+            basis,
+            Decimal(1).scaleb(-spec.sz_decimals),
+            cum_qty=event.cum_qty,
+            quantity=event.quantity,
+            fee=event.fee,
+        )
         if not moves:
             # A fill smaller than one lot moves no partition. The venue fills on
             # its lot grid, so this is a broken assumption, not a case to skip.
             raise InvariantViolation(
                 f"flatten fill {event.event_id} of {event.quantity} moves no partition"
             )
-        fees = split_fee(moves, event.fee)
         return [
             (
                 PartitionFill(
                     event_id=f"{event.event_id}:{owner}",
                     strategy_id=None if owner == UNATTRIBUTED else owner,
                     symbol=event.symbol,
-                    quantity=abs(move),
+                    quantity=abs(move.size),
                     price=event.price,
-                    fee=fees[owner],
+                    fee=move.fee,
                 ),
-                Side.BUY if move > 0 else Side.SELL,
+                Side.BUY if move.size > 0 else Side.SELL,
             )
             for owner, move in moves.items()
         ]

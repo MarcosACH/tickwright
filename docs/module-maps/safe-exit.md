@@ -201,9 +201,9 @@ loop never books a fill. Booking stays on the fill path, so a fill after a crash
 
 ### flatten_split (`engine`, new, pure)
 
-**Interface:** A pure function. It takes the partition sizes, the lot size, and the cumulative
-fill. It returns each partition's total move toward zero. It also splits a fee by the absolute
-size each partition books.
+**Interface:** A pure function. It takes the partition sizes, the lot size, and one fill: its
+cumulative size, its own size, and its fee. It returns the move and the fee share of each partition
+that fill moves. The fee splits by the absolute size each partition books.
 
 **Responsibilities:** The ADR-0056 rule. Split by side, then hand out lots one at a time to the
 partition furthest behind its exact share. Ties go to the partition id that sorts first. The moves
@@ -212,7 +212,7 @@ sum to the fill after every fill. A later fill never takes a lot back.
 **Seams:** None.
 
 **Depth note:** A small interface over a subtle rule. It knows nothing about orders, so property
-tests reach it directly.
+tests reach it directly. They feed it fills one at a time, the way the `Checkpointer` does.
 
 ---
 
@@ -221,9 +221,8 @@ tests reach it directly.
 **Interface:** `checkpoint_fill` is unchanged for callers. `pre_trade_reading` gains the strategy's
 own position. It also gains a read of every partition's size in a symbol, for `split_basis`.
 
-**Responsibilities:** When an order has a `split_basis`, the fill write calls `flatten_split` on
-the cumulative fill. It books each partition's change since the last fill, in one
-`checkpoint_ledger` transaction. The `Store` seam already takes a tuple of positions.
+**Responsibilities:** When an order has a `split_basis`, the fill write calls `flatten_split` with
+the fill. It books each partition's move as its own fill, in one `checkpoint_ledger` transaction. The `Store` seam already takes a tuple of positions.
 
 **Seams:** None new.
 
