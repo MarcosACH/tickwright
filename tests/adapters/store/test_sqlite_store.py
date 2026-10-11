@@ -72,6 +72,8 @@ def test_a_held_lock_names_the_holder_pid_and_the_lock_file(tmp_path: Path) -> N
         assert holder is not None
         assert holder.pid == os.getpid()
         assert str(tmp_path / "tickwright.db.lock") in holder.detail
+        # ``exit.refused`` names the store by its absolute path (ADR-0060).
+        assert holder.store == str(db)
 
 
 def test_a_lock_held_before_its_pid_is_written_is_still_a_refusal(tmp_path: Path) -> None:

@@ -52,6 +52,7 @@ from tickwright.domain import (
     OrderRef,
     PlaceOrder,
     VenueAccountState,
+    VenueOpenOrder,
     VenueOrderView,
     VenuePositionState,
     VenueReadFailure,
@@ -335,6 +336,10 @@ class VenueDouble:
     async def stop(self) -> None:
         return None
 
+    async def fetch_open_orders(self) -> list[VenueOpenOrder] | VenueReadFailure:
+        # Nothing resting. Only an exit run reads this, and no double suite runs one.
+        return []
+
     async def fetch_account_state(self) -> VenueAccountState | None:
         # The paper venue's permanent answer, and the fail-closed one for a
         # double as well: no account truth to compare against, so nothing heals
@@ -427,6 +432,9 @@ class VenueLink:
 
     async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
         return await self._venue.fetch_order(ref)
+
+    async def fetch_open_orders(self) -> list[VenueOpenOrder] | VenueReadFailure:
+        return await self._venue.fetch_open_orders()
 
     async def fetch_account_state(self) -> VenueAccountState | None:
         return await self._venue.fetch_account_state()

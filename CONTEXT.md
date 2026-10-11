@@ -142,6 +142,8 @@ goes by the oid once the saga holds one, and before that a read refuses a record
 placed before the saga existed (ADR-0011 inv 2, invariant 12).
 Since #460 `cancel` takes a list of refs. A single cancel sends a list of one, and a cancel all
 is one call that a venue can send as one batch (ADR-0055).
+Since #468 `fetch_open_orders()` lists every order resting in the account, ours or not. Paper
+answers it. Hyperliquid answers it from #470 on.
 _Avoid_: order API, order client (the anchor is what makes it one seam, not the verb shapes).
 
 **Account anchor** / `AccountAnchor` *(Protocol)*:
@@ -444,7 +446,9 @@ is the whole account, including orders placed by hand at the venue. A strategy's
 orders. The operator runs it as a one-shot command with the engine stopped (ADR-0052). A strategy
 sends one cancel all per symbol. It cancels only the orders it sent before that signal
 (ADR-0055). Operator cancel all is done when a final venue read finds no resting order. If orders
-remain, it cancels them once more, then exits 1 if any still rest (ADR-0060). Not built yet (#408).
+remain, it cancels them once more, then exits 1 if any still rest (ADR-0060). Operator cancel all
+is built on paper (#468). Hyperliquid follows in #470. A strategy's cancel all is not built yet
+(#408).
 _Avoid_: flatten (that closes positions), mass-cancel.
 
 **Flatten**:
@@ -491,8 +495,8 @@ _Avoid_: close order, exit order.
 A one-shot run of `tickwright cancel-all` or `tickwright flatten`, with the engine stopped
 (ADR-0052). It is the same [[Engine]] process with an exit job in place of the strategies. It takes
 the store lock, boots and reconciles like a normal run, does its one job, and exits 0, 1, or 2
-(ADR-0060). The job is `OperatorCancelAll` or `Flatten`. See `docs/module-maps/safe-exit.md`. Not
-built yet (#408).
+(ADR-0060). The job is `OperatorCancelAll` or `Flatten`. See `docs/module-maps/safe-exit.md`.
+`OperatorCancelAll` is built on paper (#468). `Flatten` is not built yet (#408).
 _Avoid_: exit mode, maintenance run.
 
 **Split basis**:

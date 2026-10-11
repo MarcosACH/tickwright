@@ -42,7 +42,9 @@ from tickwright.domain import (
     Signal,
     Store,
     StoreLockHeld,
+    StoreLockHolder,
     Strategy,
+    VenueReadFailure,
     duration_ns,
 )
 from tickwright.observability import NamedEvent, named_event
@@ -52,6 +54,7 @@ from .barrier import StartupBarrier
 from .cadence import run_cadence
 from .checkpoint import Checkpointer
 from .execution import ExecutionManager
+from .exit_run import ExitContext, ExitJob, ExitOutcome, ExitStatus, describe_orders
 from .guard import NoopGuard
 from .ledger_reconcile import LedgerReconciliation, ValuationBand
 from .portfolio import PortfolioProjection
@@ -99,6 +102,20 @@ def _first_leaf(exc: BaseException) -> BaseException:
     return exc
 
 
+def _describe_left(outcome: ExitOutcome | None) -> str:
+    """What the job's last venue read left, for ``exit.finished`` (ADR-0060).
+
+    One string, because every catalog field is a scalar.
+    """
+    if outcome is None:
+        return "unread"
+    if isinstance(outcome.left, VenueReadFailure):
+        return f"read_failed: {outcome.left.value}"
+    if not outcome.left:
+        return "none"
+    return describe_orders(outcome.left)
+
+
 class Engine:
     """The supervised host: ``run()`` drives the whole ADR-0024 lifecycle."""
 
@@ -113,8 +130,13 @@ class Engine:
         guard: PreTradeGuard | None = None,
         config: EngineConfig | None = None,
         leverage: LeverageBook = EMPTY_LEVERAGE_BOOK,
+        exit_job: ExitJob | None = None,
     ) -> None:
         self._bus = bus
+        # With a job this is a one-shot exit run (ADR-0052). It boots the same
+        # way and runs the job in place of the strategies.
+        self._exit_job = exit_job
+        self._exit_outcome: ExitOutcome | None = None
         self._clock = clock
         self._store = store
         self._exchange = exchange
@@ -180,6 +202,7 @@ class Engine:
         self._stopped = asyncio.Event()
         self._feed_task: asyncio.Task[None] | None = None
         self._exchange_task: asyncio.Task[None] | None = None
+        self._exit_task: asyncio.Task[None] | None = None
         self._cadence_tasks: list[asyncio.Task[None]] = []
 
     @property
@@ -230,82 +253,35 @@ class Engine:
 
         Returns the process exit-code contract (ADR-0024): 0 = graceful stop,
         non-zero = ``FAULTED`` — the external supervisor's restart signal.
+
+        An exit run returns the ADR-0060 codes instead. 0 means a final venue
+        read confirmed the job done. 1 means it stopped partway.
         """
         # The store lock comes before anything that writes, ``recover()`` first
         # among them (ADR-0052). A refusal also skips the teardown, because its
         # ``host.stop`` snapshots strategies and this store is another engine's.
         try:
             holder = self._store.lock()
-            if holder is not None:
-                raise StoreLockHeld(holder.detail)
         except Exception as exc:
             return self._fault_before_boot(exc)
+        if holder is not None:
+            if self._exit_job is not None:
+                return self._refuse_exit_run(holder)
+            return self._fault_before_boot(StoreLockHeld(holder.detail))
         self._install_signal_handlers()
         try:
             await self._start_sequence()
             async with asyncio.TaskGroup() as tg:
-                # The continuous reconciliation cadences (ADR-0011/0024), paced
-                # by virtual time (ADR-0033): they run for the life of the
-                # TaskGroup and stop with the reverse shutdown below.
-                self._cadence_tasks = [
-                    tg.create_task(
-                        run_cadence(
-                            clock=self._clock,
-                            interval_seconds=self._reconcile_config.inflight_interval_seconds,
-                            cycle=self._reconciler.reconcile_inflight,
-                        )
-                    ),
-                    tg.create_task(
-                        run_cadence(
-                            clock=self._clock,
-                            interval_seconds=self._reconcile_config.open_order_interval_seconds,
-                            cycle=self._reconciler.reconcile_open_orders,
-                        )
-                    ),
-                ]
-                # The account grain joins them on the **live path alone**
-                # (ADR-0034): paper has no second account to compare the ledger
-                # against, and `PaperExchange` answers this read `None` by
-                # construction — the fail-closed value — so a cadence scheduled
-                # there would freeze every cycle and report the default path as
-                # an outage. The predicate is the venue's own declaration, the
-                # same `declares_genesis` the startup checks read (ADR-0042 §6):
-                # declared on paper, ingested on live. It is the
-                # venue kind and not the row, which is what separates it from
-                # the barrier's step one grain up — that one asks whether a
-                # *read is owed* and a live restart answers no, while this asks
-                # whether there is anything to reconcile against at all, and the
-                # answer holds for every cycle of the run.
-                if not self._exchange.account_spec().declares_genesis:
-                    self._cadence_tasks.append(
-                        tg.create_task(
-                            run_cadence(
-                                clock=self._clock,
-                                interval_seconds=self._reconcile_config.account_interval_seconds,
-                                cycle=self._ledger_reconciler.reconcile_account,
-                            )
-                        )
-                    )
-                # The venue's own long-lived half (ADR-0037's paper funding
-                # generator, today), supervised beside the cadences rather than
-                # spawned by the adapter: an exception raised in it aborts this
-                # group and faults the run at the refusal, which is the whole
-                # of why the seam declares ``run`` separately from ``start``.
-                # Awaiting it at step 4 instead is not available — that step
-                # must return so the barrier can run — and a task the adapter
-                # created for itself would have no fault channel at all.
-                # An adapter with no loop returns here immediately and its task
-                # simply completes; nothing downstream distinguishes the two.
-                self._exchange_task = tg.create_task(self._exchange.run())
-                # The feed starts last (ADR-0024 step 7): the first tick is only
-                # possible after the barrier cleared, so nothing places before
-                # reconciliation completes. Replay end-of-file ends the task but
-                # not the run — like the CLI, the engine stops only when told to.
-                # The connect is inline and the loop is supervised, for the
-                # reasons ADR-0024 step 7's amendment states in full.
-                await self._feed.start()
-                named_event(NamedEvent.ENGINE_FEED_STARTED)
-                self._feed_task = tg.create_task(self._feed.run())
+                # An exit run schedules no cadence and starts no feed. Its job
+                # runs every reconcile pass itself, so two never overlap
+                # (ADR-0052). The venue's own long-lived half runs either way.
+                if self._exit_job is None:
+                    self._schedule_cadences(tg)
+                self._start_exchange_loop(tg)
+                if self._exit_job is None:
+                    await self._start_feed(tg)
+                else:
+                    self._exit_task = tg.create_task(self._run_exit_job(self._exit_job))
                 tg.create_task(self._stop_when_requested())
         except Exception as exc:
             # The first raw-handler exception aborted the TaskGroup and
@@ -316,19 +292,139 @@ class Engine:
             named_event(NamedEvent.ENGINE_FAULTED, error=repr(_first_leaf(exc)))
             await self._run_best_effort_stop_hooks()
             self._stopped.set()
-            return 1
+            return self._finish_exit_run(1)
         finally:
             self._remove_signal_handlers()
         self._state = ComponentState.STOPPED
         self._stopped.set()
-        return 0
+        if self._exit_job is None:
+            return 0
+        # Only a final venue read that found nothing left makes it done. A signal
+        # stops the job before it reports, so there is no outcome (ADR-0060).
+        done = self._exit_outcome is not None and self._exit_outcome.status is ExitStatus.DONE
+        return self._finish_exit_run(0 if done else 1)
+
+    def _schedule_cadences(self, tg: asyncio.TaskGroup) -> None:
+        """Start the reconcile cadences of a normal run."""
+        # The continuous reconciliation cadences (ADR-0011/0024), paced
+        # by virtual time (ADR-0033): they run for the life of the
+        # TaskGroup and stop with the reverse shutdown below.
+        self._cadence_tasks = [
+            tg.create_task(
+                run_cadence(
+                    clock=self._clock,
+                    interval_seconds=self._reconcile_config.inflight_interval_seconds,
+                    cycle=self._reconciler.reconcile_inflight,
+                )
+            ),
+            tg.create_task(
+                run_cadence(
+                    clock=self._clock,
+                    interval_seconds=self._reconcile_config.open_order_interval_seconds,
+                    cycle=self._reconciler.reconcile_open_orders,
+                )
+            ),
+        ]
+        # The account grain joins them on the **live path alone**
+        # (ADR-0034): paper has no second account to compare the ledger
+        # against, and `PaperExchange` answers this read `None` by
+        # construction — the fail-closed value — so a cadence scheduled
+        # there would freeze every cycle and report the default path as
+        # an outage. The predicate is the venue's own declaration, the
+        # same `declares_genesis` the startup checks read (ADR-0042 §6):
+        # declared on paper, ingested on live. It is the
+        # venue kind and not the row, which is what separates it from
+        # the barrier's step one grain up — that one asks whether a
+        # *read is owed* and a live restart answers no, while this asks
+        # whether there is anything to reconcile against at all, and the
+        # answer holds for every cycle of the run.
+        if not self._exchange.account_spec().declares_genesis:
+            self._cadence_tasks.append(
+                tg.create_task(
+                    run_cadence(
+                        clock=self._clock,
+                        interval_seconds=self._reconcile_config.account_interval_seconds,
+                        cycle=self._ledger_reconciler.reconcile_account,
+                    )
+                )
+            )
+
+    def _start_exchange_loop(self, tg: asyncio.TaskGroup) -> None:
+        """Supervise the venue's own long-lived half in the run's task group."""
+        # The venue's own long-lived half (ADR-0037's paper funding
+        # generator, today), supervised beside the cadences rather than
+        # spawned by the adapter: an exception raised in it aborts this
+        # group and faults the run at the refusal, which is the whole
+        # of why the seam declares ``run`` separately from ``start``.
+        # Awaiting it at step 4 instead is not available — that step
+        # must return so the barrier can run — and a task the adapter
+        # created for itself would have no fault channel at all.
+        # An adapter with no loop returns here immediately and its task
+        # simply completes; nothing downstream distinguishes the two.
+        self._exchange_task = tg.create_task(self._exchange.run())
+
+    async def _start_feed(self, tg: asyncio.TaskGroup) -> None:
+        """Connect the feed and supervise its loop. Always the last start step."""
+        # The feed starts last (ADR-0024 step 7): the first tick is only
+        # possible after the barrier cleared, so nothing places before
+        # reconciliation completes. Replay end-of-file ends the task but
+        # not the run — like the CLI, the engine stops only when told to.
+        # The connect is inline and the loop is supervised, for the
+        # reasons ADR-0024 step 7's amendment states in full.
+        await self._feed.start()
+        named_event(NamedEvent.ENGINE_FEED_STARTED)
+        self._feed_task = tg.create_task(self._feed.run())
+
+    async def _run_exit_job(self, job: ExitJob) -> None:
+        """Run the job, keep its outcome, then ask for the usual stop."""
+        context = ExitContext(
+            account=self._exchange, orders=self._exchange, checkpointer=self._checkpointer
+        )
+        self._exit_outcome = await job.run(context)
+        self._stop_requested.set()
+
+    def _finish_exit_run(self, exit_code: int) -> int:
+        """Emit the exit run's last event and return its code (ADR-0060).
+
+        A normal run returns ``exit_code`` unchanged and emits nothing here.
+        """
+        if self._exit_job is None:
+            return exit_code
+        outcome = self._exit_outcome
+        named_event(
+            NamedEvent.EXIT_FINISHED,
+            job=self._exit_job.name,
+            outcome=outcome.status.value if outcome is not None else ExitStatus.STOPPED.value,
+            exit_code=exit_code,
+            left=_describe_left(outcome),
+        )
+        return exit_code
+
+    def _refuse_exit_run(self, holder: StoreLockHolder) -> int:
+        """Turn an exit run away from a store another engine holds (ADR-0060).
+
+        Code 2 tells the operator nothing moved, so they can end the holder and
+        run the job again. A normal run faults instead, so its supervisor retries.
+        """
+        self._state = ComponentState.FAULTED
+        self._fault = StoreLockHeld(holder.detail)
+        named_event(
+            NamedEvent.EXIT_REFUSED, reason="lock_held", store=holder.store, holder=holder.detail
+        )
+        self._close_before_boot()
+        return 2
 
     def _fault_before_boot(self, exc: Exception) -> int:
-        """Fault with nothing started, so there is nothing to tear down. Closing
-        the store's own connection is the one step left, and it writes nothing."""
+        """Fault with nothing started, so there is nothing to tear down."""
         self._state = ComponentState.FAULTED
         self._fault = exc
         named_event(NamedEvent.ENGINE_FAULTED, error=repr(exc))
+        self._close_before_boot()
+        return 1
+
+    def _close_before_boot(self) -> None:
+        """Closing the store's own connection is the one step left, and it
+        writes nothing."""
         try:
             self._store.close()
         except Exception as close_exc:
@@ -336,7 +432,6 @@ class Engine:
                 NamedEvent.ENGINE_STOP_HOOK_FAILED, hook="store.close", error=repr(close_exc)
             )
         self._stopped.set()
-        return 1
 
     async def stop(self) -> None:
         """Request the graceful stop and wait for the reverse shutdown to finish."""
@@ -438,7 +533,9 @@ class Engine:
         ).run(timeout_seconds=self._config.startup_reconciliation_timeout_seconds)
         named_event(NamedEvent.ENGINE_BARRIER_CLEARED)
         # Strategies after the barrier: restore snapshot, resume seq, subscribe.
-        self._host.start()
+        # An exit run starts none, so nothing but its job can place or cancel.
+        if self._exit_job is None:
+            self._host.start()
         self._state = ComponentState.RUNNING
 
     async def _on_funding_accrual(self, accrual: FundingAccrual) -> None:
@@ -505,19 +602,25 @@ class Engine:
         second call as an error, in the one window where nothing can act on it.
         The five that cross a seam say so at that seam — ``MarketFeed.stop``,
         ``Exchange.stop``, ``EventBus.drain``, ``EventBus.close``,
-        ``Store.close``; the other two are the engine's own and answer for it
-        here (``_stop_cadences`` re-cancels tasks already done, a no-op, and
-        ``StrategyHost.stop`` retakes the final snapshots into the same
+        ``Store.close``; the other three are the engine's own and answer for it
+        here (``_stop_cadences`` and ``_stop_exit_job`` re-cancel tasks already
+        done, a no-op, and ``StrategyHost.stop`` retakes the final snapshots into the same
         latest-wins row per strategy — a rewrite, not a second effect). The two
         entries that are both — ``feed.stop`` and ``exchange.stop`` wrap a seam
         call *and* a task cancellation — inherit the property from each half.
         """
+        # An exit run never started its strategies. Their snapshot would overwrite
+        # the one the last normal run saved, so it takes none.
+        host_stop: tuple[tuple[str, Callable[[], Awaitable[None] | None]], ...] = (
+            (("host.stop", self._host.stop),) if self._exit_job is None else ()
+        )
         return (
             ("feed.stop", self._stop_feed),
             ("reconcile.stop", self._stop_cadences),
+            ("exit_job.stop", self._stop_exit_job),
             ("exchange.stop", self._stop_exchange),
             ("bus.drain", self._bus.drain),
-            ("host.stop", self._host.stop),
+            *host_stop,
             ("bus.close", self._bus.close),
             ("store.close", self._store.close),
         )
@@ -530,6 +633,16 @@ class Engine:
         for task in self._cadence_tasks:
             task.cancel()
         await asyncio.gather(*self._cadence_tasks, return_exceptions=True)
+
+    async def _stop_exit_job(self) -> None:
+        """End an exit job a signal interrupted, before the venue it reads is
+        released. A job that already returned is done, so this is a no-op. A
+        cancel it was sending may or may not land. Its saga mark is already
+        durable, so restart reconciliation reads the truth either way."""
+        if self._exit_task is None:
+            return
+        self._exit_task.cancel()
+        await asyncio.gather(self._exit_task, return_exceptions=True)
 
     async def _stop_exchange(self) -> None:
         """Release the venue, then end the long-lived half this runner supervises."""

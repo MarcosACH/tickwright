@@ -75,6 +75,14 @@ when a venue read fails, and which named events an exit run emits. Decided in
   `refused`. `refused` covers every refusal that is not a rate limit, and a send that dies
   (ADR-0056). `limit` is `address` or `ip`. What is left comes from the last venue read. If that
   read failed, the field says so.
+
+  **(Field names as shipped, since [#468](https://github.com/MarcosACH/tickwright/issues/468):**
+  the lock holder is the field `holder`. `cancel_all.orders_remain` names its orders in one field,
+  `orders`, as a comma-separated list. An order with no oid is named by its cloid. What is left on
+  `exit.finished` is the field `left`. It is `none` when the last read found no order. It is
+  `read_failed: <reason>` when that read failed. It is `unread` when the job never returned, as
+  after a signal or a fault. Each is one string because every catalog field is a scalar
+  (ADR-0020).**)**
 - **No separate summary.** `exit.finished` is the summary. It goes through the same logger as every
   other event, so it is the last line the operator sees.
 
