@@ -7,7 +7,7 @@ sees them.
 """
 
 import asyncio
-from collections.abc import Iterable, Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import StrEnum
@@ -75,10 +75,11 @@ class ExitContext:
 
 
 class FeedHandle:
-    """Lets a job start the feed for the symbols it needs.
+    """The one way the engine starts the feed.
 
-    The engine builds it over its own task group, so the feed loop stays
-    supervised the same way it is in a normal run.
+    A normal run starts it with no symbols to add. An exit job starts it for the
+    symbols it needs. The engine builds it over its own task group, so the feed
+    loop is supervised the same way on both paths.
     """
 
     def __init__(self, feed: MarketFeed, tasks: asyncio.TaskGroup) -> None:
@@ -87,9 +88,12 @@ class FeedHandle:
         self.task: asyncio.Task[None] | None = None
         """The feed loop, for the engine's teardown. ``None`` until started."""
 
-    async def start(self, symbols: Iterable[str]) -> None:
+    async def start(self, symbols: Collection[str] = ()) -> None:
         """Add ``symbols`` to the feed, connect it, and run its loop."""
-        self._feed.add_symbols(symbols)
+        # A feed that cannot add symbols raises on any call, as Hyperliquid does
+        # until #475. A normal run adds none, so it must not call at all.
+        if symbols:
+            self._feed.add_symbols(symbols)
         await self._feed.start()
         named_event(NamedEvent.ENGINE_FEED_STARTED)
         self.task = self._tasks.create_task(self._feed.run())

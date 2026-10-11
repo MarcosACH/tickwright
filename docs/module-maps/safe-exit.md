@@ -65,6 +65,9 @@ for callers. With a job, `run()` returns 0, 1, or 2 (ADR-0060) instead of the AD
   - No reconcile cadences. The job runs every pass itself, so two passes never overlap.
   - No feed task at the start. The job starts the feed through the `FeedHandle` in its context.
     The handle runs `feed.run()` as a task in this group, so a feed fault still faults the run.
+    **(Changed by #472:** a normal run also starts the feed through a `FeedHandle`, with no
+    symbols to add. So the feed starts and stops in one place. The handle calls `add_symbols()`
+    only when there are symbols, because the live feed refuses the call until #475.**)**
   - The job runs as a task in this group. `exchange.run()` runs beside it as today.
 - When the job returns, request the stop and run the reverse shutdown as today.
 - Map the job's `ExitOutcome`, a signal, or a fault to the exit code. SIGINT and SIGTERM cancel
