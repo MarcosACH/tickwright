@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
 from ledgers import GENESIS
 
 from tickwright.adapters.bus import InMemoryBus
@@ -24,6 +25,8 @@ from tickwright.domain import (
     ExecutionReport,
     InstrumentSpec,
     MarketTick,
+    OrderDenied,
+    OrderEvent,
     OrderState,
     PlaceSignal,
     ReconciliationFill,
@@ -166,6 +169,46 @@ def test_a_flatten_sell_fills_in_two_parts_and_every_partition_reads_flat() -> N
     assert engine.store.get_order(flatten).state is OrderState.FILLED  # type: ignore[union-attr]
     # The operator never owns a partition.
     assert _size(engine, OPERATOR) is None
+
+
+@pytest.mark.parametrize(
+    ("held", "side", "quantity", "reason"),
+    [
+        (None, Side.SELL, "0.01", "a flatten order needs a net position to close"),
+        ("0.02", Side.BUY, "0.01", "a flatten order must trade against the net position"),
+        ("0.02", Side.SELL, "0.03", "a flatten order may not trade more than the net position"),
+    ],
+)
+def test_a_flatten_order_its_fills_could_not_split_is_denied_before_the_send(
+    held: str | None, side: Side, quantity: str, reason: str
+) -> None:
+    # The split assumes the order closes the net its basis holds. When the books
+    # lag the venue, that can fail, and the fill would flip a partition or crash
+    # the fill write on every boot. So the order never goes out.
+    engine = _engine()
+    denials: list[OrderDenied] = []
+
+    async def record(event: OrderEvent) -> None:
+        if isinstance(event, OrderDenied):
+            denials.append(event)
+
+    engine.bus.subscribe(OrderEvent, record)
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))
+        if held is not None:
+            await engine.bus.publish(_crossing_limit("trivial", side=Side.BUY, quantity=held))
+            await engine.bus.publish(_tick("42001"))
+        await engine.bus.publish(
+            _crossing_limit(OPERATOR, side=side, quantity=quantity, reduce_only=True)
+        )
+
+    asyncio.run(scenario())
+
+    flatten = derive_cloid(f"{OPERATOR}:BTC:1")
+    assert [(d.cloid, d.reason) for d in denials] == [(flatten, reason)]
+    assert engine.store.get_order(flatten).state is OrderState.DENIED  # type: ignore[union-attr]
+    assert engine.store.get_order(flatten).split_basis is None  # type: ignore[union-attr]
 
 
 def _life(store: SQLiteStore, venue: PaperExchange, clock: ManualClock) -> _Engine:

@@ -207,7 +207,8 @@ that fill moves. The fee splits by the absolute size each partition books.
 
 **Responsibilities:** The ADR-0056 rule. Split by side, then hand out lots one at a time to the
 partition furthest behind its exact share. Ties go to the partition id that sorts first. The moves
-sum to the fill after every fill. A later fill never takes a lot back.
+sum to the fill after every fill. A later fill never takes a lot back. A basis with no net, or a
+fill past the net, raises `InvariantViolation`. `split_refusal` keeps such an order from going out.
 
 **Seams:** None.
 
@@ -246,6 +247,10 @@ split is safe only on this path.
 - An `__operator__` order that is not reduce-only ends `DENIED` before the guard. Its fills could
   not split (ADR-0054). The guard and this module read one rule, `is_flatten`, for what a flatten
   order is.
+- A flatten order the split cannot book ends `DENIED` before the `PENDING` write. That is a basis
+  with no net, a side that does not close the net, or a size past the net. `split_refusal` in
+  `flatten_split` names the reason. A fill like that would flip a partition, and on reconcile it
+  would fault every boot (#471).
 - `reduce_only` flows from the signal to the order and to the `PlaceOrder`.
 
 **Seams:** None new.

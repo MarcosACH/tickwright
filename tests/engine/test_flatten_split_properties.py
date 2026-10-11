@@ -9,9 +9,11 @@ fill into moves is under test too, not only the cumulative rule behind it.
 
 from decimal import Decimal
 
+import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
+from tickwright.domain import InvariantViolation
 from tickwright.engine.flatten_split import PartitionMove, flatten_split
 
 LOT = Decimal("0.1")
@@ -57,6 +59,21 @@ def test_a_partition_against_the_net_moves_toward_zero_too() -> None:
     assert _sizes(first) == {"A": Decimal("-0.1")}
     assert _sizes(second) == {"A": Decimal("-0.2"), "B": Decimal("0.1")}
     assert _sizes(third) == {"A": Decimal("-0.2"), "B": Decimal("0.1")}
+
+
+@pytest.mark.parametrize(
+    ("basis", "fill", "message"),
+    [
+        ((), LOT, "a basis with no net"),
+        ((("A", Decimal("0.1")), ("B", Decimal("-0.1"))), LOT, "a basis with no net"),
+        ((("A", Decimal("0.2")),), Decimal("0.3"), "past the basis net"),
+    ],
+)
+def test_a_fill_the_basis_cannot_split_faults(basis: Basis, fill: Decimal, message: str) -> None:
+    # The ExecutionManager denies such an order before the send. Reaching the split anyway is a
+    # broken caller, and a guess would flip a partition.
+    with pytest.raises(InvariantViolation, match=message):
+        _feed(basis, [fill])
 
 
 _ids = st.sampled_from(["A", "B", "C", "D", "E"])

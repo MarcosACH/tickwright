@@ -8,6 +8,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 
+from tickwright.domain import InvariantViolation, Side
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class PartitionMove:
@@ -16,6 +18,24 @@ class PartitionMove:
     size: Decimal
     """The signed change toward zero. A long partition moves down, a short one up."""
     fee: Decimal
+
+
+def split_refusal(
+    basis: Sequence[tuple[str, Decimal]], side: Side, quantity: Decimal
+) -> str | None:
+    """Why a flatten order of ``side`` and ``quantity`` could not split over ``basis``, or ``None``.
+
+    The split assumes the order closes the net the basis holds. A fill past that net would flip a
+    partition, and a net of zero has nothing to split by.
+    """
+    net = sum((size for _, size in basis), Decimal(0))
+    if net == 0:
+        return "a flatten order needs a net position to close"
+    if (side is Side.SELL) != (net > 0):
+        return "a flatten order must trade against the net position"
+    if quantity > abs(net):
+        return "a flatten order may not trade more than the net position"
+    return None
 
 
 def flatten_split(
@@ -32,6 +52,13 @@ def flatten_split(
     order's fill so far, this fill's ``quantity`` included. A partition this fill does not move is
     left out, so a fill below one lot returns nothing.
     """
+    # ``split_refusal`` keeps such an order from being sent. Getting here anyway is a broken
+    # caller, and any split we guessed would flip a partition.
+    net = sum((size for _, size in basis), Decimal(0))
+    if net == 0:
+        raise InvariantViolation(f"cannot split a flatten fill over a basis with no net: {basis}")
+    if cum_qty > abs(net):
+        raise InvariantViolation(f"flatten fill of {cum_qty} is past the basis net of {net}")
     # Each move is the partition's total move after this fill minus its total before it. Both
     # totals come from the cumulative fill alone, so a fill booked again after a crash gives the
     # same moves.
