@@ -502,3 +502,45 @@ def test_a_failed_read_after_the_cancel_stops_the_run_even_with_every_order_canc
     assert logs[-1]["outcome"] == "stopped"
     assert logs[-1]["left"] == "read_failed: send_failed"
     assert [order.state for order in _sagas(tmp_path, cloids)] == [OrderState.CANCELLED]
+
+
+class _SigtermWhileConnecting(VenueLink):
+    """The operator sends SIGTERM while the run is still booting."""
+
+    def __init__(self, venue: PaperExchange, bus: InMemoryBus) -> None:
+        super().__init__(venue)
+        self.cancels_sent = 0
+
+    async def start(self) -> None:
+        await super().start()
+        os.kill(os.getpid(), signal.SIGTERM)
+        # The loop runs the engine's handler on a later turn. Two turns let it
+        # run before boot goes on.
+        for _ in range(2):
+            await asyncio.sleep(0)
+
+    async def cancel(self, refs: Sequence[OrderRef]) -> None:
+        self.cancels_sent += len(refs)
+        await super().cancel(refs)
+
+
+def test_sigterm_during_boot_stops_the_run_before_the_job_sends_anything(
+    tmp_path: Path,
+) -> None:
+    links: list[_SigtermWhileConnecting] = []
+
+    def link(paper: PaperExchange, bus: InMemoryBus) -> Exchange:
+        links.append(_SigtermWhileConnecting(paper, bus))
+        return links[-1]
+
+    exit_code, cloids, logs = _cancel_all(tmp_path, prices=["30000"], link=link)
+
+    # The operator asked to stop before the job began, so it never begins.
+    assert exit_code == 1
+    assert links[0].cancels_sent == 0
+    assert logs[-1]["event"] == "exit.finished"
+    assert logs[-1]["outcome"] == "stopped"
+    assert logs[-1]["left"] == "unread"
+    [order] = _sagas(tmp_path, cloids)
+    assert order.state is OrderState.LIVE
+    assert not order.cancel_requested

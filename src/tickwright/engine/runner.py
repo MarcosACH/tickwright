@@ -377,6 +377,10 @@ class Engine:
 
     async def _run_exit_job(self, job: ExitJob) -> None:
         """Run the job, keep its outcome, then ask for the usual stop."""
+        # A signal during boot means the operator changed their mind. The job
+        # never starts, so nothing reaches the venue after it (ADR-0060).
+        if self._stop_requested.is_set():
+            return
         context = ExitContext(
             account=self._exchange, orders=self._exchange, checkpointer=self._checkpointer
         )
