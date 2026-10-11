@@ -36,7 +36,7 @@ class ExitOutcome:
     """What a job reports back to the engine when it returns."""
 
     status: ExitStatus
-    left: list[VenueOpenOrder] | VenueReadFailure
+    left: tuple[VenueOpenOrder, ...] | VenueReadFailure
     """What the last venue read left, or how that read failed."""
 
 
@@ -76,8 +76,8 @@ class OperatorCancelAll:
             return ExitOutcome(status=ExitStatus.STOPPED, left=left)
         if left:
             named_event(NamedEvent.CANCEL_ALL_ORDERS_REMAIN, orders=describe_orders(left))
-            return ExitOutcome(status=ExitStatus.STOPPED, left=left)
-        return ExitOutcome(status=ExitStatus.DONE, left=left)
+            return ExitOutcome(status=ExitStatus.STOPPED, left=tuple(left))
+        return ExitOutcome(status=ExitStatus.DONE, left=())
 
 
 def describe_orders(orders: Sequence[VenueOpenOrder]) -> str:
