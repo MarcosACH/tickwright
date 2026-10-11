@@ -40,6 +40,20 @@ UNATTRIBUTED = "__unattributed__"
 OPERATOR = "__operator__"
 
 
+def reserved_id_refusal(strategy_id: str) -> str | None:
+    """The sentence refusing a reserved ``strategy_id``, or ``None`` if the id is free.
+
+    ``StrategyConfig`` and ``StrategyHost.register`` both refuse these ids, each with its own
+    exception type. The rule and its wording live here, so the two gates cannot drift apart."""
+    if strategy_id == UNATTRIBUTED:
+        # A strategy with this id would merge its book with flow the engine never placed.
+        return f"{UNATTRIBUTED} is the reserved unattributed partition, not a strategy id"
+    if strategy_id == OPERATOR:
+        # A reduce-only order from this id skips the kill switch (ADR-0054).
+        return f"{OPERATOR} is reserved for operator orders, not a strategy id"
+    return None
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class PartitionFill:
     """One partition's piece of a flatten order's fill (ADR-0054, ADR-0056).

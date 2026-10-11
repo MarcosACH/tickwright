@@ -23,7 +23,7 @@ from tickwright.adapters.bus import KafkaBusConfig
 from tickwright.adapters.feed import ReplayFeedConfig
 from tickwright.adapters.paper import PaperExchangeConfig
 from tickwright.adapters.store import PostgresStoreConfig, SQLiteStoreConfig
-from tickwright.domain import OPERATOR, UNATTRIBUTED, LeverageSpec, Side, SymbolOwnership
+from tickwright.domain import LeverageSpec, Side, SymbolOwnership, reserved_id_refusal
 from tickwright.engine.guard import NO_LIMITS, PreTradeLimits
 from tickwright.engine.runner import EngineConfig
 from tickwright.venues.hyperliquid import HyperliquidConfig
@@ -46,17 +46,15 @@ class StrategyConfig(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _id_may_not_be_the_reserved_partition(self) -> Self:
-        # ADR-0043 §2: the sentinel is made uncollidable rather than merely
-        # conventional. Refused here and again at ``StrategyHost.register`` —
-        # this is the earliest the id exists, that is the last point before it
-        # keys a ledger row, and a strategy built without a config only meets
-        # the second.
-        if self.strategy_id == UNATTRIBUTED:
-            raise ValueError(f"{UNATTRIBUTED} is the reserved unattributed partition, not an id")
-        # ADR-0054: a reduce-only order from this id skips the kill switch.
-        if self.strategy_id == OPERATOR:
-            raise ValueError(f"{OPERATOR} is reserved for operator orders, not a strategy id")
+    def _id_may_not_be_a_reserved_owner(self) -> Self:
+        # ADR-0043 §2, ADR-0054: the reserved ids are made uncollidable rather
+        # than merely conventional. Refused here and again at
+        # ``StrategyHost.register`` — this is the earliest the id exists, that
+        # is the last point before it keys a ledger row, and a strategy built
+        # without a config only meets the second.
+        refusal = reserved_id_refusal(self.strategy_id)
+        if refusal is not None:
+            raise ValueError(refusal)
         return self
 
 

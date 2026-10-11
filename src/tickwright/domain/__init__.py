@@ -88,6 +88,7 @@ from .position import (
     PositionChange,
     PositionView,
     account_net_size,
+    reserved_id_refusal,
 )
 from .protocols import (
     AccountAnchor,
@@ -216,6 +217,8 @@ __all__ = [
     "funding_boundaries",
     # the Σ-invariant's left-hand side
     "account_net_size",
+    # the one rule for the reserved owner ids, read by config and StrategyHost
+    "reserved_id_refusal",
     # the cash line a venue snapshot implies — the genesis and the reconcile
     # anchor read it from one place
     "venue_cash",

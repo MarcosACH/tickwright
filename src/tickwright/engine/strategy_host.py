@@ -14,8 +14,6 @@ full ADR-0024 lifecycle.
 from collections.abc import Awaitable, Callable, Iterable
 
 from tickwright.domain import (
-    OPERATOR,
-    UNATTRIBUTED,
     Clock,
     Event,
     EventBus,
@@ -26,6 +24,7 @@ from tickwright.domain import (
     Store,
     Strategy,
     SymbolOwnership,
+    reserved_id_refusal,
 )
 from tickwright.engine.cache import Cache
 from tickwright.observability import NamedEvent, named_event
@@ -86,7 +85,9 @@ class StrategyHost:
         placed, so a strategy taking that name would have its book folded into
         foreign flow rather than into another strategy's (ADR-0043 §2).
         ``StrategyConfig`` refuses it earlier; a strategy registered without a
-        config only ever meets this one.
+        config only ever meets this one. ``OPERATOR`` is refused the same way
+        (ADR-0054). Both gates read ``reserved_id_refusal``, so they cannot
+        disagree about which ids are reserved.
 
         A symbol another registered strategy already owns is refused for a
         reason that is not about ids at all: on a ``NET`` venue two strategies
@@ -96,15 +97,9 @@ class StrategyHost:
         refuses a *configured* overlap at load and the two gates must not come
         to disagree about what an overlap is.
         """
-        if strategy.strategy_id == UNATTRIBUTED:
-            raise InvariantViolation(
-                f"{UNATTRIBUTED} is the reserved unattributed partition, not a strategy_id"
-            )
-        # ADR-0054: a reduce-only order from this id skips the kill switch.
-        if strategy.strategy_id == OPERATOR:
-            raise InvariantViolation(
-                f"{OPERATOR} is reserved for operator orders, not a strategy_id"
-            )
+        reserved = reserved_id_refusal(strategy.strategy_id)
+        if reserved is not None:
+            raise InvariantViolation(reserved)
         if strategy.strategy_id in self._strategies:
             raise InvariantViolation(f"duplicate strategy_id registered: {strategy.strategy_id}")
         declared = frozenset(symbols)

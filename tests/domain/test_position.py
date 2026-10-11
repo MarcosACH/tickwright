@@ -12,6 +12,8 @@ import pytest
 
 from tickwright.domain import (
     DEFAULT_LEVERAGE,
+    OPERATOR,
+    UNATTRIBUTED,
     InvariantViolation,
     LiquidationSource,
     OrderFilled,
@@ -21,6 +23,7 @@ from tickwright.domain import (
     Side,
     account_net_size,
     position_view,
+    reserved_id_refusal,
 )
 
 
@@ -374,3 +377,15 @@ def test_partitions_that_offset_net_to_a_zero_that_is_reported_rather_than_dropp
     }
     assert account_net_size([_held("alpha", "BTC", "0")]) == {"BTC": Decimal("0")}
     assert account_net_size([]) == {}
+
+
+def test_a_reserved_owner_id_is_refused_with_its_own_reason() -> None:
+    # Config and StrategyHost both refuse these ids. One sentence each, so the two gates cannot
+    # come to disagree.
+    assert reserved_id_refusal(UNATTRIBUTED) == (
+        f"{UNATTRIBUTED} is the reserved unattributed partition, not a strategy id"
+    )
+    assert reserved_id_refusal(OPERATOR) == (
+        f"{OPERATOR} is reserved for operator orders, not a strategy id"
+    )
+    assert reserved_id_refusal("alpha") is None
