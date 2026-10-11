@@ -152,9 +152,15 @@ context. Starts the feed through the `FeedHandle`.
   one in progress, then runs its own, so it never reads a pass that started before its attempt
   ended.
 - Run one private per-symbol loop for each held symbol, all at the same time. Wait for all of them.
+- **(Deferred by #472:** the closes run one after another, and there is no pass lock. Each symbol
+  gets one attempt, so only one pass runs at a time anyway. #473 builds the loops and the lock,
+  because retries need them.**)**
 - Do the final venue read. Done means no resting order and no position.
 - Keep the `__operator__` seq counter. Start it from the same saga high-water fold the
   `StrategyHost` uses. `engine` cannot import `SignalEmitter`.
+- **(Deferred by #472:** every close uses seq 1. The manager drops a signal id it has seen
+  (ADR-0006). So a second flatten on the same store sends no close for a symbol an earlier
+  flatten closed. It exits 1 and names the symbol in `left`. #474 builds the counter.**)**
 
 **The per-symbol loop (private):**
 

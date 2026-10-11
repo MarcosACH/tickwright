@@ -191,6 +191,9 @@ A position the feed never priced is not closed. The run exits `1`, and `exit.fin
 symbol and its size, for example `left=BTC=0.02`. Under `GUARD=noop` there is no kill switch to
 trip, so the run warns with `exit.unguarded`.
 
+Flatten closes each symbol only once per store today. If a later run opens that symbol again, the
+next flatten sends no close for it. It exits `1` and names the symbol in `left`. #474 fixes this.
+
 ## What it does today
 
 - Venues: [Hyperliquid](https://hyperliquid.gitbook.io/hyperliquid-docs) (mainnet and testnet),
