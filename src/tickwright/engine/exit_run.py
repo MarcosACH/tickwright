@@ -16,6 +16,7 @@ from tickwright.domain import (
     InvariantViolation,
     OrderAnchor,
     OrderRef,
+    PreTradeGuard,
     VenueOpenOrder,
     VenueReadFailure,
 )
@@ -50,6 +51,7 @@ class ExitContext:
     account: AccountAnchor
     orders: OrderAnchor
     checkpointer: Checkpointer
+    guard: PreTradeGuard
 
 
 class ExitJob(Protocol):
@@ -81,6 +83,32 @@ class OperatorCancelAll:
             named_event(NamedEvent.CANCEL_ALL_ORDERS_REMAIN, orders=describe_orders(left))
             return ExitOutcome(status=ExitStatus.STOPPED, left=describe_orders(left))
         return ExitOutcome(status=ExitStatus.DONE, left=NOTHING_LEFT)
+
+
+class Flatten:
+    """``tickwright flatten``: close every position the account holds."""
+
+    name = "flatten"
+
+    async def run(self, context: ExitContext) -> ExitOutcome:
+        # First, so a crash mid-flatten still leaves the store halted (ADR-0053).
+        context.guard.trip_kill_switch("flatten: operator exit")
+        return await _final_read(context)
+
+
+async def _final_read(context: ExitContext) -> ExitOutcome:
+    """Done only when the venue holds no resting order and no position (ADR-0060)."""
+    orders = await context.account.fetch_open_orders()
+    if isinstance(orders, VenueReadFailure):
+        return ExitOutcome(status=ExitStatus.STOPPED, left=describe_failure(orders))
+    positions = await context.account.fetch_positions()
+    if isinstance(positions, VenueReadFailure):
+        return ExitOutcome(status=ExitStatus.STOPPED, left=describe_failure(positions))
+    if orders or positions:
+        left = [describe_orders(orders)] if orders else []
+        left += [f"{symbol}={size}" for symbol, size in positions.items()]
+        return ExitOutcome(status=ExitStatus.STOPPED, left=",".join(left))
+    return ExitOutcome(status=ExitStatus.DONE, left=NOTHING_LEFT)
 
 
 NOTHING_LEFT = "none"

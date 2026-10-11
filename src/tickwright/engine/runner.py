@@ -368,7 +368,10 @@ class Engine:
         if self._stop_requested.is_set():
             return
         context = ExitContext(
-            account=self._exchange, orders=self._exchange, checkpointer=self._checkpointer
+            account=self._exchange,
+            orders=self._exchange,
+            checkpointer=self._checkpointer,
+            guard=self._guard,
         )
         self._exit_outcome = await job.run(context)
         self._stop_requested.set()
