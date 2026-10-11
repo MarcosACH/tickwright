@@ -8,6 +8,7 @@ import asyncio
 import random
 from dataclasses import dataclass
 from decimal import Decimal
+from pathlib import Path
 
 from ledgers import GENESIS
 
@@ -35,6 +36,7 @@ from tickwright.domain.enums import OrderType
 from tickwright.engine.checkpoint import Checkpointer
 from tickwright.engine.execution import ExecutionManager
 from tickwright.engine.guard import RealGuard
+from tickwright.engine.reconcile import ReconcileConfig, Reconciler
 
 _SPEC = InstrumentSpec(
     symbol="BTC", sz_decimals=3, max_decimals=6, max_sig_figs=5, min_notional=Decimal("10")
@@ -164,3 +166,104 @@ def test_a_flatten_sell_fills_in_two_parts_and_every_partition_reads_flat() -> N
     assert engine.store.get_order(flatten).state is OrderState.FILLED  # type: ignore[union-attr]
     # The operator never owns a partition.
     assert _size(engine, OPERATOR) is None
+
+
+def _life(store: SQLiteStore, venue: PaperExchange, clock: ManualClock) -> _Engine:
+    """One engine process over ``store``. The venue is passed in because it outlives us."""
+    bus = InMemoryBus()
+    checks = Checkpointer(
+        spec=AccountSpec(account_id="paper-default", genesis_collateral=GENESIS),
+        store=store,
+        clock=clock,
+        specs={"BTC": _SPEC},
+    )
+    checks.recover()
+    manager = ExecutionManager(
+        bus=bus,
+        exchange=venue,
+        checkpointer=checks,
+        guard=RealGuard(specs={"BTC": _SPEC}, store=store, clock=clock),
+    )
+    bus.subscribe(Signal, manager.on_signal)
+    bus.subscribe(ExecutionReport, manager.on_execution_report)
+    return _Engine(bus, store, checks)
+
+
+def test_reconcile_after_a_restart_books_the_rest_of_a_flatten_order_by_the_same_split(
+    tmp_path: Path,
+) -> None:
+    # The same book as above. The first half of the flatten sell books live.
+    # Then the engine dies, the second half fills at the venue, and reconcile
+    # books it in the next life.
+    clock = ManualClock(start_ns=1_000)
+    path = tmp_path / "saga.db"
+    open_store = [SQLiteStore(path)]
+    # The venue reads the ledger through whichever store is open, and reports
+    # on its own bus. The link to the engine dies with the engine.
+    venue_bus = InMemoryBus()
+    link: list[InMemoryBus] = []
+    venue = PaperExchange(
+        bus=venue_bus,
+        clock=clock,
+        fill_model=StochasticFillModel(
+            rng=random.Random(0),
+            clock=clock,
+            params=StochasticParams(partial_fill_fraction=Decimal("0.5")),
+        ),
+        genesis_collateral=GENESIS,
+        account_net=lambda: paper_store_reads(open_store[0]).account_net(),
+        applied_fills=lambda cloid: paper_store_reads(open_store[0]).applied_fills(cloid),
+    )
+
+    async def forward(report: ExecutionReport) -> None:
+        for bus in link:
+            await bus.publish(report)
+
+    venue_bus.subscribe(ExecutionReport, forward)
+    flatten = derive_cloid(f"{OPERATOR}:BTC:1")
+
+    async def scenario() -> _Engine:
+        first = _life(open_store[0], venue, clock)
+        link.append(first.bus)
+        await venue_bus.publish(_tick("42000"))
+        await first.bus.publish(_crossing_limit("trivial", side=Side.BUY, quantity="0.02"))
+        await venue_bus.publish(_tick("42001"))
+        first.checks.checkpoint_heal(
+            (
+                ReconciliationFill(
+                    symbol="BTC",
+                    side=Side.BUY,
+                    quantity=Decimal("0.01"),
+                    price=Decimal("42000"),
+                    ts_ns=1_000,
+                ),
+            )
+        )
+        await first.bus.publish(
+            _crossing_limit(OPERATOR, side=Side.SELL, quantity="0.03", reduce_only=True)
+        )
+        assert _sizes(first) == (Decimal("0.01"), Decimal("0.005"))
+
+        # The crash. The rest fills while nothing is listening.
+        link.clear()
+        first.store.close()
+        open_store[0] = SQLiteStore(path)
+        await venue_bus.publish(_tick("42002"))
+
+        second = _life(open_store[0], venue, clock)
+        reconciler = Reconciler(
+            bus=second.bus,
+            clock=clock,
+            exchange=venue,
+            cache=second.checks.cache,
+            config=ReconcileConfig(),
+        )
+        assert await reconciler.reconcile_startup()
+        return second
+
+    second = asyncio.run(scenario())
+
+    assert _sizes(second) == (Decimal("0"), Decimal("0"))
+    assert second.store.get_order(flatten).state is OrderState.FILLED  # type: ignore[union-attr]
+    assert _size(second, OPERATOR) is None
+    second.store.close()
