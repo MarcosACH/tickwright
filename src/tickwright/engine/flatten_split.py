@@ -33,7 +33,10 @@ def split_fee(moves: Mapping[str, Decimal], fee: Decimal) -> dict[str, Decimal]:
     # would hand it a negative fee.
     weights = {owner: abs(move) for owner, move in moves.items()}
     total = sum(weights.values(), Decimal(0))
-    shares = {owner: fee * weight / total for owner, weight in weights.items()}
+    # A Decimal sum rounds at 28 digits, so shares with long tails can miss the fee. Shares on one
+    # step, 20 digits below the fee's leading digit, add up exactly.
+    step = Decimal(1).scaleb(fee.adjusted() - 20)
+    shares = {owner: (fee * weight / total).quantize(step) for owner, weight in weights.items()}
     # Division can round. The largest share takes the rounding, so the shares sum to the fee.
     largest = max(sorted(weights), key=lambda o: weights[o])
     shares[largest] += fee - sum(shares.values(), Decimal(0))
