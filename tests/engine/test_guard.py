@@ -17,6 +17,7 @@ import structlog.testing
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
+    OPERATOR,
     Approved,
     Denied,
     GuardDecision,
@@ -29,7 +30,7 @@ from tickwright.domain import (
     Side,
     TimeInForce,
 )
-from tickwright.engine.guard import NoopGuard, PreTradeLimits, RealGuard, SymbolLimits
+from tickwright.engine.guard import NoopGuard, PreTradeLimits, RateCap, RealGuard, SymbolLimits
 
 
 def _spec(
@@ -70,17 +71,24 @@ def _limit_signal(
     )
 
 
-def _market_signal(*, quantity: str = "1") -> PlaceSignal:
+def _market_signal(
+    *,
+    quantity: str = "1",
+    side: Side = Side.BUY,
+    strategy_id: str = "trivial",
+    reduce_only: bool = False,
+) -> PlaceSignal:
     return PlaceSignal(
         ts_event=1_000,
         ts_init=1_000,
-        strategy_id="trivial",
+        strategy_id=strategy_id,
         symbol="BTC",
         seq=1,
-        side=Side.BUY,
+        side=side,
         quantity=Decimal(quantity),
         order_type=OrderType.MARKET,
         time_in_force=TimeInForce.IOC,
+        reduce_only=reduce_only,
     )
 
 
@@ -107,14 +115,21 @@ def _max_position(coins: str) -> PreTradeLimits:
 
 
 def _check(
-    guard: PreTradeGuard, signal: PlaceSignal, *, net: str = "0", open_remainder: str = "0"
+    guard: PreTradeGuard,
+    signal: PlaceSignal,
+    *,
+    net: str = "0",
+    own: str | None = None,
+    open_remainder: str = "0",
 ) -> GuardDecision:
-    """Check ``signal`` with no mark. The book is empty unless a test says otherwise."""
+    """Check ``signal`` with no mark. The book is empty unless a test says otherwise.
+
+    The order's own size is the account net unless ``own`` says otherwise."""
     reading = PreTradeReading(
         symbol=signal.symbol,
         side=signal.side,
         account_net_size=Decimal(net),
-        strategy_net_size=Decimal(net),
+        strategy_net_size=Decimal(net if own is None else own),
         open_remainder=Decimal(open_remainder),
         mark=None,
     )
@@ -342,6 +357,31 @@ def test_tripped_kill_switch_denies_an_unspecced_symbol_without_raising() -> Non
     guard = _guard()
     guard.trip_kill_switch("halt")
     assert isinstance(_check(guard, _limit_signal(symbol="ETH")), Denied)
+
+
+def test_a_flatten_order_passes_the_kill_switch_every_cap_and_the_rate_cap() -> None:
+    # ADR-0058's flatten column. The rate cap is full, the kill switch is
+    # tripped, and every cap is below the order. The operator owns no
+    # partition, so its own size reads 0 and the own-position check would deny.
+    limits = PreTradeLimits(
+        symbols={
+            "BTC": SymbolLimits(
+                max_order_size=Decimal("1"),
+                max_order_value=Decimal("1"),
+                max_position=Decimal("1"),
+            )
+        },
+        rate_cap=RateCap(max_orders=1, window_seconds=1.0),
+    )
+    guard = _guard(limits=limits)
+    # This order takes the one rate cap slot.
+    assert isinstance(_check(guard, _limit_signal(price="1", quantity="0.5")), Approved)
+    guard.trip_kill_switch("halt")
+
+    flatten = _market_signal(quantity="3", side=Side.SELL, strategy_id=OPERATOR, reduce_only=True)
+    decision = _check(guard, flatten, net="3", own="0")
+
+    assert decision == Approved(quantity=Decimal("3"), price=None)
 
 
 def test_noop_guard_passes_a_signal_through_unmodified() -> None:
