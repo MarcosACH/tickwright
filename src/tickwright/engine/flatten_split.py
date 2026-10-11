@@ -15,14 +15,26 @@ def flatten_split(
 
     ``basis`` holds each partition's signed size when the order was placed.
     """
-    lots = {owner: int(abs(size) / lot_size) for owner, size in basis}
+    net_long = sum((size for _, size in basis), Decimal(0)) > 0
+    with_net = {o: int(abs(s) / lot_size) for o, s in basis if (s > 0) == net_long}
+    against = {o: int(abs(s) / lot_size) for o, s in basis if (s > 0) != net_long}
+    with_lots, against_lots = sum(with_net.values()), sum(against.values())
+    # The order trades only the net, but every partition must reach zero at a full fill. So the
+    # side with the net moves faster than the fill, and the side against it moves the difference.
+    fill_lots = int(filled / lot_size)
+    with_moved = with_lots * fill_lots // (with_lots - against_lots)
+    got = _hand_out(with_net, with_moved) | _hand_out(against, with_moved - fill_lots)
+    return {owner: (-1 if size > 0 else 1) * got[owner] * lot_size for owner, size in basis}
+
+
+def _hand_out(lots: dict[str, int], total: int) -> dict[str, int]:
+    """Give ``total`` lots one at a time, each to the partition furthest behind its exact share."""
     side_lots = sum(lots.values())
     got = dict.fromkeys(lots, 0)
-    # One lot at a time, to the partition furthest behind its exact share. Scaled by the side's
-    # size, so the comparison stays in integers. ``max`` keeps the first of equal keys, so a tie
-    # goes to the id that sorts first.
+    # Scaled by the side's size, so the comparison stays in integers. ``max`` keeps the first of
+    # equal keys, so a tie goes to the id that sorts first.
     ordered = sorted(lots)
-    for handed in range(1, int(filled / lot_size) + 1):
+    for handed in range(1, total + 1):
         best = max(ordered, key=lambda o: lots[o] * handed - got[o] * side_lots)
         got[best] += 1
-    return {owner: (-1 if size > 0 else 1) * got[owner] * lot_size for owner, size in basis}
+    return got
