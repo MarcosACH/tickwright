@@ -312,13 +312,15 @@ class Position:
         lets every producer — venue ingress, reconciler synthetics, replay —
         inherit the precondition instead of each honouring it unstated.
 
-        **Two fill shapes, and this is the seam they are peers at** (ADR-0034's
+        **Three fill shapes, and this is the seam they are peers at** (ADR-0034's
         "the same idempotent ``apply()`` path"). A ``ReconciliationFill`` has no
         order behind it, so it shares no base class with one — what it shares is
         exactly the surface read below: a partition, a magnitude, a price and a
         dedup key. A ``PartitionFill`` is one partition's piece of a flatten
         order's fill (ADR-0054). It is the third producer, and the union still
-        names all three.
+        names all three. A Protocol would let any object with these fields book
+        into the ledger. The union keeps the list of what may book a fill short
+        and visible here.
 
         ``side`` rides the saga rather than the event: ``OrderFillEvent`` carries
         the trade (quantity, price, ids) and the ``Order`` carries the direction,
