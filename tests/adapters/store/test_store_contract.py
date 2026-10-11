@@ -181,6 +181,7 @@ def test_every_saga_column_round_trips_under_a_distinct_value(store_backend: Bac
         cancel_requested_ts=5_555,
         cancel_signal_id="alpha:ETH:8",
         applied_event_ids=["evt-1", "evt-2"],
+        split_basis=(("__unattributed__", Decimal("1.0")), ("alpha", Decimal("-2.50"))),
     )
     with store_backend.open() as store:
         store.checkpoint(order, ts_ns=1_000)
@@ -206,6 +207,20 @@ def test_every_saga_column_round_trips_under_a_distinct_value(store_backend: Bac
     assert loaded.cancel_requested_ts == 5_555
     assert loaded.cancel_signal_id == "alpha:ETH:8"
     assert loaded.applied_event_ids == frozenset({"evt-1", "evt-2"})
+    # Order and representation both hold. A fill booked after a restart splits against these.
+    assert [(owner, str(size)) for owner, size in loaded.split_basis or ()] == [
+        ("__unattributed__", "1.0"),
+        ("alpha", "-2.50"),
+    ]
+
+
+def test_an_order_without_a_split_basis_reads_back_without_one(store_backend: Backend) -> None:
+    with store_backend.open() as store:
+        store.checkpoint(_order(), ts_ns=1_000)
+        loaded = store.get_order("0xabc")
+
+    assert loaded is not None
+    assert loaded.split_basis is None
 
 
 def test_recheckpointing_upserts_the_record_and_appends_history(store_backend: Backend) -> None:
@@ -356,6 +371,24 @@ def test_a_database_from_before_both_added_columns_gains_both_on_open(
         loaded_old = reopened.get_order("0xabc")
         assert loaded_old is not None
         assert (loaded_old.created_ts_ns, loaded_old.acked_ts_ns) == (1_000, 2_000)
+
+
+def test_a_database_from_before_the_split_basis_column_gains_it_on_open(
+    store_backend: Backend,
+) -> None:
+    # A v0.4.0 database has no split_basis column. No order before it was a flatten order, so an
+    # old row reads back with no basis, and its saga still resumes.
+    old = _order()
+    old.apply(_submitted())
+    with store_backend.open() as first:
+        first.checkpoint(old, ts_ns=1_000)
+    store_backend.drop_column("orders", "split_basis")
+
+    with store_backend.open() as reopened:
+        loaded_old = reopened.get_order("0xabc")
+        assert loaded_old is not None
+        assert loaded_old.state is OrderState.SUBMITTED
+        assert loaded_old.split_basis is None
 
 
 def test_close_is_idempotent(store_backend: Backend) -> None:

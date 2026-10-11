@@ -90,6 +90,9 @@ class Order:
     cancel_requested: bool = False
     cancel_requested_ts: int | None = None
     cancel_signal_id: str | None = None
+    # A flatten order's partition sizes, read once at place (ADR-0054). Each fill splits against
+    # them, so a fill booked after a restart gives the same moves. ``None`` for any other order.
+    split_basis: tuple[tuple[str, Decimal], ...] | None = None
     _applied_event_ids: set[str] = field(default_factory=set, init=False, repr=False)
 
     @property
@@ -163,6 +166,7 @@ class Order:
         cancel_requested_ts: int | None,
         cancel_signal_id: str | None,
         applied_event_ids: Iterable[str],
+        split_basis: tuple[tuple[str, Decimal], ...] | None = None,
     ) -> "Order":
         """Rebuild a checkpointed saga exactly as persisted (ADR-0008 recovery).
 
@@ -189,6 +193,7 @@ class Order:
             cancel_requested=cancel_requested,
             cancel_requested_ts=cancel_requested_ts,
             cancel_signal_id=cancel_signal_id,
+            split_basis=split_basis,
         )
         order._applied_event_ids.update(applied_event_ids)
         return order

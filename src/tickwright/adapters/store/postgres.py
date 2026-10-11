@@ -87,6 +87,7 @@ _SCHEMA: tuple[str, ...] = (
         cancel_requested    BOOLEAN NOT NULL DEFAULT FALSE,
         cancel_requested_ts BIGINT,
         cancel_signal_id    TEXT,
+        split_basis         TEXT,
         applied_event_ids   TEXT NOT NULL,
         history             TEXT NOT NULL
     )
@@ -141,7 +142,11 @@ _SCHEMA: tuple[str, ...] = (
 
 # This dialect's type for each column in ``_records.ADDED_ORDER_COLUMNS``. The
 # column is also in ``_SCHEMA`` for a fresh database.
-_ADDED_COLUMN_TYPES: dict[str, str] = {"acked_ts_ns": "BIGINT", "created_ts_ns": "BIGINT"}
+_ADDED_COLUMN_TYPES: dict[str, str] = {
+    "acked_ts_ns": "BIGINT",
+    "created_ts_ns": "BIGINT",
+    "split_basis": "TEXT",
+}
 
 
 class PostgresStore(SqlStore):
