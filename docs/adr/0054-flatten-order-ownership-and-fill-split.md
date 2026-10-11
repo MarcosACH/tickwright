@@ -80,8 +80,8 @@ Decided in [#412](https://github.com/MarcosACH/tickwright/issues/412), part of
   place to book its fills. The split assumes the order closes the net, and a buy that grows a long
   would book the strategy as selling. An `__operator__` partition must not exist either. So every
   `__operator__` order that reaches the guard is a flatten order. Called on its own, the guard
-  still gives any other one no flatten pass. The guard and the `ExecutionManager` read one rule for what a flatten order
-  is.**)**
+  still gives any other one no flatten pass. The guard and the `ExecutionManager` read one rule for
+  what a flatten order is.**)**
 
 Example. Strategy S holds BTC +2. The unattributed partition holds -1. The venue shows +1. Flatten
 sends one reduce-only sell of 1. A fill of 0.5 books S selling 1 and the unattributed partition

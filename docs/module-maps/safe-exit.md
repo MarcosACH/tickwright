@@ -223,7 +223,8 @@ tests reach it directly. They feed it fills one at a time, the way the `Checkpoi
 own position. It also gains a read of every partition's size in a symbol, for `split_basis`.
 
 **Responsibilities:** When an order has a `split_basis`, the fill write calls `flatten_split` with
-the fill. It books each partition's move as its own fill, in one `checkpoint_ledger` transaction. The `Store` seam already takes a tuple of positions.
+the fill. It books each partition's move as its own fill, in one `checkpoint_ledger` transaction.
+The `Store` seam already takes a tuple of positions.
 
 **Seams:** None new.
 
