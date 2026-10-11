@@ -245,8 +245,10 @@ def test_flatten_with_nothing_to_close_still_trips_the_kill_switch(tmp_path: Pat
     assert state.reason == "flatten: operator exit"
 
 
-def test_flatten_under_a_noop_guard_warns_and_still_finishes(tmp_path: Path) -> None:
+def test_flatten_under_a_noop_guard_warns_and_still_closes(tmp_path: Path) -> None:
     # A noop guard has no kill switch to trip, so the next boot trades at once (ADR-0053).
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+
     exit_code, logs = _flatten(tmp_path, guarded=False)
 
     assert exit_code == 0
@@ -255,6 +257,7 @@ def test_flatten_under_a_noop_guard_warns_and_still_finishes(tmp_path: Path) -> 
     assert "restart" in unguarded[0]["warning"]
     assert logs[-1]["event"] == "exit.finished"
     assert logs[-1]["outcome"] == "done"
+    assert _partitions(tmp_path) == {("trivial", "BTC"): (Decimal("0"), Decimal("40"))}
 
 
 def test_flatten_closes_a_long_at_the_last_replay_row_and_the_partition_reads_flat(
