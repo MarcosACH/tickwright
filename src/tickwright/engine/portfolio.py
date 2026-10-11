@@ -34,6 +34,7 @@ from tickwright.domain import (
     LiquidationSource,
     MarkTick,
     OrderFillEvent,
+    PartitionFill,
     Portfolio,
     Position,
     PositionChange,
@@ -669,7 +670,9 @@ class PortfolioProjection:
         shares.append(bucket - allocated)
         return tuple(shares)
 
-    def apply_fill(self, event: OrderFillEvent | ReconciliationFill, *, side: Side) -> LedgerChange:
+    def apply_fill(
+        self, event: OrderFillEvent | ReconciliationFill | PartitionFill, *, side: Side
+    ) -> LedgerChange:
         """Fold a fill into its partition and the cash line — the single write
         verb of the Tier-1 path.
 
@@ -1271,6 +1274,16 @@ class PortfolioProjection:
         through it.
         """
         return account_net_size(self._positions.values())
+
+    def partition_sizes(self, symbol: str) -> tuple[tuple[str | None, Decimal], ...]:
+        """Every partition on ``symbol`` that holds size, with its signed size.
+
+        A flatten order reads this once at place, as its split basis (ADR-0054)."""
+        return tuple(
+            (owner, position.signed_size)
+            for (owner, held), position in self._positions.items()
+            if held == symbol and not position.is_flat
+        )
 
     def _mark_prices(self) -> dict[str, Decimal]:
         """The price half of the mark cache, as every fold below wants it.

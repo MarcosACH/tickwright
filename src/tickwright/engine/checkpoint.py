@@ -46,6 +46,7 @@ from decimal import Decimal
 
 from tickwright.domain import (
     EMPTY_LEVERAGE_BOOK,
+    UNATTRIBUTED,
     AccountSpec,
     CashCorrection,
     Clock,
@@ -55,6 +56,7 @@ from tickwright.domain import (
     LeverageBook,
     Order,
     OrderFillEvent,
+    PartitionFill,
     PreTradeReading,
     ReconciliationFill,
     Side,
@@ -63,6 +65,7 @@ from tickwright.domain import (
 )
 
 from .cache import Cache
+from .flatten_split import flatten_split, split_fee
 from .portfolio import HealChange, PortfolioProjection
 
 
@@ -91,6 +94,7 @@ class Checkpointer:
         # ``specs`` travels the same route for the same reason: it is the second
         # of the margin model's two venue-sourced inputs (ADR-0040 §4), and this
         # constructor is where the venue's declarations are already arriving.
+        self._specs = dict(specs or {})
         self._cache = Cache(store=store)
         self._portfolio = PortfolioProjection(
             spec=spec, store=store, clock=clock, leverage=leverage, specs=specs
@@ -223,13 +227,20 @@ class Checkpointer:
         ``InvariantViolation`` faults the run (ADR-0014), so nothing goes on to
         trade or report against a read-model the store never recorded.
         """
-        change = self._portfolio.apply_fill(event, side=side)
+        if order.split_basis is None:
+            changes = [self._portfolio.apply_fill(event, side=side)]
+        else:
+            changes = [
+                self._portfolio.apply_fill(piece, side=piece_side)
+                for piece, piece_side in self._split(order.split_basis, event)
+            ]
         ts_ns = self._clock.timestamp_ns()
         try:
             self._store.checkpoint_ledger(
                 order=order,
-                positions=(change.position,),
-                account=change.account,
+                positions=tuple(change.position for change in changes),
+                # Every change holds the one account aggregate (ADR-0038).
+                account=changes[0].account,
                 ts_ns=ts_ns,
             )
         except InvariantViolation as exc:
@@ -243,7 +254,62 @@ class Checkpointer:
                 f"in state {order.state.value}"
             ) from exc
         self._cache.project(order, ts_ns=ts_ns)
-        self._portfolio.project(change)
+        for change in changes:
+            self._portfolio.project(change)
+
+    def split_basis(self, symbol: str) -> tuple[tuple[str, Decimal], ...]:
+        """Every partition's size on ``symbol``, for a flatten order to store at place.
+
+        Owners go by their stored names, sorted, so a split tie breaks the same
+        way after a restart (ADR-0056)."""
+        return tuple(
+            sorted(
+                (UNATTRIBUTED if owner is None else owner, size)
+                for owner, size in self._portfolio.partition_sizes(symbol)
+            )
+        )
+
+    def _split(
+        self, basis: tuple[tuple[str, Decimal], ...], event: OrderFillEvent
+    ) -> list[tuple[PartitionFill, Side]]:
+        """One flatten fill as one piece per partition it moves (ADR-0054, ADR-0056).
+
+        Each piece is the partition's move up to this fill's ``cum_qty`` minus its
+        move before it. The split reads only the cumulative fill, so a fill booked
+        again after a crash gives the same pieces."""
+        spec = self._specs.get(event.symbol)
+        if spec is None:
+            # Without the lot size the split cannot be computed, and a guess
+            # could leave a partition short of flat.
+            raise InvariantViolation(
+                f"no InstrumentSpec for {event.symbol!r}; a flatten fill needs its lot size"
+            )
+        lot_size = Decimal(1).scaleb(-spec.sz_decimals)
+        before = flatten_split(basis, lot_size, event.cum_qty - event.quantity)
+        after = flatten_split(basis, lot_size, event.cum_qty)
+        moves = {owner: after[owner] - before[owner] for owner in after}
+        moves = {owner: move for owner, move in moves.items() if move != 0}
+        if not moves:
+            # A fill smaller than one lot moves no partition. The venue fills on
+            # its lot grid, so this is a broken assumption, not a case to skip.
+            raise InvariantViolation(
+                f"flatten fill {event.event_id} of {event.quantity} moves no partition"
+            )
+        fees = split_fee(moves, event.fee)
+        return [
+            (
+                PartitionFill(
+                    event_id=f"{event.event_id}:{owner}",
+                    strategy_id=None if owner == UNATTRIBUTED else owner,
+                    symbol=event.symbol,
+                    quantity=abs(move),
+                    price=event.price,
+                    fee=fees[owner],
+                ),
+                Side.BUY if move > 0 else Side.SELL,
+            )
+            for owner, move in moves.items()
+        ]
 
     def checkpoint_heal(
         self,

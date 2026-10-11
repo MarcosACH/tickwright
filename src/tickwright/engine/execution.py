@@ -40,6 +40,7 @@ from decimal import Decimal
 from typing import TypedDict
 
 from tickwright.domain import (
+    OPERATOR,
     CancelSignal,
     Denied,
     EventBus,
@@ -239,6 +240,11 @@ class ExecutionManager:
         # The quantized quantity is what actually gets placed and filled, so the
         # saga records it, not the strategy's raw intent.
         order = self._order_for(signal, quantity=decision.quantity)
+        if signal.strategy_id == OPERATOR:
+            # The operator owns no partition, so its fills split over all of
+            # them. The sizes ride the PENDING write below, so a fill booked
+            # after a crash splits against the same basis (ADR-0054).
+            order.split_basis = self._checkpointer.split_basis(signal.symbol)
 
         # PENDING is the write-ahead intent: durable before anything else
         # happens (ADR-0008 rule 1), then announced.

@@ -83,6 +83,7 @@ from .pacing import Backoff, Deadline
 from .position import (
     OPERATOR,
     UNATTRIBUTED,
+    PartitionFill,
     Position,
     PositionChange,
     PositionView,
@@ -181,6 +182,7 @@ __all__ = [
     "OrderRejected",
     "OrderStatusReport",
     "OrderSubmitted",
+    "PartitionFill",
     "PlaceOrder",
     "PlaceSignal",
     "Position",

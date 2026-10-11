@@ -40,6 +40,22 @@ UNATTRIBUTED = "__unattributed__"
 OPERATOR = "__operator__"
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class PartitionFill:
+    """One partition's piece of a flatten order's fill (ADR-0054, ADR-0056).
+
+    A flatten fill has no single owner, so the ``Checkpointer`` books it as one piece per
+    partition. Each piece carries only what ``Position.apply`` reads."""
+
+    event_id: str
+    """The fill's ``event_id`` and the owner, so a replayed fill dedups in each partition."""
+    strategy_id: str | None
+    symbol: str
+    quantity: Decimal
+    price: Decimal
+    fee: Decimal
+
+
 class PositionChange(StrEnum):
     """What a fill did to a position — the aggregate's own classification.
 
@@ -265,7 +281,7 @@ class Position:
         return self.signed_size * (mark - self.entry_price)
 
     def apply(
-        self, event: OrderFillEvent | ReconciliationFill, *, side: Side
+        self, event: OrderFillEvent | ReconciliationFill | PartitionFill, *, side: Side
     ) -> tuple[PositionChange, ...]:
         """Fold ``event`` into this partition; idempotent and checked.
 
@@ -278,9 +294,9 @@ class Position:
         "the same idempotent ``apply()`` path"). A ``ReconciliationFill`` has no
         order behind it, so it shares no base class with one — what it shares is
         exactly the surface read below: a partition, a magnitude, a price and a
-        dedup key. A union of the two concretes rather than a Protocol over
-        them, on the map's two-implementations bar: a third producer is what
-        would make the abstraction earn its name.
+        dedup key. A ``PartitionFill`` is one partition's piece of a flatten
+        order's fill (ADR-0054). It is the third producer, and the union still
+        names all three.
 
         ``side`` rides the saga rather than the event: ``OrderFillEvent`` carries
         the trade (quantity, price, ids) and the ``Order`` carries the direction,
