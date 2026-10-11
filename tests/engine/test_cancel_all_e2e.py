@@ -434,14 +434,22 @@ def test_an_order_resting_through_both_cancels_stops_the_run_with_exit_one(
 
 
 class _AccountReadFails(VenueLink):
-    """Every open-orders read fails, as on a venue that drops the request."""
+    """Open-orders reads fail from read number ``first_failing_read`` on, as on a
+    venue that starts dropping requests."""
 
-    def __init__(self, venue: PaperExchange, bus: InMemoryBus) -> None:
+    def __init__(
+        self, venue: PaperExchange, bus: InMemoryBus, *, first_failing_read: int = 1
+    ) -> None:
         super().__init__(venue)
+        self._first_failing_read = first_failing_read
+        self._reads = 0
         self.cancels_sent = 0
 
     async def fetch_open_orders(self) -> list[VenueOpenOrder] | VenueReadFailure:
-        return VenueReadFailure.SEND_FAILED
+        self._reads += 1
+        if self._reads >= self._first_failing_read:
+            return VenueReadFailure.SEND_FAILED
+        return await super().fetch_open_orders()
 
     async def cancel(self, refs: Sequence[OrderRef]) -> None:
         self.cancels_sent += len(refs)
@@ -469,3 +477,26 @@ def test_a_failed_first_read_stops_the_run_with_exit_one_and_cancels_nothing(
     [order] = _sagas(tmp_path, cloids)
     assert order.state is OrderState.LIVE
     assert not order.cancel_requested
+
+
+def test_a_failed_read_after_the_cancel_stops_the_run_even_with_every_order_cancelled(
+    tmp_path: Path,
+) -> None:
+    links: list[_AccountReadFails] = []
+
+    def link(paper: PaperExchange, bus: InMemoryBus) -> Exchange:
+        links.append(_AccountReadFails(paper, bus, first_failing_read=2))
+        return links[-1]
+
+    exit_code, cloids, logs = _cancel_all(tmp_path, prices=["30000"], link=link)
+
+    # Paper did cancel the order. But only a final read can make the run done,
+    # and that read failed (ADR-0060).
+    assert exit_code == 1
+    # The failed read gave no list, so no second cancel went out blind.
+    assert links[0].cancels_sent == 1
+    assert "cancel_all.orders_remain" not in [log["event"] for log in logs]
+    assert logs[-1]["event"] == "exit.finished"
+    assert logs[-1]["outcome"] == "stopped"
+    assert logs[-1]["left"] == "read_failed: send_failed"
+    assert [order.state for order in _sagas(tmp_path, cloids)] == [OrderState.CANCELLED]
