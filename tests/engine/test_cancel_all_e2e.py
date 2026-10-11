@@ -431,3 +431,41 @@ def test_an_order_resting_through_both_cancels_stops_the_run_with_exit_one(
     stuck, *cancelled = _sagas(tmp_path, cloids)
     assert stuck.state is OrderState.LIVE
     assert [order.state for order in cancelled] == [OrderState.CANCELLED] * 2
+
+
+class _AccountReadFails(VenueLink):
+    """Every open-orders read fails, as on a venue that drops the request."""
+
+    def __init__(self, venue: PaperExchange, bus: InMemoryBus) -> None:
+        super().__init__(venue)
+        self.cancels_sent = 0
+
+    async def fetch_open_orders(self) -> list[VenueOpenOrder] | VenueReadFailure:
+        return VenueReadFailure.SEND_FAILED
+
+    async def cancel(self, refs: Sequence[OrderRef]) -> None:
+        self.cancels_sent += len(refs)
+        await super().cancel(refs)
+
+
+def test_a_failed_first_read_stops_the_run_with_exit_one_and_cancels_nothing(
+    tmp_path: Path,
+) -> None:
+    links: list[_AccountReadFails] = []
+
+    def link(paper: PaperExchange, bus: InMemoryBus) -> Exchange:
+        links.append(_AccountReadFails(paper, bus))
+        return links[-1]
+
+    exit_code, cloids, logs = _cancel_all(tmp_path, prices=["30000"], link=link)
+
+    # A failed read proves nothing, so there is no list to cancel from (ADR-0060).
+    assert exit_code == 1
+    assert links[0].cancels_sent == 0
+    assert "cancel_all.orders_remain" not in [log["event"] for log in logs]
+    assert logs[-1]["event"] == "exit.finished"
+    assert logs[-1]["outcome"] == "stopped"
+    assert logs[-1]["left"] == "read_failed: send_failed"
+    [order] = _sagas(tmp_path, cloids)
+    assert order.state is OrderState.LIVE
+    assert not order.cancel_requested
