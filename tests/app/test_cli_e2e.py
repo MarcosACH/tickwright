@@ -312,6 +312,22 @@ def test_cancel_all_on_a_store_another_engine_holds_exits_two(
     assert [event["event"] for event in _events(log)] == ["exit.refused"]
 
 
+def test_cancel_all_on_a_store_it_cannot_open_exits_two(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The store fails before boot, so nothing at the venue moved (ADR-0060)."""
+    _write_workspace(tmp_path)
+    _export_hostile_config(monkeypatch)
+    with (tmp_path / ".env").open("a") as env:
+        env.write("TICKWRIGHT_SQLITE__PATH=no-such-dir/saga.db\n")
+    log = tmp_path / "cancel_all.log"
+
+    assert _run_to_exit(tmp_path, log, "cancel-all") == 2, log.read_text()
+
+    assert "tickwright cancel-all:" in log.read_text()
+    assert _events(log) == []
+
+
 def test_cancel_all_on_hyperliquid_exits_two_before_it_boots(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

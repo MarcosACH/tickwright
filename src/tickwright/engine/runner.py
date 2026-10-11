@@ -255,7 +255,8 @@ class Engine:
         non-zero = ``FAULTED`` — the external supervisor's restart signal.
 
         An exit run returns the ADR-0060 codes instead. 0 means a final venue
-        read confirmed the job done. 1 means it stopped partway.
+        read confirmed the job done. 1 means it stopped partway. 2 means it
+        never booted.
         """
         # The store lock comes before anything that writes, ``recover()`` first
         # among them (ADR-0052). A refusal also skips the teardown, because its
@@ -424,7 +425,8 @@ class Engine:
         self._fault = exc
         named_event(NamedEvent.ENGINE_FAULTED, error=repr(exc))
         self._close_before_boot()
-        return 1
+        # An exit run that never booted moved nothing at the venue (ADR-0060).
+        return 1 if self._exit_job is None else 2
 
     def _close_before_boot(self) -> None:
         """Closing the store's own connection is the one step left, and it

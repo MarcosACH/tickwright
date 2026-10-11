@@ -164,6 +164,36 @@ def test_an_exit_run_on_a_store_another_engine_holds_exits_two_and_writes_nothin
         holder.close()
 
 
+def test_an_exit_run_whose_store_lock_read_fails_exits_two(tmp_path: Path) -> None:
+    bus = InMemoryBus()
+    clock = ManualClock()
+    store = SQLiteStore(tmp_path / "saga.db")
+    # A closed store refuses the lock read, as a lost connection would.
+    store.close()
+    engine = Engine(
+        bus=bus,
+        clock=clock,
+        store=store,
+        exchange=PaperExchange(
+            bus=bus,
+            clock=clock,
+            fill_model=ImmediateFillModel(),
+            genesis_collateral=GENESIS,
+            account_net=dict,
+            applied_fills=lambda cloid: (),
+        ),
+        feed=ReplayFeed(path=_ticks(tmp_path / "ticks.jsonl"), bus=bus, clock=clock),
+        exit_job=OperatorCancelAll(),
+    )
+
+    with capture_events() as logs:
+        exit_code = asyncio.run(asyncio.wait_for(engine.run(), timeout=5))
+
+    # Nothing booted, so nothing at the venue moved (ADR-0060).
+    assert exit_code == 2
+    assert [log["event"] for log in logs] == ["engine.faulted"]
+
+
 class _ReadThatNeverAnswers(VenueLink):
     """The account read hangs, as on a venue that stopped answering."""
 

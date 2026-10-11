@@ -54,6 +54,11 @@ def _run_cancel_all() -> int:
     except (ValidationError, UnsupportedExitRun) as exc:
         print(f"tickwright cancel-all: {exc}", file=sys.stderr)
         return 2
+    except Exception as exc:
+        # Building talks to no venue, so any failure here, such as a store that
+        # cannot be opened, means nothing moved. That is code 2 (ADR-0060).
+        print(f"tickwright cancel-all: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
     return asyncio.run(engine.run())
 
 
