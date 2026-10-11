@@ -53,7 +53,8 @@ from .barrier import StartupBarrier
 from .cadence import run_cadence
 from .checkpoint import Checkpointer
 from .execution import ExecutionManager
-from .exit_run import ExitContext, ExitJob, ExitOutcome, ExitStatus, FeedHandle
+from .exit_run import ExitContext, ExitJob, ExitOutcome, ExitStatus
+from .feed_handle import FeedHandle
 from .guard import NoopGuard
 from .ledger_reconcile import LedgerReconciliation, ValuationBand
 from .portfolio import PortfolioProjection

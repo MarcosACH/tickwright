@@ -20,8 +20,9 @@ src/tickwright/
     protocols.py              # Exchange: cancel(refs), fetch_open_orders, fetch_positions
                               # MarketFeed: add_symbols. Store: lock, seq record
   engine/
-    exit_job.py               # ExitJob, ExitContext, FeedHandle, ExitOutcome,  NEW
+    exit_job.py               # ExitJob, ExitContext, ExitOutcome,              NEW
                               # OperatorCancelAll
+    feed_handle.py            # FeedHandle, how every run starts the feed      NEW
     flatten.py                # Flatten and its private per-symbol loop        NEW
     flatten_split.py          # the pure pro rata split                        NEW
     runner.py                 # Engine takes an optional ExitJob, no cadences on it

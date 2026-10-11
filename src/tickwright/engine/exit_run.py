@@ -6,8 +6,7 @@ because the engine builds those parts itself and the composition root never
 sees them.
 """
 
-import asyncio
-from collections.abc import Collection, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import StrEnum
@@ -19,7 +18,6 @@ from tickwright.domain import (
     Clock,
     EventBus,
     InvariantViolation,
-    MarketFeed,
     MarketTick,
     OrderAnchor,
     OrderRef,
@@ -35,6 +33,7 @@ from tickwright.domain import (
 from tickwright.observability import NamedEvent, named_event
 
 from .checkpoint import Checkpointer
+from .feed_handle import FeedHandle
 from .reconcile import Reconciler
 
 
@@ -67,41 +66,11 @@ class ExitContext:
     guard: PreTradeGuard
     bus: EventBus
     clock: Clock
-    feed: "FeedHandle"
+    feed: FeedHandle
     reconciler: Reconciler
     pass_interval_seconds: float
     """How long a job waits between its own reconcile passes. No cadence runs in an
     exit run, so the job paces them itself (ADR-0052)."""
-
-
-class FeedHandle:
-    """The one way the engine starts the feed.
-
-    A normal run starts it with no symbols to add. An exit job starts it for the
-    symbols it needs. The engine builds it over its own task group, so the feed
-    loop is supervised the same way on both paths.
-    """
-
-    def __init__(self, feed: MarketFeed, tasks: asyncio.TaskGroup) -> None:
-        self._feed = feed
-        self._tasks = tasks
-        self.task: asyncio.Task[None] | None = None
-        """The feed loop, for the engine's teardown. ``None`` until started."""
-
-    async def start(self, symbols: Collection[str] = ()) -> None:
-        """Add ``symbols`` to the feed, connect it, and run its loop."""
-        # A feed that cannot add symbols raises on any call, as Hyperliquid does
-        # until #475. A normal run adds none, so it must not call at all.
-        if symbols:
-            self._feed.add_symbols(symbols)
-        await self._feed.start()
-        named_event(NamedEvent.ENGINE_FEED_STARTED)
-        self.task = self._tasks.create_task(self._feed.run())
-
-    async def ended(self) -> None:
-        """Wait for the feed loop to return. A feed that fails faults the run instead."""
-        if self.task is not None:
-            await asyncio.wait([self.task])
 
 
 class ExitJob(Protocol):
