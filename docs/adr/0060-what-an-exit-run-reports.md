@@ -106,3 +106,8 @@ when a venue read fails, and which named events an exit run emits. Decided in
 - A short venue outage is ridden out. One that lasts past 3 tries ends the run, and the operator
   runs flatten again.
 - Not built yet. The build adds the eight events to the catalog.
+
+  **(Partly built, since [#468](https://github.com/MarcosACH/tickwright/issues/468):**
+  `tickwright cancel-all` runs on paper. The catalog has `exit.refused`, `exit.finished`, and
+  `cancel_all.orders_remain`. `exit.new_store` comes with #469. `exit.unguarded` and the three
+  `flatten.*` events come with the flatten slices.**)**
