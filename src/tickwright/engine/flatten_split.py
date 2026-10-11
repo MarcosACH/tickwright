@@ -4,7 +4,7 @@ A flatten order closes the account net, so no single partition owns its fills. T
 only on the cumulative fill. That way a fill booked again after a crash gives the same moves.
 """
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from decimal import Decimal
 
 
@@ -25,6 +25,19 @@ def flatten_split(
     with_moved = with_lots * fill_lots // (with_lots - against_lots)
     got = _hand_out(with_net, with_moved) | _hand_out(against, with_moved - fill_lots)
     return {owner: (-1 if size > 0 else 1) * got[owner] * lot_size for owner, size in basis}
+
+
+def split_fee(moves: Mapping[str, Decimal], fee: Decimal) -> dict[str, Decimal]:
+    """Split one fill's ``fee`` over the partitions by the absolute size each one moved."""
+    # Absolute, not signed. A partition against the net moves the other way, and a signed weight
+    # would hand it a negative fee.
+    weights = {owner: abs(move) for owner, move in moves.items()}
+    total = sum(weights.values(), Decimal(0))
+    shares = {owner: fee * weight / total for owner, weight in weights.items()}
+    # Division can round. The largest share takes the rounding, so the shares sum to the fee.
+    largest = max(sorted(weights), key=lambda o: weights[o])
+    shares[largest] += fee - sum(shares.values(), Decimal(0))
+    return shares
 
 
 def _hand_out(lots: dict[str, int], total: int) -> dict[str, int]:

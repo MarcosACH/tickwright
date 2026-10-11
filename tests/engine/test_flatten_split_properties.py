@@ -9,7 +9,7 @@ from decimal import Decimal
 from hypothesis import given
 from hypothesis import strategies as st
 
-from tickwright.engine.flatten_split import flatten_split
+from tickwright.engine.flatten_split import flatten_split, split_fee
 
 LOT = Decimal("0.1")
 
@@ -102,3 +102,40 @@ def test_a_later_fill_never_takes_a_lot_back(basis: tuple[tuple[str, Decimal], .
     for before, after in zip(splits, splits[1:], strict=False):
         for owner, _ in basis:
             assert abs(after[owner]) >= abs(before[owner])
+
+
+def test_a_fee_splits_by_absolute_size() -> None:
+    # B moves against the order's side. A split by signed size would hand B a negative fee.
+    moves = {"A": Decimal("-0.2"), "B": Decimal("0.1"), "C": Decimal("0")}
+
+    assert split_fee(moves, Decimal("0.003")) == {
+        "A": Decimal("0.002"),
+        "B": Decimal("0.001"),
+        "C": Decimal("0"),
+    }
+
+
+@given(
+    basis=_basis(),
+    data=st.data(),
+    fee=st.decimals(min_value=-10, max_value=10, places=6, allow_nan=False, allow_infinity=False),
+)
+def test_fee_shares_sum_to_the_fee_and_keep_its_sign(
+    basis: tuple[tuple[str, Decimal], ...], data: st.DataObject, fee: Decimal
+) -> None:
+    # One fill's moves are the change between two cumulative splits.
+    total_lots = int(abs(sum((size for _, size in basis), Decimal(0))) / LOT)
+    earlier = data.draw(st.integers(0, total_lots - 1))
+    later = data.draw(st.integers(earlier + 1, total_lots))
+    before = flatten_split(basis, LOT, earlier * LOT)
+    after = flatten_split(basis, LOT, later * LOT)
+    moves = {owner: after[owner] - before[owner] for owner, _ in basis}
+
+    shares = split_fee(moves, fee)
+
+    assert sum(shares.values(), Decimal(0)) == fee
+    for owner, move in moves.items():
+        # A rebate stays a rebate, and a partition that booked nothing pays nothing.
+        assert shares[owner] * fee >= 0
+        if move == 0:
+            assert shares[owner] == 0
