@@ -377,6 +377,8 @@ class Engine:
             bus=self._bus,
             clock=self._clock,
             feed=self._feed_handle,
+            reconciler=self._reconciler,
+            pass_interval_seconds=self._reconcile_config.inflight_interval_seconds,
         )
         self._exit_outcome = await job.run(context)
         self._stop_requested.set()

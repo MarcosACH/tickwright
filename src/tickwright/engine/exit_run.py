@@ -29,10 +29,12 @@ from tickwright.domain import (
     TimeInForce,
     VenueOpenOrder,
     VenueReadFailure,
+    derive_cloid,
 )
 from tickwright.observability import NamedEvent, named_event
 
 from .checkpoint import Checkpointer
+from .reconcile import Reconciler
 
 
 class ExitStatus(StrEnum):
@@ -65,6 +67,10 @@ class ExitContext:
     bus: EventBus
     clock: Clock
     feed: "FeedHandle"
+    reconciler: Reconciler
+    pass_interval_seconds: float
+    """How long a job waits between its own reconcile passes. No cadence runs in an
+    exit run, so the job paces them itself (ADR-0052)."""
 
 
 class FeedHandle:
@@ -147,27 +153,53 @@ class Flatten:
             # fills at the last row (ADR-0059). The CLI refuses a live feed until #475.
             await context.feed.ended()
             for symbol, size in positions.items():
-                await _close(symbol, size, context)
+                await _await_verdict(await _close(symbol, size, context), context)
         return await _final_read(context)
 
 
-async def _close(symbol: str, size: Decimal, context: ExitContext) -> None:
-    """Send one reduce-only market IOC order for the whole of ``size`` (ADR-0054)."""
+async def _close(symbol: str, size: Decimal, context: ExitContext) -> str:
+    """Send one reduce-only market IOC order for the whole of ``size`` (ADR-0054).
+
+    Returns the cloid of the order's saga.
+    """
     now = context.clock.timestamp_ns()
-    await context.bus.publish(
-        PlaceSignal(
-            ts_event=now,
-            ts_init=now,
-            strategy_id=OPERATOR,
-            symbol=symbol,
-            seq=1,
-            side=Side.SELL if size > 0 else Side.BUY,
-            quantity=abs(size),
-            order_type=OrderType.MARKET,
-            time_in_force=TimeInForce.IOC,
-            reduce_only=True,
-        )
+    signal = PlaceSignal(
+        ts_event=now,
+        ts_init=now,
+        strategy_id=OPERATOR,
+        symbol=symbol,
+        seq=1,
+        side=Side.SELL if size > 0 else Side.BUY,
+        quantity=abs(size),
+        order_type=OrderType.MARKET,
+        time_in_force=TimeInForce.IOC,
+        reduce_only=True,
     )
+    await context.bus.publish(signal)
+    return derive_cloid(signal.signal_id)
+
+
+async def _await_verdict(cloid: str, context: ExitContext) -> None:
+    """Run reconcile passes until the close's saga is terminal (ADR-0011, ADR-0026).
+
+    A pass covers both halves. ``reconcile_inflight`` resolves a send that never
+    acked. ``reconcile_open_orders`` resolves an acked order whose last push was lost.
+
+    A failed pass ends the wait, so a venue that cannot answer never hangs the run.
+    The saga stays open, and the next boot resumes it.
+    """
+    while not _decided(cloid, context):
+        await context.clock.sleep(context.pass_interval_seconds)
+        if not await context.reconciler.reconcile_inflight():
+            return
+        if not await context.reconciler.reconcile_open_orders():
+            return
+
+
+def _decided(cloid: str, context: ExitContext) -> bool:
+    saga = context.checkpointer.cache.get_order(cloid)
+    # The manager writes a saga for every signal it handles, a denial included.
+    return saga is None or saga.is_terminal
 
 
 async def _final_read(context: ExitContext) -> ExitOutcome:

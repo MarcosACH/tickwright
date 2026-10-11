@@ -13,6 +13,7 @@ from pathlib import Path
 
 from ledgers import GENESIS
 from structlog.typing import EventDict
+from venue_doubles import VenueLink
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
@@ -21,16 +22,23 @@ from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.adapters.store import SQLiteStore
 from tickwright.app.build import paper_store_reads
 from tickwright.domain import (
+    OPERATOR,
     AggressorSide,
     Exchange,
     ExecutionReport,
     InstrumentSpec,
     MarketTick,
+    OrderRef,
+    OrderState,
     OrderType,
+    PlaceOrder,
     PlaceSignal,
     Side,
     Signal,
     TimeInForce,
+    VenueOrderView,
+    VenueReadFailure,
+    derive_cloid,
 )
 from tickwright.engine.checkpoint import Checkpointer
 from tickwright.engine.execution import ExecutionManager
@@ -214,3 +222,55 @@ def test_flatten_closes_a_long_at_the_last_replay_row_and_the_partition_reads_fl
     assert logs[-1]["outcome"] == "done"
     assert logs[-1]["left"] == "none"
     assert _partitions(tmp_path) == {("trivial", "BTC"): (Decimal("0"), Decimal("40"))}
+
+
+class _DropsEveryPlace(VenueLink):
+    """Every send is lost on the way, so the venue never hears of the order."""
+
+    async def place(self, order: PlaceOrder) -> None:
+        return None
+
+
+def test_a_lost_close_is_reconciled_to_a_verdict_and_the_run_stops_with_the_size_left(
+    tmp_path: Path,
+) -> None:
+    # Only reconcile passes can tell the saga the send never landed (ADR-0011).
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+
+    exit_code, logs = _flatten(tmp_path, link=_DropsEveryPlace)
+
+    assert exit_code == 1
+    assert logs[-1]["event"] == "exit.finished"
+    assert logs[-1]["outcome"] == "stopped"
+    assert logs[-1]["left"] == "BTC=0.02"
+    with SQLiteStore(tmp_path / "saga.db") as store:
+        close = store.get_order(derive_cloid(f"{OPERATOR}:BTC:1"))
+    assert close is not None
+    assert close.state is OrderState.FAILED
+
+
+class _LostAndUnreadable(_DropsEveryPlace):
+    """The send is lost and every order read fails, so no pass can ever decide it."""
+
+    def __init__(self, venue: Exchange) -> None:
+        super().__init__(venue)
+        self.reads = 0
+
+    async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
+        self.reads += 1
+        # A hang on the virtual clock never yields, so the test bounds it here.
+        assert self.reads < 10, "flatten kept reading a venue that cannot answer"
+        return VenueReadFailure.SEND_FAILED
+
+
+def test_a_failed_reconcile_pass_ends_the_wait_and_the_final_read_decides(
+    tmp_path: Path,
+) -> None:
+    # The saga stays open for the next boot to resume (#474). The run never hangs.
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+
+    exit_code, logs = _flatten(tmp_path, link=_LostAndUnreadable)
+
+    assert exit_code == 1
+    assert logs[-1]["outcome"] == "stopped"
+    assert logs[-1]["left"] == "BTC=0.02"
