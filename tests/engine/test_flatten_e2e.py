@@ -7,7 +7,7 @@ The real paper path, with no strategy: ``PaperExchange`` over ``InMemoryBus`` an
 
 import asyncio
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from decimal import Decimal
 from pathlib import Path
 
@@ -56,7 +56,7 @@ _SPECS = {
 _ROWS = {"BTC": ("42000", "43000", "44000"), "ETH": ("3000", "3100", "3200")}
 
 
-def _ticks(path: Path) -> Path:
+def _ticks(path: Path, replayed: Iterable[str]) -> Path:
     rows = [
         {
             "symbol": symbol,
@@ -67,7 +67,7 @@ def _ticks(path: Path) -> Path:
             "ts_event": 1_000 * n,
         }
         for n, (symbol, price) in enumerate(
-            ((symbol, price) for symbol, prices in _ROWS.items() for price in prices), start=1
+            ((symbol, price) for symbol in replayed for price in _ROWS[symbol]), start=1
         )
     ]
     path.write_text("".join(json.dumps(row) + "\n" for row in rows))
@@ -140,11 +140,13 @@ def _flatten(
     *,
     guarded: bool = True,
     link: Callable[[PaperExchange], Exchange] | None = None,
+    replayed: Iterable[str] = tuple(_ROWS),
 ) -> tuple[int, list[EventDict]]:
     """Run flatten over paper and the ``_ROWS`` replay file.
 
     ``guarded`` gives the engine a real guard. ``link`` puts a venue double in
-    front of paper. Returns the exit code and every event the run emitted.
+    front of paper. ``replayed`` picks the symbols the file has rows for.
+    Returns the exit code and every event the run emitted.
     """
     bus = InMemoryBus()
     clock = ManualClock()
@@ -155,7 +157,7 @@ def _flatten(
         clock=clock,
         store=store,
         exchange=paper if link is None else link(paper),
-        feed=ReplayFeed(path=_ticks(tmp_path / "ticks.jsonl"), bus=bus, clock=clock),
+        feed=ReplayFeed(path=_ticks(tmp_path / "ticks.jsonl", replayed), bus=bus, clock=clock),
         guard=RealGuard(specs=_SPECS, store=store, clock=clock) if guarded else None,
         exit_job=Flatten(),
     )
@@ -222,6 +224,21 @@ def test_flatten_closes_a_long_at_the_last_replay_row_and_the_partition_reads_fl
     assert logs[-1]["outcome"] == "done"
     assert logs[-1]["left"] == "none"
     assert _partitions(tmp_path) == {("trivial", "BTC"): (Decimal("0"), Decimal("40"))}
+
+
+def test_a_held_symbol_the_replay_never_prices_stops_the_run_with_its_size_left(
+    tmp_path: Path,
+) -> None:
+    # Paper has no price to fill BTC at, so the close cannot fill. The final read says so.
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+
+    exit_code, logs = _flatten(tmp_path, replayed=("ETH",))
+
+    assert exit_code == 1
+    assert logs[-1]["event"] == "exit.finished"
+    assert logs[-1]["outcome"] == "stopped"
+    assert logs[-1]["left"] == "BTC=0.02"
+    assert _partitions(tmp_path) == {("trivial", "BTC"): (Decimal("0.02"), Decimal("0"))}
 
 
 class _DropsEveryPlace(VenueLink):

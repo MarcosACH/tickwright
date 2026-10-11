@@ -20,6 +20,7 @@ from tickwright.domain import (
     EventBus,
     InvariantViolation,
     MarketFeed,
+    MarketTick,
     OrderAnchor,
     OrderRef,
     OrderType,
@@ -148,12 +149,22 @@ class Flatten:
         if isinstance(positions, VenueReadFailure):
             return ExitOutcome(status=ExitStatus.STOPPED, left=describe_failure(positions))
         if positions:
+            priced: set[str] = set()
+
+            async def note_price(tick: MarketTick) -> None:
+                priced.add(tick.symbol)
+
+            # Before the feed starts, so no tick goes unseen.
+            context.bus.subscribe(MarketTick, note_price)
             await context.feed.start(positions)
             # Only a replay ends, and it plays the whole file first. So each close
             # fills at the last row (ADR-0059). The CLI refuses a live feed until #475.
             await context.feed.ended()
             for symbol, size in positions.items():
-                await _await_verdict(await _close(symbol, size, context), context)
+                # No venue can send a market close without a price. The symbol
+                # stays open, and the final read reports its size.
+                if symbol in priced:
+                    await _await_verdict(await _close(symbol, size, context), context)
         return await _final_read(context)
 
 
