@@ -81,6 +81,7 @@ from .order import Order
 from .ownership import SymbolOwnership
 from .pacing import Backoff, Deadline
 from .position import (
+    OPERATOR,
     UNATTRIBUTED,
     Position,
     PositionChange,
@@ -144,6 +145,7 @@ __all__ = [
     # events + value types
     "DEFAULT_LEVERAGE",
     "EMPTY_LEVERAGE_BOOK",
+    "OPERATOR",
     "UNATTRIBUTED",
     "Account",
     "AccountModeVerdict",

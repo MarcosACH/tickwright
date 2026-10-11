@@ -14,6 +14,7 @@ full ADR-0024 lifecycle.
 from collections.abc import Awaitable, Callable, Iterable
 
 from tickwright.domain import (
+    OPERATOR,
     UNATTRIBUTED,
     Clock,
     Event,
@@ -98,6 +99,11 @@ class StrategyHost:
         if strategy.strategy_id == UNATTRIBUTED:
             raise InvariantViolation(
                 f"{UNATTRIBUTED} is the reserved unattributed partition, not a strategy_id"
+            )
+        # ADR-0054: a reduce-only order from this id skips the kill switch.
+        if strategy.strategy_id == OPERATOR:
+            raise InvariantViolation(
+                f"{OPERATOR} is reserved for operator orders, not a strategy_id"
             )
         if strategy.strategy_id in self._strategies:
             raise InvariantViolation(f"duplicate strategy_id registered: {strategy.strategy_id}")

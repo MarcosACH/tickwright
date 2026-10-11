@@ -35,6 +35,10 @@ _ZERO = Decimal("0")
 # and nothing narrower than the collision itself needs forbidding.
 UNATTRIBUTED = "__unattributed__"
 
+# The owner of a flatten order (ADR-0054). It never owns a partition. Its fills only feed the
+# split. A reduce-only order from it skips the kill switch, so a strategy may not take the name.
+OPERATOR = "__operator__"
+
 
 class PositionChange(StrEnum):
     """What a fill did to a position — the aggregate's own classification.

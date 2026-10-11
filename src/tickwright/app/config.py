@@ -23,7 +23,7 @@ from tickwright.adapters.bus import KafkaBusConfig
 from tickwright.adapters.feed import ReplayFeedConfig
 from tickwright.adapters.paper import PaperExchangeConfig
 from tickwright.adapters.store import PostgresStoreConfig, SQLiteStoreConfig
-from tickwright.domain import UNATTRIBUTED, LeverageSpec, Side, SymbolOwnership
+from tickwright.domain import OPERATOR, UNATTRIBUTED, LeverageSpec, Side, SymbolOwnership
 from tickwright.engine.guard import NO_LIMITS, PreTradeLimits
 from tickwright.engine.runner import EngineConfig
 from tickwright.venues.hyperliquid import HyperliquidConfig
@@ -54,6 +54,9 @@ class StrategyConfig(BaseModel):
         # the second.
         if self.strategy_id == UNATTRIBUTED:
             raise ValueError(f"{UNATTRIBUTED} is the reserved unattributed partition, not an id")
+        # ADR-0054: a reduce-only order from this id skips the kill switch.
+        if self.strategy_id == OPERATOR:
+            raise ValueError(f"{OPERATOR} is reserved for operator orders, not a strategy id")
         return self
 
 
