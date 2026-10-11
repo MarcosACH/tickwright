@@ -27,6 +27,7 @@ from tickwright.adapters.paper import (
 from tickwright.adapters.store import SQLiteStore
 from tickwright.app.build import paper_store_reads
 from tickwright.domain import (
+    OPERATOR,
     AggressorSide,
     CancelSignal,
     ExecutionReport,
@@ -188,17 +189,25 @@ def _engine(
     return _Engine(bus, clock, store, checks, guard, order_events)
 
 
-def _market_signal(*, quantity: str, seq: int = 1, side: Side = Side.BUY) -> PlaceSignal:
+def _market_signal(
+    *,
+    quantity: str,
+    seq: int = 1,
+    side: Side = Side.BUY,
+    strategy_id: str = "trivial",
+    reduce_only: bool = False,
+) -> PlaceSignal:
     return PlaceSignal(
         ts_event=1_000,
         ts_init=1_000,
-        strategy_id="trivial",
+        strategy_id=strategy_id,
         symbol="BTC",
         seq=seq,
         side=side,
         quantity=Decimal(quantity),
         order_type=OrderType.MARKET,
         time_in_force=TimeInForce.IOC,
+        reduce_only=reduce_only,
     )
 
 
@@ -876,6 +885,23 @@ def test_a_tripped_kill_switch_still_denies_an_order_that_closes_a_long() -> Non
     asyncio.run(scenario())
 
     _assert_denied_by(engine, derive_cloid("trivial:BTC:2"), "kill switch tripped")
+
+
+def test_an_operator_order_that_is_not_reduce_only_meets_the_kill_switch() -> None:
+    # Only a reduce-only operator order is a flatten. Without reduce-only the
+    # venue could let it grow the account, so a halt stops it (ADR-0054).
+    engine = _holding("0.03", side=Side.BUY, limits=NO_LIMITS)
+    engine.guard.trip_kill_switch("operator halt")
+
+    async def scenario() -> None:
+        await engine.bus.publish(_tick("42000"))
+        await engine.bus.publish(
+            _market_signal(quantity="0.03", seq=1, side=Side.SELL, strategy_id=OPERATOR)
+        )
+
+    asyncio.run(scenario())
+
+    _assert_denied_by(engine, derive_cloid(f"{OPERATOR}:BTC:1"), "kill switch tripped")
 
 
 def test_kill_switch_denies_new_orders_while_resting_orders_keep_filling() -> None:
