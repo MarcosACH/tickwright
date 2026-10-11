@@ -7,10 +7,12 @@ The real paper path, with no strategy: ``PaperExchange`` over ``InMemoryBus`` an
 
 import asyncio
 import json
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from decimal import Decimal
+from functools import partial
 from pathlib import Path
 
+import pytest
 from ledgers import GENESIS
 from structlog.typing import EventDict
 from venue_doubles import VenueLink
@@ -38,6 +40,7 @@ from tickwright.domain import (
     Side,
     Signal,
     TimeInForce,
+    VenueOpenOrder,
     VenueOrderView,
     VenueReadFailure,
     derive_cloid,
@@ -319,6 +322,74 @@ def test_flatten_cancels_a_resting_order_before_it_closes_a_long_and_a_short(
         resting = store.get_order(_RESTING)
     assert resting is not None
     assert resting.state is OrderState.CANCELLED
+
+
+class _DropsEveryCancel(VenueLink):
+    """Every cancel is lost on the way, so the order keeps resting."""
+
+    async def cancel(self, refs: Sequence[OrderRef]) -> None:
+        return None
+
+
+def test_an_order_that_stays_resting_stops_flatten_before_any_close(tmp_path: Path) -> None:
+    # The order could fill after the close and reopen exposure (ADR-0060).
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+
+    exit_code, logs = _flatten(tmp_path, link=_DropsEveryCancel, resting=True)
+
+    assert exit_code == 1
+    assert "cancel_all.orders_remain" in [log["event"] for log in logs]
+    assert not [log for log in logs if str(log.get("signal_id", "")).startswith(OPERATOR)]
+    assert logs[-1]["event"] == "exit.finished"
+    assert logs[-1]["outcome"] == "stopped"
+    assert logs[-1]["left"] == _RESTING
+    assert _partitions(tmp_path) == {("trivial", "BTC"): (Decimal("0.02"), Decimal("0"))}
+
+
+class _FailsOneRead(VenueLink):
+    """The ``nth`` call of ``read`` fails. Every other read is the real venue's answer."""
+
+    def __init__(self, venue: Exchange, *, read: str, nth: int) -> None:
+        super().__init__(venue)
+        self._read = read
+        self._nth = nth
+        self._calls = {"fetch_open_orders": 0, "fetch_positions": 0}
+
+    def _fails(self, read: str) -> bool:
+        self._calls[read] += 1
+        return read == self._read and self._calls[read] == self._nth
+
+    async def fetch_open_orders(self) -> list[VenueOpenOrder] | VenueReadFailure:
+        if self._fails("fetch_open_orders"):
+            return VenueReadFailure.SEND_FAILED
+        return await super().fetch_open_orders()
+
+    async def fetch_positions(self) -> dict[str, Decimal] | VenueReadFailure:
+        if self._fails("fetch_positions"):
+            return VenueReadFailure.SEND_FAILED
+        return await super().fetch_positions()
+
+
+@pytest.mark.parametrize(
+    ("read", "nth"),
+    [
+        pytest.param("fetch_positions", 1, id="positions-before-any-close"),
+        pytest.param("fetch_open_orders", 2, id="final-orders"),
+        pytest.param("fetch_positions", 2, id="final-positions"),
+    ],
+)
+def test_a_failed_venue_read_stops_flatten_and_never_reads_as_flat(
+    tmp_path: Path, read: str, nth: int
+) -> None:
+    # A failed read is not an empty account (ADR-0011 inv 1), so the run cannot be done.
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+
+    exit_code, logs = _flatten(tmp_path, link=partial(_FailsOneRead, read=read, nth=nth))
+
+    assert exit_code == 1
+    assert logs[-1]["event"] == "exit.finished"
+    assert logs[-1]["outcome"] == "stopped"
+    assert logs[-1]["left"] == f"read_failed: {VenueReadFailure.SEND_FAILED.value}"
 
 
 class _DropsEveryPlace(VenueLink):
