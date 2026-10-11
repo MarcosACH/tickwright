@@ -27,6 +27,13 @@ when a venue read fails, and which named events an exit run emits. Decided in
   store is new and `--new-store` was not passed (ADR-0052). Or the config or the command line is
   invalid. Nothing at the venue moved. Only the store check emits `exit.refused`. A config or
   command line error prints its message and emits no event, because logging needs a valid config.
+
+  **(Extended by [#468](https://github.com/MarcosACH/tickwright/issues/468):** a store the run
+  cannot open or lock is code 2 too. It fails before boot, so nothing at the venue moved. Code 1
+  would tell a script to check the account for no reason. A store that fails while the run is being
+  built prints its message and emits no event, like a config error. A store whose lock read fails
+  emits `engine.faulted` naming the error. Neither emits `exit.refused`, because the store check
+  never answered.**)**
 - **Cancel all trusts the read, not the statuses.** Hyperliquid answers one status per cancel
   (P4 in the probes). "Already filled", "already cancelled", and "never placed" share one error
   string. Cancelling a parent also cancels its TP and SL, so they answer "already canceled" (P5).
@@ -75,6 +82,14 @@ when a venue read fails, and which named events an exit run emits. Decided in
   `refused`. `refused` covers every refusal that is not a rate limit, and a send that dies
   (ADR-0056). `limit` is `address` or `ip`. What is left comes from the last venue read. If that
   read failed, the field says so.
+
+  **(Field names as shipped, since [#468](https://github.com/MarcosACH/tickwright/issues/468):**
+  the lock holder is the field `holder`. `cancel_all.orders_remain` names its orders in one field,
+  `orders`, as a comma-separated list. An order with no oid is named by its cloid. What is left on
+  `exit.finished` is the field `left`. It is `none` when the last read found no order. It is
+  `read_failed: <reason>` when that read failed. It is `unread` when the job never returned, as
+  after a signal or a fault. Each is one string because every catalog field is a scalar
+  (ADR-0020).**)**
 - **No separate summary.** `exit.finished` is the summary. It goes through the same logger as every
   other event, so it is the last line the operator sees.
 
@@ -98,3 +113,8 @@ when a venue read fails, and which named events an exit run emits. Decided in
 - A short venue outage is ridden out. One that lasts past 3 tries ends the run, and the operator
   runs flatten again.
 - Not built yet. The build adds the eight events to the catalog.
+
+  **(Partly built, since [#468](https://github.com/MarcosACH/tickwright/issues/468):**
+  `tickwright cancel-all` runs on paper. The catalog has `exit.refused`, `exit.finished`, and
+  `cancel_all.orders_remain`. `exit.new_store` comes with #469. `exit.unguarded` and the three
+  `flatten.*` events come with the flatten slices.**)**

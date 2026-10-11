@@ -50,7 +50,9 @@ from tickwright.domain import (
     Side,
     Store,
     VenueAccountState,
+    VenueOpenOrder,
     VenuePositionState,
+    VenueReadFailure,
 )
 from tickwright.engine.checkpoint import Checkpointer
 from tickwright.engine.ledger_reconcile import (
@@ -68,8 +70,9 @@ from tickwright.observability.testing import capture_events
 class _AccountVenue:
     """A venue that answers the **account anchor** and holds nothing else.
 
-    Two members and no base class, because two members is the whole seam this
-    cycle is constructed against (``domain.AccountAnchor``). It used to extend
+    No base class, because this cycle is constructed against
+    ``domain.AccountAnchor`` alone. It reads two of its members. The third,
+    ``fetch_open_orders``, is operator cancel all's (ADR-0052). It used to extend
     ``LiveVenueDouble`` and stub ``place``/``cancel``/``fetch_order`` as
     assertion-raisers, and those raisers were the suite's way of saying that a
     cloid read or an order action reaching the seam is the specification being
@@ -101,6 +104,9 @@ class _AccountVenue:
         self._mode = mode
         self.account_reads = 0
         self.mode_reads = 0
+
+    async def fetch_open_orders(self) -> list[VenueOpenOrder] | VenueReadFailure:
+        return []
 
     async def fetch_account_state(self) -> VenueAccountState | None:
         self.account_reads += 1
@@ -2454,13 +2460,15 @@ def test_a_cycle_that_finds_only_leverage_drift_writes_nothing_and_cannot_re_pus
 
     The refusal to re-push is asserted as the **shape of the seam** rather than
     as an uncalled method: the cycle is constructed against ``AccountAnchor``,
-    whose members are a snapshot read and a mode verdict, so there is no write
+    whose members are a snapshot read, a mode verdict, and an open-order list
+    (ADR-0052). All three are reads, so there is no write
     to leave uncalled and a case cannot fail by forgetting to check. Pinning the
     member set is what keeps that true — a later ``update_leverage`` added here
     for a caller elsewhere would hand this cycle the revert it must not have.
     """
     assert {name for name in dir(AccountAnchor) if not name.startswith("_")} == {
         "fetch_account_state",
+        "fetch_open_orders",
         "verify_account_mode",
     }
 

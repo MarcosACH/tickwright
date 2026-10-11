@@ -26,6 +26,7 @@ from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.feed import ReplayFeed
 from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.adapters.store import SQLiteStore
+from tickwright.app.build import paper_store_reads
 from tickwright.domain import (
     Account,
     ComponentState,
@@ -39,7 +40,6 @@ from tickwright.domain import (
     Position,
     Side,
     Store,
-    account_net_size,
 )
 from tickwright.engine.runner import Engine
 from tickwright.strategies import SingleShotMarketStrategy
@@ -183,6 +183,10 @@ async def _run(
     bus = InMemoryBus()
     clock = ManualClock(start_ns=start_ns)
     store = store_factory(db)
+    # The production wiring itself, because the thing under test across two
+    # lives is precisely that the venue's notional basis is the ledger's and
+    # not a tally of its own.
+    reads = paper_store_reads(store)
     exchange = PaperExchange(
         bus=bus,
         clock=clock,
@@ -190,13 +194,8 @@ async def _run(
         genesis_collateral=GENESIS,
         instrument_specs={"BTC": _SPEC},
         funding_interval_ns=_INTERVAL_NS,
-        # The production wiring verbatim (``app/build.py``), because the thing
-        # under test across two lives is precisely that the venue's notional
-        # basis is the ledger's and not a tally of its own.
-        account_net=lambda: account_net_size(store.all_positions()),
-        applied_fills=lambda cloid: (
-            order.applied_event_ids if (order := store.get_order(cloid)) else ()
-        ),
+        account_net=reads.account_net,
+        applied_fills=reads.applied_fills,
     )
     feed = ReplayFeed(path=ticks, bus=bus, clock=clock)
     engine = Engine(bus=bus, clock=clock, store=store, exchange=exchange, feed=feed)

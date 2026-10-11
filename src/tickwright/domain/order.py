@@ -128,6 +128,20 @@ class Order:
         self.cancel_signal_id = signal_id
         return True
 
+    def mark_operator_cancel(self, *, ts_ns: int) -> None:
+        """Record the operator's cancel all on this saga (ADR-0052).
+
+        Unlike ``request_cancel``, it does not skip an order already marked. An
+        earlier cancel may never have reached the venue, so the operator sends
+        again. It never sets ``cancel_signal_id``, because the operator consumes
+        no strategy seq. So the seq a restart recovers stays the same.
+        """
+        if self.is_terminal:
+            return
+        self.cancel_requested = True
+        if self.cancel_requested_ts is None:
+            self.cancel_requested_ts = ts_ns
+
     @classmethod
     def restore(
         cls,

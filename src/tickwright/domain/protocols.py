@@ -23,6 +23,7 @@ from .venue import (
     OrderRef,
     PlaceOrder,
     VenueAccountState,
+    VenueOpenOrder,
     VenueOrderView,
     VenueReadFailure,
 )
@@ -528,13 +529,25 @@ class AccountAnchor(Protocol):
     ability to place an order, which is a claim its constructor now makes and
     its docstring used to have to.
 
-    Both members are answered by **both** adapters even so. The account cycle is
+    Operator cancel all is a second caller, on both paths. It reads only
+    ``fetch_open_orders``, which answers for the whole account (ADR-0052).
+
+    The two account-cycle members are answered by **both** adapters even so. The account cycle is
     constructed on every path and scheduled on one (``engine/runner.py``), so
     paper implements this seam and answers it permanently — ``None`` and
     ``VERIFIED`` — rather than being withheld from it. A seam an adapter may
     fail to satisfy would push the live/paper split into the runner as an
     unwrappable ``None``, which is the shape that decision already rejected.
     """
+
+    async def fetch_open_orders(self) -> list[VenueOpenOrder] | VenueReadFailure:
+        """Every order resting in the account, ours or not (ADR-0052).
+
+        Operator cancel all reads it for its list and again for its final check.
+        A failed read returns a ``VenueReadFailure`` and never an empty list,
+        because an empty list says the account holds no order (ADR-0011 inv 1).
+        """
+        ...
 
     async def fetch_account_state(self) -> VenueAccountState | None:
         """Venue truth for the account — the reconcile's account-grain pull, the

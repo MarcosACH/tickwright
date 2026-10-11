@@ -1734,6 +1734,15 @@ def test_the_hyperliquid_venue_satisfies_the_exchange_seam() -> None:
     assert isinstance(exchange, Exchange)
 
 
+def test_the_venue_refuses_to_list_open_orders_until_it_can_read_them() -> None:
+    # #470 builds this read. Until then the CLI refuses cancel-all on this venue
+    # before boot, so a call here is a wiring bug and must fail loudly.
+    exchange = make_exchange(FakeExchangeApi({}), bus=InMemoryBus(), clock=ManualClock())
+
+    with pytest.raises(NotImplementedError, match="#470"):
+        asyncio.run(exchange.fetch_open_orders())
+
+
 def test_the_venue_hands_out_the_meta_sourced_specs_by_copy() -> None:
     """The specs the composition root wires into the venue-agnostic guard come
     from the venue itself (ADR-0031): the adapter is the one component that
@@ -1762,6 +1771,7 @@ _SEAM_CLAIMS = {
     "place": "test_market_buy_places_an_aggressive_ioc_limit_at_the_bounded_price",
     "cancel": "test_cancel_sends_a_signed_cancel_by_cloid_and_reports_cancelled",
     "fetch_order": "test_fetch_order_bundles_the_venue_status_and_fills_into_one_view",
+    "fetch_open_orders": "test_the_venue_refuses_to_list_open_orders_until_it_can_read_them",
     # test_account.py — the module that owns what clearinghouseState means.
     "fetch_account_state": "test_a_recorded_cross_snapshot_normalizes_to_the_measured_account_figures",
     # test_preflight.py — the module that owns the mode allowlist on both paths.

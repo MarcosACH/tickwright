@@ -329,6 +329,40 @@ def test_request_cancel_on_a_terminal_order_is_a_no_op() -> None:
     assert order.cancel_signal_id is None
 
 
+def test_operator_cancel_marks_an_unmarked_order_and_consumes_no_seq() -> None:
+    order = _order()
+    order.apply(_submitted())
+    order.apply(_live())
+    order.mark_operator_cancel(ts_ns=5)
+    assert order.cancel_requested is True
+    assert order.cancel_requested_ts == 5
+    # The operator sends no strategy signal, so no seq is recorded (ADR-0052).
+    assert order.cancel_signal_id is None
+    assert order.state is OrderState.LIVE
+
+
+def test_operator_cancel_marks_an_order_a_strategy_already_marked() -> None:
+    order = _order()
+    order.apply(_submitted())
+    order.apply(_live())
+    order.request_cancel(signal_id="trivial:BTC:2", ts_ns=5)
+    order.mark_operator_cancel(ts_ns=9)
+    assert order.cancel_requested is True
+    # The first request time stays. The strategy's seq stays too, so the seq a
+    # restart recovers does not move (ADR-0052).
+    assert order.cancel_requested_ts == 5
+    assert order.cancel_signal_id == "trivial:BTC:2"
+
+
+def test_operator_cancel_on_a_terminal_order_is_a_no_op() -> None:
+    order = _order()
+    order.apply(_submitted())
+    order.apply(_filled())  # FILLED is terminal
+    order.mark_operator_cancel(ts_ns=5)
+    assert order.cancel_requested is False
+    assert order.cancel_requested_ts is None
+
+
 def test_a_fill_after_cancel_requested_still_transitions_to_filled() -> None:
     order = _order()
     order.apply(_submitted())

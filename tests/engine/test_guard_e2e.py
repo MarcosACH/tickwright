@@ -25,6 +25,7 @@ from tickwright.adapters.paper import (
     StochasticParams,
 )
 from tickwright.adapters.store import SQLiteStore
+from tickwright.app.build import paper_store_reads
 from tickwright.domain import (
     AggressorSide,
     CancelSignal,
@@ -43,7 +44,6 @@ from tickwright.domain import (
     Side,
     Signal,
     TimeInForce,
-    account_net_size,
     derive_cloid,
 )
 from tickwright.domain.enums import OrderType
@@ -149,17 +149,16 @@ def _engine(
         # one, except that a crossing limit fills only this fraction per tick.
         params = StochasticParams(partial_fill_fraction=Decimal(partial_fill_fraction))
         fill_model = StochasticFillModel(rng=random.Random(0), clock=clock, params=params)
+    # Wired by the composition root's own function, so paper judges a
+    # reduce-only order against the same net the guard reads.
+    reads = paper_store_reads(store)
     exchange = PaperExchange(
         bus=bus,
         clock=clock,
         fill_model=fill_model,
         genesis_collateral=GENESIS,
-        # Wired as the composition root wires it, so paper judges a reduce-only
-        # order against the same net the guard reads.
-        account_net=lambda: account_net_size(store.all_positions()),
-        applied_fills=lambda cloid: (
-            order.applied_event_ids if (order := store.get_order(cloid)) else ()
-        ),
+        account_net=reads.account_net,
+        applied_fills=reads.applied_fills,
     )
     checks = checkpointer(store, clock=clock)
     # The runner's boot step: the ledger first, then the order cache. Rebuilding

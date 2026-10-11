@@ -23,6 +23,7 @@ from decimal import Decimal
 
 import pytest
 from closed_sets import assert_covers_exactly
+from psycopg.conninfo import conninfo_to_dict
 from store_backends import PostgresBackend, SQLiteBackend
 
 from tickwright.domain import (
@@ -863,3 +864,19 @@ def test_a_postgres_holder_pid_is_the_session_that_holds_the_lock(
         store_backend.terminate(holder.pid)
 
         assert second.lock() is None
+
+
+def test_a_postgres_holder_names_the_store_without_its_credentials(
+    store_backend: Backend,
+) -> None:
+    """``exit.refused`` names the store, and that event goes to the operator's
+    logs (ADR-0060). So it carries the host and database, never the password."""
+    if not isinstance(store_backend, PostgresBackend):
+        pytest.skip("only a Postgres store has credentials to leave out")
+    with store_backend.open() as first, store_backend.open() as second:
+        assert first.lock() is None
+        holder = second.lock()
+        assert holder is not None
+
+        dsn = conninfo_to_dict(store_backend.dsn)
+        assert holder.store == f"{dsn['host']}:{dsn.get('port', 5432)}/{dsn['dbname']}"

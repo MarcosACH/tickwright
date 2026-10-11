@@ -38,6 +38,7 @@ from tickwright.domain import (
     Side,
     TimeInForce,
     VenueAccountState,
+    VenueOpenOrder,
     VenueOrderView,
     VenueReadFailure,
     quantize_price,
@@ -508,6 +509,12 @@ class HyperliquidExchange:
             cloid=ref.cloid, symbol=record.coin, status=record.state, venue_oid=str(record.oid)
         )
         return VenueOrderView(status=status, fills=tuple(fills))
+
+    async def fetch_open_orders(self) -> list[VenueOpenOrder] | VenueReadFailure:
+        # The CLI refuses cancel-all on this venue before boot until #470 builds
+        # this read. A failed read would be the wrong answer here: it would let an
+        # exit run boot and exit 1 when it should never have started.
+        raise NotImplementedError("Hyperliquid lists open orders from #470 on")
 
     async def fetch_account_state(self) -> VenueAccountState | None:
         """Venue truth for the account: one ``clearinghouseState`` read, the

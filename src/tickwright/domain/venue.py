@@ -105,6 +105,20 @@ class VenueOrderView:
         return self.status is not None or bool(self.fills)
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class VenueOpenOrder:
+    """One order the venue holds resting, from ``AccountAnchor.fetch_open_orders``.
+
+    The cloid is ``None`` for an order the engine did not place, such as one
+    placed by hand in the venue UI. The oid is ``None`` on paper, which assigns
+    none. A live venue always gives one.
+    """
+
+    symbol: str
+    cloid: str | None = None
+    venue_oid: str | None = None
+
+
 # --- Venue truth for the account (a query result, not an event) --------------
 
 

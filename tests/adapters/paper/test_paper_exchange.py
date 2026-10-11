@@ -45,6 +45,7 @@ from tickwright.domain import (
     Side,
     TimeInForce,
     VenueAccountState,
+    VenueOpenOrder,
     VenueOrderView,
     VenueReadFailure,
 )
@@ -676,6 +677,25 @@ def test_cancel_removes_a_resting_order_and_reports_cancelled() -> None:
     assert statuses[0].cloid == "0xabc"
 
 
+def test_fetch_open_orders_lists_the_orders_still_resting_on_the_book() -> None:
+    # Cancel all reads this list first, then reads it again to prove it is done (ADR-0060).
+    exchange, bus, clock, _fills, _statuses = _limit_harness()
+
+    async def scenario() -> list[VenueOpenOrder] | VenueReadFailure:
+        clock.advance_to(1_000)
+        await bus.publish(_tick("42000"))
+        await exchange.place(_limit_order("41000", cloid="0xa"))
+        await exchange.place(_limit_order("40000", cloid="0xb"))
+        await exchange.place(_limit_order("39000", cloid="0xc"))
+        await exchange.cancel([OrderRef(cloid="0xb", symbol="BTC")])
+        return await exchange.fetch_open_orders()
+
+    assert asyncio.run(scenario()) == [
+        VenueOpenOrder(symbol="BTC", cloid="0xa"),
+        VenueOpenOrder(symbol="BTC", cloid="0xc"),
+    ]
+
+
 def test_cancel_of_two_resting_orders_reports_each_one_cancelled() -> None:
     # A cancel all is one call with many refs (ADR-0055).
     exchange, bus, clock, fills, statuses = _limit_harness()
@@ -1032,6 +1052,7 @@ _SEAM_CLAIMS = {
     "place": "test_market_order_fills_at_the_latest_tick_price",
     "cancel": "test_cancel_removes_a_resting_order_and_reports_cancelled",
     "fetch_order": "test_fetch_order_reports_a_resting_limit_as_live",
+    "fetch_open_orders": "test_fetch_open_orders_lists_the_orders_still_resting_on_the_book",
     "fetch_account_state": "test_the_paper_venue_reports_no_account_truth_even_on_a_healthy_read",
     "verify_account_mode": "test_the_paper_venue_has_no_account_mode_to_verify_and_never_withholds_one",
     "account_spec": "test_the_paper_venue_declares_a_two_segment_account_id_and_its_genesis",

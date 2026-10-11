@@ -39,19 +39,23 @@ from ._durability import durable
 from ._sql import SqlStore
 
 
-def _holder_of(path: str, written: str) -> StoreLockHolder:
-    """The holder of the lock at ``path``, from the pid it wrote there.
+def _holder_of(database: str, written: str) -> StoreLockHolder:
+    """The holder of ``database``'s lock, from the pid it wrote in the lock file.
 
     The pid can be missing for a moment, between the holder taking the lock and
     writing it. The lock still decides, so this is still a refusal.
     """
+    path = f"{database}.lock"
     if not written.isdigit():
         return StoreLockHolder(
-            pid=None, detail=f"Another engine holds {path}. Stop it first, then try again."
+            pid=None,
+            detail=f"Another engine holds {path}. Stop it first, then try again.",
+            store=database,
         )
     return StoreLockHolder(
         pid=int(written),
         detail=f"Process {written} holds {path}. Stop that engine first, then try again.",
+        store=database,
     )
 
 
@@ -174,7 +178,7 @@ class SQLiteStore(SqlStore):
                 fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 file.seek(0)
-                return _holder_of(path, file.read().strip())
+                return _holder_of(database, file.read().strip())
             file.truncate(0)
             file.write(str(os.getpid()))
             file.flush()
