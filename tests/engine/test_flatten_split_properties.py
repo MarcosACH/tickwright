@@ -55,3 +55,17 @@ def test_moves_sum_to_the_fill_and_never_pass_zero(
     for owner, size in basis:
         after = size + moves[owner]
         assert after == 0 or (after > 0) == (size > 0)
+
+
+@given(basis=_one_sided_basis())
+def test_a_later_fill_never_takes_a_lot_back(basis: tuple[tuple[str, Decimal], ...]) -> None:
+    net = sum((size for _, size in basis), Decimal(0))
+    # Every fill size, not two random ones. A take-back shows up only at a few fill sizes.
+    fills = [lots * LOT for lots in range(int(abs(net) / LOT) + 1)]
+
+    splits = [flatten_split(basis, LOT, filled) for filled in fills]
+
+    # A taken-back lot would book a trade the venue never made.
+    for before, after in zip(splits, splits[1:], strict=False):
+        for owner, _ in basis:
+            assert abs(after[owner]) >= abs(before[owner])
