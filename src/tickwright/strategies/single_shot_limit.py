@@ -23,10 +23,9 @@ from tickwright.domain import (
     OrderFilled,
     OrderType,
     Side,
+    SignalEmitter,
     TimeInForce,
 )
-
-from .emitter import SignalEmitter
 
 
 class SingleShotLimitStrategy:

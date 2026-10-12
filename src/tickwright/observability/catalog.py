@@ -65,6 +65,8 @@ class NamedEvent(StrEnum):
     EXIT_FINISHED = "exit.finished"
     EXIT_UNGUARDED = "exit.unguarded"
     CANCEL_ALL_ORDERS_REMAIN = "cancel_all.orders_remain"
+    FLATTEN_DRY_ATTEMPT = "flatten.dry_attempt"
+    FLATTEN_GAVE_UP = "flatten.gave_up"
 
     # Pre-trade kill switch (``PreTradeGuard``).
     GUARD_KILL_SWITCH_TRIPPED = "guard.kill_switch_tripped"
@@ -280,6 +282,8 @@ FIELDS: dict[NamedEvent, frozenset[str]] = {
     NamedEvent.EXIT_FINISHED: frozenset({"job", "outcome", "exit_code", "left"}),
     NamedEvent.EXIT_UNGUARDED: frozenset({"warning"}),
     NamedEvent.CANCEL_ALL_ORDERS_REMAIN: frozenset({"orders"}),
+    NamedEvent.FLATTEN_DRY_ATTEMPT: frozenset({"symbol", "count", "reason"}),
+    NamedEvent.FLATTEN_GAVE_UP: frozenset({"symbol", "size"}),
     NamedEvent.GUARD_KILL_SWITCH_TRIPPED: frozenset({"reason"}),
     NamedEvent.GUARD_KILL_SWITCH_RESET: frozenset(),
     NamedEvent.STRATEGY_ERROR: frozenset({"strategy_id", "event_id", "error"}),

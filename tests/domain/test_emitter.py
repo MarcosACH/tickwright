@@ -18,9 +18,9 @@ from tickwright.domain import (
     PlaceSignal,
     Side,
     Signal,
+    SignalEmitter,
     TimeInForce,
 )
-from tickwright.strategies import SignalEmitter
 
 
 def _harness() -> tuple[InMemoryBus, ManualClock, SignalEmitter, list[Signal]]:

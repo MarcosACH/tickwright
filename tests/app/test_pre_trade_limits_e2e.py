@@ -52,11 +52,11 @@ from tickwright.domain import (
     OrderType,
     Portfolio,
     Side,
+    SignalEmitter,
     TimeInForce,
 )
 from tickwright.engine.guard import PreTradeLimits, RateCap, SymbolLimits
 from tickwright.engine.runner import Engine
-from tickwright.strategies.emitter import SignalEmitter
 
 SECOND_NS = 1_000_000_000
 PRICES = {"BTC": Decimal("50000"), "ETH": Decimal("3000")}

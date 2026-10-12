@@ -29,9 +29,9 @@ from tickwright.domain import (
     OrderType,
     Portfolio,
     Side,
+    SignalEmitter,
     TimeInForce,
 )
-from tickwright.strategies.emitter import SignalEmitter
 
 log = structlog.get_logger()
 

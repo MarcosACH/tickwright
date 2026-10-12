@@ -8,6 +8,7 @@ The real paper path, with no strategy: ``PaperExchange`` over ``InMemoryBus`` an
 import asyncio
 import json
 from collections.abc import Callable, Iterable, Sequence
+from dataclasses import replace
 from decimal import Decimal
 from functools import partial
 from pathlib import Path
@@ -27,13 +28,17 @@ from tickwright.domain import (
     OPERATOR,
     AggressorSide,
     Clock,
+    Event,
+    EventBus,
     Exchange,
     ExecutionReport,
+    Handler,
     InstrumentSpec,
     MarketTick,
     Order,
     OrderRef,
     OrderState,
+    OrderStatusReport,
     OrderType,
     PlaceOrder,
     PlaceSignal,
@@ -79,7 +84,7 @@ def _ticks(path: Path, replayed: Iterable[str]) -> Path:
     return path
 
 
-def _paper(bus: InMemoryBus, clock: ManualClock, store: SQLiteStore) -> PaperExchange:
+def _paper(bus: EventBus, clock: ManualClock, store: SQLiteStore) -> PaperExchange:
     reads = paper_store_reads(store)
     return PaperExchange(
         bus=bus,
@@ -92,8 +97,8 @@ def _paper(bus: InMemoryBus, clock: ManualClock, store: SQLiteStore) -> PaperExc
     )
 
 
-def _hold(path: Path, sizes: dict[str, str], *, strategy_id: str = "trivial") -> None:
-    """Open each signed size as ``strategy_id``, at the symbol's first row price.
+def _hold(path: Path, sizes: dict[str, str], *, strategy_id: str = "trivial", row: int = 0) -> None:
+    """Open each signed size as ``strategy_id``, at the price of the symbol's ``row``.
 
     Seeded through the engine's own order path on a separate bus, as an earlier run would.
     """
@@ -109,7 +114,7 @@ def _hold(path: Path, sizes: dict[str, str], *, strategy_id: str = "trivial") ->
 
         async def go() -> None:
             for seq, (symbol, size) in enumerate(sizes.items(), start=1):
-                await bus.publish(_tick(symbol, _ROWS[symbol][0]))
+                await bus.publish(_tick(symbol, _ROWS[symbol][row]))
                 await bus.publish(
                     PlaceSignal(
                         ts_event=0,
@@ -147,16 +152,20 @@ def _flatten(
     link: Callable[[PaperExchange], Exchange] | None = None,
     replayed: Iterable[str] = tuple(_ROWS),
     resting: bool = False,
+    clock: ManualClock | None = None,
+    bus: EventBus | None = None,
 ) -> tuple[int, list[EventDict]]:
     """Run flatten over paper and the ``_ROWS`` replay file.
 
     ``guarded`` gives the engine a real guard. ``link`` puts a venue double in
     front of paper. ``replayed`` picks the symbols the file has rows for.
     ``resting`` rests one BTC buy far below the replay, as ``_RESTING``.
+    ``clock`` lets a test read the virtual time the run ended at. ``bus`` lets
+    a venue double publish its own reports.
     Returns the exit code and every event the run emitted.
     """
-    bus = InMemoryBus()
-    clock = ManualClock()
+    bus = bus or InMemoryBus()
+    clock = clock or ManualClock()
     store = SQLiteStore(tmp_path / "saga.db")
     paper = _paper(bus, clock, store)
     engine = Engine(
@@ -182,7 +191,7 @@ def _flatten(
 _RESTING = derive_cloid("resting:BTC:1")
 
 
-async def _rest(bus: InMemoryBus, paper: PaperExchange, store: SQLiteStore, clock: Clock) -> None:
+async def _rest(bus: EventBus, paper: PaperExchange, store: SQLiteStore, clock: Clock) -> None:
     """Rest ``_RESTING`` on paper, with its saga in the store.
 
     Paper keeps its book in memory only (#484), so the order goes on the run's own
@@ -279,19 +288,289 @@ def test_flatten_closes_a_long_at_the_last_replay_row_and_the_partition_reads_fl
     assert _partitions(tmp_path) == {("trivial", "BTC"): (Decimal("0"), Decimal("40"))}
 
 
-def test_a_held_symbol_the_replay_never_prices_stops_the_run_with_its_size_left(
+def test_a_held_symbol_the_replay_never_prices_gives_up_after_three_dry_attempts(
     tmp_path: Path,
 ) -> None:
-    # Paper has no price to fill BTC at, so the close cannot fill. The final read says so.
+    # No price can come after the replay ends, so every attempt is dry (ADR-0056).
+    # The replay ends at 3000 ns. Two 2 second waits sit between the three attempts.
     _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+    clock = ManualClock()
 
-    exit_code, logs = _flatten(tmp_path, replayed=("ETH",))
+    exit_code, logs = _flatten(tmp_path, replayed=("ETH",), clock=clock)
 
     assert exit_code == 1
+    dry = [log for log in logs if log["event"] == "flatten.dry_attempt"]
+    assert [(log["symbol"], log["count"], log["reason"]) for log in dry] == [
+        ("BTC", 1, "no_price"),
+        ("BTC", 2, "no_price"),
+        ("BTC", 3, "no_price"),
+    ]
+    gave_up = [log for log in logs if log["event"] == "flatten.gave_up"]
+    assert [(log["symbol"], log["size"]) for log in gave_up] == [("BTC", "0.02")]
+    assert clock.timestamp_ns() == 3_000 + 4_000_000_000
     assert logs[-1]["event"] == "exit.finished"
     assert logs[-1]["outcome"] == "stopped"
     assert logs[-1]["left"] == "BTC=0.02"
     assert _partitions(tmp_path) == {("trivial", "BTC"): (Decimal("0.02"), Decimal("0"))}
+
+
+class _ThinBook(VenueLink):
+    """Each close fills only what the book holds, and the venue cancels the rest.
+
+    ``fills`` gives the size each send finds, in order. Zero fills nothing.
+    """
+
+    def __init__(self, venue: Exchange, *, bus: EventBus, fills: Sequence[str]) -> None:
+        super().__init__(venue)
+        self._bus = bus
+        self._fills = [Decimal(fill) for fill in fills]
+
+    async def place(self, order: PlaceOrder) -> None:
+        fill = self._fills.pop(0)
+        if fill:
+            await super().place(replace(order, quantity=fill))
+        # An IOC never rests, so whatever did not fill ends cancelled.
+        await self._bus.publish(
+            OrderStatusReport(
+                ts_event=0,
+                ts_init=0,
+                cloid=order.cloid,
+                symbol=order.symbol,
+                status=OrderState.CANCELLED,
+            )
+        )
+
+
+def test_a_fill_between_dry_attempts_resets_the_count(tmp_path: Path) -> None:
+    # Two dry attempts, then a partial fill, then three more dry ones. Without the
+    # reset, flatten would give up on the third dry attempt, before its fifth send.
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+    bus = InMemoryBus()
+    link = partial(_ThinBook, bus=bus, fills=("0", "0", "0.01", "0", "0", "0"))
+
+    exit_code, logs = _flatten(tmp_path, link=link, bus=bus)
+
+    assert exit_code == 1
+    dry = [log for log in logs if log["event"] == "flatten.dry_attempt"]
+    assert [(log["count"], log["reason"]) for log in dry] == [
+        (1, "no_fill"),
+        (2, "no_fill"),
+        (1, "no_fill"),
+        (2, "no_fill"),
+        (3, "no_fill"),
+    ]
+    gave_up = [log for log in logs if log["event"] == "flatten.gave_up"]
+    assert [(log["symbol"], Decimal(log["size"])) for log in gave_up] == [("BTC", Decimal("0.01"))]
+    symbol, left = logs[-1]["left"].split("=")
+    assert (symbol, Decimal(left)) == ("BTC", Decimal("0.01"))
+
+
+class _ReadsMore(VenueLink):
+    """The venue reads more size than the ledger holds, by ``extra``, on every read."""
+
+    def __init__(self, venue: Exchange, *, symbol: str, extra: str) -> None:
+        super().__init__(venue)
+        self._symbol = symbol
+        self._extra = Decimal(extra)
+
+    async def fetch_positions(self) -> dict[str, Decimal] | VenueReadFailure:
+        positions = await super().fetch_positions()
+        if isinstance(positions, VenueReadFailure):
+            return positions
+        return {**positions, self._symbol: positions.get(self._symbol, Decimal(0)) + self._extra}
+
+
+def test_a_size_gap_that_never_heals_gives_up_with_no_close(tmp_path: Path) -> None:
+    # A close is split across the partitions, so it may only go out when they sum
+    # to the venue size (ADR-0054). Paper has no account truth to heal the gap with.
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+
+    exit_code, logs = _flatten(tmp_path, link=partial(_ReadsMore, symbol="BTC", extra="0.01"))
+
+    assert exit_code == 1
+    dry = [log for log in logs if log["event"] == "flatten.dry_attempt"]
+    assert [(log["count"], log["reason"]) for log in dry] == [
+        (1, "size_gap"),
+        (2, "size_gap"),
+        (3, "size_gap"),
+    ]
+    gave_up = [log for log in logs if log["event"] == "flatten.gave_up"]
+    assert [(log["symbol"], log["size"]) for log in gave_up] == [("BTC", "0.03")]
+    assert not [log for log in logs if str(log.get("signal_id", "")).startswith(OPERATOR)]
+    assert logs[-1]["left"] == "BTC=0.03"
+    assert _partitions(tmp_path) == {("trivial", "BTC"): (Decimal("0.02"), Decimal("0"))}
+
+
+class _HoldsOneOrder:
+    """An ``InMemoryBus`` that holds every report for ``cloid`` until ``drain()``.
+
+    Those are reports the venue published that the engine has not applied yet.
+    Kafka can leave them in flight, in order, and ``drain()`` waits for them.
+    """
+
+    def __init__(self, cloid: str) -> None:
+        self._bus = InMemoryBus()
+        self._cloid = cloid
+        self._held: list[ExecutionReport] = []
+
+    def subscribe[E: Event](self, event_type: type[E], handler: Handler[E]) -> None:
+        self._bus.subscribe(event_type, handler)
+
+    async def start(self) -> None:
+        await self._bus.start()
+
+    async def publish(self, event: Event) -> None:
+        if isinstance(event, ExecutionReport) and event.cloid == self._cloid:
+            self._held.append(event)
+            return
+        await self._bus.publish(event)
+
+    async def drain(self) -> None:
+        held, self._held = self._held, []
+        for event in held:
+            await self._bus.publish(event)
+        await self._bus.drain()
+
+    async def close(self) -> None:
+        await self._bus.close()
+
+
+class _FillsAsItCancels(VenueLink):
+    """The market trades through each resting BTC buy just before its cancel lands."""
+
+    def __init__(self, venue: Exchange, *, bus: EventBus) -> None:
+        super().__init__(venue)
+        self._bus = bus
+
+    async def cancel(self, refs: Sequence[OrderRef]) -> None:
+        await self._bus.publish(_tick("BTC", "30000"))
+        await super().cancel(refs)
+
+
+def test_a_size_gap_from_a_fill_still_in_flight_closes_after_a_drain(tmp_path: Path) -> None:
+    # The resting buy fills on the venue as cancel all runs, but its fill is still
+    # in flight. The drain applies it, so the partitions sum to the venue size
+    # again, and one close covers both (ADR-0054).
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+    bus = _HoldsOneOrder(_RESTING)
+
+    exit_code, logs = _flatten(
+        tmp_path, link=partial(_FillsAsItCancels, bus=bus), bus=bus, resting=True
+    )
+
+    assert exit_code == 0
+    assert not [log for log in logs if log["event"] == "flatten.dry_attempt"]
+    assert logs[-1]["outcome"] == "done"
+    # Both close at 44000. One opened at 42000, the other filled at 30000.
+    assert _partitions(tmp_path) == {
+        ("trivial", "BTC"): (Decimal("0"), Decimal("40")),
+        ("resting", "BTC"): (Decimal("0"), Decimal("140")),
+    }
+
+
+class _SoldByHand(_ThinBook):
+    """The first close fills nothing, and then the venue reads BTC flat.
+
+    The operator sold it by hand in the venue UI, so the books never see that trade.
+    """
+
+    def __init__(self, venue: Exchange, *, bus: EventBus) -> None:
+        super().__init__(venue, bus=bus, fills=("0",))
+        self._sold = False
+
+    async def place(self, order: PlaceOrder) -> None:
+        await super().place(order)
+        self._sold = True
+
+    async def fetch_positions(self) -> dict[str, Decimal] | VenueReadFailure:
+        positions = await super().fetch_positions()
+        if isinstance(positions, VenueReadFailure) or not self._sold:
+            return positions
+        return {symbol: size for symbol, size in positions.items() if symbol != "BTC"}
+
+
+def test_a_venue_that_reads_flat_moves_the_leftover_to_unattributed_at_the_entry_price(
+    tmp_path: Path,
+) -> None:
+    # No order can close what the venue no longer holds. The strategy's size moves at
+    # its own entry price, so its realized PnL stays 0. At the 44000 mark it would be
+    # 40. The unattributed size keeps the gap visible (ADR-0054, ADR-0056).
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+    bus = InMemoryBus()
+
+    exit_code, logs = _flatten(tmp_path, link=partial(_SoldByHand, bus=bus), bus=bus)
+
+    assert exit_code == 0
+    assert logs[-1]["outcome"] == "done"
+    assert logs[-1]["left"] == "none"
+    assert _partitions(tmp_path) == {
+        ("trivial", "BTC"): (Decimal("0"), Decimal("0")),
+        (None, "BTC"): (Decimal("0.02"), Decimal("0")),
+    }
+    with SQLiteStore(tmp_path / "saga.db") as store:
+        unattributed = [row for row in store.all_positions() if row.strategy_id is None]
+    assert [row.entry_price for row in unattributed] == [Decimal("42000")]
+
+
+class _SoldAfterTheBootRead(VenueLink):
+    """The venue reads BTC flat on every positions read after flatten's first.
+
+    The operator sold it by hand while flatten waited, so the books never see that trade.
+    """
+
+    def __init__(self, venue: Exchange) -> None:
+        super().__init__(venue)
+        self._reads = 0
+
+    async def fetch_positions(self) -> dict[str, Decimal] | VenueReadFailure:
+        self._reads += 1
+        positions = await super().fetch_positions()
+        if isinstance(positions, VenueReadFailure) or self._reads == 1:
+            return positions
+        return {symbol: size for symbol, size in positions.items() if symbol != "BTC"}
+
+
+def test_a_venue_that_reads_flat_with_no_price_ends_the_loop_with_no_give_up(
+    tmp_path: Path,
+) -> None:
+    # An attempt with no price sends no order, but it still reads the venue before
+    # it counts. A flat venue ends flatten (ADR-0056), so the leftover moves and
+    # no dry attempt is counted.
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+
+    exit_code, logs = _flatten(tmp_path, link=_SoldAfterTheBootRead, replayed=("ETH",))
+
+    assert exit_code == 0
+    assert not [log for log in logs if log["event"].startswith("flatten.")]
+    assert logs[-1]["outcome"] == "done"
+    assert _partitions(tmp_path) == {
+        ("trivial", "BTC"): (Decimal("0"), Decimal("0")),
+        (None, "BTC"): (Decimal("0.02"), Decimal("0")),
+    }
+
+
+def test_two_strategies_of_opposite_sign_leave_one_unattributed_piece_at_their_cost(
+    tmp_path: Path,
+) -> None:
+    # Each strategy leaves at its own entry, so neither books realized PnL. The
+    # unattributed side takes their net at the cost they paid together, so no
+    # cash moves (ADR-0054). That price need not be one the market traded:
+    # 0.02 at 42000 less 0.01 at 44000 is 400, over a size of 0.01.
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+    _hold(tmp_path / "saga.db", {"BTC": "-0.01"}, strategy_id="other", row=2)
+
+    exit_code, logs = _flatten(tmp_path, link=_SoldAfterTheBootRead, replayed=("ETH",))
+
+    assert exit_code == 0
+    assert logs[-1]["outcome"] == "done"
+    assert _partitions(tmp_path) == {
+        ("trivial", "BTC"): (Decimal("0"), Decimal("0")),
+        ("other", "BTC"): (Decimal("0"), Decimal("0")),
+        (None, "BTC"): (Decimal("0.01"), Decimal("0")),
+    }
+    with SQLiteStore(tmp_path / "saga.db") as store:
+        unattributed = [row for row in store.all_positions() if row.strategy_id is None]
+    assert [row.entry_price for row in unattributed] == [Decimal("40000")]
 
 
 def test_flatten_cancels_a_resting_order_before_it_closes_a_long_and_a_short(
@@ -375,7 +654,8 @@ class _FailsOneRead(VenueLink):
     [
         pytest.param("fetch_positions", 1, id="positions-before-any-close"),
         pytest.param("fetch_open_orders", 2, id="final-orders"),
-        pytest.param("fetch_positions", 2, id="final-positions"),
+        # The second positions read is the one after the close.
+        pytest.param("fetch_positions", 3, id="final-positions"),
     ],
 )
 def test_a_failed_venue_read_stops_flatten_and_never_reads_as_flat(
@@ -417,9 +697,148 @@ def test_a_lost_close_is_reconciled_to_a_verdict_and_the_run_stops_with_the_size
     assert close.state is OrderState.FAILED
 
 
+class _LostOverANetwork(_DropsEveryPlace):
+    """Every send is lost, and each order read waits on the network.
+
+    ``places`` lists the symbol of each send in order. ``overlap`` is the most
+    order reads that were in flight at once. A pass reads its orders one by one,
+    so more than one means two passes overlapped.
+    """
+
+    def __init__(self, venue: Exchange) -> None:
+        super().__init__(venue)
+        self.places: list[str] = []
+        self.overlap = 0
+        self._in_flight = 0
+
+    async def place(self, order: PlaceOrder) -> None:
+        self.places.append(order.symbol)
+
+    async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
+        self._in_flight += 1
+        self.overlap = max(self.overlap, self._in_flight)
+        # The network round trip, where another loop gets to run.
+        await asyncio.sleep(0)
+        self._in_flight -= 1
+        return await super().fetch_order(ref)
+
+
+def test_two_held_symbols_retry_at_the_same_time_and_their_passes_never_overlap(
+    tmp_path: Path,
+) -> None:
+    # One loop per symbol, all at the same time, and one reconcile pass at a time
+    # under a lock. A loop that needs a pass waits for the one in progress.
+    _hold(tmp_path / "saga.db", {"BTC": "0.02", "ETH": "0.5"})
+    venues: list[_LostOverANetwork] = []
+
+    def link(paper: PaperExchange) -> Exchange:
+        venues.append(_LostOverANetwork(paper))
+        return venues[0]
+
+    exit_code, logs = _flatten(tmp_path, link=link)
+
+    assert exit_code == 1
+    [venue] = venues
+    # Both symbols send a first close before either sends a second one.
+    assert sorted(venue.places[:2]) == ["BTC", "ETH"]
+    assert sorted(venue.places) == ["BTC"] * 3 + ["ETH"] * 3
+    assert venue.overlap == 1
+    gave_up = [log["symbol"] for log in logs if log["event"] == "flatten.gave_up"]
+    assert sorted(gave_up) == ["BTC", "ETH"]
+
+
+class _PlacesOverANetwork(VenueLink):
+    """Each send waits on the network before the venue takes it, as an HTTP send does.
+
+    ``places`` lists the symbol of each send in order.
+    """
+
+    def __init__(self, venue: Exchange) -> None:
+        super().__init__(venue)
+        self.places: list[str] = []
+
+    async def place(self, order: PlaceOrder) -> None:
+        self.places.append(order.symbol)
+        # The network round trip, where another loop gets to run.
+        await asyncio.sleep(0)
+        await super().place(order)
+
+
+def test_a_send_that_waits_on_the_network_gets_no_second_close_beside_it(
+    tmp_path: Path,
+) -> None:
+    # While one loop's send waits, another loop may run. Its close must still be
+    # handled before it looks for a verdict. Otherwise it reads no fill and sends
+    # a second close beside the first (ADR-0056).
+    _hold(tmp_path / "saga.db", {"BTC": "0.02", "ETH": "0.5"})
+    venues: list[_PlacesOverANetwork] = []
+
+    def link(paper: PaperExchange) -> Exchange:
+        venues.append(_PlacesOverANetwork(paper))
+        return venues[0]
+
+    exit_code, logs = _flatten(tmp_path, link=link)
+
+    assert exit_code == 0
+    [venue] = venues
+    assert sorted(venue.places) == ["BTC", "ETH"]
+    assert not [log for log in logs if log["event"].startswith("flatten.")]
+    assert _partitions(tmp_path) == {
+        ("trivial", "BTC"): (Decimal("0"), Decimal("40")),
+        ("trivial", "ETH"): (Decimal("0"), Decimal("100")),
+    }
+
+
+class _NeverHandlesCloses:
+    """An ``InMemoryBus`` that takes every ``__operator__`` close and never handles it.
+
+    ``closes`` counts them. This is a publish that returned before the engine handled it.
+    """
+
+    def __init__(self) -> None:
+        self._bus = InMemoryBus()
+        self.closes = 0
+
+    def subscribe[E: Event](self, event_type: type[E], handler: Handler[E]) -> None:
+        self._bus.subscribe(event_type, handler)
+
+    async def start(self) -> None:
+        await self._bus.start()
+
+    async def publish(self, event: Event) -> None:
+        if isinstance(event, PlaceSignal) and event.strategy_id == OPERATOR:
+            self.closes += 1
+            return
+        await self._bus.publish(event)
+
+    async def drain(self) -> None:
+        await self._bus.drain()
+
+    async def close(self) -> None:
+        await self._bus.close()
+
+
+def test_a_close_the_engine_never_handled_stops_the_run_with_no_second_close(
+    tmp_path: Path,
+) -> None:
+    # With no saga there is no verdict to read. Reading it as a dry attempt would
+    # send a second close, and the first could still reach the venue (ADR-0056).
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+    bus = _NeverHandlesCloses()
+
+    exit_code, logs = _flatten(tmp_path, bus=bus)
+
+    assert exit_code == 1
+    assert bus.closes == 1
+    assert not [log for log in logs if log["event"] == "flatten.dry_attempt"]
+    assert [log for log in logs if log["event"] == "engine.faulted"]
+    assert logs[-1]["outcome"] == "stopped"
+
+
 def test_a_second_flatten_closes_with_a_seq_above_the_first_ones_close(tmp_path: Path) -> None:
     # The manager drops a signal id it has seen (ADR-0006). So a second flatten that
-    # reused seq 1 would send nothing, and the size would stay open.
+    # reused seq 1 would send nothing, and the size would stay open. The first one
+    # spends seqs 1 to 3 on its three lost closes.
     _hold(tmp_path / "saga.db", {"BTC": "0.02"})
     assert _flatten(tmp_path, link=_DropsEveryPlace)[0] == 1
 
@@ -429,7 +848,7 @@ def test_a_second_flatten_closes_with_a_seq_above_the_first_ones_close(tmp_path:
     assert logs[-1]["outcome"] == "done"
     assert _partitions(tmp_path) == {("trivial", "BTC"): (Decimal("0"), Decimal("40"))}
     with SQLiteStore(tmp_path / "saga.db") as store:
-        close = store.get_order(derive_cloid(f"{OPERATOR}:BTC:2"))
+        close = store.get_order(derive_cloid(f"{OPERATOR}:BTC:4"))
     assert close is not None
     assert close.state is OrderState.FILLED
 
@@ -448,17 +867,82 @@ class _LostAndUnreadable(_DropsEveryPlace):
         return VenueReadFailure.SEND_FAILED
 
 
-def test_a_failed_reconcile_pass_ends_the_wait_and_the_final_read_decides(
-    tmp_path: Path,
-) -> None:
-    # The saga stays open for the next boot to resume (#474). The run never hangs.
+def test_three_failed_reconcile_passes_give_up_with_no_second_close(tmp_path: Path) -> None:
+    # A failed read is a dry attempt (ADR-0060), so the run never hangs. The close
+    # could still fill, so no second one goes beside it. The saga stays open for
+    # the next boot to resume (#474).
     _hold(tmp_path / "saga.db", {"BTC": "0.02"})
 
     exit_code, logs = _flatten(tmp_path, link=_LostAndUnreadable)
 
     assert exit_code == 1
+    dry = [log for log in logs if log["event"] == "flatten.dry_attempt"]
+    assert [(log["count"], log["reason"]) for log in dry] == [
+        (1, "read_failed"),
+        (2, "read_failed"),
+        (3, "read_failed"),
+    ]
+    assert [log["symbol"] for log in logs if log["event"] == "flatten.gave_up"] == ["BTC"]
+    assert not [log for log in logs if log.get("signal_id") == f"{OPERATOR}:BTC:2"]
     assert logs[-1]["outcome"] == "stopped"
     assert logs[-1]["left"] == "BTC=0.02"
+
+
+def test_a_failed_read_after_a_close_is_a_dry_attempt_and_the_next_read_decides(
+    tmp_path: Path,
+) -> None:
+    # The close filled, but the read that would say so failed. Flatten waits and
+    # reads again instead of stopping (ADR-0060). It sends no second close.
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+
+    # The first positions read is flatten's own. The second is the one after the close.
+    exit_code, logs = _flatten(tmp_path, link=partial(_FailsOneRead, read="fetch_positions", nth=2))
+
+    assert exit_code == 0
+    dry = [log for log in logs if log["event"] == "flatten.dry_attempt"]
+    assert [(log["count"], log["reason"]) for log in dry] == [(1, "read_failed")]
+    assert not [log for log in logs if log.get("signal_id") == f"{OPERATOR}:BTC:2"]
+    assert logs[-1]["outcome"] == "done"
+    assert _partitions(tmp_path) == {("trivial", "BTC"): (Decimal("0"), Decimal("40"))}
+
+
+class _ReadsPositionsOnce(VenueLink):
+    """Only the first positions read answers. Every later one fails."""
+
+    def __init__(self, venue: Exchange) -> None:
+        super().__init__(venue)
+        self._reads = 0
+
+    async def fetch_positions(self) -> dict[str, Decimal] | VenueReadFailure:
+        self._reads += 1
+        if self._reads > 1:
+            return VenueReadFailure.SEND_FAILED
+        return await super().fetch_positions()
+
+
+def test_a_venue_that_never_answers_after_a_close_gives_up_and_the_run_ends(
+    tmp_path: Path,
+) -> None:
+    # Each failed read is a dry attempt, so a venue that cannot answer never hangs
+    # the run (ADR-0060). It sends no second close.
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+
+    exit_code, logs = _flatten(tmp_path, link=_ReadsPositionsOnce)
+
+    assert exit_code == 1
+    dry = [log for log in logs if log["event"] == "flatten.dry_attempt"]
+    assert [(log["count"], log["reason"]) for log in dry] == [
+        (1, "read_failed"),
+        (2, "read_failed"),
+        (3, "read_failed"),
+    ]
+    # The close filled, but no read could say so. So the event names the last
+    # size the venue reported, from before the close.
+    gave_up = [log for log in logs if log["event"] == "flatten.gave_up"]
+    assert [(log["symbol"], log["size"]) for log in gave_up] == [("BTC", "0.02")]
+    assert not [log for log in logs if log.get("signal_id") == f"{OPERATOR}:BTC:2"]
+    assert logs[-1]["outcome"] == "stopped"
+    assert logs[-1]["left"] == f"read_failed: {VenueReadFailure.SEND_FAILED.value}"
 
 
 def _left_open(path: Path, symbol: str, *, quantity: str = "0.02") -> str:
@@ -527,33 +1011,47 @@ class _ReadsOnlyAtBoot(VenueLink):
 def test_a_close_left_open_that_no_pass_can_decide_gets_no_second_close_beside_it(
     tmp_path: Path,
 ) -> None:
-    # The wait ends on a failed pass (ADR-0060), with the old close still open.
-    # The run stops with the size left, and the next boot resumes the saga.
+    # Each failed pass is a dry attempt, as it is after a close (ADR-0060). After 3
+    # the old close is still open. The run stops with the size left, and the next
+    # boot resumes the saga.
     _hold(tmp_path / "saga.db", {"BTC": "0.02"})
     _left_open(tmp_path / "saga.db", "BTC")
 
     exit_code, logs = _flatten(tmp_path, link=_ReadsOnlyAtBoot)
 
     assert exit_code == 1
+    dry = [log for log in logs if log["event"] == "flatten.dry_attempt"]
+    assert [(log["count"], log["reason"]) for log in dry] == [
+        (1, "read_failed"),
+        (2, "read_failed"),
+        (3, "read_failed"),
+    ]
+    assert [log["symbol"] for log in logs if log["event"] == "flatten.gave_up"] == ["BTC"]
     assert logs[-1]["left"] == "BTC=0.02"
     assert not [log for log in logs if log.get("signal_id") == f"{OPERATOR}:BTC:2"]
 
 
-def test_a_failed_read_after_the_wait_stops_flatten_with_no_second_close(
+def test_a_failed_read_after_the_wait_is_a_dry_attempt_and_the_next_read_sizes_the_close(
     tmp_path: Path,
 ) -> None:
-    # The old close may have filled during the wait. With no read of what is
-    # left, flatten cannot size a close, so it sends none (ADR-0060).
+    # The old close may have filled during the wait. With no read of what is left,
+    # flatten cannot size a close (ADR-0060). So it waits and reads again, as it
+    # does after a close, and only that read sizes the next one.
     _hold(tmp_path / "saga.db", {"BTC": "0.02"})
     _left_open(tmp_path / "saga.db", "BTC")
 
     # The first positions read is flatten's own. The second is the read after the wait.
     exit_code, logs = _flatten(tmp_path, link=partial(_FailsOneRead, read="fetch_positions", nth=2))
 
-    assert exit_code == 1
-    assert logs[-1]["outcome"] == "stopped"
-    assert logs[-1]["left"] == f"read_failed: {VenueReadFailure.SEND_FAILED.value}"
-    assert not [log for log in logs if log.get("signal_id") == f"{OPERATOR}:BTC:2"]
+    assert exit_code == 0
+    dry = [log for log in logs if log["event"] == "flatten.dry_attempt"]
+    assert [(log["count"], log["reason"]) for log in dry] == [(1, "read_failed")]
+    events = [(log["event"], log.get("signal_id")) for log in logs]
+    assert events.index(("flatten.dry_attempt", None)) < events.index(
+        ("order.placed", f"{OPERATOR}:BTC:2")
+    )
+    assert logs[-1]["outcome"] == "done"
+    assert _partitions(tmp_path) == {("trivial", "BTC"): (Decimal("0"), Decimal("40"))}
 
 
 class _Venue:

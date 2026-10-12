@@ -6,6 +6,7 @@ because the engine builds those parts itself and the composition root never
 sees them.
 """
 
+import asyncio
 from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
@@ -22,9 +23,9 @@ from tickwright.domain import (
     OrderAnchor,
     OrderRef,
     OrderType,
-    PlaceSignal,
     PreTradeGuard,
     Side,
+    SignalEmitter,
     TimeInForce,
     VenueOpenOrder,
     VenueReadFailure,
@@ -138,90 +139,278 @@ class Flatten:
             # Only a replay ends, and it plays the whole file first. So each close
             # fills at the last row (ADR-0059). The CLI refuses a live feed until #475.
             await context.feed.ended()
-            # From the sagas, as a strategy's is. An earlier flatten's seq is
-            # consumed, and the manager drops a signal id it has seen (ADR-0006).
-            seq = context.checkpointer.cache.seq_high_water().get(OPERATOR, 0)
-            for symbol, size in positions.items():
-                # No venue can send a market close without a price. The symbol
-                # stays open, and the final read reports its size.
-                if symbol not in priced:
-                    continue
-                resumed = await _resume_closes(symbol, size, context)
-                if isinstance(resumed, VenueReadFailure):
-                    return ExitOutcome(status=ExitStatus.STOPPED, left=describe_failure(resumed))
-                if resumed:
-                    seq += 1
-                    await _await_verdict(await _close(symbol, resumed, seq, context), context)
+            emitter = SignalEmitter(strategy_id=OPERATOR, bus=context.bus, clock=context.clock)
+            # Seeded from the sagas, as a strategy's is. An earlier flatten's seq
+            # is consumed, and the manager drops a signal id it has seen (ADR-0006).
+            high_water = context.checkpointer.cache.seq_high_water()
+            emitter.set_next_seq(high_water.get(OPERATOR, 0) + 1)
+            turns = _Turns(context.reconciler)
+            # One loop per symbol, all at the same time, so a thin book on one
+            # symbol does not hold back the others (ADR-0056). A task group
+            # cancels the rest when one faults. A loop reports nothing, because
+            # only the final read can say what is left (ADR-0060).
+            async with asyncio.TaskGroup() as group:
+                for symbol, size in positions.items():
+                    group.create_task(
+                        _flatten_symbol(symbol, size, priced, emitter, turns, context)
+                    )
         return await _final_read(context)
 
 
+DRY_ATTEMPTS_TO_GIVE_UP = 3
+"""Dry attempts in a row that stop a symbol's loop (ADR-0056)."""
+
+DRY_WAIT_SECONDS = 2.0
+"""The wait after a dry attempt, before the next one (ADR-0056)."""
+
+
+class _Turns:
+    """One close or reconcile pass at a time, shared by every loop of one flatten run.
+
+    A loop that needs a turn waits for the one in progress, then takes its own.
+    A pass that started before the loop's attempt ended may not cover it.
+
+    A close takes a turn too. A publish made while another task's cascade runs
+    joins that cascade and returns before it is handled. The loop would then
+    find no saga, read it as a close that filled nothing, and send a second
+    one beside it (ADR-0056).
+    """
+
+    def __init__(self, reconciler: Reconciler) -> None:
+        self._reconciler = reconciler
+        self._lock = asyncio.Lock()
+
+    async def run_pass(self) -> bool:
+        """Run both halves of one pass. False when either failed."""
+        async with self._lock:
+            return (
+                await self._reconciler.reconcile_inflight()
+                and await self._reconciler.reconcile_open_orders()
+            )
+
+    async def close(self, symbol: str, size: Decimal, emitter: SignalEmitter) -> str:
+        """Send one close, and return once the engine has handled it."""
+        async with self._lock:
+            return await _close(symbol, size, emitter)
+
+
+class _DryAttempts:
+    """One symbol's count of attempts in a row that closed nothing (ADR-0056)."""
+
+    def __init__(self, symbol: str, clock: Clock) -> None:
+        self._symbol = symbol
+        self._clock = clock
+        self._count = 0
+
+    def reset(self) -> None:
+        self._count = 0
+
+    async def gave_up(self, reason: str, size: Decimal) -> bool:
+        """Count one dry attempt. Say whether it was the last, or wait before the next.
+
+        ``size`` is the last size the venue reported. After failed reads it can be
+        from before the last close, so the final read says what is left (ADR-0060).
+        """
+        self._count += 1
+        named_event(
+            NamedEvent.FLATTEN_DRY_ATTEMPT, symbol=self._symbol, count=self._count, reason=reason
+        )
+        if self._count == DRY_ATTEMPTS_TO_GIVE_UP:
+            named_event(NamedEvent.FLATTEN_GAVE_UP, symbol=self._symbol, size=str(size))
+            return True
+        await self._clock.sleep(DRY_WAIT_SECONDS)
+        return False
+
+
+async def _flatten_symbol(
+    symbol: str,
+    size: Decimal,
+    priced: set[str],
+    emitter: SignalEmitter,
+    turns: _Turns,
+    context: ExitContext,
+) -> None:
+    """One symbol's loop: wait for a close the boot left open, then close the rest."""
+    # One count for the whole loop, so the resume wait's dry attempts are in the row.
+    dry = _DryAttempts(symbol, context.clock)
+    resumed = await _resume_closes(symbol, size, dry, turns, context)
+    if resumed is not None:
+        await _close_symbol(symbol, resumed, priced, emitter, dry, turns, context)
+
+
+async def _close_symbol(
+    symbol: str,
+    size: Decimal,
+    priced: set[str],
+    emitter: SignalEmitter,
+    dry: _DryAttempts,
+    turns: _Turns,
+    context: ExitContext,
+) -> None:
+    """Close ``symbol`` until the venue reads it flat, or stop after 3 dry attempts in a row.
+
+    A fill resets the count, so a thin book that keeps filling a little never gives up
+    (ADR-0056). A failed read is dry too, so a venue that cannot answer never hangs
+    the run (ADR-0060). The final read reports what is left.
+    """
+    while attempt := await _attempt(symbol, size, priced, emitter, dry, turns, context):
+        size = attempt.left
+        if attempt.dry is None:
+            dry.reset()
+        elif await dry.gave_up(attempt.dry, size):
+            return
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Attempt:
+    """How one attempt ended, when the loop goes on after it."""
+
+    left: Decimal
+    """What the venue still holds on the symbol. Never zero."""
+    dry: str | None
+    """Why the attempt closed nothing, or ``None`` when it filled."""
+
+
+async def _attempt(
+    symbol: str,
+    size: Decimal,
+    priced: set[str],
+    emitter: SignalEmitter,
+    dry: _DryAttempts,
+    turns: _Turns,
+    context: ExitContext,
+) -> _Attempt | None:
+    """Try to close ``size`` once, then read what is left. ``None`` ends the loop.
+
+    Every attempt reads the venue before it counts. So a venue that went flat
+    ends the loop with no dry attempt, even when no close went out (ADR-0056).
+    """
+    reason: str | None
+    # No venue can send a market close without a price.
+    if symbol not in priced:
+        reason = "no_price"
+    elif await _size_gap(symbol, size, context):
+        reason = "size_gap"
+    else:
+        cloid = await turns.close(symbol, size, emitter)
+        if not await _verdict(cloid, size, dry, turns, context):
+            return None
+        reason = None if _filled(cloid, context) else "no_fill"
+    left = await _read_left(symbol, size, dry, context)
+    return None if left is None else _Attempt(left=left, dry=reason)
+
+
+async def _size_gap(symbol: str, size: Decimal, context: ExitContext) -> bool:
+    """Whether the account net size on ``symbol`` differs from the venue's ``size``.
+
+    A close is split across the partitions it closes (ADR-0054). Against a gap,
+    some of it would land on no partition, or one would be left holding size.
+    The gap can be fills the bus has not delivered yet, so a drain comes first.
+    """
+    if _held(symbol, context) == size:
+        return False
+    await context.bus.drain()
+    return _held(symbol, context) != size
+
+
+def _held(symbol: str, context: ExitContext) -> Decimal:
+    """The account net size on ``symbol``, from the portfolio's one definition of it."""
+    return context.checkpointer.portfolio.account_net().get(symbol, Decimal(0))
+
+
+async def _verdict(
+    cloid: str, size: Decimal, dry: _DryAttempts, turns: _Turns, context: ExitContext
+) -> bool:
+    """Run reconcile passes until the close's saga is terminal (ADR-0011, ADR-0026).
+
+    A pass covers both halves. ``reconcile_inflight`` resolves a send that never
+    acked. ``reconcile_open_orders`` resolves an acked order whose last push was lost.
+
+    A failed pass is a dry attempt, so a venue that cannot answer never hangs the
+    run (ADR-0060). False when failed passes used up the dry attempts. A second
+    close beside an open one could close the size twice. So a failed pass waits
+    for this close again, and a give-up leaves it to the next boot.
+    """
+    while not _decided(cloid, context):
+        await context.clock.sleep(context.pass_interval_seconds)
+        if not await turns.run_pass() and await dry.gave_up("read_failed", size):
+            return False
+    return True
+
+
+async def _read_left(
+    symbol: str, held: Decimal, dry: _DryAttempts, context: ExitContext
+) -> Decimal | None:
+    """What the venue still holds on ``symbol``, read again after each failed read.
+
+    ``None`` ends the loop. Either the failed reads used up the dry attempts, or
+    the venue reads flat. ``held`` is the last size read, for ``flatten.gave_up``.
+
+    A hand trade the books cannot see may have closed a flat venue, and no order
+    can close what the venue does not hold. So what the strategies still hold
+    moves to the unattributed partition (ADR-0054, ADR-0056).
+    """
+    while isinstance(positions := await context.account.fetch_positions(), VenueReadFailure):
+        if await dry.gave_up("read_failed", held):
+            return None
+    left = positions.get(symbol, Decimal(0))
+    if not left:
+        context.checkpointer.checkpoint_leftover(symbol)
+        return None
+    return left
+
+
 async def _resume_closes(
-    symbol: str, size: Decimal, context: ExitContext
-) -> Decimal | VenueReadFailure:
+    symbol: str, size: Decimal, dry: _DryAttempts, turns: _Turns, context: ExitContext
+) -> Decimal | None:
     """Wait for any close the boot left open in ``symbol``, then say what is left to close.
 
     That close could still fill, so a second one sent beside it could close the
-    size twice. A symbol never has two closes open (ADR-0056). So a wait that ends
-    with one still open leaves nothing to close. The final read reports the size,
-    and the next boot resumes the saga. The wait runs after the feed has played,
-    because its passes move the replay clock.
+    size twice. A symbol never has two closes open (ADR-0056). So the wait and the
+    read are the same ones that follow an attempt. ``None`` ends the loop, as it
+    does there. After a give-up, the final read reports the size, and the next boot
+    resumes the saga. The wait runs after the feed has played, because its passes
+    move the replay clock.
     """
     left_open = context.checkpointer.cache.open_orders(strategy_id=OPERATOR, symbol=symbol)
     if not left_open:
         return size
     for order in left_open:
-        await _await_verdict(order.cloid, context)
-    if not all(_decided(order.cloid, context) for order in left_open):
-        return Decimal(0)
-    positions = await context.account.fetch_positions()
-    if isinstance(positions, VenueReadFailure):
-        return positions
-    return positions.get(symbol, Decimal(0))
+        if not await _verdict(order.cloid, size, dry, turns, context):
+            return None
+    # The old close may have filled during the wait, so only a new read sizes the next.
+    return await _read_left(symbol, size, dry, context)
 
 
-async def _close(symbol: str, size: Decimal, seq: int, context: ExitContext) -> str:
+async def _close(symbol: str, size: Decimal, emitter: SignalEmitter) -> str:
     """Send one reduce-only market IOC order for the whole of ``size`` (ADR-0054).
 
     Returns the cloid of the order's saga.
     """
-    now = context.clock.timestamp_ns()
-    signal = PlaceSignal(
-        ts_event=now,
-        ts_init=now,
-        strategy_id=OPERATOR,
+    signal_id = await emitter.place(
         symbol=symbol,
-        seq=seq,
         side=Side.SELL if size > 0 else Side.BUY,
         quantity=abs(size),
         order_type=OrderType.MARKET,
         time_in_force=TimeInForce.IOC,
         reduce_only=True,
     )
-    await context.bus.publish(signal)
-    return derive_cloid(signal.signal_id)
-
-
-async def _await_verdict(cloid: str, context: ExitContext) -> None:
-    """Run reconcile passes until the close's saga is terminal (ADR-0011, ADR-0026).
-
-    A pass covers both halves. ``reconcile_inflight`` resolves a send that never
-    acked. ``reconcile_open_orders`` resolves an acked order whose last push was lost.
-
-    A failed pass ends the wait, so a venue that cannot answer never hangs the run.
-    The saga stays open, and the next boot resumes it.
-    """
-    while not _decided(cloid, context):
-        await context.clock.sleep(context.pass_interval_seconds)
-        if not await context.reconciler.reconcile_inflight():
-            return
-        if not await context.reconciler.reconcile_open_orders():
-            return
+    return derive_cloid(signal_id)
 
 
 def _decided(cloid: str, context: ExitContext) -> bool:
     saga = context.checkpointer.cache.get_order(cloid)
-    # The manager writes a saga for every signal it handles, a denial included.
-    return saga is None or saga.is_terminal
+    if saga is None:
+        # The manager writes a saga for every signal it handles, a denial included.
+        # So the close was never handled, and it may still reach the venue. A
+        # second close beside it could close the size twice (ADR-0056).
+        raise InvariantViolation(f"flatten close {cloid} was never handled")
+    return saga.is_terminal
+
+
+def _filled(cloid: str, context: ExitContext) -> bool:
+    saga = context.checkpointer.cache.get_order(cloid)
+    return saga is not None and saga.cum_qty > 0
 
 
 async def _final_read(context: ExitContext) -> ExitOutcome:

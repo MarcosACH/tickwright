@@ -36,7 +36,7 @@ src/tickwright/
     store/                    # the lock, the seq record, split_basis
     feed/replay.py            # add_symbols is a no-op
   venues/hyperliquid/         # r flag, batches of 200, refusals, mark cap, reads, feed symbols
-  strategies/emitter.py       # cancel_all(), reduce_only on place()
+  domain/emitter.py           # cancel_all(), reduce_only on place(), moved from strategies
   observability/catalog.py    # the 8 new events
   app/
     __main__.py               # cancel-all and flatten commands, --new-store
@@ -156,6 +156,13 @@ context. Starts the feed through the `FeedHandle`.
 - **(Deferred by #472:** the closes run one after another, and there is no pass lock. Each symbol
   gets one attempt, so only one pass runs at a time anyway. #473 builds the loops and the lock,
   because retries need them.**)**
+- **(Built by #473:** each symbol runs in its own task in one `asyncio.TaskGroup`, so a fault in
+  one loop cancels the others. The pass lock is an `asyncio.Lock` that every loop shares. A loop
+  returns nothing. Only the final read says what is left.**)**
+- **(Built by #473:** a close takes the same lock as a pass. A publish made while another task's
+  cascade runs joins that cascade and returns before it is handled. The loop would then read no
+  saga as a close that filled nothing, and send a second one beside it. A close that still has no
+  saga after its publish stops the run, so the next boot resumes it.**)**
 - Do the final venue read. Done means no resting order and no position.
 - Keep the `__operator__` seq counter. Start it from the same saga high-water fold the
   `StrategyHost` uses. `engine` cannot import `SignalEmitter`.
@@ -164,6 +171,9 @@ context. Starts the feed through the `FeedHandle`.
   flatten closed. It exits 1 and names the symbol in `left`. #474 builds the counter.**)**
 - **(Built by #474:** the fold moved to `Cache.seq_high_water()`. `StrategyHost` and `Flatten`
   both read it. Each close takes the next seq.**)**
+- **(Built by #473:** `SignalEmitter` moved to `domain`, so `engine` can import it. `Flatten` keeps
+  no counter of its own. It seeds an emitter for `__operator__` the way `StrategyHost` seeds a
+  strategy's, and every close goes through `place()`. The seq rule (ADR-0016) lives in one place.**)**
 
 **The per-symbol loop (private):**
 
@@ -174,6 +184,9 @@ context. Starts the feed through the `FeedHandle`.
   played. Its passes move the replay clock, so an earlier wait would fault the replay. The size is
   read again after the wait, because the old close may have filled. A wait that ends with the
   saga still open sends no close for that symbol. The final read reports its size.**)**
+- **(Built by #473:** the resume wait and the read after it are the ones an attempt uses. So a
+  failed pass or a failed read there is a dry attempt, in the same count as the loop's. A flat
+  read there moves the leftover too.**)**
 - Place only when the partition sizes sum to the venue size from `fetch_positions()` (ADR-0054).
   If they differ, call `bus.drain()` first, so every fill already published is applied. If they
   still differ and the venue has account truth, run `LedgerReconciliation.reconcile_account()`.
@@ -185,9 +198,24 @@ context. Starts the feed through the `FeedHandle`.
 - **(Deferred by #472:** this size check and the drain moved to #475. On paper the sizes always
   match when flatten places. #472 also sends no order for a symbol the feed never priced, and the
   final read reports it. Under replay no later price can come.**)**
+- **(Built by #473:** the size check and the drain. A gap the drain does not close is a dry
+  attempt with reason `size_gap`. The gap is checked again after a new venue read. The check
+  compares the venue size with the account net size from `portfolio.account_net()`.**)**
+- **(Built by #473:** every attempt reads the venue before it counts, even one that sent no
+  close for a missing price or a gap. So a venue that went flat ends the loop with no dry
+  attempt.**)**
+- **(Deferred by #473:** the `reconcile_account()` step moved to #475, code and test together.
+  Paper has no account truth, so it cannot run there, and a live venue arrives in #475.**)**
 - A gap that is still there counts as a dry attempt. So a gap that never heals ends in
   `flatten.gave_up`, not in a loop.
 - A flat venue moves each leftover into the unattributed partition instead.
+- **(Built by #473:** `Checkpointer.checkpoint_leftover()` does the move in one transaction, with
+  no order. Each strategy leaves at its own entry price. The unattributed side is one piece at the
+  cost the strategies paid together, so no cash moves. With strategies of opposite sign, that price
+  is a cost figure and can be zero or negative. Only a read inside a loop triggers it.**)**
+- **(Deferred by #473:** a symbol the venue already reads flat at the boot read gets no loop, so
+  its leftover does not move. [#489](https://github.com/MarcosACH/tickwright/issues/489) builds
+  it.**)**
 - Place one reduce-only market IOC order, as a `PlaceSignal` from `__operator__` on the bus. Size it
   from `fetch_positions()`.
 - After each attempt, run passes until the saga has a verdict. Wait the in-flight interval between
@@ -299,7 +327,7 @@ check. `__operator__` owns no partition, so that check would deny every flatten 
 
 ---
 
-### StrategyHost and SignalEmitter (`engine`, `strategies`, existing)
+### StrategyHost and SignalEmitter (`engine`, `domain`, existing)
 
 **Interface:** The emitter gains `cancel_all(symbol=...)`, which returns its `signal_id`. `place()`
 gains `reduce_only`.
@@ -310,6 +338,9 @@ a handled cancel all's seq (ADR-0055).
 **Seams:** None new.
 
 **Depth note:** The seq stays owned by the emitter. The host only resumes it.
+
+**(Built by #473:** the emitter moved from `strategies` to `domain`. `Flatten` uses one for
+`__operator__`.**)**
 
 ---
 

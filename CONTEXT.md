@@ -206,7 +206,7 @@ also reads it. Not built yet (#408).
 _Avoid_: signal uuid, request id.
 
 **SignalEmitter**:
-The strategy-author's helper (`strategies/emitter.py`) that owns a [[Strategy]]'s monotonic
+The strategy-author's helper (`domain/emitter.py`) that owns a [[Strategy]]'s monotonic
 `seq` counter and builds/publishes its [[Signal]]s (`place`/`cancel`, clock-stamped, returning
 the [[signal_id]]). Concentrates the one piece of strategy mechanics that is a correctness spine
 — never reusing a [[signal_id]] across restart — so it is not each author's problem. A strategy

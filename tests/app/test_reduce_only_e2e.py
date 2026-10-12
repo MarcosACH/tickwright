@@ -43,10 +43,10 @@ from tickwright.domain import (
     OrderType,
     Portfolio,
     Side,
+    SignalEmitter,
     TimeInForce,
 )
 from tickwright.engine.runner import Engine
-from tickwright.strategies.emitter import SignalEmitter
 
 SECOND_NS = 1_000_000_000
 PRICE = Decimal("50000")

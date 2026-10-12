@@ -26,10 +26,9 @@ from tickwright.domain import (
     Portfolio,
     PositionView,
     Side,
+    SignalEmitter,
     TimeInForce,
 )
-
-from .emitter import SignalEmitter
 
 
 class SingleShotMarketStrategy:
