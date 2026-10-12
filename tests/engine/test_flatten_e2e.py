@@ -8,6 +8,7 @@ The real paper path, with no strategy: ``PaperExchange`` over ``InMemoryBus`` an
 import asyncio
 import json
 from collections.abc import Callable, Iterable, Sequence
+from dataclasses import replace
 from decimal import Decimal
 from functools import partial
 from pathlib import Path
@@ -34,6 +35,7 @@ from tickwright.domain import (
     Order,
     OrderRef,
     OrderState,
+    OrderStatusReport,
     OrderType,
     PlaceOrder,
     PlaceSignal,
@@ -148,16 +150,18 @@ def _flatten(
     replayed: Iterable[str] = tuple(_ROWS),
     resting: bool = False,
     clock: ManualClock | None = None,
+    bus: InMemoryBus | None = None,
 ) -> tuple[int, list[EventDict]]:
     """Run flatten over paper and the ``_ROWS`` replay file.
 
     ``guarded`` gives the engine a real guard. ``link`` puts a venue double in
     front of paper. ``replayed`` picks the symbols the file has rows for.
     ``resting`` rests one BTC buy far below the replay, as ``_RESTING``.
-    ``clock`` lets a test read the virtual time the run ended at.
+    ``clock`` lets a test read the virtual time the run ended at. ``bus`` lets
+    a venue double publish its own reports.
     Returns the exit code and every event the run emitted.
     """
-    bus = InMemoryBus()
+    bus = bus or InMemoryBus()
     clock = clock or ManualClock()
     store = SQLiteStore(tmp_path / "saga.db")
     paper = _paper(bus, clock, store)
@@ -307,6 +311,57 @@ def test_a_held_symbol_the_replay_never_prices_gives_up_after_three_dry_attempts
     assert _partitions(tmp_path) == {("trivial", "BTC"): (Decimal("0.02"), Decimal("0"))}
 
 
+class _ThinBook(VenueLink):
+    """Each close fills only what the book holds, and the venue cancels the rest.
+
+    ``fills`` gives the size each send finds, in order. Zero fills nothing.
+    """
+
+    def __init__(self, venue: Exchange, *, bus: InMemoryBus, fills: Sequence[str]) -> None:
+        super().__init__(venue)
+        self._bus = bus
+        self._fills = [Decimal(fill) for fill in fills]
+
+    async def place(self, order: PlaceOrder) -> None:
+        fill = self._fills.pop(0)
+        if fill:
+            await super().place(replace(order, quantity=fill))
+        # An IOC never rests, so whatever did not fill ends cancelled.
+        await self._bus.publish(
+            OrderStatusReport(
+                ts_event=0,
+                ts_init=0,
+                cloid=order.cloid,
+                symbol=order.symbol,
+                status=OrderState.CANCELLED,
+            )
+        )
+
+
+def test_a_fill_between_dry_attempts_resets_the_count(tmp_path: Path) -> None:
+    # Two dry attempts, then a partial fill, then three more dry ones. Without the
+    # reset, flatten would give up on the third dry attempt, before its fifth send.
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+    bus = InMemoryBus()
+    link = partial(_ThinBook, bus=bus, fills=("0", "0", "0.01", "0", "0", "0"))
+
+    exit_code, logs = _flatten(tmp_path, link=link, bus=bus)
+
+    assert exit_code == 1
+    dry = [log for log in logs if log["event"] == "flatten.dry_attempt"]
+    assert [(log["count"], log["reason"]) for log in dry] == [
+        (1, "no_fill"),
+        (2, "no_fill"),
+        (1, "no_fill"),
+        (2, "no_fill"),
+        (3, "no_fill"),
+    ]
+    gave_up = [log for log in logs if log["event"] == "flatten.gave_up"]
+    assert [(log["symbol"], Decimal(log["size"])) for log in gave_up] == [("BTC", Decimal("0.01"))]
+    symbol, left = logs[-1]["left"].split("=")
+    assert (symbol, Decimal(left)) == ("BTC", Decimal("0.01"))
+
+
 def test_flatten_cancels_a_resting_order_before_it_closes_a_long_and_a_short(
     tmp_path: Path,
 ) -> None:
@@ -432,7 +487,8 @@ def test_a_lost_close_is_reconciled_to_a_verdict_and_the_run_stops_with_the_size
 
 def test_a_second_flatten_closes_with_a_seq_above_the_first_ones_close(tmp_path: Path) -> None:
     # The manager drops a signal id it has seen (ADR-0006). So a second flatten that
-    # reused seq 1 would send nothing, and the size would stay open.
+    # reused seq 1 would send nothing, and the size would stay open. The first one
+    # spends seqs 1 to 3 on its three lost closes.
     _hold(tmp_path / "saga.db", {"BTC": "0.02"})
     assert _flatten(tmp_path, link=_DropsEveryPlace)[0] == 1
 
@@ -442,7 +498,7 @@ def test_a_second_flatten_closes_with_a_seq_above_the_first_ones_close(tmp_path:
     assert logs[-1]["outcome"] == "done"
     assert _partitions(tmp_path) == {("trivial", "BTC"): (Decimal("0"), Decimal("40"))}
     with SQLiteStore(tmp_path / "saga.db") as store:
-        close = store.get_order(derive_cloid(f"{OPERATOR}:BTC:2"))
+        close = store.get_order(derive_cloid(f"{OPERATOR}:BTC:4"))
     assert close is not None
     assert close.state is OrderState.FILLED
 
