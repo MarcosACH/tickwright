@@ -537,6 +537,23 @@ def test_a_close_left_open_that_no_pass_can_decide_gets_no_second_close_beside_i
     assert not [log for log in logs if log.get("signal_id") == f"{OPERATOR}:BTC:2"]
 
 
+def test_a_failed_read_after_the_wait_stops_flatten_with_no_second_close(
+    tmp_path: Path,
+) -> None:
+    # The old close may have filled during the wait. With no read of what is
+    # left, flatten cannot size a close, so it sends none (ADR-0060).
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+    _left_open(tmp_path / "saga.db", "BTC")
+
+    # The first positions read is flatten's own. The second is the read after the wait.
+    exit_code, logs = _flatten(tmp_path, link=partial(_FailsOneRead, read="fetch_positions", nth=2))
+
+    assert exit_code == 1
+    assert logs[-1]["outcome"] == "stopped"
+    assert logs[-1]["left"] == f"read_failed: {VenueReadFailure.SEND_FAILED.value}"
+    assert not [log for log in logs if log.get("signal_id") == f"{OPERATOR}:BTC:2"]
+
+
 class _Venue:
     """Paper on a bus of its own, so it outlives the engine run it serves.
 
