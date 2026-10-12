@@ -277,7 +277,7 @@ class _DryAttempts:
 
 
 async def _size_gap(symbol: str, size: Decimal, context: ExitContext) -> bool:
-    """Whether the partitions on ``symbol`` fail to sum to the venue's ``size``.
+    """Whether the account net size on ``symbol`` differs from the venue's ``size``.
 
     A close is split across the partitions it closes (ADR-0054). Against a gap,
     some of it would land on no partition, or one would be left holding size.
@@ -290,8 +290,8 @@ async def _size_gap(symbol: str, size: Decimal, context: ExitContext) -> bool:
 
 
 def _held(symbol: str, context: ExitContext) -> Decimal:
-    """The sum of every partition's size on ``symbol``."""
-    return sum((part for _owner, part in context.checkpointer.split_basis(symbol)), Decimal(0))
+    """The account net size on ``symbol``, from the portfolio's one definition of it."""
+    return context.checkpointer.portfolio.account_net().get(symbol, Decimal(0))
 
 
 async def _read_size(
