@@ -30,6 +30,7 @@ from tickwright.domain import (
     InstrumentSpec,
     LeverageBook,
     MarketTick,
+    MarkTick,
     OrderRef,
     OrderState,
     OrderStatusReport,
@@ -120,6 +121,7 @@ class HyperliquidExchange:
         # account is a deployment fact, not something that moves at runtime.
         self._account_spec = account_spec(config, address=self._user_address)
         self._latest_price: dict[str, Decimal] = {}
+        self._latest_mark: dict[str, Decimal] = {}
         # The last nonce sent: the venue requires per-address nonces to be
         # strictly increasing, and the ms-truncated clock would collide on two
         # sends inside one millisecond — this floor keeps them monotonic.
@@ -127,6 +129,9 @@ class HyperliquidExchange:
         # The MARKET slippage bound needs the latest traded price, and the tick
         # stream is where prices live (ADR-0027) — subscribe like any consumer.
         bus.subscribe(MarketTick, self.on_tick)
+        # A stale trade can sit far from the market. The mark keeps a MARKET
+        # within the bound of where the venue values the coin (ADR-0059).
+        bus.subscribe(MarkTick, self.on_mark)
         # The live half of ADR-0037: the venue pays funding at its own
         # boundaries and this ingests it. Built here rather than in ``run()`` so
         # that ``stop()`` has something to close even if the runner never got as
@@ -221,6 +226,9 @@ class HyperliquidExchange:
 
     async def on_tick(self, tick: MarketTick) -> None:
         self._latest_price[tick.symbol] = tick.price
+
+    async def on_mark(self, mark: MarkTick) -> None:
+        self._latest_mark[mark.symbol] = mark.price
 
     async def place(self, order: PlaceOrder) -> None:
         action = {
@@ -713,7 +721,11 @@ class HyperliquidExchange:
             if order.side is Side.BUY
             else 1 - self._config.slippage_bound
         )
-        return quantize_price(latest * bound, order.side, self._universe.specs[order.symbol])
+        price = latest * bound
+        mark = self._latest_mark.get(order.symbol)
+        if mark is not None:
+            price = min(price, mark * bound)
+        return quantize_price(price, order.side, self._universe.specs[order.symbol])
 
     def _wire_tif(self, order: PlaceOrder) -> str:
         if order.order_type is OrderType.MARKET:

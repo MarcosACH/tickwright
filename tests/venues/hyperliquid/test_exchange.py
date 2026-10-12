@@ -37,6 +37,7 @@ from tickwright.domain import (
     FillReport,
     InstrumentSpec,
     MarketTick,
+    MarkTick,
     OrderRef,
     OrderState,
     OrderStatusReport,
@@ -186,6 +187,36 @@ def test_market_sell_places_an_aggressive_ioc_limit_at_the_bounded_price() -> No
     assert wire["p"] == "41088"
     assert wire["s"] == "0.25"
     assert wire["t"] == {"limit": {"tif": "Ioc"}}
+
+
+def mark(symbol: str, price: str) -> MarkTick:
+    return MarkTick(
+        symbol=symbol,
+        price=Decimal(price),
+        ts_event=1_700_000_000_000 * _NS_PER_MS,
+        ts_init=1_700_000_000_000 * _NS_PER_MS,
+    )
+
+
+def test_market_buy_is_capped_by_the_mark_when_the_trade_is_far_above_it() -> None:
+    async def main() -> FakeExchangeApi:
+        bus = InMemoryBus()
+        clock = ManualClock(start_ns=1_700_000_001_000 * _NS_PER_MS)
+        post = FakeExchangeApi({"order": resting_response(oid=79)})
+        exchange = make_exchange(post, bus=bus, clock=clock)
+        await bus.publish(tick("BTC", "43250.5"))
+        await bus.publish(mark("BTC", "40000"))
+        await exchange.place(market_order(Side.BUY, "0.5"))
+        return post
+
+    post = asyncio.run(main())
+
+    (_, payload) = post.requests[0]
+    (wire,) = payload["action"]["orders"]
+    # The trade alone allows 43250.5 × 1.05 = 45413. That is 13.5% above the
+    # mark. The mark caps it at 40000 × 1.05 = 42000 (ADR-0059).
+    assert wire["b"] is True
+    assert wire["p"] == "42000"
 
 
 def limit_order(
