@@ -880,21 +880,27 @@ def test_a_close_left_open_that_no_pass_can_decide_gets_no_second_close_beside_i
     assert not [log for log in logs if log.get("signal_id") == f"{OPERATOR}:BTC:2"]
 
 
-def test_a_failed_read_after_the_wait_stops_flatten_with_no_second_close(
+def test_a_failed_read_after_the_wait_is_a_dry_attempt_and_the_next_read_sizes_the_close(
     tmp_path: Path,
 ) -> None:
-    # The old close may have filled during the wait. With no read of what is
-    # left, flatten cannot size a close, so it sends none (ADR-0060).
+    # The old close may have filled during the wait. With no read of what is left,
+    # flatten cannot size a close (ADR-0060). So it waits and reads again, as it
+    # does after a close, and only that read sizes the next one.
     _hold(tmp_path / "saga.db", {"BTC": "0.02"})
     _left_open(tmp_path / "saga.db", "BTC")
 
     # The first positions read is flatten's own. The second is the read after the wait.
     exit_code, logs = _flatten(tmp_path, link=partial(_FailsOneRead, read="fetch_positions", nth=2))
 
-    assert exit_code == 1
-    assert logs[-1]["outcome"] == "stopped"
-    assert logs[-1]["left"] == f"read_failed: {VenueReadFailure.SEND_FAILED.value}"
-    assert not [log for log in logs if log.get("signal_id") == f"{OPERATOR}:BTC:2"]
+    assert exit_code == 0
+    dry = [log for log in logs if log["event"] == "flatten.dry_attempt"]
+    assert [(log["count"], log["reason"]) for log in dry] == [(1, "read_failed")]
+    events = [(log["event"], log.get("signal_id")) for log in logs]
+    assert events.index(("flatten.dry_attempt", None)) < events.index(
+        ("order.placed", f"{OPERATOR}:BTC:2")
+    )
+    assert logs[-1]["outcome"] == "done"
+    assert _partitions(tmp_path) == {("trivial", "BTC"): (Decimal("0"), Decimal("40"))}
 
 
 class _Venue:

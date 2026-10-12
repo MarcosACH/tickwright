@@ -147,17 +147,13 @@ class Flatten:
             passes = _Passes(context.reconciler)
             # One loop per symbol, all at the same time, so a thin book on one
             # symbol does not hold back the others (ADR-0056). A task group
-            # cancels the rest when one faults.
+            # cancels the rest when one faults. A loop reports nothing, because
+            # only the final read can say what is left (ADR-0060).
             async with asyncio.TaskGroup() as group:
-                loops = [
+                for symbol, size in positions.items():
                     group.create_task(
                         _flatten_symbol(symbol, size, priced, emitter, passes, context)
                     )
-                    for symbol, size in positions.items()
-                ]
-            for loop in loops:
-                if (failure := loop.result()) is not None:
-                    return ExitOutcome(status=ExitStatus.STOPPED, left=describe_failure(failure))
         return await _final_read(context)
 
 
@@ -219,16 +215,13 @@ async def _flatten_symbol(
     emitter: SignalEmitter,
     passes: _Passes,
     context: ExitContext,
-) -> VenueReadFailure | None:
+) -> None:
     """One symbol's loop: wait for a close the boot left open, then close the rest."""
     # One count for the whole loop, so the resume wait's dry attempts are in the row.
     dry = _DryAttempts(symbol, context.clock)
     resumed = await _resume_closes(symbol, size, dry, passes, context)
-    if isinstance(resumed, VenueReadFailure):
-        return resumed
-    if resumed:
+    if resumed is not None:
         await _close_symbol(symbol, resumed, priced, emitter, dry, passes, context)
-    return None
 
 
 async def _close_symbol(
@@ -314,13 +307,19 @@ def _held(symbol: str, context: ExitContext) -> Decimal:
 async def _verdict(
     cloid: str, size: Decimal, dry: _DryAttempts, passes: _Passes, context: ExitContext
 ) -> bool:
-    """Wait for the close's verdict. False when failed passes used up the dry attempts.
+    """Run reconcile passes until the close's saga is terminal (ADR-0011, ADR-0026).
 
-    A second close beside an open one could close the size twice. So a failed pass
-    waits for this close again, and a give-up leaves it to the next boot.
+    A pass covers both halves. ``reconcile_inflight`` resolves a send that never
+    acked. ``reconcile_open_orders`` resolves an acked order whose last push was lost.
+
+    A failed pass is a dry attempt, so a venue that cannot answer never hangs the
+    run (ADR-0060). False when failed passes used up the dry attempts. A second
+    close beside an open one could close the size twice. So a failed pass waits
+    for this close again, and a give-up leaves it to the next boot.
     """
-    while not await _await_verdict(cloid, passes, context):
-        if await dry.gave_up("read_failed", size):
+    while not _decided(cloid, context):
+        await context.clock.sleep(context.pass_interval_seconds)
+        if not await passes.run() and await dry.gave_up("read_failed", size):
             return False
     return True
 
@@ -349,25 +348,24 @@ async def _read_left(
 
 async def _resume_closes(
     symbol: str, size: Decimal, dry: _DryAttempts, passes: _Passes, context: ExitContext
-) -> Decimal | VenueReadFailure:
+) -> Decimal | None:
     """Wait for any close the boot left open in ``symbol``, then say what is left to close.
 
     That close could still fill, so a second one sent beside it could close the
-    size twice. A symbol never has two closes open (ADR-0056). So the wait is the
-    same one that follows an attempt, and a give-up leaves nothing to close. The
-    final read reports the size, and the next boot resumes the saga. The wait runs
-    after the feed has played, because its passes move the replay clock.
+    size twice. A symbol never has two closes open (ADR-0056). So the wait and the
+    read are the same ones that follow an attempt. ``None`` ends the loop, as it
+    does there. After a give-up, the final read reports the size, and the next boot
+    resumes the saga. The wait runs after the feed has played, because its passes
+    move the replay clock.
     """
     left_open = context.checkpointer.cache.open_orders(strategy_id=OPERATOR, symbol=symbol)
     if not left_open:
         return size
     for order in left_open:
         if not await _verdict(order.cloid, size, dry, passes, context):
-            return Decimal(0)
-    positions = await context.account.fetch_positions()
-    if isinstance(positions, VenueReadFailure):
-        return positions
-    return positions.get(symbol, Decimal(0))
+            return None
+    # The old close may have filled during the wait, so only a new read sizes the next.
+    return await _read_left(symbol, size, dry, context)
 
 
 async def _close(symbol: str, size: Decimal, emitter: SignalEmitter) -> str:
@@ -384,22 +382,6 @@ async def _close(symbol: str, size: Decimal, emitter: SignalEmitter) -> str:
         reduce_only=True,
     )
     return derive_cloid(signal_id)
-
-
-async def _await_verdict(cloid: str, passes: _Passes, context: ExitContext) -> bool:
-    """Run reconcile passes until the close's saga is terminal (ADR-0011, ADR-0026).
-
-    A pass covers both halves. ``reconcile_inflight`` resolves a send that never
-    acked. ``reconcile_open_orders`` resolves an acked order whose last push was lost.
-
-    A failed pass ends the wait and returns False, so a venue that cannot answer
-    never hangs the run. The saga stays open, and the caller decides what is next.
-    """
-    while not _decided(cloid, context):
-        await context.clock.sleep(context.pass_interval_seconds)
-        if not await passes.run():
-            return False
-    return True
 
 
 def _decided(cloid: str, context: ExitContext) -> bool:
