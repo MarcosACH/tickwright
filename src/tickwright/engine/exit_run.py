@@ -221,11 +221,13 @@ async def _flatten_symbol(
     context: ExitContext,
 ) -> VenueReadFailure | None:
     """One symbol's loop: wait for a close the boot left open, then close the rest."""
-    resumed = await _resume_closes(symbol, size, passes, context)
+    # One count for the whole loop, so the resume wait's dry attempts are in the row.
+    dry = _DryAttempts(symbol, context.clock)
+    resumed = await _resume_closes(symbol, size, dry, passes, context)
     if isinstance(resumed, VenueReadFailure):
         return resumed
     if resumed:
-        await _close_symbol(symbol, resumed, priced, emitter, passes, context)
+        await _close_symbol(symbol, resumed, priced, emitter, dry, passes, context)
     return None
 
 
@@ -234,6 +236,7 @@ async def _close_symbol(
     size: Decimal,
     priced: set[str],
     emitter: SignalEmitter,
+    dry: _DryAttempts,
     passes: _Passes,
     context: ExitContext,
 ) -> None:
@@ -243,7 +246,6 @@ async def _close_symbol(
     (ADR-0056). A failed read is dry too, so a venue that cannot answer never hangs
     the run (ADR-0060). The final read reports what is left.
     """
-    dry = _DryAttempts(symbol, context.clock)
     while attempt := await _attempt(symbol, size, priced, emitter, dry, passes, context):
         size = attempt.left
         if attempt.dry is None:
@@ -346,23 +348,22 @@ async def _read_left(
 
 
 async def _resume_closes(
-    symbol: str, size: Decimal, passes: _Passes, context: ExitContext
+    symbol: str, size: Decimal, dry: _DryAttempts, passes: _Passes, context: ExitContext
 ) -> Decimal | VenueReadFailure:
     """Wait for any close the boot left open in ``symbol``, then say what is left to close.
 
     That close could still fill, so a second one sent beside it could close the
-    size twice. A symbol never has two closes open (ADR-0056). So a wait that ends
-    with one still open leaves nothing to close. The final read reports the size,
-    and the next boot resumes the saga. The wait runs after the feed has played,
-    because its passes move the replay clock.
+    size twice. A symbol never has two closes open (ADR-0056). So the wait is the
+    same one that follows an attempt, and a give-up leaves nothing to close. The
+    final read reports the size, and the next boot resumes the saga. The wait runs
+    after the feed has played, because its passes move the replay clock.
     """
     left_open = context.checkpointer.cache.open_orders(strategy_id=OPERATOR, symbol=symbol)
     if not left_open:
         return size
     for order in left_open:
-        await _await_verdict(order.cloid, passes, context)
-    if not all(_decided(order.cloid, context) for order in left_open):
-        return Decimal(0)
+        if not await _verdict(order.cloid, size, dry, passes, context):
+            return Decimal(0)
     positions = await context.account.fetch_positions()
     if isinstance(positions, VenueReadFailure):
         return positions

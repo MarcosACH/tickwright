@@ -860,14 +860,22 @@ class _ReadsOnlyAtBoot(VenueLink):
 def test_a_close_left_open_that_no_pass_can_decide_gets_no_second_close_beside_it(
     tmp_path: Path,
 ) -> None:
-    # The wait ends on a failed pass (ADR-0060), with the old close still open.
-    # The run stops with the size left, and the next boot resumes the saga.
+    # Each failed pass is a dry attempt, as it is after a close (ADR-0060). After 3
+    # the old close is still open. The run stops with the size left, and the next
+    # boot resumes the saga.
     _hold(tmp_path / "saga.db", {"BTC": "0.02"})
     _left_open(tmp_path / "saga.db", "BTC")
 
     exit_code, logs = _flatten(tmp_path, link=_ReadsOnlyAtBoot)
 
     assert exit_code == 1
+    dry = [log for log in logs if log["event"] == "flatten.dry_attempt"]
+    assert [(log["count"], log["reason"]) for log in dry] == [
+        (1, "read_failed"),
+        (2, "read_failed"),
+        (3, "read_failed"),
+    ]
+    assert [log["symbol"] for log in logs if log["event"] == "flatten.gave_up"] == ["BTC"]
     assert logs[-1]["left"] == "BTC=0.02"
     assert not [log for log in logs if log.get("signal_id") == f"{OPERATOR}:BTC:2"]
 
