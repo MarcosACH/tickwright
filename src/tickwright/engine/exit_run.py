@@ -250,11 +250,18 @@ async def _read_size(
 
     ``None`` means the failed reads used up the dry attempts. ``held`` is the
     last size read, for ``flatten.gave_up``.
+
+    Zero is a flat venue. A hand trade the books cannot see may have closed it,
+    and no order can close what the venue does not hold. So what the strategies
+    still hold moves to the unattributed partition first (ADR-0054, ADR-0056).
     """
     while isinstance(positions := await context.account.fetch_positions(), VenueReadFailure):
         if await dry.gave_up("read_failed", held):
             return None
-    return positions.get(symbol, Decimal(0))
+    size = positions.get(symbol, Decimal(0))
+    if not size:
+        context.checkpointer.checkpoint_leftover(symbol)
+    return size
 
 
 async def _resume_closes(

@@ -311,6 +311,44 @@ class Checkpointer:
             for owner, move in moves.items()
         ]
 
+    def checkpoint_leftover(self, symbol: str) -> None:
+        """Move every strategy's size on ``symbol`` into the unattributed partition.
+
+        Only for a venue that reads flat, where no order can close the size
+        (ADR-0054). Each strategy leaves at its own entry price, so its realized
+        PnL does not change. The unattributed side is one piece at the size-weighted
+        entry, so a strategy pair of opposite sign moves nothing there. No order
+        and no fee, and every partition moves in one transaction.
+        """
+        ts_ns = self._clock.timestamp_ns()
+        pieces: list[tuple[PartitionFill, Side]] = []
+        moved = cost = Decimal(0)
+        for owner, size in self._portfolio.partition_sizes(symbol):
+            view = self._portfolio.position(symbol, strategy_id=owner)
+            if owner is None or not size or view is None:
+                continue
+            pieces.append(
+                _leftover_piece(owner, symbol, -size, price=view.entry_price, ts_ns=ts_ns)
+            )
+            moved += size
+            cost += size * view.entry_price
+        if moved:
+            pieces.append(_leftover_piece(None, symbol, moved, price=cost / moved, ts_ns=ts_ns))
+        if not pieces:
+            return
+        changes = [self._portfolio.apply_fill(piece, side=side) for piece, side in pieces]
+        try:
+            self._store.checkpoint_ledger(
+                account=changes[0].account,
+                positions=tuple(change.position for change in changes),
+                ts_ns=ts_ns,
+            )
+        except InvariantViolation as exc:
+            # Only the seam's own failure type is relabelled, as its siblings do.
+            raise InvariantViolation(f"leftover move write failed for {symbol}") from exc
+        for change in changes:
+            self._portfolio.project(change)
+
     def checkpoint_heal(
         self,
         fills: Sequence[ReconciliationFill],
@@ -459,3 +497,20 @@ class Checkpointer:
                 f"at boundary {accrual.boundary_ts_ns}"
             ) from exc
         self._portfolio.project_funding(change)
+
+
+def _leftover_piece(
+    owner: str | None, symbol: str, size: Decimal, *, price: Decimal, ts_ns: int
+) -> tuple[PartitionFill, Side]:
+    """One partition's signed ``size`` move of a leftover, at ``price`` and with no fee."""
+    return (
+        PartitionFill(
+            event_id=f"leftover:{symbol}:{ts_ns}:{UNATTRIBUTED if owner is None else owner}",
+            strategy_id=owner,
+            symbol=symbol,
+            quantity=abs(size),
+            price=price,
+            fee=Decimal(0),
+        ),
+        Side.BUY if size > 0 else Side.SELL,
+    )

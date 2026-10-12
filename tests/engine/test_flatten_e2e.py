@@ -468,6 +468,50 @@ def test_a_size_gap_from_a_fill_still_in_flight_closes_after_a_drain(tmp_path: P
     }
 
 
+class _SoldByHand(_ThinBook):
+    """The first close fills nothing, and then the venue reads BTC flat.
+
+    The operator sold it by hand in the venue UI, so the books never see that trade.
+    """
+
+    def __init__(self, venue: Exchange, *, bus: EventBus) -> None:
+        super().__init__(venue, bus=bus, fills=("0",))
+        self._sold = False
+
+    async def place(self, order: PlaceOrder) -> None:
+        await super().place(order)
+        self._sold = True
+
+    async def fetch_positions(self) -> dict[str, Decimal] | VenueReadFailure:
+        positions = await super().fetch_positions()
+        if isinstance(positions, VenueReadFailure) or not self._sold:
+            return positions
+        return {symbol: size for symbol, size in positions.items() if symbol != "BTC"}
+
+
+def test_a_venue_that_reads_flat_moves_the_leftover_to_unattributed_at_the_entry_price(
+    tmp_path: Path,
+) -> None:
+    # No order can close what the venue no longer holds. The strategy's size moves at
+    # its own entry price, so its realized PnL stays 0. At the 44000 mark it would be
+    # 40. The unattributed size keeps the gap visible (ADR-0054, ADR-0056).
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+    bus = InMemoryBus()
+
+    exit_code, logs = _flatten(tmp_path, link=partial(_SoldByHand, bus=bus), bus=bus)
+
+    assert exit_code == 0
+    assert logs[-1]["outcome"] == "done"
+    assert logs[-1]["left"] == "none"
+    assert _partitions(tmp_path) == {
+        ("trivial", "BTC"): (Decimal("0"), Decimal("0")),
+        (None, "BTC"): (Decimal("0.02"), Decimal("0")),
+    }
+    with SQLiteStore(tmp_path / "saga.db") as store:
+        unattributed = [row for row in store.all_positions() if row.strategy_id is None]
+    assert [row.entry_price for row in unattributed] == [Decimal("42000")]
+
+
 def test_flatten_cancels_a_resting_order_before_it_closes_a_long_and_a_short(
     tmp_path: Path,
 ) -> None:
