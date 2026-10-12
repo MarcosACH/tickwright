@@ -97,7 +97,9 @@ when a venue read fails, and which named events an exit run emits. Decided in
   with the signed size, in one comma list. For example `8812,BTC=0.5`.**)**
 
   **(Field names as shipped, since [#473](https://github.com/MarcosACH/tickwright/issues/473):**
-  the size left on `flatten.gave_up` is the field `size`, signed, as a string. `count` on
+  `size` on `flatten.gave_up` is the last size the venue reported for the symbol, signed, as a
+  string. After failed reads it can be from before the last close, so it can be more than is left.
+  `exit.finished` says what is left. `count` on
   `flatten.dry_attempt` is the dry attempts in a row so far, from 1 to 3.**)**
 
   **(Extended by [#473](https://github.com/MarcosACH/tickwright/issues/473):** `reason` on

@@ -206,7 +206,11 @@ class _DryAttempts:
         self._count = 0
 
     async def gave_up(self, reason: str, size: Decimal) -> bool:
-        """Count one dry attempt. Say whether it was the last, or wait before the next."""
+        """Count one dry attempt. Say whether it was the last, or wait before the next.
+
+        ``size`` is the last size the venue reported. After failed reads it can be
+        from before the last close, so the final read says what is left (ADR-0060).
+        """
         self._count += 1
         named_event(
             NamedEvent.FLATTEN_DRY_ATTEMPT, symbol=self._symbol, count=self._count, reason=reason
