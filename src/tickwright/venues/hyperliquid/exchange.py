@@ -716,17 +716,19 @@ class HyperliquidExchange:
         latest = self._latest_price.get(order.symbol)
         if latest is None:
             raise ValueError(f"no market tick cached for {order.symbol!r}; cannot bound MARKET")
+        # A trade alone could be stale, so a missing mark is a missing price
+        # (ADR-0059).
+        mark = self._latest_mark.get(order.symbol)
+        if mark is None:
+            raise ValueError(f"no mark cached for {order.symbol!r}; cannot bound MARKET")
         bound = (
             1 + self._config.slippage_bound
             if order.side is Side.BUY
             else 1 - self._config.slippage_bound
         )
-        price = latest * bound
-        mark = self._latest_mark.get(order.symbol)
-        if mark is not None:
-            # The tighter of the two: a buy pays no more, a sell takes no less.
-            tighter = min if order.side is Side.BUY else max
-            price = tighter(price, mark * bound)
+        # The tighter of the two: a buy pays no more, a sell takes no less.
+        tighter = min if order.side is Side.BUY else max
+        price = tighter(latest * bound, mark * bound)
         return quantize_price(price, order.side, self._universe.specs[order.symbol])
 
     def _wire_tif(self, order: PlaceOrder) -> str:

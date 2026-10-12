@@ -131,6 +131,8 @@ def test_market_buy_places_an_aggressive_ioc_limit_at_the_bounded_price() -> Non
         post = FakeExchangeApi({"order": resting_response(oid=77)})
         exchange = make_exchange(post, bus=bus, clock=clock)
         await bus.publish(tick("BTC", "43250.5"))
+        # 44000 × 1.05 = 46200 is looser than the trade's bound, so the trade binds.
+        await bus.publish(mark("BTC", "44000"))
         await exchange.place(market_order(Side.BUY, "0.5"))
         return post, clock
 
@@ -174,6 +176,8 @@ def test_market_sell_places_an_aggressive_ioc_limit_at_the_bounded_price() -> No
         post = FakeExchangeApi({"order": resting_response(oid=78)})
         exchange = make_exchange(post, bus=bus, clock=clock)
         await bus.publish(tick("BTC", "43250.5"))
+        # 42500 × 0.95 = 40375 is looser than the trade's bound, so the trade binds.
+        await bus.publish(mark("BTC", "42500"))
         await exchange.place(market_order(Side.SELL, "0.25"))
         return post
 
@@ -238,6 +242,23 @@ def test_market_sell_is_capped_by_the_mark_when_the_trade_is_far_below_it() -> N
     # mark. The mark caps it at 40000 × 0.95 = 38000 (ADR-0059).
     assert wire["b"] is False
     assert wire["p"] == "38000"
+
+
+def test_market_order_with_no_mark_is_refused_like_one_with_no_trade() -> None:
+    post = FakeExchangeApi({"order": resting_response(oid=81)})
+
+    async def main() -> None:
+        bus = InMemoryBus()
+        clock = ManualClock(start_ns=1_700_000_001_000 * _NS_PER_MS)
+        exchange = make_exchange(post, bus=bus, clock=clock)
+        await bus.publish(tick("BTC", "43250.5"))
+        await exchange.place(market_order(Side.BUY, "0.5"))
+
+    # A missing mark is a missing price (ADR-0059). The trade alone could be
+    # stale, so nothing goes out.
+    with pytest.raises(ValueError, match="no mark cached for 'BTC'"):
+        asyncio.run(main())
+    assert post.requests == []
 
 
 def limit_order(
@@ -337,6 +358,7 @@ async def place_and_collect_reports(
     bus.subscribe(ExecutionReport, collect)
     if prime_tick:
         await bus.publish(tick("BTC", "43250.5"))
+        await bus.publish(mark("BTC", "43250.5"))
     await exchange.place(order)
     return reports
 
