@@ -461,6 +461,82 @@ def test_a_failed_reconcile_pass_ends_the_wait_and_the_final_read_decides(
     assert logs[-1]["left"] == "BTC=0.02"
 
 
+def _left_open(path: Path, symbol: str) -> str:
+    """Leave an ``__operator__`` close ``LIVE`` in the store, one paper never lists.
+
+    That is a close the venue acked and then dropped (#242) before a crash. The
+    boot can only arm its ghost window, so the saga is still open when flatten
+    starts. Returns its cloid.
+    """
+    cloid = derive_cloid(f"{OPERATOR}:{symbol}:1")
+    clock = ManualClock()
+    with SQLiteStore(path) as store:
+        paper = _paper(InMemoryBus(), clock, store)
+        checks = Checkpointer(spec=paper.account_spec(), store=store, clock=clock, specs=_SPECS)
+        checks.recover()
+        checks.checkpoint(
+            Order(
+                cloid=cloid,
+                strategy_id=OPERATOR,
+                signal_id=f"{OPERATOR}:{symbol}:1",
+                symbol=symbol,
+                side=Side.SELL,
+                quantity=Decimal("0.02"),
+                order_type=OrderType.MARKET,
+                state=OrderState.LIVE,
+                created_ts_ns=0,
+            )
+        )
+    return cloid
+
+
+def test_flatten_waits_for_the_verdict_on_a_close_the_boot_left_open_before_it_closes_again(
+    tmp_path: Path,
+) -> None:
+    # The dropped close could still have filled. A second close sent beside it
+    # could close the size twice, so a symbol never has two closes open (ADR-0056).
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+    left_open = _left_open(tmp_path / "saga.db", "BTC")
+
+    exit_code, logs = _flatten(tmp_path)
+
+    assert exit_code == 0
+    events = [(log["event"], log.get("cloid"), log.get("signal_id")) for log in logs]
+    verdict = events.index(("ghost.reconciled", left_open, None))
+    placed = events.index(("order.placed", None, f"{OPERATOR}:BTC:2"))
+    assert verdict < placed
+    assert _partitions(tmp_path) == {("trivial", "BTC"): (Decimal("0"), Decimal("40"))}
+
+
+class _ReadsOnlyAtBoot(VenueLink):
+    """The boot reads every order. After that, no order read reaches the venue."""
+
+    def __init__(self, venue: Exchange) -> None:
+        super().__init__(venue)
+        self.reads = 0
+
+    async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
+        self.reads += 1
+        if self.reads == 1:
+            return await super().fetch_order(ref)
+        return VenueReadFailure.SEND_FAILED
+
+
+def test_a_close_left_open_that_no_pass_can_decide_gets_no_second_close_beside_it(
+    tmp_path: Path,
+) -> None:
+    # The wait ends on a failed pass (ADR-0060), with the old close still open.
+    # The run stops with the size left, and the next boot resumes the saga.
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+    _left_open(tmp_path / "saga.db", "BTC")
+
+    exit_code, logs = _flatten(tmp_path, link=_ReadsOnlyAtBoot)
+
+    assert exit_code == 1
+    assert logs[-1]["left"] == "BTC=0.02"
+    assert not [log for log in logs if log.get("signal_id") == f"{OPERATOR}:BTC:2"]
+
+
 class _Venue:
     """Paper on a bus of its own, so it outlives the engine run it serves.
 

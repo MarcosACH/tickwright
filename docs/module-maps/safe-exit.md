@@ -170,6 +170,10 @@ context. Starts the feed through the `FeedHandle`.
 - Before the first attempt, wait for the verdict on any open `__operator__` saga for the symbol
   that the boot left open. It waits the same way as after an attempt, below. A symbol never has
   two attempts open.
+- **(Built by #474, before the loops of #473:** the wait runs per symbol, after the feed has
+  played. Its passes move the replay clock, so an earlier wait would fault the replay. The size is
+  read again after the wait, because the old close may have filled. A wait that ends with the
+  saga still open sends no close for that symbol. The final read reports its size.**)**
 - Place only when the partition sizes sum to the venue size from `fetch_positions()` (ADR-0054).
   If they differ, call `bus.drain()` first, so every fill already published is applied. If they
   still differ and the venue has account truth, run `LedgerReconciliation.reconcile_account()`.
