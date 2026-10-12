@@ -3,12 +3,13 @@ async HTTP.
 
 A thin venue boundary (ADR-0015): translate and send, own no saga. Every
 venue quirk stays here, never in the engine (ADR-0030): MARKET becomes an
-aggressive IOC limit at ``latest × (1 ± slippage_bound)`` quantized per the
-ADR-0017 price rule, ``post_only`` becomes ALO, LIMIT passes through as
-GTC/IOC. Signing borrows the SDK's utilities only (ADR-0021) — the HTTP call
-is our own async client, and the nonce comes from the injected ``Clock``
-(ADR-0005), never the SDK's wall-time helper. The latest price a MARKET is
-bounded against is the tick stream's — the adapter subscribes itself, like
+aggressive IOC limit at ``latest × (1 ± slippage_bound)``, capped by
+``mark × (1 ± slippage_bound)`` (ADR-0059) and quantized per the ADR-0017
+price rule, ``post_only`` becomes ALO, LIMIT passes through as GTC/IOC.
+Signing borrows the SDK's utilities only (ADR-0021) — the HTTP call is our own
+async client, and the nonce comes from the injected ``Clock`` (ADR-0005),
+never the SDK's wall-time helper. The trade and the mark a MARKET is bounded
+against come from the market data stream. The adapter subscribes itself, like
 every consumer of market data.
 """
 

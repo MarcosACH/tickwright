@@ -38,7 +38,8 @@ class HyperliquidConfig(BaseModel):
     # account, whose address is what every /info query must ask about.
     account_address: str | None = None
     # MARKET → aggressive-IOC translation bound (ADR-0030): the limit price is
-    # latest × (1 ± slippage_bound). The default mirrors the venue SDK's 5%.
+    # latest × (1 ± slippage_bound), capped by mark × (1 ± slippage_bound)
+    # (ADR-0059). The default mirrors the venue SDK's 5%.
     slippage_bound: Decimal = Field(default=Decimal("0.05"), ge=0)
     # Reconnect pacing (ADR-0021): doubling from initial, capped at max, always
     # slept on the injected Clock — a reconnect storm can never hammer the venue.

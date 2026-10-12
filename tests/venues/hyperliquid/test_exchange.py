@@ -5,7 +5,8 @@ throwaway, publicly-known test key), so every asserted wire is one the venue
 could verify — the recovery check proves the signature binds the exact action
 sent. Venue quirk translation lives in the adapter, never the engine
 (ADR-0030): MARKET becomes an aggressive IOC limit at
-``latest × (1 ± slippage_bound)``, quantized per the ADR-0017 price rule.
+``latest × (1 ± slippage_bound)``, capped by ``mark × (1 ± slippage_bound)``
+(ADR-0059), quantized per the ADR-0017 price rule.
 """
 
 import asyncio
