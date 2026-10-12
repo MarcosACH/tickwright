@@ -293,10 +293,6 @@ async def _attempt(
         reason = "size_gap"
     else:
         cloid = await turns.close(symbol, size, emitter)
-        if context.checkpointer.cache.get_order(cloid) is None:
-            # With no saga there is no verdict, and the close may still reach the
-            # venue. A second close beside it could close the size twice (ADR-0056).
-            raise InvariantViolation(f"flatten close {cloid} on {symbol} was never handled")
         if not await _verdict(cloid, size, dry, turns, context):
             return None
         reason = None if _filled(cloid, context) else "no_fill"
@@ -404,8 +400,12 @@ async def _close(symbol: str, size: Decimal, emitter: SignalEmitter) -> str:
 
 def _decided(cloid: str, context: ExitContext) -> bool:
     saga = context.checkpointer.cache.get_order(cloid)
-    # The manager writes a saga for every signal it handles, a denial included.
-    return saga is None or saga.is_terminal
+    if saga is None:
+        # The manager writes a saga for every signal it handles, a denial included.
+        # So the close was never handled, and it may still reach the venue. A
+        # second close beside it could close the size twice (ADR-0056).
+        raise InvariantViolation(f"flatten close {cloid} was never handled")
+    return saga.is_terminal
 
 
 def _filled(cloid: str, context: ExitContext) -> bool:
