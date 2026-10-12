@@ -6,6 +6,7 @@ because the engine builds those parts itself and the composition root never
 sees them.
 """
 
+import asyncio
 from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
@@ -143,12 +144,20 @@ class Flatten:
             # is consumed, and the manager drops a signal id it has seen (ADR-0006).
             high_water = context.checkpointer.cache.seq_high_water()
             emitter.set_next_seq(high_water.get(OPERATOR, 0) + 1)
-            for symbol, size in positions.items():
-                resumed = await _resume_closes(symbol, size, context)
-                if isinstance(resumed, VenueReadFailure):
-                    return ExitOutcome(status=ExitStatus.STOPPED, left=describe_failure(resumed))
-                if resumed:
-                    await _close_symbol(symbol, resumed, priced, emitter, context)
+            passes = _Passes(context.reconciler)
+            # One loop per symbol, all at the same time, so a thin book on one
+            # symbol does not hold back the others (ADR-0056). A task group
+            # cancels the rest when one faults.
+            async with asyncio.TaskGroup() as group:
+                loops = [
+                    group.create_task(
+                        _flatten_symbol(symbol, size, priced, emitter, passes, context)
+                    )
+                    for symbol, size in positions.items()
+                ]
+            for loop in loops:
+                if (failure := loop.result()) is not None:
+                    return ExitOutcome(status=ExitStatus.STOPPED, left=describe_failure(failure))
         return await _final_read(context)
 
 
@@ -159,8 +168,50 @@ DRY_WAIT_SECONDS = 2.0
 """The wait after a dry attempt, before the next one (ADR-0056)."""
 
 
+class _Passes:
+    """One reconcile pass at a time, shared by every loop of one flatten run.
+
+    A loop that needs a pass waits for the one in progress, then runs its own.
+    A pass that started before the loop's attempt ended may not cover it.
+    """
+
+    def __init__(self, reconciler: Reconciler) -> None:
+        self._reconciler = reconciler
+        self._lock = asyncio.Lock()
+
+    async def run(self) -> bool:
+        """Run both halves of one pass. False when either failed."""
+        async with self._lock:
+            return (
+                await self._reconciler.reconcile_inflight()
+                and await self._reconciler.reconcile_open_orders()
+            )
+
+
+async def _flatten_symbol(
+    symbol: str,
+    size: Decimal,
+    priced: set[str],
+    emitter: SignalEmitter,
+    passes: _Passes,
+    context: ExitContext,
+) -> VenueReadFailure | None:
+    """One symbol's loop: wait for a close the boot left open, then close the rest."""
+    resumed = await _resume_closes(symbol, size, passes, context)
+    if isinstance(resumed, VenueReadFailure):
+        return resumed
+    if resumed:
+        await _close_symbol(symbol, resumed, priced, emitter, passes, context)
+    return None
+
+
 async def _close_symbol(
-    symbol: str, size: Decimal, priced: set[str], emitter: SignalEmitter, context: ExitContext
+    symbol: str,
+    size: Decimal,
+    priced: set[str],
+    emitter: SignalEmitter,
+    passes: _Passes,
+    context: ExitContext,
 ) -> None:
     """Close ``symbol`` until the venue reads it flat, or stop after 3 dry attempts in a row.
 
@@ -179,7 +230,7 @@ async def _close_symbol(
             cloid = await _close(symbol, size, emitter)
             # A second close beside an open one could close the size twice. So a failed
             # pass waits for this close again, and a give-up leaves it to the next boot.
-            while not await _await_verdict(cloid, context):
+            while not await _await_verdict(cloid, passes, context):
                 if await dry.gave_up("read_failed", size):
                     return
             read = await _read_size(symbol, size, dry, context)
@@ -265,7 +316,7 @@ async def _read_size(
 
 
 async def _resume_closes(
-    symbol: str, size: Decimal, context: ExitContext
+    symbol: str, size: Decimal, passes: _Passes, context: ExitContext
 ) -> Decimal | VenueReadFailure:
     """Wait for any close the boot left open in ``symbol``, then say what is left to close.
 
@@ -279,7 +330,7 @@ async def _resume_closes(
     if not left_open:
         return size
     for order in left_open:
-        await _await_verdict(order.cloid, context)
+        await _await_verdict(order.cloid, passes, context)
     if not all(_decided(order.cloid, context) for order in left_open):
         return Decimal(0)
     positions = await context.account.fetch_positions()
@@ -304,7 +355,7 @@ async def _close(symbol: str, size: Decimal, emitter: SignalEmitter) -> str:
     return derive_cloid(signal_id)
 
 
-async def _await_verdict(cloid: str, context: ExitContext) -> bool:
+async def _await_verdict(cloid: str, passes: _Passes, context: ExitContext) -> bool:
     """Run reconcile passes until the close's saga is terminal (ADR-0011, ADR-0026).
 
     A pass covers both halves. ``reconcile_inflight`` resolves a send that never
@@ -315,9 +366,7 @@ async def _await_verdict(cloid: str, context: ExitContext) -> bool:
     """
     while not _decided(cloid, context):
         await context.clock.sleep(context.pass_interval_seconds)
-        if not await context.reconciler.reconcile_inflight():
-            return False
-        if not await context.reconciler.reconcile_open_orders():
+        if not await passes.run():
             return False
     return True
 

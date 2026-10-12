@@ -636,6 +636,56 @@ def test_a_lost_close_is_reconciled_to_a_verdict_and_the_run_stops_with_the_size
     assert close.state is OrderState.FAILED
 
 
+class _LostOverANetwork(_DropsEveryPlace):
+    """Every send is lost, and each order read waits on the network.
+
+    ``places`` lists the symbol of each send in order. ``overlap`` is the most
+    order reads that were in flight at once. A pass reads its orders one by one,
+    so more than one means two passes overlapped.
+    """
+
+    def __init__(self, venue: Exchange) -> None:
+        super().__init__(venue)
+        self.places: list[str] = []
+        self.overlap = 0
+        self._in_flight = 0
+
+    async def place(self, order: PlaceOrder) -> None:
+        self.places.append(order.symbol)
+
+    async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
+        self._in_flight += 1
+        self.overlap = max(self.overlap, self._in_flight)
+        # The network round trip, where another loop gets to run.
+        await asyncio.sleep(0)
+        self._in_flight -= 1
+        return await super().fetch_order(ref)
+
+
+def test_two_held_symbols_retry_at_the_same_time_and_their_passes_never_overlap(
+    tmp_path: Path,
+) -> None:
+    # One loop per symbol, all at the same time, and one reconcile pass at a time
+    # under a lock. A loop that needs a pass waits for the one in progress.
+    _hold(tmp_path / "saga.db", {"BTC": "0.02", "ETH": "0.5"})
+    venues: list[_LostOverANetwork] = []
+
+    def link(paper: PaperExchange) -> Exchange:
+        venues.append(_LostOverANetwork(paper))
+        return venues[0]
+
+    exit_code, logs = _flatten(tmp_path, link=link)
+
+    assert exit_code == 1
+    [venue] = venues
+    # Both symbols send a first close before either sends a second one.
+    assert sorted(venue.places[:2]) == ["BTC", "ETH"]
+    assert sorted(venue.places) == ["BTC"] * 3 + ["ETH"] * 3
+    assert venue.overlap == 1
+    gave_up = [log["symbol"] for log in logs if log["event"] == "flatten.gave_up"]
+    assert sorted(gave_up) == ["BTC", "ETH"]
+
+
 def test_a_second_flatten_closes_with_a_seq_above_the_first_ones_close(tmp_path: Path) -> None:
     # The manager drops a signal id it has seen (ADR-0006). So a second flatten that
     # reused seq 1 would send nothing, and the size would stay open. The first one

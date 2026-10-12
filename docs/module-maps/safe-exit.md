@@ -156,6 +156,9 @@ context. Starts the feed through the `FeedHandle`.
 - **(Deferred by #472:** the closes run one after another, and there is no pass lock. Each symbol
   gets one attempt, so only one pass runs at a time anyway. #473 builds the loops and the lock,
   because retries need them.**)**
+- **(Built by #473:** each symbol runs in its own task in one `asyncio.TaskGroup`, so a fault in
+  one loop cancels the others. The pass lock is an `asyncio.Lock` that every loop shares. A failed
+  read in one loop's resume wait still stops the whole run, after every loop has ended.**)**
 - Do the final venue read. Done means no resting order and no position.
 - Keep the `__operator__` seq counter. Start it from the same saga high-water fold the
   `StrategyHost` uses. `engine` cannot import `SignalEmitter`.
