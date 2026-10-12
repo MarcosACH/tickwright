@@ -724,7 +724,9 @@ class HyperliquidExchange:
         price = latest * bound
         mark = self._latest_mark.get(order.symbol)
         if mark is not None:
-            price = min(price, mark * bound)
+            # The tighter of the two: a buy pays no more, a sell takes no less.
+            tighter = min if order.side is Side.BUY else max
+            price = tighter(price, mark * bound)
         return quantize_price(price, order.side, self._universe.specs[order.symbol])
 
     def _wire_tif(self, order: PlaceOrder) -> str:

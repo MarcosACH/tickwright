@@ -219,6 +219,27 @@ def test_market_buy_is_capped_by_the_mark_when_the_trade_is_far_above_it() -> No
     assert wire["p"] == "42000"
 
 
+def test_market_sell_is_capped_by_the_mark_when_the_trade_is_far_below_it() -> None:
+    async def main() -> FakeExchangeApi:
+        bus = InMemoryBus()
+        clock = ManualClock(start_ns=1_700_000_001_000 * _NS_PER_MS)
+        post = FakeExchangeApi({"order": resting_response(oid=80)})
+        exchange = make_exchange(post, bus=bus, clock=clock)
+        await bus.publish(tick("BTC", "38000"))
+        await bus.publish(mark("BTC", "40000"))
+        await exchange.place(market_order(Side.SELL, "0.5"))
+        return post
+
+    post = asyncio.run(main())
+
+    (_, payload) = post.requests[0]
+    (wire,) = payload["action"]["orders"]
+    # The trade alone allows 38000 × 0.95 = 36100. That is 9.75% below the
+    # mark. The mark caps it at 40000 × 0.95 = 38000 (ADR-0059).
+    assert wire["b"] is False
+    assert wire["p"] == "38000"
+
+
 def limit_order(
     side: Side,
     quantity: str,
