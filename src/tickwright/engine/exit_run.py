@@ -138,15 +138,19 @@ class Flatten:
             # Only a replay ends, and it plays the whole file first. So each close
             # fills at the last row (ADR-0059). The CLI refuses a live feed until #475.
             await context.feed.ended()
+            # From the sagas, as a strategy's is. An earlier flatten's seq is
+            # consumed, and the manager drops a signal id it has seen (ADR-0006).
+            seq = context.checkpointer.cache.seq_high_water().get(OPERATOR, 0)
             for symbol, size in positions.items():
                 # No venue can send a market close without a price. The symbol
                 # stays open, and the final read reports its size.
                 if symbol in priced:
-                    await _await_verdict(await _close(symbol, size, context), context)
+                    seq += 1
+                    await _await_verdict(await _close(symbol, size, seq, context), context)
         return await _final_read(context)
 
 
-async def _close(symbol: str, size: Decimal, context: ExitContext) -> str:
+async def _close(symbol: str, size: Decimal, seq: int, context: ExitContext) -> str:
     """Send one reduce-only market IOC order for the whole of ``size`` (ADR-0054).
 
     Returns the cloid of the order's saga.
@@ -157,7 +161,7 @@ async def _close(symbol: str, size: Decimal, context: ExitContext) -> str:
         ts_init=now,
         strategy_id=OPERATOR,
         symbol=symbol,
-        seq=1,
+        seq=seq,
         side=Side.SELL if size > 0 else Side.BUY,
         quantity=abs(size),
         order_type=OrderType.MARKET,

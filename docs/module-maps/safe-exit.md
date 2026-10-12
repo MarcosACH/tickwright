@@ -162,6 +162,8 @@ context. Starts the feed through the `FeedHandle`.
 - **(Deferred by #472:** every close uses seq 1. The manager drops a signal id it has seen
   (ADR-0006). So a second flatten on the same store sends no close for a symbol an earlier
   flatten closed. It exits 1 and names the symbol in `left`. #474 builds the counter.**)**
+- **(Built by #474:** the fold moved to `Cache.seq_high_water()`. `StrategyHost` and `Flatten`
+  both read it. Each close takes the next seq.**)**
 
 **The per-symbol loop (private):**
 

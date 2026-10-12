@@ -417,6 +417,23 @@ def test_a_lost_close_is_reconciled_to_a_verdict_and_the_run_stops_with_the_size
     assert close.state is OrderState.FAILED
 
 
+def test_a_second_flatten_closes_with_a_seq_above_the_first_ones_close(tmp_path: Path) -> None:
+    # The manager drops a signal id it has seen (ADR-0006). So a second flatten that
+    # reused seq 1 would send nothing, and the size would stay open.
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+    assert _flatten(tmp_path, link=_DropsEveryPlace)[0] == 1
+
+    exit_code, logs = _flatten(tmp_path)
+
+    assert exit_code == 0
+    assert logs[-1]["outcome"] == "done"
+    assert _partitions(tmp_path) == {("trivial", "BTC"): (Decimal("0"), Decimal("40"))}
+    with SQLiteStore(tmp_path / "saga.db") as store:
+        close = store.get_order(derive_cloid(f"{OPERATOR}:BTC:2"))
+    assert close is not None
+    assert close.state is OrderState.FILLED
+
+
 class _LostAndUnreadable(_DropsEveryPlace):
     """The send is lost and every order read fails, so no pass can ever decide it."""
 

@@ -7,7 +7,7 @@ any strategy's subscription. Writes flow only through the ``ExecutionManager``'s
 checkpoint path.
 """
 
-from tickwright.domain import Order, Store
+from tickwright.domain import Order, SignalId, Store
 
 
 class Cache:
@@ -69,6 +69,25 @@ class Cache:
         records already here (issue #233). A fresh list, like ``open_orders``.
         """
         return list(self._orders.values())
+
+    def seq_high_water(self) -> dict[str, int]:
+        """Max consumed seq per strategy across every saga (ADR-0016).
+
+        Every place consumed its ``signal_id``'s seq, and every requested
+        cancel consumed its own (ADR-0026 — omitting cancels would let a
+        restart reuse a consumed id). One per-strategy counter across all
+        symbols, so this is a single max over the strategy's records. The
+        strategies and the operator's exit jobs both start their counters
+        here, so neither can reuse an id after a restart.
+        """
+        high_water: dict[str, int] = {}
+        for order in self._orders.values():
+            seqs = [SignalId.parse(order.signal_id).seq]
+            if order.cancel_signal_id is not None:
+                seqs.append(SignalId.parse(order.cancel_signal_id).seq)
+            current = high_water.get(order.strategy_id, 0)
+            high_water[order.strategy_id] = max(current, *seqs)
+        return high_water
 
     def last_event_ts(self, cloid: str) -> int | None:
         """The ``ts_ns`` of ``cloid``'s most recent checkpoint *this session*, or
