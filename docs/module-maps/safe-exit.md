@@ -157,8 +157,8 @@ context. Starts the feed through the `FeedHandle`.
   gets one attempt, so only one pass runs at a time anyway. #473 builds the loops and the lock,
   because retries need them.**)**
 - **(Built by #473:** each symbol runs in its own task in one `asyncio.TaskGroup`, so a fault in
-  one loop cancels the others. The pass lock is an `asyncio.Lock` that every loop shares. A failed
-  read in one loop's resume wait still stops the whole run, after every loop has ended.**)**
+  one loop cancels the others. The pass lock is an `asyncio.Lock` that every loop shares. A loop
+  returns nothing. Only the final read says what is left.**)**
 - Do the final venue read. Done means no resting order and no position.
 - Keep the `__operator__` seq counter. Start it from the same saga high-water fold the
   `StrategyHost` uses. `engine` cannot import `SignalEmitter`.
@@ -180,6 +180,9 @@ context. Starts the feed through the `FeedHandle`.
   played. Its passes move the replay clock, so an earlier wait would fault the replay. The size is
   read again after the wait, because the old close may have filled. A wait that ends with the
   saga still open sends no close for that symbol. The final read reports its size.**)**
+- **(Built by #473:** the resume wait and the read after it are the ones an attempt uses. So a
+  failed pass or a failed read there is a dry attempt, in the same count as the loop's. A flat
+  read there moves the leftover too.**)**
 - Place only when the partition sizes sum to the venue size from `fetch_positions()` (ADR-0054).
   If they differ, call `bus.drain()` first, so every fill already published is applied. If they
   still differ and the venue has account truth, run `LedgerReconciliation.reconcile_account()`.
@@ -192,7 +195,11 @@ context. Starts the feed through the `FeedHandle`.
   match when flatten places. #472 also sends no order for a symbol the feed never priced, and the
   final read reports it. Under replay no later price can come.**)**
 - **(Built by #473:** the size check and the drain. A gap the drain does not close is a dry
-  attempt with reason `size_gap`. The gap is checked again after a new venue read.**)**
+  attempt with reason `size_gap`. The gap is checked again after a new venue read. The check
+  compares the venue size with the account net size from `portfolio.account_net()`.**)**
+- **(Built by #473:** every attempt reads the venue before it counts, even one that sent no
+  close for a missing price or a gap. So a venue that went flat ends the loop with no dry
+  attempt.**)**
 - **(Deferred by #473:** the `reconcile_account()` step moved to #475, code and test together.
   Paper has no account truth, so it cannot run there, and a live venue arrives in #475.**)**
 - A gap that is still there counts as a dry attempt. So a gap that never heals ends in
