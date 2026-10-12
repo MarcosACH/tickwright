@@ -144,9 +144,9 @@ class Flatten:
             high_water = context.checkpointer.cache.seq_high_water()
             emitter.set_next_seq(high_water.get(OPERATOR, 0) + 1)
             for symbol, size in positions.items():
-                # No venue can send a market close without a price. The symbol
-                # stays open, and the final read reports its size.
+                # No venue can send a market close without a price.
                 if symbol not in priced:
+                    await _give_up_unpriced(symbol, size, context)
                     continue
                 resumed = await _resume_closes(symbol, size, context)
                 if isinstance(resumed, VenueReadFailure):
@@ -154,6 +154,25 @@ class Flatten:
                 if resumed:
                     await _await_verdict(await _close(symbol, resumed, emitter), context)
         return await _final_read(context)
+
+
+DRY_ATTEMPTS_TO_GIVE_UP = 3
+"""Dry attempts in a row that stop a symbol's loop (ADR-0056)."""
+
+DRY_WAIT_SECONDS = 2.0
+"""The wait after a dry attempt, before the next one (ADR-0056)."""
+
+
+async def _give_up_unpriced(symbol: str, size: Decimal, context: ExitContext) -> None:
+    dry = 0
+    while True:
+        dry += 1
+        named_event(NamedEvent.FLATTEN_DRY_ATTEMPT, symbol=symbol, count=dry, reason="no_price")
+        if dry == DRY_ATTEMPTS_TO_GIVE_UP:
+            # The symbol stays open, and the final read reports its size.
+            named_event(NamedEvent.FLATTEN_GAVE_UP, symbol=symbol, size=str(size))
+            return
+        await context.clock.sleep(DRY_WAIT_SECONDS)
 
 
 async def _resume_closes(

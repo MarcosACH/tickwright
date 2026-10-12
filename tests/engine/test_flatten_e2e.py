@@ -147,16 +147,18 @@ def _flatten(
     link: Callable[[PaperExchange], Exchange] | None = None,
     replayed: Iterable[str] = tuple(_ROWS),
     resting: bool = False,
+    clock: ManualClock | None = None,
 ) -> tuple[int, list[EventDict]]:
     """Run flatten over paper and the ``_ROWS`` replay file.
 
     ``guarded`` gives the engine a real guard. ``link`` puts a venue double in
     front of paper. ``replayed`` picks the symbols the file has rows for.
     ``resting`` rests one BTC buy far below the replay, as ``_RESTING``.
+    ``clock`` lets a test read the virtual time the run ended at.
     Returns the exit code and every event the run emitted.
     """
     bus = InMemoryBus()
-    clock = ManualClock()
+    clock = clock or ManualClock()
     store = SQLiteStore(tmp_path / "saga.db")
     paper = _paper(bus, clock, store)
     engine = Engine(
@@ -279,15 +281,26 @@ def test_flatten_closes_a_long_at_the_last_replay_row_and_the_partition_reads_fl
     assert _partitions(tmp_path) == {("trivial", "BTC"): (Decimal("0"), Decimal("40"))}
 
 
-def test_a_held_symbol_the_replay_never_prices_stops_the_run_with_its_size_left(
+def test_a_held_symbol_the_replay_never_prices_gives_up_after_three_dry_attempts(
     tmp_path: Path,
 ) -> None:
-    # Paper has no price to fill BTC at, so the close cannot fill. The final read says so.
+    # No price can come after the replay ends, so every attempt is dry (ADR-0056).
+    # The replay ends at 3000 ns. Two 2 second waits sit between the three attempts.
     _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+    clock = ManualClock()
 
-    exit_code, logs = _flatten(tmp_path, replayed=("ETH",))
+    exit_code, logs = _flatten(tmp_path, replayed=("ETH",), clock=clock)
 
     assert exit_code == 1
+    dry = [log for log in logs if log["event"] == "flatten.dry_attempt"]
+    assert [(log["symbol"], log["count"], log["reason"]) for log in dry] == [
+        ("BTC", 1, "no_price"),
+        ("BTC", 2, "no_price"),
+        ("BTC", 3, "no_price"),
+    ]
+    gave_up = [log for log in logs if log["event"] == "flatten.gave_up"]
+    assert [(log["symbol"], log["size"]) for log in gave_up] == [("BTC", "0.02")]
+    assert clock.timestamp_ns() == 3_000 + 4_000_000_000
     assert logs[-1]["event"] == "exit.finished"
     assert logs[-1]["outcome"] == "stopped"
     assert logs[-1]["left"] == "BTC=0.02"

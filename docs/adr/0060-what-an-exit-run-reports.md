@@ -95,6 +95,10 @@ when a venue read fails, and which named events an exit run emits. Decided in
   its own `left`, because only the job knows what its last read covered. The engine writes only
   `unread`. Flatten's `left` lists the resting orders first, then each position as `SYMBOL=size`
   with the signed size, in one comma list. For example `8812,BTC=0.5`.**)**
+
+  **(Field names as shipped, since [#473](https://github.com/MarcosACH/tickwright/issues/473):**
+  the size left on `flatten.gave_up` is the field `size`, signed, as a string. `count` on
+  `flatten.dry_attempt` is the dry attempts in a row so far, from 1 to 3.**)**
 - **No separate summary.** `exit.finished` is the summary. It goes through the same logger as every
   other event, so it is the last line the operator sees.
 

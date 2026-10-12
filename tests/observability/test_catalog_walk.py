@@ -797,6 +797,28 @@ def _drive_exit_unguarded() -> None:
     assert asyncio.run(engine.run()) == 0
 
 
+def _drive_flatten_gave_up() -> None:
+    """One flatten of a position the idle feed never prices, so every attempt is dry (ADR-0056)."""
+    bus = InMemoryBus()
+    clock = ManualClock()
+    engine = Engine(
+        bus=bus,
+        clock=clock,
+        store=SQLiteStore(":memory:"),
+        exchange=PaperExchange(
+            bus=bus,
+            clock=clock,
+            fill_model=ImmediateFillModel(),
+            genesis_collateral=GENESIS,
+            account_net=lambda: {"BTC": Decimal("0.02")},
+            applied_fills=lambda cloid: (),
+        ),
+        feed=_IdleFeed(),
+        exit_job=Flatten(),
+    )
+    assert asyncio.run(engine.run()) == 1
+
+
 def _drive_exit_refused() -> None:
     """One operator cancel all on a store another engine holds (ADR-0060)."""
     with tempfile.TemporaryDirectory() as tmp, SQLiteStore(Path(tmp) / "saga.db") as holder:
@@ -1125,6 +1147,8 @@ SCENARIOS: dict[NamedEvent, Callable[[], None]] = {
     NamedEvent.EXIT_FINISHED: _drive_exit_finished,
     NamedEvent.EXIT_UNGUARDED: _drive_exit_unguarded,
     NamedEvent.CANCEL_ALL_ORDERS_REMAIN: _drive_cancel_all_orders_remain,
+    NamedEvent.FLATTEN_DRY_ATTEMPT: _drive_flatten_gave_up,
+    NamedEvent.FLATTEN_GAVE_UP: _drive_flatten_gave_up,
     NamedEvent.GUARD_KILL_SWITCH_TRIPPED: _drive_kill_switch(reset=False),
     NamedEvent.GUARD_KILL_SWITCH_RESET: _drive_kill_switch(reset=True),
     NamedEvent.STRATEGY_ERROR: _drive_strategy_error,
