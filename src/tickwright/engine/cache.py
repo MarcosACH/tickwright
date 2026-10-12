@@ -81,7 +81,7 @@ class Cache:
         can reuse an id after a restart.
         """
         high_water: dict[str, int] = {}
-        for order in self._orders.values():
+        for order in self.all_orders():
             seqs = [SignalId.parse(order.signal_id).seq]
             if order.cancel_signal_id is not None:
                 seqs.append(SignalId.parse(order.cancel_signal_id).seq)
