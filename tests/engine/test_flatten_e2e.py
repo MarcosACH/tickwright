@@ -92,8 +92,8 @@ def _paper(bus: InMemoryBus, clock: ManualClock, store: SQLiteStore) -> PaperExc
     )
 
 
-def _hold(path: Path, sizes: dict[str, str]) -> None:
-    """Open each signed size as the strategy ``trivial``, at the symbol's first row price.
+def _hold(path: Path, sizes: dict[str, str], *, strategy_id: str = "trivial") -> None:
+    """Open each signed size as ``strategy_id``, at the symbol's first row price.
 
     Seeded through the engine's own order path on a separate bus, as an earlier run would.
     """
@@ -114,7 +114,7 @@ def _hold(path: Path, sizes: dict[str, str]) -> None:
                     PlaceSignal(
                         ts_event=0,
                         ts_init=0,
-                        strategy_id="trivial",
+                        strategy_id=strategy_id,
                         symbol=symbol,
                         seq=seq,
                         side=Side.BUY if Decimal(size) > 0 else Side.SELL,
@@ -459,3 +459,123 @@ def test_a_failed_reconcile_pass_ends_the_wait_and_the_final_read_decides(
     assert exit_code == 1
     assert logs[-1]["outcome"] == "stopped"
     assert logs[-1]["left"] == "BTC=0.02"
+
+
+class _Venue:
+    """Paper on a bus of its own, so it outlives the engine run it serves.
+
+    The real venue keeps an order a crashed engine never booked. Paper keeps its
+    book in memory only (#484), so the test holds one instance across both runs.
+    """
+
+    def __init__(self, path: Path, clock: ManualClock) -> None:
+        self.bus = InMemoryBus()
+        self.store = SQLiteStore(path)
+        self._engine_bus: InMemoryBus | None = None
+        self.paper = PaperExchange(
+            bus=self.bus,
+            clock=clock,
+            fill_model=ImmediateFillModel(),
+            genesis_collateral=GENESIS,
+            instrument_specs=_SPECS,
+            account_net=lambda: paper_store_reads(self.store).account_net(),
+            applied_fills=lambda cloid: paper_store_reads(self.store).applied_fills(cloid),
+        )
+        self.bus.subscribe(ExecutionReport, self._report)
+
+    def serve(self, engine_bus: InMemoryBus) -> None:
+        """Link the venue to a new engine run: its ticks in, the venue's reports out."""
+        self._engine_bus = engine_bus
+
+        async def tick(tick: MarketTick) -> None:
+            await self.bus.publish(tick)
+
+        engine_bus.subscribe(MarketTick, tick)
+
+    def cut(self) -> None:
+        """The engine dies. Nothing the venue says from here reaches it."""
+        self._engine_bus = None
+
+    async def _report(self, report: ExecutionReport) -> None:
+        if self._engine_bus is not None:
+            await self._engine_bus.publish(report)
+
+
+class _CrashesAfterTheSend(VenueLink):
+    """The close reaches the venue, and the engine dies before it hears the fill."""
+
+    def __init__(self, venue: Exchange, crash: Callable[[], None]) -> None:
+        super().__init__(venue)
+        self._crash = crash
+        self.crashed = asyncio.Event()
+
+    async def place(self, order: PlaceOrder) -> None:
+        self._crash()
+        await super().place(order)
+        self.crashed.set()
+        await asyncio.Event().wait()
+
+
+def _engine(venue: _Venue, exchange: Exchange, tmp_path: Path) -> Engine:
+    """One engine run of flatten, served by ``venue`` through ``exchange``.
+
+    Each run replays the file from its first row, so each gets its own clock.
+    """
+    bus = InMemoryBus()
+    clock = ManualClock()
+    venue.serve(bus)
+    return Engine(
+        bus=bus,
+        clock=clock,
+        store=venue.store,
+        exchange=exchange,
+        feed=ReplayFeed(path=_ticks(tmp_path / "ticks.jsonl", _ROWS), bus=bus, clock=clock),
+        guard=RealGuard(specs=_SPECS, store=venue.store, clock=clock),
+        exit_job=Flatten(),
+    )
+
+
+def test_a_flatten_that_crashed_after_its_send_is_booked_by_the_split_and_the_rest_closed(
+    tmp_path: Path,
+) -> None:
+    # Two partitions share BTC, so the boot books the resumed fill by its stored
+    # split (ADR-0054). The other symbol is still open, and the next run closes it.
+    _hold(tmp_path / "saga.db", {"BTC": "0.02", "ETH": "0.5"})
+    _hold(tmp_path / "saga.db", {"BTC": "0.01"}, strategy_id="other")
+    venue = _Venue(tmp_path / "saga.db", ManualClock())
+    link = _CrashesAfterTheSend(venue.paper, venue.cut)
+
+    async def first_life() -> None:
+        run = asyncio.create_task(_engine(venue, link, tmp_path).run())
+        await asyncio.wait_for(link.crashed.wait(), timeout=5)
+        run.cancel()
+        await asyncio.gather(run, return_exceptions=True)
+
+    asyncio.run(first_life())
+    venue.store.close()
+    venue.store = SQLiteStore(tmp_path / "saga.db")
+
+    async def second_life() -> int:
+        return await asyncio.wait_for(_engine(venue, venue.paper, tmp_path).run(), 5)
+
+    with capture_events() as logs:
+        exit_code = asyncio.run(second_life())
+    venue.store.close()
+
+    assert exit_code == 0
+    assert logs[-1]["outcome"] == "done"
+    # Opened at 42000 and 3000. Closed at the last rows, 44000 and 3200 (ADR-0059).
+    assert _partitions(tmp_path) == {
+        ("trivial", "BTC"): (Decimal("0"), Decimal("40")),
+        ("other", "BTC"): (Decimal("0"), Decimal("20")),
+        ("trivial", "ETH"): (Decimal("0"), Decimal("100")),
+    }
+    with SQLiteStore(tmp_path / "saga.db") as store:
+        closes = [order for order in store.all_orders() if order.strategy_id == OPERATOR]
+    # One close per symbol, so no size was closed twice. The resumed run's seq is
+    # above the crashed run's.
+    assert sorted((order.symbol, order.signal_id) for order in closes) in (
+        [("BTC", f"{OPERATOR}:BTC:1"), ("ETH", f"{OPERATOR}:ETH:2")],
+        [("BTC", f"{OPERATOR}:BTC:2"), ("ETH", f"{OPERATOR}:ETH:1")],
+    )
+    assert all(order.state is OrderState.FILLED for order in closes)
