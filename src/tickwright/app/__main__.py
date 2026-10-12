@@ -5,13 +5,14 @@ the engine through the composition root, and runs the supervised lifecycle.
 The process exit code is the ADR-0024 contract: 0 = graceful stop (SIGINT/
 SIGTERM), non-zero = ``FAULTED`` — the external supervisor's restart signal.
 
-``tickwright cancel-all`` uses the ADR-0060 codes instead. 0 means done, 1
+``tickwright cancel-all`` and ``tickwright flatten`` use the ADR-0060 codes instead. 0 means done, 1
 means it stopped partway, and 2 means it never booted.
 """
 
 import argparse
 import asyncio
 import sys
+from typing import Literal
 
 from pydantic import ValidationError
 
@@ -23,14 +24,14 @@ from .config import AppSettings
 
 def main() -> int:
     parser = argparse.ArgumentParser(prog="tickwright")
-    # No command runs the engine. ``cancel-all`` is a one-shot exit run with
-    # the engine stopped (ADR-0052). An unknown command exits 2 here, before
-    # anything is built, so a typo can never start a trading run.
-    parser.add_argument("command", nargs="?", choices=["cancel-all"])
+    # No command runs the engine. ``cancel-all`` and ``flatten`` are one-shot exit
+    # runs with the engine stopped (ADR-0052). An unknown command exits 2 here,
+    # before anything is built, so a typo can never start a trading run.
+    parser.add_argument("command", nargs="?", choices=["cancel-all", "flatten"])
     command = parser.parse_args().command
     if command is None:
         return _run_engine()
-    return _run_cancel_all()
+    return _run_exit_job(command)
 
 
 def _run_engine() -> int:
@@ -44,20 +45,20 @@ def _run_engine() -> int:
     return asyncio.run(engine.run())
 
 
-def _run_cancel_all() -> int:
+def _run_exit_job(command: Literal["cancel-all", "flatten"]) -> int:
     # A config the run cannot use exits 2 with its message and no event, because
     # logging needs a valid config (ADR-0060).
     try:
         config = AppSettings()
         configure_logging(secrets=config.secrets())
-        engine = build_exit_job(config)
+        engine = build_exit_job(config, command)
     except (ValidationError, UnsupportedExitRun) as exc:
-        print(f"tickwright cancel-all: {exc}", file=sys.stderr)
+        print(f"tickwright {command}: {exc}", file=sys.stderr)
         return 2
     except Exception as exc:
         # Building talks to no venue, so any failure here, such as a store that
         # cannot be opened, means nothing moved. That is code 2 (ADR-0060).
-        print(f"tickwright cancel-all: {type(exc).__name__}: {exc}", file=sys.stderr)
+        print(f"tickwright {command}: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
     return asyncio.run(engine.run())
 

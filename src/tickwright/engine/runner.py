@@ -44,7 +44,6 @@ from tickwright.domain import (
     StoreLockHeld,
     StoreLockHolder,
     Strategy,
-    VenueReadFailure,
     duration_ns,
 )
 from tickwright.observability import NamedEvent, named_event
@@ -54,7 +53,8 @@ from .barrier import StartupBarrier
 from .cadence import run_cadence
 from .checkpoint import Checkpointer
 from .execution import ExecutionManager
-from .exit_run import ExitContext, ExitJob, ExitOutcome, ExitStatus, describe_orders
+from .exit_run import ExitContext, ExitJob, ExitOutcome, ExitStatus
+from .feed_handle import FeedHandle
 from .guard import NoopGuard
 from .ledger_reconcile import LedgerReconciliation, ValuationBand
 from .portfolio import PortfolioProjection
@@ -100,20 +100,6 @@ def _first_leaf(exc: BaseException) -> BaseException:
     while isinstance(exc, BaseExceptionGroup):
         exc = exc.exceptions[0]
     return exc
-
-
-def _describe_left(outcome: ExitOutcome | None) -> str:
-    """What the job's last venue read left, for ``exit.finished`` (ADR-0060).
-
-    One string, because every catalog field is a scalar.
-    """
-    if outcome is None:
-        return "unread"
-    if isinstance(outcome.left, VenueReadFailure):
-        return f"read_failed: {outcome.left.value}"
-    if not outcome.left:
-        return "none"
-    return describe_orders(outcome.left)
 
 
 class Engine:
@@ -200,7 +186,7 @@ class Engine:
         self._fault: Exception | None = None
         self._stop_requested = asyncio.Event()
         self._stopped = asyncio.Event()
-        self._feed_task: asyncio.Task[None] | None = None
+        self._feed_handle: FeedHandle | None = None
         self._exchange_task: asyncio.Task[None] | None = None
         self._exit_task: asyncio.Task[None] | None = None
         self._cadence_tasks: list[asyncio.Task[None]] = []
@@ -276,13 +262,16 @@ class Engine:
                 # An exit run schedules no cadence and starts no feed. Its job
                 # runs every reconcile pass itself, so two never overlap
                 # (ADR-0052). The venue's own long-lived half runs either way.
+                self._feed_handle = FeedHandle(self._feed, tg)
                 if self._exit_job is None:
                     self._schedule_cadences(tg)
                 self._start_exchange_loop(tg)
                 if self._exit_job is None:
-                    await self._start_feed(tg)
+                    await self._start_feed(self._feed_handle)
                 else:
-                    self._exit_task = tg.create_task(self._run_exit_job(self._exit_job))
+                    self._exit_task = tg.create_task(
+                        self._run_exit_job(self._exit_job, self._feed_handle)
+                    )
                 tg.create_task(self._stop_when_requested())
         except Exception as exc:
             # The first raw-handler exception aborted the TaskGroup and
@@ -364,7 +353,8 @@ class Engine:
         # simply completes; nothing downstream distinguishes the two.
         self._exchange_task = tg.create_task(self._exchange.run())
 
-    async def _start_feed(self, tg: asyncio.TaskGroup) -> None:
+    @staticmethod
+    async def _start_feed(feed: FeedHandle) -> None:
         """Connect the feed and supervise its loop. Always the last start step."""
         # The feed starts last (ADR-0024 step 7): the first tick is only
         # possible after the barrier cleared, so nothing places before
@@ -372,18 +362,24 @@ class Engine:
         # not the run — like the CLI, the engine stops only when told to.
         # The connect is inline and the loop is supervised, for the
         # reasons ADR-0024 step 7's amendment states in full.
-        await self._feed.start()
-        named_event(NamedEvent.ENGINE_FEED_STARTED)
-        self._feed_task = tg.create_task(self._feed.run())
+        await feed.start()
 
-    async def _run_exit_job(self, job: ExitJob) -> None:
+    async def _run_exit_job(self, job: ExitJob, feed: FeedHandle) -> None:
         """Run the job, keep its outcome, then ask for the usual stop."""
         # A signal during boot means the operator changed their mind. The job
         # never starts, so nothing reaches the venue after it (ADR-0060).
         if self._stop_requested.is_set():
             return
         context = ExitContext(
-            account=self._exchange, orders=self._exchange, checkpointer=self._checkpointer
+            account=self._exchange,
+            orders=self._exchange,
+            checkpointer=self._checkpointer,
+            guard=self._guard,
+            bus=self._bus,
+            clock=self._clock,
+            feed=feed,
+            reconciler=self._reconciler,
+            pass_interval_seconds=self._reconcile_config.inflight_interval_seconds,
         )
         self._exit_outcome = await job.run(context)
         self._stop_requested.set()
@@ -401,7 +397,8 @@ class Engine:
             job=self._exit_job.name,
             outcome=outcome.status.value if outcome is not None else ExitStatus.STOPPED.value,
             exit_code=exit_code,
-            left=_describe_left(outcome),
+            # Only the engine knows the job never returned (ADR-0060).
+            left=outcome.left if outcome is not None else "unread",
         )
         return exit_code
 
@@ -656,7 +653,9 @@ class Engine:
 
     async def _stop_feed(self) -> None:
         """Release the feed, then end the long-lived half this runner supervises."""
-        await self._stop_supervised(self._feed.stop, self._feed_task)
+        # No handle means the run faulted before its task group opened.
+        task = None if self._feed_handle is None else self._feed_handle.task
+        await self._stop_supervised(self._feed.stop, task)
 
     @staticmethod
     async def _stop_supervised(

@@ -340,6 +340,10 @@ class VenueDouble:
         # Nothing resting. Only an exit run reads this, and no double suite runs one.
         return []
 
+    async def fetch_positions(self) -> dict[str, Decimal] | VenueReadFailure:
+        # Flat, for the same reason as ``fetch_open_orders`` above.
+        return {}
+
     async def fetch_account_state(self) -> VenueAccountState | None:
         # The paper venue's permanent answer, and the fail-closed one for a
         # double as well: no account truth to compare against, so nothing heals
@@ -435,6 +439,9 @@ class VenueLink:
 
     async def fetch_open_orders(self) -> list[VenueOpenOrder] | VenueReadFailure:
         return await self._venue.fetch_open_orders()
+
+    async def fetch_positions(self) -> dict[str, Decimal] | VenueReadFailure:
+        return await self._venue.fetch_positions()
 
     async def fetch_account_state(self) -> VenueAccountState | None:
         return await self._venue.fetch_account_state()

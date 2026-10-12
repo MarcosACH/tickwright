@@ -63,6 +63,7 @@ class NamedEvent(StrEnum):
     # ``exit.refused`` is the only event of one the store check turned away.
     EXIT_REFUSED = "exit.refused"
     EXIT_FINISHED = "exit.finished"
+    EXIT_UNGUARDED = "exit.unguarded"
     CANCEL_ALL_ORDERS_REMAIN = "cancel_all.orders_remain"
 
     # Pre-trade kill switch (``PreTradeGuard``).
@@ -277,6 +278,7 @@ FIELDS: dict[NamedEvent, frozenset[str]] = {
     NamedEvent.ENGINE_STOP_HOOK_FAILED: frozenset({"hook", "error"}),
     NamedEvent.EXIT_REFUSED: frozenset({"reason", "store", "holder"}),
     NamedEvent.EXIT_FINISHED: frozenset({"job", "outcome", "exit_code", "left"}),
+    NamedEvent.EXIT_UNGUARDED: frozenset({"warning"}),
     NamedEvent.CANCEL_ALL_ORDERS_REMAIN: frozenset({"orders"}),
     NamedEvent.GUARD_KILL_SWITCH_TRIPPED: frozenset({"reason"}),
     NamedEvent.GUARD_KILL_SWITCH_RESET: frozenset(),

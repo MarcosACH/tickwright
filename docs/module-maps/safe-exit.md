@@ -20,8 +20,9 @@ src/tickwright/
     protocols.py              # Exchange: cancel(refs), fetch_open_orders, fetch_positions
                               # MarketFeed: add_symbols. Store: lock, seq record
   engine/
-    exit_job.py               # ExitJob, ExitContext, FeedHandle, ExitOutcome,  NEW
+    exit_job.py               # ExitJob, ExitContext, ExitOutcome,              NEW
                               # OperatorCancelAll
+    feed_handle.py            # FeedHandle, how every run starts the feed      NEW
     flatten.py                # Flatten and its private per-symbol loop        NEW
     flatten_split.py          # the pure pro rata split                        NEW
     runner.py                 # Engine takes an optional ExitJob, no cadences on it
@@ -65,6 +66,9 @@ for callers. With a job, `run()` returns 0, 1, or 2 (ADR-0060) instead of the AD
   - No reconcile cadences. The job runs every pass itself, so two passes never overlap.
   - No feed task at the start. The job starts the feed through the `FeedHandle` in its context.
     The handle runs `feed.run()` as a task in this group, so a feed fault still faults the run.
+    **(Changed by #472:** a normal run also starts the feed through a `FeedHandle`, with no
+    symbols to add. So the feed starts and stops in one place. The handle calls `add_symbols()`
+    only when there are symbols, because the live feed refuses the call until #475.**)**
   - The job runs as a task in this group. `exchange.run()` runs beside it as today.
 - When the job returns, request the stop and run the reverse shutdown as today.
 - Map the job's `ExitOutcome`, a signal, or a fault to the exit code. SIGINT and SIGTERM cancel
@@ -149,9 +153,15 @@ context. Starts the feed through the `FeedHandle`.
   one in progress, then runs its own, so it never reads a pass that started before its attempt
   ended.
 - Run one private per-symbol loop for each held symbol, all at the same time. Wait for all of them.
+- **(Deferred by #472:** the closes run one after another, and there is no pass lock. Each symbol
+  gets one attempt, so only one pass runs at a time anyway. #473 builds the loops and the lock,
+  because retries need them.**)**
 - Do the final venue read. Done means no resting order and no position.
 - Keep the `__operator__` seq counter. Start it from the same saga high-water fold the
   `StrategyHost` uses. `engine` cannot import `SignalEmitter`.
+- **(Deferred by #472:** every close uses seq 1. The manager drops a signal id it has seen
+  (ADR-0006). So a second flatten on the same store sends no close for a symbol an earlier
+  flatten closed. It exits 1 and names the symbol in `left`. #474 builds the counter.**)**
 
 **The per-symbol loop (private):**
 
@@ -166,6 +176,9 @@ context. Starts the feed through the `FeedHandle`.
   again.
 - On paper the gap is only fills the store has not applied yet. Paper has no account truth, so the
   drain alone closes it.
+- **(Deferred by #472:** this size check and the drain moved to #475. On paper the sizes always
+  match when flatten places. #472 also sends no order for a symbol the feed never priced, and the
+  final read reports it. Under replay no later price can come.**)**
 - A gap that is still there counts as a dry attempt. So a gap that never heals ends in
   `flatten.gave_up`, not in a loop.
 - A flat venue moves each leftover into the unattributed partition instead.

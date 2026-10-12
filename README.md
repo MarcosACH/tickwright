@@ -178,6 +178,22 @@ works on paper today. On Hyperliquid it exits `2` before it touches anything, un
 
 The kill switch stays as it was. The last log line is `exit.finished`, which says what is left.
 
+### Close every position
+
+Stop the engine, then run `uv run tickwright flatten`. It trips the kill switch first, so the
+engine does not trade when it restarts. Then it cancels every resting order and closes every
+position with a reduce-only market order. It uses the same exit codes as `cancel-all`.
+
+It works on paper with the replay feed today. Each close fills at the last row of the replay file.
+Any other exchange or feed exits `2` before it touches anything, until #475.
+
+A position the feed never priced is not closed. The run exits `1`, and `exit.finished` names the
+symbol and its size, for example `left=BTC=0.02`. Under `GUARD=noop` there is no kill switch to
+trip, so the run warns with `exit.unguarded`.
+
+Flatten closes each symbol only once per store today. If a later run opens that symbol again, the
+next flatten sends no close for it. It exits `1` and names the symbol in `left`. #474 fixes this.
+
 ## What it does today
 
 - Venues: [Hyperliquid](https://hyperliquid.gitbook.io/hyperliquid-docs) (mainnet and testnet),
@@ -190,7 +206,7 @@ The kill switch stays as it was. The last log line is `exit.finished`, which say
   account snapshot and a disagreement is alerted.
 - Strategies: two reference strategies that place one market or one limit order. They exist to
   exercise the pipeline.
-- Operator commands: `tickwright cancel-all`, on paper.
+- Operator commands: `tickwright cancel-all` on paper, and `tickwright flatten` on paper replay.
 
 Each seam has exactly two implementations. One would look hardcoded. Three would be scope creep.
 

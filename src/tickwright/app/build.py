@@ -11,7 +11,7 @@ import asyncio
 import random
 from collections.abc import Callable, Mapping
 from decimal import Decimal
-from typing import NamedTuple, assert_never
+from typing import Literal, NamedTuple, assert_never
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import LiveClock, ManualClock
@@ -38,7 +38,7 @@ from tickwright.domain import (
     Strategy,
     account_net_size,
 )
-from tickwright.engine.exit_run import ExitJob, OperatorCancelAll
+from tickwright.engine.exit_run import ExitJob, Flatten, OperatorCancelAll
 from tickwright.engine.guard import NoopGuard, RealGuard
 from tickwright.engine.runner import Engine
 from tickwright.strategies import SingleShotLimitStrategy, SingleShotMarketStrategy
@@ -298,9 +298,18 @@ class UnsupportedExitRun(ValueError):
     """
 
 
-def build_exit_job(config: AppConfig) -> Engine:
-    """The engine for ``tickwright cancel-all``: the same stack as ``build_engine``,
-    with the job in place of the strategies (ADR-0052)."""
+def build_exit_job(config: AppConfig, command: Literal["cancel-all", "flatten"]) -> Engine:
+    """The engine for ``tickwright cancel-all`` or ``tickwright flatten``: the same
+    stack as ``build_engine``, with the job in place of the strategies (ADR-0052)."""
+    if command == "flatten":
+        # Flatten closes at the replay's last price. A live feed never ends, and
+        # its first close needs a fresh price (#475).
+        if config.exchange != "paper" or config.feed != "replay":
+            raise UnsupportedExitRun(
+                f"flatten needs exchange=paper and feed=replay, not exchange={config.exchange} "
+                f"and feed={config.feed}. See issue #475."
+            )
+        return _build_engine(config, exit_job=Flatten())
     if config.exchange != "paper":
         # Hyperliquid cannot list the account's resting orders yet (#470).
         raise UnsupportedExitRun(

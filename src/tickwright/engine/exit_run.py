@@ -8,20 +8,33 @@ sees them.
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from decimal import Decimal
 from enum import StrEnum
 from typing import Protocol
 
 from tickwright.domain import (
+    OPERATOR,
     AccountAnchor,
+    Clock,
+    EventBus,
     InvariantViolation,
+    MarketTick,
     OrderAnchor,
     OrderRef,
+    OrderType,
+    PlaceSignal,
+    PreTradeGuard,
+    Side,
+    TimeInForce,
     VenueOpenOrder,
     VenueReadFailure,
+    derive_cloid,
 )
 from tickwright.observability import NamedEvent, named_event
 
 from .checkpoint import Checkpointer
+from .feed_handle import FeedHandle
+from .reconcile import Reconciler
 
 
 class ExitStatus(StrEnum):
@@ -36,8 +49,11 @@ class ExitOutcome:
     """What a job reports back to the engine when it returns."""
 
     status: ExitStatus
-    left: tuple[VenueOpenOrder, ...] | VenueReadFailure
-    """What the last venue read left, or how that read failed."""
+    left: str
+    """What the last venue read left, or how that read failed, for ``exit.finished``.
+
+    The job writes it, because only the job knows what its last read covered.
+    """
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -47,6 +63,14 @@ class ExitContext:
     account: AccountAnchor
     orders: OrderAnchor
     checkpointer: Checkpointer
+    guard: PreTradeGuard
+    bus: EventBus
+    clock: Clock
+    feed: FeedHandle
+    reconciler: Reconciler
+    pass_interval_seconds: float
+    """How long a job waits between its own reconcile passes. No cadence runs in an
+    exit run, so the job paces them itself (ADR-0052)."""
 
 
 class ExitJob(Protocol):
@@ -73,11 +97,122 @@ class OperatorCancelAll:
         for _ in range(2):
             left = await _cancel_round(left, context)
         if isinstance(left, VenueReadFailure):
-            return ExitOutcome(status=ExitStatus.STOPPED, left=left)
+            return ExitOutcome(status=ExitStatus.STOPPED, left=describe_failure(left))
         if left:
             named_event(NamedEvent.CANCEL_ALL_ORDERS_REMAIN, orders=describe_orders(left))
-            return ExitOutcome(status=ExitStatus.STOPPED, left=tuple(left))
-        return ExitOutcome(status=ExitStatus.DONE, left=())
+            return ExitOutcome(status=ExitStatus.STOPPED, left=describe_orders(left))
+        return ExitOutcome(status=ExitStatus.DONE, left=NOTHING_LEFT)
+
+
+class Flatten:
+    """``tickwright flatten``: close every position the account holds."""
+
+    name = "flatten"
+
+    async def run(self, context: ExitContext) -> ExitOutcome:
+        # First, so a crash mid-flatten still leaves the store halted (ADR-0053).
+        context.guard.trip_kill_switch("flatten: operator exit")
+        # A guard with no kill switch reads untripped right after the trip.
+        if not context.guard.kill_switch_tripped:
+            named_event(
+                NamedEvent.EXIT_UNGUARDED,
+                warning="no kill switch under GUARD=noop: the engine trades as soon as it restarts",
+            )
+        # A resting order could fill after the close and reopen exposure. So the
+        # cancel all step runs first, and flatten stops where it stops (ADR-0060).
+        cancelled = await OperatorCancelAll().run(context)
+        if cancelled.status is ExitStatus.STOPPED:
+            return cancelled
+        positions = await context.account.fetch_positions()
+        if isinstance(positions, VenueReadFailure):
+            return ExitOutcome(status=ExitStatus.STOPPED, left=describe_failure(positions))
+        if positions:
+            priced: set[str] = set()
+
+            async def note_price(tick: MarketTick) -> None:
+                priced.add(tick.symbol)
+
+            # Before the feed starts, so no tick goes unseen.
+            context.bus.subscribe(MarketTick, note_price)
+            await context.feed.start(positions)
+            # Only a replay ends, and it plays the whole file first. So each close
+            # fills at the last row (ADR-0059). The CLI refuses a live feed until #475.
+            await context.feed.ended()
+            for symbol, size in positions.items():
+                # No venue can send a market close without a price. The symbol
+                # stays open, and the final read reports its size.
+                if symbol in priced:
+                    await _await_verdict(await _close(symbol, size, context), context)
+        return await _final_read(context)
+
+
+async def _close(symbol: str, size: Decimal, context: ExitContext) -> str:
+    """Send one reduce-only market IOC order for the whole of ``size`` (ADR-0054).
+
+    Returns the cloid of the order's saga.
+    """
+    now = context.clock.timestamp_ns()
+    signal = PlaceSignal(
+        ts_event=now,
+        ts_init=now,
+        strategy_id=OPERATOR,
+        symbol=symbol,
+        seq=1,
+        side=Side.SELL if size > 0 else Side.BUY,
+        quantity=abs(size),
+        order_type=OrderType.MARKET,
+        time_in_force=TimeInForce.IOC,
+        reduce_only=True,
+    )
+    await context.bus.publish(signal)
+    return derive_cloid(signal.signal_id)
+
+
+async def _await_verdict(cloid: str, context: ExitContext) -> None:
+    """Run reconcile passes until the close's saga is terminal (ADR-0011, ADR-0026).
+
+    A pass covers both halves. ``reconcile_inflight`` resolves a send that never
+    acked. ``reconcile_open_orders`` resolves an acked order whose last push was lost.
+
+    A failed pass ends the wait, so a venue that cannot answer never hangs the run.
+    The saga stays open, and the next boot resumes it.
+    """
+    while not _decided(cloid, context):
+        await context.clock.sleep(context.pass_interval_seconds)
+        if not await context.reconciler.reconcile_inflight():
+            return
+        if not await context.reconciler.reconcile_open_orders():
+            return
+
+
+def _decided(cloid: str, context: ExitContext) -> bool:
+    saga = context.checkpointer.cache.get_order(cloid)
+    # The manager writes a saga for every signal it handles, a denial included.
+    return saga is None or saga.is_terminal
+
+
+async def _final_read(context: ExitContext) -> ExitOutcome:
+    """Done only when the venue holds no resting order and no position (ADR-0060)."""
+    orders = await context.account.fetch_open_orders()
+    if isinstance(orders, VenueReadFailure):
+        return ExitOutcome(status=ExitStatus.STOPPED, left=describe_failure(orders))
+    positions = await context.account.fetch_positions()
+    if isinstance(positions, VenueReadFailure):
+        return ExitOutcome(status=ExitStatus.STOPPED, left=describe_failure(positions))
+    if orders or positions:
+        left = [describe_orders(orders)] if orders else []
+        left += [f"{symbol}={size}" for symbol, size in positions.items()]
+        return ExitOutcome(status=ExitStatus.STOPPED, left=",".join(left))
+    return ExitOutcome(status=ExitStatus.DONE, left=NOTHING_LEFT)
+
+
+NOTHING_LEFT = "none"
+"""``left`` when the last read found nothing to act on."""
+
+
+def describe_failure(failure: VenueReadFailure) -> str:
+    """``left`` when the last read failed."""
+    return f"read_failed: {failure.value}"
 
 
 def describe_orders(orders: Sequence[VenueOpenOrder]) -> str:

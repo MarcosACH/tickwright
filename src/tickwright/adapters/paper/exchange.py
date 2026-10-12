@@ -520,6 +520,13 @@ class PaperExchange:
             VenueOpenOrder(symbol=order.symbol, cloid=order.cloid) for order in self._book.resting()
         ]
 
+    async def fetch_positions(self) -> dict[str, Decimal] | VenueReadFailure:
+        """The account net per symbol, counting fills the store has not applied
+        yet, so a close sized from it never misses a fill in flight."""
+        symbols = set(self._account_net()) | self._unapplied.symbols()
+        nets = {symbol: self._net(symbol) for symbol in sorted(symbols)}
+        return {symbol: net for symbol, net in nets.items() if net != 0}
+
     async def fetch_account_state(self) -> VenueAccountState | None:
         """``None`` **always — by construction, not by failure**.
 

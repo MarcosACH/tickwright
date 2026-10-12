@@ -12,7 +12,7 @@ import asyncio
 import json
 import os
 import signal
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from decimal import Decimal
 from pathlib import Path
 
@@ -1216,6 +1216,9 @@ class _HangingFeed:
     """A feed whose ``stop()`` never returns — a wedged venue connection at
     teardown. A ``MarketFeed`` double at the venue boundary."""
 
+    def add_symbols(self, symbols: Iterable[str]) -> None:
+        return None
+
     async def start(self) -> None:
         return None
 
@@ -1233,6 +1236,9 @@ class _BlockingFeed:
 
     def __init__(self) -> None:
         self.started = asyncio.Event()
+
+    def add_symbols(self, symbols: Iterable[str]) -> None:
+        return None
 
     async def start(self) -> None:
         return None
@@ -1436,6 +1442,40 @@ def test_graceful_stop_cancels_a_still_running_feed(tmp_path: Path) -> None:
     assert engine.state is ComponentState.STOPPED
 
 
+class _FixedSymbolsFeed(_BlockingFeed):
+    """A feed that cannot add symbols, as the live Hyperliquid feed cannot yet (#475)."""
+
+    def add_symbols(self, symbols: Iterable[str]) -> None:
+        raise NotImplementedError("this feed plays only the symbols it was built with")
+
+
+def test_a_normal_run_starts_a_feed_that_cannot_add_symbols(tmp_path: Path) -> None:
+    """A normal run starts the feed through the same handle an exit job uses. It has
+    no symbols to add, so it must never ask the feed to add any."""
+
+    async def main() -> int:
+        bus = InMemoryBus()
+        clock = ManualClock()
+        store = SQLiteStore(tmp_path / "saga.db")
+        exchange = PaperExchange(
+            bus=bus,
+            clock=clock,
+            fill_model=ImmediateFillModel(),
+            genesis_collateral=GENESIS,
+            account_net=dict,
+            applied_fills=lambda cloid: (),
+        )
+        feed = _FixedSymbolsFeed()
+        engine = Engine(bus=bus, clock=clock, store=store, exchange=exchange, feed=feed)
+
+        run = asyncio.create_task(engine.run())
+        await asyncio.wait_for(feed.started.wait(), timeout=5)
+        await asyncio.wait_for(engine.stop(), timeout=5)
+        return await asyncio.wait_for(run, timeout=5)
+
+    assert asyncio.run(main()) == 0
+
+
 def test_invariant_violation_faults_the_engine_and_exits_nonzero(tmp_path: Path) -> None:
     """ADR-0014/0024 fail-fast: an ``InvariantViolation`` in an engine-internal
     handler pierces everything — siblings cancelled, ``FAULTED``, non-zero exit."""
@@ -1540,6 +1580,9 @@ class _FaultingFeed:
     def __init__(self, timeline: list[str] | None = None) -> None:
         self._timeline = timeline if timeline is not None else []
 
+    def add_symbols(self, symbols: Iterable[str]) -> None:
+        return None
+
     async def start(self) -> None:
         return None
 
@@ -1559,6 +1602,9 @@ class _UnreachableFeed:
 
     def __init__(self) -> None:
         self.ran = False
+
+    def add_symbols(self, symbols: Iterable[str]) -> None:
+        return None
 
     async def start(self) -> None:
         raise ConnectionRefusedError("the venue refused the market-data socket")

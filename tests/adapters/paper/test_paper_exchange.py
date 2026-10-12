@@ -696,6 +696,33 @@ def test_fetch_open_orders_lists_the_orders_still_resting_on_the_book() -> None:
     ]
 
 
+def test_fetch_positions_reads_the_store_net_plus_fills_the_store_has_not_applied() -> None:
+    # Flatten sizes each close from this read, so a fill in flight must count (ADR-0054).
+    bus = InMemoryBus()
+    clock = ManualClock()
+    exchange = PaperExchange(
+        bus=bus,
+        clock=clock,
+        fill_model=ImmediateFillModel(),
+        genesis_collateral=GENESIS,
+        account_net=lambda: {"BTC": Decimal("3"), "ETH": Decimal("-2")},
+        applied_fills=lambda cloid: (),
+    )
+
+    async def scenario() -> dict[str, Decimal] | VenueReadFailure:
+        clock.advance_to(1_000)
+        await bus.publish(_tick("42000"))
+        await bus.publish(_tick("3000", symbol="ETH"))
+        await exchange.place(replace(_market_order(qty="1"), side=Side.SELL))
+        await exchange.place(_market_order(qty="2", symbol="ETH", cloid="0xdef"))
+        await bus.publish(_tick("150", symbol="SOL"))
+        await exchange.place(_market_order(qty="4", symbol="SOL", cloid="0x123"))
+        return await exchange.fetch_positions()
+
+    # ETH reads flat once its buy lands. SOL is held only by a fill in flight.
+    assert asyncio.run(scenario()) == {"BTC": Decimal("2"), "SOL": Decimal("4")}
+
+
 def test_cancel_of_two_resting_orders_reports_each_one_cancelled() -> None:
     # A cancel all is one call with many refs (ADR-0055).
     exchange, bus, clock, fills, statuses = _limit_harness()
@@ -1053,6 +1080,9 @@ _SEAM_CLAIMS = {
     "cancel": "test_cancel_removes_a_resting_order_and_reports_cancelled",
     "fetch_order": "test_fetch_order_reports_a_resting_limit_as_live",
     "fetch_open_orders": "test_fetch_open_orders_lists_the_orders_still_resting_on_the_book",
+    "fetch_positions": (
+        "test_fetch_positions_reads_the_store_net_plus_fills_the_store_has_not_applied"
+    ),
     "fetch_account_state": "test_the_paper_venue_reports_no_account_truth_even_on_a_healthy_read",
     "verify_account_mode": "test_the_paper_venue_has_no_account_mode_to_verify_and_never_withholds_one",
     "account_spec": "test_the_paper_venue_declares_a_two_segment_account_id_and_its_genesis",

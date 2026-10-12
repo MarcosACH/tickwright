@@ -9,6 +9,7 @@ passing a function whose body was deleted.
 """
 
 import asyncio
+from collections.abc import Iterable
 from decimal import Decimal
 
 import pytest
@@ -31,6 +32,9 @@ class TradesOnlyFeed:
     def __init__(self, *, bus: EventBus, symbols: list[str]) -> None:
         self._bus = bus
         self._symbols = symbols
+
+    def add_symbols(self, symbols: Iterable[str]) -> None:
+        self._symbols.extend(symbols)
 
     async def start(self) -> None:
         """Nothing to reach: the stub's venue is a for-loop."""
