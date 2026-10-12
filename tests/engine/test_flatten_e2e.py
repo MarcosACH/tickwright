@@ -461,7 +461,7 @@ def test_a_failed_reconcile_pass_ends_the_wait_and_the_final_read_decides(
     assert logs[-1]["left"] == "BTC=0.02"
 
 
-def _left_open(path: Path, symbol: str) -> str:
+def _left_open(path: Path, symbol: str, *, quantity: str = "0.02") -> str:
     """Leave an ``__operator__`` close ``LIVE`` in the store, one paper never lists.
 
     That is a close the venue acked and then dropped (#242) before a crash. The
@@ -481,10 +481,12 @@ def _left_open(path: Path, symbol: str) -> str:
                 signal_id=f"{OPERATOR}:{symbol}:1",
                 symbol=symbol,
                 side=Side.SELL,
-                quantity=Decimal("0.02"),
+                quantity=Decimal(quantity),
                 order_type=OrderType.MARKET,
                 state=OrderState.LIVE,
                 created_ts_ns=0,
+                # As the manager stores it at place, so a fill can be booked (ADR-0054).
+                split_basis=checks.split_basis(symbol),
             )
         )
     return cloid
@@ -650,11 +652,21 @@ def _crash_a_flatten(tmp_path: Path) -> _Venue:
     return venue
 
 
-def _next_run(venue: _Venue, tmp_path: Path, job: ExitJob) -> tuple[int, list[EventDict]]:
-    """Run ``job`` after the crash. Returns the exit code and every event it emitted."""
+def _next_run(
+    venue: _Venue,
+    tmp_path: Path,
+    job: ExitJob,
+    *,
+    link: Callable[[PaperExchange], Exchange] | None = None,
+) -> tuple[int, list[EventDict]]:
+    """Run ``job`` after the crash. Returns the exit code and every event it emitted.
+
+    ``link`` puts a venue double in front of paper.
+    """
+    exchange = venue.paper if link is None else link(venue.paper)
 
     async def go() -> int:
-        return await asyncio.wait_for(_engine(venue, venue.paper, tmp_path, job).run(), 5)
+        return await asyncio.wait_for(_engine(venue, exchange, tmp_path, job).run(), 5)
 
     with capture_events() as logs:
         exit_code = asyncio.run(go())
@@ -709,4 +721,61 @@ def test_a_cancel_all_after_a_crashed_flatten_books_the_close_at_boot(tmp_path: 
     with SQLiteStore(tmp_path / "saga.db") as store:
         close = store.get_order(derive_cloid(f"{OPERATOR}:BTC:1"))
     assert close is not None
+    assert close.state is OrderState.FILLED
+
+
+class _FillsDuringTheWait(VenueLink):
+    """``close`` is unknown to the boot's read. It fills just before the next read.
+
+    So it fills after flatten's first position read and before the wait ends.
+    """
+
+    def __init__(self, venue: Exchange, *, close: PlaceOrder) -> None:
+        super().__init__(venue)
+        self._close = close
+        self._reads = 0
+
+    async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
+        if ref.cloid == self._close.cloid:
+            self._reads += 1
+            if self._reads == 1:
+                return VenueOrderView(status=None)
+            if self._reads == 2:
+                await self.place(self._close)
+        return await super().fetch_order(ref)
+
+
+def test_a_close_left_open_that_fills_during_the_wait_leaves_only_the_rest_to_close(
+    tmp_path: Path,
+) -> None:
+    # A close sized from the read before the wait would ask for the whole size
+    # again. Paper would shrink it to what is left and cancel the rest (ADR-0057).
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+    left_open = _left_open(tmp_path / "saga.db", "BTC", quantity="0.01")
+    close = PlaceOrder(
+        cloid=left_open,
+        symbol="BTC",
+        side=Side.SELL,
+        quantity=Decimal("0.01"),
+        order_type=OrderType.MARKET,
+        time_in_force=TimeInForce.IOC,
+        reduce_only=True,
+    )
+    venue = _Venue(tmp_path / "saga.db", ManualClock())
+
+    exit_code, logs = _next_run(
+        venue, tmp_path, Flatten(), link=partial(_FillsDuringTheWait, close=close)
+    )
+
+    assert exit_code == 0
+    assert logs[-1]["outcome"] == "done"
+    # Opened at 42000. Both halves close at the last row, 44000 (ADR-0059).
+    assert _partitions(tmp_path) == {("trivial", "BTC"): (Decimal("0"), Decimal("40"))}
+    with SQLiteStore(tmp_path / "saga.db") as store:
+        old = store.get_order(left_open)
+        close = store.get_order(derive_cloid(f"{OPERATOR}:BTC:2"))
+    assert old is not None
+    assert old.state is OrderState.FILLED
+    assert close is not None
+    assert close.quantity == Decimal("0.01")
     assert close.state is OrderState.FILLED
