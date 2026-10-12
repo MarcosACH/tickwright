@@ -723,6 +723,94 @@ def test_two_held_symbols_retry_at_the_same_time_and_their_passes_never_overlap(
     assert sorted(gave_up) == ["BTC", "ETH"]
 
 
+class _PlacesOverANetwork(VenueLink):
+    """Each send waits on the network before the venue takes it, as an HTTP send does.
+
+    ``places`` lists the symbol of each send in order.
+    """
+
+    def __init__(self, venue: Exchange) -> None:
+        super().__init__(venue)
+        self.places: list[str] = []
+
+    async def place(self, order: PlaceOrder) -> None:
+        self.places.append(order.symbol)
+        # The network round trip, where another loop gets to run.
+        await asyncio.sleep(0)
+        await super().place(order)
+
+
+def test_a_send_that_waits_on_the_network_gets_no_second_close_beside_it(
+    tmp_path: Path,
+) -> None:
+    # While one loop's send waits, another loop may run. Its close must still be
+    # handled before it looks for a verdict. Otherwise it reads no fill and sends
+    # a second close beside the first (ADR-0056).
+    _hold(tmp_path / "saga.db", {"BTC": "0.02", "ETH": "0.5"})
+    venues: list[_PlacesOverANetwork] = []
+
+    def link(paper: PaperExchange) -> Exchange:
+        venues.append(_PlacesOverANetwork(paper))
+        return venues[0]
+
+    exit_code, logs = _flatten(tmp_path, link=link)
+
+    assert exit_code == 0
+    [venue] = venues
+    assert sorted(venue.places) == ["BTC", "ETH"]
+    assert not [log for log in logs if log["event"].startswith("flatten.")]
+    assert _partitions(tmp_path) == {
+        ("trivial", "BTC"): (Decimal("0"), Decimal("40")),
+        ("trivial", "ETH"): (Decimal("0"), Decimal("100")),
+    }
+
+
+class _NeverHandlesCloses:
+    """An ``InMemoryBus`` that takes every ``__operator__`` close and never handles it.
+
+    ``closes`` counts them. This is a publish that returned before the engine handled it.
+    """
+
+    def __init__(self) -> None:
+        self._bus = InMemoryBus()
+        self.closes = 0
+
+    def subscribe[E: Event](self, event_type: type[E], handler: Handler[E]) -> None:
+        self._bus.subscribe(event_type, handler)
+
+    async def start(self) -> None:
+        await self._bus.start()
+
+    async def publish(self, event: Event) -> None:
+        if isinstance(event, PlaceSignal) and event.strategy_id == OPERATOR:
+            self.closes += 1
+            return
+        await self._bus.publish(event)
+
+    async def drain(self) -> None:
+        await self._bus.drain()
+
+    async def close(self) -> None:
+        await self._bus.close()
+
+
+def test_a_close_the_engine_never_handled_stops_the_run_with_no_second_close(
+    tmp_path: Path,
+) -> None:
+    # With no saga there is no verdict to read. Reading it as a dry attempt would
+    # send a second close, and the first could still reach the venue (ADR-0056).
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+    bus = _NeverHandlesCloses()
+
+    exit_code, logs = _flatten(tmp_path, bus=bus)
+
+    assert exit_code == 1
+    assert bus.closes == 1
+    assert not [log for log in logs if log["event"] == "flatten.dry_attempt"]
+    assert [log for log in logs if log["event"] == "engine.faulted"]
+    assert logs[-1]["outcome"] == "stopped"
+
+
 def test_a_second_flatten_closes_with_a_seq_above_the_first_ones_close(tmp_path: Path) -> None:
     # The manager drops a signal id it has seen (ADR-0006). So a second flatten that
     # reused seq 1 would send nothing, and the size would stay open. The first one

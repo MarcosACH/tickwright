@@ -144,7 +144,7 @@ class Flatten:
             # is consumed, and the manager drops a signal id it has seen (ADR-0006).
             high_water = context.checkpointer.cache.seq_high_water()
             emitter.set_next_seq(high_water.get(OPERATOR, 0) + 1)
-            passes = _Passes(context.reconciler)
+            turns = _Turns(context.reconciler)
             # One loop per symbol, all at the same time, so a thin book on one
             # symbol does not hold back the others (ADR-0056). A task group
             # cancels the rest when one faults. A loop reports nothing, because
@@ -152,7 +152,7 @@ class Flatten:
             async with asyncio.TaskGroup() as group:
                 for symbol, size in positions.items():
                     group.create_task(
-                        _flatten_symbol(symbol, size, priced, emitter, passes, context)
+                        _flatten_symbol(symbol, size, priced, emitter, turns, context)
                     )
         return await _final_read(context)
 
@@ -164,24 +164,34 @@ DRY_WAIT_SECONDS = 2.0
 """The wait after a dry attempt, before the next one (ADR-0056)."""
 
 
-class _Passes:
-    """One reconcile pass at a time, shared by every loop of one flatten run.
+class _Turns:
+    """One close or reconcile pass at a time, shared by every loop of one flatten run.
 
-    A loop that needs a pass waits for the one in progress, then runs its own.
+    A loop that needs a turn waits for the one in progress, then takes its own.
     A pass that started before the loop's attempt ended may not cover it.
+
+    A close takes a turn too. A publish made while another task's cascade runs
+    joins that cascade and returns before it is handled. The loop would then
+    find no saga, read it as a close that filled nothing, and send a second
+    one beside it (ADR-0056).
     """
 
     def __init__(self, reconciler: Reconciler) -> None:
         self._reconciler = reconciler
         self._lock = asyncio.Lock()
 
-    async def run(self) -> bool:
+    async def run_pass(self) -> bool:
         """Run both halves of one pass. False when either failed."""
         async with self._lock:
             return (
                 await self._reconciler.reconcile_inflight()
                 and await self._reconciler.reconcile_open_orders()
             )
+
+    async def close(self, symbol: str, size: Decimal, emitter: SignalEmitter) -> str:
+        """Send one close, and return once the engine has handled it."""
+        async with self._lock:
+            return await _close(symbol, size, emitter)
 
 
 class _DryAttempts:
@@ -213,15 +223,15 @@ async def _flatten_symbol(
     size: Decimal,
     priced: set[str],
     emitter: SignalEmitter,
-    passes: _Passes,
+    turns: _Turns,
     context: ExitContext,
 ) -> None:
     """One symbol's loop: wait for a close the boot left open, then close the rest."""
     # One count for the whole loop, so the resume wait's dry attempts are in the row.
     dry = _DryAttempts(symbol, context.clock)
-    resumed = await _resume_closes(symbol, size, dry, passes, context)
+    resumed = await _resume_closes(symbol, size, dry, turns, context)
     if resumed is not None:
-        await _close_symbol(symbol, resumed, priced, emitter, dry, passes, context)
+        await _close_symbol(symbol, resumed, priced, emitter, dry, turns, context)
 
 
 async def _close_symbol(
@@ -230,7 +240,7 @@ async def _close_symbol(
     priced: set[str],
     emitter: SignalEmitter,
     dry: _DryAttempts,
-    passes: _Passes,
+    turns: _Turns,
     context: ExitContext,
 ) -> None:
     """Close ``symbol`` until the venue reads it flat, or stop after 3 dry attempts in a row.
@@ -239,7 +249,7 @@ async def _close_symbol(
     (ADR-0056). A failed read is dry too, so a venue that cannot answer never hangs
     the run (ADR-0060). The final read reports what is left.
     """
-    while attempt := await _attempt(symbol, size, priced, emitter, dry, passes, context):
+    while attempt := await _attempt(symbol, size, priced, emitter, dry, turns, context):
         size = attempt.left
         if attempt.dry is None:
             dry.reset()
@@ -263,7 +273,7 @@ async def _attempt(
     priced: set[str],
     emitter: SignalEmitter,
     dry: _DryAttempts,
-    passes: _Passes,
+    turns: _Turns,
     context: ExitContext,
 ) -> _Attempt | None:
     """Try to close ``size`` once, then read what is left. ``None`` ends the loop.
@@ -278,8 +288,12 @@ async def _attempt(
     elif await _size_gap(symbol, size, context):
         reason = "size_gap"
     else:
-        cloid = await _close(symbol, size, emitter)
-        if not await _verdict(cloid, size, dry, passes, context):
+        cloid = await turns.close(symbol, size, emitter)
+        if context.checkpointer.cache.get_order(cloid) is None:
+            # With no saga there is no verdict, and the close may still reach the
+            # venue. A second close beside it could close the size twice (ADR-0056).
+            raise InvariantViolation(f"flatten close {cloid} on {symbol} was never handled")
+        if not await _verdict(cloid, size, dry, turns, context):
             return None
         reason = None if _filled(cloid, context) else "no_fill"
     left = await _read_left(symbol, size, dry, context)
@@ -305,7 +319,7 @@ def _held(symbol: str, context: ExitContext) -> Decimal:
 
 
 async def _verdict(
-    cloid: str, size: Decimal, dry: _DryAttempts, passes: _Passes, context: ExitContext
+    cloid: str, size: Decimal, dry: _DryAttempts, turns: _Turns, context: ExitContext
 ) -> bool:
     """Run reconcile passes until the close's saga is terminal (ADR-0011, ADR-0026).
 
@@ -319,7 +333,7 @@ async def _verdict(
     """
     while not _decided(cloid, context):
         await context.clock.sleep(context.pass_interval_seconds)
-        if not await passes.run() and await dry.gave_up("read_failed", size):
+        if not await turns.run_pass() and await dry.gave_up("read_failed", size):
             return False
     return True
 
@@ -347,7 +361,7 @@ async def _read_left(
 
 
 async def _resume_closes(
-    symbol: str, size: Decimal, dry: _DryAttempts, passes: _Passes, context: ExitContext
+    symbol: str, size: Decimal, dry: _DryAttempts, turns: _Turns, context: ExitContext
 ) -> Decimal | None:
     """Wait for any close the boot left open in ``symbol``, then say what is left to close.
 
@@ -362,7 +376,7 @@ async def _resume_closes(
     if not left_open:
         return size
     for order in left_open:
-        if not await _verdict(order.cloid, size, dry, passes, context):
+        if not await _verdict(order.cloid, size, dry, turns, context):
             return None
     # The old close may have filled during the wait, so only a new read sizes the next.
     return await _read_left(symbol, size, dry, context)

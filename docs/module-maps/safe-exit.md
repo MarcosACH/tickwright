@@ -159,6 +159,10 @@ context. Starts the feed through the `FeedHandle`.
 - **(Built by #473:** each symbol runs in its own task in one `asyncio.TaskGroup`, so a fault in
   one loop cancels the others. The pass lock is an `asyncio.Lock` that every loop shares. A loop
   returns nothing. Only the final read says what is left.**)**
+- **(Built by #473:** a close takes the same lock as a pass. A publish made while another task's
+  cascade runs joins that cascade and returns before it is handled. The loop would then read no
+  saga as a close that filled nothing, and send a second one beside it. A close that still has no
+  saga after its publish stops the run, so the next boot resumes it.**)**
 - Do the final venue read. Done means no resting order and no position.
 - Keep the `__operator__` seq counter. Start it from the same saga high-water fold the
   `StrategyHost` uses. `engine` cannot import `SignalEmitter`.
