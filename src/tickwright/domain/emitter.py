@@ -7,20 +7,15 @@ is a correctness spine, not strategy business logic — so this helper concentra
 it, plus the clock-stamped envelope and the publish, behind two typed methods.
 A strategy *composes* an emitter (holds one as a field) rather than inheriting a
 base: the ``Strategy`` seam is satisfied by shape, never by inheritance (ADR-0032).
-Depends on ``domain`` only, so it emits no named events.
+It lives in ``domain`` so the engine's own operator jobs keep their seq the same
+way. One counter rule then serves every signal source. It emits no named events.
 """
 
 from decimal import Decimal
 
-from tickwright.domain import (
-    CancelSignal,
-    Clock,
-    EventBus,
-    OrderType,
-    PlaceSignal,
-    Side,
-    TimeInForce,
-)
+from .enums import OrderType, Side, TimeInForce
+from .events import CancelSignal, PlaceSignal
+from .protocols import Clock, EventBus
 
 
 class SignalEmitter:

@@ -8,6 +8,7 @@ It is the stable contract of the system; keep it log-free and dependency-free.
 from .account import Account, AccountSpec, AccountView, venue_cash
 from .duration import duration_ns
 from .economics import fill_fee, funding_amount, funding_boundaries
+from .emitter import SignalEmitter
 from .enums import (
     AggressorSide,
     ComponentState,
@@ -231,6 +232,8 @@ __all__ = [
     "account_valuation",
     "account_view",
     "position_view",
+    # the one seq counter for every signal source (ADR-0016)
+    "SignalEmitter",
     # retry pacing
     "Backoff",
     "Deadline",

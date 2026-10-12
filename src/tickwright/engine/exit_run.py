@@ -22,9 +22,9 @@ from tickwright.domain import (
     OrderAnchor,
     OrderRef,
     OrderType,
-    PlaceSignal,
     PreTradeGuard,
     Side,
+    SignalEmitter,
     TimeInForce,
     VenueOpenOrder,
     VenueReadFailure,
@@ -138,9 +138,11 @@ class Flatten:
             # Only a replay ends, and it plays the whole file first. So each close
             # fills at the last row (ADR-0059). The CLI refuses a live feed until #475.
             await context.feed.ended()
-            # From the sagas, as a strategy's is. An earlier flatten's seq is
-            # consumed, and the manager drops a signal id it has seen (ADR-0006).
-            seq = context.checkpointer.cache.seq_high_water().get(OPERATOR, 0)
+            emitter = SignalEmitter(strategy_id=OPERATOR, bus=context.bus, clock=context.clock)
+            # Seeded from the sagas, as a strategy's is. An earlier flatten's seq
+            # is consumed, and the manager drops a signal id it has seen (ADR-0006).
+            high_water = context.checkpointer.cache.seq_high_water()
+            emitter.set_next_seq(high_water.get(OPERATOR, 0) + 1)
             for symbol, size in positions.items():
                 # No venue can send a market close without a price. The symbol
                 # stays open, and the final read reports its size.
@@ -150,8 +152,7 @@ class Flatten:
                 if isinstance(resumed, VenueReadFailure):
                     return ExitOutcome(status=ExitStatus.STOPPED, left=describe_failure(resumed))
                 if resumed:
-                    seq += 1
-                    await _await_verdict(await _close(symbol, resumed, seq, context), context)
+                    await _await_verdict(await _close(symbol, resumed, emitter), context)
         return await _final_read(context)
 
 
@@ -179,26 +180,20 @@ async def _resume_closes(
     return positions.get(symbol, Decimal(0))
 
 
-async def _close(symbol: str, size: Decimal, seq: int, context: ExitContext) -> str:
+async def _close(symbol: str, size: Decimal, emitter: SignalEmitter) -> str:
     """Send one reduce-only market IOC order for the whole of ``size`` (ADR-0054).
 
     Returns the cloid of the order's saga.
     """
-    now = context.clock.timestamp_ns()
-    signal = PlaceSignal(
-        ts_event=now,
-        ts_init=now,
-        strategy_id=OPERATOR,
+    signal_id = await emitter.place(
         symbol=symbol,
-        seq=seq,
         side=Side.SELL if size > 0 else Side.BUY,
         quantity=abs(size),
         order_type=OrderType.MARKET,
         time_in_force=TimeInForce.IOC,
         reduce_only=True,
     )
-    await context.bus.publish(signal)
-    return derive_cloid(signal.signal_id)
+    return derive_cloid(signal_id)
 
 
 async def _await_verdict(cloid: str, context: ExitContext) -> None:

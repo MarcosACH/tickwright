@@ -82,7 +82,7 @@ A strategy consumes ticks and lifecycle events and emits `PlaceSignal`/`CancelSi
 - [ ] Add a class in `src/tickwright/strategies/` implementing the `Strategy` Protocol:
   `strategy_id`, `on_tick`, `on_order_event`, `set_next_seq`, `snapshot`, `restore`.
 - [ ] Emit signals through a composed `SignalEmitter`
-  ([`strategies/emitter.py`](../src/tickwright/strategies/emitter.py)) — it owns the `seq`,
+  ([`domain/emitter.py`](../src/tickwright/domain/emitter.py)) — it owns the `seq`,
   clock-stamps each signal, and publishes it. Never build a `signal_id` by hand.
 - [ ] Close a position with a reduce-only order. It can only shrink the account net, never grow it
   or flip it. An order larger than the net is shrunk to it, and the cut part ends `CANCELLED`

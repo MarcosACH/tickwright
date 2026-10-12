@@ -36,7 +36,7 @@ src/tickwright/
     store/                    # the lock, the seq record, split_basis
     feed/replay.py            # add_symbols is a no-op
   venues/hyperliquid/         # r flag, batches of 200, refusals, mark cap, reads, feed symbols
-  strategies/emitter.py       # cancel_all(), reduce_only on place()
+  domain/emitter.py           # cancel_all(), reduce_only on place(), moved from strategies
   observability/catalog.py    # the 8 new events
   app/
     __main__.py               # cancel-all and flatten commands, --new-store
@@ -164,6 +164,9 @@ context. Starts the feed through the `FeedHandle`.
   flatten closed. It exits 1 and names the symbol in `left`. #474 builds the counter.**)**
 - **(Built by #474:** the fold moved to `Cache.seq_high_water()`. `StrategyHost` and `Flatten`
   both read it. Each close takes the next seq.**)**
+- **(Built by #473:** `SignalEmitter` moved to `domain`, so `engine` can import it. `Flatten` keeps
+  no counter of its own. It seeds an emitter for `__operator__` the way `StrategyHost` seeds a
+  strategy's, and every close goes through `place()`. The seq rule (ADR-0016) lives in one place.**)**
 
 **The per-symbol loop (private):**
 
@@ -299,7 +302,7 @@ check. `__operator__` owns no partition, so that check would deny every flatten 
 
 ---
 
-### StrategyHost and SignalEmitter (`engine`, `strategies`, existing)
+### StrategyHost and SignalEmitter (`engine`, `domain`, existing)
 
 **Interface:** The emitter gains `cancel_all(symbol=...)`, which returns its `signal_id`. `place()`
 gains `reduce_only`.
@@ -310,6 +313,9 @@ a handled cancel all's seq (ADR-0055).
 **Seams:** None new.
 
 **Depth note:** The seq stays owned by the emitter. The host only resumes it.
+
+**(Built by #473:** the emitter moved from `strategies` to `domain`. `Flatten` uses one for
+`__operator__`.**)**
 
 ---
 
