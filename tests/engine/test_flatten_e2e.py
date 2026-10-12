@@ -752,7 +752,7 @@ def test_a_close_left_open_that_fills_during_the_wait_leaves_only_the_rest_to_cl
     # again. Paper would shrink it to what is left and cancel the rest (ADR-0057).
     _hold(tmp_path / "saga.db", {"BTC": "0.02"})
     left_open = _left_open(tmp_path / "saga.db", "BTC", quantity="0.01")
-    close = PlaceOrder(
+    late = PlaceOrder(
         cloid=left_open,
         symbol="BTC",
         side=Side.SELL,
@@ -764,7 +764,7 @@ def test_a_close_left_open_that_fills_during_the_wait_leaves_only_the_rest_to_cl
     venue = _Venue(tmp_path / "saga.db", ManualClock())
 
     exit_code, logs = _next_run(
-        venue, tmp_path, Flatten(), link=partial(_FillsDuringTheWait, close=close)
+        venue, tmp_path, Flatten(), link=partial(_FillsDuringTheWait, close=late)
     )
 
     assert exit_code == 0
