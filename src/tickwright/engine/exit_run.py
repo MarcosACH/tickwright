@@ -172,25 +172,33 @@ async def _close_symbol(
     while True:
         # No venue can send a market close without a price.
         if symbol not in priced:
-            if await dry.gave_up("no_price", size):
+            reason = "no_price"
+        elif await _size_gap(symbol, size, context):
+            reason = "size_gap"
+        else:
+            cloid = await _close(symbol, size, emitter)
+            # A second close beside an open one could close the size twice. So a failed
+            # pass waits for this close again, and a give-up leaves it to the next boot.
+            while not await _await_verdict(cloid, context):
+                if await dry.gave_up("read_failed", size):
+                    return
+            read = await _read_size(symbol, size, dry, context)
+            # None is a give-up on the reads. Zero is a flat venue.
+            if not read:
                 return
-            continue
-        cloid = await _close(symbol, size, emitter)
-        # A second close beside an open one could close the size twice. So a failed
-        # pass waits for this close again, and a give-up leaves it to the next boot.
-        while not await _await_verdict(cloid, context):
-            if await dry.gave_up("read_failed", size):
-                return
-        while isinstance(positions := await context.account.fetch_positions(), VenueReadFailure):
-            if await dry.gave_up("read_failed", size):
-                return
-        size = positions.get(symbol, Decimal(0))
-        if not size:
+            size = read
+            if _filled(cloid, context):
+                dry.reset()
+                continue
+            reason = "no_fill"
+        if await dry.gave_up(reason, size):
             return
-        if _filled(cloid, context):
-            dry.reset()
-        elif await dry.gave_up("no_fill", size):
-            return
+        if reason == "size_gap":
+            # The gap can be the venue's side too, so the next check needs a new read.
+            read = await _read_size(symbol, size, dry, context)
+            if not read:
+                return
+            size = read
 
 
 class _DryAttempts:
@@ -215,6 +223,38 @@ class _DryAttempts:
             return True
         await self._context.clock.sleep(DRY_WAIT_SECONDS)
         return False
+
+
+async def _size_gap(symbol: str, size: Decimal, context: ExitContext) -> bool:
+    """Whether the partitions on ``symbol`` fail to sum to the venue's ``size``.
+
+    A close is split across the partitions it closes (ADR-0054). Against a gap,
+    some of it would land on no partition, or one would be left holding size.
+    The gap can be fills the bus has not delivered yet, so a drain comes first.
+    """
+    if _held(symbol, context) == size:
+        return False
+    await context.bus.drain()
+    return _held(symbol, context) != size
+
+
+def _held(symbol: str, context: ExitContext) -> Decimal:
+    """The sum of every partition's size on ``symbol``."""
+    return sum((part for _owner, part in context.checkpointer.split_basis(symbol)), Decimal(0))
+
+
+async def _read_size(
+    symbol: str, held: Decimal, dry: _DryAttempts, context: ExitContext
+) -> Decimal | None:
+    """The venue's size on ``symbol``, read again after each failed read.
+
+    ``None`` means the failed reads used up the dry attempts. ``held`` is the
+    last size read, for ``flatten.gave_up``.
+    """
+    while isinstance(positions := await context.account.fetch_positions(), VenueReadFailure):
+        if await dry.gave_up("read_failed", held):
+            return None
+    return positions.get(symbol, Decimal(0))
 
 
 async def _resume_closes(

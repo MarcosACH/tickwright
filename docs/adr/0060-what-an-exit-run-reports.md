@@ -99,6 +99,10 @@ when a venue read fails, and which named events an exit run emits. Decided in
   **(Field names as shipped, since [#473](https://github.com/MarcosACH/tickwright/issues/473):**
   the size left on `flatten.gave_up` is the field `size`, signed, as a string. `count` on
   `flatten.dry_attempt` is the dry attempts in a row so far, from 1 to 3.**)**
+
+  **(Extended by [#473](https://github.com/MarcosACH/tickwright/issues/473):** `reason` on
+  `flatten.dry_attempt` can also be `size_gap`. That is a gap between the partitions and the venue
+  size that a drain did not close (ADR-0054). No close goes out against it.**)**
 - **No separate summary.** `exit.finished` is the summary. It goes through the same logger as every
   other event, so it is the last line the operator sees.
 

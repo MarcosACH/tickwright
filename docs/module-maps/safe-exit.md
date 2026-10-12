@@ -188,6 +188,10 @@ context. Starts the feed through the `FeedHandle`.
 - **(Deferred by #472:** this size check and the drain moved to #475. On paper the sizes always
   match when flatten places. #472 also sends no order for a symbol the feed never priced, and the
   final read reports it. Under replay no later price can come.**)**
+- **(Built by #473:** the size check and the drain. A gap the drain does not close is a dry
+  attempt with reason `size_gap`. The gap is checked again after a new venue read.**)**
+- **(Deferred by #473:** the `reconcile_account()` step moved to #475, code and test together.
+  Paper has no account truth, so it cannot run there, and a live venue arrives in #475.**)**
 - A gap that is still there counts as a dry attempt. So a gap that never heals ends in
   `flatten.gave_up`, not in a loop.
 - A flat venue moves each leftover into the unattributed partition instead.

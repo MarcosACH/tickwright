@@ -28,8 +28,11 @@ from tickwright.domain import (
     OPERATOR,
     AggressorSide,
     Clock,
+    Event,
+    EventBus,
     Exchange,
     ExecutionReport,
+    Handler,
     InstrumentSpec,
     MarketTick,
     Order,
@@ -81,7 +84,7 @@ def _ticks(path: Path, replayed: Iterable[str]) -> Path:
     return path
 
 
-def _paper(bus: InMemoryBus, clock: ManualClock, store: SQLiteStore) -> PaperExchange:
+def _paper(bus: EventBus, clock: ManualClock, store: SQLiteStore) -> PaperExchange:
     reads = paper_store_reads(store)
     return PaperExchange(
         bus=bus,
@@ -150,7 +153,7 @@ def _flatten(
     replayed: Iterable[str] = tuple(_ROWS),
     resting: bool = False,
     clock: ManualClock | None = None,
-    bus: InMemoryBus | None = None,
+    bus: EventBus | None = None,
 ) -> tuple[int, list[EventDict]]:
     """Run flatten over paper and the ``_ROWS`` replay file.
 
@@ -188,7 +191,7 @@ def _flatten(
 _RESTING = derive_cloid("resting:BTC:1")
 
 
-async def _rest(bus: InMemoryBus, paper: PaperExchange, store: SQLiteStore, clock: Clock) -> None:
+async def _rest(bus: EventBus, paper: PaperExchange, store: SQLiteStore, clock: Clock) -> None:
     """Rest ``_RESTING`` on paper, with its saga in the store.
 
     Paper keeps its book in memory only (#484), so the order goes on the run's own
@@ -317,7 +320,7 @@ class _ThinBook(VenueLink):
     ``fills`` gives the size each send finds, in order. Zero fills nothing.
     """
 
-    def __init__(self, venue: Exchange, *, bus: InMemoryBus, fills: Sequence[str]) -> None:
+    def __init__(self, venue: Exchange, *, bus: EventBus, fills: Sequence[str]) -> None:
         super().__init__(venue)
         self._bus = bus
         self._fills = [Decimal(fill) for fill in fills]
@@ -360,6 +363,109 @@ def test_a_fill_between_dry_attempts_resets_the_count(tmp_path: Path) -> None:
     assert [(log["symbol"], Decimal(log["size"])) for log in gave_up] == [("BTC", Decimal("0.01"))]
     symbol, left = logs[-1]["left"].split("=")
     assert (symbol, Decimal(left)) == ("BTC", Decimal("0.01"))
+
+
+class _ReadsMore(VenueLink):
+    """The venue reads more size than the ledger holds, by ``extra``, on every read."""
+
+    def __init__(self, venue: Exchange, *, symbol: str, extra: str) -> None:
+        super().__init__(venue)
+        self._symbol = symbol
+        self._extra = Decimal(extra)
+
+    async def fetch_positions(self) -> dict[str, Decimal] | VenueReadFailure:
+        positions = await super().fetch_positions()
+        if isinstance(positions, VenueReadFailure):
+            return positions
+        return {**positions, self._symbol: positions.get(self._symbol, Decimal(0)) + self._extra}
+
+
+def test_a_size_gap_that_never_heals_gives_up_with_no_close(tmp_path: Path) -> None:
+    # A close is split across the partitions, so it may only go out when they sum
+    # to the venue size (ADR-0054). Paper has no account truth to heal the gap with.
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+
+    exit_code, logs = _flatten(tmp_path, link=partial(_ReadsMore, symbol="BTC", extra="0.01"))
+
+    assert exit_code == 1
+    dry = [log for log in logs if log["event"] == "flatten.dry_attempt"]
+    assert [(log["count"], log["reason"]) for log in dry] == [
+        (1, "size_gap"),
+        (2, "size_gap"),
+        (3, "size_gap"),
+    ]
+    gave_up = [log for log in logs if log["event"] == "flatten.gave_up"]
+    assert [(log["symbol"], log["size"]) for log in gave_up] == [("BTC", "0.03")]
+    assert not [log for log in logs if str(log.get("signal_id", "")).startswith(OPERATOR)]
+    assert logs[-1]["left"] == "BTC=0.03"
+    assert _partitions(tmp_path) == {("trivial", "BTC"): (Decimal("0.02"), Decimal("0"))}
+
+
+class _HoldsOneOrder:
+    """An ``InMemoryBus`` that holds every report for ``cloid`` until ``drain()``.
+
+    Those are reports the venue published that the engine has not applied yet.
+    Kafka can leave them in flight, in order, and ``drain()`` waits for them.
+    """
+
+    def __init__(self, cloid: str) -> None:
+        self._bus = InMemoryBus()
+        self._cloid = cloid
+        self._held: list[ExecutionReport] = []
+
+    def subscribe[E: Event](self, event_type: type[E], handler: Handler[E]) -> None:
+        self._bus.subscribe(event_type, handler)
+
+    async def start(self) -> None:
+        await self._bus.start()
+
+    async def publish(self, event: Event) -> None:
+        if isinstance(event, ExecutionReport) and event.cloid == self._cloid:
+            self._held.append(event)
+            return
+        await self._bus.publish(event)
+
+    async def drain(self) -> None:
+        held, self._held = self._held, []
+        for event in held:
+            await self._bus.publish(event)
+        await self._bus.drain()
+
+    async def close(self) -> None:
+        await self._bus.close()
+
+
+class _FillsAsItCancels(VenueLink):
+    """The market trades through each resting BTC buy just before its cancel lands."""
+
+    def __init__(self, venue: Exchange, *, bus: EventBus) -> None:
+        super().__init__(venue)
+        self._bus = bus
+
+    async def cancel(self, refs: Sequence[OrderRef]) -> None:
+        await self._bus.publish(_tick("BTC", "30000"))
+        await super().cancel(refs)
+
+
+def test_a_size_gap_from_a_fill_still_in_flight_closes_after_a_drain(tmp_path: Path) -> None:
+    # The resting buy fills on the venue as cancel all runs, but its fill is still
+    # in flight. The drain applies it, so the partitions sum to the venue size
+    # again, and one close covers both (ADR-0054).
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+    bus = _HoldsOneOrder(_RESTING)
+
+    exit_code, logs = _flatten(
+        tmp_path, link=partial(_FillsAsItCancels, bus=bus), bus=bus, resting=True
+    )
+
+    assert exit_code == 0
+    assert not [log for log in logs if log["event"] == "flatten.dry_attempt"]
+    assert logs[-1]["outcome"] == "done"
+    # Both close at 44000. One opened at 42000, the other filled at 30000.
+    assert _partitions(tmp_path) == {
+        ("trivial", "BTC"): (Decimal("0"), Decimal("40")),
+        ("resting", "BTC"): (Decimal("0"), Decimal("140")),
+    }
 
 
 def test_flatten_cancels_a_resting_order_before_it_closes_a_long_and_a_short(
