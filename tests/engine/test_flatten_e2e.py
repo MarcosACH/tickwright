@@ -882,6 +882,45 @@ def test_a_failed_read_after_a_close_is_a_dry_attempt_and_the_next_read_decides(
     assert _partitions(tmp_path) == {("trivial", "BTC"): (Decimal("0"), Decimal("40"))}
 
 
+class _ReadsPositionsOnce(VenueLink):
+    """Only the first positions read answers. Every later one fails."""
+
+    def __init__(self, venue: Exchange) -> None:
+        super().__init__(venue)
+        self._reads = 0
+
+    async def fetch_positions(self) -> dict[str, Decimal] | VenueReadFailure:
+        self._reads += 1
+        if self._reads > 1:
+            return VenueReadFailure.SEND_FAILED
+        return await super().fetch_positions()
+
+
+def test_a_venue_that_never_answers_after_a_close_gives_up_and_the_run_ends(
+    tmp_path: Path,
+) -> None:
+    # Each failed read is a dry attempt, so a venue that cannot answer never hangs
+    # the run (ADR-0060). It sends no second close.
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+
+    exit_code, logs = _flatten(tmp_path, link=_ReadsPositionsOnce)
+
+    assert exit_code == 1
+    dry = [log for log in logs if log["event"] == "flatten.dry_attempt"]
+    assert [(log["count"], log["reason"]) for log in dry] == [
+        (1, "read_failed"),
+        (2, "read_failed"),
+        (3, "read_failed"),
+    ]
+    # The close filled, but no read could say so. So the event names the last
+    # size the venue reported, from before the close.
+    gave_up = [log for log in logs if log["event"] == "flatten.gave_up"]
+    assert [(log["symbol"], log["size"]) for log in gave_up] == [("BTC", "0.02")]
+    assert not [log for log in logs if log.get("signal_id") == f"{OPERATOR}:BTC:2"]
+    assert logs[-1]["outcome"] == "stopped"
+    assert logs[-1]["left"] == f"read_failed: {VenueReadFailure.SEND_FAILED.value}"
+
+
 def _left_open(path: Path, symbol: str, *, quantity: str = "0.02") -> str:
     """Leave an ``__operator__`` close ``LIVE`` in the store, one paper never lists.
 
