@@ -443,7 +443,8 @@ class _FailsOneRead(VenueLink):
     [
         pytest.param("fetch_positions", 1, id="positions-before-any-close"),
         pytest.param("fetch_open_orders", 2, id="final-orders"),
-        pytest.param("fetch_positions", 2, id="final-positions"),
+        # The second positions read is the one after the close.
+        pytest.param("fetch_positions", 3, id="final-positions"),
     ],
 )
 def test_a_failed_venue_read_stops_flatten_and_never_reads_as_flat(
@@ -517,17 +518,43 @@ class _LostAndUnreadable(_DropsEveryPlace):
         return VenueReadFailure.SEND_FAILED
 
 
-def test_a_failed_reconcile_pass_ends_the_wait_and_the_final_read_decides(
-    tmp_path: Path,
-) -> None:
-    # The saga stays open for the next boot to resume (#474). The run never hangs.
+def test_three_failed_reconcile_passes_give_up_with_no_second_close(tmp_path: Path) -> None:
+    # A failed read is a dry attempt (ADR-0060), so the run never hangs. The close
+    # could still fill, so no second one goes beside it. The saga stays open for
+    # the next boot to resume (#474).
     _hold(tmp_path / "saga.db", {"BTC": "0.02"})
 
     exit_code, logs = _flatten(tmp_path, link=_LostAndUnreadable)
 
     assert exit_code == 1
+    dry = [log for log in logs if log["event"] == "flatten.dry_attempt"]
+    assert [(log["count"], log["reason"]) for log in dry] == [
+        (1, "read_failed"),
+        (2, "read_failed"),
+        (3, "read_failed"),
+    ]
+    assert [log["symbol"] for log in logs if log["event"] == "flatten.gave_up"] == ["BTC"]
+    assert not [log for log in logs if log.get("signal_id") == f"{OPERATOR}:BTC:2"]
     assert logs[-1]["outcome"] == "stopped"
     assert logs[-1]["left"] == "BTC=0.02"
+
+
+def test_a_failed_read_after_a_close_is_a_dry_attempt_and_the_next_read_decides(
+    tmp_path: Path,
+) -> None:
+    # The close filled, but the read that would say so failed. Flatten waits and
+    # reads again instead of stopping (ADR-0060). It sends no second close.
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+
+    # The first positions read is flatten's own. The second is the one after the close.
+    exit_code, logs = _flatten(tmp_path, link=partial(_FailsOneRead, read="fetch_positions", nth=2))
+
+    assert exit_code == 0
+    dry = [log for log in logs if log["event"] == "flatten.dry_attempt"]
+    assert [(log["count"], log["reason"]) for log in dry] == [(1, "read_failed")]
+    assert not [log for log in logs if log.get("signal_id") == f"{OPERATOR}:BTC:2"]
+    assert logs[-1]["outcome"] == "done"
+    assert _partitions(tmp_path) == {("trivial", "BTC"): (Decimal("0"), Decimal("40"))}
 
 
 def _left_open(path: Path, symbol: str, *, quantity: str = "0.02") -> str:
