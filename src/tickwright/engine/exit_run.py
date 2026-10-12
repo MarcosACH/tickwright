@@ -188,6 +188,30 @@ class _Passes:
             )
 
 
+class _DryAttempts:
+    """One symbol's count of attempts in a row that closed nothing (ADR-0056)."""
+
+    def __init__(self, symbol: str, clock: Clock) -> None:
+        self._symbol = symbol
+        self._clock = clock
+        self._count = 0
+
+    def reset(self) -> None:
+        self._count = 0
+
+    async def gave_up(self, reason: str, size: Decimal) -> bool:
+        """Count one dry attempt. Say whether it was the last, or wait before the next."""
+        self._count += 1
+        named_event(
+            NamedEvent.FLATTEN_DRY_ATTEMPT, symbol=self._symbol, count=self._count, reason=reason
+        )
+        if self._count == DRY_ATTEMPTS_TO_GIVE_UP:
+            named_event(NamedEvent.FLATTEN_GAVE_UP, symbol=self._symbol, size=str(size))
+            return True
+        await self._clock.sleep(DRY_WAIT_SECONDS)
+        return False
+
+
 async def _flatten_symbol(
     symbol: str,
     size: Decimal,
@@ -219,61 +243,52 @@ async def _close_symbol(
     (ADR-0056). A failed read is dry too, so a venue that cannot answer never hangs
     the run (ADR-0060). The final read reports what is left.
     """
-    dry = _DryAttempts(symbol, context)
-    while True:
-        # No venue can send a market close without a price.
-        if symbol not in priced:
-            reason = "no_price"
-        elif await _size_gap(symbol, size, context):
-            reason = "size_gap"
-        else:
-            cloid = await _close(symbol, size, emitter)
-            # A second close beside an open one could close the size twice. So a failed
-            # pass waits for this close again, and a give-up leaves it to the next boot.
-            while not await _await_verdict(cloid, passes, context):
-                if await dry.gave_up("read_failed", size):
-                    return
-            read = await _read_size(symbol, size, dry, context)
-            # None is a give-up on the reads. Zero is a flat venue.
-            if not read:
-                return
-            size = read
-            if _filled(cloid, context):
-                dry.reset()
-                continue
-            reason = "no_fill"
-        if await dry.gave_up(reason, size):
+    dry = _DryAttempts(symbol, context.clock)
+    while attempt := await _attempt(symbol, size, priced, emitter, dry, passes, context):
+        size = attempt.left
+        if attempt.dry is None:
+            dry.reset()
+        elif await dry.gave_up(attempt.dry, size):
             return
-        if reason == "size_gap":
-            # The gap can be the venue's side too, so the next check needs a new read.
-            read = await _read_size(symbol, size, dry, context)
-            if not read:
-                return
-            size = read
 
 
-class _DryAttempts:
-    """One symbol's count of attempts in a row that closed nothing (ADR-0056)."""
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Attempt:
+    """How one attempt ended, when the loop goes on after it."""
 
-    def __init__(self, symbol: str, context: ExitContext) -> None:
-        self._symbol = symbol
-        self._context = context
-        self._count = 0
+    left: Decimal
+    """What the venue still holds on the symbol. Never zero."""
+    dry: str | None
+    """Why the attempt closed nothing, or ``None`` when it filled."""
 
-    def reset(self) -> None:
-        self._count = 0
 
-    async def gave_up(self, reason: str, size: Decimal) -> bool:
-        """Count one dry attempt. Say whether it was the last, or wait before the next."""
-        self._count += 1
-        named_event(
-            NamedEvent.FLATTEN_DRY_ATTEMPT, symbol=self._symbol, count=self._count, reason=reason
-        )
-        if self._count == DRY_ATTEMPTS_TO_GIVE_UP:
-            named_event(NamedEvent.FLATTEN_GAVE_UP, symbol=self._symbol, size=str(size))
-            return True
-        await self._context.clock.sleep(DRY_WAIT_SECONDS)
-        return False
+async def _attempt(
+    symbol: str,
+    size: Decimal,
+    priced: set[str],
+    emitter: SignalEmitter,
+    dry: _DryAttempts,
+    passes: _Passes,
+    context: ExitContext,
+) -> _Attempt | None:
+    """Try to close ``size`` once, then read what is left. ``None`` ends the loop.
+
+    Every attempt reads the venue before it counts. So a venue that went flat
+    ends the loop with no dry attempt, even when no close went out (ADR-0056).
+    """
+    reason: str | None
+    # No venue can send a market close without a price.
+    if symbol not in priced:
+        reason = "no_price"
+    elif await _size_gap(symbol, size, context):
+        reason = "size_gap"
+    else:
+        cloid = await _close(symbol, size, emitter)
+        if not await _verdict(cloid, size, dry, passes, context):
+            return None
+        reason = None if _filled(cloid, context) else "no_fill"
+    left = await _read_left(symbol, size, dry, context)
+    return None if left is None else _Attempt(left=left, dry=reason)
 
 
 async def _size_gap(symbol: str, size: Decimal, context: ExitContext) -> bool:
@@ -294,25 +309,40 @@ def _held(symbol: str, context: ExitContext) -> Decimal:
     return context.checkpointer.portfolio.account_net().get(symbol, Decimal(0))
 
 
-async def _read_size(
+async def _verdict(
+    cloid: str, size: Decimal, dry: _DryAttempts, passes: _Passes, context: ExitContext
+) -> bool:
+    """Wait for the close's verdict. False when failed passes used up the dry attempts.
+
+    A second close beside an open one could close the size twice. So a failed pass
+    waits for this close again, and a give-up leaves it to the next boot.
+    """
+    while not await _await_verdict(cloid, passes, context):
+        if await dry.gave_up("read_failed", size):
+            return False
+    return True
+
+
+async def _read_left(
     symbol: str, held: Decimal, dry: _DryAttempts, context: ExitContext
 ) -> Decimal | None:
-    """The venue's size on ``symbol``, read again after each failed read.
+    """What the venue still holds on ``symbol``, read again after each failed read.
 
-    ``None`` means the failed reads used up the dry attempts. ``held`` is the
-    last size read, for ``flatten.gave_up``.
+    ``None`` ends the loop. Either the failed reads used up the dry attempts, or
+    the venue reads flat. ``held`` is the last size read, for ``flatten.gave_up``.
 
-    Zero is a flat venue. A hand trade the books cannot see may have closed it,
-    and no order can close what the venue does not hold. So what the strategies
-    still hold moves to the unattributed partition first (ADR-0054, ADR-0056).
+    A hand trade the books cannot see may have closed a flat venue, and no order
+    can close what the venue does not hold. So what the strategies still hold
+    moves to the unattributed partition (ADR-0054, ADR-0056).
     """
     while isinstance(positions := await context.account.fetch_positions(), VenueReadFailure):
         if await dry.gave_up("read_failed", held):
             return None
-    size = positions.get(symbol, Decimal(0))
-    if not size:
+    left = positions.get(symbol, Decimal(0))
+    if not left:
         context.checkpointer.checkpoint_leftover(symbol)
-    return size
+        return None
+    return left
 
 
 async def _resume_closes(

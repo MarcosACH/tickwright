@@ -512,6 +512,43 @@ def test_a_venue_that_reads_flat_moves_the_leftover_to_unattributed_at_the_entry
     assert [row.entry_price for row in unattributed] == [Decimal("42000")]
 
 
+class _SoldAfterTheBootRead(VenueLink):
+    """The venue reads BTC flat on every positions read after flatten's first.
+
+    The operator sold it by hand while flatten waited, so the books never see that trade.
+    """
+
+    def __init__(self, venue: Exchange) -> None:
+        super().__init__(venue)
+        self._reads = 0
+
+    async def fetch_positions(self) -> dict[str, Decimal] | VenueReadFailure:
+        self._reads += 1
+        positions = await super().fetch_positions()
+        if isinstance(positions, VenueReadFailure) or self._reads == 1:
+            return positions
+        return {symbol: size for symbol, size in positions.items() if symbol != "BTC"}
+
+
+def test_a_venue_that_reads_flat_with_no_price_ends_the_loop_with_no_give_up(
+    tmp_path: Path,
+) -> None:
+    # An attempt with no price sends no order, but it still reads the venue before
+    # it counts. A flat venue ends flatten (ADR-0056), so the leftover moves and
+    # no dry attempt is counted.
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+
+    exit_code, logs = _flatten(tmp_path, link=_SoldAfterTheBootRead, replayed=("ETH",))
+
+    assert exit_code == 0
+    assert not [log for log in logs if log["event"].startswith("flatten.")]
+    assert logs[-1]["outcome"] == "done"
+    assert _partitions(tmp_path) == {
+        ("trivial", "BTC"): (Decimal("0"), Decimal("0")),
+        (None, "BTC"): (Decimal("0.02"), Decimal("0")),
+    }
+
+
 def test_flatten_cancels_a_resting_order_before_it_closes_a_long_and_a_short(
     tmp_path: Path,
 ) -> None:
