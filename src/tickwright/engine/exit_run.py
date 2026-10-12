@@ -138,15 +138,48 @@ class Flatten:
             # Only a replay ends, and it plays the whole file first. So each close
             # fills at the last row (ADR-0059). The CLI refuses a live feed until #475.
             await context.feed.ended()
+            # From the sagas, as a strategy's is. An earlier flatten's seq is
+            # consumed, and the manager drops a signal id it has seen (ADR-0006).
+            seq = context.checkpointer.cache.seq_high_water().get(OPERATOR, 0)
             for symbol, size in positions.items():
                 # No venue can send a market close without a price. The symbol
                 # stays open, and the final read reports its size.
-                if symbol in priced:
-                    await _await_verdict(await _close(symbol, size, context), context)
+                if symbol not in priced:
+                    continue
+                resumed = await _resume_closes(symbol, size, context)
+                if isinstance(resumed, VenueReadFailure):
+                    return ExitOutcome(status=ExitStatus.STOPPED, left=describe_failure(resumed))
+                if resumed:
+                    seq += 1
+                    await _await_verdict(await _close(symbol, resumed, seq, context), context)
         return await _final_read(context)
 
 
-async def _close(symbol: str, size: Decimal, context: ExitContext) -> str:
+async def _resume_closes(
+    symbol: str, size: Decimal, context: ExitContext
+) -> Decimal | VenueReadFailure:
+    """Wait for any close the boot left open in ``symbol``, then say what is left to close.
+
+    That close could still fill, so a second one sent beside it could close the
+    size twice. A symbol never has two closes open (ADR-0056). So a wait that ends
+    with one still open leaves nothing to close. The final read reports the size,
+    and the next boot resumes the saga. The wait runs after the feed has played,
+    because its passes move the replay clock.
+    """
+    left_open = context.checkpointer.cache.open_orders(strategy_id=OPERATOR, symbol=symbol)
+    if not left_open:
+        return size
+    for order in left_open:
+        await _await_verdict(order.cloid, context)
+    if not all(_decided(order.cloid, context) for order in left_open):
+        return Decimal(0)
+    positions = await context.account.fetch_positions()
+    if isinstance(positions, VenueReadFailure):
+        return positions
+    return positions.get(symbol, Decimal(0))
+
+
+async def _close(symbol: str, size: Decimal, seq: int, context: ExitContext) -> str:
     """Send one reduce-only market IOC order for the whole of ``size`` (ADR-0054).
 
     Returns the cloid of the order's saga.
@@ -157,7 +190,7 @@ async def _close(symbol: str, size: Decimal, context: ExitContext) -> str:
         ts_init=now,
         strategy_id=OPERATOR,
         symbol=symbol,
-        seq=1,
+        seq=seq,
         side=Side.SELL if size > 0 else Side.BUY,
         quantity=abs(size),
         order_type=OrderType.MARKET,

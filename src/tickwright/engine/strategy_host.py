@@ -20,7 +20,6 @@ from tickwright.domain import (
     InvariantViolation,
     MarketTick,
     OrderEvent,
-    SignalId,
     Store,
     Strategy,
     SymbolOwnership,
@@ -119,7 +118,7 @@ class StrategyHost:
         ``Cache`` the runner rebuilt from that store, so the boot deserializes
         the history once (issue #233).
         """
-        high_water = self._seq_high_water()
+        high_water = self._cache.seq_high_water()
         for strategy in self._strategies.values():
             self._restore(strategy)
             # Probe once before any tick: a strategy the host cannot persist
@@ -128,23 +127,6 @@ class StrategyHost:
             strategy.set_next_seq(high_water.get(strategy.strategy_id, 0) + 1)
             self._subscribe(strategy)
         self._started = True
-
-    def _seq_high_water(self) -> dict[str, int]:
-        """Max consumed seq per strategy across every checkpointed saga.
-
-        Every place consumed its ``signal_id``'s seq, and every requested
-        cancel consumed its own (ADR-0026 — omitting cancels would let a
-        restart reuse a consumed id). One per-strategy counter across all
-        symbols, so this is a single max over the strategy's records.
-        """
-        high_water: dict[str, int] = {}
-        for order in self._cache.all_orders():
-            seqs = [SignalId.parse(order.signal_id).seq]
-            if order.cancel_signal_id is not None:
-                seqs.append(SignalId.parse(order.cancel_signal_id).seq)
-            current = high_water.get(order.strategy_id, 0)
-            high_water[order.strategy_id] = max(current, *seqs)
-        return high_water
 
     def _restore(self, strategy: Strategy) -> None:
         """Feed the persisted snapshot to ``strategy.restore()``, if one exists.

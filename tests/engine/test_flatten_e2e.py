@@ -47,7 +47,7 @@ from tickwright.domain import (
 )
 from tickwright.engine.checkpoint import Checkpointer
 from tickwright.engine.execution import ExecutionManager
-from tickwright.engine.exit_run import Flatten
+from tickwright.engine.exit_run import ExitJob, Flatten, OperatorCancelAll
 from tickwright.engine.guard import NoopGuard, RealGuard
 from tickwright.engine.runner import Engine
 from tickwright.observability.testing import capture_events
@@ -92,8 +92,8 @@ def _paper(bus: InMemoryBus, clock: ManualClock, store: SQLiteStore) -> PaperExc
     )
 
 
-def _hold(path: Path, sizes: dict[str, str]) -> None:
-    """Open each signed size as the strategy ``trivial``, at the symbol's first row price.
+def _hold(path: Path, sizes: dict[str, str], *, strategy_id: str = "trivial") -> None:
+    """Open each signed size as ``strategy_id``, at the symbol's first row price.
 
     Seeded through the engine's own order path on a separate bus, as an earlier run would.
     """
@@ -114,7 +114,7 @@ def _hold(path: Path, sizes: dict[str, str]) -> None:
                     PlaceSignal(
                         ts_event=0,
                         ts_init=0,
-                        strategy_id="trivial",
+                        strategy_id=strategy_id,
                         symbol=symbol,
                         seq=seq,
                         side=Side.BUY if Decimal(size) > 0 else Side.SELL,
@@ -417,6 +417,23 @@ def test_a_lost_close_is_reconciled_to_a_verdict_and_the_run_stops_with_the_size
     assert close.state is OrderState.FAILED
 
 
+def test_a_second_flatten_closes_with_a_seq_above_the_first_ones_close(tmp_path: Path) -> None:
+    # The manager drops a signal id it has seen (ADR-0006). So a second flatten that
+    # reused seq 1 would send nothing, and the size would stay open.
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+    assert _flatten(tmp_path, link=_DropsEveryPlace)[0] == 1
+
+    exit_code, logs = _flatten(tmp_path)
+
+    assert exit_code == 0
+    assert logs[-1]["outcome"] == "done"
+    assert _partitions(tmp_path) == {("trivial", "BTC"): (Decimal("0"), Decimal("40"))}
+    with SQLiteStore(tmp_path / "saga.db") as store:
+        close = store.get_order(derive_cloid(f"{OPERATOR}:BTC:2"))
+    assert close is not None
+    assert close.state is OrderState.FILLED
+
+
 class _LostAndUnreadable(_DropsEveryPlace):
     """The send is lost and every order read fails, so no pass can ever decide it."""
 
@@ -442,3 +459,323 @@ def test_a_failed_reconcile_pass_ends_the_wait_and_the_final_read_decides(
     assert exit_code == 1
     assert logs[-1]["outcome"] == "stopped"
     assert logs[-1]["left"] == "BTC=0.02"
+
+
+def _left_open(path: Path, symbol: str, *, quantity: str = "0.02") -> str:
+    """Leave an ``__operator__`` close ``LIVE`` in the store, one paper never lists.
+
+    That is a close the venue acked and then dropped (#242) before a crash. The
+    boot can only arm its ghost window, so the saga is still open when flatten
+    starts. Returns its cloid.
+    """
+    cloid = derive_cloid(f"{OPERATOR}:{symbol}:1")
+    clock = ManualClock()
+    with SQLiteStore(path) as store:
+        paper = _paper(InMemoryBus(), clock, store)
+        checks = Checkpointer(spec=paper.account_spec(), store=store, clock=clock, specs=_SPECS)
+        checks.recover()
+        checks.checkpoint(
+            Order(
+                cloid=cloid,
+                strategy_id=OPERATOR,
+                signal_id=f"{OPERATOR}:{symbol}:1",
+                symbol=symbol,
+                side=Side.SELL,
+                quantity=Decimal(quantity),
+                order_type=OrderType.MARKET,
+                state=OrderState.LIVE,
+                created_ts_ns=0,
+                # As the manager stores it at place, so a fill can be booked (ADR-0054).
+                split_basis=checks.split_basis(symbol),
+            )
+        )
+    return cloid
+
+
+def test_flatten_waits_for_the_verdict_on_a_close_the_boot_left_open_before_it_closes_again(
+    tmp_path: Path,
+) -> None:
+    # The dropped close could still have filled. A second close sent beside it
+    # could close the size twice, so a symbol never has two closes open (ADR-0056).
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+    left_open = _left_open(tmp_path / "saga.db", "BTC")
+
+    exit_code, logs = _flatten(tmp_path)
+
+    assert exit_code == 0
+    events = [(log["event"], log.get("cloid"), log.get("signal_id")) for log in logs]
+    verdict = events.index(("ghost.reconciled", left_open, None))
+    placed = events.index(("order.placed", None, f"{OPERATOR}:BTC:2"))
+    assert verdict < placed
+    assert _partitions(tmp_path) == {("trivial", "BTC"): (Decimal("0"), Decimal("40"))}
+
+
+class _ReadsOnlyAtBoot(VenueLink):
+    """The boot reads every order. After that, no order read reaches the venue."""
+
+    def __init__(self, venue: Exchange) -> None:
+        super().__init__(venue)
+        self.reads = 0
+
+    async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
+        self.reads += 1
+        if self.reads == 1:
+            return await super().fetch_order(ref)
+        return VenueReadFailure.SEND_FAILED
+
+
+def test_a_close_left_open_that_no_pass_can_decide_gets_no_second_close_beside_it(
+    tmp_path: Path,
+) -> None:
+    # The wait ends on a failed pass (ADR-0060), with the old close still open.
+    # The run stops with the size left, and the next boot resumes the saga.
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+    _left_open(tmp_path / "saga.db", "BTC")
+
+    exit_code, logs = _flatten(tmp_path, link=_ReadsOnlyAtBoot)
+
+    assert exit_code == 1
+    assert logs[-1]["left"] == "BTC=0.02"
+    assert not [log for log in logs if log.get("signal_id") == f"{OPERATOR}:BTC:2"]
+
+
+def test_a_failed_read_after_the_wait_stops_flatten_with_no_second_close(
+    tmp_path: Path,
+) -> None:
+    # The old close may have filled during the wait. With no read of what is
+    # left, flatten cannot size a close, so it sends none (ADR-0060).
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+    _left_open(tmp_path / "saga.db", "BTC")
+
+    # The first positions read is flatten's own. The second is the read after the wait.
+    exit_code, logs = _flatten(tmp_path, link=partial(_FailsOneRead, read="fetch_positions", nth=2))
+
+    assert exit_code == 1
+    assert logs[-1]["outcome"] == "stopped"
+    assert logs[-1]["left"] == f"read_failed: {VenueReadFailure.SEND_FAILED.value}"
+    assert not [log for log in logs if log.get("signal_id") == f"{OPERATOR}:BTC:2"]
+
+
+class _Venue:
+    """Paper on a bus of its own, so it outlives the engine run it serves.
+
+    The real venue keeps an order a crashed engine never booked. Paper keeps its
+    book in memory only (#484), so the test holds one instance across both runs.
+    """
+
+    def __init__(self, path: Path, clock: ManualClock) -> None:
+        self.bus = InMemoryBus()
+        self.store = SQLiteStore(path)
+        self._engine_bus: InMemoryBus | None = None
+        self.paper = PaperExchange(
+            bus=self.bus,
+            clock=clock,
+            fill_model=ImmediateFillModel(),
+            genesis_collateral=GENESIS,
+            instrument_specs=_SPECS,
+            account_net=lambda: paper_store_reads(self.store).account_net(),
+            applied_fills=lambda cloid: paper_store_reads(self.store).applied_fills(cloid),
+        )
+        self.bus.subscribe(ExecutionReport, self._report)
+
+    def serve(self, engine_bus: InMemoryBus) -> None:
+        """Link the venue to a new engine run: its ticks in, the venue's reports out."""
+        self._engine_bus = engine_bus
+
+        async def tick(tick: MarketTick) -> None:
+            await self.bus.publish(tick)
+
+        engine_bus.subscribe(MarketTick, tick)
+
+    def cut(self) -> None:
+        """The engine dies. Nothing the venue says from here reaches it."""
+        self._engine_bus = None
+
+    async def _report(self, report: ExecutionReport) -> None:
+        if self._engine_bus is not None:
+            await self._engine_bus.publish(report)
+
+
+class _CrashesAfterTheSend(VenueLink):
+    """The close reaches the venue, and the engine dies before it hears the fill."""
+
+    def __init__(self, venue: Exchange, crash: Callable[[], None]) -> None:
+        super().__init__(venue)
+        self._crash = crash
+        self.crashed = asyncio.Event()
+
+    async def place(self, order: PlaceOrder) -> None:
+        self._crash()
+        await super().place(order)
+        self.crashed.set()
+        await asyncio.Event().wait()
+
+
+def _engine(
+    venue: _Venue, exchange: Exchange, tmp_path: Path, job: ExitJob | None = None
+) -> Engine:
+    """One engine run of ``job``, flatten by default, served by ``venue`` through ``exchange``.
+
+    Each run replays the file from its first row, so each gets its own clock.
+    """
+    bus = InMemoryBus()
+    clock = ManualClock()
+    venue.serve(bus)
+    return Engine(
+        bus=bus,
+        clock=clock,
+        store=venue.store,
+        exchange=exchange,
+        feed=ReplayFeed(path=_ticks(tmp_path / "ticks.jsonl", _ROWS), bus=bus, clock=clock),
+        guard=RealGuard(specs=_SPECS, store=venue.store, clock=clock),
+        exit_job=Flatten() if job is None else job,
+    )
+
+
+def _crash_a_flatten(tmp_path: Path) -> _Venue:
+    """Run flatten until its first close reaches paper, then kill the run.
+
+    Returns the venue that still holds the fill, with the store open again.
+    """
+    venue = _Venue(tmp_path / "saga.db", ManualClock())
+    link = _CrashesAfterTheSend(venue.paper, venue.cut)
+
+    async def first_life() -> None:
+        run = asyncio.create_task(_engine(venue, link, tmp_path).run())
+        await asyncio.wait_for(link.crashed.wait(), timeout=5)
+        run.cancel()
+        await asyncio.gather(run, return_exceptions=True)
+
+    asyncio.run(first_life())
+    venue.store.close()
+    venue.store = SQLiteStore(tmp_path / "saga.db")
+    return venue
+
+
+def _next_run(
+    venue: _Venue,
+    tmp_path: Path,
+    job: ExitJob,
+    *,
+    link: Callable[[PaperExchange], Exchange] | None = None,
+) -> tuple[int, list[EventDict]]:
+    """Run ``job`` after the crash. Returns the exit code and every event it emitted.
+
+    ``link`` puts a venue double in front of paper.
+    """
+    exchange = venue.paper if link is None else link(venue.paper)
+
+    async def go() -> int:
+        return await asyncio.wait_for(_engine(venue, exchange, tmp_path, job).run(), 5)
+
+    with capture_events() as logs:
+        exit_code = asyncio.run(go())
+    venue.store.close()
+    return exit_code, logs
+
+
+def test_a_flatten_that_crashed_after_its_send_is_booked_by_the_split_and_the_rest_closed(
+    tmp_path: Path,
+) -> None:
+    # Two partitions share BTC, so the boot books the resumed fill by its stored
+    # split (ADR-0054). The other symbol is still open, and the next run closes it.
+    _hold(tmp_path / "saga.db", {"BTC": "0.02", "ETH": "0.5"})
+    _hold(tmp_path / "saga.db", {"BTC": "0.01"}, strategy_id="other")
+    venue = _crash_a_flatten(tmp_path)
+
+    exit_code, logs = _next_run(venue, tmp_path, Flatten())
+
+    assert exit_code == 0
+    assert logs[-1]["outcome"] == "done"
+    # Opened at 42000 and 3000. Closed at the last rows, 44000 and 3200 (ADR-0059).
+    assert _partitions(tmp_path) == {
+        ("trivial", "BTC"): (Decimal("0"), Decimal("40")),
+        ("other", "BTC"): (Decimal("0"), Decimal("20")),
+        ("trivial", "ETH"): (Decimal("0"), Decimal("100")),
+    }
+    with SQLiteStore(tmp_path / "saga.db") as store:
+        closes = [order for order in store.all_orders() if order.strategy_id == OPERATOR]
+    # One close per symbol, so no size was closed twice. The resumed run's seq is
+    # above the crashed run's.
+    assert sorted((order.symbol, order.signal_id) for order in closes) in (
+        [("BTC", f"{OPERATOR}:BTC:1"), ("ETH", f"{OPERATOR}:ETH:2")],
+        [("BTC", f"{OPERATOR}:BTC:2"), ("ETH", f"{OPERATOR}:ETH:1")],
+    )
+    assert all(order.state is OrderState.FILLED for order in closes)
+
+
+def test_a_cancel_all_after_a_crashed_flatten_books_the_close_at_boot(tmp_path: Path) -> None:
+    # The resume is the boot, not the flatten job, so any exit run does it (ADR-0056).
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+    _hold(tmp_path / "saga.db", {"BTC": "0.01"}, strategy_id="other")
+    venue = _crash_a_flatten(tmp_path)
+
+    exit_code, logs = _next_run(venue, tmp_path, OperatorCancelAll())
+
+    assert exit_code == 0
+    assert logs[-1]["job"] == "cancel_all"
+    assert _partitions(tmp_path) == {
+        ("trivial", "BTC"): (Decimal("0"), Decimal("40")),
+        ("other", "BTC"): (Decimal("0"), Decimal("20")),
+    }
+    with SQLiteStore(tmp_path / "saga.db") as store:
+        close = store.get_order(derive_cloid(f"{OPERATOR}:BTC:1"))
+    assert close is not None
+    assert close.state is OrderState.FILLED
+
+
+class _FillsDuringTheWait(VenueLink):
+    """``close`` is unknown to the boot's read. It fills just before the next read.
+
+    So it fills after flatten's first position read and before the wait ends.
+    """
+
+    def __init__(self, venue: Exchange, *, close: PlaceOrder) -> None:
+        super().__init__(venue)
+        self._close = close
+        self._reads = 0
+
+    async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
+        if ref.cloid == self._close.cloid:
+            self._reads += 1
+            if self._reads == 1:
+                return VenueOrderView(status=None)
+            if self._reads == 2:
+                await self.place(self._close)
+        return await super().fetch_order(ref)
+
+
+def test_a_close_left_open_that_fills_during_the_wait_leaves_only_the_rest_to_close(
+    tmp_path: Path,
+) -> None:
+    # A close sized from the read before the wait would ask for the whole size
+    # again. Paper would shrink it to what is left and cancel the rest (ADR-0057).
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+    left_open = _left_open(tmp_path / "saga.db", "BTC", quantity="0.01")
+    late = PlaceOrder(
+        cloid=left_open,
+        symbol="BTC",
+        side=Side.SELL,
+        quantity=Decimal("0.01"),
+        order_type=OrderType.MARKET,
+        time_in_force=TimeInForce.IOC,
+        reduce_only=True,
+    )
+    venue = _Venue(tmp_path / "saga.db", ManualClock())
+
+    exit_code, logs = _next_run(
+        venue, tmp_path, Flatten(), link=partial(_FillsDuringTheWait, close=late)
+    )
+
+    assert exit_code == 0
+    assert logs[-1]["outcome"] == "done"
+    # Opened at 42000. Both halves close at the last row, 44000 (ADR-0059).
+    assert _partitions(tmp_path) == {("trivial", "BTC"): (Decimal("0"), Decimal("40"))}
+    with SQLiteStore(tmp_path / "saga.db") as store:
+        old = store.get_order(left_open)
+        close = store.get_order(derive_cloid(f"{OPERATOR}:BTC:2"))
+    assert old is not None
+    assert old.state is OrderState.FILLED
+    assert close is not None
+    assert close.quantity == Decimal("0.01")
+    assert close.state is OrderState.FILLED
