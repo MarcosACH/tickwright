@@ -97,8 +97,8 @@ def _paper(bus: EventBus, clock: ManualClock, store: SQLiteStore) -> PaperExchan
     )
 
 
-def _hold(path: Path, sizes: dict[str, str], *, strategy_id: str = "trivial") -> None:
-    """Open each signed size as ``strategy_id``, at the symbol's first row price.
+def _hold(path: Path, sizes: dict[str, str], *, strategy_id: str = "trivial", row: int = 0) -> None:
+    """Open each signed size as ``strategy_id``, at the price of the symbol's ``row``.
 
     Seeded through the engine's own order path on a separate bus, as an earlier run would.
     """
@@ -114,7 +114,7 @@ def _hold(path: Path, sizes: dict[str, str], *, strategy_id: str = "trivial") ->
 
         async def go() -> None:
             for seq, (symbol, size) in enumerate(sizes.items(), start=1):
-                await bus.publish(_tick(symbol, _ROWS[symbol][0]))
+                await bus.publish(_tick(symbol, _ROWS[symbol][row]))
                 await bus.publish(
                     PlaceSignal(
                         ts_event=0,
@@ -547,6 +547,30 @@ def test_a_venue_that_reads_flat_with_no_price_ends_the_loop_with_no_give_up(
         ("trivial", "BTC"): (Decimal("0"), Decimal("0")),
         (None, "BTC"): (Decimal("0.02"), Decimal("0")),
     }
+
+
+def test_two_strategies_of_opposite_sign_leave_one_unattributed_piece_at_their_cost(
+    tmp_path: Path,
+) -> None:
+    # Each strategy leaves at its own entry, so neither books realized PnL. The
+    # unattributed side takes their net at the cost they paid together, so no
+    # cash moves (ADR-0054). That price need not be one the market traded:
+    # 0.02 at 42000 less 0.01 at 44000 is 400, over a size of 0.01.
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+    _hold(tmp_path / "saga.db", {"BTC": "-0.01"}, strategy_id="other", row=2)
+
+    exit_code, logs = _flatten(tmp_path, link=_SoldAfterTheBootRead, replayed=("ETH",))
+
+    assert exit_code == 0
+    assert logs[-1]["outcome"] == "done"
+    assert _partitions(tmp_path) == {
+        ("trivial", "BTC"): (Decimal("0"), Decimal("0")),
+        ("other", "BTC"): (Decimal("0"), Decimal("0")),
+        (None, "BTC"): (Decimal("0.01"), Decimal("0")),
+    }
+    with SQLiteStore(tmp_path / "saga.db") as store:
+        unattributed = [row for row in store.all_positions() if row.strategy_id is None]
+    assert [row.entry_price for row in unattributed] == [Decimal("40000")]
 
 
 def test_flatten_cancels_a_resting_order_before_it_closes_a_long_and_a_short(

@@ -211,8 +211,8 @@ context. Starts the feed through the `FeedHandle`.
 - A flat venue moves each leftover into the unattributed partition instead.
 - **(Built by #473:** `Checkpointer.checkpoint_leftover()` does the move in one transaction, with
   no order. Each strategy leaves at its own entry price. The unattributed side is one piece at the
-  size-weighted entry, so two strategies of opposite sign move nothing there. Only a read inside a
-  loop triggers it.**)**
+  cost the strategies paid together, so no cash moves. With strategies of opposite sign, that price
+  is a cost figure and can be zero or negative. Only a read inside a loop triggers it.**)**
 - **(Deferred by #473:** a symbol the venue already reads flat at the boot read gets no loop, so
   its leftover does not move. [#489](https://github.com/MarcosACH/tickwright/issues/489) builds
   it.**)**

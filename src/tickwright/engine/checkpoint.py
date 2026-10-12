@@ -316,9 +316,11 @@ class Checkpointer:
 
         Only for a venue that reads flat, where no order can close the size
         (ADR-0054). Each strategy leaves at its own entry price, so its realized
-        PnL does not change. The unattributed side is one piece at the size-weighted
-        entry, so a strategy pair of opposite sign moves nothing there. No order
-        and no fee, and every partition moves in one transaction.
+        PnL does not change. The unattributed side is one piece at the cost the
+        strategies paid together, so no cash moves (ADR-0054). With strategies of
+        opposite sign, that price is a cost figure, not a traded price. It can be
+        zero or negative. No order and no fee, and every partition moves in one
+        transaction.
         """
         ts_ns = self._clock.timestamp_ns()
         pieces: list[tuple[PartitionFill, Side]] = []
