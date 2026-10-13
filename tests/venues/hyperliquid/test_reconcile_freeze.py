@@ -45,6 +45,7 @@ from tickwright.venues.hyperliquid import (
     HyperliquidExchange,
     HyperliquidUniverse,
 )
+from tickwright.venues.hyperliquid.transport import IpRateLimited
 
 BTC_SPEC = InstrumentSpec(
     symbol="BTC",
@@ -245,6 +246,42 @@ def test_a_venue_outage_freezes_reconciliation_instead_of_resolving_inflight() -
     # synthetic reaches the bus, and the freeze is named for triage.
     assert cleared is False
     assert reports == []
+    assert any(e["event"] == NamedEvent.RECONCILE_FROZEN for e in events)
+
+
+def test_a_read_refused_for_the_ip_rate_limit_stops_the_pass_and_marks_no_order() -> None:
+    async def main() -> tuple[bool, list[ExecutionReport], FakeExchangeApi, Cache]:
+        bus = InMemoryBus()
+        clock = ManualClock(start_ns=0)
+        # The venue answers every read with a 429. Reading the second order
+        # would only spend more of the limit to learn the same thing.
+        post = FakeExchangeApi({"orderStatus": IpRateLimited("429 from the venue")})
+        exchange = _make_exchange(post, bus, clock)
+        store = SQLiteStore(":memory:")
+        store.checkpoint(_saga(POISON, OrderState.SUBMITTED), ts_ns=500)
+        store.checkpoint(_saga(HEALTHY, OrderState.SUBMITTED), ts_ns=500)
+        cache = Cache(store=store)
+        cache.rebuild()
+        reconciler = Reconciler(
+            bus=bus, clock=clock, exchange=exchange, cache=cache, config=ReconcileConfig()
+        )
+
+        reports: list[ExecutionReport] = []
+
+        async def collect(report: ExecutionReport) -> None:
+            reports.append(report)
+
+        bus.subscribe(ExecutionReport, collect)
+        cleared = await reconciler.reconcile_inflight()
+        return cleared, reports, post, cache
+
+    with capture_events() as events:
+        cleared, reports, post, cache = asyncio.run(main())
+
+    assert cleared is False
+    assert reports == []
+    assert [o.state for o in cache.open_orders()] == [OrderState.SUBMITTED] * 2
+    assert len(post.requests) == 1
     assert any(e["event"] == NamedEvent.RECONCILE_FROZEN for e in events)
 
 
