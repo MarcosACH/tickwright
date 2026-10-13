@@ -32,6 +32,7 @@ from tickwright.domain import (
     EventBus,
     Exchange,
     ExecutionReport,
+    ExternalOrderRef,
     Handler,
     InstrumentSpec,
     MarketTick,
@@ -442,7 +443,7 @@ class _FillsAsItCancels(VenueLink):
         super().__init__(venue)
         self._bus = bus
 
-    async def cancel(self, refs: Sequence[OrderRef]) -> None:
+    async def cancel(self, refs: Sequence[OrderRef | ExternalOrderRef]) -> None:
         await self._bus.publish(_tick("BTC", "30000"))
         await super().cancel(refs)
 
@@ -606,7 +607,7 @@ def test_flatten_cancels_a_resting_order_before_it_closes_a_long_and_a_short(
 class _DropsEveryCancel(VenueLink):
     """Every cancel is lost on the way, so the order keeps resting."""
 
-    async def cancel(self, refs: Sequence[OrderRef]) -> None:
+    async def cancel(self, refs: Sequence[OrderRef | ExternalOrderRef]) -> None:
         return None
 
 

@@ -89,6 +89,19 @@ class OrderRef:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class ExternalOrderRef:
+    """An order the engine did not place, such as one placed by hand in the
+    venue UI. It has no cloid of ours and no saga, so the oid is the only key.
+
+    Only a cancel takes it (ADR-0052, ADR-0055). Every read stays keyed by
+    cloid through ``OrderRef``.
+    """
+
+    symbol: str
+    venue_oid: str
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class VenueOrderView:
     """One *successful* venue read for a cloid (``Exchange.fetch_order``).
 

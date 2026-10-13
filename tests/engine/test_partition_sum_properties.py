@@ -45,6 +45,7 @@ from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     DEFAULT_LEVERAGE,
     AccountSpec,
+    ExternalOrderRef,
     Order,
     OrderRef,
     OrderState,
@@ -227,7 +228,7 @@ class _AccountVenue(LiveVenueDouble):
     async def place(self, order: PlaceOrder) -> None:
         raise AssertionError("the account cycle places nothing")
 
-    async def cancel(self, refs: Sequence[OrderRef]) -> None:
+    async def cancel(self, refs: Sequence[OrderRef | ExternalOrderRef]) -> None:
         raise AssertionError("the account cycle cancels nothing")
 
     async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:

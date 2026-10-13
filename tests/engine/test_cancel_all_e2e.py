@@ -26,6 +26,7 @@ from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     AggressorSide,
     Exchange,
+    ExternalOrderRef,
     MarketTick,
     Order,
     OrderEvent,
@@ -408,7 +409,7 @@ class _FillsBeforeTheCancel(VenueLink):
         super().__init__(venue)
         self._bus = bus
 
-    async def cancel(self, refs: Sequence[OrderRef]) -> None:
+    async def cancel(self, refs: Sequence[OrderRef | ExternalOrderRef]) -> None:
         await self._bus.publish(_trade("34000", aggressor=AggressorSide.SELL, ts=900))
         await super().cancel(refs)
 
@@ -436,9 +437,10 @@ class _LosesEveryCancelForOne(VenueLink):
         super().__init__(venue)
         self.sends_for_stuck = 0
 
-    async def cancel(self, refs: Sequence[OrderRef]) -> None:
-        self.sends_for_stuck += sum(ref.cloid == _STUCK for ref in refs)
-        await super().cancel([ref for ref in refs if ref.cloid != _STUCK])
+    async def cancel(self, refs: Sequence[OrderRef | ExternalOrderRef]) -> None:
+        stuck = [ref for ref in refs if isinstance(ref, OrderRef) and ref.cloid == _STUCK]
+        self.sends_for_stuck += len(stuck)
+        await super().cancel([ref for ref in refs if ref not in stuck])
 
 
 def test_an_order_resting_through_both_cancels_stops_the_run_with_exit_one(
@@ -483,7 +485,7 @@ class _AccountReadFails(VenueLink):
             return VenueReadFailure.SEND_FAILED
         return await super().fetch_open_orders()
 
-    async def cancel(self, refs: Sequence[OrderRef]) -> None:
+    async def cancel(self, refs: Sequence[OrderRef | ExternalOrderRef]) -> None:
         self.cancels_sent += len(refs)
         await super().cancel(refs)
 
@@ -549,7 +551,7 @@ class _SigtermWhileConnecting(VenueLink):
         for _ in range(2):
             await asyncio.sleep(0)
 
-    async def cancel(self, refs: Sequence[OrderRef]) -> None:
+    async def cancel(self, refs: Sequence[OrderRef | ExternalOrderRef]) -> None:
         self.cancels_sent += len(refs)
         await super().cancel(refs)
 

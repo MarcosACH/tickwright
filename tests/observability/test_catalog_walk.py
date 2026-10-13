@@ -51,6 +51,7 @@ from tickwright.domain import (
     AggressorSide,
     Exchange,
     ExecutionReport,
+    ExternalOrderRef,
     FillReport,
     InstrumentSpec,
     InvariantViolation,
@@ -178,7 +179,7 @@ class _SilentExchange(VenueDouble):
     async def place(self, order: PlaceOrder) -> None:
         return None
 
-    async def cancel(self, refs: Sequence[OrderRef]) -> None:
+    async def cancel(self, refs: Sequence[OrderRef | ExternalOrderRef]) -> None:
         return None
 
     async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
@@ -191,7 +192,7 @@ class _ForgetfulVenue(VenueDouble):
     async def place(self, order: PlaceOrder) -> None:
         raise AssertionError("the reconcile walk never places")
 
-    async def cancel(self, refs: Sequence[OrderRef]) -> None:
+    async def cancel(self, refs: Sequence[OrderRef | ExternalOrderRef]) -> None:
         raise AssertionError("the reconcile walk never cancels")
 
     async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
@@ -205,7 +206,7 @@ class _LiveShapedVenue(LiveVenueDouble):
     async def place(self, order: PlaceOrder) -> None:
         raise AssertionError("the materialisation walk never places")
 
-    async def cancel(self, refs: Sequence[OrderRef]) -> None:
+    async def cancel(self, refs: Sequence[OrderRef | ExternalOrderRef]) -> None:
         raise AssertionError("the materialisation walk never cancels")
 
     async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
@@ -218,7 +219,7 @@ class _DarkVenue(VenueDouble):
     async def place(self, order: PlaceOrder) -> None:
         raise AssertionError("the frozen cycle never places")
 
-    async def cancel(self, refs: Sequence[OrderRef]) -> None:
+    async def cancel(self, refs: Sequence[OrderRef | ExternalOrderRef]) -> None:
         raise AssertionError("the frozen cycle never cancels")
 
     async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
@@ -846,7 +847,7 @@ def _drive_exit_refused() -> None:
 class _DeafToCancels(VenueLink):
     """A venue that never receives a cancel, so its orders stay resting."""
 
-    async def cancel(self, refs: Sequence[OrderRef]) -> None:
+    async def cancel(self, refs: Sequence[OrderRef | ExternalOrderRef]) -> None:
         return None
 
 

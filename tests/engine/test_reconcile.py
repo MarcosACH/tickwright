@@ -24,6 +24,7 @@ from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     AggressorSide,
     ExecutionReport,
+    ExternalOrderRef,
     FillReport,
     MarketTick,
     Order,
@@ -347,7 +348,7 @@ class _DarkVenue(VenueDouble):
     async def place(self, order: PlaceOrder) -> None:
         raise AssertionError("nothing may be placed before the barrier clears")
 
-    async def cancel(self, refs: Sequence[OrderRef]) -> None:
+    async def cancel(self, refs: Sequence[OrderRef | ExternalOrderRef]) -> None:
         raise AssertionError("nothing may be cancelled before the barrier clears")
 
     async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:

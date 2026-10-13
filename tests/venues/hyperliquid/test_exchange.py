@@ -10,6 +10,7 @@ sent. Venue quirk translation lives in the adapter, never the engine
 """
 
 import asyncio
+from collections.abc import Sequence
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -35,6 +36,7 @@ from tickwright.domain import (
     AggressorSide,
     Exchange,
     ExecutionReport,
+    ExternalOrderRef,
     FillReport,
     InstrumentSpec,
     MarketTick,
@@ -740,7 +742,7 @@ def cancel_statuses_response(*statuses: object) -> dict:
 
 
 def cancel_and_collect(
-    post: FakeExchangeApi, refs: list[OrderRef]
+    post: FakeExchangeApi, refs: Sequence[OrderRef | ExternalOrderRef]
 ) -> tuple[list[ExecutionReport], list[tuple[str, object]]]:
     """Cancel ``refs`` and return the reports emitted and each event named, with its cloid."""
 
@@ -818,13 +820,19 @@ def test_a_cancel_batch_whose_send_fails_names_each_order() -> None:
     ]
 
 
-def test_a_cancel_list_with_and_without_oids_goes_as_cancel_and_cancel_by_cloid() -> None:
+def test_each_ref_in_a_mixed_cancel_list_goes_by_its_own_key() -> None:
     # One venue action takes one kind of key. An acked order goes by its oid,
-    # and an unacked one by its cloid (ADR-0055, #354).
+    # and an unacked one by its cloid (ADR-0055, #354). A hand-placed order has
+    # only an oid. It comes first here, because the key used to be read off the
+    # first ref of a batch.
     post = FakeExchangeApi(
         {"cancel": every_cancel_succeeds, "cancelByCloid": every_cancel_succeeds}
     )
-    refs = [UNACKED_REF, OrderRef(cloid=CLOID_2, symbol="BTC", venue_oid="78")]
+    refs: list[OrderRef | ExternalOrderRef] = [
+        ExternalOrderRef(symbol="BTC", venue_oid="902"),
+        UNACKED_REF,
+        OrderRef(cloid=CLOID_2, symbol="BTC", venue_oid="78"),
+    ]
 
     reports, _ = cancel_and_collect(post, refs)
 
@@ -833,8 +841,9 @@ def test_a_cancel_list_with_and_without_oids_goes_as_cancel_and_cancel_by_cloid(
         "cancelByCloid",
     ]
     actions = {payload["action"]["type"]: payload["action"] for _, payload in post.requests}
-    assert actions["cancel"]["cancels"] == [{"a": 3, "o": 78}]
+    assert actions["cancel"]["cancels"] == [{"a": 3, "o": 902}, {"a": 3, "o": 78}]
     assert actions["cancelByCloid"]["cancels"] == [{"asset": 3, "cloid": CLOID}]
+    # The hand-placed order has no saga to report to, so only ours are reported.
     assert sorted(r.cloid for r in reports) == sorted([CLOID, CLOID_2])
 
 
