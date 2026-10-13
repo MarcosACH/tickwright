@@ -27,6 +27,7 @@ from tickwright.domain import (
     Clock,
     Deadline,
     EventBus,
+    ExternalOrderRef,
     FillReport,
     InstrumentSpec,
     LeverageBook,
@@ -279,7 +280,7 @@ class HyperliquidExchange:
                 # emitting no terminal: a transient refusal must leave the order
                 # resendable, and reconcile-by-cloid resolves it (ADR-0008
                 # rule 2).
-                self._action_rejected("place", order.cloid, message)
+                self._action_rejected("place", message, cloid=order.cloid, oid=None)
             case _Resting(oid=oid):
                 await self._ack(order, oid=oid)
             case _Rejected(reason=reason):
@@ -361,46 +362,41 @@ class HyperliquidExchange:
             )
         )
 
-    def _action_rejected(self, request: str, cloid: str, reason: str) -> None:
+    def _action_rejected(
+        self, request: str, reason: str, *, cloid: str | None, oid: str | None
+    ) -> None:
         # The venue refused the whole action (bad nonce/signature, an action
         # rate-limit): a 200-OK `err` envelope, not a transport failure and not
         # a per-order REJECTED. Name it and stop — reconcile-by-cloid owns the
         # in-flight order (a place never landed, so a later resend is safe).
+        # A hand-placed order has no cloid, so its oid is what names it.
         named_event(
-            NamedEvent.EXCHANGE_ACTION_REJECTED, request=request, cloid=cloid, reason=reason
+            NamedEvent.EXCHANGE_ACTION_REJECTED,
+            request=request,
+            cloid=cloid,
+            oid=oid,
+            reason=reason,
         )
 
-    async def cancel(self, refs: Sequence[OrderRef]) -> None:
-        # The oid names exactly one order, where a cloid may not (#354). A ref
-        # with no ack yet has only its cloid. The venue may hold an earlier
-        # life's order under it too. Which one that cancels is the venue's
-        # choice, and reconciliation is the backstop. The two go in separate
-        # actions because each venue action takes one kind of key (ADR-0055).
-        by_oid = [ref for ref in refs if ref.venue_oid is not None]
-        by_cloid = [ref for ref in refs if ref.venue_oid is None]
-        for group in (by_oid, by_cloid):
+    async def cancel(self, refs: Sequence[OrderRef | ExternalOrderRef]) -> None:
+        # Each venue action takes one kind of key, so the refs are grouped by
+        # the action their key needs, then batched (ADR-0055).
+        groups: dict[str, list[tuple[OrderRef | ExternalOrderRef, dict[str, object]]]] = {}
+        for ref in refs:
+            action_type, entry = _cancel_entry(ref, asset=self._universe.asset_indices[ref.symbol])
+            groups.setdefault(action_type, []).append((ref, entry))
+        for action_type, group in groups.items():
             for start in range(0, len(group), _CANCEL_BATCH_LIMIT):
-                await self._cancel_batch(group[start : start + _CANCEL_BATCH_LIMIT])
+                await self._cancel_batch(action_type, group[start : start + _CANCEL_BATCH_LIMIT])
 
-    async def _cancel_batch(self, refs: Sequence[OrderRef]) -> None:
-        """One venue cancel action for ``refs``, which all share one kind of key."""
-        if refs[0].venue_oid is None:
-            action = {
-                "type": "cancelByCloid",
-                "cancels": [
-                    {"asset": self._universe.asset_indices[ref.symbol], "cloid": ref.cloid}
-                    for ref in refs
-                ],
-            }
-        else:
-            action = {
-                "type": "cancel",
-                "cancels": [
-                    {"a": self._universe.asset_indices[ref.symbol], "o": int(ref.venue_oid)}
-                    for ref in refs
-                    if ref.venue_oid is not None
-                ],
-            }
+    async def _cancel_batch(
+        self,
+        action_type: str,
+        batch: Sequence[tuple[OrderRef | ExternalOrderRef, dict[str, object]]],
+    ) -> None:
+        """One venue cancel action of ``action_type``, one entry per ref."""
+        refs = [ref for ref, _ in batch]
+        action = {"type": action_type, "cancels": [entry for _, entry in batch]}
         adjudications = await read(
             request="cancel",
             query=action,
@@ -408,7 +404,7 @@ class HyperliquidExchange:
             normalize=functools.partial(_cancel_adjudications, count=len(refs)),
             # A failure names every order in the batch. Each may still rest, and
             # reconciliation never resends a cancel (ADR-0055).
-            cloids=[ref.cloid for ref in refs],
+            cloids=[ref.cloid for ref in refs if isinstance(ref, OrderRef)],
         )
         if isinstance(adjudications, VenueReadFailure):
             # An ack-lost cancel and an adjudication we cannot read prove the
@@ -425,25 +421,34 @@ class HyperliquidExchange:
             else adjudications
         )
         for ref, adjudication in zip(refs, per_order, strict=True):
-            await self._apply_cancellation(
-                cloid=ref.cloid, symbol=ref.symbol, adjudication=adjudication
-            )
+            await self._apply_cancellation(ref, adjudication)
 
     async def _apply_cancellation(
-        self, *, cloid: str, symbol: str, adjudication: "_CancelAdjudication"
+        self, ref: OrderRef | ExternalOrderRef, adjudication: "_CancelAdjudication"
     ) -> None:
         """Carry out a cancel adjudication that has already been read — the peer
         of ``_apply_placement`` on the other write verb, outside the
-        unreadable-body guard for the same reason."""
+        unreadable-body guard for the same reason.
+
+        The one place that decides what each outcome emits, for both kinds of ref."""
         match adjudication:
             case _ActionError(message=message):
-                # The cancel action was refused, not adjudicated: a benign no-op —
-                # the durable cancel_requested marker leaves it to reconciliation.
-                self._action_rejected("cancel", cloid, message)
-            case _CancelVerdict.CANCELLED:
+                # The cancel action was refused, not adjudicated: a benign no-op.
+                # Ours keeps its durable cancel_requested marker for
+                # reconciliation. A hand-placed one shows in the next read. It
+                # has no cloid, so its oid is what names it.
+                cloid = ref.cloid if isinstance(ref, OrderRef) else None
+                self._action_rejected("cancel", message, cloid=cloid, oid=ref.venue_oid)
+            case _CancelVerdict.CANCELLED if isinstance(ref, OrderRef):
                 await self._bus.publish(
-                    self._status_report(cloid=cloid, symbol=symbol, status=OrderState.CANCELLED)
+                    self._status_report(
+                        cloid=ref.cloid, symbol=ref.symbol, status=OrderState.CANCELLED
+                    )
                 )
+            case _CancelVerdict.CANCELLED:
+                # A hand-placed order has no saga to report to. Operator cancel
+                # all trusts its next read, not this status (ADR-0060).
+                return
             case _CancelVerdict.ALREADY_GONE:
                 # The order is filled, cancelled, or never landed: positive venue
                 # truth, not an unreadable body — nothing to name, and nothing to
@@ -519,11 +524,21 @@ class HyperliquidExchange:
         )
         return VenueOrderView(status=status, fills=tuple(fills))
 
-    async def fetch_open_orders(self) -> list[VenueOpenOrder] | VenueReadFailure:
-        # The CLI refuses cancel-all on this venue before boot until #470 builds
-        # this read. A failed read would be the wrong answer here: it would let an
-        # exit run boot and exit 1 when it should never have started.
-        raise NotImplementedError("Hyperliquid lists open orders from #470 on")
+    async def fetch_open_orders(self) -> list[VenueOpenOrder | ExternalOrderRef] | VenueReadFailure:
+        # frontendOpenOrders, not openOrders: only this one carries the cloid,
+        # and the engine finds an order's saga by its cloid. No ``dex`` is sent,
+        # so only the first perp dex is listed (ADR-0052, the #470 block).
+        listed = await read(
+            request="frontendOpenOrders",
+            query={"type": "frontendOpenOrders", "user": self._user_address},
+            send=self._info,
+            normalize=functools.partial(_open_orders, perps=self._universe.asset_indices),
+        )
+        if isinstance(listed, VenueReadFailure):
+            return listed
+        for coin, oid in listed.spot:
+            named_event(NamedEvent.EXCHANGE_SPOT_ORDER_SKIPPED, coin=coin, oid=oid)
+        return listed.orders
 
     async def fetch_positions(self) -> dict[str, Decimal] | VenueReadFailure:
         # The CLI refuses flatten on this venue before boot until #475 builds
@@ -980,6 +995,67 @@ def _cancel_adjudications(response: object, *, count: int) -> _ActionError | lis
     if len(outcome) != count:
         raise ValueError(f"{len(outcome)} cancel statuses for {count} cancels: {outcome!r}")
     return [_cancel_verdict(status) for status in outcome]
+
+
+def _cancel_entry(ref: OrderRef | ExternalOrderRef, *, asset: int) -> tuple[str, dict[str, object]]:
+    """The one place a ref's cancel key is chosen: the venue action and its entry.
+
+    The oid names exactly one order, where a cloid may not (#354). An acked
+    order and a hand-placed one go by oid. An unacked order has only its cloid.
+    The venue may hold an earlier life's order under it too. Which one that
+    cancels is the venue's choice, and reconciliation is the backstop.
+    """
+    match ref:
+        case ExternalOrderRef(venue_oid=oid) | OrderRef(venue_oid=str(oid)):
+            return "cancel", {"a": asset, "o": int(oid)}
+        case OrderRef(cloid=cloid):
+            return "cancelByCloid", {"asset": asset, "cloid": cloid}
+        case unreachable:
+            assert_never(unreachable)
+
+
+@dataclass(frozen=True, slots=True)
+class _OpenOrders:
+    """A read ``frontendOpenOrders`` answer: the perp orders, and the spot
+    orders left out as ``(coin, oid)`` pairs for the caller to name."""
+
+    orders: list[VenueOpenOrder | ExternalOrderRef]
+    spot: list[tuple[str, str]]
+
+
+def _open_orders(response: object, *, perps: Mapping[str, int]) -> _OpenOrders:
+    """Read a ``frontendOpenOrders`` answer. The venue sends ``"cloid": null``
+    for an order placed by hand, so a missing key is unreadable, not hand-placed.
+    A hand-placed order is listed as the ``ExternalOrderRef`` its cancel needs.
+
+    On the first perp dex the answer also holds spot orders, named ``@107`` or
+    ``PURR/USDC``. The engine trades perps only, so they are left out. Any
+    other coin outside ``perps`` is unreadable. The cancel could not address it,
+    and a guess could leave a real order resting.
+
+    A TP or SL nested under a parent as ``children`` is not listed. Cancelling
+    the parent cancels them (the P5 probe in
+    ``docs/research/hyperliquid-reduce-only-cancel-market-probes.md``). If one
+    survives, the read after the cancel shows it.
+    """
+    if not isinstance(response, list):
+        raise TypeError(f"open orders is not a list: {response!r}")
+    orders: list[VenueOpenOrder | ExternalOrderRef] = []
+    spot: list[tuple[str, str]] = []
+    for entry in response:
+        symbol = str(entry["coin"])
+        oid = str(int(entry["oid"]))
+        if symbol.startswith("@") or "/" in symbol:
+            spot.append((symbol, oid))
+            continue
+        if symbol not in perps:
+            raise KeyError(f"open order {oid} on {symbol!r}, outside the perp universe")
+        cloid = entry["cloid"]
+        if cloid is None:
+            orders.append(ExternalOrderRef(symbol=symbol, venue_oid=oid))
+        else:
+            orders.append(VenueOpenOrder(symbol=symbol, cloid=str(cloid), venue_oid=oid))
+    return _OpenOrders(orders=orders, spot=spot)
 
 
 def _cancel_verdict(status: object) -> _CancelVerdict:

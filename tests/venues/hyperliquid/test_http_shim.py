@@ -55,6 +55,26 @@ def test_an_http_error_status_is_a_connection_error_carrying_the_url() -> None:
         asyncio.run(_post_to(internal_error, {"type": "meta"}))
 
 
+def test_a_429_is_the_ip_rate_limit_and_still_a_connection_error() -> None:
+    async def too_many_requests(request: web.Request) -> web.Response:
+        return web.Response(status=429, text="rate limited")
+
+    # A 429 is the venue's IP limit (ADR-0056). It stays a ConnectionError, so
+    # every guard that keys on OSError still catches it.
+    with pytest.raises(transport.IpRateLimited, match="/info") as raised:
+        asyncio.run(_post_to(too_many_requests, {"type": "meta"}))
+    assert isinstance(raised.value, ConnectionError)
+
+
+def test_an_http_error_status_other_than_429_is_not_the_ip_rate_limit() -> None:
+    async def internal_error(request: web.Request) -> web.Response:
+        return web.Response(status=500, text="venue down")
+
+    with pytest.raises(ConnectionError) as raised:
+        asyncio.run(_post_to(internal_error, {"type": "meta"}))
+    assert not isinstance(raised.value, transport.IpRateLimited)
+
+
 async def _post_to_a_silent_peer(payload: dict[str, object]) -> object:
     async with silent_peer() as port:
         return await post_json(f"http://127.0.0.1:{port}/info", payload)

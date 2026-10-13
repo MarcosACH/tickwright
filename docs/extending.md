@@ -160,7 +160,9 @@ auth, quirk translation — and importing no other adapter. It provides both a `
   be unreachable, and every order behind this one would pay a full request timeout to learn the
   same) and `UNREADABLE_BODY` when a body arrived and could not be parsed (only that order is
   skipped, against a per-cloid span that faults once the condition is proven durable, ADR-0049).
-  `fetch_account_state` reads one grain with no worklist behind it, so it collapses both and
+  A third member, `RATE_LIMITED_IP`, means the venue refused the read because this IP is over its
+  rate limit. The reconciler stops its pass on it, as on `SEND_FAILED` (ADR-0056).
+  `fetch_account_state` reads one grain with no worklist behind it, so it collapses all and
   returns **`None`**. `place`/`cancel` emit raw `ExecutionReport`s on the bus rather than
   returning them; a cancel of an unknown order is a benign no-op.
 - [ ] Answer the four questions the accounting surface asks of an `Exchange`. Each is a member the

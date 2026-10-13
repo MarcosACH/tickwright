@@ -18,6 +18,7 @@ from tickwright.domain import (
     AccountAnchor,
     Clock,
     EventBus,
+    ExternalOrderRef,
     InvariantViolation,
     MarketTick,
     OrderAnchor,
@@ -437,17 +438,20 @@ def describe_failure(failure: VenueReadFailure) -> str:
     return f"read_failed: {failure.value}"
 
 
-def describe_orders(orders: Sequence[VenueOpenOrder]) -> str:
+def describe_orders(orders: Sequence[VenueOpenOrder | ExternalOrderRef]) -> str:
     """Name each order by its oid, or by its cloid where the venue gives no oid.
 
     One string, because every catalog field is a scalar.
     """
-    return ",".join(order.venue_oid or order.cloid or "?" for order in orders)
+    return ",".join(
+        order.venue_oid if isinstance(order, ExternalOrderRef) else order.venue_oid or order.cloid
+        for order in orders
+    )
 
 
 async def _cancel_round(
-    resting: list[VenueOpenOrder] | VenueReadFailure, context: ExitContext
-) -> list[VenueOpenOrder] | VenueReadFailure:
+    resting: list[VenueOpenOrder | ExternalOrderRef] | VenueReadFailure, context: ExitContext
+) -> list[VenueOpenOrder | ExternalOrderRef] | VenueReadFailure:
     """Cancel what ``resting`` shows, then read again.
 
     A failed read or an empty book is returned as it is, with nothing sent. The
@@ -459,15 +463,17 @@ async def _cancel_round(
     return await context.account.fetch_open_orders()
 
 
-def _mark(order: VenueOpenOrder, checkpointer: Checkpointer) -> OrderRef:
+def _mark(
+    order: VenueOpenOrder | ExternalOrderRef, checkpointer: Checkpointer
+) -> OrderRef | ExternalOrderRef:
     """The ref to cancel ``order`` by, with its saga marked first if it has one.
 
     The mark is durable before the send. Without it, a crash after the send
     leaves reconcile to judge the order a ghost and mark it ``REJECTED``.
     """
-    if order.cloid is None:
-        # Only a live venue lists an order the engine did not place (#470).
-        raise InvariantViolation(f"cannot cancel an order with no cloid on {order.symbol}")
+    if isinstance(order, ExternalOrderRef):
+        # The engine did not place it, so there is no saga to mark (ADR-0052).
+        return order
     saga = checkpointer.cache.get_order(order.cloid)
     if saga is None:
         return OrderRef(cloid=order.cloid, symbol=order.symbol, venue_oid=order.venue_oid)

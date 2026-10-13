@@ -51,6 +51,7 @@ from tickwright.domain import (
     AggressorSide,
     Exchange,
     ExecutionReport,
+    ExternalOrderRef,
     FillReport,
     InstrumentSpec,
     InvariantViolation,
@@ -178,7 +179,7 @@ class _SilentExchange(VenueDouble):
     async def place(self, order: PlaceOrder) -> None:
         return None
 
-    async def cancel(self, refs: Sequence[OrderRef]) -> None:
+    async def cancel(self, refs: Sequence[OrderRef | ExternalOrderRef]) -> None:
         return None
 
     async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
@@ -191,7 +192,7 @@ class _ForgetfulVenue(VenueDouble):
     async def place(self, order: PlaceOrder) -> None:
         raise AssertionError("the reconcile walk never places")
 
-    async def cancel(self, refs: Sequence[OrderRef]) -> None:
+    async def cancel(self, refs: Sequence[OrderRef | ExternalOrderRef]) -> None:
         raise AssertionError("the reconcile walk never cancels")
 
     async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
@@ -205,7 +206,7 @@ class _LiveShapedVenue(LiveVenueDouble):
     async def place(self, order: PlaceOrder) -> None:
         raise AssertionError("the materialisation walk never places")
 
-    async def cancel(self, refs: Sequence[OrderRef]) -> None:
+    async def cancel(self, refs: Sequence[OrderRef | ExternalOrderRef]) -> None:
         raise AssertionError("the materialisation walk never cancels")
 
     async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
@@ -218,7 +219,7 @@ class _DarkVenue(VenueDouble):
     async def place(self, order: PlaceOrder) -> None:
         raise AssertionError("the frozen cycle never places")
 
-    async def cancel(self, refs: Sequence[OrderRef]) -> None:
+    async def cancel(self, refs: Sequence[OrderRef | ExternalOrderRef]) -> None:
         raise AssertionError("the frozen cycle never cancels")
 
     async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
@@ -589,6 +590,30 @@ def _drive_exchange_action_rejected() -> None:
     asyncio.run(go())
 
 
+def _drive_exchange_spot_order_skipped() -> None:
+    """A live open-orders read that lists a spot order: the adapter leaves it
+    out of the list and names it, because the engine trades perps only (#470)."""
+
+    async def go() -> None:
+        exchange = HyperliquidExchange(
+            config=HyperliquidConfig(
+                testnet=True,
+                symbols=["BTC"],
+                signing_key=SecretStr(TEST_SIGNING_KEY),
+            ),
+            bus=InMemoryBus(),
+            clock=ManualClock(),
+            universe=HyperliquidUniverse(specs={"BTC": _SPEC}, asset_indices={"BTC": 0}),
+            startup_timeout_seconds=60.0,
+            post=FakeExchangeApi(
+                {"frontendOpenOrders": [{"coin": "@107", "oid": 903, "cloid": None}]}
+            ),
+        )
+        assert await exchange.fetch_open_orders() == []
+
+    asyncio.run(go())
+
+
 def _drive_exchange_leverage_unchanged() -> None:
     """A live boot whose venue already agrees: the leverage push declines to
     write and names the symbol it left alone (``preflight``, ADR-0044 §7).
@@ -846,7 +871,7 @@ def _drive_exit_refused() -> None:
 class _DeafToCancels(VenueLink):
     """A venue that never receives a cancel, so its orders stay resting."""
 
-    async def cancel(self, refs: Sequence[OrderRef]) -> None:
+    async def cancel(self, refs: Sequence[OrderRef | ExternalOrderRef]) -> None:
         return None
 
 
@@ -1165,6 +1190,7 @@ SCENARIOS: dict[NamedEvent, Callable[[], None]] = {
     NamedEvent.ACCOUNT_RECONCILE_FROZEN: _drive_account_reconcile_frozen,
     NamedEvent.EXCHANGE_REQUEST_FAILED: _drive_exchange_request_failed,
     NamedEvent.EXCHANGE_ACTION_REJECTED: _drive_exchange_action_rejected,
+    NamedEvent.EXCHANGE_SPOT_ORDER_SKIPPED: _drive_exchange_spot_order_skipped,
     NamedEvent.EXCHANGE_LEVERAGE_UNCHANGED: _drive_exchange_leverage_unchanged,
 }
 

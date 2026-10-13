@@ -27,6 +27,7 @@ from tickwright.domain import (
     AggressorSide,
     Exchange,
     ExecutionReport,
+    ExternalOrderRef,
     FillReport,
     MarketTick,
     Order,
@@ -290,7 +291,7 @@ class _ForgetfulVenue(VenueDouble):
     async def place(self, order: PlaceOrder) -> None:
         raise AssertionError("the ghost cycle must never place")
 
-    async def cancel(self, refs: Sequence[OrderRef]) -> None:
+    async def cancel(self, refs: Sequence[OrderRef | ExternalOrderRef]) -> None:
         raise AssertionError("the ghost cycle must never cancel")
 
     async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:

@@ -41,6 +41,7 @@ from tickwright.domain import (
     Account,
     ComponentState,
     Exchange,
+    ExternalOrderRef,
     FillReport,
     InstrumentSpec,
     InvariantViolation,
@@ -624,7 +625,7 @@ class _LiveShapedVenue(LiveVenueDouble):
     async def place(self, order: PlaceOrder) -> None:
         raise AssertionError("nothing is placed: no strategy is registered")
 
-    async def cancel(self, refs: Sequence[OrderRef]) -> None:
+    async def cancel(self, refs: Sequence[OrderRef | ExternalOrderRef]) -> None:
         raise AssertionError("nothing is cancelled: no order exists")
 
     async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
@@ -789,7 +790,7 @@ class _PaperShapedVenue(VenueDouble):
     async def place(self, order: PlaceOrder) -> None:
         raise AssertionError("nothing is placed: no strategy is registered")
 
-    async def cancel(self, refs: Sequence[OrderRef]) -> None:
+    async def cancel(self, refs: Sequence[OrderRef | ExternalOrderRef]) -> None:
         raise AssertionError("nothing is cancelled: no order exists")
 
     async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
@@ -1812,7 +1813,7 @@ class _LifecycleRecordingVenue(VenueDouble):
         # through the saga path, which is not what these tests are asking about.
         self._timeline.append("exchange.place")
 
-    async def cancel(self, refs: Sequence[OrderRef]) -> None:
+    async def cancel(self, refs: Sequence[OrderRef | ExternalOrderRef]) -> None:
         self._timeline.append("exchange.cancel")
 
     async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:

@@ -320,13 +320,14 @@ See ADR-0011, ADR-0048, ADR-0049.
 _Avoid_: empty result, no orders (the whole point is that these differ from a failure).
 
 **Failed read** (`VenueReadFailure`):
-The two-member vocabulary the [[Connectivity guard]] answers with, and the whole of what a
+The three-member vocabulary the [[Connectivity guard]] answers with, and the whole of what a
 caller needs to decide **how much** one order's failure costs. `SEND_FAILED`: no body arrived,
 so the venue may be unreachable — the pass stops, since every order behind this one would pay a
 30s request timeout to learn the same thing. `UNREADABLE_BODY`: a body arrived and could not be
 read, from a venue that is up and answering at full speed — that order alone is skipped, its
-per-cloid span runs, and the pass carries on. Both are still "not venue truth"; neither is ever
-a view. The span is what makes the durable case escape the transient verdict: staying unreadable
+per-cloid span runs, and the pass carries on. `RATE_LIMITED_IP`: the venue answered HTTP 429
+because this IP is over its rate limit. Every other read would be refused too, so the pass stops,
+as on `SEND_FAILED` (ADR-0056). All are still "not venue truth"; none is ever a view. The span is what makes the durable case escape the transient verdict: staying unreadable
 across `unreadable_grace_seconds` of waiting is the more-than-one-sample a [[Permanent refusal]]
 cannot be told from otherwise, and spending it raises `VenueReadUnresolvable` — never a terminal
 state invented for an order whose body was never read. Measured in **wall-clock and never in
@@ -447,8 +448,9 @@ orders. The operator runs it as a one-shot command with the engine stopped (ADR-
 sends one cancel all per symbol. It cancels only the orders it sent before that signal
 (ADR-0055). Operator cancel all is done when a final venue read finds no resting order. If orders
 remain, it cancels them once more, then exits 1 if any still rest (ADR-0060). Operator cancel all
-is built on paper (#468). Hyperliquid follows in #470. A strategy's cancel all is not built yet
-(#408).
+is built on paper (#468) and on Hyperliquid (#470). On Hyperliquid it covers perp orders on the
+first perp dex. It leaves spot orders resting and names each one (ADR-0052). A strategy's cancel
+all is not built yet (#408).
 _Avoid_: flatten (that closes positions), mass-cancel.
 
 **Flatten**:

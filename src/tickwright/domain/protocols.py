@@ -21,6 +21,7 @@ from .position import Position, PositionView
 from .store_lock import StoreLockHolder
 from .venue import (
     AccountModeVerdict,
+    ExternalOrderRef,
     OrderRef,
     PlaceOrder,
     VenueAccountState,
@@ -471,7 +472,9 @@ class OrderAnchor(Protocol):
     anchors, and each one's collaborators differ. Everything here is keyed by
     the ``cloid`` the engine minted (ADR-0006) — a placement carries it, a
     cancel and a read take it — so a caller of this seam needs to know what a
-    ``cloid`` is and needs to know nothing about an account.
+    ``cloid`` is and needs to know nothing about an account. One exception: a
+    cancel also takes an ``ExternalOrderRef``, an order the engine did not
+    place. It has no cloid, so it goes by its oid (ADR-0052, ADR-0055).
 
     Declared separately because two engine components read it and **neither
     reads anything else on the seam**: the ``ExecutionManager`` places and
@@ -490,14 +493,17 @@ class OrderAnchor(Protocol):
         """Place ``order`` at the venue; emit the resulting raw ``ExecutionReport``(s)."""
         ...
 
-    async def cancel(self, refs: Sequence[OrderRef]) -> None:
+    async def cancel(self, refs: Sequence[OrderRef | ExternalOrderRef]) -> None:
         """Cancel every order ``refs`` names; emit the resulting raw
         ``ExecutionReport`` for each. A list, so a cancel all is one venue
         request where the venue can batch. A single cancel sends a list of one
         (ADR-0055). A cancel of an unknown/already-gone order is a
         benign no-op (ADR-0026). The ref carries the saga's oid once the venue
         has assigned one, and a venue that keeps more than one order under a
-        cloid cancels by that oid (#354)."""
+        cloid cancels by that oid (#354).
+
+        An ``ExternalOrderRef`` has no saga, so its cancel emits no report.
+        Its caller learns the outcome from its next ``fetch_open_orders``."""
         ...
 
     async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
@@ -532,7 +538,7 @@ class AccountAnchor(Protocol):
     that snapshot's account-grain figures still mean what they meant at boot
     (ADR-0046 §4), so it is a property of this anchor and of nothing else.
 
-    **One caller**, and that is the point rather than a weakness: the cycle is
+    **One live-only caller for the account cycle**, and that is the point: the cycle is
     live-only (paper has no second account to compare against), and this is the
     only seam it holds. Separating it is what lets that be visible — the class
     that writes a venue number to disk declares the two members it reads and no
@@ -551,8 +557,14 @@ class AccountAnchor(Protocol):
     unwrappable ``None``, which is the shape that decision already rejected.
     """
 
-    async def fetch_open_orders(self) -> list[VenueOpenOrder] | VenueReadFailure:
-        """Every order resting in the account, ours or not (ADR-0052).
+    async def fetch_open_orders(
+        self,
+    ) -> list[VenueOpenOrder | ExternalOrderRef] | VenueReadFailure:
+        """Every order resting in the account, ours or not (ADR-0052). An order
+        the engine did not place has no cloid, so it is an ``ExternalOrderRef``.
+        A venue may narrow the account to the markets the engine trades. It
+        names each order it leaves out. Hyperliquid lists only perp orders on
+        its first perp dex.
 
         Operator cancel all reads it for its list and again for its final check.
         A failed read returns a ``VenueReadFailure`` and never an empty list,

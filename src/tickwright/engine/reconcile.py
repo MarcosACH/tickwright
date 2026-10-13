@@ -283,7 +283,10 @@ class Reconciler:
                 with operation(cloid=order.cloid):
                     view = await self._exchange.fetch_order(OrderRef.of(order))
                     match view:
-                        case VenueReadFailure.SEND_FAILED:
+                        case VenueReadFailure.SEND_FAILED | VenueReadFailure.RATE_LIMITED_IP:
+                            # Every other read in the pass would fail the same
+                            # way. Under the IP limit it would also spend more
+                            # of the limit (ADR-0056).
                             return self._freeze(_FreezeScope.CYCLE)
                         case VenueReadFailure.UNREADABLE_BODY:
                             self._charge_unreadable(order)

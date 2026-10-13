@@ -10,6 +10,7 @@ sent. Venue quirk translation lives in the adapter, never the engine
 """
 
 import asyncio
+from collections.abc import Sequence
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -35,6 +36,7 @@ from tickwright.domain import (
     AggressorSide,
     Exchange,
     ExecutionReport,
+    ExternalOrderRef,
     FillReport,
     InstrumentSpec,
     MarketTick,
@@ -47,6 +49,7 @@ from tickwright.domain import (
     Side,
     TimeInForce,
     VenueFactUnsupported,
+    VenueOpenOrder,
     VenueOrderView,
     VenueReadFailure,
 )
@@ -57,6 +60,7 @@ from tickwright.venues.hyperliquid import (
     HyperliquidExchange,
     HyperliquidUniverse,
 )
+from tickwright.venues.hyperliquid.transport import IpRateLimited
 
 CLOID = "0x" + "ab" * 16
 UNACKED_REF = OrderRef(cloid=CLOID, symbol="BTC")
@@ -730,6 +734,38 @@ def test_a_cancel_of_201_orders_goes_as_two_requests_of_200_and_1() -> None:
     assert [r.cloid for r in reports] == [ref.cloid for ref in refs]
 
 
+def test_a_mixed_cancel_of_250_orders_sends_no_request_with_more_than_200() -> None:
+    # An operator cancel all mixes hand-placed orders with engine ones. The
+    # hand-placed and the acked ones share one key, 225 orders by oid. That
+    # group alone is over the venue limit, so it must split too (ADR-0055).
+    hand_placed = [ExternalOrderRef(symbol="BTC", venue_oid=str(2000 + i)) for i in range(125)]
+    acked = [
+        OrderRef(cloid=f"0x{i:032x}", symbol="BTC", venue_oid=str(1000 + i)) for i in range(100)
+    ]
+    unacked = [OrderRef(cloid=f"0x{500 + i:032x}", symbol="BTC") for i in range(25)]
+    refs: list[OrderRef | ExternalOrderRef] = [
+        *(ref for pair in zip(hand_placed, acked, strict=False) for ref in pair),
+        *hand_placed[100:],
+        *unacked,
+    ]
+    post = FakeExchangeApi(
+        {"cancel": every_cancel_succeeds, "cancelByCloid": every_cancel_succeeds}
+    )
+
+    cancel_and_collect(post, refs)
+
+    sent = [entry for _, payload in post.requests for entry in payload["action"]["cancels"]]
+    assert max(len(payload["action"]["cancels"]) for _, payload in post.requests) <= 200
+    # Every order is still sent exactly once.
+    assert sorted(entry["o"] for entry in sent if "o" in entry) == [
+        *range(1000, 1100),
+        *range(2000, 2125),
+    ]
+    assert sorted(entry["cloid"] for entry in sent if "cloid" in entry) == [
+        ref.cloid for ref in unacked
+    ]
+
+
 CLOID_2 = "0x" + "cd" * 16
 
 
@@ -738,7 +774,7 @@ def cancel_statuses_response(*statuses: object) -> dict:
 
 
 def cancel_and_collect(
-    post: FakeExchangeApi, refs: list[OrderRef]
+    post: FakeExchangeApi, refs: Sequence[OrderRef | ExternalOrderRef]
 ) -> tuple[list[ExecutionReport], list[tuple[str, object]]]:
     """Cancel ``refs`` and return the reports emitted and each event named, with its cloid."""
 
@@ -816,13 +852,19 @@ def test_a_cancel_batch_whose_send_fails_names_each_order() -> None:
     ]
 
 
-def test_a_cancel_list_with_and_without_oids_goes_as_cancel_and_cancel_by_cloid() -> None:
+def test_each_ref_in_a_mixed_cancel_list_goes_by_its_own_key() -> None:
     # One venue action takes one kind of key. An acked order goes by its oid,
-    # and an unacked one by its cloid (ADR-0055, #354).
+    # and an unacked one by its cloid (ADR-0055, #354). A hand-placed order has
+    # only an oid. It comes first here, because the key used to be read off the
+    # first ref of a batch.
     post = FakeExchangeApi(
         {"cancel": every_cancel_succeeds, "cancelByCloid": every_cancel_succeeds}
     )
-    refs = [UNACKED_REF, OrderRef(cloid=CLOID_2, symbol="BTC", venue_oid="78")]
+    refs: list[OrderRef | ExternalOrderRef] = [
+        ExternalOrderRef(symbol="BTC", venue_oid="902"),
+        UNACKED_REF,
+        OrderRef(cloid=CLOID_2, symbol="BTC", venue_oid="78"),
+    ]
 
     reports, _ = cancel_and_collect(post, refs)
 
@@ -831,8 +873,9 @@ def test_a_cancel_list_with_and_without_oids_goes_as_cancel_and_cancel_by_cloid(
         "cancelByCloid",
     ]
     actions = {payload["action"]["type"]: payload["action"] for _, payload in post.requests}
-    assert actions["cancel"]["cancels"] == [{"a": 3, "o": 78}]
+    assert actions["cancel"]["cancels"] == [{"a": 3, "o": 902}, {"a": 3, "o": 78}]
     assert actions["cancelByCloid"]["cancels"] == [{"asset": 3, "cloid": CLOID}]
+    # The hand-placed order has no saga to report to, so only ours are reported.
     assert sorted(r.cloid for r in reports) == sorted([CLOID, CLOID_2])
 
 
@@ -852,6 +895,46 @@ def test_a_refused_cancel_batch_names_each_order_and_reports_none() -> None:
         (NamedEvent.EXCHANGE_ACTION_REJECTED, CLOID),
         (NamedEvent.EXCHANGE_ACTION_REJECTED, CLOID_2),
     ]
+
+
+def test_a_refused_cancel_names_a_hand_placed_order_by_its_oid() -> None:
+    # A hand-placed order has no cloid. Its oid is what the operator can find
+    # in the venue UI, so a refusal names it by that.
+    post = FakeExchangeApi({"cancel": action_error_response("Invalid nonce")})
+    refs: list[OrderRef | ExternalOrderRef] = [
+        ExternalOrderRef(symbol="BTC", venue_oid="902"),
+        OrderRef(cloid=CLOID, symbol="BTC", venue_oid="77"),
+    ]
+
+    async def main() -> None:
+        exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
+        await exchange.cancel(refs)
+
+    with capture_events() as events:
+        asyncio.run(main())
+
+    assert [
+        (e["cloid"], e["oid"]) for e in events if e["event"] == NamedEvent.EXCHANGE_ACTION_REJECTED
+    ] == [(None, "902"), (CLOID, "77")]
+
+
+def test_a_hand_placed_order_already_gone_is_as_silent_as_one_of_ours() -> None:
+    # A hand-placed order filled or pulled before our cancel landed is the same
+    # ordinary race as for one of ours. Nothing is reported and nothing is named.
+    post = FakeExchangeApi(
+        {"cancel": cancel_statuses_response("success", {"error": "Order was never placed"})}
+    )
+    refs: list[OrderRef | ExternalOrderRef] = [
+        OrderRef(cloid=CLOID, symbol="BTC", venue_oid="77"),
+        ExternalOrderRef(symbol="BTC", venue_oid="902"),
+    ]
+
+    reports, named = cancel_and_collect(post, refs)
+
+    assert [(r.cloid, r.status) for r in reports if isinstance(r, OrderStatusReport)] == [
+        (CLOID, OrderState.CANCELLED)
+    ]
+    assert named == []
 
 
 async def fetch_view(
@@ -1809,13 +1892,102 @@ def test_the_hyperliquid_venue_satisfies_the_exchange_seam() -> None:
     assert isinstance(exchange, Exchange)
 
 
-def test_the_venue_refuses_to_list_open_orders_until_it_can_read_them() -> None:
-    # #470 builds this read. Until then the CLI refuses cancel-all on this venue
-    # before boot, so a call here is a wiring bug and must fail loudly.
-    exchange = make_exchange(FakeExchangeApi({}), bus=InMemoryBus(), clock=ManualClock())
+def test_open_orders_lists_engine_and_hand_placed_orders_with_their_oids() -> None:
+    # Shaped like the testnet capture in
+    # docs/research/hyperliquid-reduce-only-cancel-market-probes.md, P1 and P5.
+    post = FakeExchangeApi(
+        {
+            "frontendOpenOrders": [
+                {
+                    "coin": "BTC",
+                    "side": "B",
+                    "limitPx": "40000.0",
+                    "sz": "0.01",
+                    "oid": 901,
+                    "reduceOnly": False,
+                    "orderType": "Limit",
+                    "origSz": "0.01",
+                    "tif": "Gtc",
+                    "cloid": CLOID,
+                },
+                {
+                    "coin": "BTC",
+                    "side": "A",
+                    "limitPx": "50000.0",
+                    "sz": "0.02",
+                    "oid": 902,
+                    "reduceOnly": False,
+                    "orderType": "Limit",
+                    "origSz": "0.02",
+                    "tif": "Gtc",
+                    "cloid": None,
+                },
+            ]
+        }
+    )
+    exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
 
-    with pytest.raises(NotImplementedError, match="#470"):
-        asyncio.run(exchange.fetch_open_orders())
+    orders = asyncio.run(exchange.fetch_open_orders())
+
+    # The hand-placed order comes back as the ref its cancel needs. So no
+    # listed order can lack both keys.
+    assert orders == [
+        VenueOpenOrder(symbol="BTC", cloid=CLOID, venue_oid="901"),
+        ExternalOrderRef(symbol="BTC", venue_oid="902"),
+    ]
+    [(_, query)] = post.requests
+    assert query["user"] == Account.from_key(TEST_SIGNING_KEY).address
+
+
+def test_open_orders_leaves_out_spot_orders_and_names_each_one() -> None:
+    # The read on the first perp dex also lists spot orders (info endpoint,
+    # the ``dex`` parameter). A spot order is outside a perp engine's scope, and
+    # its coin has no perp asset index for the cancel to address.
+    post = FakeExchangeApi(
+        {
+            "frontendOpenOrders": [
+                {"coin": "BTC", "oid": 902, "cloid": None},
+                {"coin": "@107", "oid": 903, "cloid": None},
+                {"coin": "PURR/USDC", "oid": 904, "cloid": None},
+            ]
+        }
+    )
+    exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
+
+    with capture_events() as logs:
+        orders = asyncio.run(exchange.fetch_open_orders())
+
+    assert orders == [ExternalOrderRef(symbol="BTC", venue_oid="902")]
+    skipped = [
+        (log["coin"], log["oid"])
+        for log in logs
+        if log["event"] == NamedEvent.EXCHANGE_SPOT_ORDER_SKIPPED.value
+    ]
+    assert skipped == [("@107", "903"), ("PURR/USDC", "904")]
+
+
+def test_open_orders_with_a_perp_coin_the_universe_lacks_is_an_unreadable_body() -> None:
+    # Not spot, and not a perp the cancel can address. Failing the read stops
+    # the exit run cleanly. A guess here could leave a real order resting.
+    post = FakeExchangeApi(
+        {
+            "frontendOpenOrders": [
+                {"coin": "BTC", "oid": 902, "cloid": None},
+                {"coin": "ETH", "oid": 905, "cloid": None},
+            ]
+        }
+    )
+    exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
+
+    assert asyncio.run(exchange.fetch_open_orders()) is VenueReadFailure.UNREADABLE_BODY
+
+
+def test_an_open_orders_read_that_hits_the_ip_rate_limit_says_so_and_nothing_more() -> None:
+    post = FakeExchangeApi({"frontendOpenOrders": IpRateLimited("429 from the venue")})
+    exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
+
+    # The engine gets the kind of failure. The venue text stays in the adapter.
+    assert asyncio.run(exchange.fetch_open_orders()) is VenueReadFailure.RATE_LIMITED_IP
 
 
 def test_the_venue_refuses_to_read_positions_until_it_can_read_them() -> None:
@@ -1855,7 +2027,7 @@ _SEAM_CLAIMS = {
     "place": "test_market_buy_places_an_aggressive_ioc_limit_at_the_bounded_price",
     "cancel": "test_cancel_sends_a_signed_cancel_by_cloid_and_reports_cancelled",
     "fetch_order": "test_fetch_order_bundles_the_venue_status_and_fills_into_one_view",
-    "fetch_open_orders": "test_the_venue_refuses_to_list_open_orders_until_it_can_read_them",
+    "fetch_open_orders": "test_open_orders_lists_engine_and_hand_placed_orders_with_their_oids",
     "fetch_positions": "test_the_venue_refuses_to_read_positions_until_it_can_read_them",
     # test_account.py — the module that owns what clearinghouseState means.
     "fetch_account_state": "test_a_recorded_cross_snapshot_normalizes_to_the_measured_account_figures",

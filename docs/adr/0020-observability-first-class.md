@@ -56,6 +56,9 @@ same in every renderer. The catalog walk holds both. Correlation ids stay ambien
 declared, with one exception: a venue adapter sits below the seam and cannot know which scope its
 caller bound, so `exchange.request_failed` and `exchange.action_rejected` carry the order's `cloid`
 as a field of their own.**)**
+**(Extended by [#470](https://github.com/MarcosACH/tickwright/issues/470):**
+`exchange.action_rejected` also carries `oid`. A hand-placed order has no cloid, so its `cloid` is
+`None` and its oid names it. `oid` is `None` where the order has no venue id yet.**)**
 
 ## Coverage requirement
 

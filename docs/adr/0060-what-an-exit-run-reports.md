@@ -137,3 +137,6 @@ when a venue read fails, and which named events an exit run emits. Decided in
   **(Partly built, since [#472](https://github.com/MarcosACH/tickwright/issues/472):**
   `tickwright flatten` runs on paper with the replay feed. Any other exchange or feed exits 2
   before boot, until #475. The catalog has `exit.unguarded`.**)**
+
+  **(Partly built, since [#470](https://github.com/MarcosACH/tickwright/issues/470):**
+  `tickwright cancel-all` also runs on Hyperliquid. It cancels a hand-placed order by its oid.**)**

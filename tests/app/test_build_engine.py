@@ -30,6 +30,7 @@ from tickwright.app.build import (
     build_clock,
     build_engine,
     build_exchange,
+    build_exit_job,
     build_feed,
     build_guard,
     build_store,
@@ -625,3 +626,19 @@ def test_a_live_run_reads_the_leverage_without_touching_a_paper_block(
         asyncio.run(exchange.start())
 
     assert "BTC" in str(refusal.value)
+
+
+def test_cancel_all_builds_on_hyperliquid(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Hyperliquid lists every resting order now, hand-placed ones too (#470).
+    # So the operator can run cancel-all on real money.
+    post = FakeExchangeApi(
+        {"meta": {"universe": [{"name": "BTC", "szDecimals": 5, "maxLeverage": 40}]}}
+    )
+    monkeypatch.setattr("tickwright.venues.hyperliquid.transport.post_json", post)
+    config = _config(
+        tmp_path,
+        exchange="hyperliquid",
+        hyperliquid={"signing_key": TEST_SIGNING_KEY, "symbols": ["BTC"], "testnet": True},
+    )
+
+    assert isinstance(build_exit_job(config, "cancel-all"), Engine)

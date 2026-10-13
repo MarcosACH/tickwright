@@ -352,8 +352,13 @@ a handled cancel all's seq (ADR-0055).
   a list of one. `ExternalOrderRef` names an order the engine did not place: a symbol and a
   required oid. `OrderRef` keeps its required cloid, so `fetch_order` and every reconcile read stay
   keyed by cloid.
-- `AccountAnchor.fetch_open_orders()` returns every resting order in the account as
-  `VenueOpenOrder` values (symbol, oid, cloid if any), or a `VenueReadFailure`.
+- `AccountAnchor.fetch_open_orders()` returns every resting order in the account, or a
+  `VenueReadFailure`. An engine order is a `VenueOpenOrder`: a symbol, a required cloid, and the
+  oid where the venue gives one. Paper gives none. A hand-placed order is an `ExternalOrderRef`.
+  So no listed order can lack both keys. `VenueOpenOrder` is not an `OrderRef`, because the read
+  has no saga stamps, and `fetch_order` without the created stamp keeps an earlier life's record
+  (#354). On Hyperliquid it lists perp orders on the first perp dex only (ADR-0052, the #470
+  block).
 - `AccountAnchor.fetch_positions()` returns a signed size per symbol, or a `VenueReadFailure`.
 - `VenueReadFailure` gains `RATE_LIMITED_IP`. Reads only meet the IP limit.
 - A new raw report, `OrderRefusedReport`, with `refusal`: `rate_limited_address`,

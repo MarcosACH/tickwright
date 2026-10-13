@@ -24,6 +24,8 @@ from typing import Any, NoReturn
 from tickwright.domain import VenueFactUnsupported, VenueReadFailure, exact_figure
 from tickwright.observability import NamedEvent, named_event
 
+from .transport import IpRateLimited
+
 UNREADABLE = (ArithmeticError, KeyError, TypeError, ValueError)
 """What reading a reported body raises when it cannot be read.
 
@@ -80,9 +82,11 @@ async def read[T](
       arrived, so there is nothing to parse: ``SEND_FAILED``;
     - the **body** arrived and could not be read (``UNREADABLE``) — a shape
       outside the venue's contract, a missing field, a figure that is not one:
-      ``UNREADABLE_BODY``.
+      ``UNREADABLE_BODY``;
+    - the venue answered HTTP 429 (``IpRateLimited``), a send failure with a
+      known cause: ``RATE_LIMITED_IP`` (ADR-0056).
 
-    Both are transient by assumption: the caller retries at its next deadline
+    All are transient by assumption: the caller retries at its next deadline
     and nothing was guessed in the meantime. They are **two members and not
     one** because a caller reading a *worklist* needs to know whether the venue
     answered at all before deciding how many of its other orders one failure
@@ -140,6 +144,9 @@ async def read[T](
     """
     try:
         response = await send(query)
+    except IpRateLimited as exc:
+        _failed_send(request=request, cloids=cloids, error=exc)
+        return VenueReadFailure.RATE_LIMITED_IP
     except OSError as exc:
         _failed_send(request=request, cloids=cloids, error=exc)
         return VenueReadFailure.SEND_FAILED

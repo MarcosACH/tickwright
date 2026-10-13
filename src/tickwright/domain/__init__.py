@@ -116,6 +116,7 @@ from .valuation import (
 )
 from .venue import (
     AccountModeVerdict,
+    ExternalOrderRef,
     OrderRef,
     PlaceOrder,
     VenueAccountState,
@@ -161,6 +162,7 @@ __all__ = [
     "Denied",
     "Event",
     "ExecutionReport",
+    "ExternalOrderRef",
     "FillReport",
     "FundingAccrual",
     "GuardDecision",

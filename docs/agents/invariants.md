@@ -65,12 +65,14 @@ Consumed by `/code-review` (any regression is BLOCKING) and `/python-codebase-ma
    is covered by is **whether something above it retries** — a barrier step freezes because the
    barrier re-drives it, while a read with no retry above it (`universe.py`, the ADR-0046 mode
    gate) owns its own refusal and raises.
-   **How much one failed read costs is the second half**, and why the failure is a two-member
-   type: a failed **send** stops the pass (no body arrived, so the venue may be unreachable and
+   **How much one failed read costs is the second half**, and why the failure has more than one
+   member: a failed **send** stops the pass (no body arrived, so the venue may be unreachable and
    every order behind it would pay a 30s request timeout to learn the same), while an unreadable
    **body** — from a venue that is up and answering — skips only its own order and the pass
    reconciles the rest. `_drive` may never again let one order's failure stop the orders behind
-   it on a venue that answered. The durable case is caught by a per-cloid **span of continuous
+   it on a venue that answered. A third member, `RATE_LIMITED_IP`, is a send the venue refused
+   with HTTP 429. It stops the pass like a failed send, because every other read would be
+   refused too (ADR-0056). The durable case is caught by a per-cloid **span of continuous
    unreadability** (`unreadable_grace_seconds`), escalating to `VenueReadUnresolvable`, which
    **faults** rather than inventing a terminal state for an order whose body was never read; it
    restarts on any readable read, so blips can never accumulate into a fault. The span is
@@ -78,7 +80,8 @@ Consumed by `/code-review` (any regression is BLOCKING) and `/python-codebase-ma
    barrier's backoff apart, so a count buys a different amount of waiting under each — and at
    boot would silently overrule `startup_reconciliation_timeout_seconds`. The pass verdict stays
    `False` on either failure, so a startup pass that could not prove an order never clears the
-   barrier (inv 5). (ADR-0011, ADR-0034, ADR-0037 §2, ADR-0043 §6, ADR-0048, ADR-0049)
+   barrier (inv 5). (ADR-0011, ADR-0034, ADR-0037 §2, ADR-0043 §6, ADR-0048, ADR-0049,
+   ADR-0056)
 4. **Rejections are explicit events.** A placed-but-rejected order surfaces as its taxonomy
    terminal (`DENIED` / `REJECTED` / `FAILED`), propagated as an event — never a silent
    `return None`. (ADR-0010)

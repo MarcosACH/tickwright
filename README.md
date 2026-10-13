@@ -168,7 +168,9 @@ stuck.
 
 Stop the engine, then run `uv run tickwright cancel-all`. It reads the same config as a normal
 run. It cancels every order resting in the account, including orders placed by hand, and exits. It
-works on paper today. On Hyperliquid it exits `2` before it touches anything, until #470.
+works on paper and on Hyperliquid. On Hyperliquid it cancels perp orders on the first perp dex
+only. It leaves spot orders and orders on other perp dexes resting. Each spot order it leaves is
+logged as `exchange.spot_order_skipped`.
 
 | Exit code | Meaning |
 | --- | --- |
@@ -203,7 +205,8 @@ trip, so the run warns with `exit.unguarded`.
   account snapshot and a disagreement is alerted.
 - Strategies: two reference strategies that place one market or one limit order. They exist to
   exercise the pipeline.
-- Operator commands: `tickwright cancel-all` on paper, and `tickwright flatten` on paper replay.
+- Operator commands: `tickwright cancel-all` on paper and Hyperliquid, and `tickwright flatten` on
+  paper replay.
 
 Each seam has exactly two implementations. One would look hardcoded. Three would be scope creep.
 

@@ -38,6 +38,7 @@ from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.domain import (
     AggressorSide,
     ExecutionReport,
+    ExternalOrderRef,
     FillReport,
     MarketTick,
     OrderEvent,
@@ -94,7 +95,7 @@ class _CrashingTransport(VenueLink):
         await self._venue.place(order)
         raise ConnectionError("process died with the send in flight; ack lost")
 
-    async def cancel(self, refs: Sequence[OrderRef]) -> None:
+    async def cancel(self, refs: Sequence[OrderRef | ExternalOrderRef]) -> None:
         raise AssertionError("first life never cancels")
 
     async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:

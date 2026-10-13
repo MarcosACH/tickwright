@@ -43,6 +43,7 @@ from tickwright.domain import (
     AccountSpec,
     Clock,
     EventBus,
+    ExternalOrderRef,
     FillReport,
     InstrumentSpec,
     InvariantViolation,
@@ -445,8 +446,12 @@ class PaperExchange:
         self._book.rest(order, working=self._working_size(order))
         await self._bus.publish(self._status_report(order, OrderState.LIVE))
 
-    async def cancel(self, refs: Sequence[OrderRef]) -> None:
+    async def cancel(self, refs: Sequence[OrderRef | ExternalOrderRef]) -> None:
         for ref in refs:
+            if isinstance(ref, ExternalOrderRef):
+                # Paper assigns no oids, so no oid names one of its orders. It
+                # is an order this venue does not know: a benign no-op (ADR-0026).
+                continue
             order = self._book.remove(ref.cloid)
             if order is None:
                 # Nothing resting under this cloid: already filled/cancelled or never
@@ -513,7 +518,7 @@ class PaperExchange:
             fills=tuple(self._fills.get(ref.cloid, [])),
         )
 
-    async def fetch_open_orders(self) -> list[VenueOpenOrder] | VenueReadFailure:
+    async def fetch_open_orders(self) -> list[VenueOpenOrder | ExternalOrderRef] | VenueReadFailure:
         """The resting book. Paper places only engine orders and assigns no oid,
         and an in-process read cannot fail."""
         return [

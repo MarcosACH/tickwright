@@ -48,6 +48,7 @@ from tickwright.domain import (
     AccountModeVerdict,
     AccountSpec,
     Exchange,
+    ExternalOrderRef,
     InstrumentSpec,
     OrderRef,
     PlaceOrder,
@@ -336,7 +337,7 @@ class VenueDouble:
     async def stop(self) -> None:
         return None
 
-    async def fetch_open_orders(self) -> list[VenueOpenOrder] | VenueReadFailure:
+    async def fetch_open_orders(self) -> list[VenueOpenOrder | ExternalOrderRef] | VenueReadFailure:
         # Nothing resting. Only an exit run reads this, and no double suite runs one.
         return []
 
@@ -431,13 +432,13 @@ class VenueLink:
     async def place(self, order: PlaceOrder) -> None:
         await self._venue.place(order)
 
-    async def cancel(self, refs: Sequence[OrderRef]) -> None:
+    async def cancel(self, refs: Sequence[OrderRef | ExternalOrderRef]) -> None:
         await self._venue.cancel(refs)
 
     async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
         return await self._venue.fetch_order(ref)
 
-    async def fetch_open_orders(self) -> list[VenueOpenOrder] | VenueReadFailure:
+    async def fetch_open_orders(self) -> list[VenueOpenOrder | ExternalOrderRef] | VenueReadFailure:
         return await self._venue.fetch_open_orders()
 
     async def fetch_positions(self) -> dict[str, Decimal] | VenueReadFailure:

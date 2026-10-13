@@ -30,6 +30,7 @@ from tickwright.domain import (
     AggressorSide,
     Event,
     Exchange,
+    ExternalOrderRef,
     FillReport,
     InstrumentSpec,
     LeverageBook,
@@ -681,7 +682,7 @@ def test_fetch_open_orders_lists_the_orders_still_resting_on_the_book() -> None:
     # Cancel all reads this list first, then reads it again to prove it is done (ADR-0060).
     exchange, bus, clock, _fills, _statuses = _limit_harness()
 
-    async def scenario() -> list[VenueOpenOrder] | VenueReadFailure:
+    async def scenario() -> list[VenueOpenOrder | ExternalOrderRef] | VenueReadFailure:
         clock.advance_to(1_000)
         await bus.publish(_tick("42000"))
         await exchange.place(_limit_order("41000", cloid="0xa"))
@@ -759,6 +760,25 @@ def test_cancel_of_an_unknown_order_is_a_benign_no_op() -> None:
 
     assert fills == []
     assert statuses == []
+
+
+def test_cancel_of_an_order_the_engine_did_not_place_is_a_benign_no_op() -> None:
+    # Paper assigns no oids, so no oid can name one of its orders. The ref is
+    # treated like any order the venue does not know, and the rest still cancel.
+    exchange, bus, clock, fills, statuses = _limit_harness()
+
+    async def scenario() -> None:
+        clock.advance_to(1_000)
+        await bus.publish(_tick("42000"))
+        await exchange.place(_limit_order("41000", cloid="0xa1"))
+        statuses.clear()
+        await exchange.cancel(
+            [ExternalOrderRef(symbol="BTC", venue_oid="1"), OrderRef(cloid="0xa1", symbol="BTC")]
+        )
+
+    asyncio.run(scenario())
+
+    assert [(s.cloid, s.status) for s in statuses] == [("0xa1", OrderState.CANCELLED)]
 
 
 def test_immediate_fill_model_is_full_fill_zero_slippage() -> None:

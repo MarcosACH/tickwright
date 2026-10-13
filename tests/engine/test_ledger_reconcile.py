@@ -39,6 +39,7 @@ from tickwright.domain import (
     AccountAnchor,
     AccountModeVerdict,
     AccountSpec,
+    ExternalOrderRef,
     FundingAccrual,
     InstrumentSpec,
     LeverageBook,
@@ -105,7 +106,7 @@ class _AccountVenue:
         self.account_reads = 0
         self.mode_reads = 0
 
-    async def fetch_open_orders(self) -> list[VenueOpenOrder] | VenueReadFailure:
+    async def fetch_open_orders(self) -> list[VenueOpenOrder | ExternalOrderRef] | VenueReadFailure:
         return []
 
     async def fetch_positions(self) -> dict[str, Decimal] | VenueReadFailure:
