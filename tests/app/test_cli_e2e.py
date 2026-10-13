@@ -368,23 +368,3 @@ def test_flatten_off_paper_and_replay_exits_two_before_it_boots(
 
     assert "#475" in log.read_text()
     assert _events(log) == []
-
-
-def test_cancel_all_on_hyperliquid_exits_two_before_it_boots(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Hyperliquid cannot list every resting order yet (#470). So the run
-    refuses before it connects, and nothing at the venue moves."""
-    _write_workspace(tmp_path)
-    with (tmp_path / ".env").open("a") as env:
-        env.write(
-            "TICKWRIGHT_EXCHANGE=hyperliquid\n"
-            'TICKWRIGHT_HYPERLIQUID__SYMBOLS=["BTC"]\n'
-            "TICKWRIGHT_HYPERLIQUID__SIGNING_KEY=0x" + "11" * 32 + "\n"
-        )
-    log = tmp_path / "cancel_all.log"
-
-    assert _run_to_exit(tmp_path, log, "cancel-all") == 2, log.read_text()
-
-    assert "#470" in log.read_text()
-    assert _events(log) == []

@@ -18,6 +18,7 @@ from tickwright.domain import (
     AccountAnchor,
     Clock,
     EventBus,
+    ExternalOrderRef,
     InvariantViolation,
     MarketTick,
     OrderAnchor,
@@ -459,15 +460,19 @@ async def _cancel_round(
     return await context.account.fetch_open_orders()
 
 
-def _mark(order: VenueOpenOrder, checkpointer: Checkpointer) -> OrderRef:
+def _mark(order: VenueOpenOrder, checkpointer: Checkpointer) -> OrderRef | ExternalOrderRef:
     """The ref to cancel ``order`` by, with its saga marked first if it has one.
 
     The mark is durable before the send. Without it, a crash after the send
     leaves reconcile to judge the order a ghost and mark it ``REJECTED``.
     """
     if order.cloid is None:
-        # Only a live venue lists an order the engine did not place (#470).
-        raise InvariantViolation(f"cannot cancel an order with no cloid on {order.symbol}")
+        if order.venue_oid is None:
+            raise InvariantViolation(
+                f"cannot cancel an order with no cloid and no oid on {order.symbol}"
+            )
+        # The engine did not place it, so there is no saga to mark (ADR-0052).
+        return ExternalOrderRef(symbol=order.symbol, venue_oid=order.venue_oid)
     saga = checkpointer.cache.get_order(order.cloid)
     if saga is None:
         return OrderRef(cloid=order.cloid, symbol=order.symbol, venue_oid=order.venue_oid)

@@ -310,11 +310,6 @@ def build_exit_job(config: AppConfig, command: Literal["cancel-all", "flatten"])
                 f"and feed={config.feed}. See issue #475."
             )
         return _build_engine(config, exit_job=Flatten())
-    if config.exchange != "paper":
-        # Hyperliquid cannot list the account's resting orders yet (#470).
-        raise UnsupportedExitRun(
-            f"cancel-all does not support exchange={config.exchange} yet. See issue #470."
-        )
     return _build_engine(config, exit_job=OperatorCancelAll())
 
 
