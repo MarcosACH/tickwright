@@ -8,8 +8,10 @@ Cancel all must pull those too, not only the orders the engine placed.
 
 import asyncio
 import json
+from collections.abc import MutableMapping
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 from hyperliquid_fakes import (
     TEST_SIGNING_KEY,
@@ -121,14 +123,16 @@ def _resting(oid: int, cloid: str | None) -> dict:
 class _VenueBook:
     """The account's resting orders. A cancel by oid takes an order off it."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, spot: list[dict] | None = None) -> None:
         self.orders = {
             ENGINE_OID: _resting(ENGINE_OID, CLOID),
             HAND_PLACED_OID: _resting(HAND_PLACED_OID, None),
         }
+        # Spot orders the read lists beside the perp ones. No cancel reaches them.
+        self.spot = spot or []
 
     def open_orders(self, payload: dict) -> list[dict]:
-        return list(self.orders.values())
+        return [*self.orders.values(), *self.spot]
 
     def cancel(self, payload: dict) -> dict:
         cancels = payload["action"]["cancels"]
@@ -152,10 +156,10 @@ def _ticks(path: Path) -> Path:
     return path
 
 
-def test_cancel_all_cancels_an_engine_order_and_a_hand_placed_one_and_exits_zero(
-    tmp_path: Path,
-) -> None:
-    book = _VenueBook()
+def _cancel_all(
+    tmp_path: Path, book: _VenueBook
+) -> tuple[int, list[MutableMapping[str, Any]], FakeExchangeApi]:
+    """Run ``cancel-all`` on Hyperliquid, faked at HTTP, over ``book``."""
     post = FakeExchangeApi(
         {
             "userAbstraction": "disabled",
@@ -195,6 +199,15 @@ def test_cancel_all_cancels_an_engine_order_and_a_hand_placed_one_and_exits_zero
 
     with capture_events() as logs:
         exit_code = asyncio.run(asyncio.wait_for(engine.run(), timeout=5))
+    return exit_code, logs, post
+
+
+def test_cancel_all_cancels_an_engine_order_and_a_hand_placed_one_and_exits_zero(
+    tmp_path: Path,
+) -> None:
+    book = _VenueBook()
+
+    exit_code, logs, post = _cancel_all(tmp_path, book)
 
     assert exit_code == 0, [(log["event"], log.get("error")) for log in logs]
     assert book.orders == {}
@@ -210,8 +223,24 @@ def test_cancel_all_cancels_an_engine_order_and_a_hand_placed_one_and_exits_zero
     assert logs[-1]["outcome"] == "done"
     # The engine order's saga was marked before the send, so a crash after it
     # cannot leave reconcile to judge the order a ghost.
-    reread = checkpointer(SQLiteStore(tmp_path / "saga.db"), clock=clock)
+    reread = checkpointer(SQLiteStore(tmp_path / "saga.db"), clock=ManualClock())
     reread.cache.rebuild()
     saga = reread.cache.get_order(CLOID)
     assert saga is not None
     assert saga.cancel_requested
+
+
+def test_cancel_all_on_hyperliquid_leaves_a_spot_order_and_still_pulls_the_perp_ones(
+    tmp_path: Path,
+) -> None:
+    # The read lists spot orders too. One used to stop the whole cancel before
+    # any request went out, so every perp order stayed resting.
+    book = _VenueBook(spot=[{"coin": "@107", "oid": 903, "cloid": None}])
+
+    exit_code, logs, post = _cancel_all(tmp_path, book)
+
+    assert exit_code == 0, [(log["event"], log.get("error")) for log in logs]
+    assert book.orders == {}
+    skipped = [log for log in logs if log["event"] == "exchange.spot_order_skipped"]
+    assert skipped and all(log["coin"] == "@107" and log["oid"] == "903" for log in skipped)
+    assert logs[-1]["outcome"] == "done"

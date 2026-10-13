@@ -1939,6 +1939,49 @@ def test_open_orders_lists_engine_and_hand_placed_orders_with_their_oids() -> No
     assert query["user"] == Account.from_key(TEST_SIGNING_KEY).address
 
 
+def test_open_orders_leaves_out_spot_orders_and_names_each_one() -> None:
+    # The read on the first perp dex also lists spot orders (info endpoint,
+    # the ``dex`` parameter). A spot order is outside a perp engine's scope, and
+    # its coin has no perp asset index for the cancel to address.
+    post = FakeExchangeApi(
+        {
+            "frontendOpenOrders": [
+                {"coin": "BTC", "oid": 902, "cloid": None},
+                {"coin": "@107", "oid": 903, "cloid": None},
+                {"coin": "PURR/USDC", "oid": 904, "cloid": None},
+            ]
+        }
+    )
+    exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
+
+    with capture_events() as logs:
+        orders = asyncio.run(exchange.fetch_open_orders())
+
+    assert orders == [ExternalOrderRef(symbol="BTC", venue_oid="902")]
+    skipped = [
+        (log["coin"], log["oid"])
+        for log in logs
+        if log["event"] == NamedEvent.EXCHANGE_SPOT_ORDER_SKIPPED.value
+    ]
+    assert skipped == [("@107", "903"), ("PURR/USDC", "904")]
+
+
+def test_open_orders_with_a_perp_coin_the_universe_lacks_is_an_unreadable_body() -> None:
+    # Not spot, and not a perp the cancel can address. Failing the read stops
+    # the exit run cleanly. A guess here could leave a real order resting.
+    post = FakeExchangeApi(
+        {
+            "frontendOpenOrders": [
+                {"coin": "BTC", "oid": 902, "cloid": None},
+                {"coin": "ETH", "oid": 905, "cloid": None},
+            ]
+        }
+    )
+    exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
+
+    assert asyncio.run(exchange.fetch_open_orders()) is VenueReadFailure.UNREADABLE_BODY
+
+
 def test_an_open_orders_read_that_hits_the_ip_rate_limit_says_so_and_nothing_more() -> None:
     post = FakeExchangeApi({"frontendOpenOrders": IpRateLimited("429 from the venue")})
     exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())

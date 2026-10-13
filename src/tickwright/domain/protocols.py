@@ -562,6 +562,9 @@ class AccountAnchor(Protocol):
     ) -> list[VenueOpenOrder | ExternalOrderRef] | VenueReadFailure:
         """Every order resting in the account, ours or not (ADR-0052). An order
         the engine did not place has no cloid, so it is an ``ExternalOrderRef``.
+        A venue may narrow the account to the markets the engine trades. It
+        names each order it leaves out. Hyperliquid lists only perp orders on
+        its first perp dex.
 
         Operator cancel all reads it for its list and again for its final check.
         A failed read returns a ``VenueReadFailure`` and never an empty list,

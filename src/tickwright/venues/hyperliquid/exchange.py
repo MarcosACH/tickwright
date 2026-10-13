@@ -526,13 +526,19 @@ class HyperliquidExchange:
 
     async def fetch_open_orders(self) -> list[VenueOpenOrder | ExternalOrderRef] | VenueReadFailure:
         # frontendOpenOrders, not openOrders: only this one carries the cloid,
-        # and the engine finds an order's saga by its cloid.
-        return await read(
+        # and the engine finds an order's saga by its cloid. No ``dex`` is sent,
+        # so only the first perp dex is listed (ADR-0052, the #470 block).
+        listed = await read(
             request="frontendOpenOrders",
             query={"type": "frontendOpenOrders", "user": self._user_address},
             send=self._info,
-            normalize=_open_orders,
+            normalize=functools.partial(_open_orders, perps=self._universe.asset_indices),
         )
+        if isinstance(listed, VenueReadFailure):
+            return listed
+        for coin, oid in listed.spot:
+            named_event(NamedEvent.EXCHANGE_SPOT_ORDER_SKIPPED, coin=coin, oid=oid)
+        return listed.orders
 
     async def fetch_positions(self) -> dict[str, Decimal] | VenueReadFailure:
         # The CLI refuses flatten on this venue before boot until #475 builds
@@ -1008,10 +1014,24 @@ def _cancel_entry(ref: OrderRef | ExternalOrderRef, *, asset: int) -> tuple[str,
             assert_never(unreachable)
 
 
-def _open_orders(response: object) -> list[VenueOpenOrder | ExternalOrderRef]:
+@dataclass(frozen=True, slots=True)
+class _OpenOrders:
+    """A read ``frontendOpenOrders`` answer: the perp orders, and the spot
+    orders left out as ``(coin, oid)`` pairs for the caller to name."""
+
+    orders: list[VenueOpenOrder | ExternalOrderRef]
+    spot: list[tuple[str, str]]
+
+
+def _open_orders(response: object, *, perps: Mapping[str, int]) -> _OpenOrders:
     """Read a ``frontendOpenOrders`` answer. The venue sends ``"cloid": null``
     for an order placed by hand, so a missing key is unreadable, not hand-placed.
     A hand-placed order is listed as the ``ExternalOrderRef`` its cancel needs.
+
+    On the first perp dex the answer also holds spot orders, named ``@107`` or
+    ``PURR/USDC``. The engine trades perps only, so they are left out. Any
+    other coin outside ``perps`` is unreadable. The cancel could not address it,
+    and a guess could leave a real order resting.
 
     A TP or SL nested under a parent as ``children`` is not listed. Cancelling
     the parent cancels them (the P5 probe in
@@ -1021,15 +1041,21 @@ def _open_orders(response: object) -> list[VenueOpenOrder | ExternalOrderRef]:
     if not isinstance(response, list):
         raise TypeError(f"open orders is not a list: {response!r}")
     orders: list[VenueOpenOrder | ExternalOrderRef] = []
+    spot: list[tuple[str, str]] = []
     for entry in response:
         symbol = str(entry["coin"])
-        cloid = entry["cloid"]
         oid = str(int(entry["oid"]))
+        if symbol.startswith("@") or "/" in symbol:
+            spot.append((symbol, oid))
+            continue
+        if symbol not in perps:
+            raise KeyError(f"open order {oid} on {symbol!r}, outside the perp universe")
+        cloid = entry["cloid"]
         if cloid is None:
             orders.append(ExternalOrderRef(symbol=symbol, venue_oid=oid))
         else:
             orders.append(VenueOpenOrder(symbol=symbol, cloid=str(cloid), venue_oid=oid))
-    return orders
+    return _OpenOrders(orders=orders, spot=spot)
 
 
 def _cancel_verdict(status: object) -> _CancelVerdict:

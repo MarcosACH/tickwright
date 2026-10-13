@@ -448,8 +448,9 @@ orders. The operator runs it as a one-shot command with the engine stopped (ADR-
 sends one cancel all per symbol. It cancels only the orders it sent before that signal
 (ADR-0055). Operator cancel all is done when a final venue read finds no resting order. If orders
 remain, it cancels them once more, then exits 1 if any still rest (ADR-0060). Operator cancel all
-is built on paper (#468) and on Hyperliquid (#470). A strategy's cancel all is not built yet
-(#408).
+is built on paper (#468) and on Hyperliquid (#470). On Hyperliquid it covers perp orders on the
+first perp dex. It leaves spot orders resting and names each one (ADR-0052). A strategy's cancel
+all is not built yet (#408).
 _Avoid_: flatten (that closes positions), mass-cancel.
 
 **Flatten**:

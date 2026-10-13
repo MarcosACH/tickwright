@@ -237,6 +237,10 @@ class NamedEvent(StrEnum):
     # the order's venue id where it has one. A hand-placed order has no cloid,
     # so ``oid`` is the only thing that names it.
     EXCHANGE_ACTION_REJECTED = "exchange.action_rejected"
+    # The open-orders read listed a spot order, and the adapter left it out.
+    # The engine trades perps only, so cancel all does not pull it. Named so an
+    # operator sees what stays resting (``HyperliquidExchange``, #470).
+    EXCHANGE_SPOT_ORDER_SKIPPED = "exchange.spot_order_skipped"
     # The boot-time leverage push declining to write: the venue already holds a
     # position at the configured mode and leverage, so nothing was sent
     # (``preflight.push_leverage``, ADR-0044 §7). Carries ``symbol``/``mode``/
@@ -314,5 +318,6 @@ FIELDS: dict[NamedEvent, frozenset[str]] = {
     # ``cloid`` is ``None`` on the account-grain read, which has no order.
     NamedEvent.EXCHANGE_REQUEST_FAILED: frozenset({"request", "cloid", "error"}),
     NamedEvent.EXCHANGE_ACTION_REJECTED: frozenset({"request", "cloid", "oid", "reason"}),
+    NamedEvent.EXCHANGE_SPOT_ORDER_SKIPPED: frozenset({"coin", "oid"}),
     NamedEvent.EXCHANGE_LEVERAGE_UNCHANGED: frozenset({"symbol", "mode", "leverage"}),
 }

@@ -168,7 +168,9 @@ stuck.
 
 Stop the engine, then run `uv run tickwright cancel-all`. It reads the same config as a normal
 run. It cancels every order resting in the account, including orders placed by hand, and exits. It
-works on paper and on Hyperliquid.
+works on paper and on Hyperliquid. On Hyperliquid it cancels perp orders on the first perp dex
+only. It leaves spot orders and orders on other perp dexes resting. Each spot order it leaves is
+logged as `exchange.spot_order_skipped`.
 
 | Exit code | Meaning |
 | --- | --- |
