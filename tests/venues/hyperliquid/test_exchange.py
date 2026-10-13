@@ -918,6 +918,25 @@ def test_a_refused_cancel_names_a_hand_placed_order_by_its_oid() -> None:
     ] == [(None, "902"), (CLOID, "77")]
 
 
+def test_a_hand_placed_order_already_gone_is_as_silent_as_one_of_ours() -> None:
+    # A hand-placed order filled or pulled before our cancel landed is the same
+    # ordinary race as for one of ours. Nothing is reported and nothing is named.
+    post = FakeExchangeApi(
+        {"cancel": cancel_statuses_response("success", {"error": "Order was never placed"})}
+    )
+    refs: list[OrderRef | ExternalOrderRef] = [
+        OrderRef(cloid=CLOID, symbol="BTC", venue_oid="77"),
+        ExternalOrderRef(symbol="BTC", venue_oid="902"),
+    ]
+
+    reports, named = cancel_and_collect(post, refs)
+
+    assert [(r.cloid, r.status) for r in reports if isinstance(r, OrderStatusReport)] == [
+        (CLOID, OrderState.CANCELLED)
+    ]
+    assert named == []
+
+
 async def fetch_view(
     post: FakeExchangeApi, ref: OrderRef = UNACKED_REF
 ) -> VenueOrderView | VenueReadFailure:

@@ -421,33 +421,34 @@ class HyperliquidExchange:
             else adjudications
         )
         for ref, adjudication in zip(refs, per_order, strict=True):
-            if isinstance(ref, ExternalOrderRef):
-                if isinstance(adjudication, _ActionError):
-                    self._action_rejected(
-                        "cancel", adjudication.message, cloid=None, oid=ref.venue_oid
-                    )
-                # Otherwise there is no saga to report to. Operator cancel all
-                # trusts its next read, not this status (ADR-0060).
-                continue
-            await self._apply_cancellation(
-                cloid=ref.cloid, oid=ref.venue_oid, symbol=ref.symbol, adjudication=adjudication
-            )
+            await self._apply_cancellation(ref, adjudication)
 
     async def _apply_cancellation(
-        self, *, cloid: str, oid: str | None, symbol: str, adjudication: "_CancelAdjudication"
+        self, ref: OrderRef | ExternalOrderRef, adjudication: "_CancelAdjudication"
     ) -> None:
         """Carry out a cancel adjudication that has already been read — the peer
         of ``_apply_placement`` on the other write verb, outside the
-        unreadable-body guard for the same reason."""
+        unreadable-body guard for the same reason.
+
+        The one place that decides what each outcome emits, for both kinds of ref."""
         match adjudication:
             case _ActionError(message=message):
-                # The cancel action was refused, not adjudicated: a benign no-op —
-                # the durable cancel_requested marker leaves it to reconciliation.
-                self._action_rejected("cancel", message, cloid=cloid, oid=oid)
-            case _CancelVerdict.CANCELLED:
+                # The cancel action was refused, not adjudicated: a benign no-op.
+                # Ours keeps its durable cancel_requested marker for
+                # reconciliation. A hand-placed one shows in the next read. It
+                # has no cloid, so its oid is what names it.
+                cloid = ref.cloid if isinstance(ref, OrderRef) else None
+                self._action_rejected("cancel", message, cloid=cloid, oid=ref.venue_oid)
+            case _CancelVerdict.CANCELLED if isinstance(ref, OrderRef):
                 await self._bus.publish(
-                    self._status_report(cloid=cloid, symbol=symbol, status=OrderState.CANCELLED)
+                    self._status_report(
+                        cloid=ref.cloid, symbol=ref.symbol, status=OrderState.CANCELLED
+                    )
                 )
+            case _CancelVerdict.CANCELLED:
+                # A hand-placed order has no saga to report to. Operator cancel
+                # all trusts its next read, not this status (ADR-0060).
+                return
             case _CancelVerdict.ALREADY_GONE:
                 # The order is filled, cancelled, or never landed: positive venue
                 # truth, not an unreadable body — nothing to name, and nothing to
