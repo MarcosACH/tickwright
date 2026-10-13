@@ -734,6 +734,38 @@ def test_a_cancel_of_201_orders_goes_as_two_requests_of_200_and_1() -> None:
     assert [r.cloid for r in reports] == [ref.cloid for ref in refs]
 
 
+def test_a_mixed_cancel_of_250_orders_sends_no_request_with_more_than_200() -> None:
+    # An operator cancel all mixes hand-placed orders with engine ones. The
+    # hand-placed and the acked ones share one key, 225 orders by oid. That
+    # group alone is over the venue limit, so it must split too (ADR-0055).
+    hand_placed = [ExternalOrderRef(symbol="BTC", venue_oid=str(2000 + i)) for i in range(125)]
+    acked = [
+        OrderRef(cloid=f"0x{i:032x}", symbol="BTC", venue_oid=str(1000 + i)) for i in range(100)
+    ]
+    unacked = [OrderRef(cloid=f"0x{500 + i:032x}", symbol="BTC") for i in range(25)]
+    refs: list[OrderRef | ExternalOrderRef] = [
+        *(ref for pair in zip(hand_placed, acked, strict=False) for ref in pair),
+        *hand_placed[100:],
+        *unacked,
+    ]
+    post = FakeExchangeApi(
+        {"cancel": every_cancel_succeeds, "cancelByCloid": every_cancel_succeeds}
+    )
+
+    cancel_and_collect(post, refs)
+
+    sent = [entry for _, payload in post.requests for entry in payload["action"]["cancels"]]
+    assert max(len(payload["action"]["cancels"]) for _, payload in post.requests) <= 200
+    # Every order is still sent exactly once.
+    assert sorted(entry["o"] for entry in sent if "o" in entry) == [
+        *range(1000, 1100),
+        *range(2000, 2125),
+    ]
+    assert sorted(entry["cloid"] for entry in sent if "cloid" in entry) == [
+        ref.cloid for ref in unacked
+    ]
+
+
 CLOID_2 = "0x" + "cd" * 16
 
 
