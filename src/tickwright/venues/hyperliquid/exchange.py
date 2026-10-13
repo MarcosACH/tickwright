@@ -520,10 +520,14 @@ class HyperliquidExchange:
         return VenueOrderView(status=status, fills=tuple(fills))
 
     async def fetch_open_orders(self) -> list[VenueOpenOrder] | VenueReadFailure:
-        # The CLI refuses cancel-all on this venue before boot until #470 builds
-        # this read. A failed read would be the wrong answer here: it would let an
-        # exit run boot and exit 1 when it should never have started.
-        raise NotImplementedError("Hyperliquid lists open orders from #470 on")
+        # frontendOpenOrders, not openOrders: only this one carries the cloid,
+        # and the engine finds an order's saga by its cloid.
+        return await read(
+            request="frontendOpenOrders",
+            query={"type": "frontendOpenOrders", "user": self._user_address},
+            send=self._info,
+            normalize=_open_orders,
+        )
 
     async def fetch_positions(self) -> dict[str, Decimal] | VenueReadFailure:
         # The CLI refuses flatten on this venue before boot until #475 builds
@@ -980,6 +984,30 @@ def _cancel_adjudications(response: object, *, count: int) -> _ActionError | lis
     if len(outcome) != count:
         raise ValueError(f"{len(outcome)} cancel statuses for {count} cancels: {outcome!r}")
     return [_cancel_verdict(status) for status in outcome]
+
+
+def _open_orders(response: object) -> list[VenueOpenOrder]:
+    """Read a ``frontendOpenOrders`` answer. The venue sends ``"cloid": null``
+    for an order placed by hand, so a missing key is unreadable, not hand-placed.
+
+    A TP or SL nested under a parent as ``children`` is not listed. Cancelling
+    the parent cancels them (the P5 probe in
+    ``docs/research/hyperliquid-reduce-only-cancel-market-probes.md``). If one
+    survives, the read after the cancel shows it.
+    """
+    if not isinstance(response, list):
+        raise TypeError(f"open orders is not a list: {response!r}")
+    orders = []
+    for entry in response:
+        cloid = entry["cloid"]
+        orders.append(
+            VenueOpenOrder(
+                symbol=str(entry["coin"]),
+                cloid=None if cloid is None else str(cloid),
+                venue_oid=str(int(entry["oid"])),
+            )
+        )
+    return orders
 
 
 def _cancel_verdict(status: object) -> _CancelVerdict:

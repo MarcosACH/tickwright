@@ -47,6 +47,7 @@ from tickwright.domain import (
     Side,
     TimeInForce,
     VenueFactUnsupported,
+    VenueOpenOrder,
     VenueOrderView,
     VenueReadFailure,
 )
@@ -1809,13 +1810,49 @@ def test_the_hyperliquid_venue_satisfies_the_exchange_seam() -> None:
     assert isinstance(exchange, Exchange)
 
 
-def test_the_venue_refuses_to_list_open_orders_until_it_can_read_them() -> None:
-    # #470 builds this read. Until then the CLI refuses cancel-all on this venue
-    # before boot, so a call here is a wiring bug and must fail loudly.
-    exchange = make_exchange(FakeExchangeApi({}), bus=InMemoryBus(), clock=ManualClock())
+def test_open_orders_lists_engine_and_hand_placed_orders_with_their_oids() -> None:
+    # Shaped like the testnet capture in
+    # docs/research/hyperliquid-reduce-only-cancel-market-probes.md, P1 and P5.
+    post = FakeExchangeApi(
+        {
+            "frontendOpenOrders": [
+                {
+                    "coin": "BTC",
+                    "side": "B",
+                    "limitPx": "40000.0",
+                    "sz": "0.01",
+                    "oid": 901,
+                    "reduceOnly": False,
+                    "orderType": "Limit",
+                    "origSz": "0.01",
+                    "tif": "Gtc",
+                    "cloid": CLOID,
+                },
+                {
+                    "coin": "BTC",
+                    "side": "A",
+                    "limitPx": "50000.0",
+                    "sz": "0.02",
+                    "oid": 902,
+                    "reduceOnly": False,
+                    "orderType": "Limit",
+                    "origSz": "0.02",
+                    "tif": "Gtc",
+                    "cloid": None,
+                },
+            ]
+        }
+    )
+    exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
 
-    with pytest.raises(NotImplementedError, match="#470"):
-        asyncio.run(exchange.fetch_open_orders())
+    orders = asyncio.run(exchange.fetch_open_orders())
+
+    assert orders == [
+        VenueOpenOrder(symbol="BTC", cloid=CLOID, venue_oid="901"),
+        VenueOpenOrder(symbol="BTC", cloid=None, venue_oid="902"),
+    ]
+    [(_, query)] = post.requests
+    assert query["user"] == Account.from_key(TEST_SIGNING_KEY).address
 
 
 def test_the_venue_refuses_to_read_positions_until_it_can_read_them() -> None:
@@ -1855,7 +1892,7 @@ _SEAM_CLAIMS = {
     "place": "test_market_buy_places_an_aggressive_ioc_limit_at_the_bounded_price",
     "cancel": "test_cancel_sends_a_signed_cancel_by_cloid_and_reports_cancelled",
     "fetch_order": "test_fetch_order_bundles_the_venue_status_and_fills_into_one_view",
-    "fetch_open_orders": "test_the_venue_refuses_to_list_open_orders_until_it_can_read_them",
+    "fetch_open_orders": "test_open_orders_lists_engine_and_hand_placed_orders_with_their_oids",
     "fetch_positions": "test_the_venue_refuses_to_read_positions_until_it_can_read_them",
     # test_account.py — the module that owns what clearinghouseState means.
     "fetch_account_state": "test_a_recorded_cross_snapshot_normalizes_to_the_measured_account_figures",
