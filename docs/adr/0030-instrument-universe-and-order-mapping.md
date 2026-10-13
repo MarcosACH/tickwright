@@ -49,3 +49,5 @@ of `latest_price × (1 + slippage_bound)` and `mark × (1 + slippage_bound)`. A 
 higher of the two, with `(1 − slippage_bound)`. A stale last trade can no longer widen the bound.
 A missing mark fails the order like a missing trade price. Paper is unchanged. Not built yet.
 Decided in [#438](https://github.com/MarcosACH/tickwright/issues/438).**)**
+**(Built in [#467](https://github.com/MarcosACH/tickwright/issues/467):** the Hyperliquid adapter
+caps every MARKET price by the mark.**)**

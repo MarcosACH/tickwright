@@ -3,12 +3,13 @@ async HTTP.
 
 A thin venue boundary (ADR-0015): translate and send, own no saga. Every
 venue quirk stays here, never in the engine (ADR-0030): MARKET becomes an
-aggressive IOC limit at ``latest × (1 ± slippage_bound)`` quantized per the
-ADR-0017 price rule, ``post_only`` becomes ALO, LIMIT passes through as
-GTC/IOC. Signing borrows the SDK's utilities only (ADR-0021) — the HTTP call
-is our own async client, and the nonce comes from the injected ``Clock``
-(ADR-0005), never the SDK's wall-time helper. The latest price a MARKET is
-bounded against is the tick stream's — the adapter subscribes itself, like
+aggressive IOC limit at ``latest × (1 ± slippage_bound)``, capped by
+``mark × (1 ± slippage_bound)`` (ADR-0059) and quantized per the ADR-0017
+price rule, ``post_only`` becomes ALO, LIMIT passes through as GTC/IOC.
+Signing borrows the SDK's utilities only (ADR-0021) — the HTTP call is our own
+async client, and the nonce comes from the injected ``Clock`` (ADR-0005),
+never the SDK's wall-time helper. The trade and the mark a MARKET is bounded
+against come from the market data stream. The adapter subscribes itself, like
 every consumer of market data.
 """
 
@@ -30,6 +31,7 @@ from tickwright.domain import (
     InstrumentSpec,
     LeverageBook,
     MarketTick,
+    MarkTick,
     OrderRef,
     OrderState,
     OrderStatusReport,
@@ -120,6 +122,7 @@ class HyperliquidExchange:
         # account is a deployment fact, not something that moves at runtime.
         self._account_spec = account_spec(config, address=self._user_address)
         self._latest_price: dict[str, Decimal] = {}
+        self._latest_mark: dict[str, Decimal] = {}
         # The last nonce sent: the venue requires per-address nonces to be
         # strictly increasing, and the ms-truncated clock would collide on two
         # sends inside one millisecond — this floor keeps them monotonic.
@@ -127,6 +130,9 @@ class HyperliquidExchange:
         # The MARKET slippage bound needs the latest traded price, and the tick
         # stream is where prices live (ADR-0027) — subscribe like any consumer.
         bus.subscribe(MarketTick, self.on_tick)
+        # A stale trade can sit far from the market. The mark keeps a MARKET
+        # within the bound of where the venue values the coin (ADR-0059).
+        bus.subscribe(MarkTick, self.on_mark)
         # The live half of ADR-0037: the venue pays funding at its own
         # boundaries and this ingests it. Built here rather than in ``run()`` so
         # that ``stop()`` has something to close even if the runner never got as
@@ -221,6 +227,9 @@ class HyperliquidExchange:
 
     async def on_tick(self, tick: MarketTick) -> None:
         self._latest_price[tick.symbol] = tick.price
+
+    async def on_mark(self, mark: MarkTick) -> None:
+        self._latest_mark[mark.symbol] = mark.price
 
     async def place(self, order: PlaceOrder) -> None:
         action = {
@@ -708,12 +717,20 @@ class HyperliquidExchange:
         latest = self._latest_price.get(order.symbol)
         if latest is None:
             raise ValueError(f"no market tick cached for {order.symbol!r}; cannot bound MARKET")
+        # A trade alone could be stale, so a missing mark is a missing price
+        # (ADR-0059).
+        mark = self._latest_mark.get(order.symbol)
+        if mark is None:
+            raise ValueError(f"no mark cached for {order.symbol!r}; cannot bound MARKET")
         bound = (
             1 + self._config.slippage_bound
             if order.side is Side.BUY
             else 1 - self._config.slippage_bound
         )
-        return quantize_price(latest * bound, order.side, self._universe.specs[order.symbol])
+        # The tighter of the two: a buy pays no more, a sell takes no less.
+        tighter = min if order.side is Side.BUY else max
+        price = tighter(latest * bound, mark * bound)
+        return quantize_price(price, order.side, self._universe.specs[order.symbol])
 
     def _wire_tif(self, order: PlaceOrder) -> str:
         if order.order_type is OrderType.MARKET:

@@ -73,6 +73,8 @@ of [#408](https://github.com/MarcosACH/tickwright/issues/408).
   It now also fails when no mark is cached.
 - Not built yet. The build updates the `SLIPPAGE_BOUND` line in `.env.example` and the adapter's
   docstring, which still say last trade × (1 ± bound).
+  **(Built in [#467](https://github.com/MarcosACH/tickwright/issues/467):** the Hyperliquid
+  adapter caps every market order by the mark. `.env.example` and the adapter docstring say so.**)**
 - Under replay, a missing price cannot hang the run. `ManualClock.sleep` returns at once and moves
   virtual time forward. So the 3 attempts end at once, and so does a stochastic fill's latency.
 - A paper flatten under replay fills at the last price in the file, not at a current price. This is

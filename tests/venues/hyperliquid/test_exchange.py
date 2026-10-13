@@ -5,7 +5,8 @@ throwaway, publicly-known test key), so every asserted wire is one the venue
 could verify — the recovery check proves the signature binds the exact action
 sent. Venue quirk translation lives in the adapter, never the engine
 (ADR-0030): MARKET becomes an aggressive IOC limit at
-``latest × (1 ± slippage_bound)``, quantized per the ADR-0017 price rule.
+``latest × (1 ± slippage_bound)``, capped by ``mark × (1 ± slippage_bound)``
+(ADR-0059), quantized per the ADR-0017 price rule.
 """
 
 import asyncio
@@ -37,6 +38,7 @@ from tickwright.domain import (
     FillReport,
     InstrumentSpec,
     MarketTick,
+    MarkTick,
     OrderRef,
     OrderState,
     OrderStatusReport,
@@ -130,6 +132,8 @@ def test_market_buy_places_an_aggressive_ioc_limit_at_the_bounded_price() -> Non
         post = FakeExchangeApi({"order": resting_response(oid=77)})
         exchange = make_exchange(post, bus=bus, clock=clock)
         await bus.publish(tick("BTC", "43250.5"))
+        # 44000 × 1.05 = 46200 is looser than the trade's bound, so the trade binds.
+        await bus.publish(mark("BTC", "44000"))
         await exchange.place(market_order(Side.BUY, "0.5"))
         return post, clock
 
@@ -173,6 +177,8 @@ def test_market_sell_places_an_aggressive_ioc_limit_at_the_bounded_price() -> No
         post = FakeExchangeApi({"order": resting_response(oid=78)})
         exchange = make_exchange(post, bus=bus, clock=clock)
         await bus.publish(tick("BTC", "43250.5"))
+        # 42500 × 0.95 = 40375 is looser than the trade's bound, so the trade binds.
+        await bus.publish(mark("BTC", "42500"))
         await exchange.place(market_order(Side.SELL, "0.25"))
         return post
 
@@ -186,6 +192,74 @@ def test_market_sell_places_an_aggressive_ioc_limit_at_the_bounded_price() -> No
     assert wire["p"] == "41088"
     assert wire["s"] == "0.25"
     assert wire["t"] == {"limit": {"tif": "Ioc"}}
+
+
+def mark(symbol: str, price: str) -> MarkTick:
+    return MarkTick(
+        symbol=symbol,
+        price=Decimal(price),
+        ts_event=1_700_000_000_000 * _NS_PER_MS,
+        ts_init=1_700_000_000_000 * _NS_PER_MS,
+    )
+
+
+def test_market_buy_is_capped_by_the_mark_when_the_trade_is_far_above_it() -> None:
+    async def main() -> FakeExchangeApi:
+        bus = InMemoryBus()
+        clock = ManualClock(start_ns=1_700_000_001_000 * _NS_PER_MS)
+        post = FakeExchangeApi({"order": resting_response(oid=79)})
+        exchange = make_exchange(post, bus=bus, clock=clock)
+        await bus.publish(tick("BTC", "43250.5"))
+        await bus.publish(mark("BTC", "40000"))
+        await exchange.place(market_order(Side.BUY, "0.5"))
+        return post
+
+    post = asyncio.run(main())
+
+    (_, payload) = post.requests[0]
+    (wire,) = payload["action"]["orders"]
+    # The trade alone allows 43250.5 × 1.05 = 45413. That is 13.5% above the
+    # mark. The mark caps it at 40000 × 1.05 = 42000 (ADR-0059).
+    assert wire["b"] is True
+    assert wire["p"] == "42000"
+
+
+def test_market_sell_is_capped_by_the_mark_when_the_trade_is_far_below_it() -> None:
+    async def main() -> FakeExchangeApi:
+        bus = InMemoryBus()
+        clock = ManualClock(start_ns=1_700_000_001_000 * _NS_PER_MS)
+        post = FakeExchangeApi({"order": resting_response(oid=80)})
+        exchange = make_exchange(post, bus=bus, clock=clock)
+        await bus.publish(tick("BTC", "38000"))
+        await bus.publish(mark("BTC", "40000"))
+        await exchange.place(market_order(Side.SELL, "0.5"))
+        return post
+
+    post = asyncio.run(main())
+
+    (_, payload) = post.requests[0]
+    (wire,) = payload["action"]["orders"]
+    # The trade alone allows 38000 × 0.95 = 36100. That is 9.75% below the
+    # mark. The mark caps it at 40000 × 0.95 = 38000 (ADR-0059).
+    assert wire["b"] is False
+    assert wire["p"] == "38000"
+
+
+def test_market_order_with_no_mark_is_refused_like_one_with_no_trade() -> None:
+    post = FakeExchangeApi({"order": resting_response(oid=81)})
+
+    async def main() -> None:
+        bus = InMemoryBus()
+        clock = ManualClock(start_ns=1_700_000_001_000 * _NS_PER_MS)
+        exchange = make_exchange(post, bus=bus, clock=clock)
+        await bus.publish(tick("BTC", "43250.5"))
+        await exchange.place(market_order(Side.BUY, "0.5"))
+
+    # A missing mark is a missing price (ADR-0059). The trade alone could be
+    # stale, so nothing goes out.
+    with pytest.raises(ValueError, match="no mark cached for 'BTC'"):
+        asyncio.run(main())
+    assert post.requests == []
 
 
 def limit_order(
@@ -285,6 +359,7 @@ async def place_and_collect_reports(
     bus.subscribe(ExecutionReport, collect)
     if prime_tick:
         await bus.publish(tick("BTC", "43250.5"))
+        await bus.publish(mark("BTC", "43250.5"))
     await exchange.place(order)
     return reports
 
