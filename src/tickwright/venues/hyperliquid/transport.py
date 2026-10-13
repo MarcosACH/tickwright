@@ -16,8 +16,8 @@ if TYPE_CHECKING:
 
 type PostJson = Callable[[str, dict[str, Any]], Awaitable[object]]
 """POSTs ``payload`` as JSON to ``url`` and returns the decoded response,
-raising ``OSError`` (``TimeoutError`` included) on transport failure.
-Defaults to the real client; tests inject fakes."""
+raising ``OSError`` (``TimeoutError`` included) on transport failure, and
+``IpRateLimited`` on an HTTP 429. Defaults to the real client; tests inject fakes."""
 
 
 HTTP_TIMEOUT_SECONDS = 30.0
@@ -29,6 +29,14 @@ A per-call transport bound and a module constant, for the reasons
 patch it down and pin the timeout path without waiting the full budget."""
 
 
+class IpRateLimited(ConnectionError):
+    """The venue answered HTTP 429: this IP is over its rate limit (ADR-0056).
+
+    A ``ConnectionError``, so a caller that only keys on ``OSError`` still
+    treats it as a failed send. A caller that cares can tell it apart.
+    """
+
+
 async def post_json(url: str, payload: dict[str, Any]) -> object:
     """The real transport. Imported lazily so the package stays light until a
     live component is actually built (mirrors the feed's websockets import)."""
@@ -38,6 +46,8 @@ async def post_json(url: str, payload: dict[str, Any]) -> object:
         timeout = aiohttp.ClientTimeout(total=HTTP_TIMEOUT_SECONDS)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(url, json=payload) as response:
+                if response.status == 429:
+                    raise IpRateLimited(f"hyperliquid request to {url} hit the IP rate limit")
                 response.raise_for_status()
                 return await response.json()
     except aiohttp.ClientError as exc:

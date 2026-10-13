@@ -58,6 +58,7 @@ from tickwright.venues.hyperliquid import (
     HyperliquidExchange,
     HyperliquidUniverse,
 )
+from tickwright.venues.hyperliquid.transport import IpRateLimited
 
 CLOID = "0x" + "ab" * 16
 UNACKED_REF = OrderRef(cloid=CLOID, symbol="BTC")
@@ -1853,6 +1854,14 @@ def test_open_orders_lists_engine_and_hand_placed_orders_with_their_oids() -> No
     ]
     [(_, query)] = post.requests
     assert query["user"] == Account.from_key(TEST_SIGNING_KEY).address
+
+
+def test_an_open_orders_read_that_hits_the_ip_rate_limit_says_so_and_nothing_more() -> None:
+    post = FakeExchangeApi({"frontendOpenOrders": IpRateLimited("429 from the venue")})
+    exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
+
+    # The engine gets the kind of failure. The venue text stays in the adapter.
+    assert asyncio.run(exchange.fetch_open_orders()) is VenueReadFailure.RATE_LIMITED_IP
 
 
 def test_the_venue_refuses_to_read_positions_until_it_can_read_them() -> None:

@@ -38,6 +38,9 @@ class VenueReadFailure(Enum):
       up and answering at full speed; the next order's read is one ordinary
       round-trip away, and the unreadable one says nothing about it. Only that
       order is skipped.
+    - ``RATE_LIMITED_IP`` — the venue refused the read because this IP is over
+      its rate limit (ADR-0056). Every other read in the pass would be refused
+      too, so the pass stops here, as on ``SEND_FAILED``.
 
     Deliberately not a third state on ``VenueOrderView``: a view is a
     *successful* read, and a failure that could be carried inside one would be
@@ -48,6 +51,7 @@ class VenueReadFailure(Enum):
 
     SEND_FAILED = "send_failed"
     UNREADABLE_BODY = "unreadable_body"
+    RATE_LIMITED_IP = "rate_limited_ip"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
