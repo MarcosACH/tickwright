@@ -865,6 +865,27 @@ def test_a_refused_cancel_batch_names_each_order_and_reports_none() -> None:
     ]
 
 
+def test_a_refused_cancel_names_a_hand_placed_order_by_its_oid() -> None:
+    # A hand-placed order has no cloid. Its oid is what the operator can find
+    # in the venue UI, so a refusal names it by that.
+    post = FakeExchangeApi({"cancel": action_error_response("Invalid nonce")})
+    refs: list[OrderRef | ExternalOrderRef] = [
+        ExternalOrderRef(symbol="BTC", venue_oid="902"),
+        OrderRef(cloid=CLOID, symbol="BTC", venue_oid="77"),
+    ]
+
+    async def main() -> None:
+        exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
+        await exchange.cancel(refs)
+
+    with capture_events() as events:
+        asyncio.run(main())
+
+    assert [
+        (e["cloid"], e["oid"]) for e in events if e["event"] == NamedEvent.EXCHANGE_ACTION_REJECTED
+    ] == [(None, "902"), (CLOID, "77")]
+
+
 async def fetch_view(
     post: FakeExchangeApi, ref: OrderRef = UNACKED_REF
 ) -> VenueOrderView | VenueReadFailure:

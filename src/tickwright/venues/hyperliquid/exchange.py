@@ -280,7 +280,7 @@ class HyperliquidExchange:
                 # emitting no terminal: a transient refusal must leave the order
                 # resendable, and reconcile-by-cloid resolves it (ADR-0008
                 # rule 2).
-                self._action_rejected("place", order.cloid, message)
+                self._action_rejected("place", message, cloid=order.cloid, oid=None)
             case _Resting(oid=oid):
                 await self._ack(order, oid=oid)
             case _Rejected(reason=reason):
@@ -362,13 +362,20 @@ class HyperliquidExchange:
             )
         )
 
-    def _action_rejected(self, request: str, cloid: str, reason: str) -> None:
+    def _action_rejected(
+        self, request: str, reason: str, *, cloid: str | None, oid: str | None
+    ) -> None:
         # The venue refused the whole action (bad nonce/signature, an action
         # rate-limit): a 200-OK `err` envelope, not a transport failure and not
         # a per-order REJECTED. Name it and stop — reconcile-by-cloid owns the
         # in-flight order (a place never landed, so a later resend is safe).
+        # A hand-placed order has no cloid, so its oid is what names it.
         named_event(
-            NamedEvent.EXCHANGE_ACTION_REJECTED, request=request, cloid=cloid, reason=reason
+            NamedEvent.EXCHANGE_ACTION_REJECTED,
+            request=request,
+            cloid=cloid,
+            oid=oid,
+            reason=reason,
         )
 
     async def cancel(self, refs: Sequence[OrderRef | ExternalOrderRef]) -> None:
@@ -415,15 +422,19 @@ class HyperliquidExchange:
         )
         for ref, adjudication in zip(refs, per_order, strict=True):
             if isinstance(ref, ExternalOrderRef):
-                # No saga to report to. Operator cancel all trusts its next
-                # read, not this status (ADR-0060).
+                if isinstance(adjudication, _ActionError):
+                    self._action_rejected(
+                        "cancel", adjudication.message, cloid=None, oid=ref.venue_oid
+                    )
+                # Otherwise there is no saga to report to. Operator cancel all
+                # trusts its next read, not this status (ADR-0060).
                 continue
             await self._apply_cancellation(
-                cloid=ref.cloid, symbol=ref.symbol, adjudication=adjudication
+                cloid=ref.cloid, oid=ref.venue_oid, symbol=ref.symbol, adjudication=adjudication
             )
 
     async def _apply_cancellation(
-        self, *, cloid: str, symbol: str, adjudication: "_CancelAdjudication"
+        self, *, cloid: str, oid: str | None, symbol: str, adjudication: "_CancelAdjudication"
     ) -> None:
         """Carry out a cancel adjudication that has already been read — the peer
         of ``_apply_placement`` on the other write verb, outside the
@@ -432,7 +443,7 @@ class HyperliquidExchange:
             case _ActionError(message=message):
                 # The cancel action was refused, not adjudicated: a benign no-op —
                 # the durable cancel_requested marker leaves it to reconciliation.
-                self._action_rejected("cancel", cloid, message)
+                self._action_rejected("cancel", message, cloid=cloid, oid=oid)
             case _CancelVerdict.CANCELLED:
                 await self._bus.publish(
                     self._status_report(cloid=cloid, symbol=symbol, status=OrderState.CANCELLED)
