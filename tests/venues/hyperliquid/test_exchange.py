@@ -1910,9 +1910,11 @@ def test_open_orders_lists_engine_and_hand_placed_orders_with_their_oids() -> No
 
     orders = asyncio.run(exchange.fetch_open_orders())
 
+    # The hand-placed order comes back as the ref its cancel needs. So no
+    # listed order can lack both keys.
     assert orders == [
         VenueOpenOrder(symbol="BTC", cloid=CLOID, venue_oid="901"),
-        VenueOpenOrder(symbol="BTC", cloid=None, venue_oid="902"),
+        ExternalOrderRef(symbol="BTC", venue_oid="902"),
     ]
     [(_, query)] = post.requests
     assert query["user"] == Account.from_key(TEST_SIGNING_KEY).address

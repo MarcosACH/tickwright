@@ -202,7 +202,7 @@ class _ReadThatNeverAnswers(VenueLink):
         super().__init__(venue)
         self.reading = asyncio.Event()
 
-    async def fetch_open_orders(self) -> list[VenueOpenOrder] | VenueReadFailure:
+    async def fetch_open_orders(self) -> list[VenueOpenOrder | ExternalOrderRef] | VenueReadFailure:
         self.reading.set()
         await asyncio.Event().wait()
         raise AssertionError("unreachable")
@@ -479,7 +479,7 @@ class _AccountReadFails(VenueLink):
         self._reads = 0
         self.cancels_sent = 0
 
-    async def fetch_open_orders(self) -> list[VenueOpenOrder] | VenueReadFailure:
+    async def fetch_open_orders(self) -> list[VenueOpenOrder | ExternalOrderRef] | VenueReadFailure:
         self._reads += 1
         if self._reads >= self._first_failing_read:
             return VenueReadFailure.SEND_FAILED

@@ -518,7 +518,7 @@ class PaperExchange:
             fills=tuple(self._fills.get(ref.cloid, [])),
         )
 
-    async def fetch_open_orders(self) -> list[VenueOpenOrder] | VenueReadFailure:
+    async def fetch_open_orders(self) -> list[VenueOpenOrder | ExternalOrderRef] | VenueReadFailure:
         """The resting book. Paper places only engine orders and assigns no oid,
         and an in-process read cannot fail."""
         return [

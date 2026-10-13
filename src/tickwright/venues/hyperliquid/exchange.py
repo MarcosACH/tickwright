@@ -523,7 +523,7 @@ class HyperliquidExchange:
         )
         return VenueOrderView(status=status, fills=tuple(fills))
 
-    async def fetch_open_orders(self) -> list[VenueOpenOrder] | VenueReadFailure:
+    async def fetch_open_orders(self) -> list[VenueOpenOrder | ExternalOrderRef] | VenueReadFailure:
         # frontendOpenOrders, not openOrders: only this one carries the cloid,
         # and the engine finds an order's saga by its cloid.
         return await read(
@@ -1007,9 +1007,10 @@ def _cancel_entry(ref: OrderRef | ExternalOrderRef, *, asset: int) -> tuple[str,
             assert_never(unreachable)
 
 
-def _open_orders(response: object) -> list[VenueOpenOrder]:
+def _open_orders(response: object) -> list[VenueOpenOrder | ExternalOrderRef]:
     """Read a ``frontendOpenOrders`` answer. The venue sends ``"cloid": null``
     for an order placed by hand, so a missing key is unreadable, not hand-placed.
+    A hand-placed order is listed as the ``ExternalOrderRef`` its cancel needs.
 
     A TP or SL nested under a parent as ``children`` is not listed. Cancelling
     the parent cancels them (the P5 probe in
@@ -1018,16 +1019,15 @@ def _open_orders(response: object) -> list[VenueOpenOrder]:
     """
     if not isinstance(response, list):
         raise TypeError(f"open orders is not a list: {response!r}")
-    orders = []
+    orders: list[VenueOpenOrder | ExternalOrderRef] = []
     for entry in response:
+        symbol = str(entry["coin"])
         cloid = entry["cloid"]
-        orders.append(
-            VenueOpenOrder(
-                symbol=str(entry["coin"]),
-                cloid=None if cloid is None else str(cloid),
-                venue_oid=str(int(entry["oid"])),
-            )
-        )
+        oid = str(int(entry["oid"]))
+        if cloid is None:
+            orders.append(ExternalOrderRef(symbol=symbol, venue_oid=oid))
+        else:
+            orders.append(VenueOpenOrder(symbol=symbol, cloid=str(cloid), venue_oid=oid))
     return orders
 
 

@@ -639,7 +639,7 @@ class _FailsOneRead(VenueLink):
         self._calls[read] += 1
         return read == self._read and self._calls[read] == self._nth
 
-    async def fetch_open_orders(self) -> list[VenueOpenOrder] | VenueReadFailure:
+    async def fetch_open_orders(self) -> list[VenueOpenOrder | ExternalOrderRef] | VenueReadFailure:
         if self._fails("fetch_open_orders"):
             return VenueReadFailure.SEND_FAILED
         return await super().fetch_open_orders()

@@ -557,8 +557,11 @@ class AccountAnchor(Protocol):
     unwrappable ``None``, which is the shape that decision already rejected.
     """
 
-    async def fetch_open_orders(self) -> list[VenueOpenOrder] | VenueReadFailure:
-        """Every order resting in the account, ours or not (ADR-0052).
+    async def fetch_open_orders(
+        self,
+    ) -> list[VenueOpenOrder | ExternalOrderRef] | VenueReadFailure:
+        """Every order resting in the account, ours or not (ADR-0052). An order
+        the engine did not place has no cloid, so it is an ``ExternalOrderRef``.
 
         Operator cancel all reads it for its list and again for its final check.
         A failed read returns a ``VenueReadFailure`` and never an empty list,

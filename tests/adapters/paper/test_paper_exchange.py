@@ -682,7 +682,7 @@ def test_fetch_open_orders_lists_the_orders_still_resting_on_the_book() -> None:
     # Cancel all reads this list first, then reads it again to prove it is done (ADR-0060).
     exchange, bus, clock, _fills, _statuses = _limit_harness()
 
-    async def scenario() -> list[VenueOpenOrder] | VenueReadFailure:
+    async def scenario() -> list[VenueOpenOrder | ExternalOrderRef] | VenueReadFailure:
         clock.advance_to(1_000)
         await bus.publish(_tick("42000"))
         await exchange.place(_limit_order("41000", cloid="0xa"))

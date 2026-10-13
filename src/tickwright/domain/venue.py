@@ -94,7 +94,8 @@ class ExternalOrderRef:
     venue UI. It has no cloid of ours and no saga, so the oid is the only key.
 
     Only a cancel takes it (ADR-0052, ADR-0055). Every read stays keyed by
-    cloid through ``OrderRef``.
+    cloid through ``OrderRef``. ``fetch_open_orders`` returns it, so the order
+    it lists is already the ref its cancel needs.
     """
 
     symbol: str
@@ -124,15 +125,20 @@ class VenueOrderView:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class VenueOpenOrder:
-    """One order the venue holds resting, from ``AccountAnchor.fetch_open_orders``.
+    """One resting order with a cloid, from ``AccountAnchor.fetch_open_orders``.
 
-    The cloid is ``None`` for an order the engine did not place, such as one
-    placed by hand in the venue UI. The oid is ``None`` on paper, which assigns
-    none. A live venue always gives one.
+    That read lists an order the engine did not place as an
+    ``ExternalOrderRef`` instead. So every listed order has a key to cancel it
+    by. The oid is ``None`` on paper, which assigns none. A live venue always
+    gives one.
+
+    Not an ``OrderRef``, on purpose. The read carries no saga stamps, and a
+    ``fetch_order`` without the created stamp keeps an earlier life's record
+    under the same cloid (#354). Only the saga builds the ref for a read.
     """
 
     symbol: str
-    cloid: str | None = None
+    cloid: str
     venue_oid: str | None = None
 
 
