@@ -44,6 +44,12 @@ operator asks for cancel all and flatten, and what each one touches. The terms a
   run sends a cancel for every order the read shows resting, marked or not, because an earlier
   cancel may have been lost. An external order has no saga. It is cancelled by oid alone, as an
   `ExternalOrderRef` (ADR-0055).**)**
+  **(Corrected by [#470](https://github.com/MarcosACH/tickwright/issues/470):** the read does not
+  give every order an oid. Paper assigns none. An engine order comes back as a `VenueOpenOrder`
+  with a required cloid and the oid where the venue gives one. A hand-placed order comes back as
+  the `ExternalOrderRef` that cancels it. So no listed order can lack both keys. A
+  `VenueOpenOrder` is not an `OrderRef`, because the read carries no saga stamps. A `fetch_order`
+  without the created stamp would keep an earlier life's record under the same cloid (#354).**)**
 - **A store lock.** A running engine holds an exclusive lock on its store. For SQLite this is a
   file lock. For Postgres it is an advisory lock. A one-shot run takes the same lock. It refuses to
   start while another process holds it. The lock must end when the process that holds it dies. A
