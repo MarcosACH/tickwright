@@ -16,7 +16,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from decimal import Decimal
 
-from .enums import OrderState, OrderType, Side
+from .enums import OrderState, OrderType, Side, TimeInForce
 from .errors import InvariantViolation
 from .events import (
     OrderDenied,
@@ -94,6 +94,13 @@ class Order:
     # A flatten order's partition sizes, read once at place (ADR-0054). Each fill splits against
     # them, so a fill booked after a restart gives the same moves. ``None`` for any other order.
     split_basis: tuple[tuple[str, Decimal], ...] | None = None
+    # The terms the venue got at place. Paper keeps its book in memory only, so a
+    # restarted paper venue rebuilds its resting orders from these (#484). A row
+    # written before they existed has no price, and paper leaves it out.
+    price: Decimal | None = None
+    time_in_force: TimeInForce | None = None
+    post_only: bool = False
+    reduce_only: bool = False
     _applied_event_ids: set[str] = field(default_factory=set, init=False, repr=False)
 
     @property
@@ -195,6 +202,10 @@ class Order:
         cancel_signal_id: str | None,
         applied_event_ids: Iterable[str],
         split_basis: tuple[tuple[str, Decimal], ...] | None = None,
+        price: Decimal | None = None,
+        time_in_force: TimeInForce | None = None,
+        post_only: bool = False,
+        reduce_only: bool = False,
     ) -> "Order":
         """Rebuild a checkpointed saga exactly as persisted (ADR-0008 recovery).
 
@@ -222,6 +233,10 @@ class Order:
             cancel_requested_ts=cancel_requested_ts,
             cancel_signal_id=cancel_signal_id,
             split_basis=split_basis,
+            price=price,
+            time_in_force=time_in_force,
+            post_only=post_only,
+            reduce_only=reduce_only,
         )
         order._applied_event_ids.update(applied_event_ids)
         return order

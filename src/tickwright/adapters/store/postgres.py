@@ -100,6 +100,10 @@ _SCHEMA: tuple[str, ...] = (
         cancel_requested_ts BIGINT,
         cancel_signal_id    TEXT,
         split_basis         TEXT,
+        price               TEXT,
+        time_in_force       TEXT,
+        post_only           BOOLEAN NOT NULL DEFAULT FALSE,
+        reduce_only         BOOLEAN NOT NULL DEFAULT FALSE,
         applied_event_ids   TEXT NOT NULL,
         history             TEXT NOT NULL
     )
@@ -164,6 +168,10 @@ _ADDED_COLUMN_TYPES: dict[str, str] = {
     "acked_ts_ns": "BIGINT",
     "created_ts_ns": "BIGINT",
     "split_basis": "TEXT",
+    "price": "TEXT",
+    "time_in_force": "TEXT",
+    "post_only": "BOOLEAN NOT NULL DEFAULT FALSE",
+    "reduce_only": "BOOLEAN NOT NULL DEFAULT FALSE",
 }
 
 

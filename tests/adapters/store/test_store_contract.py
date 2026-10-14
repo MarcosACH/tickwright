@@ -42,6 +42,7 @@ from tickwright.domain import (
     Position,
     Side,
     Store,
+    TimeInForce,
 )
 
 Backend = SQLiteBackend | PostgresBackend
@@ -187,6 +188,10 @@ def test_every_saga_column_round_trips_under_a_distinct_value(store_backend: Bac
         cancel_signal_id="alpha:ETH:8",
         applied_event_ids=["evt-1", "evt-2"],
         split_basis=(("__unattributed__", Decimal("1.0")), ("alpha", Decimal("-2.50"))),
+        price=Decimal("2100.50"),
+        time_in_force=TimeInForce.GTC,
+        post_only=False,
+        reduce_only=True,
     )
     with store_backend.open() as store:
         store.checkpoint(order, ts_ns=1_000)
@@ -217,6 +222,11 @@ def test_every_saga_column_round_trips_under_a_distinct_value(store_backend: Bac
         ("__unattributed__", "1.0"),
         ("alpha", "-2.50"),
     ]
+    # The terms paper rebuilds a resting order from after a restart (issue #484).
+    assert str(loaded.price) == "2100.50"
+    assert loaded.time_in_force is TimeInForce.GTC
+    assert loaded.post_only is False
+    assert loaded.reduce_only is True
 
 
 def test_an_order_without_a_split_basis_reads_back_without_one(store_backend: Backend) -> None:
@@ -394,6 +404,44 @@ def test_a_database_from_before_the_split_basis_column_gains_it_on_open(
         assert loaded_old is not None
         assert loaded_old.state is OrderState.SUBMITTED
         assert loaded_old.split_basis is None
+
+
+def test_a_database_from_before_the_order_term_columns_gains_them_on_open(
+    store_backend: Backend,
+) -> None:
+    # A database from before #484 has no order terms. An old row reads back with
+    # no price, which tells paper it cannot rebuild that order. A new checkpoint
+    # on the upgraded database keeps its terms.
+    old = _order()
+    old.apply(_submitted())
+    with store_backend.open() as first:
+        first.checkpoint(old, ts_ns=1_000)
+    for column in ("price", "time_in_force", "post_only", "reduce_only"):
+        store_backend.drop_column("orders", column)
+
+    with store_backend.open() as reopened:
+        loaded_old = reopened.get_order("0xabc")
+        assert loaded_old is not None
+        assert loaded_old.state is OrderState.SUBMITTED
+        assert loaded_old.price is None
+        assert loaded_old.time_in_force is None
+        assert loaded_old.post_only is False
+        assert loaded_old.reduce_only is False
+
+        new = replace(
+            _order(),
+            cloid="0xdef",
+            order_type=OrderType.LIMIT,
+            price=Decimal("50000"),
+            time_in_force=TimeInForce.GTC,
+            reduce_only=True,
+        )
+        reopened.checkpoint(new, ts_ns=2_000)
+        loaded_new = reopened.get_order("0xdef")
+        assert loaded_new is not None
+        assert loaded_new.price == Decimal("50000")
+        assert loaded_new.time_in_force is TimeInForce.GTC
+        assert loaded_new.reduce_only is True
 
 
 def test_close_is_idempotent(store_backend: Backend) -> None:

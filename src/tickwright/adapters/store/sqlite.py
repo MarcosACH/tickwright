@@ -79,6 +79,10 @@ _SCHEMA: tuple[str, ...] = (
         cancel_requested_ts INTEGER,
         cancel_signal_id    TEXT,
         split_basis         TEXT,
+        price               TEXT,
+        time_in_force       TEXT,
+        post_only           INTEGER NOT NULL DEFAULT 0,
+        reduce_only         INTEGER NOT NULL DEFAULT 0,
         applied_event_ids TEXT NOT NULL,
         history           TEXT NOT NULL
     )
@@ -143,6 +147,10 @@ _ADDED_COLUMN_TYPES: dict[str, str] = {
     "acked_ts_ns": "INTEGER",
     "created_ts_ns": "INTEGER",
     "split_basis": "TEXT",
+    "price": "TEXT",
+    "time_in_force": "TEXT",
+    "post_only": "INTEGER NOT NULL DEFAULT 0",
+    "reduce_only": "INTEGER NOT NULL DEFAULT 0",
 }
 
 
