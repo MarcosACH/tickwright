@@ -79,10 +79,7 @@ class SignalEmitter:
             post_only=post_only,
             reduce_only=reduce_only,
         )
-        # Before the publish. On Kafka a crash can leave the signal in the topic
-        # with no saga, and the restart must not hand its seq out again (#442).
-        self._record_seq(self._strategy_id, seq)
-        await self._bus.publish(signal)
+        await self._publish(signal)
         return signal.signal_id
 
     async def cancel(self, *, symbol: str, target_signal_id: str) -> str:
@@ -99,7 +96,7 @@ class SignalEmitter:
             seq=seq,
             target_signal_id=target_signal_id,
         )
-        await self._bus.publish(signal)
+        await self._publish(signal)
         return signal.signal_id
 
     async def cancel_all(self, *, symbol: str) -> str:
@@ -115,8 +112,14 @@ class SignalEmitter:
             symbol=symbol,
             seq=seq,
         )
-        await self._bus.publish(signal)
+        await self._publish(signal)
         return signal.signal_id
+
+    async def _publish(self, signal: PlaceSignal | CancelSignal | CancelAllSignal) -> None:
+        # Record before the publish. On Kafka a crash can leave the signal in the
+        # topic with no saga, and the restart must not hand its seq out again (#442).
+        self._record_seq(self._strategy_id, signal.seq)
+        await self._bus.publish(signal)
 
     def _next(self) -> tuple[int, int]:
         """Allocate the next ``(seq, clock-stamped ns)`` for a signal envelope."""

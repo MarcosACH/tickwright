@@ -113,6 +113,31 @@ def test_set_next_seq_resumes_the_recovered_counter() -> None:
     assert signals[0].signal_id == "alpha:BTC:7"
 
 
+def test_every_signal_kind_is_in_the_seq_record_before_the_bus_sees_it() -> None:
+    # On Kafka a crash can leave a signal in the topic with no saga behind it.
+    # The restart reads the seq record, so it must already hold the signal's seq (#442).
+    bus = InMemoryBus()
+    store = SQLiteStore(":memory:")
+    emitter = SignalEmitter(
+        strategy_id="alpha", bus=bus, clock=ManualClock(start_ns=1_000), record_seq=store.raise_seq
+    )
+    record_at_delivery: list[tuple[int, int | None]] = []
+
+    async def read_record(signal: Signal) -> None:
+        record_at_delivery.append((signal.seq, store.seq_records().get("alpha")))
+
+    bus.subscribe(Signal, read_record)
+
+    async def scenario() -> None:
+        await _place(emitter)
+        await emitter.cancel(symbol="BTC", target_signal_id="alpha:BTC:1")
+        await emitter.cancel_all(symbol="BTC")
+
+    asyncio.run(scenario())
+
+    assert record_at_delivery == [(1, 1), (2, 2), (3, 3)]
+
+
 def test_signals_are_stamped_from_the_clock() -> None:
     _, clock, emitter, signals = _harness()
 
