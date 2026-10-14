@@ -67,7 +67,6 @@ from tickwright.domain import (
     PlaceSignal,
     PreTradeGuard,
     Signal,
-    SignalId,
     derive_cloid,
     is_flatten,
 )
@@ -337,16 +336,13 @@ class ExecutionManager:
         # (ADR-0055).
         self._checkpointer.raise_seq(signal.strategy_id, signal.seq)
         now = self._clock.timestamp_ns()
-        # Only orders sent before the cancel all, which means a lower seq. The seq
-        # only goes up, so a redelivered cancel all never reaches a newer order
-        # (ADR-0055).
+        # Each order decides by seq whether this cancel all reaches it (ADR-0055).
         marked = [
             order
             for order in self._checkpointer.cache.open_orders(
                 strategy_id=signal.strategy_id, symbol=signal.symbol
             )
-            if SignalId.parse(order.signal_id).seq < signal.seq
-            and order.request_cancel_all(signal_id=signal.signal_id, ts_ns=now)
+            if order.request_cancel_all(signal_id=signal.signal_id, ts_ns=now)
         ]
         # Every marker is durable before the one send, as on the single-cancel
         # path (ADR-0026), so reconcile can settle any cancel the send loses.
