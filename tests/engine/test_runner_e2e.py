@@ -1439,7 +1439,7 @@ def test_graceful_stop_cancels_a_still_running_feed(tmp_path: Path) -> None:
 
 
 class _FixedSymbolsFeed(_BlockingFeed):
-    """A feed that cannot add symbols, as the live Hyperliquid feed cannot yet (#475)."""
+    """A feed that cannot add symbols, as a third-party feed may not."""
 
     def add_symbols(self, symbols: Iterable[str]) -> None:
         raise NotImplementedError("this feed plays only the symbols it was built with")

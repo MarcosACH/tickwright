@@ -176,7 +176,7 @@ def _flatten(
         exchange=paper if link is None else link(paper),
         feed=ReplayFeed(path=_ticks(tmp_path / "ticks.jsonl", replayed), bus=bus, clock=clock),
         guard=RealGuard(specs=_SPECS, store=store, clock=clock) if guarded else None,
-        exit_job=Flatten(),
+        exit_job=Flatten(feed_ends=True),
     )
 
     async def go() -> int:
@@ -1127,7 +1127,7 @@ def _engine(
         exchange=exchange,
         feed=ReplayFeed(path=_ticks(tmp_path / "ticks.jsonl", _ROWS), bus=bus, clock=clock),
         guard=RealGuard(specs=_SPECS, store=venue.store, clock=clock),
-        exit_job=Flatten() if job is None else job,
+        exit_job=Flatten(feed_ends=True) if job is None else job,
     )
 
 
@@ -1182,7 +1182,7 @@ def test_a_flatten_that_crashed_after_its_send_is_booked_by_the_split_and_the_re
     _hold(tmp_path / "saga.db", {"BTC": "0.01"}, strategy_id="other")
     venue = _crash_a_flatten(tmp_path)
 
-    exit_code, logs = _next_run(venue, tmp_path, Flatten())
+    exit_code, logs = _next_run(venue, tmp_path, Flatten(feed_ends=True))
 
     assert exit_code == 0
     assert logs[-1]["outcome"] == "done"
@@ -1263,7 +1263,7 @@ def test_a_close_left_open_that_fills_during_the_wait_leaves_only_the_rest_to_cl
     venue = _Venue(tmp_path / "saga.db", ManualClock())
 
     exit_code, logs = _next_run(
-        venue, tmp_path, Flatten(), link=partial(_FillsDuringTheWait, close=late)
+        venue, tmp_path, Flatten(feed_ends=True), link=partial(_FillsDuringTheWait, close=late)
     )
 
     assert exit_code == 0

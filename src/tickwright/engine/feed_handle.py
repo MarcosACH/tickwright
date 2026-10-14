@@ -27,8 +27,8 @@ class FeedHandle:
 
     async def start(self, symbols: Collection[str] = ()) -> None:
         """Add ``symbols`` to the feed, connect it, and run its loop."""
-        # A feed that cannot add symbols raises on any call, as Hyperliquid does
-        # until #475. A normal run adds none, so it must not call at all.
+        # A third-party feed may not support adding symbols. A normal run adds
+        # none, so it must not call at all.
         if symbols:
             self._feed.add_symbols(symbols)
         await self._feed.start()

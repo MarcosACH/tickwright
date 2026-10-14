@@ -7,7 +7,7 @@ sees them.
 """
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import StrEnum
@@ -21,6 +21,7 @@ from tickwright.domain import (
     ExternalOrderRef,
     InvariantViolation,
     MarketTick,
+    MarkTick,
     OrderAnchor,
     OrderRef,
     OrderType,
@@ -73,6 +74,10 @@ class ExitContext:
     pass_interval_seconds: float
     """How long a job waits between its own reconcile passes. No cadence runs in an
     exit run, so the job paces them itself (ADR-0052)."""
+    reconcile_account: Callable[[], Awaitable[object]] | None
+    """One account reconcile pass, or ``None`` on a venue with no account truth.
+    It heals a position the books cannot see into the unattributed partition
+    (ADR-0038), so flatten can size a close against it (ADR-0054)."""
 
 
 class ExitJob(Protocol):
@@ -107,9 +112,16 @@ class OperatorCancelAll:
 
 
 class Flatten:
-    """``tickwright flatten``: close every position the account holds."""
+    """``tickwright flatten``: close every position the account holds.
+
+    ``feed_ends`` is true for a replay. The composition root sets it, because
+    only the root knows which feed it built (ADR-0059).
+    """
 
     name = "flatten"
+
+    def __init__(self, *, feed_ends: bool) -> None:
+        self._feed_ends = feed_ends
 
     async def run(self, context: ExitContext) -> ExitOutcome:
         # First, so a crash mid-flatten still leaves the store halted (ADR-0053).
@@ -129,17 +141,16 @@ class Flatten:
         if isinstance(positions, VenueReadFailure):
             return ExitOutcome(status=ExitStatus.STOPPED, left=describe_failure(positions))
         if positions:
-            priced: set[str] = set()
-
-            async def note_price(tick: MarketTick) -> None:
-                priced.add(tick.symbol)
-
+            priced = _Prices(positions, waits=not self._feed_ends, clock=context.clock)
             # Before the feed starts, so no tick goes unseen.
-            context.bus.subscribe(MarketTick, note_price)
+            context.bus.subscribe(MarketTick, priced.note_trade)
+            context.bus.subscribe(MarkTick, priced.note_mark)
             await context.feed.start(positions)
-            # Only a replay ends, and it plays the whole file first. So each close
-            # fills at the last row (ADR-0059). The CLI refuses a live feed until #475.
-            await context.feed.ended()
+            # A replay plays the whole file first, so each close fills at the
+            # last row (ADR-0059). A live feed never ends. Each loop waits for
+            # its own symbol's first price instead.
+            if self._feed_ends:
+                await context.feed.ended()
             emitter = SignalEmitter(
                 strategy_id=OPERATOR,
                 bus=context.bus,
@@ -168,6 +179,50 @@ DRY_ATTEMPTS_TO_GIVE_UP = 3
 
 DRY_WAIT_SECONDS = 2.0
 """The wait after a dry attempt, before the next one (ADR-0056)."""
+
+
+class _Prices:
+    """Which held symbols the feed has priced, for one flatten run.
+
+    A symbol is priced once it has both a trade and a mark. A market order is
+    priced from the trade and capped by the mark, so either one missing makes
+    the venue refuse to price it (ADR-0059).
+
+    On a live feed, an attempt waits up to one dry wait for its symbol's first
+    price. On subscribe the venue sends it at once, so a healthy run counts no
+    dry attempt. A dead socket still ends in the give-up rule, never a hang
+    (ADR-0059). After a replay no price can come, so nothing waits.
+    """
+
+    def __init__(self, symbols: Iterable[str], *, waits: bool, clock: Clock) -> None:
+        self._seen = {symbol: asyncio.Event() for symbol in symbols}
+        self._traded: set[str] = set()
+        self._marked: set[str] = set()
+        self._waits = waits
+        self._clock = clock
+
+    async def note_trade(self, tick: MarketTick) -> None:
+        self._traded.add(tick.symbol)
+        self._note(tick.symbol)
+
+    async def note_mark(self, mark: MarkTick) -> None:
+        self._marked.add(mark.symbol)
+        self._note(mark.symbol)
+
+    def _note(self, symbol: str) -> None:
+        seen = self._seen.get(symbol)
+        if seen is not None and symbol in self._traded and symbol in self._marked:
+            seen.set()
+
+    async def has(self, symbol: str) -> bool:
+        seen = self._seen[symbol]
+        if self._waits and not seen.is_set():
+            price = asyncio.ensure_future(seen.wait())
+            timer = asyncio.ensure_future(self._clock.sleep(DRY_WAIT_SECONDS))
+            await asyncio.wait((price, timer), return_when=asyncio.FIRST_COMPLETED)
+            price.cancel()
+            timer.cancel()
+        return seen.is_set()
 
 
 class _Turns:
@@ -231,7 +286,7 @@ class _DryAttempts:
 async def _flatten_symbol(
     symbol: str,
     size: Decimal,
-    priced: set[str],
+    priced: _Prices,
     emitter: SignalEmitter,
     turns: _Turns,
     context: ExitContext,
@@ -247,7 +302,7 @@ async def _flatten_symbol(
 async def _close_symbol(
     symbol: str,
     size: Decimal,
-    priced: set[str],
+    priced: _Prices,
     emitter: SignalEmitter,
     dry: _DryAttempts,
     turns: _Turns,
@@ -280,7 +335,7 @@ class _Attempt:
 async def _attempt(
     symbol: str,
     size: Decimal,
-    priced: set[str],
+    priced: _Prices,
     emitter: SignalEmitter,
     dry: _DryAttempts,
     turns: _Turns,
@@ -293,7 +348,7 @@ async def _attempt(
     """
     reason: str | None
     # No venue can send a market close without a price.
-    if symbol not in priced:
+    if not await priced.has(symbol):
         reason = "no_price"
     elif await _size_gap(symbol, size, context):
         reason = "size_gap"
@@ -312,10 +367,16 @@ async def _size_gap(symbol: str, size: Decimal, context: ExitContext) -> bool:
     A close is split across the partitions it closes (ADR-0054). Against a gap,
     some of it would land on no partition, or one would be left holding size.
     The gap can be fills the bus has not delivered yet, so a drain comes first.
+    On a venue with account truth it can also be a trade made by hand, which
+    only an account pass can see.
     """
     if _held(symbol, context) == size:
         return False
     await context.bus.drain()
+    if _held(symbol, context) == size:
+        return False
+    if context.reconcile_account is not None:
+        await context.reconcile_account()
     return _held(symbol, context) != size
 
 

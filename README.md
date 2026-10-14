@@ -186,8 +186,10 @@ Stop the engine, then run `uv run tickwright flatten`. It trips the kill switch 
 engine does not trade when it restarts. Then it cancels every resting order and closes every
 position with a reduce-only market order. It uses the same exit codes as `cancel-all`.
 
-It works on paper with the replay feed today. Each close fills at the last row of the replay file.
-Any other exchange or feed exits `2` before it touches anything, until #475.
+On paper with the replay feed, each close fills at the last row of the replay file. On a live
+feed, it also subscribes to every coin the account holds, including coins not in your config. Each
+close goes out once its coin has a trade and a mark. Hyperliquid with the replay feed exits `2`
+before it touches anything, because a real close must be priced from the live market.
 
 A position the feed never priced is not closed. The run exits `1`, and `exit.finished` names the
 symbol and its size, for example `left=BTC=0.02`. Under `GUARD=noop` there is no kill switch to

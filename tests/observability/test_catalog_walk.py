@@ -821,7 +821,7 @@ def _drive_exit_unguarded() -> None:
             applied_fills=lambda cloid: (),
         ),
         feed=_IdleFeed(),
-        exit_job=Flatten(),
+        exit_job=Flatten(feed_ends=True),
     )
     assert asyncio.run(engine.run()) == 0
 
@@ -843,7 +843,7 @@ def _drive_flatten_gave_up() -> None:
             applied_fills=lambda cloid: (),
         ),
         feed=_IdleFeed(),
-        exit_job=Flatten(),
+        exit_job=Flatten(feed_ends=True),
     )
     assert asyncio.run(engine.run()) == 1
 
