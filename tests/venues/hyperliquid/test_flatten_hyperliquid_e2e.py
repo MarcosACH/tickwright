@@ -34,16 +34,24 @@ from hyperliquid_flatten import (
 
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import OPERATOR, OrderState, derive_cloid
+from tickwright.engine.reconcile import ReconcileConfig
+from tickwright.engine.runner import EngineConfig
 from tickwright.observability.testing import capture_events
 from tickwright.venues.hyperliquid.transport import IpRateLimited
 
 
 def _flatten(
-    tmp_path: Path, venue: HeldShort, frames: list[str]
+    tmp_path: Path,
+    venue: HeldShort,
+    frames: list[str],
+    *,
+    engine_config: EngineConfig | None = None,
 ) -> tuple[int, list[MutableMapping[str, Any]], FakeExchangeApi, FakeWsConnection]:
     """Run ``flatten`` on Hyperliquid and keep the named events it emitted."""
     with capture_events() as logs:
-        exit_code, post, socket = run_flatten(tmp_path / "saga.db", venue, frames)
+        exit_code, post, socket = run_flatten(
+            tmp_path / "saga.db", venue, frames, engine_config=engine_config
+        )
     return exit_code, logs, post, socket
 
 
@@ -79,7 +87,12 @@ def test_a_close_refused_for_a_rate_limit_waits_10_s_and_is_no_dry_attempt(
 ) -> None:
     # The venue lets requests through again in time, so waiting makes progress.
     # A dry attempt here would let a busy account give up a close it could make.
-    exit_code, logs, post, _ = _flatten(tmp_path, AnswersFirst(refusal), priced_frames())
+    # One read by cloid decides the refused close, so its verdict takes 5 seconds.
+    # Only the rate limit wait can then put 10 seconds between the two closes.
+    fast_verdict = EngineConfig(reconcile=ReconcileConfig(inflight_max_attempts=1))
+    exit_code, logs, post, _ = _flatten(
+        tmp_path, AnswersFirst(refusal), priced_frames(), engine_config=fast_verdict
+    )
 
     assert exit_code == 0, [(log["event"], log.get("error")) for log in logs]
     limited = [log for log in logs if log["event"] == "flatten.rate_limited"]

@@ -27,7 +27,7 @@ from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import InstrumentSpec
 from tickwright.engine.exit_run import Flatten
-from tickwright.engine.runner import Engine
+from tickwright.engine.runner import Engine, EngineConfig
 from tickwright.venues.hyperliquid import (
     HyperliquidConfig,
     HyperliquidExchange,
@@ -156,9 +156,16 @@ class AnswersFirst(HeldShort):
 
 
 def run_flatten(
-    store: Path | str, venue: HeldShort, frames: list[str]
+    store: Path | str,
+    venue: HeldShort,
+    frames: list[str],
+    *,
+    engine_config: EngineConfig | None = None,
 ) -> tuple[int, FakeExchangeApi, FakeWsConnection]:
-    """Run ``flatten`` once and return its exit code, the HTTP fake and the socket fake."""
+    """Run ``flatten`` once and return its exit code, the HTTP fake and the socket fake.
+
+    ``engine_config`` lets a test change the reconcile timing. ``None`` keeps the defaults.
+    """
     post = FakeExchangeApi(
         {
             "userAbstraction": "disabled",
@@ -195,6 +202,7 @@ def run_flatten(
         store=SQLiteStore(store),
         exchange=exchange,
         feed=HyperliquidFeed(config=config, bus=bus, clock=clock, connect=socket.connect),
+        config=engine_config,
         exit_job=Flatten(feed_ends=False),
     )
     exit_code = asyncio.run(asyncio.wait_for(engine.run(), timeout=5))
