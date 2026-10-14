@@ -176,9 +176,15 @@ logged as `exchange.spot_order_skipped`.
 | --- | --- |
 | `0` | Done. A final venue read found no resting order. |
 | `1` | Stopped partway, by a signal, a fault, or orders that survived two cancels. |
-| `2` | Never started. Another engine holds the store, the store cannot be opened, or the config is not usable. |
+| `2` | Never started. Another engine holds the store, no engine has used the store, the store cannot be opened, or the config is not usable. |
 
 The kill switch stays as it was. The last log line is `exit.finished`, which says what is left.
+
+A store no engine has used is almost always the wrong directory. The engine you meant to stop may
+still be trading somewhere else. So the run exits `2` with `exit.refused` and `reason=new_store`,
+and touches nothing. If the store really is new, pass `--new-store`. The run then logs
+`exit.new_store` with a warning and goes on. `flatten` makes the same check and takes the same
+flag.
 
 ### Close every position
 

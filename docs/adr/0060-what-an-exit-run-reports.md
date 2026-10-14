@@ -150,3 +150,8 @@ when a venue read fails, and which named events an exit run emits. Decided in
   `tickwright flatten` also runs on Hyperliquid with the live feed. It closes a coin held by hand
   that the config never named. Only a live exchange with the replay feed still exits 2 before
   boot. A replay row is not the market.**)**
+
+  **(Partly built, since [#469](https://github.com/MarcosACH/tickwright/issues/469):**
+  `cancel-all` and `flatten` refuse a store no engine has used. They exit 2 with `exit.refused`
+  and `reason=new_store`. With `--new-store` they emit `exit.new_store` and go on. The catalog has
+  `exit.new_store`.**)**
