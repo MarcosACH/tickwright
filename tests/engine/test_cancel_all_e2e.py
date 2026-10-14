@@ -25,6 +25,7 @@ from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     AggressorSide,
+    ComponentState,
     Exchange,
     ExternalOrderRef,
     MarketTick,
@@ -35,6 +36,7 @@ from tickwright.domain import (
     OrderType,
     PlaceOrder,
     Side,
+    StoreNeverUsed,
     TimeInForce,
     VenueOpenOrder,
     VenueReadFailure,
@@ -207,6 +209,10 @@ def test_an_exit_run_on_a_store_no_engine_has_used_exits_two_and_writes_nothing(
     assert logs[0]["reason"] == "new_store"
     assert logs[0]["store"] == str(db.resolve())
     assert logs[0]["holder"] == "none"
+    # The engine reports the refusal, as it does a held lock, so a job cannot forget to.
+    assert engine.state is ComponentState.FAULTED
+    assert isinstance(engine.fault, StoreNeverUsed)
+    assert str(db.resolve()) in str(engine.fault)
     after = SQLiteStore(db)
     try:
         assert after.load_account() is None

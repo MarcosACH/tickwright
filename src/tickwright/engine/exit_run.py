@@ -31,6 +31,7 @@ from tickwright.domain import (
     Side,
     SignalEmitter,
     Store,
+    StoreNeverUsed,
     TimeInForce,
     VenueOpenOrder,
     VenueReadFailure,
@@ -91,11 +92,12 @@ class ExitJob(Protocol):
         """The job's name in ``exit.finished``."""
         ...
 
-    def admit(self, store: Store) -> bool:
-        """Say whether the run may boot on ``store``. A refusal emits ``exit.refused``.
+    def admit(self, store: Store) -> StoreNeverUsed | None:
+        """Return the refusal if the run must not boot on ``store``, else ``None``.
 
         It runs after the store lock and before ``recover()``, because boot
-        writes the account row this check reads (ADR-0052).
+        writes the account row this check reads (ADR-0052). The engine reports
+        a refusal, so a job cannot forget ``exit.refused``.
         """
         ...
 
@@ -104,21 +106,20 @@ class ExitJob(Protocol):
         ...
 
 
-def _admit_store(store: Store, *, new_store: bool) -> bool:
+def _admit_store(store: Store, *, new_store: bool) -> StoreNeverUsed | None:
     """Refuse a store no engine has used. That is almost always the wrong
     directory, and the engine the operator meant to stop may still trade there
     (ADR-0052). ``new_store`` is the operator saying the store is new on purpose."""
     if store.load_account() is not None:
-        return True
+        return None
     if new_store:
         named_event(
             NamedEvent.EXIT_NEW_STORE,
             store=store.name,
-            warning="no engine has used this store. Any engine trading elsewhere keeps trading.",
+            warning="no engine has used this store: any engine trading elsewhere keeps trading",
         )
-        return True
-    named_event(NamedEvent.EXIT_REFUSED, reason="new_store", store=store.name, holder="none")
-    return False
+        return None
+    return StoreNeverUsed(store.name)
 
 
 class OperatorCancelAll:
@@ -129,7 +130,7 @@ class OperatorCancelAll:
     def __init__(self, *, new_store: bool = False) -> None:
         self._new_store = new_store
 
-    def admit(self, store: Store) -> bool:
+    def admit(self, store: Store) -> StoreNeverUsed | None:
         return _admit_store(store, new_store=self._new_store)
 
     async def run(self, context: ExitContext) -> ExitOutcome:
@@ -158,7 +159,7 @@ class Flatten:
         self._feed_ends = feed_ends
         self._new_store = new_store
 
-    def admit(self, store: Store) -> bool:
+    def admit(self, store: Store) -> StoreNeverUsed | None:
         return _admit_store(store, new_store=self._new_store)
 
     async def run(self, context: ExitContext) -> ExitOutcome:

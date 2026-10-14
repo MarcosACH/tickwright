@@ -34,6 +34,7 @@ from tickwright.domain import (
     Exchange,
     ExecutionReport,
     FundingAccrual,
+    InvariantViolation,
     LeverageBook,
     MarketFeed,
     MarkTick,
@@ -43,7 +44,6 @@ from tickwright.domain import (
     SignalEmitter,
     Store,
     StoreLockHeld,
-    StoreLockHolder,
     Strategy,
     duration_ns,
 )
@@ -273,17 +273,22 @@ class Engine:
             return self._fault_before_boot(exc)
         if holder is not None:
             if self._exit_job is not None:
-                return self._refuse_exit_run(holder)
+                return self._refuse_exit_run(
+                    StoreLockHeld(holder.detail),
+                    reason="lock_held",
+                    store=holder.store,
+                    holder=holder.detail,
+                )
             return self._fault_before_boot(StoreLockHeld(holder.detail))
         # Before ``recover()``, because boot writes the account row the job checks.
         try:
-            admitted = self._exit_job is None or self._exit_job.admit(self._store)
+            refusal = None if self._exit_job is None else self._exit_job.admit(self._store)
         except Exception as exc:
             return self._fault_before_boot(exc)
-        if not admitted:
-            # Nothing booted, so nothing at the venue moved (ADR-0060).
-            self._close_before_boot()
-            return 2
+        if refusal is not None:
+            return self._refuse_exit_run(
+                refusal, reason="new_store", store=self._store.name, holder="none"
+            )
         self._install_signal_handlers()
         try:
             await self._start_sequence()
@@ -438,17 +443,18 @@ class Engine:
         )
         return exit_code
 
-    def _refuse_exit_run(self, holder: StoreLockHolder) -> int:
-        """Turn an exit run away from a store another engine holds (ADR-0060).
+    def _refuse_exit_run(
+        self, refusal: InvariantViolation, *, reason: str, store: str, holder: str
+    ) -> int:
+        """Turn an exit run away from a store it must not touch (ADR-0060).
 
-        Code 2 tells the operator nothing moved, so they can end the holder and
-        run the job again. A normal run faults instead, so its supervisor retries.
+        Code 2 tells the operator nothing moved, so they can fix the cause and
+        run the job again. A normal run faults on a held lock instead, so its
+        supervisor retries.
         """
         self._state = ComponentState.FAULTED
-        self._fault = StoreLockHeld(holder.detail)
-        named_event(
-            NamedEvent.EXIT_REFUSED, reason="lock_held", store=holder.store, holder=holder.detail
-        )
+        self._fault = refusal
+        named_event(NamedEvent.EXIT_REFUSED, reason=reason, store=store, holder=holder)
         self._close_before_boot()
         return 2
 
