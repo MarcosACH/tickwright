@@ -228,9 +228,12 @@ class _Prices:
         if self._waits and not seen.is_set():
             price = asyncio.ensure_future(seen.wait())
             timer = asyncio.ensure_future(self._clock.sleep(DRY_WAIT_SECONDS))
-            await asyncio.wait((price, timer), return_when=asyncio.FIRST_COMPLETED)
-            price.cancel()
-            timer.cancel()
+            try:
+                await asyncio.wait((price, timer), return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                # Also on a stop mid-wait, so neither task outlives the loop.
+                price.cancel()
+                timer.cancel()
         return seen.is_set()
 
 

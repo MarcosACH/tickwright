@@ -944,6 +944,59 @@ def test_a_failed_read_after_a_fill_is_the_first_dry_attempt_of_a_new_row(tmp_pa
     assert logs[-1]["outcome"] == "done"
 
 
+class _PriceWaitBlocks(ManualClock):
+    """A ``ManualClock`` whose 2 second sleep never ends. ``waiting`` is set once one starts.
+
+    The first 2 second sleep of a live flatten is the wait for a symbol's first price.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.waiting = asyncio.Event()
+
+    async def sleep(self, seconds: float) -> None:
+        if seconds == 2.0:
+            self.waiting.set()
+            await asyncio.Event().wait()
+        await super().sleep(seconds)
+
+
+def test_a_stop_during_the_wait_for_a_first_price_leaves_no_task_behind(
+    tmp_path: Path,
+) -> None:
+    # A live feed never ends, so a stop cancels the job mid-wait. The wait must
+    # cancel its own tasks. Left behind, they outlive the run that made them.
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+    bus = InMemoryBus()
+    clock = _PriceWaitBlocks()
+    store = SQLiteStore(tmp_path / "saga.db")
+    engine = Engine(
+        bus=bus,
+        clock=clock,
+        store=store,
+        exchange=_paper(bus, clock, store),
+        # No BTC rows, so BTC is never priced.
+        feed=ReplayFeed(path=_ticks(tmp_path / "ticks.jsonl", ("ETH",)), bus=bus, clock=clock),
+        guard=RealGuard(specs=_SPECS, store=store, clock=clock),
+        exit_job=Flatten(feed_ends=False),
+    )
+
+    async def go() -> tuple[int, set[asyncio.Task[object]]]:
+        run = asyncio.create_task(engine.run())
+        await asyncio.wait_for(clock.waiting.wait(), timeout=5)
+        await engine.stop()
+        exit_code = await asyncio.wait_for(run, timeout=5)
+        for _ in range(3):
+            await asyncio.sleep(0)
+        return exit_code, asyncio.all_tasks() - {asyncio.current_task()}
+
+    with capture_events():
+        exit_code, left = asyncio.run(go())
+
+    assert exit_code == 1
+    assert left == set()
+
+
 class _ReadsPositionsOnce(VenueLink):
     """Only the first positions read answers. Every later one fails."""
 
