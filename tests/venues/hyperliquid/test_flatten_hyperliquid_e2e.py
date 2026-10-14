@@ -195,3 +195,24 @@ def test_flatten_subscribes_and_closes_a_held_coin_the_config_never_named(
     assert not [log for log in logs if log["event"] == "flatten.dry_attempt"]
     assert logs[-1]["event"] == "exit.finished"
     assert logs[-1]["outcome"] == "done"
+
+
+def test_a_coin_with_trades_but_no_mark_is_never_closed(tmp_path: Path) -> None:
+    # Hyperliquid caps a market order by the mark. With no mark, the close
+    # cannot be priced, so each attempt is dry and no order goes out (#467).
+    venue = _Venue()
+    frames = [trades_frame(trade("HYPE", "25.0", 7, time=START_MS))]
+
+    exit_code, logs, post, _ = _flatten(tmp_path, venue, frames)
+
+    assert exit_code == 1
+    assert not [url for url, payload in post.requests if request_type(url, payload) == "order"]
+    dry = [log for log in logs if log["event"] == "flatten.dry_attempt"]
+    assert [(log["symbol"], log["count"], log["reason"]) for log in dry] == [
+        ("HYPE", 1, "no_price"),
+        ("HYPE", 2, "no_price"),
+        ("HYPE", 3, "no_price"),
+    ]
+    assert logs[-1]["event"] == "exit.finished"
+    assert logs[-1]["outcome"] == "stopped"
+    assert logs[-1]["left"] == "HYPE=-2.0"
