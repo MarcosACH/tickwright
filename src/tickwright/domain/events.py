@@ -237,6 +237,14 @@ class CancelSignal(Signal):
     target_signal_id: str
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CancelAllSignal(Signal):
+    """Intent to cancel every open order the strategy sent earlier on ``symbol`` (ADR-0055).
+
+    It names no target. "Earlier" means a lower seq, so a redelivered cancel all
+    can never reach an order sent after it."""
+
+
 # --- Raw venue facts (ExecutionReport) --------------------------------------
 
 

@@ -32,6 +32,7 @@ from .errors import (
     VenueSubscriptionUnreachable,
 )
 from .events import (
+    CancelAllSignal,
     CancelSignal,
     CashCorrection,
     Event,
@@ -157,6 +158,7 @@ __all__ = [
     "AccountSpec",
     "AccountView",
     "Approved",
+    "CancelAllSignal",
     "CancelSignal",
     "CashCorrection",
     "Denied",

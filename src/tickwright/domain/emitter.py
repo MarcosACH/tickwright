@@ -14,7 +14,7 @@ way. One counter rule then serves every signal source. It emits no named events.
 from decimal import Decimal
 
 from .enums import OrderType, Side, TimeInForce
-from .events import CancelSignal, PlaceSignal
+from .events import CancelAllSignal, CancelSignal, PlaceSignal
 from .protocols import Clock, EventBus
 
 
@@ -86,6 +86,22 @@ class SignalEmitter:
             symbol=symbol,
             seq=seq,
             target_signal_id=target_signal_id,
+        )
+        await self._bus.publish(signal)
+        return signal.signal_id
+
+    async def cancel_all(self, *, symbol: str) -> str:
+        """Publish a ``CancelAllSignal`` for ``symbol``; return its ``signal_id``.
+
+        It cancels every open order this strategy sent earlier on ``symbol``.
+        Each order still ends with its own ``OrderCancelled`` or fill (ADR-0055)."""
+        seq, now = self._next()
+        signal = CancelAllSignal(
+            ts_event=now,
+            ts_init=now,
+            strategy_id=self._strategy_id,
+            symbol=symbol,
+            seq=seq,
         )
         await self._bus.publish(signal)
         return signal.signal_id

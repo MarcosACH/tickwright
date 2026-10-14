@@ -41,6 +41,7 @@ from typing import TypedDict
 
 from tickwright.domain import (
     OPERATOR,
+    CancelAllSignal,
     CancelSignal,
     Denied,
     EventBus,
@@ -202,6 +203,8 @@ class ExecutionManager:
                 await self._place(signal)
             elif isinstance(signal, CancelSignal):
                 await self._cancel(signal)
+            elif isinstance(signal, CancelAllSignal):
+                await self._cancel_all(signal)
 
     async def on_execution_report(self, report: ExecutionReport) -> None:
         # Venue-fact (and reconciler-synthetic) handling is saga handling: it
@@ -326,6 +329,22 @@ class ExecutionManager:
         # so the order can still fill (ADR-0026).
         self._checkpointer.checkpoint(order)
         await self._exchange.cancel([OrderRef.of(order)])
+
+    async def _cancel_all(self, signal: CancelAllSignal) -> None:
+        now = self._clock.timestamp_ns()
+        marked = [
+            order
+            for order in self._checkpointer.cache.open_orders(
+                strategy_id=signal.strategy_id, symbol=signal.symbol
+            )
+            if order.request_cancel(signal_id=signal.signal_id, ts_ns=now)
+        ]
+        # Every marker is durable before the one send, as on the single-cancel
+        # path (ADR-0026), so reconcile can settle any cancel the send loses.
+        for order in marked:
+            self._checkpointer.checkpoint(order)
+        if marked:
+            await self._exchange.cancel([OrderRef.of(order) for order in marked])
 
     async def _apply_status(self, report: OrderStatusReport) -> None:
         order = self._checkpointer.cache.get_order(report.cloid)
