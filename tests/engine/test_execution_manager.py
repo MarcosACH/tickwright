@@ -31,6 +31,7 @@ from tickwright.domain import (
     Account,
     AggressorSide,
     Approved,
+    CancelAllSignal,
     CancelSignal,
     ExecutionReport,
     FillReport,
@@ -1001,6 +1002,34 @@ def test_cancel_signal_for_an_unknown_order_is_a_benign_no_op() -> None:
     asyncio.run(scenario())
 
     assert order_events == []
+
+
+def _cancel_all_signal(*, seq: int) -> CancelAllSignal:
+    return CancelAllSignal(
+        ts_event=1_000, ts_init=1_000, strategy_id="trivial", symbol="BTC", seq=seq
+    )
+
+
+def test_a_cancel_all_leaves_an_order_sent_after_it_open() -> None:
+    bus, _, store, order_events = _harness()
+
+    async def scenario() -> None:
+        await bus.publish(_tick("42000"))
+        await bus.publish(_limit_signal("41000", seq=1))
+        await bus.publish(_limit_signal("41000", seq=3))
+        # The cancel all with seq 2 arrives after the order with seq 3, as on a
+        # redelivery or a replay. Seq 3 was sent after it, so it stays open (ADR-0055).
+        await bus.publish(_cancel_all_signal(seq=2))
+
+    asyncio.run(scenario())
+
+    earlier = store.get_order(derive_cloid("trivial:BTC:1"))
+    later = store.get_order(derive_cloid("trivial:BTC:3"))
+    assert earlier is not None and earlier.state is OrderState.CANCELLED
+    assert later is not None and later.state is OrderState.LIVE
+    assert later.cancel_requested is False
+    cancelled = [ev.cloid for ev in order_events if isinstance(ev, OrderCancelled)]
+    assert cancelled == [derive_cloid("trivial:BTC:1")]
 
 
 async def _record(sink: list, event: object) -> None:
