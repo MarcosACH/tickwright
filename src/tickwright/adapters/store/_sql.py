@@ -240,6 +240,26 @@ class SqlStore(ABC):
         return KillSwitchState(tripped=bool(row[0]), reason=row[1], ts_ns=row[2])
 
     @_member
+    def raise_seq(self, strategy_id: str, seq: int) -> None:
+        """Keep the higher of the stored seq and ``seq`` for ``strategy_id`` (ADR-0055).
+
+        The ``WHERE`` makes a lower seq a no-op. Both backends read this one
+        statement, so neither can let the record go down."""
+        with self._transaction():
+            self._execute(
+                f"INSERT INTO seq_records (strategy_id, seq) VALUES ({self._p}, {self._p}) "
+                "ON CONFLICT (strategy_id) DO UPDATE SET seq = EXCLUDED.seq "
+                "WHERE EXCLUDED.seq > seq_records.seq",
+                (strategy_id, seq),
+            )
+
+    @_member
+    def seq_records(self) -> dict[str, int]:
+        """Every strategy's seq record. A strategy never written has no entry."""
+        rows = self._execute("SELECT strategy_id, seq FROM seq_records").fetchall()
+        return {strategy_id: int(seq) for strategy_id, seq in rows}
+
+    @_member
     def checkpoint_ledger(
         self,
         *,
