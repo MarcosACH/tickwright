@@ -848,6 +848,32 @@ def test_resting_limit_drives_the_saga_to_live() -> None:
     ]
 
 
+def test_a_resting_order_row_keeps_the_terms_the_venue_got() -> None:
+    # Paper rebuilds its book from these after a restart (#484), so the row must
+    # hold the price the venue got, not the strategy's raw price.
+    store = SQLiteStore(":memory:")
+    spec = InstrumentSpec(
+        symbol="BTC", sz_decimals=3, max_decimals=6, max_sig_figs=5, min_notional=Decimal("0")
+    )
+    guard = RealGuard(specs={"BTC": spec}, store=store, clock=ManualClock(start_ns=1_000))
+    wiring = _wiring(store, guard=guard)
+
+    async def scenario() -> None:
+        await wiring.bus.publish(_tick("42000"))
+        await wiring.bus.publish(_limit_signal("41000.7", post_only=True))
+
+    asyncio.run(scenario())
+
+    record = store.get_order(derive_cloid("trivial:BTC:1"))
+    assert record is not None
+    assert record.state is OrderState.LIVE
+    # Five significant figures, and a BUY rounds down (ADR-0017).
+    assert record.price == Decimal("41000")
+    assert record.time_in_force is TimeInForce.GTC
+    assert record.post_only is True
+    assert record.reduce_only is False
+
+
 def test_duplicate_status_report_yields_a_single_order_live() -> None:
     bus, _, _, order_events = _harness()
     cloid = derive_cloid("trivial:BTC:1")

@@ -272,6 +272,9 @@ class ExecutionManager:
         # saga records it, not the strategy's raw intent.
         order = self._order_for(signal, quantity=decision.quantity)
         order.split_basis = split_basis
+        # The quantized price, for the same reason. Paper rebuilds a resting
+        # order from it after a restart (#484).
+        order.price = decision.price
 
         # PENDING is the write-ahead intent: durable before anything else
         # happens (ADR-0008 rule 1), then announced.
@@ -313,6 +316,9 @@ class ExecutionManager:
             quantity=quantity,
             order_type=signal.order_type,
             created_ts_ns=self._clock.timestamp_ns(),
+            time_in_force=signal.time_in_force,
+            post_only=signal.post_only,
+            reduce_only=signal.reduce_only,
         )
 
     async def _cancel(self, signal: CancelSignal) -> None:
