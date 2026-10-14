@@ -71,3 +71,17 @@ class OrderState(StrEnum):
     DENIED = "denied"
     REJECTED = "rejected"
     FAILED = "failed"
+
+
+class OrderRefusal(StrEnum):
+    """Why the venue did not take an order, as the engine sees it (ADR-0056).
+
+    A closed set, so the engine never reads venue text. Flatten waits out a
+    rate limit. Any other kind is a dry attempt.
+    """
+
+    RATE_LIMITED_ADDRESS = "rate_limited_address"
+    RATE_LIMITED_IP = "rate_limited_ip"
+    REFUSED = "refused"
+    SEND_FAILED = "send_failed"
+    """No answer came back. The order may still have reached the venue."""

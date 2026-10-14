@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import ClassVar
 
-from .enums import AggressorSide, OrderState, OrderType, Side, TimeInForce
+from .enums import AggressorSide, OrderRefusal, OrderState, OrderType, Side, TimeInForce
 from .ids import SignalId
 
 
@@ -315,6 +315,22 @@ class FillReport(ExecutionReport):
     @property
     def event_id(self) -> str:
         return f"{self.cloid}:fill:{self.trade_id}"
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class OrderRefusedReport(ExecutionReport):
+    """A raw fact: the venue did not take the order, or never answered (ADR-0056).
+
+    It moves no saga. The order's truth is still unknown, so reconcile resolves
+    it by cloid. Flatten reads ``refusal`` to choose how long to wait before
+    its next attempt. Paper never emits it.
+    """
+
+    refusal: OrderRefusal
+
+    @property
+    def event_id(self) -> str:
+        return f"{self.cloid}:refused"
 
 
 # --- Canonical saga transitions (OrderEvent) --------------------------------

@@ -113,6 +113,10 @@ Decided in [#413](https://github.com/MarcosACH/tickwright/issues/413), part of
   never reach the job. For reads, `VenueReadFailure` gains `RATE_LIMITED_IP`. The reconciler
   treats it like `SEND_FAILED` and stops the pass, because every other read would be refused
   too.**)**
+  **(Corrected in [#475](https://github.com/MarcosACH/tickwright/issues/475):** `refusal` has a
+  fourth kind, `send_failed`, for a send that dies. A dead send may still have reached the venue,
+  so calling it `refused` would be false. Flatten treats it like `refused`. It counts as a dry
+  attempt, and the cloid verdict decides. An answer the adapter cannot read emits no report.**)**
 - **The count lives in memory.** A crash resets it. A new run is a new choice by the operator, so it
   gets its full tries.
 - **On boot, an open flatten saga is resumed first.** The engine finds it at the venue by its id. It

@@ -363,7 +363,8 @@ a handled cancel all's seq (ADR-0055).
 - `AccountAnchor.fetch_positions()` returns a signed size per symbol, or a `VenueReadFailure`.
 - `VenueReadFailure` gains `RATE_LIMITED_IP`. Reads only meet the IP limit.
 - A new raw report, `OrderRefusedReport`, with `refusal`: `rate_limited_address`,
-  `rate_limited_ip`, or `refused`. It moves no saga. Reconcile still resolves the order by cloid.
+  `rate_limited_ip`, `refused`, or `send_failed`. It moves no saga. Reconcile still resolves the
+  order by cloid. `send_failed` means no answer came back, so the order may have landed (#475).
 
 **Responsibilities:** Both new reads answer for the account, so they sit on `AccountAnchor`. That
 is the placement rule in `protocols.py`.
@@ -418,7 +419,8 @@ already gets `account_net`.
 - Split a cancel list into batches of at most 200. Split `cancel` and `cancelByCloid` by whether a
   ref has an oid (ADR-0055).
 - Emit `OrderRefusedReport` on a refused action and on a send that dies. Tell the address limit and
-  the IP limit (HTTP 429) apart from any other refusal (ADR-0056).
+  the IP limit (HTTP 429) apart from any other refusal (ADR-0056). A dead send is `send_failed`. An
+  answer it cannot read emits no report.
 - Cap every market order price by the mark too (ADR-0059). A missing mark is a missing price.
 - Answer `fetch_open_orders()` and `fetch_positions()`. Return `RATE_LIMITED_IP` on a 429.
 - The feed's `add_symbols()` adds coins to the subscription before `start()`.

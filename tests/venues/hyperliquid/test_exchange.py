@@ -42,6 +42,8 @@ from tickwright.domain import (
     MarketTick,
     MarkTick,
     OrderRef,
+    OrderRefusal,
+    OrderRefusedReport,
     OrderState,
     OrderStatusReport,
     OrderType,
@@ -1403,19 +1405,30 @@ def test_fetch_order_treats_a_status_it_cannot_map_as_a_named_failed_read() -> N
     assert "triggered" in str(failures[0]["error"])
 
 
-def test_a_transport_failure_on_place_emits_no_report_and_does_not_raise() -> None:
-    # The send window's truth is unknown — the order may or may not have
-    # landed — so the adapter reports nothing (no fact to report) and lets
-    # reconcile-by-cloid resolve the in-flight order (ADR-0008 rule 2). It
-    # names the failure for triage instead of faulting the engine.
-    post = FakeExchangeApi({"order": ConnectionError("connection refused")})
+@pytest.mark.parametrize(
+    ("failure", "refusal"),
+    [
+        (ConnectionError("connection refused"), OrderRefusal.SEND_FAILED),
+        (IpRateLimited("429 from the venue"), OrderRefusal.RATE_LIMITED_IP),
+    ],
+)
+def test_a_send_failure_on_place_reports_only_its_kind_and_does_not_raise(
+    failure: Exception, refusal: OrderRefusal
+) -> None:
+    # The send window's truth is unknown, since the order may have landed. So
+    # the only report is a refusal, which moves no saga. Reconcile-by-cloid
+    # resolves the order (ADR-0008 rule 2). Flatten reads the kind to pick
+    # its wait (ADR-0056). The failure is named for triage, never a fault.
+    post = FakeExchangeApi({"order": failure})
 
     with capture_events() as events:
         reports = asyncio.run(
             place_and_collect_reports(post, limit_order(Side.BUY, "0.5", "42000"))
         )
 
-    assert reports == []
+    (report,) = reports
+    assert isinstance(report, OrderRefusedReport)
+    assert (report.cloid, report.symbol, report.refusal) == (CLOID, "BTC", refusal)
     assert any(e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED for e in events)
 
 
@@ -1653,7 +1666,7 @@ def action_error_response(message: str) -> dict:
     return {"status": "err", "response": message}
 
 
-def test_a_top_level_action_error_on_place_emits_no_report_and_names_it() -> None:
+def test_a_top_level_action_error_on_place_reports_only_a_refusal_and_names_it() -> None:
     # A top-level `err` envelope means the order never entered the book (the send
     # was refused, not adjudicated) — so the adapter emits no terminal REJECTED
     # (which would wrongly kill a resendable order on a transient nonce/rate
@@ -1666,9 +1679,32 @@ def test_a_top_level_action_error_on_place_emits_no_report_and_names_it() -> Non
             place_and_collect_reports(post, limit_order(Side.BUY, "0.5", "42000"))
         )
 
-    assert reports == []
+    (report,) = reports
+    assert isinstance(report, OrderRefusedReport)
+    assert (report.cloid, report.symbol, report.refusal) == (CLOID, "BTC", OrderRefusal.REFUSED)
     rejected = [e for e in events if e["event"] == NamedEvent.EXCHANGE_ACTION_REJECTED]
     assert rejected and rejected[0]["reason"] == "Invalid nonce"
+
+
+# The venue's own words, from a testnet probe
+# (docs/research/hyperliquid-rate-limit-window-probe.md).
+ADDRESS_LIMIT = (
+    "Too many cumulative requests sent (97460 > 97456) for cumulative volume traded"
+    " $87457.46. Place taker orders to free up 1 request per USDC traded."
+)
+
+
+def test_a_place_over_the_address_limit_reports_the_refusal_kind() -> None:
+    # Flatten waits out a rate limit and counts it as no dry attempt (ADR-0056).
+    # So the engine must learn the kind from the adapter, never from venue text.
+    post = FakeExchangeApi({"order": action_error_response(ADDRESS_LIMIT)})
+
+    reports = asyncio.run(place_and_collect_reports(post, limit_order(Side.BUY, "0.5", "42000")))
+
+    (report,) = reports
+    assert isinstance(report, OrderRefusedReport)
+    assert (report.cloid, report.symbol) == (CLOID, "BTC")
+    assert report.refusal is OrderRefusal.RATE_LIMITED_ADDRESS
 
 
 def test_a_top_level_action_error_on_cancel_emits_no_report_and_names_it() -> None:
