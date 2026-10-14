@@ -339,19 +339,12 @@ class HyperliquidExchange:
                 # saga and would never heal fills that came later. For the same
                 # reason it waits until the read holds every fill the venue
                 # reported. A short read leaves the saga open for reconcile.
-                read_sz = sum((fill.quantity for fill in fills), Decimal("0"))
-                if order.reduce_only and read_sz == total_sz and total_sz < order.quantity:
-                    # A reconcile read can run while this fills read is out, and
-                    # it may have started the wait. The saga ends here, so no
-                    # later read will take the entry out.
-                    self._shrunk_fills.pop(order.cloid, None)
+                filled = _fill_total(fills)
+                if filled == total_sz and _shrunk(
+                    reduce_only=order.reduce_only, asked=order.quantity, filled=filled
+                ):
                     await self._bus.publish(
-                        self._status_report(
-                            cloid=order.cloid,
-                            symbol=order.symbol,
-                            status=OrderState.CANCELLED,
-                            reason="reduce-only shrink",
-                        )
+                        self._end_shrunk(cloid=order.cloid, symbol=order.symbol)
                     )
             case unreachable:
                 # An adjudication the reader can produce and this cannot carry
@@ -539,18 +532,18 @@ class HyperliquidExchange:
         )
         if isinstance(fills, VenueReadFailure):
             return fills
-        if _shrunk(record, fills, asked=ref.quantity) and self._fills_settled(
-            ref.cloid, fills, seen=seen
+        filled = _fill_total(fills)
+        if (
+            record.state is OrderState.FILLED
+            and ref.quantity is not None
+            and _shrunk(reduce_only=record.reduce_only, asked=ref.quantity, filled=filled)
+            and self._fills_settled(ref.cloid, filled, seen=seen)
         ):
             # The venue answers `filled` for an order it shrank, and a FILLED
             # report moves no saga. The cut part ends CANCELLED, as it does
             # when the fills read at placement works (ADR-0057).
-            status = self._status_report(
-                cloid=ref.cloid,
-                symbol=record.coin,
-                status=OrderState.CANCELLED,
-                venue_oid=str(record.oid),
-                reason="reduce-only shrink",
+            status = self._end_shrunk(
+                cloid=ref.cloid, symbol=record.coin, venue_oid=str(record.oid)
             )
             return VenueOrderView(status=status, fills=tuple(fills))
         status = self._status_report(
@@ -558,8 +551,26 @@ class HyperliquidExchange:
         )
         return VenueOrderView(status=status, fills=tuple(fills))
 
+    def _end_shrunk(
+        self, *, cloid: str, symbol: str, venue_oid: str | None = None
+    ) -> OrderStatusReport:
+        """The CANCELLED that ends a shrunk order's cut part (ADR-0057).
+
+        Placement and reconcile both end it here. A reconcile read can start
+        the wait while the placement fills read is still out. The saga ends
+        now, so no later read would take that entry out.
+        """
+        self._shrunk_fills.pop(cloid, None)
+        return self._status_report(
+            cloid=cloid,
+            symbol=symbol,
+            status=OrderState.CANCELLED,
+            venue_oid=venue_oid,
+            reason="reduce-only shrink",
+        )
+
     def _fills_settled(
-        self, cloid: str, fills: list[FillReport], *, seen: tuple[Decimal, int] | None
+        self, cloid: str, total: Decimal, *, seen: tuple[Decimal, int] | None
     ) -> bool:
         """Whether this read's fill total has held for the whole wait.
 
@@ -568,7 +579,6 @@ class HyperliquidExchange:
         part waits until the same total has held for one open-order interval.
         ``seen`` is the total an earlier read showed, and when it first did.
         """
-        total = sum((fill.quantity for fill in fills), Decimal("0"))
         now = self._clock.timestamp_ns()
         if seen is not None and seen[0] == total:
             if now - seen[1] >= self._shrink_wait_ns:
@@ -867,12 +877,20 @@ def _placed_before(record: "_OrderRecord", *, created_ts_ns: int | None) -> bool
     return record.timestamp < created_ts_ns // _NS_PER_MS - _ACK_SKEW_ALLOWANCE_MS
 
 
-def _shrunk(record: "_OrderRecord", fills: list[FillReport], *, asked: Decimal | None) -> bool:
-    """Whether the venue shrank a reduce-only order: it says `filled`, yet the
-    fills fall short of the size the saga asked for."""
-    if asked is None or not record.reduce_only or record.state is not OrderState.FILLED:
-        return False
-    return sum((fill.quantity for fill in fills), Decimal("0")) < asked
+def _shrunk(*, reduce_only: bool, asked: Decimal, filled: Decimal) -> bool:
+    """Whether the venue shrank a reduce-only order: the order is done, yet it
+    filled less than the saga asked for (ADR-0057).
+
+    Placement and reconcile both ask this. Each must also prove its fills read
+    holds every fill, and that proof differs. Placement has the venue's own
+    ``totalSz``. Reconcile waits for the total to hold (``_fills_settled``).
+    """
+    return reduce_only and filled < asked
+
+
+def _fill_total(fills: Sequence[FillReport]) -> Decimal:
+    """How much ``fills`` filled, summed."""
+    return sum((fill.quantity for fill in fills), Decimal("0"))
 
 
 def _decode_order_status(response: object) -> _OrderDecode:
