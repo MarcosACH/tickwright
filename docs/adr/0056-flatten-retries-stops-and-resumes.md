@@ -123,6 +123,10 @@ Decided in [#413](https://github.com/MarcosACH/tickwright/issues/413), part of
   filled. So a refused or dead attempt waits about 2 seconds longer than the #439 block says. That
   is safe. The test clocks add up waits that run at the same time, so no test could show the
   difference.**)**
+  **(Clarified in [#475](https://github.com/MarcosACH/tickwright/issues/475):** a fill on a close
+  left open by an earlier run also resets the count. Flatten waits for that close before its first
+  attempt, and failed reads during the wait count. Only a fill during the wait counts as a fill. A
+  fill booked before the crash does not.**)**
 - **The count lives in memory.** A crash resets it. A new run is a new choice by the operator, so it
   gets its full tries.
 - **On boot, an open flatten saga is resumed first.** The engine finds it at the venue by its id. It

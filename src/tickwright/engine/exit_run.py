@@ -488,9 +488,15 @@ async def _resume_closes(
     left_open = context.checkpointer.cache.open_orders(strategy_id=OPERATOR, symbol=symbol)
     if not left_open:
         return size
-    for order in left_open:
-        if not await _verdict(order.cloid, size, dry, turns, context):
+    # What each close had filled before this run, so only a fill during the wait counts.
+    before = {order.cloid: order.cum_qty for order in left_open}
+    for cloid in before:
+        if not await _verdict(cloid, size, dry, turns, context):
             return None
+    if any(_cum_qty(cloid, context) > qty for cloid, qty in before.items()):
+        # A fill on a close from an earlier run ends the row too, before the read
+        # (ADR-0056).
+        dry.reset()
     # The old close may have filled during the wait, so only a new read sizes the next.
     return await _read_left(symbol, size, dry, context)
 
@@ -522,8 +528,12 @@ def _decided(cloid: str, context: ExitContext) -> bool:
 
 
 def _filled(cloid: str, context: ExitContext) -> bool:
+    return _cum_qty(cloid, context) > 0
+
+
+def _cum_qty(cloid: str, context: ExitContext) -> Decimal:
     saga = context.checkpointer.cache.get_order(cloid)
-    return saga is not None and saga.cum_qty > 0
+    return Decimal(0) if saga is None else saga.cum_qty
 
 
 async def _final_read(context: ExitContext) -> ExitOutcome:

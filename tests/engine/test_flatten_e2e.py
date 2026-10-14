@@ -1315,3 +1315,68 @@ def test_a_close_left_open_that_fills_during_the_wait_leaves_only_the_rest_to_cl
     assert close is not None
     assert close.quantity == Decimal("0.01")
     assert close.state is OrderState.FILLED
+
+
+class _FillsAfterFailedReads(VenueLink):
+    """``close`` is unknown to the boot's read. Two reads by cloid fail, then it fills.
+
+    The positions read after the fill fails once.
+    """
+
+    def __init__(self, venue: Exchange, *, close: PlaceOrder) -> None:
+        super().__init__(venue)
+        self._close = close
+        self._order_reads = 0
+        self._position_reads = 0
+
+    async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
+        if ref.cloid == self._close.cloid:
+            self._order_reads += 1
+            if self._order_reads == 1:
+                return VenueOrderView(status=None)
+            if self._order_reads in (2, 3):
+                return VenueReadFailure.SEND_FAILED
+            if self._order_reads == 4:
+                await self.place(self._close)
+        return await super().fetch_order(ref)
+
+    async def fetch_positions(self) -> dict[str, Decimal] | VenueReadFailure:
+        self._position_reads += 1
+        # The first positions read is flatten's own. The second follows the fill.
+        if self._position_reads == 2:
+            return VenueReadFailure.SEND_FAILED
+        return await super().fetch_positions()
+
+
+def test_a_close_left_open_that_fills_after_failed_reads_starts_a_new_row(
+    tmp_path: Path,
+) -> None:
+    # A fill on a close from an earlier run ends the row too (ADR-0056). Counted
+    # in the old row, the failed read after it would be the third dry attempt,
+    # and flatten would give up a symbol that is still closing.
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+    left_open = _left_open(tmp_path / "saga.db", "BTC", quantity="0.01")
+    late = PlaceOrder(
+        cloid=left_open,
+        symbol="BTC",
+        side=Side.SELL,
+        quantity=Decimal("0.01"),
+        order_type=OrderType.MARKET,
+        time_in_force=TimeInForce.IOC,
+        reduce_only=True,
+    )
+    venue = _Venue(tmp_path / "saga.db", ManualClock())
+
+    exit_code, logs = _next_run(
+        venue, tmp_path, Flatten(feed_ends=True), link=partial(_FillsAfterFailedReads, close=late)
+    )
+
+    dry = [log for log in logs if log["event"] == "flatten.dry_attempt"]
+    assert [(log["count"], log["reason"]) for log in dry] == [
+        (1, "read_failed"),
+        (2, "read_failed"),
+        (1, "read_failed"),
+    ]
+    assert not [log for log in logs if log["event"] == "flatten.gave_up"]
+    assert exit_code == 0
+    assert logs[-1]["outcome"] == "done"
