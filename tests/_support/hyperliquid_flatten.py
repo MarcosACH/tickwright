@@ -112,6 +112,10 @@ class HeldShort:
         self.held = False
         return filled_response(oid=CLOSE_OID, total_sz="2.0", avg_px="25.0")
 
+    def order_status(self, payload: dict) -> dict:
+        # A refused close never reached the book, so the read by cloid finds no record.
+        return {"status": "unknownOid"}
+
     def fills(self, payload: dict) -> list[dict]:
         if self.held:
             return []
@@ -154,8 +158,7 @@ def run_flatten(
             "clearinghouseState": venue.account,
             "frontendOpenOrders": [],
             "order": venue.order,
-            # A refused close never reached the book, so the read by cloid finds no record.
-            "orderStatus": {"status": "unknownOid"},
+            "orderStatus": venue.order_status,
             "userFills": venue.fills,
             "userFillsByTime": venue.fills,
         }

@@ -391,7 +391,11 @@ async def _attempt(
         if not decided:
             return None
         filled = _filled(cloid, context)
-        reason = None if filled or limit is not None else "no_fill"
+        if filled or limit is not None:
+            reason = None
+        else:
+            # A send that dies counts as refused too (ADR-0060).
+            reason = "no_fill" if refusal is None else "refused"
     left = await _read_left(symbol, size, dry, context)
     return None if left is None else _Attempt(left=left, filled=filled, dry=reason)
 
