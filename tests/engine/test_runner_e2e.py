@@ -59,6 +59,7 @@ from tickwright.domain import (
     PlaceSignal,
     Portfolio,
     Side,
+    Signal,
     TimeInForce,
     VenueAccountState,
     VenueOrderView,
@@ -2429,3 +2430,40 @@ def test_graceful_stop_leaves_resting_live_orders_for_the_next_start_to_re_adopt
     # The venue still holds exactly the one resting order — no duplicate send.
     view = asyncio.run(venue.fetch_order(OrderRef(cloid=cloid, symbol="BTC")))
     assert isinstance(view, VenueOrderView) and view.has_record
+
+
+def test_the_engine_hands_out_an_emitter_that_records_each_seq_before_the_bus(
+    tmp_path: Path,
+) -> None:
+    """The engine builds a strategy's emitter, so no strategy has to wire the
+    seq record itself. A strategy that wired a no-op would reopen #442."""
+    bus = InMemoryBus()
+    clock = ManualClock()
+    store = SQLiteStore(tmp_path / "saga.db")
+    engine = Engine(
+        bus=bus,
+        clock=clock,
+        store=store,
+        exchange=PaperExchange(
+            bus=bus,
+            clock=clock,
+            fill_model=ImmediateFillModel(),
+            genesis_collateral=GENESIS,
+            account_net=dict,
+            applied_fills=lambda cloid: (),
+        ),
+        feed=ReplayFeed(path=_write_ticks(tmp_path / "ticks.jsonl"), bus=bus, clock=clock),
+    )
+    emitter = engine.emitter_for("alpha")
+    record_at_delivery: list[tuple[str, int | None]] = []
+
+    async def read_record(signal: Signal) -> None:
+        record_at_delivery.append((signal.signal_id, store.seq_records().get("alpha")))
+
+    bus.subscribe(Signal, read_record)
+
+    asyncio.run(emitter.cancel_all(symbol="BTC"))
+
+    assert emitter.strategy_id == "alpha"
+    assert record_at_delivery == [("alpha:BTC:1", 1)]
+    store.close()

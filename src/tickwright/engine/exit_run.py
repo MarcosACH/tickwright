@@ -144,9 +144,9 @@ class Flatten:
                 strategy_id=OPERATOR,
                 bus=context.bus,
                 clock=context.clock,
-                record_seq=context.checkpointer.cache.raise_seq,
+                record_seq=context.checkpointer.raise_seq,
             )
-            # Seeded from the sagas, as a strategy's is. An earlier flatten's seq
+            # Seeded from the store high-water, as a strategy's is. An earlier flatten's seq
             # is consumed, and the manager drops a signal id it has seen (ADR-0006).
             high_water = context.checkpointer.cache.seq_high_water()
             emitter.set_next_seq(high_water.get(OPERATOR, 0) + 1)

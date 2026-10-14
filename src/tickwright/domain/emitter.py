@@ -38,6 +38,14 @@ class SignalEmitter:
         self._record_seq = record_seq
         self._next_seq = 1
 
+    @property
+    def strategy_id(self) -> str:
+        """The id every signal from this emitter carries.
+
+        A strategy takes its own id from here. A separate argument could name
+        another strategy, and then its seq would resume from the wrong record."""
+        return self._strategy_id
+
     def set_next_seq(self, next_seq: int) -> None:
         """Resume the ``seq`` counter from the engine-recovered high-water (ADR-0016).
 

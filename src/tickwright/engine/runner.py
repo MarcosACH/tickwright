@@ -40,6 +40,7 @@ from tickwright.domain import (
     Portfolio,
     PreTradeGuard,
     Signal,
+    SignalEmitter,
     Store,
     StoreLockHeld,
     StoreLockHolder,
@@ -232,6 +233,22 @@ class Engine:
         the ``Cache`` does.
         """
         return self._checkpointer.portfolio.for_strategy(strategy_id)
+
+    def emitter_for(self, strategy_id: str) -> SignalEmitter:
+        """The emitter to hand ``strategy_id``'s constructor.
+
+        Built here so every strategy gets the same seq write path as the
+        manager: the store, then the cache (ADR-0016). A strategy that built
+        its own could pass a recorder that writes nothing, and #442 would come
+        back without a type error. The composition root still does the
+        injecting, as with ``portfolio_for``.
+        """
+        return SignalEmitter(
+            strategy_id=strategy_id,
+            bus=self._bus,
+            clock=self._clock,
+            record_seq=self._checkpointer.raise_seq,
+        )
 
     def register(self, strategy: Strategy, *, symbols: Iterable[str]) -> None:
         """Add ``strategy`` to the hosted set before ``run()`` (ADR-0018)."""
