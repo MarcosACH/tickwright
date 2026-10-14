@@ -16,6 +16,9 @@ from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.adapters.store import SQLiteStore
 from tickwright.app.build import paper_store_reads
 from tickwright.domain import (
+    AggressorSide,
+    FillReport,
+    MarketTick,
     Order,
     OrderState,
     OrderType,
@@ -25,10 +28,10 @@ from tickwright.domain import (
 )
 
 
-def _paper(store: SQLiteStore) -> PaperExchange:
+def _paper(store: SQLiteStore, bus: InMemoryBus | None = None) -> PaperExchange:
     reads = paper_store_reads(store)
     return PaperExchange(
-        bus=InMemoryBus(),
+        bus=bus or InMemoryBus(),
         clock=ManualClock(start_ns=1_000),
         fill_model=ImmediateFillModel(),
         genesis_collateral=GENESIS,
@@ -71,3 +74,40 @@ def test_a_restarted_paper_venue_lists_the_orders_an_earlier_run_left_resting() 
         return await exchange.fetch_open_orders()
 
     assert asyncio.run(scenario()) == [VenueOpenOrder(symbol="BTC", cloid="0xa")]
+
+
+def test_a_rebuilt_order_fills_only_the_size_an_earlier_run_left_open() -> None:
+    # It asked for 2 and an earlier run filled 0.5. Filling 2 again would
+    # over-fill the saga, so the venue must work only the 1.5 still open.
+    store = SQLiteStore(":memory:")
+    store.checkpoint(_resting("0xa", cum_qty="0.5"), ts_ns=1_000)
+    bus = InMemoryBus()
+    exchange = _paper(store, bus)
+    fills: list[FillReport] = []
+
+    async def record(report: FillReport) -> None:
+        fills.append(report)
+
+    bus.subscribe(FillReport, record)
+
+    async def scenario() -> None:
+        await exchange.start()
+        # A tick below the BUY limit at 41000 crosses it.
+        await bus.publish(
+            MarketTick(
+                ts_event=2_000,
+                ts_init=2_000,
+                symbol="BTC",
+                price=Decimal("40000"),
+                size=Decimal("5"),
+                aggressor_side=AggressorSide.SELL,
+                trade_id="t2000",
+                seq=0,
+            )
+        )
+
+    asyncio.run(scenario())
+
+    assert [(fill.cloid, fill.quantity, fill.price) for fill in fills] == [
+        ("0xa", Decimal("1.5"), Decimal("41000"))
+    ]
