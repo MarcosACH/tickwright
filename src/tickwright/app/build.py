@@ -40,7 +40,6 @@ from tickwright.domain import (
 )
 from tickwright.engine.exit_run import ExitJob, Flatten, OperatorCancelAll
 from tickwright.engine.guard import NoopGuard, RealGuard
-from tickwright.engine.reconcile import ReconcileConfig
 from tickwright.engine.runner import Engine
 from tickwright.strategies import SingleShotLimitStrategy, SingleShotMarketStrategy
 
@@ -154,13 +153,8 @@ def build_exchange(
                 startup_timeout_seconds=config.engine.startup_reconciliation_timeout_seconds,
                 # A shrunk order's fill total must hold for one open-order pass
                 # before its cut part ends (ADR-0057). The adapter cannot read
-                # the engine's config, so the interval is handed over here. It
-                # resolves an unset config the same way the runner does.
-                shrink_wait_seconds=(
-                    config.engine.reconcile
-                    if config.engine.reconcile is not None
-                    else ReconcileConfig()
-                ).open_order_interval_seconds,
+                # the engine's config, so the interval is handed over here.
+                shrink_wait_seconds=config.engine.reconcile.open_order_interval_seconds,
                 # The same resolved book the paper arm and the margin model get:
                 # live validates the identical bound before pushing anything, so
                 # the two paths cannot disagree about a leverage (ADR-0044 §9).
