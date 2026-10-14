@@ -179,6 +179,44 @@ def test_a_refused_or_dead_close_the_venue_shows_filled_is_booked_and_never_sent
     assert logs[-1]["outcome"] == "done"
 
 
+class _CloidReadLimitedOnce(_FilledBehindAnswer):
+    """A dead send the venue filled. The first read by cloid is refused for the IP limit."""
+
+    def __init__(self) -> None:
+        super().__init__(DEAD_SEND)
+        self.limited_ns: int | None = None
+        self.read_after_limit_ns: int | None = None
+
+    def order_status(self, payload: dict) -> dict:
+        if self.limited_ns is None:
+            self.limited_ns = self.clock.timestamp_ns()
+            raise IpRateLimited("429 from the venue")
+        if self.read_after_limit_ns is None:
+            self.read_after_limit_ns = self.clock.timestamp_ns()
+        return super().order_status(payload)
+
+
+def test_a_cloid_read_refused_for_a_rate_limit_waits_10_s_and_is_no_dry_attempt(
+    tmp_path: Path,
+) -> None:
+    # The verdict needs the cloid read, and waiting out the IP limit makes
+    # progress (ADR-0060). A dry attempt here could give up a close that filled.
+    venue = _CloidReadLimitedOnce()
+
+    exit_code, logs, post, _ = _flatten(tmp_path, venue, priced_frames())
+
+    assert exit_code == 0, [(log["event"], log.get("error")) for log in logs]
+    limited = [log for log in logs if log["event"] == "flatten.rate_limited"]
+    assert [(log["symbol"], log["limit"]) for log in limited] == [("HYPE", "ip")]
+    assert not [log for log in logs if log["event"] == "flatten.dry_attempt"]
+    assert venue.limited_ns is not None
+    assert venue.read_after_limit_ns is not None
+    assert venue.read_after_limit_ns - venue.limited_ns >= 10_000_000_000
+    orders = [url for url, payload in post.requests if request_type(url, payload) == "order"]
+    assert len(orders) == 1
+    assert logs[-1]["outcome"] == "done"
+
+
 @pytest.mark.parametrize("answer", [REFUSED, DEAD_SEND], ids=["refused", "dead_send"])
 def test_a_refused_or_dead_close_the_venue_never_took_is_a_refused_dry_attempt(
     tmp_path: Path, answer: object

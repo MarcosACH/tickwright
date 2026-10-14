@@ -40,7 +40,7 @@ from tickwright.domain import (
     derive_cloid,
 )
 from tickwright.engine.execution import ExecutionManager
-from tickwright.engine.reconcile import ReconcileConfig, Reconciler
+from tickwright.engine.reconcile import PassResult, ReconcileConfig, Reconciler
 from tickwright.venues.hyperliquid import (
     HyperliquidConfig,
     HyperliquidExchange,
@@ -132,7 +132,7 @@ def _place_then_reconcile(post: FakeExchangeApi, *, passes: int) -> tuple[Order,
             clock.advance_to(
                 clock.timestamp_ns() + int(config.open_order_interval_seconds * 1_000_000_000)
             )
-            assert await reconciler.reconcile_open_orders() is True
+            assert await reconciler.reconcile_open_orders() is PassResult.PROVED
         order = store.get_order(CLOID)
         assert order is not None
         return order, events

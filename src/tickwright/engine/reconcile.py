@@ -79,6 +79,21 @@ class _FreezeScope(Enum):
     ORDER = "order"
 
 
+class PassResult(Enum):
+    """How one continuous reconcile pass ended.
+
+    A rate limit is its own result, because a caller that waits it out makes
+    progress. Flatten waits it out rather than count it as a failed read (ADR-0060).
+    """
+
+    PROVED = "proved"
+    """Every order the pass looked at was read and resolved."""
+    FAILED = "failed"
+    """A venue read failed, so the pass could not prove every order."""
+    RATE_LIMITED = "rate_limited"
+    """The venue refused a read for the IP limit, so the pass stopped there."""
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReconcileConfig:
     """Timing knobs for the continuous loops (ADR-0011 defaults).
@@ -221,23 +236,23 @@ class Reconciler:
         step shares with the account materialisation ordered ahead of it)
         retries; nothing was guessed in the meantime.
         """
-        return await self._drive("startup", None, self._adopt)
+        return await self._drive("startup", None, self._adopt) is PassResult.PROVED
 
-    async def reconcile_inflight(self) -> bool:
+    async def reconcile_inflight(self) -> PassResult:
         """The fast continuous cycle: resolve ``SUBMITTED`` orders that never
-        acked — the riskiest "did it land?" path (ADR-0011). ``True`` on a
-        completed pass; ``False`` means a venue read failed and the cycle froze.
+        acked — the riskiest "did it land?" path (ADR-0011). Anything but
+        ``PROVED`` means a venue read failed and the cycle froze.
         """
         return await self._drive("inflight", _INFLIGHT_STATES, self._resolve_inflight)
 
-    async def reconcile_open_orders(self) -> bool:
+    async def reconcile_open_orders(self) -> PassResult:
         """The slow continuous cycle: resting orders and ghosts (ADR-0011).
 
         An order whose venue record is gone becomes a ghost candidate; only
         **continuous** absence across the grace window resolves it terminally,
         and every read doubles as the fill-history cross-check — a vanished
-        order may have filled. ``True`` on a completed pass; ``False`` means a
-        venue read failed and the cycle froze.
+        order may have filled. Anything but ``PROVED`` means a venue read
+        failed and the cycle froze.
 
         The handler is ``_adopt`` itself: the cadence and the startup pass read
         the same answer shapes and must resolve them the same way (inv 3), so
@@ -250,13 +265,14 @@ class Reconciler:
         cycle: str,
         states: frozenset[OrderState] | None,
         handle: Callable[[Order, VenueOrderView], Awaitable[None]],
-    ) -> bool:
+    ) -> PassResult:
         """The one skeleton every cadence shares: over each non-terminal saga in
         ``states`` (all of them when ``None``), read venue truth by cloid and let
         ``handle`` resolve the gap. A failed read trips the connectivity guard —
         the whole pass freezes here and nowhere else, so ADR-0011 inv 1 lives in
-        exactly one place. ``True`` only on a pass that proved **every** order it
-        looked at; ``False`` when any read failed.
+        exactly one place. ``PROVED`` only on a pass that proved **every** order
+        it looked at. ``RATE_LIMITED`` when a read was refused for the IP limit,
+        and ``FAILED`` when any other read failed.
 
         **How much a failed read costs turns on whether the venue answered**
         (ADR-0049). A dead send says nothing about this order in particular — the
@@ -267,7 +283,7 @@ class Reconciler:
         durably unreadable body stall every other order forever. That one order
         is skipped, its own budget is charged, and the pass carries on.
 
-        The verdict is ``False`` either way, and that is what keeps the startup
+        The verdict is not ``PROVED`` either way, and that is what keeps the startup
         phase's contract intact (inv 5): a pass that could not prove one order
         never clears the ``StartupBarrier``, whichever way the read failed.
         """
@@ -283,18 +299,22 @@ class Reconciler:
                 with operation(cloid=order.cloid):
                     view = await self._exchange.fetch_order(OrderRef.of(order))
                     match view:
-                        case VenueReadFailure.SEND_FAILED | VenueReadFailure.RATE_LIMITED_IP:
-                            # Every other read in the pass would fail the same
-                            # way. Under the IP limit it would also spend more
-                            # of the limit (ADR-0056).
-                            return self._freeze(_FreezeScope.CYCLE)
+                        case VenueReadFailure.SEND_FAILED:
+                            # Every other read in the pass would fail the same way.
+                            self._freeze(_FreezeScope.CYCLE)
+                            return PassResult.FAILED
+                        case VenueReadFailure.RATE_LIMITED_IP:
+                            # Every other read would be refused too, and would
+                            # spend more of the limit (ADR-0056).
+                            self._freeze(_FreezeScope.CYCLE)
+                            return PassResult.RATE_LIMITED
                         case VenueReadFailure.UNREADABLE_BODY:
                             self._charge_unreadable(order)
                             proved_all = False
                         case _:
                             self._unreadable_run.record_present(order.cloid)
                             await handle(order, view)
-            return proved_all
+            return PassResult.PROVED if proved_all else PassResult.FAILED
 
     async def _resolve_inflight(self, order: Order, view: VenueOrderView) -> None:
         """Resolve one ``SUBMITTED`` order against its venue reading. A record
@@ -379,11 +399,10 @@ class Reconciler:
             "reads for this cloid, each quoting the body"
         )
 
-    def _freeze(self, scope: "_FreezeScope") -> bool:
+    def _freeze(self, scope: "_FreezeScope") -> None:
         """The connectivity guard tripping (ADR-0011 inv 1): a failed venue read
         heals nothing — nothing is ghosted, removed, or counted, since an outage
-        must never read as "all orders vanished". Returns ``False`` for the
-        caller to propagate as the cycle verdict. The frozen cycle and the order
+        must never read as "all orders vanished". The frozen cycle and the order
         whose read failed ride the ambient context (ADR-0020).
 
         ``scope`` is what says **how much** froze, and it is a field rather than
@@ -393,7 +412,6 @@ class Reconciler:
         ``reconcile.frozen`` cannot tell a pass that stopped dead from a pass
         that reconciled everything except one order (ADR-0049)."""
         named_event(NamedEvent.RECONCILE_FROZEN, scope=scope.value)
-        return False
 
     async def _adopt(self, order: Order, view: VenueOrderView) -> None:
         """Align one saga with the venue's view of its cloid.

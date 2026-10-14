@@ -42,7 +42,7 @@ from tickwright.domain import (
     derive_cloid,
 )
 from tickwright.engine.execution import ExecutionManager
-from tickwright.engine.reconcile import ReconcileConfig, Reconciler
+from tickwright.engine.reconcile import PassResult, ReconcileConfig, Reconciler
 from tickwright.venues.hyperliquid import (
     HyperliquidConfig,
     HyperliquidExchange,
@@ -213,7 +213,7 @@ def test_an_order_that_filled_on_placement_is_healed_by_its_oid_once_the_record_
         reconciler = Reconciler(
             bus=bus, clock=clock, exchange=exchange, cache=checks.cache, config=ReconcileConfig()
         )
-        assert await reconciler.reconcile_open_orders() is True
+        assert await reconciler.reconcile_open_orders() is PassResult.PROVED
         return store, events, post
 
     store, events, post = asyncio.run(main())

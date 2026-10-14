@@ -39,7 +39,7 @@ from tickwright.observability import NamedEvent, named_event
 
 from .checkpoint import Checkpointer
 from .feed_handle import FeedHandle
-from .reconcile import Reconciler
+from .reconcile import PassResult, Reconciler
 
 
 class ExitStatus(StrEnum):
@@ -254,13 +254,13 @@ class _Turns:
     async def note_refusal(self, report: OrderRefusedReport) -> None:
         self._refusals[report.cloid] = report.refusal
 
-    async def run_pass(self) -> bool:
-        """Run both halves of one pass. False when either failed."""
+    async def run_pass(self) -> PassResult:
+        """Run both halves of one pass. The second runs only when the first proved."""
         async with self._lock:
-            return (
-                await self._reconciler.reconcile_inflight()
-                and await self._reconciler.reconcile_open_orders()
-            )
+            inflight = await self._reconciler.reconcile_inflight()
+            if inflight is not PassResult.PROVED:
+                return inflight
+            return await self._reconciler.reconcile_open_orders()
 
     async def close(
         self, symbol: str, size: Decimal, emitter: SignalEmitter
@@ -381,7 +381,7 @@ async def _attempt(
     else:
         cloid, refusal = await turns.close(symbol, size, emitter)
         limit = _RATE_LIMITS.get(refusal) if refusal is not None else None
-        verdict = _verdict(cloid, size, dry, turns, context)
+        verdict = _verdict(symbol, cloid, size, dry, turns, context)
         if limit is not None:
             named_event(NamedEvent.FLATTEN_RATE_LIMITED, symbol=symbol, limit=limit)
             # The 10 seconds count from the refusal, so they run beside the verdict.
@@ -433,7 +433,12 @@ def _held(symbol: str, context: ExitContext) -> Decimal:
 
 
 async def _verdict(
-    cloid: str, size: Decimal, dry: _DryAttempts, turns: _Turns, context: ExitContext
+    symbol: str,
+    cloid: str,
+    size: Decimal,
+    dry: _DryAttempts,
+    turns: _Turns,
+    context: ExitContext,
 ) -> bool:
     """Run reconcile passes until the close's saga is terminal (ADR-0011, ADR-0026).
 
@@ -444,10 +449,17 @@ async def _verdict(
     run (ADR-0060). False when failed passes used up the dry attempts. A second
     close beside an open one could close the size twice. So a failed pass waits
     for this close again, and a give-up leaves it to the next boot.
+
+    A pass refused for the IP limit is not a failed read. It waits 10 seconds,
+    and the count does not move (ADR-0060).
     """
     while not _decided(cloid, context):
         await context.clock.sleep(context.pass_interval_seconds)
-        if not await turns.run_pass() and await dry.gave_up("read_failed", size):
+        result = await turns.run_pass()
+        if result is PassResult.RATE_LIMITED:
+            named_event(NamedEvent.FLATTEN_RATE_LIMITED, symbol=symbol, limit="ip")
+            await context.clock.sleep(RATE_LIMIT_WAIT_SECONDS)
+        elif result is PassResult.FAILED and await dry.gave_up("read_failed", size):
             return False
     return True
 
@@ -496,7 +508,7 @@ async def _resume_closes(
     if not left_open:
         return size
     for order in left_open:
-        if not await _verdict(order.cloid, size, dry, turns, context):
+        if not await _verdict(symbol, order.cloid, size, dry, turns, context):
             return None
     # The old close may have filled during the wait, so only a new read sizes the next.
     return await _read_left(symbol, size, dry, context)

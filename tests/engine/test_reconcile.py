@@ -48,7 +48,7 @@ from tickwright.domain import (
 from tickwright.engine.barrier import StartupBarrier
 from tickwright.engine.cache import Cache
 from tickwright.engine.execution import ExecutionManager
-from tickwright.engine.reconcile import ReconcileConfig, Reconciler
+from tickwright.engine.reconcile import PassResult, ReconcileConfig, Reconciler
 from tickwright.observability.testing import capture_events
 
 
@@ -263,7 +263,7 @@ def test_the_startup_absence_arms_the_grace_clock_from_the_boot_instant() -> Non
         # still be LIVE here. Deferring the verdict is a delay, not a reprieve.
         await clock.sleep(ReconcileConfig().ghost_grace_seconds)
         with capture_events() as logs:
-            assert await reconciler.reconcile_open_orders() is True
+            assert await reconciler.reconcile_open_orders() is PassResult.PROVED
 
         ghosts = [log for log in logs if log["event"] == "ghost.reconciled"]
         assert len(ghosts) == 1
@@ -708,14 +708,14 @@ def test_a_record_returning_after_boot_restarts_the_window_it_armed() -> None:
         # evidence can restart — not a countdown already running.
         venue.present = True
         await clock.sleep(50.0)
-        assert await reconciler.reconcile_open_orders() is True
+        assert await reconciler.reconcile_open_orders() is PassResult.PROVED
 
         # Absent again, now 100s after boot — past the 90s window boot armed.
         # It must not ghost: this is a *new* run, 0s old.
         venue.present = False
         await clock.sleep(50.0)
         with capture_events() as logs:
-            assert await reconciler.reconcile_open_orders() is True
+            assert await reconciler.reconcile_open_orders() is PassResult.PROVED
         order = store.get_order("0xabc")
         assert order is not None
         assert order.state is OrderState.LIVE
@@ -724,7 +724,7 @@ def test_a_record_returning_after_boot_restarts_the_window_it_armed() -> None:
         # And the restarted run still measures: one window past the *reset*,
         # not past boot, the order is gone for good.
         await clock.sleep(91.0)
-        assert await reconciler.reconcile_open_orders() is True
+        assert await reconciler.reconcile_open_orders() is PassResult.PROVED
         order = store.get_order("0xabc")
         assert order is not None
         assert order.state is OrderState.REJECTED
@@ -885,7 +885,7 @@ def test_a_record_a_redriven_boot_finds_restarts_the_window_boot_armed() -> None
         # And the restarted run is a measurement, not an amnesty: one window
         # past the 61s the order went absent again, it is gone for good.
         await clock.sleep(91.0)
-        assert await reconciler.reconcile_open_orders() is True
+        assert await reconciler.reconcile_open_orders() is PassResult.PROVED
         gone = store.get_order("0xabc")
         assert gone is not None
         assert gone.state is OrderState.REJECTED
@@ -970,7 +970,7 @@ def test_a_boot_reading_fills_without_a_record_arms_the_window_too() -> None:
         # can only have elapsed if boot armed the clock on this shape too.
         await clock.sleep(ReconcileConfig().ghost_grace_seconds)
         with capture_events() as logs:
-            assert await reconciler.reconcile_open_orders() is True
+            assert await reconciler.reconcile_open_orders() is PassResult.PROVED
         ghosts = [log for log in logs if log["event"] == "ghost.reconciled"]
         assert len(ghosts) == 1
         assert ghosts[0]["resolution"] == "cancelled"

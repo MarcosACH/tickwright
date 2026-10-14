@@ -50,7 +50,7 @@ from tickwright.domain import (
 )
 from tickwright.engine.cache import Cache
 from tickwright.engine.execution import ExecutionManager
-from tickwright.engine.reconcile import ReconcileConfig, Reconciler
+from tickwright.engine.reconcile import PassResult, ReconcileConfig, Reconciler
 from tickwright.observability.testing import capture_events
 
 _NS_PER_SECOND = 1_000_000_000
@@ -210,7 +210,7 @@ def test_inflight_cycle_adopts_venue_truth_for_a_submitted_order_the_ack_missed(
     store.checkpoint(_saga("0xabc", OrderState.SUBMITTED), ts_ns=500)
     _, reconciler, events = _engine(store, exchange, clock)
 
-    assert asyncio.run(reconciler.reconcile_inflight()) is True
+    assert asyncio.run(reconciler.reconcile_inflight()) is PassResult.PROVED
 
     # The riskiest "did it land?" gap closed without waiting for the slow loop.
     recovered = store.get_order("0xabc")
@@ -234,7 +234,7 @@ def test_inflight_no_record_resolves_failed_only_after_the_attempt_budget() -> N
 
     async def cycles(n: int) -> None:
         for _ in range(n):
-            assert await reconciler.reconcile_inflight() is True
+            assert await reconciler.reconcile_inflight() is PassResult.PROVED
 
     # Bounded retries (ADR-0011): a no-record read is not instant proof while
     # the send may still land — the first misses resolve nothing.
@@ -266,11 +266,11 @@ def test_the_inflight_failed_verdict_is_announced_as_a_named_event() -> None:
     # verdict is a reconcile decision worth its own telemetry — parity with the
     # ghost cadence's ``ghost.reconciled`` (ADR-0020).
     with structlog.testing.capture_logs() as first:
-        assert asyncio.run(reconciler.reconcile_inflight()) is True
+        assert asyncio.run(reconciler.reconcile_inflight()) is PassResult.PROVED
     assert not [log for log in first if log["event"] == "inflight.reconciled"]
 
     with capture_events() as verdict:
-        assert asyncio.run(reconciler.reconcile_inflight()) is True
+        assert asyncio.run(reconciler.reconcile_inflight()) is PassResult.PROVED
     reconciled = [log for log in verdict if log["event"] == "inflight.reconciled"]
     assert len(reconciled) == 1
     # The cloid rides the ambient reconcile context, not the call site (ADR-0020).
@@ -309,9 +309,9 @@ def test_a_live_order_absent_across_the_grace_window_resolves_rejected() -> None
     async def scenario() -> None:
         # First sighting of the absence arms the grace clock; well inside the
         # window a missing record proves nothing (ADR-0011 inv 3).
-        assert await reconciler.reconcile_open_orders() is True
+        assert await reconciler.reconcile_open_orders() is PassResult.PROVED
         await clock.sleep(50.0)
-        assert await reconciler.reconcile_open_orders() is True
+        assert await reconciler.reconcile_open_orders() is PassResult.PROVED
         order = store.get_order("0xabc")
         assert order is not None
         assert order.state is OrderState.LIVE
@@ -320,7 +320,7 @@ def test_a_live_order_absent_across_the_grace_window_resolves_rejected() -> None
         # (ADR-0010), announced as a ghost resolution.
         await clock.sleep(41.0)
         with structlog.testing.capture_logs() as logs:
-            assert await reconciler.reconcile_open_orders() is True
+            assert await reconciler.reconcile_open_orders() is PassResult.PROVED
         order = store.get_order("0xabc")
         assert order is not None
         assert order.state is OrderState.REJECTED
@@ -358,7 +358,7 @@ def test_a_ghost_whose_fill_history_has_fills_heals_to_filled_not_rejected() -> 
     )
     _, reconciler, events = _engine(store, venue, clock)
 
-    assert asyncio.run(reconciler.reconcile_open_orders()) is True
+    assert asyncio.run(reconciler.reconcile_open_orders()) is PassResult.PROVED
 
     order = store.get_order("0xabc")
     assert order is not None
@@ -398,7 +398,7 @@ def test_a_healthy_resting_order_makes_the_slow_cycle_a_quiet_no_op() -> None:
 
     async def cycles() -> None:
         for _ in range(3):
-            assert await reconciler.reconcile_open_orders() is True
+            assert await reconciler.reconcile_open_orders() is PassResult.PROVED
 
     asyncio.run(cycles())
 
@@ -427,7 +427,7 @@ def test_a_healed_fill_and_the_venues_late_duplicate_collapse_to_one_apply() -> 
     engine_bus, reconciler, events = _engine(store, exchange, clock)
 
     # The slow cycle heals the missed fill through the ExecutionManager.
-    assert asyncio.run(reconciler.reconcile_open_orders()) is True
+    assert asyncio.run(reconciler.reconcile_open_orders()) is PassResult.PROVED
     order = store.get_order("0xabc")
     assert order is not None
     assert order.state is OrderState.FILLED
@@ -465,10 +465,10 @@ def test_a_vanished_order_with_the_cancel_requested_marker_resolves_cancelled() 
     _, reconciler, events = _engine(store, venue, clock, config)
 
     async def scenario() -> None:
-        assert await reconciler.reconcile_open_orders() is True
+        assert await reconciler.reconcile_open_orders() is PassResult.PROVED
         await clock.sleep(91.0)
         with structlog.testing.capture_logs() as logs:
-            assert await reconciler.reconcile_open_orders() is True
+            assert await reconciler.reconcile_open_orders() is PassResult.PROVED
         ghosts = [log for log in logs if log["event"] == "ghost.reconciled"]
         assert len(ghosts) == 1
         assert ghosts[0]["resolution"] == "cancelled"
@@ -495,9 +495,9 @@ def test_a_partially_filled_ghost_truly_gone_resolves_cancelled_with_fills_kept(
     _, reconciler, events = _engine(store, venue, clock, config)
 
     async def scenario() -> None:
-        assert await reconciler.reconcile_open_orders() is True
+        assert await reconciler.reconcile_open_orders() is PassResult.PROVED
         await clock.sleep(91.0)
-        assert await reconciler.reconcile_open_orders() is True
+        assert await reconciler.reconcile_open_orders() is PassResult.PROVED
 
     asyncio.run(scenario())
     # CANCELLED, not REJECTED: a rejection would deny fills that provably
@@ -542,7 +542,7 @@ def test_a_recent_orders_absence_neither_arms_the_grace_clock_nor_ghosts_it() ->
     async def scenario() -> None:
         for _ in range(3):
             with capture_events() as logs:
-                assert await reconciler.reconcile_open_orders() is True
+                assert await reconciler.reconcile_open_orders() is PassResult.PROVED
             skipped = [log for log in logs if log["event"] == "reconcile.recency_skipped"]
             assert len(skipped) == 1
             assert skipped[0]["cloid"] == "0xabc"
@@ -582,7 +582,7 @@ def test_a_recent_order_that_filled_heals_immediately_inside_the_protection_wind
     # The order is well within its protection window, but the fill-history
     # cross-check is mandatory and independent of the recency skip (ADR-0011
     # inv 2/4): executed truth heals immediately, with no grace wait.
-    assert asyncio.run(reconciler.reconcile_open_orders()) is True
+    assert asyncio.run(reconciler.reconcile_open_orders()) is PassResult.PROVED
 
     order = store.get_order("0xabc")
     assert order is not None
@@ -603,18 +603,18 @@ def test_a_recent_order_resumes_normal_ghost_resolution_once_it_ages_out() -> No
 
     async def scenario() -> None:
         # Inside the protection window: skipped, so the grace clock never armed.
-        assert await reconciler.reconcile_open_orders() is True
+        assert await reconciler.reconcile_open_orders() is PassResult.PROVED
         # Aged past protection: the first unprotected sighting arms the grace
         # clock now (never earlier), so a lone read still ghosts nothing.
         await clock.sleep(31.0)
-        assert await reconciler.reconcile_open_orders() is True
+        assert await reconciler.reconcile_open_orders() is PassResult.PROVED
         order = store.get_order("0xabc")
         assert order is not None
         assert order.state is OrderState.LIVE
         # Continuously absent across the grace window past that arming: the #15
         # ghost behavior resumes unchanged → REJECTED from LIVE (ADR-0010/0011).
         await clock.sleep(91.0)
-        assert await reconciler.reconcile_open_orders() is True
+        assert await reconciler.reconcile_open_orders() is PassResult.PROVED
 
     asyncio.run(scenario())
     order = store.get_order("0xabc")
@@ -646,7 +646,7 @@ def test_a_failed_read_freezes_the_cycle_emits_frozen_and_the_next_cycle_heals()
     # the cycle freezes, resolves nothing, and says so as telemetry.
     link.down = True
     with capture_events() as logs:
-        assert asyncio.run(reconciler.reconcile_inflight()) is False
+        assert asyncio.run(reconciler.reconcile_inflight()) is PassResult.FAILED
     order = store.get_order("0xabc")
     assert order is not None
     assert order.state is OrderState.SUBMITTED
@@ -658,22 +658,22 @@ def test_a_failed_read_freezes_the_cycle_emits_frozen_and_the_next_cycle_heals()
     # The link returns: the very next cycle heals normally — the freeze also
     # never advanced the no-record miss count toward a false FAILED.
     link.down = False
-    assert asyncio.run(reconciler.reconcile_inflight()) is True
+    assert asyncio.run(reconciler.reconcile_inflight()) is PassResult.PROVED
     order = store.get_order("0xabc")
     assert order is not None
     assert order.state is OrderState.LIVE
 
 
 @pytest.mark.parametrize(
-    ("cycle_method", "saga_state", "frozen_label"),
+    ("cycle_method", "saga_state", "frozen_label", "verdict"),
     [
-        ("reconcile_startup", OrderState.SUBMITTED, "startup"),
-        ("reconcile_inflight", OrderState.SUBMITTED, "inflight"),
-        ("reconcile_open_orders", OrderState.LIVE, "open_order"),
+        ("reconcile_startup", OrderState.SUBMITTED, "startup", False),
+        ("reconcile_inflight", OrderState.SUBMITTED, "inflight", PassResult.FAILED),
+        ("reconcile_open_orders", OrderState.LIVE, "open_order", PassResult.FAILED),
     ],
 )
 def test_every_cadence_freezes_on_a_failed_read_and_removes_nothing(
-    cycle_method: str, saga_state: OrderState, frozen_label: str
+    cycle_method: str, saga_state: OrderState, frozen_label: str, verdict: object
 ) -> None:
     # The connectivity guard (ADR-0011 inv 1) is one skeleton behind every
     # cadence: a failed read freezes the whole pass, resolves nothing, and names
@@ -687,7 +687,7 @@ def test_every_cadence_freezes_on_a_failed_read_and_removes_nothing(
 
     link.down = True
     with capture_events() as logs:
-        assert asyncio.run(getattr(reconciler, cycle_method)()) is False
+        assert asyncio.run(getattr(reconciler, cycle_method)()) is verdict
 
     order = store.get_order("0xabc")
     assert order is not None
@@ -715,14 +715,14 @@ def test_a_dead_send_stops_the_worklist_where_an_unreadable_body_does_not() -> N
     dead.down = True
     _, frozen_reconciler, _ = _engine(store, dead, clock)
     with capture_events() as outage_logs:
-        assert asyncio.run(frozen_reconciler.reconcile_open_orders()) is False
+        assert asyncio.run(frozen_reconciler.reconcile_open_orders()) is PassResult.FAILED
     assert dead.reads == ["0xaaa"]  # nothing behind it was even asked
 
     garbled = _GarbledLink(exchange)
     garbled.garbled = {"0xaaa"}
     _, skipping_reconciler, _ = _engine(store, garbled, clock)
     with capture_events() as skip_logs:
-        assert asyncio.run(skipping_reconciler.reconcile_open_orders()) is False
+        assert asyncio.run(skipping_reconciler.reconcile_open_orders()) is PassResult.FAILED
     assert garbled.reads == ["0xaaa", "0xbbb"]
 
     # And the two are told apart in telemetry. Both name the cloid whose read
