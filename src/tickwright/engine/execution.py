@@ -48,6 +48,7 @@ from tickwright.domain import (
     ExecutionReport,
     FillReport,
     GuardDecision,
+    InvariantViolation,
     Order,
     OrderAnchor,
     OrderCancelled,
@@ -205,6 +206,10 @@ class ExecutionManager:
                 await self._cancel(signal)
             elif isinstance(signal, CancelAllSignal):
                 await self._cancel_all(signal)
+            else:
+                # A signal type with no branch here would drop the strategy's
+                # intent with no trace, so it faults instead (invariant 13).
+                raise InvariantViolation(f"no handler for signal type {type(signal).__name__}")
 
     async def on_execution_report(self, report: ExecutionReport) -> None:
         # Venue-fact (and reconciler-synthetic) handling is saga handling: it

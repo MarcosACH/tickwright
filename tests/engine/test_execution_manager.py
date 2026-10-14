@@ -1163,6 +1163,22 @@ def test_a_cancel_all_sends_every_cancel_in_one_call() -> None:
     assert links[0].calls == [[OrderRef.of(order) for order in orders if order is not None]]
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _UnknownSignal(Signal):
+    """A signal type the manager has no branch for."""
+
+
+def test_a_signal_type_the_manager_does_not_know_faults() -> None:
+    wiring = _wiring(SQLiteStore(":memory:"))
+    signal = _UnknownSignal(
+        ts_event=1_000, ts_init=1_000, strategy_id="trivial", symbol="BTC", seq=1
+    )
+
+    # Dropping it would lose the strategy's intent with no trace (invariant 13).
+    with pytest.raises(InvariantViolation, match="_UnknownSignal"):
+        asyncio.run(wiring.bus.publish(signal))
+
+
 async def _record(sink: list, event: object) -> None:
     sink.append(event)
 
