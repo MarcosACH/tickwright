@@ -144,6 +144,12 @@ operator asks for cancel all and flatten, and what each one touches. The terms a
   holder and how to end its session. A live engine cut off for 25 seconds also loses its lock. It
   then stops at its next write. These settings are not yet tested against a real server. The slice
   must confirm them with a `postgres`-marked test. See the block under the store lock above.**)**
+  **(Confirmed in [#466](https://github.com/MarcosACH/tickwright/issues/466):** the store sets the
+  four values on its session right after it connects. A `postgres`-marked test reads them back from
+  a real server. A second test ends an engine's session between two ticks. The engine exits 1 and
+  never sends the second order. No test cuts a real network, so the 25 seconds rest on the values,
+  not on a measured drop. Over a Unix socket the server ignores these settings, but the engine then
+  runs on the same host as the server.**)**
 - On paper, a market order fails when no price is cached. So a paper flatten cannot fill unless
   the feed runs. A replay feed restarts from the top of its file (ADR-0043 §5.1).
 - Still open in #408:
