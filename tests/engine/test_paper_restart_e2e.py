@@ -41,7 +41,14 @@ def _paper(store: SQLiteStore, bus: InMemoryBus | None = None) -> PaperExchange:
     )
 
 
-def _resting(cloid: str = "0xa", *, cum_qty: str = "0") -> Order:
+def _resting(
+    cloid: str = "0xa",
+    *,
+    cum_qty: str = "0",
+    state: OrderState = OrderState.LIVE,
+    price: Decimal | None = Decimal("41000"),
+    time_in_force: TimeInForce | None = TimeInForce.GTC,
+) -> Order:
     """A limit an earlier run left resting, as its order row holds it."""
     return Order.restore(
         cloid=cloid,
@@ -51,7 +58,7 @@ def _resting(cloid: str = "0xa", *, cum_qty: str = "0") -> Order:
         side=Side.BUY,
         quantity=Decimal("2"),
         order_type=OrderType.LIMIT,
-        state=OrderState.LIVE,
+        state=state,
         cum_qty=Decimal(cum_qty),
         venue_oid=None,
         reason=None,
@@ -59,8 +66,8 @@ def _resting(cloid: str = "0xa", *, cum_qty: str = "0") -> Order:
         cancel_requested_ts=None,
         cancel_signal_id=None,
         applied_event_ids=(),
-        price=Decimal("41000"),
-        time_in_force=TimeInForce.GTC,
+        price=price,
+        time_in_force=time_in_force,
     )
 
 
@@ -111,3 +118,37 @@ def test_a_rebuilt_order_fills_only_the_size_an_earlier_run_left_open() -> None:
     assert [(fill.cloid, fill.quantity, fill.price) for fill in fills] == [
         ("0xa", Decimal("1.5"), Decimal("41000"))
     ]
+
+
+def test_a_restarted_paper_venue_rebuilds_only_the_orders_the_venue_confirmed_open() -> None:
+    # Only LIVE and PARTIALLY_FILLED rows are orders the venue confirmed it
+    # holds. A PENDING or SUBMITTED row may never have reached paper, so
+    # rebuilding it would invent an order nobody placed. Reconcile resolves
+    # those FAILED. Finished rows, rows with no price and IOC rows never rest.
+    store = SQLiteStore(":memory:")
+    store.checkpoint(_resting("0xlive"), ts_ns=1_000)
+    store.checkpoint(
+        _resting("0xpartial", state=OrderState.PARTIALLY_FILLED, cum_qty="0.5"), ts_ns=1_000
+    )
+    store.checkpoint(_resting("0xpending", state=OrderState.PENDING), ts_ns=1_000)
+    store.checkpoint(_resting("0xsubmitted", state=OrderState.SUBMITTED), ts_ns=1_000)
+    store.checkpoint(_resting("0xfilled", state=OrderState.FILLED, cum_qty="2"), ts_ns=1_000)
+    store.checkpoint(_resting("0xcancelled", state=OrderState.CANCELLED), ts_ns=1_000)
+    store.checkpoint(_resting("0xnoprice", price=None, time_in_force=None), ts_ns=1_000)
+    store.checkpoint(
+        _resting("0xioc", state=OrderState.PARTIALLY_FILLED, time_in_force=TimeInForce.IOC),
+        ts_ns=1_000,
+    )
+    exchange = _paper(store)
+
+    async def scenario() -> object:
+        await exchange.start()
+        return await exchange.fetch_open_orders()
+
+    orders = asyncio.run(scenario())
+
+    assert isinstance(orders, list)
+    assert set(orders) == {
+        VenueOpenOrder(symbol="BTC", cloid="0xlive"),
+        VenueOpenOrder(symbol="BTC", cloid="0xpartial"),
+    }

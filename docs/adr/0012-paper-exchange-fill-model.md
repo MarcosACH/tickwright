@@ -40,4 +40,7 @@ The `Engine` hands paper nothing. `app/build.py` injects a `resting_orders` read
 runs before the barrier. The order row keeps the price, time in force, `post_only` and
 `reduce_only` the venue got, so paper can rebuild each order at the size still open. A row written
 before those columns existed has no price. Paper leaves it out, and reconcile ghosts it.
+Paper rebuilds only `LIVE` and `PARTIALLY_FILLED` GTC rows. Those are the orders the venue confirmed
+it holds. A `PENDING` or `SUBMITTED` row may never have reached paper. Rebuilding it would invent an
+order nobody placed, so paper leaves it out and reconcile resolves it `FAILED`.
 **)**

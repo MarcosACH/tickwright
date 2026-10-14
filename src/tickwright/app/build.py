@@ -31,6 +31,7 @@ from tickwright.domain import (
     InstrumentSpec,
     LeverageBook,
     MarketFeed,
+    OrderState,
     PlaceOrder,
     Portfolio,
     PreTradeGuard,
@@ -38,6 +39,7 @@ from tickwright.domain import (
     SignalEmitter,
     Store,
     Strategy,
+    TimeInForce,
     account_net_size,
 )
 from tickwright.engine.exit_run import ExitJob, Flatten, OperatorCancelAll
@@ -198,6 +200,11 @@ def paper_store_reads(store: Store) -> PaperStoreReads:
 def _resting_orders(store: Store) -> list[PlaceOrder]:
     """The orders an earlier run left on paper's book, at the size still open.
 
+    Only LIVE and PARTIALLY_FILLED rows count. The venue confirmed it holds
+    those. A PENDING or SUBMITTED row may never have reached paper, so
+    rebuilding it would invent an order nobody placed. Reconcile resolves it
+    FAILED instead. An IOC order never rests.
+
     A row with no price is from before the store kept order terms. Paper cannot
     rest it, so reconcile ghosts it, as before #484.
     """
@@ -214,7 +221,9 @@ def _resting_orders(store: Store) -> list[PlaceOrder]:
             reduce_only=order.reduce_only,
         )
         for order in store.all_orders()
-        if order.price is not None and order.time_in_force is not None
+        if order.state in (OrderState.LIVE, OrderState.PARTIALLY_FILLED)
+        and order.price is not None
+        and order.time_in_force is TimeInForce.GTC
     ]
 
 
