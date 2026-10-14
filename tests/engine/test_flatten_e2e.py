@@ -907,6 +907,43 @@ def test_a_failed_read_after_a_close_is_a_dry_attempt_and_the_next_read_decides(
     assert _partitions(tmp_path) == {("trivial", "BTC"): (Decimal("0"), Decimal("40"))}
 
 
+class _ThinBookFailsOneRead(_ThinBook):
+    """A thin book whose ``nth`` positions read fails."""
+
+    def __init__(self, venue: Exchange, *, bus: EventBus, fills: Sequence[str], nth: int) -> None:
+        super().__init__(venue, bus=bus, fills=fills)
+        self._nth = nth
+        self._reads = 0
+
+    async def fetch_positions(self) -> dict[str, Decimal] | VenueReadFailure:
+        self._reads += 1
+        if self._reads == self._nth:
+            return VenueReadFailure.SEND_FAILED
+        return await super().fetch_positions()
+
+
+def test_a_failed_read_after_a_fill_is_the_first_dry_attempt_of_a_new_row(tmp_path: Path) -> None:
+    # Two dry attempts, then a close that fills, then a failed read. The fill ends
+    # the row (ADR-0056). Counted in the old row, the read would be the third dry
+    # attempt, and flatten would give up a symbol it just closed.
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+    bus = InMemoryBus()
+    # The first positions read is flatten's own. Reads 2 to 4 follow the three closes.
+    link = partial(_ThinBookFailsOneRead, bus=bus, fills=("0", "0", "0.02"), nth=4)
+
+    exit_code, logs = _flatten(tmp_path, link=link, bus=bus)
+
+    assert exit_code == 0
+    dry = [log for log in logs if log["event"] == "flatten.dry_attempt"]
+    assert [(log["count"], log["reason"]) for log in dry] == [
+        (1, "no_fill"),
+        (2, "no_fill"),
+        (1, "read_failed"),
+    ]
+    assert not [log for log in logs if log["event"] == "flatten.gave_up"]
+    assert logs[-1]["outcome"] == "done"
+
+
 class _ReadsPositionsOnce(VenueLink):
     """Only the first positions read answers. Every later one fails."""
 

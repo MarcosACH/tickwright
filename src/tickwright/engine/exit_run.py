@@ -365,7 +365,6 @@ async def _attempt(
     # Why the attempt closed nothing. It stays ``None`` when the close filled,
     # or when it waited out a rate limit, because waiting makes progress.
     reason: str | None = None
-    filled = False
     # No venue can send a market close without a price.
     if not await priced.has(symbol):
         reason = "no_price"
@@ -382,16 +381,16 @@ async def _attempt(
             decided = await verdict
         if not decided:
             return None
-        filled = _filled(cloid, context)
-        if not filled and limit is None:
+        if _filled(cloid, context):
+            # Before the read, so a failed read after a fill starts a new row.
+            dry.reset()
+        elif limit is None:
             # A send that dies counts as refused too (ADR-0060).
             reason = "no_fill" if refusal is None else "refused"
     left = await _read_left(symbol, size, dry, context)
     if left is None:
         return None
-    if filled:
-        dry.reset()
-    elif reason is not None and await dry.gave_up(reason, left):
+    if reason is not None and await dry.gave_up(reason, left):
         return None
     return left
 
