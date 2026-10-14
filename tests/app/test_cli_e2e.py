@@ -319,6 +319,50 @@ def test_cancel_all_on_a_store_another_engine_holds_exits_two(
     assert [event["event"] for event in _events(log)] == ["exit.refused"]
 
 
+def test_cancel_all_on_a_store_no_engine_has_used_exits_two(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_workspace(tmp_path)
+    _export_hostile_config(monkeypatch)
+    log = tmp_path / "cancel_all.log"
+
+    assert _run_to_exit(tmp_path, log, "cancel-all") == 2, log.read_text()
+
+    events = _events(log)
+    assert [event["event"] for event in events] == ["exit.refused"]
+    assert events[0]["reason"] == "new_store"
+    with SQLiteStore(tmp_path / "saga.db") as store:
+        assert store.load_account() is None
+
+
+def test_cancel_all_with_new_store_on_a_store_no_engine_has_used_exits_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_workspace(tmp_path)
+    _export_hostile_config(monkeypatch)
+    log = tmp_path / "cancel_all.log"
+
+    assert _run_to_exit(tmp_path, log, "cancel-all", "--new-store") == 0, log.read_text()
+
+    events = [event["event"] for event in _events(log)]
+    assert events.count("exit.new_store") == 1
+    assert events[-1] == "exit.finished"
+
+
+def test_new_store_with_no_exit_command_exits_two_and_starts_no_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The flag means nothing to a trading run, so a stray one must not start one.
+    _write_workspace(tmp_path)
+    _export_hostile_config(monkeypatch)
+    log = tmp_path / "engine.log"
+
+    assert _run_to_exit(tmp_path, log, "--new-store") == 2, log.read_text()
+
+    assert "--new-store" in log.read_text()
+    assert _events(log) == []
+
+
 def test_cancel_all_on_a_store_it_cannot_open_exits_two(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
