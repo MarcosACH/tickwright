@@ -938,6 +938,26 @@ def test_a_postgres_holder_names_the_store_without_its_credentials(
         assert holder.store == f"{dsn['host']}:{dsn.get('port', 5432)}/{dsn['dbname']}"
 
 
+def test_a_postgres_refusal_says_where_the_holder_runs_and_when_to_retry(
+    store_backend: Backend,
+) -> None:
+    """The operator must tell a dead engine from a live one before ending its
+    session. So the refusal names the holder's client address and start time.
+    A dead holder frees the lock in about 25 seconds, so it says to retry in
+    about 30 (ADR-0052)."""
+    if not isinstance(store_backend, PostgresBackend):
+        pytest.skip("only a Postgres holder has a client address and start time")
+    with store_backend.open() as first, store_backend.open() as second:
+        assert first.lock() is None
+        holder = second.lock()
+        assert holder is not None and holder.pid is not None
+
+        client, started = store_backend.session(holder.pid)
+        assert client in holder.detail
+        assert started in holder.detail
+        assert "retry in about 30 seconds" in holder.detail
+
+
 def test_a_postgres_store_that_lost_its_session_refuses_its_next_write(
     store_backend: Backend,
 ) -> None:

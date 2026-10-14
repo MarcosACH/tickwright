@@ -70,8 +70,9 @@ def _holder_of(store: str, pid: int, client: object, started: datetime | None) -
         pid=pid,
         detail=(
             f"Postgres session {pid} from {source} holds this store's lock. "
-            f"It started at {started}. If that engine is dead, the server frees the lock "
-            f"once it notices. To end it now, run SELECT pg_terminate_backend({pid})."
+            f"It started at {started}. If that engine is dead, retry in about 30 seconds. "
+            f"The server frees a dead session's lock by then. "
+            f"To end it now, run SELECT pg_terminate_backend({pid})."
         ),
         store=store,
     )
