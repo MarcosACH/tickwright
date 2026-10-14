@@ -30,6 +30,7 @@ from tickwright.domain import (
     ExecutionReport,
     InstrumentSpec,
     Order,
+    OrderCancelled,
     OrderEvent,
     OrderState,
     OrderType,
@@ -75,14 +76,17 @@ CLOID = derive_cloid(SIGNAL.signal_id)
 
 
 def _shrunk_venue(
-    *fills: dict, placement_fills: object = None, reconcile_fills: object = None
+    *fills: dict,
+    placement_fills: object = None,
+    reconcile_fills: object = None,
+    total_sz: str = "0.3",
 ) -> FakeExchangeApi:
     """The venue after it shrank the 0.5 buy to the 0.3 short and filled it.
     By default the fills read right after placement dies, and reconcile reads
     ``fills``."""
     return FakeExchangeApi(
         {
-            "order": filled_response(oid=91, total_sz="0.3", avg_px="43250.0"),
+            "order": filled_response(oid=91, total_sz=total_sz, avg_px="43250.0"),
             "userFills": placement_fills or ConnectionError("connection refused"),
             "orderStatus": order_status_response(
                 cloid=CLOID, status="filled", oid=91, placed_ms=ACK_MS, reduce_only=True
@@ -174,3 +178,17 @@ def test_a_fill_listed_late_starts_the_count_again(passes: int, state: str) -> N
         assert order.state is OrderState.PARTIALLY_FILLED
     else:
         assert order.state is OrderState.CANCELLED
+
+
+def test_a_reduce_only_order_filled_to_its_full_size_ends_filled() -> None:
+    # Against a short of 0.5 or more, the venue does not shrink the buy. Its
+    # fills reach the asked size, so there is no cut part to cancel.
+    post = _shrunk_venue(
+        fill_entry(oid=91, tid=556, px="43250.0", sz="0.5", time=FILL_MS), total_sz="0.5"
+    )
+
+    order, events = _place_then_reconcile(post, passes=2)
+
+    assert order.state is OrderState.FILLED
+    assert order.cum_qty == Decimal("0.5")
+    assert not any(isinstance(event, OrderCancelled) for event in events)
