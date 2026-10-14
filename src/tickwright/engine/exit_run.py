@@ -140,8 +140,13 @@ class Flatten:
             # Only a replay ends, and it plays the whole file first. So each close
             # fills at the last row (ADR-0059). The CLI refuses a live feed until #475.
             await context.feed.ended()
-            emitter = SignalEmitter(strategy_id=OPERATOR, bus=context.bus, clock=context.clock)
-            # Seeded from the sagas, as a strategy's is. An earlier flatten's seq
+            emitter = SignalEmitter(
+                strategy_id=OPERATOR,
+                bus=context.bus,
+                clock=context.clock,
+                record_seq=context.checkpointer.raise_seq,
+            )
+            # Seeded from the store high-water, as a strategy's is. An earlier flatten's seq
             # is consumed, and the manager drops a signal id it has seen (ADR-0006).
             high_water = context.checkpointer.cache.seq_high_water()
             emitter.set_next_seq(high_water.get(OPERATOR, 0) + 1)

@@ -8,7 +8,7 @@ point of the surrounding engine is that a strategy stays this small.
 
 It is also the ``Portfolio`` seam's only consumer (ADR-0041 §8). The facade
 arrives **already scoped** to this ``strategy_id``, constructor-injected beside
-the ``bus``/``clock`` pair, which is what keeps ``strategies`` free of an
+the emitter, which is what keeps ``strategies`` free of an
 ``engine`` import and the ``Strategy`` Protocol unchanged. Depends on ``domain``
 only; it emits no named events itself.
 """
@@ -17,8 +17,6 @@ import json
 from decimal import Decimal
 
 from tickwright.domain import (
-    Clock,
-    EventBus,
     MarketTick,
     OrderEvent,
     OrderFilled,
@@ -37,16 +35,16 @@ class SingleShotMarketStrategy:
     def __init__(
         self,
         *,
-        strategy_id: str,
-        bus: EventBus,
-        clock: Clock,
+        emitter: SignalEmitter,
         portfolio: Portfolio,
         side: Side,
         quantity: Decimal,
         time_in_force: TimeInForce = TimeInForce.IOC,
     ) -> None:
-        self.strategy_id = strategy_id
-        self._emitter = SignalEmitter(strategy_id=strategy_id, bus=bus, clock=clock)
+        # The id comes from the emitter, so the two cannot name different
+        # strategies (#442).
+        self.strategy_id = emitter.strategy_id
+        self._emitter = emitter
         # The ``domain`` Protocol, never the ``engine`` projection behind it, and
         # never the facade class either — the seam exists for exactly that
         # dependency direction (ADR-0035, ADR-0041 §8).

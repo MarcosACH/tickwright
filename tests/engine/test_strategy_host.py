@@ -33,6 +33,7 @@ from tickwright.domain import (
     OrderType,
     Side,
     Signal,
+    SignalEmitter,
     SignalId,
     Store,
     derive_cloid,
@@ -437,9 +438,9 @@ def test_a_single_shot_strategy_killed_after_firing_does_not_fire_again() -> Non
         bus = InMemoryBus()
         host = _host(bus=bus, clock=clock, store=store)
         shooter = SingleShotLimitStrategy(
-            strategy_id="shooter",
-            bus=bus,
-            clock=clock,
+            emitter=SignalEmitter(
+                strategy_id="shooter", bus=bus, clock=clock, record_seq=store.raise_seq
+            ),
             side=Side.BUY,
             quantity=Decimal("0.5"),
             price=Decimal("41000"),
@@ -474,9 +475,9 @@ def test_the_snapshot_is_on_disk_before_the_signal_it_records_is_dispatched() ->
     bus = InMemoryBus()
     host = _host(bus=bus, clock=clock, store=store)
     shooter = SingleShotLimitStrategy(
-        strategy_id="shooter",
-        bus=bus,
-        clock=clock,
+        emitter=SignalEmitter(
+            strategy_id="shooter", bus=bus, clock=clock, record_seq=store.raise_seq
+        ),
         side=Side.BUY,
         quantity=Decimal("0.5"),
         price=Decimal("41000"),
@@ -515,9 +516,9 @@ def test_on_kafka_the_snapshot_is_on_disk_before_the_signal_reaches_the_topic() 
     )
     host = _host(bus=bus, clock=clock, store=store)
     shooter = SingleShotLimitStrategy(
-        strategy_id="shooter",
-        bus=bus,
-        clock=clock,
+        emitter=SignalEmitter(
+            strategy_id="shooter", bus=bus, clock=clock, record_seq=store.raise_seq
+        ),
         side=Side.BUY,
         quantity=Decimal("0.5"),
         price=Decimal("41000"),

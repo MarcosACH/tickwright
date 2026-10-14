@@ -85,6 +85,10 @@ A strategy consumes ticks and lifecycle events and emits `PlaceSignal`/`CancelSi
 - [ ] Emit signals through a composed `SignalEmitter`
   ([`domain/emitter.py`](../src/tickwright/domain/emitter.py)) — it owns the `seq`,
   clock-stamps each signal, and publishes it. Never build a `signal_id` by hand.
+- [ ] Take the emitter as a constructor argument, and set `self.strategy_id = emitter.strategy_id`.
+  Do not build one yourself. `app/build.py` gets it from `engine.emitter_for(strategy_id)`, as it
+  gets `portfolio_for`. The engine's emitter saves each seq before it publishes, so a restart never
+  reuses one (ADR-0016).
 - [ ] Close a position with a reduce-only order. It can only shrink the account net, never grow it
   or flip it. An order larger than the net is shrunk to it, and the cut part ends `CANCELLED`
   (ADR-0057). The real guard denies it unless it shrinks your own position. Your open orders on
@@ -141,6 +145,7 @@ A strategy consumes ticks and lifecycle events and emits `PlaceSignal`/`CancelSi
   [`app/config.py`](../src/tickwright/app/config.py), plus any config fields it needs (validate
   cross-field requirements in the model, as `single_shot_limit`'s `price` does).
 - [ ] Add one `match` arm to `_build_strategy(...)` in [`app/build.py`](../src/tickwright/app/build.py).
+  Pass it the `emitter` the function receives.
 - [ ] TDD it: a `ReplayFeed` tick → your strategy → `PaperExchange` → the expected `OrderEvent` on the
   bus, plus a snapshot/restore round-trip and a seq-resumes-after-restart test.
 - [ ] Document the new `kind` in [`.env.example`](../.env.example) (`TICKWRIGHT_STRATEGIES`).

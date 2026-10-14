@@ -181,7 +181,10 @@ class Checkpointer:
         self._cache.rebuild()
 
     def raise_seq(self, strategy_id: str, seq: int) -> None:
-        """Make a handled cancel all's seq durable, then project it (ADR-0055).
+        """Make a sent seq durable, then project it (ADR-0016, ADR-0055).
+
+        Every emitter the engine builds writes here before it publishes. The
+        manager writes a handled cancel all's seq here too.
 
         A failed write already raises ``InvariantViolation`` that names
         ``raise_seq``, so there is nothing to relabel here."""

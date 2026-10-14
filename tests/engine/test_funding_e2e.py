@@ -201,9 +201,7 @@ async def _run(
     engine = Engine(bus=bus, clock=clock, store=store, exchange=exchange, feed=feed)
     if trade:
         strategy = SingleShotMarketStrategy(
-            strategy_id="trivial",
-            bus=bus,
-            clock=clock,
+            emitter=engine.emitter_for("trivial"),
             portfolio=engine.portfolio_for("trivial"),
             side=Side.BUY,
             quantity=Decimal("0.5"),

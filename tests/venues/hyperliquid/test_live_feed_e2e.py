@@ -24,6 +24,7 @@ from tickwright.domain import (
     OrderFilled,
     Side,
     Signal,
+    SignalEmitter,
 )
 from tickwright.engine.execution import ExecutionManager
 from tickwright.strategies import SingleShotMarketStrategy
@@ -42,12 +43,13 @@ def test_mocked_frames_reach_a_paper_fill_through_the_whole_pipeline() -> None:
             account_net=dict,
             applied_fills=lambda cloid: (),
         )
-        checks = checkpointer(SQLiteStore(":memory:"), clock=clock)
+        store = SQLiteStore(":memory:")
+        checks = checkpointer(store, clock=clock)
         manager = ExecutionManager(bus=bus, exchange=exchange, checkpointer=checks)
         strategy = SingleShotMarketStrategy(
-            strategy_id="live",
-            bus=bus,
-            clock=clock,
+            emitter=SignalEmitter(
+                strategy_id="live", bus=bus, clock=clock, record_seq=checks.raise_seq
+            ),
             portfolio=checks.portfolio.for_strategy("live"),
             side=Side.BUY,
             quantity=Decimal("0.5"),

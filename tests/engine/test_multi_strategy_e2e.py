@@ -26,6 +26,7 @@ from tickwright.domain import (
     OrderState,
     Side,
     Signal,
+    SignalEmitter,
     derive_cloid,
 )
 from tickwright.engine.execution import ExecutionManager
@@ -75,17 +76,17 @@ def _life(
     manager = ExecutionManager(bus=bus, exchange=venue, checkpointer=checks)
     host = StrategyHost(bus=bus, clock=clock, store=store, cache=checks.cache)
     btc_strat = SingleShotMarketStrategy(
-        strategy_id="btc-shot",
-        bus=bus,
-        clock=clock,
+        emitter=SignalEmitter(
+            strategy_id="btc-shot", bus=bus, clock=clock, record_seq=checks.raise_seq
+        ),
         portfolio=projection.for_strategy("btc-shot"),
         side=Side.BUY,
         quantity=Decimal("1"),
     )
     eth_strat = SingleShotMarketStrategy(
-        strategy_id="eth-shot",
-        bus=bus,
-        clock=clock,
+        emitter=SignalEmitter(
+            strategy_id="eth-shot", bus=bus, clock=clock, record_seq=checks.raise_seq
+        ),
         portfolio=projection.for_strategy("eth-shot"),
         side=Side.SELL,
         quantity=Decimal("2"),

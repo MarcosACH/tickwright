@@ -21,8 +21,6 @@ from decimal import Decimal
 import structlog
 
 from tickwright.domain import (
-    Clock,
-    EventBus,
     MarketTick,
     OrderEvent,
     OrderFilled,
@@ -50,11 +48,9 @@ def _plain(value: object) -> object:
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class Wiring:
     """What every verification strategy is built from, bundled so the four
-    constructors stay typed without repeating six keyword arguments each."""
+    constructors stay typed without repeating four keyword arguments each."""
 
-    strategy_id: str
-    bus: EventBus
-    clock: Clock
+    emitter: SignalEmitter
     portfolio: Portfolio
     symbol: str
     quantity: Decimal
@@ -66,10 +62,8 @@ class _Base:
     version = 1
 
     def __init__(self, wiring: Wiring) -> None:
-        self.strategy_id = wiring.strategy_id
-        self._emitter = SignalEmitter(
-            strategy_id=wiring.strategy_id, bus=wiring.bus, clock=wiring.clock
-        )
+        self.strategy_id = wiring.emitter.strategy_id
+        self._emitter = wiring.emitter
         self._portfolio = wiring.portfolio
         self._symbol = wiring.symbol
         self._quantity = wiring.quantity

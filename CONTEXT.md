@@ -203,9 +203,10 @@ never the snapshot (ADR-0016). The engine's saga and dedup are keyed on it. **Mu
 pure function of strategy state — never random.** The `SignalId` value object (`domain/ids.py`)
 is the single owner of this format: `Signal.signal_id` composes it (`render`) and seq
 high-water recovery reads it back (`parse`), so the wire form and the recovery read can never
-drift. See ADR-0006. The store also keeps a per-strategy seq record that only goes up. A
-[[Cancel all]] writes its seq there before it marks any order, and the high-water reads that record
-too. So a restart never reuses the seq of a cancel all that cancelled nothing (ADR-0055).
+drift. See ADR-0006. The store also keeps a per-strategy seq record that only goes up. The
+[[SignalEmitter]] writes each seq there before it publishes the signal, and the high-water reads
+that record too. So a restart never reuses a sent seq, even one the crash left unhandled
+(ADR-0016, ADR-0055).
 _Avoid_: signal uuid, request id.
 
 **SignalEmitter**:
@@ -215,7 +216,9 @@ returning the [[signal_id]]). Concentrates the one piece of strategy mechanics t
 correctness spine — never reusing a [[signal_id]] across restart — so it is not each author's problem. A strategy
 **composes** an emitter (holds one as a field); it is never a base class, because the [[Strategy]]
 seam is satisfied by shape, not inheritance (ADR-0032). The engine's `set_next_seq()` (ADR-0016)
-sets the counter through it.
+sets the counter through it. The [[Composition root]] builds each strategy's emitter with
+`Engine.emitter_for(strategy_id)` and passes it to the constructor, like the [[Portfolio]]. The
+strategy takes its `strategy_id` from the emitter. So no strategy wires the seq record itself (#442).
 _Avoid_: strategy base class, signal factory.
 
 **Client order id** / `cloid`:

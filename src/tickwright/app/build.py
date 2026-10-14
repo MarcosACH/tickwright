@@ -34,6 +34,7 @@ from tickwright.domain import (
     Portfolio,
     PreTradeGuard,
     ReplayClock,
+    SignalEmitter,
     Store,
     Strategy,
     account_net_size,
@@ -347,8 +348,7 @@ def _build_engine(config: AppConfig, *, exit_job: ExitJob | None) -> Engine:
         engine.register(
             _build_strategy(
                 strategy_config,
-                bus=bus,
-                clock=clock,
+                emitter=engine.emitter_for(strategy_config.strategy_id),
                 portfolio=engine.portfolio_for(strategy_config.strategy_id),
             ),
             symbols={strategy_config.symbol},
@@ -357,14 +357,12 @@ def _build_engine(config: AppConfig, *, exit_job: ExitJob | None) -> Engine:
 
 
 def _build_strategy(
-    config: StrategyConfig, *, bus: EventBus, clock: Clock, portfolio: Portfolio
+    config: StrategyConfig, *, emitter: SignalEmitter, portfolio: Portfolio
 ) -> Strategy:
     match config.kind:
         case "single_shot_market":
             return SingleShotMarketStrategy(
-                strategy_id=config.strategy_id,
-                bus=bus,
-                clock=clock,
+                emitter=emitter,
                 portfolio=portfolio,
                 side=config.side,
                 quantity=config.quantity,
@@ -375,9 +373,7 @@ def _build_strategy(
             # an unused seam (ADR-0041 §7).
             assert config.price is not None  # enforced by StrategyConfig validation
             return SingleShotLimitStrategy(
-                strategy_id=config.strategy_id,
-                bus=bus,
-                clock=clock,
+                emitter=emitter,
                 side=config.side,
                 quantity=config.quantity,
                 price=config.price,

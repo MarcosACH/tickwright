@@ -32,6 +32,7 @@ from tickwright.domain import (
     OrderState,
     Side,
     Signal,
+    SignalEmitter,
     derive_cloid,
 )
 from tickwright.engine.execution import ExecutionManager
@@ -75,9 +76,9 @@ def _run(
         checkpointer=checks,
     )
     strategy = SingleShotLimitStrategy(
-        strategy_id="trivial",
-        bus=bus,
-        clock=clock,
+        emitter=SignalEmitter(
+            strategy_id="trivial", bus=bus, clock=clock, record_seq=checks.raise_seq
+        ),
         side=Side.BUY,
         quantity=Decimal("0.5"),
         price=Decimal("41000"),
