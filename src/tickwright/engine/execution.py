@@ -332,6 +332,10 @@ class ExecutionManager:
         await self._exchange.cancel([OrderRef.of(order)])
 
     async def _cancel_all(self, signal: CancelAllSignal) -> None:
+        # The seq is durable before anything is marked. A cancel all may mark no
+        # order, and a restart must still never hand its seq to a new order
+        # (ADR-0055).
+        self._checkpointer.raise_seq(signal.strategy_id, signal.seq)
         now = self._clock.timestamp_ns()
         # Only orders sent before the cancel all, which means a lower seq. The seq
         # only goes up, so a redelivered cancel all never reaches a newer order

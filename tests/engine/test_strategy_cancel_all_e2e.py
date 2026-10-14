@@ -162,3 +162,19 @@ def test_a_cancel_all_leaves_orders_on_another_symbol_open(tmp_path: Path) -> No
     assert other.state is OrderState.LIVE
     assert other.cancel_requested is False
     assert [event.cloid for event in strategy.cancellations] == [derive_cloid("scripted:BTC:1")]
+
+
+def test_a_restart_never_reuses_the_seq_of_a_cancel_all_that_cancelled_nothing(
+    tmp_path: Path,
+) -> None:
+    # Life 1: the cancel all takes seq 1 and finds no order. No saga records it.
+    _run(tmp_path, [_cancel_all("BTC")])
+
+    # Life 2 on the same store: the next order must take seq 2. With seq 1, a
+    # redelivery of the old cancel all could not tell it apart (ADR-0055).
+    _, store = _run(tmp_path, [_rest("BTC")])
+
+    assert store.get_order(derive_cloid("scripted:BTC:1")) is None
+    order = store.get_order(derive_cloid("scripted:BTC:2"))
+    assert order is not None
+    assert order.state is OrderState.LIVE

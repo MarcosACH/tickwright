@@ -23,6 +23,16 @@ class Cache:
         # re-proves it against venue truth before anything places (ADR-0009), the
         # same in-memory-and-reset-on-restart discipline the absence trackers keep.
         self._last_event_ns: dict[str, int] = {}
+        # The seqs a handled cancel all consumed (ADR-0055). No saga records them,
+        # so the seq high-water fold reads them from here.
+        self._seq_records: dict[str, int] = {}
+
+    def raise_seq(self, strategy_id: str, seq: int) -> None:
+        """Write through: durably raise ``strategy_id``'s seq record, then project it.
+
+        Store first, as in ``checkpoint``. The record only goes up (ADR-0055)."""
+        self._store.raise_seq(strategy_id, seq)
+        self._seq_records[strategy_id] = max(self._seq_records.get(strategy_id, 0), seq)
 
     def checkpoint(self, order: Order, *, ts_ns: int) -> None:
         """Write through: durably checkpoint ``order``, then project it.
@@ -54,6 +64,7 @@ class Cache:
     def rebuild(self) -> None:
         """Reload the projection from the durable store (recovery step 2)."""
         self._orders = {order.cloid: order for order in self._store.all_orders()}
+        self._seq_records = self._store.seq_records()
         self._last_event_ns = {}
 
     def get_order(self, cloid: str) -> Order | None:
@@ -79,8 +90,11 @@ class Cache:
         symbols, so this is a single max over the strategy's records. The
         strategies and ``Flatten`` both start their counters here, so neither
         can reuse an id after a restart.
+
+        A handled cancel all may mark no saga, so its seq lives only in the
+        seq records. The fold starts from them (ADR-0055).
         """
-        high_water: dict[str, int] = {}
+        high_water: dict[str, int] = dict(self._seq_records)
         for order in self.all_orders():
             seqs = [SignalId.parse(order.signal_id).seq]
             if order.cancel_signal_id is not None:
