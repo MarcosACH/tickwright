@@ -45,7 +45,10 @@ signal as a duplicate. Now `SignalEmitter` writes the seq record before it publi
 place, cancel and cancel all. So the high-water covers every seq a strategy sent, handled or not.
 A single cancel that marks nothing is covered too. The emitter takes a `record_seq` callable, not
 the `Store`, so `domain` still depends on no adapter. A failed write raises before the publish,
-so no signal goes out without its record.**)**
+so no signal goes out without its record. The engine builds each strategy's emitter with
+`Engine.emitter_for`, and the strategy takes its `strategy_id` from it. The emitter writes through
+the `Checkpointer`, the same path as the manager, so the `Cache` stays equal to the store. No
+strategy passes a `record_seq` of its own.**)**
 
 ## Cadence
 

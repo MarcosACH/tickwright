@@ -216,7 +216,9 @@ returning the [[signal_id]]). Concentrates the one piece of strategy mechanics t
 correctness spine — never reusing a [[signal_id]] across restart — so it is not each author's problem. A strategy
 **composes** an emitter (holds one as a field); it is never a base class, because the [[Strategy]]
 seam is satisfied by shape, not inheritance (ADR-0032). The engine's `set_next_seq()` (ADR-0016)
-sets the counter through it.
+sets the counter through it. The [[Composition root]] builds each strategy's emitter with
+`Engine.emitter_for(strategy_id)` and passes it to the constructor, like the [[Portfolio]]. The
+strategy takes its `strategy_id` from the emitter. So no strategy wires the seq record itself (#442).
 _Avoid_: strategy base class, signal factory.
 
 **Client order id** / `cloid`:
