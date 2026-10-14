@@ -152,7 +152,15 @@ def build_exchange(
                 # (ADR-0044 §6, ADR-0046 §3) — handed the engine's, from the
                 # one place that holds both configs.
                 startup_timeout_seconds=config.engine.startup_reconciliation_timeout_seconds,
-                shrink_wait_seconds=ReconcileConfig().open_order_interval_seconds,
+                # A shrunk order's fill total must hold for one open-order pass
+                # before its cut part ends (ADR-0057). The adapter cannot read
+                # the engine's config, so the interval is handed over here. It
+                # resolves an unset config the same way the runner does.
+                shrink_wait_seconds=(
+                    config.engine.reconcile
+                    if config.engine.reconcile is not None
+                    else ReconcileConfig()
+                ).open_order_interval_seconds,
                 # The same resolved book the paper arm and the margin model get:
                 # live validates the identical bound before pushing anything, so
                 # the two paths cannot disagree about a leverage (ADR-0044 §9).
