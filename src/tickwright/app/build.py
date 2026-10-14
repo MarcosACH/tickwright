@@ -209,17 +209,7 @@ def _resting_orders(store: Store) -> list[PlaceOrder]:
     rest it, so reconcile ghosts it, as before #484.
     """
     return [
-        PlaceOrder(
-            cloid=order.cloid,
-            symbol=order.symbol,
-            side=order.side,
-            quantity=order.quantity - order.cum_qty,
-            order_type=order.order_type,
-            time_in_force=order.time_in_force,
-            price=order.price,
-            post_only=order.post_only,
-            reduce_only=order.reduce_only,
-        )
+        PlaceOrder.of(order)
         for order in store.all_orders()
         if order.state in (OrderState.LIVE, OrderState.PARTIALLY_FILLED)
         and order.price is not None
