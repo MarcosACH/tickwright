@@ -31,6 +31,15 @@ decides how paper copies them. Decided in
   The saga goes `PARTIALLY_FILLED → CANCELLED`, a move it already allows. The Hyperliquid adapter
   must end a shrunk order the same way. The venue answers `filled` there (P1), so without this the
   saga stays open forever. That adapter change ships in the same slice.
+
+  **(Amended by [#478](https://github.com/MarcosACH/tickwright/issues/478):** the adapter can only
+  send `CANCELLED` at placement when its fills read holds every fill. When that read fails or comes
+  back short, reconcile ends the order instead. `fetch_order` reports `CANCELLED` with the reason
+  "reduce-only shrink" when three things hold. The record is `filled`. It is `reduceOnly`. Its
+  fills add up to less than the size the saga asked for, which `OrderRef.quantity` carries. One read
+  is not enough. A fill that lands after `CANCELLED` is an illegal move and would be lost. So the
+  adapter waits until two reads, one reconcile pass apart, show the same fill total. It keeps the
+  last total in memory. A restart forgets it and only waits one more pass.**)**
 - **After every fill, paper re-checks its resting reduce-only orders in that symbol.** If the net
   is smaller than an order's working size, the order shrinks to the net. If the net is zero or on
   the order's side, paper cancels the order with the reason "reduce-only cancelled". This copies
