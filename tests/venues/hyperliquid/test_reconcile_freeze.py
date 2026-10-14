@@ -37,7 +37,7 @@ from tickwright.domain import (
     VenueReadUnresolvable,
 )
 from tickwright.engine.cache import Cache
-from tickwright.engine.reconcile import ReconcileConfig, Reconciler
+from tickwright.engine.reconcile import PassResult, ReconcileConfig, Reconciler
 from tickwright.observability import NamedEvent
 from tickwright.observability.testing import capture_events
 from tickwright.venues.hyperliquid import (
@@ -119,7 +119,7 @@ def test_an_unreadable_body_stops_its_own_order_and_not_the_ones_behind_it() -> 
     # the *other* failure — so stopping the pass at the first one buys nothing
     # and costs everything behind it, on every cycle, for as long as the venue
     # keeps returning the same stored string.
-    async def main() -> tuple[bool, list[ExecutionReport], FakeExchangeApi]:
+    async def main() -> tuple[PassResult, list[ExecutionReport], FakeExchangeApi]:
         bus = InMemoryBus()
         clock = ManualClock(start_ns=0)
         post = _poisoned_book()
@@ -156,8 +156,8 @@ def test_an_unreadable_body_stops_its_own_order_and_not_the_ones_behind_it() -> 
     assert (healed.cloid, healed.status) == (HEALTHY, OrderState.CANCELLED)
 
     # The pass is still not a clean one: one order could not be proven, so the
-    # verdict stays False and the freeze is named against that order.
-    assert cleared is False
+    # verdict stays FAILED and the freeze is named against that order.
+    assert cleared is PassResult.FAILED
     failed = [e for e in events if e["event"] == NamedEvent.EXCHANGE_REQUEST_FAILED]
     assert [e["cloid"] for e in failed] == [POISON]
 
@@ -216,7 +216,7 @@ def test_a_durably_unreadable_body_escalates_once_its_span_is_spent() -> None:
 
 
 def test_a_venue_outage_freezes_reconciliation_instead_of_resolving_inflight() -> None:
-    async def main() -> tuple[bool, list[ExecutionReport]]:
+    async def main() -> tuple[PassResult, list[ExecutionReport]]:
         bus = InMemoryBus()
         clock = ManualClock(start_ns=0)
         # Every orderStatus read the reconciler makes dies in transport: the
@@ -245,13 +245,13 @@ def test_a_venue_outage_freezes_reconciliation_instead_of_resolving_inflight() -
 
     # Frozen: the in-flight saga stays unresolved (no barrier clear), nothing
     # synthetic reaches the bus, and the freeze is named for triage.
-    assert cleared is False
+    assert cleared is PassResult.FAILED
     assert reports == []
     assert any(e["event"] == NamedEvent.RECONCILE_FROZEN for e in events)
 
 
 def test_a_read_refused_for_the_ip_rate_limit_stops_the_pass_and_marks_no_order() -> None:
-    async def main() -> tuple[bool, list[ExecutionReport], FakeExchangeApi, Cache]:
+    async def main() -> tuple[PassResult, list[ExecutionReport], FakeExchangeApi, Cache]:
         bus = InMemoryBus()
         clock = ManualClock(start_ns=0)
         # The venue answers every read with a 429. Reading the second order
@@ -279,7 +279,8 @@ def test_a_read_refused_for_the_ip_rate_limit_stops_the_pass_and_marks_no_order(
     with capture_events() as events:
         cleared, reports, post, cache = asyncio.run(main())
 
-    assert cleared is False
+    # Its own result, so a caller can wait the limit out (ADR-0060).
+    assert cleared is PassResult.RATE_LIMITED
     assert reports == []
     assert [o.state for o in cache.open_orders()] == [OrderState.SUBMITTED] * 2
     assert len(post.requests) == 1

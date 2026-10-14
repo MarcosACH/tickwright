@@ -2,7 +2,7 @@
 
 Connects to the venue WS endpoint directly with an async client — no SDK on
 the hot path (ADR-0021) — and subscribes **two public channels per configured
-coin**:
+coin**, and per coin added with ``add_symbols()``:
 
 * ``trades`` → one ``MarketTick`` per venue trade (ADR-0027 field mapping:
   ``px``/``sz`` → ``Decimal``, ``time`` ms → engine ns, ``tid`` → the live dedup
@@ -51,6 +51,8 @@ class HyperliquidFeed:
         self._bus = bus
         self._clock = clock
         self._seq_by_symbol: dict[str, int] = {}
+        # A list, not a set, so the subscribe order is the order given.
+        self._symbols = list(config.symbols)
         self._session = WsSession(
             config=config,
             clock=clock,
@@ -60,9 +62,11 @@ class HyperliquidFeed:
         )
 
     def add_symbols(self, symbols: Iterable[str]) -> None:
-        # The CLI refuses flatten on a live feed before boot until #475 builds
-        # this, so a call here is a wiring bug and must fail loudly.
-        raise NotImplementedError("Hyperliquid subscribes to added symbols from #475 on")
+        # A reconnect subscribes the same list again, so an added coin keeps
+        # its prices after a drop.
+        for symbol in symbols:
+            if symbol not in self._symbols:
+                self._symbols.append(symbol)
 
     async def start(self) -> None:
         await self._session.start()
@@ -107,7 +111,7 @@ class HyperliquidFeed:
         is, and reading it off the *account* endpoint instead would have needed
         one.
         """
-        for symbol in self._config.symbols:
+        for symbol in self._symbols:
             for channel in ("trades", "activeAssetCtx"):
                 message = {"method": "subscribe", "subscription": {"type": channel, "coin": symbol}}
                 await connection.send(json.dumps(message))

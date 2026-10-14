@@ -484,11 +484,12 @@ last row's price (ADR-0059). It is owned by the reserved id `__operator__`, not 
 Its fills split pro rata over every [[Position]] partition of the symbol, so each strategy reads
 flat (ADR-0054). When no order can close a strategy's leftover, it moves into the unattributed
 partition at the strategy's entry price. A failed venue read also counts as an attempt that fills
-nothing (ADR-0060). A read refused for a rate limit does not count. It waits like an order.
+nothing (ADR-0060). A read in the close loop refused for a rate limit does not count. It waits
+like an order.
 Flatten is done only when the venue holds no resting order and no position. The fill split is built
 (#471). #472 built one attempt per symbol on paper replay. A symbol the feed never priced gets no
-order, and the final read reports it. The size check before an order moved to #475. #474 built
-the resume after a crash. Each close takes a new seq. The rest is not built yet (#408).
+order, and the final read reports it. #473 built the size check before an order, and #475 added
+the account pass to it. #474 built the resume after a crash. #475 runs flatten on Hyperliquid. Each close takes a new seq. The rest is not built yet (#408).
 _Avoid_: close out, liquidate (that is the venue's forced close), panic sell.
 
 **Reduce-only order**:

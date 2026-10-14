@@ -51,6 +51,7 @@ def _run_feed[E: (MarketTick, MarkTick)](
     event_type: type[E],
     until: int,
     clock: ManualClock,
+    added: list[str] | None = None,
 ) -> tuple[list[E], FakeWsConnection]:
     """Run the feed over ``frames`` until ``until`` events of ``event_type``
     arrive, then stop.
@@ -81,6 +82,8 @@ def _run_feed[E: (MarketTick, MarkTick)](
             clock=clock,
             connect=connection.connect,
         )
+        if added is not None:
+            feed.add_symbols(added)
         await feed.start()
         run = asyncio.create_task(feed.run())
         await asyncio.wait_for(enough.wait(), timeout=2)
@@ -862,19 +865,29 @@ def test_the_live_feed_satisfies_the_market_feed_seam() -> None:
 # Which test claims each ``MarketFeed`` member for *this* adapter. Not a second
 # copy of the seam: the gate below asserts it against the Protocol itself, so a
 # new member cannot arrive without someone naming what asserts it here.
-def test_the_live_feed_refuses_to_add_symbols_until_it_can_subscribe_to_them() -> None:
-    # #475 builds this. Until then the CLI refuses flatten on a live feed before
-    # boot, so a call here is a wiring bug and must fail loudly.
-    feed = HyperliquidFeed(
-        config=HyperliquidConfig(symbols=["BTC"]), bus=InMemoryBus(), clock=ManualClock()
+def test_added_symbols_are_subscribed_on_start_beside_the_configured_ones() -> None:
+    # Flatten closes every coin the account holds, and a held coin may be one
+    # the operator never configured (ADR-0059). A coin in both is subscribed once.
+    frames = [asset_ctx_frame("HYPE", "25.0")]
+    _, connection = _run_feed(
+        frames,
+        symbols=["BTC"],
+        event_type=MarkTick,
+        until=1,
+        clock=ManualClock(),
+        added=["HYPE", "BTC"],
     )
 
-    with pytest.raises(NotImplementedError, match="#475"):
-        feed.add_symbols(["ETH"])
+    assert [json.loads(m) for m in connection.sent] == [
+        {"method": "subscribe", "subscription": {"type": "trades", "coin": "BTC"}},
+        {"method": "subscribe", "subscription": {"type": "activeAssetCtx", "coin": "BTC"}},
+        {"method": "subscribe", "subscription": {"type": "trades", "coin": "HYPE"}},
+        {"method": "subscribe", "subscription": {"type": "activeAssetCtx", "coin": "HYPE"}},
+    ]
 
 
 _SEAM_CLAIMS = {
-    "add_symbols": "test_the_live_feed_refuses_to_add_symbols_until_it_can_subscribe_to_them",
+    "add_symbols": "test_added_symbols_are_subscribed_on_start_beside_the_configured_ones",
     "start": "test_the_live_feed_connects_in_start_and_leaves_the_loop_to_run",
     "run": "test_ws_drop_reconnects_with_backoff_resubscribes_and_resumes",
     "stop": "test_stop_does_not_trigger_a_reconnect",

@@ -40,6 +40,10 @@ Decided in [#412](https://github.com/MarcosACH/tickwright/issues/412), part of
   and the drain moved to #475. On paper the sizes always match when flatten places, because a
   fresh run has no unapplied fills. So no paper test can show the gap. It needs a venue with
   account truth.**)**
+  **(Built by [#473](https://github.com/MarcosACH/tickwright/issues/473) and
+  [#475](https://github.com/MarcosACH/tickwright/issues/475):** #473 built the size check and the
+  drain. #475 added the account pass. When the drain leaves a gap on a venue with account truth,
+  flatten runs `reconcile_account()` and checks again.**)**
 - **Fills are split pro rata.** Each partition of the symbol moves the same share of the way to
   zero. Each split piece uses the real fill price.
 - **Fees split by the absolute size each partition books.** Partitions can have opposite signs. A

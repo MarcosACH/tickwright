@@ -344,27 +344,21 @@ def test_flatten_on_an_empty_paper_account_trips_the_kill_switch_and_exits_zero(
     assert events[-1]["left"] == "none"
 
 
-@pytest.mark.parametrize(
-    "venue",
-    [
-        "TICKWRIGHT_EXCHANGE=hyperliquid\n",
-        "TICKWRIGHT_FEED=hyperliquid\n",
-    ],
-)
-def test_flatten_off_paper_and_replay_exits_two_before_it_boots(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, venue: str
+def test_flatten_on_hyperliquid_priced_by_a_replay_exits_two_before_it_boots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Flatten closes at the replay's last price, and a live feed never ends (#475).
-    So the run refuses before it connects, and nothing at the venue moves."""
+    """A replay row is not the market, so a real close must not be priced from one.
+    The run refuses before it connects, and nothing at the venue moves."""
     _write_workspace(tmp_path)
     with (tmp_path / ".env").open("a") as env:
         env.write(
-            venue + 'TICKWRIGHT_HYPERLIQUID__SYMBOLS=["BTC"]\n'
+            "TICKWRIGHT_EXCHANGE=hyperliquid\n"
+            'TICKWRIGHT_HYPERLIQUID__SYMBOLS=["BTC"]\n'
             "TICKWRIGHT_HYPERLIQUID__SIGNING_KEY=0x" + "11" * 32 + "\n"
         )
     log = tmp_path / "flatten.log"
 
     assert _run_to_exit(tmp_path, log, "flatten") == 2, log.read_text()
 
-    assert "#475" in log.read_text()
+    assert "needs feed=hyperliquid" in log.read_text()
     assert _events(log) == []

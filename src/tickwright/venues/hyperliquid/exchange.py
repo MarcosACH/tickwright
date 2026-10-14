@@ -34,6 +34,8 @@ from tickwright.domain import (
     MarketTick,
     MarkTick,
     OrderRef,
+    OrderRefusal,
+    OrderRefusedReport,
     OrderState,
     OrderStatusReport,
     OrderType,
@@ -71,6 +73,11 @@ _ACK_SKEW_ALLOWANCE_MS = 60_000
 _CANCEL_BATCH_LIMIT = 200
 
 _TIF_WIRE = {TimeInForce.GTC: "Gtc", TimeInForce.IOC: "Ioc"}
+
+# How the venue words a refusal over the address limit. The venue sends it as
+# an action error at HTTP 200, so its text is the only way to tell it apart.
+# Evidence: docs/research/hyperliquid-rate-limit-window-probe.md.
+_ADDRESS_LIMIT_PREFIX = "Too many cumulative requests"
 
 
 class HyperliquidExchange:
@@ -261,10 +268,21 @@ class HyperliquidExchange:
             cloids=[order.cloid],
         )
         if isinstance(adjudication, VenueReadFailure):
-            # Either way it failed, we hold no fact worth reporting: a dead send
-            # leaves the order's truth unknown, and an unreadable adjudication
-            # is a body we cannot read (inv 1). ``read`` named it; reconcile-by-
-            # cloid resolves the in-flight order (ADR-0008 rule 2).
+            # No fact about the order is held. A dead send leaves its truth
+            # unknown, and an unreadable body says nothing we can trust (inv 1).
+            # ``read`` named it, and reconcile-by-cloid resolves the order
+            # (ADR-0008 rule 2). A send that got no usable answer still reports
+            # its kind, so flatten can pick its wait (ADR-0056). An unreadable
+            # body reports nothing, and the cloid verdict decides.
+            match adjudication:
+                case VenueReadFailure.SEND_FAILED:
+                    await self._refused(order, OrderRefusal.SEND_FAILED)
+                case VenueReadFailure.RATE_LIMITED_IP:
+                    await self._refused(order, OrderRefusal.RATE_LIMITED_IP)
+                case VenueReadFailure.UNREADABLE_BODY:
+                    pass
+                case unreachable:
+                    assert_never(unreachable)
             return
         await self._apply_placement(order, adjudication)
 
@@ -292,6 +310,10 @@ class HyperliquidExchange:
                 # resendable, and reconcile-by-cloid resolves it (ADR-0008
                 # rule 2).
                 self._action_rejected("place", message, cloid=order.cloid, oid=None)
+                if message.startswith(_ADDRESS_LIMIT_PREFIX):
+                    await self._refused(order, OrderRefusal.RATE_LIMITED_ADDRESS)
+                else:
+                    await self._refused(order, OrderRefusal.REFUSED)
             case _Resting(oid=oid):
                 await self._ack(order, oid=oid)
             case _Rejected(reason=reason):
@@ -367,6 +389,15 @@ class HyperliquidExchange:
                 symbol=order.symbol,
                 status=OrderState.LIVE,
                 venue_oid=str(oid),
+            )
+        )
+
+    async def _refused(self, order: PlaceOrder, refusal: OrderRefusal) -> None:
+        """Publish that the venue did not take ``order``. No saga moves (ADR-0056)."""
+        now = self._clock.timestamp_ns()
+        await self._bus.publish(
+            OrderRefusedReport(
+                ts_event=now, ts_init=now, cloid=order.cloid, symbol=order.symbol, refusal=refusal
             )
         )
 
@@ -606,9 +637,18 @@ class HyperliquidExchange:
         return listed.orders
 
     async def fetch_positions(self) -> dict[str, Decimal] | VenueReadFailure:
-        # The CLI refuses flatten on this venue before boot until #475 builds
-        # this read, for the same reason as ``fetch_open_orders`` above.
-        raise NotImplementedError("Hyperliquid reads positions from #475 on")
+        # The same read as the account state, so a position and the account
+        # figures never come from two different answers. Unlike that read, the
+        # failure keeps its kind, because flatten waits out a rate limit (ADR-0060).
+        state = await read(
+            request="clearinghouseState",
+            query={"type": "clearinghouseState", "user": self._user_address},
+            send=self._info,
+            normalize=normalize_account_state,
+        )
+        if isinstance(state, VenueReadFailure):
+            return state
+        return {position.symbol: position.signed_size for position in state.positions}
 
     async def fetch_account_state(self) -> VenueAccountState | None:
         """Venue truth for the account: one ``clearinghouseState`` read, the

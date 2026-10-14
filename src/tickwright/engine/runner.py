@@ -400,6 +400,13 @@ class Engine:
             feed=feed,
             reconciler=self._reconciler,
             pass_interval_seconds=self._reconcile_config.inflight_interval_seconds,
+            # The same test as the account cadence: a venue that declares
+            # genesis has no account truth to reconcile against.
+            reconcile_account=(
+                None
+                if self._exchange.account_spec().declares_genesis
+                else self._ledger_reconciler.reconcile_account
+            ),
         )
         self._exit_outcome = await job.run(context)
         self._stop_requested.set()

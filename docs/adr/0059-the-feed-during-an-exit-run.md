@@ -31,6 +31,9 @@ of [#408](https://github.com/MarcosACH/tickwright/issues/408).
   flatten whether its feed ends. The flag is true for replay. With it on, flatten waits for
   `feed.run()` to return before its first attempt. With it off, flatten waits for each symbol's
   first price. Only the root needs this fact, so `MarketFeed` gains no `finite` property.**)**
+  **(Clarified in [#475](https://github.com/MarcosACH/tickwright/issues/475):** a symbol has its
+  first price once it has both a trade and a mark. A market order on Hyperliquid needs both. Each
+  attempt waits up to 2 seconds for it. A symbol still without one is a `no_price` attempt.**)**
 - **`tickwright cancel-all` starts no feed.** A cancel needs no price. Flatten runs cancel all as
   its first step, before the feed starts.
 - **A missing price counts as an attempt that fills nothing.** Flatten waits 2 seconds and tries

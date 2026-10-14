@@ -7,7 +7,7 @@ sees them.
 """
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Iterable, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import StrEnum
@@ -21,8 +21,11 @@ from tickwright.domain import (
     ExternalOrderRef,
     InvariantViolation,
     MarketTick,
+    MarkTick,
     OrderAnchor,
     OrderRef,
+    OrderRefusal,
+    OrderRefusedReport,
     OrderType,
     PreTradeGuard,
     Side,
@@ -36,7 +39,7 @@ from tickwright.observability import NamedEvent, named_event
 
 from .checkpoint import Checkpointer
 from .feed_handle import FeedHandle
-from .reconcile import Reconciler
+from .reconcile import PassResult, Reconciler
 
 
 class ExitStatus(StrEnum):
@@ -73,6 +76,10 @@ class ExitContext:
     pass_interval_seconds: float
     """How long a job waits between its own reconcile passes. No cadence runs in an
     exit run, so the job paces them itself (ADR-0052)."""
+    reconcile_account: Callable[[], Awaitable[object]] | None
+    """One account reconcile pass, or ``None`` on a venue with no account truth.
+    It heals a position the books cannot see into the unattributed partition
+    (ADR-0038), so flatten can size a close against it (ADR-0054)."""
 
 
 class ExitJob(Protocol):
@@ -107,9 +114,16 @@ class OperatorCancelAll:
 
 
 class Flatten:
-    """``tickwright flatten``: close every position the account holds."""
+    """``tickwright flatten``: close every position the account holds.
+
+    ``feed_ends`` is true for a replay. The composition root sets it, because
+    only the root knows which feed it built (ADR-0059).
+    """
 
     name = "flatten"
+
+    def __init__(self, *, feed_ends: bool) -> None:
+        self._feed_ends = feed_ends
 
     async def run(self, context: ExitContext) -> ExitOutcome:
         # First, so a crash mid-flatten still leaves the store halted (ADR-0053).
@@ -129,17 +143,16 @@ class Flatten:
         if isinstance(positions, VenueReadFailure):
             return ExitOutcome(status=ExitStatus.STOPPED, left=describe_failure(positions))
         if positions:
-            priced: set[str] = set()
-
-            async def note_price(tick: MarketTick) -> None:
-                priced.add(tick.symbol)
-
+            priced = _Prices(positions, waits=not self._feed_ends, clock=context.clock)
             # Before the feed starts, so no tick goes unseen.
-            context.bus.subscribe(MarketTick, note_price)
+            context.bus.subscribe(MarketTick, priced.note_trade)
+            context.bus.subscribe(MarkTick, priced.note_mark)
             await context.feed.start(positions)
-            # Only a replay ends, and it plays the whole file first. So each close
-            # fills at the last row (ADR-0059). The CLI refuses a live feed until #475.
-            await context.feed.ended()
+            # A replay plays the whole file first, so each close fills at the
+            # last row (ADR-0059). A live feed never ends. Each loop waits for
+            # its own symbol's first price instead.
+            if self._feed_ends:
+                await context.feed.ended()
             emitter = SignalEmitter(
                 strategy_id=OPERATOR,
                 bus=context.bus,
@@ -150,7 +163,8 @@ class Flatten:
             # is consumed, and the manager drops a signal id it has seen (ADR-0006).
             high_water = context.checkpointer.cache.seq_high_water()
             emitter.set_next_seq(high_water.get(OPERATOR, 0) + 1)
-            turns = _Turns(context.reconciler)
+            turns = _Turns(context.reconciler, context.reconcile_account)
+            context.bus.subscribe(OrderRefusedReport, turns.note_refusal)
             # One loop per symbol, all at the same time, so a thin book on one
             # symbol does not hold back the others (ADR-0056). A task group
             # cancels the rest when one faults. A loop reports nothing, because
@@ -169,6 +183,59 @@ DRY_ATTEMPTS_TO_GIVE_UP = 3
 DRY_WAIT_SECONDS = 2.0
 """The wait after a dry attempt, before the next one (ADR-0056)."""
 
+RATE_LIMIT_WAIT_SECONDS = 10.0
+"""The wait after the venue refused a close or a read for a rate limit (ADR-0056, ADR-0060)."""
+
+_RATE_LIMITS = {OrderRefusal.RATE_LIMITED_ADDRESS: "address", OrderRefusal.RATE_LIMITED_IP: "ip"}
+"""The ``limit`` field ``flatten.rate_limited`` names for each rate limit (ADR-0060)."""
+
+
+class _Prices:
+    """Which held symbols the feed has priced, for one flatten run.
+
+    A symbol is priced once it has both a trade and a mark. A market order is
+    priced from the trade and capped by the mark, so either one missing makes
+    the venue refuse to price it (ADR-0059).
+
+    On a live feed, an attempt waits up to one dry wait for its symbol's first
+    price. On subscribe the venue sends it at once, so a healthy run counts no
+    dry attempt. A dead socket still ends in the give-up rule, never a hang
+    (ADR-0059). After a replay no price can come, so nothing waits.
+    """
+
+    def __init__(self, symbols: Iterable[str], *, waits: bool, clock: Clock) -> None:
+        self._seen = {symbol: asyncio.Event() for symbol in symbols}
+        self._traded: set[str] = set()
+        self._marked: set[str] = set()
+        self._waits = waits
+        self._clock = clock
+
+    async def note_trade(self, tick: MarketTick) -> None:
+        self._traded.add(tick.symbol)
+        self._note(tick.symbol)
+
+    async def note_mark(self, mark: MarkTick) -> None:
+        self._marked.add(mark.symbol)
+        self._note(mark.symbol)
+
+    def _note(self, symbol: str) -> None:
+        seen = self._seen.get(symbol)
+        if seen is not None and symbol in self._traded and symbol in self._marked:
+            seen.set()
+
+    async def has(self, symbol: str) -> bool:
+        seen = self._seen[symbol]
+        if self._waits and not seen.is_set():
+            price = asyncio.ensure_future(seen.wait())
+            timer = asyncio.ensure_future(self._clock.sleep(DRY_WAIT_SECONDS))
+            try:
+                await asyncio.wait((price, timer), return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                # Also on a stop mid-wait, so neither task outlives the loop.
+                price.cancel()
+                timer.cancel()
+        return seen.is_set()
+
 
 class _Turns:
     """One close or reconcile pass at a time, shared by every loop of one flatten run.
@@ -180,28 +247,58 @@ class _Turns:
     joins that cascade and returns before it is handled. The loop would then
     find no saga, read it as a close that filled nothing, and send a second
     one beside it (ADR-0056).
+
+    An account pass takes a turn too. Beside a close, it could read a fill the
+    venue made before the engine booked it. It would heal that fill into the
+    books, and the real fill would then book it again.
     """
 
-    def __init__(self, reconciler: Reconciler) -> None:
+    def __init__(
+        self, reconciler: Reconciler, reconcile_account: Callable[[], Awaitable[object]] | None
+    ) -> None:
         self._reconciler = reconciler
+        self._reconcile_account = reconcile_account
         self._lock = asyncio.Lock()
+        self._refusals: dict[str, OrderRefusal] = {}
 
-    async def run_pass(self) -> bool:
-        """Run both halves of one pass. False when either failed."""
-        async with self._lock:
-            return (
-                await self._reconciler.reconcile_inflight()
-                and await self._reconciler.reconcile_open_orders()
-            )
+    async def note_refusal(self, report: OrderRefusedReport) -> None:
+        self._refusals[report.cloid] = report.refusal
 
-    async def close(self, symbol: str, size: Decimal, emitter: SignalEmitter) -> str:
-        """Send one close, and return once the engine has handled it."""
+    async def account_pass(self) -> None:
+        """Run one account pass, on a venue that has account truth."""
+        if self._reconcile_account is None:
+            return
         async with self._lock:
-            return await _close(symbol, size, emitter)
+            await self._reconcile_account()
+
+    async def run_pass(self) -> PassResult:
+        """Run both halves of one pass. The second runs only when the first proved."""
+        async with self._lock:
+            inflight = await self._reconciler.reconcile_inflight()
+            if inflight is not PassResult.PROVED:
+                return inflight
+            return await self._reconciler.reconcile_open_orders()
+
+    async def close(
+        self, symbol: str, size: Decimal, emitter: SignalEmitter
+    ) -> tuple[str, OrderRefusal | None]:
+        """Send one close, and return once the engine has handled it.
+
+        Returns its cloid, and why the venue did not take it, if it did not.
+        The venue's answer is part of the handling, so it is known by then.
+        """
+        async with self._lock:
+            cloid = await _close(symbol, size, emitter)
+            return cloid, self._refusals.pop(cloid, None)
 
 
 class _DryAttempts:
-    """One symbol's count of attempts in a row that closed nothing (ADR-0056)."""
+    """What a step that closed nothing costs one symbol's loop (ADR-0056, ADR-0060).
+
+    Most steps count as one dry attempt in a row, then wait 2 seconds. A rate
+    limit waits 10 seconds and does not count, because waiting it out makes
+    progress. This is the one place that tells the two apart.
+    """
 
     def __init__(self, symbol: str, clock: Clock) -> None:
         self._symbol = symbol
@@ -227,95 +324,117 @@ class _DryAttempts:
         await self._clock.sleep(DRY_WAIT_SECONDS)
         return False
 
+    async def read_failed(self, size: Decimal, *, rate_limited: bool) -> bool:
+        """Count a failed venue read as dry, unless the IP limit refused it.
+
+        Says whether the loop gave up, as ``gave_up`` does. Only the IP limit
+        covers reads, so that is the limit the wait names.
+        """
+        if rate_limited:
+            await self.wait_out("ip")
+            return False
+        return await self.gave_up("read_failed", size)
+
+    async def wait_out(self, limit: str) -> None:
+        """Wait out a rate limit. ``limit`` is the field ``flatten.rate_limited`` names."""
+        named_event(NamedEvent.FLATTEN_RATE_LIMITED, symbol=self._symbol, limit=limit)
+        await self._clock.sleep(RATE_LIMIT_WAIT_SECONDS)
+
 
 async def _flatten_symbol(
     symbol: str,
     size: Decimal,
-    priced: set[str],
+    priced: _Prices,
     emitter: SignalEmitter,
     turns: _Turns,
     context: ExitContext,
 ) -> None:
-    """One symbol's loop: wait for a close the boot left open, then close the rest."""
+    """One symbol's loop: wait for a close the boot left open, then close the rest.
+
+    It closes until the venue reads the symbol flat, or stops after 3 dry
+    attempts in a row. A failed read is dry too, so a venue that cannot answer
+    never hangs the run (ADR-0060). A rate limit is the one failure that waits
+    instead. The final read reports what is left.
+    """
     # One count for the whole loop, so the resume wait's dry attempts are in the row.
     dry = _DryAttempts(symbol, context.clock)
-    resumed = await _resume_closes(symbol, size, dry, turns, context)
-    if resumed is not None:
-        await _close_symbol(symbol, resumed, priced, emitter, dry, turns, context)
-
-
-async def _close_symbol(
-    symbol: str,
-    size: Decimal,
-    priced: set[str],
-    emitter: SignalEmitter,
-    dry: _DryAttempts,
-    turns: _Turns,
-    context: ExitContext,
-) -> None:
-    """Close ``symbol`` until the venue reads it flat, or stop after 3 dry attempts in a row.
-
-    A fill resets the count, so a thin book that keeps filling a little never gives up
-    (ADR-0056). A failed read is dry too, so a venue that cannot answer never hangs
-    the run (ADR-0060). The final read reports what is left.
-    """
-    while attempt := await _attempt(symbol, size, priced, emitter, dry, turns, context):
-        size = attempt.left
-        if attempt.dry is None:
-            dry.reset()
-        elif await dry.gave_up(attempt.dry, size):
-            return
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class _Attempt:
-    """How one attempt ended, when the loop goes on after it."""
-
-    left: Decimal
-    """What the venue still holds on the symbol. Never zero."""
-    dry: str | None
-    """Why the attempt closed nothing, or ``None`` when it filled."""
+    left = await _resume_closes(symbol, size, dry, turns, context)
+    while left is not None:
+        left = await _attempt(symbol, left, priced, emitter, dry, turns, context)
 
 
 async def _attempt(
     symbol: str,
     size: Decimal,
-    priced: set[str],
+    priced: _Prices,
     emitter: SignalEmitter,
     dry: _DryAttempts,
     turns: _Turns,
     context: ExitContext,
-) -> _Attempt | None:
-    """Try to close ``size`` once, then read what is left. ``None`` ends the loop.
+) -> Decimal | None:
+    """Try to close ``size`` once, then return what is left. ``None`` ends the loop.
 
     Every attempt reads the venue before it counts. So a venue that went flat
     ends the loop with no dry attempt, even when no close went out (ADR-0056).
+    A fill resets the count, so a thin book that keeps filling a little never
+    gives up.
     """
-    reason: str | None
+    # Why the attempt closed nothing. It stays ``None`` when the close filled,
+    # or when it waited out a rate limit, because waiting makes progress.
+    reason: str | None = None
     # No venue can send a market close without a price.
-    if symbol not in priced:
+    if not await priced.has(symbol):
         reason = "no_price"
-    elif await _size_gap(symbol, size, context):
+    elif await _size_gap(symbol, size, turns, context):
         reason = "size_gap"
     else:
-        cloid = await turns.close(symbol, size, emitter)
-        if not await _verdict(cloid, size, dry, turns, context):
+        cloid, refusal = await turns.close(symbol, size, emitter)
+        limit = _RATE_LIMITS.get(refusal) if refusal is not None else None
+        verdict = _verdict(cloid, size, dry, turns, context)
+        if limit is not None:
+            # The 10 seconds count from the refusal, so they run beside the verdict.
+            decided = await _beside(verdict, dry.wait_out(limit))
+        else:
+            decided = await verdict
+        if not decided:
             return None
-        reason = None if _filled(cloid, context) else "no_fill"
+        if _filled(cloid, context):
+            # Before the read, so a failed read after a fill starts a new row.
+            dry.reset()
+        elif limit is None:
+            # A send that dies counts as refused too (ADR-0060).
+            reason = "no_fill" if refusal is None else "refused"
     left = await _read_left(symbol, size, dry, context)
-    return None if left is None else _Attempt(left=left, dry=reason)
+    if left is None:
+        return None
+    if reason is not None and await dry.gave_up(reason, left):
+        return None
+    return left
 
 
-async def _size_gap(symbol: str, size: Decimal, context: ExitContext) -> bool:
+async def _beside(verdict: Coroutine[None, None, bool], wait: Coroutine[None, None, None]) -> bool:
+    """Run ``verdict`` and ``wait`` at the same time. Return once both are done."""
+    async with asyncio.TaskGroup() as group:
+        decided = group.create_task(verdict)
+        group.create_task(wait)
+    return decided.result()
+
+
+async def _size_gap(symbol: str, size: Decimal, turns: _Turns, context: ExitContext) -> bool:
     """Whether the account net size on ``symbol`` differs from the venue's ``size``.
 
     A close is split across the partitions it closes (ADR-0054). Against a gap,
     some of it would land on no partition, or one would be left holding size.
     The gap can be fills the bus has not delivered yet, so a drain comes first.
+    On a venue with account truth it can also be a trade made by hand, which
+    only an account pass can see.
     """
     if _held(symbol, context) == size:
         return False
     await context.bus.drain()
+    if _held(symbol, context) == size:
+        return False
+    await turns.account_pass()
     return _held(symbol, context) != size
 
 
@@ -332,14 +451,18 @@ async def _verdict(
     A pass covers both halves. ``reconcile_inflight`` resolves a send that never
     acked. ``reconcile_open_orders`` resolves an acked order whose last push was lost.
 
-    A failed pass is a dry attempt, so a venue that cannot answer never hangs the
-    run (ADR-0060). False when failed passes used up the dry attempts. A second
-    close beside an open one could close the size twice. So a failed pass waits
-    for this close again, and a give-up leaves it to the next boot.
+    A failed pass costs what any failed read costs (``_DryAttempts.read_failed``),
+    so a venue that cannot answer never hangs the run (ADR-0060). False when
+    failed passes used up the dry attempts. A second close beside an open one
+    could close the size twice. So a failed pass waits for this close again, and
+    a give-up leaves it to the next boot.
     """
     while not _decided(cloid, context):
         await context.clock.sleep(context.pass_interval_seconds)
-        if not await turns.run_pass() and await dry.gave_up("read_failed", size):
+        result = await turns.run_pass()
+        if result is not PassResult.PROVED and await dry.read_failed(
+            size, rate_limited=result is PassResult.RATE_LIMITED
+        ):
             return False
     return True
 
@@ -357,7 +480,7 @@ async def _read_left(
     moves to the unattributed partition (ADR-0054, ADR-0056).
     """
     while isinstance(positions := await context.account.fetch_positions(), VenueReadFailure):
-        if await dry.gave_up("read_failed", held):
+        if await dry.read_failed(held, rate_limited=positions is VenueReadFailure.RATE_LIMITED_IP):
             return None
     left = positions.get(symbol, Decimal(0))
     if not left:
@@ -381,9 +504,15 @@ async def _resume_closes(
     left_open = context.checkpointer.cache.open_orders(strategy_id=OPERATOR, symbol=symbol)
     if not left_open:
         return size
-    for order in left_open:
-        if not await _verdict(order.cloid, size, dry, turns, context):
+    # What each close had filled before this run, so only a fill during the wait counts.
+    before = {order.cloid: order.cum_qty for order in left_open}
+    for cloid in before:
+        if not await _verdict(cloid, size, dry, turns, context):
             return None
+    if any(_cum_qty(cloid, context) > qty for cloid, qty in before.items()):
+        # A fill on a close from an earlier run ends the row too, before the read
+        # (ADR-0056).
+        dry.reset()
     # The old close may have filled during the wait, so only a new read sizes the next.
     return await _read_left(symbol, size, dry, context)
 
@@ -415,8 +544,12 @@ def _decided(cloid: str, context: ExitContext) -> bool:
 
 
 def _filled(cloid: str, context: ExitContext) -> bool:
+    return _cum_qty(cloid, context) > 0
+
+
+def _cum_qty(cloid: str, context: ExitContext) -> Decimal:
     saga = context.checkpointer.cache.get_order(cloid)
-    return saga is not None and saga.cum_qty > 0
+    return Decimal(0) if saga is None else saga.cum_qty
 
 
 async def _final_read(context: ExitContext) -> ExitOutcome:

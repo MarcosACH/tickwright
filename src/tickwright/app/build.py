@@ -307,14 +307,15 @@ def build_exit_job(config: AppConfig, command: Literal["cancel-all", "flatten"])
     """The engine for ``tickwright cancel-all`` or ``tickwright flatten``: the same
     stack as ``build_engine``, with the job in place of the strategies (ADR-0052)."""
     if command == "flatten":
-        # Flatten closes at the replay's last price. A live feed never ends, and
-        # its first close needs a fresh price (#475).
-        if config.exchange != "paper" or config.feed != "replay":
+        # A replay row is not the market. A real close priced from one could
+        # fill far from where the venue trades now.
+        if config.exchange != "paper" and config.feed == "replay":
             raise UnsupportedExitRun(
-                f"flatten needs exchange=paper and feed=replay, not exchange={config.exchange} "
-                f"and feed={config.feed}. See issue #475."
+                f"flatten on exchange={config.exchange} needs feed=hyperliquid, not feed=replay. "
+                "A real close must be priced from the live market."
             )
-        return _build_engine(config, exit_job=Flatten())
+        # Only a replay ends. A live flatten waits for each symbol's first price instead.
+        return _build_engine(config, exit_job=Flatten(feed_ends=config.feed == "replay"))
     return _build_engine(config, exit_job=OperatorCancelAll())
 
 

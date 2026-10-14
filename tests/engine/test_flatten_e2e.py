@@ -176,7 +176,7 @@ def _flatten(
         exchange=paper if link is None else link(paper),
         feed=ReplayFeed(path=_ticks(tmp_path / "ticks.jsonl", replayed), bus=bus, clock=clock),
         guard=RealGuard(specs=_SPECS, store=store, clock=clock) if guarded else None,
-        exit_job=Flatten(),
+        exit_job=Flatten(feed_ends=True),
     )
 
     async def go() -> int:
@@ -907,6 +907,96 @@ def test_a_failed_read_after_a_close_is_a_dry_attempt_and_the_next_read_decides(
     assert _partitions(tmp_path) == {("trivial", "BTC"): (Decimal("0"), Decimal("40"))}
 
 
+class _ThinBookFailsOneRead(_ThinBook):
+    """A thin book whose ``nth`` positions read fails."""
+
+    def __init__(self, venue: Exchange, *, bus: EventBus, fills: Sequence[str], nth: int) -> None:
+        super().__init__(venue, bus=bus, fills=fills)
+        self._nth = nth
+        self._reads = 0
+
+    async def fetch_positions(self) -> dict[str, Decimal] | VenueReadFailure:
+        self._reads += 1
+        if self._reads == self._nth:
+            return VenueReadFailure.SEND_FAILED
+        return await super().fetch_positions()
+
+
+def test_a_failed_read_after_a_fill_is_the_first_dry_attempt_of_a_new_row(tmp_path: Path) -> None:
+    # Two dry attempts, then a close that fills, then a failed read. The fill ends
+    # the row (ADR-0056). Counted in the old row, the read would be the third dry
+    # attempt, and flatten would give up a symbol it just closed.
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+    bus = InMemoryBus()
+    # The first positions read is flatten's own. Reads 2 to 4 follow the three closes.
+    link = partial(_ThinBookFailsOneRead, bus=bus, fills=("0", "0", "0.02"), nth=4)
+
+    exit_code, logs = _flatten(tmp_path, link=link, bus=bus)
+
+    assert exit_code == 0
+    dry = [log for log in logs if log["event"] == "flatten.dry_attempt"]
+    assert [(log["count"], log["reason"]) for log in dry] == [
+        (1, "no_fill"),
+        (2, "no_fill"),
+        (1, "read_failed"),
+    ]
+    assert not [log for log in logs if log["event"] == "flatten.gave_up"]
+    assert logs[-1]["outcome"] == "done"
+
+
+class _PriceWaitBlocks(ManualClock):
+    """A ``ManualClock`` whose 2 second sleep never ends. ``waiting`` is set once one starts.
+
+    The first 2 second sleep of a live flatten is the wait for a symbol's first price.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.waiting = asyncio.Event()
+
+    async def sleep(self, seconds: float) -> None:
+        if seconds == 2.0:
+            self.waiting.set()
+            await asyncio.Event().wait()
+        await super().sleep(seconds)
+
+
+def test_a_stop_during_the_wait_for_a_first_price_leaves_no_task_behind(
+    tmp_path: Path,
+) -> None:
+    # A live feed never ends, so a stop cancels the job mid-wait. The wait must
+    # cancel its own tasks. Left behind, they outlive the run that made them.
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+    bus = InMemoryBus()
+    clock = _PriceWaitBlocks()
+    store = SQLiteStore(tmp_path / "saga.db")
+    engine = Engine(
+        bus=bus,
+        clock=clock,
+        store=store,
+        exchange=_paper(bus, clock, store),
+        # No BTC rows, so BTC is never priced.
+        feed=ReplayFeed(path=_ticks(tmp_path / "ticks.jsonl", ("ETH",)), bus=bus, clock=clock),
+        guard=RealGuard(specs=_SPECS, store=store, clock=clock),
+        exit_job=Flatten(feed_ends=False),
+    )
+
+    async def go() -> tuple[int, set[asyncio.Task[object]]]:
+        run = asyncio.create_task(engine.run())
+        await asyncio.wait_for(clock.waiting.wait(), timeout=5)
+        await engine.stop()
+        exit_code = await asyncio.wait_for(run, timeout=5)
+        for _ in range(3):
+            await asyncio.sleep(0)
+        return exit_code, asyncio.all_tasks() - {asyncio.current_task()}
+
+    with capture_events():
+        exit_code, left = asyncio.run(go())
+
+    assert exit_code == 1
+    assert left == set()
+
+
 class _ReadsPositionsOnce(VenueLink):
     """Only the first positions read answers. Every later one fails."""
 
@@ -1127,7 +1217,7 @@ def _engine(
         exchange=exchange,
         feed=ReplayFeed(path=_ticks(tmp_path / "ticks.jsonl", _ROWS), bus=bus, clock=clock),
         guard=RealGuard(specs=_SPECS, store=venue.store, clock=clock),
-        exit_job=Flatten() if job is None else job,
+        exit_job=Flatten(feed_ends=True) if job is None else job,
     )
 
 
@@ -1182,7 +1272,7 @@ def test_a_flatten_that_crashed_after_its_send_is_booked_by_the_split_and_the_re
     _hold(tmp_path / "saga.db", {"BTC": "0.01"}, strategy_id="other")
     venue = _crash_a_flatten(tmp_path)
 
-    exit_code, logs = _next_run(venue, tmp_path, Flatten())
+    exit_code, logs = _next_run(venue, tmp_path, Flatten(feed_ends=True))
 
     assert exit_code == 0
     assert logs[-1]["outcome"] == "done"
@@ -1263,7 +1353,7 @@ def test_a_close_left_open_that_fills_during_the_wait_leaves_only_the_rest_to_cl
     venue = _Venue(tmp_path / "saga.db", ManualClock())
 
     exit_code, logs = _next_run(
-        venue, tmp_path, Flatten(), link=partial(_FillsDuringTheWait, close=late)
+        venue, tmp_path, Flatten(feed_ends=True), link=partial(_FillsDuringTheWait, close=late)
     )
 
     assert exit_code == 0
@@ -1278,3 +1368,68 @@ def test_a_close_left_open_that_fills_during_the_wait_leaves_only_the_rest_to_cl
     assert close is not None
     assert close.quantity == Decimal("0.01")
     assert close.state is OrderState.FILLED
+
+
+class _FillsAfterFailedReads(VenueLink):
+    """``close`` is unknown to the boot's read. Two reads by cloid fail, then it fills.
+
+    The positions read after the fill fails once.
+    """
+
+    def __init__(self, venue: Exchange, *, close: PlaceOrder) -> None:
+        super().__init__(venue)
+        self._close = close
+        self._order_reads = 0
+        self._position_reads = 0
+
+    async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
+        if ref.cloid == self._close.cloid:
+            self._order_reads += 1
+            if self._order_reads == 1:
+                return VenueOrderView(status=None)
+            if self._order_reads in (2, 3):
+                return VenueReadFailure.SEND_FAILED
+            if self._order_reads == 4:
+                await self.place(self._close)
+        return await super().fetch_order(ref)
+
+    async def fetch_positions(self) -> dict[str, Decimal] | VenueReadFailure:
+        self._position_reads += 1
+        # The first positions read is flatten's own. The second follows the fill.
+        if self._position_reads == 2:
+            return VenueReadFailure.SEND_FAILED
+        return await super().fetch_positions()
+
+
+def test_a_close_left_open_that_fills_after_failed_reads_starts_a_new_row(
+    tmp_path: Path,
+) -> None:
+    # A fill on a close from an earlier run ends the row too (ADR-0056). Counted
+    # in the old row, the failed read after it would be the third dry attempt,
+    # and flatten would give up a symbol that is still closing.
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+    left_open = _left_open(tmp_path / "saga.db", "BTC", quantity="0.01")
+    late = PlaceOrder(
+        cloid=left_open,
+        symbol="BTC",
+        side=Side.SELL,
+        quantity=Decimal("0.01"),
+        order_type=OrderType.MARKET,
+        time_in_force=TimeInForce.IOC,
+        reduce_only=True,
+    )
+    venue = _Venue(tmp_path / "saga.db", ManualClock())
+
+    exit_code, logs = _next_run(
+        venue, tmp_path, Flatten(feed_ends=True), link=partial(_FillsAfterFailedReads, close=late)
+    )
+
+    dry = [log for log in logs if log["event"] == "flatten.dry_attempt"]
+    assert [(log["count"], log["reason"]) for log in dry] == [
+        (1, "read_failed"),
+        (2, "read_failed"),
+        (1, "read_failed"),
+    ]
+    assert not [log for log in logs if log["event"] == "flatten.gave_up"]
+    assert exit_code == 0
+    assert logs[-1]["outcome"] == "done"

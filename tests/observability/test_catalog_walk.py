@@ -31,6 +31,7 @@ from hyperliquid_fakes import (
     trade,
     trades_frame,
 )
+from hyperliquid_flatten import AnswersFirst, priced_frames, run_flatten
 from ledgers import GENESIS, book_fill, checkpointer
 from pydantic import SecretStr
 from venue_doubles import (
@@ -81,7 +82,7 @@ from tickwright.engine.execution import ExecutionManager
 from tickwright.engine.exit_run import Flatten, OperatorCancelAll
 from tickwright.engine.guard import RealGuard
 from tickwright.engine.ledger_reconcile import LedgerReconciliation
-from tickwright.engine.reconcile import ReconcileConfig, Reconciler
+from tickwright.engine.reconcile import PassResult, ReconcileConfig, Reconciler
 from tickwright.engine.runner import Engine
 from tickwright.engine.strategy_host import StrategyHost
 from tickwright.observability import NamedEvent
@@ -93,6 +94,7 @@ from tickwright.venues.hyperliquid import (
     HyperliquidFeed,
     HyperliquidUniverse,
 )
+from tickwright.venues.hyperliquid.transport import IpRateLimited
 
 # What the processor chain puts on a record beside the event's own fields: the
 # name, the level, and the ambient correlation ids (ADR-0020).
@@ -476,7 +478,7 @@ def _drive_snapshot_incompatible() -> None:
 def _drive_inflight_reconciled() -> None:
     config = ReconcileConfig(inflight_interval_seconds=5.0, inflight_max_attempts=1)
     reconciler = _reconciler(OrderState.SUBMITTED, _ForgetfulVenue(), config)
-    assert asyncio.run(reconciler.reconcile_inflight()) is True
+    assert asyncio.run(reconciler.reconcile_inflight()) is PassResult.PROVED
 
 
 def _drive_recency_skipped() -> None:
@@ -493,7 +495,7 @@ def _drive_recency_skipped() -> None:
         cache=cache,
         config=ReconcileConfig(recent_order_protection_seconds=30.0, ghost_grace_seconds=90.0),
     )
-    assert asyncio.run(reconciler.reconcile_open_orders()) is True
+    assert asyncio.run(reconciler.reconcile_open_orders()) is PassResult.PROVED
 
 
 def _drive_ghost_reconciled() -> None:
@@ -511,16 +513,17 @@ def _drive_ghost_reconciled() -> None:
     )
 
     async def go() -> None:
-        assert await reconciler.reconcile_open_orders() is True  # arms the grace clock
+        # The first pass arms the grace clock. The second sees continuous absence → ghost.
+        assert await reconciler.reconcile_open_orders() is PassResult.PROVED
         await clock.sleep(91.0)
-        assert await reconciler.reconcile_open_orders() is True  # continuous absence → ghost
+        assert await reconciler.reconcile_open_orders() is PassResult.PROVED
 
     asyncio.run(go())
 
 
 def _drive_frozen() -> None:
     reconciler = _reconciler(OrderState.SUBMITTED, _DarkVenue(), ReconcileConfig())
-    assert asyncio.run(reconciler.reconcile_inflight()) is False
+    assert asyncio.run(reconciler.reconcile_inflight()) is PassResult.FAILED
 
 
 def _drive_exchange_request_failed() -> None:
@@ -821,7 +824,7 @@ def _drive_exit_unguarded() -> None:
             applied_fills=lambda cloid: (),
         ),
         feed=_IdleFeed(),
-        exit_job=Flatten(),
+        exit_job=Flatten(feed_ends=True),
     )
     assert asyncio.run(engine.run()) == 0
 
@@ -843,9 +846,16 @@ def _drive_flatten_gave_up() -> None:
             applied_fills=lambda cloid: (),
         ),
         feed=_IdleFeed(),
-        exit_job=Flatten(),
+        exit_job=Flatten(feed_ends=True),
     )
     assert asyncio.run(engine.run()) == 1
+
+
+def _drive_flatten_rate_limited() -> None:
+    """One Hyperliquid flatten whose first close the venue refuses over the IP limit (ADR-0056)."""
+    venue = AnswersFirst(IpRateLimited("429 from the venue"))
+    exit_code, _, _ = run_flatten(":memory:", venue, priced_frames())
+    assert exit_code == 0
 
 
 def _drive_exit_refused() -> None:
@@ -1178,6 +1188,7 @@ SCENARIOS: dict[NamedEvent, Callable[[], None]] = {
     NamedEvent.CANCEL_ALL_ORDERS_REMAIN: _drive_cancel_all_orders_remain,
     NamedEvent.FLATTEN_DRY_ATTEMPT: _drive_flatten_gave_up,
     NamedEvent.FLATTEN_GAVE_UP: _drive_flatten_gave_up,
+    NamedEvent.FLATTEN_RATE_LIMITED: _drive_flatten_rate_limited,
     NamedEvent.GUARD_KILL_SWITCH_TRIPPED: _drive_kill_switch(reset=False),
     NamedEvent.GUARD_KILL_SWITCH_RESET: _drive_kill_switch(reset=True),
     NamedEvent.STRATEGY_ERROR: _drive_strategy_error,
