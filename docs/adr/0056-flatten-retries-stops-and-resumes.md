@@ -117,6 +117,12 @@ Decided in [#413](https://github.com/MarcosACH/tickwright/issues/413), part of
   fourth kind, `send_failed`, for a send that dies. A dead send may still have reached the venue,
   so calling it `refused` would be false. Flatten treats it like `refused`. It counts as a dry
   attempt, and the cloid verdict decides. An answer the adapter cannot read emits no report.**)**
+  **(Corrected in [#475](https://github.com/MarcosACH/tickwright/issues/475):** only the 10
+  second rate limit wait runs beside the verdict. The 2 second wait starts after the verdict, once
+  the attempt is known to be dry. Before the verdict, flatten cannot know whether the attempt
+  filled. So a refused or dead attempt waits about 2 seconds longer than the #439 block says. That
+  is safe. The test clocks add up waits that run at the same time, so no test could show the
+  difference.**)**
 - **The count lives in memory.** A crash resets it. A new run is a new choice by the operator, so it
   gets its full tries.
 - **On boot, an open flatten saga is resumed first.** The engine finds it at the venue by its id. It

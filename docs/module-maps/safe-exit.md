@@ -237,6 +237,8 @@ context. Starts the feed through the `FeedHandle`.
 - On an `OrderRefusedReport` or a dead send, resolve the saga by cloid before the next attempt.
 - Wait 2 seconds after a dry attempt and 10 seconds after a rate limit. Both run beside the cloid
   verdict. A rate limit does not count. Waits use `clock.sleep`.
+- **(Corrected by #475:** only the 10 second wait runs beside the verdict. The 2 second wait starts
+  after it, because only the verdict says whether the attempt was dry (ADR-0056).**)**
 - Emit `flatten.dry_attempt` and `flatten.rate_limited`.
 
 **Seams:** None.
