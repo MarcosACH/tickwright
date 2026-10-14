@@ -91,6 +91,16 @@ def test_a_lock_held_before_its_pid_is_written_is_still_a_refusal(tmp_path: Path
     assert f"{db}.lock" in holder.detail
 
 
+def test_a_store_opened_by_a_relative_path_names_itself_by_its_absolute_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An exit run in the wrong directory opens a new store there. The operator
+    can only spot that from the full path in ``exit.refused`` (ADR-0052)."""
+    monkeypatch.chdir(tmp_path)
+    with SQLiteStore("tickwright.db") as store:
+        assert store.name == str(tmp_path.resolve() / "tickwright.db")
+
+
 def test_an_in_memory_store_always_gets_the_lock() -> None:
     """No other process can open a ``:memory:`` database, so nothing can contend."""
     with SQLiteStore() as store:

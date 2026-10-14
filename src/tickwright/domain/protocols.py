@@ -459,6 +459,16 @@ class Store(Protocol):
         audit half, and audit is a real audience, not an accident."""
         ...
 
+    @property
+    def name(self) -> str:
+        """Where this store lives, for the operator's logs (ADR-0060).
+
+        An exit run in the wrong directory opens a new store there, and this
+        name is how the operator spots it. So it is a full path or a host and
+        database, and it never carries credentials.
+        """
+        ...
+
     def lock(self) -> StoreLockHolder | None:
         """Take this store's exclusive lock, or say who holds it (ADR-0052).
 

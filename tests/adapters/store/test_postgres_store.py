@@ -73,6 +73,16 @@ def test_a_postgres_holder_names_the_store_without_its_credentials(
         assert holder.store == f"{dsn['host']}:{dsn.get('port', 5432)}/{dsn['dbname']}"
 
 
+def test_a_postgres_store_names_itself_without_its_credentials(
+    backend: PostgresBackend,
+) -> None:
+    """``exit.refused`` and ``exit.new_store`` name the store in the operator's
+    logs (ADR-0060). So the name carries the host and database, never the password."""
+    with backend.open() as store:
+        dsn = conninfo_to_dict(backend.dsn)
+        assert store.name == f"{dsn['host']}:{dsn.get('port', 5432)}/{dsn['dbname']}"
+
+
 def test_a_postgres_refusal_says_where_the_holder_runs_and_when_to_retry(
     backend: PostgresBackend,
 ) -> None:
