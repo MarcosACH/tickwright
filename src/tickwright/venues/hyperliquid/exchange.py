@@ -519,6 +519,18 @@ class HyperliquidExchange:
         )
         if isinstance(fills, VenueReadFailure):
             return fills
+        if _shrunk(record, fills, asked=ref.quantity):
+            # The venue answers `filled` for an order it shrank, and a FILLED
+            # report moves no saga. The cut part ends CANCELLED, as it does
+            # when the fills read at placement works (ADR-0057).
+            status = self._status_report(
+                cloid=ref.cloid,
+                symbol=record.coin,
+                status=OrderState.CANCELLED,
+                venue_oid=str(record.oid),
+                reason="reduce-only shrink",
+            )
+            return VenueOrderView(status=status, fills=tuple(fills))
         status = self._status_report(
             cloid=ref.cloid, symbol=record.coin, status=record.state, venue_oid=str(record.oid)
         )
@@ -774,12 +786,14 @@ class _OrderRecord:
     """The venue's decoded ``orderStatus`` order record: the coin it lives
     under, the venue oid, its placement timestamp (ms), and its status already
     in saga vocabulary. ``fetch_order`` bounds the fills read at ``timestamp``
-    and reports ``state``."""
+    and reports ``state``. ``reduce_only`` tells a shrunk order from a filled
+    one (ADR-0057)."""
 
     coin: str
     oid: int
     timestamp: int
     state: OrderState
+    reduce_only: bool = False
 
 
 class _OrderStatusRead(Enum):
@@ -810,6 +824,14 @@ def _placed_before(record: "_OrderRecord", *, created_ts_ns: int | None) -> bool
     return record.timestamp < created_ts_ns // _NS_PER_MS - _ACK_SKEW_ALLOWANCE_MS
 
 
+def _shrunk(record: "_OrderRecord", fills: list[FillReport], *, asked: Decimal | None) -> bool:
+    """Whether the venue shrank a reduce-only order: it says `filled`, yet the
+    fills fall short of the size the saga asked for."""
+    if asked is None or not record.reduce_only or record.state is not OrderState.FILLED:
+        return False
+    return sum((fill.quantity for fill in fills), Decimal("0")) < asked
+
+
 def _decode_order_status(response: object) -> _OrderDecode:
     """Decode a venue ``orderStatus`` response into its order record, or the
     venue's positive ``unknownOid``. Any shape outside those two raises into
@@ -826,11 +848,24 @@ def _decode_order_status(response: object) -> _OrderDecode:
         case {
             "status": "order",
             "order": {
-                "order": {"coin": str(coin), "oid": int(oid), "timestamp": int(timestamp)},
+                "order": {
+                    "coin": str(coin),
+                    "oid": int(oid),
+                    "timestamp": int(timestamp),
+                    **record,
+                },
                 "status": str(status),
             },
         }:
-            return _OrderRecord(coin=coin, oid=oid, timestamp=timestamp, state=_order_state(status))
+            # A record without the flag reads as a plain order. That only keeps
+            # a shrunk saga open, which is the safe side.
+            return _OrderRecord(
+                coin=coin,
+                oid=oid,
+                timestamp=timestamp,
+                state=_order_state(status),
+                reduce_only=record.get("reduceOnly") is True,
+            )
     raise ValueError("unrecognized orderStatus response")
 
 

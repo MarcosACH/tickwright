@@ -127,6 +127,7 @@ def order_status_response(
     oid: int = 77,
     coin: str = "BTC",
     placed_ms: int = 1_700_000_000_000,
+    reduce_only: bool = False,
 ) -> dict:
     """The venue's ``orderStatus`` answer for a known order.
 
@@ -146,6 +147,7 @@ def order_status_response(
                 "timestamp": placed_ms,
                 "origSz": "0.5",
                 "cloid": cloid,
+                "reduceOnly": reduce_only,
             },
             "status": status,
             "statusTimestamp": placed_ms + 100,
