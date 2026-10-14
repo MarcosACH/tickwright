@@ -606,9 +606,18 @@ class HyperliquidExchange:
         return listed.orders
 
     async def fetch_positions(self) -> dict[str, Decimal] | VenueReadFailure:
-        # The CLI refuses flatten on this venue before boot until #475 builds
-        # this read, for the same reason as ``fetch_open_orders`` above.
-        raise NotImplementedError("Hyperliquid reads positions from #475 on")
+        # The same read as the account state, so a position and the account
+        # figures never come from two different answers. Unlike that read, the
+        # failure keeps its kind, because flatten waits out a rate limit (ADR-0060).
+        state = await read(
+            request="clearinghouseState",
+            query={"type": "clearinghouseState", "user": self._user_address},
+            send=self._info,
+            normalize=normalize_account_state,
+        )
+        if isinstance(state, VenueReadFailure):
+            return state
+        return {position.symbol: position.signed_size for position in state.positions}
 
     async def fetch_account_state(self) -> VenueAccountState | None:
         """Venue truth for the account: one ``clearinghouseState`` read, the

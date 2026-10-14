@@ -25,7 +25,13 @@ from pydantic import SecretStr
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
-from tickwright.domain import InstrumentSpec, LeverageSpec, Netting, VenueAccountState
+from tickwright.domain import (
+    InstrumentSpec,
+    LeverageSpec,
+    Netting,
+    VenueAccountState,
+    VenueReadFailure,
+)
 from tickwright.observability import NamedEvent
 from tickwright.observability.testing import capture_events
 from tickwright.venues.hyperliquid import (
@@ -781,6 +787,24 @@ def test_a_flat_account_is_positive_proof_of_flat_not_a_failed_read() -> None:
     assert state.equity == Decimal("25.9264")
     assert state.free_margin == Decimal("25.9264")
     assert state.cross_maintenance_margin == Decimal("0.0")
+
+
+def _fetch_positions(response: object) -> dict[str, Decimal] | VenueReadFailure:
+    async def main() -> dict[str, Decimal] | VenueReadFailure:
+        exchange = _exchange(testnet=True, post=FakeExchangeApi({"clearinghouseState": response}))
+        return await exchange.fetch_positions()
+
+    return asyncio.run(main())
+
+
+def test_positions_read_the_signed_size_of_every_coin_the_account_holds() -> None:
+    # Flatten sizes each close from this read, so the sign is the side it closes.
+    # Neither coin is in the config: flatten closes what the account holds.
+    assert _fetch_positions(MIXED_SNAPSHOT) == {
+        "HYPE": Decimal("-2000.0"),
+        "CASHCAT": Decimal("1000000.0"),
+    }
+    assert _fetch_positions(FLAT_SNAPSHOT) == {}
 
 
 def test_a_named_unparseable_read_carries_the_response_shape_not_its_whole_body() -> None:
