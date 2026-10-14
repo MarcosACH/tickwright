@@ -93,6 +93,42 @@ def test_a_close_refused_for_a_rate_limit_waits_10_s_and_is_no_dry_attempt(
     assert logs[-1]["outcome"] == "done"
 
 
+class _ReadLimitedOnce(HeldShort):
+    """Refuses the first position read after the close for the IP limit, then answers."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.limited_ns: int | None = None
+        self.read_after_limit_ns: int | None = None
+
+    def account(self, payload: dict) -> dict:
+        if not self.held and self.limited_ns is None:
+            self.limited_ns = self.clock.timestamp_ns()
+            raise IpRateLimited("429 from the venue")
+        if self.limited_ns is not None and self.read_after_limit_ns is None:
+            self.read_after_limit_ns = self.clock.timestamp_ns()
+        return super().account(payload)
+
+
+def test_a_position_read_refused_for_a_rate_limit_waits_10_s_and_is_no_dry_attempt(
+    tmp_path: Path,
+) -> None:
+    # The IP limit covers reads too, and waiting it out makes progress (ADR-0060).
+    # A dry attempt here would let a busy account give up a close that worked.
+    venue = _ReadLimitedOnce()
+
+    exit_code, logs, _, _ = _flatten(tmp_path, venue, priced_frames())
+
+    assert exit_code == 0, [(log["event"], log.get("error")) for log in logs]
+    limited = [log for log in logs if log["event"] == "flatten.rate_limited"]
+    assert [(log["symbol"], log["limit"]) for log in limited] == [("HYPE", "ip")]
+    assert not [log for log in logs if log["event"] == "flatten.dry_attempt"]
+    assert venue.limited_ns is not None
+    assert venue.read_after_limit_ns is not None
+    assert venue.read_after_limit_ns - venue.limited_ns >= 10_000_000_000
+    assert logs[-1]["outcome"] == "done"
+
+
 REFUSED = {"status": "err", "response": "Invalid nonce"}
 DEAD_SEND = ConnectionError("connection reset")
 

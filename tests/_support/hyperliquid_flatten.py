@@ -99,11 +99,28 @@ def _short(coin: str, size: str, entry: str) -> dict:
     }
 
 
+class _SocketPacedClock(ManualClock):
+    """A ``ManualClock`` whose ``sleep`` also lets the socket reader run.
+
+    A plain ``ManualClock`` returns from ``sleep`` without yielding, so flatten's
+    first-price wait would always time out before the feed reads a frame. On a
+    real clock the venue's subscribe answer arrives well inside that wait.
+    """
+
+    async def sleep(self, seconds: float) -> None:
+        await asyncio.sleep(0.001)
+        await super().sleep(seconds)
+
+
 class HeldShort:
-    """The account: a HYPE short opened by hand, flat once a close fills it."""
+    """The account: a HYPE short opened by hand, flat once a close fills it.
+
+    It owns the run's clock, so a fake can date the requests it answers.
+    """
 
     def __init__(self) -> None:
         self.held = True
+        self.clock = _SocketPacedClock(start_ns=START_MS * 1_000_000)
 
     def account(self, payload: dict) -> dict:
         return _account(_short("HYPE", "-2.0", "25.0")) if self.held else _account()
@@ -138,19 +155,6 @@ class AnswersFirst(HeldShort):
         return answer if answer is not None else super().order(payload)
 
 
-class _SocketPacedClock(ManualClock):
-    """A ``ManualClock`` whose ``sleep`` also lets the socket reader run.
-
-    A plain ``ManualClock`` returns from ``sleep`` without yielding, so flatten's
-    first-price wait would always time out before the feed reads a frame. On a
-    real clock the venue's subscribe answer arrives well inside that wait.
-    """
-
-    async def sleep(self, seconds: float) -> None:
-        await asyncio.sleep(0.001)
-        await super().sleep(seconds)
-
-
 def run_flatten(
     store: Path | str, venue: HeldShort, frames: list[str]
 ) -> tuple[int, FakeExchangeApi, FakeWsConnection]:
@@ -167,7 +171,7 @@ def run_flatten(
         }
     )
     bus = InMemoryBus()
-    clock = _SocketPacedClock(start_ns=START_MS * 1_000_000)
+    clock = venue.clock
     config = HyperliquidConfig(
         testnet=True, symbols=["BTC"], signing_key=SecretStr(TEST_SIGNING_KEY)
     )

@@ -463,9 +463,15 @@ async def _read_left(
     A hand trade the books cannot see may have closed a flat venue, and no order
     can close what the venue does not hold. So what the strategies still hold
     moves to the unattributed partition (ADR-0054, ADR-0056).
+
+    A read refused for the IP limit is not a failed read. Waiting it out makes
+    progress, so it waits 10 seconds and the count does not move (ADR-0060).
     """
     while isinstance(positions := await context.account.fetch_positions(), VenueReadFailure):
-        if await dry.gave_up("read_failed", held):
+        if positions is VenueReadFailure.RATE_LIMITED_IP:
+            named_event(NamedEvent.FLATTEN_RATE_LIMITED, symbol=symbol, limit="ip")
+            await context.clock.sleep(RATE_LIMIT_WAIT_SECONDS)
+        elif await dry.gave_up("read_failed", held):
             return None
     left = positions.get(symbol, Decimal(0))
     if not left:
