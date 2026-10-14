@@ -212,7 +212,9 @@ context. Starts the feed through the `FeedHandle`.
   Paper has no account truth, so it cannot run there, and a live venue arrives in #475.**)**
 - **(Built by #475:** when the drain leaves a gap, flatten runs `reconcile_account()` from its
   context and checks again. The context has none on paper. The Hyperliquid end to end test closes
-  a short opened by hand on a coin the config never named.**)**
+  a short opened by hand on a coin the config never named. The account pass takes the same lock
+  as a close and a reconcile pass. Beside another symbol's close, it could heal a fill the engine
+  has not booked yet, and the fill would then book twice.**)**
 - A gap that is still there counts as a dry attempt. So a gap that never heals ends in
   `flatten.gave_up`, not in a loop.
 - A flat venue moves each leftover into the unattributed partition instead.

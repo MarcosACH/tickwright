@@ -6,6 +6,7 @@ Shared by the flatten e2e tests and the catalog walk.
 """
 
 import asyncio
+from collections.abc import Callable
 from decimal import Decimal
 from pathlib import Path
 
@@ -34,6 +35,7 @@ from tickwright.venues.hyperliquid import (
     HyperliquidFeed,
     HyperliquidUniverse,
 )
+from tickwright.venues.hyperliquid.transport import PostJson
 
 BTC_SPEC = InstrumentSpec(
     symbol="BTC", sz_decimals=5, max_decimals=6, min_notional=Decimal("10"), max_sig_figs=5
@@ -155,16 +157,47 @@ class AnswersFirst(HeldShort):
         return answer if answer is not None else super().order(payload)
 
 
+class HalfClosesBesideAGap(HeldShort):
+    """Each HYPE close fills half the short. A BTC long the books never hold sits beside it.
+
+    The venue gives the BTC row no ``entryPx``, so no account pass can book it
+    (ADR-0034). BTC's loop then runs an account pass on every attempt.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.closes = 0
+
+    def account(self, payload: dict) -> dict:
+        btc = _short("BTC", "0.001", "0.0")
+        del btc["position"]["entryPx"]
+        hype = Decimal("-2.0") + self.closes
+        return _account(btc, *([_short("HYPE", str(hype), "25.0")] if hype else []))
+
+    def order(self, payload: dict) -> object:
+        self.closes += 1
+        return filled_response(oid=CLOSE_OID + self.closes, total_sz="1.0", avg_px="25.0")
+
+    def fills(self, payload: dict) -> list[dict]:
+        return [
+            fill_entry(oid=CLOSE_OID + n, tid=n, px="25.0", sz="1.0", time=START_MS + 500 * n)
+            | {"coin": "HYPE", "dir": "Close Short", "startPosition": str(Decimal(n - 3))}
+            for n in range(1, self.closes + 1)
+        ]
+
+
 def run_flatten(
     store: Path | str,
     venue: HeldShort,
     frames: list[str],
     *,
     engine_config: EngineConfig | None = None,
+    transport: Callable[[FakeExchangeApi], PostJson] | None = None,
 ) -> tuple[int, FakeExchangeApi, FakeWsConnection]:
     """Run ``flatten`` once and return its exit code, the HTTP fake and the socket fake.
 
     ``engine_config`` lets a test change the reconcile timing. ``None`` keeps the defaults.
+    ``transport`` wraps the HTTP fake, so a test can hold an answer open.
     """
     post = FakeExchangeApi(
         {
@@ -190,7 +223,7 @@ def run_flatten(
             specs={"BTC": BTC_SPEC, "HYPE": HYPE_SPEC},
             asset_indices={"BTC": 3, "HYPE": HYPE_ASSET},
         ),
-        post=post,
+        post=post if transport is None else transport(post),
         connect=idle_ws,
         startup_timeout_seconds=60.0,
         shrink_wait_seconds=30.0,

@@ -6,6 +6,8 @@ On real money the account can hold a coin the operator never configured, opened
 by hand in the venue UI. Flatten must price that coin and close it.
 """
 
+import asyncio
+import contextlib
 import json
 from collections.abc import MutableMapping
 from decimal import Decimal
@@ -16,6 +18,7 @@ import pytest
 from hyperliquid_fakes import (
     FakeExchangeApi,
     FakeWsConnection,
+    asset_ctx_frame,
     order_status_response,
     request_type,
     trade,
@@ -27,6 +30,7 @@ from hyperliquid_flatten import (
     HYPE_ASSET,
     START_MS,
     AnswersFirst,
+    HalfClosesBesideAGap,
     HeldShort,
     priced_frames,
     run_flatten,
@@ -37,7 +41,7 @@ from tickwright.domain import OPERATOR, OrderState, derive_cloid
 from tickwright.engine.reconcile import ReconcileConfig
 from tickwright.engine.runner import EngineConfig
 from tickwright.observability.testing import capture_events
-from tickwright.venues.hyperliquid.transport import IpRateLimited
+from tickwright.venues.hyperliquid.transport import IpRateLimited, PostJson
 
 
 def _flatten(
@@ -53,6 +57,60 @@ def _flatten(
             tmp_path / "saga.db", venue, frames, engine_config=engine_config
         )
     return exit_code, logs, post, socket
+
+
+def _holds_the_first_close(fake: FakeExchangeApi) -> PostJson:
+    """Hold the first close's answer until two account reads come in, or half a second.
+
+    The venue has filled the close by then, but the engine has not booked it.
+    Two reads, because one may be BTC's position read and not its account pass.
+    """
+    reads = 0
+    read_twice = asyncio.Event()
+    holding = False
+
+    async def post(url: str, payload: dict[str, Any]) -> object:
+        nonlocal reads, holding
+        answer = await fake(url, payload)
+        asked = request_type(url, payload)
+        if asked == "order" and not holding:
+            holding = True
+            # Real time, because a loop stuck on a lock moves no clock.
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(read_twice.wait(), timeout=0.5)
+        elif asked == "clearinghouseState" and holding:
+            reads += 1
+            if reads == 2:
+                read_twice.set()
+        return answer
+
+    return post
+
+
+def test_an_account_pass_waits_for_another_symbols_close_to_be_booked(tmp_path: Path) -> None:
+    # One close or pass at a time (ADR-0056). An account pass beside a close
+    # could see the venue fill before the engine books it. It would heal the
+    # fill into the books, and the real fill would then book it a second time.
+    # BTC first, so it is priced before the close. While the close is being
+    # handled, the bus holds every new tick back.
+    frames = [
+        trades_frame(trade("BTC", "60000.0", 8, time=START_MS)),
+        asset_ctx_frame("BTC", "60000.0"),
+        *priced_frames(),
+    ]
+
+    with capture_events() as logs:
+        exit_code, post, _ = run_flatten(
+            tmp_path / "saga.db", HalfClosesBesideAGap(), frames, transport=_holds_the_first_close
+        )
+
+    assert exit_code == 1
+    assert logs[-1]["left"] == "BTC=0.001"
+    closes = [url for url, payload in post.requests if request_type(url, payload) == "order"]
+    assert len(closes) == 2
+    # Only the first pass heals HYPE: the short opened by hand.
+    healed = [log for log in logs if log["event"] == "account.healed" and log["symbol"] == "HYPE"]
+    assert [(log["ledger"], log["venue"]) for log in healed] == [("0", "-2.0")]
 
 
 def test_flatten_subscribes_and_closes_a_held_coin_the_config_never_named(

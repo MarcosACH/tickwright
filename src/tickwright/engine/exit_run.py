@@ -163,7 +163,7 @@ class Flatten:
             # is consumed, and the manager drops a signal id it has seen (ADR-0006).
             high_water = context.checkpointer.cache.seq_high_water()
             emitter.set_next_seq(high_water.get(OPERATOR, 0) + 1)
-            turns = _Turns(context.reconciler)
+            turns = _Turns(context.reconciler, context.reconcile_account)
             context.bus.subscribe(OrderRefusedReport, turns.note_refusal)
             # One loop per symbol, all at the same time, so a thin book on one
             # symbol does not hold back the others (ADR-0056). A task group
@@ -247,15 +247,29 @@ class _Turns:
     joins that cascade and returns before it is handled. The loop would then
     find no saga, read it as a close that filled nothing, and send a second
     one beside it (ADR-0056).
+
+    An account pass takes a turn too. Beside a close, it could read a fill the
+    venue made before the engine booked it. It would heal that fill into the
+    books, and the real fill would then book it again.
     """
 
-    def __init__(self, reconciler: Reconciler) -> None:
+    def __init__(
+        self, reconciler: Reconciler, reconcile_account: Callable[[], Awaitable[object]] | None
+    ) -> None:
         self._reconciler = reconciler
+        self._reconcile_account = reconcile_account
         self._lock = asyncio.Lock()
         self._refusals: dict[str, OrderRefusal] = {}
 
     async def note_refusal(self, report: OrderRefusedReport) -> None:
         self._refusals[report.cloid] = report.refusal
+
+    async def account_pass(self) -> None:
+        """Run one account pass, on a venue that has account truth."""
+        if self._reconcile_account is None:
+            return
+        async with self._lock:
+            await self._reconcile_account()
 
     async def run_pass(self) -> PassResult:
         """Run both halves of one pass. The second runs only when the first proved."""
@@ -371,7 +385,7 @@ async def _attempt(
     # No venue can send a market close without a price.
     if not await priced.has(symbol):
         reason = "no_price"
-    elif await _size_gap(symbol, size, context):
+    elif await _size_gap(symbol, size, turns, context):
         reason = "size_gap"
     else:
         cloid, refusal = await turns.close(symbol, size, emitter)
@@ -406,7 +420,7 @@ async def _beside(verdict: Coroutine[None, None, bool], wait: Coroutine[None, No
     return decided.result()
 
 
-async def _size_gap(symbol: str, size: Decimal, context: ExitContext) -> bool:
+async def _size_gap(symbol: str, size: Decimal, turns: _Turns, context: ExitContext) -> bool:
     """Whether the account net size on ``symbol`` differs from the venue's ``size``.
 
     A close is split across the partitions it closes (ADR-0054). Against a gap,
@@ -420,8 +434,7 @@ async def _size_gap(symbol: str, size: Decimal, context: ExitContext) -> bool:
     await context.bus.drain()
     if _held(symbol, context) == size:
         return False
-    if context.reconcile_account is not None:
-        await context.reconcile_account()
+    await turns.account_pass()
     return _held(symbol, context) != size
 
 
