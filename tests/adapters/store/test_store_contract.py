@@ -936,3 +936,27 @@ def test_a_postgres_holder_names_the_store_without_its_credentials(
 
         dsn = conninfo_to_dict(store_backend.dsn)
         assert holder.store == f"{dsn['host']}:{dsn.get('port', 5432)}/{dsn['dbname']}"
+
+
+def test_a_postgres_store_session_drops_a_dead_peer_within_25_seconds(
+    store_backend: Backend,
+) -> None:
+    """Without keepalives, the server keeps a dead engine's session, and its
+    lock, for about two hours. ADR-0052 sets these four values so it takes about
+    25 seconds. Only the session itself can show its settings, so this reads
+    them through the store's own connection."""
+    if not isinstance(store_backend, PostgresBackend):
+        pytest.skip("only a Postgres store has a server session")
+    with store_backend.open() as store:
+        rows = store._conn.execute(
+            "SELECT name, setting FROM pg_settings WHERE name IN "
+            "('tcp_keepalives_idle', 'tcp_keepalives_interval', "
+            "'tcp_keepalives_count', 'tcp_user_timeout')"
+        ).fetchall()
+
+    assert dict(rows) == {
+        "tcp_keepalives_idle": "10",
+        "tcp_keepalives_interval": "5",
+        "tcp_keepalives_count": "3",
+        "tcp_user_timeout": "25000",
+    }

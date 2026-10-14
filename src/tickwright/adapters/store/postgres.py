@@ -51,6 +51,17 @@ _HOLDER_QUERY = """
       AND l.classid = 0 AND l.objid::bigint = %s AND l.objsubid = 1
 """
 
+# Server-side keepalives for the store's session (ADR-0052). With the defaults,
+# the server keeps a dead engine's session, and its lock, for about two hours.
+# These drop it in about 25 seconds. They are set after connecting so a DSN's own
+# ``options`` stay as the operator wrote them.
+_KEEPALIVES = {
+    "tcp_keepalives_idle": "10",
+    "tcp_keepalives_interval": "5",
+    "tcp_keepalives_count": "3",
+    "tcp_user_timeout": "25000",
+}
+
 
 def _holder_of(store: str, pid: int, client: object, started: datetime | None) -> StoreLockHolder:
     """The refusal the operator reads. It says how to end the holder (ADR-0052)."""
@@ -165,6 +176,8 @@ class PostgresStore(SqlStore):
 
     def __init__(self, dsn: str) -> None:
         self._conn = psycopg.connect(dsn, autocommit=True)
+        for name, value in _KEEPALIVES.items():
+            self._conn.execute("SELECT set_config(%s, %s, false)", (name, value))
         super().__init__(
             schema=_SCHEMA, added_column_types=_ADDED_COLUMN_TYPES, release=self._conn.close
         )
