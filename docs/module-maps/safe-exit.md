@@ -69,6 +69,8 @@ for callers. With a job, `run()` returns 0, 1, or 2 (ADR-0060) instead of the AD
     **(Changed by #472:** a normal run also starts the feed through a `FeedHandle`, with no
     symbols to add. So the feed starts and stops in one place. The handle calls `add_symbols()`
     only when there are symbols, because the live feed refuses the call until #475.**)**
+    **(Built by #475:** `HyperliquidFeed.add_symbols()` adds the coins to its subscription, and
+    `start()` subscribes them. The handle still calls it only when there are symbols.**)**
   - The job runs as a task in this group. `exchange.run()` runs beside it as today.
 - When the job returns, request the stop and run the reverse shutdown as today.
 - Map the job's `ExitOutcome`, a signal, or a fault to the exit code. SIGINT and SIGTERM cancel
@@ -148,6 +150,8 @@ context. Starts the feed through the `FeedHandle`.
 - Read the held symbols with `fetch_positions()`. Pass them to `FeedHandle.start()`.
 - If the feed ends, wait for `FeedHandle.ended()`, so replay fills at the last row (ADR-0059).
   Otherwise wait for each symbol's first price.
+- **(Built by #475:** a symbol has its first price once it has both a trade and a mark (ADR-0059).
+  Each attempt waits up to 2 seconds for it. A symbol still without one is a `no_price` attempt.**)**
 - Run one reconcile pass at a time, under one lock. A pass is `reconcile_inflight()` and then
   `reconcile_open_orders()`, and it covers every symbol. A loop that needs a pass waits for the
   one in progress, then runs its own, so it never reads a pass that started before its attempt
@@ -206,6 +210,9 @@ context. Starts the feed through the `FeedHandle`.
   attempt.**)**
 - **(Deferred by #473:** the `reconcile_account()` step moved to #475, code and test together.
   Paper has no account truth, so it cannot run there, and a live venue arrives in #475.**)**
+- **(Built by #475:** when the drain leaves a gap, flatten runs `reconcile_account()` from its
+  context and checks again. The context has none on paper. The Hyperliquid end to end test closes
+  a short opened by hand on a coin the config never named.**)**
 - A gap that is still there counts as a dry attempt. So a gap that never heals ends in
   `flatten.gave_up`, not in a loop.
 - A flat venue moves each leftover into the unattributed partition instead.
@@ -232,6 +239,9 @@ context. Starts the feed through the `FeedHandle`.
   loop that waits on it, even when the failed read was another symbol's saga. This can stop the
   run early, but it never hangs it. A per-symbol result would need a new `Reconciler` return
   shape, and a dead send fails every symbol's read anyway.
+- **(Built by #475:** a continuous pass returns `PassResult`: proved, failed, or rate limited. It
+  is still one result for all symbols. A rate-limited pass emits `flatten.rate_limited` and waits
+  10 seconds. It is not a dry attempt (ADR-0060).**)**
 - Count dry attempts: no fill, no price, a failed read, or a refusal (ADR-0056, ADR-0060). A fill
   resets the count. Stop after 3 in a row with `flatten.gave_up`.
 - On an `OrderRefusedReport` or a dead send, resolve the saga by cloid before the next attempt.
@@ -239,6 +249,9 @@ context. Starts the feed through the `FeedHandle`.
   verdict. A rate limit does not count. Waits use `clock.sleep`.
 - **(Corrected by #475:** only the 10 second wait runs beside the verdict. The 2 second wait starts
   after it, because only the verdict says whether the attempt was dry (ADR-0056).**)**
+- **(Built by #475:** a position read in the loop refused for the IP limit also waits 10 seconds
+  and is not a dry attempt. The first position read and the final read still stop the run on any
+  failed read (ADR-0060).**)**
 - Emit `flatten.dry_attempt` and `flatten.rate_limited`.
 
 **Seams:** None.

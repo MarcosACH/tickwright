@@ -62,6 +62,11 @@ when a venue read fails, and which named events an exit run emits. Decided in
   `VenueReadFailure.RATE_LIMITED_IP`. So `fetch_open_orders()` and `fetch_positions()` return a
   `VenueReadFailure` rather than `None`. With `None`, flatten could not tell a rate-limited read
   from a failed one. ADR-0056 holds the rest of the refusal report.**)**
+  **(Narrowed in [#475](https://github.com/MarcosACH/tickwright/issues/475):** only the reads
+  inside a symbol's close loop wait out the limit. Those are the position read and the read by
+  cloid. A reconcile pass now returns `PassResult`, so flatten can tell a rate-limited pass from a
+  failed one. The first position read and the final read still stop the run on any failed read,
+  a 429 included. No order goes out after either one, so stopping there is safe.**)**
 - **Named events.** The `order.*` events already cover each order. An exit run adds these:
 
   | Event | When | Fields |
@@ -140,3 +145,8 @@ when a venue read fails, and which named events an exit run emits. Decided in
 
   **(Partly built, since [#470](https://github.com/MarcosACH/tickwright/issues/470):**
   `tickwright cancel-all` also runs on Hyperliquid. It cancels a hand-placed order by its oid.**)**
+
+  **(Partly built, since [#475](https://github.com/MarcosACH/tickwright/issues/475):**
+  `tickwright flatten` also runs on Hyperliquid with the live feed. It closes a coin held by hand
+  that the config never named. Only a live exchange with the replay feed still exits 2 before
+  boot. A replay row is not the market.**)**
