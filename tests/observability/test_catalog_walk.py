@@ -889,6 +889,28 @@ def _drive_exit_refused() -> None:
         assert asyncio.run(engine.run()) == 2
 
 
+def _drive_exit_new_store() -> None:
+    """One operator cancel all on a fresh store, with --new-store (ADR-0052)."""
+    bus = InMemoryBus()
+    clock = ManualClock()
+    engine = Engine(
+        bus=bus,
+        clock=clock,
+        store=SQLiteStore(":memory:"),
+        exchange=PaperExchange(
+            bus=bus,
+            clock=clock,
+            fill_model=ImmediateFillModel(),
+            genesis_collateral=GENESIS,
+            account_net=dict,
+            applied_fills=lambda cloid: (),
+        ),
+        feed=_IdleFeed(),
+        exit_job=OperatorCancelAll(new_store=True),
+    )
+    assert asyncio.run(engine.run()) == 0
+
+
 class _DeafToCancels(VenueLink):
     """A venue that never receives a cancel, so its orders stay resting."""
 
@@ -1190,6 +1212,7 @@ SCENARIOS: dict[NamedEvent, Callable[[], None]] = {
     NamedEvent.ENGINE_FAULTED: _drive_engine_faulted,
     NamedEvent.ENGINE_STOP_HOOK_FAILED: _drive_engine_stop_hook_failed,
     NamedEvent.EXIT_REFUSED: _drive_exit_refused,
+    NamedEvent.EXIT_NEW_STORE: _drive_exit_new_store,
     NamedEvent.EXIT_FINISHED: _drive_exit_finished,
     NamedEvent.EXIT_UNGUARDED: _drive_exit_unguarded,
     NamedEvent.CANCEL_ALL_ORDERS_REMAIN: _drive_cancel_all_orders_remain,

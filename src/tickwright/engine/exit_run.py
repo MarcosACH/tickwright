@@ -104,11 +104,18 @@ class ExitJob(Protocol):
         ...
 
 
-def _admit_store(store: Store) -> bool:
+def _admit_store(store: Store, *, new_store: bool) -> bool:
     """Refuse a store no engine has used. That is almost always the wrong
     directory, and the engine the operator meant to stop may still trade there
-    (ADR-0052)."""
+    (ADR-0052). ``new_store`` is the operator saying the store is new on purpose."""
     if store.load_account() is not None:
+        return True
+    if new_store:
+        named_event(
+            NamedEvent.EXIT_NEW_STORE,
+            store=store.name,
+            warning="no engine has used this store. Any engine trading elsewhere keeps trading.",
+        )
         return True
     named_event(NamedEvent.EXIT_REFUSED, reason="new_store", store=store.name, holder="none")
     return False
@@ -119,8 +126,11 @@ class OperatorCancelAll:
 
     name = "cancel_all"
 
+    def __init__(self, *, new_store: bool = False) -> None:
+        self._new_store = new_store
+
     def admit(self, store: Store) -> bool:
-        return _admit_store(store)
+        return _admit_store(store, new_store=self._new_store)
 
     async def run(self, context: ExitContext) -> ExitOutcome:
         left = await context.account.fetch_open_orders()

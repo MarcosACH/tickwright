@@ -214,6 +214,40 @@ def test_an_exit_run_on_a_store_no_engine_has_used_exits_two_and_writes_nothing(
         after.close()
 
 
+def test_an_exit_run_told_the_store_is_new_warns_and_runs(tmp_path: Path) -> None:
+    db = tmp_path / "saga.db"
+    bus = InMemoryBus()
+    clock = ManualClock()
+    engine = Engine(
+        bus=bus,
+        clock=clock,
+        store=SQLiteStore(db),
+        exchange=PaperExchange(
+            bus=bus,
+            clock=clock,
+            fill_model=ImmediateFillModel(),
+            genesis_collateral=GENESIS,
+            account_net=dict,
+            applied_fills=lambda cloid: (),
+        ),
+        feed=ReplayFeed(path=_ticks(tmp_path / "ticks.jsonl"), bus=bus, clock=clock),
+        exit_job=OperatorCancelAll(new_store=True),
+    )
+
+    with capture_events() as logs:
+        exit_code = asyncio.run(asyncio.wait_for(engine.run(), timeout=5))
+
+    assert exit_code == 0
+    events = [log["event"] for log in logs]
+    assert "exit.refused" not in events
+    warned = [log for log in logs if log["event"] == "exit.new_store"]
+    assert len(warned) == 1
+    assert warned[0]["store"] == str(db.resolve())
+    assert warned[0]["warning"]
+    assert logs[-1]["event"] == "exit.finished"
+    assert logs[-1]["outcome"] == "done"
+
+
 def test_an_exit_run_whose_store_lock_read_fails_exits_two(tmp_path: Path) -> None:
     bus = InMemoryBus()
     clock = ManualClock()
