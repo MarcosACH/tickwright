@@ -189,9 +189,9 @@ _Avoid_: using them interchangeably — one is venue truth, one is engine state.
 An [[Event]] a [[Strategy]] emits expressing an order intent. Typed variants: **`PlaceSignal`**
 (side, qty, price, MARKET/LIMIT, GTC/IOC, `post_only`) and **`CancelSignal`** (its own seq'd
 [[signal_id]] plus a `target_signal_id` naming the order to cancel — the strategy references the
-`signal_id` it emitted, and the engine re-derives the [[Client order id|cloid]]). ADR-0055 adds
-**`CancelAllSignal`**, which cancels the strategy's earlier orders on one symbol. Not built yet
-(#408). Each carries a
+`signal_id` it emitted, and the engine re-derives the [[Client order id|cloid]]). A
+**`CancelAllSignal`** has its own seq'd [[signal_id]] and a symbol, and no target. It cancels the
+strategy's earlier orders on that symbol (ADR-0055). Each carries a
 deterministic [[signal_id]] so replays converge; the [[ExecutionManager]] consumes signals and
 turns each into an order saga. See ADR-0026.
 _Avoid_: order request, command (the bus has no command pattern — a signal is just an event).
@@ -203,15 +203,16 @@ never the snapshot (ADR-0016). The engine's saga and dedup are keyed on it. **Mu
 pure function of strategy state — never random.** The `SignalId` value object (`domain/ids.py`)
 is the single owner of this format: `Signal.signal_id` composes it (`render`) and seq
 high-water recovery reads it back (`parse`), so the wire form and the recovery read can never
-drift. See ADR-0006. ADR-0055 adds a per-strategy seq record for cancel all seqs. The high-water
-also reads it. Not built yet (#408).
+drift. See ADR-0006. The store also keeps a per-strategy seq record that only goes up. A
+[[Cancel all]] writes its seq there before it marks any order, and the high-water reads that record
+too. So a restart never reuses the seq of a cancel all that cancelled nothing (ADR-0055).
 _Avoid_: signal uuid, request id.
 
 **SignalEmitter**:
 The strategy-author's helper (`domain/emitter.py`) that owns a [[Strategy]]'s monotonic
-`seq` counter and builds/publishes its [[Signal]]s (`place`/`cancel`, clock-stamped, returning
-the [[signal_id]]). Concentrates the one piece of strategy mechanics that is a correctness spine
-— never reusing a [[signal_id]] across restart — so it is not each author's problem. A strategy
+`seq` counter and builds/publishes its [[Signal]]s (`place`/`cancel`/`cancel_all`, clock-stamped,
+returning the [[signal_id]]). Concentrates the one piece of strategy mechanics that is a
+correctness spine — never reusing a [[signal_id]] across restart — so it is not each author's problem. A strategy
 **composes** an emitter (holds one as a field); it is never a base class, because the [[Strategy]]
 seam is satisfied by shape, not inheritance (ADR-0032). The engine's `set_next_seq()` (ADR-0016)
 sets the counter through it.
@@ -452,7 +453,9 @@ sends one cancel all per symbol. It cancels only the orders it sent before that 
 remain, it cancels them once more, then exits 1 if any still rest (ADR-0060). Operator cancel all
 is built on paper (#468) and on Hyperliquid (#470). On Hyperliquid it covers perp orders on the
 first perp dex. It leaves spot orders resting and names each one (ADR-0052). A strategy's cancel
-all is not built yet (#408).
+all is built (#464). A redelivered one sends no cancel twice. A newer one sends the cancel again for
+an order still open, so a second cancel all is how a strategy retries. The kill switch does not
+block it (ADR-0055).
 _Avoid_: flatten (that closes positions), mass-cancel.
 
 **Flatten**:

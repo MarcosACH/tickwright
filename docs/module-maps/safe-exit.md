@@ -14,7 +14,7 @@ src/tickwright/
   domain/
     events.py                 # + CancelAllSignal, reduce_only, OrderRefusedReport
     venue.py                  # + VenueOpenOrder, ExternalOrderRef, RATE_LIMITED_IP
-    order.py                  # + split_basis, the operator cancel mark, request_cancel by seq
+    order.py                  # + split_basis, the operator cancel mark, request_cancel_all by seq
     position.py               # + OPERATOR, beside UNATTRIBUTED
     instrument.py             # + the strategy's own position on PreTradeReading
     protocols.py              # Exchange: cancel(refs), fetch_open_orders, fetch_positions
