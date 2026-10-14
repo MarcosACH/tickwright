@@ -31,8 +31,9 @@ from tickwright.domain import (
 )
 from tickwright.engine.runner import Engine
 
-# One step per tick: what the strategy does when that tick arrives.
-Step = Callable[[SignalEmitter], Awaitable[object]]
+# One step per tick: the tick's symbol, and what the strategy does when it arrives.
+# The paper exchange prices a limit off the symbol's last tick, so each step gets one.
+Step = tuple[str, Callable[[SignalEmitter], Awaitable[object]]]
 
 
 class _ScriptedStrategy:
@@ -46,7 +47,8 @@ class _ScriptedStrategy:
 
     async def on_tick(self, tick: MarketTick) -> None:
         if self._steps:
-            await self._steps.pop(0)(self._emitter)
+            _, action = self._steps.pop(0)
+            await action(self._emitter)
 
     async def on_order_event(self, event: OrderEvent) -> None:
         if isinstance(event, OrderCancelled):
@@ -75,14 +77,14 @@ def _rest(symbol: str) -> Step:
             price=Decimal("30000"),
         )
 
-    return step
+    return symbol, step
 
 
 def _cancel_all(symbol: str) -> Step:
     async def step(emitter: SignalEmitter) -> object:
         return await emitter.cancel_all(symbol=symbol)
 
-    return step
+    return symbol, step
 
 
 def _write_ticks(path: Path, symbols: list[str]) -> Path:
@@ -103,7 +105,7 @@ def _write_ticks(path: Path, symbols: list[str]) -> Path:
 
 def _run(tmp_path: Path, steps: list[Step]) -> tuple[_ScriptedStrategy, SQLiteStore]:
     """One engine life: replay one tick per step, then stop gracefully."""
-    ticks = _write_ticks(tmp_path / "ticks.jsonl", ["BTC"] * len(steps))
+    ticks = _write_ticks(tmp_path / "ticks.jsonl", [symbol for symbol, _ in steps])
     db = tmp_path / "saga.db"
 
     async def main() -> _ScriptedStrategy:
@@ -120,7 +122,7 @@ def _run(tmp_path: Path, steps: list[Step]) -> tuple[_ScriptedStrategy, SQLiteSt
         feed = ReplayFeed(path=ticks, bus=bus, clock=clock)
         engine = Engine(bus=bus, clock=clock, store=SQLiteStore(db), exchange=exchange, feed=feed)
         strategy = _ScriptedStrategy(bus=bus, clock=clock, steps=steps)
-        engine.register(strategy, symbols={"BTC"})
+        engine.register(strategy, symbols={"BTC", "ETH"})
 
         done = asyncio.Event()
 
@@ -149,3 +151,14 @@ def test_one_cancel_all_cancels_every_open_order_on_the_symbol(tmp_path: Path) -
         assert order is not None
         assert order.state is OrderState.CANCELLED
     assert sorted(event.cloid for event in strategy.cancellations) == sorted(placed)
+
+
+def test_a_cancel_all_leaves_orders_on_another_symbol_open(tmp_path: Path) -> None:
+    steps = [_rest("BTC"), _rest("ETH"), _cancel_all("BTC")]
+    strategy, store = _run(tmp_path, steps)
+
+    other = store.get_order(derive_cloid("scripted:ETH:2"))
+    assert other is not None
+    assert other.state is OrderState.LIVE
+    assert other.cancel_requested is False
+    assert [event.cloid for event in strategy.cancellations] == [derive_cloid("scripted:BTC:1")]
