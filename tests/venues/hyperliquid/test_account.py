@@ -39,6 +39,7 @@ from tickwright.venues.hyperliquid import (
     HyperliquidExchange,
     HyperliquidUniverse,
 )
+from tickwright.venues.hyperliquid.transport import IpRateLimited
 
 WALLET_ADDRESS = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
 
@@ -805,6 +806,12 @@ def test_positions_read_the_signed_size_of_every_coin_the_account_holds() -> Non
         "CASHCAT": Decimal("1000000.0"),
     }
     assert _fetch_positions(FLAT_SNAPSHOT) == {}
+
+
+def test_a_positions_read_that_hits_the_ip_rate_limit_says_so_and_nothing_more() -> None:
+    # Flatten waits out a rate limit and does not count it as a dry attempt
+    # (ADR-0060). So the kind must survive, and an empty dict here would read flat.
+    assert _fetch_positions(IpRateLimited("429 from the venue")) is VenueReadFailure.RATE_LIMITED_IP
 
 
 def test_a_named_unparseable_read_carries_the_response_shape_not_its_whole_body() -> None:
