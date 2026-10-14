@@ -419,10 +419,10 @@ def test_sigterm_during_cancel_all_stops_the_run_with_exit_one(tmp_path: Path) -
 async def _rest(exchange: PaperExchange, sagas: Checkpointer, *, seq: int, price: str) -> str:
     """One engine order resting on paper, with its saga in the store.
 
-    Seeded through the two seams rather than by an earlier engine run. Paper keeps
-    its book in memory only (#484), so the exit run must share this exchange, and
-    two engines cannot share one bus. The saga is left ``SUBMITTED``, as after a
-    crash before the ack. The boot barrier then heals it to ``LIVE`` from paper's
+    Seeded through the two seams rather than by an earlier engine run. The saga is
+    left ``SUBMITTED``, as after a crash before the ack. A new paper venue never
+    rebuilds a ``SUBMITTED`` row (#484), so the exit run must share this exchange,
+    and two engines cannot share one bus. The boot barrier then heals it to ``LIVE`` from paper's
     own record, so it rests when the job starts.
     """
     signal_id = f"resting:BTC:{seq}"
