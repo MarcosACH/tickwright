@@ -95,6 +95,7 @@ def _paper(bus: EventBus, clock: ManualClock, store: SQLiteStore) -> PaperExchan
         instrument_specs=_SPECS,
         account_net=reads.account_net,
         applied_fills=reads.applied_fills,
+        resting_orders=reads.resting_orders,
     )
 
 
@@ -1199,6 +1200,7 @@ class _Venue:
             instrument_specs=_SPECS,
             account_net=lambda: paper_store_reads(self.store).account_net(),
             applied_fills=lambda cloid: paper_store_reads(self.store).applied_fills(cloid),
+            resting_orders=lambda: paper_store_reads(self.store).resting_orders(),
         )
         self.bus.subscribe(ExecutionReport, self._report)
 

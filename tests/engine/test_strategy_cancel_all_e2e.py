@@ -118,6 +118,7 @@ def _run(tmp_path: Path, steps: list[Step]) -> tuple[_ScriptedStrategy, SQLiteSt
             genesis_collateral=GENESIS,
             account_net=dict,
             applied_fills=lambda cloid: (),
+            resting_orders=list,
         )
         feed = ReplayFeed(path=ticks, bus=bus, clock=clock)
         engine = Engine(bus=bus, clock=clock, store=SQLiteStore(db), exchange=exchange, feed=feed)

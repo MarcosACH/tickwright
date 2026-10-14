@@ -33,7 +33,7 @@ until the bus delivers it, so the venue counts its own unapplied fills on top of
 the store net. It drops each one once the store shows it applied (ADR-0057).
 """
 
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import replace
 from decimal import Decimal
 
@@ -84,6 +84,7 @@ class PaperExchange:
         account_label: str = DEFAULT_ACCOUNT_LABEL,
         account_net: Callable[[], Mapping[str, Decimal]],
         applied_fills: Callable[[str], Collection[str]],
+        resting_orders: Callable[[], Iterable[PlaceOrder]],
         instrument_specs: Mapping[str, InstrumentSpec] | None = None,
         leverage: LeverageBook = EMPTY_LEVERAGE_BOOK,
         funding_interval_ns: int = HOUR_NS,
@@ -103,6 +104,10 @@ class PaperExchange:
         # a default would let two quick reduce-only orders both fill past the
         # position (ADR-0057).
         self._unapplied = UnappliedFills(applied=applied_fills)
+        # The orders an earlier run left resting, read at ``start()``. Required
+        # for the same reason: an empty default is a venue that silently forgot
+        # every order it held when the process restarted (#484).
+        self._resting_orders = resting_orders
         self._funding_interval_ns = funding_interval_ns
         # The account's opening cash is the operator's declaration, never the
         # venue's: the paper exchange has nobody to ask, and the engine supplies
@@ -161,8 +166,14 @@ class PaperExchange:
         promotion — the divergence ADR-0034's identical-compute grain exists to
         prevent. Refusing here precedes the barrier, so no order is ever placed
         against a leverage the venue would reject.
+
+        It also puts back the orders an earlier run left resting. A live venue
+        still holds them after a restart, so paper must too (#484). This runs
+        before the barrier, so reconcile reads the same book a live venue gives.
         """
         self._leverage.validate_against(self._specs)
+        for order in self._resting_orders():
+            self._book.rest(order, working=self._working_size(order))
 
     async def run(self) -> None:
         """Settle funding boundaries for as long as the engine supervises this.

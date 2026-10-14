@@ -31,6 +31,7 @@ from tickwright.domain import (
     InstrumentSpec,
     LeverageBook,
     MarketFeed,
+    PlaceOrder,
     Portfolio,
     PreTradeGuard,
     ReplayClock,
@@ -130,6 +131,7 @@ def build_exchange(
                 instrument_specs=config.paper.instrument_specs,
                 account_net=reads.account_net,
                 applied_fills=reads.applied_fills,
+                resting_orders=reads.resting_orders,
                 # The resolved book, the same object the margin model receives
                 # below — paper validates its bounds in ``start()`` and writes
                 # nothing (ADR-0044 §9).
@@ -166,10 +168,11 @@ def build_exchange(
 
 
 class PaperStoreReads(NamedTuple):
-    """The two store reads the paper venue needs, in its own parameter names."""
+    """The store reads the paper venue needs, in its own parameter names."""
 
     account_net: Callable[[], Mapping[str, Decimal]]
     applied_fills: Callable[[str], frozenset[str]]
+    resting_orders: Callable[[], list[PlaceOrder]]
 
 
 def paper_store_reads(store: Store) -> PaperStoreReads:
@@ -186,7 +189,33 @@ def paper_store_reads(store: Store) -> PaperStoreReads:
         # The fill ids the store has applied to one order. Paper counts its own
         # fills on top of the net until they show up here (ADR-0057).
         applied_fills=lambda cloid: _applied_fills(store, cloid),
+        # Paper keeps its book in memory only, so a restart rebuilds it from the
+        # order rows an earlier run left resting (#484).
+        resting_orders=lambda: _resting_orders(store),
     )
+
+
+def _resting_orders(store: Store) -> list[PlaceOrder]:
+    """The orders an earlier run left on paper's book, at the size still open.
+
+    A row with no price is from before the store kept order terms. Paper cannot
+    rest it, so reconcile ghosts it, as before #484.
+    """
+    return [
+        PlaceOrder(
+            cloid=order.cloid,
+            symbol=order.symbol,
+            side=order.side,
+            quantity=order.quantity - order.cum_qty,
+            order_type=order.order_type,
+            time_in_force=order.time_in_force,
+            price=order.price,
+            post_only=order.post_only,
+            reduce_only=order.reduce_only,
+        )
+        for order in store.all_orders()
+        if order.price is not None and order.time_in_force is not None
+    ]
 
 
 def _applied_fills(store: Store, cloid: str) -> frozenset[str]:

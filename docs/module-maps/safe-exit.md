@@ -414,7 +414,8 @@ already gets `account_net`.
 - Count its own fills the store has not applied yet. Drop each one at the next tick or net read
   after the store applies it, so the list stays empty when the engine is idle.
 - Skip the min notional for a reduce-only order that covers the whole net.
-- `fetch_open_orders()` reads its own resting book.
+- `fetch_open_orders()` reads its own resting book. `start()` rebuilds that book from the store,
+  so an exit run on paper sees the orders an earlier run left (ADR-0012, #484).
 - `fetch_positions()` answers the store net plus the unapplied fills. That is the number the
   reduce-only rules already use. `fetch_account_state()` still answers `None`.
 - `cancel(refs)` cancels each ref in turn. It never emits `OrderRefusedReport`.

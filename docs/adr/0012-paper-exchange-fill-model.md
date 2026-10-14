@@ -33,3 +33,11 @@ path, ADR-0031) and it **rebuilds its resting book by cloid**. Startup reconcili
 then finds them present — exactly like a live venue that kept them — so restart **re-adopts**
 resting orders instead of ghosting every healthy order, and the crash-recovery E2E (ADR-0022)
 exercises the same re-adopt path the live venue exercises, deterministically.
+
+**(Amended by #484 — paper reads the orders itself, and the row keeps their terms:**
+The `Engine` hands paper nothing. `app/build.py` injects a `resting_orders` read through
+`paper_store_reads`, next to `account_net` and `applied_fills`. Paper calls it in `start()`, which
+runs before the barrier. The order row keeps the price, time in force, `post_only` and
+`reduce_only` the venue got, so paper can rebuild each order at the size still open. A row written
+before those columns existed has no price. Paper leaves it out, and reconcile ghosts it.
+**)**

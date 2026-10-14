@@ -162,6 +162,7 @@ def test_a_resting_limit_partial_fills_across_ticks_and_converges() -> None:
         genesis_collateral=GENESIS,
         account_net=dict,
         applied_fills=lambda cloid: (),
+        resting_orders=list,
     )
     fills: list[FillReport] = []
     bus.subscribe(FillReport, lambda r: _record(fills, r))
@@ -198,6 +199,7 @@ def test_a_marketable_limit_partial_fill_rests_its_remainder_and_converges() -> 
         genesis_collateral=GENESIS,
         account_net=dict,
         applied_fills=lambda cloid: (),
+        resting_orders=list,
     )
     fills: list[FillReport] = []
     bus.subscribe(FillReport, lambda r: _record(fills, r))
@@ -229,6 +231,7 @@ def test_a_marketable_ioc_limit_partial_fill_cancels_its_remainder() -> None:
         genesis_collateral=GENESIS,
         account_net=dict,
         applied_fills=lambda cloid: (),
+        resting_orders=list,
     )
     fills: list[FillReport] = []
     statuses: list[OrderStatusReport] = []
@@ -270,6 +273,7 @@ def test_a_partial_is_sized_from_a_shrink_made_earlier_on_the_same_tick() -> Non
         genesis_collateral=GENESIS,
         account_net=lambda: {"BTC": Decimal("3")},
         applied_fills=lambda cloid: (),
+        resting_orders=list,
     )
     fills: list[FillReport] = []
     bus.subscribe(FillReport, lambda r: _record(fills, r))
@@ -308,6 +312,7 @@ def test_a_queue_miss_emits_no_fill_and_leaves_the_order_resting() -> None:
         genesis_collateral=GENESIS,
         account_net=dict,
         applied_fills=lambda cloid: (),
+        resting_orders=list,
     )
     fills: list[FillReport] = []
     statuses: list[OrderStatusReport] = []
@@ -345,6 +350,7 @@ def test_fill_latency_advances_virtual_time_via_the_injected_clock() -> None:
         genesis_collateral=GENESIS,
         account_net=dict,
         applied_fills=lambda cloid: (),
+        resting_orders=list,
     )
     fills: list[FillReport] = []
     bus.subscribe(FillReport, lambda r: _record(fills, r))
@@ -383,6 +389,7 @@ def _run_stream(seed: int) -> list[tuple[Decimal, Decimal]]:
         genesis_collateral=GENESIS,
         account_net=dict,
         applied_fills=lambda cloid: (),
+        resting_orders=list,
     )
     fills: list[FillReport] = []
     bus.subscribe(FillReport, lambda r: _record(fills, r))

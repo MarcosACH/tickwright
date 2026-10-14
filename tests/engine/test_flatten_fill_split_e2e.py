@@ -67,6 +67,7 @@ def _engine() -> _Engine:
         genesis_collateral=GENESIS,
         account_net=reads.account_net,
         applied_fills=reads.applied_fills,
+        resting_orders=reads.resting_orders,
     )
     checks = Checkpointer(
         spec=AccountSpec(account_id="paper-default", genesis_collateral=GENESIS),
@@ -256,6 +257,7 @@ def test_reconcile_after_a_restart_books_the_rest_of_a_flatten_order_by_the_same
         genesis_collateral=GENESIS,
         account_net=lambda: paper_store_reads(open_store[0]).account_net(),
         applied_fills=lambda cloid: paper_store_reads(open_store[0]).applied_fills(cloid),
+        resting_orders=lambda: paper_store_reads(open_store[0]).resting_orders(),
     )
 
     async def forward(report: ExecutionReport) -> None:

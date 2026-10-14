@@ -371,6 +371,7 @@ def _saga_pipeline(broker: FakeKafkaBroker) -> tuple[KafkaBus, SQLiteStore, list
         genesis_collateral=GENESIS,
         account_net=dict,
         applied_fills=lambda cloid: (),
+        resting_orders=list,
     )
     manager = ExecutionManager(
         bus=bus, exchange=exchange, checkpointer=checkpointer(store, clock=clock)

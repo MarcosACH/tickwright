@@ -56,6 +56,7 @@ def _wire(backend: str) -> tuple[EventBus, SQLiteStore, list[OrderEvent]]:
         genesis_collateral=GENESIS,
         account_net=dict,
         applied_fills=lambda cloid: (),
+        resting_orders=list,
     )
     checks = checkpointer(store, clock=clock)
     manager = ExecutionManager(

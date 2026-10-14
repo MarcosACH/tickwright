@@ -68,6 +68,7 @@ def _run(
         genesis_collateral=GENESIS,
         account_net=dict,
         applied_fills=lambda cloid: (),
+        resting_orders=list,
     )
     checks = checkpointer(store, clock=clock)
     manager = ExecutionManager(

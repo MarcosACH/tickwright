@@ -304,6 +304,7 @@ def _drive_market_fill() -> None:
         genesis_collateral=GENESIS,
         account_net=dict,
         applied_fills=lambda cloid: (),
+        resting_orders=list,
     )
     _manager(bus, clock, exchange)
 
@@ -353,6 +354,7 @@ def _drive_position_changes(*, closing: bool) -> Callable[[], None]:
             genesis_collateral=GENESIS,
             account_net=dict,
             applied_fills=lambda cloid: (),
+            resting_orders=list,
         )
         _manager(bus, clock, exchange)
 
@@ -379,6 +381,7 @@ def _drive_position_changed() -> None:
         genesis_collateral=GENESIS,
         account_net=dict,
         applied_fills=lambda cloid: (),
+        resting_orders=list,
     )
     _manager(bus, clock, exchange)
 
@@ -716,6 +719,7 @@ def _drive_engine_faulted() -> None:
                 genesis_collateral=GENESIS,
                 account_net=dict,
                 applied_fills=lambda cloid: (),
+                resting_orders=list,
             ),
             feed=_PoisonedFeed(),
         )
@@ -750,6 +754,7 @@ def _drive_engine_stop_hook_failed() -> None:
                 genesis_collateral=GENESIS,
                 account_net=dict,
                 applied_fills=lambda cloid: (),
+                resting_orders=list,
             ),
             feed=_PoisonedFeed(),
         )
@@ -775,6 +780,7 @@ def _drive_engine_lifecycle() -> None:
                 genesis_collateral=GENESIS,
                 account_net=dict,
                 applied_fills=lambda cloid: (),
+                resting_orders=list,
             ),
             feed=_IdleFeed(),
         )
@@ -807,6 +813,7 @@ def _drive_exit_finished() -> None:
             genesis_collateral=GENESIS,
             account_net=dict,
             applied_fills=lambda cloid: (),
+            resting_orders=list,
         ),
         feed=_IdleFeed(),
         exit_job=OperatorCancelAll(),
@@ -829,6 +836,7 @@ def _drive_exit_unguarded() -> None:
             genesis_collateral=GENESIS,
             account_net=dict,
             applied_fills=lambda cloid: (),
+            resting_orders=list,
         ),
         feed=_IdleFeed(),
         exit_job=Flatten(feed_ends=True),
@@ -851,6 +859,7 @@ def _drive_flatten_gave_up() -> None:
             genesis_collateral=GENESIS,
             account_net=lambda: {"BTC": Decimal("0.02")},
             applied_fills=lambda cloid: (),
+            resting_orders=list,
         ),
         feed=_IdleFeed(),
         exit_job=Flatten(feed_ends=True),
@@ -882,6 +891,7 @@ def _drive_exit_refused() -> None:
                 genesis_collateral=GENESIS,
                 account_net=dict,
                 applied_fills=lambda cloid: (),
+                resting_orders=list,
             ),
             feed=_IdleFeed(),
             exit_job=OperatorCancelAll(),
@@ -904,6 +914,7 @@ def _drive_exit_new_store() -> None:
             genesis_collateral=GENESIS,
             account_net=dict,
             applied_fills=lambda cloid: (),
+            resting_orders=list,
         ),
         feed=_IdleFeed(),
         exit_job=OperatorCancelAll(new_store=True),
@@ -929,6 +940,7 @@ def _drive_cancel_all_orders_remain() -> None:
         genesis_collateral=GENESIS,
         account_net=dict,
         applied_fills=lambda cloid: (),
+        resting_orders=list,
     )
     engine = Engine(
         bus=bus,
