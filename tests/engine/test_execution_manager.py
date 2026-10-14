@@ -10,13 +10,14 @@ our own classes.
 
 import asyncio
 import random
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 from ledgers import GENESIS, checkpointer
+from venue_doubles import VenueLink
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
@@ -33,7 +34,9 @@ from tickwright.domain import (
     Approved,
     CancelAllSignal,
     CancelSignal,
+    Exchange,
     ExecutionReport,
+    ExternalOrderRef,
     FillReport,
     GuardDecision,
     InvariantViolation,
@@ -45,6 +48,7 @@ from tickwright.domain import (
     OrderLive,
     OrderPartiallyFilled,
     OrderPlaced,
+    OrderRef,
     OrderRejected,
     OrderState,
     OrderStatusReport,
@@ -147,9 +151,15 @@ class _Wiring:
         return self.checkpointer.portfolio
 
 
-def _wiring(store: SQLiteStore, *, guard: PreTradeGuard | None = None) -> _Wiring:
+def _wiring(
+    store: SQLiteStore,
+    *,
+    guard: PreTradeGuard | None = None,
+    link: Callable[[PaperExchange], Exchange] | None = None,
+) -> _Wiring:
     """The manager over its real collaborators, on the ``store`` handed in — so a
-    case can substitute one that fails at a chosen seam.
+    case can substitute one that fails at a chosen seam. ``link`` puts a
+    ``VenueLink`` in front of the paper venue, for a case where the network fails.
 
     Both read-models come from the one ``Checkpointer`` built on that store, so
     this harness cannot express the split write the atomic path exists to close
@@ -170,7 +180,8 @@ def _wiring(store: SQLiteStore, *, guard: PreTradeGuard | None = None) -> _Wirin
     # that skipped this step would leave behind the one shape #188 refuses —
     # order history with no ledger — for whatever life reopens the store next.
     checks.recover()
-    manager = ExecutionManager(bus=bus, exchange=exchange, checkpointer=checks, guard=guard)
+    venue = link(exchange) if link is not None else exchange
+    manager = ExecutionManager(bus=bus, exchange=venue, checkpointer=checks, guard=guard)
 
     bus.subscribe(Signal, manager.on_signal)
     bus.subscribe(ExecutionReport, manager.on_execution_report)
@@ -1030,6 +1041,43 @@ def test_a_cancel_all_leaves_an_order_sent_after_it_open() -> None:
     assert later.cancel_requested is False
     cancelled = [ev.cloid for ev in order_events if isinstance(ev, OrderCancelled)]
     assert cancelled == [derive_cloid("trivial:BTC:1")]
+
+
+class _CancelsLost(VenueLink):
+    """Every cancel is lost on the way to the venue, so the order stays open."""
+
+    def __init__(self, venue: Exchange) -> None:
+        super().__init__(venue)
+        self.cancels_sent: list[OrderRef | ExternalOrderRef] = []
+
+    async def cancel(self, refs: Sequence[OrderRef | ExternalOrderRef]) -> None:
+        self.cancels_sent.extend(refs)
+
+
+def test_a_redelivered_cancel_all_sends_no_cancel_twice() -> None:
+    links: list[_CancelsLost] = []
+
+    def link(venue: PaperExchange) -> Exchange:
+        links.append(_CancelsLost(venue))
+        return links[-1]
+
+    wiring = _wiring(SQLiteStore(":memory:"), link=link)
+
+    async def scenario() -> None:
+        await wiring.bus.publish(_tick("42000"))
+        await wiring.bus.publish(_limit_signal("41000", seq=1))
+        await wiring.bus.publish(_cancel_all_signal(seq=2))
+        # The first cancel was lost, so the order is still open with its marker.
+        # A redelivery of the same cancel all must not send it again (ADR-0055).
+        await wiring.bus.publish(_cancel_all_signal(seq=2))
+
+    asyncio.run(scenario())
+
+    order = wiring.store.get_order(derive_cloid("trivial:BTC:1"))
+    assert order is not None
+    assert links[0].cancels_sent == [OrderRef.of(order)]
+    assert order.state is OrderState.LIVE
+    assert order.cancel_signal_id == "trivial:BTC:2"
 
 
 async def _record(sink: list, event: object) -> None:
