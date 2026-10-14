@@ -12,6 +12,7 @@ cut part.
 import asyncio
 from decimal import Decimal
 
+import pytest
 from hyperliquid_fakes import (
     TEST_SIGNING_KEY,
     FakeExchangeApi,
@@ -73,17 +74,20 @@ SIGNAL = PlaceSignal(
 CLOID = derive_cloid(SIGNAL.signal_id)
 
 
-def _shrunk_venue(*fills: dict) -> FakeExchangeApi:
+def _shrunk_venue(
+    *fills: dict, placement_fills: object = None, reconcile_fills: object = None
+) -> FakeExchangeApi:
     """The venue after it shrank the 0.5 buy to the 0.3 short and filled it.
-    The fills read right after placement dies. Reconcile's reads succeed."""
+    By default the fills read right after placement dies, and reconcile reads
+    ``fills``."""
     return FakeExchangeApi(
         {
             "order": filled_response(oid=91, total_sz="0.3", avg_px="43250.0"),
-            "userFills": ConnectionError("connection refused"),
+            "userFills": placement_fills or ConnectionError("connection refused"),
             "orderStatus": order_status_response(
                 cloid=CLOID, status="filled", oid=91, placed_ms=ACK_MS, reduce_only=True
             ),
-            "userFillsByTime": list(fills),
+            "userFillsByTime": reconcile_fills or list(fills),
         }
     )
 
@@ -144,3 +148,29 @@ def test_one_pass_alone_leaves_a_shrunk_order_open() -> None:
 
     assert order.state is OrderState.PARTIALLY_FILLED
     assert order.cum_qty == Decimal("0.3")
+
+
+@pytest.mark.parametrize(("passes", "state"), [(2, "open"), (3, "cancelled")])
+def test_a_fill_listed_late_starts_the_count_again(passes: int, state: str) -> None:
+    # The venue filled 0.2 and 0.1, but lists the 0.1 late. The read right
+    # after placement holds only the 0.2, a short read (#480). So does the
+    # first reconcile pass. The second pass sees 0.3, a new total, so it is
+    # not yet proof. The third agrees with the second and ends the saga.
+    first = fill_entry(oid=91, tid=556, px="43250.0", sz="0.2", time=FILL_MS)
+    late = fill_entry(oid=91, tid=557, px="43250.0", sz="0.1", time=FILL_MS)
+    reads = 0
+
+    def listed_so_far(_payload: dict) -> list[dict]:
+        nonlocal reads
+        reads += 1
+        return [first] if reads == 1 else [first, late]
+
+    post = _shrunk_venue(placement_fills=[first], reconcile_fills=listed_so_far)
+
+    order, _events = _place_then_reconcile(post, passes=passes)
+
+    assert order.cum_qty == Decimal("0.3")
+    if state == "open":
+        assert order.state is OrderState.PARTIALLY_FILLED
+    else:
+        assert order.state is OrderState.CANCELLED
