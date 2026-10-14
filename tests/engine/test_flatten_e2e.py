@@ -155,6 +155,8 @@ def _flatten(
     resting: bool = False,
     clock: ManualClock | None = None,
     bus: EventBus | None = None,
+    used: bool = True,
+    new_store: bool = False,
 ) -> tuple[int, list[EventDict]]:
     """Run flatten over paper and the ``_ROWS`` replay file.
 
@@ -162,9 +164,13 @@ def _flatten(
     front of paper. ``replayed`` picks the symbols the file has rows for.
     ``resting`` rests one BTC buy far below the replay, as ``_RESTING``.
     ``clock`` lets a test read the virtual time the run ended at. ``bus`` lets
-    a venue double publish its own reports.
+    a venue double publish its own reports. ``used`` boots a fresh store
+    first, because an exit run refuses one no engine has used (ADR-0052).
+    ``new_store`` is the operator's ``--new-store``.
     Returns the exit code and every event the run emitted.
     """
+    if used:
+        _hold(tmp_path / "saga.db", {})
     bus = bus or InMemoryBus()
     clock = clock or ManualClock()
     store = SQLiteStore(tmp_path / "saga.db")
@@ -176,7 +182,7 @@ def _flatten(
         exchange=paper if link is None else link(paper),
         feed=ReplayFeed(path=_ticks(tmp_path / "ticks.jsonl", replayed), bus=bus, clock=clock),
         guard=RealGuard(specs=_SPECS, store=store, clock=clock) if guarded else None,
-        exit_job=Flatten(feed_ends=True),
+        exit_job=Flatten(feed_ends=True, new_store=new_store),
     )
 
     async def go() -> int:
@@ -256,6 +262,35 @@ def test_flatten_with_nothing_to_close_still_trips_the_kill_switch(tmp_path: Pat
     assert state is not None
     assert state.tripped
     assert state.reason == "flatten: operator exit"
+
+
+def test_flatten_on_a_store_no_engine_has_used_exits_two_and_trips_nothing(
+    tmp_path: Path,
+) -> None:
+    # The kill switch trip is a write, so a refused run must not reach it (ADR-0052).
+    exit_code, logs = _flatten(tmp_path, used=False)
+
+    assert exit_code == 2
+    assert [log["event"] for log in logs] == ["exit.refused"]
+    assert logs[0]["reason"] == "new_store"
+    after = SQLiteStore(tmp_path / "saga.db")
+    try:
+        assert after.load_account() is None
+        assert after.load_kill_switch() is None
+    finally:
+        after.close()
+
+
+def test_flatten_told_the_store_is_new_warns_and_runs(tmp_path: Path) -> None:
+    exit_code, logs = _flatten(tmp_path, used=False, new_store=True)
+
+    assert exit_code == 0
+    events = [log["event"] for log in logs]
+    assert "exit.refused" not in events
+    assert events.count("exit.new_store") == 1
+    assert "guard.kill_switch_tripped" in events
+    assert logs[-1]["event"] == "exit.finished"
+    assert logs[-1]["outcome"] == "done"
 
 
 def test_flatten_under_a_noop_guard_warns_and_still_closes(tmp_path: Path) -> None:

@@ -154,11 +154,12 @@ class Flatten:
 
     name = "flatten"
 
-    def __init__(self, *, feed_ends: bool) -> None:
+    def __init__(self, *, feed_ends: bool, new_store: bool = False) -> None:
         self._feed_ends = feed_ends
+        self._new_store = new_store
 
     def admit(self, store: Store) -> bool:
-        return True
+        return _admit_store(store, new_store=self._new_store)
 
     async def run(self, context: ExitContext) -> ExitOutcome:
         # First, so a crash mid-flatten still leaves the store halted (ADR-0053).

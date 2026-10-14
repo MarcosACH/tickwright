@@ -821,7 +821,7 @@ def _drive_exit_unguarded() -> None:
     engine = Engine(
         bus=bus,
         clock=clock,
-        store=SQLiteStore(":memory:"),
+        store=_used_store(clock),
         exchange=PaperExchange(
             bus=bus,
             clock=clock,
@@ -843,7 +843,7 @@ def _drive_flatten_gave_up() -> None:
     engine = Engine(
         bus=bus,
         clock=clock,
-        store=SQLiteStore(":memory:"),
+        store=_used_store(clock),
         exchange=PaperExchange(
             bus=bus,
             clock=clock,

@@ -341,6 +341,9 @@ def test_flatten_on_an_empty_paper_account_trips_the_kill_switch_and_exits_zero(
     _write_workspace(tmp_path)
     _export_hostile_config(monkeypatch)
     log = tmp_path / "flatten.log"
+    # An engine booted here before, so the store holds the account row (ADR-0052).
+    with SQLiteStore(tmp_path / "saga.db") as store:
+        checkpointer(store, clock=ManualClock()).recover()
 
     assert _run_to_exit(tmp_path, log, "flatten") == 0, log.read_text()
 
