@@ -288,3 +288,23 @@ class PlaceOrder:
     price: Decimal | None = None
     post_only: bool = False
     reduce_only: bool = False
+
+    @classmethod
+    def of(cls, order: Order) -> "PlaceOrder":
+        """The order the venue works for ``order``: its terms, at the size still open.
+
+        A new saga has filled nothing, so that is the full size. A restarted
+        paper venue rebuilds a partly filled order from this, so it never works
+        the filled part again (#484).
+        """
+        return cls(
+            cloid=order.cloid,
+            symbol=order.symbol,
+            side=order.side,
+            quantity=order.quantity - order.cum_qty,
+            order_type=order.order_type,
+            time_in_force=order.time_in_force,
+            price=order.price,
+            post_only=order.post_only,
+            reduce_only=order.reduce_only,
+        )

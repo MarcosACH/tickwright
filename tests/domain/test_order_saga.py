@@ -23,7 +23,9 @@ from tickwright.domain import (
     OrderState,
     OrderSubmitted,
     OrderType,
+    PlaceOrder,
     Side,
+    TimeInForce,
 )
 
 
@@ -507,3 +509,43 @@ def test_live_ack_records_its_time_and_a_redelivered_ack_is_a_no_op() -> None:
     )
     assert order.apply(redelivered) is False
     assert order.acked_ts_ns == 2
+
+
+def _limit() -> Order:
+    return Order(
+        cloid="0xabc",
+        strategy_id="trivial",
+        signal_id="trivial:BTC:1",
+        symbol="BTC",
+        side=Side.SELL,
+        quantity=Decimal("2"),
+        order_type=OrderType.LIMIT,
+        price=Decimal("101"),
+        time_in_force=TimeInForce.GTC,
+        post_only=True,
+        reduce_only=True,
+    )
+
+
+def test_the_venue_order_for_a_new_saga_carries_its_terms_at_full_size() -> None:
+    assert PlaceOrder.of(_limit()) == PlaceOrder(
+        cloid="0xabc",
+        symbol="BTC",
+        side=Side.SELL,
+        quantity=Decimal("2"),
+        order_type=OrderType.LIMIT,
+        time_in_force=TimeInForce.GTC,
+        price=Decimal("101"),
+        post_only=True,
+        reduce_only=True,
+    )
+
+
+def test_the_venue_order_for_a_partly_filled_saga_works_only_the_size_still_open() -> None:
+    # A restarted paper venue rebuilds the order from this. Working the full
+    # size again would fill more than the saga asked for (#484).
+    order = _limit()
+    order.apply(_submitted())
+    order.apply(_live())
+    order.apply(_partial(quantity="0.5", cum_qty="0.5"))
+    assert PlaceOrder.of(order).quantity == Decimal("1.5")
