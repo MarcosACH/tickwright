@@ -44,6 +44,7 @@ from tickwright.domain import (
     VenueOpenOrder,
     VenueOrderView,
     VenueReadFailure,
+    duration_ns,
     quantize_price,
 )
 from tickwright.observability import NamedEvent, named_event
@@ -83,6 +84,7 @@ class HyperliquidExchange:
         clock: Clock,
         universe: HyperliquidUniverse,
         startup_timeout_seconds: float,
+        shrink_wait_seconds: float,
         leverage: LeverageBook = EMPTY_LEVERAGE_BOOK,
         post: PostJson | None = None,
         connect: Connect = open_websocket,
@@ -128,10 +130,15 @@ class HyperliquidExchange:
         # strictly increasing, and the ms-truncated clock would collide on two
         # sends inside one millisecond — this floor keeps them monotonic.
         self._last_nonce = 0
-        # The fill total each shrunk order showed on its last read, by cloid.
-        # Its cut part ends only once two reads agree (``fetch_order``). Kept in
-        # memory on purpose: a restart forgets it and only waits one more pass.
-        self._shrunk_fills: dict[str, Decimal] = {}
+        # The fill total each shrunk order shows, by cloid, and when a read
+        # first showed it. Its cut part ends only once that total has held for
+        # the whole wait (``fetch_order``). Kept in memory on purpose: a restart
+        # forgets it and only waits once more.
+        self._shrunk_fills: dict[str, tuple[Decimal, int]] = {}
+        # The engine's open-order interval, handed down by the composition root.
+        # A read count would let a boot retry one second later pass as a second
+        # reconcile pass. A wait in clock time cannot (#478).
+        self._shrink_wait_ns = duration_ns(shrink_wait_seconds, name="shrink_wait_seconds")
         # The MARKET slippage bound needs the latest traded price, and the tick
         # stream is where prices live (ADR-0027) — subscribe like any consumer.
         bus.subscribe(MarketTick, self.on_tick)
@@ -334,6 +341,10 @@ class HyperliquidExchange:
                 # reported. A short read leaves the saga open for reconcile.
                 read_sz = sum((fill.quantity for fill in fills), Decimal("0"))
                 if order.reduce_only and read_sz == total_sz and total_sz < order.quantity:
+                    # A reconcile read can run while this fills read is out, and
+                    # it may have started the wait. The saga ends here, so no
+                    # later read will take the entry out.
+                    self._shrunk_fills.pop(order.cloid, None)
                     await self._bus.publish(
                         self._status_report(
                             cloid=order.cloid,
@@ -494,6 +505,11 @@ class HyperliquidExchange:
             # venue answering everything else at full speed (ADR-0049). Neither
             # may ever be mistaken for an empty book.
             return record
+        # Taken out on every answer, so an order that stops reading as shrunk
+        # leaves nothing behind. Only a shrunk order still waiting puts it back.
+        # A failed fills read below then restarts the wait, which is the safe
+        # side: it only keeps the saga open longer.
+        seen = self._shrunk_fills.pop(ref.cloid, None)
         if record is _OrderStatusRead.NO_RECORD:
             # unknownOid: a *successful* read that positively has no record.
             # Either the order never landed, or the venue has since dropped the
@@ -523,7 +539,9 @@ class HyperliquidExchange:
         )
         if isinstance(fills, VenueReadFailure):
             return fills
-        if _shrunk(record, fills, asked=ref.quantity) and self._fills_settled(ref.cloid, fills):
+        if _shrunk(record, fills, asked=ref.quantity) and self._fills_settled(
+            ref.cloid, fills, seen=seen
+        ):
             # The venue answers `filled` for an order it shrank, and a FILLED
             # report moves no saga. The cut part ends CANCELLED, as it does
             # when the fills read at placement works (ADR-0057).
@@ -540,17 +558,25 @@ class HyperliquidExchange:
         )
         return VenueOrderView(status=status, fills=tuple(fills))
 
-    def _fills_settled(self, cloid: str, fills: list[FillReport]) -> bool:
-        """Whether this read shows the same fill total as the last one.
+    def _fills_settled(
+        self, cloid: str, fills: list[FillReport], *, seen: tuple[Decimal, int] | None
+    ) -> bool:
+        """Whether this read's fill total has held for the whole wait.
 
         One read is not proof the venue has listed every fill yet. A fill that
         lands after CANCELLED is an illegal move and would be lost. So the cut
-        part waits until two reads, one reconcile pass apart, agree.
+        part waits until the same total has held for one open-order interval.
+        ``seen`` is the total an earlier read showed, and when it first did.
         """
         total = sum((fill.quantity for fill in fills), Decimal("0"))
-        if self._shrunk_fills.pop(cloid, None) == total:
-            return True
-        self._shrunk_fills[cloid] = total
+        now = self._clock.timestamp_ns()
+        if seen is not None and seen[0] == total:
+            if now - seen[1] >= self._shrink_wait_ns:
+                return True
+            self._shrunk_fills[cloid] = seen
+            return False
+        # A new total, so the venue was still listing fills. The wait restarts.
+        self._shrunk_fills[cloid] = (total, now)
         return False
 
     async def fetch_open_orders(self) -> list[VenueOpenOrder | ExternalOrderRef] | VenueReadFailure:

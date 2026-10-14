@@ -187,6 +187,7 @@ def _cancel_all(
         post=post,
         connect=idle_ws,
         startup_timeout_seconds=60.0,
+        shrink_wait_seconds=30.0,
     )
     engine = Engine(
         bus=bus,

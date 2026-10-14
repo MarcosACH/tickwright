@@ -159,6 +159,7 @@ def _exchange(snapshot: dict) -> tuple[HyperliquidExchange, FakeExchangeApi]:
             universe=UNIVERSE,
             post=post,
             startup_timeout_seconds=60.0,
+            shrink_wait_seconds=30.0,
         ),
         post,
     )

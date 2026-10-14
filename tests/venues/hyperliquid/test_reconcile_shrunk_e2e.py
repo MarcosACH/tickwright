@@ -100,6 +100,7 @@ def _place_then_reconcile(post: FakeExchangeApi, *, passes: int) -> tuple[Order,
     async def main() -> tuple[Order, list[OrderEvent]]:
         bus = InMemoryBus()
         clock = ManualClock(start_ns=ACK_MS * 1_000_000)
+        config = ReconcileConfig()
         exchange = HyperliquidExchange(
             config=HyperliquidConfig(
                 testnet=True, symbols=["BTC"], signing_key=SecretStr(TEST_SIGNING_KEY)
@@ -109,6 +110,8 @@ def _place_then_reconcile(post: FakeExchangeApi, *, passes: int) -> tuple[Order,
             universe=HyperliquidUniverse(specs={"BTC": BTC_SPEC}, asset_indices={"BTC": 3}),
             post=post,
             startup_timeout_seconds=60.0,
+            # What the composition root hands it: the engine's open-order interval.
+            shrink_wait_seconds=config.open_order_interval_seconds,
         )
         store = SQLiteStore(":memory:")
         checks = checkpointer(store, clock=clock)
@@ -122,9 +125,13 @@ def _place_then_reconcile(post: FakeExchangeApi, *, passes: int) -> tuple[Order,
         bus.subscribe(OrderEvent, collect)
         await manager.on_signal(SIGNAL)
         reconciler = Reconciler(
-            bus=bus, clock=clock, exchange=exchange, cache=checks.cache, config=ReconcileConfig()
+            bus=bus, clock=clock, exchange=exchange, cache=checks.cache, config=config
         )
         for _ in range(passes):
+            # Paced like the open-order cadence: one interval, then a pass.
+            clock.advance_to(
+                clock.timestamp_ns() + int(config.open_order_interval_seconds * 1_000_000_000)
+            )
             assert await reconciler.reconcile_open_orders() is True
         order = store.get_order(CLOID)
         assert order is not None
@@ -155,7 +162,7 @@ def test_one_pass_alone_leaves_a_shrunk_order_open() -> None:
 
 
 @pytest.mark.parametrize(("passes", "state"), [(2, "open"), (3, "cancelled")])
-def test_a_fill_listed_late_starts_the_count_again(passes: int, state: str) -> None:
+def test_a_fill_listed_late_starts_the_wait_again(passes: int, state: str) -> None:
     # The venue filled 0.2 and 0.1, but lists the 0.1 late. The read right
     # after placement holds only the 0.2, a short read (#480). So does the
     # first reconcile pass. The second pass sees 0.3, a new total, so it is

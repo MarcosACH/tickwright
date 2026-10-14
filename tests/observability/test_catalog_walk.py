@@ -539,6 +539,7 @@ def _drive_exchange_request_failed() -> None:
             clock=ManualClock(),
             universe=HyperliquidUniverse(specs={"BTC": _SPEC}, asset_indices={"BTC": 0}),
             startup_timeout_seconds=60.0,
+            shrink_wait_seconds=30.0,
             post=FakeExchangeApi({"order": ConnectionError("connection refused")}),
         )
         await exchange.place(
@@ -573,6 +574,7 @@ def _drive_exchange_action_rejected() -> None:
             clock=ManualClock(),
             universe=HyperliquidUniverse(specs={"BTC": _SPEC}, asset_indices={"BTC": 0}),
             startup_timeout_seconds=60.0,
+            shrink_wait_seconds=30.0,
             post=FakeExchangeApi({"order": {"status": "err", "response": "Invalid nonce"}}),
         )
         await exchange.place(
@@ -605,6 +607,7 @@ def _drive_exchange_spot_order_skipped() -> None:
             clock=ManualClock(),
             universe=HyperliquidUniverse(specs={"BTC": _SPEC}, asset_indices={"BTC": 0}),
             startup_timeout_seconds=60.0,
+            shrink_wait_seconds=30.0,
             post=FakeExchangeApi(
                 {"frontendOpenOrders": [{"coin": "@107", "oid": 903, "cloid": None}]}
             ),
@@ -635,6 +638,7 @@ def _drive_exchange_leverage_unchanged() -> None:
             clock=ManualClock(),
             universe=HyperliquidUniverse(specs={"BTC": _SPEC}, asset_indices={"BTC": 0}),
             startup_timeout_seconds=60.0,
+            shrink_wait_seconds=30.0,
             # ``start()`` also opens the funding socket (#300), not this walk's.
             connect=idle_ws,
             post=FakeExchangeApi(

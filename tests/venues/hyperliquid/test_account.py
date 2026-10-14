@@ -323,6 +323,7 @@ def _exchange(
         # silent one against a real socket.
         post=post if post is not None else FakeExchangeApi({}),
         startup_timeout_seconds=60.0,
+        shrink_wait_seconds=30.0,
     )
 
 

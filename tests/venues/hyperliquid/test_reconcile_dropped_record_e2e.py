@@ -103,6 +103,7 @@ def _make_exchange(
         universe=HyperliquidUniverse(specs={"BTC": BTC_SPEC}, asset_indices={"BTC": 3}),
         post=post,
         startup_timeout_seconds=60.0,
+        shrink_wait_seconds=30.0,
     )
 
 

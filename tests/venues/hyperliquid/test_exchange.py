@@ -101,6 +101,9 @@ def make_exchange(
         # ADR-0024's barrier budget, which the boot guards in ``start()`` are
         # bounded by. Only the mode-gate tests in ``test_preflight.py`` spend it.
         startup_timeout_seconds=60.0,
+        # The engine's open-order interval at its default. A shrunk order's
+        # fill total must hold this long before its cut part ends (#478).
+        shrink_wait_seconds=30.0,
     )
 
 
@@ -989,8 +992,8 @@ def test_fetch_order_ends_only_a_reduce_only_order_filled_for_less_than_asked(
 ) -> None:
     # A reduce-only buy of 0.5. The venue says `filled` either way. Fills of
     # 0.3 mean it shrank the order, so the cut part ends CANCELLED once two
-    # reads agree (ADR-0057, #478). Fills of 0.5 mean it did not, and the
-    # record stays FILLED on every read.
+    # reads one open-order interval apart agree (ADR-0057, #478). Fills of 0.5
+    # mean it did not, and the record stays FILLED on every read.
     post = FakeExchangeApi(
         {
             "orderStatus": order_status_response(
@@ -1002,8 +1005,11 @@ def test_fetch_order_ends_only_a_reduce_only_order_filled_for_less_than_asked(
     ref = OrderRef(cloid=CLOID, symbol="BTC", quantity=Decimal("0.5"))
 
     async def read_twice() -> list[VenueOrderView | VenueReadFailure]:
-        exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
-        return [await exchange.fetch_order(ref), await exchange.fetch_order(ref)]
+        clock = ManualClock()
+        exchange = make_exchange(post, bus=InMemoryBus(), clock=clock)
+        first = await exchange.fetch_order(ref)
+        clock.advance_to(30 * 1_000_000_000)
+        return [first, await exchange.fetch_order(ref)]
 
     first, second = asyncio.run(read_twice())
 
@@ -1011,6 +1017,37 @@ def test_fetch_order_ends_only_a_reduce_only_order_filled_for_less_than_asked(
     assert first.status is not None and second.status is not None
     assert first.status.status is OrderState.FILLED
     assert second.status.status is second_read
+
+
+def test_a_shrunk_order_ends_only_once_its_fills_have_held_for_one_open_order_interval() -> None:
+    # Two reads that agree are not proof the venue has listed every fill. A
+    # boot retry can read the order again one second later. So the same total
+    # must hold for one open-order interval, the gap between two reconcile
+    # passes in a normal run (#478).
+    post = FakeExchangeApi(
+        {
+            "orderStatus": order_status_response(
+                cloid=CLOID, status="filled", oid=91, reduce_only=True
+            ),
+            "userFillsByTime": [fill_entry(oid=91, tid=556, px="43250.0", sz="0.3")],
+        }
+    )
+    ref = OrderRef(cloid=CLOID, symbol="BTC", quantity=Decimal("0.5"))
+    clock = ManualClock()
+
+    async def read_three_times() -> list[OrderState]:
+        exchange = make_exchange(post, bus=InMemoryBus(), clock=clock)
+        states = []
+        for seconds in (0, 1, 30):
+            clock.advance_to(seconds * 1_000_000_000)
+            view = await exchange.fetch_order(ref)
+            assert isinstance(view, VenueOrderView) and view.status is not None
+            states.append(view.status.status)
+        return states
+
+    states = asyncio.run(read_three_times())
+
+    assert states == [OrderState.FILLED, OrderState.FILLED, OrderState.CANCELLED]
 
 
 def test_fetch_order_asks_for_the_record_by_the_acked_oid_not_the_cloid() -> None:

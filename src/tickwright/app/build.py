@@ -40,6 +40,7 @@ from tickwright.domain import (
 )
 from tickwright.engine.exit_run import ExitJob, Flatten, OperatorCancelAll
 from tickwright.engine.guard import NoopGuard, RealGuard
+from tickwright.engine.reconcile import ReconcileConfig
 from tickwright.engine.runner import Engine
 from tickwright.strategies import SingleShotLimitStrategy, SingleShotMarketStrategy
 
@@ -151,6 +152,7 @@ def build_exchange(
                 # (ADR-0044 §6, ADR-0046 §3) — handed the engine's, from the
                 # one place that holds both configs.
                 startup_timeout_seconds=config.engine.startup_reconciliation_timeout_seconds,
+                shrink_wait_seconds=ReconcileConfig().open_order_interval_seconds,
                 # The same resolved book the paper arm and the margin model get:
                 # live validates the identical bound before pushing anything, so
                 # the two paths cannot disagree about a leverage (ADR-0044 §9).

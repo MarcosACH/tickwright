@@ -38,8 +38,10 @@ decides how paper copies them. Decided in
   "reduce-only shrink" when three things hold. The record is `filled`. It is `reduceOnly`. Its
   fills add up to less than the size the saga asked for, which `OrderRef.quantity` carries. One read
   is not enough. A fill that lands after `CANCELLED` is an illegal move and would be lost. So the
-  adapter waits until two reads, one reconcile pass apart, show the same fill total. It keeps the
-  last total in memory. A restart forgets it and only waits one more pass.**)**
+  adapter waits until the same fill total has held for one open-order interval, by its own clock.
+  The composition root hands it that interval. A count of reads would not do. A boot retry reads
+  again one second later, and an exit run passes every in-flight interval. The adapter keeps the
+  total, and when it first saw it, in memory. A restart forgets it and only waits once more.**)**
 - **After every fill, paper re-checks its resting reduce-only orders in that symbol.** If the net
   is smaller than an order's working size, the order shrinks to the net. If the net is zero or on
   the order's side, paper cancels the order with the reason "reduce-only cancelled". This copies
