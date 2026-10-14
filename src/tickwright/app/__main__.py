@@ -28,10 +28,15 @@ def main() -> int:
     # runs with the engine stopped (ADR-0052). An unknown command exits 2 here,
     # before anything is built, so a typo can never start a trading run.
     parser.add_argument("command", nargs="?", choices=["cancel-all", "flatten"])
-    command = parser.parse_args().command
-    if command is None:
+    # An exit run refuses a store no engine has used, because that is almost
+    # always the wrong directory. This flag says the store is new on purpose.
+    parser.add_argument("--new-store", action="store_true")
+    args = parser.parse_args()
+    if args.command is None:
+        if args.new_store:
+            parser.error("--new-store only applies to cancel-all and flatten")
         return _run_engine()
-    return _run_exit_job(command)
+    return _run_exit_job(args.command, new_store=args.new_store)
 
 
 def _run_engine() -> int:
@@ -45,13 +50,13 @@ def _run_engine() -> int:
     return asyncio.run(engine.run())
 
 
-def _run_exit_job(command: Literal["cancel-all", "flatten"]) -> int:
+def _run_exit_job(command: Literal["cancel-all", "flatten"], *, new_store: bool) -> int:
     # A config the run cannot use exits 2 with its message and no event, because
     # logging needs a valid config (ADR-0060).
     try:
         config = AppSettings()
         configure_logging(secrets=config.secrets())
-        engine = build_exit_job(config, command)
+        engine = build_exit_job(config, command, new_store=new_store)
     except (ValidationError, UnsupportedExitRun) as exc:
         print(f"tickwright {command}: {exc}", file=sys.stderr)
         return 2

@@ -48,6 +48,12 @@ class StoreLockHeld(InvariantViolation):
     is gone."""
 
 
+class StoreNeverUsed(InvariantViolation):
+    """No engine has used this store, so an exit run must not boot on it
+    (ADR-0052). It is almost always the wrong directory. The message is the
+    store's name, so the operator can see where the run looked."""
+
+
 class VenueFactUnsupported(InvariantViolation):
     """The venue said something this engine cannot act on and will say it
     identically forever (ADR-0048). Two conditions qualify:

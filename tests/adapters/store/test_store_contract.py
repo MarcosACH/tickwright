@@ -788,8 +788,11 @@ def test_the_seams_error_contract_is_asserted_on_every_member() -> None:
 
     ``close()`` is the one deliberate exclusion (``_durability``): teardown that
     fails is a leaked resource the runner already records as a stop-hook failure,
-    not a durability claim that proved false."""
-    assert_covers_exactly(Store, _SEAM_CALLS, what="_SEAM_CALLS", excluding={"close"})
+    not a durability claim that proved false.
+
+    ``name`` is excluded too. It is read once when the store opens, so it never
+    touches the driver after that and has no failure to contain."""
+    assert_covers_exactly(Store, _SEAM_CALLS, what="_SEAM_CALLS", excluding={"close", "name"})
 
 
 def test_the_funding_mark_is_absent_until_written_and_then_advances(

@@ -303,9 +303,14 @@ class UnsupportedExitRun(ValueError):
     """
 
 
-def build_exit_job(config: AppConfig, command: Literal["cancel-all", "flatten"]) -> Engine:
+def build_exit_job(
+    config: AppConfig, command: Literal["cancel-all", "flatten"], *, new_store: bool = False
+) -> Engine:
     """The engine for ``tickwright cancel-all`` or ``tickwright flatten``: the same
-    stack as ``build_engine``, with the job in place of the strategies (ADR-0052)."""
+    stack as ``build_engine``, with the job in place of the strategies (ADR-0052).
+
+    ``new_store`` is the operator's ``--new-store``. It lets the run boot on a
+    store no engine has used."""
     if command == "flatten":
         # A replay row is not the market. A real close priced from one could
         # fill far from where the venue trades now.
@@ -315,8 +320,10 @@ def build_exit_job(config: AppConfig, command: Literal["cancel-all", "flatten"])
                 "A real close must be priced from the live market."
             )
         # Only a replay ends. A live flatten waits for each symbol's first price instead.
-        return _build_engine(config, exit_job=Flatten(feed_ends=config.feed == "replay"))
-    return _build_engine(config, exit_job=OperatorCancelAll())
+        return _build_engine(
+            config, exit_job=Flatten(feed_ends=config.feed == "replay", new_store=new_store)
+        )
+    return _build_engine(config, exit_job=OperatorCancelAll(new_store=new_store))
 
 
 def _build_engine(config: AppConfig, *, exit_job: ExitJob | None) -> Engine:

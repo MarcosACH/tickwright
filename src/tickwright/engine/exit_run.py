@@ -30,6 +30,8 @@ from tickwright.domain import (
     PreTradeGuard,
     Side,
     SignalEmitter,
+    Store,
+    StoreNeverUsed,
     TimeInForce,
     VenueOpenOrder,
     VenueReadFailure,
@@ -90,15 +92,46 @@ class ExitJob(Protocol):
         """The job's name in ``exit.finished``."""
         ...
 
+    def admit(self, store: Store) -> StoreNeverUsed | None:
+        """Return the refusal if the run must not boot on ``store``, else ``None``.
+
+        It runs after the store lock and before ``recover()``, because boot
+        writes the account row this check reads (ADR-0052). The engine reports
+        a refusal, so a job cannot forget ``exit.refused``.
+        """
+        ...
+
     async def run(self, context: ExitContext) -> ExitOutcome:
         """Do the job and say what the venue holds at the end."""
         ...
+
+
+def _admit_store(store: Store, *, new_store: bool) -> StoreNeverUsed | None:
+    """Refuse a store no engine has used. That is almost always the wrong
+    directory, and the engine the operator meant to stop may still trade there
+    (ADR-0052). ``new_store`` is the operator saying the store is new on purpose."""
+    if store.load_account() is not None:
+        return None
+    if new_store:
+        named_event(
+            NamedEvent.EXIT_NEW_STORE,
+            store=store.name,
+            warning="no engine has used this store: any engine trading elsewhere keeps trading",
+        )
+        return None
+    return StoreNeverUsed(store.name)
 
 
 class OperatorCancelAll:
     """``tickwright cancel-all``: cancel every order resting in the account."""
 
     name = "cancel_all"
+
+    def __init__(self, *, new_store: bool = False) -> None:
+        self._new_store = new_store
+
+    def admit(self, store: Store) -> StoreNeverUsed | None:
+        return _admit_store(store, new_store=self._new_store)
 
     async def run(self, context: ExitContext) -> ExitOutcome:
         left = await context.account.fetch_open_orders()
@@ -122,8 +155,12 @@ class Flatten:
 
     name = "flatten"
 
-    def __init__(self, *, feed_ends: bool) -> None:
+    def __init__(self, *, feed_ends: bool, new_store: bool = False) -> None:
         self._feed_ends = feed_ends
+        self._new_store = new_store
+
+    def admit(self, store: Store) -> StoreNeverUsed | None:
+        return _admit_store(store, new_store=self._new_store)
 
     async def run(self, context: ExitContext) -> ExitOutcome:
         # First, so a crash mid-flatten still leaves the store halted (ADR-0053).

@@ -168,7 +168,13 @@ class SQLiteStore(SqlStore):
         self._conn = conn
         self._lock_file = lock_file
         self._holds_lock = False
+        # SQLite resolves the file to its absolute path. It is empty for ":memory:".
+        self._name = conn.execute("PRAGMA database_list").fetchone()[2] or ":memory:"
         super().__init__(schema=_SCHEMA, added_column_types=_ADDED_COLUMN_TYPES, release=release)
+
+    @property
+    def name(self) -> str:
+        return self._name
 
     @durable
     def lock(self) -> StoreLockHolder | None:

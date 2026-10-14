@@ -26,7 +26,7 @@ from pydantic import SecretStr
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.store import SQLiteStore
-from tickwright.domain import InstrumentSpec
+from tickwright.domain import Account, InstrumentSpec
 from tickwright.engine.exit_run import Flatten
 from tickwright.engine.runner import Engine, EngineConfig
 from tickwright.venues.hyperliquid import (
@@ -229,10 +229,21 @@ def run_flatten(
         shrink_wait_seconds=30.0,
     )
     socket = FakeWsConnection(frames)
+    used = SQLiteStore(store)
+    # The engine that opened the position also opened the account row (ADR-0052).
+    if used.load_account() is None:
+        used.checkpoint_ledger(
+            account=Account(
+                account_id=exchange.account_spec().account_id,
+                genesis_collateral=Decimal("0"),
+                genesis_ts_ns=0,
+            ),
+            ts_ns=0,
+        )
     engine = Engine(
         bus=bus,
         clock=clock,
-        store=SQLiteStore(store),
+        store=used,
         exchange=exchange,
         feed=HyperliquidFeed(config=config, bus=bus, clock=clock, connect=socket.connect),
         config=engine_config,

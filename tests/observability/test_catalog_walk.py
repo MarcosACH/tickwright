@@ -785,6 +785,13 @@ def _drive_engine_lifecycle() -> None:
     asyncio.run(go())
 
 
+def _used_store(clock: ManualClock) -> SQLiteStore:
+    """A store an engine has booted on. An exit run refuses one with no account row (ADR-0052)."""
+    store = SQLiteStore(":memory:")
+    checkpointer(store, clock=clock).recover()
+    return store
+
+
 def _drive_exit_finished() -> None:
     """One operator cancel all on an empty paper account (ADR-0060)."""
     bus = InMemoryBus()
@@ -792,7 +799,7 @@ def _drive_exit_finished() -> None:
     engine = Engine(
         bus=bus,
         clock=clock,
-        store=SQLiteStore(":memory:"),
+        store=_used_store(clock),
         exchange=PaperExchange(
             bus=bus,
             clock=clock,
@@ -814,7 +821,7 @@ def _drive_exit_unguarded() -> None:
     engine = Engine(
         bus=bus,
         clock=clock,
-        store=SQLiteStore(":memory:"),
+        store=_used_store(clock),
         exchange=PaperExchange(
             bus=bus,
             clock=clock,
@@ -836,7 +843,7 @@ def _drive_flatten_gave_up() -> None:
     engine = Engine(
         bus=bus,
         clock=clock,
-        store=SQLiteStore(":memory:"),
+        store=_used_store(clock),
         exchange=PaperExchange(
             bus=bus,
             clock=clock,
@@ -882,6 +889,28 @@ def _drive_exit_refused() -> None:
         assert asyncio.run(engine.run()) == 2
 
 
+def _drive_exit_new_store() -> None:
+    """One operator cancel all on a fresh store, with --new-store (ADR-0052)."""
+    bus = InMemoryBus()
+    clock = ManualClock()
+    engine = Engine(
+        bus=bus,
+        clock=clock,
+        store=SQLiteStore(":memory:"),
+        exchange=PaperExchange(
+            bus=bus,
+            clock=clock,
+            fill_model=ImmediateFillModel(),
+            genesis_collateral=GENESIS,
+            account_net=dict,
+            applied_fills=lambda cloid: (),
+        ),
+        feed=_IdleFeed(),
+        exit_job=OperatorCancelAll(new_store=True),
+    )
+    assert asyncio.run(engine.run()) == 0
+
+
 class _DeafToCancels(VenueLink):
     """A venue that never receives a cancel, so its orders stay resting."""
 
@@ -904,7 +933,7 @@ def _drive_cancel_all_orders_remain() -> None:
     engine = Engine(
         bus=bus,
         clock=clock,
-        store=SQLiteStore(":memory:"),
+        store=_used_store(clock),
         exchange=_DeafToCancels(paper),
         feed=_IdleFeed(),
         exit_job=OperatorCancelAll(),
@@ -1183,6 +1212,7 @@ SCENARIOS: dict[NamedEvent, Callable[[], None]] = {
     NamedEvent.ENGINE_FAULTED: _drive_engine_faulted,
     NamedEvent.ENGINE_STOP_HOOK_FAILED: _drive_engine_stop_hook_failed,
     NamedEvent.EXIT_REFUSED: _drive_exit_refused,
+    NamedEvent.EXIT_NEW_STORE: _drive_exit_new_store,
     NamedEvent.EXIT_FINISHED: _drive_exit_finished,
     NamedEvent.EXIT_UNGUARDED: _drive_exit_unguarded,
     NamedEvent.CANCEL_ALL_ORDERS_REMAIN: _drive_cancel_all_orders_remain,

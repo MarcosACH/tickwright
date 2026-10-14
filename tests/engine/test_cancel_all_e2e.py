@@ -25,6 +25,7 @@ from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     AggressorSide,
+    ComponentState,
     Exchange,
     ExternalOrderRef,
     MarketTick,
@@ -35,13 +36,15 @@ from tickwright.domain import (
     OrderType,
     PlaceOrder,
     Side,
+    Store,
+    StoreNeverUsed,
     TimeInForce,
     VenueOpenOrder,
     VenueReadFailure,
     derive_cloid,
 )
 from tickwright.engine.checkpoint import Checkpointer
-from tickwright.engine.exit_run import OperatorCancelAll
+from tickwright.engine.exit_run import ExitContext, ExitOutcome, OperatorCancelAll
 from tickwright.engine.guard import RealGuard
 from tickwright.engine.runner import Engine
 from tickwright.observability.testing import capture_events
@@ -85,10 +88,20 @@ def _ticks(path: Path) -> Path:
     return path
 
 
+def _used_store(path: Path, clock: ManualClock) -> SQLiteStore:
+    """A store an engine has booted on, so it holds the account row.
+
+    An exit run refuses a store with no account row (ADR-0052).
+    """
+    store = SQLiteStore(path)
+    checkpointer(store, clock=clock).recover()
+    return store
+
+
 def test_an_exit_run_on_an_empty_account_starts_nothing_and_exits_done(tmp_path: Path) -> None:
     bus = InMemoryBus()
     clock = ManualClock()
-    store = SQLiteStore(tmp_path / "saga.db")
+    store = _used_store(tmp_path / "saga.db", clock)
     exchange = PaperExchange(
         bus=bus,
         clock=clock,
@@ -165,6 +178,154 @@ def test_an_exit_run_on_a_store_another_engine_holds_exits_two_and_writes_nothin
         holder.close()
 
 
+def test_an_exit_run_on_a_store_no_engine_has_used_exits_two_and_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "saga.db"
+    bus = InMemoryBus()
+    clock = ManualClock()
+    engine = Engine(
+        bus=bus,
+        clock=clock,
+        store=SQLiteStore(db),
+        exchange=PaperExchange(
+            bus=bus,
+            clock=clock,
+            fill_model=ImmediateFillModel(),
+            genesis_collateral=GENESIS,
+            account_net=dict,
+            applied_fills=lambda cloid: (),
+        ),
+        feed=ReplayFeed(path=_ticks(tmp_path / "ticks.jsonl"), bus=bus, clock=clock),
+        exit_job=OperatorCancelAll(),
+    )
+
+    with capture_events() as logs:
+        exit_code = asyncio.run(asyncio.wait_for(engine.run(), timeout=5))
+
+    # A store with no account row is almost always the wrong directory. The
+    # engine the operator meant to stop may still be trading (ADR-0052).
+    assert exit_code == 2
+    assert [log["event"] for log in logs] == ["exit.refused"]
+    assert logs[0]["reason"] == "new_store"
+    assert logs[0]["store"] == str(db.resolve())
+    assert logs[0]["holder"] == "none"
+    # The engine reports the refusal, as it does a held lock, so a job cannot forget to.
+    assert engine.state is ComponentState.FAULTED
+    assert isinstance(engine.fault, StoreNeverUsed)
+    assert str(db.resolve()) in str(engine.fault)
+    after = SQLiteStore(db)
+    try:
+        assert after.load_account() is None
+    finally:
+        after.close()
+
+
+def test_an_exit_run_told_the_store_is_new_warns_and_runs(tmp_path: Path) -> None:
+    db = tmp_path / "saga.db"
+    bus = InMemoryBus()
+    clock = ManualClock()
+    engine = Engine(
+        bus=bus,
+        clock=clock,
+        store=SQLiteStore(db),
+        exchange=PaperExchange(
+            bus=bus,
+            clock=clock,
+            fill_model=ImmediateFillModel(),
+            genesis_collateral=GENESIS,
+            account_net=dict,
+            applied_fills=lambda cloid: (),
+        ),
+        feed=ReplayFeed(path=_ticks(tmp_path / "ticks.jsonl"), bus=bus, clock=clock),
+        exit_job=OperatorCancelAll(new_store=True),
+    )
+
+    with capture_events() as logs:
+        exit_code = asyncio.run(asyncio.wait_for(engine.run(), timeout=5))
+
+    assert exit_code == 0
+    events = [log["event"] for log in logs]
+    assert "exit.refused" not in events
+    warned = [log for log in logs if log["event"] == "exit.new_store"]
+    assert len(warned) == 1
+    assert warned[0]["store"] == str(db.resolve())
+    assert warned[0]["warning"]
+    assert logs[-1]["event"] == "exit.finished"
+    assert logs[-1]["outcome"] == "done"
+
+
+def test_an_exit_run_told_a_used_store_is_new_runs_as_before(tmp_path: Path) -> None:
+    bus = InMemoryBus()
+    clock = ManualClock()
+    engine = Engine(
+        bus=bus,
+        clock=clock,
+        store=_used_store(tmp_path / "saga.db", clock),
+        exchange=PaperExchange(
+            bus=bus,
+            clock=clock,
+            fill_model=ImmediateFillModel(),
+            genesis_collateral=GENESIS,
+            account_net=dict,
+            applied_fills=lambda cloid: (),
+        ),
+        feed=ReplayFeed(path=_ticks(tmp_path / "ticks.jsonl"), bus=bus, clock=clock),
+        exit_job=OperatorCancelAll(new_store=True),
+    )
+
+    with capture_events() as logs:
+        exit_code = asyncio.run(asyncio.wait_for(engine.run(), timeout=5))
+
+    # The flag only matters on a new store. A used one gets no warning.
+    assert exit_code == 0
+    events = [log["event"] for log in logs]
+    assert "exit.new_store" not in events
+    assert "exit.refused" not in events
+    assert logs[-1]["event"] == "exit.finished"
+    assert logs[-1]["outcome"] == "done"
+
+
+class _StoreCheckFails:
+    """An exit job whose store check raises, as a lost connection would make it."""
+
+    name = "cancel_all"
+
+    def admit(self, store: Store) -> StoreNeverUsed | None:
+        raise OSError("connection lost")
+
+    async def run(self, context: ExitContext) -> ExitOutcome:
+        raise AssertionError("a run whose store check failed must not boot")
+
+
+def test_an_exit_run_whose_store_check_fails_exits_two(tmp_path: Path) -> None:
+    bus = InMemoryBus()
+    clock = ManualClock()
+    engine = Engine(
+        bus=bus,
+        clock=clock,
+        store=SQLiteStore(tmp_path / "saga.db"),
+        exchange=PaperExchange(
+            bus=bus,
+            clock=clock,
+            fill_model=ImmediateFillModel(),
+            genesis_collateral=GENESIS,
+            account_net=dict,
+            applied_fills=lambda cloid: (),
+        ),
+        feed=ReplayFeed(path=_ticks(tmp_path / "ticks.jsonl"), bus=bus, clock=clock),
+        exit_job=_StoreCheckFails(),
+    )
+
+    with capture_events() as logs:
+        exit_code = asyncio.run(asyncio.wait_for(engine.run(), timeout=5))
+
+    # Nothing booted, so nothing at the venue moved (ADR-0060).
+    assert exit_code == 2
+    assert [log["event"] for log in logs] == ["engine.faulted"]
+    assert isinstance(engine.fault, OSError)
+
+
 def test_an_exit_run_whose_store_lock_read_fails_exits_two(tmp_path: Path) -> None:
     bus = InMemoryBus()
     clock = ManualClock()
@@ -225,7 +386,7 @@ def test_sigterm_during_cancel_all_stops_the_run_with_exit_one(tmp_path: Path) -
         engine = Engine(
             bus=bus,
             clock=clock,
-            store=SQLiteStore(tmp_path / "saga.db"),
+            store=_used_store(tmp_path / "saga.db", clock),
             exchange=venue,
             feed=ReplayFeed(path=_ticks(tmp_path / "ticks.jsonl"), bus=bus, clock=clock),
             exit_job=OperatorCancelAll(),

@@ -182,6 +182,13 @@ class PostgresStore(SqlStore):
         super().__init__(
             schema=_SCHEMA, added_column_types=_ADDED_COLUMN_TYPES, release=self._conn.close
         )
+        # Built from the live connection, which never shows the password.
+        info = self._conn.info
+        self._name = f"{info.host}:{info.port}/{info.dbname}"
+
+    @property
+    def name(self) -> str:
+        return self._name
 
     @durable
     def lock(self) -> StoreLockHolder | None:
@@ -194,9 +201,7 @@ class PostgresStore(SqlStore):
                 return None
             holder = self._conn.execute(_HOLDER_QUERY, (_LOCK_KEY,)).fetchone()
             if holder is not None:
-                # Built from the live connection, which never shows the password.
-                info = self._conn.info
-                return _holder_of(f"{info.host}:{info.port}/{info.dbname}", *holder)
+                return _holder_of(self._name, *holder)
             # The holder let go between the two reads, so the lock may be free.
 
     def _has_column(self, table: str, column: str) -> bool:
