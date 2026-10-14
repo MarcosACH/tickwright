@@ -69,15 +69,20 @@ class EngineConfig:
     startup_reconciliation_timeout_seconds: float = 60.0
     shutdown_timeout_seconds: float = 10.0
     tick_staleness_ns: int | None = None
-    reconcile: ReconcileConfig | None = None
+    reconcile: ReconcileConfig = ReconcileConfig()
+    """The reconcile cadences and windows (ADR-0011).
+
+    Whole, not ``| None``. The runner paces its cadences off it, and the
+    Hyperliquid adapter waits one open-order interval before it ends a shrunk
+    order (ADR-0057). A ``None`` would need each of them to resolve the same
+    default, and two copies can drift apart.
+    """
+
     band: ValuationBand = ValuationBand()
     """The Tier-2 alert tolerance (ADR-0040 §6), the one knob its cycle owns.
 
-    Whole, not ``| None`` like ``reconcile`` beside it: that one is optional
-    because the runner *also* paces its own cadences off it and so has to
-    resolve it here either way, while this one is read once and handed
-    straight on — an unconfigured run and a run configured to the defaults are
-    the same run, so there is nothing for the ``None`` to mean.
+    Whole, not ``| None``: an unconfigured run and a run configured to the
+    defaults are the same run, so there is nothing for the ``None`` to mean.
     """
 
     run_id: str | None = None
@@ -155,11 +160,9 @@ class Engine:
         self._execution = ExecutionManager(
             bus=bus, exchange=exchange, checkpointer=self._checkpointer, guard=self._guard
         )
-        # Resolved here (not left to the Reconciler default) because the runner
-        # also paces the continuous cadences off the same intervals below.
-        self._reconcile_config = (
-            self._config.reconcile if self._config.reconcile is not None else ReconcileConfig()
-        )
+        # One config for both: the runner also paces the continuous cadences
+        # off the same intervals below.
+        self._reconcile_config = self._config.reconcile
         self._reconciler = Reconciler(
             bus=bus,
             clock=clock,

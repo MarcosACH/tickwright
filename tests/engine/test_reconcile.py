@@ -611,8 +611,9 @@ def test_the_reconciler_reads_the_venue_by_the_saga_s_full_identity() -> None:
     # The cloid alone is not enough once the venue has dropped the record: the
     # fill history is keyed by the ack's oid and bounded by the ack time
     # (ADR-0011 inv 2). And before the ack, the creation time is what tells an
-    # earlier life's record under the same cloid from ours (#354). Every read
-    # hands the venue all five.
+    # earlier life's record under the same cloid from ours (#354). The asked
+    # size is what shows the cut part of a shrunk order (#478). Every read
+    # hands the venue all six.
     saga = _saga("0xabc", OrderState.SUBMITTED)
     saga.created_ts_ns = 400
     saga.apply(
@@ -639,7 +640,14 @@ def test_the_reconciler_reads_the_venue_by_the_saga_s_full_identity() -> None:
     asyncio.run(reconciler.reconcile_startup())
 
     assert venue.refs == [
-        OrderRef(cloid="0xabc", symbol="BTC", venue_oid="777", acked_ts_ns=600, created_ts_ns=400)
+        OrderRef(
+            cloid="0xabc",
+            symbol="BTC",
+            venue_oid="777",
+            acked_ts_ns=600,
+            created_ts_ns=400,
+            quantity=saga.quantity,
+        )
     ]
 
 

@@ -78,6 +78,7 @@ def test_place_reconcile_cancel_round_trip_on_testnet() -> None:
             clock=clock,
             universe=universe,
             startup_timeout_seconds=60.0,
+            shrink_wait_seconds=30.0,
         )
         reports: list[ExecutionReport] = []
 
@@ -224,6 +225,7 @@ def test_the_boot_pushes_configured_leverage_to_testnet() -> None:
                 clock=LiveClock(),
                 universe=universe,
                 startup_timeout_seconds=60.0,
+                shrink_wait_seconds=30.0,
                 leverage=LeverageBook(entries={SYMBOL: book}),
             )
 
@@ -280,6 +282,7 @@ def test_the_cash_line_the_venue_implies_is_invariant_under_a_moving_mark() -> N
             clock=LiveClock(),
             universe=universe,
             startup_timeout_seconds=60.0,
+            shrink_wait_seconds=30.0,
         )
 
         first = await exchange.fetch_account_state()

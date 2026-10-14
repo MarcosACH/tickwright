@@ -15,7 +15,12 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-from hyperliquid_fakes import TEST_SIGNING_KEY, FakeExchangeApi
+from hyperliquid_fakes import (
+    TEST_SIGNING_KEY,
+    FakeExchangeApi,
+    fill_entry,
+    order_status_response,
+)
 from ledgers import GENESIS
 from pydantic import SecretStr, ValidationError
 
@@ -44,12 +49,14 @@ from tickwright.domain import (
     LeverageOutOfBounds,
     LeverageSpec,
     MarketTick,
+    OrderRef,
     OrderState,
     OrderType,
     PlaceOrder,
     Side,
     TimeInForce,
     VenueAccountModeUnsupported,
+    VenueOrderView,
     derive_cloid,
 )
 from tickwright.engine.guard import NoopGuard, RealGuard
@@ -208,6 +215,54 @@ def test_the_hyperliquid_arm_hands_the_adapter_the_engine_s_startup_budget(
     # backoff interval of it, which is the overshoot the cap bounds.
     elapsed_seconds = clock.timestamp_ns() / 1_000_000_000
     assert 300.0 <= elapsed_seconds < 330.0
+
+
+def test_the_hyperliquid_arm_hands_the_adapter_the_engine_s_open_order_interval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A shrunk reduce-only order ends CANCELLED only once its fill total has
+    # held for one open-order interval (#478). The adapter cannot read the
+    # engine's config, so this function hands the interval over. The test uses
+    # 45 s, not the 30 s default, so a hard-coded default cannot pass it.
+    cloid = "0x" + "ab" * 16
+    post = FakeExchangeApi(
+        {
+            "meta": {"universe": [{"name": "BTC", "szDecimals": 5, "maxLeverage": 40}]},
+            "orderStatus": order_status_response(
+                cloid=cloid, status="filled", oid=91, reduce_only=True
+            ),
+            "userFillsByTime": [fill_entry(oid=91, tid=556, px="43250.0", sz="0.3")],
+        }
+    )
+    monkeypatch.setattr("tickwright.venues.hyperliquid.transport.post_json", post)
+    clock = ManualClock(start_ns=0)
+    config = _config(
+        tmp_path,
+        exchange="hyperliquid",
+        hyperliquid={"signing_key": TEST_SIGNING_KEY, "symbols": ["BTC"], "testnet": True},
+        engine={"reconcile": {"open_order_interval_seconds": 45.0}},
+    )
+    exchange = build_exchange(
+        config,
+        bus=InMemoryBus(),
+        clock=clock,
+        store=SQLiteStore(":memory:"),
+        leverage=resolve_leverage(config),
+    )
+    ref = OrderRef(cloid=cloid, symbol="BTC", quantity=Decimal("0.5"))
+
+    async def read_at(*seconds: int) -> list[OrderState]:
+        states = []
+        for second in seconds:
+            clock.advance_to(second * 1_000_000_000)
+            view = await exchange.fetch_order(ref)
+            assert isinstance(view, VenueOrderView) and view.status is not None
+            states.append(view.status.status)
+        return states
+
+    states = asyncio.run(read_at(0, 30, 45))
+
+    assert states == [OrderState.FILLED, OrderState.FILLED, OrderState.CANCELLED]
 
 
 def test_the_hyperliquid_exchange_requires_a_signing_key(tmp_path: Path) -> None:

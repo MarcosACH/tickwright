@@ -142,6 +142,8 @@ goes by the oid once the saga holds one, and before that a read refuses a record
 placed before the saga existed (ADR-0011 inv 2, invariant 12).
 Since #460 `cancel` takes a list of refs. A single cancel sends a list of one, and a cancel all
 is one call that a venue can send as one batch (ADR-0055).
+Since #478 the ref also carries the size the saga asked for. A venue that shrank a reduce-only
+order reports it `filled` for less, and only the asked size shows the cut part (ADR-0057).
 Since #468 `fetch_open_orders()` lists every order resting in the account, ours or not. Paper
 answers it. Hyperliquid answers it from #470 on.
 _Avoid_: order API, order client (the anchor is what makes it one seam, not the verb shapes).
