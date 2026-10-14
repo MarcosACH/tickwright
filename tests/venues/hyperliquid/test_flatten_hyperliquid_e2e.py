@@ -26,8 +26,8 @@ from hyperliquid_flatten import (
     CLOSE_OID,
     HYPE_ASSET,
     START_MS,
+    AnswersFirst,
     HeldShort,
-    RateLimitedOnce,
     priced_frames,
     run_flatten,
 )
@@ -79,7 +79,7 @@ def test_a_close_refused_for_a_rate_limit_waits_10_s_and_is_no_dry_attempt(
 ) -> None:
     # The venue lets requests through again in time, so waiting makes progress.
     # A dry attempt here would let a busy account give up a close it could make.
-    exit_code, logs, post, _ = _flatten(tmp_path, RateLimitedOnce(refusal), priced_frames())
+    exit_code, logs, post, _ = _flatten(tmp_path, AnswersFirst(refusal), priced_frames())
 
     assert exit_code == 0, [(log["event"], log.get("error")) for log in logs]
     limited = [log for log in logs if log["event"] == "flatten.rate_limited"]
@@ -93,12 +93,20 @@ def test_a_close_refused_for_a_rate_limit_waits_10_s_and_is_no_dry_attempt(
     assert logs[-1]["outcome"] == "done"
 
 
-class _RefusedButFilled(HeldShort):
-    """Answers the close with an action error, yet the venue took and filled it."""
+REFUSED = {"status": "err", "response": "Invalid nonce"}
+DEAD_SEND = ConnectionError("connection reset")
+
+
+class _FilledBehindAnswer(HeldShort):
+    """Gives ``answer`` for the close, yet the venue took and filled it."""
+
+    def __init__(self, answer: object) -> None:
+        super().__init__()
+        self._answer = answer
 
     def order(self, payload: dict) -> object:
         super().order(payload)
-        return {"status": "err", "response": "Invalid nonce"}
+        return self._answer
 
     def order_status(self, payload: dict) -> dict:
         if self.held:
@@ -113,13 +121,16 @@ class _RefusedButFilled(HeldShort):
         )
 
 
-def test_a_refused_close_the_venue_shows_filled_is_booked_and_never_sent_again(
-    tmp_path: Path,
+@pytest.mark.parametrize("answer", [REFUSED, DEAD_SEND], ids=["refused", "dead_send"])
+def test_a_refused_or_dead_close_the_venue_shows_filled_is_booked_and_never_sent_again(
+    tmp_path: Path, answer: object
 ) -> None:
-    # A refusal is the venue's answer, not proof the order is absent. Flatten
-    # asks by cloid before it counts (ADR-0056). A second close beside a filled
-    # one could open a position on the other side.
-    exit_code, logs, post, _ = _flatten(tmp_path, _RefusedButFilled(), priced_frames())
+    # Neither answer is proof the order is absent. A dead send may have landed.
+    # Flatten asks by cloid before it counts (ADR-0056). A second close beside
+    # a filled one could open a position on the other side.
+    venue = _FilledBehindAnswer(answer)
+
+    exit_code, logs, post, _ = _flatten(tmp_path, venue, priced_frames())
 
     assert exit_code == 0, [(log["event"], log.get("error")) for log in logs]
     orders = [url for url, payload in post.requests if request_type(url, payload) == "order"]
@@ -132,11 +143,12 @@ def test_a_refused_close_the_venue_shows_filled_is_booked_and_never_sent_again(
     assert logs[-1]["outcome"] == "done"
 
 
-def test_a_refused_close_the_venue_never_took_is_a_refused_dry_attempt(
-    tmp_path: Path,
+@pytest.mark.parametrize("answer", [REFUSED, DEAD_SEND], ids=["refused", "dead_send"])
+def test_a_refused_or_dead_close_the_venue_never_took_is_a_refused_dry_attempt(
+    tmp_path: Path, answer: object
 ) -> None:
     # ADR-0060 names the reason, so the operator can tell a refusal from a thin book.
-    venue = RateLimitedOnce({"status": "err", "response": "Invalid nonce"})
+    venue = AnswersFirst(answer)
 
     exit_code, logs, _, _ = _flatten(tmp_path, venue, priced_frames())
 

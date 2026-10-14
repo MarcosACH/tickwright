@@ -31,7 +31,7 @@ from hyperliquid_fakes import (
     trade,
     trades_frame,
 )
-from hyperliquid_flatten import RateLimitedOnce, priced_frames, run_flatten
+from hyperliquid_flatten import AnswersFirst, priced_frames, run_flatten
 from ledgers import GENESIS, book_fill, checkpointer
 from pydantic import SecretStr
 from venue_doubles import (
@@ -852,7 +852,7 @@ def _drive_flatten_gave_up() -> None:
 
 def _drive_flatten_rate_limited() -> None:
     """One Hyperliquid flatten whose first close the venue refuses over the IP limit (ADR-0056)."""
-    venue = RateLimitedOnce(IpRateLimited("429 from the venue"))
+    venue = AnswersFirst(IpRateLimited("429 from the venue"))
     exit_code, _, _ = run_flatten(":memory:", venue, priced_frames())
     assert exit_code == 0
 

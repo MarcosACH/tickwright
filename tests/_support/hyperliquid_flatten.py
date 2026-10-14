@@ -123,16 +123,19 @@ class HeldShort:
         return [fill | {"coin": "HYPE", "dir": "Close Short", "startPosition": "-2.0"}]
 
 
-class RateLimitedOnce(HeldShort):
-    """Refuses the first close for a rate limit, then fills the next one."""
+class AnswersFirst(HeldShort):
+    """Gives ``answer`` for the first close and never takes it, then fills the next one.
 
-    def __init__(self, refusal: object) -> None:
+    ``answer`` is a venue body, or an exception the send raises.
+    """
+
+    def __init__(self, answer: object) -> None:
         super().__init__()
-        self._refusal: object | None = refusal
+        self._answer: object | None = answer
 
     def order(self, payload: dict) -> object:
-        refusal, self._refusal = self._refusal, None
-        return refusal if refusal is not None else super().order(payload)
+        answer, self._answer = self._answer, None
+        return answer if answer is not None else super().order(payload)
 
 
 class _SocketPacedClock(ManualClock):
