@@ -1128,6 +1128,41 @@ def test_a_cancel_all_goes_out_while_the_kill_switch_is_tripped() -> None:
     assert order.state is OrderState.CANCELLED
 
 
+class _CancelCalls(VenueLink):
+    """Records the refs of each ``cancel`` call, then lets the venue cancel them."""
+
+    def __init__(self, venue: Exchange) -> None:
+        super().__init__(venue)
+        self.calls: list[list[OrderRef | ExternalOrderRef]] = []
+
+    async def cancel(self, refs: Sequence[OrderRef | ExternalOrderRef]) -> None:
+        self.calls.append(list(refs))
+        await super().cancel(refs)
+
+
+def test_a_cancel_all_sends_every_cancel_in_one_call() -> None:
+    links: list[_CancelCalls] = []
+
+    def link(venue: PaperExchange) -> Exchange:
+        links.append(_CancelCalls(venue))
+        return links[-1]
+
+    wiring = _wiring(SQLiteStore(":memory:"), link=link)
+
+    async def scenario() -> None:
+        await wiring.bus.publish(_tick("42000"))
+        for seq in (1, 2, 3):
+            await wiring.bus.publish(_limit_signal("41000", seq=seq))
+        # One call lets Hyperliquid take the whole cancel all as one request (ADR-0055).
+        await wiring.bus.publish(_cancel_all_signal(seq=4))
+
+    asyncio.run(scenario())
+
+    orders = [wiring.store.get_order(derive_cloid(f"trivial:BTC:{seq}")) for seq in (1, 2, 3)]
+    assert all(order is not None and order.state is OrderState.CANCELLED for order in orders)
+    assert links[0].calls == [[OrderRef.of(order) for order in orders if order is not None]]
+
+
 async def _record(sink: list, event: object) -> None:
     sink.append(event)
 
