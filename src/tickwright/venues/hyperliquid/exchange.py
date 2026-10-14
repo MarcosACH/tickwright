@@ -128,6 +128,10 @@ class HyperliquidExchange:
         # strictly increasing, and the ms-truncated clock would collide on two
         # sends inside one millisecond — this floor keeps them monotonic.
         self._last_nonce = 0
+        # The fill total each shrunk order showed on its last read, by cloid.
+        # Its cut part ends only once two reads agree (``fetch_order``). Kept in
+        # memory on purpose: a restart forgets it and only waits one more pass.
+        self._shrunk_fills: dict[str, Decimal] = {}
         # The MARKET slippage bound needs the latest traded price, and the tick
         # stream is where prices live (ADR-0027) — subscribe like any consumer.
         bus.subscribe(MarketTick, self.on_tick)
@@ -519,7 +523,7 @@ class HyperliquidExchange:
         )
         if isinstance(fills, VenueReadFailure):
             return fills
-        if _shrunk(record, fills, asked=ref.quantity):
+        if _shrunk(record, fills, asked=ref.quantity) and self._fills_settled(ref.cloid, fills):
             # The venue answers `filled` for an order it shrank, and a FILLED
             # report moves no saga. The cut part ends CANCELLED, as it does
             # when the fills read at placement works (ADR-0057).
@@ -535,6 +539,19 @@ class HyperliquidExchange:
             cloid=ref.cloid, symbol=record.coin, status=record.state, venue_oid=str(record.oid)
         )
         return VenueOrderView(status=status, fills=tuple(fills))
+
+    def _fills_settled(self, cloid: str, fills: list[FillReport]) -> bool:
+        """Whether this read shows the same fill total as the last one.
+
+        One read is not proof the venue has listed every fill yet. A fill that
+        lands after CANCELLED is an illegal move and would be lost. So the cut
+        part waits until two reads, one reconcile pass apart, agree.
+        """
+        total = sum((fill.quantity for fill in fills), Decimal("0"))
+        if self._shrunk_fills.pop(cloid, None) == total:
+            return True
+        self._shrunk_fills[cloid] = total
+        return False
 
     async def fetch_open_orders(self) -> list[VenueOpenOrder | ExternalOrderRef] | VenueReadFailure:
         # frontendOpenOrders, not openOrders: only this one carries the cloid,

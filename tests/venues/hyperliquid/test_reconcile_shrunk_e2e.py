@@ -132,3 +132,15 @@ def test_a_shrunk_order_ends_cancelled_once_two_passes_read_the_same_fills() -> 
 
     assert order.state is OrderState.CANCELLED
     assert order.cum_qty == Decimal("0.3")
+
+
+def test_one_pass_alone_leaves_a_shrunk_order_open() -> None:
+    # The fills the venue holds may not all be readable yet. A fill that lands
+    # after CANCELLED is an illegal move and would be lost. So one read is not
+    # proof that the fills are complete. The saga waits for a second pass.
+    post = _shrunk_venue(fill_entry(oid=91, tid=556, px="43250.0", sz="0.3", time=FILL_MS))
+
+    order, _events = _place_then_reconcile(post, passes=1)
+
+    assert order.state is OrderState.PARTIALLY_FILLED
+    assert order.cum_qty == Decimal("0.3")
