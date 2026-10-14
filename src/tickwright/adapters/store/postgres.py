@@ -138,6 +138,12 @@ _SCHEMA: tuple[str, ...] = (
         ts_ns              BIGINT NOT NULL
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS seq_records (
+        strategy_id TEXT PRIMARY KEY,
+        seq         BIGINT NOT NULL
+    )
+    """,
 )
 
 # This dialect's type for each column in ``_records.ADDED_ORDER_COLUMNS``. The

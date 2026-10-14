@@ -121,6 +121,8 @@ _SEAM_CALLS: Mapping[str, Callable[[Store], object]] = {
         tripped=True, reason="drawdown", ts_ns=1_000
     ),
     "load_kill_switch": lambda store: store.load_kill_switch(),
+    "raise_seq": lambda store: store.raise_seq("trivial", 1),
+    "seq_records": lambda store: store.seq_records(),
     "checkpoint_ledger": lambda store: store.checkpoint_ledger(account=_account(), ts_ns=1_000),
     "all_positions": lambda store: store.all_positions(),
     "load_account": lambda store: store.load_account(),
@@ -721,6 +723,27 @@ def test_a_refused_ledger_write_leaves_no_part_of_it_durable(store_backend: Back
         assert reopened.load_account() is None
         assert reopened.all_positions() == []
         assert reopened.get_order("0xabc") is None
+
+
+def test_the_seq_record_only_goes_up_and_survives_a_reopen(store_backend: Backend) -> None:
+    """A handled cancel all's seq, kept per strategy (ADR-0055).
+
+    Each symbol has its own partition, so an older cancel all on one symbol can
+    arrive after a newer one on another. A lower seq must never replace a higher
+    one, or a restart could reuse the higher seq."""
+    with store_backend.open() as store:
+        assert store.seq_records() == {}
+
+        store.raise_seq("trivial", 5)
+        store.raise_seq("trivial", 3)
+        store.raise_seq("other", 2)
+
+    with store_backend.open() as reopened:
+        assert reopened.seq_records() == {"trivial": 5, "other": 2}
+
+        reopened.raise_seq("trivial", 7)
+
+        assert reopened.seq_records() == {"trivial": 7, "other": 2}
 
 
 def test_a_store_that_cannot_reach_its_backend_raises_invariant_violation(

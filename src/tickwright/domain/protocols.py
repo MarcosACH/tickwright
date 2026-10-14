@@ -371,6 +371,19 @@ class Store(Protocol):
         reset."""
         ...
 
+    def raise_seq(self, strategy_id: str, seq: int) -> None:
+        """Durably raise ``strategy_id``'s seq record to ``seq`` (ADR-0055).
+
+        It keeps the higher of the stored seq and ``seq``, so it never goes
+        down. A handled cancel all writes its seq here, so a restart never reuses
+        it, even when the cancel all marked no order."""
+        ...
+
+    def seq_records(self) -> dict[str, int]:
+        """Every strategy's seq record. The seq high-water fold reads it at boot
+        (ADR-0016, ADR-0055)."""
+        ...
+
     def checkpoint_ledger(
         self,
         *,

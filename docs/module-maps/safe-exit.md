@@ -14,7 +14,7 @@ src/tickwright/
   domain/
     events.py                 # + CancelAllSignal, reduce_only, OrderRefusedReport
     venue.py                  # + VenueOpenOrder, ExternalOrderRef, RATE_LIMITED_IP
-    order.py                  # + split_basis, the operator cancel mark, request_cancel by seq
+    order.py                  # + split_basis, the operator cancel mark, request_cancel_all by seq
     position.py               # + OPERATOR, beside UNATTRIBUTED
     instrument.py             # + the strategy's own position on PreTradeReading
     protocols.py              # Exchange: cancel(refs), fetch_open_orders, fetch_positions
@@ -289,7 +289,8 @@ split is safe only on this path.
 - A `CancelAllSignal` raises the strategy's seq record first. Then it marks and cancels the
   strategy's open orders on that symbol with a lower seq. It skips terminal orders, and orders whose
   marker already has this seq or a higher one. Every cancel goes out in one `cancel(refs)` call
-  (ADR-0055).
+  (ADR-0055). `Order.request_cancel_all` holds both seq checks, so the manager only picks the
+  strategy and the symbol.
 - An `__operator__` place reads the partition sizes from the `Checkpointer`. It stores them as
   `split_basis` in the same `PENDING` write that comes before the send (ADR-0054).
 - An `__operator__` order that is not reduce-only ends `DENIED` before the guard. Its fills could

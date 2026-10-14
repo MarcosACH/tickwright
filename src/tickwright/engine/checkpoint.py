@@ -180,6 +180,13 @@ class Checkpointer:
         self._portfolio.recover()
         self._cache.rebuild()
 
+    def raise_seq(self, strategy_id: str, seq: int) -> None:
+        """Make a handled cancel all's seq durable, then project it (ADR-0055).
+
+        A failed write already raises ``InvariantViolation`` that names
+        ``raise_seq``, so there is nothing to relabel here."""
+        self._cache.raise_seq(strategy_id, seq)
+
     def checkpoint(self, order: Order) -> None:
         """Make a **non-fill** transition durable, then project it.
 

@@ -50,7 +50,7 @@ Concretely, the engine does the pulling **for** you before it subscribes you (in
    the snapshot.
 2. **`set_next_seq(next_seq)`** — your monotonic `seq` is resumed from the **saga store's
    high-water mark**, not from your snapshot, so a stale snapshot can never reuse a consumed
-   `signal_id` (ADR-0006/0016). Both place *and* cancel intents consume a `seq`.
+   `signal_id` (ADR-0006/0016). Place, cancel, and cancel all intents each consume a `seq`.
 3. Only then are your `on_tick` / `on_order_event` handlers subscribed, and the feed starts.
 
 A strategy cannot read its open orders. The engine keeps them in its `Cache`, but that lives in
@@ -75,7 +75,8 @@ Startup may have resolved an order before your handlers were subscribed. The cor
 
 ## Checklist: add a `Strategy`
 
-A strategy consumes ticks and lifecycle events and emits `PlaceSignal`/`CancelSignal`s. It depends on
+A strategy consumes ticks and lifecycle events and emits `PlaceSignal`/`CancelSignal`/
+`CancelAllSignal`s. It depends on
 `domain` **only** — no saga, store, or venue knowledge. Study
 [`strategies/single_shot.py`](../src/tickwright/strategies/single_shot.py) as the reference.
 
@@ -101,6 +102,11 @@ A strategy consumes ticks and lifecycle events and emits `PlaceSignal`/`CancelSi
       reduce_only=True,
   )
   ```
+- [ ] Cancel all your open orders on a symbol with `await self._emitter.cancel_all(symbol="BTC")`.
+  It cancels only the orders you sent before it. To clear every symbol, send one per symbol. There
+  is no "all done" event. Each order gives you one `OrderCancelled`, or a fill if the fill wins the
+  race. If a cancel may not have reached the venue, send a new cancel all to retry. It goes out
+  even while the kill switch is tripped (ADR-0055).
 - [ ] Make `snapshot()`/`restore()` a versioned, minimal payload; raise on an unknown version.
 - [ ] Read your own economics through the [`Portfolio`](../src/tickwright/domain/protocols.py)
   seam, if the strategy needs them. Take it as a constructor argument. The composition root hands
