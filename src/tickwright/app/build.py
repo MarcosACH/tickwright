@@ -25,13 +25,13 @@ from tickwright.adapters.paper import (
 )
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
+    WORKING_STATES,
     Clock,
     EventBus,
     Exchange,
     InstrumentSpec,
     LeverageBook,
     MarketFeed,
-    OrderState,
     PlaceOrder,
     Portfolio,
     PreTradeGuard,
@@ -211,7 +211,7 @@ def _resting_orders(store: Store) -> list[PlaceOrder]:
     return [
         PlaceOrder.of(order)
         for order in store.all_orders()
-        if order.state in (OrderState.LIVE, OrderState.PARTIALLY_FILLED)
+        if order.state in WORKING_STATES
         and order.price is not None
         and order.time_in_force is TimeInForce.GTC
     ]

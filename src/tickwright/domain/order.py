@@ -65,6 +65,11 @@ _TERMINAL_STATES: frozenset[OrderState] = frozenset(
     }
 )
 
+# The states of an order the venue acked and still works. Reconcile asks the
+# ghost gate about one it cannot find. A restarted paper venue rebuilds only
+# these, because a PENDING or SUBMITTED one may never have reached it (#484).
+WORKING_STATES: frozenset[OrderState] = frozenset({OrderState.LIVE, OrderState.PARTIALLY_FILLED})
+
 
 @dataclass(slots=True)
 class Order:
