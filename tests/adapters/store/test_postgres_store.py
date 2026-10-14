@@ -111,7 +111,7 @@ def test_a_postgres_store_that_lost_its_session_refuses_its_next_write(
             assert successor.lock() is None
 
 
-def test_a_postgres_store_session_drops_a_dead_peer_within_25_seconds(
+def test_a_postgres_store_session_carries_the_adr_0052_keepalives(
     backend: PostgresBackend,
 ) -> None:
     """Without keepalives, the server keeps a dead engine's session, and its
