@@ -549,3 +549,10 @@ def test_the_venue_order_for_a_partly_filled_saga_works_only_the_size_still_open
     order.apply(_live())
     order.apply(_partial(quantity="0.5", cum_qty="0.5"))
     assert PlaceOrder.of(order).quantity == Decimal("1.5")
+
+
+def test_the_venue_order_refuses_a_saga_with_no_time_in_force() -> None:
+    # A row written before the store kept order terms reads back with none.
+    # Every venue order needs one, so guessing it would send terms nobody chose.
+    with pytest.raises(InvariantViolation, match="0xabc"):
+        PlaceOrder.of(_order())

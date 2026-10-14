@@ -14,6 +14,7 @@ from decimal import Decimal
 from enum import Enum
 
 from .enums import OrderType, Side, TimeInForce
+from .errors import InvariantViolation
 from .events import FillReport, OrderStatusReport
 from .leverage import LeverageSpec
 from .order import Order
@@ -296,7 +297,12 @@ class PlaceOrder:
         A new saga has filled nothing, so that is the full size. A restarted
         paper venue rebuilds a partly filled order from this, so it never works
         the filled part again (#484).
+
+        A row written before the store kept order terms has no time in force.
+        This raises on it rather than guess terms nobody chose.
         """
+        if order.time_in_force is None:
+            raise InvariantViolation(f"order {order.cloid} has no saved time in force")
         return cls(
             cloid=order.cloid,
             symbol=order.symbol,
