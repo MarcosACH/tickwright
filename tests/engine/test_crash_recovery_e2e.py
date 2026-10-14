@@ -444,7 +444,12 @@ def _signals_in_topic(broker: FakeKafkaBroker) -> list[str]:
 
 
 def _kafka_life(
-    broker: FakeKafkaBroker, backend: Backend, venue: PaperExchange, clock: ManualClock
+    broker: FakeKafkaBroker,
+    backend: Backend,
+    venue: PaperExchange,
+    clock: ManualClock,
+    *,
+    cancel_after_ticks: int | None = None,
 ) -> tuple[KafkaBus, Store]:
     """One process life over Kafka, wired the way the runner wires it.
 
@@ -471,6 +476,7 @@ def _kafka_life(
             side=Side.BUY,
             quantity=Decimal("0.5"),
             price=Decimal("41000"),
+            cancel_after_ticks=cancel_after_ticks,
         ),
         symbols={"BTC"},
     )
@@ -559,8 +565,8 @@ def test_on_kafka_a_place_killed_before_it_is_handled_keeps_its_seq_across_the_r
     store_backend: Backend,
 ) -> None:
     """Issue #442. The place is in the topic but no saga holds it. The restart
-    must still know its seq, or the strategy's next place reuses it and the
-    manager drops that new place as a duplicate."""
+    must still know its seq. If not, the strategy's next signal reuses it, and
+    the manager can drop that signal as a duplicate."""
     broker = FakeKafkaBroker()
     clock = ManualClock()
     venue = PaperExchange(
@@ -576,22 +582,27 @@ def test_on_kafka_a_place_killed_before_it_is_handled_keeps_its_seq_across_the_r
         if isinstance(decode_event(record.value), Signal):
             raise _Killed
 
-    async def first_life() -> None:
+    async def scenario() -> None:
+        # Life 1: dies the instant the place lands in the topic, before any saga.
         broker.on_produce.append(kill_on_signal)
-        bus, store = _kafka_life(broker, store_backend, venue, clock)
+        bus, store = _kafka_life(broker, store_backend, venue, clock, cancel_after_ticks=1)
         await bus.start()
         with pytest.raises(_Killed):
             await bus.publish(_first_tick())
         await bus.close()
+        broker.on_produce.clear()
+        assert store.get_order(_CLOID) is None
         store.close()
 
-    asyncio.run(asyncio.wait_for(first_life(), timeout=5))
-    assert _signals_in_topic(broker) == ["trivial:BTC:1"]
+        # Life 2: the tick redelivers, and the restored strategy sends its cancel.
+        # Then the old place is handled, and the cancel after it.
+        bus, store = _kafka_life(broker, store_backend, venue, clock, cancel_after_ticks=1)
+        await _run_until_committed(bus, broker)
+        # The cancel takes the next seq, not the one the unhandled place holds.
+        assert _signals_in_topic(broker) == ["trivial:BTC:1", "trivial:BTC:2"]
+        order = store.get_order(_CLOID)
+        assert order is not None
+        assert order.cancel_signal_id == "trivial:BTC:2"
+        store.close()
 
-    store = store_backend.open()
-    checks = checkpointer(store, clock=clock)
-    checks.recover()
-    assert store.get_order(_CLOID) is None
-    # The fold the host seeds the strategy's next seq from (ADR-0016).
-    assert checks.cache.seq_high_water() == {"trivial": 1}
-    store.close()
+    asyncio.run(asyncio.wait_for(scenario(), timeout=5))
