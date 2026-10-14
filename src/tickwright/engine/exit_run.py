@@ -184,7 +184,7 @@ DRY_WAIT_SECONDS = 2.0
 """The wait after a dry attempt, before the next one (ADR-0056)."""
 
 RATE_LIMIT_WAIT_SECONDS = 10.0
-"""The wait after a close the venue refused for a rate limit (ADR-0056)."""
+"""The wait after the venue refused a close or a read for a rate limit (ADR-0056, ADR-0060)."""
 
 _RATE_LIMITS = {OrderRefusal.RATE_LIMITED_ADDRESS: "address", OrderRefusal.RATE_LIMITED_IP: "ip"}
 """The ``limit`` field ``flatten.rate_limited`` names for each rate limit (ADR-0060)."""
@@ -276,7 +276,12 @@ class _Turns:
 
 
 class _DryAttempts:
-    """One symbol's count of attempts in a row that closed nothing (ADR-0056)."""
+    """What a step that closed nothing costs one symbol's loop (ADR-0056, ADR-0060).
+
+    Most steps count as one dry attempt in a row, then wait 2 seconds. A rate
+    limit waits 10 seconds and does not count, because waiting it out makes
+    progress. This is the one place that tells the two apart.
+    """
 
     def __init__(self, symbol: str, clock: Clock) -> None:
         self._symbol = symbol
@@ -302,6 +307,22 @@ class _DryAttempts:
         await self._clock.sleep(DRY_WAIT_SECONDS)
         return False
 
+    async def read_failed(self, size: Decimal, *, rate_limited: bool) -> bool:
+        """Count a failed venue read as dry, unless the IP limit refused it.
+
+        Says whether the loop gave up, as ``gave_up`` does. Only the IP limit
+        covers reads, so that is the limit the wait names.
+        """
+        if rate_limited:
+            await self.wait_out("ip")
+            return False
+        return await self.gave_up("read_failed", size)
+
+    async def wait_out(self, limit: str) -> None:
+        """Wait out a rate limit. ``limit`` is the field ``flatten.rate_limited`` names."""
+        named_event(NamedEvent.FLATTEN_RATE_LIMITED, symbol=self._symbol, limit=limit)
+        await self._clock.sleep(RATE_LIMIT_WAIT_SECONDS)
+
 
 async def _flatten_symbol(
     symbol: str,
@@ -311,50 +332,18 @@ async def _flatten_symbol(
     turns: _Turns,
     context: ExitContext,
 ) -> None:
-    """One symbol's loop: wait for a close the boot left open, then close the rest."""
+    """One symbol's loop: wait for a close the boot left open, then close the rest.
+
+    It closes until the venue reads the symbol flat, or stops after 3 dry
+    attempts in a row. A failed read is dry too, so a venue that cannot answer
+    never hangs the run (ADR-0060). A rate limit is the one failure that waits
+    instead. The final read reports what is left.
+    """
     # One count for the whole loop, so the resume wait's dry attempts are in the row.
     dry = _DryAttempts(symbol, context.clock)
-    resumed = await _resume_closes(symbol, size, dry, turns, context)
-    if resumed is not None:
-        await _close_symbol(symbol, resumed, priced, emitter, dry, turns, context)
-
-
-async def _close_symbol(
-    symbol: str,
-    size: Decimal,
-    priced: _Prices,
-    emitter: SignalEmitter,
-    dry: _DryAttempts,
-    turns: _Turns,
-    context: ExitContext,
-) -> None:
-    """Close ``symbol`` until the venue reads it flat, or stop after 3 dry attempts in a row.
-
-    A fill resets the count, so a thin book that keeps filling a little never gives up
-    (ADR-0056). A failed read is dry too, so a venue that cannot answer never hangs
-    the run (ADR-0060). The final read reports what is left.
-    """
-    while attempt := await _attempt(symbol, size, priced, emitter, dry, turns, context):
-        size = attempt.left
-        if attempt.filled:
-            dry.reset()
-        elif attempt.dry is not None and await dry.gave_up(attempt.dry, size):
-            return
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class _Attempt:
-    """How one attempt ended, when the loop goes on after it."""
-
-    left: Decimal
-    """What the venue still holds on the symbol. Never zero."""
-    filled: bool
-    dry: str | None
-    """Why an attempt that closed nothing counts as dry.
-
-    ``None`` when it filled, or when a rate limit refused it. A rate limit
-    does not count, because waiting it out makes progress (ADR-0056).
-    """
+    left = await _resume_closes(symbol, size, dry, turns, context)
+    while left is not None:
+        left = await _attempt(symbol, left, priced, emitter, dry, turns, context)
 
 
 async def _attempt(
@@ -365,13 +354,17 @@ async def _attempt(
     dry: _DryAttempts,
     turns: _Turns,
     context: ExitContext,
-) -> _Attempt | None:
-    """Try to close ``size`` once, then read what is left. ``None`` ends the loop.
+) -> Decimal | None:
+    """Try to close ``size`` once, then return what is left. ``None`` ends the loop.
 
     Every attempt reads the venue before it counts. So a venue that went flat
     ends the loop with no dry attempt, even when no close went out (ADR-0056).
+    A fill resets the count, so a thin book that keeps filling a little never
+    gives up.
     """
-    reason: str | None
+    # Why the attempt closed nothing. It stays ``None`` when the close filled,
+    # or when it waited out a rate limit, because waiting makes progress.
+    reason: str | None = None
     filled = False
     # No venue can send a market close without a price.
     if not await priced.has(symbol):
@@ -381,23 +374,26 @@ async def _attempt(
     else:
         cloid, refusal = await turns.close(symbol, size, emitter)
         limit = _RATE_LIMITS.get(refusal) if refusal is not None else None
-        verdict = _verdict(symbol, cloid, size, dry, turns, context)
+        verdict = _verdict(cloid, size, dry, turns, context)
         if limit is not None:
-            named_event(NamedEvent.FLATTEN_RATE_LIMITED, symbol=symbol, limit=limit)
             # The 10 seconds count from the refusal, so they run beside the verdict.
-            decided = await _beside(verdict, context.clock.sleep(RATE_LIMIT_WAIT_SECONDS))
+            decided = await _beside(verdict, dry.wait_out(limit))
         else:
             decided = await verdict
         if not decided:
             return None
         filled = _filled(cloid, context)
-        if filled or limit is not None:
-            reason = None
-        else:
+        if not filled and limit is None:
             # A send that dies counts as refused too (ADR-0060).
             reason = "no_fill" if refusal is None else "refused"
     left = await _read_left(symbol, size, dry, context)
-    return None if left is None else _Attempt(left=left, filled=filled, dry=reason)
+    if left is None:
+        return None
+    if filled:
+        dry.reset()
+    elif reason is not None and await dry.gave_up(reason, left):
+        return None
+    return left
 
 
 async def _beside(verdict: Coroutine[None, None, bool], wait: Coroutine[None, None, None]) -> bool:
@@ -433,33 +429,25 @@ def _held(symbol: str, context: ExitContext) -> Decimal:
 
 
 async def _verdict(
-    symbol: str,
-    cloid: str,
-    size: Decimal,
-    dry: _DryAttempts,
-    turns: _Turns,
-    context: ExitContext,
+    cloid: str, size: Decimal, dry: _DryAttempts, turns: _Turns, context: ExitContext
 ) -> bool:
     """Run reconcile passes until the close's saga is terminal (ADR-0011, ADR-0026).
 
     A pass covers both halves. ``reconcile_inflight`` resolves a send that never
     acked. ``reconcile_open_orders`` resolves an acked order whose last push was lost.
 
-    A failed pass is a dry attempt, so a venue that cannot answer never hangs the
-    run (ADR-0060). False when failed passes used up the dry attempts. A second
-    close beside an open one could close the size twice. So a failed pass waits
-    for this close again, and a give-up leaves it to the next boot.
-
-    A pass refused for the IP limit is not a failed read. It waits 10 seconds,
-    and the count does not move (ADR-0060).
+    A failed pass costs what any failed read costs (``_DryAttempts.read_failed``),
+    so a venue that cannot answer never hangs the run (ADR-0060). False when
+    failed passes used up the dry attempts. A second close beside an open one
+    could close the size twice. So a failed pass waits for this close again, and
+    a give-up leaves it to the next boot.
     """
     while not _decided(cloid, context):
         await context.clock.sleep(context.pass_interval_seconds)
         result = await turns.run_pass()
-        if result is PassResult.RATE_LIMITED:
-            named_event(NamedEvent.FLATTEN_RATE_LIMITED, symbol=symbol, limit="ip")
-            await context.clock.sleep(RATE_LIMIT_WAIT_SECONDS)
-        elif result is PassResult.FAILED and await dry.gave_up("read_failed", size):
+        if result is not PassResult.PROVED and await dry.read_failed(
+            size, rate_limited=result is PassResult.RATE_LIMITED
+        ):
             return False
     return True
 
@@ -475,15 +463,9 @@ async def _read_left(
     A hand trade the books cannot see may have closed a flat venue, and no order
     can close what the venue does not hold. So what the strategies still hold
     moves to the unattributed partition (ADR-0054, ADR-0056).
-
-    A read refused for the IP limit is not a failed read. Waiting it out makes
-    progress, so it waits 10 seconds and the count does not move (ADR-0060).
     """
     while isinstance(positions := await context.account.fetch_positions(), VenueReadFailure):
-        if positions is VenueReadFailure.RATE_LIMITED_IP:
-            named_event(NamedEvent.FLATTEN_RATE_LIMITED, symbol=symbol, limit="ip")
-            await context.clock.sleep(RATE_LIMIT_WAIT_SECONDS)
-        elif await dry.gave_up("read_failed", held):
+        if await dry.read_failed(held, rate_limited=positions is VenueReadFailure.RATE_LIMITED_IP):
             return None
     left = positions.get(symbol, Decimal(0))
     if not left:
@@ -508,7 +490,7 @@ async def _resume_closes(
     if not left_open:
         return size
     for order in left_open:
-        if not await _verdict(symbol, order.cloid, size, dry, turns, context):
+        if not await _verdict(order.cloid, size, dry, turns, context):
             return None
     # The old close may have filled during the wait, so only a new read sizes the next.
     return await _read_left(symbol, size, dry, context)
