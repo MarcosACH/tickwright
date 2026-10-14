@@ -27,6 +27,10 @@ it. Decided in [#415](https://github.com/MarcosACH/tickwright/issues/415), part 
   The write only raises the record. It keeps the higher of the stored seq and the new one. Each
   symbol has its own partition, so an older cancel all on one symbol can arrive after a newer one
   on another. If it lowered the record, a restart could reuse the newer seq.
+  **(Corrected by [#442](https://github.com/MarcosACH/tickwright/issues/442):** the seq is durable
+  once sent, which closes the gap named in the bullet above. `SignalEmitter` writes the seq record
+  before it publishes any signal. The manager's write stays, and it only raises the record. See
+  ADR-0016.**)**
 - **Each order goes through the single-cancel path.** The manager sets the `cancel_requested`
   marker on each order, with the cancel all's `signal_id`, and checkpoints it before the send.
   A terminal order is skipped. An order whose marker already has this seq or a higher one is
@@ -73,8 +77,11 @@ it. Decided in [#415](https://github.com/MarcosACH/tickwright/issues/415), part 
   change. Tracked under "Not yet specified" on #408.
   **(Corrected:** the gap hits places too, so it is out of scope for #408. It is now the bug
   [#442](https://github.com/MarcosACH/tickwright/issues/442).**)**
+  **(Resolved by #442:** the emitter writes the record when the strategy sends. It takes a
+  `record_seq` callable, not the store.**)**
 - A single cancel that marks nothing still leaves no trace, and a restart can reuse its seq. That
   stays safe, because it names one fixed target. A reused seq cannot change what it cancels.
+  **(Corrected by #442:** the emitter records every seq it sends, so a restart reuses none.**)**
 - Many orders can carry the same `cancel_signal_id`. The seq high-water reads the same max.
 - The Hyperliquid adapter needs a reader for one status per cancel. It must also handle one error
   for the whole batch. An error leaves every order in the batch marked and still resting.

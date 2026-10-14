@@ -23,8 +23,8 @@ class Cache:
         # re-proves it against venue truth before anything places (ADR-0009), the
         # same in-memory-and-reset-on-restart discipline the absence trackers keep.
         self._last_event_ns: dict[str, int] = {}
-        # The seqs a handled cancel all consumed (ADR-0055). No saga records them,
-        # so the seq high-water fold reads them from here.
+        # The seqs the emitter sent and a handled cancel all consumed (ADR-0016,
+        # ADR-0055). No saga may record them, so the seq high-water fold reads them here.
         self._seq_records: dict[str, int] = {}
 
     def raise_seq(self, strategy_id: str, seq: int) -> None:
@@ -91,8 +91,9 @@ class Cache:
         strategies and ``Flatten`` both start their counters here, so neither
         can reuse an id after a restart.
 
-        A handled cancel all may mark no saga, so its seq lives only in the
-        seq records. The fold starts from them (ADR-0055).
+        A signal sent but unhandled at a crash, or a cancel all that marked no
+        saga, leaves its seq only in the seq records. The fold starts from them
+        (ADR-0016, ADR-0055).
         """
         high_water: dict[str, int] = dict(self._seq_records)
         for order in self.all_orders():

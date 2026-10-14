@@ -38,6 +38,15 @@ all sent but not handled before a crash is not covered, the same as a place. A s
 marks nothing still leaves no trace, and a restart can reuse its seq. That is safe, because it
 names one fixed target. Decided in [#415](https://github.com/MarcosACH/tickwright/issues/415).**)**
 
+**(Amended by [#442](https://github.com/MarcosACH/tickwright/issues/442): the seq is recorded
+when it is sent, not when it is handled.** On Kafka, a signal can sit in the topic at a crash with
+no saga behind it. The restart then handed its seq out again, and the manager dropped the new
+signal as a duplicate. Now `SignalEmitter` writes the seq record before it publishes any signal:
+place, cancel and cancel all. So the high-water covers every seq a strategy sent, handled or not.
+A single cancel that marks nothing is covered too. The emitter takes a `record_seq` callable, not
+the `Store`, so `domain` still depends on no adapter. A failed write raises before the publish,
+so no signal goes out without its record.**)**
+
 ## Cadence
 
 The engine snapshots strategy state on a configurable trigger (periodic + on `stop`, optionally

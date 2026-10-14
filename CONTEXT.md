@@ -203,9 +203,10 @@ never the snapshot (ADR-0016). The engine's saga and dedup are keyed on it. **Mu
 pure function of strategy state — never random.** The `SignalId` value object (`domain/ids.py`)
 is the single owner of this format: `Signal.signal_id` composes it (`render`) and seq
 high-water recovery reads it back (`parse`), so the wire form and the recovery read can never
-drift. See ADR-0006. The store also keeps a per-strategy seq record that only goes up. A
-[[Cancel all]] writes its seq there before it marks any order, and the high-water reads that record
-too. So a restart never reuses the seq of a cancel all that cancelled nothing (ADR-0055).
+drift. See ADR-0006. The store also keeps a per-strategy seq record that only goes up. The
+[[SignalEmitter]] writes each seq there before it publishes the signal, and the high-water reads
+that record too. So a restart never reuses a sent seq, even one the crash left unhandled
+(ADR-0016, ADR-0055).
 _Avoid_: signal uuid, request id.
 
 **SignalEmitter**:

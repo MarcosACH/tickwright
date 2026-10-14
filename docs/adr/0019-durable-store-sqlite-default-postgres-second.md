@@ -34,6 +34,9 @@ means the current row state (ADR-0043 §1, extending ADR-0009 from orders to acc
 **(Extended by ADR-0055:** the store also holds **a seq record**, one row per `strategy_id`. It
 keeps the highest seq of any cancel all the manager handled. A write only raises it. It is a
 current-state row too. Decided in [#415](https://github.com/MarcosACH/tickwright/issues/415).**)**
+**(Amended by [#442](https://github.com/MarcosACH/tickwright/issues/442):** the record keeps the
+highest seq the strategy sent, of any signal kind. `SignalEmitter` writes it before each publish
+(ADR-0016).**)**
 
 ## One error contract for the seam
 

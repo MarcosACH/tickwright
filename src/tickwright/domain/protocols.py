@@ -375,8 +375,8 @@ class Store(Protocol):
         """Durably raise ``strategy_id``'s seq record to ``seq`` (ADR-0055).
 
         It keeps the higher of the stored seq and ``seq``, so it never goes
-        down. A handled cancel all writes its seq here, so a restart never reuses
-        it, even when the cancel all marked no order."""
+        down. ``SignalEmitter`` writes every seq here before it publishes, so a
+        restart never reuses one, even for a signal the crash left unhandled."""
         ...
 
     def seq_records(self) -> dict[str, int]:
