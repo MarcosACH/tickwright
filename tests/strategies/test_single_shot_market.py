@@ -25,6 +25,7 @@ from tickwright.domain import (
     PlaceSignal,
     Side,
     Signal,
+    SignalEmitter,
     TimeInForce,
 )
 from tickwright.engine.portfolio import PortfolioProjection
@@ -50,10 +51,12 @@ def _harness(
     bus = InMemoryBus()
     clock = ManualClock(start_ns=1_000)
     strategy = SingleShotMarketStrategy(
-        strategy_id="trivial",
-        bus=bus,
-        clock=clock,
-        record_seq=SQLiteStore(":memory:").raise_seq,
+        emitter=SignalEmitter(
+            strategy_id="trivial",
+            bus=bus,
+            clock=clock,
+            record_seq=SQLiteStore(":memory:").raise_seq,
+        ),
         # A real projection, scoped exactly as the composition root scopes it —
         # the strategy holds the ``domain`` Protocol and never the concrete.
         portfolio=(
@@ -87,6 +90,13 @@ def test_signal_id_is_deterministic_and_strategy_owned() -> None:
     bus, _, _, signals = _harness()
     asyncio.run(bus.publish(_tick()))
     assert signals[0].signal_id == "trivial:BTC:1"
+
+
+def test_its_strategy_id_is_the_one_its_emitter_was_built_for() -> None:
+    # One source for the id. The host seeds the seq and checks reserved ids by
+    # strategy_id, so it must name the same strategy the signals do.
+    _, _, strategy, _ = _harness()
+    assert strategy.strategy_id == "trivial"
 
 
 def test_signal_is_stamped_from_the_clock() -> None:

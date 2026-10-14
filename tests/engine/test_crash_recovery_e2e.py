@@ -53,6 +53,7 @@ from tickwright.domain import (
     PlaceSignal,
     Side,
     Signal,
+    SignalEmitter,
     Store,
     TimeInForce,
     VenueOrderView,
@@ -181,10 +182,9 @@ def _first_life(
         checkpointer=checks,
     )
     strategy = SingleShotLimitStrategy(
-        strategy_id="trivial",
-        bus=bus,
-        clock=clock,
-        record_seq=store.raise_seq,
+        emitter=SignalEmitter(
+            strategy_id="trivial", bus=bus, clock=clock, record_seq=checks.raise_seq
+        ),
         side=Side.BUY,
         quantity=Decimal("0.5"),
         price=Decimal("41000"),
@@ -465,10 +465,9 @@ def _kafka_life(
     host = StrategyHost(bus=bus, clock=clock, store=store, cache=checks.cache)
     host.register(
         SingleShotLimitStrategy(
-            strategy_id="trivial",
-            bus=bus,
-            clock=clock,
-            record_seq=store.raise_seq,
+            emitter=SignalEmitter(
+                strategy_id="trivial", bus=bus, clock=clock, record_seq=checks.raise_seq
+            ),
             side=Side.BUY,
             quantity=Decimal("0.5"),
             price=Decimal("41000"),

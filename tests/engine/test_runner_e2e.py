@@ -125,10 +125,7 @@ async def _run_to_fill_then_stop(
     feed = ReplayFeed(path=ticks, bus=bus, clock=clock)
     engine = Engine(bus=bus, clock=clock, store=store, exchange=exchange, feed=feed)
     strategy = SingleShotMarketStrategy(
-        strategy_id="trivial",
-        bus=bus,
-        clock=clock,
-        record_seq=store.raise_seq,
+        emitter=engine.emitter_for("trivial"),
         portfolio=engine.portfolio_for("trivial"),
         side=Side.BUY,
         quantity=Decimal("0.5"),
@@ -323,11 +320,10 @@ def test_an_engine_on_a_store_another_process_holds_faults_and_writes_nothing(
     backing.drop_column("orders", "created_ts_ns")
     bus = InMemoryBus()
     clock = ManualClock()
-    store = SQLiteStore(db)
     engine = Engine(
         bus=bus,
         clock=clock,
-        store=store,
+        store=SQLiteStore(db),
         exchange=PaperExchange(
             bus=bus,
             clock=clock,
@@ -340,10 +336,7 @@ def test_an_engine_on_a_store_another_process_holds_faults_and_writes_nothing(
     )
     engine.register(
         SingleShotMarketStrategy(
-            strategy_id="trivial",
-            bus=bus,
-            clock=clock,
-            record_seq=store.raise_seq,
+            emitter=engine.emitter_for("trivial"),
             portfolio=engine.portfolio_for("trivial"),
             side=Side.BUY,
             quantity=Decimal("0.5"),
@@ -537,11 +530,10 @@ def test_a_negative_free_margin_is_reported_and_stops_nothing(tmp_path: Path) ->
     async def one_life() -> tuple[int, Engine, _MarginBlindStrategy]:
         bus = InMemoryBus()
         clock = ManualClock()
-        store = SQLiteStore(db)
         engine = Engine(
             bus=bus,
             clock=clock,
-            store=store,
+            store=SQLiteStore(db),
             exchange=PaperExchange(
                 bus=bus,
                 clock=clock,
@@ -553,10 +545,7 @@ def test_a_negative_free_margin_is_reported_and_stops_nothing(tmp_path: Path) ->
             feed=ReplayFeed(path=ticks, bus=bus, clock=clock),
         )
         overweight = SingleShotMarketStrategy(
-            strategy_id="overweight",
-            bus=bus,
-            clock=clock,
-            record_seq=store.raise_seq,
+            emitter=engine.emitter_for("overweight"),
             portfolio=engine.portfolio_for("overweight"),
             side=Side.BUY,
             quantity=Decimal("3"),
@@ -1515,10 +1504,7 @@ def test_invariant_violation_faults_the_engine_and_exits_nonzero(tmp_path: Path)
         )
         engine.register(
             SingleShotMarketStrategy(
-                strategy_id="doomed",
-                bus=bus,
-                clock=clock,
-                record_seq=store.raise_seq,
+                emitter=engine.emitter_for("doomed"),
                 portfolio=engine.portfolio_for("doomed"),
                 side=Side.BUY,
                 quantity=Decimal("0.5"),
@@ -2185,20 +2171,16 @@ def test_a_venue_that_refuses_to_start_faults_the_engine_before_any_order(
     async def refused_life() -> tuple[int, Engine]:
         bus = InMemoryBus()
         clock = ManualClock()
-        store = SQLiteStore(tmp_path / "saga.db")
         engine = Engine(
             bus=bus,
             clock=clock,
-            store=store,
+            store=SQLiteStore(tmp_path / "saga.db"),
             exchange=venue,
             feed=ReplayFeed(path=_write_ticks(tmp_path / "ticks.jsonl"), bus=bus, clock=clock),
         )
         engine.register(
             SingleShotMarketStrategy(
-                strategy_id="eager",
-                bus=bus,
-                clock=clock,
-                record_seq=store.raise_seq,
+                emitter=engine.emitter_for("eager"),
                 portfolio=engine.portfolio_for("eager"),
                 side=Side.BUY,
                 quantity=Decimal("0.5"),
@@ -2333,10 +2315,7 @@ def test_graceful_stop_leaves_resting_live_orders_for_the_next_start_to_re_adopt
         engine = Engine(bus=bus, clock=clock, store=store, exchange=venue, feed=feed)
         engine.register(
             SingleShotLimitStrategy(
-                strategy_id="resting",
-                bus=bus,
-                clock=clock,
-                record_seq=store.raise_seq,
+                emitter=engine.emitter_for("resting"),
                 side=Side.BUY,
                 quantity=Decimal("0.5"),
                 price=Decimal("41000"),
@@ -2389,10 +2368,7 @@ def test_graceful_stop_leaves_resting_live_orders_for_the_next_start_to_re_adopt
         engine = Engine(bus=bus, clock=clock, store=store, exchange=venue, feed=feed)
         engine.register(
             SingleShotLimitStrategy(
-                strategy_id="resting",
-                bus=bus,
-                clock=clock,
-                record_seq=store.raise_seq,
+                emitter=engine.emitter_for("resting"),
                 side=Side.BUY,
                 quantity=Decimal("0.5"),
                 price=Decimal("41000"),

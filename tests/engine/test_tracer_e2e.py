@@ -46,6 +46,7 @@ from tickwright.domain import (
     Portfolio,
     Side,
     Signal,
+    SignalEmitter,
     TimeInForce,
     derive_cloid,
 )
@@ -139,10 +140,9 @@ def _run(
     projection = checks.portfolio
     manager = ExecutionManager(bus=bus, exchange=exchange, checkpointer=checks)
     strategy = SingleShotMarketStrategy(
-        strategy_id="trivial",
-        bus=bus,
-        clock=clock,
-        record_seq=store.raise_seq,
+        emitter=SignalEmitter(
+            strategy_id="trivial", bus=bus, clock=clock, record_seq=checks.raise_seq
+        ),
         side=Side.BUY,
         quantity=Decimal("0.5"),
         portfolio=projection.for_strategy("trivial"),

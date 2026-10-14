@@ -87,10 +87,7 @@ def main() -> int:
 
     def wiring(strategy_id: str, sym: str) -> Wiring:
         return Wiring(
-            strategy_id=strategy_id,
-            bus=bus,
-            clock=clock,
-            record_seq=store.raise_seq,
+            emitter=engine.emitter_for(strategy_id),
             portfolio=engine.portfolio_for(strategy_id),
             symbol=sym,
             quantity=quantity,

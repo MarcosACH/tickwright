@@ -11,12 +11,9 @@ deterministic and replayable, and knows nothing of the saga, store, or venue.
 """
 
 import json
-from collections.abc import Callable
 from decimal import Decimal
 
 from tickwright.domain import (
-    Clock,
-    EventBus,
     InvariantViolation,
     MarketTick,
     OrderCancelled,
@@ -35,10 +32,7 @@ class SingleShotLimitStrategy:
     def __init__(
         self,
         *,
-        strategy_id: str,
-        bus: EventBus,
-        clock: Clock,
-        record_seq: Callable[[str, int], None],
+        emitter: SignalEmitter,
         side: Side,
         quantity: Decimal,
         price: Decimal,
@@ -46,10 +40,10 @@ class SingleShotLimitStrategy:
         post_only: bool = False,
         cancel_after_ticks: int | None = None,
     ) -> None:
-        self.strategy_id = strategy_id
-        self._emitter = SignalEmitter(
-            strategy_id=strategy_id, bus=bus, clock=clock, record_seq=record_seq
-        )
+        # The id comes from the emitter, so the two cannot name different
+        # strategies (#442).
+        self.strategy_id = emitter.strategy_id
+        self._emitter = emitter
         self._side = side
         self._quantity = quantity
         self._price = price

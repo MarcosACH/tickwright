@@ -41,7 +41,6 @@ from tickwright.app.build import (
 )
 from tickwright.app.config import AppConfig, StrategyConfig
 from tickwright.domain import (
-    Clock,
     EventBus,
     InstrumentSpec,
     MarketTick,
@@ -178,16 +177,11 @@ class ScriptedStrategy:
     def __init__(
         self,
         *,
-        strategy_id: str,
-        bus: EventBus,
-        clock: Clock,
-        record_seq: Callable[[str, int], None],
+        emitter: SignalEmitter,
         script: Mapping[int, Sequence[Order]],
     ) -> None:
-        self.strategy_id = strategy_id
-        self._emitter = SignalEmitter(
-            strategy_id=strategy_id, bus=bus, clock=clock, record_seq=record_seq
-        )
+        self.strategy_id = emitter.strategy_id
+        self._emitter = emitter
         self._script = script
         self._sent: list[str] = []
         self._results: dict[str, str] = {}
@@ -288,10 +282,7 @@ def _wire(config: AppConfig, steps: Sequence[Step], *, bus: EventBus | None = No
         leverage=leverage,
     )
     strategy = ScriptedStrategy(
-        strategy_id="scripted",
-        bus=bus,
-        clock=clock,
-        record_seq=store.raise_seq,
+        emitter=engine.emitter_for("scripted"),
         script={step.ts_ns: step.orders for step in steps},
     )
     engine.register(strategy, symbols={"BTC", "ETH"})

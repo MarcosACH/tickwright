@@ -24,6 +24,7 @@ from tickwright.domain import (
     PlaceSignal,
     Side,
     Signal,
+    SignalEmitter,
     TimeInForce,
 )
 from tickwright.strategies import SingleShotLimitStrategy
@@ -48,10 +49,12 @@ def _harness(
     bus = InMemoryBus()
     clock = ManualClock(start_ns=1_000)
     strategy = SingleShotLimitStrategy(
-        strategy_id="trivial",
-        bus=bus,
-        clock=clock,
-        record_seq=SQLiteStore(":memory:").raise_seq,
+        emitter=SignalEmitter(
+            strategy_id="trivial",
+            bus=bus,
+            clock=clock,
+            record_seq=SQLiteStore(":memory:").raise_seq,
+        ),
         side=Side.BUY,
         quantity=Decimal("0.5"),
         price=Decimal("41000"),
