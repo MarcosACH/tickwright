@@ -31,6 +31,7 @@ from hyperliquid_fakes import (
     trade,
     trades_frame,
 )
+from hyperliquid_flatten import RateLimitedOnce, priced_frames, run_flatten
 from ledgers import GENESIS, book_fill, checkpointer
 from pydantic import SecretStr
 from venue_doubles import (
@@ -93,6 +94,7 @@ from tickwright.venues.hyperliquid import (
     HyperliquidFeed,
     HyperliquidUniverse,
 )
+from tickwright.venues.hyperliquid.transport import IpRateLimited
 
 # What the processor chain puts on a record beside the event's own fields: the
 # name, the level, and the ambient correlation ids (ADR-0020).
@@ -848,6 +850,13 @@ def _drive_flatten_gave_up() -> None:
     assert asyncio.run(engine.run()) == 1
 
 
+def _drive_flatten_rate_limited() -> None:
+    """One Hyperliquid flatten whose first close the venue refuses over the IP limit (ADR-0056)."""
+    venue = RateLimitedOnce(IpRateLimited("429 from the venue"))
+    exit_code, _, _ = run_flatten(":memory:", venue, priced_frames())
+    assert exit_code == 0
+
+
 def _drive_exit_refused() -> None:
     """One operator cancel all on a store another engine holds (ADR-0060)."""
     with tempfile.TemporaryDirectory() as tmp, SQLiteStore(Path(tmp) / "saga.db") as holder:
@@ -1178,6 +1187,7 @@ SCENARIOS: dict[NamedEvent, Callable[[], None]] = {
     NamedEvent.CANCEL_ALL_ORDERS_REMAIN: _drive_cancel_all_orders_remain,
     NamedEvent.FLATTEN_DRY_ATTEMPT: _drive_flatten_gave_up,
     NamedEvent.FLATTEN_GAVE_UP: _drive_flatten_gave_up,
+    NamedEvent.FLATTEN_RATE_LIMITED: _drive_flatten_rate_limited,
     NamedEvent.GUARD_KILL_SWITCH_TRIPPED: _drive_kill_switch(reset=False),
     NamedEvent.GUARD_KILL_SWITCH_RESET: _drive_kill_switch(reset=True),
     NamedEvent.STRATEGY_ERROR: _drive_strategy_error,

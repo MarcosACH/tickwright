@@ -7,7 +7,7 @@ sees them.
 """
 
 import asyncio
-from collections.abc import Awaitable, Callable, Iterable, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Iterable, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import StrEnum
@@ -24,6 +24,8 @@ from tickwright.domain import (
     MarkTick,
     OrderAnchor,
     OrderRef,
+    OrderRefusal,
+    OrderRefusedReport,
     OrderType,
     PreTradeGuard,
     Side,
@@ -162,6 +164,7 @@ class Flatten:
             high_water = context.checkpointer.cache.seq_high_water()
             emitter.set_next_seq(high_water.get(OPERATOR, 0) + 1)
             turns = _Turns(context.reconciler)
+            context.bus.subscribe(OrderRefusedReport, turns.note_refusal)
             # One loop per symbol, all at the same time, so a thin book on one
             # symbol does not hold back the others (ADR-0056). A task group
             # cancels the rest when one faults. A loop reports nothing, because
@@ -179,6 +182,12 @@ DRY_ATTEMPTS_TO_GIVE_UP = 3
 
 DRY_WAIT_SECONDS = 2.0
 """The wait after a dry attempt, before the next one (ADR-0056)."""
+
+RATE_LIMIT_WAIT_SECONDS = 10.0
+"""The wait after a close the venue refused for a rate limit (ADR-0056)."""
+
+_RATE_LIMITS = {OrderRefusal.RATE_LIMITED_ADDRESS: "address", OrderRefusal.RATE_LIMITED_IP: "ip"}
+"""The ``limit`` field ``flatten.rate_limited`` names for each rate limit (ADR-0060)."""
 
 
 class _Prices:
@@ -240,6 +249,10 @@ class _Turns:
     def __init__(self, reconciler: Reconciler) -> None:
         self._reconciler = reconciler
         self._lock = asyncio.Lock()
+        self._refusals: dict[str, OrderRefusal] = {}
+
+    async def note_refusal(self, report: OrderRefusedReport) -> None:
+        self._refusals[report.cloid] = report.refusal
 
     async def run_pass(self) -> bool:
         """Run both halves of one pass. False when either failed."""
@@ -249,10 +262,17 @@ class _Turns:
                 and await self._reconciler.reconcile_open_orders()
             )
 
-    async def close(self, symbol: str, size: Decimal, emitter: SignalEmitter) -> str:
-        """Send one close, and return once the engine has handled it."""
+    async def close(
+        self, symbol: str, size: Decimal, emitter: SignalEmitter
+    ) -> tuple[str, OrderRefusal | None]:
+        """Send one close, and return once the engine has handled it.
+
+        Returns its cloid, and why the venue did not take it, if it did not.
+        The venue's answer is part of the handling, so it is known by then.
+        """
         async with self._lock:
-            return await _close(symbol, size, emitter)
+            cloid = await _close(symbol, size, emitter)
+            return cloid, self._refusals.pop(cloid, None)
 
 
 class _DryAttempts:
@@ -316,9 +336,9 @@ async def _close_symbol(
     """
     while attempt := await _attempt(symbol, size, priced, emitter, dry, turns, context):
         size = attempt.left
-        if attempt.dry is None:
+        if attempt.filled:
             dry.reset()
-        elif await dry.gave_up(attempt.dry, size):
+        elif attempt.dry is not None and await dry.gave_up(attempt.dry, size):
             return
 
 
@@ -328,8 +348,13 @@ class _Attempt:
 
     left: Decimal
     """What the venue still holds on the symbol. Never zero."""
+    filled: bool
     dry: str | None
-    """Why the attempt closed nothing, or ``None`` when it filled."""
+    """Why an attempt that closed nothing counts as dry.
+
+    ``None`` when it filled, or when a rate limit refused it. A rate limit
+    does not count, because waiting it out makes progress (ADR-0056).
+    """
 
 
 async def _attempt(
@@ -347,18 +372,36 @@ async def _attempt(
     ends the loop with no dry attempt, even when no close went out (ADR-0056).
     """
     reason: str | None
+    filled = False
     # No venue can send a market close without a price.
     if not await priced.has(symbol):
         reason = "no_price"
     elif await _size_gap(symbol, size, context):
         reason = "size_gap"
     else:
-        cloid = await turns.close(symbol, size, emitter)
-        if not await _verdict(cloid, size, dry, turns, context):
+        cloid, refusal = await turns.close(symbol, size, emitter)
+        limit = _RATE_LIMITS.get(refusal) if refusal is not None else None
+        verdict = _verdict(cloid, size, dry, turns, context)
+        if limit is not None:
+            named_event(NamedEvent.FLATTEN_RATE_LIMITED, symbol=symbol, limit=limit)
+            # The 10 seconds count from the refusal, so they run beside the verdict.
+            decided = await _beside(verdict, context.clock.sleep(RATE_LIMIT_WAIT_SECONDS))
+        else:
+            decided = await verdict
+        if not decided:
             return None
-        reason = None if _filled(cloid, context) else "no_fill"
+        filled = _filled(cloid, context)
+        reason = None if filled or limit is not None else "no_fill"
     left = await _read_left(symbol, size, dry, context)
-    return None if left is None else _Attempt(left=left, dry=reason)
+    return None if left is None else _Attempt(left=left, filled=filled, dry=reason)
+
+
+async def _beside(verdict: Coroutine[None, None, bool], wait: Coroutine[None, None, None]) -> bool:
+    """Run ``verdict`` and ``wait`` at the same time. Return once both are done."""
+    async with asyncio.TaskGroup() as group:
+        decided = group.create_task(verdict)
+        group.create_task(wait)
+    return decided.result()
 
 
 async def _size_gap(symbol: str, size: Decimal, context: ExitContext) -> bool:
