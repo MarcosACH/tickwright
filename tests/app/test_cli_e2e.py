@@ -13,6 +13,7 @@ re-adoption, where the venue survives, is proven in-process in
 ``tests/engine/test_runner_e2e.py``.)
 """
 
+import errno
 import json
 import os
 import signal
@@ -22,6 +23,7 @@ import time
 from pathlib import Path
 
 import pytest
+from store_backends import PostgresBackend, resolve_backend
 
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import OrderState, derive_cloid
@@ -362,3 +364,82 @@ def test_flatten_on_hyperliquid_priced_by_a_replay_exits_two_before_it_boots(
 
     assert "needs feed=hyperliquid" in log.read_text()
     assert _events(log) == []
+
+
+def _open_tick_pipe(fifo: Path, *, timeout: float = 15.0) -> int:
+    """Open the write end of the engine's tick pipe once the engine reads it.
+
+    Non-blocking, so a child that dies before it reaches its feed fails the test
+    instead of hanging it. Until a reader opens the pipe, the open fails with
+    ``ENXIO``.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            return os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+        except OSError as exc:
+            if exc.errno != errno.ENXIO:
+                raise
+        time.sleep(0.05)
+    raise AssertionError("the engine never opened its tick file")
+
+
+@pytest.mark.postgres
+def test_an_engine_whose_postgres_session_ends_exits_1_before_its_next_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An engine that lost its session has lost its lock, and another engine may
+    hold it now. It never reconnects, so its next store call fails and the
+    engine stops before it sends the order (ADR-0052).
+
+    On paper that call is the exchange's read of applied fills, not the saga's
+    ``PENDING`` write. A live venue has no such read, so the write is what stops
+    it there. ``test_a_postgres_store_that_lost_its_session_refuses_its_next_write``
+    covers that write.
+
+    The tick file is a named pipe, so the engine waits on it like a live feed.
+    That gives the test a moment between two ticks to end the session."""
+    backend = resolve_backend("postgres", tmp_path / "unused.db")
+    assert isinstance(backend, PostgresBackend)
+    _write_workspace(tmp_path)
+    os.mkfifo(tmp_path / "ticks.fifo")
+    late = {**_STRATEGIES[0], "strategy_id": "late", "symbol": "ETH"}
+    with (tmp_path / ".env").open("a") as env:
+        env.write(
+            "TICKWRIGHT_REPLAY__PATH=ticks.fifo\n"
+            "TICKWRIGHT_STORE=postgres\n"
+            f"TICKWRIGHT_POSTGRES__DSN={backend.dsn}\n"
+            f"TICKWRIGHT_STRATEGIES={json.dumps([_STRATEGIES[0], late])}\n"
+        )
+    _export_hostile_config(monkeypatch)
+    log = tmp_path / "engine.log"
+    late_cloid = derive_cloid("late:ETH:1")
+
+    with _spawn(tmp_path, log) as engine:
+        try:
+            pipe = _open_tick_pipe(tmp_path / "ticks.fifo")
+            try:
+                os.write(pipe, (json.dumps(_TICKS[0]) + "\n").encode())
+                _await_event(log, "order.filled")
+                with backend.open() as probe:
+                    holder = probe.lock()
+                assert holder is not None and holder.pid is not None
+
+                backend.terminate(holder.pid)
+                os.write(pipe, (json.dumps(_TICKS[1]) + "\n").encode())
+
+                exit_code = engine.wait(timeout=15)
+            finally:
+                os.close(pipe)
+        except BaseException:
+            engine.kill()
+            raise AssertionError(f"engine run failed; stderr:\n{log.read_text()}") from None
+
+    assert exit_code == 1, log.read_text()
+    events = _events(log)
+    assert "engine.faulted" in [event["event"] for event in events]
+    submitted = [e["signal_id"] for e in events if e["event"] == "order.submitted"]
+    assert submitted == ["shooter:BTC:1"]
+    with backend.open() as reader:
+        assert reader.get_order(late_cloid) is None
+        assert reader.lock() is None

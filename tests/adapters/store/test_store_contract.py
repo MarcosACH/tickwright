@@ -15,6 +15,10 @@ surfaces is one the two backends could disagree about unobserved.
 
 The Postgres arm carries the ``postgres`` marker and auto-skips when no server is
 reachable (see ``conftest``), so ``uv run pytest`` stays hermetic by default.
+
+Every test here runs on both backends and skips neither. What only one store
+has lives in that store's own file: ``test_sqlite_store.py`` or
+``test_postgres_store.py``.
 """
 
 from collections.abc import Callable, Mapping
@@ -23,7 +27,6 @@ from decimal import Decimal
 
 import pytest
 from closed_sets import assert_covers_exactly
-from psycopg.conninfo import conninfo_to_dict
 from store_backends import PostgresBackend, SQLiteBackend
 
 from tickwright.domain import (
@@ -901,38 +904,3 @@ def test_a_store_refused_its_lock_leaves_an_older_schema_as_it_found_it(
             assert refused.lock() is not None
 
         assert not store_backend.has_column("orders", "created_ts_ns")
-
-
-def test_a_postgres_holder_pid_is_the_session_that_holds_the_lock(
-    store_backend: Backend,
-) -> None:
-    """The refusal tells the operator to run ``pg_terminate_backend(<pid>)``
-    (ADR-0052). That only works if the pid is the holder's own session, so ending
-    that session must free the lock."""
-    if not isinstance(store_backend, PostgresBackend):
-        pytest.skip("only a Postgres holder is a server session")
-    with store_backend.open() as first, store_backend.open() as second:
-        assert first.lock() is None
-        holder = second.lock()
-        assert holder is not None
-        assert holder.pid is not None
-
-        store_backend.terminate(holder.pid)
-
-        assert second.lock() is None
-
-
-def test_a_postgres_holder_names_the_store_without_its_credentials(
-    store_backend: Backend,
-) -> None:
-    """``exit.refused`` names the store, and that event goes to the operator's
-    logs (ADR-0060). So it carries the host and database, never the password."""
-    if not isinstance(store_backend, PostgresBackend):
-        pytest.skip("only a Postgres store has credentials to leave out")
-    with store_backend.open() as first, store_backend.open() as second:
-        assert first.lock() is None
-        holder = second.lock()
-        assert holder is not None
-
-        dsn = conninfo_to_dict(store_backend.dsn)
-        assert holder.store == f"{dsn['host']}:{dsn.get('port', 5432)}/{dsn['dbname']}"

@@ -94,6 +94,16 @@ class PostgresBackend:
             ).fetchone()
         return row is not None
 
+    def session(self, pid: int) -> tuple[str, str]:
+        """The client address and start time of server session ``pid``, read from
+        a separate connection, as the operator would read them."""
+        with psycopg.connect(self._dsn, autocommit=True) as conn:
+            row = conn.execute(
+                "SELECT client_addr, backend_start FROM pg_stat_activity WHERE pid = %s", (pid,)
+            ).fetchone()
+        assert row is not None, f"no server session {pid}"
+        return str(row[0]), str(row[1])
+
     def terminate(self, pid: int) -> None:
         """End the server session ``pid``, the way the operator would."""
         with psycopg.connect(self._dsn, autocommit=True) as conn:
