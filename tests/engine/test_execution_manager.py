@@ -1080,6 +1080,31 @@ def test_a_redelivered_cancel_all_sends_no_cancel_twice() -> None:
     assert order.cancel_signal_id == "trivial:BTC:2"
 
 
+def test_a_newer_cancel_all_resends_the_cancel_for_an_order_still_open() -> None:
+    links: list[_CancelsLost] = []
+
+    def link(venue: PaperExchange) -> Exchange:
+        links.append(_CancelsLost(venue))
+        return links[-1]
+
+    wiring = _wiring(SQLiteStore(":memory:"), link=link)
+
+    async def scenario() -> None:
+        await wiring.bus.publish(_tick("42000"))
+        await wiring.bus.publish(_limit_signal("41000", seq=1))
+        await wiring.bus.publish(_cancel_all_signal(seq=2))
+        # The first cancel was lost. A newer cancel all is how a strategy retries,
+        # so it sends the cancel again and takes over the marker (ADR-0055).
+        await wiring.bus.publish(_cancel_all_signal(seq=3))
+
+    asyncio.run(scenario())
+
+    order = wiring.store.get_order(derive_cloid("trivial:BTC:1"))
+    assert order is not None
+    assert links[0].cancels_sent == [OrderRef.of(order), OrderRef.of(order)]
+    assert order.cancel_signal_id == "trivial:BTC:3"
+
+
 async def _record(sink: list, event: object) -> None:
     sink.append(event)
 

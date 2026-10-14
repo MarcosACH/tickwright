@@ -346,7 +346,7 @@ class ExecutionManager:
                 strategy_id=signal.strategy_id, symbol=signal.symbol
             )
             if SignalId.parse(order.signal_id).seq < signal.seq
-            and order.request_cancel(signal_id=signal.signal_id, ts_ns=now)
+            and order.request_cancel_all(signal_id=signal.signal_id, ts_ns=now)
         ]
         # Every marker is durable before the one send, as on the single-cancel
         # path (ADR-0026), so reconcile can settle any cancel the send loses.

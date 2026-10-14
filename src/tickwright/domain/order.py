@@ -27,6 +27,7 @@ from .events import (
     OrderPartiallyFilled,
     OrderRejected,
 )
+from .ids import SignalId
 
 # Legal saga transitions as (from_state, to_state) pairs (ADR-0007).
 _LEGAL_TRANSITIONS: frozenset[tuple[OrderState, OrderState]] = frozenset(
@@ -128,6 +129,26 @@ class Order:
             return False
         self.cancel_requested = True
         self.cancel_requested_ts = ts_ns
+        self.cancel_signal_id = signal_id
+        return True
+
+    def request_cancel_all(self, *, signal_id: str, ts_ns: int) -> bool:
+        """Record a strategy's cancel all on this saga (ADR-0055).
+
+        Unlike ``request_cancel``, it does not skip every order already marked.
+        An earlier cancel may never have reached the venue, so a newer cancel all
+        takes the marker and the caller sends again. A marker with this seq or a
+        higher one is skipped, so a redelivered cancel all sends nothing twice.
+        Returns ``True`` if the caller should send the cancel.
+        """
+        if self.is_terminal:
+            return False
+        seq = SignalId.parse(signal_id).seq
+        if self.cancel_signal_id is not None and SignalId.parse(self.cancel_signal_id).seq >= seq:
+            return False
+        self.cancel_requested = True
+        if self.cancel_requested_ts is None:
+            self.cancel_requested_ts = ts_ns
         self.cancel_signal_id = signal_id
         return True
 
