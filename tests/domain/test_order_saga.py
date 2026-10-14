@@ -363,6 +363,18 @@ def test_operator_cancel_on_a_terminal_order_is_a_no_op() -> None:
     assert order.cancel_requested_ts is None
 
 
+@pytest.mark.parametrize("seq", [1, 0])
+def test_request_cancel_all_skips_an_order_sent_at_or_after_it(seq: int) -> None:
+    order = _order()  # sent with seq 1
+    order.apply(_submitted())
+    order.apply(_live())
+    # A cancel all reaches only orders with a lower seq, so a redelivered one can
+    # never cancel an order sent after it (ADR-0055).
+    assert order.request_cancel_all(signal_id=f"trivial:BTC:{seq}", ts_ns=5) is False
+    assert order.cancel_requested is False
+    assert order.cancel_signal_id is None
+
+
 def test_a_fill_after_cancel_requested_still_transitions_to_filled() -> None:
     order = _order()
     order.apply(_submitted())
