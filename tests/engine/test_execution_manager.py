@@ -39,6 +39,7 @@ from tickwright.domain import (
     ExternalOrderRef,
     FillReport,
     GuardDecision,
+    InstrumentSpec,
     InvariantViolation,
     MarketTick,
     Order,
@@ -66,6 +67,7 @@ from tickwright.domain.enums import OrderType
 from tickwright.engine.cache import Cache
 from tickwright.engine.checkpoint import Checkpointer
 from tickwright.engine.execution import ExecutionManager
+from tickwright.engine.guard import RealGuard
 from tickwright.engine.portfolio import PortfolioProjection
 
 
@@ -1103,6 +1105,27 @@ def test_a_newer_cancel_all_resends_the_cancel_for_an_order_still_open() -> None
     assert order is not None
     assert links[0].cancels_sent == [OrderRef.of(order), OrderRef.of(order)]
     assert order.cancel_signal_id == "trivial:BTC:3"
+
+
+def test_a_cancel_all_goes_out_while_the_kill_switch_is_tripped() -> None:
+    store = SQLiteStore(":memory:")
+    spec = InstrumentSpec(symbol="BTC", sz_decimals=3, max_decimals=6, min_notional=Decimal("0"))
+    guard = RealGuard(specs={"BTC": spec}, store=store, clock=ManualClock(start_ns=1_000))
+    wiring = _wiring(store, guard=guard)
+
+    async def scenario() -> None:
+        await wiring.bus.publish(_tick("42000"))
+        await wiring.bus.publish(_limit_signal("41000", seq=1))
+        # The kill switch halts new places only. A tripped engine must still be
+        # able to take its orders off the book (ADR-0055, ADR-0053).
+        guard.trip_kill_switch("test")
+        await wiring.bus.publish(_cancel_all_signal(seq=2))
+
+    asyncio.run(scenario())
+
+    order = wiring.store.get_order(derive_cloid("trivial:BTC:1"))
+    assert order is not None
+    assert order.state is OrderState.CANCELLED
 
 
 async def _record(sink: list, event: object) -> None:
