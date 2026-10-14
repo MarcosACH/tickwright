@@ -13,6 +13,7 @@ from decimal import Decimal
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
+from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     AggressorSide,
     CancelSignal,
@@ -50,6 +51,7 @@ def _harness(
         strategy_id="trivial",
         bus=bus,
         clock=clock,
+        record_seq=SQLiteStore(":memory:").raise_seq,
         side=Side.BUY,
         quantity=Decimal("0.5"),
         price=Decimal("41000"),

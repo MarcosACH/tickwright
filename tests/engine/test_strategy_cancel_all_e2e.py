@@ -39,9 +39,18 @@ Step = tuple[str, Callable[[SignalEmitter], Awaitable[object]]]
 class _ScriptedStrategy:
     """Runs one scripted step per tick and records every cancel it hears."""
 
-    def __init__(self, *, bus: InMemoryBus, clock: ManualClock, steps: list[Step]) -> None:
+    def __init__(
+        self,
+        *,
+        bus: InMemoryBus,
+        clock: ManualClock,
+        record_seq: Callable[[str, int], None],
+        steps: list[Step],
+    ) -> None:
         self.strategy_id = "scripted"
-        self._emitter = SignalEmitter(strategy_id=self.strategy_id, bus=bus, clock=clock)
+        self._emitter = SignalEmitter(
+            strategy_id=self.strategy_id, bus=bus, clock=clock, record_seq=record_seq
+        )
         self._steps = list(steps)
         self.cancellations: list[OrderCancelled] = []
 
@@ -120,8 +129,9 @@ def _run(tmp_path: Path, steps: list[Step]) -> tuple[_ScriptedStrategy, SQLiteSt
             applied_fills=lambda cloid: (),
         )
         feed = ReplayFeed(path=ticks, bus=bus, clock=clock)
-        engine = Engine(bus=bus, clock=clock, store=SQLiteStore(db), exchange=exchange, feed=feed)
-        strategy = _ScriptedStrategy(bus=bus, clock=clock, steps=steps)
+        store = SQLiteStore(db)
+        engine = Engine(bus=bus, clock=clock, store=store, exchange=exchange, feed=feed)
+        strategy = _ScriptedStrategy(bus=bus, clock=clock, record_seq=store.raise_seq, steps=steps)
         engine.register(strategy, symbols={"BTC", "ETH"})
 
         done = asyncio.Event()

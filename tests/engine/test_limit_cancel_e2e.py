@@ -78,6 +78,7 @@ def _run(
         strategy_id="trivial",
         bus=bus,
         clock=clock,
+        record_seq=store.raise_seq,
         side=Side.BUY,
         quantity=Decimal("0.5"),
         price=Decimal("41000"),

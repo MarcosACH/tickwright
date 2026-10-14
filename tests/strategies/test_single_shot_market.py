@@ -53,6 +53,7 @@ def _harness(
         strategy_id="trivial",
         bus=bus,
         clock=clock,
+        record_seq=SQLiteStore(":memory:").raise_seq,
         # A real projection, scoped exactly as the composition root scopes it —
         # the strategy holds the ``domain`` Protocol and never the concrete.
         portfolio=(

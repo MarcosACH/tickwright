@@ -90,6 +90,7 @@ def main() -> int:
             strategy_id=strategy_id,
             bus=bus,
             clock=clock,
+            record_seq=store.raise_seq,
             portfolio=engine.portfolio_for(strategy_id),
             symbol=sym,
             quantity=quantity,

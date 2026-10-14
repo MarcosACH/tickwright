@@ -11,6 +11,7 @@ It lives in ``domain`` so the engine's own operator jobs keep their seq the same
 way. One counter rule then serves every signal source. It emits no named events.
 """
 
+from collections.abc import Callable
 from decimal import Decimal
 
 from .enums import OrderType, Side, TimeInForce
@@ -21,10 +22,18 @@ from .protocols import Clock, EventBus
 class SignalEmitter:
     """Owns a strategy's ``seq`` counter and builds/publishes its ``Signal``s."""
 
-    def __init__(self, *, strategy_id: str, bus: EventBus, clock: Clock) -> None:
+    def __init__(
+        self,
+        *,
+        strategy_id: str,
+        bus: EventBus,
+        clock: Clock,
+        record_seq: Callable[[str, int], None],
+    ) -> None:
         self._strategy_id = strategy_id
         self._bus = bus
         self._clock = clock
+        self._record_seq = record_seq
         self._next_seq = 1
 
     def set_next_seq(self, next_seq: int) -> None:
@@ -70,6 +79,9 @@ class SignalEmitter:
             post_only=post_only,
             reduce_only=reduce_only,
         )
+        # Before the publish. On Kafka a crash can leave the signal in the topic
+        # with no saga, and the restart must not hand its seq out again (#442).
+        self._record_seq(self._strategy_id, seq)
         await self._bus.publish(signal)
         return signal.signal_id
 

@@ -204,6 +204,7 @@ async def _run(
             strategy_id="trivial",
             bus=bus,
             clock=clock,
+            record_seq=store.raise_seq,
             portfolio=engine.portfolio_for("trivial"),
             side=Side.BUY,
             quantity=Decimal("0.5"),

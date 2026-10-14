@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+from collections.abc import Callable
 from decimal import Decimal
 
 import structlog
@@ -55,6 +56,7 @@ class Wiring:
     strategy_id: str
     bus: EventBus
     clock: Clock
+    record_seq: Callable[[str, int], None]
     portfolio: Portfolio
     symbol: str
     quantity: Decimal
@@ -68,7 +70,10 @@ class _Base:
     def __init__(self, wiring: Wiring) -> None:
         self.strategy_id = wiring.strategy_id
         self._emitter = SignalEmitter(
-            strategy_id=wiring.strategy_id, bus=wiring.bus, clock=wiring.clock
+            strategy_id=wiring.strategy_id,
+            bus=wiring.bus,
+            clock=wiring.clock,
+            record_seq=wiring.record_seq,
         )
         self._portfolio = wiring.portfolio
         self._symbol = wiring.symbol

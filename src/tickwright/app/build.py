@@ -349,6 +349,7 @@ def _build_engine(config: AppConfig, *, exit_job: ExitJob | None) -> Engine:
                 strategy_config,
                 bus=bus,
                 clock=clock,
+                record_seq=store.raise_seq,
                 portfolio=engine.portfolio_for(strategy_config.strategy_id),
             ),
             symbols={strategy_config.symbol},
@@ -357,7 +358,12 @@ def _build_engine(config: AppConfig, *, exit_job: ExitJob | None) -> Engine:
 
 
 def _build_strategy(
-    config: StrategyConfig, *, bus: EventBus, clock: Clock, portfolio: Portfolio
+    config: StrategyConfig,
+    *,
+    bus: EventBus,
+    clock: Clock,
+    record_seq: Callable[[str, int], None],
+    portfolio: Portfolio,
 ) -> Strategy:
     match config.kind:
         case "single_shot_market":
@@ -365,6 +371,7 @@ def _build_strategy(
                 strategy_id=config.strategy_id,
                 bus=bus,
                 clock=clock,
+                record_seq=record_seq,
                 portfolio=portfolio,
                 side=config.side,
                 quantity=config.quantity,
@@ -378,6 +385,7 @@ def _build_strategy(
                 strategy_id=config.strategy_id,
                 bus=bus,
                 clock=clock,
+                record_seq=record_seq,
                 side=config.side,
                 quantity=config.quantity,
                 price=config.price,

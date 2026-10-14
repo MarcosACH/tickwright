@@ -181,10 +181,13 @@ class ScriptedStrategy:
         strategy_id: str,
         bus: EventBus,
         clock: Clock,
+        record_seq: Callable[[str, int], None],
         script: Mapping[int, Sequence[Order]],
     ) -> None:
         self.strategy_id = strategy_id
-        self._emitter = SignalEmitter(strategy_id=strategy_id, bus=bus, clock=clock)
+        self._emitter = SignalEmitter(
+            strategy_id=strategy_id, bus=bus, clock=clock, record_seq=record_seq
+        )
         self._script = script
         self._sent: list[str] = []
         self._results: dict[str, str] = {}
@@ -288,6 +291,7 @@ def _wire(config: AppConfig, steps: Sequence[Step], *, bus: EventBus | None = No
         strategy_id="scripted",
         bus=bus,
         clock=clock,
+        record_seq=store.raise_seq,
         script={step.ts_ns: step.orders for step in steps},
     )
     engine.register(strategy, symbols={"BTC", "ETH"})

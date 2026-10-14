@@ -109,6 +109,7 @@ def test_a_missed_fill_landing_mid_run_is_healed_by_the_inflight_cadence(
             strategy_id="trivial",
             bus=bus,
             clock=clock,
+            record_seq=store.raise_seq,
             side=Side.BUY,
             quantity=Decimal("0.5"),
             price=Decimal("41000"),
@@ -226,6 +227,7 @@ def test_a_vanished_order_is_ghosted_only_after_grace_and_a_failed_read_freezes(
             strategy_id="trivial",
             bus=bus,
             clock=clock,
+            record_seq=store.raise_seq,
             side=Side.BUY,
             quantity=Decimal("0.5"),
             price=Decimal("41000"),  # rests below the 42000 prints: never fills
@@ -338,6 +340,7 @@ def test_a_durably_unreadable_body_faults_the_composed_engine(tmp_path: Path) ->
                 strategy_id="trivial",
                 bus=bus,
                 clock=clock,
+                record_seq=store.raise_seq,
                 side=Side.BUY,
                 quantity=Decimal("0.5"),
                 price=Decimal("41000"),  # rests below the 42000 prints: never fills

@@ -14,6 +14,7 @@ only; it emits no named events itself.
 """
 
 import json
+from collections.abc import Callable
 from decimal import Decimal
 
 from tickwright.domain import (
@@ -40,13 +41,16 @@ class SingleShotMarketStrategy:
         strategy_id: str,
         bus: EventBus,
         clock: Clock,
+        record_seq: Callable[[str, int], None],
         portfolio: Portfolio,
         side: Side,
         quantity: Decimal,
         time_in_force: TimeInForce = TimeInForce.IOC,
     ) -> None:
         self.strategy_id = strategy_id
-        self._emitter = SignalEmitter(strategy_id=strategy_id, bus=bus, clock=clock)
+        self._emitter = SignalEmitter(
+            strategy_id=strategy_id, bus=bus, clock=clock, record_seq=record_seq
+        )
         # The ``domain`` Protocol, never the ``engine`` projection behind it, and
         # never the facade class either — the seam exists for exactly that
         # dependency direction (ADR-0035, ADR-0041 §8).

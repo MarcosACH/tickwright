@@ -12,6 +12,7 @@ from decimal import Decimal
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
+from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     CancelSignal,
     OrderType,
@@ -26,7 +27,8 @@ from tickwright.domain import (
 def _harness() -> tuple[InMemoryBus, ManualClock, SignalEmitter, list[Signal]]:
     bus = InMemoryBus()
     clock = ManualClock(start_ns=1_000)
-    emitter = SignalEmitter(strategy_id="alpha", bus=bus, clock=clock)
+    store = SQLiteStore(":memory:")
+    emitter = SignalEmitter(strategy_id="alpha", bus=bus, clock=clock, record_seq=store.raise_seq)
     signals: list[Signal] = []
 
     async def record(signal: Signal) -> None:

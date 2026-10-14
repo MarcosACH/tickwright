@@ -184,6 +184,7 @@ def _first_life(
         strategy_id="trivial",
         bus=bus,
         clock=clock,
+        record_seq=store.raise_seq,
         side=Side.BUY,
         quantity=Decimal("0.5"),
         price=Decimal("41000"),
@@ -467,6 +468,7 @@ def _kafka_life(
             strategy_id="trivial",
             bus=bus,
             clock=clock,
+            record_seq=store.raise_seq,
             side=Side.BUY,
             quantity=Decimal("0.5"),
             price=Decimal("41000"),
@@ -552,3 +554,45 @@ def test_on_kafka_a_kill_right_after_the_signal_lands_places_one_order_across_th
     )
     assert isinstance(first, VenueOrderView) and first.has_record
     assert isinstance(second, VenueOrderView) and not second.has_record
+
+
+def test_on_kafka_a_place_killed_before_it_is_handled_keeps_its_seq_across_the_restart(
+    store_backend: Backend,
+) -> None:
+    """Issue #442. The place is in the topic but no saga holds it. The restart
+    must still know its seq, or the strategy's next place reuses it and the
+    manager drops that new place as a duplicate."""
+    broker = FakeKafkaBroker()
+    clock = ManualClock()
+    venue = PaperExchange(
+        bus=InMemoryBus(),
+        clock=clock,
+        fill_model=ImmediateFillModel(),
+        genesis_collateral=GENESIS,
+        account_net=dict,
+        applied_fills=lambda cloid: (),
+    )
+
+    def kill_on_signal(record: Record) -> None:
+        if isinstance(decode_event(record.value), Signal):
+            raise _Killed
+
+    async def first_life() -> None:
+        broker.on_produce.append(kill_on_signal)
+        bus, store = _kafka_life(broker, store_backend, venue, clock)
+        await bus.start()
+        with pytest.raises(_Killed):
+            await bus.publish(_first_tick())
+        await bus.close()
+        store.close()
+
+    asyncio.run(asyncio.wait_for(first_life(), timeout=5))
+    assert _signals_in_topic(broker) == ["trivial:BTC:1"]
+
+    store = store_backend.open()
+    checks = checkpointer(store, clock=clock)
+    checks.recover()
+    assert store.get_order(_CLOID) is None
+    # The fold the host seeds the strategy's next seq from (ADR-0016).
+    assert checks.cache.seq_high_water() == {"trivial": 1}
+    store.close()
