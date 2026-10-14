@@ -938,6 +938,28 @@ def test_a_postgres_holder_names_the_store_without_its_credentials(
         assert holder.store == f"{dsn['host']}:{dsn.get('port', 5432)}/{dsn['dbname']}"
 
 
+def test_a_postgres_store_that_lost_its_session_refuses_its_next_write(
+    store_backend: Backend,
+) -> None:
+    """A lost session is a lost lock, and another engine may now hold it. The
+    store never reconnects, so its next write fails, and ``InvariantViolation``
+    faults the engine before it can place another order (ADR-0052)."""
+    if not isinstance(store_backend, PostgresBackend):
+        pytest.skip("only a Postgres store has a server session to lose")
+    with store_backend.open() as lost:
+        assert lost.lock() is None
+        with store_backend.open() as probe:
+            holder = probe.lock()
+        assert holder is not None and holder.pid is not None
+
+        store_backend.terminate(holder.pid)
+
+        with pytest.raises(InvariantViolation):
+            lost.checkpoint(_order(), ts_ns=1_000)
+        with store_backend.open() as successor:
+            assert successor.lock() is None
+
+
 def test_a_postgres_store_session_drops_a_dead_peer_within_25_seconds(
     store_backend: Backend,
 ) -> None:
