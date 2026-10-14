@@ -30,6 +30,7 @@ from tickwright.domain import (
     PreTradeGuard,
     Side,
     SignalEmitter,
+    Store,
     TimeInForce,
     VenueOpenOrder,
     VenueReadFailure,
@@ -90,15 +91,36 @@ class ExitJob(Protocol):
         """The job's name in ``exit.finished``."""
         ...
 
+    def admit(self, store: Store) -> bool:
+        """Say whether the run may boot on ``store``. A refusal emits ``exit.refused``.
+
+        It runs after the store lock and before ``recover()``, because boot
+        writes the account row this check reads (ADR-0052).
+        """
+        ...
+
     async def run(self, context: ExitContext) -> ExitOutcome:
         """Do the job and say what the venue holds at the end."""
         ...
+
+
+def _admit_store(store: Store) -> bool:
+    """Refuse a store no engine has used. That is almost always the wrong
+    directory, and the engine the operator meant to stop may still trade there
+    (ADR-0052)."""
+    if store.load_account() is not None:
+        return True
+    named_event(NamedEvent.EXIT_REFUSED, reason="new_store", store=store.name, holder="none")
+    return False
 
 
 class OperatorCancelAll:
     """``tickwright cancel-all``: cancel every order resting in the account."""
 
     name = "cancel_all"
+
+    def admit(self, store: Store) -> bool:
+        return _admit_store(store)
 
     async def run(self, context: ExitContext) -> ExitOutcome:
         left = await context.account.fetch_open_orders()
@@ -124,6 +146,9 @@ class Flatten:
 
     def __init__(self, *, feed_ends: bool) -> None:
         self._feed_ends = feed_ends
+
+    def admit(self, store: Store) -> bool:
+        return True
 
     async def run(self, context: ExitContext) -> ExitOutcome:
         # First, so a crash mid-flatten still leaves the store halted (ADR-0053).

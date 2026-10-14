@@ -85,10 +85,20 @@ def _ticks(path: Path) -> Path:
     return path
 
 
+def _used_store(path: Path, clock: ManualClock) -> SQLiteStore:
+    """A store an engine has booted on, so it holds the account row.
+
+    An exit run refuses a store with no account row (ADR-0052).
+    """
+    store = SQLiteStore(path)
+    checkpointer(store, clock=clock).recover()
+    return store
+
+
 def test_an_exit_run_on_an_empty_account_starts_nothing_and_exits_done(tmp_path: Path) -> None:
     bus = InMemoryBus()
     clock = ManualClock()
-    store = SQLiteStore(tmp_path / "saga.db")
+    store = _used_store(tmp_path / "saga.db", clock)
     exchange = PaperExchange(
         bus=bus,
         clock=clock,
@@ -165,6 +175,45 @@ def test_an_exit_run_on_a_store_another_engine_holds_exits_two_and_writes_nothin
         holder.close()
 
 
+def test_an_exit_run_on_a_store_no_engine_has_used_exits_two_and_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "saga.db"
+    bus = InMemoryBus()
+    clock = ManualClock()
+    engine = Engine(
+        bus=bus,
+        clock=clock,
+        store=SQLiteStore(db),
+        exchange=PaperExchange(
+            bus=bus,
+            clock=clock,
+            fill_model=ImmediateFillModel(),
+            genesis_collateral=GENESIS,
+            account_net=dict,
+            applied_fills=lambda cloid: (),
+        ),
+        feed=ReplayFeed(path=_ticks(tmp_path / "ticks.jsonl"), bus=bus, clock=clock),
+        exit_job=OperatorCancelAll(),
+    )
+
+    with capture_events() as logs:
+        exit_code = asyncio.run(asyncio.wait_for(engine.run(), timeout=5))
+
+    # A store with no account row is almost always the wrong directory. The
+    # engine the operator meant to stop may still be trading (ADR-0052).
+    assert exit_code == 2
+    assert [log["event"] for log in logs] == ["exit.refused"]
+    assert logs[0]["reason"] == "new_store"
+    assert logs[0]["store"] == str(db.resolve())
+    assert logs[0]["holder"] == "none"
+    after = SQLiteStore(db)
+    try:
+        assert after.load_account() is None
+    finally:
+        after.close()
+
+
 def test_an_exit_run_whose_store_lock_read_fails_exits_two(tmp_path: Path) -> None:
     bus = InMemoryBus()
     clock = ManualClock()
@@ -225,7 +274,7 @@ def test_sigterm_during_cancel_all_stops_the_run_with_exit_one(tmp_path: Path) -
         engine = Engine(
             bus=bus,
             clock=clock,
-            store=SQLiteStore(tmp_path / "saga.db"),
+            store=_used_store(tmp_path / "saga.db", clock),
             exchange=venue,
             feed=ReplayFeed(path=_ticks(tmp_path / "ticks.jsonl"), bus=bus, clock=clock),
             exit_job=OperatorCancelAll(),

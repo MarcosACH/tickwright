@@ -785,6 +785,13 @@ def _drive_engine_lifecycle() -> None:
     asyncio.run(go())
 
 
+def _used_store(clock: ManualClock) -> SQLiteStore:
+    """A store an engine has booted on. An exit run refuses one with no account row (ADR-0052)."""
+    store = SQLiteStore(":memory:")
+    checkpointer(store, clock=clock).recover()
+    return store
+
+
 def _drive_exit_finished() -> None:
     """One operator cancel all on an empty paper account (ADR-0060)."""
     bus = InMemoryBus()
@@ -792,7 +799,7 @@ def _drive_exit_finished() -> None:
     engine = Engine(
         bus=bus,
         clock=clock,
-        store=SQLiteStore(":memory:"),
+        store=_used_store(clock),
         exchange=PaperExchange(
             bus=bus,
             clock=clock,
@@ -904,7 +911,7 @@ def _drive_cancel_all_orders_remain() -> None:
     engine = Engine(
         bus=bus,
         clock=clock,
-        store=SQLiteStore(":memory:"),
+        store=_used_store(clock),
         exchange=_DeafToCancels(paper),
         feed=_IdleFeed(),
         exit_job=OperatorCancelAll(),

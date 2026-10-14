@@ -28,6 +28,7 @@ from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.feed import ReplayFeed
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
+    Account,
     InstrumentSpec,
     Order,
     OrderLive,
@@ -188,6 +189,15 @@ def _cancel_all(
         connect=idle_ws,
         startup_timeout_seconds=60.0,
         shrink_wait_seconds=30.0,
+    )
+    # The engine that placed the order also opened the account row (ADR-0052).
+    store.checkpoint_ledger(
+        account=Account(
+            account_id=exchange.account_spec().account_id,
+            genesis_collateral=Decimal("0"),
+            genesis_ts_ns=500,
+        ),
+        ts_ns=500,
     )
     engine = Engine(
         bus=bus,

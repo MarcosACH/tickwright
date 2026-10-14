@@ -275,6 +275,15 @@ class Engine:
             if self._exit_job is not None:
                 return self._refuse_exit_run(holder)
             return self._fault_before_boot(StoreLockHeld(holder.detail))
+        # Before ``recover()``, because boot writes the account row the job checks.
+        try:
+            admitted = self._exit_job is None or self._exit_job.admit(self._store)
+        except Exception as exc:
+            return self._fault_before_boot(exc)
+        if not admitted:
+            # Nothing booted, so nothing at the venue moved (ADR-0060).
+            self._close_before_boot()
+            return 2
         self._install_signal_handlers()
         try:
             await self._start_sequence()

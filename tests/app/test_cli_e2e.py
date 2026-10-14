@@ -23,8 +23,10 @@ import time
 from pathlib import Path
 
 import pytest
+from ledgers import checkpointer
 from store_backends import PostgresBackend, resolve_backend
 
+from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import OrderState, derive_cloid
 
@@ -289,6 +291,9 @@ def test_cancel_all_on_an_empty_paper_account_exits_zero(
     _write_workspace(tmp_path)
     _export_hostile_config(monkeypatch)
     log = tmp_path / "cancel_all.log"
+    # An engine booted here before, so the store holds the account row (ADR-0052).
+    with SQLiteStore(tmp_path / "saga.db") as store:
+        checkpointer(store, clock=ManualClock()).recover()
 
     assert _run_to_exit(tmp_path, log, "cancel-all") == 0, log.read_text()
 
