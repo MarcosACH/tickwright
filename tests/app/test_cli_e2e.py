@@ -389,8 +389,13 @@ def test_an_engine_whose_postgres_session_ends_exits_1_before_its_next_order(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An engine that lost its session has lost its lock, and another engine may
-    hold it now. It never reconnects, so the saga's ``PENDING`` write fails and
-    the engine stops before it sends the order (ADR-0052).
+    hold it now. It never reconnects, so its next store call fails and the
+    engine stops before it sends the order (ADR-0052).
+
+    On paper that call is the exchange's read of applied fills, not the saga's
+    ``PENDING`` write. A live venue has no such read, so the write is what stops
+    it there. ``test_a_postgres_store_that_lost_its_session_refuses_its_next_write``
+    covers that write.
 
     The tick file is a named pipe, so the engine waits on it like a live feed.
     That gives the test a moment between two ticks to end the session."""
