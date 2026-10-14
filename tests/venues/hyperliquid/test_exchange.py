@@ -980,6 +980,39 @@ def test_fetch_order_bundles_the_venue_status_and_fills_into_one_view() -> None:
     }
 
 
+@pytest.mark.parametrize(
+    ("filled", "second_read"),
+    [("0.3", OrderState.CANCELLED), ("0.5", OrderState.FILLED)],
+)
+def test_fetch_order_ends_only_a_reduce_only_order_filled_for_less_than_asked(
+    filled: str, second_read: OrderState
+) -> None:
+    # A reduce-only buy of 0.5. The venue says `filled` either way. Fills of
+    # 0.3 mean it shrank the order, so the cut part ends CANCELLED once two
+    # reads agree (ADR-0057, #478). Fills of 0.5 mean it did not, and the
+    # record stays FILLED on every read.
+    post = FakeExchangeApi(
+        {
+            "orderStatus": order_status_response(
+                cloid=CLOID, status="filled", oid=91, reduce_only=True
+            ),
+            "userFillsByTime": [fill_entry(oid=91, tid=556, px="43250.0", sz=filled)],
+        }
+    )
+    ref = OrderRef(cloid=CLOID, symbol="BTC", quantity=Decimal("0.5"))
+
+    async def read_twice() -> list[VenueOrderView | VenueReadFailure]:
+        exchange = make_exchange(post, bus=InMemoryBus(), clock=ManualClock())
+        return [await exchange.fetch_order(ref), await exchange.fetch_order(ref)]
+
+    first, second = asyncio.run(read_twice())
+
+    assert isinstance(first, VenueOrderView) and isinstance(second, VenueOrderView)
+    assert first.status is not None and second.status is not None
+    assert first.status.status is OrderState.FILLED
+    assert second.status.status is second_read
+
+
 def test_fetch_order_asks_for_the_record_by_the_acked_oid_not_the_cloid() -> None:
     # A cloid is derived from the signal id, and the venue keeps every order
     # ever placed under it, one per life of the account. A read by cloid can
