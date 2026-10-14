@@ -36,6 +36,7 @@ from tickwright.domain import (
     OrderType,
     PlaceOrder,
     Side,
+    Store,
     StoreNeverUsed,
     TimeInForce,
     VenueOpenOrder,
@@ -43,7 +44,7 @@ from tickwright.domain import (
     derive_cloid,
 )
 from tickwright.engine.checkpoint import Checkpointer
-from tickwright.engine.exit_run import OperatorCancelAll
+from tickwright.engine.exit_run import ExitContext, ExitOutcome, OperatorCancelAll
 from tickwright.engine.guard import RealGuard
 from tickwright.engine.runner import Engine
 from tickwright.observability.testing import capture_events
@@ -252,6 +253,77 @@ def test_an_exit_run_told_the_store_is_new_warns_and_runs(tmp_path: Path) -> Non
     assert warned[0]["warning"]
     assert logs[-1]["event"] == "exit.finished"
     assert logs[-1]["outcome"] == "done"
+
+
+def test_an_exit_run_told_a_used_store_is_new_runs_as_before(tmp_path: Path) -> None:
+    bus = InMemoryBus()
+    clock = ManualClock()
+    engine = Engine(
+        bus=bus,
+        clock=clock,
+        store=_used_store(tmp_path / "saga.db", clock),
+        exchange=PaperExchange(
+            bus=bus,
+            clock=clock,
+            fill_model=ImmediateFillModel(),
+            genesis_collateral=GENESIS,
+            account_net=dict,
+            applied_fills=lambda cloid: (),
+        ),
+        feed=ReplayFeed(path=_ticks(tmp_path / "ticks.jsonl"), bus=bus, clock=clock),
+        exit_job=OperatorCancelAll(new_store=True),
+    )
+
+    with capture_events() as logs:
+        exit_code = asyncio.run(asyncio.wait_for(engine.run(), timeout=5))
+
+    # The flag only matters on a new store. A used one gets no warning.
+    assert exit_code == 0
+    events = [log["event"] for log in logs]
+    assert "exit.new_store" not in events
+    assert "exit.refused" not in events
+    assert logs[-1]["event"] == "exit.finished"
+    assert logs[-1]["outcome"] == "done"
+
+
+class _StoreCheckFails:
+    """An exit job whose store check raises, as a lost connection would make it."""
+
+    name = "cancel_all"
+
+    def admit(self, store: Store) -> StoreNeverUsed | None:
+        raise OSError("connection lost")
+
+    async def run(self, context: ExitContext) -> ExitOutcome:
+        raise AssertionError("a run whose store check failed must not boot")
+
+
+def test_an_exit_run_whose_store_check_fails_exits_two(tmp_path: Path) -> None:
+    bus = InMemoryBus()
+    clock = ManualClock()
+    engine = Engine(
+        bus=bus,
+        clock=clock,
+        store=SQLiteStore(tmp_path / "saga.db"),
+        exchange=PaperExchange(
+            bus=bus,
+            clock=clock,
+            fill_model=ImmediateFillModel(),
+            genesis_collateral=GENESIS,
+            account_net=dict,
+            applied_fills=lambda cloid: (),
+        ),
+        feed=ReplayFeed(path=_ticks(tmp_path / "ticks.jsonl"), bus=bus, clock=clock),
+        exit_job=_StoreCheckFails(),
+    )
+
+    with capture_events() as logs:
+        exit_code = asyncio.run(asyncio.wait_for(engine.run(), timeout=5))
+
+    # Nothing booted, so nothing at the venue moved (ADR-0060).
+    assert exit_code == 2
+    assert [log["event"] for log in logs] == ["engine.faulted"]
+    assert isinstance(engine.fault, OSError)
 
 
 def test_an_exit_run_whose_store_lock_read_fails_exits_two(tmp_path: Path) -> None:
