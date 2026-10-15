@@ -58,6 +58,10 @@ Preconditions:
 
 ## Gotchas
 
+- A buy sent before the first mark faults the engine
+  ([#509](https://github.com/MarcosACH/tickwright/issues/509)). Until it is fixed, add
+  `--param WAIT_SECONDS=10` to the `rt` life.
+
 - Every run places the same cloids on the venue, because the cloid is derived from
   `round_trip:BTC:2`. The engine reads and cancels by oid once it has one, and before the ack it
   refuses a record placed before the saga was created (#354). A run should not adopt an older

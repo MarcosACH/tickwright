@@ -13,9 +13,12 @@ Parameters arrive as ``VERIFY_*`` variables (``verify start --param KEY=VALUE``)
     QUANTITY     default 0.5
     HOLD_TICKS   default 2            (round_trip_then_flat)
     TAKE_PROFIT  default 100          (take_profit, in quote currency)
+    REST_BELOW   default 0.8          (rest_then_hold, a fraction of the last trade price)
+    WAIT_SECONDS default 0            (round_trip_then_flat, rest_then_hold: wall time
+                                       before the first buy)
     LEVERAGE     default {}           (JSON, symbol -> {"mode": .., "leverage": ..})
 
-Usage: run_strategy.py {round_trip_then_flat,take_profit,margin_watch,dual_symbol}
+Usage: run_strategy.py {round_trip_then_flat,take_profit,margin_watch,dual_symbol,rest_then_hold}
 """
 
 from __future__ import annotations
@@ -26,7 +29,14 @@ import os
 import sys
 from decimal import Decimal
 
-from strategies import DualSymbolLeg, MarginWatch, RoundTripThenFlat, TakeProfit, Wiring
+from strategies import (
+    DualSymbolLeg,
+    MarginWatch,
+    RestThenHold,
+    RoundTripThenFlat,
+    TakeProfit,
+    Wiring,
+)
 
 from tickwright.app.build import (
     build_bus,
@@ -41,7 +51,7 @@ from tickwright.domain import LeverageBook, LeverageSpec, Side
 from tickwright.engine.runner import Engine
 from tickwright.observability.logging import configure_logging
 
-NAMES = ("round_trip_then_flat", "take_profit", "margin_watch", "dual_symbol")
+NAMES = ("round_trip_then_flat", "take_profit", "margin_watch", "dual_symbol", "rest_then_hold")
 
 
 def param(name: str, default: str) -> str:
@@ -91,6 +101,7 @@ def main() -> int:
             portfolio=engine.portfolio_for(strategy_id),
             symbol=sym,
             quantity=quantity,
+            wait_seconds=int(param("WAIT_SECONDS", "0")),
         )
 
     match name:
@@ -108,6 +119,12 @@ def main() -> int:
             )
         case "margin_watch":
             engine.register(MarginWatch(wiring("margin_watch", symbol)), symbols={symbol})
+        case "rest_then_hold":
+            below = Decimal(param("REST_BELOW", "0.8"))
+            engine.register(
+                RestThenHold(wiring("rest_then_hold", symbol), rest_below=below),
+                symbols={symbol},
+            )
         case "dual_symbol":
             engine.register(
                 DualSymbolLeg(wiring("leg_long", symbol), side=Side.BUY), symbols={symbol}

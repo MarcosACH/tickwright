@@ -416,6 +416,9 @@ def cmd_start(args: argparse.Namespace) -> int:
         command = [sys.executable, str(STRATEGY_RUNNER), args.strategy]
     else:
         command = list(ENGINE_CMD)
+        # An exit run is the same CLI with one argument, so it reads the same .env.
+        if args.command:
+            command.append(args.command)
 
     supervisor = [
         sys.executable,
@@ -983,7 +986,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("life", help="a name for this process, e.g. first, second")
     p.add_argument("--preset", choices=sorted(PRESETS), help="baseline .env to start from")
     p.add_argument("--env", action="append", default=[], help="KEY=VALUE written to scratch/.env")
-    p.add_argument("--strategy", help="run scripts/run_strategy.py <name> instead of the CLI")
+    run = p.add_mutually_exclusive_group()
+    run.add_argument("--strategy", help="run scripts/run_strategy.py <name> instead of the CLI")
+    run.add_argument(
+        "--command", choices=["cancel-all", "flatten"], help="run a one-shot exit run of the CLI"
+    )
     p.add_argument("--param", action="append", default=[], help="KEY=VALUE exported as VERIFY_KEY")
     p.add_argument(
         "--forward-key", action="store_true", help="forward the testnet key from the repo .env"

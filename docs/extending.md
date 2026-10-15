@@ -162,8 +162,13 @@ auth, quirk translation — and importing no other adapter. It provides both a `
   `MarketTick`s **and `MarkTick`s** — the obligation and its consequence are stated on the
   [`MarketFeed` Protocol](../src/tickwright/domain/protocols.py) itself, and made executable by the
   shared feed contract in the TDD bullet below), an `Exchange` adapter (`start`/`run`/`stop` plus
-  `place`/`cancel`/`fetch_order`/`fetch_account_state`/`verify_account_mode`/`account_spec`/
-  `instrument_specs`), spec sourcing, and a `<Venue>Config`.
+  `place`/`cancel`/`fetch_order`/`fetch_open_orders`/`fetch_positions`/`fetch_account_state`/
+  `verify_account_mode`/`account_spec`/`instrument_specs`), spec sourcing, and a `<Venue>Config`.
+
+  > **Breaking change for an `Exchange` written before the safe exit work (#457).** `cancel(ref)`
+  > became `cancel(refs)`, which takes a list of orders. The seam also gained two reads,
+  > `fetch_open_orders` and `fetch_positions`. Cancel all and flatten need them (ADR-0052,
+  > ADR-0054). An adapter without them no longer matches the `Exchange` Protocol.
 - [ ] Honor the `Exchange` contracts: a failed read is **never venue truth** (never `[]`, never a
   view — an outage must not look like "no orders", ADR-0011 inv 1), and the two read grains say so
   differently. `fetch_order` returns a **`VenueReadFailure`**, whose member says *which way* it
