@@ -56,6 +56,8 @@ pytestmark = [
         not live_testnet_enabled(),
         reason=f"no {LIVE_TESTNET_ENV}: live testnet suite not opted in (ADR-0022)",
     ),
+    # A boot alone may wait 60 seconds on the real testnet, past the suite default.
+    pytest.mark.timeout(300),
 ]
 
 

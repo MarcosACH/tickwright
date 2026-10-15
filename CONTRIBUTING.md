@@ -38,6 +38,10 @@ CI runs all five and fails under 90% coverage.
 The default run is hermetic. It uses the paper exchange, the in-memory bus, SQLite, and an
 in-process fake Kafka broker. It needs no service, no API key, and no `.env`.
 
+Every test has a 60 second timeout (`pytest-timeout`). A test that hangs prints every stack and
+ends the run. It never runs on for hours. A test that needs longer sets
+`@pytest.mark.timeout(<seconds>)`, as the `live` tests do.
+
 Two markers reach real infrastructure. Both skip themselves when it is not configured.
 
 - `postgres` runs the `PostgresStore` contract against a real server. Start one with
