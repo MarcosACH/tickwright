@@ -818,6 +818,32 @@ def test_a_live_flip_through_zero_reads_unknown_until_the_next_ingest() -> None:
     assert posted.margin_used == Decimal("81.745")
 
 
+def test_an_account_read_taken_before_a_live_open_leaves_its_bucket_unknown() -> None:
+    """The cadence reads the venue, then waits, and a fill can land meanwhile.
+
+    That read holds no BTC, so it says nothing about the new bucket. Before the
+    fix it cleared the wait anyway, and the row's 0 read as real again: 8174.5x
+    on a 1x position. A later read that carries our 0.001 posts the bucket.
+    """
+    projection = _isolated_1x(None)
+
+    projection.apply_heal((), snapshot=venue_holding())
+
+    stale = projection.for_strategy("alpha").position("BTC")
+    assert stale is not None
+    assert stale.margin_used is None
+    assert stale.effective_leverage is None
+    assert projection.account().free_margin is None
+
+    projection.apply_heal(
+        (), snapshot=venue_holding(BTC=Decimal("81.735"), sizes={"BTC": Decimal("0.001")})
+    )
+
+    posted = projection.for_strategy("alpha").position("BTC")
+    assert posted is not None
+    assert posted.margin_used == Decimal("81.745")
+
+
 def _live_restart(bucket: str | None) -> PortfolioProjection:
     """A live 1x isolated long checkpointed, then restored by a second life.
 

@@ -601,13 +601,24 @@ class PortfolioProjection:
         every deadline, which is the same indistinguishable-from-a-correction
         write ``apply_funding``'s ``None`` refuses one grain up.
 
-        Every partition of ours is covered, so after this no bucket is waiting
-        for the venue any more (#516). That holds even when a share does not
-        move: a venue 0 read back onto a row at 0 is now a posted 0.
+        A waiting bucket is posted only by a snapshot that **carries** our
+        position, meaning the venue's size for the symbol equals our account
+        net (#516). The cadence reads the venue and then waits, and a fill can
+        land in between. A snapshot older than that fill describes a position
+        we no longer hold, so its bucket is not ours. Once carried, a share
+        that does not move still posts: a venue 0 read back onto a row at 0 is
+        a posted 0.
         """
-        self._unposted.clear()
+        venue = {position.symbol: position.signed_size for position in snapshot.positions}
+        carried = {
+            symbol
+            for symbol, net in account_net_size(self._positions.values()).items()
+            if venue.get(symbol, _ZERO) == net
+        }
         moved: list[Position] = []
         for position, share in self._venue_shares(snapshot):
+            if position.symbol in carried:
+                self._unposted.discard((position.strategy_id, position.symbol))
             if position.isolated_collateral != share:
                 position.isolated_collateral = share
                 moved.append(position)
