@@ -455,3 +455,15 @@ class VenueLink:
 
     def instrument_specs(self) -> Mapping[str, InstrumentSpec]:
         return self._venue.instrument_specs()
+
+
+class SendCrashed(Exception):
+    """The process died while the order was in the send window."""
+
+
+class SendDies(VenueLink):
+    """A placement that dies mid-send. Nothing reaches the venue, and the saga
+    is left in flight for a later report or a restart to resolve."""
+
+    async def place(self, order: PlaceOrder) -> None:
+        raise SendCrashed(order.cloid)
