@@ -29,6 +29,7 @@ from tickwright.adapters.paper import (
 )
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
+    OPERATOR,
     Account,
     AggressorSide,
     Approved,
@@ -54,6 +55,7 @@ from tickwright.domain import (
     OrderState,
     OrderStatusReport,
     OrderSubmitted,
+    PlaceOrder,
     PlaceSignal,
     Position,
     PreTradeGuard,
@@ -160,10 +162,12 @@ def _wiring(
     *,
     guard: PreTradeGuard | None = None,
     link: Callable[[PaperExchange], Exchange] | None = None,
+    exit_run: bool = False,
 ) -> _Wiring:
     """The manager over its real collaborators, on the ``store`` handed in — so a
     case can substitute one that fails at a chosen seam. ``link`` puts a
     ``VenueLink`` in front of the paper venue, for a case where the network fails.
+    ``exit_run`` builds the manager as an exit run's engine does.
 
     Both read-models come from the one ``Checkpointer`` built on that store, so
     this harness cannot express the split write the atomic path exists to close
@@ -186,7 +190,9 @@ def _wiring(
     # order history with no ledger — for whatever life reopens the store next.
     checks.recover()
     venue = link(exchange) if link is not None else exchange
-    manager = ExecutionManager(bus=bus, exchange=venue, checkpointer=checks, guard=guard)
+    manager = ExecutionManager(
+        bus=bus, exchange=venue, checkpointer=checks, guard=guard, exit_run=exit_run
+    )
 
     bus.subscribe(Signal, manager.on_signal)
     bus.subscribe(ExecutionReport, manager.on_execution_report)
@@ -1252,6 +1258,71 @@ def test_an_operator_cancel_marks_every_saga_durably_before_its_one_send() -> No
     # Durable before the send, so a crash between the two never lets reconcile
     # judge the order a ghost and mark it REJECTED.
     assert links[0].marked == [True, True]
+
+
+class _Sends(VenueLink):
+    """Records each place and cancel by cloid, in order, then lets the venue act."""
+
+    def __init__(self, venue: Exchange) -> None:
+        super().__init__(venue)
+        self.sent: list[tuple[str, str | None]] = []
+
+    async def place(self, order: PlaceOrder) -> None:
+        self.sent.append(("place", order.cloid))
+        await super().place(order)
+
+    async def cancel(self, refs: Sequence[OrderRef | ExternalOrderRef]) -> None:
+        self.sent.extend(("cancel", getattr(ref, "cloid", None)) for ref in refs)
+        await super().cancel(refs)
+
+
+def test_an_exit_run_denies_a_strategy_place_but_sends_its_cancel_and_the_operator_close() -> None:
+    store = SQLiteStore(":memory:")
+    first = _wiring(store)
+
+    async def strategy_life() -> None:
+        await first.bus.publish(_tick("42000"))
+        await first.bus.publish(_market_signal(seq=1))
+        await first.bus.publish(_limit_signal("41000", seq=2))
+
+    asyncio.run(strategy_life())
+
+    links: list[_Sends] = []
+
+    def link(venue: PaperExchange) -> Exchange:
+        links.append(_Sends(venue))
+        return links[-1]
+
+    exit_life = _wiring(store, link=link, exit_run=True)
+    close = PlaceSignal(
+        ts_event=1_000,
+        ts_init=1_000,
+        strategy_id=OPERATOR,
+        symbol="BTC",
+        seq=1,
+        side=Side.SELL,
+        quantity=Decimal("0.5"),
+        order_type=OrderType.MARKET,
+        time_in_force=TimeInForce.IOC,
+        reduce_only=True,
+    )
+
+    async def exit_run() -> None:
+        await exit_life.bus.publish(_tick("42000"))
+        # A strategy signal a crashed life never handled, replayed at boot.
+        await exit_life.bus.publish(_limit_signal("41000", seq=3))
+        # A cancel cannot add exposure, so it still goes out.
+        await exit_life.bus.publish(_cancel_signal("trivial:BTC:2", seq=4))
+        await exit_life.bus.publish(close)
+
+    asyncio.run(exit_run())
+
+    replayed = store.get_order(derive_cloid("trivial:BTC:3"))
+    assert replayed is not None and replayed.state is OrderState.DENIED
+    assert links[0].sent == [
+        ("cancel", derive_cloid("trivial:BTC:2")),
+        ("place", derive_cloid(close.signal_id)),
+    ]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
