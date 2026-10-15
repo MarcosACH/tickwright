@@ -17,13 +17,17 @@ from tickwright.domain import EventBus
 BUS_BACKENDS = ["in_memory", "kafka"]
 
 
-def make_bus(backend: str) -> EventBus:
-    """A fresh bus of the named backend (kafka: over its own fresh fake broker)."""
+def make_bus(backend: str, broker: FakeKafkaBroker | None = None) -> EventBus:
+    """A fresh bus of the named backend.
+
+    Kafka runs over ``broker`` when given, so a restart can reach the same
+    cluster an earlier life wrote to. Otherwise it gets its own fresh broker.
+    """
     match backend:
         case "in_memory":
             return InMemoryBus()
         case "kafka":
-            broker = FakeKafkaBroker()
+            broker = broker or FakeKafkaBroker()
             return KafkaBus(
                 bootstrap_servers="kafka:9092",
                 topic="tickwright.events",

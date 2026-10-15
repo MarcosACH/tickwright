@@ -39,6 +39,7 @@ class FakeKafkaBroker:
         self.partitions = [[] for _ in range(self.partition_count)]
         self.committed = [0] * self.partition_count
         self._changed: asyncio.Event = asyncio.Event()
+        self._changed_loop: asyncio.AbstractEventLoop | None = None
         # Every client handed out, so suites can observe lifecycle at the
         # boundary: connected during a run, disconnected after teardown.
         self.producers: list[FakeProducer] = []
@@ -64,6 +65,12 @@ class FakeKafkaBroker:
         self._changed.set()
 
     async def _wait_for_change(self) -> None:
+        # A cluster outlives the process that wrote to it. A restart test runs
+        # each life in its own event loop, and an Event binds to the first loop
+        # that waits on it, so each new loop gets a new Event.
+        loop = asyncio.get_running_loop()
+        if self._changed_loop is not loop:
+            self._changed, self._changed_loop = asyncio.Event(), loop
         self._changed.clear()
         await self._changed.wait()
 
