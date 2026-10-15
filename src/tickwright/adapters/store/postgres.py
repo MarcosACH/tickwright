@@ -54,8 +54,8 @@ _HOLDER_QUERY = """
 # Server-side keepalives for the store's session (ADR-0052). With the defaults,
 # the server keeps a dead engine's session, and its lock, for about two hours.
 # These drop it in about 25 seconds. They are set after connecting so a DSN's own
-# ``options`` stay as the operator wrote them. ``PostgresStore.__init__`` repeats
-# these values for the engine's side, so change both together.
+# ``options`` stay as the operator wrote them. ``PostgresStore.__init__`` reads
+# the same values for the engine's side, so the two sides cannot drift apart.
 _KEEPALIVES = {
     "tcp_keepalives_idle": "10",
     "tcp_keepalives_interval": "5",
@@ -188,15 +188,14 @@ class PostgresStore(SqlStore):
         # The same bound on the engine's side (ADR-0052). Without it, a store
         # call on a dropped network can hang the engine for about 15 minutes.
         # Connect arguments win over the DSN, so a DSN cannot turn this off.
-        # The values match ``_KEEPALIVES``, so change both together.
         self._conn = psycopg.connect(
             dsn,
             autocommit=True,
             keepalives=1,
-            keepalives_idle=10,
-            keepalives_interval=5,
-            keepalives_count=3,
-            tcp_user_timeout=25000,
+            keepalives_idle=_KEEPALIVES["tcp_keepalives_idle"],
+            keepalives_interval=_KEEPALIVES["tcp_keepalives_interval"],
+            keepalives_count=_KEEPALIVES["tcp_keepalives_count"],
+            tcp_user_timeout=_KEEPALIVES["tcp_user_timeout"],
         )
         for name, value in _KEEPALIVES.items():
             self._conn.execute("SELECT set_config(%s, %s, false)", (name, value))
