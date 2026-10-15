@@ -73,11 +73,11 @@ Preconditions:
 
 - Every life shares one store, and `check --sql` reads it as it is now. Run each life's checks
   before the next life starts, or they read a later state.
-- **Known engine bug (found 2026-10-15, not filed yet).** On Hyperliquid, a market order sent
-  before the first mark arrives faults the whole engine with exit 1:
-  `no mark cached for 'BTC'; cannot bound MARKET`. The order stays `pending` and never reaches
-  the venue. `WAIT_SECONDS=10` makes the strategy wait 10 seconds of wall time after its first trade, so a mark
-  arrives. The `halted` life does not need it, because the guard denies its order before the
+- **Known engine bug ([#509](https://github.com/MarcosACH/tickwright/issues/509)).** On
+  Hyperliquid, a market order sent before the first mark arrives faults the whole engine with
+  exit 1: `no mark cached for 'BTC'; cannot bound MARKET`. The order stays `pending` and never
+  reaches the venue. `WAIT_SECONDS=10` makes the strategy wait 10 seconds of wall time after its
+  first trade, so a mark arrives. The `halted` life does not need it, because the guard denies its order before the
   adapter prices it. Drop the wait once the bug is fixed.
 - Exit code 0 from an exit run is the venue proof. Only a final venue read with nothing left
   makes a run `done` (ADR-0060). The `exit.finished` line names what was left when it is not 0.

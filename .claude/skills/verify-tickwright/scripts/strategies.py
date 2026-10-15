@@ -56,7 +56,7 @@ class Wiring:
     symbol: str
     quantity: Decimal
     # On Hyperliquid, a market order sent before the first mark faults the
-    # engine (features/safe-exit.md, Gotchas). A wait lets a mark arrive first.
+    # engine (#509). A wait lets a mark arrive first.
     wait_seconds: int = 0
 
 
