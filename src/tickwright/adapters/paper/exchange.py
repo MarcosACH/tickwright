@@ -152,6 +152,10 @@ class PaperExchange:
         # and not on the ``Exchange`` seam. Safe against ordering: the feed
         # starts last (ADR-0024), so no tick is ever published before this.
         bus.subscribe(MarketTick, self.on_tick)
+        # On Kafka, a fill published just before a crash comes back after the
+        # restart. Paper must book it on the order it rebuilt, or it fills that
+        # size again (#484).
+        bus.subscribe(FillReport, self._on_fill_report)
 
     async def start(self) -> None:
         """Nothing to connect — the venue is in-process and its one link, the
@@ -183,6 +187,23 @@ class PaperExchange:
             # Trade ids count from 1 in each process. Start after the fills the
             # saga booked, or the next fill reuses a booked id and is dropped.
             self._fill_counts[saga.cloid] = saga.fill_count
+
+    async def _on_fill_report(self, report: FillReport) -> None:
+        """Book a fill an earlier run made on an order this run rebuilt.
+
+        Every event is keyed by symbol, so a redelivered fill arrives before
+        any new tick on its symbol. It is booked before paper can fill again.
+        A fill this run made is already booked, so it is skipped.
+        """
+        if any(fill.trade_id == report.trade_id for fill in self._fills.get(report.cloid, [])):
+            return
+        order = self._book.working(report.cloid)
+        if order is None:
+            return
+        self._book.apply_fill(report.cloid, report.quantity)
+        self._fill_counts[report.cloid] = self._fill_counts.get(report.cloid, 0) + 1
+        self._fills.setdefault(report.cloid, []).append(report)
+        self._unapplied.record(report, order.side)
 
     async def run(self) -> None:
         """Settle funding boundaries for as long as the engine supervises this.

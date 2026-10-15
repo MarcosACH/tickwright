@@ -9,24 +9,30 @@ import asyncio
 from decimal import Decimal
 
 import pytest
+from kafka_fakes import FakeKafkaBroker
 from ledgers import GENESIS, checkpointer
 
 from tickwright.adapters.bus import InMemoryBus
+from tickwright.adapters.bus.kafka import KafkaBus
+from tickwright.adapters.bus.serde import encode_event
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.adapters.store import SQLiteStore
 from tickwright.app.build import paper_store_reads
 from tickwright.domain import (
     AggressorSide,
+    EventBus,
     ExecutionReport,
     FillReport,
     MarketTick,
     Order,
+    OrderRef,
     OrderState,
     OrderType,
     Side,
     TimeInForce,
     VenueOpenOrder,
+    VenueOrderView,
 )
 from tickwright.engine.execution import ExecutionManager
 from tickwright.engine.reconcile import PassResult, ReconcileConfig, Reconciler
@@ -34,7 +40,7 @@ from tickwright.observability.testing import capture_events
 
 
 def _paper(
-    store: SQLiteStore, bus: InMemoryBus | None = None, clock: ManualClock | None = None
+    store: SQLiteStore, bus: EventBus | None = None, clock: ManualClock | None = None
 ) -> PaperExchange:
     reads = paper_store_reads(store)
     return PaperExchange(
@@ -251,3 +257,90 @@ def test_a_rebuilt_order_books_its_next_fill_on_the_saga() -> None:
     recovered = store.get_order("0xa")
     assert recovered is not None
     assert (recovered.state, recovered.cum_qty) == (OrderState.FILLED, Decimal("2"))
+
+
+def _crossing_tick(ts_ns: int) -> MarketTick:
+    """A tick below the BUY limit at 41000, so it crosses it."""
+    return MarketTick(
+        ts_event=ts_ns,
+        ts_init=ts_ns,
+        symbol="BTC",
+        price=Decimal("40000"),
+        size=Decimal("5"),
+        aggressor_side=AggressorSide.SELL,
+        trade_id=f"t{ts_ns}",
+        seq=0,
+    )
+
+
+def _earlier_fill(trade_id: str, quantity: str) -> FillReport:
+    """A fill paper published for 0xa in an earlier run."""
+    return FillReport(
+        ts_event=1_500,
+        ts_init=1_500,
+        cloid="0xa",
+        symbol="BTC",
+        trade_id=trade_id,
+        quantity=Decimal(quantity),
+        price=Decimal("41000"),
+        fee=Decimal("0"),
+    )
+
+
+def _kafka_second_life(
+    store: SQLiteStore, clock: ManualClock, broker: FakeKafkaBroker
+) -> tuple[KafkaBus, PaperExchange]:
+    """A new process on the same store and the same Kafka topic."""
+    bus = KafkaBus(
+        bootstrap_servers="kafka:9092",
+        topic="tickwright.events",
+        group_id="tickwright",
+        producer_factory=broker.producer,
+        consumer_factory=broker.consumer,
+    )
+    checks = checkpointer(store, clock=clock)
+    checks.cache.rebuild()
+    exchange = _paper(store, bus, clock)
+    manager = ExecutionManager(bus=bus, exchange=exchange, checkpointer=checks)
+    bus.subscribe(ExecutionReport, manager.on_execution_report)
+    return bus, exchange
+
+
+def _restart_on_kafka(store: SQLiteStore, broker: FakeKafkaBroker) -> PaperExchange:
+    """Start a second life, let Kafka redeliver, then cross the rebuilt order."""
+    bus, exchange = _kafka_second_life(store, ManualClock(start_ns=2_000), broker)
+
+    async def scenario() -> None:
+        # The runner's order. Paper reads the store before any redelivery lands.
+        await bus.start()
+        await exchange.start()
+        await broker.all_committed()
+        await bus.publish(_crossing_tick(3_000))
+        await bus.close()
+
+    asyncio.run(asyncio.wait_for(scenario(), timeout=5))
+    return exchange
+
+
+def test_on_kafka_a_redelivered_fill_books_on_the_rebuilt_order() -> None:
+    # An earlier run published fill 0xa-1 for 1, then crashed before Kafka
+    # committed it. The saga never booked it, so paper rebuilds the order at 2.
+    # Kafka redelivers the fill after that. If paper ignores it, paper works 2
+    # more, names that fill 0xa-1 again, and the saga drops it as a duplicate.
+    store = SQLiteStore(":memory:")
+    store.checkpoint(_resting("0xa", applied_event_ids=("0xa:submitted", "0xa:live")), ts_ns=1_000)
+    broker = FakeKafkaBroker()
+    redelivered = _earlier_fill("0xa-1", "1")
+    broker.produce(redelivered.partition_key.encode(), encode_event(redelivered))
+
+    exchange = _restart_on_kafka(store, broker)
+
+    recovered = store.get_order("0xa")
+    assert recovered is not None
+    assert (recovered.state, recovered.cum_qty) == (OrderState.FILLED, Decimal("2"))
+    view = asyncio.run(exchange.fetch_order(OrderRef(cloid="0xa", symbol="BTC")))
+    assert isinstance(view, VenueOrderView)
+    assert [(fill.trade_id, fill.quantity) for fill in view.fills] == [
+        ("0xa-1", Decimal("1")),
+        ("0xa-2", Decimal("1")),
+    ]
