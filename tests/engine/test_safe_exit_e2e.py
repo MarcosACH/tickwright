@@ -17,18 +17,25 @@ from bus_backends import BUS_BACKENDS, make_bus
 from kafka_fakes import FakeKafkaBroker
 from ledgers import GENESIS
 from store_backends import STORE_BACKEND_PARAMS, PostgresBackend, SQLiteBackend, resolve_backend
+from venue_doubles import VenueLink
 
+from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.feed import ReplayFeed
 from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.app.build import paper_store_reads
 from tickwright.domain import (
     EventBus,
+    Exchange,
+    ExecutionReport,
+    ExternalOrderRef,
     InstrumentSpec,
     MarketTick,
     OrderEvent,
+    OrderRef,
     OrderState,
     OrderType,
+    PlaceOrder,
     Side,
     SignalEmitter,
     Store,
@@ -140,6 +147,8 @@ class _Lives:
         self.backend: SQLiteBackend | PostgresBackend = resolve_backend(store, tmp_path / "saga.db")
         self._bus = bus
         self._broker = FakeKafkaBroker()
+        # Set for a crash test, so the venue keeps what a dead life sent it.
+        self.lasting_venue: _Venue | None = None
 
     def bus(self) -> EventBus:
         return make_bus(self._bus, self._broker)
@@ -167,17 +176,28 @@ class _Lives:
         return path
 
     def engine(
-        self, ticks: Path, *, exit_job: Flatten | None = None, clock: ManualClock | None = None
+        self,
+        ticks: Path,
+        *,
+        exit_job: Flatten | None = None,
+        clock: ManualClock | None = None,
+        link: Callable[[PaperExchange], Exchange] | None = None,
     ) -> tuple[Engine, PaperExchange]:
+        """One engine life. ``link`` puts a venue double in front of paper."""
         bus = self.bus()
         clock = clock or ManualClock()
         store = self.backend.open()
-        paper = _paper(bus, clock, store)
+        # A crash test closes it by hand, as the death of a process would.
+        self.last_store = store
+        if self.lasting_venue is None:
+            paper = _paper(bus, clock, store)
+        else:
+            paper = self.lasting_venue.serve(bus, store)
         engine = Engine(
             bus=bus,
             clock=clock,
             store=store,
-            exchange=paper,
+            exchange=paper if link is None else link(paper),
             feed=ReplayFeed(path=ticks, bus=bus, clock=clock),
             guard=RealGuard(specs=_SPECS, store=store, clock=clock),
             exit_job=exit_job,
@@ -185,7 +205,10 @@ class _Lives:
         return engine, paper
 
     def venue(self) -> tuple[dict[str, Decimal], list[object]]:
-        """What a restarted paper venue holds: each non-zero position, and every open order."""
+        """What the paper venue holds: each non-zero position, and every open order.
+
+        Without a lasting venue, this is paper rebuilt from the store, as after a restart.
+        """
 
         async def read(paper: PaperExchange) -> tuple[dict[str, Decimal], list[object]]:
             positions = await paper.fetch_positions()
@@ -194,11 +217,62 @@ class _Lives:
             return {symbol: size for symbol, size in positions.items() if size != 0}, [*orders]
 
         with self.backend.open() as store:
-            return asyncio.run(read(_paper(self.bus(), ManualClock(), store)))
+            if self.lasting_venue is None:
+                return asyncio.run(read(_paper(self.bus(), ManualClock(), store)))
+            return asyncio.run(read(self.lasting_venue.serve(None, store)))
 
     def positions(self) -> dict[tuple[str | None, str], Decimal]:
         with self.backend.open() as store:
             return {(row.strategy_id, row.symbol): row.signed_size for row in store.all_positions()}
+
+
+class _Venue:
+    """Paper on a bus of its own, so it outlives the engine lives it serves.
+
+    A new paper venue rebuilds only from order rows the store holds (#484). A
+    crashed life can leave an order at the venue that the store never booked,
+    so a crash test keeps one venue across every life.
+    """
+
+    def __init__(self) -> None:
+        self._bus = InMemoryBus()
+        self._store: Store | None = None
+        self._engine_bus: EventBus | None = None
+        self.paper = PaperExchange(
+            bus=self._bus,
+            clock=ManualClock(),
+            fill_model=ImmediateFillModel(),
+            genesis_collateral=GENESIS,
+            instrument_specs=_SPECS,
+            account_net=lambda: paper_store_reads(self._live_store()).account_net(),
+            applied_fills=lambda cloid: paper_store_reads(self._live_store()).applied_fills(cloid),
+            resting_orders=lambda: paper_store_reads(self._live_store()).resting_orders(),
+        )
+        self._bus.subscribe(ExecutionReport, self._report)
+
+    def serve(self, engine_bus: EventBus | None, store: Store) -> PaperExchange:
+        """Link the venue to a new life: its ticks in, the venue's reports out."""
+        self._engine_bus = engine_bus
+        self._store = store
+        if engine_bus is not None:
+
+            async def tick(tick: MarketTick) -> None:
+                await self._bus.publish(tick)
+
+            engine_bus.subscribe(MarketTick, tick)
+        return self.paper
+
+    def cut(self) -> None:
+        """The engine dies. Nothing the venue says from here reaches it."""
+        self._engine_bus = None
+
+    def _live_store(self) -> Store:
+        assert self._store is not None
+        return self._store
+
+    async def _report(self, report: ExecutionReport) -> None:
+        if self._engine_bus is not None:
+            await self._engine_bus.publish(report)
 
 
 def _paper(bus: EventBus, clock: ManualClock, store: Store) -> PaperExchange:
@@ -223,9 +297,11 @@ _FLATTEN_ROWS = [{"BTC": "51000", "ETH": "3100"}, {"BTC": "52000", "ETH": "3200"
 _AFTER_STRATEGIES = {("alpha", "BTC"): Decimal("0.02"), ("beta", "ETH"): Decimal("0.5")}
 
 
-def _strategy_engine(lives: _Lives) -> tuple[Engine, Callable[[], bool]]:
+def _strategy_engine(
+    lives: _Lives, link: Callable[[PaperExchange], Exchange] | None = None
+) -> tuple[Engine, Callable[[], bool]]:
     """An engine running alpha and beta, and a check that both have exited."""
-    engine, _ = lives.engine(lives.ticks("strategy", [_STRATEGY_ROW] * 3, start_s=1))
+    engine, _ = lives.engine(lives.ticks("strategy", [_STRATEGY_ROW] * 3, start_s=1), link=link)
     alpha = _Exiter(
         engine.emitter_for("alpha"), symbol="BTC", open_qty="0.03", reduce="0.01", rest=True
     )
@@ -351,3 +427,130 @@ def test_flatten_will_not_start_on_a_store_a_running_engine_holds(
     assert lives.positions() == _AFTER_STRATEGIES
     with lives.backend.open() as reader:
         assert reader.load_kill_switch() is None
+
+
+Send = tuple[str, PlaceOrder | Sequence[OrderRef | ExternalOrderRef]]
+
+
+class _DiesAtTheSend(VenueLink):
+    """The engine dies at the send ``hits`` picks, before it hears back.
+
+    With ``reaches`` the send gets to the venue first. Without it, the send is lost.
+    ``hits`` sees every send in order, as ``("place", order)`` or ``("cancel", refs)``.
+    """
+
+    def __init__(
+        self,
+        venue: Exchange,
+        cut: Callable[[], None],
+        hits: Callable[[Send], bool],
+        *,
+        reaches: bool,
+    ) -> None:
+        super().__init__(venue)
+        self._cut = cut
+        self._hits = hits
+        self._reaches = reaches
+        self.crashed = asyncio.Event()
+
+    async def place(self, order: PlaceOrder) -> None:
+        if not self._hits(("place", order)):
+            return await super().place(order)
+        self._cut()
+        if self._reaches:
+            await super().place(order)
+        await self._die()
+
+    async def cancel(self, refs: Sequence[OrderRef | ExternalOrderRef]) -> None:
+        if not self._hits(("cancel", refs)):
+            return await super().cancel(refs)
+        self._cut()
+        if self._reaches:
+            await super().cancel(refs)
+        await self._die()
+
+    async def _die(self) -> None:
+        self.crashed.set()
+        await asyncio.Event().wait()
+
+
+def _nth(call: str, n: int, *, reduce_only: bool = False) -> Callable[[], Callable[[Send], bool]]:
+    """Picks the ``n``th send of ``call``, counting only reduce-only orders if asked."""
+
+    def make() -> Callable[[Send], bool]:
+        seen = 0
+
+        def hits(send: Send) -> bool:
+            nonlocal seen
+            name, arg = send
+            if name != call or (reduce_only and not getattr(arg, "reduce_only", False)):
+                return False
+            seen += 1
+            return seen == n
+
+        return hits
+
+    return make
+
+
+# Each step of the exit path a crash can hit: the life it hits, the send it dies
+# at, and whether that send reached the venue.
+_CRASHES = {
+    "strategy-reduce-only-sell": ("strategy", _nth("place", 1, reduce_only=True), True),
+    "strategy-cancel-all-sent": ("strategy", _nth("cancel", 1), True),
+    # The order stays resting, so flatten has to pull it before it closes.
+    "strategy-cancel-all-lost": ("strategy", _nth("cancel", 1), False),
+    "flatten-first-close": ("flatten", _nth("place", 1), True),
+    "flatten-second-close": ("flatten", _nth("place", 2), True),
+}
+
+
+def _die_in(lives: _Lives, engine: Engine, dying: _DiesAtTheSend) -> None:
+    """Run ``engine`` until it reaches its crash point, then kill the life."""
+
+    async def go() -> None:
+        run = asyncio.create_task(engine.run())
+        crashed = asyncio.create_task(dying.crashed.wait())
+        await asyncio.wait({run, crashed}, timeout=5, return_when=asyncio.FIRST_COMPLETED)
+        assert crashed.done(), "the life ended before it reached its crash point"
+        run.cancel()
+        await asyncio.gather(run, return_exceptions=True)
+
+    with capture_events():
+        asyncio.run(go())
+    lives.last_store.close()
+
+
+@pytest.mark.parametrize("crash", list(_CRASHES))
+@pytest.mark.parametrize("bus", BUS_BACKENDS)
+@pytest.mark.parametrize("store", STORE_BACKEND_PARAMS)
+def test_a_crash_at_any_step_then_a_flatten_ends_with_every_partition_and_the_venue_flat(
+    tmp_path: Path, store: str, bus: str, crash: str
+) -> None:
+    lives = _Lives(tmp_path, store, bus)
+    venue = lives.lasting_venue = _Venue()
+    life, hits, reaches = _CRASHES[crash]
+    dying = _DiesAtTheSend(venue.paper, venue.cut, hits(), reaches=reaches)
+
+    if life == "strategy":
+        engine, _ = _strategy_engine(lives, link=lambda _: dying)
+    else:
+        _strategies_exit(lives)
+        engine, _ = lives.engine(
+            lives.ticks("flatten", _FLATTEN_ROWS, start_s=10),
+            exit_job=Flatten(feed_ends=True),
+            link=lambda _: dying,
+        )
+    _die_in(lives, engine, dying)
+
+    engine, _ = lives.engine(
+        lives.ticks("restart", _FLATTEN_ROWS, start_s=20), exit_job=Flatten(feed_ends=True)
+    )
+
+    async def go() -> int:
+        return await asyncio.wait_for(engine.run(), timeout=5)
+
+    with capture_events():
+        assert asyncio.run(go()) == 0
+    assert {key: size for key, size in lives.positions().items() if size != 0} == {}
+    assert lives.venue() == ({}, [])
