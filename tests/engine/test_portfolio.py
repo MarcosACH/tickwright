@@ -756,7 +756,9 @@ def test_the_first_ingest_makes_an_unposted_live_bucket_real() -> None:
     """
     projection = _isolated_1x(None)
 
-    projection.apply_heal((), snapshot=venue_holding(BTC=Decimal("81.735")))
+    projection.apply_heal(
+        (), snapshot=venue_holding(BTC=Decimal("81.735"), sizes={"BTC": Decimal("0.001")})
+    )
 
     view = projection.for_strategy("alpha").position("BTC")
     account = projection.account()
@@ -795,7 +797,9 @@ def test_a_live_flip_through_zero_reads_unknown_until_the_next_ingest() -> None:
     posts 81.745, the short marked at its entry reads that bucket alone.
     """
     projection = _isolated_1x(None)
-    projection.apply_heal((), snapshot=venue_holding(BTC=Decimal("81.735")))
+    projection.apply_heal(
+        (), snapshot=venue_holding(BTC=Decimal("81.735"), sizes={"BTC": Decimal("0.001")})
+    )
 
     book_fill(projection, _fill(trade_id="f2", quantity="0.002", price="81745"), side=Side.SELL)
 
@@ -805,7 +809,9 @@ def test_a_live_flip_through_zero_reads_unknown_until_the_next_ingest() -> None:
     assert flipped.margin_used is None
     assert projection.account().free_margin is None
 
-    projection.apply_heal((), snapshot=venue_holding(BTC=Decimal("81.745")))
+    projection.apply_heal(
+        (), snapshot=venue_holding(BTC=Decimal("81.745"), sizes={"BTC": Decimal("-0.001")})
+    )
 
     posted = projection.for_strategy("alpha").position("BTC")
     assert posted is not None
@@ -827,7 +833,9 @@ def _live_restart(bucket: str | None) -> PortfolioProjection:
     store.checkpoint_ledger(account=change.account, positions=(change.position,), ts_ns=1_000)
     opened.project(change)
     if bucket is not None:
-        heal = opened.apply_heal((), snapshot=venue_holding(BTC=Decimal(bucket)))
+        heal = opened.apply_heal(
+            (), snapshot=venue_holding(BTC=Decimal(bucket), sizes={"BTC": Decimal("0.001")})
+        )
         assert heal is not None
         store.checkpoint_ledger(account=heal.account, positions=heal.collateral, ts_ns=2_000)
 
@@ -850,7 +858,9 @@ def test_a_live_restart_reads_a_bucket_saved_before_any_ingest_as_unknown() -> N
     assert view.margin_used is None
     assert restarted.account().free_margin is None
 
-    restarted.apply_heal((), snapshot=venue_holding(BTC=Decimal("81.735")))
+    restarted.apply_heal(
+        (), snapshot=venue_holding(BTC=Decimal("81.735"), sizes={"BTC": Decimal("0.001")})
+    )
 
     posted = restarted.for_strategy("alpha").position("BTC")
     assert posted is not None
@@ -2020,7 +2030,9 @@ def test_the_venues_bucket_splits_across_partitions_and_sums_to_it_exactly() -> 
     )
     bucket = Decimal("12600.01")
 
-    change = projection.apply_heal((), snapshot=venue_holding(BTC=bucket))
+    change = projection.apply_heal(
+        (), snapshot=venue_holding(BTC=bucket, sizes={"BTC": Decimal("3")})
+    )
 
     assert change is not None
     buckets = {p.strategy_id: p.isolated_collateral for p in change.collateral}
@@ -2040,9 +2052,13 @@ def test_a_venue_cross_position_releases_the_bucket_it_has_no_claim_on() -> None
     """
     projection = _live_isolated()
     book_fill(projection, _fill(trade_id="f1", quantity="1", price="42000"), side=Side.BUY)
-    projection.apply_heal((), snapshot=venue_holding(BTC=Decimal("4200")))
+    projection.apply_heal(
+        (), snapshot=venue_holding(BTC=Decimal("4200"), sizes={"BTC": Decimal("1")})
+    )
 
-    change = projection.apply_heal((), snapshot=venue_holding(BTC=None))
+    change = projection.apply_heal(
+        (), snapshot=venue_holding(BTC=None, sizes={"BTC": Decimal("1")})
+    )
 
     assert change is not None
     assert [p.isolated_collateral for p in change.collateral] == [Decimal("0")]
@@ -2058,7 +2074,9 @@ def test_a_symbol_the_snapshot_does_not_mention_releases_its_bucket() -> None:
     """
     projection = _live_isolated()
     book_fill(projection, _fill(trade_id="f1", quantity="1", price="42000"), side=Side.BUY)
-    projection.apply_heal((), snapshot=venue_holding(BTC=Decimal("4200")))
+    projection.apply_heal(
+        (), snapshot=venue_holding(BTC=Decimal("4200"), sizes={"BTC": Decimal("1")})
+    )
 
     change = projection.apply_heal((), snapshot=venue_holding())
 
@@ -2079,7 +2097,9 @@ def test_live_closing_an_isolated_position_releases_the_ingested_bucket() -> Non
     """
     projection = _live_isolated()
     book_fill(projection, _fill(trade_id="f1", quantity="1", price="42000"), side=Side.BUY)
-    projection.apply_heal((), snapshot=venue_holding(BTC=Decimal("4200")))
+    projection.apply_heal(
+        (), snapshot=venue_holding(BTC=Decimal("4200"), sizes={"BTC": Decimal("1")})
+    )
     projection.observe_mark(_mark(price="42000", ts_event=9_000))
     assert projection.account().total_margin_used == Decimal("4200")
 
@@ -2103,6 +2123,16 @@ def test_a_cycle_with_nothing_new_to_ingest_writes_nothing() -> None:
     """
     projection = _live_isolated()
     book_fill(projection, _fill(trade_id="f1", quantity="1", price="42000"), side=Side.BUY)
-    assert projection.apply_heal((), snapshot=venue_holding(BTC=Decimal("4200"))) is not None
+    assert (
+        projection.apply_heal(
+            (), snapshot=venue_holding(BTC=Decimal("4200"), sizes={"BTC": Decimal("1")})
+        )
+        is not None
+    )
 
-    assert projection.apply_heal((), snapshot=venue_holding(BTC=Decimal("4200"))) is None
+    assert (
+        projection.apply_heal(
+            (), snapshot=venue_holding(BTC=Decimal("4200"), sizes={"BTC": Decimal("1")})
+        )
+        is None
+    )
