@@ -121,6 +121,10 @@ class _Exiter:
         if event.signal_id == self._rest_id and event.state is OrderState.LIVE:
             await self._emitter.cancel_all(symbol=self.symbol)
 
+    def opened(self, state: OrderState) -> bool:
+        """Whether the opening order has reached ``state``."""
+        return self._reached(self._open, state)
+
     def done(self) -> bool:
         return (
             self._reached(self._open, OrderState.FILLED)
@@ -602,3 +606,62 @@ def test_an_exit_run_denies_a_strategy_order_kafka_replays_after_a_crash(
         assert rest_buy is not None and rest_buy.state is OrderState.DENIED
         placed = [reader.get_order(order.cloid) for order in records.placed]
     assert {order.strategy_id for order in placed if order is not None} <= {OPERATOR}
+
+
+def _openers(lives: _Lives, name: str, *, start_s: int) -> tuple[Engine, list[_Exiter]]:
+    """An engine whose alpha and beta each open a long on their first tick and stop there."""
+    engine, _ = lives.engine(lives.ticks(name, [_STRATEGY_ROW] * 3, start_s=start_s))
+    alpha = _Exiter(
+        engine.emitter_for("alpha"), symbol="BTC", open_qty="0.03", reduce=None, rest=False
+    )
+    beta = _Exiter(
+        engine.emitter_for("beta"), symbol="ETH", open_qty="0.5", reduce=None, rest=False
+    )
+    engine.register(alpha, symbols={"BTC"})
+    engine.register(beta, symbols={"ETH"})
+    return engine, [alpha, beta]
+
+
+def _run_until_opened(engine: Engine, exiters: list[_Exiter], state: OrderState) -> None:
+    """Run until each opening order is denied or filled, then check it reached ``state``."""
+
+    def settled() -> bool:
+        return all(e.opened(OrderState.DENIED) or e.opened(OrderState.FILLED) for e in exiters)
+
+    async def go() -> int:
+        run = asyncio.create_task(engine.run())
+        await asyncio.wait_for(_until(settled, run), timeout=5)
+        await engine.stop()
+        return await run
+
+    assert asyncio.run(go()) == 0
+    assert all(exiter.opened(state) for exiter in exiters)
+
+
+@pytest.mark.parametrize("bus", BUS_BACKENDS)
+@pytest.mark.parametrize("store", STORE_BACKEND_PARAMS)
+def test_after_a_flatten_a_restarted_engine_places_nothing_until_the_kill_switch_is_reset(
+    tmp_path: Path, store: str, bus: str
+) -> None:
+    lives = _Lives(tmp_path, store, bus)
+    _strategies_exit(lives)
+    engine, _ = lives.engine(
+        lives.ticks("flatten", _FLATTEN_ROWS, start_s=10), exit_job=Flatten(feed_ends=True)
+    )
+    assert asyncio.run(asyncio.wait_for(engine.run(), timeout=5)) == 0
+
+    # The operator restarts the strategies without resetting the kill switch.
+    engine, exiters = _openers(lives, "halted", start_s=20)
+    _run_until_opened(engine, exiters, OrderState.DENIED)
+    assert {key: size for key, size in lives.positions().items() if size != 0} == {}
+    assert lives.venue() == ({}, [])
+
+    # The operator resets it, as SIGUSR2 does, and the next life trades again.
+    with lives.backend.open() as reset:
+        RealGuard(specs=_SPECS, store=reset, clock=ManualClock()).reset_kill_switch()
+    engine, exiters = _openers(lives, "reset", start_s=30)
+    _run_until_opened(engine, exiters, OrderState.FILLED)
+    assert {key: size for key, size in lives.positions().items() if size != 0} == {
+        ("alpha", "BTC"): Decimal("0.03"),
+        ("beta", "ETH"): Decimal("0.5"),
+    }
