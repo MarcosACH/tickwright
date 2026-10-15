@@ -14,21 +14,18 @@ from pathlib import Path
 
 import pytest
 from bus_backends import BUS_BACKENDS, make_bus
+from exit_runs import LastingVenue, PriceWaitBlocks, paper_on
 from kafka_fakes import FakeKafkaBroker
-from ledgers import GENESIS
 from store_backends import STORE_BACKEND_PARAMS, PostgresBackend, SQLiteBackend, resolve_backend
 from venue_doubles import VenueLink
 
-from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.feed import ReplayFeed
-from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
-from tickwright.app.build import paper_store_reads
+from tickwright.adapters.paper import PaperExchange
 from tickwright.domain import (
     OPERATOR,
     EventBus,
     Exchange,
-    ExecutionReport,
     ExternalOrderRef,
     InstrumentSpec,
     MarketTick,
@@ -39,7 +36,6 @@ from tickwright.domain import (
     PlaceOrder,
     Side,
     SignalEmitter,
-    Store,
     TimeInForce,
     derive_cloid,
 )
@@ -154,7 +150,7 @@ class _Lives:
         self._bus = bus
         self._broker = FakeKafkaBroker()
         # Set for a crash test, so the venue keeps what a dead life sent it.
-        self.lasting_venue: _Venue | None = None
+        self.lasting_venue: LastingVenue | None = None
 
     def bus(self) -> EventBus:
         return make_bus(self._bus, self._broker)
@@ -196,7 +192,7 @@ class _Lives:
         # A crash test closes it by hand, as the death of a process would.
         self.last_store = store
         if self.lasting_venue is None:
-            paper = _paper(bus, clock, store)
+            paper = paper_on(store, bus=bus, clock=clock, specs=_SPECS)
         else:
             paper = self.lasting_venue.serve(bus, store)
         engine = Engine(
@@ -224,75 +220,13 @@ class _Lives:
 
         with self.backend.open() as store:
             if self.lasting_venue is None:
-                return asyncio.run(read(_paper(self.bus(), ManualClock(), store)))
+                paper = paper_on(store, bus=self.bus(), clock=ManualClock(), specs=_SPECS)
+                return asyncio.run(read(paper))
             return asyncio.run(read(self.lasting_venue.serve(None, store)))
 
     def positions(self) -> dict[tuple[str | None, str], Decimal]:
         with self.backend.open() as store:
             return {(row.strategy_id, row.symbol): row.signed_size for row in store.all_positions()}
-
-
-class _Venue:
-    """Paper on a bus of its own, so it outlives the engine lives it serves.
-
-    A new paper venue rebuilds only from order rows the store holds (#484). A
-    crashed life can leave an order at the venue that the store never booked,
-    so a crash test keeps one venue across every life.
-    """
-
-    def __init__(self) -> None:
-        self._bus = InMemoryBus()
-        self._store: Store | None = None
-        self._engine_bus: EventBus | None = None
-        self.paper = PaperExchange(
-            bus=self._bus,
-            clock=ManualClock(),
-            fill_model=ImmediateFillModel(),
-            genesis_collateral=GENESIS,
-            instrument_specs=_SPECS,
-            account_net=lambda: paper_store_reads(self._live_store()).account_net(),
-            applied_fills=lambda cloid: paper_store_reads(self._live_store()).applied_fills(cloid),
-            resting_orders=lambda: paper_store_reads(self._live_store()).resting_orders(),
-        )
-        self._bus.subscribe(ExecutionReport, self._report)
-
-    def serve(self, engine_bus: EventBus | None, store: Store) -> PaperExchange:
-        """Link the venue to a new life: its ticks in, the venue's reports out."""
-        self._engine_bus = engine_bus
-        self._store = store
-        if engine_bus is not None:
-
-            async def tick(tick: MarketTick) -> None:
-                await self._bus.publish(tick)
-
-            engine_bus.subscribe(MarketTick, tick)
-        return self.paper
-
-    def cut(self) -> None:
-        """The engine dies. Nothing the venue says from here reaches it."""
-        self._engine_bus = None
-
-    def _live_store(self) -> Store:
-        assert self._store is not None
-        return self._store
-
-    async def _report(self, report: ExecutionReport) -> None:
-        if self._engine_bus is not None:
-            await self._engine_bus.publish(report)
-
-
-def _paper(bus: EventBus, clock: ManualClock, store: Store) -> PaperExchange:
-    reads = paper_store_reads(store)
-    return PaperExchange(
-        bus=bus,
-        clock=clock,
-        fill_model=ImmediateFillModel(),
-        genesis_collateral=GENESIS,
-        instrument_specs=_SPECS,
-        account_net=reads.account_net,
-        applied_fills=reads.applied_fills,
-        resting_orders=reads.resting_orders,
-    )
 
 
 _STRATEGY_ROW = {"BTC": "50000", "ETH": "3000"}
@@ -360,29 +294,11 @@ def test_a_strategy_exit_then_flatten_leaves_every_partition_and_the_venue_flat(
     assert lives.venue() == ({}, [])
 
 
-class _PriceWaitBlocks(ManualClock):
-    """A ``ManualClock`` whose 2 second sleep never ends. ``waiting`` is set once one starts.
-
-    The first 2 second sleep of a live flatten is the wait for a symbol's first
-    price, so a flatten on this clock holds its store until it is stopped.
-    """
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.waiting = asyncio.Event()
-
-    async def sleep(self, seconds: float) -> None:
-        if seconds == 2.0:
-            self.waiting.set()
-            await asyncio.Event().wait()
-        await super().sleep(seconds)
-
-
 @pytest.mark.parametrize("store", STORE_BACKEND_PARAMS)
 def test_an_engine_will_not_start_on_a_store_a_flatten_holds(tmp_path: Path, store: str) -> None:
     lives = _Lives(tmp_path, store, "in_memory")
     _strategies_exit(lives)
-    clock = _PriceWaitBlocks()
+    clock = PriceWaitBlocks()
     # A live flatten whose feed never prices a symbol, so it waits and holds the store.
     flatten, _ = lives.engine(
         lives.ticks("silent", [], start_s=10), exit_job=Flatten(feed_ends=False), clock=clock
@@ -534,7 +450,7 @@ def test_a_crash_at_any_step_then_a_flatten_ends_with_every_partition_and_the_ve
     tmp_path: Path, store: str, bus: str, crash: str
 ) -> None:
     lives = _Lives(tmp_path, store, bus)
-    venue = lives.lasting_venue = _Venue()
+    venue = lives.lasting_venue = LastingVenue(specs=_SPECS)
     life, hits, reaches = _CRASHES[crash]
     dying = _DiesAtTheSend(venue.paper, venue.cut, hits(), reaches=reaches)
 
@@ -585,7 +501,7 @@ def test_an_exit_run_denies_a_strategy_order_kafka_replays_after_a_crash(
     # signal, the buy it rests after its reduce-only sell. An exit run hosts
     # no strategy, so it must never send that buy to the venue (issue #476).
     lives = _Lives(tmp_path, store, "kafka")
-    venue = lives.lasting_venue = _Venue()
+    venue = lives.lasting_venue = LastingVenue(specs=_SPECS)
     _, hits, reaches = _CRASHES["strategy-reduce-only-sell"]
     dying = _DiesAtTheSend(venue.paper, venue.cut, hits(), reaches=reaches)
     engine, _ = _strategy_engine(lives, link=lambda _: dying)

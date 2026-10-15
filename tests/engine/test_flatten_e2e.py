@@ -14,16 +14,15 @@ from functools import partial
 from pathlib import Path
 
 import pytest
-from ledgers import GENESIS
+from exit_runs import LastingVenue, PriceWaitBlocks, paper_on
 from structlog.typing import EventDict
 from venue_doubles import VenueLink
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.feed import ReplayFeed
-from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
+from tickwright.adapters.paper import PaperExchange
 from tickwright.adapters.store import SQLiteStore
-from tickwright.app.build import paper_store_reads
 from tickwright.domain import (
     OPERATOR,
     AggressorSide,
@@ -85,20 +84,6 @@ def _ticks(path: Path, replayed: Iterable[str]) -> Path:
     return path
 
 
-def _paper(bus: EventBus, clock: ManualClock, store: SQLiteStore) -> PaperExchange:
-    reads = paper_store_reads(store)
-    return PaperExchange(
-        bus=bus,
-        clock=clock,
-        fill_model=ImmediateFillModel(),
-        genesis_collateral=GENESIS,
-        instrument_specs=_SPECS,
-        account_net=reads.account_net,
-        applied_fills=reads.applied_fills,
-        resting_orders=reads.resting_orders,
-    )
-
-
 def _hold(path: Path, sizes: dict[str, str], *, strategy_id: str = "trivial", row: int = 0) -> None:
     """Open each signed size as ``strategy_id``, at the price of the symbol's ``row``.
 
@@ -107,7 +92,7 @@ def _hold(path: Path, sizes: dict[str, str], *, strategy_id: str = "trivial", ro
     bus = InMemoryBus()
     clock = ManualClock()
     with SQLiteStore(path) as store:
-        paper = _paper(bus, clock, store)
+        paper = paper_on(store, bus=bus, clock=clock, specs=_SPECS)
         checks = Checkpointer(spec=paper.account_spec(), store=store, clock=clock, specs=_SPECS)
         checks.recover()
         manager = ExecutionManager(bus=bus, exchange=paper, checkpointer=checks, guard=NoopGuard())
@@ -175,7 +160,7 @@ def _flatten(
     bus = bus or InMemoryBus()
     clock = clock or ManualClock()
     store = SQLiteStore(tmp_path / "saga.db")
-    paper = _paper(bus, clock, store)
+    paper = paper_on(store, bus=bus, clock=clock, specs=_SPECS)
     engine = Engine(
         bus=bus,
         clock=clock,
@@ -1014,23 +999,6 @@ def test_a_failed_read_after_a_fill_is_the_first_dry_attempt_of_a_new_row(tmp_pa
     assert logs[-1]["outcome"] == "done"
 
 
-class _PriceWaitBlocks(ManualClock):
-    """A ``ManualClock`` whose 2 second sleep never ends. ``waiting`` is set once one starts.
-
-    The first 2 second sleep of a live flatten is the wait for a symbol's first price.
-    """
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.waiting = asyncio.Event()
-
-    async def sleep(self, seconds: float) -> None:
-        if seconds == 2.0:
-            self.waiting.set()
-            await asyncio.Event().wait()
-        await super().sleep(seconds)
-
-
 def test_a_stop_during_the_wait_for_a_first_price_leaves_no_task_behind(
     tmp_path: Path,
 ) -> None:
@@ -1038,13 +1006,13 @@ def test_a_stop_during_the_wait_for_a_first_price_leaves_no_task_behind(
     # cancel its own tasks. Left behind, they outlive the run that made them.
     _hold(tmp_path / "saga.db", {"BTC": "0.02"})
     bus = InMemoryBus()
-    clock = _PriceWaitBlocks()
+    clock = PriceWaitBlocks()
     store = SQLiteStore(tmp_path / "saga.db")
     engine = Engine(
         bus=bus,
         clock=clock,
         store=store,
-        exchange=_paper(bus, clock, store),
+        exchange=paper_on(store, bus=bus, clock=clock, specs=_SPECS),
         # No BTC rows, so BTC is never priced.
         feed=ReplayFeed(path=_ticks(tmp_path / "ticks.jsonl", ("ETH",)), bus=bus, clock=clock),
         guard=RealGuard(specs=_SPECS, store=store, clock=clock),
@@ -1119,7 +1087,7 @@ def _left_open(
     cloid = derive_cloid(signal_id)
     clock = ManualClock()
     with SQLiteStore(path) as store:
-        paper = _paper(InMemoryBus(), clock, store)
+        paper = paper_on(store, bus=InMemoryBus(), clock=clock, specs=_SPECS)
         checks = Checkpointer(spec=paper.account_spec(), store=store, clock=clock, specs=_SPECS)
         checks.recover()
         checks.checkpoint(
@@ -1218,46 +1186,10 @@ def test_a_failed_read_after_the_wait_is_a_dry_attempt_and_the_next_read_sizes_t
     assert _partitions(tmp_path) == {("trivial", "BTC"): (Decimal("0"), Decimal("40"))}
 
 
-class _Venue:
-    """Paper on a bus of its own, so it outlives the engine run it serves.
-
-    The real venue keeps an order a crashed engine never booked. A new paper venue
-    rebuilds only from order rows the store holds (#484), and this order has none,
-    so the test holds one instance across both runs.
-    """
-
-    def __init__(self, path: Path, clock: ManualClock) -> None:
-        self.bus = InMemoryBus()
-        self.store = SQLiteStore(path)
-        self._engine_bus: InMemoryBus | None = None
-        self.paper = PaperExchange(
-            bus=self.bus,
-            clock=clock,
-            fill_model=ImmediateFillModel(),
-            genesis_collateral=GENESIS,
-            instrument_specs=_SPECS,
-            account_net=lambda: paper_store_reads(self.store).account_net(),
-            applied_fills=lambda cloid: paper_store_reads(self.store).applied_fills(cloid),
-            resting_orders=lambda: paper_store_reads(self.store).resting_orders(),
-        )
-        self.bus.subscribe(ExecutionReport, self._report)
-
-    def serve(self, engine_bus: InMemoryBus) -> None:
-        """Link the venue to a new engine run: its ticks in, the venue's reports out."""
-        self._engine_bus = engine_bus
-
-        async def tick(tick: MarketTick) -> None:
-            await self.bus.publish(tick)
-
-        engine_bus.subscribe(MarketTick, tick)
-
-    def cut(self) -> None:
-        """The engine dies. Nothing the venue says from here reaches it."""
-        self._engine_bus = None
-
-    async def _report(self, report: ExecutionReport) -> None:
-        if self._engine_bus is not None:
-            await self._engine_bus.publish(report)
+def _venue(tmp_path: Path) -> LastingVenue:
+    """One venue for both runs. The real venue keeps an order a crashed engine
+    never booked, and a new paper venue rebuilds only from order rows (#484)."""
+    return LastingVenue(specs=_SPECS, store=SQLiteStore(tmp_path / "saga.db"))
 
 
 class _CrashesAfterTheSend(VenueLink):
@@ -1276,7 +1208,7 @@ class _CrashesAfterTheSend(VenueLink):
 
 
 def _engine(
-    venue: _Venue, exchange: Exchange, tmp_path: Path, job: ExitJob | None = None
+    venue: LastingVenue, exchange: Exchange, tmp_path: Path, job: ExitJob | None = None
 ) -> Engine:
     """One engine run of ``job``, flatten by default, served by ``venue`` through ``exchange``.
 
@@ -1296,12 +1228,12 @@ def _engine(
     )
 
 
-def _crash_a_flatten(tmp_path: Path) -> _Venue:
+def _crash_a_flatten(tmp_path: Path) -> LastingVenue:
     """Run flatten until its first close reaches paper, then kill the run.
 
     Returns the venue that still holds the fill, with the store open again.
     """
-    venue = _Venue(tmp_path / "saga.db", ManualClock())
+    venue = _venue(tmp_path)
     link = _CrashesAfterTheSend(venue.paper, venue.cut)
 
     async def first_life() -> None:
@@ -1317,7 +1249,7 @@ def _crash_a_flatten(tmp_path: Path) -> _Venue:
 
 
 def _next_run(
-    venue: _Venue,
+    venue: LastingVenue,
     tmp_path: Path,
     job: ExitJob,
     *,
@@ -1425,7 +1357,7 @@ def test_a_close_left_open_that_fills_during_the_wait_leaves_only_the_rest_to_cl
         time_in_force=TimeInForce.IOC,
         reduce_only=True,
     )
-    venue = _Venue(tmp_path / "saga.db", ManualClock())
+    venue = _venue(tmp_path)
 
     exit_code, logs = _next_run(
         venue, tmp_path, Flatten(feed_ends=True), link=partial(_FillsDuringTheWait, close=late)
@@ -1493,7 +1425,7 @@ def test_a_close_left_open_that_fills_after_failed_reads_starts_a_new_row(
         time_in_force=TimeInForce.IOC,
         reduce_only=True,
     )
-    venue = _Venue(tmp_path / "saga.db", ManualClock())
+    venue = _venue(tmp_path)
 
     exit_code, logs = _next_run(
         venue, tmp_path, Flatten(feed_ends=True), link=partial(_FillsAfterFailedReads, close=late)
@@ -1526,7 +1458,7 @@ class _UnseenAtBoot(VenueLink):
         return await super().fetch_order(ref)
 
 
-def _fill_unheard(venue: _Venue, order: PlaceOrder) -> None:
+def _fill_unheard(venue: LastingVenue, order: PlaceOrder) -> None:
     """Fill ``order`` on paper at the last replay row, while no engine hears the fill."""
 
     async def go() -> None:
@@ -1544,7 +1476,7 @@ def test_a_close_that_filled_before_a_flat_boot_read_is_booked_before_any_leftov
     # the move, and the strategy would read short (ADR-0054, ADR-0056).
     _hold(tmp_path / "saga.db", {"BTC": "0.02"})
     left_open = _left_open(tmp_path / "saga.db", "BTC")
-    venue = _Venue(tmp_path / "saga.db", ManualClock())
+    venue = _venue(tmp_path)
     _fill_unheard(
         venue,
         PlaceOrder(
@@ -1579,7 +1511,7 @@ def test_a_strategy_sell_that_filled_before_a_flat_boot_read_is_booked_before_an
     # the strategy, so moving the size first would leave the strategy short.
     _hold(tmp_path / "saga.db", {"BTC": "0.02"})
     left_open = _left_open(tmp_path / "saga.db", "BTC", strategy_id="trivial", seq=2)
-    venue = _Venue(tmp_path / "saga.db", ManualClock())
+    venue = _venue(tmp_path)
     _fill_unheard(
         venue,
         PlaceOrder(
@@ -1622,7 +1554,7 @@ def test_a_flat_symbol_whose_open_order_is_never_decided_stops_the_run(
     # "done" (ADR-0060). The next boot resumes the saga.
     _hold(tmp_path / "saga.db", {"BTC": "0.02"})
     left_open = _left_open(tmp_path / "saga.db", "BTC")
-    venue = _Venue(tmp_path / "saga.db", ManualClock())
+    venue = _venue(tmp_path)
     _fill_unheard(
         venue,
         PlaceOrder(
