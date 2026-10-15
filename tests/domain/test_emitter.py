@@ -93,6 +93,18 @@ def test_place_carries_limit_price_and_post_only() -> None:
     assert signal.post_only is True
 
 
+def test_a_limit_with_no_price_is_refused_and_uses_no_seq() -> None:
+    # A venue cannot rest a LIMIT with no price, and its adapter faults the engine
+    # on one (#513). The strategy gets the error at its own call instead.
+    _, _, emitter, signals = _harness()
+
+    with pytest.raises(ValueError, match="price"):
+        asyncio.run(_place(emitter, order_type=OrderType.LIMIT))
+
+    assert signals == []
+    assert asyncio.run(_place(emitter)) == "alpha:BTC:1"
+
+
 def test_seq_is_monotonic_across_places_and_cancels() -> None:
     bus, _, emitter, signals = _harness()
 
