@@ -20,6 +20,14 @@ when a venue read fails, and which named events an exit run emits. Decided in
 
 - **Done is what the venue says at the end.** Cancel all is done when the venue holds no resting
   order. Flatten is done when it holds no resting order and no position.
+
+  **(Corrected by [#489](https://github.com/MarcosACH/tickwright/issues/489):** flatten is done
+  only when the venue reads flat and no symbol's loop gave up. A loop can give up waiting for an
+  order an earlier run left open, while the venue already reads flat. That order's fill is not
+  booked yet, so a strategy still holds size in the books. The run then exits 1 with
+  `outcome: stopped` and `left: none`, and `flatten.gave_up` names the symbol with `size: 0`.
+  `left` still comes from the final venue read, so `none` there means only that the venue is
+  flat. The next boot resumes the open saga.**)**
 - **Code 1 covers every run that started and did not finish.** That is flatten giving up, a failed
   read, cancel all leaving orders, a fault, and a stop by signal. Under ADR-0024, SIGINT (Ctrl-C)
   and SIGTERM give 0. Here both give 1, because the job is not done.
