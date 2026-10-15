@@ -812,6 +812,64 @@ def test_a_live_flip_through_zero_reads_unknown_until_the_next_ingest() -> None:
     assert posted.margin_used == Decimal("81.745")
 
 
+def _live_restart(bucket: str | None) -> PortfolioProjection:
+    """A live 1x isolated long checkpointed, then restored by a second life.
+
+    ``bucket`` is the venue's bucket ingested before the checkpoint. ``None``
+    is a crash inside the window, so the row went to disk at 0. A live
+    restart with an open ledger makes no account read at boot.
+    """
+    store = SQLiteStore(":memory:")
+    leverage = LeverageBook(entries={"BTC": LeverageSpec(mode="isolated", leverage=1)})
+    opened = _projection(None, store=store, leverage=leverage)
+    opened.recover()
+    change = opened.apply_fill(_fill(trade_id="f1", quantity="0.001", price="81735"), side=Side.BUY)
+    store.checkpoint_ledger(account=change.account, positions=(change.position,), ts_ns=1_000)
+    opened.project(change)
+    if bucket is not None:
+        heal = opened.apply_heal((), snapshot=venue_holding(BTC=Decimal(bucket)))
+        assert heal is not None
+        store.checkpoint_ledger(account=heal.account, positions=heal.collateral, ts_ns=2_000)
+
+    restarted = _projection(None, store=store, leverage=leverage)
+    restarted.recover()
+    restarted.observe_mark(_mark(price="81745", ts_event=9_000))
+    return restarted
+
+
+def test_a_live_restart_reads_a_bucket_saved_before_any_ingest_as_unknown() -> None:
+    """A crash inside the window wrote the row's 0 to disk (#516).
+
+    An open isolated position always has a bucket on the venue, so a restored
+    0 is a bucket we never read. It waits for the first ingest like a new open.
+    """
+    restarted = _live_restart(None)
+
+    view = restarted.for_strategy("alpha").position("BTC")
+    assert view is not None
+    assert view.margin_used is None
+    assert restarted.account().free_margin is None
+
+    restarted.apply_heal((), snapshot=venue_holding(BTC=Decimal("81.735")))
+
+    posted = restarted.for_strategy("alpha").position("BTC")
+    assert posted is not None
+    assert posted.margin_used == Decimal("81.745")
+
+
+def test_a_live_restart_reads_a_bucket_the_venue_posted_before_the_crash() -> None:
+    """A restored bucket the venue did post is real, so it reads at once.
+
+    Only a restored 0 waits for the first ingest. Making every restored bucket
+    wait would blank real margin for a minute after each restart.
+    """
+    restarted = _live_restart("81.735")
+
+    view = restarted.for_strategy("alpha").position("BTC")
+    assert view is not None
+    assert view.margin_used == Decimal("81.745")
+
+
 def test_paper_reads_the_bucket_it_locked_at_open_from_the_first_read() -> None:
     """The paper twin of the case above reads real numbers, because paper
     declares its own bucket at open: 0.001 × 81 735 / 1 = 81.735.

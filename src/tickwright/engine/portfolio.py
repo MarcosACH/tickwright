@@ -1034,6 +1034,19 @@ class PortfolioProjection:
             (position.strategy_id, position.symbol): position
             for position in self._store.all_positions()
         }
+        if not self._spec.declares_genesis:
+            # A crash inside the unposted window saved the row's 0, and a live
+            # restart with an open ledger makes no account read at boot. An
+            # open isolated position always holds a bucket on the venue, so a
+            # restored 0 is one we never read (#516). If that is ever wrong,
+            # the cost is ``None`` until the first ingest, never a wrong number.
+            self._unposted = {
+                key
+                for key, position in self._positions.items()
+                if position.signed_size != _ZERO
+                and position.isolated_collateral == _ZERO
+                and self.leverage_for(position.symbol).mode == "isolated"
+            }
 
     def _refuse_disagreement(self, stored: Account | None) -> None:
         """Refuse a store this engine may not trade (ADR-0043 §10).
