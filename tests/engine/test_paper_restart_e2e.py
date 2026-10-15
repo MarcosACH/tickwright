@@ -62,6 +62,7 @@ def _resting(
     price: Decimal | None = Decimal("41000"),
     time_in_force: TimeInForce | None = TimeInForce.GTC,
     applied_event_ids: tuple[str, ...] = (),
+    order_type: OrderType = OrderType.LIMIT,
 ) -> Order:
     """A limit an earlier run left resting, as its order row holds it."""
     return Order.restore(
@@ -71,7 +72,7 @@ def _resting(
         symbol="BTC",
         side=Side.BUY,
         quantity=Decimal("2"),
-        order_type=OrderType.LIMIT,
+        order_type=order_type,
         state=state,
         cum_qty=Decimal(cum_qty),
         venue_oid=None,
@@ -138,8 +139,10 @@ def test_a_restarted_paper_venue_rebuilds_only_the_orders_the_venue_confirmed_op
     # Only LIVE and PARTIALLY_FILLED rows are orders the venue confirmed it
     # holds. A PENDING or SUBMITTED row may never have reached paper, so
     # rebuilding it would invent an order nobody placed. Reconcile resolves
-    # those FAILED. Finished rows, rows with no price and IOC rows never rest.
+    # those FAILED. Finished rows, rows with no price, IOC rows and market rows
+    # never rest. A market row with a price could only come from before #513.
     store = SQLiteStore(":memory:")
+    store.checkpoint(_resting("0xmarket", order_type=OrderType.MARKET), ts_ns=1_000)
     store.checkpoint(_resting("0xlive"), ts_ns=1_000)
     store.checkpoint(
         _resting("0xpartial", state=OrderState.PARTIALLY_FILLED, cum_qty="0.5"), ts_ns=1_000
