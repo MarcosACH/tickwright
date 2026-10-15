@@ -31,6 +31,8 @@ from tickwright.domain import (
     FillReport,
     InstrumentSpec,
     LeverageBook,
+    LimitOrder,
+    MarketOrder,
     MarketTick,
     MarkTick,
     OrderRef,
@@ -38,7 +40,6 @@ from tickwright.domain import (
     OrderRefusedReport,
     OrderState,
     OrderStatusReport,
-    OrderType,
     PlaceOrder,
     Side,
     TimeInForce,
@@ -844,9 +845,7 @@ class HyperliquidExchange:
         }
 
     def _limit_price(self, order: PlaceOrder) -> Decimal:
-        if order.order_type is OrderType.LIMIT:
-            if order.price is None:
-                raise ValueError(f"LIMIT order {order.cloid} has no price")
+        if isinstance(order, LimitOrder):
             return order.price
         # MARKET → aggressive IOC limit (ADR-0030): no native market type at
         # the venue, so the order is priced through the book with a bound. The
@@ -871,7 +870,7 @@ class HyperliquidExchange:
         return quantize_price(price, order.side, self._universe.specs[order.symbol])
 
     def _wire_tif(self, order: PlaceOrder) -> str:
-        if order.order_type is OrderType.MARKET:
+        if isinstance(order, MarketOrder):
             return "Ioc"
         if order.post_only:
             return "Alo"

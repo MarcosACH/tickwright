@@ -36,13 +36,13 @@ from tickwright.domain import (
     LeverageBook,
     LeverageOutOfBounds,
     LeverageSpec,
+    LimitOrder,
+    MarketOrder,
     MarketTick,
     Netting,
     OrderRef,
     OrderState,
     OrderStatusReport,
-    OrderType,
-    PlaceOrder,
     Side,
     TimeInForce,
     VenueAccountState,
@@ -65,13 +65,12 @@ def _tick(price: str, ts: int = 1_000, symbol: str = "BTC") -> MarketTick:
     )
 
 
-def _market_order(qty: str = "1", symbol: str = "BTC", cloid: str = "0xabc") -> PlaceOrder:
-    return PlaceOrder(
+def _market_order(qty: str = "1", symbol: str = "BTC", cloid: str = "0xabc") -> MarketOrder:
+    return MarketOrder(
         cloid=cloid,
         symbol=symbol,
         side=Side.BUY,
         quantity=Decimal(qty),
-        order_type=OrderType.MARKET,
         time_in_force=TimeInForce.IOC,
     )
 
@@ -85,13 +84,12 @@ def _limit_order(
     qty: str = "1",
     symbol: str = "BTC",
     cloid: str = "0xabc",
-) -> PlaceOrder:
-    return PlaceOrder(
+) -> LimitOrder:
+    return LimitOrder(
         cloid=cloid,
         symbol=symbol,
         side=side,
         quantity=Decimal(qty),
-        order_type=OrderType.LIMIT,
         time_in_force=time_in_force,
         price=Decimal(price),
         post_only=post_only,

@@ -48,12 +48,13 @@ from tickwright.domain import (
     InstrumentSpec,
     InvariantViolation,
     LeverageBook,
+    LimitOrder,
+    MarketOrder,
     MarketTick,
     Order,
     OrderRef,
     OrderState,
     OrderStatusReport,
-    OrderType,
     PlaceOrder,
     Side,
     TimeInForce,
@@ -63,6 +64,7 @@ from tickwright.domain import (
     VenueReadFailure,
     fill_fee,
     min_notional_refuses,
+    place_order_of,
 )
 
 from .book import RestingBook
@@ -192,7 +194,10 @@ class PaperExchange:
         """
         self._leverage.validate_against(self._specs)
         for saga in self._resting_orders():
-            order = PlaceOrder.of(saga)
+            order = place_order_of(saga)
+            if not isinstance(order, LimitOrder):
+                # Only a LIMIT rests, so only LIMIT rows are handed over (#513).
+                raise InvariantViolation(f"order {saga.cloid} to rebuild is not a LIMIT")
             self._book.rest(order, working=self._working_size(order))
             # ``fetch_order`` answers from this memory. Without a status here,
             # reconcile reads the order as absent and ghosts it while paper can
@@ -337,7 +342,7 @@ class PaperExchange:
                 await self._fill_crossing_limit(order, tick, maker=True)
 
     async def _fill_crossing_limit(
-        self, order: PlaceOrder, tick: MarketTick, *, maker: bool
+        self, order: LimitOrder, tick: MarketTick, *, maker: bool
     ) -> bool:
         """Fill a crossing LIMIT per the model against its working remainder.
 
@@ -388,7 +393,7 @@ class PaperExchange:
                 )
             )
             return
-        if order.order_type is OrderType.MARKET:
+        if isinstance(order, MarketOrder):
             await self._place_market(order, tick)
         else:
             await self._place_limit(order, tick)
@@ -413,7 +418,7 @@ class PaperExchange:
             self._status_report(order, OrderState.CANCELLED, reason="reduce-only shrink")
         )
 
-    async def _place_market(self, order: PlaceOrder, tick: MarketTick) -> None:
+    async def _place_market(self, order: MarketOrder, tick: MarketTick) -> None:
         asked = order.quantity
         order = replace(order, quantity=self._working_size(order))
         spec = self._specs.get(order.symbol)
@@ -463,7 +468,7 @@ class PaperExchange:
             else:
                 self._book.shrink(order.cloid, abs(self._net(symbol)))
 
-    async def _place_limit(self, order: PlaceOrder, tick: MarketTick) -> None:
+    async def _place_limit(self, order: LimitOrder, tick: MarketTick) -> None:
         if self._crosses(order, tick):
             if order.post_only:
                 # post_only is a maker-only guarantee: crossing on arrival would
@@ -536,15 +541,12 @@ class PaperExchange:
         unapplied = self._unapplied.signed_size(symbol)
         return self._account_net().get(symbol, Decimal("0")) + unapplied
 
-    def _crosses(self, order: PlaceOrder, tick: MarketTick) -> bool:
+    def _crosses(self, order: LimitOrder, tick: MarketTick) -> bool:
         """Whether a trade at ``tick.price`` matches ``order``'s LIMIT price.
 
         A BUY fills when the market trades at or below its limit; a SELL when the
-        market trades at or above it. ``price`` is always set for a LIMIT.
+        market trades at or above it.
         """
-        if order.price is None:
-            # Only LIMITs reach the book; a priceless one is a broken assumption.
-            raise InvariantViolation(f"LIMIT order {order.cloid} on the book with no price")
         if order.side is Side.BUY:
             return tick.price <= order.price
         return tick.price >= order.price

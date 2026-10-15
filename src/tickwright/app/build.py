@@ -33,6 +33,7 @@ from tickwright.domain import (
     LeverageBook,
     MarketFeed,
     Order,
+    OrderType,
     Portfolio,
     PreTradeGuard,
     ReplayClock,
@@ -206,12 +207,14 @@ def _resting_orders(store: Store) -> list[Order]:
     FAILED instead. An IOC order never rests.
 
     A row with no price is from before the store kept order terms. Paper cannot
-    rest it, so reconcile ghosts it, as before #484.
+    rest it, so reconcile ghosts it, as before #484. Only a LIMIT rests, so a
+    MARKET row is never rebuilt, even one that holds a price from before #513.
     """
     return [
         order
         for order in store.all_orders()
         if order.state in WORKING_STATES
+        and order.order_type is OrderType.LIMIT
         and order.price is not None
         and order.time_in_force is TimeInForce.GTC
     ]
