@@ -184,7 +184,18 @@ class PostgresStore(SqlStore):
     _placeholder = "%s"
 
     def __init__(self, dsn: str) -> None:
-        self._conn = psycopg.connect(dsn, autocommit=True)
+        # The same bound on the engine's side (ADR-0052). Without it, a store
+        # call on a dropped network can hang the engine for about 15 minutes.
+        # Connect arguments win over the DSN, so a DSN cannot turn this off.
+        self._conn = psycopg.connect(
+            dsn,
+            autocommit=True,
+            keepalives=1,
+            keepalives_idle=10,
+            keepalives_interval=5,
+            keepalives_count=3,
+            tcp_user_timeout=25000,
+        )
         for name, value in _KEEPALIVES.items():
             self._conn.execute("SELECT set_config(%s, %s, false)", (name, value))
         super().__init__(

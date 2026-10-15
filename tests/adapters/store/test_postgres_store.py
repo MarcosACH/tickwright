@@ -14,9 +14,10 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from psycopg.conninfo import conninfo_to_dict
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from store_backends import PostgresBackend, resolve_backend
 
+from tickwright.adapters.store.postgres import PostgresStore
 from tickwright.domain import InvariantViolation, Order, OrderType, Side
 
 pytestmark = pytest.mark.postgres
@@ -141,3 +142,33 @@ def test_a_postgres_store_session_carries_the_adr_0052_keepalives(
         "tcp_keepalives_count": "3",
         "tcp_user_timeout": "25000",
     }
+
+
+def test_a_postgres_store_connection_times_out_on_its_own_side_even_over_the_dsn(
+    backend: PostgresBackend,
+) -> None:
+    """Without client-side keepalives, a store call on a dropped network can
+    hang the engine for about 15 minutes. ADR-0052 bounds it to about 25
+    seconds. The engine's values win over a DSN's own, so an operator cannot
+    turn the bound off by accident."""
+    dsn = make_conninfo(backend.dsn, keepalives_idle=600)
+
+    with PostgresStore(dsn) as store:
+        params = store._conn.info.get_parameters()
+
+    assert {name: params.get(name) for name in _CLIENT_KEEPALIVES} == {
+        "keepalives": "1",
+        "keepalives_idle": "10",
+        "keepalives_interval": "5",
+        "keepalives_count": "3",
+        "tcp_user_timeout": "25000",
+    }
+
+
+_CLIENT_KEEPALIVES = (
+    "keepalives",
+    "keepalives_idle",
+    "keepalives_interval",
+    "keepalives_count",
+    "tcp_user_timeout",
+)
