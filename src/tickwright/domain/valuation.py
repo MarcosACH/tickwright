@@ -45,6 +45,10 @@ class LiquidationSource:
     ``Decimal | None`` would be one value, and the only reading of that value is
     "fall back to the formula" — on live precisely the fabricated number
     ADR-0034's freeze-never-substitute rule exists to refuse.
+
+    Live always reads ``reported``. Before its first account read the price is
+    ``reported(None)``, because the venue has not spoken yet. So ``computed()``
+    is paper's branch only, never "live has not read yet" (#515).
     """
 
     _price: Decimal | None
@@ -52,7 +56,7 @@ class LiquidationSource:
 
     @classmethod
     def computed(cls) -> Self:
-        """No venue read stands behind this position; the formula's answer holds."""
+        """Paper's branch. No venue reports this price, so the formula's answer holds."""
         return cls(_price=None, _reported=False)
 
     @classmethod

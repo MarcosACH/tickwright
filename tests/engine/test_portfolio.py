@@ -1773,6 +1773,38 @@ def _live_isolated() -> PortfolioProjection:
     return _projection(None, leverage=_ISOLATED_10X)
 
 
+def test_live_reports_no_liquidation_price_before_the_first_account_read() -> None:
+    """Live never computes a liquidation price (ADR-0040 §3), even before the
+    first reconcile read lands (#515).
+
+    Before the fix, live fell back to the paper formula until that read. A new
+    isolated position holds 0 collateral on live until the read too, so the
+    formula put a long's liquidation price above its entry.
+
+    The paper ledger gets the same inputs, to show the formula has an answer
+    here. So the live `None` is the venue's silence, not a missing input.
+    """
+    spec = InstrumentSpec(
+        symbol="BTC",
+        sz_decimals=3,
+        max_decimals=6,
+        min_notional=Decimal("0"),
+        margin_maint=Decimal("0.0125"),
+    )
+    paper = _projection(leverage=_ISOLATED_10X, specs={"BTC": spec})
+    live = _projection(None, leverage=_ISOLATED_10X, specs={"BTC": spec})
+    for projection in (paper, live):
+        book_fill(projection, _fill(trade_id="f1", quantity="0.001", price="81735"), side=Side.BUY)
+        projection.observe_mark(_mark(price="81735", ts_event=9_000))
+
+    computed = paper.for_strategy("alpha").position("BTC")
+    assert computed is not None
+    assert computed.liquidation_price is not None
+    position = live.for_strategy("alpha").position("BTC")
+    assert position is not None
+    assert position.liquidation_price is None
+
+
 def test_the_venues_bucket_splits_across_partitions_and_sums_to_it_exactly() -> None:
     """The venue holds **one** bucket per symbol and knows nothing of our
     partitions (ADR-0035), so an ingest has to divide it — and `valuation.py`
