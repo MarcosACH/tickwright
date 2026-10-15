@@ -80,6 +80,10 @@ _TIF_WIRE = {TimeInForce.GTC: "Gtc", TimeInForce.IOC: "Ioc"}
 _ADDRESS_LIMIT_PREFIX = "Too many cumulative requests"
 
 
+class _MissingPrice(Exception):
+    """A market order has no price to bound it, so it cannot be sent."""
+
+
 class HyperliquidExchange:
     """The live ``Exchange`` adapter for Hyperliquid perps."""
 
@@ -251,9 +255,23 @@ class HyperliquidExchange:
         self._latest_mark[mark.symbol] = mark.price
 
     async def place(self, order: PlaceOrder) -> None:
+        try:
+            wire = self._order_wire(order)
+        except _MissingPrice as missing:
+            # Nothing was sent, so the order provably never landed (ADR-0010).
+            # A raise here would fault the whole engine for one order (#509).
+            await self._bus.publish(
+                self._status_report(
+                    cloid=order.cloid,
+                    symbol=order.symbol,
+                    status=OrderState.FAILED,
+                    reason=str(missing),
+                )
+            )
+            return
         action = {
             "type": "order",
-            "orders": [self._order_wire(order)],
+            "orders": [wire],
             "grouping": "na",
         }
         # The signed action goes through the same read as every query: ``read``
@@ -836,12 +854,12 @@ class HyperliquidExchange:
         # down, a sell up, never past the slippage cap.
         latest = self._latest_price.get(order.symbol)
         if latest is None:
-            raise ValueError(f"no market tick cached for {order.symbol!r}; cannot bound MARKET")
+            raise _MissingPrice(f"no market tick cached for {order.symbol!r}")
         # A trade alone could be stale, so a missing mark is a missing price
         # (ADR-0059).
         mark = self._latest_mark.get(order.symbol)
         if mark is None:
-            raise ValueError(f"no mark cached for {order.symbol!r}; cannot bound MARKET")
+            raise _MissingPrice(f"no mark cached for {order.symbol!r}")
         bound = (
             1 + self._config.slippage_bound
             if order.side is Side.BUY

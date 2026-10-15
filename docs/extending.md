@@ -180,7 +180,10 @@ auth, quirk translation — and importing no other adapter. It provides both a `
   rate limit. The reconciler stops its pass on it, as on `SEND_FAILED` (ADR-0056).
   `fetch_account_state` reads one grain with no worklist behind it, so it collapses all and
   returns **`None`**. `place`/`cancel` emit raw `ExecutionReport`s on the bus rather than
-  returning them; a cancel of an unknown order is a benign no-op.
+  returning them; a cancel of an unknown order is a benign no-op. `place` never raises for one
+  order. A raise faults the whole engine, so every outcome is a report on the bus. The
+  [`OrderAnchor.place`](../src/tickwright/domain/protocols.py) docstring lists which report goes
+  with which outcome (#509).
 - [ ] Answer the four questions the accounting surface asks of an `Exchange`. Each is a member the
   seam-claims gate below will make you name a test for.
   - `account_spec()` returns an `AccountSpec`: the qualified `account_id` the store keys the ledger

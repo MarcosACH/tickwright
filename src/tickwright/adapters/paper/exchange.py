@@ -377,10 +377,21 @@ class PaperExchange:
                 )
             )
             return
+        tick = self._latest_tick.get(order.symbol)
+        if tick is None:
+            # No price, so nothing fills or rests and the order never landed
+            # (ADR-0010). A raise here would fault the whole engine for one
+            # order (#509).
+            await self._bus.publish(
+                self._status_report(
+                    order, OrderState.FAILED, reason=f"no market tick cached for {order.symbol!r}"
+                )
+            )
+            return
         if order.order_type is OrderType.MARKET:
-            await self._place_market(order)
+            await self._place_market(order, tick)
         else:
-            await self._place_limit(order)
+            await self._place_limit(order, tick)
 
     def _working_size(self, order: PlaceOrder) -> Decimal:
         """The size the venue works ``order`` at.
@@ -402,11 +413,7 @@ class PaperExchange:
             self._status_report(order, OrderState.CANCELLED, reason="reduce-only shrink")
         )
 
-    async def _place_market(self, order: PlaceOrder) -> None:
-        tick = self._latest_tick.get(order.symbol)
-        if tick is None:
-            raise ValueError(f"no market tick cached for {order.symbol!r}; cannot fill MARKET")
-
+    async def _place_market(self, order: PlaceOrder, tick: MarketTick) -> None:
         asked = order.quantity
         order = replace(order, quantity=self._working_size(order))
         spec = self._specs.get(order.symbol)
@@ -456,11 +463,7 @@ class PaperExchange:
             else:
                 self._book.shrink(order.cloid, abs(self._net(symbol)))
 
-    async def _place_limit(self, order: PlaceOrder) -> None:
-        tick = self._latest_tick.get(order.symbol)
-        if tick is None:
-            raise ValueError(f"no market tick cached for {order.symbol!r}; cannot price LIMIT")
-
+    async def _place_limit(self, order: PlaceOrder, tick: MarketTick) -> None:
         if self._crosses(order, tick):
             if order.post_only:
                 # post_only is a maker-only guarantee: crossing on arrival would

@@ -529,11 +529,27 @@ def test_fill_trade_id_is_deterministic_across_runs() -> None:
     assert run() == run()
 
 
-def test_market_order_without_a_cached_tick_is_rejected() -> None:
-    exchange, _, _, _ = _harness()
-    # No tick has been published, so there is no price to fill against.
-    with pytest.raises(ValueError, match="no market tick"):
-        asyncio.run(exchange.place(_market_order()))
+def test_market_order_without_a_cached_tick_fails_without_filling() -> None:
+    exchange, _, _, fills, statuses = _limit_harness()
+    # No tick has been published, so there is no price to fill against. The
+    # order never landed, so it ends FAILED and the engine keeps running (#509).
+    asyncio.run(exchange.place(_market_order()))
+
+    assert fills == []
+    assert [(s.cloid, s.status, s.reason) for s in statuses] == [
+        ("0xabc", OrderState.FAILED, "no market tick cached for 'BTC'")
+    ]
+
+
+def test_limit_order_without_a_cached_tick_fails_without_resting() -> None:
+    exchange, _, _, fills, statuses = _limit_harness()
+    # With no tick, paper cannot tell whether the limit crosses.
+    asyncio.run(exchange.place(_limit_order("42000")))
+
+    assert fills == []
+    assert [(s.cloid, s.status, s.reason) for s in statuses] == [
+        ("0xabc", OrderState.FAILED, "no market tick cached for 'BTC'")
+    ]
 
 
 def test_gtc_limit_that_does_not_cross_rests_without_filling() -> None:
