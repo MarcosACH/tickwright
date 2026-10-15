@@ -1,4 +1,4 @@
-"""Four throwaway strategies that read the ``Portfolio`` seam, for verification only.
+"""Five throwaway strategies that read the ``Portfolio`` seam, for verification only.
 
 They are not shipped ``kind``s. ``docs/extending.md`` keeps a third strategy
 out of tree, so these satisfy the ``Strategy`` Protocol by shape and are
@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import time
 from decimal import Decimal
 
 import structlog
@@ -47,13 +48,16 @@ def _plain(value: object) -> object:
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class Wiring:
-    """What every verification strategy is built from, bundled so the four
-    constructors stay typed without repeating four keyword arguments each."""
+    """What every verification strategy is built from, bundled so the
+    constructors stay typed without repeating the same keyword arguments each."""
 
     emitter: SignalEmitter
     portfolio: Portfolio
     symbol: str
     quantity: Decimal
+    # On Hyperliquid, a market order sent before the first mark faults the
+    # engine (features/safe-exit.md, Gotchas). A wait lets a mark arrive first.
+    wait_seconds: int = 0
 
 
 class _Base:
@@ -67,8 +71,20 @@ class _Base:
         self._portfolio = wiring.portfolio
         self._symbol = wiring.symbol
         self._quantity = wiring.quantity
+        self._wait_seconds = wiring.wait_seconds
+        self._first_seen: float | None = None
         self._phase = "idle"
         self._ticks_seen = 0
+
+    def _waited(self) -> bool:
+        """Whether ``wait_seconds`` of wall time have passed since the first trade.
+
+        Wall time, not trade time: the Hyperliquid feed's first batch can carry
+        trades older than the wait, so trade time can pass it at once.
+        """
+        if self._first_seen is None:
+            self._first_seen = time.monotonic()
+        return time.monotonic() - self._first_seen >= self._wait_seconds
 
     def _read(self, event: str, **extra: object) -> None:
         position = self._portfolio.position(self._symbol)
@@ -125,7 +141,7 @@ class RoundTripThenFlat(_Base):
 
     async def on_tick(self, tick: MarketTick) -> None:
         self._ticks_seen += 1
-        if self._phase == "idle":
+        if self._phase == "idle" and self._waited():
             self._phase = "buying"
             await self._place(Side.BUY)
         elif self._phase == "holding":
@@ -188,6 +204,41 @@ class MarginWatch(_Base):
     async def _after_fill(self) -> None:
         if self._phase == "buying":
             self._phase = "holding"
+
+
+class RestThenHold(_Base):
+    """Buy at market, then rest a buy at ``rest_below`` times the last trade price.
+
+    It leaves what a safe exit has to clean up: a position and a resting order
+    that will not fill. See features/safe-exit.md.
+    """
+
+    def __init__(self, wiring: Wiring, *, rest_below: Decimal) -> None:
+        super().__init__(wiring)
+        self._rest_below = rest_below
+        self._last_price: Decimal | None = None
+
+    async def on_tick(self, tick: MarketTick) -> None:
+        self._ticks_seen += 1
+        self._last_price = tick.price
+        if self._phase == "idle" and self._waited():
+            self._phase = "buying"
+            await self._place(Side.BUY)
+
+    async def _after_fill(self) -> None:
+        if self._phase != "buying" or self._last_price is None:
+            return
+        self._phase = "resting"
+        price = self._last_price * self._rest_below
+        await self._emitter.place(
+            symbol=self._symbol,
+            side=Side.BUY,
+            quantity=self._quantity,
+            order_type=OrderType.LIMIT,
+            time_in_force=TimeInForce.GTC,
+            price=price,
+        )
+        self._read("verify.rested", price=price)
 
 
 class DualSymbolLeg(_Base):
