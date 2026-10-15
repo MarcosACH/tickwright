@@ -8,7 +8,7 @@ broker and a new store over the same backing, as a restart would.
 
 import asyncio
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from decimal import Decimal
 from pathlib import Path
 
@@ -37,6 +37,7 @@ from tickwright.domain import (
 from tickwright.engine.exit_run import Flatten
 from tickwright.engine.guard import RealGuard
 from tickwright.engine.runner import Engine
+from tickwright.observability.testing import capture_events
 
 SECOND_NS = 1_000_000_000
 
@@ -165,9 +166,11 @@ class _Lives:
         )
         return path
 
-    def engine(self, ticks: Path, *, flatten: bool = False) -> tuple[Engine, PaperExchange]:
+    def engine(
+        self, ticks: Path, *, exit_job: Flatten | None = None, clock: ManualClock | None = None
+    ) -> tuple[Engine, PaperExchange]:
         bus = self.bus()
-        clock = ManualClock()
+        clock = clock or ManualClock()
         store = self.backend.open()
         paper = _paper(bus, clock, store)
         engine = Engine(
@@ -177,7 +180,7 @@ class _Lives:
             exchange=paper,
             feed=ReplayFeed(path=ticks, bus=bus, clock=clock),
             guard=RealGuard(specs=_SPECS, store=store, clock=clock),
-            exit_job=Flatten(feed_ends=True) if flatten else None,
+            exit_job=exit_job,
         )
         return engine, paper
 
@@ -216,8 +219,12 @@ _STRATEGY_ROW = {"BTC": "50000", "ETH": "3000"}
 _FLATTEN_ROWS = [{"BTC": "51000", "ETH": "3100"}, {"BTC": "52000", "ETH": "3200"}]
 
 
-def _strategies_exit(lives: _Lives) -> None:
-    """Run the strategy life until both strategies have exited, then stop it."""
+# What the strategy life leaves: alpha bought 0.03 and sold 0.01, beta bought 0.5.
+_AFTER_STRATEGIES = {("alpha", "BTC"): Decimal("0.02"), ("beta", "ETH"): Decimal("0.5")}
+
+
+def _strategy_engine(lives: _Lives) -> tuple[Engine, Callable[[], bool]]:
+    """An engine running alpha and beta, and a check that both have exited."""
     engine, _ = lives.engine(lives.ticks("strategy", [_STRATEGY_ROW] * 3, start_s=1))
     alpha = _Exiter(
         engine.emitter_for("alpha"), symbol="BTC", open_qty="0.03", reduce="0.01", rest=True
@@ -227,15 +234,22 @@ def _strategies_exit(lives: _Lives) -> None:
     )
     engine.register(alpha, symbols={"BTC"})
     engine.register(beta, symbols={"ETH"})
+    return engine, lambda: alpha.done() and beta.done()
 
-    async def go() -> int | None:
+
+async def _until(done: Callable[[], bool], run: asyncio.Task[int]) -> None:
+    """Wait for ``done``, or for ``run`` to end first, so a failed boot surfaces."""
+    while not done() and not run.done():
+        await asyncio.sleep(0)
+
+
+def _strategies_exit(lives: _Lives) -> None:
+    """Run the strategy life until both strategies have exited, then stop it."""
+    engine, exited = _strategy_engine(lives)
+
+    async def go() -> int:
         run = asyncio.create_task(engine.run())
-
-        async def settled() -> None:
-            while not (alpha.done() and beta.done()) and not run.done():
-                await asyncio.sleep(0)
-
-        await asyncio.wait_for(settled(), timeout=5)
+        await asyncio.wait_for(_until(exited, run), timeout=5)
         await engine.stop()
         return await run
 
@@ -250,16 +264,90 @@ def test_a_strategy_exit_then_flatten_leaves_every_partition_and_the_venue_flat(
     lives = _Lives(tmp_path, store, bus)
 
     _strategies_exit(lives)
-    assert lives.positions() == {
-        ("alpha", "BTC"): Decimal("0.02"),
-        ("beta", "ETH"): Decimal("0.5"),
-    }
+    assert lives.positions() == _AFTER_STRATEGIES
 
-    engine, _ = lives.engine(lives.ticks("flatten", _FLATTEN_ROWS, start_s=10), flatten=True)
+    engine, _ = lives.engine(
+        lives.ticks("flatten", _FLATTEN_ROWS, start_s=10), exit_job=Flatten(feed_ends=True)
+    )
 
-    async def go() -> int | None:
+    async def go() -> int:
         return await asyncio.wait_for(engine.run(), timeout=5)
 
     assert asyncio.run(go()) == 0
     assert {key: size for key, size in lives.positions().items() if size != 0} == {}
     assert lives.venue() == ({}, [])
+
+
+class _PriceWaitBlocks(ManualClock):
+    """A ``ManualClock`` whose 2 second sleep never ends. ``waiting`` is set once one starts.
+
+    The first 2 second sleep of a live flatten is the wait for a symbol's first
+    price, so a flatten on this clock holds its store until it is stopped.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.waiting = asyncio.Event()
+
+    async def sleep(self, seconds: float) -> None:
+        if seconds == 2.0:
+            self.waiting.set()
+            await asyncio.Event().wait()
+        await super().sleep(seconds)
+
+
+@pytest.mark.parametrize("store", STORE_BACKEND_PARAMS)
+def test_an_engine_will_not_start_on_a_store_a_flatten_holds(tmp_path: Path, store: str) -> None:
+    lives = _Lives(tmp_path, store, "in_memory")
+    _strategies_exit(lives)
+    clock = _PriceWaitBlocks()
+    # A live flatten whose feed never prices a symbol, so it waits and holds the store.
+    flatten, _ = lives.engine(
+        lives.ticks("silent", [], start_s=10), exit_job=Flatten(feed_ends=False), clock=clock
+    )
+    refused, _ = _strategy_engine(lives)
+
+    async def go() -> tuple[int, int]:
+        run = asyncio.create_task(flatten.run())
+        waiting = asyncio.create_task(clock.waiting.wait())
+        await asyncio.wait({run, waiting}, timeout=5, return_when=asyncio.FIRST_COMPLETED)
+        assert waiting.done(), "the flatten never reached its wait for a price"
+        refused_code = await asyncio.wait_for(refused.run(), timeout=5)
+        await flatten.stop()
+        return refused_code, await asyncio.wait_for(run, timeout=5)
+
+    with capture_events() as logs:
+        refused_code, flatten_code = asyncio.run(go())
+
+    assert refused_code == 1
+    assert [e for e in logs if e["event"] == "engine.faulted" and "StoreLockHeld" in e["error"]]
+    # A stopped flatten has not finished its job (ADR-0060).
+    assert flatten_code == 1
+    assert lives.positions() == _AFTER_STRATEGIES
+
+
+@pytest.mark.parametrize("store", STORE_BACKEND_PARAMS)
+def test_flatten_will_not_start_on_a_store_a_running_engine_holds(
+    tmp_path: Path, store: str
+) -> None:
+    lives = _Lives(tmp_path, store, "in_memory")
+    engine, exited = _strategy_engine(lives)
+    flatten, _ = lives.engine(
+        lives.ticks("flatten", _FLATTEN_ROWS, start_s=10), exit_job=Flatten(feed_ends=True)
+    )
+
+    async def go() -> tuple[int, int]:
+        run = asyncio.create_task(engine.run())
+        await asyncio.wait_for(_until(exited, run), timeout=5)
+        refused_code = await asyncio.wait_for(flatten.run(), timeout=5)
+        await engine.stop()
+        return refused_code, await run
+
+    with capture_events() as logs:
+        refused_code, engine_code = asyncio.run(go())
+
+    assert (refused_code, engine_code) == (2, 0)
+    assert [e for e in logs if e["event"] == "exit.refused" and e["reason"] == "lock_held"]
+    assert lives.positions() == _AFTER_STRATEGIES
+    with lives.backend.open() as reader:
+        assert reader.load_kill_switch() is None
