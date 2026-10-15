@@ -28,6 +28,7 @@ from dataclasses import dataclass
 
 from tickwright.domain import (
     EMPTY_LEVERAGE_BOOK,
+    OPERATOR,
     Clock,
     ComponentState,
     EventBus,
@@ -408,9 +409,16 @@ class Engine:
         # never starts, so nothing reaches the venue after it (ADR-0060).
         if self._stop_requested.is_set():
             return
+        # Built and seeded as the host does it for a strategy, so the operator's
+        # seq cannot be reused after a restart (#442). The fold already holds
+        # every seq a crashed life sent, because the emitter records each one
+        # before its publish (ADR-0016).
+        emitter = self.emitter_for(OPERATOR)
+        emitter.set_next_seq(self._checkpointer.cache.seq_high_water().get(OPERATOR, 0) + 1)
         context = ExitContext(
             account=self._exchange,
             cancel=self._execution.cancel_for_operator,
+            emitter=emitter,
             checkpointer=self._checkpointer,
             guard=self._guard,
             bus=self._bus,

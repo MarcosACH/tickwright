@@ -14,7 +14,6 @@ from enum import StrEnum
 from typing import Protocol
 
 from tickwright.domain import (
-    OPERATOR,
     AccountAnchor,
     Clock,
     EventBus,
@@ -68,6 +67,9 @@ class ExitContext:
     account: AccountAnchor
     cancel: Callable[[Sequence[VenueOpenOrder | ExternalOrderRef]], Awaitable[None]]
     """The manager's operator cancel. A job has no cancel that skips the saga mark."""
+    emitter: SignalEmitter
+    """The ``__operator__`` emitter. The engine builds it as it builds a strategy's,
+    and seeds it past every seq an earlier life used (ADR-0016)."""
     checkpointer: Checkpointer
     guard: PreTradeGuard
     bus: EventBus
@@ -194,16 +196,7 @@ class Flatten:
             # its own symbol's first price instead.
             if self._feed_ends:
                 await context.feed.ended()
-            emitter = SignalEmitter(
-                strategy_id=OPERATOR,
-                bus=context.bus,
-                clock=context.clock,
-                record_seq=context.checkpointer.raise_seq,
-            )
-            # Seeded from the store high-water, as a strategy's is. An earlier flatten's seq
-            # is consumed, and the manager drops a signal id it has seen (ADR-0006).
-            high_water = context.checkpointer.cache.seq_high_water()
-            emitter.set_next_seq(high_water.get(OPERATOR, 0) + 1)
+            emitter = context.emitter
             turns = _Turns(context.reconciler, context.reconcile_account)
             context.bus.subscribe(OrderRefusedReport, turns.note_refusal)
             # One loop per symbol, all at the same time, so a thin book on one

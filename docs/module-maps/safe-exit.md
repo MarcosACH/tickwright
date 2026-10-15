@@ -98,7 +98,8 @@ bus, the clock, and a `FeedHandle`. The handle has `start(symbols)`, which calls
 `feed.add_symbols()` and `feed.start()` and then supervises `feed.run()`. It also has `ended()`,
 which waits for `feed.run()` to return.
 **(Changed by #476:** the order anchor is gone. The context holds `cancel`, which is the
-manager's `cancel_for_operator`. So a job has no cancel that skips the saga mark.**)**
+manager's `cancel_for_operator`. So a job has no cancel that skips the saga mark. The context
+also holds `emitter`, the seeded `__operator__` emitter.**)**
 
 **Responsibilities:** The contract between the host and one operator job. A job is built by the
 composition root with only the facts the root owns: the `--new-store` flag, and for `Flatten`
@@ -187,6 +188,9 @@ context. Starts the feed through the `FeedHandle`.
 - **(Built by #473:** `SignalEmitter` moved to `domain`, so `engine` can import it. `Flatten` keeps
   no counter of its own. It seeds an emitter for `__operator__` the way `StrategyHost` seeds a
   strategy's, and every close goes through `place()`. The seq rule (ADR-0016) lives in one place.**)**
+- **(Changed by #476:** `Flatten` no longer builds or seeds the emitter. The `Engine` builds it
+  with `emitter_for`, as it does for a strategy, seeds it, and hands it over as
+  `ExitContext.emitter`.**)**
 
 **The per-symbol loop (private):**
 
