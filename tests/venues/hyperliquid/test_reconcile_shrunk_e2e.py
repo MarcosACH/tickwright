@@ -7,9 +7,13 @@ The venue shrinks a reduce-only order to the position and answers `filled`
 adapter leaves the order to reconcile. Reconcile heals the fills, but a
 `filled` record moves no saga, so the saga must still end CANCELLED for the
 cut part.
+
+A resting GTC order takes the same path (issue #479). The venue holds it at
+the position size, and its fills reach the engine only through reconcile.
 """
 
 import asyncio
+from dataclasses import replace
 from decimal import Decimal
 
 import pytest
@@ -19,6 +23,7 @@ from hyperliquid_fakes import (
     fill_entry,
     filled_response,
     order_status_response,
+    resting_response,
 )
 from ledgers import checkpointer
 from pydantic import SecretStr
@@ -32,7 +37,11 @@ from tickwright.domain import (
     Order,
     OrderCancelled,
     OrderEvent,
+    OrderLive,
+    OrderPartiallyFilled,
+    OrderPlaced,
     OrderState,
+    OrderSubmitted,
     OrderType,
     PlaceSignal,
     Side,
@@ -96,7 +105,9 @@ def _shrunk_venue(
     )
 
 
-def _place_then_reconcile(post: FakeExchangeApi, *, passes: int) -> tuple[Order, list[OrderEvent]]:
+def _place_then_reconcile(
+    post: FakeExchangeApi, *, passes: int, signal: PlaceSignal = SIGNAL
+) -> tuple[Order, list[OrderEvent]]:
     async def main() -> tuple[Order, list[OrderEvent]]:
         bus = InMemoryBus()
         clock = ManualClock(start_ns=ACK_MS * 1_000_000)
@@ -123,7 +134,7 @@ def _place_then_reconcile(post: FakeExchangeApi, *, passes: int) -> tuple[Order,
             events.append(event)
 
         bus.subscribe(OrderEvent, collect)
-        await manager.on_signal(SIGNAL)
+        await manager.on_signal(signal)
         reconciler = Reconciler(
             bus=bus, clock=clock, exchange=exchange, cache=checks.cache, config=config
         )
@@ -199,3 +210,48 @@ def test_a_reduce_only_order_filled_to_its_full_size_ends_filled() -> None:
     assert order.state is OrderState.FILLED
     assert order.cum_qty == Decimal("0.5")
     assert not any(isinstance(event, OrderCancelled) for event in events)
+
+
+def test_a_resting_order_the_venue_shrank_ends_cancelled_once_it_fills() -> None:
+    # Short 0.3. A reduce-only GTC buy of 0.5 rests, and the venue holds it at
+    # 0.3. The first pass finds it still resting. Then it fills for 0.3, and
+    # the next two passes read the same fills.
+    resting_signal = replace(SIGNAL, time_in_force=TimeInForce.GTC)
+    fill = fill_entry(oid=91, tid=556, px="43250.0", sz="0.3", time=FILL_MS)
+    reads = 0
+
+    def order_status(_payload: dict) -> dict:
+        nonlocal reads
+        reads += 1
+        return order_status_response(
+            cloid=CLOID,
+            status="open" if reads == 1 else "filled",
+            oid=91,
+            placed_ms=ACK_MS,
+            reduce_only=True,
+        )
+
+    def fills(_payload: dict) -> list[dict]:
+        return [] if reads == 1 else [fill]
+
+    post = FakeExchangeApi(
+        {
+            "order": resting_response(oid=91),
+            "orderStatus": order_status,
+            "userFillsByTime": fills,
+        }
+    )
+
+    order, events = _place_then_reconcile(post, passes=3, signal=resting_signal)
+
+    assert order.state is OrderState.CANCELLED
+    assert order.cum_qty == Decimal("0.3")
+    # OrderLive proves the saga saw the order rest before it filled. Without
+    # it, this test would only repeat the filled-at-once case above.
+    assert [type(event) for event in events] == [
+        OrderPlaced,
+        OrderSubmitted,
+        OrderLive,
+        OrderPartiallyFilled,
+        OrderCancelled,
+    ]
