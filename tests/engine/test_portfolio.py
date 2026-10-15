@@ -768,6 +768,25 @@ def test_the_first_ingest_makes_an_unposted_live_bucket_real() -> None:
     assert account.free_margin == account.equity - Decimal("81.745")
 
 
+def test_a_live_close_before_the_first_ingest_reads_no_margin_rather_than_unknown() -> None:
+    """A flat position holds no bucket on the venue, so its 0 is a fact (#516).
+
+    The open marked the bucket unknown and no ingest ran since. The close
+    still settles it. Reading ``None`` here would blank the account's margin
+    for a book that holds nothing.
+    """
+    projection = _isolated_1x(None)
+
+    book_fill(projection, _fill(trade_id="f2", quantity="0.001", price="81745"), side=Side.SELL)
+
+    view = projection.for_strategy("alpha").position("BTC")
+    account = projection.account()
+    assert view is not None
+    assert view.margin_used == Decimal("0")
+    assert account.total_margin_used == Decimal("0")
+    assert account.free_margin == account.equity
+
+
 def test_paper_reads_the_bucket_it_locked_at_open_from_the_first_read() -> None:
     """The paper twin of the case above reads real numbers, because paper
     declares its own bucket at open: 0.001 × 81 735 / 1 = 81.735.

@@ -779,6 +779,8 @@ class PortfolioProjection:
         """
         if PositionChange.CLOSED in changes:
             position.isolated_collateral = _ZERO
+            # A flat bucket of 0 is known, so it no longer waits for the venue.
+            self._unposted.discard((position.strategy_id, position.symbol))
         if PositionChange.OPENED not in changes:
             return
         leverage = self.leverage_for(position.symbol)
