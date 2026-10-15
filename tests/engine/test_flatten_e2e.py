@@ -1603,3 +1603,51 @@ def test_a_strategy_sell_that_filled_before_a_flat_boot_read_is_booked_before_an
         old = store.get_order(left_open)
     assert old is not None
     assert old.state is OrderState.FILLED
+
+
+class _UnseenThenUnreadable(_UnseenAtBoot):
+    """The boot's read of ``cloid`` finds no record. Every later read of it fails."""
+
+    async def fetch_order(self, ref: OrderRef) -> VenueOrderView | VenueReadFailure:
+        if ref.cloid == self._cloid and self._reads:
+            return VenueReadFailure.SEND_FAILED
+        return await super().fetch_order(ref)
+
+
+def test_a_flat_symbol_whose_open_order_is_never_decided_stops_the_run(
+    tmp_path: Path,
+) -> None:
+    # The venue reads flat, but the close's fill is not booked. The wait gives up,
+    # so the strategy still holds its size. A flat final read must not make that
+    # "done" (ADR-0060). The next boot resumes the saga.
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+    left_open = _left_open(tmp_path / "saga.db", "BTC")
+    venue = _Venue(tmp_path / "saga.db", ManualClock())
+    _fill_unheard(
+        venue,
+        PlaceOrder(
+            cloid=left_open,
+            symbol="BTC",
+            side=Side.SELL,
+            quantity=Decimal("0.02"),
+            order_type=OrderType.MARKET,
+            time_in_force=TimeInForce.IOC,
+            reduce_only=True,
+        ),
+    )
+
+    exit_code, logs = _next_run(
+        venue,
+        tmp_path,
+        Flatten(feed_ends=True),
+        link=partial(_UnseenThenUnreadable, cloid=left_open),
+    )
+
+    assert exit_code == 1
+    assert [log["symbol"] for log in logs if log["event"] == "flatten.gave_up"] == ["BTC"]
+    assert logs[-1]["outcome"] == "stopped"
+    assert _partitions(tmp_path) == {("trivial", "BTC"): (Decimal("0.02"), Decimal("0"))}
+    with SQLiteStore(tmp_path / "saga.db") as store:
+        old = store.get_order(left_open)
+    assert old is not None
+    assert old.state is OrderState.LIVE

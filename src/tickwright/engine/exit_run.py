@@ -183,6 +183,7 @@ class Flatten:
         # order an earlier run left open may be what made it flat. Its fill must book
         # before the leftover moves, or it books on top of the move (ADR-0054).
         symbols = sorted(set(positions) | _held_in_books(context))
+        gave_up = False
         if symbols:
             priced = _Prices(symbols, waits=not self._feed_ends, clock=context.clock)
             # Before the feed starts, so no tick goes unseen.
@@ -208,15 +209,29 @@ class Flatten:
             context.bus.subscribe(OrderRefusedReport, turns.note_refusal)
             # One loop per symbol, all at the same time, so a thin book on one
             # symbol does not hold back the others (ADR-0056). A task group
-            # cancels the rest when one faults. A loop reports nothing, because
-            # only the final read can say what is left (ADR-0060).
+            # cancels the rest when one faults. A loop reports only whether it
+            # gave up, because only the final read can say what is left (ADR-0060).
             async with asyncio.TaskGroup() as group:
-                for symbol in symbols:
-                    size = positions.get(symbol, Decimal(0))
+                loops = [
                     group.create_task(
-                        _flatten_symbol(symbol, size, priced, emitter, turns, context)
+                        _flatten_symbol(
+                            symbol,
+                            positions.get(symbol, Decimal(0)),
+                            priced,
+                            emitter,
+                            turns,
+                            context,
+                        )
                     )
-        return await _final_read(context)
+                    for symbol in symbols
+                ]
+            gave_up = any(loop.result() for loop in loops)
+        outcome = await _final_read(context)
+        if gave_up:
+            # A loop can give up on a venue that reads flat, with a fill not booked
+            # yet. The books are then not flat, so the run is not done (ADR-0060).
+            return ExitOutcome(status=ExitStatus.STOPPED, left=outcome.left)
+        return outcome
 
 
 def _held_in_books(context: ExitContext) -> set[str]:
@@ -356,6 +371,11 @@ class _DryAttempts:
     def reset(self) -> None:
         self._count = 0
 
+    @property
+    def spent(self) -> bool:
+        """Whether the loop gave up. Nothing resets the count after that."""
+        return self._count == DRY_ATTEMPTS_TO_GIVE_UP
+
     async def gave_up(self, reason: str, size: Decimal) -> bool:
         """Count one dry attempt. Say whether it was the last, or wait before the next.
 
@@ -396,19 +416,20 @@ async def _flatten_symbol(
     emitter: SignalEmitter,
     turns: _Turns,
     context: ExitContext,
-) -> None:
+) -> bool:
     """One symbol's loop: wait for any order the boot left open, then close the rest.
 
     It closes until the venue reads the symbol flat, or stops after 3 dry
     attempts in a row. A failed read is dry too, so a venue that cannot answer
     never hangs the run (ADR-0060). A rate limit is the one failure that waits
-    instead. The final read reports what is left.
+    instead. True when the loop gave up. The final read reports what is left.
     """
     # One count for the whole loop, so the resume wait's dry attempts are in the row.
     dry = _DryAttempts(symbol, context.clock)
     left = await _resume_orders(symbol, size, dry, turns, context)
     while left is not None:
         left = await _attempt(symbol, left, priced, emitter, dry, turns, context)
+    return dry.spent
 
 
 async def _attempt(
