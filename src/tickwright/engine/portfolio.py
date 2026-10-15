@@ -383,13 +383,9 @@ class PortfolioProjection:
         # subject is not the margin model omits it and reads the ``None``.
         self._specs = dict(specs) if specs is not None else {}
         # The one Tier-2 figure live does not compute (ADR-0040 §3), cached off
-        # the reconcile pull and **stale-frozen between cycles**. ``None`` is
-        # not an empty map: it is "no venue read has ever landed", the state
-        # paper stays in forever and live leaves at its first cycle. The
-        # distinction is the whole switch — an empty map after a read means the
-        # venue holds nothing, which is an answer, where never having read is
-        # not one.
-        self._venue_liquidation: dict[str, Decimal | None] | None = None
+        # the reconcile pull and **stale-frozen between cycles**. Empty before
+        # the first read, so live reads ``None`` then. Paper never reads it.
+        self._venue_liquidation: dict[str, Decimal | None] = {}
 
     def leverage_for(self, symbol: str) -> LeverageSpec:
         """The margin mode and leverage this run computes ``symbol`` against.
@@ -1402,8 +1398,6 @@ class PortfolioProjection:
         """
         if self._spec.declares_genesis:
             return LiquidationSource.computed()
-        if self._venue_liquidation is None:
-            return LiquidationSource.reported(None)
         return LiquidationSource.reported(self._venue_liquidation.get(symbol))
 
     def account(self) -> AccountView:
