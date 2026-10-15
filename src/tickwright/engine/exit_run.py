@@ -179,17 +179,16 @@ class Flatten:
         positions = await context.account.fetch_positions()
         if isinstance(positions, VenueReadFailure):
             return ExitOutcome(status=ExitStatus.STOPPED, left=describe_failure(positions))
-        # A symbol the venue already reads flat gets no loop, so no later read would
-        # move what the strategies still hold. It moves here instead (ADR-0054).
-        for symbol in sorted(context.checkpointer.portfolio.account_net()):
-            if not positions.get(symbol):
-                context.checkpointer.checkpoint_leftover(symbol)
-        if positions:
-            priced = _Prices(positions, waits=not self._feed_ends, clock=context.clock)
+        # A symbol the books hold gets a loop even when the venue reads it flat. An
+        # order an earlier run left open may be what made it flat. Its fill must book
+        # before the leftover moves, or it books on top of the move (ADR-0054).
+        symbols = sorted(set(positions) | _held_in_books(context))
+        if symbols:
+            priced = _Prices(symbols, waits=not self._feed_ends, clock=context.clock)
             # Before the feed starts, so no tick goes unseen.
             context.bus.subscribe(MarketTick, priced.note_trade)
             context.bus.subscribe(MarkTick, priced.note_mark)
-            await context.feed.start(positions)
+            await context.feed.start(symbols)
             # A replay plays the whole file first, so each close fills at the
             # last row (ADR-0059). A live feed never ends. Each loop waits for
             # its own symbol's first price instead.
@@ -212,11 +211,18 @@ class Flatten:
             # cancels the rest when one faults. A loop reports nothing, because
             # only the final read can say what is left (ADR-0060).
             async with asyncio.TaskGroup() as group:
-                for symbol, size in positions.items():
+                for symbol in symbols:
+                    size = positions.get(symbol, Decimal(0))
                     group.create_task(
                         _flatten_symbol(symbol, size, priced, emitter, turns, context)
                     )
         return await _final_read(context)
+
+
+def _held_in_books(context: ExitContext) -> set[str]:
+    """Every symbol on which some partition holds size."""
+    portfolio = context.checkpointer.portfolio
+    return {symbol for symbol in portfolio.account_net() if portfolio.partition_sizes(symbol)}
 
 
 DRY_ATTEMPTS_TO_GIVE_UP = 3
@@ -391,7 +397,7 @@ async def _flatten_symbol(
     turns: _Turns,
     context: ExitContext,
 ) -> None:
-    """One symbol's loop: wait for a close the boot left open, then close the rest.
+    """One symbol's loop: wait for any order the boot left open, then close the rest.
 
     It closes until the venue reads the symbol flat, or stops after 3 dry
     attempts in a row. A failed read is dry too, so a venue that cannot answer
@@ -400,7 +406,7 @@ async def _flatten_symbol(
     """
     # One count for the whole loop, so the resume wait's dry attempts are in the row.
     dry = _DryAttempts(symbol, context.clock)
-    left = await _resume_closes(symbol, size, dry, turns, context)
+    left = await _resume_orders(symbol, size, dry, turns, context)
     while left is not None:
         left = await _attempt(symbol, left, priced, emitter, dry, turns, context)
 
@@ -516,46 +522,60 @@ async def _read_left(
 
     ``None`` ends the loop. Either the failed reads used up the dry attempts, or
     the venue reads flat. ``held`` is the last size read, for ``flatten.gave_up``.
-
-    A hand trade the books cannot see may have closed a flat venue, and no order
-    can close what the venue does not hold. So what the strategies still hold
-    moves to the unattributed partition (ADR-0054, ADR-0056).
     """
     while isinstance(positions := await context.account.fetch_positions(), VenueReadFailure):
         if await dry.read_failed(held, rate_limited=positions is VenueReadFailure.RATE_LIMITED_IP):
             return None
-    left = positions.get(symbol, Decimal(0))
-    if not left:
+    return _left(symbol, positions.get(symbol, Decimal(0)), context)
+
+
+def _left(symbol: str, size: Decimal, context: ExitContext) -> Decimal | None:
+    """The venue's ``size`` on ``symbol``, or ``None`` when it is flat and the loop ends.
+
+    A hand trade the books cannot see may have closed a flat venue, and no order
+    can close what the venue does not hold. So what the strategies still hold
+    moves to the unattributed partition (ADR-0054, ADR-0056). Only once no order
+    on the symbol is open, or that order's fill would book on top of the move.
+    """
+    if not size:
         context.checkpointer.checkpoint_leftover(symbol)
         return None
-    return left
+    return size
 
 
-async def _resume_closes(
+async def _resume_orders(
     symbol: str, size: Decimal, dry: _DryAttempts, turns: _Turns, context: ExitContext
 ) -> Decimal | None:
-    """Wait for any close the boot left open in ``symbol``, then say what is left to close.
+    """Wait for any order the boot left open in ``symbol``, then say what is left to close.
 
-    That close could still fill, so a second one sent beside it could close the
-    size twice. A symbol never has two closes open (ADR-0056). So the wait and the
-    read are the same ones that follow an attempt. ``None`` ends the loop, as it
-    does there. After a give-up, the final read reports the size, and the next boot
-    resumes the saga. The wait runs after the feed has played, because its passes
-    move the replay clock.
+    A close left open could still fill, so a second one sent beside it could close
+    the size twice. A symbol never has two closes open (ADR-0056). Any order left
+    open may also have filled already, with its fill not booked yet. The venue can
+    then read flat, and the leftover must not move before that fill books (ADR-0054).
+    So the wait covers a strategy's orders too.
+
+    The wait and the read are the same ones that follow an attempt. ``None`` ends
+    the loop, as it does there. After a give-up, the final read reports the size,
+    and the next boot resumes the saga. The wait runs after the feed has played,
+    because its passes move the replay clock.
     """
-    left_open = context.checkpointer.cache.open_orders(strategy_id=OPERATOR, symbol=symbol)
+    # A report the bus has not delivered yet can be what ends an order. Waiting on
+    # that order would wait for a pass to say what the bus already holds.
+    await context.bus.drain()
+    left_open = context.checkpointer.cache.open_orders(symbol=symbol)
     if not left_open:
-        return size
-    # What each close had filled before this run, so only a fill during the wait counts.
+        # With no order open, nothing the engine did since the boot read moved the venue.
+        return _left(symbol, size, context)
+    # What each order had filled before this run, so only a fill during the wait counts.
     before = {order.cloid: order.cum_qty for order in left_open}
     for cloid in before:
         if not await _verdict(cloid, size, dry, turns, context):
             return None
     if any(_cum_qty(cloid, context) > qty for cloid, qty in before.items()):
-        # A fill on a close from an earlier run ends the row too, before the read
+        # A fill on an order from an earlier run ends the row too, before the read
         # (ADR-0056).
         dry.reset()
-    # The old close may have filled during the wait, so only a new read sizes the next.
+    # The old order may have filled during the wait, so only a new read sizes the next.
     return await _read_left(symbol, size, dry, context)
 
 

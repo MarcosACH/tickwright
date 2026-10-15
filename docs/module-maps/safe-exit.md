@@ -191,6 +191,10 @@ context. Starts the feed through the `FeedHandle`.
 - **(Built by #473:** the resume wait and the read after it are the ones an attempt uses. So a
   failed pass or a failed read there is a dry attempt, in the same count as the loop's. A flat
   read there moves the leftover too.**)**
+- **(Extended by [#489](https://github.com/MarcosACH/tickwright/issues/489):** the wait covers
+  every open saga on the symbol, a strategy's too. A strategy's order can also have filled with
+  its fill not booked yet. The loop drains the bus before it looks, so it never waits on an order
+  whose last report is already on the bus.**)**
 - Place only when the partition sizes sum to the venue size from `fetch_positions()` (ADR-0054).
   If they differ, call `bus.drain()` first, so every fill already published is applied. If they
   still differ and the venue has account truth, run `LedgerReconciliation.reconcile_account()`.
@@ -225,9 +229,12 @@ context. Starts the feed through the `FeedHandle`.
 - **(Deferred by #473:** a symbol the venue already reads flat at the boot read gets no loop, so
   its leftover does not move. [#489](https://github.com/MarcosACH/tickwright/issues/489) builds
   it.**)**
-- **(Built by [#489](https://github.com/MarcosACH/tickwright/issues/489):** the boot read moves the
-  leftover too. Each symbol the books hold that the venue reads flat there moves before any loop
-  starts.**)**
+- **(Built by [#489](https://github.com/MarcosACH/tickwright/issues/489):** a symbol the books hold
+  gets a loop even when the venue reads it flat at the boot read. The move cannot happen at the
+  boot read itself. An order an earlier run left open may have filled, and that fill may be what
+  made the venue flat. Booked after the move, the fill would land on top of it, and the strategy
+  would read the size with the opposite sign. So the loop waits for that order first, as below.
+  With no order open, the boot read decides, and a flat one moves the leftover at once.**)**
 - Place one reduce-only market IOC order, as a `PlaceSignal` from `__operator__` on the bus. Size it
   from `fetch_positions()`.
 - After each attempt, run passes until the saga has a verdict. Wait the in-flight interval between
