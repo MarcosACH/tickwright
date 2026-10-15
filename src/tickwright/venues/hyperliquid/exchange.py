@@ -854,7 +854,7 @@ class HyperliquidExchange:
         # down, a sell up, never past the slippage cap.
         latest = self._latest_price.get(order.symbol)
         if latest is None:
-            raise ValueError(f"no market tick cached for {order.symbol!r}; cannot bound MARKET")
+            raise _MissingPrice(f"no market tick cached for {order.symbol!r}")
         # A trade alone could be stale, so a missing mark is a missing price
         # (ADR-0059).
         mark = self._latest_mark.get(order.symbol)
