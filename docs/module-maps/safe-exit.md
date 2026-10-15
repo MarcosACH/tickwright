@@ -169,10 +169,9 @@ context. Starts the feed through the `FeedHandle`.
   saga after its publish stops the run, so the next boot resumes it.**)**
 - Do the final venue read. Done means no resting order and no position.
 - **(Corrected by [#489](https://github.com/MarcosACH/tickwright/issues/489):** a loop now returns
-  whether it gave up. A run where any loop gave up exits 1, even when the final read is flat. A
-  loop can give up waiting for an order on a venue that reads flat. That order's fill is not
-  booked yet, so the strategy still holds size. ADR-0060 already makes a give-up exit 1. `left`
-  still comes from the final read.**)**
+  whether it gave up. A run where any loop gave up exits 1, even when the final read is flat. The
+  rule and what the operator sees are in ADR-0060, under "Done is what the venue says at the
+  end".**)**
 - Keep the `__operator__` seq counter. Start it from the same saga high-water fold the
   `StrategyHost` uses. `engine` cannot import `SignalEmitter`.
 - **(Deferred by #472:** every close uses seq 1. The manager drops a signal id it has seen
