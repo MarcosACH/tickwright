@@ -870,6 +870,22 @@ def test_a_live_restart_reads_a_bucket_the_venue_posted_before_the_crash() -> No
     assert view.margin_used == Decimal("81.745")
 
 
+def test_the_reconcile_reading_values_a_waiting_bucket_off_the_snapshot() -> None:
+    """The reading takes each bucket from the snapshot it compares (#402).
+
+    So a bucket still waiting for its ingest is known there. Reading it as
+    unknown would leave the cadence nothing to compare the venue's margin
+    against.
+    """
+    projection = _isolated_1x(None)
+
+    reading = projection.ledger_reading(snapshot=venue_holding(BTC=Decimal("81.735")))
+
+    assert reading.rows["BTC"].margin_used == Decimal("81.745")
+    assert reading.account.total_margin_used == Decimal("81.745")
+    assert reading.account.free_margin is not None
+
+
 def test_paper_reads_the_bucket_it_locked_at_open_from_the_first_read() -> None:
     """The paper twin of the case above reads real numbers, because paper
     declares its own bucket at open: 0.001 × 81 735 / 1 = 81.735.
