@@ -29,6 +29,9 @@ def test_spins_forever() -> None:
 
 def test_every_test_runs_under_a_timeout(pytestconfig: pytest.Config) -> None:
     assert float(pytestconfig.getini("timeout")) > 0
+    # The signal method can be swallowed inside an asyncio callback. The spin
+    # test below still passes most runs under it, so only this line catches it.
+    assert pytestconfig.getini("timeout_method") == "thread"
 
 
 def test_a_spinning_asyncio_test_is_stopped_at_its_timeout(tmp_path: Path) -> None:
@@ -54,8 +57,10 @@ def test_a_spinning_asyncio_test_is_stopped_at_its_timeout(tmp_path: Path) -> No
         ],
         capture_output=True,
         text=True,
-        # A run with no working timeout spins until this kills it.
-        timeout=60,
+        # A run with no working timeout spins until this kills it. It must end
+        # well before this test's own timeout. That one exits the whole process
+        # and would leave the child spinning.
+        timeout=20,
         env={k: v for k, v in os.environ.items() if not k.startswith("TICKWRIGHT_")},
     )
 
