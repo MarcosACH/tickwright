@@ -214,3 +214,40 @@ def test_reconcile_finds_a_rebuilt_order_and_never_ghosts_it(
     recovered = store.get_order("0xa")
     assert recovered is not None
     assert (recovered.state, recovered.cum_qty) == (state, Decimal(cum_qty))
+
+
+def test_a_rebuilt_order_books_its_next_fill_on_the_saga() -> None:
+    # An earlier run booked fill 0xa-1 for 0.5. The next fill must carry a new
+    # trade id, or the saga drops it as a duplicate and misses 1.5.
+    clock = ManualClock(start_ns=2_000)
+    store = SQLiteStore(":memory:")
+    store.checkpoint(
+        _resting(
+            "0xa",
+            state=OrderState.PARTIALLY_FILLED,
+            cum_qty="0.5",
+            applied_event_ids=("0xa:submitted", "0xa:fill:0xa-1"),
+        ),
+        ts_ns=1_000,
+    )
+    bus, _ = _second_life(store, clock)
+
+    # A tick below the BUY limit at 41000 crosses it.
+    asyncio.run(
+        bus.publish(
+            MarketTick(
+                ts_event=3_000,
+                ts_init=3_000,
+                symbol="BTC",
+                price=Decimal("40000"),
+                size=Decimal("5"),
+                aggressor_side=AggressorSide.SELL,
+                trade_id="t3000",
+                seq=0,
+            )
+        )
+    )
+
+    recovered = store.get_order("0xa")
+    assert recovered is not None
+    assert (recovered.state, recovered.cum_qty) == (OrderState.FILLED, Decimal("2"))

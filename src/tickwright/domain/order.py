@@ -119,6 +119,16 @@ class Order:
         return frozenset(self._applied_event_ids)
 
     @property
+    def fill_count(self) -> int:
+        """How many fills the saga has booked.
+
+        A restarted paper venue numbers the next fill after these, so it never
+        reuses a booked trade id (#484). The prefix is ``OrderFillEvent.event_id``.
+        """
+        prefix = f"{self.cloid}:fill:"
+        return sum(1 for event_id in self._applied_event_ids if event_id.startswith(prefix))
+
+    @property
     def is_terminal(self) -> bool:
         """Whether the saga has reached a terminal state (no transition leaves it)."""
         return self.state in _TERMINAL_STATES

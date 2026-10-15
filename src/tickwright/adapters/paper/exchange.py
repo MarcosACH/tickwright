@@ -180,6 +180,9 @@ class PaperExchange:
             # reconcile reads the order as absent and ghosts it while paper can
             # still fill it. The saga's own state replays as a no-op.
             self._status_report(order, saga.state)
+            # Trade ids count from 1 in each process. Start after the fills the
+            # saga booked, or the next fill reuses a booked id and is dropped.
+            self._fill_counts[saga.cloid] = saga.fill_count
 
     async def run(self) -> None:
         """Settle funding boundaries for as long as the engine supervises this.
