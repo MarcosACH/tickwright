@@ -611,6 +611,39 @@ def test_two_strategies_of_opposite_sign_leave_one_unattributed_piece_at_their_c
     assert [row.entry_price for row in unattributed] == [Decimal("40000")]
 
 
+class _SoldBeforeFlatten(VenueLink):
+    """The venue reads BTC flat on every positions read.
+
+    The operator sold it by hand before flatten ran, so the books never see that trade.
+    """
+
+    async def fetch_positions(self) -> dict[str, Decimal] | VenueReadFailure:
+        positions = await super().fetch_positions()
+        if isinstance(positions, VenueReadFailure):
+            return positions
+        return {symbol: size for symbol, size in positions.items() if symbol != "BTC"}
+
+
+def test_a_venue_already_flat_at_the_boot_read_moves_the_leftover_to_unattributed(
+    tmp_path: Path,
+) -> None:
+    # The boot read starts no loop for BTC, so no later read can move the size. Without
+    # the move at the boot read, the strategy would keep reading +1 after "done" (ADR-0054).
+    _hold(tmp_path / "saga.db", {"BTC": "1"})
+
+    exit_code, logs = _flatten(tmp_path, link=_SoldBeforeFlatten)
+
+    assert exit_code == 0
+    assert logs[-1]["outcome"] == "done"
+    assert _partitions(tmp_path) == {
+        ("trivial", "BTC"): (Decimal("0"), Decimal("0")),
+        (None, "BTC"): (Decimal("1"), Decimal("0")),
+    }
+    with SQLiteStore(tmp_path / "saga.db") as store:
+        unattributed = [row for row in store.all_positions() if row.strategy_id is None]
+    assert [row.entry_price for row in unattributed] == [Decimal("42000")]
+
+
 def test_flatten_cancels_a_resting_order_before_it_closes_a_long_and_a_short(
     tmp_path: Path,
 ) -> None:

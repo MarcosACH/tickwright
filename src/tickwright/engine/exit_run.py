@@ -179,6 +179,11 @@ class Flatten:
         positions = await context.account.fetch_positions()
         if isinstance(positions, VenueReadFailure):
             return ExitOutcome(status=ExitStatus.STOPPED, left=describe_failure(positions))
+        # A symbol the venue already reads flat gets no loop, so no later read would
+        # move what the strategies still hold. It moves here instead (ADR-0054).
+        for symbol in sorted(context.checkpointer.portfolio.account_net()):
+            if not positions.get(symbol):
+                context.checkpointer.checkpoint_leftover(symbol)
         if positions:
             priced = _Prices(positions, waits=not self._feed_ends, clock=context.clock)
             # Before the feed starts, so no tick goes unseen.

@@ -225,6 +225,9 @@ context. Starts the feed through the `FeedHandle`.
 - **(Deferred by #473:** a symbol the venue already reads flat at the boot read gets no loop, so
   its leftover does not move. [#489](https://github.com/MarcosACH/tickwright/issues/489) builds
   it.**)**
+- **(Built by [#489](https://github.com/MarcosACH/tickwright/issues/489):** the boot read moves the
+  leftover too. Each symbol the books hold that the venue reads flat there moves before any loop
+  starts.**)**
 - Place one reduce-only market IOC order, as a `PlaceSignal` from `__operator__` on the bus. Size it
   from `fetch_positions()`.
 - After each attempt, run passes until the saga has a verdict. Wait the in-flight interval between
