@@ -37,7 +37,11 @@ from tickwright.domain import (
     Order,
     OrderCancelled,
     OrderEvent,
+    OrderLive,
+    OrderPartiallyFilled,
+    OrderPlaced,
     OrderState,
+    OrderSubmitted,
     OrderType,
     PlaceSignal,
     Side,
@@ -238,7 +242,16 @@ def test_a_resting_order_the_venue_shrank_ends_cancelled_once_it_fills() -> None
         }
     )
 
-    order, _events = _place_then_reconcile(post, passes=3, signal=resting_signal)
+    order, events = _place_then_reconcile(post, passes=3, signal=resting_signal)
 
     assert order.state is OrderState.CANCELLED
     assert order.cum_qty == Decimal("0.3")
+    # OrderLive proves the saga saw the order rest before it filled. Without
+    # it, this test would only repeat the filled-at-once case above.
+    assert [type(event) for event in events] == [
+        OrderPlaced,
+        OrderSubmitted,
+        OrderLive,
+        OrderPartiallyFilled,
+        OrderCancelled,
+    ]
