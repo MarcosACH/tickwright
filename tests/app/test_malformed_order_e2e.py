@@ -1,17 +1,19 @@
-"""A strategy's LIMIT order sent with no price (issue #513).
+"""A strategy's order whose type and price do not fit (issue #513).
 
-The engine is wired from a pure ``AppConfig`` with the public ``app``
-builders: ``ReplayFeed`` -> strategy -> ``ExecutionManager`` ->
-``PaperExchange``. No venue, no network, no ambient ``TICKWRIGHT_*``.
+A LIMIT with no price, or a MARKET with a price. The engine is wired from a
+pure ``AppConfig`` with the public ``app`` builders: ``ReplayFeed`` ->
+strategy -> ``ExecutionManager`` -> ``PaperExchange``. No venue, no network,
+no ambient ``TICKWRIGHT_*``.
 
-The strategy's first order is a LIMIT with no price. Its second is a valid
-market buy.
+The strategy's first order is the bad one. Its second is a valid market buy.
 """
 
 import asyncio
 import json
 from decimal import Decimal
 from pathlib import Path
+
+import pytest
 
 from tickwright.adapters.feed import ReplayFeedConfig
 from tickwright.adapters.paper import PaperExchangeConfig
@@ -50,12 +52,16 @@ BTC = InstrumentSpec(
 )
 
 
-class ForgetsThePriceOnce:
-    """Sends a LIMIT with no price on its first tick, then a market buy."""
+class SendsABadOrderOnce:
+    """Sends the bad order on its first tick, then a market buy."""
 
-    def __init__(self, emitter: SignalEmitter) -> None:
+    def __init__(
+        self, emitter: SignalEmitter, *, order_type: OrderType, price: Decimal | None
+    ) -> None:
         self.strategy_id = emitter.strategy_id
         self._emitter = emitter
+        self._order_type = order_type
+        self._price = price
         self.errors: list[Exception] = []
         self.sent: list[str] = []
         self.states: dict[str, list[OrderState]] = {}
@@ -67,8 +73,9 @@ class ForgetsThePriceOnce:
                     symbol="BTC",
                     side=Side.BUY,
                     quantity=Decimal("1"),
-                    order_type=OrderType.LIMIT,
+                    order_type=self._order_type,
                     time_in_force=TimeInForce.GTC,
+                    price=self._price,
                 )
             except ValueError as error:
                 self.errors.append(error)
@@ -96,8 +103,13 @@ class ForgetsThePriceOnce:
         pass
 
 
-def test_a_limit_with_no_price_raises_in_the_strategy_and_the_engine_keeps_trading(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    ("order_type", "price"),
+    [(OrderType.LIMIT, None), (OrderType.MARKET, Decimal("100"))],
+    ids=["limit-with-no-price", "market-with-a-price"],
+)
+def test_a_bad_order_raises_in_the_strategy_and_the_engine_keeps_trading(
+    tmp_path: Path, order_type: OrderType, price: Decimal | None
 ) -> None:
     ticks = tmp_path / "ticks.jsonl"
     ticks.write_text(
@@ -139,7 +151,7 @@ def test_a_limit_with_no_price_raises_in_the_strategy_and_the_engine_keeps_tradi
         config=config.engine,
         leverage=leverage,
     )
-    strategy = ForgetsThePriceOnce(engine.emitter_for("buyer"))
+    strategy = SendsABadOrderOnce(engine.emitter_for("buyer"), order_type=order_type, price=price)
     engine.register(strategy, symbols={"BTC"})
 
     def filled() -> bool:
