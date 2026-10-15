@@ -203,8 +203,6 @@ __all__ = [
     "PlaceOrder",
     "LimitOrder",
     "MarketOrder",
-    # the one place a saga becomes a venue order
-    "place_order_of",
     "PlaceSignal",
     "Position",
     "PositionChange",
@@ -241,6 +239,8 @@ __all__ = [
     "reserved_id_refusal",
     # the one rule for which orders are flatten orders, read by the guard and ExecutionManager
     "is_flatten",
+    # the one place a saga becomes a venue order
+    "place_order_of",
     # the cash line a venue snapshot implies — the genesis and the reconcile
     # anchor read it from one place
     "venue_cash",
