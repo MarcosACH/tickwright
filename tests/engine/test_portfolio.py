@@ -787,6 +787,31 @@ def test_a_live_close_before_the_first_ingest_reads_no_margin_rather_than_unknow
     assert account.free_margin == account.equity
 
 
+def test_a_live_flip_through_zero_reads_unknown_until_the_next_ingest() -> None:
+    """A flip owes the residual's bucket, which only the venue knows (#516).
+
+    The long's bucket was posted, then a sell of 0.002 flips it to a short of
+    0.001 at 81 745. The row's 0 is not the new leg's bucket. After the venue
+    posts 81.745, the short marked at its entry reads that bucket alone.
+    """
+    projection = _isolated_1x(None)
+    projection.apply_heal((), snapshot=venue_holding(BTC=Decimal("81.735")))
+
+    book_fill(projection, _fill(trade_id="f2", quantity="0.002", price="81745"), side=Side.SELL)
+
+    flipped = projection.for_strategy("alpha").position("BTC")
+    assert flipped is not None
+    assert flipped.size == Decimal("-0.001")
+    assert flipped.margin_used is None
+    assert projection.account().free_margin is None
+
+    projection.apply_heal((), snapshot=venue_holding(BTC=Decimal("81.745")))
+
+    posted = projection.for_strategy("alpha").position("BTC")
+    assert posted is not None
+    assert posted.margin_used == Decimal("81.745")
+
+
 def test_paper_reads_the_bucket_it_locked_at_open_from_the_first_read() -> None:
     """The paper twin of the case above reads real numbers, because paper
     declares its own bucket at open: 0.001 × 81 735 / 1 = 81.735.
