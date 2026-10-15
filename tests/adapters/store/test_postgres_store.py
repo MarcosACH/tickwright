@@ -152,11 +152,7 @@ def test_a_postgres_store_connection_times_out_on_its_own_side_even_over_the_dsn
     seconds. The engine's values win over a DSN's own, so an operator cannot
     turn the bound off by accident."""
     dsn = make_conninfo(backend.dsn, keepalives_idle=600)
-
-    with PostgresStore(dsn) as store:
-        params = store._conn.info.get_parameters()
-
-    assert {name: params.get(name) for name in _CLIENT_KEEPALIVES} == {
+    expected = {
         "keepalives": "1",
         "keepalives_idle": "10",
         "keepalives_interval": "5",
@@ -164,11 +160,7 @@ def test_a_postgres_store_connection_times_out_on_its_own_side_even_over_the_dsn
         "tcp_user_timeout": "25000",
     }
 
+    with PostgresStore(dsn) as store:
+        params = store._conn.info.get_parameters()
 
-_CLIENT_KEEPALIVES = (
-    "keepalives",
-    "keepalives_idle",
-    "keepalives_interval",
-    "keepalives_count",
-    "tcp_user_timeout",
-)
+    assert {name: params.get(name) for name in expected} == expected
