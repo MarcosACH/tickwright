@@ -538,7 +538,7 @@ class ExecutionManager:
         the bridge for a recovered ``PENDING`` whose send provably landed, and
         the proven-never-landed verdict (ADR-0010) — verdicts, not venue pushes.
         One exception: an adapter reports ``FAILED`` for an order it never sent
-        because it had no price (#509).
+        because it had no price (``OrderAnchor.place``, #509).
         """
         oid, flag = report.venue_oid, report.reconciliation
         match report.status:
