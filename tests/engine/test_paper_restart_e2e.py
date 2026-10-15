@@ -24,6 +24,7 @@ from tickwright.domain import (
     EventBus,
     ExecutionReport,
     FillReport,
+    InvariantViolation,
     MarketTick,
     Order,
     OrderRef,
@@ -169,6 +170,23 @@ def test_a_restarted_paper_venue_rebuilds_only_the_orders_the_venue_confirmed_op
         VenueOpenOrder(symbol="BTC", cloid="0xlive"),
         VenueOpenOrder(symbol="BTC", cloid="0xpartial"),
     }
+
+
+def test_a_restarted_paper_venue_refuses_to_rebuild_a_market_row() -> None:
+    # The store reads filter market rows out. If that filter ever lets one
+    # through, paper must stop the boot, not rest a market order at a price.
+    exchange = PaperExchange(
+        bus=InMemoryBus(),
+        clock=ManualClock(start_ns=1_000),
+        fill_model=ImmediateFillModel(),
+        genesis_collateral=GENESIS,
+        account_net=dict,
+        applied_fills=lambda cloid: (),
+        resting_orders=lambda: [_resting("0xmarket", order_type=OrderType.MARKET)],
+    )
+
+    with pytest.raises(InvariantViolation, match="0xmarket"):
+        asyncio.run(exchange.start())
 
 
 def _second_life(store: SQLiteStore, clock: ManualClock) -> tuple[InMemoryBus, Reconciler]:
