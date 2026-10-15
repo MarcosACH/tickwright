@@ -84,7 +84,7 @@ class AccountSpec:
         still reads ``genesis_collateral``; this answers only the question the
         value's absence poses.
 
-        The liquidation-price source reads it too. Live never computes that
+        The liquidation-price source is a fifth caller. Live never computes that
         price, even before its first account read (#515).
         """
         return self.genesis_collateral is not None
