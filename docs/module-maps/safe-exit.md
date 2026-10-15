@@ -477,8 +477,9 @@ because the file decides which symbols it plays.
 - SQLite: an OS lock on `<db>.lock`, never on the database file. The pid goes into the file for the
   message only.
 - Postgres: an advisory lock on the connection the store writes through. The connect step sets the
-  keepalives from ADR-0052. A lost session fails the next write with `InvariantViolation`, which
-  already faults the engine.
+  keepalives from ADR-0052, on both the server and the client side. A lost session fails the next
+  write with `InvariantViolation`, which already faults the engine. A dropped network fails it
+  within about 25 seconds.
 
 **Seams:** Two real adapters, SQLite and Postgres. The store contract tests cover both.
 
