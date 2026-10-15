@@ -344,3 +344,31 @@ def test_on_kafka_a_redelivered_fill_books_on_the_rebuilt_order() -> None:
         ("0xa-1", Decimal("1")),
         ("0xa-2", Decimal("1")),
     ]
+
+
+def test_on_kafka_a_redelivered_fill_the_saga_booked_leaves_the_rebuilt_order_alone() -> None:
+    # Stale offsets redeliver fill 0xa-1, which the saga already booked. The
+    # rebuilt size of 1.5 already counts it. Booking it again would leave paper
+    # working 1 of the 1.5 still open, and the order would never fill.
+    store = SQLiteStore(":memory:")
+    store.checkpoint(
+        _resting(
+            "0xa",
+            state=OrderState.PARTIALLY_FILLED,
+            cum_qty="0.5",
+            applied_event_ids=("0xa:submitted", "0xa:fill:0xa-1"),
+        ),
+        ts_ns=1_000,
+    )
+    broker = FakeKafkaBroker()
+    redelivered = _earlier_fill("0xa-1", "0.5")
+    broker.produce(redelivered.partition_key.encode(), encode_event(redelivered))
+
+    exchange = _restart_on_kafka(store, broker)
+
+    recovered = store.get_order("0xa")
+    assert recovered is not None
+    assert (recovered.state, recovered.cum_qty) == (OrderState.FILLED, Decimal("2"))
+    view = asyncio.run(exchange.fetch_order(OrderRef(cloid="0xa", symbol="BTC")))
+    assert isinstance(view, VenueOrderView)
+    assert [(fill.trade_id, fill.quantity) for fill in view.fills] == [("0xa-2", Decimal("1.5"))]

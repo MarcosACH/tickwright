@@ -72,6 +72,20 @@ from .funding import HOUR_NS, FundingBasis, run_funding
 from .unapplied import UnappliedFills
 
 
+def _trade_id(cloid: str, number: int) -> str:
+    """Paper names each fill of an order by its number, counting from 1."""
+    return f"{cloid}-{number}"
+
+
+def _fill_number(report: FillReport) -> int | None:
+    """The number ``_trade_id`` put in this fill's trade id, or ``None`` if
+    paper did not name this fill."""
+    prefix, _, number = report.trade_id.rpartition("-")
+    if prefix != report.cloid or not number.isdecimal():
+        return None
+    return int(number)
+
+
 class PaperExchange:
     """An ``Exchange`` that fills against replayed/live ticks, deterministically."""
 
@@ -193,15 +207,18 @@ class PaperExchange:
 
         Every event is keyed by symbol, so a redelivered fill arrives before
         any new tick on its symbol. It is booked before paper can fill again.
-        A fill this run made is already booked, so it is skipped.
+        Paper has already counted a fill this run made and a fill the saga
+        booked before the rebuild. Their numbers are not past its count, so
+        both are skipped. So is a fill paper did not name.
         """
-        if any(fill.trade_id == report.trade_id for fill in self._fills.get(report.cloid, [])):
+        number = _fill_number(report)
+        if number is None or number <= self._fill_counts.get(report.cloid, 0):
             return
         order = self._book.working(report.cloid)
         if order is None:
             return
         self._book.apply_fill(report.cloid, report.quantity)
-        self._fill_counts[report.cloid] = self._fill_counts.get(report.cloid, 0) + 1
+        self._fill_counts[report.cloid] = number
         self._fills.setdefault(report.cloid, []).append(report)
         self._unapplied.record(report, order.side)
 
@@ -635,7 +652,7 @@ class PaperExchange:
             ts_init=now,
             cloid=order.cloid,
             symbol=order.symbol,
-            trade_id=f"{order.cloid}-{index}",
+            trade_id=_trade_id(order.cloid, index),
             quantity=fill.quantity,
             price=fill.price,
             fee=self._fee(order.symbol, fill, maker=maker),
