@@ -205,7 +205,9 @@ def test_cli_replays_trades_and_exits_zero_on_sigterm(
             raise AssertionError(f"second life failed; stderr:\n{second_log.read_text()}") from None
         assert _terminate(second) == 0
 
-    # The venue holds the order, so nothing ghosts it.
+    # A replay run never moves the clock past the grace window, so this alone
+    # proves little. tests/engine/test_paper_restart_e2e.py drives reconcile
+    # past the window and proves the rebuilt order is never ghosted.
     assert "ghost.reconciled" not in second_log.read_text()
     reader = SQLiteStore(db)
     try:

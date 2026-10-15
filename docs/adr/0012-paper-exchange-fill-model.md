@@ -43,4 +43,8 @@ before those columns existed has no price. Paper leaves it out, and reconcile gh
 Paper rebuilds only `LIVE` and `PARTIALLY_FILLED` GTC rows. Those are the orders the venue confirmed
 it holds. A `PENDING` or `SUBMITTED` row may never have reached paper. Rebuilding it would invent an
 order nobody placed, so paper leaves it out and reconcile resolves it `FAILED`.
+The read hands paper each saga, not a bare venue order. Paper records the saga's state as the
+order's status, so `fetch_order` finds it and reconcile never ghosts it. Paper also numbers the
+order's next fill after the fills the saga booked. A reused trade id would be dropped as a
+duplicate.
 **)**
