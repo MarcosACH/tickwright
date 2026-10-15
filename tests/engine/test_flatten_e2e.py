@@ -95,6 +95,7 @@ def _paper(bus: EventBus, clock: ManualClock, store: SQLiteStore) -> PaperExchan
         instrument_specs=_SPECS,
         account_net=reads.account_net,
         applied_fills=reads.applied_fills,
+        resting_orders=reads.resting_orders,
     )
 
 
@@ -201,8 +202,9 @@ _RESTING = derive_cloid("resting:BTC:1")
 async def _rest(bus: EventBus, paper: PaperExchange, store: SQLiteStore, clock: Clock) -> None:
     """Rest ``_RESTING`` on paper, with its saga in the store.
 
-    Paper keeps its book in memory only (#484), so the order goes on the run's own
-    exchange. The saga is left ``SUBMITTED``, and the boot barrier heals it to ``LIVE``.
+    The saga is left ``SUBMITTED``, and the boot barrier heals it to ``LIVE``. A new
+    paper venue never rebuilds a ``SUBMITTED`` row (#484), so the order goes on the
+    run's own exchange.
     """
     # Paper prices a LIMIT against the last tick, so it needs one first.
     await bus.publish(_tick("BTC", "42000"))
@@ -1183,8 +1185,9 @@ def test_a_failed_read_after_the_wait_is_a_dry_attempt_and_the_next_read_sizes_t
 class _Venue:
     """Paper on a bus of its own, so it outlives the engine run it serves.
 
-    The real venue keeps an order a crashed engine never booked. Paper keeps its
-    book in memory only (#484), so the test holds one instance across both runs.
+    The real venue keeps an order a crashed engine never booked. A new paper venue
+    rebuilds only from order rows the store holds (#484), and this order has none,
+    so the test holds one instance across both runs.
     """
 
     def __init__(self, path: Path, clock: ManualClock) -> None:
@@ -1199,6 +1202,7 @@ class _Venue:
             instrument_specs=_SPECS,
             account_net=lambda: paper_store_reads(self.store).account_net(),
             applied_fills=lambda cloid: paper_store_reads(self.store).applied_fills(cloid),
+            resting_orders=lambda: paper_store_reads(self.store).resting_orders(),
         )
         self.bus.subscribe(ExecutionReport, self._report)
 

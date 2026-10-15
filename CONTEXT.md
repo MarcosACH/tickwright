@@ -66,6 +66,12 @@ A timeout never transitions it — only [[Reconciliation]] moves a stuck `SUBMIT
 order that fills on placement is acked `LIVE` first, then its fills move it on (#328).
 _Avoid_: order state machine (fine informally), workflow, process.
 
+**Working state**:
+`LIVE` or `PARTIALLY_FILLED`. The venue acked the order and still works it. The domain names
+the pair once, as `WORKING_STATES`. [[Reconciliation]] asks the ghost gate only about a missing
+order in a working state. A restarted [[Paper exchange]] rebuilds only these (#484).
+_Avoid_: open order. In the [[Cache]], "open" means every non-terminal saga, `PENDING` included.
+
 **cancel_requested marker**:
 A checkpointed boolean+timestamp the [[ExecutionManager]] sets on a `LIVE` [[Order saga]] when it
 sends a cancel — **not** a `CANCELLING` state (the order stays `LIVE` and can still fill). It lets

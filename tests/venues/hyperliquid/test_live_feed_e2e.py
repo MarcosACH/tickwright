@@ -42,6 +42,7 @@ def test_mocked_frames_reach_a_paper_fill_through_the_whole_pipeline() -> None:
             genesis_collateral=GENESIS,
             account_net=dict,
             applied_fills=lambda cloid: (),
+            resting_orders=list,
         )
         store = SQLiteStore(":memory:")
         checks = checkpointer(store, clock=clock)

@@ -272,6 +272,9 @@ class ExecutionManager:
         # saga records it, not the strategy's raw intent.
         order = self._order_for(signal, quantity=decision.quantity)
         order.split_basis = split_basis
+        # The quantized price, for the same reason. Paper rebuilds a resting
+        # order from it after a restart (#484).
+        order.price = decision.price
 
         # PENDING is the write-ahead intent: durable before anything else
         # happens (ADR-0008 rule 1), then announced.
@@ -282,19 +285,8 @@ class ExecutionManager:
         order.apply(submitted)
         await self._announce(submitted)
 
-        await self._exchange.place(
-            PlaceOrder(
-                cloid=cloid,
-                symbol=signal.symbol,
-                side=signal.side,
-                quantity=order.quantity,
-                order_type=signal.order_type,
-                time_in_force=signal.time_in_force,
-                price=decision.price,
-                post_only=signal.post_only,
-                reduce_only=signal.reduce_only,
-            )
-        )
+        # Built from the saga, so the row holds exactly the terms the venue got.
+        await self._exchange.place(PlaceOrder.of(order))
         # SUBMITTED is checkpointed only after the send returns: until then the
         # durable record stays PENDING, so a crash anywhere in the send window
         # recovers through reconcile-by-cloid (ADR-0008 rule 2). Its timestamp
@@ -313,6 +305,9 @@ class ExecutionManager:
             quantity=quantity,
             order_type=signal.order_type,
             created_ts_ns=self._clock.timestamp_ns(),
+            time_in_force=signal.time_in_force,
+            post_only=signal.post_only,
+            reduce_only=signal.reduce_only,
         )
 
     async def _cancel(self, signal: CancelSignal) -> None:

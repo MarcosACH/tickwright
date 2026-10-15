@@ -121,6 +121,7 @@ async def _run_to_fill_then_stop(
         instrument_specs=instrument_specs or {},
         account_net=dict,
         applied_fills=lambda cloid: (),
+        resting_orders=list,
     )
     feed = ReplayFeed(path=ticks, bus=bus, clock=clock)
     engine = Engine(bus=bus, clock=clock, store=store, exchange=exchange, feed=feed)
@@ -173,6 +174,7 @@ def test_the_engine_lends_a_strategy_a_facade_onto_its_own_ledger(tmp_path: Path
             genesis_collateral=GENESIS,
             account_net=dict,
             applied_fills=lambda cloid: (),
+            resting_orders=list,
         ),
         feed=ReplayFeed(path=_write_ticks(tmp_path / "ticks.jsonl"), bus=bus, clock=clock),
     )
@@ -274,6 +276,7 @@ def test_a_restart_on_a_changed_genesis_refuses_before_a_tick_is_ever_replayed(
                 genesis_collateral=GENESIS * 2,
                 account_net=dict,
                 applied_fills=lambda cloid: (),
+                resting_orders=list,
             ),
             feed=ReplayFeed(path=ticks, bus=bus, clock=clock),
         )
@@ -331,6 +334,7 @@ def test_an_engine_on_a_store_another_process_holds_faults_and_writes_nothing(
             genesis_collateral=GENESIS,
             account_net=dict,
             applied_fills=lambda cloid: (),
+            resting_orders=list,
         ),
         feed=ReplayFeed(path=_write_ticks(tmp_path / "ticks.jsonl"), bus=bus, clock=clock),
     )
@@ -541,6 +545,7 @@ def test_a_negative_free_margin_is_reported_and_stops_nothing(tmp_path: Path) ->
                 genesis_collateral=GENESIS,
                 account_net=dict,
                 applied_fills=lambda cloid: (),
+                resting_orders=list,
             ),
             feed=ReplayFeed(path=ticks, bus=bus, clock=clock),
         )
@@ -1116,6 +1121,7 @@ def test_sigterm_stops_the_engine_gracefully(tmp_path: Path) -> None:
             genesis_collateral=GENESIS,
             account_net=dict,
             applied_fills=lambda cloid: (),
+            resting_orders=list,
         )
         feed = ReplayFeed(path=ticks, bus=bus, clock=clock)
         engine = Engine(bus=bus, clock=clock, store=store, exchange=exchange, feed=feed)
@@ -1163,6 +1169,7 @@ def test_sigusr1_trips_the_kill_switch_and_sigusr2_resets_it(tmp_path: Path) -> 
             genesis_collateral=GENESIS,
             account_net=dict,
             applied_fills=lambda cloid: (),
+            resting_orders=list,
         )
         feed = ReplayFeed(path=_write_ticks(tmp_path / "ticks.jsonl"), bus=bus, clock=clock)
         guard = RealGuard(specs={"BTC": spec}, store=store, clock=clock)
@@ -1278,6 +1285,7 @@ def test_the_ledger_is_recovered_before_the_order_cache_is_rebuilt(tmp_path: Pat
                 genesis_collateral=GENESIS,
                 account_net=dict,
                 applied_fills=lambda cloid: (),
+                resting_orders=list,
             ),
             feed=feed,
         )
@@ -1353,6 +1361,7 @@ def test_a_start_deserializes_the_saga_history_once(tmp_path: Path) -> None:
                 genesis_collateral=GENESIS,
                 account_net=dict,
                 applied_fills=lambda cloid: (),
+                resting_orders=list,
             ),
             feed=feed,
         )
@@ -1384,6 +1393,7 @@ def test_shutdown_is_bounded_a_hung_teardown_faults_instead_of_hanging(tmp_path:
             genesis_collateral=GENESIS,
             account_net=dict,
             applied_fills=lambda cloid: (),
+            resting_orders=list,
         )
         engine = Engine(
             bus=bus,
@@ -1422,6 +1432,7 @@ def test_graceful_stop_cancels_a_still_running_feed(tmp_path: Path) -> None:
             genesis_collateral=GENESIS,
             account_net=dict,
             applied_fills=lambda cloid: (),
+            resting_orders=list,
         )
         feed = _BlockingFeed()
         engine = Engine(bus=bus, clock=clock, store=store, exchange=exchange, feed=feed)
@@ -1460,6 +1471,7 @@ def test_a_normal_run_starts_a_feed_that_cannot_add_symbols(tmp_path: Path) -> N
             genesis_collateral=GENESIS,
             account_net=dict,
             applied_fills=lambda cloid: (),
+            resting_orders=list,
         )
         feed = _FixedSymbolsFeed()
         engine = Engine(bus=bus, clock=clock, store=store, exchange=exchange, feed=feed)
@@ -1488,6 +1500,7 @@ def test_invariant_violation_faults_the_engine_and_exits_nonzero(tmp_path: Path)
             genesis_collateral=GENESIS,
             account_net=dict,
             applied_fills=lambda cloid: (),
+            resting_orders=list,
         )
         feed = ReplayFeed(path=ticks, bus=bus, clock=clock)
         # A real guard with no specs: the first placement is a composition-root
@@ -1542,6 +1555,7 @@ def test_a_broken_stop_hook_on_the_fault_path_is_recorded_not_swallowed(tmp_path
             genesis_collateral=GENESIS,
             account_net=dict,
             applied_fills=lambda cloid: (),
+            resting_orders=list,
         )
         engine = Engine(
             bus=bus,
@@ -1638,6 +1652,7 @@ def test_a_feed_the_venue_refuses_at_the_boot_connect_faults_the_run(tmp_path: P
             genesis_collateral=GENESIS,
             account_net=dict,
             applied_fills=lambda cloid: (),
+            resting_orders=list,
         )
         engine = Engine(bus=bus, clock=clock, store=store, exchange=exchange, feed=feed)
         return await engine.run(), engine
@@ -1672,6 +1687,7 @@ def test_a_fault_from_a_supervised_task_is_named_by_the_fault_itself(tmp_path: P
             genesis_collateral=GENESIS,
             account_net=dict,
             applied_fills=lambda cloid: (),
+            resting_orders=list,
         )
         engine = Engine(
             bus=bus,
@@ -1718,6 +1734,7 @@ def test_the_runner_owns_the_bus_lifecycle_connect_on_start_disconnect_on_stop(
             genesis_collateral=GENESIS,
             account_net=dict,
             applied_fills=lambda cloid: (),
+            resting_orders=list,
         )
         engine = Engine(
             bus=bus,
@@ -1766,6 +1783,7 @@ def test_the_fault_path_walks_the_same_teardown_feed_stopped_and_bus_closed(
             genesis_collateral=GENESIS,
             account_net=dict,
             applied_fills=lambda cloid: (),
+            resting_orders=list,
         )
         engine = Engine(bus=bus, clock=clock, store=store, exchange=exchange, feed=feed)
         return await engine.run(), engine
@@ -2310,6 +2328,7 @@ def test_graceful_stop_leaves_resting_live_orders_for_the_next_start_to_re_adopt
             genesis_collateral=GENESIS,
             account_net=dict,
             applied_fills=lambda cloid: (),
+            resting_orders=list,
         )
         feed = ReplayFeed(path=_write_ticks(tmp_path / "first.jsonl"), bus=bus, clock=clock)
         engine = Engine(bus=bus, clock=clock, store=store, exchange=venue, feed=feed)
@@ -2427,6 +2446,7 @@ def test_the_engine_hands_out_an_emitter_that_records_each_seq_before_the_bus(
             genesis_collateral=GENESIS,
             account_net=dict,
             applied_fills=lambda cloid: (),
+            resting_orders=list,
         ),
         feed=ReplayFeed(path=_write_ticks(tmp_path / "ticks.jsonl"), bus=bus, clock=clock),
     )

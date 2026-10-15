@@ -41,6 +41,7 @@ from dataclasses import dataclass, replace
 from enum import Enum
 
 from tickwright.domain import (
+    WORKING_STATES,
     Clock,
     EventBus,
     Order,
@@ -61,9 +62,9 @@ from .cache import Cache
 from .ghost_gate import GhostGate, GhostVerdict
 
 # The per-cadence state filters gating which sagas each continuous cycle reads.
-# Startup filters nothing — it reconciles every non-terminal saga.
+# Startup filters nothing — it reconciles every non-terminal saga. The open-order
+# cycle reads the domain's ``WORKING_STATES``.
 _INFLIGHT_STATES = frozenset({OrderState.SUBMITTED})
-_OPEN_ORDER_STATES = frozenset({OrderState.LIVE, OrderState.PARTIALLY_FILLED})
 
 
 class _FreezeScope(Enum):
@@ -258,7 +259,7 @@ class Reconciler:
         the same answer shapes and must resolve them the same way (inv 3), so
         there is one resolver and not a per-phase copy of it.
         """
-        return await self._drive("open_order", _OPEN_ORDER_STATES, self._adopt)
+        return await self._drive("open_order", WORKING_STATES, self._adopt)
 
     async def _drive(
         self,
@@ -445,7 +446,7 @@ class Reconciler:
             # one reading that makes boot more willing to forget an absence
             # than the running engine is.
             self._ghost_gate.record_present(order.cloid)
-        elif not view.fills and order.state not in _OPEN_ORDER_STATES:
+        elif not view.fills and order.state not in WORKING_STATES:
             # A successful read with no status and no fills is positive proof
             # the order never landed: resolve FAILED (ADR-0010/0011) — never a
             # blind resend (ADR-0008 rule 2). Recreating is the strategy's call.
@@ -477,7 +478,7 @@ class Reconciler:
             # fills finished releases the clock, so a run armed by an earlier
             # look this boot — the barrier re-drives, so there can be one — is
             # never left behind a cloid nothing will evaluate again.
-            if order.state in _OPEN_ORDER_STATES:
+            if order.state in WORKING_STATES:
                 await self._judge_ghost(order)
             else:
                 self._ghost_gate.record_present(order.cloid)

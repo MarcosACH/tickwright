@@ -3,14 +3,9 @@
 ``python -m tickwright.app`` in a scratch directory: replays the configured
 file, trades on the paper venue, and exits 0 on SIGTERM. The resting LIVE
 order is still checkpointed afterwards — a graceful stop never cancels it —
-and the next start reconciles it against venue truth. (The paper venue's book
-dies with its process, so the second life's read comes back empty — and the
-barrier arms the ghost grace window rather than concluding on it, leaving the
-order as recovered (ADR-0011 inv 3, as amended by #243). It stays that way for
-this process's whole life: a replay run is on virtual time, and once the tick
-file is exhausted there is no clock left to spend a grace window against. True
-re-adoption, where the venue survives, is proven in-process in
-``tests/engine/test_runner_e2e.py``.)
+and the next start reconciles it against venue truth. The new paper venue
+rebuilds its book from the store, so the next start finds the order and
+re-adopts it, as a live venue that kept it would (ADR-0012, #484).
 """
 
 import errno
@@ -199,11 +194,9 @@ def test_cli_replays_trades_and_exits_zero_on_sigterm(
         reader.close()
 
     # Next start: the barrier reconciles the survivor against venue truth
-    # before anything can trade. This paper venue lost its book with the old
-    # process, so the read comes back empty — and an empty read is not proof at
-    # boot any more than it is in flight (ADR-0011 inv 3, as amended by #243).
-    # The barrier arms the grace window and clears; the order is left exactly
-    # as recovered, and the restored strategies stay quiet (no re-placement).
+    # before anything can trade. The new paper venue rebuilt the order from
+    # the store, so the read finds it and the barrier re-adopts it (#484). The
+    # restored strategies stay quiet (no re-placement).
     with _spawn(tmp_path, second_log) as second:
         try:
             _await_event(second_log, "engine.barrier_cleared")
@@ -212,13 +205,9 @@ def test_cli_replays_trades_and_exits_zero_on_sigterm(
             raise AssertionError(f"second life failed; stderr:\n{second_log.read_text()}") from None
         assert _terminate(second) == 0
 
-    # Boot resolved nothing terminally on one read — the whole of #243. And it
-    # never will *in this process*: a replay run is on virtual time (ADR-0027/
-    # 0033), so once the tick file is exhausted nothing advances the clock and
-    # the open-order cadence's deadline never comes. The grace window is real
-    # time passing, and a finished replay has none left to spend. A live run,
-    # where the wall clock moves on its own, ghosts it one window later —
-    # proven on virtual time in ``tests/engine/test_reconcile.py``.
+    # A replay run never moves the clock past the grace window, so this alone
+    # proves little. tests/engine/test_paper_restart_e2e.py drives reconcile
+    # past the window and proves the rebuilt order is never ghosted.
     assert "ghost.reconciled" not in second_log.read_text()
     reader = SQLiteStore(db)
     try:
@@ -303,6 +292,40 @@ def test_cancel_all_on_an_empty_paper_account_exits_zero(
     assert events[-1]["left"] == "none"
     # The configured strategies belong to normal runs. This run places nothing.
     assert not any(str(event["event"]).startswith("order.") for event in events)
+
+
+def test_cancel_all_after_a_paper_run_cancels_the_order_it_left_resting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The #484 repro. A paper run leaves a limit resting and stops. A
+    ``cancel-all`` on the same store must find that order and end it CANCELLED,
+    the way it would on a live venue that kept the order."""
+    _write_workspace(tmp_path)
+    _export_hostile_config(monkeypatch)
+    db = tmp_path / "saga.db"
+    run_log = tmp_path / "run.log"
+
+    with _spawn(tmp_path, run_log) as process:
+        try:
+            _await_states(db, {_FILLED_CLOID: OrderState.FILLED, _RESTING_CLOID: OrderState.LIVE})
+        except BaseException:
+            process.kill()
+            raise AssertionError(f"the run failed; stderr:\n{run_log.read_text()}") from None
+        assert _terminate(process) == 0
+
+    log = tmp_path / "cancel_all.log"
+    assert _run_to_exit(tmp_path, log, "cancel-all") == 0, log.read_text()
+
+    events = _events(log)
+    assert events[-1]["event"] == "exit.finished"
+    assert events[-1]["left"] == "none"
+    with SQLiteStore(db) as reader:
+        resting = reader.get_order(_RESTING_CLOID)
+        filled = reader.get_order(_FILLED_CLOID)
+    assert resting is not None
+    assert resting.state is OrderState.CANCELLED
+    assert filled is not None
+    assert filled.state is OrderState.FILLED
 
 
 def test_cancel_all_on_a_store_another_engine_holds_exits_two(

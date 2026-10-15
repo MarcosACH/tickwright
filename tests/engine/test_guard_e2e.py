@@ -160,6 +160,7 @@ def _engine(
         genesis_collateral=GENESIS,
         account_net=reads.account_net,
         applied_fills=reads.applied_fills,
+        resting_orders=reads.resting_orders,
     )
     checks = checkpointer(store, clock=clock)
     # The runner's boot step: the ledger first, then the order cache. Rebuilding
@@ -257,6 +258,7 @@ def test_market_below_min_notional_is_rejected_by_the_venue_via_sourced_specs() 
         instrument_specs={"BTC": _SPEC},
         account_net=dict,
         applied_fills=lambda cloid: (),
+        resting_orders=list,
     )
     checks = checkpointer(store, clock=clock)
     guard = RealGuard(specs=exchange.instrument_specs(), store=store, clock=clock)

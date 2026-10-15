@@ -85,6 +85,7 @@ def _venue(
         instrument_specs={"BTC": _spec(funding_rate)},
         account_net=account_net,
         applied_fills=lambda cloid: (),
+        resting_orders=list,
     )
 
 

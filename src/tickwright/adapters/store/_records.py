@@ -29,6 +29,7 @@ from tickwright.domain import (
     OrderType,
     Position,
     Side,
+    TimeInForce,
 )
 
 _ZERO = Decimal("0")
@@ -53,6 +54,10 @@ RECORD_COLUMNS: tuple[str, ...] = (
     "cancel_requested_ts",
     "cancel_signal_id",
     "split_basis",
+    "price",
+    "time_in_force",
+    "post_only",
+    "reduce_only",
     "applied_event_ids",
     "history",
 )
@@ -98,6 +103,10 @@ def record_values(order: Order, *, history: Sequence[Any]) -> tuple[Any, ...]:
         order.cancel_requested_ts,
         order.cancel_signal_id,
         _encode_split_basis(order.split_basis),
+        str(order.price) if order.price is not None else None,
+        order.time_in_force.value if order.time_in_force is not None else None,
+        order.post_only,
+        order.reduce_only,
         json.dumps(sorted(order.applied_event_ids)),
         json.dumps(list(history)),
     )
@@ -153,6 +162,12 @@ def restore_order(row: Sequence[Any]) -> Order:
         cancel_signal_id=column["cancel_signal_id"],
         applied_event_ids=json.loads(column["applied_event_ids"]),
         split_basis=_decode_split_basis(column["split_basis"]),
+        price=Decimal(column["price"]) if column["price"] is not None else None,
+        time_in_force=(
+            TimeInForce(column["time_in_force"]) if column["time_in_force"] is not None else None
+        ),
+        post_only=bool(column["post_only"]),
+        reduce_only=bool(column["reduce_only"]),
     )
 
 
@@ -198,6 +213,15 @@ def no_split_basis(history_json: str | None) -> None:
     return None
 
 
+def no_order_terms(history_json: str | None) -> None:
+    """Always ``None``. The history holds no order terms.
+
+    So an old row has no price, and paper leaves it out of the book it rebuilds
+    (#484). Reconcile ghosts that order, as it did before the columns existed.
+    """
+    return None
+
+
 # Columns that arrived on ``orders`` after a database may already have been
 # written, each with what fills its existing rows from their transition
 # history. ``CREATE TABLE IF NOT EXISTS`` leaves an existing table as it was, so
@@ -210,6 +234,10 @@ ADDED_ORDER_COLUMNS: Mapping[str, Callable[[str | None], int | None]] = MappingP
         "acked_ts_ns": acked_ts_from_history,
         "created_ts_ns": created_ts_from_history,
         "split_basis": no_split_basis,
+        "price": no_order_terms,
+        "time_in_force": no_order_terms,
+        "post_only": no_order_terms,
+        "reduce_only": no_order_terms,
     }
 )
 

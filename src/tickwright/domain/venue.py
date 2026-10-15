@@ -14,6 +14,7 @@ from decimal import Decimal
 from enum import Enum
 
 from .enums import OrderType, Side, TimeInForce
+from .errors import InvariantViolation
 from .events import FillReport, OrderStatusReport
 from .leverage import LeverageSpec
 from .order import Order
@@ -288,3 +289,28 @@ class PlaceOrder:
     price: Decimal | None = None
     post_only: bool = False
     reduce_only: bool = False
+
+    @classmethod
+    def of(cls, order: Order) -> "PlaceOrder":
+        """The order the venue works for ``order``: its terms, at the size still open.
+
+        A new saga has filled nothing, so that is the full size. A restarted
+        paper venue rebuilds a partly filled order from this, so it never works
+        the filled part again (#484).
+
+        A row written before the store kept order terms has no time in force.
+        This raises on it rather than guess terms nobody chose.
+        """
+        if order.time_in_force is None:
+            raise InvariantViolation(f"order {order.cloid} has no saved time in force")
+        return cls(
+            cloid=order.cloid,
+            symbol=order.symbol,
+            side=order.side,
+            quantity=order.quantity - order.cum_qty,
+            order_type=order.order_type,
+            time_in_force=order.time_in_force,
+            price=order.price,
+            post_only=order.post_only,
+            reduce_only=order.reduce_only,
+        )

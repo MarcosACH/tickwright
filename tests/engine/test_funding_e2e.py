@@ -196,6 +196,7 @@ async def _run(
         funding_interval_ns=_INTERVAL_NS,
         account_net=reads.account_net,
         applied_fills=reads.applied_fills,
+        resting_orders=reads.resting_orders,
     )
     feed = ReplayFeed(path=ticks, bus=bus, clock=clock)
     engine = Engine(bus=bus, clock=clock, store=store, exchange=exchange, feed=feed)

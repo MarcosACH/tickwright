@@ -168,6 +168,7 @@ def _first_life(
         genesis_collateral=GENESIS,
         account_net=dict,
         applied_fills=lambda cloid: (),
+        resting_orders=list,
     )
     checks = checkpointer(store, clock=clock)
     # Recovered before the feed starts, exactly as the runner starts a process
@@ -334,6 +335,7 @@ def _life_through_the_fill(backend: Backend) -> ManualClock:
         genesis_collateral=GENESIS,
         account_net=dict,
         applied_fills=lambda cloid: (),
+        resting_orders=list,
     )
     checks = checkpointer(store, clock=clock)
     checks.recover()  # a life starts the way the runner starts one (ADR-0043 §6)
@@ -387,6 +389,7 @@ def test_a_landed_fill_is_restored_and_a_redelivery_does_not_double_count_it(
             genesis_collateral=GENESIS,
             account_net=dict,
             applied_fills=lambda cloid: (),
+            resting_orders=list,
         ),
         checkpointer=checks,
     )
@@ -513,6 +516,7 @@ def test_on_kafka_a_kill_right_after_the_signal_lands_places_one_order_across_th
         genesis_collateral=GENESIS,
         account_net=dict,
         applied_fills=lambda cloid: (),
+        resting_orders=list,
     )
 
     def kill_on_signal(record: Record) -> None:
@@ -576,6 +580,7 @@ def test_on_kafka_a_place_killed_before_it_is_handled_keeps_its_seq_across_the_r
         genesis_collateral=GENESIS,
         account_net=dict,
         applied_fills=lambda cloid: (),
+        resting_orders=list,
     )
 
     def kill_on_signal(record: Record) -> None:

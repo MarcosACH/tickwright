@@ -109,6 +109,7 @@ def test_an_exit_run_on_an_empty_account_starts_nothing_and_exits_done(tmp_path:
         genesis_collateral=GENESIS,
         account_net=dict,
         applied_fills=lambda cloid: (),
+        resting_orders=list,
     )
     feed = ReplayFeed(path=_ticks(tmp_path / "ticks.jsonl"), bus=bus, clock=clock)
     engine = Engine(
@@ -157,6 +158,7 @@ def test_an_exit_run_on_a_store_another_engine_holds_exits_two_and_writes_nothin
             genesis_collateral=GENESIS,
             account_net=dict,
             applied_fills=lambda cloid: (),
+            resting_orders=list,
         ),
         feed=ReplayFeed(path=_ticks(tmp_path / "ticks.jsonl"), bus=bus, clock=clock),
         exit_job=OperatorCancelAll(),
@@ -195,6 +197,7 @@ def test_an_exit_run_on_a_store_no_engine_has_used_exits_two_and_writes_nothing(
             genesis_collateral=GENESIS,
             account_net=dict,
             applied_fills=lambda cloid: (),
+            resting_orders=list,
         ),
         feed=ReplayFeed(path=_ticks(tmp_path / "ticks.jsonl"), bus=bus, clock=clock),
         exit_job=OperatorCancelAll(),
@@ -236,6 +239,7 @@ def test_an_exit_run_told_the_store_is_new_warns_and_runs(tmp_path: Path) -> Non
             genesis_collateral=GENESIS,
             account_net=dict,
             applied_fills=lambda cloid: (),
+            resting_orders=list,
         ),
         feed=ReplayFeed(path=_ticks(tmp_path / "ticks.jsonl"), bus=bus, clock=clock),
         exit_job=OperatorCancelAll(new_store=True),
@@ -269,6 +273,7 @@ def test_an_exit_run_told_a_used_store_is_new_runs_as_before(tmp_path: Path) -> 
             genesis_collateral=GENESIS,
             account_net=dict,
             applied_fills=lambda cloid: (),
+            resting_orders=list,
         ),
         feed=ReplayFeed(path=_ticks(tmp_path / "ticks.jsonl"), bus=bus, clock=clock),
         exit_job=OperatorCancelAll(new_store=True),
@@ -312,6 +317,7 @@ def test_an_exit_run_whose_store_check_fails_exits_two(tmp_path: Path) -> None:
             genesis_collateral=GENESIS,
             account_net=dict,
             applied_fills=lambda cloid: (),
+            resting_orders=list,
         ),
         feed=ReplayFeed(path=_ticks(tmp_path / "ticks.jsonl"), bus=bus, clock=clock),
         exit_job=_StoreCheckFails(),
@@ -343,6 +349,7 @@ def test_an_exit_run_whose_store_lock_read_fails_exits_two(tmp_path: Path) -> No
             genesis_collateral=GENESIS,
             account_net=dict,
             applied_fills=lambda cloid: (),
+            resting_orders=list,
         ),
         feed=ReplayFeed(path=_ticks(tmp_path / "ticks.jsonl"), bus=bus, clock=clock),
         exit_job=OperatorCancelAll(),
@@ -381,6 +388,7 @@ def test_sigterm_during_cancel_all_stops_the_run_with_exit_one(tmp_path: Path) -
                 genesis_collateral=GENESIS,
                 account_net=dict,
                 applied_fills=lambda cloid: (),
+                resting_orders=list,
             )
         )
         engine = Engine(
@@ -411,10 +419,10 @@ def test_sigterm_during_cancel_all_stops_the_run_with_exit_one(tmp_path: Path) -
 async def _rest(exchange: PaperExchange, sagas: Checkpointer, *, seq: int, price: str) -> str:
     """One engine order resting on paper, with its saga in the store.
 
-    Seeded through the two seams rather than by an earlier engine run. Paper keeps
-    its book in memory only (#484), so the exit run must share this exchange, and
-    two engines cannot share one bus. The saga is left ``SUBMITTED``, as after a
-    crash before the ack. The boot barrier then heals it to ``LIVE`` from paper's
+    Seeded through the two seams rather than by an earlier engine run. The saga is
+    left ``SUBMITTED``, as after a crash before the ack. A new paper venue never
+    rebuilds a ``SUBMITTED`` row (#484), so the exit run must share this exchange,
+    and two engines cannot share one bus. The boot barrier then heals it to ``LIVE`` from paper's
     own record, so it rests when the job starts.
     """
     signal_id = f"resting:BTC:{seq}"
@@ -483,6 +491,7 @@ def _cancel_all(
         genesis_collateral=GENESIS,
         account_net=dict,
         applied_fills=lambda cloid: (),
+        resting_orders=list,
     )
 
     async def go() -> tuple[int, list[str]]:

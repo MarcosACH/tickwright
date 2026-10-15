@@ -16,7 +16,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from decimal import Decimal
 
-from .enums import OrderState, OrderType, Side
+from .enums import OrderState, OrderType, Side, TimeInForce
 from .errors import InvariantViolation
 from .events import (
     OrderDenied,
@@ -65,6 +65,11 @@ _TERMINAL_STATES: frozenset[OrderState] = frozenset(
     }
 )
 
+# The states of an order the venue acked and still works. Reconcile asks the
+# ghost gate about one it cannot find. A restarted paper venue rebuilds only
+# these, because a PENDING or SUBMITTED one may never have reached it (#484).
+WORKING_STATES: frozenset[OrderState] = frozenset({OrderState.LIVE, OrderState.PARTIALLY_FILLED})
+
 
 @dataclass(slots=True)
 class Order:
@@ -94,6 +99,13 @@ class Order:
     # A flatten order's partition sizes, read once at place (ADR-0054). Each fill splits against
     # them, so a fill booked after a restart gives the same moves. ``None`` for any other order.
     split_basis: tuple[tuple[str, Decimal], ...] | None = None
+    # The terms the venue got at place. Paper keeps its book in memory only, so a
+    # restarted paper venue rebuilds its resting orders from these (#484). A row
+    # written before they existed has no price, and paper leaves it out.
+    price: Decimal | None = None
+    time_in_force: TimeInForce | None = None
+    post_only: bool = False
+    reduce_only: bool = False
     _applied_event_ids: set[str] = field(default_factory=set, init=False, repr=False)
 
     @property
@@ -105,6 +117,16 @@ class Order:
         precisely why ADR-0043 §4 rejects the same shape on the ledger row.
         """
         return frozenset(self._applied_event_ids)
+
+    @property
+    def fill_count(self) -> int:
+        """How many fills the saga has booked.
+
+        A restarted paper venue numbers the next fill after these, so it never
+        reuses a booked trade id (#484). The prefix is ``OrderFillEvent.event_id``.
+        """
+        prefix = f"{self.cloid}:fill:"
+        return sum(1 for event_id in self._applied_event_ids if event_id.startswith(prefix))
 
     @property
     def is_terminal(self) -> bool:
@@ -195,6 +217,10 @@ class Order:
         cancel_signal_id: str | None,
         applied_event_ids: Iterable[str],
         split_basis: tuple[tuple[str, Decimal], ...] | None = None,
+        price: Decimal | None = None,
+        time_in_force: TimeInForce | None = None,
+        post_only: bool = False,
+        reduce_only: bool = False,
     ) -> "Order":
         """Rebuild a checkpointed saga exactly as persisted (ADR-0008 recovery).
 
@@ -222,6 +248,10 @@ class Order:
             cancel_requested_ts=cancel_requested_ts,
             cancel_signal_id=cancel_signal_id,
             split_basis=split_basis,
+            price=price,
+            time_in_force=time_in_force,
+            post_only=post_only,
+            reduce_only=reduce_only,
         )
         order._applied_event_ids.update(applied_event_ids)
         return order

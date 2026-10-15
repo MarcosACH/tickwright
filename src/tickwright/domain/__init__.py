@@ -82,7 +82,7 @@ from .leverage import (
     LeverageSpec,
     MarginMode,
 )
-from .order import Order
+from .order import WORKING_STATES, Order
 from .ownership import SymbolOwnership
 from .pacing import Backoff, Deadline
 from .position import (
@@ -157,6 +157,7 @@ __all__ = [
     "EMPTY_LEVERAGE_BOOK",
     "OPERATOR",
     "UNATTRIBUTED",
+    "WORKING_STATES",
     "Account",
     "AccountModeVerdict",
     "AccountSpec",

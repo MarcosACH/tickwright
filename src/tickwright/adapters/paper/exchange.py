@@ -33,7 +33,7 @@ until the bus delivers it, so the venue counts its own unapplied fills on top of
 the store net. It drops each one once the store shows it applied (ADR-0057).
 """
 
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import replace
 from decimal import Decimal
 
@@ -49,6 +49,7 @@ from tickwright.domain import (
     InvariantViolation,
     LeverageBook,
     MarketTick,
+    Order,
     OrderRef,
     OrderState,
     OrderStatusReport,
@@ -71,6 +72,20 @@ from .funding import HOUR_NS, FundingBasis, run_funding
 from .unapplied import UnappliedFills
 
 
+def _trade_id(cloid: str, number: int) -> str:
+    """Paper names each fill of an order by its number, counting from 1."""
+    return f"{cloid}-{number}"
+
+
+def _fill_number(report: FillReport) -> int | None:
+    """The number ``_trade_id`` put in this fill's trade id, or ``None`` if
+    paper did not name this fill."""
+    prefix, _, number = report.trade_id.rpartition("-")
+    if prefix != report.cloid or not number.isdecimal():
+        return None
+    return int(number)
+
+
 class PaperExchange:
     """An ``Exchange`` that fills against replayed/live ticks, deterministically."""
 
@@ -84,6 +99,7 @@ class PaperExchange:
         account_label: str = DEFAULT_ACCOUNT_LABEL,
         account_net: Callable[[], Mapping[str, Decimal]],
         applied_fills: Callable[[str], Collection[str]],
+        resting_orders: Callable[[], Iterable[Order]],
         instrument_specs: Mapping[str, InstrumentSpec] | None = None,
         leverage: LeverageBook = EMPTY_LEVERAGE_BOOK,
         funding_interval_ns: int = HOUR_NS,
@@ -103,6 +119,10 @@ class PaperExchange:
         # a default would let two quick reduce-only orders both fill past the
         # position (ADR-0057).
         self._unapplied = UnappliedFills(applied=applied_fills)
+        # The orders an earlier run left resting, read at ``start()``. Required
+        # for the same reason: an empty default is a venue that silently forgot
+        # every order it held when the process restarted (#484).
+        self._resting_orders = resting_orders
         self._funding_interval_ns = funding_interval_ns
         # The account's opening cash is the operator's declaration, never the
         # venue's: the paper exchange has nobody to ask, and the engine supplies
@@ -146,6 +166,10 @@ class PaperExchange:
         # and not on the ``Exchange`` seam. Safe against ordering: the feed
         # starts last (ADR-0024), so no tick is ever published before this.
         bus.subscribe(MarketTick, self.on_tick)
+        # On Kafka, a fill published just before a crash comes back after the
+        # restart. Paper must book it on the order it rebuilt, or it fills that
+        # size again (#484).
+        bus.subscribe(FillReport, self._on_fill_report)
 
     async def start(self) -> None:
         """Nothing to connect — the venue is in-process and its one link, the
@@ -161,8 +185,42 @@ class PaperExchange:
         promotion — the divergence ADR-0034's identical-compute grain exists to
         prevent. Refusing here precedes the barrier, so no order is ever placed
         against a leverage the venue would reject.
+
+        It also puts back the orders an earlier run left resting. A live venue
+        still holds them after a restart, so paper must too (#484). This runs
+        before the barrier, so reconcile reads the same book a live venue gives.
         """
         self._leverage.validate_against(self._specs)
+        for saga in self._resting_orders():
+            order = PlaceOrder.of(saga)
+            self._book.rest(order, working=self._working_size(order))
+            # ``fetch_order`` answers from this memory. Without a status here,
+            # reconcile reads the order as absent and ghosts it while paper can
+            # still fill it. The saga's own state replays as a no-op.
+            self._status_report(order, saga.state)
+            # Trade ids count from 1 in each process. Start after the fills the
+            # saga booked, or the next fill reuses a booked id and is dropped.
+            self._fill_counts[saga.cloid] = saga.fill_count
+
+    async def _on_fill_report(self, report: FillReport) -> None:
+        """Book a fill an earlier run made on an order this run rebuilt.
+
+        Every event is keyed by symbol, so a redelivered fill arrives before
+        any new tick on its symbol. It is booked before paper can fill again.
+        Paper has already counted a fill this run made and a fill the saga
+        booked before the rebuild. Their numbers are not past its count, so
+        both are skipped. So is a fill paper did not name.
+        """
+        number = _fill_number(report)
+        if number is None or number <= self._fill_counts.get(report.cloid, 0):
+            return
+        order = self._book.working(report.cloid)
+        if order is None:
+            return
+        self._book.apply_fill(report.cloid, report.quantity)
+        self._fill_counts[report.cloid] = number
+        self._fills.setdefault(report.cloid, []).append(report)
+        self._unapplied.record(report, order.side)
 
     async def run(self) -> None:
         """Settle funding boundaries for as long as the engine supervises this.
@@ -594,7 +652,7 @@ class PaperExchange:
             ts_init=now,
             cloid=order.cloid,
             symbol=order.symbol,
-            trade_id=f"{order.cloid}-{index}",
+            trade_id=_trade_id(order.cloid, index),
             quantity=fill.quantity,
             price=fill.price,
             fee=self._fee(order.symbol, fill, maker=maker),

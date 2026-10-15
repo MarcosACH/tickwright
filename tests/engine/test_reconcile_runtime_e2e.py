@@ -95,6 +95,7 @@ def test_a_missed_fill_landing_mid_run_is_healed_by_the_inflight_cadence(
             genesis_collateral=GENESIS,
             account_net=dict,
             applied_fills=lambda cloid: (),
+            resting_orders=list,
         )
         feed = ReplayFeed(path=ticks, bus=bus, clock=clock)
         engine = Engine(
@@ -210,6 +211,7 @@ def test_a_vanished_order_is_ghosted_only_after_grace_and_a_failed_read_freezes(
             genesis_collateral=GENESIS,
             account_net=dict,
             applied_fills=lambda cloid: (),
+            resting_orders=list,
         )
         feed = ReplayFeed(path=ticks, bus=bus, clock=clock)
         engine = Engine(
@@ -320,6 +322,7 @@ def test_a_durably_unreadable_body_faults_the_composed_engine(tmp_path: Path) ->
             genesis_collateral=GENESIS,
             account_net=dict,
             applied_fills=lambda cloid: (),
+            resting_orders=list,
         )
         engine = Engine(
             bus=bus,

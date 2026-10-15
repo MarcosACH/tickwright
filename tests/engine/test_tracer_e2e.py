@@ -126,6 +126,7 @@ def _run(
         instrument_specs=instrument_specs or {},
         account_net=dict,
         applied_fills=lambda cloid: (),
+        resting_orders=list,
     )
     # Opened off the venue's own spec, exactly as the ``Engine`` does, so the
     # ledger this tracer asserts on is seeded the way a real run's is — and over
