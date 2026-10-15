@@ -47,4 +47,9 @@ The read hands paper each saga, not a bare venue order. Paper records the saga's
 order's status, so `fetch_order` finds it and reconcile never ghosts it. Paper also numbers the
 order's next fill after the fills the saga booked. A reused trade id would be dropped as a
 duplicate.
+On Kafka, a fill paper published just before a crash is redelivered after the rebuild. The saga had
+not booked it, so the rebuilt order still counts its size. Paper subscribes to `FillReport` and
+books such a fill on the rebuilt order. Every event is keyed by symbol, so the fill arrives before
+any new tick on that symbol. Paper reads the fill number from the trade id. It books only a number
+past its count, so its own fills and fills the saga already booked are never booked twice.
 **)**
