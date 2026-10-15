@@ -555,7 +555,7 @@ app.__main__ → app.build → engine.Engine, engine.OperatorCancelAll, engine.F
 engine.Engine → engine.ExitJob, engine.ExitContext, domain.Store (lock), domain.MarketFeed
 engine.ExitContext → engine.Checkpointer, engine.Reconciler, engine.LedgerReconciliation
 engine.ExitContext → engine.ExecutionManager (cancel), domain.AccountAnchor, domain.PreTradeGuard
-engine.ExitContext → domain.EventBus, domain.Clock, engine.FeedHandle
+engine.ExitContext → domain.EventBus, domain.Clock, engine.FeedHandle, domain.SignalEmitter
 engine.Flatten → engine.OperatorCancelAll, engine.ExitContext
 engine.OperatorCancelAll → engine.ExitContext
 engine.ExecutionManager → engine.Checkpointer → engine.flatten_split
