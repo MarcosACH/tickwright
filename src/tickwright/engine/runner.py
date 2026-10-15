@@ -410,7 +410,7 @@ class Engine:
             return
         context = ExitContext(
             account=self._exchange,
-            orders=self._exchange,
+            cancel=self._execution.cancel_for_operator,
             checkpointer=self._checkpointer,
             guard=self._guard,
             bus=self._bus,

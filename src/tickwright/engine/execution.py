@@ -29,6 +29,9 @@ durably checkpoints the ``cancel_requested`` marker **before** calling
 ``Exchange.cancel``, and leaves the saga ``LIVE`` — the marker is metadata, not a
 state, so the order can still fill (ADR-0026).
 
+The operator's cancel all sends no signal, so it calls ``cancel_for_operator``.
+That path marks each saga durably before the send too (ADR-0052).
+
 The ``PreTradeGuard`` runs **before** the write-ahead (ADR-0017): a ``Denied``
 verdict mints the ``DENIED`` terminal and never touches the exchange, while an
 ``Approved`` verdict carries the quantized ``quantity``/``price`` the order is
@@ -36,6 +39,7 @@ actually placed at. It defaults to a passthrough ``NoopGuard`` so the paper/test
 path needs no policy wired in.
 """
 
+from collections.abc import Sequence
 from decimal import Decimal
 from typing import TypedDict
 
@@ -46,6 +50,7 @@ from tickwright.domain import (
     Denied,
     EventBus,
     ExecutionReport,
+    ExternalOrderRef,
     FillReport,
     GuardDecision,
     InvariantViolation,
@@ -68,6 +73,7 @@ from tickwright.domain import (
     PlaceSignal,
     PreTradeGuard,
     Signal,
+    VenueOpenOrder,
     derive_cloid,
     is_flatten,
 )
@@ -194,6 +200,8 @@ class ExecutionManager:
         # caller of the verbs below, so a fill is applied exactly once rather
         # than also heard on the bus (ADR-0035) — but it no longer holds the
         # ordering rules those writes obey, nor a time source of its own.
+        # The ledger verbs for funding, heals and flatten leftovers have other
+        # callers. Every saga write comes through here, the operator's included.
         self._checkpointer = checkpointer
         self._clock = checkpointer.clock
         # The pre-trade boundary run before any send (ADR-0017). Defaults to the
@@ -225,6 +233,32 @@ class ExecutionManager:
                 await self._apply_fill(report)
             elif isinstance(report, OrderStatusReport):
                 await self._apply_status(report)
+
+    async def cancel_for_operator(
+        self, resting: Sequence[VenueOpenOrder | ExternalOrderRef]
+    ) -> None:
+        """Cancel every order in ``resting`` in one call, for the operator's cancel all.
+
+        The operator sends no signal, so this is a call and not a handler. Each
+        order with a saga gets the operator mark first, durable before the send
+        as on the strategy paths (ADR-0026). The mark consumes no seq (ADR-0052).
+        """
+        await self._exchange.cancel([self._operator_ref(order) for order in resting])
+
+    def _operator_ref(
+        self, order: VenueOpenOrder | ExternalOrderRef
+    ) -> OrderRef | ExternalOrderRef:
+        if isinstance(order, ExternalOrderRef):
+            # The engine did not place it, so there is no saga to mark (ADR-0052).
+            return order
+        saga = self._checkpointer.cache.get_order(order.cloid)
+        if saga is None:
+            return OrderRef(cloid=order.cloid, symbol=order.symbol, venue_oid=order.venue_oid)
+        # Without the mark, a crash after the send leaves reconcile to judge the
+        # order a ghost and mark it REJECTED.
+        saga.mark_operator_cancel(ts_ns=self._clock.timestamp_ns())
+        self._checkpointer.checkpoint(saga)
+        return OrderRef.of(saga)
 
     async def _place(self, signal: PlaceSignal) -> None:
         cloid = derive_cloid(signal.signal_id)

@@ -61,6 +61,7 @@ from tickwright.domain import (
     Side,
     Signal,
     TimeInForce,
+    VenueOpenOrder,
     derive_cloid,
 )
 from tickwright.domain.enums import OrderType
@@ -143,6 +144,7 @@ class _Wiring:
     store: SQLiteStore
     checkpointer: Checkpointer
     order_events: list[OrderEvent]
+    manager: ExecutionManager
 
     @property
     def cache(self) -> Cache:
@@ -197,6 +199,7 @@ def _wiring(
         store=store,
         checkpointer=checks,
         order_events=order_events,
+        manager=manager,
     )
 
 
@@ -1188,6 +1191,67 @@ def test_a_cancel_all_sends_every_cancel_in_one_call() -> None:
     orders = [wiring.store.get_order(derive_cloid(f"trivial:BTC:{seq}")) for seq in (1, 2, 3)]
     assert all(order is not None and order.state is OrderState.CANCELLED for order in orders)
     assert links[0].calls == [[OrderRef.of(order) for order in orders if order is not None]]
+
+
+class _MarksAtSend(VenueLink):
+    """Records each ``cancel`` call, and whether the store held each saga's mark by then.
+
+    It sends nothing on, because the test asks only what left and what was durable.
+    """
+
+    def __init__(self, venue: Exchange, store: SQLiteStore) -> None:
+        super().__init__(venue)
+        self._store = store
+        self.calls: list[list[OrderRef | ExternalOrderRef]] = []
+        self.marked: list[bool] = []
+
+    async def cancel(self, refs: Sequence[OrderRef | ExternalOrderRef]) -> None:
+        self.calls.append(list(refs))
+        for ref in refs:
+            stored = None if isinstance(ref, ExternalOrderRef) else self._store.get_order(ref.cloid)
+            if stored is not None:
+                self.marked.append(stored.cancel_requested)
+
+
+def test_an_operator_cancel_marks_every_saga_durably_before_its_one_send() -> None:
+    store = SQLiteStore(":memory:")
+    links: list[_MarksAtSend] = []
+
+    def link(venue: PaperExchange) -> Exchange:
+        links.append(_MarksAtSend(venue, store))
+        return links[-1]
+
+    wiring = _wiring(store, link=link)
+    first, second = derive_cloid("trivial:BTC:1"), derive_cloid("trivial:BTC:2")
+
+    async def scenario() -> None:
+        await wiring.bus.publish(_tick("42000"))
+        for seq in (1, 2):
+            await wiring.bus.publish(_limit_signal("41000", seq=seq))
+        await wiring.manager.cancel_for_operator(
+            [
+                VenueOpenOrder(symbol="BTC", cloid=first),
+                VenueOpenOrder(symbol="BTC", cloid=second),
+                # A cloid with no saga here, and an order the engine never placed.
+                VenueOpenOrder(symbol="BTC", cloid="0xnosaga", venue_oid="7"),
+                ExternalOrderRef(symbol="BTC", venue_oid="9"),
+            ]
+        )
+
+    asyncio.run(scenario())
+
+    sagas = [wiring.cache.get_order(cloid) for cloid in (first, second)]
+    assert all(saga is not None for saga in sagas)
+    assert links[0].calls == [
+        [
+            *(OrderRef.of(saga) for saga in sagas if saga is not None),
+            OrderRef(cloid="0xnosaga", symbol="BTC", venue_oid="7"),
+            ExternalOrderRef(symbol="BTC", venue_oid="9"),
+        ]
+    ]
+    # Durable before the send, so a crash between the two never lets reconcile
+    # judge the order a ghost and mark it REJECTED.
+    assert links[0].marked == [True, True]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
