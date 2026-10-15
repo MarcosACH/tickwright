@@ -32,7 +32,7 @@ from tickwright.domain import (
     InstrumentSpec,
     LeverageBook,
     MarketFeed,
-    PlaceOrder,
+    Order,
     Portfolio,
     PreTradeGuard,
     ReplayClock,
@@ -174,7 +174,7 @@ class PaperStoreReads(NamedTuple):
 
     account_net: Callable[[], Mapping[str, Decimal]]
     applied_fills: Callable[[str], frozenset[str]]
-    resting_orders: Callable[[], list[PlaceOrder]]
+    resting_orders: Callable[[], list[Order]]
 
 
 def paper_store_reads(store: Store) -> PaperStoreReads:
@@ -197,8 +197,8 @@ def paper_store_reads(store: Store) -> PaperStoreReads:
     )
 
 
-def _resting_orders(store: Store) -> list[PlaceOrder]:
-    """The orders an earlier run left on paper's book, at the size still open.
+def _resting_orders(store: Store) -> list[Order]:
+    """The sagas of the orders an earlier run left on paper's book.
 
     Only LIVE and PARTIALLY_FILLED rows count. The venue confirmed it holds
     those. A PENDING or SUBMITTED row may never have reached paper, so
@@ -209,7 +209,7 @@ def _resting_orders(store: Store) -> list[PlaceOrder]:
     rest it, so reconcile ghosts it, as before #484.
     """
     return [
-        PlaceOrder.of(order)
+        order
         for order in store.all_orders()
         if order.state in WORKING_STATES
         and order.price is not None

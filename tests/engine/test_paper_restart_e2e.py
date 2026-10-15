@@ -8,7 +8,8 @@ paper the way ``app/build.py`` does, through ``paper_store_reads``.
 import asyncio
 from decimal import Decimal
 
-from ledgers import GENESIS
+import pytest
+from ledgers import GENESIS, checkpointer
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
@@ -17,6 +18,7 @@ from tickwright.adapters.store import SQLiteStore
 from tickwright.app.build import paper_store_reads
 from tickwright.domain import (
     AggressorSide,
+    ExecutionReport,
     FillReport,
     MarketTick,
     Order,
@@ -26,13 +28,18 @@ from tickwright.domain import (
     TimeInForce,
     VenueOpenOrder,
 )
+from tickwright.engine.execution import ExecutionManager
+from tickwright.engine.reconcile import PassResult, ReconcileConfig, Reconciler
+from tickwright.observability.testing import capture_events
 
 
-def _paper(store: SQLiteStore, bus: InMemoryBus | None = None) -> PaperExchange:
+def _paper(
+    store: SQLiteStore, bus: InMemoryBus | None = None, clock: ManualClock | None = None
+) -> PaperExchange:
     reads = paper_store_reads(store)
     return PaperExchange(
         bus=bus or InMemoryBus(),
-        clock=ManualClock(start_ns=1_000),
+        clock=clock or ManualClock(start_ns=1_000),
         fill_model=ImmediateFillModel(),
         genesis_collateral=GENESIS,
         account_net=reads.account_net,
@@ -48,6 +55,7 @@ def _resting(
     state: OrderState = OrderState.LIVE,
     price: Decimal | None = Decimal("41000"),
     time_in_force: TimeInForce | None = TimeInForce.GTC,
+    applied_event_ids: tuple[str, ...] = (),
 ) -> Order:
     """A limit an earlier run left resting, as its order row holds it."""
     return Order.restore(
@@ -65,7 +73,7 @@ def _resting(
         cancel_requested=False,
         cancel_requested_ts=None,
         cancel_signal_id=None,
-        applied_event_ids=(),
+        applied_event_ids=applied_event_ids,
         price=price,
         time_in_force=time_in_force,
     )
@@ -152,3 +160,57 @@ def test_a_restarted_paper_venue_rebuilds_only_the_orders_the_venue_confirmed_op
         VenueOpenOrder(symbol="BTC", cloid="0xlive"),
         VenueOpenOrder(symbol="BTC", cloid="0xpartial"),
     }
+
+
+def _second_life(store: SQLiteStore, clock: ManualClock) -> tuple[InMemoryBus, Reconciler]:
+    """A new process on the same store: rebuilt cache, manager, paper and reconciler."""
+    bus = InMemoryBus()
+    checks = checkpointer(store, clock=clock)
+    checks.cache.rebuild()
+    exchange = _paper(store, bus, clock)
+    manager = ExecutionManager(bus=bus, exchange=exchange, checkpointer=checks)
+    bus.subscribe(ExecutionReport, manager.on_execution_report)
+    reconciler = Reconciler(
+        bus=bus, clock=clock, exchange=exchange, cache=checks.cache, config=ReconcileConfig()
+    )
+    asyncio.run(exchange.start())
+    return bus, reconciler
+
+
+# A LIVE row applied its LIVE ack. A row that part-filled on arrival went from
+# SUBMITTED straight to PARTIALLY_FILLED, so it never applied one.
+_WORKING_ROWS = pytest.mark.parametrize(
+    ("state", "cum_qty", "applied"),
+    [
+        (OrderState.LIVE, "0", ("0xa:submitted", "0xa:live")),
+        (OrderState.PARTIALLY_FILLED, "0.5", ("0xa:submitted", "0xa:fill:0xa-1")),
+    ],
+    ids=["live", "partially-filled"],
+)
+
+
+@_WORKING_ROWS
+def test_reconcile_finds_a_rebuilt_order_and_never_ghosts_it(
+    state: OrderState, cum_qty: str, applied: tuple[str, ...]
+) -> None:
+    # Paper still holds the order, so reconcile must find it. A ghost verdict
+    # would end the saga while paper can still fill it.
+    clock = ManualClock(start_ns=2_000)
+    store = SQLiteStore(":memory:")
+    store.checkpoint(
+        _resting("0xa", state=state, cum_qty=cum_qty, applied_event_ids=applied), ts_ns=1_000
+    )
+    _, reconciler = _second_life(store, clock)
+
+    async def scenario() -> None:
+        assert await reconciler.reconcile_startup() is True
+        await clock.sleep(ReconcileConfig().ghost_grace_seconds)
+        assert await reconciler.reconcile_open_orders() is PassResult.PROVED
+
+    with capture_events() as logs:
+        asyncio.run(scenario())
+
+    assert "ghost.reconciled" not in [log["event"] for log in logs]
+    recovered = store.get_order("0xa")
+    assert recovered is not None
+    assert (recovered.state, recovered.cum_qty) == (state, Decimal(cum_qty))

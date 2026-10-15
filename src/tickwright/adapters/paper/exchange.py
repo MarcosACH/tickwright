@@ -49,6 +49,7 @@ from tickwright.domain import (
     InvariantViolation,
     LeverageBook,
     MarketTick,
+    Order,
     OrderRef,
     OrderState,
     OrderStatusReport,
@@ -84,7 +85,7 @@ class PaperExchange:
         account_label: str = DEFAULT_ACCOUNT_LABEL,
         account_net: Callable[[], Mapping[str, Decimal]],
         applied_fills: Callable[[str], Collection[str]],
-        resting_orders: Callable[[], Iterable[PlaceOrder]],
+        resting_orders: Callable[[], Iterable[Order]],
         instrument_specs: Mapping[str, InstrumentSpec] | None = None,
         leverage: LeverageBook = EMPTY_LEVERAGE_BOOK,
         funding_interval_ns: int = HOUR_NS,
@@ -172,8 +173,13 @@ class PaperExchange:
         before the barrier, so reconcile reads the same book a live venue gives.
         """
         self._leverage.validate_against(self._specs)
-        for order in self._resting_orders():
+        for saga in self._resting_orders():
+            order = PlaceOrder.of(saga)
             self._book.rest(order, working=self._working_size(order))
+            # ``fetch_order`` answers from this memory. Without a status here,
+            # reconcile reads the order as absent and ghosts it while paper can
+            # still fill it. The saga's own state replays as a no-op.
+            self._status_report(order, saga.state)
 
     async def run(self) -> None:
         """Settle funding boundaries for as long as the engine supervises this.
