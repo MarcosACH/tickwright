@@ -69,13 +69,13 @@ from tickwright.domain import (
     OrderState,
     OrderStatusReport,
     OrderSubmitted,
-    PlaceOrder,
     PlaceSignal,
     PreTradeGuard,
     Signal,
     VenueOpenOrder,
     derive_cloid,
     is_flatten,
+    place_order_of,
 )
 from tickwright.observability import NamedEvent, named_event
 from tickwright.observability.correlation import operation
@@ -329,7 +329,7 @@ class ExecutionManager:
         await self._announce(submitted)
 
         # Built from the saga, so the row holds exactly the terms the venue got.
-        await self._exchange.place(PlaceOrder.of(order))
+        await self._exchange.place(place_order_of(order))
         # SUBMITTED is checkpointed only after the send returns: until then the
         # durable record stays PENDING, so a crash anywhere in the send window
         # recovers through reconcile-by-cloid (ADR-0008 rule 2). Its timestamp

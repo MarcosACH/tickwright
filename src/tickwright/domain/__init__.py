@@ -121,6 +121,8 @@ from .valuation import (
 from .venue import (
     AccountModeVerdict,
     ExternalOrderRef,
+    LimitOrder,
+    MarketOrder,
     OrderRef,
     PlaceOrder,
     VenueAccountState,
@@ -128,6 +130,7 @@ from .venue import (
     VenueOrderView,
     VenuePositionState,
     VenueReadFailure,
+    place_order_of,
 )
 
 __all__ = [
@@ -198,6 +201,10 @@ __all__ = [
     "OrderSubmitted",
     "PartitionFill",
     "PlaceOrder",
+    "LimitOrder",
+    "MarketOrder",
+    # the one place a saga becomes a venue order
+    "place_order_of",
     "PlaceSignal",
     "Position",
     "PositionChange",

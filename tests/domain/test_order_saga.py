@@ -12,6 +12,8 @@ import pytest
 
 from tickwright.domain import (
     InvariantViolation,
+    LimitOrder,
+    MarketOrder,
     Order,
     OrderCancelled,
     OrderDenied,
@@ -23,9 +25,9 @@ from tickwright.domain import (
     OrderState,
     OrderSubmitted,
     OrderType,
-    PlaceOrder,
     Side,
     TimeInForce,
+    place_order_of,
 )
 
 
@@ -528,14 +530,29 @@ def _limit() -> Order:
 
 
 def test_the_venue_order_for_a_new_saga_carries_its_terms_at_full_size() -> None:
-    assert PlaceOrder.of(_limit()) == PlaceOrder(
+    assert place_order_of(_limit()) == LimitOrder(
         cloid="0xabc",
         symbol="BTC",
         side=Side.SELL,
         quantity=Decimal("2"),
-        order_type=OrderType.LIMIT,
         time_in_force=TimeInForce.GTC,
         price=Decimal("101"),
+        post_only=True,
+        reduce_only=True,
+    )
+
+
+def test_the_venue_order_for_a_market_saga_drops_a_price_from_before_513() -> None:
+    # A market saga holds a price only if a strategy sent one before #513. No
+    # venue filled a market order at it, so the venue order carries none.
+    order = _limit()
+    order.order_type = OrderType.MARKET
+    assert place_order_of(order) == MarketOrder(
+        cloid="0xabc",
+        symbol="BTC",
+        side=Side.SELL,
+        quantity=Decimal("2"),
+        time_in_force=TimeInForce.GTC,
         post_only=True,
         reduce_only=True,
     )
@@ -548,14 +565,14 @@ def test_the_venue_order_for_a_partly_filled_saga_works_only_the_size_still_open
     order.apply(_submitted())
     order.apply(_live())
     order.apply(_partial(quantity="0.5", cum_qty="0.5"))
-    assert PlaceOrder.of(order).quantity == Decimal("1.5")
+    assert place_order_of(order).quantity == Decimal("1.5")
 
 
 def test_the_venue_order_refuses_a_saga_with_no_time_in_force() -> None:
     # A row written before the store kept order terms reads back with none.
     # Every venue order needs one, so guessing it would send terms nobody chose.
     with pytest.raises(InvariantViolation, match="0xabc"):
-        PlaceOrder.of(_order())
+        place_order_of(_order())
 
 
 def test_the_venue_order_refuses_a_limit_saga_with_no_price() -> None:
@@ -564,4 +581,4 @@ def test_the_venue_order_refuses_a_limit_saga_with_no_price() -> None:
     order = _limit()
     order.price = None
     with pytest.raises(InvariantViolation, match="0xabc"):
-        PlaceOrder.of(order)
+        place_order_of(order)

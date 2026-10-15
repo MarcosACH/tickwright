@@ -39,6 +39,8 @@ from tickwright.domain import (
     ExternalOrderRef,
     FillReport,
     InstrumentSpec,
+    LimitOrder,
+    MarketOrder,
     MarketTick,
     MarkTick,
     OrderRef,
@@ -46,7 +48,6 @@ from tickwright.domain import (
     OrderRefusedReport,
     OrderState,
     OrderStatusReport,
-    OrderType,
     PlaceOrder,
     Side,
     TimeInForce,
@@ -123,13 +124,12 @@ def tick(symbol: str, price: str) -> MarketTick:
     )
 
 
-def market_order(side: Side, quantity: str) -> PlaceOrder:
-    return PlaceOrder(
+def market_order(side: Side, quantity: str) -> MarketOrder:
+    return MarketOrder(
         cloid=CLOID,
         symbol="BTC",
         side=side,
         quantity=Decimal(quantity),
-        order_type=OrderType.MARKET,
         time_in_force=TimeInForce.IOC,
     )
 
@@ -310,13 +310,12 @@ def limit_order(
     tif: TimeInForce = TimeInForce.GTC,
     post_only: bool = False,
     reduce_only: bool = False,
-) -> PlaceOrder:
-    return PlaceOrder(
+) -> LimitOrder:
+    return LimitOrder(
         cloid=CLOID,
         symbol="BTC",
         side=side,
         quantity=Decimal(quantity),
-        order_type=OrderType.LIMIT,
         time_in_force=tif,
         price=Decimal(price),
         post_only=post_only,

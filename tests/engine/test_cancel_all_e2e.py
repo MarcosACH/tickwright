@@ -28,13 +28,13 @@ from tickwright.domain import (
     ComponentState,
     Exchange,
     ExternalOrderRef,
+    LimitOrder,
     MarketTick,
     Order,
     OrderEvent,
     OrderRef,
     OrderState,
     OrderType,
-    PlaceOrder,
     Side,
     Store,
     StoreNeverUsed,
@@ -428,12 +428,11 @@ async def _rest(exchange: PaperExchange, sagas: Checkpointer, *, seq: int, price
     signal_id = f"resting:BTC:{seq}"
     cloid = derive_cloid(signal_id)
     await exchange.place(
-        PlaceOrder(
+        LimitOrder(
             cloid=cloid,
             symbol="BTC",
             side=Side.BUY,
             quantity=Decimal("0.1"),
-            order_type=OrderType.LIMIT,
             time_in_force=TimeInForce.GTC,
             price=Decimal(price),
         )

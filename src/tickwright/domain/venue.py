@@ -269,8 +269,8 @@ class AccountModeVerdict(Enum):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class PlaceOrder:
-    """The venue-neutral order the ``ExecutionManager`` hands to ``Exchange.place``.
+class _OrderTerms:
+    """The terms every ``PlaceOrder`` carries, whatever its type.
 
     Carries the engine-assigned ``cloid`` (the venue-facing identity) plus the
     order parameters; unlike a ``Signal`` it carries no strategy sequence, and
@@ -284,35 +284,67 @@ class PlaceOrder:
     symbol: str
     side: Side
     quantity: Decimal
-    order_type: OrderType
     time_in_force: TimeInForce
-    price: Decimal | None = None
     post_only: bool = False
     reduce_only: bool = False
 
-    @classmethod
-    def of(cls, order: Order) -> "PlaceOrder":
-        """The order the venue works for ``order``: its terms, at the size still open.
 
-        A new saga has filled nothing, so that is the full size. A restarted
-        paper venue rebuilds a partly filled order from this, so it never works
-        the filled part again (#484).
+@dataclass(frozen=True, slots=True, kw_only=True)
+class LimitOrder(_OrderTerms):
+    """A ``PlaceOrder`` at a limit price.
 
-        A row written before the store kept order terms has no time in force.
-        This raises on it rather than guess terms nobody chose.
-        """
-        if order.time_in_force is None:
-            raise InvariantViolation(f"order {order.cloid} has no saved time in force")
-        if order.order_type is OrderType.LIMIT and order.price is None:
-            raise InvariantViolation(f"LIMIT order {order.cloid} has no price")
-        return cls(
+    The price is always set, so no venue has to check for it (#513)."""
+
+    price: Decimal
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class MarketOrder(_OrderTerms):
+    """A ``PlaceOrder`` at the market. It has no price, so nothing can value it
+    at one (#513). A venue with no market type bounds the price itself
+    (ADR-0030)."""
+
+
+# The venue-neutral order the ``ExecutionManager`` hands to ``Exchange.place``.
+# Two types, so the type checker proves a venue reads a price only from a limit.
+type PlaceOrder = LimitOrder | MarketOrder
+
+
+def place_order_of(order: Order) -> PlaceOrder:
+    """The order the venue works for ``order``: its terms, at the size still open.
+
+    A new saga has filled nothing, so that is the full size. A restarted
+    paper venue rebuilds a partly filled order from this, so it never works
+    the filled part again (#484).
+
+    A row written before the store kept order terms has no time in force.
+    This raises on it rather than guess terms nobody chose. A LIMIT saga with
+    no price raises too. The emitter refuses that order, so the saga is a bug.
+
+    A MARKET saga that holds a price, from before #513, drops it. No venue ever
+    filled a market order at that price.
+    """
+    if order.time_in_force is None:
+        raise InvariantViolation(f"order {order.cloid} has no saved time in force")
+    if order.order_type is OrderType.MARKET:
+        return MarketOrder(
             cloid=order.cloid,
             symbol=order.symbol,
             side=order.side,
             quantity=order.quantity - order.cum_qty,
-            order_type=order.order_type,
             time_in_force=order.time_in_force,
-            price=order.price,
             post_only=order.post_only,
             reduce_only=order.reduce_only,
         )
+    if order.price is None:
+        raise InvariantViolation(f"LIMIT order {order.cloid} has no price")
+    return LimitOrder(
+        cloid=order.cloid,
+        symbol=order.symbol,
+        side=order.side,
+        quantity=order.quantity - order.cum_qty,
+        time_in_force=order.time_in_force,
+        price=order.price,
+        post_only=order.post_only,
+        reduce_only=order.reduce_only,
+    )

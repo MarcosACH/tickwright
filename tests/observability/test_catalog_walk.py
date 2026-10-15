@@ -58,6 +58,7 @@ from tickwright.domain import (
     InvariantViolation,
     LeverageBook,
     LeverageSpec,
+    LimitOrder,
     MarketTick,
     MarkTick,
     Order,
@@ -549,12 +550,11 @@ def _drive_exchange_request_failed() -> None:
             post=FakeExchangeApi({"order": ConnectionError("connection refused")}),
         )
         await exchange.place(
-            PlaceOrder(
+            LimitOrder(
                 cloid=derive_cloid("walk:BTC:1"),
                 symbol="BTC",
                 side=Side.BUY,
                 quantity=Decimal("0.5"),
-                order_type=OrderType.LIMIT,
                 time_in_force=TimeInForce.GTC,
                 price=Decimal("100"),
             )
@@ -584,12 +584,11 @@ def _drive_exchange_action_rejected() -> None:
             post=FakeExchangeApi({"order": {"status": "err", "response": "Invalid nonce"}}),
         )
         await exchange.place(
-            PlaceOrder(
+            LimitOrder(
                 cloid=derive_cloid("walk:BTC:1"),
                 symbol="BTC",
                 side=Side.BUY,
                 quantity=Decimal("0.5"),
-                order_type=OrderType.LIMIT,
                 time_in_force=TimeInForce.GTC,
                 price=Decimal("100"),
             )
@@ -954,12 +953,11 @@ def _drive_cancel_all_orders_remain() -> None:
     async def go() -> int:
         await bus.publish(_tick())
         await paper.place(
-            PlaceOrder(
+            LimitOrder(
                 cloid="0xabc",
                 symbol="BTC",
                 side=Side.BUY,
                 quantity=Decimal("0.1"),
-                order_type=OrderType.LIMIT,
                 time_in_force=TimeInForce.GTC,
                 price=Decimal("30000"),
             )

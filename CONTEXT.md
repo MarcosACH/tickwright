@@ -154,6 +154,12 @@ Since #468 `fetch_open_orders()` lists every order resting in the account, ours 
 answers it. Hyperliquid answers it from #470 on.
 _Avoid_: order API, order client (the anchor is what makes it one seam, not the verb shapes).
 
+**Venue order** / `PlaceOrder`:
+The order [[Order anchor|`OrderAnchor.place`]] takes: a `LimitOrder`, whose price is always set,
+or a `MarketOrder`, which has no price. `place_order_of` builds it from the [[Order saga]]. So
+the type checker proves that no venue reads a price from a market order (#513).
+_Avoid_: order request (a [[Signal]] is the request).
+
 **Account anchor** / `AccountAnchor` *(Protocol)*:
 [[Order anchor]]'s peer one grain up: the half of [[Exchange]] keyed by the **account** —
 `fetch_account_state` (the snapshot every cycle of [[Ledger reconciliation]] is anchored on) and
