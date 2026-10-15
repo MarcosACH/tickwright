@@ -59,9 +59,13 @@ log. Presets:
 | `paper-livefeed` | Hyperliquid **mainnet** public trades into the paper venue | network, no key |
 | `testnet` | Hyperliquid **testnet** feed and exchange | `--forward-key` and a funded key in the repo `.env` |
 
-`--strategy <name>` runs `scripts/run_strategy.py` instead of the CLI, with one of the four
-verification strategies (`round_trip_then_flat`, `take_profit`, `margin_watch`, `dual_symbol`).
-Their knobs go in as `--param KEY=VALUE`. See `features/portfolio-strategies.md`.
+`--strategy <name>` runs `scripts/run_strategy.py` instead of the CLI, with one of the five
+verification strategies (`round_trip_then_flat`, `take_profit`, `margin_watch`, `dual_symbol`,
+`rest_then_hold`). Their knobs go in as `--param KEY=VALUE`. See `features/portfolio-strategies.md`
+and `features/safe-exit.md`.
+
+`--command cancel-all` or `--command flatten` runs that one-shot exit run of the CLI instead of
+the engine. It ends by itself. See `features/safe-exit.md`.
 
 Kafka and Postgres need Docker. `$V infra <run-id> up kafka` or `up postgres` starts the compose
 service and records that this run owns it. A service you already had running is used and never

@@ -88,8 +88,8 @@ class Cache:
         cancel consumed its own (ADR-0026 — omitting cancels would let a
         restart reuse a consumed id). One per-strategy counter across all
         symbols, so this is a single max over the strategy's records. The
-        strategies and ``Flatten`` both start their counters here, so neither
-        can reuse an id after a restart.
+        strategies and the operator's emitter both start their counters here,
+        so neither can reuse an id after a restart.
 
         A signal sent but unhandled at a crash, or a cancel all that marked no
         saga, leaves its seq only in the seq records. The fold starts from them

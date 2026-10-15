@@ -28,6 +28,11 @@ operator asks for cancel all and flatten, and what each one touches. The terms a
   cannot hand them to the job. The engine passes them to the job's `run` in an `ExitContext`
   instead. That context also holds a feed handle, so the feed still runs under the engine's
   supervision. An exit run starts no reconcile cadence. The job runs every pass itself.**)**
+  **(Extended in [#476](https://github.com/MarcosACH/tickwright/issues/476):** starting no strategy
+  is not enough. On Kafka, a crashed life can leave a strategy signal it never handled, and the
+  exit run's boot replays it. So an exit run denies every strategy place it hears, before the
+  guard. The order ends `DENIED`, so a later strategy run does not replay it either. Strategy
+  cancels still go through, because a cancel cannot add exposure.**)**
 - **Account scope.** Operator cancel all also cancels orders the engine did not place, such as
   orders placed by hand in the venue UI. Flatten also closes positions in the unattributed
   partition (ADR-0038). This is an exception to ADR-0011. See its correction block.
