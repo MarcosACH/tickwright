@@ -605,9 +605,11 @@ class PortfolioProjection:
         position, meaning the venue's size for the symbol equals our account
         net (#516). The cadence reads the venue and then waits, and a fill can
         land in between. A snapshot older than that fill describes a position
-        we no longer hold, so its bucket is not ours. Once carried, a share
-        that does not move still posts: a venue 0 read back onto a row at 0 is
-        a posted 0.
+        we no longer hold, so its bucket is not ours. Such a snapshot also
+        writes nothing onto a waiting row. The row is what a crash saves, and a
+        restart reads only a restored 0 as waiting. Once carried, a share that
+        does not move still posts: a venue 0 read back onto a row at 0 is a
+        posted 0. A partition that is not waiting takes its share as before.
         """
         venue = {position.symbol: position.signed_size for position in snapshot.positions}
         carried = {
@@ -617,8 +619,11 @@ class PortfolioProjection:
         }
         moved: list[Position] = []
         for position, share in self._venue_shares(snapshot):
-            if position.symbol in carried:
-                self._unposted.discard((position.strategy_id, position.symbol))
+            key = (position.strategy_id, position.symbol)
+            if key in self._unposted:
+                if position.symbol not in carried:
+                    continue
+                self._unposted.discard(key)
             if position.isolated_collateral != share:
                 position.isolated_collateral = share
                 moved.append(position)

@@ -844,6 +844,30 @@ def test_an_account_read_taken_before_a_live_open_leaves_its_bucket_unknown() ->
     assert posted.margin_used == Decimal("81.745")
 
 
+def test_an_account_read_taken_before_a_live_flip_writes_no_bucket_onto_it() -> None:
+    """A read that still holds the old long has the old leg's bucket (#516).
+
+    Written onto the short's row, that bucket is what a crash would save. A
+    restart reads only a restored 0 as waiting, so the next life would read
+    the old leg's bucket as the short's. The ingest leaves the row at 0, which
+    writes nothing, and the short stays unknown.
+    """
+    projection = _isolated_1x(None)
+    projection.apply_heal(
+        (), snapshot=venue_holding(BTC=Decimal("81.735"), sizes={"BTC": Decimal("0.001")})
+    )
+    book_fill(projection, _fill(trade_id="f2", quantity="0.002", price="81745"), side=Side.SELL)
+
+    change = projection.apply_heal(
+        (), snapshot=venue_holding(BTC=Decimal("81.735"), sizes={"BTC": Decimal("0.001")})
+    )
+
+    assert change is None
+    flipped = projection.for_strategy("alpha").position("BTC")
+    assert flipped is not None
+    assert flipped.margin_used is None
+
+
 def _live_restart(bucket: str | None) -> PortfolioProjection:
     """A live 1x isolated long checkpointed, then restored by a second life.
 
