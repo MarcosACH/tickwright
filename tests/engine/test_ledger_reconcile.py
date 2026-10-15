@@ -1987,17 +1987,14 @@ def test_a_cycle_caches_the_venues_liquidation_price_and_the_read_passes_it_thro
     Live may not re-derive this number — the maintenance tier it needs is a
     fixed point, the tier depending on the position's value *at the price being
     solved for* — so the venue's own field is authoritative and our formula must
-    step aside for it. That is a claim about which of two real numbers is
-    reported, which is why the ledger here is given both margin-model inputs:
-    the formula is answering (the assertion before the cycle proves it), and it
-    is answering something else.
+    step aside for it. Before the first read, live has no number and reads
+    `None`, never the formula's (#515).
 
     The account is #142's own — 0.002 BTC long from 64809 against an equity of
-    25.9264 — so the computed price lands a few units from the venue's and the
-    two are genuinely rival answers to one question rather than a real number
-    against a placeholder. The snapshot agrees with the ledger on every Tier-1
-    line, so the cycle heals nothing and the only thing it leaves behind is the
-    cache under test.
+    25.9264. The ledger is given both margin-model inputs, so the `None` before
+    the cycle is not a missing input. The snapshot agrees with the ledger on
+    every Tier-1 line, so the cycle heals nothing and the only thing it leaves
+    behind is the cache under test.
     """
     store = SQLiteStore(":memory:")
     keeper = _ledger(store, equity="25.9144", leverage=_BTC_CROSS_5X, specs={"BTC": _BTC_SPEC})
@@ -2019,9 +2016,7 @@ def test_a_cycle_caches_the_venues_liquidation_price_and_the_read_passes_it_thro
 
     before = projection.position("BTC", strategy_id="alpha")
     assert before is not None
-    # The formula is live and answering — with a number that is not the venue's.
-    assert before.liquidation_price is not None
-    assert before.liquidation_price != _BTC_LIQUIDATION
+    assert before.liquidation_price is None
 
     divergences = asyncio.run(cycle.reconcile_account())
 
@@ -2077,11 +2072,13 @@ def test_a_position_the_venue_prices_at_nothing_reads_none_rather_than_the_formu
 
     It is the majority case rather than a corner — 12 of 17 cross longs across
     the 22 mainnet accounts #142 sampled (ADR-0046 §6) — so the branch this
-    pins is the one live spends most of its time on. The formula is answering
-    with a real number here (the assertion before the cycle), and once the read
-    lands it must stop: falling back to it would report a price for a position
-    the venue says has none, which is the fabricated Tier-2 value ADR-0034's
-    freeze-never-substitute rule exists to refuse.
+    pins is the one live spends most of its time on. Falling back to the formula
+    would report a price for a position the venue says has none, which is the
+    fabricated Tier-2 value ADR-0034's freeze-never-substitute rule exists to
+    refuse.
+
+    The first cycle reports a price, so the second cycle's `None` has a real
+    number to replace. Live reads `None` before any read lands too (#515).
 
     The same account and snapshot as the cache case above, so the only thing
     differing is the field under test.
@@ -2091,22 +2088,19 @@ def test_a_position_the_venue_prices_at_nothing_reads_none_rather_than_the_formu
     projection = keeper.portfolio
     _book_fill(projection, quantity="0.002", price="64809")
     _mark(projection, "BTC", "64815")
+    state = account_state(
+        "25.9264", "0.012", free_margin=_BTC_5X_FREE, maintenance=_BTC_5X_MAINTENANCE
+    )
     venue = _AccountVenue(
-        _levered(
-            _priced(
-                account_state(
-                    "25.9264", "0.012", free_margin=_BTC_5X_FREE, maintenance=_BTC_5X_MAINTENANCE
-                ),
-                None,
-            ),
-            _CROSS_5X,
-        )
+        _levered(_priced(state, _BTC_LIQUIDATION), _CROSS_5X),
+        _levered(_priced(state, None), _CROSS_5X),
     )
     cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+    assert asyncio.run(cycle.reconcile_account()) == ()
 
     before = projection.position("BTC", strategy_id="alpha")
     assert before is not None
-    assert before.liquidation_price is not None  # the formula is live and answering
+    assert before.liquidation_price == _BTC_LIQUIDATION
 
     assert asyncio.run(cycle.reconcile_account()) == ()
 

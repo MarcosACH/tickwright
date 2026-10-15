@@ -1393,14 +1393,17 @@ class PortfolioProjection:
     def _liquidation_source(self, symbol: str) -> LiquidationSource:
         """Whether this symbol's liquidation price is the venue's or ours.
 
-        The switch is "has a venue account read ever landed", not "which venue
-        is this": paper never calls ``observe_venue_liquidation``, so it stays
-        on the computed branch without the projection being told which adapter
-        it is behind — the same dependency direction the ``AccountSpec`` and the
-        instrument universe arrive on.
+        The switch is ``declares_genesis``, the spec's paper-or-live fact, and
+        not "has a venue read landed yet". Live never computes this number
+        (ADR-0040 §3). Before the first read it is ``None``, because a formula
+        run then would fabricate one (#515). A new live isolated position holds
+        0 collateral until that read, and the formula put a long's liquidation
+        price above its entry.
         """
-        if self._venue_liquidation is None:
+        if self._spec.declares_genesis:
             return LiquidationSource.computed()
+        if self._venue_liquidation is None:
+            return LiquidationSource.reported(None)
         return LiquidationSource.reported(self._venue_liquidation.get(symbol))
 
     def account(self) -> AccountView:
