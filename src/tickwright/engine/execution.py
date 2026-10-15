@@ -172,8 +172,13 @@ class ExecutionManager:
         exchange: OrderAnchor,
         checkpointer: Checkpointer,
         guard: PreTradeGuard | None = None,
+        exit_run: bool = False,
     ) -> None:
         self._bus = bus
+        # An exit run hosts no strategy, but a Kafka bus can still replay a
+        # strategy signal a crashed life never handled. Placed, it could open
+        # new exposure while the operator is getting out (issue #476).
+        self._exit_run = exit_run
         # The **cloid** anchor and not the whole ``Exchange``: this manager
         # sends and never reads the account, so the seam it declares is the
         # grain it drives (ADR-0034's two anchors, ``domain/protocols.py``).
@@ -235,6 +240,10 @@ class ExecutionManager:
             # that is not reduce-only is denied here, whatever guard is wired
             # (ADR-0054).
             decision = Denied(reason="an operator order must be reduce-only")
+        elif self._exit_run and signal.strategy_id != OPERATOR:
+            # Denied rather than dropped, so the saga is terminal and a later
+            # strategy run never replays it either.
+            decision = Denied(reason="an exit run places no strategy order")
         else:
             # The pre-trade boundary runs before write-ahead (ADR-0017): a denial is
             # never sent, so there is no in-flight intent to protect. The reading is

@@ -159,7 +159,11 @@ class Engine:
             specs=exchange.instrument_specs(),
         )
         self._execution = ExecutionManager(
-            bus=bus, exchange=exchange, checkpointer=self._checkpointer, guard=self._guard
+            bus=bus,
+            exchange=exchange,
+            checkpointer=self._checkpointer,
+            guard=self._guard,
+            exit_run=exit_job is not None,
         )
         # One config for both: the runner also paces the continuous cadences
         # off the same intervals below.

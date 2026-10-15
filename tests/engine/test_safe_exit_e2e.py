@@ -25,6 +25,7 @@ from tickwright.adapters.feed import ReplayFeed
 from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.app.build import paper_store_reads
 from tickwright.domain import (
+    OPERATOR,
     EventBus,
     Exchange,
     ExecutionReport,
@@ -40,8 +41,9 @@ from tickwright.domain import (
     SignalEmitter,
     Store,
     TimeInForce,
+    derive_cloid,
 )
-from tickwright.engine.exit_run import Flatten
+from tickwright.engine.exit_run import ExitJob, Flatten, OperatorCancelAll
 from tickwright.engine.guard import RealGuard
 from tickwright.engine.runner import Engine
 from tickwright.observability.testing import capture_events
@@ -179,7 +181,7 @@ class _Lives:
         self,
         ticks: Path,
         *,
-        exit_job: Flatten | None = None,
+        exit_job: ExitJob | None = None,
         clock: ManualClock | None = None,
         link: Callable[[PaperExchange], Exchange] | None = None,
     ) -> tuple[Engine, PaperExchange]:
@@ -554,3 +556,49 @@ def test_a_crash_at_any_step_then_a_flatten_ends_with_every_partition_and_the_ve
         assert asyncio.run(go()) == 0
     assert {key: size for key, size in lives.positions().items() if size != 0} == {}
     assert lives.venue() == ({}, [])
+
+
+class _Records(VenueLink):
+    """Records each order that reaches the venue."""
+
+    def __init__(self, venue: Exchange) -> None:
+        super().__init__(venue)
+        self.placed: list[PlaceOrder] = []
+
+    async def place(self, order: PlaceOrder) -> None:
+        self.placed.append(order)
+        await super().place(order)
+
+
+@pytest.mark.parametrize(
+    "job", [Flatten(feed_ends=True), OperatorCancelAll()], ids=["flatten", "cancel-all"]
+)
+@pytest.mark.parametrize("store", STORE_BACKEND_PARAMS)
+def test_an_exit_run_denies_a_strategy_order_kafka_replays_after_a_crash(
+    tmp_path: Path, store: str, job: ExitJob
+) -> None:
+    # Kafka keeps what a dead life never handled. Here that is alpha's third
+    # signal, the buy it rests after its reduce-only sell. An exit run hosts
+    # no strategy, so it must never send that buy to the venue (issue #476).
+    lives = _Lives(tmp_path, store, "kafka")
+    venue = lives.lasting_venue = _Venue()
+    _, hits, reaches = _CRASHES["strategy-reduce-only-sell"]
+    dying = _DiesAtTheSend(venue.paper, venue.cut, hits(), reaches=reaches)
+    engine, _ = _strategy_engine(lives, link=lambda _: dying)
+    _die_in(lives, engine, dying)
+
+    records = _Records(venue.paper)
+    engine, _ = lives.engine(
+        lives.ticks("restart", _FLATTEN_ROWS, start_s=20), exit_job=job, link=lambda _: records
+    )
+
+    async def go() -> int:
+        return await asyncio.wait_for(engine.run(), timeout=5)
+
+    with capture_events():
+        assert asyncio.run(go()) == 0
+    with lives.backend.open() as reader:
+        rest_buy = reader.get_order(derive_cloid("alpha:BTC:3"))
+        assert rest_buy is not None and rest_buy.state is OrderState.DENIED
+        placed = [reader.get_order(order.cloid) for order in records.placed]
+    assert {order.strategy_id for order in placed if order is not None} <= {OPERATOR}

@@ -313,7 +313,8 @@ split is safe only on this path.
 
 ### ExecutionManager (`engine`, existing)
 
-**Interface:** Unchanged for callers. It now consumes `CancelAllSignal` too.
+**Interface:** It now consumes `CancelAllSignal` too. It takes `exit_run`, which the `Engine` sets
+when it has an exit job (#476).
 
 **Responsibilities:**
 
@@ -332,6 +333,8 @@ split is safe only on this path.
   `flatten_split` names the reason. A fill like that would flip a partition, and on reconcile it
   would fault every boot (#471).
 - `reduce_only` flows from the signal to the order and to the `PlaceOrder`.
+- In an exit run, a strategy place ends `DENIED` before the guard. A Kafka boot can replay a
+  strategy signal that a crashed life never handled (#476).
 
 **Seams:** None new.
 
