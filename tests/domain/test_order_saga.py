@@ -556,3 +556,12 @@ def test_the_venue_order_refuses_a_saga_with_no_time_in_force() -> None:
     # Every venue order needs one, so guessing it would send terms nobody chose.
     with pytest.raises(InvariantViolation, match="0xabc"):
         PlaceOrder.of(_order())
+
+
+def test_the_venue_order_refuses_a_limit_saga_with_no_price() -> None:
+    # The emitter refuses a LIMIT with no price, so a saga holding one is a bug
+    # in this process. Every venue would have to check for it otherwise.
+    order = _limit()
+    order.price = None
+    with pytest.raises(InvariantViolation, match="0xabc"):
+        PlaceOrder.of(order)

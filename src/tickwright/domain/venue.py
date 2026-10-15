@@ -303,6 +303,8 @@ class PlaceOrder:
         """
         if order.time_in_force is None:
             raise InvariantViolation(f"order {order.cloid} has no saved time in force")
+        if order.order_type is OrderType.LIMIT and order.price is None:
+            raise InvariantViolation(f"LIMIT order {order.cloid} has no price")
         return cls(
             cloid=order.cloid,
             symbol=order.symbol,
