@@ -386,10 +386,10 @@ class PortfolioProjection:
         # the reconcile pull and **stale-frozen between cycles**. Empty before
         # the first read, so live reads ``None`` then. Paper never reads it.
         self._venue_liquidation: dict[str, Decimal | None] = {}
-        # Live isolated partitions opened since the last ingest. Their row holds
-        # 0, but the venue has posted a bucket we have not read yet, so the
-        # figures that need it read ``None`` until then (#516). In memory only,
-        # because the next ingest is what clears it.
+        # Live isolated partitions opened since the last ingest that carried
+        # them. Their row holds 0, but the venue has posted a bucket we have
+        # not read yet, so the figures that need it read ``None`` until then
+        # (#516). In memory only, because recovery rebuilds it from the 0.
         self._unposted: set[tuple[str | None, str]] = set()
 
     def leverage_for(self, symbol: str) -> LeverageSpec:
