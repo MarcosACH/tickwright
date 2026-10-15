@@ -1923,18 +1923,16 @@ _BTC_SPEC = InstrumentSpec(
     min_notional=Decimal("0"),
     margin_maint=Decimal("0.0125"),
 )
-"""The tier-0 maintenance rate #152 measured, so the computed branch has a real
-answer to be *displaced by* rather than the ``None`` a specless projection gives."""
+"""The tier-0 maintenance rate #152 measured. With it the ledger holds every margin
+input, so a live ``None`` here is the venue's silence and not a missing spec."""
 
 _BTC_CROSS_5X = LeverageBook(entries={"BTC": LeverageSpec(mode="cross", leverage=5)})
-"""**Cross**, so the computed branch has real backing to solve against.
+"""**Cross**, so the position has real backing on a live ledger.
 
-Isolated would not, on a *live* ledger: the locked bucket is the venue's to post
-(ADR-0040 §3) and nothing here has posted one, so the formula would divide a
-backing of nothing but unrealized PnL and answer with a price above the mark for
-a long. Cross backs against account equity, which a materialised live ledger
-holds — so what the venue's number displaces below is a credible price and not
-an artefact."""
+Cross backs against account equity, which a materialised live ledger holds. An
+isolated bucket is the venue's to post (ADR-0040 §3), and nothing here posts
+one. So with cross the ledger holds every margin input, and a live ``None`` is
+the venue's silence and not a missing input (#515)."""
 
 _CROSS_5X = LeverageSpec(mode="cross", leverage=5)
 """``_BTC_CROSS_5X``'s pair, as the venue's own stored setting.
@@ -2112,12 +2110,11 @@ def test_a_position_the_venue_prices_at_nothing_reads_none_rather_than_the_formu
 def test_a_position_opened_since_the_read_reads_none_rather_than_the_formula() -> None:
     """A symbol the snapshot never mentioned is *also* an absent venue price.
 
-    Once a read has landed the projection is on the read-through branch for the
-    whole book, not only for the symbols that cycle happened to carry — so an
-    ETH position opened between deadlines reads ``None`` until the next pull
-    prices it, rather than being quietly handed back to the formula. The
-    alternative reports two different quantities under one name depending on
-    whether a symbol made it into the last snapshot.
+    Live reads the venue's price for the whole book, not only for the symbols a
+    cycle happened to carry. So an ETH position opened between deadlines reads
+    ``None`` until the next pull prices it. It is never handed to the formula
+    (#515). Otherwise one name would carry two different quantities, depending
+    on whether a symbol made it into the last snapshot.
 
     ETH is given both margin-model inputs and a mark, so the formula had every
     input it needs and its silence here is the read-through's doing: the sibling
