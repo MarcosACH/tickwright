@@ -76,7 +76,9 @@ of [#408](https://github.com/MarcosACH/tickwright/issues/408).
   It now also fails when no mark is cached.
   **(Clarified in [#509](https://github.com/MarcosACH/tickwright/issues/509):** the order fails,
   not the engine. The adapter does not send it and reports it `FAILED` with the reason. The
-  engine keeps running. Paper does the same for an order sent before its symbol's first trade.**)**
+  engine keeps running. Paper fails any order sent before its symbol's first trade, a priced
+  `LIMIT` too. Hyperliquid fails only a `MARKET` and sends a priced `LIMIT` with no trade. So a
+  limit placed at boot rests live but ends `FAILED` on paper.**)**
 - Not built yet. The build updates the `SLIPPAGE_BOUND` line in `.env.example` and the adapter's
   docstring, which still say last trade × (1 ± bound).
   **(Built in [#467](https://github.com/MarcosACH/tickwright/issues/467):** the Hyperliquid

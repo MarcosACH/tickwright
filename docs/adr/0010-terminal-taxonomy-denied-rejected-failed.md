@@ -15,7 +15,7 @@ actually care about — **was the order sent, and who decided?** — rather than
   (hard transport/local error). May warrant a retry/replace decision.
   **(Clarified in [#509](https://github.com/MarcosACH/tickwright/issues/509):** an order the
   adapter cannot price is one case. It has no trade or mark to price the order with, so it sends
-  nothing and reports `SUBMITTED → FAILED` itself. Not sending is the proof that the order never
+  nothing and reports `FAILED` itself. Not sending is the proof that the order never
   landed. It is not `DENIED`, because our guard did not refuse it. It is not `REJECTED`, because
   no venue saw it.**)**
 
