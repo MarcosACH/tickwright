@@ -254,21 +254,33 @@ def test_market_sell_is_capped_by_the_mark_when_the_trade_is_far_below_it() -> N
     assert wire["p"] == "38000"
 
 
-def test_market_order_with_no_mark_is_refused_like_one_with_no_trade() -> None:
+def test_market_order_with_no_mark_fails_without_being_sent() -> None:
     post = FakeExchangeApi({"order": resting_response(oid=81)})
 
-    async def main() -> None:
+    async def main() -> list[ExecutionReport]:
         bus = InMemoryBus()
         clock = ManualClock(start_ns=1_700_000_001_000 * _NS_PER_MS)
         exchange = make_exchange(post, bus=bus, clock=clock)
+        reports: list[ExecutionReport] = []
+
+        async def collect(report: ExecutionReport) -> None:
+            reports.append(report)
+
+        bus.subscribe(ExecutionReport, collect)
         await bus.publish(tick("BTC", "43250.5"))
         await exchange.place(market_order(Side.BUY, "0.5"))
+        return reports
+
+    (report,) = asyncio.run(main())
 
     # A missing mark is a missing price (ADR-0059). The trade alone could be
-    # stale, so nothing goes out.
-    with pytest.raises(ValueError, match="no mark cached for 'BTC'"):
-        asyncio.run(main())
+    # stale, so nothing goes out. The order provably never landed, so it ends
+    # FAILED and the engine keeps running (#509).
     assert post.requests == []
+    assert isinstance(report, OrderStatusReport)
+    assert report.status is OrderState.FAILED
+    assert report.cloid == CLOID
+    assert report.reason == "no mark cached for 'BTC'"
 
 
 def limit_order(
