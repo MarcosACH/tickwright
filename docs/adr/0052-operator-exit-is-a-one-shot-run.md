@@ -150,6 +150,17 @@ operator asks for cancel all and flatten, and what each one touches. The terms a
   never sends the second order. No test cuts a real network, so the 25 seconds rest on the values,
   not on a measured drop. Over a Unix socket the server ignores these settings, but the engine then
   runs on the same host as the server.**)**
+  **(Extended in [#498](https://github.com/MarcosACH/tickwright/issues/498):** the engine had no
+  matching timeout on its own side. On a dropped network, its next store call could hang. On Linux
+  the client kernel retries for about 15 minutes. The connection is synchronous, so the whole
+  engine froze. The store now connects with the same bound on the client side: `keepalives` 1,
+  `keepalives_idle` 10, `keepalives_interval` 5, `keepalives_count` 3, and `tcp_user_timeout`
+  25000. They are connect arguments, so they win over any the DSN sets. A store call on a dropped
+  network then fails in about 25 seconds with `InvariantViolation`, and the engine exits 1. A
+  timeout during a write leaves its result unknown. That is the same as a crash, and recovery
+  already handles it. libpq applies `tcp_user_timeout` only on Linux. On other systems, a write the
+  server has not yet acknowledged can take longer to fail. A `postgres`-marked test reads the
+  values back from the connection. No test cuts a real network.**)**
 - On paper, a market order fails when no price is cached. So a paper flatten cannot fill unless
   the feed runs. A replay feed restarts from the top of its file (ADR-0043 §5.1).
 - Still open in #408:
