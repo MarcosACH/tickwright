@@ -712,6 +712,80 @@ def test_live_leaves_an_isolated_collateral_the_venue_is_the_authority_for_alone
     assert change.position.isolated_collateral == Decimal("0")
 
 
+def _isolated_1x(genesis: str | None) -> PortfolioProjection:
+    """A 0.001 BTC long opened at 81 735 on 1x isolated, marked a hair above.
+
+    The shape of run ``safe-exit-7`` (#516). The mark is 10 above the entry, so
+    the unrealized P&L is 0.01. On paper the bucket is the whole notional at 1x.
+    """
+    projection = _projection(
+        genesis, leverage=LeverageBook(entries={"BTC": LeverageSpec(mode="isolated", leverage=1)})
+    )
+    book_fill(projection, _fill(trade_id="f1", quantity="0.001", price="81735"), side=Side.BUY)
+    projection.observe_mark(_mark(price="81745", ts_event=9_000))
+    return projection
+
+
+def test_live_reads_a_bucket_the_venue_has_not_posted_yet_as_unknown() -> None:
+    """Before the first ingest a live bucket is unknown, not 0 (#516, ADR-0034).
+
+    Read as 0, the position's margin was the 0.01 of P&L alone. Its leverage
+    was 81.745 / 0.01, which is 8174.5x on a 1x position. The account's free
+    margin was too high by the whole bucket. Figures that do not need the
+    bucket stay real.
+    """
+    projection = _isolated_1x(None)
+    view = projection.for_strategy("alpha").position("BTC")
+    account = projection.account()
+
+    assert view is not None
+    assert view.margin_used is None
+    assert view.effective_leverage is None
+    assert account.total_margin_used is None
+    assert account.free_margin is None
+    assert view.notional == Decimal("81.745")
+    assert view.unrealized_pnl == Decimal("0.01")
+    assert account.equity is not None
+
+
+def test_the_first_ingest_makes_an_unposted_live_bucket_real() -> None:
+    """Once the venue's bucket is read, the four figures read real numbers.
+
+    The venue posts 81.735, the same bucket paper would lock at 1x. So margin
+    is 81.735 + 0.01 and leverage reads exactly 1.
+    """
+    projection = _isolated_1x(None)
+
+    projection.apply_heal((), snapshot=venue_holding(BTC=Decimal("81.735")))
+
+    view = projection.for_strategy("alpha").position("BTC")
+    account = projection.account()
+    assert view is not None
+    assert view.margin_used == Decimal("81.745")
+    assert view.effective_leverage == Decimal("1")
+    assert account.total_margin_used == Decimal("81.745")
+    assert account.equity is not None
+    assert account.free_margin == account.equity - Decimal("81.745")
+
+
+def test_paper_reads_the_bucket_it_locked_at_open_from_the_first_read() -> None:
+    """The paper twin of the case above reads real numbers, because paper
+    declares its own bucket at open: 0.001 × 81 735 / 1 = 81.735.
+
+    Margin is that bucket plus the 0.01 of P&L. At 1x it backs the whole
+    notional, so leverage reads exactly 1.
+    """
+    projection = _isolated_1x("100000")
+    view = projection.for_strategy("alpha").position("BTC")
+    account = projection.account()
+
+    assert view is not None
+    assert view.margin_used == Decimal("81.745")
+    assert view.effective_leverage == Decimal("1")
+    assert account.total_margin_used == Decimal("81.745")
+    assert account.free_margin == Decimal("99918.265")
+
+
 def test_a_restart_restores_the_locked_collateral_rather_than_recomputing_it() -> None:
     """The bucket is durable Tier-1, so a second life reads it back unchanged.
 

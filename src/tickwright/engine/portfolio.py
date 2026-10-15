@@ -386,6 +386,11 @@ class PortfolioProjection:
         # the reconcile pull and **stale-frozen between cycles**. Empty before
         # the first read, so live reads ``None`` then. Paper never reads it.
         self._venue_liquidation: dict[str, Decimal | None] = {}
+        # Live isolated partitions opened since the last ingest. Their row holds
+        # 0, but the venue has posted a bucket we have not read yet, so the
+        # figures that need it read ``None`` until then (#516). In memory only,
+        # because the next ingest is what clears it.
+        self._unposted: set[tuple[str | None, str]] = set()
 
     def leverage_for(self, symbol: str) -> LeverageSpec:
         """The margin mode and leverage this run computes ``symbol`` against.
@@ -595,7 +600,12 @@ class PortfolioProjection:
         Reporting every partition instead would re-stamp every position row on
         every deadline, which is the same indistinguishable-from-a-correction
         write ``apply_funding``'s ``None`` refuses one grain up.
+
+        Every partition of ours is covered, so after this no bucket is waiting
+        for the venue any more (#516). That holds even when a share does not
+        move: a venue 0 read back onto a row at 0 is now a posted 0.
         """
+        self._unposted.clear()
         moved: list[Position] = []
         for position, share in self._venue_shares(snapshot):
             if position.isolated_collateral != share:
@@ -771,6 +781,11 @@ class PortfolioProjection:
             position.isolated_collateral = _ZERO
         if PositionChange.OPENED not in changes:
             return
+        leverage = self.leverage_for(position.symbol)
+        if leverage.mode != "isolated":
+            # Cross posts no bucket of its own — its margin comes out of the
+            # account pool, which is the whole difference between the modes.
+            return
         if not self._spec.declares_genesis:
             # The declared-versus-ingested predicate, the same one recovery's
             # genesis seed turns on (ADR-0043 §10): paper *declares* the margin
@@ -778,13 +793,10 @@ class PortfolioProjection:
             # unrealizedPnl``, ADR-0043 §3). Computing one here would put a
             # number on the ledger the venue never posted, and would be wrong
             # from the first ``updateIsolatedMargin`` top-up — which live has
-            # and paper does not model (ADR-0040 §1). A live flip therefore
-            # holds 0 until the next ingest takes the residual's bucket.
-            return
-        leverage = self.leverage_for(position.symbol)
-        if leverage.mode != "isolated":
-            # Cross posts no bucket of its own — its margin comes out of the
-            # account pool, which is the whole difference between the modes.
+            # and paper does not model (ADR-0040 §1). So a live open or flip
+            # holds 0 on the row, and the bucket reads as unknown until the
+            # next ingest takes the venue's number (#516).
+            self._unposted.add((position.strategy_id, position.symbol))
             return
         position.isolated_collateral = (
             abs(position.signed_size) * position.entry_price / leverage.leverage
@@ -1304,12 +1316,16 @@ class PortfolioProjection:
         unknown rate is not a rate of nothing (ADR-0041 §6). Every branch is
         ``domain.valuation``'s, so a symbol compared by the cadence can never
         disagree with the ``PositionView`` a strategy reads for it.
+
+        Passed ``positions`` carry the snapshot's buckets, so none of them is
+        waiting for the venue (#516). Only the ledger's own rows can be.
         """
         return account_valuation(
             self._positions.values() if positions is None else positions,
             self._mark_prices(),
             leverage=self._leverage,
             specs=self._specs,
+            unposted=self._unposted if positions is None else frozenset(),
         )
 
     def _mark_observed(self) -> dict[str, int]:
@@ -1384,6 +1400,7 @@ class PortfolioProjection:
             leverage=self.leverage_for(position.symbol),
             spec=self._specs.get(position.symbol),
             liquidation=self._liquidation_source(position.symbol),
+            collateral_posted=(position.strategy_id, position.symbol) not in self._unposted,
         )
 
     def _liquidation_source(self, symbol: str) -> LiquidationSource:

@@ -2652,10 +2652,10 @@ def test_a_cycle_ingests_the_venues_locked_collateral_onto_the_partition() -> No
 
     Live never computes this number — ``_lock_isolated_collateral`` declines on
     the declared-versus-ingested predicate — so before the cycle the ledger's
-    bucket is the ``0`` the dataclass opened at, and isolated ``margin_used``,
-    which is ``isolated_collateral + unrealized_pnl``, reports the bare
-    unrealized PnL wearing the bucket's name. That is not a small error: it is
-    the position's mark-to-market where a reader expects its collateral.
+    bucket is the ``0`` the dataclass opened at. That 0 is not the venue's
+    bucket, so the figures that need it read ``None`` until the cycle ingests
+    it (#516). Read as a real bucket, ``margin_used`` was the bare unrealized
+    PnL and a 5x position read 10 802.5x.
 
     The snapshot agrees with the ledger on every Tier-1 line, so the cycle heals
     nothing and the ingest is the only thing it leaves behind. That the pass
@@ -2671,11 +2671,9 @@ def test_a_cycle_ingests_the_venues_locked_collateral_onto_the_partition() -> No
 
     before = projection.position("BTC", strategy_id="alpha")
     assert before is not None
-    # The uPnL alone, because nothing has posted a bucket: the degraded read.
-    assert before.margin_used == Decimal("0.012")
-    # And the denominator it is, which is where the damage is legible — a 5x
-    # position reporting five figures of leverage, on a book that is fine.
-    assert before.effective_leverage == Decimal("10802.5")
+    # Unknown, because nothing has posted a bucket yet.
+    assert before.margin_used is None
+    assert before.effective_leverage is None
 
     asyncio.run(cycle.reconcile_account())
 
