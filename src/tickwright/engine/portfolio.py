@@ -386,10 +386,11 @@ class PortfolioProjection:
         # the reconcile pull and **stale-frozen between cycles**. Empty before
         # the first read, so live reads ``None`` then. Paper never reads it.
         self._venue_liquidation: dict[str, Decimal | None] = {}
-        # Live isolated partitions opened since the last ingest that carried
-        # them. Their row holds 0, but the venue has posted a bucket we have
-        # not read yet, so the figures that need it read ``None`` until then
-        # (#516). In memory only, because recovery rebuilds it from the 0.
+        # Live isolated partitions opened, added to or partly closed since the
+        # last ingest that carried them (#516, #518). Their row holds 0, but the
+        # venue has posted a bucket we have not read yet, so the figures that
+        # need it read ``None`` until then. In memory only, because recovery
+        # rebuilds it from the 0.
         self._unposted: set[tuple[str | None, str]] = set()
 
     def leverage_for(self, symbol: str) -> LeverageSpec:
@@ -763,14 +764,18 @@ class PortfolioProjection:
     def _lock_isolated_collateral(
         self, position: Position, changes: tuple[PositionChange, ...]
     ) -> None:
-        """Move an isolated position's own margin in at open and back out at close.
+        """Set an isolated position's own margin after a fill moves the position.
 
         Paper does not model ``updateIsolatedMargin``, so the bucket is whatever
         the open put in it — ``notional / leverage`` at the entry the fold just
         booked — and nothing between the two ends moves it (ADR-0040 §1). That is
-        why this reads the two regime changes rather than running on every fill:
+        why paper reads the two regime changes rather than running on every fill:
         an add on the same side reports ``CHANGED``, and recomputing there would
         silently top the bucket up.
+
+        Live computes no bucket. An open, an add and a partial close all write
+        0 on the row and wait for the next ingest (#516, #518). The venue moves
+        the bucket on each, by an amount we do not model.
 
         **The close releases on both paths.** A flat position holds no isolated
         margin on the venue, so zero is a fact and not a guess. Isolated
