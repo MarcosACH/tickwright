@@ -74,6 +74,7 @@ def position_view(
     *,
     account_net: Decimal,
     account_unrealized_pnl: Decimal | None,
+    account_isolated_collateral: Decimal | None,
     account_equity: Decimal | None,
     account_maintenance_margin: Decimal | None,
     mark: Decimal | None,
@@ -81,7 +82,6 @@ def position_view(
     leverage: LeverageSpec,
     spec: InstrumentSpec | None,
     liquidation: LiquidationSource,
-    collateral_posted: bool,
 ) -> PositionView:
     """One partition's frozen snapshot, Tier-1 and Tier-2 in one read.
 
@@ -93,6 +93,13 @@ def position_view(
     input rather than the ``unrealized_pnl`` this function computes, because
     those two are the same number only until foreign flow appears in the symbol
     (§5), and the view is required to carry both grains at once.
+
+    ``account_isolated_collateral`` is the symbol's bucket summed over every
+    partition, for the same reason. This partition's own share would value the
+    whole position against part of its backing. Two strategies on one symbol
+    then each read twice the real leverage (#520). It is ``None`` while the
+    venue has not posted a live bucket yet (#516). Paper always posts its own
+    bucket at open.
 
     ``account_equity`` is the whole pool's ``cash + Σ uPnL`` — cross
     ``effective_leverage``'s denominator, and the one input here that no
@@ -144,17 +151,12 @@ def position_view(
     the same reason: ``computed()`` is the *right* answer on paper and a
     forbidden one on live, so a default would make the live path's correctness
     depend on a caller remembering to override it.
-
-    ``collateral_posted`` is ``False`` for a live isolated partition whose
-    bucket the venue has not posted yet. The row then holds 0, but 0 is not
-    what the venue holds, so every figure that needs the bucket reads ``None``
-    (#516). Paper always posts its own bucket at open.
     """
     notional = _notional(account_net, mark)
     unrealized_pnl = _unrealized_pnl(position, mark)
     backing = _backing_collateral(
         leverage=leverage,
-        isolated_collateral=position.isolated_collateral if collateral_posted else None,
+        isolated_collateral=account_isolated_collateral,
         account_unrealized_pnl=account_unrealized_pnl,
         account_equity=account_equity,
     )
@@ -473,6 +475,10 @@ class SymbolValuation:
     """The account-net signed size, over every partition."""
     unrealized_pnl: Decimal | None
     notional: Decimal | None
+    isolated_collateral: Decimal | None
+    """The symbol's isolated bucket, summed over every partition. The venue holds
+    one bucket per position, so every partition's view reads this one (#520).
+    ``None`` while any partition's live bucket is not posted yet (#516)."""
     margin_used: Decimal | None
     """Posted margin by the symbol's mode: cross ``notional / leverage``, isolated
     the locked bucket marked to market (ADR-0040 §3)."""
@@ -600,6 +606,7 @@ def account_valuation(
             net=size,
             unrealized_pnl=upnl[symbol],
             notional=notional,
+            isolated_collateral=buckets[symbol],
             margin_used=_margin_used(
                 notional,
                 leverage=symbol_leverage,

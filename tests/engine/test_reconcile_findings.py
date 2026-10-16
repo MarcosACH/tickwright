@@ -105,6 +105,7 @@ def _row(
         net=Decimal(net),
         unrealized_pnl=None if unrealized_pnl is None else Decimal(unrealized_pnl),
         notional=None if notional is None else Decimal(notional),
+        isolated_collateral=Decimal("0"),
         margin_used=None if margin_used is None else Decimal(margin_used),
         maintenance_margin=None if maintenance_margin is None else Decimal(maintenance_margin),
         leverage=leverage.leverage,

@@ -1185,6 +1185,53 @@ def test_closing_an_isolated_position_releases_the_bucket_it_locked() -> None:
     assert account.free_margin == account.equity == Decimal("100000")
 
 
+_BTC_SPEC = InstrumentSpec(
+    symbol="BTC",
+    sz_decimals=3,
+    max_decimals=6,
+    min_notional=Decimal("0"),
+    margin_maint=Decimal("0.0125"),
+)
+
+
+def test_two_strategies_on_one_isolated_symbol_each_read_the_whole_bucket() -> None:
+    """A position view's margin figures belong to the whole venue position (#520).
+
+    Two strategies each buy 0.001 BTC at 81 735 on 10x isolated. The venue holds
+    one 0.002 position, 163.47 of notional, and one bucket of 16.347. Before the
+    fix, each view read only its own half of the bucket, so `effective_leverage`
+    read 20 on a 10x book.
+
+    The liquidation price is checked against one strategy holding 0.002. That
+    book has one position on the venue, the same as this one. It is 10x and not
+    the issue's 1x, because a 1x long has no liquidation price to compare.
+    """
+    leverage = _ISOLATED_10X
+    shared = _projection(leverage=leverage, specs={"BTC": _BTC_SPEC})
+    book_fill(shared, _fill(trade_id="a1", quantity="0.001", price="81735"), side=Side.BUY)
+    book_fill(
+        shared,
+        _fill(trade_id="b1", quantity="0.001", price="81735", strategy_id="beta"),
+        side=Side.BUY,
+    )
+    alone = _projection(leverage=leverage, specs={"BTC": _BTC_SPEC})
+    book_fill(alone, _fill(trade_id="a1", quantity="0.002", price="81735"), side=Side.BUY)
+    for projection in (shared, alone):
+        projection.observe_mark(_mark(price="81735", ts_event=9_000))
+
+    view = shared.for_strategy("alpha").position("BTC")
+    whole = alone.for_strategy("alpha").position("BTC")
+
+    assert view is not None
+    assert whole is not None
+    assert view.notional == Decimal("163.47")
+    assert view.margin_used == Decimal("16.347")
+    assert view.effective_leverage == Decimal("10")
+    assert shared.account().total_margin_used == Decimal("16.347")
+    assert whole.liquidation_price is not None
+    assert view.liquidation_price == whole.liquidation_price
+
+
 def test_a_flip_through_zero_re_locks_the_bucket_at_the_residual_it_opened() -> None:
     """A close that opens a fresh position in the same fill releases *and* locks.
 

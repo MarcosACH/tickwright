@@ -187,7 +187,7 @@ def test_funding_accrues_on_its_own_line_and_never_into_price_or_pnl() -> None:
         leverage=DEFAULT_LEVERAGE,
         spec=None,
         liquidation=LiquidationSource.computed(),
-        collateral_posted=True,
+        account_isolated_collateral=position.isolated_collateral,
     )
     assert view.funding == Decimal("-0.3")
 

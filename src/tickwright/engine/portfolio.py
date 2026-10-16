@@ -1440,6 +1440,7 @@ class PortfolioProjection:
             position,
             account_net=row.net,
             account_unrealized_pnl=row.unrealized_pnl,
+            account_isolated_collateral=row.isolated_collateral,
             account_equity=account.equity,
             account_maintenance_margin=account.total_maintenance_margin,
             mark=mark.price if mark is not None else None,
@@ -1447,7 +1448,6 @@ class PortfolioProjection:
             leverage=self.leverage_for(position.symbol),
             spec=self._specs.get(position.symbol),
             liquidation=self._liquidation_source(position.symbol),
-            collateral_posted=(position.strategy_id, position.symbol) not in self._unposted,
         )
 
     def _liquidation_source(self, symbol: str) -> LiquidationSource:
