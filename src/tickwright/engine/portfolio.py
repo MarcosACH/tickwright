@@ -761,9 +761,9 @@ class PortfolioProjection:
         an add on the same side reports ``CHANGED``, and recomputing there would
         silently top the bucket up.
 
-        Live computes no bucket. An open, an add and a partial close all write
-        0 on the row and wait for the next ingest (#516, #518). The venue moves
-        the bucket on each, by an amount we do not model.
+        Live computes no bucket. An open, an add and a partial close all leave
+        the bucket unposted until the next ingest (#516, #518, #522). The venue
+        moves the bucket on each, by an amount we do not model.
 
         **The close releases on both paths.** A flat position holds no isolated
         margin on the venue, so zero is a fact and not a guess. Isolated
