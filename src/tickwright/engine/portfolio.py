@@ -386,10 +386,11 @@ class PortfolioProjection:
         # the reconcile pull and **stale-frozen between cycles**. Empty before
         # the first read, so live reads ``None`` then. Paper never reads it.
         self._venue_liquidation: dict[str, Decimal | None] = {}
-        # Live isolated partitions opened since the last ingest that carried
-        # them. Their row holds 0, but the venue has posted a bucket we have
-        # not read yet, so the figures that need it read ``None`` until then
-        # (#516). In memory only, because recovery rebuilds it from the 0.
+        # Live isolated partitions opened, added to or partly closed since the
+        # last ingest that carried them (#516, #518). Their row holds 0, but the
+        # venue has posted a bucket we have not read yet, so the figures that
+        # need it read ``None`` until then. In memory only, because recovery
+        # rebuilds it from the 0.
         self._unposted: set[tuple[str | None, str]] = set()
 
     def leverage_for(self, symbol: str) -> LeverageSpec:
@@ -594,9 +595,10 @@ class PortfolioProjection:
         cross-margined row to.
 
         Returns only the partitions it actually **moved**, so an unchanged book
-        writes nothing: the bucket holds still between ``updateIsolatedMargin``
-        calls, and it is mark-invariant by construction (``marginUsed −
-        unrealizedPnl``), so the steady state is a cycle with nothing to ingest.
+        writes nothing: the bucket holds still between fills and
+        ``updateIsolatedMargin`` calls, and it is mark-invariant by construction
+        (``marginUsed − unrealizedPnl``), so the steady state is a cycle with
+        nothing to ingest.
         Reporting every partition instead would re-stamp every position row on
         every deadline, which is the same indistinguishable-from-a-correction
         write ``apply_funding``'s ``None`` refuses one grain up.
@@ -763,14 +765,18 @@ class PortfolioProjection:
     def _lock_isolated_collateral(
         self, position: Position, changes: tuple[PositionChange, ...]
     ) -> None:
-        """Move an isolated position's own margin in at open and back out at close.
+        """Set an isolated position's own margin after a fill moves the position.
 
         Paper does not model ``updateIsolatedMargin``, so the bucket is whatever
         the open put in it — ``notional / leverage`` at the entry the fold just
         booked — and nothing between the two ends moves it (ADR-0040 §1). That is
-        why this reads the two regime changes rather than running on every fill:
+        why paper reads the two regime changes rather than running on every fill:
         an add on the same side reports ``CHANGED``, and recomputing there would
         silently top the bucket up.
+
+        Live computes no bucket. An open, an add and a partial close all write
+        0 on the row and wait for the next ingest (#516, #518). The venue moves
+        the bucket on each, by an amount we do not model.
 
         **The close releases on both paths.** A flat position holds no isolated
         margin on the venue, so zero is a fact and not a guess. Isolated
@@ -797,7 +803,8 @@ class PortfolioProjection:
             position.isolated_collateral = _ZERO
             # A flat bucket of 0 is known, so it no longer waits for the venue.
             self._unposted.discard((position.strategy_id, position.symbol))
-        if PositionChange.OPENED not in changes:
+        opened = PositionChange.OPENED in changes
+        if not opened and PositionChange.CHANGED not in changes:
             return
         leverage = self.leverage_for(position.symbol)
         if leverage.mode != "isolated":
@@ -814,7 +821,16 @@ class PortfolioProjection:
             # and paper does not model (ADR-0040 §1). So a live open or flip
             # holds 0 on the row, and the bucket reads as unknown until the
             # next ingest takes the venue's number (#516).
+            #
+            # An add or a partial close waits the same way. The venue moves the
+            # bucket by an amount we do not model, so the last ingested number
+            # no longer matches the position (#518). The row goes to 0 too,
+            # because a restart reads only a restored 0 as waiting.
+            position.isolated_collateral = _ZERO
             self._unposted.add((position.strategy_id, position.symbol))
+            return
+        if not opened:
+            # Paper keeps the open's bucket until the close (ADR-0040 §1).
             return
         position.isolated_collateral = (
             abs(position.signed_size) * position.entry_price / leverage.leverage
