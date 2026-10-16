@@ -850,6 +850,40 @@ def test_a_live_add_to_an_isolated_position_reads_unknown_until_the_next_ingest(
     assert posted.margin_used == Decimal("163.49")
 
 
+def test_a_live_partial_close_of_an_isolated_position_reads_unknown_until_the_next_ingest() -> None:
+    """The venue moves the bucket on a partial close too, by an amount we do not model (#518).
+
+    A 0.002 long at 81 735 with its 163.47 bucket posted sells half at 81 745.
+    The old bucket would read 0.5x on a 1x position. After the venue posts
+    81.735, the 0.001 left marked at 81 745 reads 81.735 + 0.01.
+    """
+    projection = _projection(
+        None, leverage=LeverageBook(entries={"BTC": LeverageSpec(mode="isolated", leverage=1)})
+    )
+    book_fill(projection, _fill(trade_id="f1", quantity="0.002", price="81735"), side=Side.BUY)
+    projection.observe_mark(_mark(price="81745", ts_event=9_000))
+    projection.apply_heal(
+        (), snapshot=venue_holding(BTC=Decimal("163.47"), sizes={"BTC": Decimal("0.002")})
+    )
+
+    book_fill(projection, _fill(trade_id="f2", quantity="0.001", price="81745"), side=Side.SELL)
+
+    reduced = projection.for_strategy("alpha").position("BTC")
+    assert reduced is not None
+    assert reduced.size == Decimal("0.001")
+    assert reduced.margin_used is None
+    assert reduced.effective_leverage is None
+    assert projection.account().free_margin is None
+
+    projection.apply_heal(
+        (), snapshot=venue_holding(BTC=Decimal("81.735"), sizes={"BTC": Decimal("0.001")})
+    )
+
+    posted = projection.for_strategy("alpha").position("BTC")
+    assert posted is not None
+    assert posted.margin_used == Decimal("81.745")
+
+
 def test_an_account_read_taken_before_a_live_open_leaves_its_bucket_unknown() -> None:
     """The cadence reads the venue, then waits, and a fill can land meanwhile.
 
