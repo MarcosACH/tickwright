@@ -797,12 +797,21 @@ class PortfolioProjection:
             position.isolated_collateral = _ZERO
             # A flat bucket of 0 is known, so it no longer waits for the venue.
             self._unposted.discard((position.strategy_id, position.symbol))
-        if PositionChange.OPENED not in changes:
+        opened = PositionChange.OPENED in changes
+        if not opened and PositionChange.CHANGED not in changes:
             return
         leverage = self.leverage_for(position.symbol)
         if leverage.mode != "isolated":
             # Cross posts no bucket of its own — its margin comes out of the
             # account pool, which is the whole difference between the modes.
+            return
+        if not opened:
+            if not self._spec.declares_genesis:
+                # The venue moves the bucket for an add or a partial close, and
+                # we do not know by how much. The last ingested number no longer
+                # matches the position, so it reads as unknown until the next
+                # ingest (#518). Paper keeps the open's bucket (ADR-0040 §1).
+                self._unposted.add((position.strategy_id, position.symbol))
             return
         if not self._spec.declares_genesis:
             # The declared-versus-ingested predicate, the same one recovery's

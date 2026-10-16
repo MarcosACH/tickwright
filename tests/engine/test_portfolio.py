@@ -818,6 +818,38 @@ def test_a_live_flip_through_zero_reads_unknown_until_the_next_ingest() -> None:
     assert posted.margin_used == Decimal("81.745")
 
 
+def test_a_live_add_to_an_isolated_position_reads_unknown_until_the_next_ingest() -> None:
+    """The venue moves margin in for the added size, and we do not know how much (#518).
+
+    Kept at the open's 81.735, the bucket read 2x on a 1x position after a
+    second 0.001 at 81 735. Free margin read too high by the added bucket.
+    After the venue posts the new bucket, the figures are real again.
+    """
+    projection = _isolated_1x(None)
+    projection.apply_heal(
+        (), snapshot=venue_holding(BTC=Decimal("81.735"), sizes={"BTC": Decimal("0.001")})
+    )
+
+    book_fill(projection, _fill(trade_id="f2", quantity="0.001", price="81735"), side=Side.BUY)
+
+    added = projection.for_strategy("alpha").position("BTC")
+    account = projection.account()
+    assert added is not None
+    assert added.size == Decimal("0.002")
+    assert added.margin_used is None
+    assert added.effective_leverage is None
+    assert account.total_margin_used is None
+    assert account.free_margin is None
+
+    projection.apply_heal(
+        (), snapshot=venue_holding(BTC=Decimal("163.47"), sizes={"BTC": Decimal("0.002")})
+    )
+
+    posted = projection.for_strategy("alpha").position("BTC")
+    assert posted is not None
+    assert posted.margin_used == Decimal("163.49")
+
+
 def test_an_account_read_taken_before_a_live_open_leaves_its_bucket_unknown() -> None:
     """The cadence reads the venue, then waits, and a fill can land meanwhile.
 
