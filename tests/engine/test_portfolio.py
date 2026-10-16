@@ -884,6 +884,29 @@ def test_a_live_partial_close_of_an_isolated_position_reads_unknown_until_the_ne
     assert posted.margin_used == Decimal("81.745")
 
 
+def test_a_live_add_to_a_cross_position_keeps_its_margin_figures() -> None:
+    """Cross holds no bucket of its own, so an add has nothing to wait for (#518).
+
+    Two 0.001 buys at 81 735 on 1x cross, marked at 81 745. The margin is the
+    notional over the leverage, 163.49. Cross leverage divides by account
+    equity, which no ingest has set here, so the test only needs it known.
+    """
+    projection = _projection(
+        None, leverage=LeverageBook(entries={"BTC": LeverageSpec(mode="cross", leverage=1)})
+    )
+    book_fill(projection, _fill(trade_id="f1", quantity="0.001", price="81735"), side=Side.BUY)
+    book_fill(projection, _fill(trade_id="f2", quantity="0.001", price="81735"), side=Side.BUY)
+    projection.observe_mark(_mark(price="81745", ts_event=9_000))
+
+    view = projection.for_strategy("alpha").position("BTC")
+    account = projection.account()
+    assert view is not None
+    assert view.margin_used == Decimal("163.49")
+    assert view.effective_leverage is not None
+    assert account.total_margin_used == Decimal("163.49")
+    assert account.free_margin is not None
+
+
 def test_an_account_read_taken_before_a_live_open_leaves_its_bucket_unknown() -> None:
     """The cadence reads the venue, then waits, and a fill can land meanwhile.
 
