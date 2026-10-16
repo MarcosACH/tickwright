@@ -227,6 +227,16 @@ def _book_fill(
     )
 
 
+def _posted(keeper: Checkpointer, *positions: tuple[str, str, str]) -> None:
+    """An earlier cycle already posted the book's isolated buckets (#522).
+
+    A live open leaves its bucket unposted, and the first cycle that carries the
+    position posts it. That post is a Tier-1 write. So a case about a cycle that
+    writes nothing has to start after it.
+    """
+    keeper.checkpoint_heal((), snapshot=_held("100000", *positions))
+
+
 def test_a_cycle_whose_snapshot_matches_the_ledger_reports_no_divergence() -> None:
     """The agreeing pass, and the anchor it rests on: **one** account read is the
     whole cycle's venue cost (ADR-0034), so the read count is also the assertion
@@ -1235,6 +1245,7 @@ def test_a_cycle_that_finds_only_tier_2_divergence_changes_no_stored_value() -> 
     keeper = _ledger(store, equity="100000")
     projection = keeper.portfolio
     _book_fill(projection, quantity="0.002", price="64809")
+    _posted(keeper, ("BTC", "0.002", "0"))
     _mark(projection, "BTC", "65000")
     opened = store.load_account()
     stored = store.all_positions()
@@ -1328,6 +1339,7 @@ def test_a_mode_frozen_pass_writes_nothing_and_leaves_the_book_readable() -> Non
     keeper = _ledger(store, equity="100000")
     projection = keeper.portfolio
     _book_fill(projection, quantity="0.002", price="64809")
+    _posted(keeper, ("BTC", "0.002", "0"))
     held = projection.open_positions(strategy_id="alpha")
     venue = _AccountVenue(_held("100500", ("BTC", "0.002", "0")), mode=AccountModeVerdict.CHANGED)
     cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
@@ -2471,6 +2483,7 @@ def test_a_cycle_that_finds_only_leverage_drift_writes_nothing_and_cannot_re_pus
     store = _SealedStore(":memory:")
     keeper = _ledger(store, equity="100000", leverage=_BTC_DEFAULT)
     _book_fill(keeper.portfolio, quantity="0.002", price="64809")
+    _posted(keeper, ("BTC", "0.002", "0"))
     opened = store.load_account()
     stored = store.all_positions()
     assert opened is not None
@@ -2652,9 +2665,8 @@ def test_a_cycle_ingests_the_venues_locked_collateral_onto_the_partition() -> No
 
     Live never computes this number — ``_lock_isolated_collateral`` declines on
     the declared-versus-ingested predicate — so before the cycle the ledger's
-    bucket is the ``0`` the dataclass opened at. That 0 is not the venue's
-    bucket, so the figures that need it read ``None`` until the cycle ingests
-    it (#516). Read as a real bucket, ``margin_used`` was the bare unrealized
+    bucket is unposted, and the figures that need it read ``None`` until the
+    cycle ingests it (#516, #522). Read as a real bucket, ``margin_used`` was the bare unrealized
     PnL and a 5x position read 10 802.5x.
 
     The snapshot agrees with the ledger on every Tier-1 line, so the cycle heals
@@ -3768,6 +3780,7 @@ def test_an_alerted_tier_2_divergence_still_changes_no_stored_value() -> None:
     keeper = _ledger(store, equity="100000")
     projection = keeper.portfolio
     _book_fill(projection, quantity="0.002", price="64809")
+    _posted(keeper, ("BTC", "0.002", "0"))
     _mark(projection, "BTC", "65000")
     opened = store.load_account()
     stored = store.all_positions()

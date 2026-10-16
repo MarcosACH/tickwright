@@ -589,10 +589,9 @@ class PortfolioProjection:
 
         A venue ``None`` is the same release, and it is a *positive* claim
         rather than a gap — the adapter refuses to guess a mode, so ``None``
-        here is "cross, backed by the account pool" (ADR-0043 §3). Our own
-        in-memory field is a plain ``Decimal``, so both cases land on ``0``,
-        which is the value the store's nullable column already restores a
-        cross-margined row to.
+        here is "cross, backed by the account pool" (ADR-0043 §3). Both cases
+        land on ``0``. Our own ``None`` means something else, an unposted
+        bucket (#522).
 
         Returns only the partitions it actually **moved**, so an unchanged book
         writes nothing: the bucket holds still between fills and
@@ -603,15 +602,12 @@ class PortfolioProjection:
         every deadline, which is the same indistinguishable-from-a-correction
         write ``apply_funding``'s ``None`` refuses one grain up.
 
-        A waiting bucket is posted only by a snapshot that **carries** our
+        An unposted bucket is posted only by a snapshot that **carries** our
         position, meaning the venue's size for the symbol equals our account
         net (#516). The cadence reads the venue and then waits, and a fill can
         land in between. A snapshot older than that fill describes a position
-        we no longer hold, so its bucket is not ours. Such a snapshot also
-        writes nothing onto a waiting row. The row is what a crash saves, and a
-        restart reads only a restored 0 as waiting. Once carried, a share that
-        does not move still posts: a venue 0 read back onto a row at 0 is a
-        posted 0. A partition that is not waiting takes its share as before.
+        we no longer hold, so its bucket is not ours. A partition whose bucket
+        is posted takes its share as before.
         """
         venue = {position.symbol: position.signed_size for position in snapshot.positions}
         carried = {
@@ -621,11 +617,8 @@ class PortfolioProjection:
         }
         moved: list[Position] = []
         for position, share in self._venue_shares(snapshot):
-            key = (position.strategy_id, position.symbol)
-            if key in self._unposted:
-                if position.symbol not in carried:
-                    continue
-                self._unposted.discard(key)
+            if position.isolated_collateral is None and position.symbol not in carried:
+                continue
             if position.isolated_collateral != share:
                 position.isolated_collateral = share
                 moved.append(position)
@@ -800,9 +793,8 @@ class PortfolioProjection:
         reconfigured with.
         """
         if PositionChange.CLOSED in changes:
-            position.isolated_collateral = _ZERO
             # A flat bucket of 0 is known, so it no longer waits for the venue.
-            self._unposted.discard((position.strategy_id, position.symbol))
+            position.isolated_collateral = _ZERO
         opened = PositionChange.OPENED in changes
         if not opened and PositionChange.CHANGED not in changes:
             return
@@ -819,15 +811,14 @@ class PortfolioProjection:
             # number on the ledger the venue never posted, and would be wrong
             # from the first ``updateIsolatedMargin`` top-up — which live has
             # and paper does not model (ADR-0040 §1). So a live open or flip
-            # holds 0 on the row, and the bucket reads as unknown until the
-            # next ingest takes the venue's number (#516).
+            # leaves the bucket unposted, unknown until the next ingest takes
+            # the venue's number (#516).
             #
             # An add or a partial close waits the same way. The venue moves the
             # bucket by an amount we do not model, so the last ingested number
-            # no longer matches the position (#518). The row goes to 0 too,
-            # because a restart reads only a restored 0 as waiting.
-            position.isolated_collateral = _ZERO
-            self._unposted.add((position.strategy_id, position.symbol))
+            # no longer matches the position (#518). The row saves the unposted
+            # state too, so a restart reads it as unknown (#522).
+            position.isolated_collateral = None
             return
         if not opened:
             # Paper keeps the open's bucket until the close (ADR-0040 §1).
@@ -1066,19 +1057,6 @@ class PortfolioProjection:
             (position.strategy_id, position.symbol): position
             for position in self._store.all_positions()
         }
-        if not self._spec.declares_genesis:
-            # A crash inside the unposted window saved the row's 0, and a live
-            # restart with an open ledger makes no account read at boot. An
-            # open isolated position always holds a bucket on the venue, so a
-            # restored 0 is one we never read (#516). If that is ever wrong,
-            # the cost is ``None`` until the first ingest, never a wrong number.
-            self._unposted = {
-                key
-                for key, position in self._positions.items()
-                if position.signed_size != _ZERO
-                and position.isolated_collateral == _ZERO
-                and self.leverage_for(position.symbol).mode == "isolated"
-            }
 
     def _refuse_disagreement(self, stored: Account | None) -> None:
         """Refuse a store this engine may not trade (ADR-0043 §10).
