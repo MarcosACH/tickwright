@@ -72,34 +72,31 @@ class LiquidationSource:
 def position_view(
     position: Position,
     *,
-    account_net: Decimal,
-    account_unrealized_pnl: Decimal | None,
-    account_isolated_collateral: Decimal | None,
+    row: "SymbolValuation",
     account_equity: Decimal | None,
     account_maintenance_margin: Decimal | None,
     mark: Decimal | None,
     mark_ts: int | None,
-    leverage: LeverageSpec,
     spec: InstrumentSpec | None,
     liquidation: LiquidationSource,
 ) -> PositionView:
     """One partition's frozen snapshot, Tier-1 and Tier-2 in one read.
 
-    ``account_net`` is the symbol's size summed over **every** partition, the
-    grain the position-grain half is computed at, and ``account_unrealized_pnl``
-    is that same Σ one tier up — the whole venue position's mark-to-market,
-    which isolated ``margin_used`` needs because the venue holds one collateral
-    bucket per position and not one per strategy (ADR-0041 §4). It is a separate
-    input rather than the ``unrealized_pnl`` this function computes, because
-    those two are the same number only until foreign flow appears in the symbol
-    (§5), and the view is required to carry both grains at once.
-
-    ``account_isolated_collateral`` is the symbol's bucket summed over every
-    partition, for the same reason. This partition's own share would value the
-    whole position against part of its backing. Two strategies on one symbol
-    then each read twice the real leverage (#520). It is ``None`` while the
+    ``row`` is the symbol's ``account_valuation`` row, folded over **every**
+    partition. The venue holds one position per symbol and one bucket behind
+    it, so the position-grain half of the view describes that whole position
+    (ADR-0041 §4). ``notional``, ``margin_used``, ``maintenance_margin`` and the
+    leverage pair are the row's own figures. The backing below reads the row's
+    net, uPnL and bucket. So a view cannot disagree with the row the reconcile
+    cadence reads. The view used to take those terms one at a time, and one of
+    them came from the wrong grain. Two strategies on one isolated symbol then
+    each read half the margin (#520). The row's bucket is ``None`` while the
     venue has not posted a live bucket yet (#516). Paper always posts its own
     bucket at open.
+
+    The view's own ``unrealized_pnl`` is still computed here, off this
+    partition's fills. It and the row's uPnL are the same number only until
+    foreign flow appears in the symbol (§5), and the view carries both grains.
 
     ``account_equity`` is the whole pool's ``cash + Σ uPnL`` — cross
     ``effective_leverage``'s denominator, and the one input here that no
@@ -120,12 +117,13 @@ def position_view(
     unknown-as-worthless mistake one grain down. The **isolated** branch never
     reads it: a ring-fenced bucket answers for itself.
 
-    ``mark`` is the latest mark the
-    projection holds for this symbol and ``mark_ts`` its observation instant,
-    both ``None`` when it holds none. Every input is explicit and required —
+    ``mark`` is the latest mark the projection holds for this symbol and
+    ``mark_ts`` its observation instant, both ``None`` when it holds none. It
+    must be the mark the row was folded at. Another one would value this slice
+    and the whole position at two prices. Every input is explicit and required —
     there is no defaulting, because each default would be a wrong answer a caller
-    could take silently: a missing ``account_net`` reads as a flat book, and a
-    missing ``mark`` as a valuation that was merely never made.
+    could take silently: a missing ``row`` reads as a flat book, and a missing
+    ``mark`` as a valuation that was merely never made.
 
     The mark's **value** is deliberately not a field of the result: a strategy
     judges freshness for itself (it holds a ``Clock``, and the read path is
@@ -136,15 +134,14 @@ def position_view(
     reads ``None`` only when the mark is absent *and its own terms need it*, so
     a flat slice still reads a real ``0``.
 
-    ``leverage`` is the resolved ``(mode, leverage)`` pair for the symbol — one
-    value rather than two, because the venue action that sets it is one signed
-    action (ADR-0044 §2). It is the margin model's only operator-authored input.
-
     ``spec`` carries the venue-authored side of the margin model. It is
     nullable and undefaulted for opposite reasons: ``None`` is reachable —
     the reserved unattributed partition can hold a symbol outside our
     configured universe, and no spec exists for it — while a *default* would
-    hand that same silence to a caller who never considered the case.
+    hand that same silence to a caller who never considered the case. The row
+    has already used it for ``maintenance_margin``. Here it gives the
+    liquidation formula its rate, so it must be the spec the row was folded
+    with.
 
     ``liquidation`` is the one field's compute/read-through switch (ADR-0040
     §3). Required and undefaulted like the rest, and for the sharpest version of
@@ -152,15 +149,12 @@ def position_view(
     forbidden one on live, so a default would make the live path's correctness
     depend on a caller remembering to override it.
     """
-    notional = _notional(account_net, mark)
-    unrealized_pnl = _unrealized_pnl(position, mark)
     backing = _backing_collateral(
-        leverage=leverage,
-        isolated_collateral=account_isolated_collateral,
-        account_unrealized_pnl=account_unrealized_pnl,
+        mode=row.margin_mode,
+        isolated_collateral=row.isolated_collateral,
+        account_unrealized_pnl=row.unrealized_pnl,
         account_equity=account_equity,
     )
-    maintenance_margin = _maintenance_margin(notional, spec=spec)
     return PositionView(
         symbol=position.symbol,
         size=position.signed_size,
@@ -168,33 +162,33 @@ def position_view(
         realized_pnl=position.realized_pnl,
         fees=position.fees,
         funding=position.funding,
-        unrealized_pnl=unrealized_pnl,
-        notional=notional,
-        leverage=leverage.leverage,
-        margin_mode=leverage.mode,
-        margin_used=_margin_used(notional, leverage=leverage, backing=backing),
-        maintenance_margin=maintenance_margin,
+        unrealized_pnl=_unrealized_pnl(position, mark),
+        notional=row.notional,
+        leverage=row.leverage,
+        margin_mode=row.margin_mode,
+        margin_used=row.margin_used,
+        maintenance_margin=row.maintenance_margin,
         liquidation_price=liquidation.resolve(
             _liquidation_price(
-                account_net=account_net,
+                account_net=row.net,
                 mark=mark,
                 backing=backing,
                 maintenance=_liquidation_maintenance(
-                    leverage=leverage,
-                    maintenance_margin=maintenance_margin,
+                    mode=row.margin_mode,
+                    maintenance_margin=row.maintenance_margin,
                     account_maintenance_margin=account_maintenance_margin,
                 ),
                 spec=spec,
             )
         ),
-        effective_leverage=_effective_leverage(notional, backing=backing),
+        effective_leverage=_effective_leverage(row.notional, backing=backing),
         mark_ts=mark_ts,
     )
 
 
 def _backing_collateral(
     *,
-    leverage: LeverageSpec,
+    mode: MarginMode,
     isolated_collateral: Decimal | None,
     account_unrealized_pnl: Decimal | None,
     account_equity: Decimal | None,
@@ -219,7 +213,7 @@ def _backing_collateral(
     A ``None`` bucket is one the venue has not posted yet (#516). Cross never
     reads it, because cross has no bucket.
     """
-    if leverage.mode == "isolated":
+    if mode == "isolated":
         if isolated_collateral is None or account_unrealized_pnl is None:
             return None
         return isolated_collateral + account_unrealized_pnl
@@ -228,7 +222,7 @@ def _backing_collateral(
 
 def _liquidation_maintenance(
     *,
-    leverage: LeverageSpec,
+    mode: MarginMode,
     maintenance_margin: Decimal | None,
     account_maintenance_margin: Decimal | None,
 ) -> Decimal | None:
@@ -265,7 +259,7 @@ def _liquidation_maintenance(
     maintenance and wrong in the safe direction, recorded as an accepted error
     on ADR-0040 §3 rather than left to arithmetic nobody has checked.
     """
-    if leverage.mode == "isolated":
+    if mode == "isolated":
         return maintenance_margin
     return account_maintenance_margin
 
@@ -576,7 +570,8 @@ def account_valuation(
 
     Three partition-grain terms are accumulated in one pass: the account-net
     size, the account-net uPnL and the isolated bucket. Every Tier-2 figure is
-    then arithmetic per symbol, through the same helpers ``position_view`` uses.
+    then arithmetic per symbol. ``position_view`` reads its position-grain
+    figures off these rows rather than computing them again (#520).
 
     ``account_equity`` is ``None`` into ``_backing_collateral`` on purpose. It
     is cross's backing, which ``effective_leverage`` and ``liquidation_price``
@@ -611,7 +606,7 @@ def account_valuation(
                 notional,
                 leverage=symbol_leverage,
                 backing=_backing_collateral(
-                    leverage=symbol_leverage,
+                    mode=symbol_leverage.mode,
                     isolated_collateral=buckets[symbol],
                     account_unrealized_pnl=upnl[symbol],
                     account_equity=None,

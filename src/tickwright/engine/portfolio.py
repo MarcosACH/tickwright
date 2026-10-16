@@ -1408,9 +1408,10 @@ class PortfolioProjection:
         The mark is resolved here, from the private cache, rather than passed in
         by the caller: pushing mark-sourcing onto every reader is exactly what
         the single always-available read path exists to prevent (ADR-0034/0039).
-        The configured leverage, the instrument spec and the liquidation
-        compute/read-through switch arrive the same way and for the same reason
-        — all four are lookups this object already holds.
+        The instrument spec and the liquidation compute/read-through switch
+        arrive the same way and for the same reason. All three are lookups this
+        object already holds. The configured leverage is not passed. It is on
+        the row, which was valued against it.
 
         ``rows`` and ``account`` are the two the caller must supply, because
         each is a **fold over every position** rather than a lookup: taken here
@@ -1435,17 +1436,13 @@ class PortfolioProjection:
         and a fallback here would read that as a flat symbol and hide it.
         """
         mark = self._marks.get(position.symbol)
-        row = rows[position.symbol]
         return position_view(
             position,
-            account_net=row.net,
-            account_unrealized_pnl=row.unrealized_pnl,
-            account_isolated_collateral=row.isolated_collateral,
+            row=rows[position.symbol],
             account_equity=account.equity,
             account_maintenance_margin=account.total_maintenance_margin,
             mark=mark.price if mark is not None else None,
             mark_ts=mark.ts_event if mark is not None else None,
-            leverage=self.leverage_for(position.symbol),
             spec=self._specs.get(position.symbol),
             liquidation=self._liquidation_source(position.symbol),
         )
