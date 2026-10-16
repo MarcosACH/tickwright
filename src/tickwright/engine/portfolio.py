@@ -805,14 +805,6 @@ class PortfolioProjection:
             # Cross posts no bucket of its own — its margin comes out of the
             # account pool, which is the whole difference between the modes.
             return
-        if not opened:
-            if not self._spec.declares_genesis:
-                # The venue moves the bucket for an add or a partial close, and
-                # we do not know by how much. The last ingested number no longer
-                # matches the position, so it reads as unknown until the next
-                # ingest (#518). Paper keeps the open's bucket (ADR-0040 §1).
-                self._unposted.add((position.strategy_id, position.symbol))
-            return
         if not self._spec.declares_genesis:
             # The declared-versus-ingested predicate, the same one recovery's
             # genesis seed turns on (ADR-0043 §10): paper *declares* the margin
@@ -823,7 +815,16 @@ class PortfolioProjection:
             # and paper does not model (ADR-0040 §1). So a live open or flip
             # holds 0 on the row, and the bucket reads as unknown until the
             # next ingest takes the venue's number (#516).
+            #
+            # An add or a partial close waits the same way. The venue moves the
+            # bucket by an amount we do not model, so the last ingested number
+            # no longer matches the position (#518). The row goes to 0 too,
+            # because a restart reads only a restored 0 as waiting.
+            position.isolated_collateral = _ZERO
             self._unposted.add((position.strategy_id, position.symbol))
+            return
+        if not opened:
+            # Paper keeps the open's bucket until the close (ADR-0040 §1).
             return
         position.isolated_collateral = (
             abs(position.signed_size) * position.entry_price / leverage.leverage
