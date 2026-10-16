@@ -386,12 +386,6 @@ class PortfolioProjection:
         # the reconcile pull and **stale-frozen between cycles**. Empty before
         # the first read, so live reads ``None`` then. Paper never reads it.
         self._venue_liquidation: dict[str, Decimal | None] = {}
-        # Live isolated partitions opened, added to or partly closed since the
-        # last ingest that carried them (#516, #518). Their row holds 0, but the
-        # venue has posted a bucket we have not read yet, so the figures that
-        # need it read ``None`` until then. In memory only, because recovery
-        # rebuilds it from the 0.
-        self._unposted: set[tuple[str | None, str]] = set()
 
     def leverage_for(self, symbol: str) -> LeverageSpec:
         """The margin mode and leverage this run computes ``symbol`` against.
@@ -1341,16 +1335,12 @@ class PortfolioProjection:
         unknown rate is not a rate of nothing (ADR-0041 §6). Every branch is
         ``domain.valuation``'s, so a symbol compared by the cadence can never
         disagree with the ``PositionView`` a strategy reads for it.
-
-        Passed ``positions`` carry the snapshot's buckets, so none of them is
-        waiting for the venue (#516). Only the ledger's own rows can be.
         """
         return account_valuation(
             self._positions.values() if positions is None else positions,
             self._mark_prices(),
             leverage=self._leverage,
             specs=self._specs,
-            unposted=self._unposted if positions is None else frozenset(),
         )
 
     def _mark_observed(self) -> dict[str, int]:

@@ -14,7 +14,7 @@ construction**: every field comes from one ``(position, mark)`` read, so two
 fields of one view can never straddle a fill (ADR-0041 §1).
 """
 
-from collections.abc import Iterable, Mapping, Set
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Self
@@ -567,7 +567,6 @@ def account_valuation(
     *,
     leverage: LeverageBook,
     specs: Mapping[str, InstrumentSpec],
-    unposted: Set[tuple[str | None, str]],
 ) -> dict[str, SymbolValuation]:
     """Every symbol's account-grain row, folded once over the book.
 
@@ -586,9 +585,8 @@ def account_valuation(
     read, while cross's margin is ``notional / leverage`` and never does
     (ADR-0040 §3).
 
-    ``unposted`` names the ``(strategy_id, symbol)`` partitions whose live
-    bucket the venue has not posted yet (#516). One of them makes its symbol's
-    bucket unknown, because the symbol's bucket is the sum over its partitions.
+    One unposted bucket makes its symbol's bucket unknown, because the symbol's
+    bucket is the sum over its partitions (#516, #522).
     """
     held = tuple(positions)
     upnl: dict[str, Decimal | None] = {}
@@ -596,10 +594,7 @@ def account_valuation(
     for position in held:
         symbol = position.symbol
         upnl[symbol] = _total(upnl.get(symbol, _ZERO), _unrealized_pnl(position, marks.get(symbol)))
-        bucket = (
-            None if (position.strategy_id, symbol) in unposted else position.isolated_collateral
-        )
-        buckets[symbol] = _total(buckets.get(symbol, _ZERO), bucket)
+        buckets[symbol] = _total(buckets.get(symbol, _ZERO), position.isolated_collateral)
     rows: dict[str, SymbolValuation] = {}
     for symbol, size in account_net_size(held).items():
         symbol_leverage = leverage.for_symbol(symbol)
