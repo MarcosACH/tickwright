@@ -851,6 +851,12 @@ an admission gate this surface does not implement), margin **call**, buying powe
 (enforcement/broker terms — this surface only reports), margin **tier** (the piecewise table is a
 deferred extension point).
 
+**Unposted bucket**:
+A live isolated `isolated_collateral` the venue has not posted since our last open, add or partial
+close of that [[Position]], so its value is unknown and the figures built on it read `None`. Only an
+account read that carries the position posts it. Paper never has one. See ADR-0041 §6, ADR-0043 §3.
+_Avoid_: waiting bucket, pending collateral.
+
 **Leverage** & **Margin mode**:
 A **per-symbol / per-position** input (not an [[AccountSpec]] fact): the integer leverage and
 `cross`/`isolated` mode that set a [[Position]]'s [[Margin|margin_used]], carried together as one

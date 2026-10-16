@@ -127,22 +127,15 @@ def test_a_null_entry_price_restores_a_flat_position() -> None:
     assert restored.realized_pnl == Decimal("125.5")
 
 
-def test_a_null_isolated_collateral_restores_a_cross_margined_position() -> None:
-    """The same read half for the other nullable column (ADR-0043 §3), where
-    ``NULL`` means *cross-margined* rather than an isolated position wiped to
-    ``0``. No writer produces it yet — margin mode does not exist in the model —
-    but the schema admits the row today, and ``Decimal(None)`` raises
-    ``TypeError``, which is not a driver error and so would escape
-    ``all_positions()`` unwrapped, past the seam's ``InvariantViolation``
-    contract, on the recovery path.
+def test_a_null_isolated_collateral_restores_an_unposted_bucket() -> None:
+    """``NULL`` in the other nullable column is an unposted bucket (#522).
 
-    It restores to ``0`` for the reason ``entry_price`` does: the aggregate has
-    no ``None`` to hold, and the distinction the column keeps is the durable one.
-    The *write* branch — emitting ``NULL`` for a genuinely cross-margined
-    position — belongs to the slice that first produces one (#190/#176)."""
+    It restores to ``None`` and not to ``0``, because a real venue bucket of 0
+    is a different fact that must still read as posted after a restart.
+    """
     row = ("trivial", "BTC", "2", "50000.25", "0", "0", "0", None, 1_000)
 
     restored = restore_position(row)
 
-    assert restored.isolated_collateral == Decimal("0")
+    assert restored.isolated_collateral is None
     assert restored.entry_price == Decimal("50000.25")

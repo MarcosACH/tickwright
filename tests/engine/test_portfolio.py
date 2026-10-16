@@ -700,7 +700,8 @@ def test_live_leaves_an_isolated_collateral_the_venue_is_the_authority_for_alone
     does not.
 
     Identical inputs to the case above, so the only thing that differs is which
-    side of that predicate the account sits on.
+    side of that predicate the account sits on. The bucket is unposted until
+    the venue posts it (#522).
     """
     projection = _projection(
         None, leverage=LeverageBook(entries={"BTC": LeverageSpec(mode="isolated", leverage=10)})
@@ -709,7 +710,7 @@ def test_live_leaves_an_isolated_collateral_the_venue_is_the_authority_for_alone
         _fill(trade_id="f1", quantity="0.5", price="42000"), side=Side.BUY
     )
 
-    assert change.position.isolated_collateral == Decimal("0")
+    assert change.position.isolated_collateral is None
 
 
 def _isolated_1x(genesis: str | None) -> PortfolioProjection:
@@ -822,7 +823,7 @@ def test_a_live_flip_through_zero_reads_unknown_until_the_next_ingest() -> None:
     """A flip owes the residual's bucket, which only the venue knows (#516).
 
     The long's bucket was posted, then a sell of 0.002 flips it to a short of
-    0.001 at 81 745. The row's 0 is not the new leg's bucket. After the venue
+    0.001 at 81 745. The new leg's bucket is unposted. After the venue
     posts 81.745, the short marked at its entry reads that bucket alone.
     """
     projection = _isolated_1x(None)
@@ -965,10 +966,9 @@ def test_an_account_read_taken_before_a_live_open_leaves_its_bucket_unknown() ->
 def test_an_account_read_taken_before_a_live_flip_writes_no_bucket_onto_it() -> None:
     """A read that still holds the old long has the old leg's bucket (#516).
 
-    Written onto the short's row, that bucket is what a crash would save. A
-    restart reads only a restored 0 as waiting, so the next life would read
-    the old leg's bucket as the short's. The ingest leaves the row at 0, which
-    writes nothing, and the short stays unknown.
+    Written onto the short's row, that bucket is what a crash would save, so
+    the next life would read the old leg's bucket as the short's. The ingest
+    leaves the row unposted, which writes nothing, and the short stays unknown.
     """
     projection = _isolated_1x(None)
     projection.apply_heal(
@@ -990,7 +990,7 @@ def _live_restart(bucket: str | None) -> PortfolioProjection:
     """A live 1x isolated long checkpointed, then restored by a second life.
 
     ``bucket`` is the venue's bucket ingested before the checkpoint. ``None``
-    is a crash inside the window, so the row went to disk at 0. A live
+    is a crash inside the window, so the row went to disk unposted. A live
     restart with an open ledger makes no account read at boot.
     """
     store = SQLiteStore(":memory:")
@@ -1014,10 +1014,10 @@ def _live_restart(bucket: str | None) -> PortfolioProjection:
 
 
 def test_a_live_restart_reads_a_bucket_saved_before_any_ingest_as_unknown() -> None:
-    """A crash inside the window wrote the row's 0 to disk (#516).
+    """A crash inside the window saved the row unposted (#516, #522).
 
-    An open isolated position always has a bucket on the venue, so a restored
-    0 is a bucket we never read. It waits for the first ingest like a new open.
+    The restart reads it as unknown and waits for the first ingest like a new
+    open.
     """
     restarted = _live_restart(None)
 
@@ -1038,14 +1038,28 @@ def test_a_live_restart_reads_a_bucket_saved_before_any_ingest_as_unknown() -> N
 def test_a_live_restart_reads_a_bucket_the_venue_posted_before_the_crash() -> None:
     """A restored bucket the venue did post is real, so it reads at once.
 
-    Only a restored 0 waits for the first ingest. Making every restored bucket
-    wait would blank real margin for a minute after each restart.
+    Only an unposted row waits for the first ingest. Making every restored
+    bucket wait would blank real margin for a minute after each restart.
     """
     restarted = _live_restart("81.735")
 
     view = restarted.for_strategy("alpha").position("BTC")
     assert view is not None
     assert view.margin_used == Decimal("81.745")
+
+
+def test_a_live_restart_reads_a_posted_bucket_of_zero_as_posted() -> None:
+    """A venue bucket of 0 is a real number, so a restart must not wait on it (#522).
+
+    The row used to save an unposted bucket as 0 too, so the restart read this
+    one as unknown and blanked real margin until the next ingest. The margin is
+    the bare unrealized PnL: 0.001 x (81745 - 81735).
+    """
+    restarted = _live_restart("0")
+
+    view = restarted.for_strategy("alpha").position("BTC")
+    assert view is not None
+    assert view.margin_used == Decimal("0.01")
 
 
 def test_a_live_restart_after_an_add_before_the_next_ingest_reads_the_bucket_as_unknown() -> None:
@@ -2334,9 +2348,11 @@ def test_the_venues_bucket_splits_across_partitions_and_sums_to_it_exactly() -> 
 
     assert change is not None
     buckets = {p.strategy_id: p.isolated_collateral for p in change.collateral}
-    assert sum(buckets.values()) == bucket  # exact, by the residue
-    assert buckets["alpha"] == bucket / 3  # its own 1-of-3 share, unrounded
-    assert buckets["beta"] == bucket - bucket / 3
+    alpha, beta = buckets["alpha"], buckets["beta"]
+    assert alpha is not None and beta is not None
+    assert alpha + beta == bucket  # exact, by the residue
+    assert alpha == bucket / 3  # its own 1-of-3 share, unrounded
+    assert beta == bucket - bucket / 3
 
 
 def test_a_venue_cross_position_releases_the_bucket_it_has_no_claim_on() -> None:

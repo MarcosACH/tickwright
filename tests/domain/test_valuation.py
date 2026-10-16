@@ -117,7 +117,7 @@ def _view(
     projection does it."""
     return account_view(
         account,
-        account_valuation(positions, marks, leverage=leverage, specs=specs, unposted=frozenset()),
+        account_valuation(positions, marks, leverage=leverage, specs=specs),
     )
 
 
@@ -143,7 +143,6 @@ def _position_view(
         {} if mark is None else {symbol: mark},
         leverage=LeverageBook(entries={symbol: leverage}),
         specs={} if spec is None else {symbol: spec},
-        unposted=frozenset(),
     )[symbol]
     return position_view(
         position,
@@ -545,7 +544,6 @@ def test_a_view_reads_its_position_grain_figures_off_the_symbol_row() -> None:
         {"BTC": Decimal("81735")},
         leverage=LeverageBook(entries={"BTC": ISOLATED_1X}),
         specs={"BTC": BTC_40X},
-        unposted=frozenset(),
     )["BTC"]
 
     view = position_view(
@@ -580,7 +578,6 @@ def test_a_view_refuses_a_row_from_another_symbol() -> None:
         {"BTC": Decimal("81735"), "ETH": Decimal("2000")},
         leverage=LeverageBook(),
         specs={"BTC": BTC_40X, "ETH": ETH_25X},
-        unposted=frozenset(),
     )
 
     with pytest.raises(InvariantViolation, match="row for ETH"):
@@ -1145,7 +1142,6 @@ def test_the_account_grain_margin_used_fold_posts_each_symbol_by_its_own_mode() 
             }
         ),
         specs={},
-        unposted=frozenset(),
     )
 
     assert {symbol: row.margin_used for symbol, row in rows.items()} == {
@@ -1188,7 +1184,6 @@ def test_the_account_grain_margin_used_fold_ranges_over_symbols_not_partitions()
         {"ETH": Decimal("2200")},
         leverage=LeverageBook(entries={"BTC": CROSS_10X, "ETH": ISOLATED_5X}),
         specs={},
-        unposted=frozenset(),
     )
 
     assert {symbol: row.margin_used for symbol, row in rows.items()} == {
@@ -1228,7 +1223,6 @@ def test_the_account_grain_maintenance_margin_fold_rates_each_symbols_notional()
         {"BTC": Decimal("60000"), "ETH": Decimal("3200"), "DOGE": Decimal("0.12")},
         leverage=LeverageBook(),
         specs={"BTC": BTC_40X, "ETH": ETH_25X, "SOL": SOL_20X},
-        unposted=frozenset(),
     )
 
     assert {symbol: row.maintenance_margin for symbol, row in rows.items()} == {
@@ -1254,9 +1248,7 @@ def test_a_flat_account_net_owes_a_real_zero_maintenance_with_neither_mark_nor_s
     long_leg = _position(quantity="2", price="100", side=Side.BUY, symbol="BTC")
     short_leg = _position(quantity="2", price="120", side=Side.SELL, symbol="BTC")
 
-    rows = account_valuation(
-        (long_leg, short_leg), {}, leverage=LeverageBook(), specs={}, unposted=frozenset()
-    )
+    rows = account_valuation((long_leg, short_leg), {}, leverage=LeverageBook(), specs={})
 
     assert {symbol: row.maintenance_margin for symbol, row in rows.items()} == {"BTC": Decimal("0")}
 
@@ -1287,7 +1279,6 @@ def test_account_valuation_folds_every_per_symbol_figure_into_one_row() -> None:
         {"BTC": Decimal("60000"), "ETH": Decimal("3200")},
         leverage=LeverageBook(entries={"BTC": CROSS_10X, "ETH": ISOLATED_5X, "SOL": CROSS_1X}),
         specs={"BTC": BTC_40X, "ETH": ETH_25X, "SOL": SOL_20X},
-        unposted=frozenset(),
     )
 
     assert rows == {
@@ -1353,9 +1344,7 @@ def test_the_account_totals_are_sums_over_the_symbol_rows() -> None:
     specs = {"BTC": BTC_40X, "ETH": ETH_25X, "SOL": SOL_20X}
     priced = {"BTC": Decimal("110"), "ETH": Decimal("3200")}
 
-    rows = account_valuation(
-        (eth, long_leg, short_leg), priced, leverage=leverage, specs=specs, unposted=frozenset()
-    )
+    rows = account_valuation((eth, long_leg, short_leg), priced, leverage=leverage, specs=specs)
     view = account_view(_account("100000"), rows)
 
     assert view.equity == Decimal("102040")
@@ -1371,7 +1360,6 @@ def test_the_account_totals_are_sums_over_the_symbol_rows() -> None:
         priced,
         leverage=leverage,
         specs=specs,
-        unposted=frozenset(),
     )
     unpriced = account_view(_account("100000"), unpriced_rows)
 

@@ -177,9 +177,7 @@ def test_funding_accrues_on_its_own_line_and_never_into_price_or_pnl() -> None:
     assert position.fees == Decimal("0")
     # And it reaches the seam's snapshot on its own line, assembled off the
     # aggregate rather than by it (ADR-0035).
-    rows = account_valuation(
-        (position,), {}, leverage=LeverageBook(), specs={}, unposted=frozenset()
-    )
+    rows = account_valuation((position,), {}, leverage=LeverageBook(), specs={})
     view = position_view(
         position,
         row=rows[position.symbol],
