@@ -770,6 +770,35 @@ def test_the_first_ingest_makes_an_unposted_live_bucket_real() -> None:
     assert account.free_margin == account.equity - Decimal("81.745")
 
 
+def test_a_posted_strategy_reads_unknown_while_another_on_its_symbol_waits() -> None:
+    """One bucket backs the whole venue position, so one wait hides it (#520).
+
+    `alpha`'s bucket is posted. Then `beta` opens on the same symbol, and the
+    venue moves the one bucket by an amount we do not model. `alpha`'s posted
+    share is no longer the backing, so its view reads unknown, like the row.
+    """
+    projection = _isolated_1x(None)
+    projection.apply_heal(
+        (), snapshot=venue_holding(BTC=Decimal("81.735"), sizes={"BTC": Decimal("0.001")})
+    )
+    posted = projection.for_strategy("alpha").position("BTC")
+    assert posted is not None
+    assert posted.margin_used == Decimal("81.745")
+
+    book_fill(
+        projection,
+        _fill(trade_id="b1", quantity="0.001", price="81745", strategy_id="beta"),
+        side=Side.BUY,
+    )
+
+    view = projection.for_strategy("alpha").position("BTC")
+    assert view is not None
+    assert view.margin_used is None
+    assert view.effective_leverage is None
+    assert projection.account().total_margin_used is None
+    assert view.notional == Decimal("163.490")
+
+
 def test_a_live_close_before_the_first_ingest_reads_no_margin_rather_than_unknown() -> None:
     """A flat position holds no bucket on the venue, so its 0 is a fact (#516).
 
