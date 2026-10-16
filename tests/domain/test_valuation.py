@@ -113,7 +113,8 @@ def _view(
     """The view off the book, folded through ``account_valuation`` as the
     projection does it."""
     return account_view(
-        account, account_valuation(positions, marks, leverage=leverage, specs=specs)
+        account,
+        account_valuation(positions, marks, leverage=leverage, specs=specs, unposted=frozenset()),
     )
 
 
@@ -143,6 +144,7 @@ def test_a_held_position_with_no_mark_reads_unknown_rather_than_worthless() -> N
         leverage=CROSS_10X,
         spec=None,
         liquidation=LiquidationSource.computed(),
+        collateral_posted=True,
     )
 
     assert view.unrealized_pnl is None
@@ -188,6 +190,7 @@ def test_a_flat_position_with_no_mark_still_reads_real_zeros() -> None:
         leverage=CROSS_10X,
         spec=None,
         liquidation=LiquidationSource.computed(),
+        collateral_posted=True,
     )
 
     assert view.unrealized_pnl == Decimal("0")
@@ -214,6 +217,7 @@ def test_the_two_terms_take_their_zero_from_different_facts() -> None:
         leverage=CROSS_10X,
         spec=None,
         liquidation=LiquidationSource.computed(),
+        collateral_posted=True,
     )
 
     assert view.notional == Decimal("0")
@@ -268,6 +272,7 @@ def test_a_cross_position_posts_its_notional_divided_by_the_configured_leverage(
         leverage=CROSS_10X,
         spec=BTC_40X,
         liquidation=LiquidationSource.computed(),
+        collateral_posted=True,
     )
 
     assert view.notional == Decimal("30000")
@@ -302,6 +307,7 @@ def test_an_isolated_position_posts_its_locked_collateral_plus_unrealized_pnl() 
         leverage=ISOLATED_5X,
         spec=BTC_40X,
         liquidation=LiquidationSource.computed(),
+        collateral_posted=True,
     )
     at_64794 = position_view(
         position,
@@ -314,6 +320,7 @@ def test_an_isolated_position_posts_its_locked_collateral_plus_unrealized_pnl() 
         leverage=ISOLATED_5X,
         spec=BTC_40X,
         liquidation=LiquidationSource.computed(),
+        collateral_posted=True,
     )
 
     assert at_64796.margin_used == Decimal("25.860067")
@@ -342,6 +349,7 @@ def test_maintenance_margin_is_the_flat_tier_zero_rate_on_notional() -> None:
         leverage=CROSS_10X,
         spec=BTC_40X,
         liquidation=LiquidationSource.computed(),
+        collateral_posted=True,
     )
 
     assert view.notional == Decimal("5873.49")
@@ -373,6 +381,7 @@ def test_maintenance_margin_stays_flat_above_the_first_tier_band() -> None:
         leverage=CROSS_10X,
         spec=BTC_40X,
         liquidation=LiquidationSource.computed(),
+        collateral_posted=True,
     )
 
     assert view.notional == Decimal("12073.655")
@@ -401,6 +410,7 @@ def test_a_flat_account_net_reads_a_real_zero_maintenance_with_no_mark_and_no_sp
         leverage=CROSS_10X,
         spec=None,
         liquidation=LiquidationSource.computed(),
+        collateral_posted=True,
     )
 
     assert view.notional == Decimal("0")
@@ -447,6 +457,7 @@ def test_the_per_term_rule_holds_in_both_margin_modes() -> None:
             leverage=mode,
             spec=BTC_40X,
             liquidation=LiquidationSource.computed(),
+            collateral_posted=True,
         )
         held_view = position_view(
             held,
@@ -459,6 +470,7 @@ def test_the_per_term_rule_holds_in_both_margin_modes() -> None:
             leverage=mode,
             spec=BTC_40X,
             liquidation=LiquidationSource.computed(),
+            collateral_posted=True,
         )
 
         assert flat_view.margin_used == Decimal("0"), mode
@@ -503,6 +515,7 @@ def test_the_view_reports_position_grain_economics_beside_the_own_slice() -> Non
         leverage=ISOLATED_5X,
         spec=BTC_40X,
         liquidation=LiquidationSource.computed(),
+        collateral_posted=True,
     )
 
     assert view.unrealized_pnl == Decimal("-0.038")
@@ -548,6 +561,7 @@ def test_effective_leverage_divides_notional_by_each_modes_own_backing() -> None
             leverage=ISOLATED_5X,
             spec=BTC_40X,
             liquidation=LiquidationSource.computed(),
+            collateral_posted=True,
         )
 
     before = at_64794(held)
@@ -571,6 +585,7 @@ def test_effective_leverage_divides_notional_by_each_modes_own_backing() -> None
         leverage=CROSS_10X,
         spec=BTC_40X,
         liquidation=LiquidationSource.computed(),
+        collateral_posted=True,
     )
 
     assert cross.notional == Decimal("30000")
@@ -609,6 +624,7 @@ def test_effective_leverage_reads_none_on_a_non_positive_denominator() -> None:
         leverage=CROSS_10X,
         spec=BTC_40X,
         liquidation=LiquidationSource.computed(),
+        collateral_posted=True,
     )
 
     assert wiped_cross.effective_leverage is None
@@ -628,6 +644,7 @@ def test_effective_leverage_reads_none_on_a_non_positive_denominator() -> None:
         leverage=ISOLATED_5X,
         spec=BTC_40X,
         liquidation=LiquidationSource.computed(),
+        collateral_posted=True,
     )
 
     assert wiped_bucket.effective_leverage is None
@@ -645,6 +662,7 @@ def test_effective_leverage_reads_none_on_a_non_positive_denominator() -> None:
         leverage=CROSS_10X,
         spec=BTC_40X,
         liquidation=LiquidationSource.computed(),
+        collateral_posted=True,
     )
     flat_isolated = position_view(
         _position(quantity="2", price="100", side=Side.BUY),
@@ -657,6 +675,7 @@ def test_effective_leverage_reads_none_on_a_non_positive_denominator() -> None:
         leverage=ISOLATED_1X,  # collateral released with the position
         spec=BTC_40X,
         liquidation=LiquidationSource.computed(),
+        collateral_posted=True,
     )
 
     assert flat_cross.effective_leverage == Decimal("0")
@@ -700,6 +719,7 @@ def test_the_paper_isolated_liquidation_price_is_computed_off_the_marked_bucket(
             leverage=ISOLATED_5X,
             spec=BTC_40X,
             liquidation=LiquidationSource.computed(),
+            collateral_posted=True,
         )
 
     before = at(held, "64794", "-0.042")  # 0.002 x (64794 - 64815)
@@ -747,6 +767,7 @@ def test_the_paper_cross_liquidation_price_is_computed_off_account_equity() -> N
             leverage=CROSS_10X,
             spec=BTC_40X,
             liquidation=LiquidationSource.computed(),
+            collateral_posted=True,
         )
 
     long = at(Side.BUY, "0.5", "1000")  # 0.5 x (60000 - 58000)
@@ -808,6 +829,7 @@ def test_each_mode_measures_its_backing_against_the_maintenance_owed_on_it() -> 
             leverage=leverage,
             spec=BTC_40X,
             liquidation=LiquidationSource.computed(),
+            collateral_posted=True,
         )
 
     cross = at(CROSS_10X)
@@ -855,6 +877,7 @@ def test_a_cross_liquidation_price_is_unknown_when_the_books_maintenance_is() ->
             leverage=leverage,
             spec=BTC_40X,
             liquidation=LiquidationSource.computed(),
+            collateral_posted=True,
         )
 
     cross = at(CROSS_10X)
@@ -907,6 +930,7 @@ def test_a_computed_liquidation_price_at_or_below_zero_reads_none() -> None:
             leverage=CROSS_10X,
             spec=BTC_40X,
             liquidation=LiquidationSource.computed(),
+            collateral_posted=True,
         )
 
     well_collateralized = at("101000")
@@ -1098,6 +1122,7 @@ def test_the_account_grain_margin_used_fold_posts_each_symbol_by_its_own_mode() 
             }
         ),
         specs={},
+        unposted=frozenset(),
     )
 
     assert {symbol: row.margin_used for symbol, row in rows.items()} == {
@@ -1140,6 +1165,7 @@ def test_the_account_grain_margin_used_fold_ranges_over_symbols_not_partitions()
         {"ETH": Decimal("2200")},
         leverage=LeverageBook(entries={"BTC": CROSS_10X, "ETH": ISOLATED_5X}),
         specs={},
+        unposted=frozenset(),
     )
 
     assert {symbol: row.margin_used for symbol, row in rows.items()} == {
@@ -1179,6 +1205,7 @@ def test_the_account_grain_maintenance_margin_fold_rates_each_symbols_notional()
         {"BTC": Decimal("60000"), "ETH": Decimal("3200"), "DOGE": Decimal("0.12")},
         leverage=LeverageBook(),
         specs={"BTC": BTC_40X, "ETH": ETH_25X, "SOL": SOL_20X},
+        unposted=frozenset(),
     )
 
     assert {symbol: row.maintenance_margin for symbol, row in rows.items()} == {
@@ -1204,7 +1231,9 @@ def test_a_flat_account_net_owes_a_real_zero_maintenance_with_neither_mark_nor_s
     long_leg = _position(quantity="2", price="100", side=Side.BUY, symbol="BTC")
     short_leg = _position(quantity="2", price="120", side=Side.SELL, symbol="BTC")
 
-    rows = account_valuation((long_leg, short_leg), {}, leverage=LeverageBook(), specs={})
+    rows = account_valuation(
+        (long_leg, short_leg), {}, leverage=LeverageBook(), specs={}, unposted=frozenset()
+    )
 
     assert {symbol: row.maintenance_margin for symbol, row in rows.items()} == {"BTC": Decimal("0")}
 
@@ -1235,6 +1264,7 @@ def test_account_valuation_folds_every_per_symbol_figure_into_one_row() -> None:
         {"BTC": Decimal("60000"), "ETH": Decimal("3200")},
         leverage=LeverageBook(entries={"BTC": CROSS_10X, "ETH": ISOLATED_5X, "SOL": CROSS_1X}),
         specs={"BTC": BTC_40X, "ETH": ETH_25X, "SOL": SOL_20X},
+        unposted=frozenset(),
     )
 
     assert rows == {
@@ -1297,7 +1327,9 @@ def test_the_account_totals_are_sums_over_the_symbol_rows() -> None:
     specs = {"BTC": BTC_40X, "ETH": ETH_25X, "SOL": SOL_20X}
     priced = {"BTC": Decimal("110"), "ETH": Decimal("3200")}
 
-    rows = account_valuation((eth, long_leg, short_leg), priced, leverage=leverage, specs=specs)
+    rows = account_valuation(
+        (eth, long_leg, short_leg), priced, leverage=leverage, specs=specs, unposted=frozenset()
+    )
     view = account_view(_account("100000"), rows)
 
     assert view.equity == Decimal("102040")
@@ -1309,7 +1341,11 @@ def test_the_account_totals_are_sums_over_the_symbol_rows() -> None:
     assert view.equity == Decimal("100000") + _sum(r.unrealized_pnl for r in rows.values())
 
     unpriced_rows = account_valuation(
-        (eth, long_leg, short_leg, sol), priced, leverage=leverage, specs=specs
+        (eth, long_leg, short_leg, sol),
+        priced,
+        leverage=leverage,
+        specs=specs,
+        unposted=frozenset(),
     )
     unpriced = account_view(_account("100000"), unpriced_rows)
 

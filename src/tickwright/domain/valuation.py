@@ -14,7 +14,7 @@ construction**: every field comes from one ``(position, mark)`` read, so two
 fields of one view can never straddle a fill (ADR-0041 §1).
 """
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Set
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Self
@@ -81,6 +81,7 @@ def position_view(
     leverage: LeverageSpec,
     spec: InstrumentSpec | None,
     liquidation: LiquidationSource,
+    collateral_posted: bool,
 ) -> PositionView:
     """One partition's frozen snapshot, Tier-1 and Tier-2 in one read.
 
@@ -143,12 +144,17 @@ def position_view(
     the same reason: ``computed()`` is the *right* answer on paper and a
     forbidden one on live, so a default would make the live path's correctness
     depend on a caller remembering to override it.
+
+    ``collateral_posted`` is ``False`` for a live isolated partition whose
+    bucket the venue has not posted yet. The row then holds 0, but 0 is not
+    what the venue holds, so every figure that needs the bucket reads ``None``
+    (#516). Paper always posts its own bucket at open.
     """
     notional = _notional(account_net, mark)
     unrealized_pnl = _unrealized_pnl(position, mark)
     backing = _backing_collateral(
         leverage=leverage,
-        isolated_collateral=position.isolated_collateral,
+        isolated_collateral=position.isolated_collateral if collateral_posted else None,
         account_unrealized_pnl=account_unrealized_pnl,
         account_equity=account_equity,
     )
@@ -187,7 +193,7 @@ def position_view(
 def _backing_collateral(
     *,
     leverage: LeverageSpec,
-    isolated_collateral: Decimal,
+    isolated_collateral: Decimal | None,
     account_unrealized_pnl: Decimal | None,
     account_equity: Decimal | None,
 ) -> Decimal | None:
@@ -207,9 +213,12 @@ def _backing_collateral(
 
     The uPnL term is the symbol's account-net Σ and never one strategy's slice,
     for the same reason: the bucket backs the whole venue position.
+
+    A ``None`` bucket is one the venue has not posted yet (#516). Cross never
+    reads it, because cross has no bucket.
     """
     if leverage.mode == "isolated":
-        if account_unrealized_pnl is None:
+        if isolated_collateral is None or account_unrealized_pnl is None:
             return None
         return isolated_collateral + account_unrealized_pnl
     return account_equity
@@ -550,6 +559,7 @@ def account_valuation(
     *,
     leverage: LeverageBook,
     specs: Mapping[str, InstrumentSpec],
+    unposted: Set[tuple[str | None, str]],
 ) -> dict[str, SymbolValuation]:
     """Every symbol's account-grain row, folded once over the book.
 
@@ -566,14 +576,21 @@ def account_valuation(
     is cross's backing, which ``effective_leverage`` and ``liquidation_price``
     read, while cross's margin is ``notional / leverage`` and never does
     (ADR-0040 §3).
+
+    ``unposted`` names the ``(strategy_id, symbol)`` partitions whose live
+    bucket the venue has not posted yet (#516). One of them makes its symbol's
+    bucket unknown, because the symbol's bucket is the sum over its partitions.
     """
     held = tuple(positions)
     upnl: dict[str, Decimal | None] = {}
-    buckets: dict[str, Decimal] = {}
+    buckets: dict[str, Decimal | None] = {}
     for position in held:
         symbol = position.symbol
         upnl[symbol] = _total(upnl.get(symbol, _ZERO), _unrealized_pnl(position, marks.get(symbol)))
-        buckets[symbol] = buckets.get(symbol, _ZERO) + position.isolated_collateral
+        bucket = (
+            None if (position.strategy_id, symbol) in unposted else position.isolated_collateral
+        )
+        buckets[symbol] = _total(buckets.get(symbol, _ZERO), bucket)
     rows: dict[str, SymbolValuation] = {}
     for symbol, size in account_net_size(held).items():
         symbol_leverage = leverage.for_symbol(symbol)
