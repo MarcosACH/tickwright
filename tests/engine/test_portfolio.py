@@ -1232,6 +1232,47 @@ def test_two_strategies_on_one_isolated_symbol_each_read_the_whole_bucket() -> N
     assert view.liquidation_price == whole.liquidation_price
 
 
+def test_a_strategy_beside_the_unattributed_partition_reads_the_whole_bucket() -> None:
+    """Foreign flow's share of the bucket backs the strategy's view too (#520).
+
+    ADR-0041 §5's own case. `alpha` buys 0.001 BTC at 81 735 on 10x isolated,
+    and a restart restores 0.001 of foreign flow with its 8.1735 share of the
+    bucket. The venue holds one 0.002 position against one 16.347 bucket. So
+    `alpha` reads that bucket, though it can never see the foreign partition.
+    """
+    store = SQLiteStore(":memory:")
+    opened = _projection(store=store, leverage=_ISOLATED_10X, specs={"BTC": _BTC_SPEC})
+    opened.recover()
+    change = opened.apply_fill(_fill(trade_id="a1", quantity="0.001", price="81735"), side=Side.BUY)
+    foreign = Position(
+        strategy_id=None,
+        symbol="BTC",
+        signed_size=Decimal("0.001"),
+        entry_price=Decimal("81735"),
+        isolated_collateral=Decimal("8.1735"),
+    )
+    store.checkpoint_ledger(
+        account=change.account, positions=(change.position, foreign), ts_ns=1_000
+    )
+    restarted = _projection(store=store, leverage=_ISOLATED_10X, specs={"BTC": _BTC_SPEC})
+    restarted.recover()
+    alone = _projection(leverage=_ISOLATED_10X, specs={"BTC": _BTC_SPEC})
+    book_fill(alone, _fill(trade_id="a1", quantity="0.002", price="81735"), side=Side.BUY)
+    for projection in (restarted, alone):
+        projection.observe_mark(_mark(price="81735", ts_event=9_000))
+
+    view = restarted.for_strategy("alpha").position("BTC")
+    whole = alone.for_strategy("alpha").position("BTC")
+
+    assert view is not None
+    assert whole is not None
+    assert view.size == Decimal("0.001")
+    assert view.margin_used == Decimal("16.347")
+    assert view.effective_leverage == Decimal("10")
+    assert whole.liquidation_price is not None
+    assert view.liquidation_price == whole.liquidation_price
+
+
 def test_a_flip_through_zero_re_locks_the_bucket_at_the_residual_it_opened() -> None:
     """A close that opens a fresh position in the same fill releases *and* locks.
 
