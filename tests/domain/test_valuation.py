@@ -16,10 +16,13 @@ nobody has seen.
 from collections.abc import Iterable, Mapping
 from decimal import Decimal
 
+import pytest
+
 from tickwright.domain import (
     Account,
     AccountView,
     InstrumentSpec,
+    InvariantViolation,
     LeverageBook,
     LeverageSpec,
     LiquidationSource,
@@ -562,6 +565,35 @@ def test_a_view_reads_its_position_grain_figures_off_the_symbol_row() -> None:
     assert view.effective_leverage == Decimal("1")
     assert (view.leverage, view.margin_mode) == (row.leverage, row.margin_mode) == (1, "isolated")
     assert view.unrealized_pnl == Decimal("0")
+
+
+def test_a_view_refuses_a_row_from_another_symbol() -> None:
+    """A row for the wrong symbol would hand the view another position's margin.
+
+    The view copies its margin, leverage and liquidation inputs off the row. So
+    a mismatched row is a wrong number a strategy could act on, not a crash.
+    """
+    btc = _position(quantity="0.001", price="81735", side=Side.BUY)
+    eth = _position(quantity="1", price="2000", side=Side.BUY, symbol="ETH")
+    rows = account_valuation(
+        (btc, eth),
+        {"BTC": Decimal("81735"), "ETH": Decimal("2000")},
+        leverage=LeverageBook(),
+        specs={"BTC": BTC_40X, "ETH": ETH_25X},
+        unposted=frozenset(),
+    )
+
+    with pytest.raises(InvariantViolation, match="row for ETH"):
+        position_view(
+            btc,
+            row=rows["ETH"],
+            account_equity=Decimal("100000"),
+            account_maintenance_margin=None,
+            mark=Decimal("81735"),
+            mark_ts=9_000,
+            spec=BTC_40X,
+            liquidation=LiquidationSource.computed(),
+        )
 
 
 def test_effective_leverage_divides_notional_by_each_modes_own_backing() -> None:

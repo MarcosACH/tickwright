@@ -20,6 +20,7 @@ from decimal import Decimal
 from typing import Self
 
 from .account import Account, AccountView
+from .errors import InvariantViolation
 from .instrument import InstrumentSpec
 from .leverage import LeverageBook, LeverageSpec, MarginMode
 from .position import Position, PositionView, account_net_size
@@ -149,6 +150,13 @@ def position_view(
     forbidden one on live, so a default would make the live path's correctness
     depend on a caller remembering to override it.
     """
+    if row.symbol != position.symbol:
+        # Every margin figure below comes off the row. Another symbol's row
+        # would value this position with that position's numbers, silently.
+        raise InvariantViolation(
+            f"row for {row.symbol} passed to the view of position "
+            f"({position.strategy_id}, {position.symbol})"
+        )
     backing = _backing_collateral(
         mode=row.margin_mode,
         isolated_collateral=row.isolated_collateral,
