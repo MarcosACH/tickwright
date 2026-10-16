@@ -595,9 +595,10 @@ class PortfolioProjection:
         cross-margined row to.
 
         Returns only the partitions it actually **moved**, so an unchanged book
-        writes nothing: the bucket holds still between ``updateIsolatedMargin``
-        calls, and it is mark-invariant by construction (``marginUsed −
-        unrealizedPnl``), so the steady state is a cycle with nothing to ingest.
+        writes nothing: the bucket holds still between fills and
+        ``updateIsolatedMargin`` calls, and it is mark-invariant by construction
+        (``marginUsed − unrealizedPnl``), so the steady state is a cycle with
+        nothing to ingest.
         Reporting every partition instead would re-stamp every position row on
         every deadline, which is the same indistinguishable-from-a-correction
         write ``apply_funding``'s ``None`` refuses one grain up.
