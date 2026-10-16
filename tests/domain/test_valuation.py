@@ -16,10 +16,13 @@ nobody has seen.
 from collections.abc import Iterable, Mapping
 from decimal import Decimal
 
+import pytest
+
 from tickwright.domain import (
     Account,
     AccountView,
     InstrumentSpec,
+    InvariantViolation,
     LeverageBook,
     LeverageSpec,
     LiquidationSource,
@@ -118,6 +121,52 @@ def _view(
     )
 
 
+def _position_view(
+    position: Position,
+    *,
+    beside: Iterable[Position] = (),
+    mark: Decimal | None,
+    leverage: LeverageSpec,
+    spec: InstrumentSpec | None,
+    account_equity: Decimal | None,
+    account_maintenance_margin: Decimal | None,
+) -> PositionView:
+    """``position``'s view off its symbol's row, folded as the projection does it.
+
+    ``beside`` is the symbol's other partitions. A case about foreign flow or
+    offsetting legs holds them for real, so the row's net and uPnL are the
+    fold's and never a hand-typed pair.
+    """
+    symbol = position.symbol
+    row = account_valuation(
+        (position, *beside),
+        {} if mark is None else {symbol: mark},
+        leverage=LeverageBook(entries={symbol: leverage}),
+        specs={} if spec is None else {symbol: spec},
+        unposted=frozenset(),
+    )[symbol]
+    return position_view(
+        position,
+        row=row,
+        account_equity=account_equity,
+        account_maintenance_margin=account_maintenance_margin,
+        mark=mark,
+        mark_ts=None if mark is None else 9_000,
+        spec=spec,
+        liquidation=LiquidationSource.computed(),
+    )
+
+
+def _leg(*, strategy_id: str | None, size: str, entry: str) -> Position:
+    """Another partition in the symbol, built straight from its Tier-1 state."""
+    return Position(
+        strategy_id=strategy_id,
+        symbol="BTC",
+        signed_size=Decimal(size),
+        entry_price=Decimal(entry),
+    )
+
+
 def _sum(terms: Iterable[Decimal | None]) -> Decimal:
     """Add row figures a case has already established are priced."""
     total = Decimal("0")
@@ -133,18 +182,13 @@ def test_a_held_position_with_no_mark_reads_unknown_rather_than_worthless() -> N
     nothing, which is a number a strategy can act on and is false."""
     position = _position(quantity="2", price="100", side=Side.BUY)
 
-    view = position_view(
+    view = _position_view(
         position,
-        account_net=Decimal("2"),
-        account_unrealized_pnl=None,
-        account_equity=None,
-        account_maintenance_margin=None,
         mark=None,
-        mark_ts=None,
         leverage=CROSS_10X,
         spec=None,
-        liquidation=LiquidationSource.computed(),
-        collateral_posted=True,
+        account_equity=None,
+        account_maintenance_margin=None,
     )
 
     assert view.unrealized_pnl is None
@@ -179,18 +223,13 @@ def test_a_flat_position_with_no_mark_still_reads_real_zeros() -> None:
         side=Side.SELL,
     )
 
-    view = position_view(
+    view = _position_view(
         position,
-        account_net=Decimal("0"),
-        account_unrealized_pnl=None,
-        account_equity=None,
-        account_maintenance_margin=None,
         mark=None,
-        mark_ts=None,
         leverage=CROSS_10X,
         spec=None,
-        liquidation=LiquidationSource.computed(),
-        collateral_posted=True,
+        account_equity=None,
+        account_maintenance_margin=None,
     )
 
     assert view.unrealized_pnl == Decimal("0")
@@ -206,18 +245,14 @@ def test_the_two_terms_take_their_zero_from_different_facts() -> None:
     """
     position = _position(quantity="2", price="100", side=Side.BUY)
 
-    view = position_view(
+    view = _position_view(
         position,
-        account_net=Decimal("0"),
-        account_unrealized_pnl=None,
-        account_equity=None,
-        account_maintenance_margin=None,
+        beside=(_leg(strategy_id="beta", size="-2", entry="100"),),
         mark=None,
-        mark_ts=None,
         leverage=CROSS_10X,
         spec=None,
-        liquidation=LiquidationSource.computed(),
-        collateral_posted=True,
+        account_equity=None,
+        account_maintenance_margin=None,
     )
 
     assert view.notional == Decimal("0")
@@ -261,18 +296,13 @@ def test_a_cross_position_posts_its_notional_divided_by_the_configured_leverage(
     """
     position = _position(quantity="0.5", price="58000", side=Side.BUY)
 
-    view = position_view(
+    view = _position_view(
         position,
-        account_net=Decimal("0.5"),
-        account_unrealized_pnl=Decimal("1000"),  # 0.5 x (60000 - 58000), one partition
-        account_equity=Decimal("101000"),
-        account_maintenance_margin=Decimal("375"),  # the book is this position: 30000 x 1/80
         mark=Decimal("60000"),
-        mark_ts=9_000,
         leverage=CROSS_10X,
         spec=BTC_40X,
-        liquidation=LiquidationSource.computed(),
-        collateral_posted=True,
+        account_equity=Decimal("101000"),
+        account_maintenance_margin=Decimal("375"),  # the book is this position: 30000 x 1/80
     )
 
     assert view.notional == Decimal("30000")
@@ -296,31 +326,21 @@ def test_an_isolated_position_posts_its_locked_collateral_plus_unrealized_pnl() 
         quantity="0.002", price="64815", side=Side.BUY, isolated_collateral="25.898067"
     )
 
-    at_64796 = position_view(
+    at_64796 = _position_view(
         position,
-        account_net=Decimal("0.002"),
-        account_unrealized_pnl=Decimal("-0.038"),  # 0.002 x (64796 - 64815)
+        mark=Decimal("64796"),  # uPnL 0.002 x (64796 - 64815) = -0.038
+        leverage=ISOLATED_5X,
+        spec=BTC_40X,
         account_equity=Decimal("99999.962"),
         account_maintenance_margin=None,  # isolated measures against its own bucket
-        mark=Decimal("64796"),
-        mark_ts=9_000,
+    )
+    at_64794 = _position_view(
+        position,
+        mark=Decimal("64794"),  # uPnL 0.002 x (64794 - 64815) = -0.042
         leverage=ISOLATED_5X,
         spec=BTC_40X,
-        liquidation=LiquidationSource.computed(),
-        collateral_posted=True,
-    )
-    at_64794 = position_view(
-        position,
-        account_net=Decimal("0.002"),
-        account_unrealized_pnl=Decimal("-0.042"),  # 0.002 x (64794 - 64815)
         account_equity=Decimal("99999.958"),
         account_maintenance_margin=None,  # isolated measures against its own bucket
-        mark=Decimal("64794"),
-        mark_ts=9_003,
-        leverage=ISOLATED_5X,
-        spec=BTC_40X,
-        liquidation=LiquidationSource.computed(),
-        collateral_posted=True,
     )
 
     assert at_64796.margin_used == Decimal("25.860067")
@@ -338,18 +358,13 @@ def test_maintenance_margin_is_the_flat_tier_zero_rate_on_notional() -> None:
     """
     position = _position(quantity="0.09", price="64000", side=Side.BUY)
 
-    view = position_view(
+    view = _position_view(
         position,
-        account_net=Decimal("0.09"),
-        account_unrealized_pnl=Decimal("113.49"),  # 0.09 x (65261 - 64000)
-        account_equity=Decimal("100113.49"),
-        account_maintenance_margin=Decimal("73.418625"),  # the book is this position
-        mark=Decimal("65261"),
-        mark_ts=9_000,
+        mark=Decimal("65261"),  # uPnL 0.09 x (65261 - 64000) = 113.49
         leverage=CROSS_10X,
         spec=BTC_40X,
-        liquidation=LiquidationSource.computed(),
-        collateral_posted=True,
+        account_equity=Decimal("100113.49"),
+        account_maintenance_margin=Decimal("73.418625"),  # the book is this position
     )
 
     assert view.notional == Decimal("5873.49")
@@ -370,18 +385,13 @@ def test_maintenance_margin_stays_flat_above_the_first_tier_band() -> None:
     """
     position = _position(quantity="0.185", price="64000", side=Side.BUY)
 
-    view = position_view(
+    view = _position_view(
         position,
-        account_net=Decimal("0.185"),
-        account_unrealized_pnl=Decimal("233.655"),  # 0.185 x (65263 - 64000)
-        account_equity=Decimal("100233.655"),
-        account_maintenance_margin=Decimal("150.9206875"),  # the book is this position
-        mark=Decimal("65263"),
-        mark_ts=9_000,
+        mark=Decimal("65263"),  # uPnL 0.185 x (65263 - 64000) = 233.655
         leverage=CROSS_10X,
         spec=BTC_40X,
-        liquidation=LiquidationSource.computed(),
-        collateral_posted=True,
+        account_equity=Decimal("100233.655"),
+        account_maintenance_margin=Decimal("150.9206875"),  # the book is this position
     )
 
     assert view.notional == Decimal("12073.655")
@@ -399,18 +409,14 @@ def test_a_flat_account_net_reads_a_real_zero_maintenance_with_no_mark_and_no_sp
     """
     position = _position(quantity="2", price="100", side=Side.BUY)
 
-    view = position_view(
+    view = _position_view(
         position,
-        account_net=Decimal("0"),
-        account_unrealized_pnl=None,
-        account_equity=None,
-        account_maintenance_margin=None,
+        beside=(_leg(strategy_id="beta", size="-2", entry="100"),),
         mark=None,
-        mark_ts=None,
         leverage=CROSS_10X,
         spec=None,
-        liquidation=LiquidationSource.computed(),
-        collateral_posted=True,
+        account_equity=None,
+        account_maintenance_margin=None,
     )
 
     assert view.notional == Decimal("0")
@@ -446,31 +452,21 @@ def test_the_per_term_rule_holds_in_both_margin_modes() -> None:
     held = _position(quantity="2", price="100", side=Side.BUY)
 
     for mode in (CROSS_10X, ISOLATED_1X):
-        flat_view = position_view(
+        flat_view = _position_view(
             closed,
-            account_net=Decimal("0"),
-            account_unrealized_pnl=Decimal("0"),
+            mark=None,
+            leverage=mode,
+            spec=BTC_40X,
             account_equity=Decimal("100000"),
             account_maintenance_margin=Decimal("0"),  # a flat book owes nothing
+        )
+        held_view = _position_view(
+            held,
             mark=None,
-            mark_ts=None,
             leverage=mode,
             spec=BTC_40X,
-            liquidation=LiquidationSource.computed(),
-            collateral_posted=True,
-        )
-        held_view = position_view(
-            held,
-            account_net=Decimal("2"),
-            account_unrealized_pnl=None,
             account_equity=None,
             account_maintenance_margin=None,
-            mark=None,
-            mark_ts=None,
-            leverage=mode,
-            spec=BTC_40X,
-            liquidation=LiquidationSource.computed(),
-            collateral_posted=True,
         )
 
         assert flat_view.margin_used == Decimal("0"), mode
@@ -504,24 +500,100 @@ def test_the_view_reports_position_grain_economics_beside_the_own_slice() -> Non
         quantity="0.002", price="64815", side=Side.BUY, isolated_collateral="25.898067"
     )
 
-    view = position_view(
+    view = _position_view(
         position,
-        account_net=Decimal("0.003"),
-        account_unrealized_pnl=Decimal("0.758"),
-        account_equity=Decimal("100000.758"),
-        account_maintenance_margin=None,  # isolated measures against its own bucket
+        # The foreign leg adds no collateral of its own here, so the bucket stays 25.898067.
+        beside=(_leg(strategy_id=None, size="0.001", entry="64000"),),
         mark=Decimal("64796"),
-        mark_ts=9_000,
         leverage=ISOLATED_5X,
         spec=BTC_40X,
-        liquidation=LiquidationSource.computed(),
-        collateral_posted=True,
+        account_equity=Decimal("100000.758"),
+        account_maintenance_margin=None,  # isolated measures against its own bucket
     )
 
     assert view.unrealized_pnl == Decimal("-0.038")
     assert view.margin_used == Decimal("26.656067")
     assert view.leverage == 5
     assert view.margin_mode == "isolated"
+
+
+def test_a_view_reads_its_position_grain_figures_off_the_symbol_row() -> None:
+    """A strategy's view and its symbol's row agree by construction (#520).
+
+    The view used to take the row's terms one at a time. One of them came from
+    the wrong grain, and two strategies on one isolated symbol each read half
+    the margin. Taking the row whole leaves no term to source on its own.
+
+    #520's paper case, worked by hand. ``alpha`` and ``beta`` each hold
+    ``+0.001`` at 81735 at 1x isolated, each with a bucket of 81.735:
+
+        notional       0.002 x 81735        = 163.47
+        margin_used    81.735 + 81.735 + 0  = 163.47
+        maintenance    163.47 x 0.0125      = 2.043375
+        eff leverage   163.47 / 163.47      = 1
+    """
+    alpha = _position(quantity="0.001", price="81735", side=Side.BUY, isolated_collateral="81.735")
+    beta = Position(
+        strategy_id="beta",
+        symbol="BTC",
+        signed_size=Decimal("0.001"),
+        entry_price=Decimal("81735"),
+        isolated_collateral=Decimal("81.735"),
+    )
+    row = account_valuation(
+        (alpha, beta),
+        {"BTC": Decimal("81735")},
+        leverage=LeverageBook(entries={"BTC": ISOLATED_1X}),
+        specs={"BTC": BTC_40X},
+        unposted=frozenset(),
+    )["BTC"]
+
+    view = position_view(
+        alpha,
+        row=row,
+        account_equity=Decimal("100000"),
+        account_maintenance_margin=None,  # isolated measures against its own bucket
+        mark=Decimal("81735"),
+        mark_ts=9_000,
+        spec=BTC_40X,
+        liquidation=LiquidationSource.computed(),
+    )
+
+    assert view.notional == row.notional == Decimal("163.47")
+    assert view.margin_used == row.margin_used == Decimal("163.47")
+    assert view.maintenance_margin == row.maintenance_margin == Decimal("2.043375")
+    assert view.effective_leverage == Decimal("1")
+    assert (view.leverage, view.margin_mode) == (row.leverage, row.margin_mode) == (1, "isolated")
+    assert view.unrealized_pnl == Decimal("0")
+
+
+def test_a_view_refuses_a_row_from_another_symbol() -> None:
+    """A row for the wrong symbol would hand the view another position's margin.
+
+    The view copies its margin, leverage and liquidation inputs off the row. So
+    a mismatched row is a wrong number a strategy could act on, not a crash.
+    """
+    btc = _position(quantity="0.001", price="81735", side=Side.BUY)
+    eth = _position(quantity="1", price="2000", side=Side.BUY, symbol="ETH")
+    rows = account_valuation(
+        (btc, eth),
+        {"BTC": Decimal("81735"), "ETH": Decimal("2000")},
+        leverage=LeverageBook(),
+        specs={"BTC": BTC_40X, "ETH": ETH_25X},
+        unposted=frozenset(),
+    )
+
+    with pytest.raises(InvariantViolation, match="row for ETH"):
+        position_view(
+            btc,
+            row=rows["ETH"],
+            account_equity=Decimal("100000"),
+            account_maintenance_margin=None,
+            mark=Decimal("81735"),
+            mark_ts=9_000,
+            spec=BTC_40X,
+            liquidation=LiquidationSource.computed(),
+        )
 
 
 def test_effective_leverage_divides_notional_by_each_modes_own_backing() -> None:
@@ -550,18 +622,13 @@ def test_effective_leverage_divides_notional_by_each_modes_own_backing() -> None
     )
 
     def at_64794(position: Position) -> PositionView:
-        return position_view(
+        return _position_view(
             position,
-            account_net=Decimal("0.002"),
-            account_unrealized_pnl=Decimal("-0.042"),  # 0.002 x (64794 - 64815)
-            account_equity=Decimal("1000"),
-            account_maintenance_margin=None,  # isolated measures against its own bucket
-            mark=Decimal("64794"),
-            mark_ts=9_000,
+            mark=Decimal("64794"),  # uPnL 0.002 x (64794 - 64815) = -0.042
             leverage=ISOLATED_5X,
             spec=BTC_40X,
-            liquidation=LiquidationSource.computed(),
-            collateral_posted=True,
+            account_equity=Decimal("1000"),
+            account_maintenance_margin=None,  # isolated measures against its own bucket
         )
 
     before = at_64794(held)
@@ -574,18 +641,13 @@ def test_effective_leverage_divides_notional_by_each_modes_own_backing() -> None
     assert after.effective_leverage.quantize(Decimal("0.0001")) == Decimal("2.8260")
     assert after.effective_leverage < before.effective_leverage
 
-    cross = position_view(
+    cross = _position_view(
         _position(quantity="0.5", price="58000", side=Side.BUY),
-        account_net=Decimal("0.5"),
-        account_unrealized_pnl=Decimal("1000"),
-        account_equity=Decimal("12000"),
-        account_maintenance_margin=Decimal("375"),  # the book is this position
         mark=Decimal("60000"),
-        mark_ts=9_000,
         leverage=CROSS_10X,
         spec=BTC_40X,
-        liquidation=LiquidationSource.computed(),
-        collateral_posted=True,
+        account_equity=Decimal("12000"),
+        account_maintenance_margin=Decimal("375"),  # the book is this position
     )
 
     assert cross.notional == Decimal("30000")
@@ -613,18 +675,13 @@ def test_effective_leverage_reads_none_on_a_non_positive_denominator() -> None:
     isolated one reads ``None``, its collateral having been released with the
     position.
     """
-    wiped_cross = position_view(
+    wiped_cross = _position_view(
         _position(quantity="0.5", price="58000", side=Side.BUY),
-        account_net=Decimal("0.5"),
-        account_unrealized_pnl=Decimal("1000"),
-        account_equity=Decimal("-500"),  # past zero, still trading (ADR-0040 §7)
-        account_maintenance_margin=Decimal("375"),  # the book is this position
         mark=Decimal("60000"),
-        mark_ts=9_000,
         leverage=CROSS_10X,
         spec=BTC_40X,
-        liquidation=LiquidationSource.computed(),
-        collateral_posted=True,
+        account_equity=Decimal("-500"),  # past zero, still trading (ADR-0040 §7)
+        account_maintenance_margin=Decimal("375"),  # the book is this position
     )
 
     assert wiped_cross.effective_leverage is None
@@ -633,49 +690,39 @@ def test_effective_leverage_reads_none_on_a_non_positive_denominator() -> None:
     assert wiped_cross.margin_used == Decimal("3000")
     assert wiped_cross.maintenance_margin == Decimal("375")  # 30000 x 1/80
 
-    wiped_bucket = position_view(
+    wiped_bucket = _position_view(
         _position(quantity="0.002", price="64815", side=Side.BUY, isolated_collateral="25.898067"),
-        account_net=Decimal("0.002"),
-        account_unrealized_pnl=Decimal("-30"),  # more than the bucket holds
-        account_equity=Decimal("100000"),
-        account_maintenance_margin=None,  # isolated measures against its own bucket
-        mark=Decimal("64794"),
-        mark_ts=9_000,
+        # uPnL 0.002 x (49815 - 64815) = -30, more than the bucket holds.
+        mark=Decimal("49815"),
         leverage=ISOLATED_5X,
         spec=BTC_40X,
-        liquidation=LiquidationSource.computed(),
-        collateral_posted=True,
+        account_equity=Decimal("100000"),
+        account_maintenance_margin=None,  # isolated measures against its own bucket
     )
 
     assert wiped_bucket.effective_leverage is None
     assert wiped_bucket.margin_used == Decimal("-4.101933")  # 25.898067 - 30, reported as-is
-    assert wiped_bucket.notional == Decimal("129.588")
+    assert wiped_bucket.notional == Decimal("99.63")  # 0.002 x 49815
 
-    flat_cross = position_view(
+    # beta's short offsets alpha's long, so the account nets flat.
+    offset = (_leg(strategy_id="beta", size="-2", entry="100"),)
+    flat_cross = _position_view(
         _position(quantity="2", price="100", side=Side.BUY),
-        account_net=Decimal("0"),
-        account_unrealized_pnl=Decimal("0"),
-        account_equity=Decimal("100000"),
-        account_maintenance_margin=Decimal("0"),  # a flat book owes nothing
+        beside=offset,
         mark=Decimal("150"),
-        mark_ts=9_000,
         leverage=CROSS_10X,
         spec=BTC_40X,
-        liquidation=LiquidationSource.computed(),
-        collateral_posted=True,
-    )
-    flat_isolated = position_view(
-        _position(quantity="2", price="100", side=Side.BUY),
-        account_net=Decimal("0"),
-        account_unrealized_pnl=Decimal("0"),
         account_equity=Decimal("100000"),
         account_maintenance_margin=Decimal("0"),  # a flat book owes nothing
+    )
+    flat_isolated = _position_view(
+        _position(quantity="2", price="100", side=Side.BUY),
+        beside=offset,
         mark=Decimal("150"),
-        mark_ts=9_000,
         leverage=ISOLATED_1X,  # collateral released with the position
         spec=BTC_40X,
-        liquidation=LiquidationSource.computed(),
-        collateral_posted=True,
+        account_equity=Decimal("100000"),
+        account_maintenance_margin=Decimal("0"),  # a flat book owes nothing
     )
 
     assert flat_cross.effective_leverage == Decimal("0")
@@ -707,24 +754,19 @@ def test_the_paper_isolated_liquidation_price_is_computed_off_the_marked_bucket(
         quantity="0.002", price="64815", side=Side.BUY, isolated_collateral="45.898067"
     )
 
-    def at(position: Position, mark: str, account_unrealized_pnl: str) -> PositionView:
-        return position_view(
+    def at(position: Position, mark: str) -> PositionView:
+        return _position_view(
             position,
-            account_net=Decimal("0.002"),
-            account_unrealized_pnl=Decimal(account_unrealized_pnl),
-            account_equity=Decimal("100000"),
-            account_maintenance_margin=None,  # isolated measures against its own bucket
             mark=Decimal(mark),
-            mark_ts=9_000,
             leverage=ISOLATED_5X,
             spec=BTC_40X,
-            liquidation=LiquidationSource.computed(),
-            collateral_posted=True,
+            account_equity=Decimal("100000"),
+            account_maintenance_margin=None,  # isolated measures against its own bucket
         )
 
-    before = at(held, "64794", "-0.042")  # 0.002 x (64794 - 64815)
-    after = at(topped_up, "64794", "-0.042")
-    two_dollars_away = at(held, "64796", "-0.038")  # 0.002 x (64796 - 64815)
+    before = at(held, "64794")  # uPnL 0.002 x (64794 - 64815) = -0.042
+    after = at(topped_up, "64794")
+    two_dollars_away = at(held, "64796")  # uPnL 0.002 x (64796 - 64815) = -0.038
 
     assert before.liquidation_price is not None
     assert before.liquidation_price.quantize(Decimal("0.0001")) == Decimal("52522.4977")
@@ -755,24 +797,20 @@ def test_the_paper_cross_liquidation_price_is_computed_off_account_equity() -> N
     flat position has no side to divide with (ADR-0041 §3).
     """
 
-    def at(side: Side, account_net: str, account_unrealized_pnl: str) -> PositionView:
-        return position_view(
+    def at(side: Side, *, beside: Iterable[Position] = ()) -> PositionView:
+        return _position_view(
             _position(quantity="0.5", price="58000", side=side),
-            account_net=Decimal(account_net),
-            account_unrealized_pnl=Decimal(account_unrealized_pnl),
-            account_equity=Decimal("12000"),
-            account_maintenance_margin=Decimal("375"),  # the book is this position
+            beside=beside,
             mark=Decimal("60000"),
-            mark_ts=9_000,
             leverage=CROSS_10X,
             spec=BTC_40X,
-            liquidation=LiquidationSource.computed(),
-            collateral_posted=True,
+            account_equity=Decimal("12000"),
+            account_maintenance_margin=Decimal("375"),  # the book is this position
         )
 
-    long = at(Side.BUY, "0.5", "1000")  # 0.5 x (60000 - 58000)
-    short = at(Side.SELL, "-0.5", "-1000")
-    flat = at(Side.BUY, "0", "0")
+    long = at(Side.BUY)
+    short = at(Side.SELL)
+    flat = at(Side.BUY, beside=(_leg(strategy_id="beta", size="-0.5", entry="58000"),))
 
     assert long.liquidation_price is not None
     assert long.liquidation_price.quantize(Decimal("0.0001")) == Decimal("36455.6962")
@@ -813,23 +851,18 @@ def test_each_mode_measures_its_backing_against_the_maintenance_owed_on_it() -> 
     """
 
     def at(leverage: LeverageSpec, *, isolated_collateral: str = "0") -> PositionView:
-        return position_view(
+        return _position_view(
             _position(
                 quantity="0.5",
                 price="58000",
                 side=Side.BUY,
                 isolated_collateral=isolated_collateral,
             ),
-            account_net=Decimal("0.5"),
-            account_unrealized_pnl=Decimal("1000"),
-            account_equity=Decimal("12000"),
-            account_maintenance_margin=Decimal("775"),  # this symbol's 375 plus ETH's 400
             mark=Decimal("60000"),
-            mark_ts=9_000,
             leverage=leverage,
             spec=BTC_40X,
-            liquidation=LiquidationSource.computed(),
-            collateral_posted=True,
+            account_equity=Decimal("12000"),
+            account_maintenance_margin=Decimal("775"),  # this symbol's 375 plus ETH's 400
         )
 
     cross = at(CROSS_10X)
@@ -861,23 +894,18 @@ def test_a_cross_liquidation_price_is_unknown_when_the_books_maintenance_is() ->
     """
 
     def at(leverage: LeverageSpec, *, isolated_collateral: str = "0") -> PositionView:
-        return position_view(
+        return _position_view(
             _position(
                 quantity="0.5",
                 price="58000",
                 side=Side.BUY,
                 isolated_collateral=isolated_collateral,
             ),
-            account_net=Decimal("0.5"),
-            account_unrealized_pnl=Decimal("1000"),
-            account_equity=Decimal("12000"),
-            account_maintenance_margin=None,  # some other symbol has no mark
             mark=Decimal("60000"),
-            mark_ts=9_000,
             leverage=leverage,
             spec=BTC_40X,
-            liquidation=LiquidationSource.computed(),
-            collateral_posted=True,
+            account_equity=Decimal("12000"),
+            account_maintenance_margin=None,  # some other symbol has no mark
         )
 
     cross = at(CROSS_10X)
@@ -918,19 +946,14 @@ def test_a_computed_liquidation_price_at_or_below_zero_reads_none() -> None:
     does have a level at which it is closed out.
     """
 
-    def at(equity: str, *, side: Side = Side.BUY, account_net: str = "0.5") -> PositionView:
-        return position_view(
+    def at(equity: str, *, side: Side = Side.BUY) -> PositionView:
+        return _position_view(
             _position(quantity="0.5", price="58000", side=side),
-            account_net=Decimal(account_net),
-            account_unrealized_pnl=Decimal("1000"),
-            account_equity=Decimal(equity),
-            account_maintenance_margin=Decimal("375"),  # the book is this position
             mark=Decimal("60000"),
-            mark_ts=9_000,
             leverage=CROSS_10X,
             spec=BTC_40X,
-            liquidation=LiquidationSource.computed(),
-            collateral_posted=True,
+            account_equity=Decimal(equity),
+            account_maintenance_margin=Decimal("375"),  # the book is this position
         )
 
     well_collateralized = at("101000")
@@ -946,7 +969,7 @@ def test_a_computed_liquidation_price_at_or_below_zero_reads_none() -> None:
     assert just_above is not None
     assert just_above.quantize(Decimal("0.0001")) == Decimal("0.2025")
 
-    short = at("101000", side=Side.SELL, account_net="-0.5")
+    short = at("101000", side=Side.SELL)
     assert short.liquidation_price is not None
     assert short.liquidation_price > Decimal("60000")
 
@@ -1273,6 +1296,7 @@ def test_account_valuation_folds_every_per_symbol_figure_into_one_row() -> None:
             net=Decimal("0.5"),
             unrealized_pnl=Decimal("1000"),
             notional=Decimal("30000"),
+            isolated_collateral=Decimal("0"),
             margin_used=Decimal("3000"),
             maintenance_margin=Decimal("375"),
             leverage=10,
@@ -1283,6 +1307,7 @@ def test_account_valuation_folds_every_per_symbol_figure_into_one_row() -> None:
             net=Decimal("10"),
             unrealized_pnl=Decimal("2000"),
             notional=Decimal("32000"),
+            isolated_collateral=Decimal("6000"),
             margin_used=Decimal("8000"),
             maintenance_margin=Decimal("640"),
             leverage=5,
@@ -1293,6 +1318,7 @@ def test_account_valuation_folds_every_per_symbol_figure_into_one_row() -> None:
             net=Decimal("100"),
             unrealized_pnl=None,
             notional=None,
+            isolated_collateral=Decimal("0"),
             margin_used=None,
             maintenance_margin=None,
             leverage=1,

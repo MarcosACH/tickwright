@@ -770,6 +770,35 @@ def test_the_first_ingest_makes_an_unposted_live_bucket_real() -> None:
     assert account.free_margin == account.equity - Decimal("81.745")
 
 
+def test_a_posted_strategy_reads_unknown_while_another_on_its_symbol_waits() -> None:
+    """One bucket backs the whole venue position, so one wait hides it (#520).
+
+    `alpha`'s bucket is posted. Then `beta` opens on the same symbol, and the
+    venue moves the one bucket by an amount we do not model. `alpha`'s posted
+    share is no longer the backing, so its view reads unknown, like the row.
+    """
+    projection = _isolated_1x(None)
+    projection.apply_heal(
+        (), snapshot=venue_holding(BTC=Decimal("81.735"), sizes={"BTC": Decimal("0.001")})
+    )
+    posted = projection.for_strategy("alpha").position("BTC")
+    assert posted is not None
+    assert posted.margin_used == Decimal("81.745")
+
+    book_fill(
+        projection,
+        _fill(trade_id="b1", quantity="0.001", price="81745", strategy_id="beta"),
+        side=Side.BUY,
+    )
+
+    view = projection.for_strategy("alpha").position("BTC")
+    assert view is not None
+    assert view.margin_used is None
+    assert view.effective_leverage is None
+    assert projection.account().total_margin_used is None
+    assert view.notional == Decimal("163.490")
+
+
 def test_a_live_close_before_the_first_ingest_reads_no_margin_rather_than_unknown() -> None:
     """A flat position holds no bucket on the venue, so its 0 is a fact (#516).
 
@@ -1183,6 +1212,94 @@ def test_closing_an_isolated_position_releases_the_bucket_it_locked() -> None:
     account = projection.account()
     assert account.total_margin_used == Decimal("0")
     assert account.free_margin == account.equity == Decimal("100000")
+
+
+_BTC_SPEC = InstrumentSpec(
+    symbol="BTC",
+    sz_decimals=3,
+    max_decimals=6,
+    min_notional=Decimal("0"),
+    margin_maint=Decimal("0.0125"),
+)
+
+
+def test_two_strategies_on_one_isolated_symbol_each_read_the_whole_bucket() -> None:
+    """A position view's margin figures belong to the whole venue position (#520).
+
+    Two strategies each buy 0.001 BTC at 81 735 on 10x isolated. The venue holds
+    one 0.002 position, 163.47 of notional, and one bucket of 16.347. Before the
+    fix, each view read only its own half of the bucket, so `effective_leverage`
+    read 20 on a 10x book.
+
+    The liquidation price is checked against one strategy holding 0.002. That
+    book has one position on the venue, the same as this one. It is 10x and not
+    the issue's 1x, because a 1x long has no liquidation price to compare.
+    """
+    leverage = _ISOLATED_10X
+    shared = _projection(leverage=leverage, specs={"BTC": _BTC_SPEC})
+    book_fill(shared, _fill(trade_id="a1", quantity="0.001", price="81735"), side=Side.BUY)
+    book_fill(
+        shared,
+        _fill(trade_id="b1", quantity="0.001", price="81735", strategy_id="beta"),
+        side=Side.BUY,
+    )
+    alone = _projection(leverage=leverage, specs={"BTC": _BTC_SPEC})
+    book_fill(alone, _fill(trade_id="a1", quantity="0.002", price="81735"), side=Side.BUY)
+    for projection in (shared, alone):
+        projection.observe_mark(_mark(price="81735", ts_event=9_000))
+
+    view = shared.for_strategy("alpha").position("BTC")
+    whole = alone.for_strategy("alpha").position("BTC")
+
+    assert view is not None
+    assert whole is not None
+    assert view.notional == Decimal("163.47")
+    assert view.margin_used == Decimal("16.347")
+    assert view.effective_leverage == Decimal("10")
+    assert shared.account().total_margin_used == Decimal("16.347")
+    assert whole.liquidation_price is not None
+    assert view.liquidation_price == whole.liquidation_price
+
+
+def test_a_strategy_beside_the_unattributed_partition_reads_the_whole_bucket() -> None:
+    """Foreign flow's share of the bucket backs the strategy's view too (#520).
+
+    ADR-0041 §5's own case. `alpha` buys 0.001 BTC at 81 735 on 10x isolated,
+    and a restart restores 0.001 of foreign flow with its 8.1735 share of the
+    bucket. The venue holds one 0.002 position against one 16.347 bucket. So
+    `alpha` reads that bucket, though it can never see the foreign partition.
+    """
+    store = SQLiteStore(":memory:")
+    opened = _projection(store=store, leverage=_ISOLATED_10X, specs={"BTC": _BTC_SPEC})
+    opened.recover()
+    change = opened.apply_fill(_fill(trade_id="a1", quantity="0.001", price="81735"), side=Side.BUY)
+    foreign = Position(
+        strategy_id=None,
+        symbol="BTC",
+        signed_size=Decimal("0.001"),
+        entry_price=Decimal("81735"),
+        isolated_collateral=Decimal("8.1735"),
+    )
+    store.checkpoint_ledger(
+        account=change.account, positions=(change.position, foreign), ts_ns=1_000
+    )
+    restarted = _projection(store=store, leverage=_ISOLATED_10X, specs={"BTC": _BTC_SPEC})
+    restarted.recover()
+    alone = _projection(leverage=_ISOLATED_10X, specs={"BTC": _BTC_SPEC})
+    book_fill(alone, _fill(trade_id="a1", quantity="0.002", price="81735"), side=Side.BUY)
+    for projection in (restarted, alone):
+        projection.observe_mark(_mark(price="81735", ts_event=9_000))
+
+    view = restarted.for_strategy("alpha").position("BTC")
+    whole = alone.for_strategy("alpha").position("BTC")
+
+    assert view is not None
+    assert whole is not None
+    assert view.size == Decimal("0.001")
+    assert view.margin_used == Decimal("16.347")
+    assert view.effective_leverage == Decimal("10")
+    assert whole.liquidation_price is not None
+    assert view.liquidation_price == whole.liquidation_price
 
 
 def test_a_flip_through_zero_re_locks_the_bucket_at_the_residual_it_opened() -> None:
