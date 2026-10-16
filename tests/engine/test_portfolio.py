@@ -2334,9 +2334,11 @@ def test_the_venues_bucket_splits_across_partitions_and_sums_to_it_exactly() -> 
 
     assert change is not None
     buckets = {p.strategy_id: p.isolated_collateral for p in change.collateral}
-    assert sum(buckets.values()) == bucket  # exact, by the residue
-    assert buckets["alpha"] == bucket / 3  # its own 1-of-3 share, unrounded
-    assert buckets["beta"] == bucket - bucket / 3
+    alpha, beta = buckets["alpha"], buckets["beta"]
+    assert alpha is not None and beta is not None
+    assert alpha + beta == bucket  # exact, by the residue
+    assert alpha == bucket / 3  # its own 1-of-3 share, unrounded
+    assert beta == bucket - bucket / 3
 
 
 def test_a_venue_cross_position_releases_the_bucket_it_has_no_claim_on() -> None:

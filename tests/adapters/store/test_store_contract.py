@@ -576,6 +576,36 @@ def test_position_round_trips(store_backend: Backend) -> None:
     assert loaded.isolated_collateral == Decimal("7500")
 
 
+def test_an_unposted_bucket_round_trips_as_unknown(store_backend: Backend) -> None:
+    """A crash can save a live isolated row before the venue posts its bucket (#522).
+
+    The restart must read that bucket as unknown. A real venue bucket of 0 is a
+    different fact, so the row has to keep the two apart.
+    """
+    unposted = Position(
+        strategy_id="alpha",
+        symbol="BTC",
+        signed_size=Decimal("0.001"),
+        entry_price=Decimal("81735"),
+        isolated_collateral=None,
+    )
+    posted = Position(
+        strategy_id="beta",
+        symbol="BTC",
+        signed_size=Decimal("0.001"),
+        entry_price=Decimal("81735"),
+        isolated_collateral=Decimal("0"),
+    )
+    with store_backend.open() as store:
+        store.checkpoint_ledger(account=_account(), positions=[unposted, posted], ts_ns=2_000)
+
+    with store_backend.open() as reopened:
+        loaded = {position.strategy_id: position for position in reopened.all_positions()}
+
+    assert loaded["alpha"].isolated_collateral is None
+    assert loaded["beta"].isolated_collateral == Decimal("0")
+
+
 def test_all_positions_returns_the_unattributed_partition_unfiltered(
     store_backend: Backend,
 ) -> None:

@@ -250,6 +250,11 @@ class Position:
     is meaningful only while non-flat and resets on a full close. ``realized_pnl``
     is **gross** — fees and funding accrue on their own lines and are never
     folded in (ADR-0045 §3).
+
+    ``isolated_collateral`` is ``None`` for an unposted bucket. That is a live
+    isolated bucket the venue has not posted since our last open, add or partial
+    close, so we do not know it (#522). It is a different ``None`` from the one
+    on ``VenuePosition``, which means the venue holds the symbol cross.
     """
 
     strategy_id: str | None
@@ -259,7 +264,7 @@ class Position:
     realized_pnl: Decimal = _ZERO
     fees: Decimal = _ZERO
     funding: Decimal = _ZERO
-    isolated_collateral: Decimal = _ZERO
+    isolated_collateral: Decimal | None = _ZERO
     _applied_event_ids: set[str] = field(default_factory=set, init=False, repr=False)
 
     @property
