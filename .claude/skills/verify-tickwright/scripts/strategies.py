@@ -55,8 +55,8 @@ class Wiring:
     portfolio: Portfolio
     symbol: str
     quantity: Decimal
-    # On Hyperliquid, a market order sent before the first mark faults the
-    # engine (#509). A wait lets a mark arrive first.
+    # On Hyperliquid, a market order sent before the first mark ends FAILED
+    # (#509). A wait lets a mark arrive first, so the order can trade.
     wait_seconds: int = 0
 
 

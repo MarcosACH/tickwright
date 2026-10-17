@@ -43,13 +43,19 @@ def _harness() -> tuple[InMemoryBus, ManualClock, SignalEmitter, list[Signal]]:
     return bus, clock, emitter, signals
 
 
-async def _place(emitter: SignalEmitter, *, order_type: OrderType = OrderType.MARKET) -> str:
+async def _place(
+    emitter: SignalEmitter,
+    *,
+    order_type: OrderType = OrderType.MARKET,
+    price: Decimal | None = None,
+) -> str:
     return await emitter.place(
         symbol="BTC",
         side=Side.BUY,
         quantity=Decimal("0.5"),
         order_type=order_type,
         time_in_force=TimeInForce.IOC,
+        price=price,
     )
 
 
@@ -91,6 +97,31 @@ def test_place_carries_limit_price_and_post_only() -> None:
     assert isinstance(signal, PlaceSignal)
     assert signal.price == Decimal("41000")
     assert signal.post_only is True
+
+
+def test_a_limit_with_no_price_is_refused_and_uses_no_seq() -> None:
+    # A venue cannot rest a LIMIT with no price, and its adapter faults the engine
+    # on one (#513). The strategy gets the error at its own call instead.
+    _, _, emitter, signals = _harness()
+
+    with pytest.raises(ValueError, match="price"):
+        asyncio.run(_place(emitter, order_type=OrderType.LIMIT))
+
+    assert signals == []
+    assert asyncio.run(_place(emitter)) == "alpha:BTC:1"
+
+
+def test_a_market_order_with_a_price_is_refused_and_uses_no_seq() -> None:
+    # The guard values an order with a price at that price, but a market order
+    # fills at the market. So a low price let a large market buy pass the max
+    # order value cap. The strategy gets the error at its own call instead.
+    _, _, emitter, signals = _harness()
+
+    with pytest.raises(ValueError, match="price"):
+        asyncio.run(_place(emitter, price=Decimal("100")))
+
+    assert signals == []
+    assert asyncio.run(_place(emitter)) == "alpha:BTC:1"
 
 
 def test_seq_is_monotonic_across_places_and_cancels() -> None:

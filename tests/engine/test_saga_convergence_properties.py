@@ -20,6 +20,7 @@ from bus_backends import BUS_BACKENDS, make_bus
 from hypothesis import given
 from hypothesis import strategies as st
 from ledgers import GENESIS, checkpointer
+from venue_doubles import SendCrashed, SendDies
 
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
@@ -27,6 +28,7 @@ from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     AggressorSide,
     EventBus,
+    Exchange,
     ExecutionReport,
     FillReport,
     MarketTick,
@@ -45,11 +47,13 @@ from tickwright.engine.execution import ExecutionManager
 _CLOID = derive_cloid("trivial:BTC:1")
 
 
-def _wire(backend: str) -> tuple[EventBus, SQLiteStore, list[OrderEvent]]:
+def _wire(
+    backend: str, *, send_dies: bool = False
+) -> tuple[EventBus, SQLiteStore, list[OrderEvent]]:
     bus = make_bus(backend)
     clock = ManualClock(start_ns=1_000)
     store = SQLiteStore(":memory:")
-    exchange = PaperExchange(
+    paper = PaperExchange(
         bus=bus,
         clock=clock,
         fill_model=ImmediateFillModel(),
@@ -58,6 +62,7 @@ def _wire(backend: str) -> tuple[EventBus, SQLiteStore, list[OrderEvent]]:
         applied_fills=lambda cloid: (),
         resting_orders=list,
     )
+    exchange: Exchange = SendDies(paper) if send_dies else paper
     checks = checkpointer(store, clock=clock)
     manager = ExecutionManager(
         bus=bus,
@@ -187,15 +192,15 @@ def test_duplicated_fill_reports_never_double_count_cum_qty(
     ]
     deliveries = data.draw(st.permutations(deliveries))
 
-    bus, store, order_events = _wire(backend)
+    bus, store, order_events = _wire(backend, send_dies=True)
 
     async def scenario() -> None:
         await bus.start()
-        # No tick cached: the send crashes, leaving an in-flight saga the
+        # The send crashes, leaving an in-flight saga the
         # venue's (duplicated) fill stream then resolves. Containment parity:
         # the handler's exception surfaces in the causing publish on both
         # backends.
-        with pytest.raises(ValueError):
+        with pytest.raises(SendCrashed):
             await bus.publish(_signal(quantity=total))
         for report in deliveries:
             await bus.publish(report)

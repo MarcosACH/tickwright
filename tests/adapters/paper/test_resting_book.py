@@ -12,20 +12,18 @@ import pytest
 from tickwright.adapters.paper.book import RestingBook
 from tickwright.domain import (
     InvariantViolation,
-    OrderType,
-    PlaceOrder,
+    LimitOrder,
     Side,
     TimeInForce,
 )
 
 
-def _limit(qty: str = "1", *, cloid: str = "0xabc", symbol: str = "BTC") -> PlaceOrder:
-    return PlaceOrder(
+def _limit(qty: str = "1", *, cloid: str = "0xabc", symbol: str = "BTC") -> LimitOrder:
+    return LimitOrder(
         cloid=cloid,
         symbol=symbol,
         side=Side.BUY,
         quantity=Decimal(qty),
-        order_type=OrderType.LIMIT,
         time_in_force=TimeInForce.GTC,
         price=Decimal("41000"),
     )

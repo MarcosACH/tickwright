@@ -318,14 +318,11 @@ def position_values(position: Position, *, ts_ns: int) -> tuple[Any, ...]:
     real price. A full close resets entry (P1 #119), so ``is_flat`` is the whole
     of the condition — a row with no exposure has no entry worth keeping.
 
-    ``isolated_collateral`` is nullable for the parallel reason — ``NULL`` is
-    *cross-margined*, distinct from an isolated position wiped to ``0`` — but the
-    write is unconditional here, because margin mode does not yet exist in the
-    model to condition on (ADR-0040 §5 makes it config-authoritative; #190/#176
-    land it). The column is in its final shape; **the slice that introduces a
-    cross-margined position owns this write branch**, not just the field — the
-    read half is already here, because a ``NULL`` the mapping cannot restore is a
-    row the schema admits and the recovery mass-read would crash on.
+    ``isolated_collateral`` is ``NULL`` for an unposted bucket (#522). A crash
+    can save a live isolated row before the venue posts its bucket, and the
+    restart has to read that bucket as unknown. A real venue bucket of ``0`` is
+    a different fact, so ``0`` cannot carry it. A cross row writes ``0``,
+    because its mode comes from config (ADR-0040 §5) and not from the row.
     """
     return (
         UNATTRIBUTED if position.strategy_id is None else position.strategy_id,
@@ -335,7 +332,7 @@ def position_values(position: Position, *, ts_ns: int) -> tuple[Any, ...]:
         str(position.realized_pnl),
         str(position.fees),
         str(position.funding),
-        str(position.isolated_collateral),
+        None if position.isolated_collateral is None else str(position.isolated_collateral),
         ts_ns,
     )
 
@@ -350,13 +347,9 @@ def restore_position(row: Sequence[Any]) -> Position:
     entry" from a real price — and it costs nothing in memory, where ``is_flat``
     already answers the same question.
 
-    ``isolated_collateral`` reads the same way, and **both** nullable columns are
-    handled here even though only one of them has a writer today: the schema
-    admits a ``NULL`` in either, and ``Decimal(None)`` raises ``TypeError`` —
-    which is not a driver error, so it would escape ``all_positions()`` unwrapped,
-    past the seam's ``InvariantViolation`` contract, on the recovery path. What
-    the deferral to #190/#176 covers is the *write* branch — emitting ``NULL``
-    for a genuinely cross-margined position — not this one.
+    A ``NULL`` ``isolated_collateral`` restores to ``None``, an unposted bucket
+    (#522). Unlike ``entry_price``, the aggregate does hold a ``None`` here,
+    because no other field can say the bucket is unknown.
     """
     return Position(
         strategy_id=None if row[0] == UNATTRIBUTED else row[0],
@@ -366,7 +359,7 @@ def restore_position(row: Sequence[Any]) -> Position:
         realized_pnl=Decimal(row[4]),
         fees=Decimal(row[5]),
         funding=Decimal(row[6]),
-        isolated_collateral=_ZERO if row[7] is None else Decimal(row[7]),
+        isolated_collateral=None if row[7] is None else Decimal(row[7]),
     )
 
 

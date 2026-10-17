@@ -31,6 +31,8 @@ from tickwright.domain import (
     FillReport,
     InstrumentSpec,
     LeverageBook,
+    LimitOrder,
+    MarketOrder,
     MarketTick,
     MarkTick,
     OrderRef,
@@ -38,7 +40,6 @@ from tickwright.domain import (
     OrderRefusedReport,
     OrderState,
     OrderStatusReport,
-    OrderType,
     PlaceOrder,
     Side,
     TimeInForce,
@@ -78,6 +79,10 @@ _TIF_WIRE = {TimeInForce.GTC: "Gtc", TimeInForce.IOC: "Ioc"}
 # an action error at HTTP 200, so its text is the only way to tell it apart.
 # Evidence: docs/research/hyperliquid-rate-limit-window-probe.md.
 _ADDRESS_LIMIT_PREFIX = "Too many cumulative requests"
+
+
+class _MissingPrice(Exception):
+    """A market order has no price to bound it, so it cannot be sent."""
 
 
 class HyperliquidExchange:
@@ -251,9 +256,23 @@ class HyperliquidExchange:
         self._latest_mark[mark.symbol] = mark.price
 
     async def place(self, order: PlaceOrder) -> None:
+        try:
+            wire = self._order_wire(order)
+        except _MissingPrice as missing:
+            # Nothing was sent, so the order provably never landed (ADR-0010).
+            # A raise here would fault the whole engine for one order (#509).
+            await self._bus.publish(
+                self._status_report(
+                    cloid=order.cloid,
+                    symbol=order.symbol,
+                    status=OrderState.FAILED,
+                    reason=str(missing),
+                )
+            )
+            return
         action = {
             "type": "order",
-            "orders": [self._order_wire(order)],
+            "orders": [wire],
             "grouping": "na",
         }
         # The signed action goes through the same read as every query: ``read``
@@ -826,9 +845,7 @@ class HyperliquidExchange:
         }
 
     def _limit_price(self, order: PlaceOrder) -> Decimal:
-        if order.order_type is OrderType.LIMIT:
-            if order.price is None:
-                raise ValueError(f"LIMIT order {order.cloid} has no price")
+        if isinstance(order, LimitOrder):
             return order.price
         # MARKET → aggressive IOC limit (ADR-0030): no native market type at
         # the venue, so the order is priced through the book with a bound. The
@@ -836,12 +853,12 @@ class HyperliquidExchange:
         # down, a sell up, never past the slippage cap.
         latest = self._latest_price.get(order.symbol)
         if latest is None:
-            raise ValueError(f"no market tick cached for {order.symbol!r}; cannot bound MARKET")
+            raise _MissingPrice(f"no market tick cached for {order.symbol!r}")
         # A trade alone could be stale, so a missing mark is a missing price
         # (ADR-0059).
         mark = self._latest_mark.get(order.symbol)
         if mark is None:
-            raise ValueError(f"no mark cached for {order.symbol!r}; cannot bound MARKET")
+            raise _MissingPrice(f"no mark cached for {order.symbol!r}")
         bound = (
             1 + self._config.slippage_bound
             if order.side is Side.BUY
@@ -853,7 +870,7 @@ class HyperliquidExchange:
         return quantize_price(price, order.side, self._universe.specs[order.symbol])
 
     def _wire_tif(self, order: PlaceOrder) -> str:
-        if order.order_type is OrderType.MARKET:
+        if isinstance(order, MarketOrder):
             return "Ioc"
         if order.post_only:
             return "Alo"
