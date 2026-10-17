@@ -40,18 +40,19 @@ Each file has an H1, one paragraph, then exactly four H2 sections in this order:
 ## Features
 
 - [Paper round trip and restart](./paper-round-trip.md): the quickstart path, a market fill, a
-  resting limit, a graceful stop, and a restart that recovers the fill and ghosts the limit.
+  resting limit, a graceful stop, and a restart that recovers the fill and keeps the limit.
 - [Crash recovery](./crash-recovery.md): `KILL` mid-run, restart, the saga and ledger converge.
 - [Kill switch](./kill-switch.md): `USR1` denies every new order, survives a restart, `USR2`
   clears it.
 - [Pre-trade limits](./pre-trade-limits.md): the size, value, position, and rate caps each deny
   one order, and a close bigger than the size and value caps still fills.
-- [Ghost reconcile](./ghost-reconcile.md): a resting order the venue no longer holds is rejected
-  after the 90 second grace window on the wall clock, and at the first tick on replay.
+- [Ghost reconcile](./ghost-reconcile.md): a restart keeps a resting order past the 90 second
+  grace window, on both clocks. A real ghost is unreachable from the helper today.
 - [Paper economics](./paper-economics.md): taker fees, hourly funding, the seeded stochastic fill
   model with partial fills.
 - [Config refusals](./config-refusals.md): the engine refuses to start on a missing genesis, a
-  changed genesis, and a dead leverage entry, with a readable error and exit 1.
+  changed genesis, a dead leverage entry, a reserved strategy id, and a held store lock, with a
+  readable error and exit 1.
 - [Portfolio strategies](./portfolio-strategies.md): four throwaway strategies that read the
   `Portfolio` seam, including margin at 5x and a two-symbol book.
 - [Kafka bus](./kafka-bus.md): the same paper run over `KafkaBus`, messages counted on the topic.
@@ -60,4 +61,5 @@ Each file has an H1, one paragraph, then exactly four H2 sections in this order:
 - [Hyperliquid testnet](./hyperliquid-testnet.md): a real round trip on the testnet exchange, the
   account reconcile cadence, and key redaction.
 - [Safe exit](./safe-exit.md): on testnet, `cancel-all` and `flatten` leave the account flat, and
-  a restart after `flatten` trades nothing until the kill switch is reset.
+  a restart after `flatten` trades nothing until the kill switch is reset. On paper, the store
+  lock refuses an exit run and `flatten` works with no key.

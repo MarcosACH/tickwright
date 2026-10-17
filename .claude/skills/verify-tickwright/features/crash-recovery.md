@@ -1,8 +1,9 @@
 # Crash recovery
 
 The process dies with `KILL` after a fill. The next start rebuilds the order cache and the ledger
-from the store, clears the barrier, resumes the strategy seq from the saga high-water so no
-signal id is ever reused, and does not place a second order for a strategy that already fired.
+from the store, clears the barrier, resumes the strategy seq so no signal id is ever reused, and
+does not place a second order for a strategy that already fired. The seq resumes from the higher
+of the saga seqs and the `seq_records` table (#442).
 
 ## Sub-features
 
@@ -40,7 +41,8 @@ Preconditions:
   `$V check crash second crash-converge --sql "select signed_size from positions" --expect 0.500`,
   `$V check crash second crash-converge --event order.placed --expect 0`,
   `$V check crash second crash-seq --sql "select count(*) from orders where signal_id='shooter:BTC:1'" --expect 1`,
-  `$V check crash second crash-seq --exit --expect 0`.
+  `$V check crash second crash-seq --exit --expect 0`,
+  `$V check crash second crash-seq --sql "select seq from seq_records where strategy_id='shooter'" --expect 1`.
 - **Report.** Run `$V report crash`. Expected verdict: `PASS`.
 - **Cleanup.** Run `$V cleanup crash`.
 

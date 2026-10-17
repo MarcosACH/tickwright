@@ -23,8 +23,9 @@ Read `features/README.md` before driving. It is the map of what to prove.
 - Logs are JSON lines on **stderr**, one `"event": "<name>"` per line. The event names are the
   catalog in `src/tickwright/observability/catalog.py`.
 - State is the store: SQLite file by default, Postgres when selected. Tables: `orders`,
-  `positions`, `account`, `kill_switch`, `funding_marks`, `strategy_snapshots`. Order states are
-  stored lowercase (`filled`, `live`, `rejected`, `denied`).
+  `positions`, `account`, `kill_switch`, `funding_marks`, `strategy_snapshots`, `seq_records`.
+  `dump` prints the first five. Order states are stored lowercase (`filled`, `live`, `rejected`,
+  `denied`).
 - Under the replay feed, time is virtual. The clock jumps to each tick's `ts_event`. So a tick
   file with rows 90 seconds apart runs the 90 second ghost grace, and a row past the top of a UTC
   hour settles paper funding. When the file ends, time stops. Nothing paced by the clock fires
@@ -230,7 +231,7 @@ All in `.claude/skills/verify-tickwright/scripts/`, all executable:
 | `verify` | `.claude/skills/verify-tickwright/scripts/verify <verb> ...` (wrapper on the venv python) |
 | `verify.py` | the helper itself, `verify --help` and `verify <verb> --help` |
 | `run_strategy.py` | run by `verify start --strategy <name>`, never by hand |
-| `strategies.py` | the four verification strategies `run_strategy.py` registers |
+| `strategies.py` | the five verification strategies `run_strategy.py` registers |
 
 ## Out of scope
 

@@ -31,7 +31,7 @@ Preconditions:
 - Run id `testnet` is unused. Budget about eight minutes.
 
 - **Run.** Run `$V init testnet --feature hyperliquid-testnet` and
-  `$V start testnet rt --preset testnet --forward-key --strategy round_trip_then_flat --param QUANTITY=0.001 --param HOLD_TICKS=3`.
+  `$V start testnet rt --preset testnet --forward-key --strategy round_trip_then_flat --param QUANTITY=0.001 --param HOLD_TICKS=3 --param WAIT_SECONDS=10`.
 - **Materialise.** Run `$V await testnet rt --event account.materialised --timeout 60`. The line
   carries the qualified `account_id` (`hyperliquid-testnet-0x...`) and the venue's cash as
   `genesis_collateral`.
@@ -50,7 +50,9 @@ Preconditions:
   `$V check testnet rt tn-reconcile --event account.reconciled --expect 1`,
   `$V check testnet rt tn-cash --event account.healed --expect 0`,
   `$V check testnet rt tn-redaction --event verify.flat --expect 1` (the run reached the end),
-  `$V check testnet rt tn-divergence --event valuation.divergence --expect 0`
+  `$V check testnet rt tn-divergence --event valuation.divergence --expect 0`,
+  `$V check testnet rt tn-round-trip --sql "select isolated_collateral from positions" --expect 0`
+  (a closed position holds a known 0, not NULL, #524)
   and read the `secrets-check` line: `no signing key in evidence`.
 - **Report.** Run `$V report testnet`. Expected verdict: `PASS`. A FAIL that matches a Gotcha
   below is known. Any other FAIL is new, and `$V issue-draft testnet` drafts it.
@@ -60,7 +62,11 @@ Preconditions:
 
 - A buy sent before the first mark is never sent. It ends `failed` and the engine keeps running
   ([#509](https://github.com/MarcosACH/tickwright/issues/509)). The round trip needs the buy to
-  fill, so add `--param WAIT_SECONDS=10` to the `rt` life.
+  fill, so the `rt` life waits 10 seconds with `--param WAIT_SECONDS=10`.
+- On live, `margin_used` and `liquidation_price` read `null` in the `verify.fill` and
+  `verify.tick` lines until a reconcile posts the venue's numbers (#517, #519). That is the
+  "unknown, not zero" rule, not a failure. Mid-hold, `positions.isolated_collateral` can be NULL
+  for the same reason.
 
 - Every run places the same cloids on the venue, because the cloid is derived from
   `round_trip:BTC:2`. The engine reads and cancels by oid once it has one, and before the ack it
