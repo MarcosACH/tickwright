@@ -1,9 +1,10 @@
 # Portfolio strategies
 
-Four throwaway strategies in `scripts/strategies.py` read the `Portfolio` seam the way a real
-strategy would and log what they read as `verify.*` events. They prove the accounting surface
-from the strategy's side of the seam: positions return to flat, unrealized PnL drives a decision,
-margin math holds at leverage, and two strategies see their own partitions but one account.
+Four of the five throwaway strategies in `scripts/strategies.py` read the `Portfolio` seam the
+way a real strategy would and log what they read as `verify.*` events. They prove the accounting
+surface from the strategy's side of the seam: positions return to flat, unrealized PnL drives a
+decision, margin math holds at leverage, and two strategies see their own partitions but one
+account.
 
 ## Sub-features
 
@@ -18,7 +19,8 @@ margin math holds at leverage, and two strategies see their own partitions but o
 
 - `$V start <run> <life> --preset paper-replay --strategy <name> --param KEY=VALUE`. Params:
   `SYMBOL` (BTC), `SYMBOL2` (ETH), `QUANTITY` (0.5), `HOLD_TICKS` (2), `TAKE_PROFIT` (100),
-  `LEVERAGE` (JSON, `{}`).
+  `LEVERAGE` (JSON, `{}`), `REST_BELOW` (0.8), `WAIT_SECONDS` (0). The last two are for the fifth
+  strategy, `rest_then_hold`, and for live feeds. See `safe-exit.md`.
 
 ## Driving it with verify
 

@@ -34,9 +34,10 @@ Preconditions:
   `$V await pg second --exit`, `$V dump pg second`.
 - **Check life two.** Run `$V check pg second pg-restart --event order.placed --expect 0`,
   `$V check pg second pg-restart --sql "select count(*) from orders" --expect 1`,
-  `$V check pg second pg-restart --exit --expect 0`. Also `ls .agents/verify/pg/scratch` shows
-  no `store.db`.
-- **Report.** Run `$V report pg`. Expected verdict: `PASS (0 of 6 checks failed)`.
+  `$V check pg second pg-restart --exit --expect 0`,
+  `$V check pg second pg-restart --sql "select seq from seq_records where strategy_id='shooter'" --expect 1`.
+  Also `ls .agents/verify/pg/scratch` shows no `store.db`.
+- **Report.** Run `$V report pg`. Expected verdict: `PASS (0 of 7 checks failed)`.
 - **Cleanup.** Run `$V cleanup pg`. It removes the container only when this run started it. A
   Postgres you already had up is left running, and the `verify_pg` database stays in it.
 

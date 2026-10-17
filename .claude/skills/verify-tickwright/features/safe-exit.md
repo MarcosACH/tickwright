@@ -4,7 +4,8 @@ An operator gets out of the market in two one-shot commands. `tickwright cancel-
 resting order in the account. `tickwright flatten` pulls them too, closes every position, and
 trips the kill switch. Each exits 0 only when its last venue read finds nothing left (ADR-0060).
 This recipe proves both on Hyperliquid testnet, and that the engine trades nothing after a
-flatten until the operator resets the kill switch.
+flatten until the operator resets the kill switch. A short paper run proves the store lock
+refusal and a flatten with no key.
 
 ## Sub-features
 
@@ -14,6 +15,9 @@ flatten until the operator resets the kill switch.
 - `se-halted` a restarted engine has its first order denied. The venue gets nothing.
 - `se-reset` after `USR2`, the next life trades a round trip and ends flat.
 - `se-redaction` the signing key appears nowhere in the evidence.
+- `se-lock` on paper, `cancel-all` while the engine runs exits 2 with `exit.refused`.
+- `se-paper-flatten` on paper replay, `flatten` exits 0, cancels the resting buy, closes the long,
+  and trips the kill switch.
 
 ## How to get to it (user POV)
 
@@ -31,6 +35,8 @@ Preconditions:
 - `flatten` closes everything in the testnet account, not only this run's orders. Use an
   account that holds nothing else you want to keep.
 - Run id `safe-exit` is unused. Budget about ten minutes.
+- The paper section at the end needs no key and no network. It runs on its own. Run id
+  `se-paper` is unused.
 
 - **Setup.** Run `$V init safe-exit --feature safe-exit` and
   `$V start safe-exit open --preset testnet --forward-key --strategy rest_then_hold --param QUANTITY=0.001 --param WAIT_SECONDS=10`.
@@ -68,6 +74,27 @@ Preconditions:
 - **Report.** Run `$V report safe-exit`. Expected verdict: `PASS`. A FAIL that is not a Gotcha
   below is new, and `$V issue-draft safe-exit` drafts it.
 - **Cleanup.** Run `$V cleanup safe-exit`.
+- **Paper, set up.** This section is a separate run. It works with or without the testnet steps
+  above. Run `$V init se-paper --feature safe-exit`,
+  `$V ticks se-paper ticks --row BTC:42000@0 --row BTC:42100@1s --row BTC:42200@2s`,
+  `$V start se-paper held --preset paper-replay --strategy rest_then_hold --param QUANTITY=0.5`,
+  `$V await se-paper held --event verify.rested`, and
+  `$V await se-paper held --order $($V cloid rest_then_hold:BTC:2)=LIVE`. Leave it running.
+- **Paper, lock.** While `held` runs, run
+  `$V start se-paper lock --preset paper-replay --command cancel-all` and
+  `$V await se-paper lock --exit`. Check
+  `$V check se-paper lock se-lock --exit --expect 2`,
+  `$V check se-paper lock se-lock --event exit.refused --expect 1`. The line reads
+  `reason: lock_held` and names the holder's pid. Then `$V signal se-paper held TERM`,
+  `$V await se-paper held --exit`, `$V dump se-paper held`.
+- **Paper, flatten.** Run `$V start se-paper flatten --preset paper-replay --command flatten`,
+  `$V await se-paper flatten --exit --timeout 60`, `$V dump se-paper flatten`. Check
+  `$V check se-paper flatten se-paper-flatten --exit --expect 0`,
+  `$V check se-paper flatten se-paper-flatten --sql "select state from orders where cloid='$($V cloid rest_then_hold:BTC:2)'" --expect cancelled`,
+  `$V check se-paper flatten se-paper-flatten --sql "select count(*) from positions where cast(signed_size as real) != 0" --expect 0`,
+  `$V check se-paper flatten se-paper-flatten --sql "select tripped from kill_switch" --expect 1`.
+  The store holds one `__operator__` market sell of 0.5. Then `$V report se-paper`, expected
+  `PASS (0 of 6 checks failed)`, and `$V cleanup se-paper`.
 
 ## Gotchas
 
@@ -88,3 +115,7 @@ Preconditions:
 - `halted` uses `margin_watch` on purpose. A denied strategy keeps its `buying` phase in its
   snapshot, so the `reset` life uses a different strategy id to start clean.
 - `feed.lagged` lines are normal on testnet. The stream conflates.
+- The paper `cancel-all` and `flatten` see the resting buy because paper rebuilds its book from
+  the store at boot (#484). A replay flatten plays the whole tick file and fills at the last row
+  (ADR-0059).
+- `start` cannot pass `--new-store`, so the `new_store` refusal is not driven here.
