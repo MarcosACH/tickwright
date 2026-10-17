@@ -107,4 +107,5 @@ gh issue close <PRD#> --comment "Delivered in vX.Y.Z: <release-url>. All sub-iss
   engine no longer crashes on a market order before the first mark (#509) or a LIMIT with no
   price (#513). A live position no longer reads a made-up liquidation price at boot (#515). Live
   isolated margin now reads right after an open, an add, a shared symbol, and a restart (#516,
-  #518, #520, #522). Bump PR backed by #527.
+  #518, #520, #522). Paper keeps its resting orders across a restart (#484). Bump PR backed by
+  #527.
