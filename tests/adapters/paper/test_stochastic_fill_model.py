@@ -21,12 +21,12 @@ from tickwright.adapters.paper import PaperExchange, StochasticFillModel, Stocha
 from tickwright.domain import (
     FillReport,
     InvariantViolation,
+    LimitOrder,
+    MarketOrder,
     MarketTick,
     OrderRef,
     OrderState,
     OrderStatusReport,
-    OrderType,
-    PlaceOrder,
     Side,
     TimeInForce,
 )
@@ -47,26 +47,24 @@ def _tick(price: str, ts: int = 1_000, symbol: str = "BTC") -> MarketTick:
     )
 
 
-def _market_order(qty: str = "1", symbol: str = "BTC", cloid: str = "0xabc") -> PlaceOrder:
-    return PlaceOrder(
+def _market_order(qty: str = "1", symbol: str = "BTC", cloid: str = "0xabc") -> MarketOrder:
+    return MarketOrder(
         cloid=cloid,
         symbol=symbol,
         side=Side.BUY,
         quantity=Decimal(qty),
-        order_type=OrderType.MARKET,
         time_in_force=TimeInForce.IOC,
     )
 
 
 def _limit_order(
     price: str, *, qty: str = "1", cloid: str = "0xabc", symbol: str = "BTC"
-) -> PlaceOrder:
-    return PlaceOrder(
+) -> LimitOrder:
+    return LimitOrder(
         cloid=cloid,
         symbol=symbol,
         side=Side.BUY,
         quantity=Decimal(qty),
-        order_type=OrderType.LIMIT,
         time_in_force=TimeInForce.GTC,
         price=Decimal(price),
     )
@@ -120,12 +118,11 @@ def test_slippage_is_adverse_and_within_the_configured_bound() -> None:
         )
         sell_fill = asyncio.run(
             sell.market_fill(
-                PlaceOrder(
+                MarketOrder(
                     cloid="0xsell",
                     symbol="BTC",
                     side=Side.SELL,
                     quantity=Decimal("1"),
-                    order_type=OrderType.MARKET,
                     time_in_force=TimeInForce.IOC,
                 ),
                 tick,
@@ -238,12 +235,11 @@ def test_a_marketable_ioc_limit_partial_fill_cancels_its_remainder() -> None:
     bus.subscribe(FillReport, lambda r: _record(fills, r))
     bus.subscribe(OrderStatusReport, lambda r: _record(statuses, r))
 
-    ioc = PlaceOrder(
+    ioc = LimitOrder(
         cloid="0xioc",
         symbol="BTC",
         side=Side.BUY,
         quantity=Decimal("1"),
-        order_type=OrderType.LIMIT,
         time_in_force=TimeInForce.IOC,
         price=Decimal("42000"),
     )
@@ -278,7 +274,7 @@ def test_a_partial_is_sized_from_a_shrink_made_earlier_on_the_same_tick() -> Non
     fills: list[FillReport] = []
     bus.subscribe(FillReport, lambda r: _record(fills, r))
 
-    def reduce_only_sell(cloid: str, qty: str) -> PlaceOrder:
+    def reduce_only_sell(cloid: str, qty: str) -> LimitOrder:
         return replace(
             _limit_order("51000", qty=qty, cloid=cloid), side=Side.SELL, reduce_only=True
         )

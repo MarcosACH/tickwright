@@ -89,6 +89,9 @@ A strategy consumes ticks and lifecycle events and emits `PlaceSignal`/`CancelSi
   Do not build one yourself. `app/build.py` gets it from `engine.emitter_for(strategy_id)`, as it
   gets `portfolio_for`. The engine's emitter saves each seq before it publishes, so a restart never
   reuses one (ADR-0016).
+- [ ] Give a `LIMIT` order a `price`, and give a `MARKET` order none. Otherwise `place` raises
+  `ValueError` at your own call. Nothing is sent and no seq is used. The engine logs
+  `strategy.error` and keeps running (#513).
 - [ ] Close a position with a reduce-only order. It can only shrink the account net, never grow it
   or flip it. An order larger than the net is shrunk to it, and the cut part ends `CANCELLED`
   (ADR-0057). The real guard denies it unless it shrinks your own position. Your open orders on
@@ -162,8 +165,13 @@ auth, quirk translation — and importing no other adapter. It provides both a `
   `MarketTick`s **and `MarkTick`s** — the obligation and its consequence are stated on the
   [`MarketFeed` Protocol](../src/tickwright/domain/protocols.py) itself, and made executable by the
   shared feed contract in the TDD bullet below), an `Exchange` adapter (`start`/`run`/`stop` plus
-  `place`/`cancel`/`fetch_order`/`fetch_account_state`/`verify_account_mode`/`account_spec`/
-  `instrument_specs`), spec sourcing, and a `<Venue>Config`.
+  `place`/`cancel`/`fetch_order`/`fetch_open_orders`/`fetch_positions`/`fetch_account_state`/
+  `verify_account_mode`/`account_spec`/`instrument_specs`), spec sourcing, and a `<Venue>Config`.
+
+  > **Breaking change for an `Exchange` written before the safe exit work (#457).** `cancel(ref)`
+  > became `cancel(refs)`, which takes a list of orders. The seam also gained two reads,
+  > `fetch_open_orders` and `fetch_positions`. Cancel all and flatten need them (ADR-0052,
+  > ADR-0054). An adapter without them no longer matches the `Exchange` Protocol.
 - [ ] Honor the `Exchange` contracts: a failed read is **never venue truth** (never `[]`, never a
   view — an outage must not look like "no orders", ADR-0011 inv 1), and the two read grains say so
   differently. `fetch_order` returns a **`VenueReadFailure`**, whose member says *which way* it
@@ -175,7 +183,10 @@ auth, quirk translation — and importing no other adapter. It provides both a `
   rate limit. The reconciler stops its pass on it, as on `SEND_FAILED` (ADR-0056).
   `fetch_account_state` reads one grain with no worklist behind it, so it collapses all and
   returns **`None`**. `place`/`cancel` emit raw `ExecutionReport`s on the bus rather than
-  returning them; a cancel of an unknown order is a benign no-op.
+  returning them; a cancel of an unknown order is a benign no-op. `place` never raises for one
+  order. A raise faults the whole engine, so every outcome is a report on the bus. The
+  [`OrderAnchor.place`](../src/tickwright/domain/protocols.py) docstring lists which report goes
+  with which outcome (#509).
 - [ ] Answer the four questions the accounting surface asks of an `Exchange`. Each is a member the
   seam-claims gate below will make you name a test for.
   - `account_spec()` returns an `AccountSpec`: the qualified `account_id` the store keys the ledger

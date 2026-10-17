@@ -29,6 +29,9 @@ durably checkpoints the ``cancel_requested`` marker **before** calling
 ``Exchange.cancel``, and leaves the saga ``LIVE`` — the marker is metadata, not a
 state, so the order can still fill (ADR-0026).
 
+The operator's cancel all sends no signal, so it calls ``cancel_for_operator``.
+That path marks each saga durably before the send too (ADR-0052).
+
 The ``PreTradeGuard`` runs **before** the write-ahead (ADR-0017): a ``Denied``
 verdict mints the ``DENIED`` terminal and never touches the exchange, while an
 ``Approved`` verdict carries the quantized ``quantity``/``price`` the order is
@@ -36,6 +39,7 @@ actually placed at. It defaults to a passthrough ``NoopGuard`` so the paper/test
 path needs no policy wired in.
 """
 
+from collections.abc import Sequence
 from decimal import Decimal
 from typing import TypedDict
 
@@ -46,6 +50,7 @@ from tickwright.domain import (
     Denied,
     EventBus,
     ExecutionReport,
+    ExternalOrderRef,
     FillReport,
     GuardDecision,
     InvariantViolation,
@@ -64,12 +69,13 @@ from tickwright.domain import (
     OrderState,
     OrderStatusReport,
     OrderSubmitted,
-    PlaceOrder,
     PlaceSignal,
     PreTradeGuard,
     Signal,
+    VenueOpenOrder,
     derive_cloid,
     is_flatten,
+    place_order_of,
 )
 from tickwright.observability import NamedEvent, named_event
 from tickwright.observability.correlation import operation
@@ -172,8 +178,13 @@ class ExecutionManager:
         exchange: OrderAnchor,
         checkpointer: Checkpointer,
         guard: PreTradeGuard | None = None,
+        exit_run: bool = False,
     ) -> None:
         self._bus = bus
+        # An exit run hosts no strategy, but a Kafka bus can still replay a
+        # strategy signal a crashed life never handled. Placed, it could open
+        # new exposure while the operator is getting out (issue #476).
+        self._exit_run = exit_run
         # The **cloid** anchor and not the whole ``Exchange``: this manager
         # sends and never reads the account, so the seam it declares is the
         # grain it drives (ADR-0034's two anchors, ``domain/protocols.py``).
@@ -189,6 +200,8 @@ class ExecutionManager:
         # caller of the verbs below, so a fill is applied exactly once rather
         # than also heard on the bus (ADR-0035) — but it no longer holds the
         # ordering rules those writes obey, nor a time source of its own.
+        # The ledger verbs for funding, heals and flatten leftovers have other
+        # callers. Every saga write comes through here, the operator's included.
         self._checkpointer = checkpointer
         self._clock = checkpointer.clock
         # The pre-trade boundary run before any send (ADR-0017). Defaults to the
@@ -221,6 +234,32 @@ class ExecutionManager:
             elif isinstance(report, OrderStatusReport):
                 await self._apply_status(report)
 
+    async def cancel_for_operator(
+        self, resting: Sequence[VenueOpenOrder | ExternalOrderRef]
+    ) -> None:
+        """Cancel every order in ``resting`` in one call, for the operator's cancel all.
+
+        The operator sends no signal, so this is a call and not a handler. Each
+        order with a saga gets the operator mark first, durable before the send
+        as on the strategy paths (ADR-0026). The mark consumes no seq (ADR-0052).
+        """
+        await self._exchange.cancel([self._operator_ref(order) for order in resting])
+
+    def _operator_ref(
+        self, order: VenueOpenOrder | ExternalOrderRef
+    ) -> OrderRef | ExternalOrderRef:
+        if isinstance(order, ExternalOrderRef):
+            # The engine did not place it, so there is no saga to mark (ADR-0052).
+            return order
+        saga = self._checkpointer.cache.get_order(order.cloid)
+        if saga is None:
+            return OrderRef(cloid=order.cloid, symbol=order.symbol, venue_oid=order.venue_oid)
+        # Without the mark, a crash after the send leaves reconcile to judge the
+        # order a ghost and mark it REJECTED.
+        saga.mark_operator_cancel(ts_ns=self._clock.timestamp_ns())
+        self._checkpointer.checkpoint(saga)
+        return OrderRef.of(saga)
+
     async def _place(self, signal: PlaceSignal) -> None:
         cloid = derive_cloid(signal.signal_id)
         if self._checkpointer.cache.get_order(cloid) is not None:
@@ -235,6 +274,10 @@ class ExecutionManager:
             # that is not reduce-only is denied here, whatever guard is wired
             # (ADR-0054).
             decision = Denied(reason="an operator order must be reduce-only")
+        elif self._exit_run and signal.strategy_id != OPERATOR:
+            # Denied rather than dropped, so the saga is terminal and a later
+            # strategy run never replays it either.
+            decision = Denied(reason="an exit run places no strategy order")
         else:
             # The pre-trade boundary runs before write-ahead (ADR-0017): a denial is
             # never sent, so there is no in-flight intent to protect. The reading is
@@ -286,7 +329,7 @@ class ExecutionManager:
         await self._announce(submitted)
 
         # Built from the saga, so the row holds exactly the terms the venue got.
-        await self._exchange.place(PlaceOrder.of(order))
+        await self._exchange.place(place_order_of(order))
         # SUBMITTED is checkpointed only after the send returns: until then the
         # durable record stays PENDING, so a crash anywhere in the send window
         # recovers through reconcile-by-cloid (ADR-0008 rule 2). Its timestamp
@@ -494,6 +537,8 @@ class ExecutionManager:
         ``SUBMITTED`` and ``FAILED`` are minted only by the ``Reconciler``:
         the bridge for a recovered ``PENDING`` whose send provably landed, and
         the proven-never-landed verdict (ADR-0010) — verdicts, not venue pushes.
+        One exception: an adapter reports ``FAILED`` for an order it never sent
+        because it had no price (``OrderAnchor.place``, #509).
         """
         oid, flag = report.venue_oid, report.reconciliation
         match report.status:

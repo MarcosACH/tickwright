@@ -14,7 +14,6 @@ from enum import StrEnum
 from typing import Protocol
 
 from tickwright.domain import (
-    OPERATOR,
     AccountAnchor,
     Clock,
     EventBus,
@@ -22,8 +21,6 @@ from tickwright.domain import (
     InvariantViolation,
     MarketTick,
     MarkTick,
-    OrderAnchor,
-    OrderRef,
     OrderRefusal,
     OrderRefusedReport,
     OrderType,
@@ -68,7 +65,11 @@ class ExitContext:
     """The engine's own parts that a job may use, built after the barrier."""
 
     account: AccountAnchor
-    orders: OrderAnchor
+    cancel: Callable[[Sequence[VenueOpenOrder | ExternalOrderRef]], Awaitable[None]]
+    """The manager's operator cancel. A job has no cancel that skips the saga mark."""
+    emitter: SignalEmitter
+    """The ``__operator__`` emitter. The engine builds it as it builds a strategy's,
+    and seeds it past every seq an earlier life used (ADR-0016)."""
     checkpointer: Checkpointer
     guard: PreTradeGuard
     bus: EventBus
@@ -195,16 +196,7 @@ class Flatten:
             # its own symbol's first price instead.
             if self._feed_ends:
                 await context.feed.ended()
-            emitter = SignalEmitter(
-                strategy_id=OPERATOR,
-                bus=context.bus,
-                clock=context.clock,
-                record_seq=context.checkpointer.raise_seq,
-            )
-            # Seeded from the store high-water, as a strategy's is. An earlier flatten's seq
-            # is consumed, and the manager drops a signal id it has seen (ADR-0006).
-            high_water = context.checkpointer.cache.seq_high_water()
-            emitter.set_next_seq(high_water.get(OPERATOR, 0) + 1)
+            emitter = context.emitter
             turns = _Turns(context.reconciler, context.reconcile_account)
             context.bus.subscribe(OrderRefusedReport, turns.note_refusal)
             # One loop per symbol, all at the same time, so a thin book on one
@@ -680,24 +672,5 @@ async def _cancel_round(
     """
     if isinstance(resting, VenueReadFailure) or not resting:
         return resting
-    await context.orders.cancel([_mark(order, context.checkpointer) for order in resting])
+    await context.cancel(resting)
     return await context.account.fetch_open_orders()
-
-
-def _mark(
-    order: VenueOpenOrder | ExternalOrderRef, checkpointer: Checkpointer
-) -> OrderRef | ExternalOrderRef:
-    """The ref to cancel ``order`` by, with its saga marked first if it has one.
-
-    The mark is durable before the send. Without it, a crash after the send
-    leaves reconcile to judge the order a ghost and mark it ``REJECTED``.
-    """
-    if isinstance(order, ExternalOrderRef):
-        # The engine did not place it, so there is no saga to mark (ADR-0052).
-        return order
-    saga = checkpointer.cache.get_order(order.cloid)
-    if saga is None:
-        return OrderRef(cloid=order.cloid, symbol=order.symbol, venue_oid=order.venue_oid)
-    saga.mark_operator_cancel(ts_ns=checkpointer.clock.timestamp_ns())
-    checkpointer.checkpoint(saga)
-    return OrderRef.of(saga)

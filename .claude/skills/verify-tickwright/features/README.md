@@ -59,3 +59,5 @@ Each file has an H1, one paragraph, then exactly four H2 sections in this order:
 - [Hyperliquid feed](./hyperliquid-feed.md): mainnet public trades into the paper venue. No key.
 - [Hyperliquid testnet](./hyperliquid-testnet.md): a real round trip on the testnet exchange, the
   account reconcile cadence, and key redaction.
+- [Safe exit](./safe-exit.md): on testnet, `cancel-all` and `flatten` leave the account flat, and
+  a restart after `flatten` trades nothing until the kill switch is reset.

@@ -513,7 +513,27 @@ class OrderAnchor(Protocol):
     """
 
     async def place(self, order: PlaceOrder) -> None:
-        """Place ``order`` at the venue; emit the resulting raw ``ExecutionReport``(s)."""
+        """Place ``order`` at the venue; emit the resulting raw ``ExecutionReport``(s).
+
+        Every outcome of one order is a report on the bus, never a raise. The
+        ``ExecutionManager`` calls this from a raw handler, so a raise faults
+        the whole engine (ADR-0024). One order that cannot go out must not stop
+        every other order (#509). Each outcome has its own report:
+
+        - The venue took the order: its ack, its fills, and its end.
+        - The venue judged the order and refused it: ``REJECTED``, with the
+          venue's reason.
+        - The adapter has no price to send the order with, so it sends
+          nothing: ``FAILED``, with the reason. Not sending is the proof that
+          the order never landed (ADR-0010).
+        - The venue or the link did not take the order and did not judge it:
+          an ``OrderRefusedReport``. No saga moves (ADR-0056).
+        - No answer could be read: no report. Reconcile resolves the order by
+          cloid (ADR-0008 rule 2).
+
+        Raise only for a bug in this process. The engine must not trade on a
+        broken assumption, so that fault is wanted.
+        """
         ...
 
     async def cancel(self, refs: Sequence[OrderRef | ExternalOrderRef]) -> None:

@@ -279,20 +279,33 @@ def account_state(
     )
 
 
-def venue_holding(**buckets: Decimal | None) -> VenueAccountState:
+def venue_holding(
+    *, sizes: Mapping[str, Decimal] | None = None, **buckets: Decimal | None
+) -> VenueAccountState:
     """A venue snapshot holding one position per symbol, each with its bucket.
 
     ``None`` is the venue's own claim that the position is cross (ADR-0043
     §3). No keyword is a venue holding nothing.
 
+    ``sizes`` is the venue's signed size per symbol. A symbol it leaves out
+    keeps the recorded 0.002. Pass the size the ledger holds when the read
+    should carry the ledger's position. The ingest only posts a waiting bucket
+    from such a read (#516).
+
     The rest of each row is ``account_state``'s recorded fixture, since the
-    collateral ingest reads the bucket and nothing else off the snapshot.
+    collateral ingest reads the size and the bucket and nothing else.
     """
     (recorded,) = account_state("100000", "0").positions
+    held = {} if sizes is None else sizes
     return replace(
         account_state("100000"),
         positions=tuple(
-            replace(recorded, symbol=symbol, isolated_collateral=bucket)
+            replace(
+                recorded,
+                symbol=symbol,
+                signed_size=held.get(symbol, recorded.signed_size),
+                isolated_collateral=bucket,
+            )
             for symbol, bucket in buckets.items()
         ),
     )
@@ -455,3 +468,15 @@ class VenueLink:
 
     def instrument_specs(self) -> Mapping[str, InstrumentSpec]:
         return self._venue.instrument_specs()
+
+
+class SendCrashed(Exception):
+    """The process died while the order was in the send window."""
+
+
+class SendDies(VenueLink):
+    """A placement that dies mid-send. Nothing reaches the venue, and the saga
+    is left in flight for a later report or a restart to resolve."""
+
+    async def place(self, order: PlaceOrder) -> None:
+        raise SendCrashed(order.cloid)

@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 from ledgers import GENESIS, checkpointer
-from venue_doubles import VenueLink
+from venue_doubles import SendCrashed, SendDies, VenueLink
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
@@ -29,6 +29,7 @@ from tickwright.adapters.paper import (
 )
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
+    OPERATOR,
     Account,
     AggressorSide,
     Approved,
@@ -54,6 +55,7 @@ from tickwright.domain import (
     OrderState,
     OrderStatusReport,
     OrderSubmitted,
+    PlaceOrder,
     PlaceSignal,
     Position,
     PreTradeGuard,
@@ -61,6 +63,7 @@ from tickwright.domain import (
     Side,
     Signal,
     TimeInForce,
+    VenueOpenOrder,
     derive_cloid,
 )
 from tickwright.domain.enums import OrderType
@@ -143,6 +146,7 @@ class _Wiring:
     store: SQLiteStore
     checkpointer: Checkpointer
     order_events: list[OrderEvent]
+    manager: ExecutionManager
 
     @property
     def cache(self) -> Cache:
@@ -158,10 +162,12 @@ def _wiring(
     *,
     guard: PreTradeGuard | None = None,
     link: Callable[[PaperExchange], Exchange] | None = None,
+    exit_run: bool = False,
 ) -> _Wiring:
     """The manager over its real collaborators, on the ``store`` handed in — so a
     case can substitute one that fails at a chosen seam. ``link`` puts a
     ``VenueLink`` in front of the paper venue, for a case where the network fails.
+    ``exit_run`` builds the manager as an exit run's engine does.
 
     Both read-models come from the one ``Checkpointer`` built on that store, so
     this harness cannot express the split write the atomic path exists to close
@@ -184,7 +190,9 @@ def _wiring(
     # order history with no ledger — for whatever life reopens the store next.
     checks.recover()
     venue = link(exchange) if link is not None else exchange
-    manager = ExecutionManager(bus=bus, exchange=venue, checkpointer=checks, guard=guard)
+    manager = ExecutionManager(
+        bus=bus, exchange=venue, checkpointer=checks, guard=guard, exit_run=exit_run
+    )
 
     bus.subscribe(Signal, manager.on_signal)
     bus.subscribe(ExecutionReport, manager.on_execution_report)
@@ -197,29 +205,31 @@ def _wiring(
         store=store,
         checkpointer=checks,
         order_events=order_events,
+        manager=manager,
     )
 
 
 def _harness(
     path: str | Path = ":memory:",
+    *,
+    link: Callable[[PaperExchange], Exchange] | None = None,
 ) -> tuple[InMemoryBus, ManualClock, SQLiteStore, list[OrderEvent]]:
     """The manager over its real collaborators. ``path`` backs the store with a
     file for the cases that must reopen it — closing a ``:memory:`` store takes
     the durable record with it, so a "what survived?" assertion needs a file."""
-    wiring = _wiring(SQLiteStore(path))
+    wiring = _wiring(SQLiteStore(path), link=link)
     return wiring.bus, wiring.clock, wiring.store, wiring.order_events
 
 
 def test_pending_intent_is_durable_before_the_send_can_crash() -> None:
-    bus, _, store, _ = _harness()
+    bus, _, store, _ = _harness(link=SendDies)
     cloid = derive_cloid("trivial:BTC:1")
 
     async def scenario() -> None:
-        # No tick published: the real PaperExchange raises on place — standing
-        # in for a crash mid-send. The write-ahead intent (ADR-0008 rule 1)
+        # The send crashes mid-flight. The write-ahead intent (ADR-0008 rule 1)
         # must already be durable, with the full params recovery needs to
         # reconcile by cloid.
-        with pytest.raises(ValueError):
+        with pytest.raises(SendCrashed):
             await bus.publish(_market_signal())
 
     asyncio.run(scenario())
@@ -237,12 +247,12 @@ def test_a_new_order_is_stamped_with_the_time_the_engine_created_it() -> None:
     # The stamp is what a venue read compares a record's placement time
     # against, so a record from an earlier life under the same cloid is never
     # taken for this order (#354). It is engine time, not the signal's.
-    wiring = _wiring(SQLiteStore(":memory:"))
+    wiring = _wiring(SQLiteStore(":memory:"), link=SendDies)
     wiring.clock.advance_to(1_500)
     cloid = derive_cloid("trivial:BTC:1")
 
     async def scenario() -> None:
-        with pytest.raises(ValueError):
+        with pytest.raises(SendCrashed):
             await wiring.bus.publish(_market_signal())
 
     asyncio.run(scenario())
@@ -319,14 +329,14 @@ def test_a_refused_ledger_write_leaves_neither_the_order_row_nor_the_ledger(
     left in-flight first, so the store is alive for the write-ahead intent and
     dead only for the fill.
     """
-    bus, _, store, _ = _harness(tmp_path / "saga.db")
+    bus, _, store, _ = _harness(tmp_path / "saga.db", link=SendDies)
     cloid = derive_cloid("trivial:BTC:1")
 
     async def scenario() -> None:
-        # No tick cached: the send raises, leaving the saga in-flight with its
+        # The send crashes, leaving the saga in-flight with its
         # PENDING intent durable — then the venue's fill arrives against a store
         # that can no longer be written.
-        with pytest.raises(ValueError):
+        with pytest.raises(SendCrashed):
             await bus.publish(_market_signal())
         store.close()
         with pytest.raises(InvariantViolation, match="ledger checkpoint write failed"):
@@ -527,13 +537,13 @@ def _fill_report(
 
 
 def test_partial_fills_accumulate_to_filled_with_checkpoints() -> None:
-    bus, _, store, order_events = _harness()
+    bus, _, store, order_events = _harness(link=SendDies)
     cloid = derive_cloid("trivial:BTC:1")
 
     async def scenario() -> None:
-        # No tick cached: the send crashes, leaving the saga in-flight — then
+        # The send crashes, leaving the saga in-flight — then
         # the venue's fills arrive in two parts, as a live venue would push them.
-        with pytest.raises(ValueError):
+        with pytest.raises(SendCrashed):
             await bus.publish(_market_signal())
         await bus.publish(_fill_report(cloid, trade_id="f1", quantity="0.2"))
         await bus.publish(_fill_report(cloid, trade_id="f2", quantity="0.3"))
@@ -560,11 +570,11 @@ def test_each_fill_event_carries_the_fee_the_venue_reported_for_that_trade() -> 
     # derives it — exactly as it already does for the report's ``ts_event`` and
     # ``reconciliation`` (ADR-0036). Per ``trade_id``, so two partials of one
     # order carry two independently reported fees and neither is a running total.
-    bus, _, _, order_events = _harness()
+    bus, _, _, order_events = _harness(link=SendDies)
     cloid = derive_cloid("trivial:BTC:1")
 
     async def scenario() -> None:
-        with pytest.raises(ValueError):
+        with pytest.raises(SendCrashed):
             await bus.publish(_market_signal())
         await bus.publish(_fill_report(cloid, trade_id="f1", quantity="0.2", fee="3.78"))
         await bus.publish(_fill_report(cloid, trade_id="f2", quantity="0.3", fee="5.67"))
@@ -590,11 +600,11 @@ def test_a_failed_checkpoint_write_is_an_invariant_violation() -> None:
 
 
 def test_time_passing_never_transitions_an_in_flight_saga() -> None:
-    bus, clock, store, order_events = _harness()
+    bus, clock, store, order_events = _harness(link=SendDies)
     cloid = derive_cloid("trivial:BTC:1")
 
     async def scenario() -> None:
-        with pytest.raises(ValueError):
+        with pytest.raises(SendCrashed):
             await bus.publish(_market_signal())
         # An hour of dead air. A timeout is never a transition (ADR-0007 inv 1):
         # only a venue fact or reconciliation may move an in-flight saga.
@@ -649,13 +659,13 @@ def test_order_filled_carries_the_fill_details() -> None:
 
 
 def test_fill_preserves_the_venue_ts_event_while_ts_init_is_engine_time() -> None:
-    bus, clock, _, order_events = _harness()
+    bus, clock, _, order_events = _harness(link=SendDies)
     cloid = derive_cloid("trivial:BTC:1")
 
     async def scenario() -> None:
-        # Leave the saga in-flight (no tick cached -> the send crashes), so the
+        # Leave the saga in-flight (the send crashes), so the
         # order exists in cache to accept a hand-built venue fill.
-        with pytest.raises(ValueError):
+        with pytest.raises(SendCrashed):
             await bus.publish(_market_signal())
         # The engine receives the fill strictly later than the venue stamped it.
         # On the paper path both clocks coincide, so the gap is only observable
@@ -681,13 +691,13 @@ def test_fill_preserves_the_venue_ts_event_while_ts_init_is_engine_time() -> Non
 
 
 def test_partial_fill_ts_event_tracks_each_report_while_ts_init_is_engine_time() -> None:
-    bus, clock, _, order_events = _harness()
+    bus, clock, _, order_events = _harness(link=SendDies)
     cloid = derive_cloid("trivial:BTC:1")
 
     async def scenario() -> None:
         # In-flight saga, then two venue fills arriving after their own instants,
         # each received at a distinct (later) engine time.
-        with pytest.raises(ValueError):
+        with pytest.raises(SendCrashed):
             await bus.publish(_market_signal())
         clock.advance_to(5_000)
         await bus.publish(_fill_report(cloid, trade_id="f1", quantity="0.2", ts_event=2_000))
@@ -1190,6 +1200,132 @@ def test_a_cancel_all_sends_every_cancel_in_one_call() -> None:
     assert links[0].calls == [[OrderRef.of(order) for order in orders if order is not None]]
 
 
+class _MarksAtSend(VenueLink):
+    """Records each ``cancel`` call, and whether the store held each saga's mark by then.
+
+    It sends nothing on, because the test asks only what left and what was durable.
+    """
+
+    def __init__(self, venue: Exchange, store: SQLiteStore) -> None:
+        super().__init__(venue)
+        self._store = store
+        self.calls: list[list[OrderRef | ExternalOrderRef]] = []
+        self.marked: list[bool] = []
+
+    async def cancel(self, refs: Sequence[OrderRef | ExternalOrderRef]) -> None:
+        self.calls.append(list(refs))
+        for ref in refs:
+            stored = None if isinstance(ref, ExternalOrderRef) else self._store.get_order(ref.cloid)
+            if stored is not None:
+                self.marked.append(stored.cancel_requested)
+
+
+def test_an_operator_cancel_marks_every_saga_durably_before_its_one_send() -> None:
+    store = SQLiteStore(":memory:")
+    links: list[_MarksAtSend] = []
+
+    def link(venue: PaperExchange) -> Exchange:
+        links.append(_MarksAtSend(venue, store))
+        return links[-1]
+
+    wiring = _wiring(store, link=link)
+    first, second = derive_cloid("trivial:BTC:1"), derive_cloid("trivial:BTC:2")
+
+    async def scenario() -> None:
+        await wiring.bus.publish(_tick("42000"))
+        for seq in (1, 2):
+            await wiring.bus.publish(_limit_signal("41000", seq=seq))
+        await wiring.manager.cancel_for_operator(
+            [
+                VenueOpenOrder(symbol="BTC", cloid=first),
+                VenueOpenOrder(symbol="BTC", cloid=second),
+                # A cloid with no saga here, and an order the engine never placed.
+                VenueOpenOrder(symbol="BTC", cloid="0xnosaga", venue_oid="7"),
+                ExternalOrderRef(symbol="BTC", venue_oid="9"),
+            ]
+        )
+
+    asyncio.run(scenario())
+
+    sagas = [wiring.cache.get_order(cloid) for cloid in (first, second)]
+    assert all(saga is not None for saga in sagas)
+    assert links[0].calls == [
+        [
+            *(OrderRef.of(saga) for saga in sagas if saga is not None),
+            OrderRef(cloid="0xnosaga", symbol="BTC", venue_oid="7"),
+            ExternalOrderRef(symbol="BTC", venue_oid="9"),
+        ]
+    ]
+    # Durable before the send, so a crash between the two never lets reconcile
+    # judge the order a ghost and mark it REJECTED.
+    assert links[0].marked == [True, True]
+
+
+class _Sends(VenueLink):
+    """Records each place and cancel by cloid, in order, then lets the venue act."""
+
+    def __init__(self, venue: Exchange) -> None:
+        super().__init__(venue)
+        self.sent: list[tuple[str, str | None]] = []
+
+    async def place(self, order: PlaceOrder) -> None:
+        self.sent.append(("place", order.cloid))
+        await super().place(order)
+
+    async def cancel(self, refs: Sequence[OrderRef | ExternalOrderRef]) -> None:
+        self.sent.extend(("cancel", getattr(ref, "cloid", None)) for ref in refs)
+        await super().cancel(refs)
+
+
+def test_an_exit_run_denies_a_strategy_place_but_sends_its_cancel_and_the_operator_close() -> None:
+    store = SQLiteStore(":memory:")
+    first = _wiring(store)
+
+    async def strategy_life() -> None:
+        await first.bus.publish(_tick("42000"))
+        await first.bus.publish(_market_signal(seq=1))
+        await first.bus.publish(_limit_signal("41000", seq=2))
+
+    asyncio.run(strategy_life())
+
+    links: list[_Sends] = []
+
+    def link(venue: PaperExchange) -> Exchange:
+        links.append(_Sends(venue))
+        return links[-1]
+
+    exit_life = _wiring(store, link=link, exit_run=True)
+    close = PlaceSignal(
+        ts_event=1_000,
+        ts_init=1_000,
+        strategy_id=OPERATOR,
+        symbol="BTC",
+        seq=1,
+        side=Side.SELL,
+        quantity=Decimal("0.5"),
+        order_type=OrderType.MARKET,
+        time_in_force=TimeInForce.IOC,
+        reduce_only=True,
+    )
+
+    async def exit_run() -> None:
+        await exit_life.bus.publish(_tick("42000"))
+        # A strategy signal a crashed life never handled, replayed at boot.
+        await exit_life.bus.publish(_limit_signal("41000", seq=3))
+        # A cancel cannot add exposure, so it still goes out.
+        await exit_life.bus.publish(_cancel_signal("trivial:BTC:2", seq=4))
+        await exit_life.bus.publish(close)
+
+    asyncio.run(exit_run())
+
+    replayed = store.get_order(derive_cloid("trivial:BTC:3"))
+    assert replayed is not None and replayed.state is OrderState.DENIED
+    assert links[0].sent == [
+        ("cancel", derive_cloid("trivial:BTC:2")),
+        ("place", derive_cloid(close.signal_id)),
+    ]
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class _UnknownSignal(Signal):
     """A signal type the manager has no branch for."""
@@ -1456,12 +1592,12 @@ def test_a_fill_the_ledger_would_refuse_never_moves_the_saga_first() -> None:
     Contained today only because the process faults either way. That containment
     is not the behavior — a restart replaying an unburned saga is.
     """
-    wiring = _wiring(SQLiteStore(":memory:"))
+    wiring = _wiring(SQLiteStore(":memory:"), link=SendDies)
     cloid = derive_cloid("trivial:BTC:1")
 
     async def scenario() -> None:
-        with pytest.raises(ValueError):
-            await wiring.bus.publish(_market_signal())  # no tick cached: the send crashes
+        with pytest.raises(SendCrashed):
+            await wiring.bus.publish(_market_signal())  # the send crashes
         await wiring.bus.publish(_fill_report(cloid, trade_id="f1", quantity="0.2"))
         with pytest.raises(InvariantViolation):
             await wiring.bus.publish(_fill_report(cloid, trade_id="f2", quantity="0"))

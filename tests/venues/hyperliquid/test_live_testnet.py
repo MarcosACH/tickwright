@@ -25,11 +25,10 @@ from tickwright.domain import (
     ExecutionReport,
     LeverageBook,
     LeverageSpec,
+    LimitOrder,
     OrderRef,
     OrderState,
     OrderStatusReport,
-    OrderType,
-    PlaceOrder,
     Side,
     TimeInForce,
     VenueOrderView,
@@ -56,6 +55,8 @@ pytestmark = [
         not live_testnet_enabled(),
         reason=f"no {LIVE_TESTNET_ENV}: live testnet suite not opted in (ADR-0022)",
     ),
+    # A boot alone may wait 60 seconds on the real testnet, past the suite default.
+    pytest.mark.timeout(300),
 ]
 
 
@@ -100,12 +101,11 @@ def test_place_reconcile_cancel_round_trip_on_testnet() -> None:
         cloid = derive_cloid(f"live-test:{SYMBOL}:{clock.timestamp_ns()}")
 
         await exchange.place(
-            PlaceOrder(
+            LimitOrder(
                 cloid=cloid,
                 symbol=SYMBOL,
                 side=Side.BUY,
                 quantity=quantity,
-                order_type=OrderType.LIMIT,
                 time_in_force=TimeInForce.GTC,
                 price=price,
             )

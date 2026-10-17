@@ -29,6 +29,7 @@ from tickwright.domain import (
     ExecutionReport,
     ExternalOrderRef,
     FillReport,
+    LimitOrder,
     MarketTick,
     Order,
     OrderCancelled,
@@ -69,13 +70,12 @@ def _tick(price: str, ts: int = 1_000) -> MarketTick:
     )
 
 
-def _resting_limit(cloid: str, price: str = "41000") -> PlaceOrder:
-    return PlaceOrder(
+def _resting_limit(cloid: str, price: str = "41000") -> LimitOrder:
+    return LimitOrder(
         cloid=cloid,
         symbol="BTC",
         side=Side.BUY,
         quantity=Decimal("0.5"),
-        order_type=OrderType.LIMIT,
         time_in_force=TimeInForce.GTC,
         price=Decimal(price),
     )

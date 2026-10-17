@@ -97,6 +97,9 @@ account anchors, the guard, the `Checkpointer`, the `Reconciler`, the `LedgerRec
 bus, the clock, and a `FeedHandle`. The handle has `start(symbols)`, which calls
 `feed.add_symbols()` and `feed.start()` and then supervises `feed.run()`. It also has `ended()`,
 which waits for `feed.run()` to return.
+**(Changed by #476:** the order anchor is gone. The context holds `cancel`, which is the
+manager's `cancel_for_operator`. So a job has no cancel that skips the saga mark. The context
+also holds `emitter`, the seeded `__operator__` emitter.**)**
 
 **Responsibilities:** The contract between the host and one operator job. A job is built by the
 composition root with only the facts the root owns: the `--new-store` flag, and for `Flatten`
@@ -118,6 +121,9 @@ whether the feed ends. Everything the engine owns arrives in the context.
 - Read every resting order in the account with `fetch_open_orders()`.
 - For an order with a saga, set the operator cancel mark and checkpoint it before the send.
   Without the marker, reconcile would judge it a ghost and mark it `REJECTED`.
+  **(Changed by #476:** the job no longer marks or checkpoints. It hands each read to
+  `context.cancel`, and the `ExecutionManager` marks and sends. Every saga write is the
+  manager's.**)**
 - The operator mark sets `cancel_requested` even when it is already set. It leaves
   `cancel_signal_id` as it was and consumes no seq. So the seq fold is unchanged, and a later
   strategy cancel all still resends. `request_cancel` is not used here, because it skips an order
@@ -182,6 +188,9 @@ context. Starts the feed through the `FeedHandle`.
 - **(Built by #473:** `SignalEmitter` moved to `domain`, so `engine` can import it. `Flatten` keeps
   no counter of its own. It seeds an emitter for `__operator__` the way `StrategyHost` seeds a
   strategy's, and every close goes through `place()`. The seq rule (ADR-0016) lives in one place.**)**
+- **(Changed by #476:** `Flatten` no longer builds or seeds the emitter. The `Engine` builds it
+  with `emitter_for`, as it does for a strategy, seeds it, and hands it over as
+  `ExitContext.emitter`.**)**
 
 **The per-symbol loop (private):**
 
@@ -313,7 +322,8 @@ split is safe only on this path.
 
 ### ExecutionManager (`engine`, existing)
 
-**Interface:** Unchanged for callers. It now consumes `CancelAllSignal` too.
+**Interface:** It now consumes `CancelAllSignal` too. It takes `exit_run`, which the `Engine` sets
+when it has an exit job (#476).
 
 **Responsibilities:**
 
@@ -332,6 +342,11 @@ split is safe only on this path.
   `flatten_split` names the reason. A fill like that would flip a partition, and on reconcile it
   would fault every boot (#471).
 - `reduce_only` flows from the signal to the order and to the `PlaceOrder`.
+- In an exit run, a strategy place ends `DENIED` before the guard. A Kafka boot can replay a
+  strategy signal that a crashed life never handled (#476).
+- `cancel_for_operator(resting)` marks each order that has a saga, durable before one
+  `cancel(refs)` call. An order with no saga goes by cloid, and an external one by oid. The
+  operator's cancel all calls it directly, because the operator sends no signal (#476).
 
 **Seams:** None new.
 
@@ -539,8 +554,8 @@ that true.
 app.__main__ → app.build → engine.Engine, engine.OperatorCancelAll, engine.Flatten
 engine.Engine → engine.ExitJob, engine.ExitContext, domain.Store (lock), domain.MarketFeed
 engine.ExitContext → engine.Checkpointer, engine.Reconciler, engine.LedgerReconciliation
-engine.ExitContext → domain.OrderAnchor, domain.AccountAnchor, domain.PreTradeGuard
-engine.ExitContext → domain.EventBus, domain.Clock, engine.FeedHandle
+engine.ExitContext → engine.ExecutionManager (cancel), domain.AccountAnchor, domain.PreTradeGuard
+engine.ExitContext → domain.EventBus, domain.Clock, engine.FeedHandle, domain.SignalEmitter
 engine.Flatten → engine.OperatorCancelAll, engine.ExitContext
 engine.OperatorCancelAll → engine.ExitContext
 engine.ExecutionManager → engine.Checkpointer → engine.flatten_split

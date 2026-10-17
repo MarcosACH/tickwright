@@ -13,7 +13,7 @@ from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import NamedTuple
 
-from tickwright.domain import InvariantViolation, PlaceOrder
+from tickwright.domain import InvariantViolation, LimitOrder
 
 
 class BookFill(NamedTuple):
@@ -36,7 +36,7 @@ class _Resting:
     (ADR-0057).
     """
 
-    order: PlaceOrder
+    order: LimitOrder
     working: Decimal
     filled: Decimal = Decimal("0")
 
@@ -44,7 +44,7 @@ class _Resting:
     def remaining(self) -> Decimal:
         return self.working - self.filled
 
-    def at_working_size(self) -> PlaceOrder:
+    def at_working_size(self) -> LimitOrder:
         """The order at its working size. The fill model sizes a partial from
         the quantity it is handed, so it must never see the asked size."""
         return replace(self.order, quantity=self.working)
@@ -56,7 +56,7 @@ class RestingBook:
     def __init__(self) -> None:
         self._orders: dict[str, _Resting] = {}
 
-    def rest(self, order: PlaceOrder, *, working: Decimal | None = None) -> PlaceOrder:
+    def rest(self, order: LimitOrder, *, working: Decimal | None = None) -> LimitOrder:
         """Put ``order`` on the book and return it at the size the book works.
 
         ``working`` is that size, by default the asked size. It is capped at
@@ -68,13 +68,13 @@ class RestingBook:
         self._orders[order.cloid] = resting
         return resting.at_working_size()
 
-    def working(self, cloid: str) -> PlaceOrder | None:
+    def working(self, cloid: str) -> LimitOrder | None:
         """One resting order at its working size now, or ``None`` if it has
         left the book."""
         resting = self._orders.get(cloid)
         return resting.at_working_size() if resting is not None else None
 
-    def resting(self) -> list[PlaceOrder]:
+    def resting(self) -> list[LimitOrder]:
         """A snapshot of the resting orders at their working size — safe to
         fill or remove entries (which mutate the book) while iterating over it.
         """
@@ -118,7 +118,7 @@ class RestingBook:
         resting = self._orders.get(cloid)
         return resting is not None and resting.filled > 0
 
-    def remove(self, cloid: str) -> PlaceOrder | None:
+    def remove(self, cloid: str) -> LimitOrder | None:
         """Lift a resting order off the book, returning it — or ``None`` if none
         rests under ``cloid`` (already filled/cancelled, or never placed)."""
         resting = self._orders.pop(cloid, None)

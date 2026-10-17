@@ -48,11 +48,10 @@ from tickwright.domain import (
     InstrumentSpec,
     LeverageOutOfBounds,
     LeverageSpec,
+    MarketOrder,
     MarketTick,
     OrderRef,
     OrderState,
-    OrderType,
-    PlaceOrder,
     Side,
     TimeInForce,
     VenueAccountModeUnsupported,
@@ -503,13 +502,12 @@ def _market_tick(price: str) -> MarketTick:
     )
 
 
-def _btc_market_order() -> PlaceOrder:
-    return PlaceOrder(
+def _btc_market_order() -> MarketOrder:
+    return MarketOrder(
         cloid="0xabc",
         symbol="BTC",
         side=Side.BUY,
         quantity=Decimal("0.5"),
-        order_type=OrderType.MARKET,
         time_in_force=TimeInForce.IOC,
     )
 

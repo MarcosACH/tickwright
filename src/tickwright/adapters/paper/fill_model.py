@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Protocol, runtime_checkable
 
-from tickwright.domain import Clock, InvariantViolation, MarketTick, PlaceOrder, Side
+from tickwright.domain import Clock, InvariantViolation, LimitOrder, MarketOrder, MarketTick, Side
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,11 +75,11 @@ class FillModel(Protocol):
     *not this tick* — a queue-position miss that leaves the order resting.
     """
 
-    async def market_fill(self, order: PlaceOrder, tick: MarketTick) -> Fill:
+    async def market_fill(self, order: MarketOrder, tick: MarketTick) -> Fill:
         """Return the fill for a MARKET ``order`` against the latest ``tick``."""
         ...
 
-    async def limit_fill(self, order: PlaceOrder, tick: MarketTick) -> Fill | None:
+    async def limit_fill(self, order: LimitOrder, tick: MarketTick) -> Fill | None:
         """Return the fill for a crossing LIMIT ``order`` (the book decides it
         crosses; the model decides how much, at what price, and *whether* it
         fills this tick — ``None`` means it stays resting for a later one)."""
@@ -89,15 +89,12 @@ class FillModel(Protocol):
 class ImmediateFillModel:
     """Deterministic, optimistic, zero-slippage, full-fill (ADR-0012 default)."""
 
-    async def market_fill(self, order: PlaceOrder, tick: MarketTick) -> Fill:
+    async def market_fill(self, order: MarketOrder, tick: MarketTick) -> Fill:
         # Unlimited liquidity: fill the whole quantity now at the tick price.
         return Fill(quantity=order.quantity, price=tick.price)
 
-    async def limit_fill(self, order: PlaceOrder, tick: MarketTick) -> Fill:
-        # Full fill at the limit price: no price improvement, no partials. The
-        # book has already decided the order crosses, so ``price`` is set.
-        if order.price is None:
-            raise InvariantViolation(f"marketable LIMIT {order.cloid} filled with no price")
+    async def limit_fill(self, order: LimitOrder, tick: MarketTick) -> Fill:
+        # Full fill at the limit price: no price improvement, no partials.
         return Fill(quantity=order.quantity, price=order.price)
 
 
@@ -115,20 +112,18 @@ class StochasticFillModel:
         self._clock = clock
         self._params = params
 
-    async def market_fill(self, order: PlaceOrder, tick: MarketTick) -> Fill:
+    async def market_fill(self, order: MarketOrder, tick: MarketTick) -> Fill:
         # Market takes liquidity now — always the full quantity (ADR-0012 scopes
         # partials to the resting book), but the price may slip adversely.
         await self._clock.sleep(self._params.latency_seconds)
         return Fill(quantity=order.quantity, price=self._slipped(order.side, tick.price))
 
-    async def limit_fill(self, order: PlaceOrder, tick: MarketTick) -> Fill | None:
+    async def limit_fill(self, order: LimitOrder, tick: MarketTick) -> Fill | None:
         # A resting LIMIT is a maker: it fills at its own price, never slipped.
         # Two seeded decisions: whether it fills *this* crossing tick at all
         # (queue position — someone may be ahead of us) and, if so, what
         # fraction of the original size. The exchange caps the fraction to the
         # remaining and re-rests any remainder, so partials converge to FILLED.
-        if order.price is None:
-            raise InvariantViolation(f"crossing LIMIT {order.cloid} priced with no price")
         if self._rng.random() >= self._params.prob_fill_on_limit:
             return None  # queue miss: stays resting for a later crossing tick
         await self._clock.sleep(self._params.latency_seconds)
