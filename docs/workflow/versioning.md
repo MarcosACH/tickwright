@@ -96,3 +96,10 @@ gh issue close <PRD#> --comment "Delivered in vX.Y.Z: <release-url>. All sub-iss
   `PreTradeReading`, so a custom guard must change. Boot now refuses a non-positive reconcile band
   mark max age (#389). Fixes: the Hyperliquid socket reconnects again (#393). An isolated position
   no longer raises a false margin divergence (#402). Bump PR backed by #406.
+- **v0.5.0** (2026-10-17). Safe exit on real money. PRD #457 sets the MINOR floor. A strategy can
+  send reduce-only orders and a `CancelAllSignal`. The operator gets `tickwright cancel-all` and
+  `tickwright flatten`, run with the engine stopped. The seams grew: `Exchange.cancel` takes a
+  list, `Exchange` gains two reads, `MarketFeed` gains `add_symbols`, and `Store` gains a lock and
+  a seq record. A running engine now holds an exclusive store lock. Fixes: Kafka seq reuse after a
+  restart (#442), the Postgres network hang (#498), and the live isolated margin readings. Bump PR
+  backed by #527.
