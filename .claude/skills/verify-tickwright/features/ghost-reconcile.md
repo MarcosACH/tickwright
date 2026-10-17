@@ -1,7 +1,7 @@
 # Ghost reconcile
 
 A ghost is a resting order the store holds but the venue does not. The barrier never concludes on
-one empty read. It arms a 90 second grace window, the open-order cadence re-reads every 30
+one empty read. It arms a 90 second grace window. The open-order cadence re-reads every 30
 seconds, and an order absent for the whole window ends `rejected` as a ghost. Since #484, paper
 rebuilds its book from the store at boot, so a plain restart no longer makes a ghost. This file
 proves that a restart keeps the order, on both clocks. The helper cannot make a real ghost today.
@@ -14,8 +14,9 @@ proves that a restart keeps the order, on both clocks. The helper cannot make a 
   `engine.barrier_cleared`. That is past the 90 second window.
 - `ghost-reject` verified-unreachable. A ghost needs an order the venue has no record of. Paper
   now keeps every resting order, and no helper verb removes an order from a venue.
-  `tests/engine/test_reconcile.py` proves the window, the reject, and the reason
-  `reconciliation: ghost: vanished from the venue` in process.
+  `tests/engine/test_reconcile.py` proves the window and the reject in process.
+  `tests/engine/test_execution_manager.py` proves the reason
+  `reconciliation: ghost: vanished from the venue`.
 
 ## How to get to it (user POV)
 

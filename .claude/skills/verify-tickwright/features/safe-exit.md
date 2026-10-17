@@ -35,6 +35,8 @@ Preconditions:
 - `flatten` closes everything in the testnet account, not only this run's orders. Use an
   account that holds nothing else you want to keep.
 - Run id `safe-exit` is unused. Budget about ten minutes.
+- The paper section at the end needs no key and no network. It runs on its own. Run id
+  `se-paper` is unused.
 
 - **Setup.** Run `$V init safe-exit --feature safe-exit` and
   `$V start safe-exit open --preset testnet --forward-key --strategy rest_then_hold --param QUANTITY=0.001 --param WAIT_SECONDS=10`.
@@ -72,7 +74,8 @@ Preconditions:
 - **Report.** Run `$V report safe-exit`. Expected verdict: `PASS`. A FAIL that is not a Gotcha
   below is new, and `$V issue-draft safe-exit` drafts it.
 - **Cleanup.** Run `$V cleanup safe-exit`.
-- **Paper, set up.** In a separate run, run `$V init se-paper --feature safe-exit`,
+- **Paper, set up.** This section is a separate run. It works with or without the testnet steps
+  above. Run `$V init se-paper --feature safe-exit`,
   `$V ticks se-paper ticks --row BTC:42000@0 --row BTC:42100@1s --row BTC:42200@2s`,
   `$V start se-paper held --preset paper-replay --strategy rest_then_hold --param QUANTITY=0.5`,
   `$V await se-paper held --event verify.rested`, and
