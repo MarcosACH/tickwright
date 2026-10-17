@@ -98,8 +98,13 @@ gh issue close <PRD#> --comment "Delivered in vX.Y.Z: <release-url>. All sub-iss
   no longer raises a false margin divergence (#402). Bump PR backed by #406.
 - **v0.5.0** (2026-10-17). Safe exit on real money. PRD #457 sets the MINOR floor. A strategy can
   send reduce-only orders and a `CancelAllSignal`. The operator gets `tickwright cancel-all` and
-  `tickwright flatten`, run with the engine stopped. The seams grew: `Exchange.cancel` takes a
-  list, `Exchange` gains two reads, `MarketFeed` gains `add_symbols`, and `Store` gains a lock and
-  a seq record. A running engine now holds an exclusive store lock. Fixes: Kafka seq reuse after a
-  restart (#442), the Postgres network hang (#498), and the live isolated margin readings. Bump PR
-  backed by #527.
+  `tickwright flatten`, run with the engine stopped. An exit run refuses a store no engine has
+  used, unless you pass `--new-store`. The seams grew: `Exchange.cancel` takes a list, `Exchange`
+  gains two reads, `MarketFeed` gains `add_symbols`, and `Store` gains a lock and a seq record. A
+  running engine now holds an exclusive store lock. Config now refuses `__operator__` and
+  `__unattributed__` as a strategy id. A Hyperliquid MARKET order is now capped by the mark too
+  (#467). Fixes: Kafka seq reuse after a restart (#442) and the Postgres network hang (#498). The
+  engine no longer crashes on a market order before the first mark (#509) or a LIMIT with no
+  price (#513). A live position no longer reads a made-up liquidation price at boot (#515). Live
+  isolated margin now reads right after an open, an add, a shared symbol, and a restart (#516,
+  #518, #520, #522). Bump PR backed by #527.
