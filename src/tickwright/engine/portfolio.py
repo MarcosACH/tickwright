@@ -383,13 +383,9 @@ class PortfolioProjection:
         # subject is not the margin model omits it and reads the ``None``.
         self._specs = dict(specs) if specs is not None else {}
         # The one Tier-2 figure live does not compute (ADR-0040 §3), cached off
-        # the reconcile pull and **stale-frozen between cycles**. ``None`` is
-        # not an empty map: it is "no venue read has ever landed", the state
-        # paper stays in forever and live leaves at its first cycle. The
-        # distinction is the whole switch — an empty map after a read means the
-        # venue holds nothing, which is an answer, where never having read is
-        # not one.
-        self._venue_liquidation: dict[str, Decimal | None] | None = None
+        # the reconcile pull and **stale-frozen between cycles**. Empty before
+        # the first read, so live reads ``None`` then. Paper never reads it.
+        self._venue_liquidation: dict[str, Decimal | None] = {}
 
     def leverage_for(self, symbol: str) -> LeverageSpec:
         """The margin mode and leverage this run computes ``symbol`` against.
@@ -587,21 +583,36 @@ class PortfolioProjection:
 
         A venue ``None`` is the same release, and it is a *positive* claim
         rather than a gap — the adapter refuses to guess a mode, so ``None``
-        here is "cross, backed by the account pool" (ADR-0043 §3). Our own
-        in-memory field is a plain ``Decimal``, so both cases land on ``0``,
-        which is the value the store's nullable column already restores a
-        cross-margined row to.
+        here is "cross, backed by the account pool" (ADR-0043 §3). Both cases
+        land on ``0``. Our own ``None`` means something else, an unposted
+        bucket (#522).
 
         Returns only the partitions it actually **moved**, so an unchanged book
-        writes nothing: the bucket holds still between ``updateIsolatedMargin``
-        calls, and it is mark-invariant by construction (``marginUsed −
-        unrealizedPnl``), so the steady state is a cycle with nothing to ingest.
+        writes nothing: the bucket holds still between fills and
+        ``updateIsolatedMargin`` calls, and it is mark-invariant by construction
+        (``marginUsed − unrealizedPnl``), so the steady state is a cycle with
+        nothing to ingest.
         Reporting every partition instead would re-stamp every position row on
         every deadline, which is the same indistinguishable-from-a-correction
         write ``apply_funding``'s ``None`` refuses one grain up.
+
+        An unposted bucket is posted only by a snapshot that **carries** our
+        position, meaning the venue's size for the symbol equals our account
+        net (#516). The cadence reads the venue and then waits, and a fill can
+        land in between. A snapshot older than that fill describes a position
+        we no longer hold, so its bucket is not ours. A partition whose bucket
+        is posted takes its share as before.
         """
+        venue = {position.symbol: position.signed_size for position in snapshot.positions}
+        carried = {
+            symbol
+            for symbol, net in account_net_size(self._positions.values()).items()
+            if venue.get(symbol, _ZERO) == net
+        }
         moved: list[Position] = []
         for position, share in self._venue_shares(snapshot):
+            if position.isolated_collateral is None and position.symbol not in carried:
+                continue
             if position.isolated_collateral != share:
                 position.isolated_collateral = share
                 moved.append(position)
@@ -741,14 +752,18 @@ class PortfolioProjection:
     def _lock_isolated_collateral(
         self, position: Position, changes: tuple[PositionChange, ...]
     ) -> None:
-        """Move an isolated position's own margin in at open and back out at close.
+        """Set an isolated position's own margin after a fill moves the position.
 
         Paper does not model ``updateIsolatedMargin``, so the bucket is whatever
         the open put in it — ``notional / leverage`` at the entry the fold just
         booked — and nothing between the two ends moves it (ADR-0040 §1). That is
-        why this reads the two regime changes rather than running on every fill:
+        why paper reads the two regime changes rather than running on every fill:
         an add on the same side reports ``CHANGED``, and recomputing there would
         silently top the bucket up.
+
+        Live computes no bucket. An open, an add and a partial close all leave
+        the bucket unposted until the next ingest (#516, #518, #522). The venue
+        moves the bucket on each, by an amount we do not model.
 
         **The close releases on both paths.** A flat position holds no isolated
         margin on the venue, so zero is a fact and not a guess. Isolated
@@ -772,8 +787,15 @@ class PortfolioProjection:
         reconfigured with.
         """
         if PositionChange.CLOSED in changes:
+            # A flat bucket of 0 is known, so it no longer waits for the venue.
             position.isolated_collateral = _ZERO
-        if PositionChange.OPENED not in changes:
+        opened = PositionChange.OPENED in changes
+        if not opened and PositionChange.CHANGED not in changes:
+            return
+        leverage = self.leverage_for(position.symbol)
+        if leverage.mode != "isolated":
+            # Cross posts no bucket of its own — its margin comes out of the
+            # account pool, which is the whole difference between the modes.
             return
         if not self._spec.declares_genesis:
             # The declared-versus-ingested predicate, the same one recovery's
@@ -782,13 +804,18 @@ class PortfolioProjection:
             # unrealizedPnl``, ADR-0043 §3). Computing one here would put a
             # number on the ledger the venue never posted, and would be wrong
             # from the first ``updateIsolatedMargin`` top-up — which live has
-            # and paper does not model (ADR-0040 §1). A live flip therefore
-            # holds 0 until the next ingest takes the residual's bucket.
+            # and paper does not model (ADR-0040 §1). So a live open or flip
+            # leaves the bucket unposted, unknown until the next ingest takes
+            # the venue's number (#516).
+            #
+            # An add or a partial close waits the same way. The venue moves the
+            # bucket by an amount we do not model, so the last ingested number
+            # no longer matches the position (#518). The row saves the unposted
+            # state too, so a restart reads it as unknown (#522).
+            position.isolated_collateral = None
             return
-        leverage = self.leverage_for(position.symbol)
-        if leverage.mode != "isolated":
-            # Cross posts no bucket of its own — its margin comes out of the
-            # account pool, which is the whole difference between the modes.
+        if not opened:
+            # Paper keeps the open's bucket until the close (ADR-0040 §1).
             return
         position.isolated_collateral = (
             abs(position.signed_size) * position.entry_price / leverage.leverage
@@ -1349,9 +1376,10 @@ class PortfolioProjection:
         The mark is resolved here, from the private cache, rather than passed in
         by the caller: pushing mark-sourcing onto every reader is exactly what
         the single always-available read path exists to prevent (ADR-0034/0039).
-        The configured leverage, the instrument spec and the liquidation
-        compute/read-through switch arrive the same way and for the same reason
-        — all four are lookups this object already holds.
+        The instrument spec and the liquidation compute/read-through switch
+        arrive the same way and for the same reason. All three are lookups this
+        object already holds. The configured leverage is not passed. It is on
+        the row, which was valued against it.
 
         ``rows`` and ``account`` are the two the caller must supply, because
         each is a **fold over every position** rather than a lookup: taken here
@@ -1376,16 +1404,13 @@ class PortfolioProjection:
         and a fallback here would read that as a flat symbol and hide it.
         """
         mark = self._marks.get(position.symbol)
-        row = rows[position.symbol]
         return position_view(
             position,
-            account_net=row.net,
-            account_unrealized_pnl=row.unrealized_pnl,
+            row=rows[position.symbol],
             account_equity=account.equity,
             account_maintenance_margin=account.total_maintenance_margin,
             mark=mark.price if mark is not None else None,
             mark_ts=mark.ts_event if mark is not None else None,
-            leverage=self.leverage_for(position.symbol),
             spec=self._specs.get(position.symbol),
             liquidation=self._liquidation_source(position.symbol),
         )
@@ -1393,13 +1418,14 @@ class PortfolioProjection:
     def _liquidation_source(self, symbol: str) -> LiquidationSource:
         """Whether this symbol's liquidation price is the venue's or ours.
 
-        The switch is "has a venue account read ever landed", not "which venue
-        is this": paper never calls ``observe_venue_liquidation``, so it stays
-        on the computed branch without the projection being told which adapter
-        it is behind — the same dependency direction the ``AccountSpec`` and the
-        instrument universe arrive on.
+        The switch is ``declares_genesis``, the spec's paper-or-live fact, and
+        not "has a venue read landed yet". Live never computes this number
+        (ADR-0040 §3). Before the first read it is ``None``, because a formula
+        run then would fabricate one (#515). A new live isolated position holds
+        0 collateral until that read, and the formula put a long's liquidation
+        price above its entry.
         """
-        if self._venue_liquidation is None:
+        if self._spec.declares_genesis:
             return LiquidationSource.computed()
         return LiquidationSource.reported(self._venue_liquidation.get(symbol))
 

@@ -227,6 +227,16 @@ def _book_fill(
     )
 
 
+def _posted(keeper: Checkpointer, *positions: tuple[str, str, str]) -> None:
+    """An earlier cycle already posted the book's isolated buckets (#522).
+
+    A live open leaves its bucket unposted, and the first cycle that carries the
+    position posts it. That post is a Tier-1 write. So a case about a cycle that
+    writes nothing has to start after it.
+    """
+    keeper.checkpoint_heal((), snapshot=_held("100000", *positions))
+
+
 def test_a_cycle_whose_snapshot_matches_the_ledger_reports_no_divergence() -> None:
     """The agreeing pass, and the anchor it rests on: **one** account read is the
     whole cycle's venue cost (ADR-0034), so the read count is also the assertion
@@ -1235,6 +1245,7 @@ def test_a_cycle_that_finds_only_tier_2_divergence_changes_no_stored_value() -> 
     keeper = _ledger(store, equity="100000")
     projection = keeper.portfolio
     _book_fill(projection, quantity="0.002", price="64809")
+    _posted(keeper, ("BTC", "0.002", "0"))
     _mark(projection, "BTC", "65000")
     opened = store.load_account()
     stored = store.all_positions()
@@ -1328,6 +1339,7 @@ def test_a_mode_frozen_pass_writes_nothing_and_leaves_the_book_readable() -> Non
     keeper = _ledger(store, equity="100000")
     projection = keeper.portfolio
     _book_fill(projection, quantity="0.002", price="64809")
+    _posted(keeper, ("BTC", "0.002", "0"))
     held = projection.open_positions(strategy_id="alpha")
     venue = _AccountVenue(_held("100500", ("BTC", "0.002", "0")), mode=AccountModeVerdict.CHANGED)
     cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
@@ -1923,18 +1935,16 @@ _BTC_SPEC = InstrumentSpec(
     min_notional=Decimal("0"),
     margin_maint=Decimal("0.0125"),
 )
-"""The tier-0 maintenance rate #152 measured, so the computed branch has a real
-answer to be *displaced by* rather than the ``None`` a specless projection gives."""
+"""The tier-0 maintenance rate #152 measured. With it the ledger holds every margin
+input, so a live ``None`` here is the venue's silence and not a missing spec."""
 
 _BTC_CROSS_5X = LeverageBook(entries={"BTC": LeverageSpec(mode="cross", leverage=5)})
-"""**Cross**, so the computed branch has real backing to solve against.
+"""**Cross**, so the position has real backing on a live ledger.
 
-Isolated would not, on a *live* ledger: the locked bucket is the venue's to post
-(ADR-0040 §3) and nothing here has posted one, so the formula would divide a
-backing of nothing but unrealized PnL and answer with a price above the mark for
-a long. Cross backs against account equity, which a materialised live ledger
-holds — so what the venue's number displaces below is a credible price and not
-an artefact."""
+Cross backs against account equity, which a materialised live ledger holds. An
+isolated bucket is the venue's to post (ADR-0040 §3), and nothing here posts
+one. So with cross the ledger holds every margin input, and a live ``None`` is
+the venue's silence and not a missing input (#515)."""
 
 _CROSS_5X = LeverageSpec(mode="cross", leverage=5)
 """``_BTC_CROSS_5X``'s pair, as the venue's own stored setting.
@@ -1987,17 +1997,14 @@ def test_a_cycle_caches_the_venues_liquidation_price_and_the_read_passes_it_thro
     Live may not re-derive this number — the maintenance tier it needs is a
     fixed point, the tier depending on the position's value *at the price being
     solved for* — so the venue's own field is authoritative and our formula must
-    step aside for it. That is a claim about which of two real numbers is
-    reported, which is why the ledger here is given both margin-model inputs:
-    the formula is answering (the assertion before the cycle proves it), and it
-    is answering something else.
+    step aside for it. Before the first read, live has no number and reads
+    `None`, never the formula's (#515).
 
     The account is #142's own — 0.002 BTC long from 64809 against an equity of
-    25.9264 — so the computed price lands a few units from the venue's and the
-    two are genuinely rival answers to one question rather than a real number
-    against a placeholder. The snapshot agrees with the ledger on every Tier-1
-    line, so the cycle heals nothing and the only thing it leaves behind is the
-    cache under test.
+    25.9264. The ledger is given both margin-model inputs, so the `None` before
+    the cycle is not a missing input. The snapshot agrees with the ledger on
+    every Tier-1 line, so the cycle heals nothing and the only thing it leaves
+    behind is the cache under test.
     """
     store = SQLiteStore(":memory:")
     keeper = _ledger(store, equity="25.9144", leverage=_BTC_CROSS_5X, specs={"BTC": _BTC_SPEC})
@@ -2019,9 +2026,7 @@ def test_a_cycle_caches_the_venues_liquidation_price_and_the_read_passes_it_thro
 
     before = projection.position("BTC", strategy_id="alpha")
     assert before is not None
-    # The formula is live and answering — with a number that is not the venue's.
-    assert before.liquidation_price is not None
-    assert before.liquidation_price != _BTC_LIQUIDATION
+    assert before.liquidation_price is None
 
     divergences = asyncio.run(cycle.reconcile_account())
 
@@ -2077,11 +2082,13 @@ def test_a_position_the_venue_prices_at_nothing_reads_none_rather_than_the_formu
 
     It is the majority case rather than a corner — 12 of 17 cross longs across
     the 22 mainnet accounts #142 sampled (ADR-0046 §6) — so the branch this
-    pins is the one live spends most of its time on. The formula is answering
-    with a real number here (the assertion before the cycle), and once the read
-    lands it must stop: falling back to it would report a price for a position
-    the venue says has none, which is the fabricated Tier-2 value ADR-0034's
-    freeze-never-substitute rule exists to refuse.
+    pins is the one live spends most of its time on. Falling back to the formula
+    would report a price for a position the venue says has none, which is the
+    fabricated Tier-2 value ADR-0034's freeze-never-substitute rule exists to
+    refuse.
+
+    The first cycle reports a price, so the second cycle's `None` has a real
+    number to replace. Live reads `None` before any read lands too (#515).
 
     The same account and snapshot as the cache case above, so the only thing
     differing is the field under test.
@@ -2091,22 +2098,19 @@ def test_a_position_the_venue_prices_at_nothing_reads_none_rather_than_the_formu
     projection = keeper.portfolio
     _book_fill(projection, quantity="0.002", price="64809")
     _mark(projection, "BTC", "64815")
+    state = account_state(
+        "25.9264", "0.012", free_margin=_BTC_5X_FREE, maintenance=_BTC_5X_MAINTENANCE
+    )
     venue = _AccountVenue(
-        _levered(
-            _priced(
-                account_state(
-                    "25.9264", "0.012", free_margin=_BTC_5X_FREE, maintenance=_BTC_5X_MAINTENANCE
-                ),
-                None,
-            ),
-            _CROSS_5X,
-        )
+        _levered(_priced(state, _BTC_LIQUIDATION), _CROSS_5X),
+        _levered(_priced(state, None), _CROSS_5X),
     )
     cycle = LedgerReconciliation(exchange=venue, checkpointer=keeper)
+    assert asyncio.run(cycle.reconcile_account()) == ()
 
     before = projection.position("BTC", strategy_id="alpha")
     assert before is not None
-    assert before.liquidation_price is not None  # the formula is live and answering
+    assert before.liquidation_price == _BTC_LIQUIDATION
 
     assert asyncio.run(cycle.reconcile_account()) == ()
 
@@ -2118,12 +2122,11 @@ def test_a_position_the_venue_prices_at_nothing_reads_none_rather_than_the_formu
 def test_a_position_opened_since_the_read_reads_none_rather_than_the_formula() -> None:
     """A symbol the snapshot never mentioned is *also* an absent venue price.
 
-    Once a read has landed the projection is on the read-through branch for the
-    whole book, not only for the symbols that cycle happened to carry — so an
-    ETH position opened between deadlines reads ``None`` until the next pull
-    prices it, rather than being quietly handed back to the formula. The
-    alternative reports two different quantities under one name depending on
-    whether a symbol made it into the last snapshot.
+    Live reads the venue's price for the whole book, not only for the symbols a
+    cycle happened to carry. So an ETH position opened between deadlines reads
+    ``None`` until the next pull prices it. It is never handed to the formula
+    (#515). Otherwise one name would carry two different quantities, depending
+    on whether a symbol made it into the last snapshot.
 
     ETH is given both margin-model inputs and a mark, so the formula had every
     input it needs and its silence here is the read-through's doing: the sibling
@@ -2480,6 +2483,7 @@ def test_a_cycle_that_finds_only_leverage_drift_writes_nothing_and_cannot_re_pus
     store = _SealedStore(":memory:")
     keeper = _ledger(store, equity="100000", leverage=_BTC_DEFAULT)
     _book_fill(keeper.portfolio, quantity="0.002", price="64809")
+    _posted(keeper, ("BTC", "0.002", "0"))
     opened = store.load_account()
     stored = store.all_positions()
     assert opened is not None
@@ -2661,10 +2665,9 @@ def test_a_cycle_ingests_the_venues_locked_collateral_onto_the_partition() -> No
 
     Live never computes this number — ``_lock_isolated_collateral`` declines on
     the declared-versus-ingested predicate — so before the cycle the ledger's
-    bucket is the ``0`` the dataclass opened at, and isolated ``margin_used``,
-    which is ``isolated_collateral + unrealized_pnl``, reports the bare
-    unrealized PnL wearing the bucket's name. That is not a small error: it is
-    the position's mark-to-market where a reader expects its collateral.
+    bucket is unposted, and the figures that need it read ``None`` until the
+    cycle ingests it (#516, #522). Read as a real bucket, ``margin_used`` was the bare unrealized
+    PnL and a 5x position read 10 802.5x.
 
     The snapshot agrees with the ledger on every Tier-1 line, so the cycle heals
     nothing and the ingest is the only thing it leaves behind. That the pass
@@ -2680,11 +2683,9 @@ def test_a_cycle_ingests_the_venues_locked_collateral_onto_the_partition() -> No
 
     before = projection.position("BTC", strategy_id="alpha")
     assert before is not None
-    # The uPnL alone, because nothing has posted a bucket: the degraded read.
-    assert before.margin_used == Decimal("0.012")
-    # And the denominator it is, which is where the damage is legible — a 5x
-    # position reporting five figures of leverage, on a book that is fine.
-    assert before.effective_leverage == Decimal("10802.5")
+    # Unknown, because nothing has posted a bucket yet.
+    assert before.margin_used is None
+    assert before.effective_leverage is None
 
     asyncio.run(cycle.reconcile_account())
 
@@ -3779,6 +3780,7 @@ def test_an_alerted_tier_2_divergence_still_changes_no_stored_value() -> None:
     keeper = _ledger(store, equity="100000")
     projection = keeper.portfolio
     _book_fill(projection, quantity="0.002", price="64809")
+    _posted(keeper, ("BTC", "0.002", "0"))
     _mark(projection, "BTC", "65000")
     opened = store.load_account()
     stored = store.all_positions()

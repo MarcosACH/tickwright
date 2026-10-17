@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 from ledgers import GENESIS, checkpointer
-from venue_doubles import VenueLink
+from venue_doubles import SendCrashed, SendDies, VenueLink
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
@@ -211,24 +211,25 @@ def _wiring(
 
 def _harness(
     path: str | Path = ":memory:",
+    *,
+    link: Callable[[PaperExchange], Exchange] | None = None,
 ) -> tuple[InMemoryBus, ManualClock, SQLiteStore, list[OrderEvent]]:
     """The manager over its real collaborators. ``path`` backs the store with a
     file for the cases that must reopen it — closing a ``:memory:`` store takes
     the durable record with it, so a "what survived?" assertion needs a file."""
-    wiring = _wiring(SQLiteStore(path))
+    wiring = _wiring(SQLiteStore(path), link=link)
     return wiring.bus, wiring.clock, wiring.store, wiring.order_events
 
 
 def test_pending_intent_is_durable_before_the_send_can_crash() -> None:
-    bus, _, store, _ = _harness()
+    bus, _, store, _ = _harness(link=SendDies)
     cloid = derive_cloid("trivial:BTC:1")
 
     async def scenario() -> None:
-        # No tick published: the real PaperExchange raises on place — standing
-        # in for a crash mid-send. The write-ahead intent (ADR-0008 rule 1)
+        # The send crashes mid-flight. The write-ahead intent (ADR-0008 rule 1)
         # must already be durable, with the full params recovery needs to
         # reconcile by cloid.
-        with pytest.raises(ValueError):
+        with pytest.raises(SendCrashed):
             await bus.publish(_market_signal())
 
     asyncio.run(scenario())
@@ -246,12 +247,12 @@ def test_a_new_order_is_stamped_with_the_time_the_engine_created_it() -> None:
     # The stamp is what a venue read compares a record's placement time
     # against, so a record from an earlier life under the same cloid is never
     # taken for this order (#354). It is engine time, not the signal's.
-    wiring = _wiring(SQLiteStore(":memory:"))
+    wiring = _wiring(SQLiteStore(":memory:"), link=SendDies)
     wiring.clock.advance_to(1_500)
     cloid = derive_cloid("trivial:BTC:1")
 
     async def scenario() -> None:
-        with pytest.raises(ValueError):
+        with pytest.raises(SendCrashed):
             await wiring.bus.publish(_market_signal())
 
     asyncio.run(scenario())
@@ -328,14 +329,14 @@ def test_a_refused_ledger_write_leaves_neither_the_order_row_nor_the_ledger(
     left in-flight first, so the store is alive for the write-ahead intent and
     dead only for the fill.
     """
-    bus, _, store, _ = _harness(tmp_path / "saga.db")
+    bus, _, store, _ = _harness(tmp_path / "saga.db", link=SendDies)
     cloid = derive_cloid("trivial:BTC:1")
 
     async def scenario() -> None:
-        # No tick cached: the send raises, leaving the saga in-flight with its
+        # The send crashes, leaving the saga in-flight with its
         # PENDING intent durable — then the venue's fill arrives against a store
         # that can no longer be written.
-        with pytest.raises(ValueError):
+        with pytest.raises(SendCrashed):
             await bus.publish(_market_signal())
         store.close()
         with pytest.raises(InvariantViolation, match="ledger checkpoint write failed"):
@@ -536,13 +537,13 @@ def _fill_report(
 
 
 def test_partial_fills_accumulate_to_filled_with_checkpoints() -> None:
-    bus, _, store, order_events = _harness()
+    bus, _, store, order_events = _harness(link=SendDies)
     cloid = derive_cloid("trivial:BTC:1")
 
     async def scenario() -> None:
-        # No tick cached: the send crashes, leaving the saga in-flight — then
+        # The send crashes, leaving the saga in-flight — then
         # the venue's fills arrive in two parts, as a live venue would push them.
-        with pytest.raises(ValueError):
+        with pytest.raises(SendCrashed):
             await bus.publish(_market_signal())
         await bus.publish(_fill_report(cloid, trade_id="f1", quantity="0.2"))
         await bus.publish(_fill_report(cloid, trade_id="f2", quantity="0.3"))
@@ -569,11 +570,11 @@ def test_each_fill_event_carries_the_fee_the_venue_reported_for_that_trade() -> 
     # derives it — exactly as it already does for the report's ``ts_event`` and
     # ``reconciliation`` (ADR-0036). Per ``trade_id``, so two partials of one
     # order carry two independently reported fees and neither is a running total.
-    bus, _, _, order_events = _harness()
+    bus, _, _, order_events = _harness(link=SendDies)
     cloid = derive_cloid("trivial:BTC:1")
 
     async def scenario() -> None:
-        with pytest.raises(ValueError):
+        with pytest.raises(SendCrashed):
             await bus.publish(_market_signal())
         await bus.publish(_fill_report(cloid, trade_id="f1", quantity="0.2", fee="3.78"))
         await bus.publish(_fill_report(cloid, trade_id="f2", quantity="0.3", fee="5.67"))
@@ -599,11 +600,11 @@ def test_a_failed_checkpoint_write_is_an_invariant_violation() -> None:
 
 
 def test_time_passing_never_transitions_an_in_flight_saga() -> None:
-    bus, clock, store, order_events = _harness()
+    bus, clock, store, order_events = _harness(link=SendDies)
     cloid = derive_cloid("trivial:BTC:1")
 
     async def scenario() -> None:
-        with pytest.raises(ValueError):
+        with pytest.raises(SendCrashed):
             await bus.publish(_market_signal())
         # An hour of dead air. A timeout is never a transition (ADR-0007 inv 1):
         # only a venue fact or reconciliation may move an in-flight saga.
@@ -658,13 +659,13 @@ def test_order_filled_carries_the_fill_details() -> None:
 
 
 def test_fill_preserves_the_venue_ts_event_while_ts_init_is_engine_time() -> None:
-    bus, clock, _, order_events = _harness()
+    bus, clock, _, order_events = _harness(link=SendDies)
     cloid = derive_cloid("trivial:BTC:1")
 
     async def scenario() -> None:
-        # Leave the saga in-flight (no tick cached -> the send crashes), so the
+        # Leave the saga in-flight (the send crashes), so the
         # order exists in cache to accept a hand-built venue fill.
-        with pytest.raises(ValueError):
+        with pytest.raises(SendCrashed):
             await bus.publish(_market_signal())
         # The engine receives the fill strictly later than the venue stamped it.
         # On the paper path both clocks coincide, so the gap is only observable
@@ -690,13 +691,13 @@ def test_fill_preserves_the_venue_ts_event_while_ts_init_is_engine_time() -> Non
 
 
 def test_partial_fill_ts_event_tracks_each_report_while_ts_init_is_engine_time() -> None:
-    bus, clock, _, order_events = _harness()
+    bus, clock, _, order_events = _harness(link=SendDies)
     cloid = derive_cloid("trivial:BTC:1")
 
     async def scenario() -> None:
         # In-flight saga, then two venue fills arriving after their own instants,
         # each received at a distinct (later) engine time.
-        with pytest.raises(ValueError):
+        with pytest.raises(SendCrashed):
             await bus.publish(_market_signal())
         clock.advance_to(5_000)
         await bus.publish(_fill_report(cloid, trade_id="f1", quantity="0.2", ts_event=2_000))
@@ -1591,12 +1592,12 @@ def test_a_fill_the_ledger_would_refuse_never_moves_the_saga_first() -> None:
     Contained today only because the process faults either way. That containment
     is not the behavior — a restart replaying an unburned saga is.
     """
-    wiring = _wiring(SQLiteStore(":memory:"))
+    wiring = _wiring(SQLiteStore(":memory:"), link=SendDies)
     cloid = derive_cloid("trivial:BTC:1")
 
     async def scenario() -> None:
-        with pytest.raises(ValueError):
-            await wiring.bus.publish(_market_signal())  # no tick cached: the send crashes
+        with pytest.raises(SendCrashed):
+            await wiring.bus.publish(_market_signal())  # the send crashes
         await wiring.bus.publish(_fill_report(cloid, trade_id="f1", quantity="0.2"))
         with pytest.raises(InvariantViolation):
             await wiring.bus.publish(_fill_report(cloid, trade_id="f2", quantity="0"))

@@ -154,6 +154,12 @@ Since #468 `fetch_open_orders()` lists every order resting in the account, ours 
 answers it. Hyperliquid answers it from #470 on.
 _Avoid_: order API, order client (the anchor is what makes it one seam, not the verb shapes).
 
+**Venue order** / `PlaceOrder`:
+The order [[Order anchor|`OrderAnchor.place`]] takes: a `LimitOrder`, whose price is always set,
+or a `MarketOrder`, which has no price. `place_order_of` builds it from the [[Order saga]]. So
+the type checker proves that no venue reads a price from a market order (#513).
+_Avoid_: order request (a [[Signal]] is the request).
+
 **Account anchor** / `AccountAnchor` *(Protocol)*:
 [[Order anchor]]'s peer one grain up: the half of [[Exchange]] keyed by the **account** —
 `fetch_account_state` (the snapshot every cycle of [[Ledger reconciliation]] is anchored on) and
@@ -844,6 +850,12 @@ _Avoid_: **initial margin** (conventionally the collateral reserved when an *ord
 an admission gate this surface does not implement), margin **call**, buying power
 (enforcement/broker terms — this surface only reports), margin **tier** (the piecewise table is a
 deferred extension point).
+
+**Unposted bucket**:
+A live isolated `isolated_collateral` the venue has not posted since our last open, add or partial
+close of that [[Position]], so its value is unknown and the figures built on it read `None`. Only an
+account read that carries the position posts it. Paper never has one. See ADR-0041 §6, ADR-0043 §3.
+_Avoid_: waiting bucket, pending collateral.
 
 **Leverage** & **Margin mode**:
 A **per-symbol / per-position** input (not an [[AccountSpec]] fact): the integer leverage and

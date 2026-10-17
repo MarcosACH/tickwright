@@ -34,6 +34,8 @@ from tickwright.domain import (
     ExternalOrderRef,
     Handler,
     InstrumentSpec,
+    LimitOrder,
+    MarketOrder,
     MarketTick,
     Order,
     OrderRef,
@@ -193,12 +195,11 @@ async def _rest(bus: EventBus, paper: PaperExchange, store: SQLiteStore, clock: 
     """
     # Paper prices a LIMIT against the last tick, so it needs one first.
     await bus.publish(_tick("BTC", "42000"))
-    order = PlaceOrder(
+    order = LimitOrder(
         cloid=_RESTING,
         symbol="BTC",
         side=Side.BUY,
         quantity=Decimal("0.01"),
-        order_type=OrderType.LIMIT,
         time_in_force=TimeInForce.GTC,
         price=Decimal("30000"),
     )
@@ -1348,12 +1349,11 @@ def test_a_close_left_open_that_fills_during_the_wait_leaves_only_the_rest_to_cl
     # again. Paper would shrink it to what is left and cancel the rest (ADR-0057).
     _hold(tmp_path / "saga.db", {"BTC": "0.02"})
     left_open = _left_open(tmp_path / "saga.db", "BTC", quantity="0.01")
-    late = PlaceOrder(
+    late = MarketOrder(
         cloid=left_open,
         symbol="BTC",
         side=Side.SELL,
         quantity=Decimal("0.01"),
-        order_type=OrderType.MARKET,
         time_in_force=TimeInForce.IOC,
         reduce_only=True,
     )
@@ -1416,12 +1416,11 @@ def test_a_close_left_open_that_fills_after_failed_reads_starts_a_new_row(
     # and flatten would give up a symbol that is still closing.
     _hold(tmp_path / "saga.db", {"BTC": "0.02"})
     left_open = _left_open(tmp_path / "saga.db", "BTC", quantity="0.01")
-    late = PlaceOrder(
+    late = MarketOrder(
         cloid=left_open,
         symbol="BTC",
         side=Side.SELL,
         quantity=Decimal("0.01"),
-        order_type=OrderType.MARKET,
         time_in_force=TimeInForce.IOC,
         reduce_only=True,
     )
@@ -1479,12 +1478,11 @@ def test_a_close_that_filled_before_a_flat_boot_read_is_booked_before_any_leftov
     venue = _venue(tmp_path)
     _fill_unheard(
         venue,
-        PlaceOrder(
+        MarketOrder(
             cloid=left_open,
             symbol="BTC",
             side=Side.SELL,
             quantity=Decimal("0.02"),
-            order_type=OrderType.MARKET,
             time_in_force=TimeInForce.IOC,
             reduce_only=True,
         ),
@@ -1514,12 +1512,11 @@ def test_a_strategy_sell_that_filled_before_a_flat_boot_read_is_booked_before_an
     venue = _venue(tmp_path)
     _fill_unheard(
         venue,
-        PlaceOrder(
+        MarketOrder(
             cloid=left_open,
             symbol="BTC",
             side=Side.SELL,
             quantity=Decimal("0.02"),
-            order_type=OrderType.MARKET,
             time_in_force=TimeInForce.IOC,
         ),
     )
@@ -1557,12 +1554,11 @@ def test_a_flat_symbol_whose_open_order_is_never_decided_stops_the_run(
     venue = _venue(tmp_path)
     _fill_unheard(
         venue,
-        PlaceOrder(
+        MarketOrder(
             cloid=left_open,
             symbol="BTC",
             side=Side.SELL,
             quantity=Decimal("0.02"),
-            order_type=OrderType.MARKET,
             time_in_force=TimeInForce.IOC,
             reduce_only=True,
         ),

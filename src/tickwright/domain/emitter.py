@@ -73,7 +73,18 @@ class SignalEmitter:
         ``cloid``, ADR-0026).
 
         A ``reduce_only`` order can only shrink the account's net position. The
-        venue shrinks it to the net or rejects it (ADR-0057)."""
+        venue shrinks it to the net or rejects it (ADR-0057).
+
+        A ``LIMIT`` with no ``price`` raises ``ValueError`` and uses no seq. The
+        adapters cannot handle one, so it must never reach the bus (#513).
+
+        A ``MARKET`` with a ``price`` raises the same way. It fills at the market,
+        but the guard would value it at that price and could let it past the max
+        order value cap (#513)."""
+        if order_type is OrderType.LIMIT and price is None:
+            raise ValueError(f"LIMIT order on {symbol} needs a price")
+        if order_type is OrderType.MARKET and price is not None:
+            raise ValueError(f"MARKET order on {symbol} takes no price")
         seq, now = self._next()
         signal = PlaceSignal(
             ts_event=now,
