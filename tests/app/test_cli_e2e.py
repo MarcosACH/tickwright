@@ -366,6 +366,27 @@ def test_cancel_all_on_a_store_another_engine_holds_exits_two(
     assert [event["event"] for event in _events(log)] == ["exit.refused"]
 
 
+def test_cancel_all_on_a_store_bound_to_another_account_exits_two(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refusal comes before the job reaches the venue, so nothing moved.
+    That is code 2 for an exit run too (ADR-0060)."""
+    _write_workspace(tmp_path)
+    _export_hostile_config(monkeypatch)
+    with SQLiteStore(tmp_path / "saga.db") as store:
+        checkpointer(store, clock=ManualClock()).recover()
+    env = tmp_path / ".env"
+    env.write_text(env.read_text().replace("GENESIS_COLLATERAL=100000", "GENESIS_COLLATERAL=5000"))
+    log = tmp_path / "cancel_all.log"
+
+    assert _run_to_exit(tmp_path, log, "cancel-all") == 2, log.read_text()
+
+    events = _events(log)
+    assert "StoreAccountMismatch" in str(events[-2]["error"])
+    assert events[-1]["event"] == "exit.finished"
+    assert events[-1]["exit_code"] == 2
+
+
 def test_cancel_all_on_a_store_no_engine_has_used_exits_two(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
