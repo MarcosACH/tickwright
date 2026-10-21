@@ -127,11 +127,26 @@ def _write_ticks(path: Path, prints: list[tuple[str, str]]) -> Path:
 
 
 def _run(tmp_path: Path, steps: list[Step]) -> _ScriptedStrategy:
-    """One engine life: replay one tick per step, then stop gracefully."""
-    prints = [(symbol, price) for symbol, price, _ in steps]
+    """One engine life with one strategy: replay one tick per step, then stop gracefully."""
+    return _run_strategies(tmp_path, {"scripted": steps})["scripted"]
+
+
+def _run_strategies(tmp_path: Path, scripts: dict[str, list[Step]]) -> dict[str, _ScriptedStrategy]:
+    """One engine life with one strategy per script.
+
+    Two strategies cannot own one symbol (ADR-0034), so each script trades its
+    own symbols and a strategy sees only those ticks. The scripts' ticks are
+    interleaved, step 1 of each script before step 2 of any. So a read in one
+    script comes after the other script's earlier steps.
+    """
+    prints = [
+        (symbol, price)
+        for round_ in zip(*scripts.values(), strict=True)
+        for symbol, price, _ in round_
+    ]
     ticks = _write_ticks(tmp_path / "ticks.jsonl", prints)
 
-    async def main() -> _ScriptedStrategy:
+    async def main() -> dict[str, _ScriptedStrategy]:
         bus = InMemoryBus()
         clock = ManualClock()
         exchange = PaperExchange(
@@ -151,17 +166,22 @@ def _run(tmp_path: Path, steps: list[Step]) -> _ScriptedStrategy:
             exchange=exchange,
             feed=feed,
         )
-        strategy = _ScriptedStrategy(
-            emitter=engine.emitter_for("scripted"),
-            portfolio=engine.portfolio_for("scripted"),
-            steps=steps,
-        )
-        engine.register(strategy, symbols={"BTC", "ETH"})
+        strategies = {
+            strategy_id: _ScriptedStrategy(
+                emitter=engine.emitter_for(strategy_id),
+                portfolio=engine.portfolio_for(strategy_id),
+                steps=steps,
+            )
+            for strategy_id, steps in scripts.items()
+        }
+        for strategy_id, steps in scripts.items():
+            symbols = {symbol for symbol, _, _ in steps}
+            engine.register(strategies[strategy_id], symbols=symbols)
 
         done = asyncio.Event()
 
         async def on_tick(tick: MarketTick) -> None:
-            if tick.trade_id == f"t{len(steps) - 1}":
+            if tick.trade_id == f"t{len(prints) - 1}":
                 done.set()
 
         run = asyncio.create_task(engine.run())
@@ -169,7 +189,7 @@ def _run(tmp_path: Path, steps: list[Step]) -> _ScriptedStrategy:
         await asyncio.wait_for(done.wait(), timeout=5)
         await engine.stop()
         assert await run == 0
-        return strategy
+        return strategies
 
     return asyncio.run(main())
 
@@ -221,3 +241,14 @@ def test_a_symbol_read_returns_only_that_symbols_orders(tmp_path: Path) -> None:
     every_symbol, btc_only = strategy.reads
     assert sorted(view.symbol for view in every_symbol) == ["BTC", "ETH"]
     assert [view.symbol for view in btc_only] == ["BTC"]
+
+
+def test_each_strategy_reads_only_its_own_orders(tmp_path: Path) -> None:
+    strategies = _run_strategies(
+        tmp_path,
+        {"alpha": [_rest("BTC"), _read("BTC")], "beta": [_rest("ETH"), _read("ETH")]},
+    )
+
+    # Both orders rest before either strategy reads.
+    assert [view.signal_id for view in strategies["alpha"].reads[0]] == ["alpha:BTC:1"]
+    assert [view.signal_id for view in strategies["beta"].reads[0]] == ["beta:ETH:1"]
