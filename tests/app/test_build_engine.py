@@ -444,7 +444,7 @@ def test_an_unknown_settings_field_is_refused_even_when_the_model_allows_extra(
             }
         ],
     )
-    with pytest.raises(ValidationError, match="quantiy"):
+    with pytest.raises(StrategyLoadRefusal, match="quantiy"):
         build_engine(config)
 
 
@@ -477,6 +477,28 @@ def test_a_strategy_class_with_no_settings_model_is_refused_before_the_store_exi
     )
     with pytest.raises(StrategyLoadRefusal, match="Settings"):
         build_engine(config)
+    assert not (tmp_path / "saga.db").exists()
+
+
+def test_settings_that_do_not_validate_are_refused_before_the_store_exists(
+    tmp_path: Path,
+) -> None:
+    config = _config(
+        tmp_path,
+        strategies=[
+            {
+                "strategy": "user_strategies:BuysEachSymbolOnce",
+                "strategy_id": "user",
+                "symbols": ["BTC"],
+                "settings": {"quantity": "lots"},
+            }
+        ],
+    )
+    # The refusal names the entry. Two entries can share one class, so the
+    # field name alone would not say which one is wrong.
+    with pytest.raises(StrategyLoadRefusal, match="strategy 'user'") as refused:
+        build_engine(config)
+    assert "quantity" in str(refused.value)
     assert not (tmp_path / "saga.db").exists()
 
 

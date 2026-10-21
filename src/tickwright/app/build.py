@@ -18,7 +18,7 @@ from collections.abc import Callable, Mapping
 from decimal import Decimal
 from typing import Any, Literal, NamedTuple, assert_never
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import LiveClock, ManualClock
@@ -41,10 +41,8 @@ from tickwright.domain import (
     MarketFeed,
     Order,
     OrderType,
-    Portfolio,
     PreTradeGuard,
     ReplayClock,
-    SignalEmitter,
     Store,
     Strategy,
     TimeInForce,
@@ -373,7 +371,7 @@ def build_exit_job(
 def _build_engine(config: AppConfig, *, exit_job: ExitJob | None) -> Engine:
     # Load first, so a bad entry refuses before the store or the venue exists.
     # An exit run trades nothing, so it loads no strategy.
-    classes = [] if exit_job is not None else [_load_strategy(c) for c in config.strategies]
+    loaded = [] if exit_job is not None else [_load_strategy(c) for c in config.strategies]
     bus = build_bus(config)
     clock = build_clock(config)
     store = build_store(config)
@@ -398,21 +396,22 @@ def _build_engine(config: AppConfig, *, exit_job: ExitJob | None) -> Engine:
     )
     if exit_job is not None:
         return engine
-    for strategy_config, cls in zip(config.strategies, classes, strict=True):
-        engine.register(
-            _build_strategy(
-                strategy_config,
-                cls,
-                emitter=engine.emitter_for(strategy_config.strategy_id),
-                portfolio=engine.portfolio_for(strategy_config.strategy_id),
-            ),
-            symbols=set(strategy_config.symbols),
+    for strategy_config, (cls, settings) in zip(config.strategies, loaded, strict=True):
+        strategy_id = strategy_config.strategy_id
+        # Always all three, even to a strategy that reads no portfolio. A fixed
+        # signature is easier to document than a rule about who gets what
+        # (ADR-0041 §7 as amended by ADR-0061).
+        strategy: Strategy = cls(
+            emitter=engine.emitter_for(strategy_id),
+            portfolio=engine.portfolio_for(strategy_id),
+            settings=settings,
         )
+        engine.register(strategy, symbols=set(strategy_config.symbols))
     return engine
 
 
-def _load_strategy(config: StrategyConfig) -> Any:
-    """Import the class a strategy entry names, or refuse the entry."""
+def _load_strategy(config: StrategyConfig) -> tuple[Any, BaseModel]:
+    """Import the class a strategy entry names and check its settings, or refuse the entry."""
     module_name, _, class_name = config.strategy.partition(":")
     where = f"strategy {config.strategy_id!r} names {config.strategy!r}, which does not import"
     # Any error counts. A user module that fails while it imports is as unusable
@@ -431,17 +430,12 @@ def _load_strategy(config: StrategyConfig) -> Any:
             f"strategy {config.strategy_id!r}: {config.strategy} has no Settings Pydantic model. "
             "A strategy with no settings declares an empty one."
         )
-    return cls
-
-
-def _build_strategy(
-    config: StrategyConfig, cls: Any, *, emitter: SignalEmitter, portfolio: Portfolio
-) -> Strategy:
     # Forbid extra fields even if the user's model allows them. Otherwise a typo
     # in a settings key boots a strategy that silently ignores it (ADR-0061).
-    settings = cls.Settings.model_validate(config.settings, extra="forbid")
-    # Always all three, even to a strategy that reads no portfolio. A fixed
-    # signature is easier to document than a rule about who gets what
-    # (ADR-0041 §7 as amended by ADR-0061).
-    strategy: Strategy = cls(emitter=emitter, portfolio=portfolio, settings=settings)
-    return strategy
+    try:
+        settings = settings_model.model_validate(config.settings, extra="forbid")
+    except ValidationError as exc:
+        raise StrategyLoadRefusal(
+            f"strategy {config.strategy_id!r}: its settings do not fit {config.strategy}: {exc}"
+        ) from exc
+    return cls, settings
