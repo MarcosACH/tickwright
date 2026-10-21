@@ -131,7 +131,7 @@ class VenueReadUnresolvable(InvariantViolation):
     """
 
 
-class VenueAccountModeUnsupported(InvariantViolation):
+class VenueAccountModeUnsupported(BootRefusal):
     """The venue account is not in a mode whose numbers this engine can read
     (ADR-0046 §3): its abstraction mode is outside Manual/Standard, or could not
     be read at all within the startup budget.
