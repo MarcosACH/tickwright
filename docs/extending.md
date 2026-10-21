@@ -56,7 +56,8 @@ Concretely, the engine does the pulling **for** you before it subscribes you (in
 Your snapshot can be stale after a restart. Startup may have settled an order before your handlers
 were subscribed, so you never saw that event. To rebuild your open orders, call
 `portfolio.open_orders()` in `restore()`. It returns this strategy's orders that are not yet
-terminal, as frozen `OpenOrderView`s keyed by `signal_id` (ADR-0041 §3). Do not call it from your
+terminal, as a tuple of frozen `OpenOrderView`s. Each carries its `signal_id`, the id a
+`CancelSignal` targets (ADR-0041 §3). Do not call it from your
 constructor. It raises `OpenOrdersReadBeforeStart` there, because startup has not yet checked the
 orders against the venue. The corollary discipline:
 

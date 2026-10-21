@@ -13,10 +13,11 @@ class InvariantViolation(Exception):
 class OpenOrdersReadBeforeStart(InvariantViolation):
     """A strategy read its open orders before the strategies started (ADR-0041 §3).
 
-    Until the startup barrier has run, the order ``Cache`` holds the last life's
-    state, which the venue has not proven. A strategy that read it from its
-    constructor could rebuild from orders that are already gone. The read opens
-    at the top of ``start()``, so ``restore()`` is the first place it works."""
+    In the constructor the order ``Cache`` is still empty, because the engine
+    rebuilds it later. A read there would report no orders while orders rest at
+    the venue. After the rebuild and before the startup barrier, the ``Cache``
+    holds state the venue has not proven. The read opens at the top of
+    ``start()``, so ``restore()`` is the first place it works."""
 
 
 class StartupReconciliationTimeout(InvariantViolation):

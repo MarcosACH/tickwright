@@ -289,7 +289,7 @@ def test_each_strategy_reads_only_its_own_orders(tmp_path: Path) -> None:
 
 
 def test_a_read_from_a_strategy_constructor_raises(tmp_path: Path) -> None:
-    # Before the barrier the Cache still holds the last life's unproven state.
+    # The engine has not rebuilt its Cache yet, so a read here would report no orders.
     engine, _, _ = _engine(tmp_path, _write_ticks(tmp_path / "ticks.jsonl", [("BTC", _ABOVE)]))
 
     with pytest.raises(OpenOrdersReadBeforeStart):
