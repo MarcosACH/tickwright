@@ -71,6 +71,16 @@ class StrategyHost:
         # then a strategy holds only its blank constructor state, and ``stop()``
         # has nothing true to persist (see there).
         self._started = False
+        # Set at the top of ``start()``, which runs after the startup barrier.
+        # Before that the ``Cache`` holds orders the venue has not proven, so a
+        # strategy must not rebuild from them (ADR-0041 §3). Kept apart from
+        # ``_started``, which is set only after every ``restore()`` returns.
+        self._open_orders_readable = False
+
+    @property
+    def open_orders_readable(self) -> bool:
+        """Whether a strategy may read its open orders yet."""
+        return self._open_orders_readable
 
     def register(self, strategy: Strategy, *, symbols: Iterable[str]) -> None:
         """Add ``strategy`` to the registry with its declared symbol set.
@@ -118,6 +128,7 @@ class StrategyHost:
         ``Cache`` the runner rebuilt from that store, so the boot deserializes
         the history once (issue #233).
         """
+        self._open_orders_readable = True
         high_water = self._cache.seq_high_water()
         for strategy in self._strategies.values():
             self._restore(strategy)

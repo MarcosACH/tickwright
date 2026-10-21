@@ -11,6 +11,7 @@ from collections.abc import Awaitable, Callable
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
 from ledgers import GENESIS
 
 from tickwright.adapters.bus import InMemoryBus
@@ -20,6 +21,7 @@ from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     MarketTick,
+    OpenOrdersReadBeforeStart,
     OpenOrderView,
     OrderEvent,
     OrderState,
@@ -43,6 +45,7 @@ class _ScriptedStrategy:
         self.portfolio = portfolio
         self._steps = list(steps)
         self.reads: list[tuple[OpenOrderView, ...]] = []
+        self.restore_reads: list[tuple[OpenOrderView, ...]] = []
 
     async def on_tick(self, tick: MarketTick) -> None:
         if self._steps:
@@ -59,7 +62,16 @@ class _ScriptedStrategy:
         return b""
 
     def restore(self, data: bytes) -> None:
-        return None
+        # Where a strategy rebuilds its state after a restart.
+        self.restore_reads.append(self.portfolio.open_orders())
+
+
+class _ReadsInConstructor(_ScriptedStrategy):
+    def __init__(
+        self, *, emitter: SignalEmitter, portfolio: Portfolio, steps: list["Step"]
+    ) -> None:
+        super().__init__(emitter=emitter, portfolio=portfolio, steps=steps)
+        self.reads.append(portfolio.open_orders())
 
 
 # One step per tick: the tick's symbol and price, and what the strategy does when it arrives.
@@ -126,6 +138,30 @@ def _write_ticks(path: Path, prints: list[tuple[str, str]]) -> Path:
     return path
 
 
+def _engine(tmp_path: Path, ticks: Path) -> tuple[Engine, InMemoryBus]:
+    """A paper engine over the store in ``tmp_path``, so a second call is the next life."""
+    bus = InMemoryBus()
+    clock = ManualClock()
+    exchange = PaperExchange(
+        bus=bus,
+        clock=clock,
+        fill_model=ImmediateFillModel(),
+        genesis_collateral=GENESIS,
+        account_net=dict,
+        applied_fills=lambda cloid: (),
+        resting_orders=list,
+    )
+    feed = ReplayFeed(path=ticks, bus=bus, clock=clock)
+    engine = Engine(
+        bus=bus,
+        clock=clock,
+        store=SQLiteStore(tmp_path / "saga.db"),
+        exchange=exchange,
+        feed=feed,
+    )
+    return engine, bus
+
+
 def _run(tmp_path: Path, steps: list[Step]) -> _ScriptedStrategy:
     """One engine life with one strategy: replay one tick per step, then stop gracefully."""
     return _run_strategies(tmp_path, {"scripted": steps})["scripted"]
@@ -147,25 +183,7 @@ def _run_strategies(tmp_path: Path, scripts: dict[str, list[Step]]) -> dict[str,
     ticks = _write_ticks(tmp_path / "ticks.jsonl", prints)
 
     async def main() -> dict[str, _ScriptedStrategy]:
-        bus = InMemoryBus()
-        clock = ManualClock()
-        exchange = PaperExchange(
-            bus=bus,
-            clock=clock,
-            fill_model=ImmediateFillModel(),
-            genesis_collateral=GENESIS,
-            account_net=dict,
-            applied_fills=lambda cloid: (),
-            resting_orders=list,
-        )
-        feed = ReplayFeed(path=ticks, bus=bus, clock=clock)
-        engine = Engine(
-            bus=bus,
-            clock=clock,
-            store=SQLiteStore(tmp_path / "saga.db"),
-            exchange=exchange,
-            feed=feed,
-        )
+        engine, bus = _engine(tmp_path, ticks)
         strategies = {
             strategy_id: _ScriptedStrategy(
                 emitter=engine.emitter_for(strategy_id),
@@ -252,3 +270,23 @@ def test_each_strategy_reads_only_its_own_orders(tmp_path: Path) -> None:
     # Both orders rest before either strategy reads.
     assert [view.signal_id for view in strategies["alpha"].reads[0]] == ["alpha:BTC:1"]
     assert [view.signal_id for view in strategies["beta"].reads[0]] == ["beta:ETH:1"]
+
+
+def test_a_read_from_a_strategy_constructor_raises(tmp_path: Path) -> None:
+    # Before the barrier the Cache still holds the last life's unproven state.
+    engine, _ = _engine(tmp_path, _write_ticks(tmp_path / "ticks.jsonl", [("BTC", _ABOVE)]))
+
+    with pytest.raises(OpenOrdersReadBeforeStart):
+        _ReadsInConstructor(
+            emitter=engine.emitter_for("scripted"),
+            portfolio=engine.portfolio_for("scripted"),
+            steps=[],
+        )
+
+
+def test_a_read_from_restore_works(tmp_path: Path) -> None:
+    # The first life persists a snapshot, so the second life calls restore().
+    _run(tmp_path, [_tick("BTC", _ABOVE)])
+    strategy = _run(tmp_path, [_tick("BTC", _ABOVE)])
+
+    assert strategy.restore_reads == [()]

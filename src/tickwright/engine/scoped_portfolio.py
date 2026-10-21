@@ -4,14 +4,24 @@ Positions and the account come from the ``PortfolioProjection``. Open orders com
 from the order ``Cache``. The facade binds one ``strategy_id`` to both, so a
 strategy never holds either projection and cannot reach another strategy's rows
 or the unattributed partition (ADR-0041 §5).
+
+The open-orders read asks the ``StrategyHost`` whether the strategies have
+started. The host owns that fact, so the facade keeps no flag of its own.
 """
 
 from dataclasses import dataclass
 
-from tickwright.domain import AccountView, OpenOrderView, Order, PositionView
+from tickwright.domain import (
+    AccountView,
+    OpenOrdersReadBeforeStart,
+    OpenOrderView,
+    Order,
+    PositionView,
+)
 
 from .cache import Cache
 from .portfolio import PortfolioProjection
+from .strategy_host import StrategyHost
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,6 +30,7 @@ class ScopedPortfolio:
 
     projection: PortfolioProjection
     cache: Cache
+    host: StrategyHost
     strategy_id: str
 
     def position(self, symbol: str) -> PositionView | None:
@@ -32,6 +43,11 @@ class ScopedPortfolio:
         return self.projection.account()
 
     def open_orders(self, symbol: str | None = None) -> tuple[OpenOrderView, ...]:
+        if not self.host.open_orders_readable:
+            raise OpenOrdersReadBeforeStart(
+                f"{self.strategy_id} read its open orders before the strategies started. "
+                "Read them in restore() or later."
+            )
         orders = self.cache.open_orders(strategy_id=self.strategy_id, symbol=symbol)
         return tuple(_view(order) for order in orders)
 

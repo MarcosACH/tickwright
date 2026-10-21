@@ -301,7 +301,10 @@ class Portfolio(Protocol):
 
         A strategy reads this after a restart. The startup barrier can settle
         an order before the strategy subscribes, so its own snapshot can be
-        stale (ADR-0041 §3)."""
+        stale (ADR-0041 §3).
+
+        Raises ``OpenOrdersReadBeforeStart`` until the strategies start.
+        ``restore()`` is the first place the read works."""
         ...
 
 

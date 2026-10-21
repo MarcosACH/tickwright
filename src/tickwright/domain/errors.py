@@ -10,6 +10,15 @@ class InvariantViolation(Exception):
     """A load-bearing engine invariant was broken (fail-fast, ADR-0014)."""
 
 
+class OpenOrdersReadBeforeStart(InvariantViolation):
+    """A strategy read its open orders before the strategies started (ADR-0041 §3).
+
+    Until the startup barrier has run, the order ``Cache`` holds the last life's
+    state, which the venue has not proven. A strategy that read it from its
+    constructor could rebuild from orders that are already gone. The read opens
+    at the top of ``start()``, so ``restore()`` is the first place it works."""
+
+
 class StartupReconciliationTimeout(InvariantViolation):
     """The startup barrier could not reconcile against the venue within its
     bounded window (ADR-0024): the engine must go ``FAULTED`` and exit non-zero

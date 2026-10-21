@@ -22,6 +22,7 @@ from .enums import (
 from .errors import (
     InvariantViolation,
     LeverageOutOfBounds,
+    OpenOrdersReadBeforeStart,
     StartupReconciliationTimeout,
     StoreAccountMismatch,
     StoreLockHeld,
@@ -145,6 +146,7 @@ __all__ = [
     # errors
     "InvariantViolation",
     "LeverageOutOfBounds",
+    "OpenOrdersReadBeforeStart",
     "StartupReconciliationTimeout",
     "StoreAccountMismatch",
     "StoreLockHeld",
