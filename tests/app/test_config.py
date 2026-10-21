@@ -505,6 +505,17 @@ def test_a_strategy_may_not_claim_the_reserved_operator_id() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "path",
+    ["my_strats.momentum", "my_strats.momentum:", ":Momentum", "my_strats:Outer:Inner"],
+    ids=["no-colon", "no-class", "no-module", "two-colons"],
+)
+def test_a_strategy_path_must_be_module_colon_class(path: str) -> None:
+    # Checked by shape alone, so the config still imports nothing (issue #71).
+    with pytest.raises(ValidationError, match="must be 'module:Class'"):
+        StrategyConfig(strategy=path, strategy_id="mom", symbols=["BTC"])
+
+
 def test_two_strategies_may_not_declare_one_symbol(tmp_path: Path) -> None:
     """ADR-0034's disjointness rule, refused before anything is built.
 

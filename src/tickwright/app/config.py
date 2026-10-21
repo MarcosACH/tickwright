@@ -15,7 +15,7 @@ adding an impl widens exactly one ``Literal`` plus one ``match`` arm in
 from collections import Counter
 from typing import Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from tickwright.adapters.bus import KafkaBusConfig
@@ -44,6 +44,20 @@ class StrategyConfig(BaseModel):
     strategy_id: str
     symbols: list[str] = Field(min_length=1)
     settings: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("strategy")
+    @classmethod
+    def _path_must_be_module_colon_class(cls, path: str) -> str:
+        # Shape only. A bad shape would otherwise reach the import step and
+        # refuse with a message that names no real problem.
+        module_name, colon, class_name = path.partition(":")
+        if not (
+            colon
+            and class_name.isidentifier()
+            and all(part.isidentifier() for part in module_name.split("."))
+        ):
+            raise ValueError(f"strategy must be 'module:Class', got {path!r}")
+        return path
 
     @model_validator(mode="after")
     def _id_may_not_be_a_reserved_owner(self) -> Self:
