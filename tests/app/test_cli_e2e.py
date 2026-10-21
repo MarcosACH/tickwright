@@ -417,6 +417,25 @@ def test_a_bad_strategy_entry_exits_two_and_leaves_no_store(
     assert not (tmp_path / "saga.db").exists()
 
 
+def test_cancel_all_exits_zero_when_a_strategy_path_does_not_import(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An operator may need cancel-all most when the strategy code is broken.
+    # The exit run trades nothing, so it must not need the strategy to import.
+    _write_workspace(tmp_path)
+    _export_hostile_config(monkeypatch)
+    entry = {"strategy": "no_such_module:Strategy", "strategy_id": "user", "symbols": ["BTC"]}
+    with (tmp_path / ".env").open("a") as env:
+        env.write(f"TICKWRIGHT_STRATEGIES={json.dumps([entry])}\n")
+    with SQLiteStore(tmp_path / "saga.db") as store:
+        checkpointer(store, clock=ManualClock()).recover()
+    log = tmp_path / "cancel_all.log"
+
+    assert _run_to_exit(tmp_path, log, "cancel-all") == 0, log.read_text()
+
+    assert _events(log)[-1]["event"] == "exit.finished"
+
+
 def test_cancel_all_on_a_store_it_cannot_open_exits_two(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
