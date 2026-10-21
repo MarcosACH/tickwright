@@ -241,7 +241,7 @@ class Engine:
         return ScopedPortfolio(
             projection=self._checkpointer.portfolio,
             cache=self._checkpointer.cache,
-            host=self._host,
+            open_orders_readable=self._host.open_orders_readable,
             strategy_id=strategy_id,
         )
 

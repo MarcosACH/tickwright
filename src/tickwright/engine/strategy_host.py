@@ -77,9 +77,11 @@ class StrategyHost:
         # ``_started``, which is set only after every ``restore()`` returns.
         self._open_orders_readable = False
 
-    @property
     def open_orders_readable(self) -> bool:
-        """Whether a strategy may read its open orders yet."""
+        """Whether a strategy may read its open orders yet.
+
+        A method, so the engine can hand it to each ``ScopedPortfolio`` and the
+        facade asks at read time, not at build time."""
         return self._open_orders_readable
 
     def register(self, strategy: Strategy, *, symbols: Iterable[str]) -> None:

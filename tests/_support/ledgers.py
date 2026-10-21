@@ -20,7 +20,6 @@ the number twice.
 
 from decimal import Decimal
 
-from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import AccountSpec, Clock, OrderFillEvent, Portfolio, Side, Store
@@ -28,7 +27,6 @@ from tickwright.engine.cache import Cache
 from tickwright.engine.checkpoint import Checkpointer
 from tickwright.engine.portfolio import PortfolioProjection
 from tickwright.engine.scoped_portfolio import ScopedPortfolio
-from tickwright.engine.strategy_host import StrategyHost
 
 GENESIS = Decimal("100000")
 """The opening cash a saga-focused suite opens both its ledger and its venue with.
@@ -84,14 +82,16 @@ def scoped(projection: PortfolioProjection, strategy_id: str) -> Portfolio:
     """``strategy_id``'s ``Portfolio`` facade over ``projection``, for a suite that
     reads positions and the account only.
 
-    The facade's order ``Cache`` here is empty and its host never starts, so
+    The facade's order ``Cache`` here is empty and its read never opens, so
     ``open_orders()`` raises. A suite about open orders takes the facade from
     ``Engine.portfolio_for`` instead, where the ``Cache`` is the real one.
     """
-    store = SQLiteStore(":memory:")
-    cache = Cache(store=store)
-    host = StrategyHost(bus=InMemoryBus(), clock=ManualClock(), store=store, cache=cache)
-    return ScopedPortfolio(projection=projection, cache=cache, host=host, strategy_id=strategy_id)
+    return ScopedPortfolio(
+        projection=projection,
+        cache=Cache(store=SQLiteStore(":memory:")),
+        open_orders_readable=lambda: False,
+        strategy_id=strategy_id,
+    )
 
 
 def book_fill(projection: PortfolioProjection, event: OrderFillEvent, *, side: Side) -> None:

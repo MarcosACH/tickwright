@@ -11,12 +11,10 @@ from decimal import Decimal
 
 from ledgers import checkpointer
 
-from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import OpenOrderView, Order, OrderState, OrderType, Side, TimeInForce
 from tickwright.engine.scoped_portfolio import ScopedPortfolio
-from tickwright.engine.strategy_host import StrategyHost
 
 
 def test_a_pending_intent_reads_as_open() -> None:
@@ -36,12 +34,10 @@ def test_a_pending_intent_reads_as_open() -> None:
             time_in_force=TimeInForce.GTC,
         )
     )
-    host = StrategyHost(bus=InMemoryBus(), clock=clock, store=store, cache=checkpoints.cache)
-    host.start()  # opens the read, as it does after the startup barrier
     portfolio = ScopedPortfolio(
         projection=checkpoints.portfolio,
         cache=checkpoints.cache,
-        host=host,
+        open_orders_readable=lambda: True,  # as it is after the startup barrier
         strategy_id="scripted",
     )
 

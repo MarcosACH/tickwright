@@ -5,10 +5,13 @@ from the order ``Cache``. The facade binds one ``strategy_id`` to both, so a
 strategy never holds either projection and cannot reach another strategy's rows
 or the unattributed partition (ADR-0041 §5).
 
-The open-orders read asks the ``StrategyHost`` whether the strategies have
-started. The host owns that fact, so the facade keeps no flag of its own.
+The open-orders read asks ``open_orders_readable`` whether it may run. The engine
+binds it to the ``StrategyHost``, which owns that fact, so the facade keeps no
+flag of its own. It takes the one question and not the host, so a test can build
+a facade without a host.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from tickwright.domain import (
@@ -21,7 +24,6 @@ from tickwright.domain import (
 
 from .cache import Cache
 from .portfolio import PortfolioProjection
-from .strategy_host import StrategyHost
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,7 +32,7 @@ class ScopedPortfolio:
 
     projection: PortfolioProjection
     cache: Cache
-    host: StrategyHost
+    open_orders_readable: Callable[[], bool]
     strategy_id: str
 
     def position(self, symbol: str) -> PositionView | None:
@@ -43,7 +45,7 @@ class ScopedPortfolio:
         return self.projection.account()
 
     def open_orders(self, symbol: str | None = None) -> tuple[OpenOrderView, ...]:
-        if not self.host.open_orders_readable:
+        if not self.open_orders_readable():
             raise OpenOrdersReadBeforeStart(
                 f"{self.strategy_id} read its open orders before the strategies started. "
                 "Read them in restore() or later."
