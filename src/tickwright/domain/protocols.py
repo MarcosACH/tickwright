@@ -16,7 +16,7 @@ from .account import Account, AccountSpec, AccountView
 from .enums import OrderState
 from .events import Event, MarketTick, OrderEvent, PlaceSignal
 from .instrument import GuardDecision, InstrumentSpec, KillSwitchState, PreTradeReading
-from .order import Order
+from .order import OpenOrderView, Order
 from .position import Position, PositionView
 from .store_lock import StoreLockHolder
 from .venue import (
@@ -260,9 +260,9 @@ class Portfolio(Protocol):
     """The pull-state read seam a ``Strategy`` queries for its own economics
     (ADR-0041). Reads are **method calls, never a PnL subscription** (ADR-0004).
 
-    Deliberately three synchronous methods returning frozen ``domain`` value
+    Deliberately four synchronous methods returning frozen ``domain`` value
     snapshots: every field of one view comes from a single read of the
-    projection, so two quantities in one view can never straddle a fill, and a
+    projection or the order ``Cache``, so two quantities in one view can never straddle a fill, and a
     synchronous read has no ``await`` point, so two reads inside one handler
     cannot either.
 
@@ -294,6 +294,14 @@ class Portfolio(Protocol):
         """The account-wide shared pool, **not** filtered to this strategy:
         collateral is one pool, and reporting a scoped slice of it would be a
         fiction (ADR-0041 §2)."""
+        ...
+
+    def open_orders(self, symbol: str | None = None) -> tuple[OpenOrderView, ...]:
+        """This strategy's orders that are not yet terminal, ``PENDING`` included.
+
+        A strategy reads this after a restart. The startup barrier can settle
+        an order before the strategy subscribes, so its own snapshot can be
+        stale (ADR-0041 §3)."""
         ...
 
 

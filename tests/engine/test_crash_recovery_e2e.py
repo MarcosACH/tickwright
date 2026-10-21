@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 from kafka_fakes import FakeKafkaBroker, Record
-from ledgers import GENESIS, checkpointer
+from ledgers import GENESIS, checkpointer, scoped
 from store_backends import (
     STORE_BACKEND_PARAMS,
     PostgresBackend,
@@ -394,7 +394,7 @@ def test_a_landed_fill_is_restored_and_a_redelivery_does_not_double_count_it(
         checkpointer=checks,
     )
     bus.subscribe(ExecutionReport, manager.on_execution_report)
-    portfolio = checks.portfolio.for_strategy("trivial")
+    portfolio = scoped(checks.portfolio, "trivial")
 
     # Nothing lost: the fill the first life booked is there before anything runs.
     restored = portfolio.position("BTC")

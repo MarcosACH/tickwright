@@ -11,7 +11,7 @@ import asyncio
 from decimal import Decimal
 
 import pytest
-from ledgers import book_fill, ledger
+from ledgers import book_fill, ledger, scoped
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
@@ -59,9 +59,9 @@ def _harness(
         ),
         # A real projection, scoped exactly as the composition root scopes it —
         # the strategy holds the ``domain`` Protocol and never the concrete.
-        portfolio=(
-            projection if projection is not None else ledger(SQLiteStore(":memory:"))
-        ).for_strategy("trivial"),
+        portfolio=scoped(
+            projection if projection is not None else ledger(SQLiteStore(":memory:")), "trivial"
+        ),
         side=Side.BUY,
         quantity=Decimal("0.5"),
     )

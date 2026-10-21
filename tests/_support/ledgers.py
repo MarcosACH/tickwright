@@ -21,9 +21,12 @@ the number twice.
 from decimal import Decimal
 
 from tickwright.adapters.clock import ManualClock
-from tickwright.domain import AccountSpec, Clock, OrderFillEvent, Side, Store
+from tickwright.adapters.store import SQLiteStore
+from tickwright.domain import AccountSpec, Clock, OrderFillEvent, Portfolio, Side, Store
+from tickwright.engine.cache import Cache
 from tickwright.engine.checkpoint import Checkpointer
 from tickwright.engine.portfolio import PortfolioProjection
+from tickwright.engine.scoped_portfolio import ScopedPortfolio
 
 GENESIS = Decimal("100000")
 """The opening cash a saga-focused suite opens both its ledger and its venue with.
@@ -73,6 +76,18 @@ def ledger(store: Store, *, genesis: Decimal = GENESIS) -> PortfolioProjection:
     store behind it cannot diverge from the order cache's.
     """
     return PortfolioProjection(spec=_spec(genesis), store=store, clock=ManualClock(start_ns=0))
+
+
+def scoped(projection: PortfolioProjection, strategy_id: str) -> Portfolio:
+    """``strategy_id``'s ``Portfolio`` facade over ``projection``, for a suite that
+    reads positions and the account only.
+
+    The facade's order ``Cache`` here is empty and sits on its own store, so
+    ``open_orders()`` reads nothing. A suite about open orders takes the facade
+    from ``Engine.portfolio_for`` instead, where the ``Cache`` is the real one.
+    """
+    cache = Cache(store=SQLiteStore(":memory:"))
+    return ScopedPortfolio(projection=projection, cache=cache, strategy_id=strategy_id)
 
 
 def book_fill(projection: PortfolioProjection, event: OrderFillEvent, *, side: Side) -> None:

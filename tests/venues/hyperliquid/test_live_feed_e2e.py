@@ -11,7 +11,7 @@ import asyncio
 from decimal import Decimal
 
 from hyperliquid_fakes import FakeWsConnection, trade, trades_frame
-from ledgers import GENESIS, checkpointer
+from ledgers import GENESIS, checkpointer, scoped
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
@@ -51,7 +51,7 @@ def test_mocked_frames_reach_a_paper_fill_through_the_whole_pipeline() -> None:
             emitter=SignalEmitter(
                 strategy_id="live", bus=bus, clock=clock, record_seq=checks.raise_seq
             ),
-            portfolio=checks.portfolio.for_strategy("live"),
+            portfolio=scoped(checks.portfolio, "live"),
             side=Side.BUY,
             quantity=Decimal("0.5"),
         )

@@ -14,7 +14,7 @@ import json
 from decimal import Decimal
 from pathlib import Path
 
-from ledgers import GENESIS, checkpointer
+from ledgers import GENESIS, checkpointer, scoped
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
@@ -80,7 +80,7 @@ def _life(
         emitter=SignalEmitter(
             strategy_id="btc-shot", bus=bus, clock=clock, record_seq=checks.raise_seq
         ),
-        portfolio=projection.for_strategy("btc-shot"),
+        portfolio=scoped(projection, "btc-shot"),
         side=Side.BUY,
         quantity=Decimal("1"),
     )
@@ -88,7 +88,7 @@ def _life(
         emitter=SignalEmitter(
             strategy_id="eth-shot", bus=bus, clock=clock, record_seq=checks.raise_seq
         ),
-        portfolio=projection.for_strategy("eth-shot"),
+        portfolio=scoped(projection, "eth-shot"),
         side=Side.SELL,
         quantity=Decimal("2"),
     )
