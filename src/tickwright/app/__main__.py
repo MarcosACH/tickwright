@@ -40,11 +40,15 @@ def main() -> int:
 
 
 def _run_engine() -> int:
-    # Everything comes from the environment/.env at runtime — a missing or
-    # inconsistent field (feed=replay without a tick file, say) is a readable
-    # pydantic validation error, which is exactly the CLI contract. This is the
-    # one place that builds the env-reading skin (issue #71).
-    config = AppSettings()
+    # Everything comes from the environment/.env at runtime. This is the one
+    # place that builds the env-reading skin (issue #71). A config that does not
+    # validate fails the same way on every restart, so it exits 2 and a
+    # supervisor stops retrying it (ADR-0024).
+    try:
+        config = AppSettings()
+    except ValidationError as exc:
+        print(f"tickwright: {exc}", file=sys.stderr)
+        return 2
     configure_logging(secrets=config.secrets())
     engine = build_engine(config)
     return asyncio.run(engine.run())

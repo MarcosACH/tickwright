@@ -410,6 +410,23 @@ def test_new_store_with_no_exit_command_exits_two_and_starts_no_run(
     assert _events(log) == []
 
 
+def test_an_engine_run_on_a_config_that_does_not_validate_exits_2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same config fails the same way on every restart, so a supervisor
+    must not retry it (ADR-0024). Nothing is built, so no store is opened."""
+    _write_workspace(tmp_path)
+    _export_hostile_config(monkeypatch)
+    with (tmp_path / ".env").open("a") as env:
+        env.write("TICKWRIGHT_BUS=no-such-bus\n")
+    log = tmp_path / "engine.log"
+
+    assert _run_to_exit(tmp_path, log) == 2, log.read_text()
+
+    assert "no-such-bus" in log.read_text()
+    assert not (tmp_path / "saga.db").exists()
+
+
 def test_cancel_all_on_a_store_it_cannot_open_exits_two(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
