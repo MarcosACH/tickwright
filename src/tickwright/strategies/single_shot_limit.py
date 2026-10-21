@@ -13,6 +13,8 @@ deterministic and replayable, and knows nothing of the saga, store, or venue.
 import json
 from decimal import Decimal
 
+from pydantic import BaseModel
+
 from tickwright.domain import (
     InvariantViolation,
     MarketTick,
@@ -20,6 +22,7 @@ from tickwright.domain import (
     OrderEvent,
     OrderFilled,
     OrderType,
+    Portfolio,
     Side,
     SignalEmitter,
     TimeInForce,
@@ -29,27 +32,29 @@ from tickwright.domain import (
 class SingleShotLimitStrategy:
     """Places one resting LIMIT on the first tick; optionally cancels it later."""
 
-    def __init__(
-        self,
-        *,
-        emitter: SignalEmitter,
-        side: Side,
-        quantity: Decimal,
-        price: Decimal,
-        time_in_force: TimeInForce = TimeInForce.GTC,
-        post_only: bool = False,
-        cancel_after_ticks: int | None = None,
-    ) -> None:
+    class Settings(BaseModel):
+        side: Side
+        quantity: Decimal
+        price: Decimal
+        time_in_force: TimeInForce = TimeInForce.GTC
+        post_only: bool = False
+        cancel_after_ticks: int | None = None
+
+    def __init__(self, *, emitter: SignalEmitter, portfolio: Portfolio, settings: Settings) -> None:
+        # It reads no position state, so it ignores the portfolio. It still
+        # accepts one, because every strategy gets the same three arguments
+        # (ADR-0041 §7 as amended by ADR-0061).
+        del portfolio
         # The id comes from the emitter, so the two cannot name different
         # strategies (#442).
         self.strategy_id = emitter.strategy_id
         self._emitter = emitter
-        self._side = side
-        self._quantity = quantity
-        self._price = price
-        self._time_in_force = time_in_force
-        self._post_only = post_only
-        self._cancel_after_ticks = cancel_after_ticks
+        self._side = settings.side
+        self._quantity = settings.quantity
+        self._price = settings.price
+        self._time_in_force = settings.time_in_force
+        self._post_only = settings.post_only
+        self._cancel_after_ticks = settings.cancel_after_ticks
         # The emitter owns the seq counter (engine-set via set_next_seq, ADR-0016);
         # everything below is the snapshot content this strategy owns.
         self._placed_signal_id: str | None = None

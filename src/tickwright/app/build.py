@@ -4,10 +4,15 @@ The one module at the top of the graph that knows every concrete. Each seam
 has a public per-seam builder with an explicit ``match`` over its config
 discriminant; ``build_engine`` composes them and hands the ``Engine``
 already-built dependencies. Adding an impl is one ``Literal`` value in
-``config.py`` and one ``match`` arm here — no registry, no import-path DSL.
+``config.py`` and one ``match`` arm here — no registry, no discovery.
+
+Strategies are the one exception. A user's strategy lives in the user's own
+code, which no arm here can name, so config names each one by import path and
+this module imports that one class (ADR-0061).
 """
 
 import asyncio
+import importlib
 import random
 from collections.abc import Callable, Mapping
 from decimal import Decimal
@@ -46,7 +51,6 @@ from tickwright.domain import (
 from tickwright.engine.exit_run import ExitJob, Flatten, OperatorCancelAll
 from tickwright.engine.guard import NoopGuard, RealGuard
 from tickwright.engine.runner import Engine
-from tickwright.strategies import SingleShotLimitStrategy, SingleShotMarketStrategy
 
 # Imported at module top, unlike the kafka/psycopg arms: the venue package is
 # light — the websockets/aiohttp/signing stacks load only when a live
@@ -390,7 +394,7 @@ def _build_engine(config: AppConfig, *, exit_job: ExitJob | None) -> Engine:
                 emitter=engine.emitter_for(strategy_config.strategy_id),
                 portfolio=engine.portfolio_for(strategy_config.strategy_id),
             ),
-            symbols={strategy_config.symbol},
+            symbols=set(strategy_config.symbols),
         )
     return engine
 
@@ -398,24 +402,11 @@ def _build_engine(config: AppConfig, *, exit_job: ExitJob | None) -> Engine:
 def _build_strategy(
     config: StrategyConfig, *, emitter: SignalEmitter, portfolio: Portfolio
 ) -> Strategy:
-    match config.kind:
-        case "single_shot_market":
-            return SingleShotMarketStrategy(
-                emitter=emitter,
-                portfolio=portfolio,
-                side=config.side,
-                quantity=config.quantity,
-            )
-        case "single_shot_limit":
-            # Deliberately not handed a portfolio: it reads no position state,
-            # and a constructor parameter with no reader is not symmetry, it is
-            # an unused seam (ADR-0041 §7).
-            assert config.price is not None  # enforced by StrategyConfig validation
-            return SingleShotLimitStrategy(
-                emitter=emitter,
-                side=config.side,
-                quantity=config.quantity,
-                price=config.price,
-            )
-        case unreachable:
-            assert_never(unreachable)
+    module_name, _, class_name = config.strategy.partition(":")
+    cls = getattr(importlib.import_module(module_name), class_name)
+    settings = cls.Settings.model_validate(config.settings)
+    # Always all three, even to a strategy that reads no portfolio. A fixed
+    # signature is easier to document than a rule about who gets what
+    # (ADR-0041 §7 as amended by ADR-0061).
+    strategy: Strategy = cls(emitter=emitter, portfolio=portfolio, settings=settings)
+    return strategy

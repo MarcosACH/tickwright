@@ -186,9 +186,12 @@ def _first_life(
         emitter=SignalEmitter(
             strategy_id="trivial", bus=bus, clock=clock, record_seq=checks.raise_seq
         ),
-        side=Side.BUY,
-        quantity=Decimal("0.5"),
-        price=Decimal("41000"),
+        portfolio=checks.portfolio.for_strategy("trivial"),
+        settings=SingleShotLimitStrategy.Settings(
+            side=Side.BUY,
+            quantity=Decimal("0.5"),
+            price=Decimal("41000"),
+        ),
     )
     feed = ReplayFeed(path=_ticks_file(tmp_path / "ticks.jsonl", ["42000"]), bus=bus, clock=clock)
 
@@ -476,10 +479,13 @@ def _kafka_life(
             emitter=SignalEmitter(
                 strategy_id="trivial", bus=bus, clock=clock, record_seq=checks.raise_seq
             ),
-            side=Side.BUY,
-            quantity=Decimal("0.5"),
-            price=Decimal("41000"),
-            cancel_after_ticks=cancel_after_ticks,
+            portfolio=checks.portfolio.for_strategy("trivial"),
+            settings=SingleShotLimitStrategy.Settings(
+                side=Side.BUY,
+                quantity=Decimal("0.5"),
+                price=Decimal("41000"),
+                cancel_after_ticks=cancel_after_ticks,
+            ),
         ),
         symbols={"BTC"},
     )

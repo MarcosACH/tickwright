@@ -355,19 +355,23 @@ def test_build_engine_wires_a_tradable_paper_engine(tmp_path: Path) -> None:
         ),
         strategies=[
             StrategyConfig(
-                kind="single_shot_market",
+                strategy="tickwright.strategies.single_shot:SingleShotMarketStrategy",
                 strategy_id="demo",
-                symbol="BTC",
-                side=Side.BUY,
-                quantity=Decimal("0.5"),
+                symbols=["BTC"],
+                settings={
+                    "side": Side.BUY,
+                    "quantity": Decimal("0.5"),
+                },
             ),
             StrategyConfig(
-                kind="single_shot_limit",
+                strategy="tickwright.strategies.single_shot_limit:SingleShotLimitStrategy",
                 strategy_id="rester",
-                symbol="ETH",
-                side=Side.BUY,
-                quantity=Decimal("0.5"),
-                price=Decimal("41000"),
+                symbols=["ETH"],
+                settings={
+                    "side": Side.BUY,
+                    "quantity": Decimal("0.5"),
+                    "price": Decimal("41000"),
+                },
             ),
         ],
     )
@@ -379,6 +383,48 @@ def test_build_engine_wires_a_tradable_paper_engine(tmp_path: Path) -> None:
         derive_cloid("rester:ETH:1"): OrderState.LIVE,
     }
     assert _run_until_states(engine, db, wanted) == 0
+
+
+def test_a_strategy_named_by_import_path_trades_each_of_its_symbols(tmp_path: Path) -> None:
+    # The strategy lives in the test tree, as a user's lives in their own repo
+    # (ADR-0061). Its settings arrive as config text, so a 0.5 order at the
+    # venue proves the engine validated them against the class's own model.
+    ticks = tmp_path / "ticks.jsonl"
+    ticks.write_text(
+        '{"symbol": "BTC", "price": "42000", "size": "3", '
+        '"aggressor_side": "buy", "trade_id": "a", "ts_event": 1000}\n'
+        '{"symbol": "ETH", "price": "42000", "size": "3", '
+        '"aggressor_side": "buy", "trade_id": "b", "ts_event": 1001}\n'
+    )
+    db = tmp_path / "saga.db"
+    config = AppConfig.model_validate(
+        {
+            "replay": ReplayFeedConfig(path=ticks),
+            "sqlite": SQLiteStoreConfig(path=db),
+            "paper": PaperExchangeConfig(
+                instrument_specs={"BTC": _SPEC, "ETH": _SPEC}, genesis_collateral=GENESIS
+            ),
+            "strategies": [
+                {
+                    "strategy": "user_strategies:BuysEachSymbolOnce",
+                    "strategy_id": "user",
+                    "symbols": ["BTC", "ETH"],
+                    "settings": {"quantity": "0.5"},
+                }
+            ],
+        }
+    )
+    wanted = {
+        derive_cloid("user:BTC:1"): OrderState.FILLED,
+        derive_cloid("user:ETH:2"): OrderState.FILLED,
+    }
+    assert _run_until_states(build_engine(config), db, wanted) == 0
+    reader = SQLiteStore(db)
+    try:
+        quantities = {reader.get_order(cloid).quantity for cloid in wanted}  # type: ignore[union-attr]
+    finally:
+        reader.close()
+    assert quantities == {Decimal("0.5")}
 
 
 def _run_until_states(engine: Engine, db: Path, wanted: dict[str, OrderState]) -> int:
@@ -428,12 +474,14 @@ def test_build_engine_hands_the_limits_to_the_guard(tmp_path: Path) -> None:
             "strategies": [
                 _strategy("BTC", "demo"),
                 StrategyConfig(
-                    kind="single_shot_limit",
+                    strategy="tickwright.strategies.single_shot_limit:SingleShotLimitStrategy",
                     strategy_id="rester",
-                    symbol="ETH",
-                    side=Side.BUY,
-                    quantity=Decimal("0.5"),
-                    price=Decimal("41000"),
+                    symbols=["ETH"],
+                    settings={
+                        "side": Side.BUY,
+                        "quantity": Decimal("0.5"),
+                        "price": Decimal("41000"),
+                    },
                 ),
             ],
             "limits": {
@@ -472,17 +520,6 @@ def test_on_replay_a_recorded_mark_is_judged_by_the_replay_clock(tmp_path: Path)
     )
     wanted = {derive_cloid("demo:BTC:1"): OrderState.FILLED}
     assert _run_until_states(build_engine(config), db, wanted) == 0
-
-
-def test_a_limit_strategy_config_requires_a_price() -> None:
-    with pytest.raises(ValidationError, match="price"):
-        StrategyConfig(
-            kind="single_shot_limit",
-            strategy_id="rester",
-            symbol="BTC",
-            side=Side.BUY,
-            quantity=Decimal("0.5"),
-        )
 
 
 async def _record_fill(sink: list, report: object) -> None:
@@ -557,11 +594,13 @@ def test_paper_fill_model_selects_the_seeded_stochastic_model_from_config(tmp_pa
 
 def _strategy(symbol: str, strategy_id: str = "demo") -> StrategyConfig:
     return StrategyConfig(
-        kind="single_shot_market",
+        strategy="tickwright.strategies.single_shot:SingleShotMarketStrategy",
         strategy_id=strategy_id,
-        symbol=symbol,
-        side=Side.BUY,
-        quantity=Decimal("0.5"),
+        symbols=[symbol],
+        settings={
+            "side": Side.BUY,
+            "quantity": Decimal("0.5"),
+        },
     )
 
 

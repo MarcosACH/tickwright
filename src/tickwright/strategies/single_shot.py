@@ -10,11 +10,14 @@ It is also the ``Portfolio`` seam's only consumer (ADR-0041 §8). The facade
 arrives **already scoped** to this ``strategy_id``, constructor-injected beside
 the emitter, which is what keeps ``strategies`` free of an
 ``engine`` import and the ``Strategy`` Protocol unchanged. Depends on ``domain``
-only; it emits no named events itself.
+only, plus pydantic for its ``Settings`` (ADR-0061); it emits no named events
+itself.
 """
 
 import json
 from decimal import Decimal
+
+from pydantic import BaseModel
 
 from tickwright.domain import (
     MarketTick,
@@ -32,15 +35,11 @@ from tickwright.domain import (
 class SingleShotMarketStrategy:
     """Buys (or sells) a fixed quantity at market, once, on the first tick seen."""
 
-    def __init__(
-        self,
-        *,
-        emitter: SignalEmitter,
-        portfolio: Portfolio,
-        side: Side,
-        quantity: Decimal,
-        time_in_force: TimeInForce = TimeInForce.IOC,
-    ) -> None:
+    class Settings(BaseModel):
+        side: Side
+        quantity: Decimal
+
+    def __init__(self, *, emitter: SignalEmitter, portfolio: Portfolio, settings: Settings) -> None:
         # The id comes from the emitter, so the two cannot name different
         # strategies (#442).
         self.strategy_id = emitter.strategy_id
@@ -49,9 +48,8 @@ class SingleShotMarketStrategy:
         # never the facade class either — the seam exists for exactly that
         # dependency direction (ADR-0035, ADR-0041 §8).
         self._portfolio = portfolio
-        self._side = side
-        self._quantity = quantity
-        self._time_in_force = time_in_force
+        self._side = settings.side
+        self._quantity = settings.quantity
         # The emitter owns the seq counter (engine-set from the saga high-water,
         # ADR-0016); the fired flag is the snapshot content this strategy owns.
         self._fired = False
@@ -71,7 +69,8 @@ class SingleShotMarketStrategy:
             side=self._side,
             quantity=self._quantity,
             order_type=OrderType.MARKET,
-            time_in_force=self._time_in_force,
+            # A market order never rests, so IOC is its only honest tif.
+            time_in_force=TimeInForce.IOC,
         )
 
     async def on_order_event(self, event: OrderEvent) -> None:

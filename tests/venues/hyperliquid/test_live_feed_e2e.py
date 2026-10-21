@@ -52,8 +52,10 @@ def test_mocked_frames_reach_a_paper_fill_through_the_whole_pipeline() -> None:
                 strategy_id="live", bus=bus, clock=clock, record_seq=checks.raise_seq
             ),
             portfolio=checks.portfolio.for_strategy("live"),
-            side=Side.BUY,
-            quantity=Decimal("0.5"),
+            settings=SingleShotMarketStrategy.Settings(
+                side=Side.BUY,
+                quantity=Decimal("0.5"),
+            ),
         )
         connection = FakeWsConnection([trades_frame(trade("BTC", "43250.5", 1, sz="3"))])
 

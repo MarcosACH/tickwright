@@ -137,8 +137,9 @@ def test_the_documented_limits_line_loads_through_the_env_skin(
         "TICKWRIGHT_REPLAY__PATH=ticks.jsonl\n"
         "TICKWRIGHT_PAPER__GENESIS_COLLATERAL=100000\n"
         # A limits entry must name a traded symbol, so BTC needs a strategy.
-        'TICKWRIGHT_STRATEGIES=[{"kind": "single_shot_market", "strategy_id": "demo", '
-        '"symbol": "BTC", "side": "buy", "quantity": "0.5"}]\n'
+        'TICKWRIGHT_STRATEGIES=[{"strategy": '
+        '"tickwright.strategies.single_shot:SingleShotMarketStrategy", "strategy_id": "demo", '
+        '"symbols": ["BTC"], "settings": {"side": "buy", "quantity": "0.5"}}]\n'
         f"{documented}\n"
     )
     monkeypatch.chdir(tmp_path)
@@ -368,11 +369,13 @@ def test_a_limits_entry_for_an_untraded_symbol_is_refused_at_load(tmp_path: Path
                 "paper": PaperExchangeConfig(genesis_collateral=Decimal("100000")),
                 "strategies": [
                     StrategyConfig(
-                        kind="single_shot_market",
+                        strategy="tickwright.strategies.single_shot:SingleShotMarketStrategy",
                         strategy_id="demo",
-                        symbol="BTC",
-                        side=Side.BUY,
-                        quantity=Decimal("0.5"),
+                        symbols=["BTC"],
+                        settings={
+                            "side": Side.BUY,
+                            "quantity": Decimal("0.5"),
+                        },
                     )
                 ],
                 "limits": {"symbols": {"XBT": {"max_order_size": "0.5"}}},
@@ -411,11 +414,13 @@ def test_a_leverage_entry_for_an_untraded_symbol_is_rejected_at_load(tmp_path: P
             paper=PaperExchangeConfig(genesis_collateral=Decimal("100000")),
             strategies=[
                 StrategyConfig(
-                    kind="single_shot_market",
+                    strategy="tickwright.strategies.single_shot:SingleShotMarketStrategy",
                     strategy_id="demo",
-                    symbol="BTC",
-                    side=Side.BUY,
-                    quantity=Decimal("0.5"),
+                    symbols=["BTC"],
+                    settings={
+                        "side": Side.BUY,
+                        "quantity": Decimal("0.5"),
+                    },
                 )
             ],
             leverage={
@@ -448,11 +453,13 @@ def test_the_traded_symbol_set_is_derived_once_for_both_readers(tmp_path: Path) 
         hyperliquid=HyperliquidConfig(symbols=["BTC", "ETH", "SOL"]),
         strategies=[
             StrategyConfig(
-                kind="single_shot_market",
+                strategy="tickwright.strategies.single_shot:SingleShotMarketStrategy",
                 strategy_id=strategy_id,
-                symbol=symbol,
-                side=Side.BUY,
-                quantity=Decimal("0.5"),
+                symbols=[symbol],
+                settings={
+                    "side": Side.BUY,
+                    "quantity": Decimal("0.5"),
+                },
             )
             for strategy_id, symbol in (("eth", "ETH"), ("btc", "BTC"), ("sol", "SOL"))
         ],
@@ -473,11 +480,13 @@ def test_a_strategy_may_not_claim_the_reserved_unattributed_id() -> None:
     """
     with pytest.raises(ValidationError, match=UNATTRIBUTED):
         StrategyConfig(
-            kind="single_shot_market",
+            strategy="tickwright.strategies.single_shot:SingleShotMarketStrategy",
             strategy_id=UNATTRIBUTED,
-            symbol="BTC",
-            side=Side.BUY,
-            quantity=Decimal("0.5"),
+            symbols=["BTC"],
+            settings={
+                "side": Side.BUY,
+                "quantity": Decimal("0.5"),
+            },
         )
 
 
@@ -486,11 +495,13 @@ def test_a_strategy_may_not_claim_the_reserved_operator_id() -> None:
     # with that id would get the same pass.
     with pytest.raises(ValidationError, match=f"{OPERATOR} is reserved for operator orders"):
         StrategyConfig(
-            kind="single_shot_market",
+            strategy="tickwright.strategies.single_shot:SingleShotMarketStrategy",
             strategy_id=OPERATOR,
-            symbol="BTC",
-            side=Side.BUY,
-            quantity=Decimal("0.5"),
+            symbols=["BTC"],
+            settings={
+                "side": Side.BUY,
+                "quantity": Decimal("0.5"),
+            },
         )
 
 
@@ -513,11 +524,13 @@ def test_two_strategies_may_not_declare_one_symbol(tmp_path: Path) -> None:
 
     def _strategy(strategy_id: str, symbol: str) -> StrategyConfig:
         return StrategyConfig(
-            kind="single_shot_market",
+            strategy="tickwright.strategies.single_shot:SingleShotMarketStrategy",
             strategy_id=strategy_id,
-            symbol=symbol,
-            side=Side.BUY,
-            quantity=Decimal("0.5"),
+            symbols=[symbol],
+            settings={
+                "side": Side.BUY,
+                "quantity": Decimal("0.5"),
+            },
         )
 
     with pytest.raises(ValidationError) as refused:
@@ -557,11 +570,13 @@ def test_two_strategies_may_not_share_one_id(tmp_path: Path) -> None:
 
     def _strategy(strategy_id: str, symbol: str) -> StrategyConfig:
         return StrategyConfig(
-            kind="single_shot_market",
+            strategy="tickwright.strategies.single_shot:SingleShotMarketStrategy",
             strategy_id=strategy_id,
-            symbol=symbol,
-            side=Side.BUY,
-            quantity=Decimal("0.5"),
+            symbols=[symbol],
+            settings={
+                "side": Side.BUY,
+                "quantity": Decimal("0.5"),
+            },
         )
 
     with pytest.raises(ValidationError) as refused:
@@ -600,11 +615,13 @@ def test_a_duplicate_id_on_one_symbol_is_refused_as_a_duplicate_id(tmp_path: Pat
 
     def _strategy(strategy_id: str, symbol: str) -> StrategyConfig:
         return StrategyConfig(
-            kind="single_shot_market",
+            strategy="tickwright.strategies.single_shot:SingleShotMarketStrategy",
             strategy_id=strategy_id,
-            symbol=symbol,
-            side=Side.BUY,
-            quantity=Decimal("0.5"),
+            symbols=[symbol],
+            settings={
+                "side": Side.BUY,
+                "quantity": Decimal("0.5"),
+            },
         )
 
     with pytest.raises(ValidationError) as refused:

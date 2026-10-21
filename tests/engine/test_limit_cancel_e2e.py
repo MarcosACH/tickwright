@@ -80,10 +80,13 @@ def _run(
         emitter=SignalEmitter(
             strategy_id="trivial", bus=bus, clock=clock, record_seq=checks.raise_seq
         ),
-        side=Side.BUY,
-        quantity=Decimal("0.5"),
-        price=Decimal("41000"),
-        cancel_after_ticks=cancel_after_ticks,
+        portfolio=checks.portfolio.for_strategy("trivial"),
+        settings=SingleShotLimitStrategy.Settings(
+            side=Side.BUY,
+            quantity=Decimal("0.5"),
+            price=Decimal("41000"),
+            cancel_after_ticks=cancel_after_ticks,
+        ),
     )
     feed = ReplayFeed(path=path, bus=bus, clock=clock)
 

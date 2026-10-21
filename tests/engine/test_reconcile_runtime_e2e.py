@@ -108,9 +108,12 @@ def test_a_missed_fill_landing_mid_run_is_healed_by_the_inflight_cadence(
         )
         strategy = SingleShotLimitStrategy(
             emitter=engine.emitter_for("trivial"),
-            side=Side.BUY,
-            quantity=Decimal("0.5"),
-            price=Decimal("41000"),
+            portfolio=engine.portfolio_for("trivial"),
+            settings=SingleShotLimitStrategy.Settings(
+                side=Side.BUY,
+                quantity=Decimal("0.5"),
+                price=Decimal("41000"),
+            ),
         )
         engine.register(strategy, symbols={"BTC"})
         # The venue self-subscribes to *its* bus at construction; the severed
@@ -224,9 +227,12 @@ def test_a_vanished_order_is_ghosted_only_after_grace_and_a_failed_read_freezes(
         )
         strategy = SingleShotLimitStrategy(
             emitter=engine.emitter_for("trivial"),
-            side=Side.BUY,
-            quantity=Decimal("0.5"),
-            price=Decimal("41000"),  # rests below the 42000 prints: never fills
+            portfolio=engine.portfolio_for("trivial"),
+            settings=SingleShotLimitStrategy.Settings(
+                side=Side.BUY,
+                quantity=Decimal("0.5"),
+                price=Decimal("41000"),  # rests below the 42000 prints: never fills
+            ),
         )
         engine.register(strategy, symbols={"BTC"})
 
@@ -335,9 +341,12 @@ def test_a_durably_unreadable_body_faults_the_composed_engine(tmp_path: Path) ->
         engine.register(
             SingleShotLimitStrategy(
                 emitter=engine.emitter_for("trivial"),
-                side=Side.BUY,
-                quantity=Decimal("0.5"),
-                price=Decimal("41000"),  # rests below the 42000 prints: never fills
+                portfolio=engine.portfolio_for("trivial"),
+                settings=SingleShotLimitStrategy.Settings(
+                    side=Side.BUY,
+                    quantity=Decimal("0.5"),
+                    price=Decimal("41000"),  # rests below the 42000 prints: never fills
+                ),
             ),
             symbols={"BTC"},
         )

@@ -62,8 +62,10 @@ def _harness(
         portfolio=(
             projection if projection is not None else ledger(SQLiteStore(":memory:"))
         ).for_strategy("trivial"),
-        side=Side.BUY,
-        quantity=Decimal("0.5"),
+        settings=SingleShotMarketStrategy.Settings(
+            side=Side.BUY,
+            quantity=Decimal("0.5"),
+        ),
     )
     bus.subscribe(MarketTick, strategy.on_tick)
     signals: list[Signal] = []

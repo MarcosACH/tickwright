@@ -246,11 +246,13 @@ def _config(tmp_path: Path, steps: Sequence[Step], **overrides: object) -> AppCo
         # engine below runs the scripted strategy under this id instead.
         "strategies": [
             StrategyConfig(
-                kind="single_shot_market",
+                strategy="tickwright.strategies.single_shot:SingleShotMarketStrategy",
                 strategy_id="scripted",
-                symbol="BTC",
-                side=Side.BUY,
-                quantity=Decimal("0.1"),
+                symbols=["BTC"],
+                settings={
+                    "side": Side.BUY,
+                    "quantity": Decimal("0.1"),
+                },
             )
         ],
     }

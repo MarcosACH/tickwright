@@ -42,19 +42,16 @@ _SPECS = {
 }
 _STRATEGIES = [
     {
-        "kind": "single_shot_market",
+        "strategy": "tickwright.strategies.single_shot:SingleShotMarketStrategy",
         "strategy_id": "shooter",
-        "symbol": "BTC",
-        "side": "buy",
-        "quantity": "0.5",
+        "symbols": ["BTC"],
+        "settings": {"side": "buy", "quantity": "0.5"},
     },
     {
-        "kind": "single_shot_limit",
+        "strategy": "tickwright.strategies.single_shot_limit:SingleShotLimitStrategy",
         "strategy_id": "rester",
-        "symbol": "ETH",
-        "side": "buy",
-        "quantity": "0.5",
-        "price": "41000",
+        "symbols": ["ETH"],
+        "settings": {"side": "buy", "quantity": "0.5", "price": "41000"},
     },
 ]
 _TICKS = [
