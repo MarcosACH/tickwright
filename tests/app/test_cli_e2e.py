@@ -444,7 +444,9 @@ def test_an_engine_run_on_a_config_that_does_not_validate_exits_2(
 
     assert _run_to_exit(tmp_path, log) == 2, log.read_text()
 
-    assert "no-such-bus" in log.read_text()
+    # The message names the field and what it accepts. It never quotes the
+    # input, because the input can hold the signing key.
+    assert "bus\n  Input should be 'in_memory' or 'kafka'" in log.read_text()
     assert not (tmp_path / "saga.db").exists()
 
 
