@@ -101,9 +101,11 @@ def _tick(symbol: str, price: str) -> Step:
     return symbol, price, step
 
 
-def _read(symbol: str) -> Step:
+def _read(symbol: str, *, only: str | None = None) -> Step:
+    """Read the open orders on a ``symbol`` tick, narrowed to ``only`` when given."""
+
     async def step(strategy: _ScriptedStrategy) -> None:
-        strategy.reads.append(strategy.portfolio.open_orders())
+        strategy.reads.append(strategy.portfolio.open_orders(only))
 
     return symbol, _ABOVE, step
 
@@ -211,3 +213,11 @@ def test_a_cancelled_order_leaves_the_read(tmp_path: Path) -> None:
     resting, after_cancel = strategy.reads
     assert [view.signal_id for view in resting] == ["scripted:BTC:1"]
     assert after_cancel == ()
+
+
+def test_a_symbol_read_returns_only_that_symbols_orders(tmp_path: Path) -> None:
+    strategy = _run(tmp_path, [_rest("BTC"), _rest("ETH"), _read("BTC"), _read("BTC", only="BTC")])
+
+    every_symbol, btc_only = strategy.reads
+    assert sorted(view.symbol for view in every_symbol) == ["BTC", "ETH"]
+    assert [view.symbol for view in btc_only] == ["BTC"]
