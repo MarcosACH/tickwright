@@ -404,7 +404,9 @@ def _build_strategy(
 ) -> Strategy:
     module_name, _, class_name = config.strategy.partition(":")
     cls = getattr(importlib.import_module(module_name), class_name)
-    settings = cls.Settings.model_validate(config.settings)
+    # Forbid extra fields even if the user's model allows them. Otherwise a typo
+    # in a settings key boots a strategy that silently ignores it (ADR-0061).
+    settings = cls.Settings.model_validate(config.settings, extra="forbid")
     # Always all three, even to a strategy that reads no portfolio. A fixed
     # signature is easier to document than a rule about who gets what
     # (ADR-0041 §7 as amended by ADR-0061).

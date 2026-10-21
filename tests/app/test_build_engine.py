@@ -427,6 +427,26 @@ def test_a_strategy_named_by_import_path_trades_each_of_its_symbols(tmp_path: Pa
     assert quantities == {Decimal("0.5")}
 
 
+def test_an_unknown_settings_field_is_refused_even_when_the_model_allows_extra(
+    tmp_path: Path,
+) -> None:
+    # A typo like "quantiy" must stop the boot. If the user's model allows extra
+    # fields, plain validation would keep it and drop the intent (ADR-0061).
+    config = _config(
+        tmp_path,
+        strategies=[
+            {
+                "strategy": "user_strategies:AllowsExtraSettings",
+                "strategy_id": "user",
+                "symbols": ["BTC"],
+                "settings": {"quantity": "0.5", "quantiy": "5"},
+            }
+        ],
+    )
+    with pytest.raises(ValidationError, match="quantiy"):
+        build_engine(config)
+
+
 def _run_until_states(engine: Engine, db: Path, wanted: dict[str, OrderState]) -> int:
     """Run ``engine`` until every order in ``wanted`` reaches its state, then stop it."""
 

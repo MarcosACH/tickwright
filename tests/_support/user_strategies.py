@@ -8,7 +8,7 @@ nothing in the shipped package can name them.
 import json
 from decimal import Decimal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from tickwright.domain import (
     MarketTick,
@@ -56,3 +56,12 @@ class BuysEachSymbolOnce:
 
     def restore(self, data: bytes) -> None:
         self._bought = set(json.loads(data)["bought"])
+
+
+class AllowsExtraSettings(BuysEachSymbolOnce):
+    """Trades like its parent, but its settings model accepts any extra field."""
+
+    class Settings(BaseModel):
+        model_config = ConfigDict(extra="allow")
+
+        quantity: Decimal
