@@ -12,6 +12,7 @@ full ADR-0024 lifecycle.
 """
 
 from collections.abc import Awaitable, Callable, Iterable
+from enum import Enum, auto
 
 from tickwright.domain import (
     Clock,
@@ -27,6 +28,21 @@ from tickwright.domain import (
 )
 from tickwright.engine.cache import Cache
 from tickwright.observability import NamedEvent, named_event
+
+
+class _Phase(Enum):
+    """Where the host is in its boot. It only moves forward. One value, so the
+    open-orders read can never be closed while ``stop()`` thinks it may persist."""
+
+    REGISTERING = auto()
+    """Before ``start()``. The ``Cache`` may still hold orders the venue has not
+    proven, so a strategy must not rebuild from them (ADR-0041 §3)."""
+    RESTORING = auto()
+    """Inside ``start()``, which runs after the startup barrier. The open-orders
+    read is open, but a strategy may still hold its blank constructor state."""
+    RUNNING = auto()
+    """Every strategy holds its restored state, so ``stop()`` has something true
+    to persist."""
 
 
 class StrategyHost:
@@ -67,22 +83,14 @@ class StrategyHost:
         # ``AppConfig`` refuses the same overlap at load and must refuse it in
         # the same words (ADR-0034; see ``domain/ownership.py``).
         self._ownership = SymbolOwnership()
-        # Set by ``start()`` once every strategy holds its restored state. Until
-        # then a strategy holds only its blank constructor state, and ``stop()``
-        # has nothing true to persist (see there).
-        self._started = False
-        # Set at the top of ``start()``, which runs after the startup barrier.
-        # Before that the ``Cache`` holds orders the venue has not proven, so a
-        # strategy must not rebuild from them (ADR-0041 §3). Kept apart from
-        # ``_started``, which is set only after every ``restore()`` returns.
-        self._open_orders_readable = False
+        self._phase = _Phase.REGISTERING
 
     def open_orders_readable(self) -> bool:
         """Whether a strategy may read its open orders yet.
 
         A method, so the engine can hand it to each ``ScopedPortfolio`` and the
         facade asks at read time, not at build time."""
-        return self._open_orders_readable
+        return self._phase is not _Phase.REGISTERING
 
     def register(self, strategy: Strategy, *, symbols: Iterable[str]) -> None:
         """Add ``strategy`` to the registry with its declared symbol set.
@@ -130,7 +138,7 @@ class StrategyHost:
         ``Cache`` the runner rebuilt from that store, so the boot deserializes
         the history once (issue #233).
         """
-        self._open_orders_readable = True
+        self._phase = _Phase.RESTORING
         high_water = self._cache.seq_high_water()
         for strategy in self._strategies.values():
             self._restore(strategy)
@@ -139,7 +147,7 @@ class StrategyHost:
             self._snapshot(strategy)
             strategy.set_next_seq(high_water.get(strategy.strategy_id, 0) + 1)
             self._subscribe(strategy)
-        self._started = True
+        self._phase = _Phase.RUNNING
 
     def _restore(self, strategy: Strategy) -> None:
         """Feed the persisted snapshot to ``strategy.restore()``, if one exists.
@@ -172,13 +180,13 @@ class StrategyHost:
         The graceful-stop half of ADR-0016's cadence: the engine owns
         durability, so the strategy's last state content outlives the process.
 
-        A no-op before ``start()``. The runner walks the same teardown when the
-        boot faults ahead of ``start()``, and a strategy that was never restored
+        A no-op until ``start()`` returns. The runner walks the same teardown when
+        the boot faults before or inside ``start()``, and a strategy that was never restored
         holds only its blank state. Persisting that would overwrite the previous
         life's snapshot, so the refusal's own remedy ("restore the declared
         values to resume") would resume a strategy that forgot what it did.
         """
-        if not self._started:
+        if self._phase is not _Phase.RUNNING:
             return
         for strategy in self._strategies.values():
             self._persist(strategy)
