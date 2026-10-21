@@ -497,6 +497,26 @@ def test_a_constructor_that_cannot_take_the_three_arguments_is_refused_before_th
     assert not (tmp_path / "saga.db").exists()
 
 
+def test_a_class_missing_a_strategy_method_is_refused_before_the_store_exists(
+    tmp_path: Path,
+) -> None:
+    # Without this check it boots, takes the store lock, and faults on the
+    # first tick with exit 1.
+    config = _config(
+        tmp_path,
+        strategies=[
+            {
+                "strategy": "user_strategies:LacksTwoMethods",
+                "strategy_id": "user",
+                "symbols": ["BTC"],
+            }
+        ],
+    )
+    with pytest.raises(StrategyLoadRefusal, match="on_tick, restore"):
+        build_engine(config)
+    assert not (tmp_path / "saga.db").exists()
+
+
 def test_settings_that_do_not_validate_are_refused_before_the_store_exists(
     tmp_path: Path,
 ) -> None:

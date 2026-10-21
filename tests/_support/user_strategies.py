@@ -89,6 +89,25 @@ class NeedsAnExtraArgument:
         self.strategy_id = emitter.strategy_id
 
 
+class LacksTwoMethods:
+    """Builds fine, but has no ``on_tick`` and no ``restore``."""
+
+    class Settings(BaseModel):
+        pass
+
+    def __init__(self, *, emitter: SignalEmitter, portfolio: Portfolio, settings: Settings) -> None:
+        self.strategy_id = emitter.strategy_id
+
+    async def on_order_event(self, event: OrderEvent) -> None:
+        pass
+
+    def set_next_seq(self, next_seq: int) -> None:
+        pass
+
+    def snapshot(self) -> bytes:
+        return b""
+
+
 class HasNoSettings:
     """A class that forgot to declare its settings model."""
 

@@ -17,7 +17,7 @@ import inspect
 import random
 from collections.abc import Callable, Mapping
 from decimal import Decimal
-from typing import Any, Literal, NamedTuple, assert_never
+from typing import Any, Literal, NamedTuple, assert_never, get_protocol_members
 
 from pydantic import BaseModel, ValidationError
 
@@ -441,6 +441,18 @@ def _load_strategy(config: StrategyConfig) -> tuple[Any, BaseModel]:
             f"strategy {config.strategy_id!r}: {config.strategy} must take exactly "
             f"emitter, portfolio and settings as keyword arguments: {exc}"
         ) from exc
+    # The list comes from the Protocol, so a new method there is checked here
+    # too. strategy_id is left out: it only exists once __init__ has run.
+    missing = sorted(
+        name
+        for name in get_protocol_members(Strategy)
+        if callable(getattr(Strategy, name, None)) and not callable(getattr(cls, name, None))
+    )
+    if missing:
+        raise StrategyLoadRefusal(
+            f"strategy {config.strategy_id!r}: {config.strategy} has no {', '.join(missing)}. "
+            "Every strategy needs the methods of the Strategy Protocol."
+        )
     # Forbid extra fields even if the user's model allows them. Otherwise a typo
     # in a settings key boots a strategy that silently ignores it (ADR-0061).
     try:
