@@ -415,11 +415,13 @@ def _build_engine(config: AppConfig, *, exit_job: ExitJob | None) -> Engine:
             ) from exc
         # The emitter and portfolio carry the entry's id, but the host keys on
         # the strategy's. A mismatch hides its fills from it and resumes its seq
-        # from the wrong high-water after a restart (#442).
-        if strategy.strategy_id != strategy_id:
+        # from the wrong high-water after a restart (#442). A missing id refuses
+        # too: as an AttributeError it would exit 1.
+        own_id = getattr(strategy, "strategy_id", None)
+        if own_id != strategy_id:
             raise StrategyLoadRefusal(
                 f"strategy {strategy_id!r}: {strategy_config.strategy} calls itself "
-                f"{strategy.strategy_id!r}. Set strategy_id from emitter.strategy_id."
+                f"{own_id!r}. Set strategy_id from emitter.strategy_id."
             )
         engine.register(strategy, symbols=set(strategy_config.symbols))
     return engine

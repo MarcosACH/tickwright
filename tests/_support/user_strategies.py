@@ -77,6 +77,17 @@ class NamesItself(BuysEachSymbolOnce):
         self.strategy_id = "momentum"
 
 
+class NeverNamesItself(BuysEachSymbolOnce):
+    """Trades like its parent, but its constructor never sets ``strategy_id``."""
+
+    def __init__(
+        self, *, emitter: SignalEmitter, portfolio: Portfolio, settings: BuysEachSymbolOnce.Settings
+    ) -> None:
+        self._emitter = emitter
+        self._quantity = settings.quantity
+        self._bought: set[str] = set()
+
+
 class RaisesWhileBuilding(BuysEachSymbolOnce):
     """Takes the right arguments, but its constructor raises."""
 

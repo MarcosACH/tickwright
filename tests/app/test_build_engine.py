@@ -536,6 +536,24 @@ def test_a_strategy_whose_id_differs_from_its_entry_is_refused(tmp_path: Path) -
         build_engine(config)
 
 
+def test_a_strategy_that_never_sets_its_id_is_refused(tmp_path: Path) -> None:
+    # The method check cannot see strategy_id, so this is its only check. As a
+    # bare AttributeError it would exit 1, and a supervisor would restart it forever.
+    config = _config(
+        tmp_path,
+        strategies=[
+            {
+                "strategy": "user_strategies:NeverNamesItself",
+                "strategy_id": "user",
+                "symbols": ["BTC"],
+                "settings": {"quantity": "0.5"},
+            }
+        ],
+    )
+    with pytest.raises(StrategyLoadRefusal, match="Set strategy_id from emitter.strategy_id"):
+        build_engine(config)
+
+
 def test_a_constructor_that_raises_is_refused(tmp_path: Path) -> None:
     # A raising constructor fails the same way on every restart. As a bare
     # exception it would exit 1, and a supervisor would restart it forever.
