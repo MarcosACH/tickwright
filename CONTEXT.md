@@ -101,6 +101,13 @@ shared durable store. Its [[signal_id]] seq high-water-mark is recovered from th
 reference impls (engine capability, not a library). See ADR-0006, ADR-0015, ADR-0016, ADR-0018.
 _Avoid_: algo, bot, trader.
 
+**User strategy**:
+A [[Strategy]] that lives in the user's own code, outside the engine's source. The user installs
+Tickwright as a dependency and writes only the strategy and the config. The engine does the rest.
+Upgrading the engine never means merging into the user's edits. The opposite is a **reference
+strategy**, one of the two the engine ships to exercise its own pipeline.
+_Avoid_: plugin (there is no registry or discovery), custom strategy, third-party strategy.
+
 **Symbol ownership**:
 Which [[Strategy]] declared which symbol, and the rule that **at most one** may declare each:
 `(strategy, symbol)` disjoint per [[Account]] — process-wide, one account per process (ADR-0038).
@@ -664,7 +671,9 @@ The single place that wires the engine: `build_engine(config)` reads the typed `
 constructs the concrete impls, which the [[Engine]] then receives already-built (the engine never
 imports a concrete class). Impl selection is an explicit `match` over a small config discriminant —
 adding an impl adds **one arm** at the top of the app, touching no adapter and no engine internal.
-**No plugin registry / import-path DSL** (a deliberate non-goal). See ADR-0032, ADR-0021.
+**No plugin registry and no discovery** (a deliberate non-goal). See ADR-0032, ADR-0021. Strategies
+are the one exception to the `match`. Config names each strategy by import path, and the engine
+imports that one class (ADR-0061).
 _Avoid_: registry, plugin loader, DI container (implies the rejected runtime-pluggability surface).
 
 **Dependency direction** (adapter isolation):
@@ -708,6 +717,14 @@ leverage, and liquidation price recomputed from marks; the boundary reconciled a
 account snapshot (the sole reconciliation anchor, ADR-0034). A **deployment fact**: one [[Engine]]
 process trades exactly one, owned exclusively (ADR-0038). See ADR-0035.
 _Avoid_: wallet, balance (a facet); not `eth_account.Account` (the signing library's unrelated type).
+
+**Agent wallet**:
+A key that signs orders for a master [[Account]] on Hyperliquid. It holds no funds and has no
+positions of its own. Every agent wallet of one master trades that same [[Account]]. So a second
+agent wallet never gives a second [[Engine]] its own account. A second account needs a new address
+with its own key. Set through `account_address` (ADR-0021, ADR-0038).
+_Avoid_: API wallet used as if it were a separate account, sub-account (a distinct venue
+mechanism, signed through `vaultAddress`).
 
 **Account abstraction mode**:
 The venue-side setting that decides whether an [[Account]]'s spot and perps balances are separate
