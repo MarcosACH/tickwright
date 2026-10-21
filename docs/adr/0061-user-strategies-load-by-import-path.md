@@ -29,8 +29,17 @@ the testnet soak. The soak was the first time someone brought a real strategy.
   allows extra fields. A typo must never be ignored without a word.
 - **The constructor receives exactly three keyword arguments.** They are `emitter`, `portfolio` and
   `settings`, always all three. A strategy that reads no portfolio still accepts it.
-- **A bad entry refuses at boot.** A path that does not import, a class with no `Settings`, or
-  settings that do not validate all refuse before the store or the venue is touched.
+- **A bad entry refuses at boot.** These all refuse before the store or the venue is touched:
+  - a path that is not `module:Class`, or that does not import
+  - a class with no `Settings`
+  - a constructor that cannot take the three keyword arguments
+  - a class that lacks a method of the `Strategy` Protocol
+  - settings that do not validate
+
+  A wrong constructor or a missing method would otherwise fail after the store exists. The CLI
+  would exit 1, and a supervisor would restart it forever. `strategy_id` and async methods are not
+  checked. The first only exists after `__init__`. The second can look wrong on a valid decorated
+  method.
 - **The import path is trusted like code.** Anyone who can set the engine's environment can already
   run code as the engine. So naming a module in config adds no new attack surface.
 - **Strategies only.** Feeds, exchanges, buses, stores and guards keep their `match` in

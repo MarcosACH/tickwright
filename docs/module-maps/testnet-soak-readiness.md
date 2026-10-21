@@ -91,8 +91,9 @@ The existing `_started` flag keeps its meaning for `stop()`. The new flag is sep
 any adapter is built.
 
 **Responsibilities:** Two steps. **Resolve** runs at the very top of `_build_engine`, before the bus
-and the store. It imports each `module:Class`, checks the class has `Settings`, and validates the
-entry's settings with extra fields refused. **Construct** runs where the strategy `match` is today.
+and the store. It imports each `module:Class` and checks the class has `Settings`. It checks the
+constructor can take the three arguments and the class has every `Strategy` method. Then it
+validates the entry's settings with extra fields refused. **Construct** runs where the strategy `match` is today.
 It passes exactly `emitter`, `portfolio` and `settings`. An exit run skips both steps, because it
 builds no strategy.
 

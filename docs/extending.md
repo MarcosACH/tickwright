@@ -162,8 +162,9 @@ A strategy consumes ticks and lifecycle events and emits `PlaceSignal`/`CancelSi
   TICKWRIGHT_STRATEGIES=[{"strategy": "my_strats.momentum:Momentum", "strategy_id": "mom", "symbols": ["BTC"], "settings": {"quantity": "0.5"}}]
   ```
 
-  A path that does not import, a class with no `Settings`, or settings that do not validate make
-  the CLI exit `2` before the store or the venue is touched.
+  These make the CLI exit `2` before the store or the venue is touched: a path that is not
+  `module:Class` or does not import, a class with no `Settings`, a constructor that cannot take the
+  three keyword arguments, a missing `Strategy` method, and settings that do not validate.
 - [ ] TDD it: a `ReplayFeed` tick → your strategy → `PaperExchange` → the expected `OrderEvent` on the
   bus, plus a snapshot/restore round-trip and a seq-resumes-after-restart test.
 
