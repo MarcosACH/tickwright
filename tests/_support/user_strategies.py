@@ -67,6 +67,28 @@ class AllowsExtraSettings(BuysEachSymbolOnce):
         quantity: Decimal
 
 
+class TakesNoPortfolio:
+    """The old reference limit shape: a constructor with no ``portfolio``."""
+
+    class Settings(BaseModel):
+        pass
+
+    def __init__(self, *, emitter: SignalEmitter, settings: Settings) -> None:
+        self.strategy_id = emitter.strategy_id
+
+
+class NeedsAnExtraArgument:
+    """A constructor that wants one more argument than the engine passes."""
+
+    class Settings(BaseModel):
+        pass
+
+    def __init__(
+        self, *, emitter: SignalEmitter, portfolio: Portfolio, settings: Settings, clock: object
+    ) -> None:
+        self.strategy_id = emitter.strategy_id
+
+
 class HasNoSettings:
     """A class that forgot to declare its settings model."""
 

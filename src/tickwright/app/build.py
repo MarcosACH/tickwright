@@ -13,6 +13,7 @@ this module imports that one class (ADR-0061).
 
 import asyncio
 import importlib
+import inspect
 import random
 from collections.abc import Callable, Mapping
 from decimal import Decimal
@@ -430,6 +431,16 @@ def _load_strategy(config: StrategyConfig) -> tuple[Any, BaseModel]:
             f"strategy {config.strategy_id!r}: {config.strategy} has no Settings Pydantic model. "
             "A strategy with no settings declares an empty one."
         )
+    # Check the call now, with the same rules Python uses for the real call.
+    # Found at construction, it would fail after the store exists and exit 1,
+    # so a supervisor would restart it forever.
+    try:
+        inspect.signature(cls).bind(emitter=None, portfolio=None, settings=None)
+    except TypeError as exc:
+        raise StrategyLoadRefusal(
+            f"strategy {config.strategy_id!r}: {config.strategy} must take exactly "
+            f"emitter, portfolio and settings as keyword arguments: {exc}"
+        ) from exc
     # Forbid extra fields even if the user's model allows them. Otherwise a typo
     # in a settings key boots a strategy that silently ignores it (ADR-0061).
     try:

@@ -480,6 +480,23 @@ def test_a_strategy_class_with_no_settings_model_is_refused_before_the_store_exi
     assert not (tmp_path / "saga.db").exists()
 
 
+@pytest.mark.parametrize("name", ["TakesNoPortfolio", "NeedsAnExtraArgument"])
+def test_a_constructor_that_cannot_take_the_three_arguments_is_refused_before_the_store_exists(
+    tmp_path: Path, name: str
+) -> None:
+    # Found only at construction, it would exit 1 with the store already
+    # made, and a supervisor would restart it forever.
+    config = _config(
+        tmp_path,
+        strategies=[
+            {"strategy": f"user_strategies:{name}", "strategy_id": "user", "symbols": ["BTC"]}
+        ],
+    )
+    with pytest.raises(StrategyLoadRefusal, match="emitter, portfolio and settings"):
+        build_engine(config)
+    assert not (tmp_path / "saga.db").exists()
+
+
 def test_settings_that_do_not_validate_are_refused_before_the_store_exists(
     tmp_path: Path,
 ) -> None:
