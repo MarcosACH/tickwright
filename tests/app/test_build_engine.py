@@ -517,6 +517,25 @@ def test_a_class_missing_a_strategy_method_is_refused_before_the_store_exists(
     assert not (tmp_path / "saga.db").exists()
 
 
+def test_a_strategy_whose_id_differs_from_its_entry_is_refused(tmp_path: Path) -> None:
+    # The emitter and portfolio carry the entry's id, but the host keys on the
+    # strategy's. A mismatch would hide its fills from it and resume its seq
+    # from the wrong high-water after a restart (#442).
+    config = _config(
+        tmp_path,
+        strategies=[
+            {
+                "strategy": "user_strategies:NamesItself",
+                "strategy_id": "user",
+                "symbols": ["BTC"],
+                "settings": {"quantity": "0.5"},
+            }
+        ],
+    )
+    with pytest.raises(StrategyLoadRefusal, match="'momentum'"):
+        build_engine(config)
+
+
 def test_settings_that_do_not_validate_are_refused_before_the_store_exists(
     tmp_path: Path,
 ) -> None:

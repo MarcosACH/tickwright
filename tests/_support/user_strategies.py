@@ -67,6 +67,16 @@ class AllowsExtraSettings(BuysEachSymbolOnce):
         quantity: Decimal
 
 
+class NamesItself(BuysEachSymbolOnce):
+    """Trades like its parent, but sets its own id instead of the emitter's."""
+
+    def __init__(
+        self, *, emitter: SignalEmitter, portfolio: Portfolio, settings: BuysEachSymbolOnce.Settings
+    ) -> None:
+        super().__init__(emitter=emitter, portfolio=portfolio, settings=settings)
+        self.strategy_id = "momentum"
+
+
 class TakesNoPortfolio:
     """The old reference limit shape: a constructor with no ``portfolio``."""
 
