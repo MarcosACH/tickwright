@@ -31,6 +31,7 @@ from tickwright.adapters.feed import ReplayFeed, ReplayFeedConfig
 from tickwright.adapters.paper import PaperExchange, PaperExchangeConfig
 from tickwright.adapters.store import SQLiteStore, SQLiteStoreConfig
 from tickwright.app.build import (
+    StrategyLoadRefusal,
     build_bus,
     build_clock,
     build_engine,
@@ -445,6 +446,23 @@ def test_an_unknown_settings_field_is_refused_even_when_the_model_allows_extra(
     )
     with pytest.raises(ValidationError, match="quantiy"):
         build_engine(config)
+
+
+@pytest.mark.parametrize(
+    "path", ["no_such_module:Strategy", "user_strategies:NoSuchClass"], ids=["module", "class"]
+)
+def test_a_strategy_path_that_does_not_import_is_refused_before_the_store_exists(
+    tmp_path: Path, path: str
+) -> None:
+    # A store file left behind by a boot that never ran would make the next
+    # boot look like a restart of that run.
+    config = _config(
+        tmp_path,
+        strategies=[{"strategy": path, "strategy_id": "user", "symbols": ["BTC"]}],
+    )
+    with pytest.raises(StrategyLoadRefusal, match=path):
+        build_engine(config)
+    assert not (tmp_path / "saga.db").exists()
 
 
 def _run_until_states(engine: Engine, db: Path, wanted: dict[str, OrderState]) -> int:

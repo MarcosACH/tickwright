@@ -16,7 +16,7 @@ import importlib
 import random
 from collections.abc import Callable, Mapping
 from decimal import Decimal
-from typing import Literal, NamedTuple, assert_never
+from typing import Any, Literal, NamedTuple, assert_never
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import LiveClock, ManualClock
@@ -338,6 +338,13 @@ class UnsupportedExitRun(ValueError):
     """
 
 
+class StrategyLoadRefusal(ValueError):
+    """A strategy entry names a class the engine cannot load.
+
+    Raised before the store or the venue is touched (ADR-0061).
+    """
+
+
 def build_exit_job(
     config: AppConfig, command: Literal["cancel-all", "flatten"], *, new_store: bool = False
 ) -> Engine:
@@ -362,6 +369,9 @@ def build_exit_job(
 
 
 def _build_engine(config: AppConfig, *, exit_job: ExitJob | None) -> Engine:
+    # Load first, so a bad entry refuses before the store or the venue exists.
+    # An exit run trades nothing, so it loads no strategy.
+    classes = [] if exit_job is not None else [_load_strategy(c) for c in config.strategies]
     bus = build_bus(config)
     clock = build_clock(config)
     store = build_store(config)
@@ -384,13 +394,13 @@ def _build_engine(config: AppConfig, *, exit_job: ExitJob | None) -> Engine:
         leverage=leverage,
         exit_job=exit_job,
     )
-    # An exit run trades nothing, so it builds no strategy.
     if exit_job is not None:
         return engine
-    for strategy_config in config.strategies:
+    for strategy_config, cls in zip(config.strategies, classes, strict=True):
         engine.register(
             _build_strategy(
                 strategy_config,
+                cls,
                 emitter=engine.emitter_for(strategy_config.strategy_id),
                 portfolio=engine.portfolio_for(strategy_config.strategy_id),
             ),
@@ -399,11 +409,25 @@ def _build_engine(config: AppConfig, *, exit_job: ExitJob | None) -> Engine:
     return engine
 
 
-def _build_strategy(
-    config: StrategyConfig, *, emitter: SignalEmitter, portfolio: Portfolio
-) -> Strategy:
+def _load_strategy(config: StrategyConfig) -> Any:
+    """Import the class a strategy entry names, or refuse the entry."""
     module_name, _, class_name = config.strategy.partition(":")
-    cls = getattr(importlib.import_module(module_name), class_name)
+    where = f"strategy {config.strategy_id!r} names {config.strategy!r}, which does not import"
+    # Any error counts. A user module that fails while it imports is as unusable
+    # as one that is not there.
+    try:
+        module = importlib.import_module(module_name)
+    except Exception as exc:
+        raise StrategyLoadRefusal(f"{where}: {exc}") from exc
+    try:
+        return getattr(module, class_name)
+    except AttributeError as exc:
+        raise StrategyLoadRefusal(f"{where}: {module_name} has no {class_name!r}") from exc
+
+
+def _build_strategy(
+    config: StrategyConfig, cls: Any, *, emitter: SignalEmitter, portfolio: Portfolio
+) -> Strategy:
     # Forbid extra fields even if the user's model allows them. Otherwise a typo
     # in a settings key boots a strategy that silently ignores it (ADR-0061).
     settings = cls.Settings.model_validate(config.settings, extra="forbid")
