@@ -46,7 +46,7 @@ class _ScriptedStrategy:
 
     async def on_tick(self, tick: MarketTick) -> None:
         if self._steps:
-            _, action = self._steps.pop(0)
+            _, _, action = self._steps.pop(0)
             await action(self)
 
     async def on_order_event(self, event: OrderEvent) -> None:
@@ -62,12 +62,15 @@ class _ScriptedStrategy:
         return None
 
 
-# One step per tick: the tick's symbol, and what the strategy does when it arrives.
-Step = tuple[str, Callable[[_ScriptedStrategy], Awaitable[None]]]
+# One step per tick: the tick's symbol and price, and what the strategy does when it arrives.
+Step = tuple[str, str, Callable[[_ScriptedStrategy], Awaitable[None]]]
+
+_ABOVE = "42000"  # far above the resting limit, so it does not fill
+_CROSSING = "29000"  # a sell print below the limit, so it fills
 
 
 def _rest(symbol: str) -> Step:
-    """A buy limit far below the replayed price, so it rests on the book."""
+    """A buy limit at 30000, below the replayed price, so it rests on the book."""
 
     async def step(strategy: _ScriptedStrategy) -> None:
         await strategy.emitter.place(
@@ -79,27 +82,43 @@ def _rest(symbol: str) -> Step:
             price=Decimal("30000"),
         )
 
-    return symbol, step
+    return symbol, _ABOVE, step
+
+
+def _cancel(symbol: str, target_signal_id: str) -> Step:
+    async def step(strategy: _ScriptedStrategy) -> None:
+        await strategy.emitter.cancel(symbol=symbol, target_signal_id=target_signal_id)
+
+    return symbol, _ABOVE, step
+
+
+def _tick(symbol: str, price: str) -> Step:
+    """A tick the strategy does nothing on. The venue still matches against it."""
+
+    async def step(strategy: _ScriptedStrategy) -> None:
+        return None
+
+    return symbol, price, step
 
 
 def _read(symbol: str) -> Step:
     async def step(strategy: _ScriptedStrategy) -> None:
         strategy.reads.append(strategy.portfolio.open_orders())
 
-    return symbol, step
+    return symbol, _ABOVE, step
 
 
-def _write_ticks(path: Path, symbols: list[str]) -> Path:
+def _write_ticks(path: Path, prints: list[tuple[str, str]]) -> Path:
     rows = [
         {
             "symbol": symbol,
-            "price": "42000",
+            "price": price,
             "size": "3",
             "aggressor_side": "sell",
             "trade_id": f"t{i}",
             "ts_event": 1_000 * (i + 1),
         }
-        for i, symbol in enumerate(symbols)
+        for i, (symbol, price) in enumerate(prints)
     ]
     path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
     return path
@@ -107,7 +126,8 @@ def _write_ticks(path: Path, symbols: list[str]) -> Path:
 
 def _run(tmp_path: Path, steps: list[Step]) -> _ScriptedStrategy:
     """One engine life: replay one tick per step, then stop gracefully."""
-    ticks = _write_ticks(tmp_path / "ticks.jsonl", [symbol for symbol, _ in steps])
+    prints = [(symbol, price) for symbol, price, _ in steps]
+    ticks = _write_ticks(tmp_path / "ticks.jsonl", prints)
 
     async def main() -> _ScriptedStrategy:
         bus = InMemoryBus()
@@ -173,3 +193,21 @@ def test_a_resting_limit_reads_back_with_its_placed_terms(tmp_path: Path) -> Non
             ),
         )
     ]
+
+
+def test_a_filled_order_leaves_the_read(tmp_path: Path) -> None:
+    strategy = _run(tmp_path, [_rest("BTC"), _read("BTC"), _tick("BTC", _CROSSING), _read("BTC")])
+
+    resting, after_fill = strategy.reads
+    assert [view.signal_id for view in resting] == ["scripted:BTC:1"]
+    assert after_fill == ()
+
+
+def test_a_cancelled_order_leaves_the_read(tmp_path: Path) -> None:
+    strategy = _run(
+        tmp_path, [_rest("BTC"), _read("BTC"), _cancel("BTC", "scripted:BTC:1"), _read("BTC")]
+    )
+
+    resting, after_cancel = strategy.reads
+    assert [view.signal_id for view in resting] == ["scripted:BTC:1"]
+    assert after_cancel == ()
