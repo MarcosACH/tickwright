@@ -28,7 +28,7 @@ proves that a restart keeps the order, on both clocks. The helper cannot make a 
 Preconditions:
 
 - Run ids `ghostlive` and `ghost` are unused. Network for the wall-clock case.
-- `S='[{"kind":"single_shot_limit","strategy_id":"rester","symbol":"BTC","side":"buy","quantity":"0.001","price":"20000"}]'`
+- `S='[{"strategy":"tickwright.strategies.single_shot_limit:SingleShotLimitStrategy","strategy_id":"rester","symbols":["BTC"],"settings":{"side":"buy","quantity":"0.001","price":"20000"}}]'`
   for the live feed, `ETH` at price `2000` and quantity `0.5` for replay.
 
 - **Wall clock, rest.** Run `$V init ghostlive --feature ghost-reconcile`,

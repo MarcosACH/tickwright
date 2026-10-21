@@ -54,7 +54,7 @@ Preconditions:
   `$V check refuse deadlev refuse-dead-leverage --exit --expect 1`. The stderr file contains
   `leverage names symbols no configured strategy trades: ETH`.
 - **Reserved id.** Run
-  `$V start refuse reserved --preset paper-replay --env 'TICKWRIGHT_STRATEGIES=[{"kind":"single_shot_market","strategy_id":"__operator__","symbol":"BTC","side":"buy","quantity":"0.5"}]'`,
+  `$V start refuse reserved --preset paper-replay --env 'TICKWRIGHT_STRATEGIES=[{"strategy":"tickwright.strategies.single_shot:SingleShotMarketStrategy","strategy_id":"__operator__","symbols":["BTC"],"settings":{"side":"buy","quantity":"0.5"}}]'`,
   `$V await refuse reserved --exit`, then
   `$V check refuse reserved refuse-reserved --exit --expect 1`. The stderr file contains
   `__operator__ is reserved for operator orders, not a strategy id`.

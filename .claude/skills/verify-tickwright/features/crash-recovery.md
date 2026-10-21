@@ -21,7 +21,7 @@ of the saga seqs and the `seq_records` table (#442).
 Preconditions:
 
 - Run id `crash` is unused.
-- `S='[{"kind":"single_shot_market","strategy_id":"shooter","symbol":"BTC","side":"buy","quantity":"0.5"}]'`
+- `S='[{"strategy":"tickwright.strategies.single_shot:SingleShotMarketStrategy","strategy_id":"shooter","symbols":["BTC"],"settings":{"side":"buy","quantity":"0.5"}}]'`
 
 - **Set up.** Run `$V init crash --feature crash-recovery` and
   `$V ticks crash ticks --row BTC:42000@0 --row BTC:42100@1s`.

@@ -35,7 +35,7 @@ Every life uses the same two settings. Set them once in your shell:
 ```bash
 G='TICKWRIGHT_GUARD=real'
 L='TICKWRIGHT_LIMITS={"symbols":{"BTC":{"max_order_size":"0.5","max_order_value":"20000","max_position":"1"}},"mark_max_age_seconds":5,"rate_cap":{"max_orders":1,"window_seconds":5}}'
-S() { echo "TICKWRIGHT_STRATEGIES=[{\"kind\":\"single_shot_market\",\"strategy_id\":\"$1\",\"symbol\":\"$2\",\"side\":\"$3\",\"quantity\":\"$4\"}]"; }
+S() { echo "TICKWRIGHT_STRATEGIES=[{\"strategy\":\"tickwright.strategies.single_shot:SingleShotMarketStrategy\",\"strategy_id\":\"$1\",\"symbols\":[\"$2\"],\"settings\":{\"side\":\"$3\",\"quantity\":\"$4\"}}]"; }
 ```
 
 Every life ends the same way. For life `<x>`, run `$V await limits <x> --event order.denied` or
@@ -59,7 +59,7 @@ Every life ends the same way. For life `<x>`, run `$V await limits <x> --event o
   Check:
   `$V check limits b limits-value --sql "select reason from orders where strategy_id='s2'" --expect 'above max order value 20000'`.
 - **Rate (c).** Start with `c.jsonl` and
-  `'TICKWRIGHT_STRATEGIES=[{"kind":"single_shot_market","strategy_id":"s3","symbol":"BTC","side":"buy","quantity":"0.4"},{"kind":"single_shot_market","strategy_id":"e3","symbol":"ETH","side":"buy","quantity":"0.1"}]'`.
+  `'TICKWRIGHT_STRATEGIES=[{"strategy":"tickwright.strategies.single_shot:SingleShotMarketStrategy","strategy_id":"s3","symbols":["BTC"],"settings":{"side":"buy","quantity":"0.4"}},{"strategy":"tickwright.strategies.single_shot:SingleShotMarketStrategy","strategy_id":"e3","symbols":["ETH"],"settings":{"side":"buy","quantity":"0.1"}}]'`.
   Await `--order $($V cloid s3:BTC:1)=FILLED` and `--event order.denied`. Check:
   `$V check limits c limits-inside --sql "select state from orders where strategy_id='s3'" --expect filled`,
   `$V check limits c limits-rate --sql "select reason from orders where strategy_id='e3'" --expect 'above max orders per window 1 in 5.0s'`.

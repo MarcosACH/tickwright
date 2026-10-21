@@ -29,7 +29,7 @@ Preconditions:
   `$V check ks arm ks-trip --sql "select tripped from kill_switch" --expect 1`,
   `$V check ks arm ks-trip --exit --expect 0`.
 - **Deny.** Run
-  `$V start ks denied --preset paper-replay --env 'TICKWRIGHT_STRATEGIES=[{"kind":"single_shot_market","strategy_id":"shooter","symbol":"BTC","side":"buy","quantity":"0.5"}]'`
+  `$V start ks denied --preset paper-replay --env 'TICKWRIGHT_STRATEGIES=[{"strategy":"tickwright.strategies.single_shot:SingleShotMarketStrategy","strategy_id":"shooter","symbols":["BTC"],"settings":{"side":"buy","quantity":"0.5"}}]'`
   and `$V await ks denied --event order.denied`.
 - **Reset.** Run `$V signal ks denied USR2`, `$V await ks denied --event guard.kill_switch_reset`,
   `$V signal ks denied TERM`, `$V await ks denied --exit`, `$V dump ks denied`.

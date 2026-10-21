@@ -24,7 +24,7 @@ uv run tickwright       # run the engine
 ```
 
 The run replays [`examples/ticks.jsonl`](examples/ticks.jsonl) through the demo
-`single_shot_market` strategy into the paper exchange. The order lifecycle shows up on stdout as
+`SingleShotMarketStrategy` into the paper exchange. The order lifecycle shows up on stdout as
 structured JSON:
 
 ```json
@@ -212,7 +212,7 @@ trip, so the run warns with `exit.unguarded`.
   equity, and free margin. Perps only. On live, the numbers are checked against the venue's
   account snapshot and a disagreement is alerted.
 - Strategies: two reference strategies that place one market or one limit order. They exist to
-  exercise the pipeline.
+  exercise the pipeline. Your own strategy stays in your repo, and config names it by import path.
 - Operator commands: `tickwright cancel-all` on paper and Hyperliquid, and `tickwright flatten` on
   paper replay.
 

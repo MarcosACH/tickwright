@@ -47,14 +47,14 @@ Preconditions:
 - **Stochastic.** Run `$V init stoch --feature paper-economics`,
   `$V ticks stoch ticks --row BTC:42050@0 --row BTC:42010@1s --row BTC:42000@2s --row BTC:41990@3s --row BTC:41980@4s --row BTC:41970@5s`.
   For each life `a` then `b`:
-  `$V start stoch <life> --preset paper-replay --env 'TICKWRIGHT_STRATEGIES=[{"kind":"single_shot_market","strategy_id":"shooter","symbol":"BTC","side":"buy","quantity":"1"}]' --env TICKWRIGHT_PAPER__FILL_MODEL=stochastic --env TICKWRIGHT_PAPER__SEED=7 --env TICKWRIGHT_PAPER__STOCHASTIC__PROB_SLIPPAGE=1.0 --env TICKWRIGHT_PAPER__STOCHASTIC__MAX_SLIPPAGE=0.01`,
+  `$V start stoch <life> --preset paper-replay --env 'TICKWRIGHT_STRATEGIES=[{"strategy":"tickwright.strategies.single_shot:SingleShotMarketStrategy","strategy_id":"shooter","symbols":["BTC"],"settings":{"side":"buy","quantity":"1"}}]' --env TICKWRIGHT_PAPER__FILL_MODEL=stochastic --env TICKWRIGHT_PAPER__SEED=7 --env TICKWRIGHT_PAPER__STOCHASTIC__PROB_SLIPPAGE=1.0 --env TICKWRIGHT_PAPER__STOCHASTIC__MAX_SLIPPAGE=0.01`,
   `$V await stoch <life> --order $($V cloid shooter:BTC:1)=FILLED`, `$V signal stoch <life> TERM`,
   `$V await stoch <life> --exit`, `$V dump stoch <life>`,
   `$V check stoch <life> econ-stochastic --sql "select entry_price from positions" --expect 42113.4320776352530573600`,
   then `rm .agents/verify/stoch/scratch/store.db`. The pinned price is seed 7's first draw on
   42050, and it must come out the same in both lives and on any machine.
 - **Partial.** In the same run:
-  `$V start stoch partial --preset paper-replay --env 'TICKWRIGHT_STRATEGIES=[{"kind":"single_shot_limit","strategy_id":"rester","symbol":"BTC","side":"buy","quantity":"1","price":"42020"}]' --env TICKWRIGHT_PAPER__FILL_MODEL=stochastic --env TICKWRIGHT_PAPER__SEED=7 --env TICKWRIGHT_PAPER__STOCHASTIC__PARTIAL_FILL_FRACTION=0.5`,
+  `$V start stoch partial --preset paper-replay --env 'TICKWRIGHT_STRATEGIES=[{"strategy":"tickwright.strategies.single_shot_limit:SingleShotLimitStrategy","strategy_id":"rester","symbols":["BTC"],"settings":{"side":"buy","quantity":"1","price":"42020"}}]' --env TICKWRIGHT_PAPER__FILL_MODEL=stochastic --env TICKWRIGHT_PAPER__SEED=7 --env TICKWRIGHT_PAPER__STOCHASTIC__PARTIAL_FILL_FRACTION=0.5`,
   `$V await stoch partial --order $($V cloid rester:BTC:1)=FILLED`, `$V signal stoch partial TERM`,
   `$V await stoch partial --exit`, `$V dump stoch partial`. Check:
   `$V check stoch partial econ-partial --event order.partially_filled --expect 1`,

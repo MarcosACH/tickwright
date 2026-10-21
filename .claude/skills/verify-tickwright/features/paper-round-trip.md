@@ -24,7 +24,7 @@ Preconditions:
 
 - `$V doctor` says the package imports.
 - Run id `rt` is unused.
-- `S='[{"kind":"single_shot_market","strategy_id":"shooter","symbol":"BTC","side":"buy","quantity":"0.5"},{"kind":"single_shot_limit","strategy_id":"rester","symbol":"ETH","side":"buy","quantity":"0.5","price":"2000"}]'`
+- `S='[{"strategy":"tickwright.strategies.single_shot:SingleShotMarketStrategy","strategy_id":"shooter","symbols":["BTC"],"settings":{"side":"buy","quantity":"0.5"}},{"strategy":"tickwright.strategies.single_shot_limit:SingleShotLimitStrategy","strategy_id":"rester","symbols":["ETH"],"settings":{"side":"buy","quantity":"0.5","price":"2000"}}]'`
 - `FILL=$($V cloid shooter:BTC:1)` and `REST=$($V cloid rester:ETH:1)`
 
 - **Set up.** Run `$V init rt --feature paper-round-trip` and

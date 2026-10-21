@@ -21,7 +21,7 @@ Preconditions:
 - Run id `livefeed` is unused.
 
 - **Run.** Run `$V init livefeed --feature hyperliquid-feed`,
-  `$V start livefeed first --preset paper-livefeed --env 'TICKWRIGHT_STRATEGIES=[{"kind":"single_shot_market","strategy_id":"shooter","symbol":"BTC","side":"buy","quantity":"0.01"}]'`,
+  `$V start livefeed first --preset paper-livefeed --env 'TICKWRIGHT_STRATEGIES=[{"strategy":"tickwright.strategies.single_shot:SingleShotMarketStrategy","strategy_id":"shooter","symbols":["BTC"],"settings":{"side":"buy","quantity":"0.01"}}]'`,
   `$V await livefeed first --event engine.feed_started --timeout 30`,
   `$V await livefeed first --order $($V cloid shooter:BTC:1)=FILLED --timeout 90`.
 - **Stop.** Run `$V signal livefeed first TERM`, `$V await livefeed first --exit`,
