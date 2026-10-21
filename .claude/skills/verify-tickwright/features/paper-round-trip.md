@@ -7,8 +7,8 @@ order is still `LIVE` in the second life (#484).
 
 ## Sub-features
 
-- `paper-fill` a `single_shot_market` fills on the first tick at the tick price.
-- `paper-rest` a `single_shot_limit` below the market rests `LIVE`.
+- `paper-fill` a `SingleShotMarketStrategy` fills on the first tick at the tick price.
+- `paper-rest` a `SingleShotLimitStrategy` below the market rests `LIVE`.
 - `paper-stop` `TERM` exits 0, snapshots strategies, leaves the resting order alone.
 - `paper-restart` the second life places nothing and exits 0.
 - `paper-keep` the second life keeps the resting order `LIVE` and ghosts nothing.

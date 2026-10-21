@@ -25,8 +25,9 @@ The seams and their two shipped implementations:
 | `FillModel` (paper-internal) | `paper.fill_model` | `immediate`, `stochastic` |
 
 > **Two implementations per seam — no more.** One looks hardcoded; three is scope creep. The repo
-> ships exactly two of each on purpose. Your extension is the *third* — keep it out of tree, or
-> replace one of ours, but don't grow the shipped set.
+> ships exactly two of each on purpose, so don't grow the shipped set. Your own strategy stays in
+> your repo and loads by import path (ADR-0061). A third feed, exchange, bus or store cannot load
+> from outside the repo. It has to replace one of ours.
 
 ---
 
