@@ -3,6 +3,9 @@
 The ``Engine`` with a scripted strategy over ``ReplayFeed``, ``PaperExchange``,
 ``InMemoryBus``, ``SQLiteStore`` and ``ManualClock``. The strategy acts on one
 tick and reads ``Portfolio.open_orders()`` on a later one. No external service.
+
+A second engine life on the same store is a restart. There the strategy also
+reads in ``restore()``, which is where it rebuilds after a crash.
 """
 
 import asyncio
@@ -13,19 +16,23 @@ from pathlib import Path
 
 import pytest
 from ledgers import GENESIS
+from venue_doubles import VenueLink
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.feed import ReplayFeed
 from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.adapters.store import SQLiteStore
+from tickwright.app.build import paper_store_reads
 from tickwright.domain import (
+    Exchange,
     MarketTick,
     OpenOrdersReadBeforeStart,
     OpenOrderView,
     OrderEvent,
     OrderState,
     OrderType,
+    PlaceOrder,
     Portfolio,
     Side,
     SignalEmitter,
@@ -138,28 +145,37 @@ def _write_ticks(path: Path, prints: list[tuple[str, str]]) -> Path:
     return path
 
 
-def _engine(tmp_path: Path, ticks: Path) -> tuple[Engine, InMemoryBus]:
-    """A paper engine over the store in ``tmp_path``, so a second call is the next life."""
+def _engine(
+    tmp_path: Path, ticks: Path, *, link: Callable[[PaperExchange], Exchange] | None = None
+) -> tuple[Engine, InMemoryBus, SQLiteStore]:
+    """A paper engine over the store in ``tmp_path``, so a second call is the next life.
+
+    Paper reads the store the way ``app/build.py`` wires it, so a later life
+    rebuilds the orders an earlier one left resting (#484). ``link`` puts a
+    transport in front of the venue.
+    """
     bus = InMemoryBus()
     clock = ManualClock()
-    exchange = PaperExchange(
+    store = SQLiteStore(tmp_path / "saga.db")
+    reads = paper_store_reads(store)
+    paper = PaperExchange(
         bus=bus,
         clock=clock,
         fill_model=ImmediateFillModel(),
         genesis_collateral=GENESIS,
-        account_net=dict,
-        applied_fills=lambda cloid: (),
-        resting_orders=list,
+        account_net=reads.account_net,
+        applied_fills=reads.applied_fills,
+        resting_orders=reads.resting_orders,
     )
     feed = ReplayFeed(path=ticks, bus=bus, clock=clock)
     engine = Engine(
         bus=bus,
         clock=clock,
-        store=SQLiteStore(tmp_path / "saga.db"),
-        exchange=exchange,
+        store=store,
+        exchange=link(paper) if link else paper,
         feed=feed,
     )
-    return engine, bus
+    return engine, bus, store
 
 
 def _run(tmp_path: Path, steps: list[Step]) -> _ScriptedStrategy:
@@ -183,7 +199,7 @@ def _run_strategies(tmp_path: Path, scripts: dict[str, list[Step]]) -> dict[str,
     ticks = _write_ticks(tmp_path / "ticks.jsonl", prints)
 
     async def main() -> dict[str, _ScriptedStrategy]:
-        engine, bus = _engine(tmp_path, ticks)
+        engine, bus, _ = _engine(tmp_path, ticks)
         strategies = {
             strategy_id: _ScriptedStrategy(
                 emitter=engine.emitter_for(strategy_id),
@@ -274,7 +290,7 @@ def test_each_strategy_reads_only_its_own_orders(tmp_path: Path) -> None:
 
 def test_a_read_from_a_strategy_constructor_raises(tmp_path: Path) -> None:
     # Before the barrier the Cache still holds the last life's unproven state.
-    engine, _ = _engine(tmp_path, _write_ticks(tmp_path / "ticks.jsonl", [("BTC", _ABOVE)]))
+    engine, _, _ = _engine(tmp_path, _write_ticks(tmp_path / "ticks.jsonl", [("BTC", _ABOVE)]))
 
     with pytest.raises(OpenOrdersReadBeforeStart):
         _ReadsInConstructor(
@@ -290,3 +306,55 @@ def test_a_read_from_restore_works(tmp_path: Path) -> None:
     strategy = _run(tmp_path, [_tick("BTC", _ABOVE)])
 
     assert strategy.restore_reads == [()]
+
+
+class _Killed(BaseException):
+    """The process died. A ``BaseException``, so no containment on the way up swallows it."""
+
+
+class _DiesOnSecondPlace(VenueLink):
+    """The venue link for a doomed life. The process dies sending its second
+    order, before the venue gets it. A network boundary is where a double may go."""
+
+    def __init__(self, venue: Exchange) -> None:
+        super().__init__(venue)
+        self._places = 0
+
+    async def place(self, order: PlaceOrder) -> None:
+        self._places += 1
+        if self._places == 2:
+            raise _Killed
+        await super().place(order)
+
+
+def test_restore_after_a_crash_reads_only_the_orders_still_resting(tmp_path: Path) -> None:
+    ticks = _write_ticks(tmp_path / "ticks.jsonl", [("BTC", _ABOVE), ("BTC", _ABOVE)])
+
+    async def crashed_life() -> None:
+        engine, _, store = _engine(tmp_path, ticks, link=_DiesOnSecondPlace)
+        strategy = _ScriptedStrategy(
+            emitter=engine.emitter_for("scripted"),
+            portfolio=engine.portfolio_for("scripted"),
+            steps=[_rest("BTC"), _rest("BTC")],
+        )
+        engine.register(strategy, symbols={"BTC"})
+        # The engine's task group wraps the death in an exception group.
+        with pytest.RaisesGroup(_Killed):
+            await asyncio.wait_for(engine.run(), timeout=5)
+        # The first order rests. The second died in the send window, so its
+        # write-ahead row is all that is left of it.
+        assert {(order.signal_id, order.state) for order in store.all_orders()} == {
+            ("scripted:BTC:1", OrderState.LIVE),
+            ("scripted:BTC:2", OrderState.PENDING),
+        }
+        store.close()
+
+    asyncio.run(crashed_life())
+
+    # Paper rebuilds the resting order. The barrier finds no venue record for
+    # the PENDING one and settles it before restore() runs.
+    strategy = _run(tmp_path, [_tick("BTC", _ABOVE)])
+
+    assert [[view.signal_id for view in read] for read in strategy.restore_reads] == [
+        ["scripted:BTC:1"]
+    ]
