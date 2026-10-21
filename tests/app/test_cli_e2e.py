@@ -383,6 +383,40 @@ def test_new_store_with_no_exit_command_exits_two_and_starts_no_run(
     assert _events(log) == []
 
 
+_MARKET = "tickwright.strategies.single_shot:SingleShotMarketStrategy"
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"strategy": "no_such_module:Strategy", "settings": {}},
+        {"strategy": "decimal:Decimal", "settings": {}},
+        {"strategy": _MARKET, "settings": {"side": "buy", "quantity": "lots"}},
+        {"strategy": _MARKET, "settings": {"side": "buy", "quantity": "0.5", "quantiy": "5"}},
+        {"kind": "single_shot_market", "symbol": "BTC", "side": "buy", "quantity": "0.5"},
+    ],
+    ids=["does-not-import", "no-settings-model", "bad-value", "unknown-field", "old-kind"],
+)
+def test_a_bad_strategy_entry_exits_two_and_leaves_no_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, entry: dict[str, object]
+) -> None:
+    # Exit 1 tells a supervisor to restart the engine. A bad entry fails the
+    # same way every time, so it must exit 2, which means it never booted.
+    _write_workspace(tmp_path)
+    _export_hostile_config(monkeypatch)
+    entry = {"strategy_id": "user", "symbols": ["BTC"], **entry}
+    if "kind" in entry:
+        del entry["symbols"]
+    with (tmp_path / ".env").open("a") as env:
+        env.write(f"TICKWRIGHT_STRATEGIES={json.dumps([entry])}\n")
+    log = tmp_path / "engine.log"
+
+    assert _run_to_exit(tmp_path, log, timeout=30.0) == 2, log.read_text()
+
+    assert "tickwright:" in log.read_text()
+    assert not (tmp_path / "saga.db").exists()
+
+
 def test_cancel_all_on_a_store_it_cannot_open_exits_two(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
