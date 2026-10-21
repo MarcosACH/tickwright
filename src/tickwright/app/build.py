@@ -17,7 +17,7 @@ import inspect
 import random
 from collections.abc import Callable, Mapping
 from decimal import Decimal
-from typing import Any, Literal, NamedTuple, assert_never, get_protocol_members
+from typing import Literal, NamedTuple, assert_never, get_protocol_members
 
 from pydantic import BaseModel, ValidationError
 
@@ -402,7 +402,7 @@ def _build_engine(config: AppConfig, *, exit_job: ExitJob | None) -> Engine:
         # Always all three, even to a strategy that reads no portfolio. A fixed
         # signature is easier to document than a rule about who gets what
         # (ADR-0041 §7 as amended by ADR-0061).
-        strategy: Strategy = cls(
+        strategy = cls(
             emitter=engine.emitter_for(strategy_id),
             portfolio=engine.portfolio_for(strategy_id),
             settings=settings,
@@ -411,7 +411,7 @@ def _build_engine(config: AppConfig, *, exit_job: ExitJob | None) -> Engine:
     return engine
 
 
-def _load_strategy(config: StrategyConfig) -> tuple[Any, BaseModel]:
+def _load_strategy(config: StrategyConfig) -> tuple[Callable[..., Strategy], BaseModel]:
     """Import the class a strategy entry names and check its settings, or refuse the entry."""
     module_name, _, class_name = config.strategy.partition(":")
     where = f"strategy {config.strategy_id!r} names {config.strategy!r}, which does not import"
