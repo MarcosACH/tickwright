@@ -342,7 +342,8 @@ class UnsupportedExitRun(ValueError):
 class StrategyLoadRefusal(ValueError):
     """A strategy entry names a class the engine cannot load.
 
-    Raised before the store or the venue is touched (ADR-0061).
+    Most checks run before the store or the venue exists. Two run once the class
+    is built, but still before the engine runs (ADR-0061).
     """
 
 
@@ -447,9 +448,8 @@ def _load_strategy(config: StrategyConfig) -> tuple[Callable[..., Strategy], Bas
             f"strategy {config.strategy_id!r}: {config.strategy} has no Settings Pydantic model. "
             "A strategy with no settings declares an empty one."
         )
-    # Check the call now, with the same rules Python uses for the real call.
-    # Found at construction, it would fail after the store exists and exit 1,
-    # so a supervisor would restart it forever.
+    # Check the call now, with the same rules Python uses for the real call,
+    # so a bad signature refuses before the store exists.
     try:
         inspect.signature(cls).bind(emitter=None, portfolio=None, settings=None)
     except TypeError as exc:
