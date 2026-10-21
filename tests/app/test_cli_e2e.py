@@ -258,6 +258,30 @@ def test_a_second_engine_on_the_same_store_exits_1_until_the_first_is_killed(
         assert _terminate(third) == 0
 
 
+def test_an_engine_on_a_store_bound_to_another_account_exits_2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A restart with the same config refuses again, so a supervisor must not
+    retry it. Exit 2 tells it apart from a fault (ADR-0024)."""
+    _write_workspace(tmp_path)
+    _export_hostile_config(monkeypatch)
+    with _spawn(tmp_path, tmp_path / "first.log") as first:
+        try:
+            _await_event(tmp_path / "first.log", "engine.barrier_cleared")
+        except BaseException:
+            first.kill()
+            raise
+        assert _terminate(first) == 0
+
+    # The same store, now declared as an account with other genesis collateral.
+    env = tmp_path / ".env"
+    env.write_text(env.read_text().replace("GENESIS_COLLATERAL=100000", "GENESIS_COLLATERAL=5000"))
+    log = tmp_path / "second.log"
+
+    assert _run_to_exit(tmp_path, log) == 2
+    assert "StoreAccountMismatch" in log.read_text()
+
+
 def _run_to_exit(cwd: Path, log: Path, *args: str, timeout: float = 15.0) -> int:
     """Run a one-shot CLI command and return its exit code."""
     with _spawn(cwd, log, *args) as process:

@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from tickwright.domain import (
     EMPTY_LEVERAGE_BOOK,
     OPERATOR,
+    BootRefusal,
     Clock,
     ComponentState,
     EventBus,
@@ -318,10 +319,13 @@ class Engine:
             # readable trail and let waiters through before exiting non-zero.
             self._state = ComponentState.FAULTED
             self._fault = exc
-            named_event(NamedEvent.ENGINE_FAULTED, error=repr(_first_leaf(exc)))
+            fault = _first_leaf(exc)
+            named_event(NamedEvent.ENGINE_FAULTED, error=repr(fault))
             await self._run_best_effort_stop_hooks()
             self._stopped.set()
-            return self._finish_exit_run(1)
+            # A boot refusal repeats on every restart, so 2 stops the supervisor
+            # retrying it. Every other fault is 1, which a restart may fix.
+            return self._finish_exit_run(2 if isinstance(fault, BootRefusal) else 1)
         finally:
             self._remove_signal_handlers()
         self._state = ComponentState.STOPPED

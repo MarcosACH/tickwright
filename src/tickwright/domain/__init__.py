@@ -20,6 +20,7 @@ from .enums import (
     TimeInForce,
 )
 from .errors import (
+    BootRefusal,
     InvariantViolation,
     LeverageOutOfBounds,
     StartupReconciliationTimeout,
@@ -143,6 +144,7 @@ __all__ = [
     "Side",
     "TimeInForce",
     # errors
+    "BootRefusal",
     "InvariantViolation",
     "LeverageOutOfBounds",
     "StartupReconciliationTimeout",

@@ -16,7 +16,16 @@ class StartupReconciliationTimeout(InvariantViolation):
     rather than trade on unverified state — freeze, don't guess (ADR-0011)."""
 
 
-class StoreAccountMismatch(InvariantViolation):
+class BootRefusal(InvariantViolation):
+    """The engine refused to start, and a restart with the same config and store
+    refuses again (ADR-0024). The run exits 2, so a supervisor stops retrying.
+
+    Each refusal comes before any order, so nothing at the venue moved. A cause
+    a retry can fix, such as a held lock or a slow read, must not inherit it.
+    """
+
+
+class StoreAccountMismatch(BootRefusal):
     """The durable ledger and the venue's ``AccountSpec`` disagree about the
     account this engine is trading (ADR-0042 §3, ADR-0043 §10).
 
