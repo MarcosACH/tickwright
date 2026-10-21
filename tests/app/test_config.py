@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from hyperliquid_fakes import TEST_SIGNING_KEY
 from pydantic import SecretStr, ValidationError
 
 from tickwright.adapters.feed import ReplayFeedConfig
@@ -660,3 +661,21 @@ def test_the_alert_band_is_operator_settable_and_defaults_to_the_documented_term
     assert tuned.engine.band == ValuationBand(
         atol=Decimal("0.05"), rtol=Decimal("0.002"), mark_max_age_seconds=30.0
     )
+
+
+def test_a_config_refusal_never_prints_any_part_of_the_signing_key() -> None:
+    """The CLI prints a refusal to stderr before log redaction exists (ADR-0020).
+    Pydantic quotes the input in the message, so the key's tail could reach it."""
+    with pytest.raises(ValidationError) as refusal:
+        AppConfig.model_validate(
+            {
+                "feed": "replay",
+                "exchange": "hyperliquid",
+                "hyperliquid": {"symbols": ["BTC"], "signing_key": TEST_SIGNING_KEY},
+            }
+        )
+
+    message = str(refusal.value)
+    key = TEST_SIGNING_KEY.removeprefix("0x")
+    leaked = [key[i : i + 8] for i in range(len(key) - 7) if key[i : i + 8] in message]
+    assert leaked == [], message
