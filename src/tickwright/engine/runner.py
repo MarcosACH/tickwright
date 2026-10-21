@@ -263,8 +263,9 @@ class Engine:
     async def run(self) -> int:
         """The supervised lifecycle: ordered startup, operation, graceful stop.
 
-        Returns the process exit-code contract (ADR-0024): 0 = graceful stop,
-        non-zero = ``FAULTED`` — the external supervisor's restart signal.
+        Returns the process exit-code contract (ADR-0024). 0 is a graceful stop.
+        1 is ``FAULTED``, the external supervisor's restart signal. 2 is a
+        ``BootRefusal``, which a restart would repeat.
 
         An exit run returns the ADR-0060 codes instead. 0 means a final venue
         read confirmed the job done. 1 means it stopped partway. 2 means it

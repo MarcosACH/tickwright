@@ -292,6 +292,19 @@ room for a missed-propagation bug.
   (`tickwright cancel-all` or `tickwright flatten`, ADR-0052) has its own codes. 0 means done, 1
   means stopped partway, and 2 means it never booted, so nothing at the venue moved. SIGINT and
   SIGTERM give 1 there. No supervisor should restart an exit run. See ADR-0060.**)**
+  **(Amended on 2026-10-21, while planning the testnet soak:** an engine run that refuses at
+  boot exits 2. The refusals are a config that does not validate, a store bound to another
+  account, and an account mode the engine does not support. Each one comes before any order, so
+  nothing at the venue moved. A restart with the same config and the same store refuses again.
+  So a supervisor or an alert can tell a refusal from a fault. 1 still means `FAULTED`. 0 still
+  means a graceful stop. This matches what 2 already means for an exit run (ADR-0060). **A store
+  another engine holds is not on this list.** An engine run still faults with 1 there, so its
+  supervisor retries. After a crash, the old engine's lock can outlive it for a moment. A Postgres
+  advisory lock lasts until Postgres sees the dead connection. A retry then succeeds, and exit 2
+  would page instead. An exit run keeps its 2 for a held lock (ADR-0060). **An account mode the
+  engine could not read in time is not on the list either.** That is a network problem, and a
+  retry can fix it, so it stays 1. Only a mode the venue reported and the engine refuses exits 2.
+  The refusals that exit 2 share one marker class, so the runner maps them in one place.**)**
 
 **The two ADR-0014 error classes are drawn by handler origin, not by exception type.** The Engine
 wraps **third-party** handlers (`Strategy.on_tick`/`on_order_event`, `MarketFeed` parse callbacks) in

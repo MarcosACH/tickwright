@@ -2,8 +2,9 @@
 
 Reads ``AppSettings`` from the environment and ``.env``, wires logging, builds
 the engine through the composition root, and runs the supervised lifecycle.
-The process exit code is the ADR-0024 contract: 0 = graceful stop (SIGINT/
-SIGTERM), non-zero = ``FAULTED`` — the external supervisor's restart signal.
+The process exit code is the ADR-0024 contract. 0 is a graceful stop (SIGINT or
+SIGTERM). 1 is ``FAULTED``, the external supervisor's restart signal. 2 is a
+boot refusal, which a restart would repeat, so the supervisor should stop.
 
 ``tickwright cancel-all`` and ``tickwright flatten`` use the ADR-0060 codes instead. 0 means done, 1
 means it stopped partway, and 2 means it never booted.
