@@ -165,7 +165,9 @@ A strategy consumes ticks and lifecycle events and emits `PlaceSignal`/`CancelSi
 
   These make the CLI exit `2` before the store or the venue is touched: a path that is not
   `module:Class` or does not import, a class with no `Settings`, a constructor that cannot take the
-  three keyword arguments, a missing `Strategy` method, and settings that do not validate.
+  three keyword arguments, a missing `Strategy` method, and settings that do not validate. Two
+  more exit `2` once the class is built, before the engine runs: a constructor that raises, and a
+  `strategy_id` that differs from the entry's.
 - [ ] TDD it: a `ReplayFeed` tick → your strategy → `PaperExchange` → the expected `OrderEvent` on the
   bus, plus a snapshot/restore round-trip and a seq-resumes-after-restart test.
 

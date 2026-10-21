@@ -94,7 +94,8 @@ any adapter is built.
 and the store. It imports each `module:Class` and checks the class has `Settings`. It checks the
 constructor can take the three arguments and the class has every `Strategy` method. Then it
 validates the entry's settings with extra fields refused. **Construct** runs where the strategy `match` is today.
-It passes exactly `emitter`, `portfolio` and `settings`. An exit run skips both steps, because it
+It passes exactly `emitter`, `portfolio` and `settings`. It refuses a constructor that raises and a
+`strategy_id` that differs from the entry's. An exit run skips both steps, because it
 builds no strategy.
 
 **Seams:** None. Every other seam keeps its `match` (ADR-0032 as narrowed by ADR-0061).

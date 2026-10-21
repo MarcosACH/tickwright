@@ -37,9 +37,14 @@ the testnet soak. The soak was the first time someone brought a real strategy.
   - settings that do not validate
 
   A wrong constructor or a missing method would otherwise fail after the store exists. The CLI
-  would exit 1, and a supervisor would restart it forever. `strategy_id` and async methods are not
-  checked. The first only exists after `__init__`. The second can look wrong on a valid decorated
-  method.
+  would exit 1, and a supervisor would restart it forever. Async methods are not checked, because
+  a valid decorated method can look sync.
+- **Two more refusals come after construction.** The store exists by then, but the engine has not
+  run, so no lock is taken and nothing is written. Both still exit 2:
+  - a constructor that raises
+  - a `strategy_id` that differs from the entry's. The emitter and portfolio carry the entry's id,
+    but the host keys on the strategy's. A mismatch would hide its fills from it, and a restart
+    would resume its seq from the wrong high-water (#442).
 - **The import path is trusted like code.** Anyone who can set the engine's environment can already
   run code as the engine. So naming a module in config adds no new attack surface.
 - **Strategies only.** Feeds, exchanges, buses, stores and guards keep their `match` in

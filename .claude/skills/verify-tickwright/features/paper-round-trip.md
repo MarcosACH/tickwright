@@ -16,7 +16,7 @@ order is still `LIVE` in the second life (#484).
 ## How to get to it (user POV)
 
 - `cp .env.example .env && uv run tickwright`, then `Ctrl-C`, then `uv run tickwright` again.
-  `.env.example` runs one market strategy. Add a `single_shot_limit` entry to see a resting order.
+  `.env.example` runs one market strategy. Add a `SingleShotLimitStrategy` entry to see a resting order.
 
 ## Driving it with verify
 
