@@ -65,3 +65,14 @@ class AllowsExtraSettings(BuysEachSymbolOnce):
         model_config = ConfigDict(extra="allow")
 
         quantity: Decimal
+
+
+class HasNoSettings:
+    """A class that forgot to declare its settings model."""
+
+
+class SettingsIsNotAModel:
+    """A class whose ``Settings`` is a plain class, not a Pydantic model."""
+
+    class Settings:
+        quantity = Decimal("1")

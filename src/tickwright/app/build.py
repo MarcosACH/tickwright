@@ -18,6 +18,8 @@ from collections.abc import Callable, Mapping
 from decimal import Decimal
 from typing import Any, Literal, NamedTuple, assert_never
 
+from pydantic import BaseModel
+
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import LiveClock, ManualClock
 from tickwright.adapters.feed import ReplayFeed
@@ -420,9 +422,16 @@ def _load_strategy(config: StrategyConfig) -> Any:
     except Exception as exc:
         raise StrategyLoadRefusal(f"{where}: {exc}") from exc
     try:
-        return getattr(module, class_name)
+        cls = getattr(module, class_name)
     except AttributeError as exc:
         raise StrategyLoadRefusal(f"{where}: {module_name} has no {class_name!r}") from exc
+    settings_model = getattr(cls, "Settings", None)
+    if not (isinstance(settings_model, type) and issubclass(settings_model, BaseModel)):
+        raise StrategyLoadRefusal(
+            f"strategy {config.strategy_id!r}: {config.strategy} has no Settings Pydantic model. "
+            "A strategy with no settings declares an empty one."
+        )
+    return cls
 
 
 def _build_strategy(

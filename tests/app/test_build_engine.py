@@ -465,6 +465,21 @@ def test_a_strategy_path_that_does_not_import_is_refused_before_the_store_exists
     assert not (tmp_path / "saga.db").exists()
 
 
+@pytest.mark.parametrize("name", ["HasNoSettings", "SettingsIsNotAModel"])
+def test_a_strategy_class_with_no_settings_model_is_refused_before_the_store_exists(
+    tmp_path: Path, name: str
+) -> None:
+    config = _config(
+        tmp_path,
+        strategies=[
+            {"strategy": f"user_strategies:{name}", "strategy_id": "user", "symbols": ["BTC"]}
+        ],
+    )
+    with pytest.raises(StrategyLoadRefusal, match="Settings"):
+        build_engine(config)
+    assert not (tmp_path / "saga.db").exists()
+
+
 def _run_until_states(engine: Engine, db: Path, wanted: dict[str, OrderState]) -> int:
     """Run ``engine`` until every order in ``wanted`` reaches its state, then stop it."""
 
