@@ -536,6 +536,25 @@ def test_a_strategy_whose_id_differs_from_its_entry_is_refused(tmp_path: Path) -
         build_engine(config)
 
 
+def test_a_constructor_that_raises_is_refused(tmp_path: Path) -> None:
+    # A raising constructor fails the same way on every restart. As a bare
+    # exception it would exit 1, and a supervisor would restart it forever.
+    config = _config(
+        tmp_path,
+        strategies=[
+            {
+                "strategy": "user_strategies:RaisesWhileBuilding",
+                "strategy_id": "user",
+                "symbols": ["BTC"],
+                "settings": {"quantity": "0.5"},
+            }
+        ],
+    )
+    with pytest.raises(StrategyLoadRefusal, match="quantity is too small") as refused:
+        build_engine(config)
+    assert isinstance(refused.value.__cause__, ValueError)
+
+
 def test_settings_that_do_not_validate_are_refused_before_the_store_exists(
     tmp_path: Path,
 ) -> None:

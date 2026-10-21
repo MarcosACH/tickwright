@@ -402,11 +402,17 @@ def _build_engine(config: AppConfig, *, exit_job: ExitJob | None) -> Engine:
         # Always all three, even to a strategy that reads no portfolio. A fixed
         # signature is easier to document than a rule about who gets what
         # (ADR-0041 §7 as amended by ADR-0061).
-        strategy = cls(
-            emitter=engine.emitter_for(strategy_id),
-            portfolio=engine.portfolio_for(strategy_id),
-            settings=settings,
-        )
+        emitter = engine.emitter_for(strategy_id)
+        portfolio = engine.portfolio_for(strategy_id)
+        # Any error counts, as with the import. A constructor that raises fails
+        # the same way on every restart, so it must exit 2, not 1.
+        try:
+            strategy = cls(emitter=emitter, portfolio=portfolio, settings=settings)
+        except Exception as exc:
+            raise StrategyLoadRefusal(
+                f"strategy {strategy_id!r}: {strategy_config.strategy} raised while it was "
+                f"built: {exc!r}"
+            ) from exc
         # The emitter and portfolio carry the entry's id, but the host keys on
         # the strategy's. A mismatch hides its fills from it and resumes its seq
         # from the wrong high-water after a restart (#442).

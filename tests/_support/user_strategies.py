@@ -77,6 +77,15 @@ class NamesItself(BuysEachSymbolOnce):
         self.strategy_id = "momentum"
 
 
+class RaisesWhileBuilding(BuysEachSymbolOnce):
+    """Takes the right arguments, but its constructor raises."""
+
+    def __init__(
+        self, *, emitter: SignalEmitter, portfolio: Portfolio, settings: BuysEachSymbolOnce.Settings
+    ) -> None:
+        raise ValueError("quantity is too small for this strategy")
+
+
 class TakesNoPortfolio:
     """The old reference limit shape: a constructor with no ``portfolio``."""
 
