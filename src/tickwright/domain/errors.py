@@ -133,8 +133,8 @@ class VenueReadUnresolvable(InvariantViolation):
 
 class VenueAccountModeUnsupported(BootRefusal):
     """The venue account is not in a mode whose numbers this engine can read
-    (ADR-0046 §3): its abstraction mode is outside Manual/Standard, or could not
-    be read at all within the startup budget.
+    (ADR-0046 §3): the venue reported an abstraction mode outside
+    Manual/Standard. A mode that could not be read is ``VenueAccountModeUnreadable``.
 
     Deliberately **not** a ``*Mismatch``. Its siblings — ``StoreAccountMismatch``
     (ADR-0042) and ``VenueLeverageMismatch`` (ADR-0044 §5) — report a recorded
@@ -144,6 +144,15 @@ class VenueAccountModeUnsupported(BootRefusal):
     clearinghouse is a sub-ledger, so equity and free margin come back an order
     of magnitude low with nothing in the response indicating it. Nothing
     downstream can be compared, so nothing downstream may run.
+    """
+
+
+class VenueAccountModeUnreadable(InvariantViolation):
+    """The engine could not read the venue account's mode within the startup
+    budget (ADR-0046 §3), so it refuses to start rather than guess the mode.
+
+    Not a ``BootRefusal``. A dark venue is a network problem, and a restart can
+    fix it, so the run exits 1 and its supervisor retries (ADR-0024).
     """
 
 
