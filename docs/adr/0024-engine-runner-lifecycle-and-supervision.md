@@ -292,6 +292,9 @@ room for a missed-propagation bug.
   (`tickwright cancel-all` or `tickwright flatten`, ADR-0052) has its own codes. 0 means done, 1
   means stopped partway, and 2 means it never booted, so nothing at the venue moved. SIGINT and
   SIGTERM give 1 there. No supervisor should restart an exit run. See ADR-0060.**)**
+  **(Amended by ADR-0061:** an engine run exits 2 when its config does not validate or a strategy
+  entry cannot load. Both happen before the store or the venue exists, and a restart would refuse
+  the same way. 1 still means `FAULTED`. 0 still means a graceful stop.**)**
 
 **The two ADR-0014 error classes are drawn by handler origin, not by exception type.** The Engine
 wraps **third-party** handlers (`Strategy.on_tick`/`on_order_event`, `MarketFeed` parse callbacks) in

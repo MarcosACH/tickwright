@@ -158,7 +158,9 @@ durable too. A halt outlives a crash and is cleared only by an explicit reset.
 | `SIGUSR1` | Trip the kill switch. New orders are denied. Resting orders stay. |
 | `SIGUSR2` | Reset the kill switch. |
 
-A non-zero exit means the engine faulted. That is the restart signal for your supervisor.
+Exit `1` means the engine faulted. That is the restart signal for your supervisor. Exit `2` means
+the engine refused to start: a config that does not validate, or a strategy entry it cannot load.
+A restart would refuse again, so do not restart on `2`. Fix the cause first.
 
 One engine owns a store at a time. A second engine on the same store exits `1` and names the
 process that holds it. The lock ends when that process stops or dies, so a crash never leaves it
