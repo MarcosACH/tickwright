@@ -528,7 +528,7 @@ def test_an_engine_whose_postgres_session_ends_exits_1_before_its_next_order(
     assert isinstance(backend, PostgresBackend)
     _write_workspace(tmp_path)
     os.mkfifo(tmp_path / "ticks.fifo")
-    late = {**_STRATEGIES[0], "strategy_id": "late", "symbol": "ETH"}
+    late = {**_STRATEGIES[0], "strategy_id": "late", "symbols": ["ETH"]}
     with (tmp_path / ".env").open("a") as env:
         env.write(
             "TICKWRIGHT_REPLAY__PATH=ticks.fifo\n"
