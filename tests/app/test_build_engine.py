@@ -54,7 +54,7 @@ from tickwright.domain import (
     OrderState,
     Side,
     TimeInForce,
-    VenueAccountModeUnsupported,
+    VenueAccountModeUnreadable,
     VenueOrderView,
     derive_cloid,
 )
@@ -204,7 +204,7 @@ def test_the_hyperliquid_arm_hands_the_adapter_the_engine_s_startup_budget(
         leverage=resolve_leverage(config),
     )
 
-    with pytest.raises(VenueAccountModeUnsupported):
+    with pytest.raises(VenueAccountModeUnreadable):
         asyncio.run(exchange.start())
 
     asked = [query["type"] for (_url, query) in post.requests]
@@ -214,6 +214,54 @@ def test_the_hyperliquid_arm_hands_the_adapter_the_engine_s_startup_budget(
     # backoff interval of it, which is the overshoot the cap bounds.
     elapsed_seconds = clock.timestamp_ns() / 1_000_000_000
     assert 300.0 <= elapsed_seconds < 330.0
+
+
+def _hyperliquid_engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, mode: object) -> Engine:
+    """A Hyperliquid engine whose venue answers the mode read with ``mode``."""
+    post = FakeExchangeApi(
+        {
+            "meta": {"universe": [{"name": "BTC", "szDecimals": 5, "maxLeverage": 40}]},
+            "userAbstraction": mode,
+        }
+    )
+    monkeypatch.setattr("tickwright.venues.hyperliquid.transport.post_json", post)
+    return build_engine(
+        _config(
+            tmp_path,
+            exchange="hyperliquid",
+            hyperliquid={"signing_key": TEST_SIGNING_KEY, "symbols": ["BTC"], "testnet": True},
+        )
+    )
+
+
+def test_an_account_mode_the_venue_reports_and_the_engine_refuses_exits_2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The venue answered, so a restart gets the same answer. Exit 2 tells a
+    supervisor to stop retrying (ADR-0024)."""
+    engine = _hyperliquid_engine(tmp_path, monkeypatch, mode="unifiedAccount")
+
+    with capture_events() as events:
+        exit_code = asyncio.run(engine.run())
+
+    assert exit_code == 2
+    faults = [event for event in events if event["event"] == NamedEvent.ENGINE_FAULTED]
+    assert "unifiedAccount" in faults[0]["error"]
+
+
+def test_an_account_mode_the_engine_could_not_read_in_time_exits_1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dark venue is a network problem, and a retry can fix it. So it stays a
+    fault, and the supervisor restarts the engine (ADR-0024)."""
+    engine = _hyperliquid_engine(tmp_path, monkeypatch, mode=ConnectionError("venue dark"))
+
+    with capture_events() as events:
+        exit_code = asyncio.run(engine.run())
+
+    assert exit_code == 1
+    faults = [event for event in events if event["event"] == NamedEvent.ENGINE_FAULTED]
+    assert "VenueAccountModeUnreadable" in faults[0]["error"]
 
 
 def test_the_hyperliquid_arm_hands_the_adapter_the_engine_s_open_order_interval(

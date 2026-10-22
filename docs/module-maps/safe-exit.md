@@ -58,6 +58,7 @@ for callers. With a job, `run()` returns 0, 1, or 2 (ADR-0060) instead of the AD
   `exit.refused`.
 - On an exit run, call `job.admit(store)` after the lock and before `recover()`. A refusal is
   exit 2.
+- A `BootRefusal` during boot is exit 2 too, with `engine.faulted` naming it (#532).
 - Boot as today: recover, bus, exchange, barrier. The barrier's startup reconcile resolves any open
   flatten saga by cloid. Its fills split by their stored `split_basis`. So "resume first" is the
   boot itself (ADR-0056).

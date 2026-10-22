@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from tickwright.domain import (
     EMPTY_LEVERAGE_BOOK,
     OPERATOR,
+    BootRefusal,
     Clock,
     ComponentState,
     EventBus,
@@ -262,8 +263,9 @@ class Engine:
     async def run(self) -> int:
         """The supervised lifecycle: ordered startup, operation, graceful stop.
 
-        Returns the process exit-code contract (ADR-0024): 0 = graceful stop,
-        non-zero = ``FAULTED`` — the external supervisor's restart signal.
+        Returns the process exit-code contract (ADR-0024). 0 is a graceful stop.
+        1 is ``FAULTED``, the external supervisor's restart signal. 2 is a
+        ``BootRefusal``, which a restart would repeat.
 
         An exit run returns the ADR-0060 codes instead. 0 means a final venue
         read confirmed the job done. 1 means it stopped partway. 2 means it
@@ -318,10 +320,13 @@ class Engine:
             # readable trail and let waiters through before exiting non-zero.
             self._state = ComponentState.FAULTED
             self._fault = exc
-            named_event(NamedEvent.ENGINE_FAULTED, error=repr(_first_leaf(exc)))
+            fault = _first_leaf(exc)
+            named_event(NamedEvent.ENGINE_FAULTED, error=repr(fault))
             await self._run_best_effort_stop_hooks()
             self._stopped.set()
-            return self._finish_exit_run(1)
+            # A boot refusal repeats on every restart, so 2 stops the supervisor
+            # retrying it. Every other fault is 1, which a restart may fix.
+            return self._finish_exit_run(2 if isinstance(fault, BootRefusal) else 1)
         finally:
             self._remove_signal_handlers()
         self._state = ComponentState.STOPPED

@@ -412,6 +412,13 @@ of it. The *loops* still differ and deliberately so: a barrier step reports a fr
 return while these guards catch a venue-specific transient tuple, and hoisting a loop over both
 would carry the venue's read vocabulary into `domain` against ADR-0031.**)**
 
+**(Amended by [#532](https://github.com/MarcosACH/tickwright/issues/532):** the two failures now
+raise two classes. A mode the venue reported and the engine refuses is still
+`VenueAccountModeUnsupported`. It is a `BootRefusal`, so the engine exits 2 and a supervisor stops
+retrying. A mode the engine could not read in time is `VenueAccountModeUnreadable`. It is a plain
+`InvariantViolation`, so the engine exits 1 and a supervisor retries. A retry can fix a dark venue.
+It cannot change a mode the venue stated. See the ADR-0024 amendment of 2026-10-21.**)**
+
 ## 4. Re-verification in flight: divergence-triggered, freeze on change
 
 **Decision: read the mode at boot, and re-read it before applying any Tier-1 **account cash** heal.

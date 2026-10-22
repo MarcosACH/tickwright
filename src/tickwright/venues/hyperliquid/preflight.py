@@ -32,6 +32,7 @@ from tickwright.domain import (
     InvariantViolation,
     LeverageBook,
     LeverageSpec,
+    VenueAccountModeUnreadable,
     VenueAccountModeUnsupported,
     VenueLeverageMismatch,
     VenueLeveragePushFailed,
@@ -191,7 +192,7 @@ def _unreadable_mode(exc: BaseException, deadline: Deadline, *, address: str) ->
     here, and the account is in whatever mode it always was — what is missing is
     our ability to read it.
     """
-    return VenueAccountModeUnsupported(
+    return VenueAccountModeUnreadable(
         f"could not read the abstraction mode of account {address} within "
         f"{deadline.budget_seconds}s ({exc}); refusing to start rather than "
         f"assume it is {_accepted()}"

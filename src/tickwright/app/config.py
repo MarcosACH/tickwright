@@ -71,8 +71,10 @@ class AppConfig(BaseModel):
 
     # Dropping BaseSettings drops the strictness it carried, and only the
     # env-reading was meant to go: a plain BaseModel ignores unknown fields,
-    # which would silently swallow a mistyped keyword.
-    model_config = ConfigDict(extra="forbid")
+    # which would silently swallow a mistyped keyword. A refusal's message
+    # quotes its input by default, and the CLI prints it before log redaction
+    # exists, so the input stays out or a signing key can reach stderr.
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
 
     # The seam discriminants (ADR-0032): each names the impl for one Protocol.
     bus: Literal["in_memory", "kafka"] = "in_memory"

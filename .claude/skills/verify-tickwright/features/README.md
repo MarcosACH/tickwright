@@ -27,7 +27,8 @@ index, then use the matching feature file as the recipe. `../SKILL.md` explains 
 - Every `Sub-features` id has at least one `check` in the recipe. The recipe's `report` line
   says the verdict the map expects today, including known FAILs named in Gotchas.
 - A fill is proven by the `orders` row, the `positions` row, and the `account` row together.
-- An exit code is proof. `0` is graceful, `1` is a refusal or a fault, `-9` is your `KILL`.
+- An exit code is proof. `0` is graceful, `1` is a fault, `2` is a boot refusal, `-9` is your
+  `KILL`.
 - Report the number you expected next to the number the dump shows.
 - Report a feature you could not reach with the command you ran and the unmet precondition
   (Docker down, no key, no network). Never report a path as verified through a different path.
@@ -52,7 +53,7 @@ Each file has an H1, one paragraph, then exactly four H2 sections in this order:
   model with partial fills.
 - [Config refusals](./config-refusals.md): the engine refuses to start on a missing genesis, a
   changed genesis, a dead leverage entry, a reserved strategy id, and a held store lock, with a
-  readable error and exit 1.
+  readable error. A held lock exits 1. The others exit 2.
 - [Portfolio strategies](./portfolio-strategies.md): four throwaway strategies that read the
   `Portfolio` seam, including margin at 5x and a two-symbol book.
 - [Kafka bus](./kafka-bus.md): the same paper run over `KafkaBus`, messages counted on the topic.
