@@ -711,6 +711,22 @@ class TestDocker:
         assert "TICKWRIGHT_POSTGRES__DSN" not in (helper.scratch("r1") / ".env").read_text()
         assert dsn in (helper.evidence("r1") / "first.env.txt").read_text()
 
+    def test_a_container_env_never_takes_the_signing_key(
+        self, helper: ModuleType, run: Callable[..., tuple[int, str]], bin_dir: Path
+    ) -> None:
+        # Every container variable is written to the evidence, so a key there would leak.
+        _recording_docker(bin_dir)
+        run("init", "r1")
+
+        code, out = run(
+            "start", "r1", "first", "--preset", "paper-replay", "--image", "img:sha-1",
+            "--container-env", "TICKWRIGHT_HYPERLIQUID__SIGNING_KEY=0xabc",
+        )  # fmt: skip
+
+        assert code == 1
+        assert "never pass the signing key through --container-env" in out
+        assert not (helper.evidence("r1") / "first.env.txt").exists()
+
 
 def _testnet_life(
     helper: ModuleType,

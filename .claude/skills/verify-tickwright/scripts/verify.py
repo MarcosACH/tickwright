@@ -401,6 +401,9 @@ def cmd_start(args: argparse.Namespace) -> int:
     exit_file = evidence(args.run_id) / f"{args.life}.exit"
     if pid_file.exists() or exit_file.exists():
         sys.exit(f"life {args.life} already exists in run {args.run_id}: pick another name")
+    # Every container variable is written to the evidence, so a key there would leak.
+    if any("SIGNING_KEY" in pair.partition("=")[0] for pair in args.container_env):
+        sys.exit("never pass the signing key through --container-env")
 
     scratch_text, evidence_text = life_env(args.preset, args.env, args.param)
     (scratch(args.run_id) / ".env").write_text(scratch_text)
