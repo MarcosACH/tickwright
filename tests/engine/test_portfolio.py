@@ -1,4 +1,4 @@
-"""``PortfolioProjection`` and the scoped ``Portfolio`` facade it hands out.
+"""``PortfolioProjection`` and the scoped ``Portfolio`` facade that reads it.
 
 The projection is exercised through its write verb (``apply_fill`` — the
 fill-apply path's single entry) and read back through the ``domain`` seam a
@@ -11,7 +11,7 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
-from ledgers import book_fill
+from ledgers import book_fill, scoped
 from venue_doubles import account_state, venue_holding
 
 from tickwright.adapters.clock import ManualClock
@@ -162,7 +162,7 @@ def _record_order_history(store: Store) -> None:
 
 def test_a_fill_lands_in_its_partition_and_reads_back_through_the_seam() -> None:
     projection = _projection()
-    portfolio: Portfolio = projection.for_strategy("alpha")
+    portfolio: Portfolio = scoped(projection, "alpha")
 
     book_fill(projection, _fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
 
@@ -184,7 +184,7 @@ def test_an_observed_mark_surfaces_its_instant_and_never_its_value() -> None:
     one without any of the callbacks ADR-0027 reserves for that.
     """
     projection = _projection()
-    portfolio: Portfolio = projection.for_strategy("alpha")
+    portfolio: Portfolio = scoped(projection, "alpha")
     book_fill(projection, _fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
 
     projection.observe_mark(_mark(price="110", ts_event=9_000))
@@ -205,7 +205,7 @@ def test_a_long_marked_above_its_entry_reads_an_unrealized_profit() -> None:
     booked it, and nothing has to un-book it when the mark moves back.
     """
     projection = _projection()
-    portfolio = projection.for_strategy("alpha")
+    portfolio = scoped(projection, "alpha")
     book_fill(projection, _fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
 
     projection.observe_mark(_mark(price="110", ts_event=9_000))
@@ -222,7 +222,7 @@ def test_a_short_marked_above_its_entry_reads_an_unrealized_loss() -> None:
     = −20. A short losing as the mark rises is the case a magnitude-only
     formula gets backwards, and it costs an account its margin silently."""
     projection = _projection()
-    portfolio = projection.for_strategy("alpha")
+    portfolio = scoped(projection, "alpha")
     book_fill(projection, _fill(trade_id="f1", quantity="2", price="100"), side=Side.SELL)
 
     projection.observe_mark(_mark(price="110", ts_event=9_000))
@@ -256,8 +256,8 @@ def test_notional_is_the_whole_accounts_exposure_not_the_strategys_own_slice() -
 
     projection.observe_mark(_mark(price="110", ts_event=9_000))
 
-    alpha = projection.for_strategy("alpha").position("BTC")
-    beta = projection.for_strategy("beta").position("BTC")
+    alpha = scoped(projection, "alpha").position("BTC")
+    beta = scoped(projection, "beta").position("BTC")
     assert alpha is not None and beta is not None
     assert alpha.notional == beta.notional == Decimal("550")
     assert alpha.unrealized_pnl == Decimal("20")  # 2 x (110 - 100)
@@ -268,7 +268,7 @@ def test_notional_is_a_magnitude_so_a_short_account_still_reads_positive() -> No
     """Exposure has no direction — ``|account net| × mark``. A negative notional
     would flip the sign of every margin figure computed off it downstream."""
     projection = _projection()
-    portfolio = projection.for_strategy("alpha")
+    portfolio = scoped(projection, "alpha")
     book_fill(projection, _fill(trade_id="f1", quantity="2", price="100"), side=Side.SELL)
 
     projection.observe_mark(_mark(price="110", ts_event=9_000))
@@ -298,7 +298,7 @@ def test_account_equity_is_cash_plus_the_unrealized_pnl_of_every_partition() -> 
     projection.observe_mark(_mark(price="110", ts_event=9_000))
     projection.observe_mark(_mark(price="2900", ts_event=9_000, symbol="ETH"))
 
-    account = projection.for_strategy("alpha").account()
+    account = scoped(projection, "alpha").account()
     assert account.cash == Decimal("100000")  # Tier-1, untouched by any mark
     assert account.equity == Decimal("100120")
 
@@ -324,7 +324,7 @@ def test_one_unmarked_symbol_makes_the_whole_account_equity_unknown() -> None:
 
     projection.observe_mark(_mark(price="110", ts_event=9_000))
 
-    account = projection.for_strategy("alpha").account()
+    account = scoped(projection, "alpha").account()
     assert account.equity is None
     assert account.cash == Decimal("100000")
 
@@ -334,7 +334,7 @@ def test_an_account_holding_nothing_reads_its_equity_as_its_cash() -> None:
     wait on, so equity is the cash line rather than ``None`` (ADR-0041 §6)."""
     projection = _projection("100000")
 
-    account = projection.for_strategy("alpha").account()
+    account = scoped(projection, "alpha").account()
     assert account.equity == Decimal("100000")
 
 
@@ -591,7 +591,7 @@ def test_a_stale_mark_freezes_at_its_last_value_and_is_never_rejected_on_read() 
     cross-check, not a read-time age gate.
     """
     projection = _projection()
-    portfolio = projection.for_strategy("alpha")
+    portfolio = scoped(projection, "alpha")
     book_fill(projection, _fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
     # ``_projection`` runs on ``ManualClock(7)``; this mark predates even that.
     projection.observe_mark(_mark(price="110", ts_event=1))
@@ -613,7 +613,7 @@ def test_a_moved_mark_moves_the_valuation_on_the_very_next_read() -> None:
     assembled from different inputs.
     """
     projection = _projection()
-    portfolio = projection.for_strategy("alpha")
+    portfolio = scoped(projection, "alpha")
     book_fill(projection, _fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
 
     projection.observe_mark(_mark(price="110", ts_event=9_000))
@@ -647,7 +647,7 @@ def test_no_tier_two_value_reaches_the_durable_ledger() -> None:
     projection.observe_mark(_mark(price="110", ts_event=9_000))
 
     # The mark moved the *view*; the durable row is untouched by it.
-    view = projection.for_strategy("alpha").position("BTC")
+    view = scoped(projection, "alpha").position("BTC")
     assert view is not None and view.unrealized_pnl == Decimal("20")
     stored = {position.symbol: position for position in store.all_positions()}["BTC"]
     assert stored.signed_size == Decimal("2")
@@ -658,7 +658,7 @@ def test_no_tier_two_value_reaches_the_durable_ledger() -> None:
     # And a fresh projection over the same store reads no mark back at all.
     restarted = _projection("100000", store=store)
     restarted.recover()
-    recovered = restarted.for_strategy("alpha").position("BTC")
+    recovered = scoped(restarted, "alpha").position("BTC")
     assert recovered is not None
     assert recovered.mark_ts is None
     assert recovered.unrealized_pnl is None
@@ -736,7 +736,7 @@ def test_live_reads_a_bucket_the_venue_has_not_posted_yet_as_unknown() -> None:
     bucket stay real.
     """
     projection = _isolated_1x(None)
-    view = projection.for_strategy("alpha").position("BTC")
+    view = scoped(projection, "alpha").position("BTC")
     account = projection.account()
 
     assert view is not None
@@ -761,7 +761,7 @@ def test_the_first_ingest_makes_an_unposted_live_bucket_real() -> None:
         (), snapshot=venue_holding(BTC=Decimal("81.735"), sizes={"BTC": Decimal("0.001")})
     )
 
-    view = projection.for_strategy("alpha").position("BTC")
+    view = scoped(projection, "alpha").position("BTC")
     account = projection.account()
     assert view is not None
     assert view.margin_used == Decimal("81.745")
@@ -782,7 +782,7 @@ def test_a_posted_strategy_reads_unknown_while_another_on_its_symbol_waits() -> 
     projection.apply_heal(
         (), snapshot=venue_holding(BTC=Decimal("81.735"), sizes={"BTC": Decimal("0.001")})
     )
-    posted = projection.for_strategy("alpha").position("BTC")
+    posted = scoped(projection, "alpha").position("BTC")
     assert posted is not None
     assert posted.margin_used == Decimal("81.745")
 
@@ -792,7 +792,7 @@ def test_a_posted_strategy_reads_unknown_while_another_on_its_symbol_waits() -> 
         side=Side.BUY,
     )
 
-    view = projection.for_strategy("alpha").position("BTC")
+    view = scoped(projection, "alpha").position("BTC")
     assert view is not None
     assert view.margin_used is None
     assert view.effective_leverage is None
@@ -811,7 +811,7 @@ def test_a_live_close_before_the_first_ingest_reads_no_margin_rather_than_unknow
 
     book_fill(projection, _fill(trade_id="f2", quantity="0.001", price="81745"), side=Side.SELL)
 
-    view = projection.for_strategy("alpha").position("BTC")
+    view = scoped(projection, "alpha").position("BTC")
     account = projection.account()
     assert view is not None
     assert view.margin_used == Decimal("0")
@@ -833,7 +833,7 @@ def test_a_live_flip_through_zero_reads_unknown_until_the_next_ingest() -> None:
 
     book_fill(projection, _fill(trade_id="f2", quantity="0.002", price="81745"), side=Side.SELL)
 
-    flipped = projection.for_strategy("alpha").position("BTC")
+    flipped = scoped(projection, "alpha").position("BTC")
     assert flipped is not None
     assert flipped.size == Decimal("-0.001")
     assert flipped.margin_used is None
@@ -843,7 +843,7 @@ def test_a_live_flip_through_zero_reads_unknown_until_the_next_ingest() -> None:
         (), snapshot=venue_holding(BTC=Decimal("81.745"), sizes={"BTC": Decimal("-0.001")})
     )
 
-    posted = projection.for_strategy("alpha").position("BTC")
+    posted = scoped(projection, "alpha").position("BTC")
     assert posted is not None
     assert posted.margin_used == Decimal("81.745")
 
@@ -862,7 +862,7 @@ def test_a_live_add_to_an_isolated_position_reads_unknown_until_the_next_ingest(
 
     book_fill(projection, _fill(trade_id="f2", quantity="0.001", price="81735"), side=Side.BUY)
 
-    added = projection.for_strategy("alpha").position("BTC")
+    added = scoped(projection, "alpha").position("BTC")
     account = projection.account()
     assert added is not None
     assert added.size == Decimal("0.002")
@@ -875,7 +875,7 @@ def test_a_live_add_to_an_isolated_position_reads_unknown_until_the_next_ingest(
         (), snapshot=venue_holding(BTC=Decimal("163.47"), sizes={"BTC": Decimal("0.002")})
     )
 
-    posted = projection.for_strategy("alpha").position("BTC")
+    posted = scoped(projection, "alpha").position("BTC")
     assert posted is not None
     assert posted.margin_used == Decimal("163.49")
 
@@ -898,7 +898,7 @@ def test_a_live_partial_close_of_an_isolated_position_reads_unknown_until_the_ne
 
     book_fill(projection, _fill(trade_id="f2", quantity="0.001", price="81745"), side=Side.SELL)
 
-    reduced = projection.for_strategy("alpha").position("BTC")
+    reduced = scoped(projection, "alpha").position("BTC")
     assert reduced is not None
     assert reduced.size == Decimal("0.001")
     assert reduced.margin_used is None
@@ -909,7 +909,7 @@ def test_a_live_partial_close_of_an_isolated_position_reads_unknown_until_the_ne
         (), snapshot=venue_holding(BTC=Decimal("81.735"), sizes={"BTC": Decimal("0.001")})
     )
 
-    posted = projection.for_strategy("alpha").position("BTC")
+    posted = scoped(projection, "alpha").position("BTC")
     assert posted is not None
     assert posted.margin_used == Decimal("81.745")
 
@@ -928,7 +928,7 @@ def test_a_live_add_to_a_cross_position_keeps_its_margin_figures() -> None:
     book_fill(projection, _fill(trade_id="f2", quantity="0.001", price="81735"), side=Side.BUY)
     projection.observe_mark(_mark(price="81745", ts_event=9_000))
 
-    view = projection.for_strategy("alpha").position("BTC")
+    view = scoped(projection, "alpha").position("BTC")
     account = projection.account()
     assert view is not None
     assert view.margin_used == Decimal("163.49")
@@ -948,7 +948,7 @@ def test_an_account_read_taken_before_a_live_open_leaves_its_bucket_unknown() ->
 
     projection.apply_heal((), snapshot=venue_holding())
 
-    stale = projection.for_strategy("alpha").position("BTC")
+    stale = scoped(projection, "alpha").position("BTC")
     assert stale is not None
     assert stale.margin_used is None
     assert stale.effective_leverage is None
@@ -958,7 +958,7 @@ def test_an_account_read_taken_before_a_live_open_leaves_its_bucket_unknown() ->
         (), snapshot=venue_holding(BTC=Decimal("81.735"), sizes={"BTC": Decimal("0.001")})
     )
 
-    posted = projection.for_strategy("alpha").position("BTC")
+    posted = scoped(projection, "alpha").position("BTC")
     assert posted is not None
     assert posted.margin_used == Decimal("81.745")
 
@@ -981,7 +981,7 @@ def test_an_account_read_taken_before_a_live_flip_writes_no_bucket_onto_it() -> 
     )
 
     assert change is None
-    flipped = projection.for_strategy("alpha").position("BTC")
+    flipped = scoped(projection, "alpha").position("BTC")
     assert flipped is not None
     assert flipped.margin_used is None
 
@@ -1021,7 +1021,7 @@ def test_a_live_restart_reads_a_bucket_saved_before_any_ingest_as_unknown() -> N
     """
     restarted = _live_restart(None)
 
-    view = restarted.for_strategy("alpha").position("BTC")
+    view = scoped(restarted, "alpha").position("BTC")
     assert view is not None
     assert view.margin_used is None
     assert restarted.account().free_margin is None
@@ -1030,7 +1030,7 @@ def test_a_live_restart_reads_a_bucket_saved_before_any_ingest_as_unknown() -> N
         (), snapshot=venue_holding(BTC=Decimal("81.735"), sizes={"BTC": Decimal("0.001")})
     )
 
-    posted = restarted.for_strategy("alpha").position("BTC")
+    posted = scoped(restarted, "alpha").position("BTC")
     assert posted is not None
     assert posted.margin_used == Decimal("81.745")
 
@@ -1043,7 +1043,7 @@ def test_a_live_restart_reads_a_bucket_the_venue_posted_before_the_crash() -> No
     """
     restarted = _live_restart("81.735")
 
-    view = restarted.for_strategy("alpha").position("BTC")
+    view = scoped(restarted, "alpha").position("BTC")
     assert view is not None
     assert view.margin_used == Decimal("81.745")
 
@@ -1057,7 +1057,7 @@ def test_a_live_restart_reads_a_posted_bucket_of_zero_as_posted() -> None:
     """
     restarted = _live_restart("0")
 
-    view = restarted.for_strategy("alpha").position("BTC")
+    view = scoped(restarted, "alpha").position("BTC")
     assert view is not None
     assert view.margin_used == Decimal("0.01")
 
@@ -1089,7 +1089,7 @@ def test_a_live_restart_after_an_add_before_the_next_ingest_reads_the_bucket_as_
     restarted.recover()
     restarted.observe_mark(_mark(price="81745", ts_event=9_000))
 
-    view = restarted.for_strategy("alpha").position("BTC")
+    view = scoped(restarted, "alpha").position("BTC")
     assert view is not None
     assert view.size == Decimal("0.002")
     assert view.margin_used is None
@@ -1099,7 +1099,7 @@ def test_a_live_restart_after_an_add_before_the_next_ingest_reads_the_bucket_as_
         (), snapshot=venue_holding(BTC=Decimal("163.47"), sizes={"BTC": Decimal("0.002")})
     )
 
-    posted = restarted.for_strategy("alpha").position("BTC")
+    posted = scoped(restarted, "alpha").position("BTC")
     assert posted is not None
     assert posted.margin_used == Decimal("163.49")
 
@@ -1128,7 +1128,7 @@ def test_paper_reads_the_bucket_it_locked_at_open_from_the_first_read() -> None:
     notional, so leverage reads exactly 1.
     """
     projection = _isolated_1x("100000")
-    view = projection.for_strategy("alpha").position("BTC")
+    view = scoped(projection, "alpha").position("BTC")
     account = projection.account()
 
     assert view is not None
@@ -1169,7 +1169,7 @@ def test_a_restart_restores_the_locked_collateral_rather_than_recomputing_it() -
     # bucket alone — the seam a strategy actually holds, not the row behind it.
     restarted.observe_mark(_mark(price="42000", ts_event=9_000))
 
-    recovered = restarted.for_strategy("alpha").position("BTC")
+    recovered = scoped(restarted, "alpha").position("BTC")
     assert recovered is not None
     assert recovered.margin_used == Decimal("2100")
 
@@ -1262,8 +1262,8 @@ def test_two_strategies_on_one_isolated_symbol_each_read_the_whole_bucket() -> N
     for projection in (shared, alone):
         projection.observe_mark(_mark(price="81735", ts_event=9_000))
 
-    view = shared.for_strategy("alpha").position("BTC")
-    whole = alone.for_strategy("alpha").position("BTC")
+    view = scoped(shared, "alpha").position("BTC")
+    whole = scoped(alone, "alpha").position("BTC")
 
     assert view is not None
     assert whole is not None
@@ -1304,8 +1304,8 @@ def test_a_strategy_beside_the_unattributed_partition_reads_the_whole_bucket() -
     for projection in (restarted, alone):
         projection.observe_mark(_mark(price="81735", ts_event=9_000))
 
-    view = restarted.for_strategy("alpha").position("BTC")
-    whole = alone.for_strategy("alpha").position("BTC")
+    view = scoped(restarted, "alpha").position("BTC")
+    whole = scoped(alone, "alpha").position("BTC")
 
     assert view is not None
     assert whole is not None
@@ -1345,7 +1345,7 @@ def test_a_position_the_projection_has_no_mark_for_reports_no_instant() -> None:
     """``mark_ts is None`` ⟺ the mark is absent — the one signal a reader has for
     telling "never valued" from "valued a while ago" (ADR-0041 §6)."""
     projection = _projection()
-    portfolio = projection.for_strategy("alpha")
+    portfolio = scoped(projection, "alpha")
     book_fill(projection, _fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
 
     view = portfolio.position("BTC")
@@ -1356,7 +1356,7 @@ def test_a_position_the_projection_has_no_mark_for_reports_no_instant() -> None:
 def test_a_mark_for_one_symbol_does_not_value_another() -> None:
     """The cache is keyed per symbol, so ETH's mark is not BTC's."""
     projection = _projection()
-    portfolio = projection.for_strategy("alpha")
+    portfolio = scoped(projection, "alpha")
     book_fill(projection, _fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
 
     projection.observe_mark(_mark(price="3000", ts_event=9_000, symbol="ETH"))
@@ -1367,7 +1367,7 @@ def test_a_mark_for_one_symbol_does_not_value_another() -> None:
 
 
 def test_a_never_traded_symbol_reads_none() -> None:
-    portfolio = _projection().for_strategy("alpha")
+    portfolio = scoped(_projection(), "alpha")
 
     assert portfolio.position("BTC") is None
     assert portfolio.open_positions() == ()
@@ -1375,7 +1375,7 @@ def test_a_never_traded_symbol_reads_none() -> None:
 
 def test_a_symbol_traded_flat_keeps_its_realized_and_leaves_the_open_set() -> None:
     projection = _projection()
-    portfolio = projection.for_strategy("alpha")
+    portfolio = scoped(projection, "alpha")
     book_fill(projection, _fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
 
     book_fill(projection, _fill(trade_id="f2", quantity="2", price="150"), side=Side.SELL)
@@ -1391,7 +1391,7 @@ def test_a_symbol_traded_flat_keeps_its_realized_and_leaves_the_open_set() -> No
 
 def test_open_positions_lists_only_the_non_flat_partitions() -> None:
     projection = _projection()
-    portfolio = projection.for_strategy("alpha")
+    portfolio = scoped(projection, "alpha")
     book_fill(projection, _fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
     book_fill(
         projection, _fill(trade_id="f2", quantity="1", price="3000", symbol="ETH"), side=Side.BUY
@@ -1405,7 +1405,7 @@ def test_open_positions_lists_only_the_non_flat_partitions() -> None:
 
 def test_realized_pnl_accrues_to_the_account_cash_line() -> None:
     projection = _projection("100000")
-    portfolio = projection.for_strategy("alpha")
+    portfolio = scoped(projection, "alpha")
 
     book_fill(projection, _fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
     assert portfolio.account().cash == Decimal("100000")  # opening a leg realizes nothing
@@ -1424,7 +1424,7 @@ def test_a_fee_accrues_on_its_own_line_and_debits_cash_without_touching_pnl() ->
     inputs — so a debited cost leaves less collateral than the run opened with.
     """
     projection = _projection("100000")
-    portfolio = projection.for_strategy("alpha")
+    portfolio = scoped(projection, "alpha")
 
     book_fill(
         projection, _fill(trade_id="f1", quantity="2", price="100", fee="0.09"), side=Side.BUY
@@ -1453,7 +1453,7 @@ def test_funding_accrues_on_its_own_line_and_moves_cash_by_the_amount() -> None:
     ``funding`` and ``cash`` reads exactly what the opening fill left.
     """
     projection = _projection("100000")
-    portfolio = projection.for_strategy("alpha")
+    portfolio = scoped(projection, "alpha")
     book_fill(projection, _fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
 
     projection.apply_funding(_accrual(amount="-10", boundary=_HOUR))
@@ -1483,7 +1483,7 @@ def test_an_accrual_at_or_below_the_stored_mark_is_dropped_whole() -> None:
     """
     store = SQLiteStore(":memory:")
     projection = _projection("100000", store=store)
-    portfolio = projection.for_strategy("alpha")
+    portfolio = scoped(projection, "alpha")
     book_fill(projection, _fill(trade_id="f1", quantity="2", price="100"), side=Side.BUY)
     # The ledger already carries the first two boundaries, as it would after the
     # crash that a re-delivery follows.
@@ -1556,8 +1556,8 @@ def test_one_accrual_splits_across_every_partition_holding_the_symbol() -> None:
 
     projection.apply_funding(_accrual(amount="-10", boundary=_HOUR))
 
-    alpha = projection.for_strategy("alpha").position("BTC")
-    beta = projection.for_strategy("beta").position("BTC")
+    alpha = scoped(projection, "alpha").position("BTC")
+    beta = scoped(projection, "beta").position("BTC")
     assert alpha is not None and beta is not None
     assert alpha.funding == Decimal("-15")  # -10 x (+3 / +2)
     assert beta.funding == Decimal("5")  # -10 x (-1 / +2)
@@ -1590,7 +1590,7 @@ def test_an_accrual_with_no_partition_to_attribute_to_still_moves_cash() -> None
     assert change.positions == ()  # nothing to attribute to, and nothing invented
     assert change.funding_mark == ("BTC", _HOUR)  # still applied, so still marked
     assert projection.account().cash == Decimal("99990")
-    assert projection.for_strategy("alpha").position("BTC") is None
+    assert scoped(projection, "alpha").position("BTC") is None
 
 
 def test_a_payment_settled_before_genesis_is_already_in_genesis_and_is_dropped() -> None:
@@ -1633,7 +1633,7 @@ def test_a_maker_rebate_credits_the_cash_line_rather_than_debiting_it() -> None:
     # *adds*. Reached by a rebate volume tier, not by making liquidity — which is
     # why nothing here says "maker" and the projection never asks.
     projection = _projection("100000")
-    portfolio = projection.for_strategy("alpha")
+    portfolio = scoped(projection, "alpha")
 
     book_fill(
         projection, _fill(trade_id="f1", quantity="2", price="100", fee="-0.03"), side=Side.BUY
@@ -1651,7 +1651,7 @@ def test_a_redelivered_fill_charges_its_fee_once() -> None:
     # Asserted on an *adding* fill, where a second application would otherwise
     # leave both the size and the fee line silently doubled.
     projection = _projection("100000")
-    portfolio = projection.for_strategy("alpha")
+    portfolio = scoped(projection, "alpha")
     fill = _fill(trade_id="f1", quantity="2", price="100", fee="0.09")
 
     book_fill(projection, fill, side=Side.BUY)
@@ -1677,8 +1677,8 @@ def test_a_strategy_reads_only_its_own_partition() -> None:
         side=Side.BUY,
     )
 
-    assert projection.for_strategy("alpha").position("BTC").size == Decimal("2")  # type: ignore[union-attr]
-    assert projection.for_strategy("beta").position("BTC").size == Decimal("5")  # type: ignore[union-attr]
+    assert scoped(projection, "alpha").position("BTC").size == Decimal("2")  # type: ignore[union-attr]
+    assert scoped(projection, "beta").position("BTC").size == Decimal("5")  # type: ignore[union-attr]
 
 
 def test_a_redelivered_fill_moves_neither_the_position_nor_the_cash_line() -> None:
@@ -1694,7 +1694,7 @@ def test_a_redelivered_fill_moves_neither_the_position_nor_the_cash_line() -> No
     deleting ``Position``'s dedup fails this test.
     """
     projection = _projection("100000")
-    portfolio = projection.for_strategy("alpha")
+    portfolio = scoped(projection, "alpha")
     book_fill(projection, _fill(trade_id="f1", quantity="4", price="100"), side=Side.BUY)
     fill = _fill(trade_id="f2", quantity="2", price="150")
     book_fill(projection, fill, side=Side.SELL)
@@ -1715,7 +1715,7 @@ def test_every_tier_one_field_reads_a_number(symbol: str) -> None:
         projection, _fill(trade_id="f1", quantity="2", price="100", symbol=symbol), side=Side.BUY
     )
 
-    view = projection.for_strategy("alpha").position(symbol)
+    view = scoped(projection, "alpha").position(symbol)
     assert view is not None
     assert all(
         isinstance(value, Decimal)
@@ -1750,7 +1750,7 @@ def test_a_fill_that_flips_through_zero_announces_closed_then_opened() -> None:
         book_fill(projection, _fill(trade_id="f2", quantity="5", price="120"), side=Side.SELL)
 
     assert _announcements(logs) == [("position.closed", "0"), ("position.opened", "-3")]
-    view = projection.for_strategy("alpha").position("BTC")
+    view = scoped(projection, "alpha").position("BTC")
     assert view is not None
     assert view.size == Decimal("-3")
     assert view.entry_price == Decimal("120")  # the residual, not a blended entry
@@ -1791,7 +1791,7 @@ def test_a_zero_quantity_fill_faults_the_projection_and_announces_nothing() -> N
     would read an open at zero size, which the catalog cannot name (ADR-0045 §2).
     """
     projection = _projection()
-    portfolio: Portfolio = projection.for_strategy("alpha")
+    portfolio: Portfolio = scoped(projection, "alpha")
 
     with (
         capture_events() as logs,
@@ -1844,16 +1844,16 @@ def test_recover_restores_the_cash_line_and_every_partition_it_finds() -> None:
 
     projection.recover()
 
-    alpha = projection.for_strategy("alpha").position("BTC")
+    alpha = scoped(projection, "alpha").position("BTC")
     assert alpha is not None
     assert alpha.size == Decimal("2")
     assert alpha.realized_pnl == Decimal("100")
-    beta = projection.for_strategy("beta").position("ETH")
+    beta = scoped(projection, "beta").position("ETH")
     assert beta is not None
     assert beta.size == Decimal("-5")
     # One pool per process, so either facade reads the same restored line — and
     # it is the accrued cash, not the genesis the projection opened at.
-    assert projection.for_strategy("alpha").account().cash == Decimal("100100")
+    assert scoped(projection, "alpha").account().cash == Decimal("100100")
 
 
 def test_recover_fabricates_no_partition_the_store_does_not_hold() -> None:
@@ -1879,7 +1879,7 @@ def test_recover_fabricates_no_partition_the_store_does_not_hold() -> None:
 
     projection.recover()
 
-    portfolio = projection.for_strategy("alpha")
+    portfolio = scoped(projection, "alpha")
     assert portfolio.position("ETH") is None  # no row: honestly absent
     restored = portfolio.position("BTC")
     assert restored is not None  # a row: flat, and its realized survives
@@ -2266,17 +2266,17 @@ def test_the_scoped_facade_cannot_reach_the_unattributed_partition() -> None:
     assert restarted.position("BTC", strategy_id=None) is not None
 
     # The seam a strategy holds sees its own two units and nothing else.
-    scoped: Portfolio = restarted.for_strategy("alpha")
-    alpha = scoped.position("BTC")
+    facade: Portfolio = scoped(restarted, "alpha")
+    alpha = facade.position("BTC")
     assert alpha is not None and alpha.size == Decimal("2")
-    assert [view.size for view in scoped.open_positions()] == [Decimal("2")]
+    assert [view.size for view in facade.open_positions()] == [Decimal("2")]
 
     # Unspoofable, not merely filtered: the sentinel is the *disk* encoding of
     # the ``None`` key (ADR-0043 §2), so a facade bound to the literal itself
     # reaches nothing — there is no in-memory key equal to it to reach. The
     # registration gates make that id unobtainable; this is why it would not
     # help even if one were obtained.
-    assert restarted.for_strategy(UNATTRIBUTED).position("BTC") is None
+    assert scoped(restarted, UNATTRIBUTED).position("BTC") is None
 
 
 _ISOLATED_10X = LeverageBook(entries={"BTC": LeverageSpec(mode="isolated", leverage=10)})
@@ -2311,10 +2311,10 @@ def test_live_reports_no_liquidation_price_before_the_first_account_read() -> No
         book_fill(projection, _fill(trade_id="f1", quantity="0.001", price="81735"), side=Side.BUY)
         projection.observe_mark(_mark(price="81735", ts_event=9_000))
 
-    computed = paper.for_strategy("alpha").position("BTC")
+    computed = scoped(paper, "alpha").position("BTC")
     assert computed is not None
     assert computed.liquidation_price is not None
-    position = live.for_strategy("alpha").position("BTC")
+    position = scoped(live, "alpha").position("BTC")
     assert position is not None
     assert position.liquidation_price is None
 

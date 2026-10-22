@@ -10,13 +10,32 @@ class InvariantViolation(Exception):
     """A load-bearing engine invariant was broken (fail-fast, ADR-0014)."""
 
 
+class OpenOrdersReadBeforeStart(InvariantViolation):
+    """A strategy read its open orders before the strategies started (ADR-0041 §3).
+
+    In the constructor the order ``Cache`` is still empty, because the engine
+    rebuilds it later. A read there would report no orders while orders rest at
+    the venue. After the rebuild and before the startup barrier, the ``Cache``
+    holds state the venue has not proven. The read opens at the top of
+    ``start()``, so ``restore()`` is the first place it works."""
+
+
 class StartupReconciliationTimeout(InvariantViolation):
     """The startup barrier could not reconcile against the venue within its
     bounded window (ADR-0024): the engine must go ``FAULTED`` and exit non-zero
     rather than trade on unverified state — freeze, don't guess (ADR-0011)."""
 
 
-class StoreAccountMismatch(InvariantViolation):
+class BootRefusal(InvariantViolation):
+    """The engine refused to start, and a restart with the same config and store
+    refuses again (ADR-0024). The run exits 2, so a supervisor stops retrying.
+
+    Each refusal comes before any order, so nothing at the venue moved. A cause
+    a retry can fix, such as a held lock or a slow read, must not inherit it.
+    """
+
+
+class StoreAccountMismatch(BootRefusal):
     """The durable ledger and the venue's ``AccountSpec`` disagree about the
     account this engine is trading (ADR-0042 §3, ADR-0043 §10).
 
@@ -122,10 +141,10 @@ class VenueReadUnresolvable(InvariantViolation):
     """
 
 
-class VenueAccountModeUnsupported(InvariantViolation):
+class VenueAccountModeUnsupported(BootRefusal):
     """The venue account is not in a mode whose numbers this engine can read
-    (ADR-0046 §3): its abstraction mode is outside Manual/Standard, or could not
-    be read at all within the startup budget.
+    (ADR-0046 §3): the venue reported an abstraction mode outside
+    Manual/Standard. A mode that could not be read is ``VenueAccountModeUnreadable``.
 
     Deliberately **not** a ``*Mismatch``. Its siblings — ``StoreAccountMismatch``
     (ADR-0042) and ``VenueLeverageMismatch`` (ADR-0044 §5) — report a recorded
@@ -135,6 +154,15 @@ class VenueAccountModeUnsupported(InvariantViolation):
     clearinghouse is a sub-ledger, so equity and free margin come back an order
     of magnitude low with nothing in the response indicating it. Nothing
     downstream can be compared, so nothing downstream may run.
+    """
+
+
+class VenueAccountModeUnreadable(InvariantViolation):
+    """The engine could not read the venue account's mode within the startup
+    budget (ADR-0046 §3), so it refuses to start rather than guess the mode.
+
+    Not a ``BootRefusal``. A dark venue is a network problem, and a restart can
+    fix it, so the run exits 1 and its supervisor retries (ADR-0024).
     """
 
 

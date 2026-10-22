@@ -13,7 +13,7 @@ from decimal import Decimal
 import pytest
 import structlog.testing
 from kafka_fakes import FakeKafkaBroker, Record
-from ledgers import ledger
+from ledgers import ledger, scoped
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.bus.kafka import KafkaBus
@@ -442,7 +442,7 @@ def test_a_single_shot_strategy_killed_after_firing_does_not_fire_again() -> Non
             emitter=SignalEmitter(
                 strategy_id="shooter", bus=bus, clock=clock, record_seq=store.raise_seq
             ),
-            portfolio=ledger(store).for_strategy("shooter"),
+            portfolio=scoped(ledger(store), "shooter"),
             settings=SingleShotLimitStrategy.Settings(
                 side=Side.BUY,
                 quantity=Decimal("0.5"),
@@ -482,7 +482,7 @@ def test_the_snapshot_is_on_disk_before_the_signal_it_records_is_dispatched() ->
         emitter=SignalEmitter(
             strategy_id="shooter", bus=bus, clock=clock, record_seq=store.raise_seq
         ),
-        portfolio=ledger(store).for_strategy("shooter"),
+        portfolio=scoped(ledger(store), "shooter"),
         settings=SingleShotLimitStrategy.Settings(
             side=Side.BUY,
             quantity=Decimal("0.5"),
@@ -526,7 +526,7 @@ def test_on_kafka_the_snapshot_is_on_disk_before_the_signal_reaches_the_topic() 
         emitter=SignalEmitter(
             strategy_id="shooter", bus=bus, clock=clock, record_seq=store.raise_seq
         ),
-        portfolio=ledger(store).for_strategy("shooter"),
+        portfolio=scoped(ledger(store), "shooter"),
         settings=SingleShotLimitStrategy.Settings(
             side=Side.BUY,
             quantity=Decimal("0.5"),
@@ -649,6 +649,23 @@ def test_invariant_violation_in_restore_pierces_and_faults_start() -> None:
     # broken engine assumption: it pierces the restore net and faults start().
     with pytest.raises(InvariantViolation, match="broken engine assumption"):
         host.start()
+
+
+def test_stop_after_a_start_that_faulted_in_restore_writes_no_snapshot() -> None:
+    """The runner still tears down after ``start()`` faults. The strategy never
+    got its restored state, so persisting it would erase the previous life's."""
+    store = SQLiteStore(":memory:")
+    store.save_strategy_snapshot("alpha", b"prior-life", ts_ns=1_000)
+    host = _host(store=store)
+    alpha = InvariantViolatingRestoreStrategy("alpha")
+    alpha.state = b"blank"
+    host.register(alpha, symbols={"BTC"})
+    with pytest.raises(InvariantViolation):
+        host.start()
+
+    host.stop()
+
+    assert store.load_strategy_snapshot("alpha") == b"prior-life"
 
 
 def _checkpointed_order(

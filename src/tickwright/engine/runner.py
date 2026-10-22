@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from tickwright.domain import (
     EMPTY_LEVERAGE_BOOK,
     OPERATOR,
+    BootRefusal,
     Clock,
     ComponentState,
     EventBus,
@@ -61,6 +62,7 @@ from .guard import NoopGuard
 from .ledger_reconcile import LedgerReconciliation, ValuationBand
 from .portfolio import PortfolioProjection
 from .reconcile import ReconcileConfig, Reconciler
+from .scoped_portfolio import ScopedPortfolio
 from .strategy_host import StrategyHost
 
 
@@ -233,11 +235,16 @@ class Engine:
         The composition root still does the injecting (ADR-0041 §7) — a strategy
         receives its facade as an ``__init__`` argument, not from the engine and
         not through the ``Strategy`` Protocol — but it resolves the facade here,
-        off the one projection the engine writes, rather than off a projection of
-        its own. Only the facade leaves: the concrete stays engine-internal, as
-        the ``Cache`` does.
+        off the projection and the ``Cache`` the engine writes, rather than off
+        copies of its own. Only the facade leaves: both concretes stay
+        engine-internal.
         """
-        return self._checkpointer.portfolio.for_strategy(strategy_id)
+        return ScopedPortfolio(
+            projection=self._checkpointer.portfolio,
+            cache=self._checkpointer.cache,
+            open_orders_readable=self._host.open_orders_readable,
+            strategy_id=strategy_id,
+        )
 
     def emitter_for(self, strategy_id: str) -> SignalEmitter:
         """The emitter to hand ``strategy_id``'s constructor.
@@ -262,8 +269,9 @@ class Engine:
     async def run(self) -> int:
         """The supervised lifecycle: ordered startup, operation, graceful stop.
 
-        Returns the process exit-code contract (ADR-0024): 0 = graceful stop,
-        non-zero = ``FAULTED`` — the external supervisor's restart signal.
+        Returns the process exit-code contract (ADR-0024). 0 is a graceful stop.
+        1 is ``FAULTED``, the external supervisor's restart signal. 2 is a
+        ``BootRefusal``, which a restart would repeat.
 
         An exit run returns the ADR-0060 codes instead. 0 means a final venue
         read confirmed the job done. 1 means it stopped partway. 2 means it
@@ -318,10 +326,13 @@ class Engine:
             # readable trail and let waiters through before exiting non-zero.
             self._state = ComponentState.FAULTED
             self._fault = exc
-            named_event(NamedEvent.ENGINE_FAULTED, error=repr(_first_leaf(exc)))
+            fault = _first_leaf(exc)
+            named_event(NamedEvent.ENGINE_FAULTED, error=repr(fault))
             await self._run_best_effort_stop_hooks()
             self._stopped.set()
-            return self._finish_exit_run(1)
+            # A boot refusal repeats on every restart, so 2 stops the supervisor
+            # retrying it. Every other fault is 1, which a restart may fix.
+            return self._finish_exit_run(2 if isinstance(fault, BootRefusal) else 1)
         finally:
             self._remove_signal_handlers()
         self._state = ComponentState.STOPPED

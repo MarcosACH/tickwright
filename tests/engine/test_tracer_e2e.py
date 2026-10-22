@@ -23,6 +23,7 @@ from pathlib import Path
 
 import pytest
 from bus_backends import BUS_BACKENDS, make_bus
+from ledgers import scoped
 
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.feed import ReplayFeed
@@ -144,7 +145,7 @@ def _run(
         emitter=SignalEmitter(
             strategy_id="trivial", bus=bus, clock=clock, record_seq=checks.raise_seq
         ),
-        portfolio=projection.for_strategy("trivial"),
+        portfolio=scoped(projection, "trivial"),
         settings=SingleShotMarketStrategy.Settings(
             side=Side.BUY,
             quantity=Decimal("0.5"),
@@ -173,7 +174,7 @@ def _run(
         await bus.close()
 
     asyncio.run(drive())
-    return recorded, strategy, store, projection.for_strategy("trivial")
+    return recorded, strategy, store, scoped(projection, "trivial")
 
 
 @pytest.mark.parametrize("backend", BUS_BACKENDS)

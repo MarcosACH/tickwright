@@ -734,7 +734,8 @@ clearinghouse *is* the account boundary; under `unifiedAccount` or `portfolioMar
 snapshot reports only the collateral posted into perps, so equity and free margin read an order of
 magnitude low. Not configuration — it is **read from the venue** and verified at boot, and again
 before any Tier-1 cash heal. The guard **fails closed at both points**: at boot an unsupported *or
-unreadable* mode refuses to start (`VenueAccountModeUnsupported`); in flight a mode that changed or
+unreadable* mode refuses to start (`VenueAccountModeUnsupported` exits 2,
+`VenueAccountModeUnreadable` exits 1 so a supervisor retries); in flight a mode that changed or
 could not be verified refuses the heal, freezes the account-grain reconcile and alerts
 (`ACCOUNT_MODE_UNVERIFIED`) — an unverified mode is never read as an unchanged one. A
 [[Venue adapter]] concern that never reaches `domain`. See ADR-0046, ADR-0038, ADR-0034.
@@ -754,10 +755,15 @@ _Avoid_: account config (it is adapter-authored, not operator-authored), account
 (that is the venue's live truth the [[PortfolioProjection]] reconciles against).
 
 **Portfolio** *(seam)*:
-The pull-style read seam a [[Strategy]] queries for [[Position]]/[[Account]] state — reads are
-**synchronous method calls, never a PnL subscription** (ADR-0004). Three methods: `position(symbol)`
+The pull-style read seam a [[Strategy]] queries for [[Position]]/[[Account]] state and its own open
+orders — reads are
+**synchronous method calls, never a PnL subscription** (ADR-0004). Four methods: `position(symbol)`
 and `open_positions()` (frozen [[PositionView]]s — this strategy's **own** attribution beside the
 whole-position economics), and `account()` (the account-wide shared pool, a frozen [[AccountView]]).
+The fourth is `open_orders()`. It returns this strategy's orders that are not yet terminal. A
+strategy reads it after a restart, because the startup barrier can settle an order before the
+strategy subscribes. It refuses a read until the strategies start, so a read from the constructor
+fails loudly instead of reporting no orders. It works from `restore()` onward.
 **Scoped to the strategy at injection** (a per-`strategy_id` facade, like the `SignalEmitter`) and
 **constructor-injected by the [[Composition root]]** — no `strategy_id`/`venue`/`account_id`
 argument, no change to the [[Strategy]] Protocol. The unattributed partition (`strategy_id=None`) is
@@ -785,6 +791,13 @@ valuations read `0` rather than `None` (a stale mark freezes; the strategy judge
 See ADR-0041.
 _Avoid_: PositionSnapshot/AccountSnapshot (overloads `Strategy.snapshot()`), live view (they are
 frozen), DTO.
+
+**OpenOrderView**:
+A frozen copy of one of the strategy's open orders, returned by `Portfolio.open_orders()`. "Open"
+means not yet terminal, so a `PENDING` intent counts. The strategy knows the order by its
+`signal_id`, the same id a `CancelSignal` targets. The view never carries a `cloid` or a venue order
+id. See ADR-0041.
+_Avoid_: Order (the mutable saga), open order snapshot.
 
 **PortfolioProjection**:
 The write-through projection of [[Position]]/[[Account]] state implementing [[Portfolio]] —
@@ -1006,7 +1019,9 @@ funded), seed capital.
   component name (feed/strategy/exchange) or **Engine** for the host.
 - "Portfolio" was used for both the accounting read-facade and the deferred portfolio-*risk*/exposure
   surface — resolved: [[Portfolio]] is the accounting read seam (this map); portfolio-risk enforcement
-  stays the deferred RiskEngine concern (ADR-0017).
+  stays the deferred RiskEngine concern (ADR-0017). The seam also returns the strategy's open
+  orders. That is not accounting, but one seam keeps every strategy's constructor at three
+  arguments.
 - "collateral" carries three distinct senses and deliberately has **no term of its own**: the
   account's collateral *pool* (→ [[Account]], [[Equity]]), an isolated position's *locked* collateral
   (→ [[Margin]], [[Leverage]]), and the account's *opening cash line* (→ [[Genesis collateral]]).

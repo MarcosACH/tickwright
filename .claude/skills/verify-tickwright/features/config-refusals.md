@@ -1,10 +1,11 @@
 # Config refusals
 
 The engine refuses to start on a config it cannot run safely, with a readable message and exit
-code 1. Three refusals matter most: a paper run with no genesis collateral, a genesis that
+code 2. Three refusals matter most: a paper run with no genesis collateral, a genesis that
 disagrees with the store's ledger, and a leverage entry for a symbol no strategy trades. Two more
 came with safe exit: the reserved strategy id `__operator__`, and a store another engine holds.
-An exit run (`cancel-all`, `flatten`) refuses with exit 2 instead. See `safe-exit.md`.
+A held store exits 1, so a supervisor retries it until the holder is gone (ADR-0024). An exit
+run (`cancel-all`, `flatten`) refuses a held store with exit 2. See `safe-exit.md`.
 
 ## Sub-features
 
@@ -31,7 +32,7 @@ Preconditions:
 - **No genesis.** Run
   `$V start refuse nogenesis --env TICKWRIGHT_REPLAY__PATH=ticks.jsonl --env TICKWRIGHT_SQLITE__PATH=store.db`,
   `$V await refuse nogenesis --exit`, then
-  `$V check refuse nogenesis refuse-genesis --exit --expect 1`. The stderr file contains
+  `$V check refuse nogenesis refuse-genesis --exit --expect 2`. The stderr file contains
   `exchange='paper' needs a starting collateral: set TICKWRIGHT_PAPER__GENESIS_COLLATERAL`.
 - **Seed a ledger.** Run `$V start refuse first --preset paper-replay` and
   `$V await refuse first --event engine.feed_started`. Leave it running.
@@ -45,18 +46,18 @@ Preconditions:
 - **Changed genesis.** Run
   `$V start refuse mismatch --preset paper-replay --env TICKWRIGHT_PAPER__GENESIS_COLLATERAL=50000`,
   `$V await refuse mismatch --exit`, then
-  `$V check refuse mismatch refuse-mismatch --exit --expect 1` and
+  `$V check refuse mismatch refuse-mismatch --exit --expect 2` and
   `$V check refuse mismatch refuse-mismatch --event engine.faulted --expect 1`. The
   `engine.faulted` line's `error` starts with `StoreAccountMismatch`.
 - **Dead leverage.** Run
   `$V start refuse deadlev --preset paper-replay --env 'TICKWRIGHT_LEVERAGE={"ETH": {"mode": "cross", "leverage": 3}}'`,
   `$V await refuse deadlev --exit`, then
-  `$V check refuse deadlev refuse-dead-leverage --exit --expect 1`. The stderr file contains
+  `$V check refuse deadlev refuse-dead-leverage --exit --expect 2`. The stderr file contains
   `leverage names symbols no configured strategy trades: ETH`.
 - **Reserved id.** Run
   `$V start refuse reserved --preset paper-replay --env 'TICKWRIGHT_STRATEGIES=[{"strategy":"tickwright.strategies.single_shot:SingleShotMarketStrategy","strategy_id":"__operator__","symbols":["BTC"],"settings":{"side":"buy","quantity":"0.5"}}]'`,
   `$V await refuse reserved --exit`, then
-  `$V check refuse reserved refuse-reserved --exit --expect 1`. The stderr file contains
+  `$V check refuse reserved refuse-reserved --exit --expect 2`. The stderr file contains
   `__operator__ is reserved for operator orders, not a strategy id`.
 - **Untouched ledger.** Run
   `$V check refuse first refuse-mismatch --sql "select genesis_collateral from account" --expect 100000`.
@@ -67,8 +68,8 @@ Preconditions:
 
 ## Gotchas
 
-- A validation refusal is a pydantic traceback on stderr, not a JSON line. `--event` cannot
-  match it. Grep the message text.
-- A `StoreAccountMismatch` is a fault after the store opened, so it is a JSON `engine.faulted`
-  line. Both shapes exit 1.
+- A validation refusal is a `tickwright:` line with the pydantic message on stderr, not a JSON
+  line. `--event` cannot match it. Grep the message text.
+- A `StoreAccountMismatch` is a refusal after the store opened, so it is a JSON `engine.faulted`
+  line. Both shapes exit 2.
 - The remedy for a mismatch is a fresh `TICKWRIGHT_SQLITE__PATH`, never editing the store.
