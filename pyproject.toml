@@ -75,7 +75,10 @@ warn_redundant_casts = true
 # The verify-tickwright scripts are in for the same reason. `strategies.py` meets the
 # `Strategy` protocol by shape and `run_strategy.py` copies `build_engine` by hand, so a
 # seam change would break the verification path with no other signal.
-files = ["src", "tests", ".claude/hooks", ".claude/skills/verify-tickwright/scripts"]
+#
+# `examples` holds a user strategy that lives outside `src`. No test imports it. Without
+# this, only the container replay would notice a domain change that breaks it.
+files = ["src", "tests", "examples", ".claude/hooks", ".claude/skills/verify-tickwright/scripts"]
 # Skill-eval fixtures are throwaway sandbox trees, not repo code, and several
 # carry the same module names on purpose (three `domain/leverage.py`). `files`
 # above already leaves them out; this keeps a hand-typed `mypy .` from erroring on the
