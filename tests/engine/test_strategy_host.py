@@ -13,6 +13,7 @@ from decimal import Decimal
 import pytest
 import structlog.testing
 from kafka_fakes import FakeKafkaBroker, Record
+from ledgers import ledger, scoped
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.bus.kafka import KafkaBus
@@ -441,9 +442,12 @@ def test_a_single_shot_strategy_killed_after_firing_does_not_fire_again() -> Non
             emitter=SignalEmitter(
                 strategy_id="shooter", bus=bus, clock=clock, record_seq=store.raise_seq
             ),
-            side=Side.BUY,
-            quantity=Decimal("0.5"),
-            price=Decimal("41000"),
+            portfolio=scoped(ledger(store), "shooter"),
+            settings=SingleShotLimitStrategy.Settings(
+                side=Side.BUY,
+                quantity=Decimal("0.5"),
+                price=Decimal("41000"),
+            ),
         )
         host.register(shooter, symbols={"BTC"})
         signals: list[Signal] = []
@@ -478,9 +482,12 @@ def test_the_snapshot_is_on_disk_before_the_signal_it_records_is_dispatched() ->
         emitter=SignalEmitter(
             strategy_id="shooter", bus=bus, clock=clock, record_seq=store.raise_seq
         ),
-        side=Side.BUY,
-        quantity=Decimal("0.5"),
-        price=Decimal("41000"),
+        portfolio=scoped(ledger(store), "shooter"),
+        settings=SingleShotLimitStrategy.Settings(
+            side=Side.BUY,
+            quantity=Decimal("0.5"),
+            price=Decimal("41000"),
+        ),
     )
     host.register(shooter, symbols={"BTC"})
     seen_at_dispatch: list[bytes | None] = []
@@ -519,9 +526,12 @@ def test_on_kafka_the_snapshot_is_on_disk_before_the_signal_reaches_the_topic() 
         emitter=SignalEmitter(
             strategy_id="shooter", bus=bus, clock=clock, record_seq=store.raise_seq
         ),
-        side=Side.BUY,
-        quantity=Decimal("0.5"),
-        price=Decimal("41000"),
+        portfolio=scoped(ledger(store), "shooter"),
+        settings=SingleShotLimitStrategy.Settings(
+            side=Side.BUY,
+            quantity=Decimal("0.5"),
+            price=Decimal("41000"),
+        ),
     )
     host.register(shooter, symbols={"BTC"})
     seen_at_produce: list[bytes | None] = []

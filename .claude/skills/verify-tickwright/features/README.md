@@ -10,7 +10,8 @@ index, then use the matching feature file as the recipe. `../SKILL.md` explains 
 - Never drive the repo root `.env` or `tickwright.db`. The helper never touches them.
 - The paper presets carry BTC and ETH specs with `max_leverage` 20 and frictionless fees. A recipe
   that needs fees or funding passes its own `TICKWRIGHT_PAPER__INSTRUMENT_SPECS`.
-- The shipped strategies are `single_shot_market` and `single_shot_limit`, passed as JSON in
+- The shipped strategies are `tickwright.strategies.single_shot:SingleShotMarketStrategy` and
+  `tickwright.strategies.single_shot_limit:SingleShotLimitStrategy`, named by import path in
   `TICKWRIGHT_STRATEGIES`. Their cloids come from `$V cloid <strategy_id>:<symbol>:<seq>`.
 
 ## Driving conventions

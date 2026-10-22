@@ -53,6 +53,12 @@ the **`Engine` constructing its own dependencies** — couples the core to concr
 the dependency direction above. A readable two-arm `match` at the composition root is the honest
 minimal wiring: exactly one place knows all concretes, and it sits at the top of the graph.
 
+**(Narrowed by ADR-0061:** rejection (a) no longer covers strategies. A strategy now loads from an
+import path named in config, such as `my_strats.momentum:Momentum`. A user's strategy lives in the
+user's own code, which no `match` arm in this repo can name. There is still no registry and no
+discovery. The config names one class, and the engine imports it. Every other seam keeps its
+`match` arm.**)**
+
 ## Consequences
 
 - Adding a venue touches four localized places: a new adapter package, a new `*Config`, one

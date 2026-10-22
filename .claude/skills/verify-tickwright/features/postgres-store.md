@@ -23,7 +23,7 @@ Preconditions:
 - **Infra.** Run `$V init pg --feature postgres-store` and `$V infra pg up postgres`. It prints
   the run's DSN, `postgresql://tickwright:tickwright@localhost:5432/verify_pg`. Export it as `DSN`.
 - **Life one.** Run `$V ticks pg ticks --row BTC:42000@0 --row BTC:42100@1s`,
-  `$V start pg first --preset paper-replay --env TICKWRIGHT_STORE=postgres --env TICKWRIGHT_POSTGRES__DSN=$DSN --env 'TICKWRIGHT_STRATEGIES=[{"kind":"single_shot_market","strategy_id":"shooter","symbol":"BTC","side":"buy","quantity":"0.5"}]'`,
+  `$V start pg first --preset paper-replay --env TICKWRIGHT_STORE=postgres --env TICKWRIGHT_POSTGRES__DSN=$DSN --env 'TICKWRIGHT_STRATEGIES=[{"strategy":"tickwright.strategies.single_shot:SingleShotMarketStrategy","strategy_id":"shooter","symbols":["BTC"],"settings":{"side":"buy","quantity":"0.5"}}]'`,
   `$V await pg first --order $($V cloid shooter:BTC:1)=FILLED`, `$V signal pg first TERM`,
   `$V await pg first --exit`, `$V dump pg first`.
 - **Check life one.** Run `$V check pg first pg-fill --sql "select state from orders" --expect filled`,

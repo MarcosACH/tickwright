@@ -116,11 +116,13 @@ def _config(tmp_path: Path, **overrides: object) -> AppConfig:
         "leverage": {"BTC": LEVERAGE},
         "strategies": [
             StrategyConfig(
-                kind="single_shot_market",
+                strategy="tickwright.strategies.single_shot:SingleShotMarketStrategy",
                 strategy_id="demo",
-                symbol="BTC",
-                side=Side.BUY,
-                quantity=QUANTITY,
+                symbols=["BTC"],
+                settings={
+                    "side": Side.BUY,
+                    "quantity": QUANTITY,
+                },
             )
         ],
     }
@@ -471,18 +473,22 @@ def test_two_strategies_partition_the_book_and_sum_to_the_account_net(tmp_path: 
         leverage={"BTC": LEVERAGE, "ETH": LEVERAGE},
         strategies=[
             StrategyConfig(
-                kind="single_shot_market",
+                strategy="tickwright.strategies.single_shot:SingleShotMarketStrategy",
                 strategy_id="demo",
-                symbol="BTC",
-                side=Side.BUY,
-                quantity=QUANTITY,
+                symbols=["BTC"],
+                settings={
+                    "side": Side.BUY,
+                    "quantity": QUANTITY,
+                },
             ),
             StrategyConfig(
-                kind="single_shot_market",
+                strategy="tickwright.strategies.single_shot:SingleShotMarketStrategy",
                 strategy_id="hedge",
-                symbol="ETH",
-                side=Side.SELL,
-                quantity=ETH_QUANTITY,
+                symbols=["ETH"],
+                settings={
+                    "side": Side.SELL,
+                    "quantity": ETH_QUANTITY,
+                },
             ),
         ],
     )

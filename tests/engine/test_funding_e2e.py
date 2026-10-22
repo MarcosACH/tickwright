@@ -204,8 +204,10 @@ async def _run(
         strategy = SingleShotMarketStrategy(
             emitter=engine.emitter_for("trivial"),
             portfolio=engine.portfolio_for("trivial"),
-            side=Side.BUY,
-            quantity=Decimal("0.5"),
+            settings=SingleShotMarketStrategy.Settings(
+                side=Side.BUY,
+                quantity=Decimal("0.5"),
+            ),
         )
         engine.register(strategy, symbols={"BTC"})
 

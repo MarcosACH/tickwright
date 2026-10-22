@@ -8,11 +8,14 @@ back. Selection is one explicit `match` arm in the composition root
 ([`app/build.py`](../src/tickwright/app/build.py)) keyed off a `Literal` discriminant in
 [`app/config.py`](../src/tickwright/app/config.py).
 
+Strategies are the one exception. Your strategy lives in your own repo, so config names its class by
+import path and the engine imports it at boot (ADR-0061).
+
 The seams and their two shipped implementations:
 
 | Seam (`Protocol`) | Discriminant | Shipped impls |
 | --- | --- | --- |
-| `Strategy` | `strategies[].kind` | `single_shot_market`, `single_shot_limit` |
+| `Strategy` | `strategies[].strategy` (import path) | `SingleShotMarketStrategy`, `SingleShotLimitStrategy` |
 | `MarketFeed` | `feed` | `replay`, `hyperliquid` |
 | `Exchange` | `exchange` | `paper`, `hyperliquid` |
 | `EventBus` | `bus` | `in_memory`, `kafka` |
@@ -22,8 +25,9 @@ The seams and their two shipped implementations:
 | `FillModel` (paper-internal) | `paper.fill_model` | `immediate`, `stochastic` |
 
 > **Two implementations per seam — no more.** One looks hardcoded; three is scope creep. The repo
-> ships exactly two of each on purpose. Your extension is the *third* — keep it out of tree, or
-> replace one of ours, but don't grow the shipped set.
+> ships exactly two of each on purpose, so don't grow the shipped set. Your own strategy stays in
+> your repo and loads by import path (ADR-0061). A third feed, exchange, bus or store cannot load
+> from outside the repo. It has to replace one of ours.
 
 ---
 
@@ -82,8 +86,14 @@ A strategy consumes ticks and lifecycle events and emits `PlaceSignal`/`CancelSi
 `domain` **only** — no saga, store, or venue knowledge. Study
 [`strategies/single_shot.py`](../src/tickwright/strategies/single_shot.py) as the reference.
 
-- [ ] Add a class in `src/tickwright/strategies/` implementing the `Strategy` Protocol:
-  `strategy_id`, `on_tick`, `on_order_event`, `set_next_seq`, `snapshot`, `restore`.
+- [ ] Write a class in your own repo that implements the `Strategy` Protocol: `strategy_id`,
+  `on_tick`, `on_order_event`, `set_next_seq`, `snapshot`, `restore`. Install Tickwright as a
+  dependency. Your class does not go in `src/tickwright/strategies/`.
+- [ ] Declare a `Settings` attribute on the class that names a Pydantic model. The engine checks
+  the config entry's `settings` against it at boot. A strategy with no settings declares an empty
+  model. An unknown settings field is refused, even if your model allows extra fields.
+- [ ] Accept exactly three keyword arguments: `emitter`, `portfolio` and `settings`. Accept all
+  three, even if you read no portfolio.
 - [ ] Emit signals through a composed `SignalEmitter`
   ([`domain/emitter.py`](../src/tickwright/domain/emitter.py)) — it owns the `seq`,
   clock-stamps each signal, and publishes it. Never build a `signal_id` by hand.
@@ -118,14 +128,17 @@ A strategy consumes ticks and lifecycle events and emits `PlaceSignal`/`CancelSi
   even while the kill switch is tripped (ADR-0055).
 - [ ] Make `snapshot()`/`restore()` a versioned, minimal payload; raise on an unknown version.
 - [ ] Read your own economics through the [`Portfolio`](../src/tickwright/domain/protocols.py)
-  seam, if the strategy needs them. Take it as a constructor argument. The composition root hands
-  you a facade already scoped to your `strategy_id`, so no method takes a strategy or account
-  argument. Four synchronous calls, each returning a frozen snapshot. The fourth,
+  seam, if the strategy needs them. It is the `portfolio` constructor argument. The composition
+  root hands you a facade already scoped to your `strategy_id`, so no method takes a strategy or
+  account argument. Four synchronous calls, each returning a frozen snapshot. The fourth,
   `open_orders()`, is covered in the recovery section above:
 
   ```python
   class MyStrategy:
-      def __init__(self, *, strategy_id: str, bus: EventBus, clock: Clock, portfolio: Portfolio):
+      class Settings(BaseModel):
+          quantity: Decimal
+
+      def __init__(self, *, emitter: SignalEmitter, portfolio: Portfolio, settings: Settings):
           self._portfolio = portfolio
           ...
 
@@ -145,16 +158,21 @@ A strategy consumes ticks and lifecycle events and emits `PlaceSignal`/`CancelSi
   the two `effective_leverage`s, is `None` until the first mark for that symbol arrives, so check
   for `None` before you do arithmetic. Reads are method calls, never a PnL subscription
   (ADR-0004). A read inside `on_order_event` for a fill is coherent with that fill: the projection
-  applied it before the event was published (ADR-0041 §7). Do not take the argument if you read
-  nothing. `single_shot_limit` does not, on purpose.
-- [ ] Add a `kind` value to the `StrategyConfig.kind` `Literal` in
-  [`app/config.py`](../src/tickwright/app/config.py), plus any config fields it needs (validate
-  cross-field requirements in the model, as `single_shot_limit`'s `price` does).
-- [ ] Add one `match` arm to `_build_strategy(...)` in [`app/build.py`](../src/tickwright/app/build.py).
-  Pass it the `emitter` the function receives.
+  applied it before the event was published (ADR-0041 §7).
+- [ ] Name the class in config as `module:Class`. The module must be importable by the engine
+  process, for example installed in its environment or on `PYTHONPATH`:
+
+  ```
+  TICKWRIGHT_STRATEGIES=[{"strategy": "my_strats.momentum:Momentum", "strategy_id": "mom", "symbols": ["BTC"], "settings": {"quantity": "0.5"}}]
+  ```
+
+  These make the CLI exit `2` before the store or the venue is touched: a path that is not
+  `module:Class` or does not import, a class with no `Settings`, a constructor that cannot take the
+  three keyword arguments, a missing `Strategy` method, and settings that do not validate. Two
+  more exit `2` once the class is built, before the engine runs: a constructor that raises, and
+  a `strategy_id` that is missing or differs from the entry's.
 - [ ] TDD it: a `ReplayFeed` tick → your strategy → `PaperExchange` → the expected `OrderEvent` on the
   bus, plus a snapshot/restore round-trip and a seq-resumes-after-restart test.
-- [ ] Document the new `kind` in [`.env.example`](../.env.example) (`TICKWRIGHT_STRATEGIES`).
 
 ## Checklist: add a venue package
 
@@ -346,7 +364,8 @@ Exactly one module — the composition root — knows every concrete
 one `Literal` value plus one `match` arm there; nothing in `engine` or another adapter changes,
 because they only ever see the Protocol. `match` over an `assert_never`-closed `Literal` means a new
 discriminant that you forget to wire is a **compile-time** (mypy) error, not a runtime surprise. That
-is the whole extensibility story — no registry, no entry-point discovery, no import-path DSL.
+is the whole extensibility story — no registry, no entry-point discovery. Strategies are the one
+exception, and they load by import path because no `match` arm can name your code (ADR-0061).
 
 See [`CONTEXT.md`](../CONTEXT.md) for the vocabulary and
 [`docs/module-maps/v1-core-engine.md`](module-maps/v1-core-engine.md) for each module's full

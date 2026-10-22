@@ -4,14 +4,22 @@ The one module at the top of the graph that knows every concrete. Each seam
 has a public per-seam builder with an explicit ``match`` over its config
 discriminant; ``build_engine`` composes them and hands the ``Engine``
 already-built dependencies. Adding an impl is one ``Literal`` value in
-``config.py`` and one ``match`` arm here — no registry, no import-path DSL.
+``config.py`` and one ``match`` arm here — no registry, no discovery.
+
+Strategies are the one exception. A user's strategy lives in the user's own
+code, which no arm here can name, so config names each one by import path and
+this module imports that one class (ADR-0061).
 """
 
 import asyncio
+import importlib
+import inspect
 import random
 from collections.abc import Callable, Mapping
 from decimal import Decimal
-from typing import Literal, NamedTuple, assert_never
+from typing import Literal, NamedTuple, assert_never, get_protocol_members
+
+from pydantic import BaseModel, ValidationError
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import LiveClock, ManualClock
@@ -34,10 +42,8 @@ from tickwright.domain import (
     MarketFeed,
     Order,
     OrderType,
-    Portfolio,
     PreTradeGuard,
     ReplayClock,
-    SignalEmitter,
     Store,
     Strategy,
     TimeInForce,
@@ -46,7 +52,6 @@ from tickwright.domain import (
 from tickwright.engine.exit_run import ExitJob, Flatten, OperatorCancelAll
 from tickwright.engine.guard import NoopGuard, RealGuard
 from tickwright.engine.runner import Engine
-from tickwright.strategies import SingleShotLimitStrategy, SingleShotMarketStrategy
 
 # Imported at module top, unlike the kafka/psycopg arms: the venue package is
 # light — the websockets/aiohttp/signing stacks load only when a live
@@ -334,6 +339,14 @@ class UnsupportedExitRun(ValueError):
     """
 
 
+class StrategyLoadRefusal(ValueError):
+    """A strategy entry names a class the engine cannot load.
+
+    Most checks run before the store or the venue exists. Two run once the class
+    is built, but still before the engine runs (ADR-0061).
+    """
+
+
 def build_exit_job(
     config: AppConfig, command: Literal["cancel-all", "flatten"], *, new_store: bool = False
 ) -> Engine:
@@ -358,6 +371,9 @@ def build_exit_job(
 
 
 def _build_engine(config: AppConfig, *, exit_job: ExitJob | None) -> Engine:
+    # Load first, so a bad entry refuses before the store or the venue exists.
+    # An exit run trades nothing, so it loads no strategy.
+    loaded = [] if exit_job is not None else [_load_strategy(c) for c in config.strategies]
     bus = build_bus(config)
     clock = build_clock(config)
     store = build_store(config)
@@ -380,42 +396,92 @@ def _build_engine(config: AppConfig, *, exit_job: ExitJob | None) -> Engine:
         leverage=leverage,
         exit_job=exit_job,
     )
-    # An exit run trades nothing, so it builds no strategy.
     if exit_job is not None:
         return engine
-    for strategy_config in config.strategies:
-        engine.register(
-            _build_strategy(
-                strategy_config,
-                emitter=engine.emitter_for(strategy_config.strategy_id),
-                portfolio=engine.portfolio_for(strategy_config.strategy_id),
-            ),
-            symbols={strategy_config.symbol},
-        )
+    for strategy_config, (cls, settings) in zip(config.strategies, loaded, strict=True):
+        strategy_id = strategy_config.strategy_id
+        # Always all three, even to a strategy that reads no portfolio. A fixed
+        # signature is easier to document than a rule about who gets what
+        # (ADR-0041 §7 as amended by ADR-0061).
+        emitter = engine.emitter_for(strategy_id)
+        portfolio = engine.portfolio_for(strategy_id)
+        # Any error counts, as with the import. A constructor that raises fails
+        # the same way on every restart, so it must exit 2, not 1.
+        try:
+            strategy = cls(emitter=emitter, portfolio=portfolio, settings=settings)
+        except Exception as exc:
+            raise StrategyLoadRefusal(
+                f"strategy {strategy_id!r}: {strategy_config.strategy} raised while it was "
+                f"built: {exc!r}"
+            ) from exc
+        # The emitter and portfolio carry the entry's id, but the host keys on
+        # the strategy's. A mismatch hides its fills from it and resumes its seq
+        # from the wrong high-water after a restart (#442). A missing id refuses
+        # too: as an AttributeError it would exit 1.
+        own_id = getattr(strategy, "strategy_id", None)
+        if own_id != strategy_id:
+            raise StrategyLoadRefusal(
+                f"strategy {strategy_id!r}: {strategy_config.strategy} calls itself "
+                f"{own_id!r}. Set strategy_id from emitter.strategy_id."
+            )
+        engine.register(strategy, symbols=set(strategy_config.symbols))
     return engine
 
 
-def _build_strategy(
-    config: StrategyConfig, *, emitter: SignalEmitter, portfolio: Portfolio
-) -> Strategy:
-    match config.kind:
-        case "single_shot_market":
-            return SingleShotMarketStrategy(
-                emitter=emitter,
-                portfolio=portfolio,
-                side=config.side,
-                quantity=config.quantity,
-            )
-        case "single_shot_limit":
-            # Deliberately not handed a portfolio: it reads no position state,
-            # and a constructor parameter with no reader is not symmetry, it is
-            # an unused seam (ADR-0041 §7).
-            assert config.price is not None  # enforced by StrategyConfig validation
-            return SingleShotLimitStrategy(
-                emitter=emitter,
-                side=config.side,
-                quantity=config.quantity,
-                price=config.price,
-            )
-        case unreachable:
-            assert_never(unreachable)
+def _load_strategy(config: StrategyConfig) -> tuple[Callable[..., Strategy], BaseModel]:
+    """Import the class a strategy entry names and check its settings, or refuse the entry."""
+    module_name, _, class_name = config.strategy.partition(":")
+    where = f"strategy {config.strategy_id!r} names {config.strategy!r}, which does not import"
+    # Any error counts. A user module that fails while it imports is as unusable
+    # as one that is not there.
+    try:
+        module = importlib.import_module(module_name)
+    except Exception as exc:
+        raise StrategyLoadRefusal(f"{where}: {exc}") from exc
+    try:
+        cls = getattr(module, class_name)
+    except AttributeError as exc:
+        raise StrategyLoadRefusal(f"{where}: {module_name} has no {class_name!r}") from exc
+    settings_model = getattr(cls, "Settings", None)
+    if not (isinstance(settings_model, type) and issubclass(settings_model, BaseModel)):
+        raise StrategyLoadRefusal(
+            f"strategy {config.strategy_id!r}: {config.strategy} has no Settings Pydantic model. "
+            "A strategy with no settings declares an empty one."
+        )
+    # Check the call now, with the same rules Python uses for the real call,
+    # so a bad signature refuses before the store exists.
+    try:
+        inspect.signature(cls).bind(emitter=None, portfolio=None, settings=None)
+    except TypeError as exc:
+        raise StrategyLoadRefusal(
+            f"strategy {config.strategy_id!r}: {config.strategy} must take exactly "
+            f"emitter, portfolio and settings as keyword arguments: {exc}"
+        ) from exc
+    # The list comes from the Protocol, so a new method there is checked here
+    # too. strategy_id is left out: it only exists once __init__ has run.
+    missing = sorted(
+        name
+        for name in get_protocol_members(Strategy)
+        if callable(getattr(Strategy, name, None)) and not callable(getattr(cls, name, None))
+    )
+    if missing:
+        raise StrategyLoadRefusal(
+            f"strategy {config.strategy_id!r}: {config.strategy} has no {', '.join(missing)}. "
+            "Every strategy needs the methods of the Strategy Protocol."
+        )
+    # Forbid extra fields even if the user's model allows them. Otherwise a typo
+    # in a settings key boots a strategy that silently ignores it (ADR-0061).
+    try:
+        settings = settings_model.model_validate(config.settings, extra="forbid")
+    except ValidationError as exc:
+        # Settings can hold a secret, and the CLI prints this before log
+        # redaction exists. So name each field and the problem, never the input.
+        # The chain is cut too, because a traceback would print the input.
+        problems = "".join(
+            f"\n  {'.'.join(map(str, error['loc']))}: {error['msg']}"
+            for error in exc.errors(include_input=False)
+        )
+        raise StrategyLoadRefusal(
+            f"strategy {config.strategy_id!r}: its settings do not fit {config.strategy}:{problems}"
+        ) from None
+    return cls, settings

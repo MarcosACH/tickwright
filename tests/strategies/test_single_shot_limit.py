@@ -11,6 +11,8 @@ a ``cloid``.
 import asyncio
 from decimal import Decimal
 
+from ledgers import ledger, scoped
+
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.store import SQLiteStore
@@ -55,10 +57,13 @@ def _harness(
             clock=clock,
             record_seq=SQLiteStore(":memory:").raise_seq,
         ),
-        side=Side.BUY,
-        quantity=Decimal("0.5"),
-        price=Decimal("41000"),
-        cancel_after_ticks=cancel_after_ticks,
+        portfolio=scoped(ledger(SQLiteStore(":memory:")), "trivial"),
+        settings=SingleShotLimitStrategy.Settings(
+            side=Side.BUY,
+            quantity=Decimal("0.5"),
+            price=Decimal("41000"),
+            cancel_after_ticks=cancel_after_ticks,
+        ),
     )
     bus.subscribe(MarketTick, strategy.on_tick)
     signals: list[Signal] = []

@@ -7,8 +7,8 @@ order is still `LIVE` in the second life (#484).
 
 ## Sub-features
 
-- `paper-fill` a `single_shot_market` fills on the first tick at the tick price.
-- `paper-rest` a `single_shot_limit` below the market rests `LIVE`.
+- `paper-fill` a `SingleShotMarketStrategy` fills on the first tick at the tick price.
+- `paper-rest` a `SingleShotLimitStrategy` below the market rests `LIVE`.
 - `paper-stop` `TERM` exits 0, snapshots strategies, leaves the resting order alone.
 - `paper-restart` the second life places nothing and exits 0.
 - `paper-keep` the second life keeps the resting order `LIVE` and ghosts nothing.
@@ -16,7 +16,7 @@ order is still `LIVE` in the second life (#484).
 ## How to get to it (user POV)
 
 - `cp .env.example .env && uv run tickwright`, then `Ctrl-C`, then `uv run tickwright` again.
-  `.env.example` runs one market strategy. Add a `single_shot_limit` entry to see a resting order.
+  `.env.example` runs one market strategy. Add a `SingleShotLimitStrategy` entry to see a resting order.
 
 ## Driving it with verify
 
@@ -24,7 +24,7 @@ Preconditions:
 
 - `$V doctor` says the package imports.
 - Run id `rt` is unused.
-- `S='[{"kind":"single_shot_market","strategy_id":"shooter","symbol":"BTC","side":"buy","quantity":"0.5"},{"kind":"single_shot_limit","strategy_id":"rester","symbol":"ETH","side":"buy","quantity":"0.5","price":"2000"}]'`
+- `S='[{"strategy":"tickwright.strategies.single_shot:SingleShotMarketStrategy","strategy_id":"shooter","symbols":["BTC"],"settings":{"side":"buy","quantity":"0.5"}},{"strategy":"tickwright.strategies.single_shot_limit:SingleShotLimitStrategy","strategy_id":"rester","symbols":["ETH"],"settings":{"side":"buy","quantity":"0.5","price":"2000"}}]'`
 - `FILL=$($V cloid shooter:BTC:1)` and `REST=$($V cloid rester:ETH:1)`
 
 - **Set up.** Run `$V init rt --feature paper-round-trip` and

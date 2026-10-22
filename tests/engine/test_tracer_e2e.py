@@ -145,9 +145,11 @@ def _run(
         emitter=SignalEmitter(
             strategy_id="trivial", bus=bus, clock=clock, record_seq=checks.raise_seq
         ),
-        side=Side.BUY,
-        quantity=Decimal("0.5"),
         portfolio=scoped(projection, "trivial"),
+        settings=SingleShotMarketStrategy.Settings(
+            side=Side.BUY,
+            quantity=Decimal("0.5"),
+        ),
     )
     feed = ReplayFeed(path=path, bus=bus, clock=clock)
 

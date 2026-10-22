@@ -24,7 +24,7 @@ uv run tickwright       # run the engine
 ```
 
 The run replays [`examples/ticks.jsonl`](examples/ticks.jsonl) through the demo
-`single_shot_market` strategy into the paper exchange. The order lifecycle shows up on stdout as
+`SingleShotMarketStrategy` into the paper exchange. The order lifecycle shows up on stdout as
 structured JSON:
 
 ```json
@@ -159,9 +159,9 @@ durable too. A halt outlives a crash and is cleared only by an explicit reset.
 | `SIGUSR2` | Reset the kill switch. |
 
 Exit `1` means the engine faulted. That is the restart signal for your supervisor. Exit `2` means
-the engine refused to start: a config that does not validate, a store bound to another account, or
-an account mode the venue reported and the engine refuses. A restart would refuse again, so do not
-restart on `2`. Fix the cause first.
+the engine refused to start: a config that does not validate, a strategy entry it cannot load, a
+store bound to another account, or an account mode the venue reported and the engine refuses. A
+restart would refuse again, so do not restart on `2`. Fix the cause first.
 
 One engine owns a store at a time. A second engine on the same store exits `1` and names the
 process that holds it. The lock ends when that process stops or dies, so a crash never leaves it
@@ -215,7 +215,7 @@ trip, so the run warns with `exit.unguarded`.
   equity, and free margin. Perps only. On live, the numbers are checked against the venue's
   account snapshot and a disagreement is alerted.
 - Strategies: two reference strategies that place one market or one limit order. They exist to
-  exercise the pipeline.
+  exercise the pipeline. Your own strategy stays in your repo, and config names it by import path.
 - Operator commands: `tickwright cancel-all` on paper and Hyperliquid, and `tickwright flatten` on
   paper replay.
 

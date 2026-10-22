@@ -81,16 +81,20 @@ def _life(
             strategy_id="btc-shot", bus=bus, clock=clock, record_seq=checks.raise_seq
         ),
         portfolio=scoped(projection, "btc-shot"),
-        side=Side.BUY,
-        quantity=Decimal("1"),
+        settings=SingleShotMarketStrategy.Settings(
+            side=Side.BUY,
+            quantity=Decimal("1"),
+        ),
     )
     eth_strat = SingleShotMarketStrategy(
         emitter=SignalEmitter(
             strategy_id="eth-shot", bus=bus, clock=clock, record_seq=checks.raise_seq
         ),
         portfolio=scoped(projection, "eth-shot"),
-        side=Side.SELL,
-        quantity=Decimal("2"),
+        settings=SingleShotMarketStrategy.Settings(
+            side=Side.SELL,
+            quantity=Decimal("2"),
+        ),
     )
     host.register(btc_strat, symbols={"BTC"})
     host.register(eth_strat, symbols={"ETH"})

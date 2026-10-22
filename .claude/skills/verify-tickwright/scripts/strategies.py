@@ -1,8 +1,8 @@
 """Five throwaway strategies that read the ``Portfolio`` seam, for verification only.
 
-They are not shipped ``kind``s. ``docs/extending.md`` keeps a third strategy
-out of tree, so these satisfy the ``Strategy`` Protocol by shape and are
-registered by hand in ``run_strategy.py``. Each one logs what it read as a
+They are not reference strategies. They predate loading by import path
+(ADR-0061), so they declare no ``Settings`` and are registered by hand in
+``run_strategy.py``. Each one logs what it read as a
 ``verify.*`` event on the same stderr stream the engine writes, so the evidence
 shows the strategy's view beside the engine's.
 

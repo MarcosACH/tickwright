@@ -13,37 +13,51 @@ adding an impl widens exactly one ``Literal`` plus one ``match`` arm in
 """
 
 from collections import Counter
-from decimal import Decimal
-from typing import Literal, Self
+from typing import Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from tickwright.adapters.bus import KafkaBusConfig
 from tickwright.adapters.feed import ReplayFeedConfig
 from tickwright.adapters.paper import PaperExchangeConfig
 from tickwright.adapters.store import PostgresStoreConfig, SQLiteStoreConfig
-from tickwright.domain import LeverageSpec, Side, SymbolOwnership, reserved_id_refusal
+from tickwright.domain import LeverageSpec, SymbolOwnership, reserved_id_refusal
 from tickwright.engine.guard import NO_LIMITS, PreTradeLimits
 from tickwright.engine.runner import EngineConfig
 from tickwright.venues.hyperliquid import HyperliquidConfig
 
 
 class StrategyConfig(BaseModel):
-    """One hosted strategy: which reference impl, its identity, and its order."""
+    """One hosted strategy: the class to import, its identity, its symbols, its settings.
 
-    kind: Literal["single_shot_market", "single_shot_limit"]
+    The entry never imports the class. That happens in ``build_engine``, so this
+    model stays pure (issue #71) and ``settings`` stays raw until the class's own
+    ``Settings`` model checks it (ADR-0061).
+    """
+
+    # An old entry that still sets ``kind`` or ``side`` must refuse. Ignoring
+    # those fields would boot a strategy with none of the settings it was given.
+    model_config = ConfigDict(extra="forbid")
+
+    strategy: str
     strategy_id: str
-    symbol: str
-    side: Side
-    quantity: Decimal
-    price: Decimal | None = None
+    symbols: list[str] = Field(min_length=1)
+    settings: dict[str, Any] = Field(default_factory=dict)
 
-    @model_validator(mode="after")
-    def _limit_needs_a_price(self) -> Self:
-        if self.kind == "single_shot_limit" and self.price is None:
-            raise ValueError("a single_shot_limit strategy needs a price")
-        return self
+    @field_validator("strategy")
+    @classmethod
+    def _path_must_be_module_colon_class(cls, path: str) -> str:
+        # Shape only. A bad shape would otherwise reach the import step and
+        # refuse with a message that names no real problem.
+        module_name, colon, class_name = path.partition(":")
+        if not (
+            colon
+            and class_name.isidentifier()
+            and all(part.isidentifier() for part in module_name.split("."))
+        ):
+            raise ValueError(f"strategy must be 'module:Class', got {path!r}")
+        return path
 
     @model_validator(mode="after")
     def _id_may_not_be_a_reserved_owner(self) -> Self:
@@ -200,9 +214,10 @@ class AppConfig(BaseModel):
         ownership = SymbolOwnership()
         refusals: list[str] = []
         for strategy in self.strategies:
-            refusal = ownership.refusal(strategy.strategy_id, symbols=(strategy.symbol,))
+            symbols = tuple(strategy.symbols)
+            refusal = ownership.refusal(strategy.strategy_id, symbols=symbols)
             if refusal is None:
-                ownership = ownership.claim(strategy.strategy_id, symbols=(strategy.symbol,))
+                ownership = ownership.claim(strategy.strategy_id, symbols=symbols)
             else:
                 refusals.append(refusal)
         if refusals:
@@ -227,7 +242,9 @@ class AppConfig(BaseModel):
         the dedupe is unreachable from a valid config and stays only so that the
         set is well-defined for a model built field-by-field mid-validation.
         """
-        return tuple(dict.fromkeys(strategy.symbol for strategy in self.strategies))
+        return tuple(
+            dict.fromkeys(symbol for strategy in self.strategies for symbol in strategy.symbols)
+        )
 
     @model_validator(mode="after")
     def _every_leverage_entry_must_name_a_traded_symbol(self) -> Self:

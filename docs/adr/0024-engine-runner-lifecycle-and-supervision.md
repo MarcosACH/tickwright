@@ -305,6 +305,9 @@ room for a missed-propagation bug.
   engine could not read in time is not on the list either.** That is a network problem, and a
   retry can fix it, so it stays 1. Only a mode the venue reported and the engine refuses exits 2.
   The refusals that exit 2 share one marker class, so the runner maps them in one place.**)**
+  **(Amended by ADR-0061:** a strategy entry that cannot load is one more boot refusal, so it
+  exits 2. The CLI maps it itself, because it is raised while the engine is built, before
+  `Engine.run`.**)**
 
 **The two ADR-0014 error classes are drawn by handler origin, not by exception type.** The Engine
 wraps **third-party** handlers (`Strategy.on_tick`/`on_order_event`, `MarketFeed` parse callbacks) in

@@ -23,7 +23,7 @@ Preconditions:
 - **Infra.** Run `$V init kafka --feature kafka-bus` and `$V infra kafka up kafka`. It waits
   for the healthcheck and prints the topic name `verify.kafka`.
 - **Run.** Run `$V ticks kafka ticks --row BTC:42000@0 --row BTC:42100@1s`,
-  `$V start kafka first --preset paper-replay --env TICKWRIGHT_BUS=kafka --env TICKWRIGHT_KAFKA__EVENTS_TOPIC=verify.kafka --env TICKWRIGHT_KAFKA__GROUP_ID=verify.kafka --env 'TICKWRIGHT_STRATEGIES=[{"kind":"single_shot_market","strategy_id":"shooter","symbol":"BTC","side":"buy","quantity":"0.5"}]'`,
+  `$V start kafka first --preset paper-replay --env TICKWRIGHT_BUS=kafka --env TICKWRIGHT_KAFKA__EVENTS_TOPIC=verify.kafka --env TICKWRIGHT_KAFKA__GROUP_ID=verify.kafka --env 'TICKWRIGHT_STRATEGIES=[{"strategy":"tickwright.strategies.single_shot:SingleShotMarketStrategy","strategy_id":"shooter","symbols":["BTC"],"settings":{"side":"buy","quantity":"0.5"}}]'`,
   `$V await kafka first --order $($V cloid shooter:BTC:1)=FILLED --timeout 60`.
 - **Count.** Run
   `docker compose exec kafka /opt/kafka/bin/kafka-get-offsets.sh --bootstrap-server localhost:9092 --topic verify.kafka > .agents/verify/kafka/evidence/first.offsets.txt`

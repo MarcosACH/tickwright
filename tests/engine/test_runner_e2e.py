@@ -128,8 +128,10 @@ async def _run_to_fill_then_stop(
     strategy = SingleShotMarketStrategy(
         emitter=engine.emitter_for("trivial"),
         portfolio=engine.portfolio_for("trivial"),
-        side=Side.BUY,
-        quantity=Decimal("0.5"),
+        settings=SingleShotMarketStrategy.Settings(
+            side=Side.BUY,
+            quantity=Decimal("0.5"),
+        ),
     )
     engine.register(strategy, symbols={"BTC"})
     assert engine.state is ComponentState.READY
@@ -342,8 +344,10 @@ def test_an_engine_on_a_store_another_process_holds_faults_and_writes_nothing(
         SingleShotMarketStrategy(
             emitter=engine.emitter_for("trivial"),
             portfolio=engine.portfolio_for("trivial"),
-            side=Side.BUY,
-            quantity=Decimal("0.5"),
+            settings=SingleShotMarketStrategy.Settings(
+                side=Side.BUY,
+                quantity=Decimal("0.5"),
+            ),
         ),
         symbols={"BTC"},
     )
@@ -552,8 +556,10 @@ def test_a_negative_free_margin_is_reported_and_stops_nothing(tmp_path: Path) ->
         overweight = SingleShotMarketStrategy(
             emitter=engine.emitter_for("overweight"),
             portfolio=engine.portfolio_for("overweight"),
-            side=Side.BUY,
-            quantity=Decimal("3"),
+            settings=SingleShotMarketStrategy.Settings(
+                side=Side.BUY,
+                quantity=Decimal("3"),
+            ),
         )
         blind = _MarginBlindStrategy(
             bus=bus,
@@ -1519,8 +1525,10 @@ def test_invariant_violation_faults_the_engine_and_exits_nonzero(tmp_path: Path)
             SingleShotMarketStrategy(
                 emitter=engine.emitter_for("doomed"),
                 portfolio=engine.portfolio_for("doomed"),
-                side=Side.BUY,
-                quantity=Decimal("0.5"),
+                settings=SingleShotMarketStrategy.Settings(
+                    side=Side.BUY,
+                    quantity=Decimal("0.5"),
+                ),
             ),
             symbols={"BTC"},
         )
@@ -2200,8 +2208,10 @@ def test_a_venue_that_refuses_to_start_faults_the_engine_before_any_order(
             SingleShotMarketStrategy(
                 emitter=engine.emitter_for("eager"),
                 portfolio=engine.portfolio_for("eager"),
-                side=Side.BUY,
-                quantity=Decimal("0.5"),
+                settings=SingleShotMarketStrategy.Settings(
+                    side=Side.BUY,
+                    quantity=Decimal("0.5"),
+                ),
             ),
             symbols={"BTC"},
         )
@@ -2335,9 +2345,12 @@ def test_graceful_stop_leaves_resting_live_orders_for_the_next_start_to_re_adopt
         engine.register(
             SingleShotLimitStrategy(
                 emitter=engine.emitter_for("resting"),
-                side=Side.BUY,
-                quantity=Decimal("0.5"),
-                price=Decimal("41000"),
+                portfolio=engine.portfolio_for("resting"),
+                settings=SingleShotLimitStrategy.Settings(
+                    side=Side.BUY,
+                    quantity=Decimal("0.5"),
+                    price=Decimal("41000"),
+                ),
             ),
             symbols={"BTC"},
         )
@@ -2388,9 +2401,12 @@ def test_graceful_stop_leaves_resting_live_orders_for_the_next_start_to_re_adopt
         engine.register(
             SingleShotLimitStrategy(
                 emitter=engine.emitter_for("resting"),
-                side=Side.BUY,
-                quantity=Decimal("0.5"),
-                price=Decimal("41000"),
+                portfolio=engine.portfolio_for("resting"),
+                settings=SingleShotLimitStrategy.Settings(
+                    side=Side.BUY,
+                    quantity=Decimal("0.5"),
+                    price=Decimal("41000"),
+                ),
             ),
             symbols={"BTC"},
         )
