@@ -404,6 +404,9 @@ def cmd_start(args: argparse.Namespace) -> int:
     # Every container variable is written to the evidence, so a key there would leak.
     if any("SIGNING_KEY" in pair.partition("=")[0] for pair in args.container_env):
         sys.exit("never pass the signing key through --container-env")
+    # The key would reach the `docker run` client, never the engine in the container.
+    if args.image and args.forward_key:
+        sys.exit("--forward-key does not reach a container: an --image life runs without a key")
 
     scratch_text, evidence_text = life_env(args.preset, args.env, args.param)
     (scratch(args.run_id) / ".env").write_text(scratch_text)

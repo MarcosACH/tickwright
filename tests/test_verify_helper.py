@@ -727,6 +727,22 @@ class TestDocker:
         assert "never pass the signing key through --container-env" in out
         assert not (helper.evidence("r1") / "first.env.txt").exists()
 
+    def test_an_image_life_refuses_to_forward_the_key(
+        self, helper: ModuleType, run: Callable[..., tuple[int, str]], bin_dir: Path
+    ) -> None:
+        # The key would reach the `docker run` client, never the engine in the container.
+        _recording_docker(bin_dir)
+        run("init", "r1")
+
+        code, out = run(
+            "start", "r1", "first", "--preset", "paper-replay", "--image", "img:sha-1",
+            "--forward-key",
+        )  # fmt: skip
+
+        assert code == 1
+        assert "--forward-key does not reach a container" in out
+        assert not (helper.evidence("r1") / "first.env.txt").exists()
+
 
 def _testnet_life(
     helper: ModuleType,
