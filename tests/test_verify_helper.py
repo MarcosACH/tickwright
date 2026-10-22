@@ -78,6 +78,22 @@ def _fake_docker(bin_dir: Path, *, running: bool) -> None:
     script.chmod(0o755)
 
 
+def _recording_docker(bin_dir: Path) -> Path:
+    """A ``docker`` that writes its arguments to a file and exits 0. Returns the file."""
+    argv_file = bin_dir / "docker.argv"
+    script = bin_dir / "docker"
+    script.write_text(f'#!/bin/sh\necho "$@" >> {argv_file}\n')
+    script.chmod(0o755)
+    return argv_file
+
+
+def _docker_that_fails_stop(bin_dir: Path, message: str) -> None:
+    """A ``docker`` whose ``stop`` prints ``message`` and exits 1, and accepts the rest."""
+    script = bin_dir / "docker"
+    script.write_text(f'#!/bin/sh\ncase "$1" in\n  stop) echo "{message}" >&2; exit 1;;\nesac\n')
+    script.chmod(0o755)
+
+
 def _finished_life(
     helper: ModuleType,
     run_id: str,
@@ -547,6 +563,200 @@ class TestDocker:
 
         assert code == 0
         assert helper.read_run_json("r1")["infra"] == ["kafka"]
+
+    # The supervisor is detached on purpose and may still be exiting when the test ends.
+    @pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
+    def test_an_image_life_runs_the_engine_in_a_container_on_the_run_scratch(
+        self, helper: ModuleType, run: Callable[..., tuple[int, str]], bin_dir: Path
+    ) -> None:
+        argv_file = _recording_docker(bin_dir)
+        run("init", "r1")
+
+        code, _ = run("start", "r1", "first", "--preset", "paper-replay", "--image", "img:sha-1")
+        run("await", "r1", "first", "--exit", "--timeout", "10")
+
+        scratch = str(helper.scratch("r1"))
+        argv = argv_file.read_text().split()
+        assert code == 0
+        assert argv[0] == "run" and argv[-1] == "img:sha-1"
+        # The same path inside, so the scratch .env and its relative paths work unchanged.
+        assert f"{scratch}:{scratch}" in argv
+        assert argv[argv.index("-w") + 1] == scratch
+        assert f"{helper.SCRIPTS.parent / 'strategies'}:/strategies:ro" in argv
+
+    @pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
+    def test_a_signal_to_an_image_life_goes_to_its_container(
+        self, helper: ModuleType, run: Callable[..., tuple[int, str]], bin_dir: Path
+    ) -> None:
+        # A KILL to the `docker run` client would leave the engine running in the container.
+        argv_file = _recording_docker(bin_dir)
+        run("init", "r1")
+        run("start", "r1", "first", "--preset", "paper-replay", "--image", "img:sha-1")
+        run("await", "r1", "first", "--exit", "--timeout", "10")
+
+        code, _ = run("signal", "r1", "first", "KILL")
+
+        run_argv, kill_argv = (line.split() for line in argv_file.read_text().splitlines())
+        container = run_argv[run_argv.index("--name") + 1]
+        assert code == 0
+        assert kill_argv == ["kill", "--signal", "KILL", container]
+
+    @pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
+    def test_cleanup_stops_the_container_of_an_image_life(
+        self,
+        helper: ModuleType,
+        run: Callable[..., tuple[int, str]],
+        bin_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # A KILL to the `docker run` client leaves the container running. The client
+        # may also be gone while the container runs on. So cleanup stops it by name.
+        argv_file = _recording_docker(bin_dir)
+        run("init", "r1")
+        run("start", "r1", "first", "--preset", "paper-replay", "--image", "img:sha-1")
+        run("await", "r1", "first", "--exit", "--timeout", "10")
+        # The secrets scan reads the repo .env. Point it at a directory with none.
+        monkeypatch.setattr(helper, "ROOT", tmp_path)
+
+        code, _ = run("cleanup", "r1")
+
+        lines = [line.split() for line in argv_file.read_text().splitlines()]
+        container = lines[0][lines[0].index("--name") + 1]
+        assert code == 0
+        assert lines[1:] == [["stop", "--timeout", "15", container]]
+
+    @pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
+    def test_cleanup_keeps_the_scratch_when_docker_cannot_stop_the_container(
+        self,
+        helper: ModuleType,
+        run: Callable[..., tuple[int, str]],
+        bin_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # The engine may still be running. Keeping the scratch lets cleanup run again.
+        _docker_that_fails_stop(bin_dir, "Cannot connect to the Docker daemon")
+        run("init", "r1")
+        run("start", "r1", "first", "--preset", "paper-replay", "--image", "img:sha-1")
+        run("await", "r1", "first", "--exit", "--timeout", "10")
+        monkeypatch.setattr(helper, "ROOT", tmp_path)
+
+        code, out = run("cleanup", "r1")
+
+        assert code == 1
+        assert "could not stop container verify-r1-first" in out
+        assert helper.scratch("r1").exists()
+
+    @pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
+    def test_cleanup_passes_over_a_container_that_is_already_gone(
+        self,
+        helper: ModuleType,
+        run: Callable[..., tuple[int, str]],
+        bin_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # The life runs with --rm, so a life that exited took its container with it.
+        _docker_that_fails_stop(
+            bin_dir, "Error response from daemon: No such container: verify-r1-first"
+        )
+        run("init", "r1")
+        run("start", "r1", "first", "--preset", "paper-replay", "--image", "img:sha-1")
+        run("await", "r1", "first", "--exit", "--timeout", "10")
+        monkeypatch.setattr(helper, "ROOT", tmp_path)
+
+        code, _ = run("cleanup", "r1")
+
+        assert code == 0
+        assert not helper.scratch("r1").exists()
+
+    @pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
+    def test_an_image_life_joins_the_network_it_is_given(
+        self, helper: ModuleType, run: Callable[..., tuple[int, str]], bin_dir: Path
+    ) -> None:
+        # The broker advertises localhost:9092, so the engine has to share its network.
+        argv_file = _recording_docker(bin_dir)
+        run("init", "r1")
+
+        code, _ = run(
+            "start", "r1", "first", "--preset", "paper-replay",
+            "--image", "img:sha-1", "--network", "container:kafka-1",
+        )  # fmt: skip
+        run("await", "r1", "first", "--exit", "--timeout", "10")
+
+        argv = argv_file.read_text().split()
+        assert code == 0
+        assert argv[argv.index("--network") + 1] == "container:kafka-1"
+
+    @pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
+    def test_a_container_env_reaches_the_container_and_not_the_helper(
+        self, helper: ModuleType, run: Callable[..., tuple[int, str]], bin_dir: Path
+    ) -> None:
+        # Inside the broker's network the store is postgres:5432. The helper still
+        # reads it from the host at localhost:5432, through the scratch .env.
+        argv_file = _recording_docker(bin_dir)
+        run("init", "r1")
+        dsn = "TICKWRIGHT_POSTGRES__DSN=postgresql://u:p@postgres:5432/db"
+
+        code, _ = run(
+            "start", "r1", "first", "--preset", "paper-replay",
+            "--image", "img:sha-1", "--container-env", dsn,
+        )  # fmt: skip
+        run("await", "r1", "first", "--exit", "--timeout", "10")
+
+        argv = argv_file.read_text().split()
+        assert code == 0
+        assert argv[argv.index("-e") + 1] == dsn
+        assert "TICKWRIGHT_POSTGRES__DSN" not in (helper.scratch("r1") / ".env").read_text()
+        assert dsn in (helper.evidence("r1") / "first.env.txt").read_text()
+
+    def test_a_container_env_never_takes_the_signing_key(
+        self, helper: ModuleType, run: Callable[..., tuple[int, str]], bin_dir: Path
+    ) -> None:
+        # Every container variable is written to the evidence, so a key there would leak.
+        _recording_docker(bin_dir)
+        run("init", "r1")
+
+        code, out = run(
+            "start", "r1", "first", "--preset", "paper-replay", "--image", "img:sha-1",
+            "--container-env", "TICKWRIGHT_HYPERLIQUID__SIGNING_KEY=0xabc",
+        )  # fmt: skip
+
+        assert code == 1
+        assert "never pass the signing key through --container-env" in out
+        assert not (helper.evidence("r1") / "first.env.txt").exists()
+
+    def test_an_image_life_refuses_to_forward_the_key(
+        self, helper: ModuleType, run: Callable[..., tuple[int, str]], bin_dir: Path
+    ) -> None:
+        # The key would reach the `docker run` client, never the engine in the container.
+        _recording_docker(bin_dir)
+        run("init", "r1")
+
+        code, out = run(
+            "start", "r1", "first", "--preset", "paper-replay", "--image", "img:sha-1",
+            "--forward-key",
+        )  # fmt: skip
+
+        assert code == 1
+        assert "--forward-key does not reach a container" in out
+        assert not (helper.evidence("r1") / "first.env.txt").exists()
+
+    @pytest.mark.parametrize(
+        "flag", [["--network", "container:kafka-1"], ["--container-env", "A=1"]]
+    )
+    def test_a_container_flag_without_an_image_is_refused(
+        self, helper: ModuleType, run: Callable[..., tuple[int, str]], flag: list[str]
+    ) -> None:
+        # A venv life would drop it without a word.
+        run("init", "r1")
+
+        code, out = run("start", "r1", "first", "--preset", "paper-replay", *flag)
+
+        assert code == 1
+        assert f"{flag[0]} needs --image" in out
+        assert not (helper.evidence("r1") / "first.env.txt").exists()
 
 
 def _testnet_life(

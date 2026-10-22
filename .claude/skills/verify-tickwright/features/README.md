@@ -29,7 +29,7 @@ index, then use the matching feature file as the recipe. `../SKILL.md` explains 
   says the verdict the map expects today, including known FAILs named in Gotchas.
 - A fill is proven by the `orders` row, the `positions` row, and the `account` row together.
 - An exit code is proof. `0` is graceful, `1` is a fault, `2` is a boot refusal, `-9` is your
-  `KILL`.
+  `KILL`. A `KILL` to an `--image` life exits `137`.
 - Report the number you expected next to the number the dump shows.
 - Report a feature you could not reach with the command you ran and the unmet precondition
   (Docker down, no key, no network). Never report a path as verified through a different path.
@@ -59,6 +59,9 @@ Each file has an H1, one paragraph, then exactly four H2 sections in this order:
   `Portfolio` seam, including margin at 5x and a two-symbol book.
 - [Kafka bus](./kafka-bus.md): the same paper run over `KafkaBus`, messages counted on the topic.
 - [Postgres store](./postgres-store.md): the same paper run on `PostgresStore`, restart included.
+- [Container restart](./container-restart.md): the published image with an import-path strategy,
+  `KILL`, and a restart that resumes from `open_orders()` on both soak setups. A strategy that
+  does not import exits 2 and compose stops after 3 restarts.
 - [Hyperliquid feed](./hyperliquid-feed.md): mainnet public trades into the paper venue. No key.
 - [Hyperliquid testnet](./hyperliquid-testnet.md): a real round trip on the testnet exchange, the
   account reconcile cadence, and key redaction.
