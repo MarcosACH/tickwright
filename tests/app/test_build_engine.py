@@ -58,6 +58,7 @@ from tickwright.domain import (
     VenueAccountModeUnreadable,
     VenueOrderView,
     derive_cloid,
+    wake_interval_refusal,
 )
 from tickwright.engine.guard import NoopGuard, RealGuard
 from tickwright.engine.runner import Engine
@@ -593,6 +594,29 @@ def test_a_strategy_that_never_declares_a_wake_interval_is_refused(tmp_path: Pat
     )
     with pytest.raises(StrategyLoadRefusal, match="has no wake_interval_seconds"):
         build_engine(config)
+
+
+@pytest.mark.parametrize("interval", [0.5, 0, -1, "60"])
+def test_a_bad_wake_interval_is_refused_with_the_rule_s_own_sentence(
+    tmp_path: Path, interval: object
+) -> None:
+    # The operator reads the same sentence StrategyHost would raise (ADR-0062).
+    config = _config(
+        tmp_path,
+        strategies=[
+            {
+                "strategy": "user_strategies:WakesOnItsSettings",
+                "strategy_id": "user",
+                "symbols": ["BTC"],
+                "settings": {"quantity": "0.5", "wake_interval_seconds": interval},
+            }
+        ],
+    )
+    refusal = wake_interval_refusal(interval)
+    assert refusal is not None
+    with pytest.raises(StrategyLoadRefusal) as refused:
+        build_engine(config)
+    assert str(refused.value) == f"strategy 'user': {refusal}"
 
 
 def test_a_strategy_whose_id_differs_from_its_entry_is_refused(tmp_path: Path) -> None:

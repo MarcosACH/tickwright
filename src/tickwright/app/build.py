@@ -48,6 +48,7 @@ from tickwright.domain import (
     Strategy,
     TimeInForce,
     account_net_size,
+    wake_interval_refusal,
 )
 from tickwright.engine.exit_run import ExitJob, Flatten, OperatorCancelAll
 from tickwright.engine.guard import NoopGuard, RealGuard
@@ -431,6 +432,9 @@ def _build_engine(config: AppConfig, *, exit_job: ExitJob | None) -> Engine:
                 f"strategy {strategy_id!r}: {strategy_config.strategy} has no "
                 "wake_interval_seconds. Set it to None if the strategy never wakes."
             )
+        refusal = wake_interval_refusal(strategy.wake_interval_seconds)
+        if refusal is not None:
+            raise StrategyLoadRefusal(f"strategy {strategy_id!r}: {refusal}")
         engine.register(strategy, symbols=set(strategy_config.symbols))
     return engine
 

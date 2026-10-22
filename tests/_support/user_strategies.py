@@ -7,6 +7,7 @@ nothing in the shipped package can name them.
 
 import json
 from decimal import Decimal
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
@@ -172,6 +173,23 @@ class LacksOnWake:
 
     def restore(self, data: bytes) -> None:
         pass
+
+
+class WakesOnItsSettings(BuysEachSymbolOnce):
+    """Trades like its parent, and reads its wake interval from its own settings."""
+
+    class Settings(BaseModel):
+        quantity: Decimal
+        # Any, so a test can hand the loader a value the wake interval rule refuses.
+        wake_interval_seconds: Any
+
+    def __init__(self, *, emitter: SignalEmitter, portfolio: Portfolio, settings: Settings) -> None:
+        super().__init__(
+            emitter=emitter,
+            portfolio=portfolio,
+            settings=BuysEachSymbolOnce.Settings(quantity=settings.quantity),
+        )
+        self.wake_interval_seconds = settings.wake_interval_seconds
 
 
 class LacksWakeInterval:
