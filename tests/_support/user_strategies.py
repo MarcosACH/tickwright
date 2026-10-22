@@ -18,6 +18,7 @@ from tickwright.domain import (
     Side,
     SignalEmitter,
     TimeInForce,
+    Wake,
 )
 
 
@@ -26,6 +27,8 @@ class BuysEachSymbolOnce:
 
     class Settings(BaseModel):
         quantity: Decimal
+
+    wake_interval_seconds: float | None = None
 
     def __init__(self, *, emitter: SignalEmitter, portfolio: Portfolio, settings: Settings) -> None:
         self.strategy_id = emitter.strategy_id
@@ -44,6 +47,9 @@ class BuysEachSymbolOnce:
             order_type=OrderType.MARKET,
             time_in_force=TimeInForce.IOC,
         )
+
+    async def on_wake(self, wake: Wake) -> None:
+        pass
 
     async def on_order_event(self, event: OrderEvent) -> None:
         pass
@@ -128,6 +134,9 @@ class LacksTwoMethods:
     def __init__(self, *, emitter: SignalEmitter, portfolio: Portfolio, settings: Settings) -> None:
         self.strategy_id = emitter.strategy_id
 
+    async def on_wake(self, wake: Wake) -> None:
+        pass
+
     async def on_order_event(self, event: OrderEvent) -> None:
         pass
 
@@ -136,6 +145,33 @@ class LacksTwoMethods:
 
     def snapshot(self) -> bytes:
         return b""
+
+
+class LacksOnWake:
+    """Has every Strategy member except ``on_wake``."""
+
+    class Settings(BaseModel):
+        pass
+
+    wake_interval_seconds = None
+
+    def __init__(self, *, emitter: SignalEmitter, portfolio: Portfolio, settings: Settings) -> None:
+        self.strategy_id = emitter.strategy_id
+
+    async def on_tick(self, tick: MarketTick) -> None:
+        pass
+
+    async def on_order_event(self, event: OrderEvent) -> None:
+        pass
+
+    def set_next_seq(self, next_seq: int) -> None:
+        pass
+
+    def snapshot(self) -> bytes:
+        return b""
+
+    def restore(self, data: bytes) -> None:
+        pass
 
 
 class HasNoSettings:

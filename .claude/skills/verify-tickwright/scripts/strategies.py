@@ -30,6 +30,7 @@ from tickwright.domain import (
     Side,
     SignalEmitter,
     TimeInForce,
+    Wake,
 )
 
 log = structlog.get_logger()
@@ -62,6 +63,8 @@ class Wiring:
 
 class _Base:
     """The shared spine: emitter, portfolio, phase snapshot, read logging."""
+
+    wake_interval_seconds: float | None = None
 
     version = 1
 
@@ -105,6 +108,9 @@ class _Base:
             order_type=OrderType.MARKET,
             time_in_force=TimeInForce.IOC,
         )
+
+    async def on_wake(self, wake: Wake) -> None:
+        pass
 
     async def on_order_event(self, event: OrderEvent) -> None:
         if isinstance(event, OrderFilled):

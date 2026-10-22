@@ -43,6 +43,7 @@ from tickwright.domain import (
     Side,
     SignalEmitter,
     TimeInForce,
+    Wake,
 )
 from tickwright.engine.runner import Engine
 
@@ -90,6 +91,8 @@ class ScriptedStrategy:
     """Sends the orders its script lists for a tick's time, and keeps every
     order event it hears, per order, in arrival order."""
 
+    wake_interval_seconds: float | None = None
+
     def __init__(
         self,
         *,
@@ -114,6 +117,9 @@ class ScriptedStrategy:
                 reduce_only=send.reduce_only,
             )
             self.sent.append(signal_id)
+
+    async def on_wake(self, wake: Wake) -> None:
+        pass
 
     async def on_order_event(self, event: OrderEvent) -> None:
         self.events.setdefault(event.signal_id, []).append(event)

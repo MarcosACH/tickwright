@@ -14,7 +14,7 @@ from typing import Protocol, runtime_checkable
 
 from .account import Account, AccountSpec, AccountView
 from .enums import OrderState
-from .events import Event, MarketTick, OrderEvent, PlaceSignal
+from .events import Event, MarketTick, OrderEvent, PlaceSignal, Wake
 from .instrument import GuardDecision, InstrumentSpec, KillSwitchState, PreTradeReading
 from .order import OpenOrderView, Order
 from .position import Position, PositionView
@@ -215,8 +215,20 @@ class Strategy(Protocol):
 
     strategy_id: str
 
+    wake_interval_seconds: float | None
+    """How often the strategy wakes, in seconds of clock time (ADR-0062).
+
+    ``None`` means it never wakes. Anything under 1 second is refused at boot."""
+
     async def on_tick(self, tick: MarketTick) -> None:
         """Handle a market tick; may emit signals."""
+        ...
+
+    async def on_wake(self, wake: Wake) -> None:
+        """Handle one wake-up; may emit signals.
+
+        Required even for a strategy that never wakes. That one writes an
+        empty handler."""
         ...
 
     async def on_order_event(self, event: OrderEvent) -> None:

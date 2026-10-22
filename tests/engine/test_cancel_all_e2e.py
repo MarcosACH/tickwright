@@ -41,6 +41,7 @@ from tickwright.domain import (
     TimeInForce,
     VenueOpenOrder,
     VenueReadFailure,
+    Wake,
     derive_cloid,
 )
 from tickwright.engine.checkpoint import Checkpointer
@@ -53,6 +54,8 @@ from tickwright.observability.testing import capture_events
 class _StrategyThatMustNotStart:
     """Records whether the host ever started or snapshotted it."""
 
+    wake_interval_seconds: float | None = None
+
     def __init__(self) -> None:
         self.strategy_id = "resting"
         self.started = False
@@ -60,6 +63,9 @@ class _StrategyThatMustNotStart:
 
     async def on_tick(self, tick: MarketTick) -> None:
         return None
+
+    async def on_wake(self, wake: Wake) -> None:
+        pass
 
     async def on_order_event(self, event: OrderEvent) -> None:
         return None

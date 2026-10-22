@@ -35,6 +35,7 @@ from tickwright.domain import (
     Side,
     SignalEmitter,
     TimeInForce,
+    Wake,
 )
 from tickwright.engine.runner import Engine
 
@@ -55,6 +56,8 @@ def spec(symbol: str) -> InstrumentSpec:
 class BuysBtcOnEveryTick:
     """Sends one BTC market buy per tick it hears, on any symbol."""
 
+    wake_interval_seconds: float | None = None
+
     def __init__(self, emitter: SignalEmitter) -> None:
         self.strategy_id = emitter.strategy_id
         self._emitter = emitter
@@ -70,6 +73,9 @@ class BuysBtcOnEveryTick:
             time_in_force=TimeInForce.IOC,
         )
         self.sent.append(signal_id)
+
+    async def on_wake(self, wake: Wake) -> None:
+        pass
 
     async def on_order_event(self, event: OrderEvent) -> None:
         self.states.setdefault(event.signal_id, []).append(event.state)

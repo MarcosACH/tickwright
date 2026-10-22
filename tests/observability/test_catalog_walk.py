@@ -74,6 +74,7 @@ from tickwright.domain import (
     Signal,
     VenueOrderView,
     VenueReadFailure,
+    Wake,
     derive_cloid,
 )
 from tickwright.domain.enums import OrderType, TimeInForce
@@ -232,11 +233,16 @@ class _DarkVenue(VenueDouble):
 class _Strategy:
     """A minimal strategy whose handlers raise, to exercise containment."""
 
+    wake_interval_seconds: float | None = None
+
     def __init__(self, strategy_id: str = "trivial") -> None:
         self.strategy_id = strategy_id
 
     async def on_tick(self, tick: MarketTick) -> None:
         raise KeyError("third-party bug")
+
+    async def on_wake(self, wake: Wake) -> None:
+        pass
 
     async def on_order_event(self, event: OrderEvent) -> None:
         return None

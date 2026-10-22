@@ -37,6 +37,7 @@ from tickwright.domain import (
     Side,
     SignalEmitter,
     TimeInForce,
+    Wake,
     derive_cloid,
 )
 from tickwright.engine.exit_run import ExitJob, Flatten, OperatorCancelAll
@@ -59,6 +60,8 @@ class _Exiter:
     rests a buy far below the market, and cancels all its orders on the symbol
     once the buy is live.
     """
+
+    wake_interval_seconds: float | None = None
 
     def __init__(
         self,
@@ -89,6 +92,9 @@ class _Exiter:
                 order_type=OrderType.MARKET,
                 time_in_force=TimeInForce.IOC,
             )
+
+    async def on_wake(self, wake: Wake) -> None:
+        pass
 
     async def on_order_event(self, event: OrderEvent) -> None:
         seen = self._states.setdefault(event.signal_id, set())

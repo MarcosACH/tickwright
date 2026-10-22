@@ -37,6 +37,7 @@ from tickwright.domain import (
     SignalEmitter,
     SignalId,
     Store,
+    Wake,
     derive_cloid,
 )
 from tickwright.engine.cache import Cache
@@ -72,6 +73,8 @@ def _host(
 class RecordingStrategy:
     """A minimal third-party strategy that records what the host delivers."""
 
+    wake_interval_seconds: float | None = None
+
     def __init__(self, strategy_id: str) -> None:
         self.strategy_id = strategy_id
         self.ticks: list[MarketTick] = []
@@ -84,6 +87,9 @@ class RecordingStrategy:
 
     async def on_tick(self, tick: MarketTick) -> None:
         self.ticks.append(tick)
+
+    async def on_wake(self, wake: Wake) -> None:
+        pass
 
     async def on_order_event(self, event: OrderEvent) -> None:
         self.order_events.append(event)

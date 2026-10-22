@@ -64,6 +64,7 @@ from tickwright.domain import (
     VenueAccountState,
     VenueOrderView,
     VenueReadFailure,
+    Wake,
     derive_cloid,
 )
 from tickwright.engine.guard import RealGuard
@@ -451,6 +452,8 @@ class _MarginBlindStrategy:
     breach it reads is one another strategy's position opened.
     """
 
+    wake_interval_seconds: float | None = None
+
     def __init__(
         self,
         *,
@@ -493,6 +496,9 @@ class _MarginBlindStrategy:
                 post_only=False,
             )
         )
+
+    async def on_wake(self, wake: Wake) -> None:
+        pass
 
     async def on_order_event(self, event: OrderEvent) -> None:
         if isinstance(event, OrderFilled):
@@ -708,6 +714,8 @@ class _AccountReadingStrategy:
     """A strategy that does nothing but read its cash line on the first tick —
     the reader ADR-0041 §6's "``cash`` is Tier-1, never ``None``" is a promise to."""
 
+    wake_interval_seconds: float | None = None
+
     def __init__(self, portfolio: Portfolio) -> None:
         self.strategy_id = "live"
         self._portfolio = portfolio
@@ -718,6 +726,9 @@ class _AccountReadingStrategy:
         if self.first_read is None:
             self.first_read = self._portfolio.account().cash
             self.read.set()
+
+    async def on_wake(self, wake: Wake) -> None:
+        pass
 
     async def on_order_event(self, event: OrderEvent) -> None:
         return None
@@ -1308,12 +1319,17 @@ def test_the_ledger_is_recovered_before_the_order_cache_is_rebuilt(tmp_path: Pat
 class _SeqRecordingStrategy:
     """Records the seq the host hands it and trades nothing."""
 
+    wake_interval_seconds: float | None = None
+
     def __init__(self, strategy_id: str) -> None:
         self.strategy_id = strategy_id
         self.next_seq: int | None = None
 
     async def on_tick(self, tick: MarketTick) -> None:
         return None
+
+    async def on_wake(self, wake: Wake) -> None:
+        pass
 
     async def on_order_event(self, event: OrderEvent) -> None:
         return None

@@ -32,6 +32,7 @@ from tickwright.domain import (
     Signal,
     SignalId,
     TimeInForce,
+    Wake,
     derive_cloid,
 )
 from tickwright.engine.cache import Cache
@@ -41,6 +42,8 @@ from tickwright.engine.strategy_host import StrategyHost
 class EveryTickStrategy:
     """A third-party strategy that places on every tick — the densest possible
     consumer of seqs, so any reuse after restart is caught immediately."""
+
+    wake_interval_seconds: float | None = None
 
     def __init__(self, strategy_id: str, bus: InMemoryBus) -> None:
         self.strategy_id = strategy_id
@@ -65,6 +68,9 @@ class EveryTickStrategy:
                 time_in_force=TimeInForce.IOC,
             )
         )
+
+    async def on_wake(self, wake: Wake) -> None:
+        pass
 
     async def on_order_event(self, event: OrderEvent) -> None:
         pass
@@ -158,12 +164,17 @@ def test_stale_snapshot_never_reuses_a_consumed_signal_id(
 class TickRecorder:
     """A third-party strategy that only records what gets through the gate."""
 
+    wake_interval_seconds: float | None = None
+
     def __init__(self, strategy_id: str) -> None:
         self.strategy_id = strategy_id
         self.ticks: list[MarketTick] = []
 
     async def on_tick(self, tick: MarketTick) -> None:
         self.ticks.append(tick)
+
+    async def on_wake(self, wake: Wake) -> None:
+        pass
 
     async def on_order_event(self, event: OrderEvent) -> None:
         pass

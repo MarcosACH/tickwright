@@ -53,6 +53,7 @@ from tickwright.domain import (
     Side,
     SignalEmitter,
     TimeInForce,
+    Wake,
 )
 from tickwright.engine.guard import PreTradeLimits, RateCap, SymbolLimits
 from tickwright.engine.runner import Engine
@@ -174,6 +175,8 @@ class ScriptedStrategy:
 
     ``outcomes`` records, in send order, ``"filled"`` or the denial reason."""
 
+    wake_interval_seconds: float | None = None
+
     def __init__(
         self,
         *,
@@ -200,6 +203,9 @@ class ScriptedStrategy:
                 time_in_force=TimeInForce.IOC,
             )
             self._sent.append(signal_id)
+
+    async def on_wake(self, wake: Wake) -> None:
+        pass
 
     async def on_order_event(self, event: OrderEvent) -> None:
         if isinstance(event, OrderFilled):

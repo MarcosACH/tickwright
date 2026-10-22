@@ -565,6 +565,19 @@ def test_a_class_missing_a_strategy_method_is_refused_before_the_store_exists(
     assert not (tmp_path / "saga.db").exists()
 
 
+def test_a_class_with_no_on_wake_is_refused_before_the_store_exists(tmp_path: Path) -> None:
+    # A strategy that never wakes still writes an empty on_wake (ADR-0062).
+    config = _config(
+        tmp_path,
+        strategies=[
+            {"strategy": "user_strategies:LacksOnWake", "strategy_id": "user", "symbols": ["BTC"]}
+        ],
+    )
+    with pytest.raises(StrategyLoadRefusal, match="has no on_wake"):
+        build_engine(config)
+    assert not (tmp_path / "saga.db").exists()
+
+
 def test_a_strategy_whose_id_differs_from_its_entry_is_refused(tmp_path: Path) -> None:
     # The emitter and portfolio carry the entry's id, but the host keys on the
     # strategy's. A mismatch would hide its fills from it and resume its seq

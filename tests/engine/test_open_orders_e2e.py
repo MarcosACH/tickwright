@@ -37,12 +37,15 @@ from tickwright.domain import (
     Side,
     SignalEmitter,
     TimeInForce,
+    Wake,
 )
 from tickwright.engine.runner import Engine
 
 
 class _ScriptedStrategy:
     """Runs one scripted step per tick and keeps every open-orders read."""
+
+    wake_interval_seconds: float | None = None
 
     def __init__(
         self, *, emitter: SignalEmitter, portfolio: Portfolio, steps: list["Step"]
@@ -58,6 +61,9 @@ class _ScriptedStrategy:
         if self._steps:
             _, _, action = self._steps.pop(0)
             await action(self)
+
+    async def on_wake(self, wake: Wake) -> None:
+        pass
 
     async def on_order_event(self, event: OrderEvent) -> None:
         return None
