@@ -14,8 +14,9 @@ def wake_interval_refusal(interval: object) -> str | None:
     # bool is an int to Python, so True would otherwise pass as 1 second.
     if isinstance(interval, bool) or not isinstance(interval, int | float):
         return f"wake_interval_seconds must be a finite number of seconds or None, not {interval!r}"
-    # NaN and infinity both pass a bare "< 1". An infinite interval never wakes.
-    if not math.isfinite(interval):
+    # NaN and infinity both pass a bare "< 1". An infinite interval never wakes. Only a float
+    # can be either, and math.isfinite raises on an int too big for a float.
+    if isinstance(interval, float) and not math.isfinite(interval):
         return f"wake_interval_seconds must be a finite number of seconds or None, not {interval!r}"
     if interval < 1:
         return f"wake_interval_seconds must be at least 1 second, not {interval!r}"

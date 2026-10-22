@@ -7,7 +7,10 @@ import pytest
 from tickwright.domain import wake_interval_refusal
 
 
-@pytest.mark.parametrize("interval", [None, 1, 1.0, 60, 3600.5])
+# 10**400 is too big for a float. The rule must still answer, not raise.
+@pytest.mark.parametrize(
+    "interval", [None, 1, 1.0, 60, 3600.5, pytest.param(10**400, id="int-too-big-for-a-float")]
+)
 def test_no_interval_and_one_second_or_more_are_fine(interval: object) -> None:
     assert wake_interval_refusal(interval) is None
 
