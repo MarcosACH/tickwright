@@ -649,6 +649,29 @@ class TestDocker:
         assert helper.scratch("r1").exists()
 
     @pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
+    def test_cleanup_passes_over_a_container_that_is_already_gone(
+        self,
+        helper: ModuleType,
+        run: Callable[..., tuple[int, str]],
+        bin_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # The life runs with --rm, so a life that exited took its container with it.
+        _docker_that_fails_stop(
+            bin_dir, "Error response from daemon: No such container: verify-r1-first"
+        )
+        run("init", "r1")
+        run("start", "r1", "first", "--preset", "paper-replay", "--image", "img:sha-1")
+        run("await", "r1", "first", "--exit", "--timeout", "10")
+        monkeypatch.setattr(helper, "ROOT", tmp_path)
+
+        code, _ = run("cleanup", "r1")
+
+        assert code == 0
+        assert not helper.scratch("r1").exists()
+
+    @pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
     def test_an_image_life_joins_the_network_it_is_given(
         self, helper: ModuleType, run: Callable[..., tuple[int, str]], bin_dir: Path
     ) -> None:

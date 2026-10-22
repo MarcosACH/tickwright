@@ -984,7 +984,7 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
             stopped = subprocess.run(
                 ["docker", "stop", "--timeout", "15", name], capture_output=True, text=True
             )
-            if stopped.returncode != 0:
+            if stopped.returncode != 0 and "No such container" not in stopped.stderr:
                 sys.exit(f"docker could not stop container {name}: {stopped.stderr.strip()}")
             continue
         if pid and pid_alive(pid) and pid_is_ours(pid, args.run_id):
