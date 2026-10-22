@@ -45,6 +45,8 @@ STRATEGY_RUNNER = SCRIPTS / "run_strategy.py"
 STRATEGIES = SCRIPTS.parent / "strategies"
 KEY_VARS = ("TICKWRIGHT_HYPERLIQUID__SIGNING_KEY", "TICKWRIGHT_HYPERLIQUID__ACCOUNT_ADDRESS")
 NO_DOCKER_PATHS = "kafka and postgres paths unavailable"
+# Seconds cleanup waits after TERM before it sends KILL.
+STOP_GRACE_S = 15
 SIGNALS = {
     "TERM": signal.SIGTERM,
     "INT": signal.SIGINT,
@@ -460,6 +462,15 @@ def cmd_start(args: argparse.Namespace) -> int:
     return 0
 
 
+def container_name(run_id: str, life: str) -> str | None:
+    """The container a life runs in, or None when the life is a host process.
+
+    A container life's pid is the ``docker run`` client, not the engine. A KILL to
+    the client leaves the engine running, so signal and stop it by this name."""
+    path = scratch(run_id) / f"{life}.container"
+    return path.read_text().strip() if path.exists() else None
+
+
 def container_command(
     run_id: str, image: str, name: str, network: str | None, env: list[str]
 ) -> list[str]:
@@ -544,10 +555,8 @@ def cmd_await(args: argparse.Namespace) -> int:
 
 def cmd_signal(args: argparse.Namespace) -> int:
     require_run(args.run_id)
-    container_file = scratch(args.run_id) / f"{args.life}.container"
-    if container_file.exists():
-        # The pid is the `docker run` client. A KILL to it would leave the engine running.
-        name = container_file.read_text().strip()
+    name = container_name(args.run_id, args.life)
+    if name is not None:
         sent = subprocess.run(["docker", "kill", "--signal", args.name, name], text=True)
         if sent.returncode != 0:
             sys.exit(f"docker could not signal container {name}")
@@ -973,29 +982,39 @@ def cmd_venue_fills(args: argparse.Namespace) -> int:
     return 0
 
 
+def stop_life(run_id: str, life: str) -> None:
+    """TERM the engine, then KILL it if it still runs after the grace period."""
+    name = container_name(run_id, life)
+    if name is not None:
+        # By name, not by pid: the client may be gone while the container runs on.
+        # `docker stop` is TERM, the grace period, then KILL.
+        stopped = subprocess.run(
+            ["docker", "stop", "--timeout", str(STOP_GRACE_S), name],
+            capture_output=True,
+            text=True,
+        )
+        # The life runs with --rm, so a life that exited took its container with it.
+        if stopped.returncode != 0 and "No such container" not in stopped.stderr:
+            sys.exit(f"docker could not stop container {name}: {stopped.stderr.strip()}")
+        if stopped.returncode == 0:
+            note(run_id, life, "cleanup", f"docker stop to container {name}")
+        return
+    pid = int((scratch(run_id) / f"{life}.pid").read_text().strip() or 0)
+    if pid and pid_alive(pid) and pid_is_ours(pid, run_id):
+        os.kill(pid, signal.SIGTERM)
+        note(run_id, life, "cleanup", f"SIGTERM to pid {pid}")
+        deadline = time.monotonic() + STOP_GRACE_S
+        while time.monotonic() < deadline and pid_alive(pid):
+            time.sleep(0.1)
+        if pid_alive(pid):
+            os.kill(pid, signal.SIGKILL)
+            note(run_id, life, "cleanup", f"SIGKILL to pid {pid}")
+
+
 def cmd_cleanup(args: argparse.Namespace) -> int:
     require_run(args.run_id)
     for pid_file in sorted(scratch(args.run_id).glob("*.pid")):
-        pid = int(pid_file.read_text().strip() or 0)
-        life = pid_file.stem
-        container_file = scratch(args.run_id) / f"{life}.container"
-        if container_file.exists():
-            name = container_file.read_text().strip()
-            stopped = subprocess.run(
-                ["docker", "stop", "--timeout", "15", name], capture_output=True, text=True
-            )
-            if stopped.returncode != 0 and "No such container" not in stopped.stderr:
-                sys.exit(f"docker could not stop container {name}: {stopped.stderr.strip()}")
-            continue
-        if pid and pid_alive(pid) and pid_is_ours(pid, args.run_id):
-            os.kill(pid, signal.SIGTERM)
-            note(args.run_id, life, "cleanup", f"SIGTERM to pid {pid}")
-            deadline = time.monotonic() + 15
-            while time.monotonic() < deadline and pid_alive(pid):
-                time.sleep(0.1)
-            if pid_alive(pid):
-                os.kill(pid, signal.SIGKILL)
-                note(args.run_id, life, "cleanup", f"SIGKILL to pid {pid}")
+        stop_life(args.run_id, pid_file.stem)
     infra_args = argparse.Namespace(run_id=args.run_id, action="down", service=None)
     cmd_infra(infra_args)
     hits = secrets_found(args.run_id)
