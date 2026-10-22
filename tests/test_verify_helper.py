@@ -595,6 +595,31 @@ class TestDocker:
         assert kill_argv == ["kill", "--signal", "KILL", container]
 
     @pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
+    def test_cleanup_stops_the_container_of_an_image_life(
+        self,
+        helper: ModuleType,
+        run: Callable[..., tuple[int, str]],
+        bin_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # A KILL to the `docker run` client leaves the container running. The client
+        # may also be gone while the container runs on. So cleanup stops it by name.
+        argv_file = _recording_docker(bin_dir)
+        run("init", "r1")
+        run("start", "r1", "first", "--preset", "paper-replay", "--image", "img:sha-1")
+        run("await", "r1", "first", "--exit", "--timeout", "10")
+        # The secrets scan reads the repo .env. Point it at a directory with none.
+        monkeypatch.setattr(helper, "ROOT", tmp_path)
+
+        code, _ = run("cleanup", "r1")
+
+        lines = [line.split() for line in argv_file.read_text().splitlines()]
+        container = lines[0][lines[0].index("--name") + 1]
+        assert code == 0
+        assert lines[1:] == [["stop", "--timeout", "15", container]]
+
+    @pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
     def test_an_image_life_joins_the_network_it_is_given(
         self, helper: ModuleType, run: Callable[..., tuple[int, str]], bin_dir: Path
     ) -> None:

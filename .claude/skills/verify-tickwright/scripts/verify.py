@@ -978,6 +978,11 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
     for pid_file in sorted(scratch(args.run_id).glob("*.pid")):
         pid = int(pid_file.read_text().strip() or 0)
         life = pid_file.stem
+        container_file = scratch(args.run_id) / f"{life}.container"
+        if container_file.exists():
+            name = container_file.read_text().strip()
+            subprocess.run(["docker", "stop", "--timeout", "15", name], capture_output=True)
+            continue
         if pid and pid_alive(pid) and pid_is_ours(pid, args.run_id):
             os.kill(pid, signal.SIGTERM)
             note(args.run_id, life, "cleanup", f"SIGTERM to pid {pid}")
