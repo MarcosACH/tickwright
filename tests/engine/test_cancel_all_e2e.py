@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 from ledgers import GENESIS, checkpointer
+from never_wakes import NeverWakes
 from structlog.typing import EventDict
 from venue_doubles import VenueLink
 
@@ -41,7 +42,6 @@ from tickwright.domain import (
     TimeInForce,
     VenueOpenOrder,
     VenueReadFailure,
-    Wake,
     derive_cloid,
 )
 from tickwright.engine.checkpoint import Checkpointer
@@ -51,10 +51,8 @@ from tickwright.engine.runner import Engine
 from tickwright.observability.testing import capture_events
 
 
-class _StrategyThatMustNotStart:
+class _StrategyThatMustNotStart(NeverWakes):
     """Records whether the host ever started or snapshotted it."""
-
-    wake_interval_seconds: float | None = None
 
     def __init__(self) -> None:
         self.strategy_id = "resting"
@@ -63,9 +61,6 @@ class _StrategyThatMustNotStart:
 
     async def on_tick(self, tick: MarketTick) -> None:
         return None
-
-    async def on_wake(self, wake: Wake) -> None:
-        pass
 
     async def on_order_event(self, event: OrderEvent) -> None:
         return None

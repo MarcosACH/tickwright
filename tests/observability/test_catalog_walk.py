@@ -33,6 +33,7 @@ from hyperliquid_fakes import (
 )
 from hyperliquid_flatten import AnswersFirst, priced_frames, run_flatten
 from ledgers import GENESIS, book_fill, checkpointer
+from never_wakes import NeverWakes
 from pydantic import SecretStr
 from venue_doubles import (
     DERIVED_STATE,
@@ -74,7 +75,6 @@ from tickwright.domain import (
     Signal,
     VenueOrderView,
     VenueReadFailure,
-    Wake,
     derive_cloid,
 )
 from tickwright.domain.enums import OrderType, TimeInForce
@@ -230,19 +230,14 @@ class _DarkVenue(VenueDouble):
         return VenueReadFailure.SEND_FAILED
 
 
-class _Strategy:
+class _Strategy(NeverWakes):
     """A minimal strategy whose handlers raise, to exercise containment."""
-
-    wake_interval_seconds: float | None = None
 
     def __init__(self, strategy_id: str = "trivial") -> None:
         self.strategy_id = strategy_id
 
     async def on_tick(self, tick: MarketTick) -> None:
         raise KeyError("third-party bug")
-
-    async def on_wake(self, wake: Wake) -> None:
-        pass
 
     async def on_order_event(self, event: OrderEvent) -> None:
         return None

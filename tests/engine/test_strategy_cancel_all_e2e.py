@@ -12,6 +12,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from ledgers import GENESIS
+from never_wakes import NeverWakes
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
@@ -27,7 +28,6 @@ from tickwright.domain import (
     Side,
     SignalEmitter,
     TimeInForce,
-    Wake,
     derive_cloid,
 )
 from tickwright.engine.runner import Engine
@@ -37,10 +37,8 @@ from tickwright.engine.runner import Engine
 Step = tuple[str, Callable[[SignalEmitter], Awaitable[object]]]
 
 
-class _ScriptedStrategy:
+class _ScriptedStrategy(NeverWakes):
     """Runs one scripted step per tick and records every cancel it hears."""
-
-    wake_interval_seconds: float | None = None
 
     def __init__(self, *, emitter: SignalEmitter, steps: list[Step]) -> None:
         self.strategy_id = emitter.strategy_id
@@ -52,9 +50,6 @@ class _ScriptedStrategy:
         if self._steps:
             _, action = self._steps.pop(0)
             await action(self._emitter)
-
-    async def on_wake(self, wake: Wake) -> None:
-        pass
 
     async def on_order_event(self, event: OrderEvent) -> None:
         if isinstance(event, OrderCancelled):

@@ -17,6 +17,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from never_wakes import NeverWakes
 
 from tickwright.adapters.feed import ReplayFeedConfig
 from tickwright.adapters.paper import PaperExchangeConfig
@@ -43,7 +44,6 @@ from tickwright.domain import (
     Side,
     SignalEmitter,
     TimeInForce,
-    Wake,
 )
 from tickwright.engine.runner import Engine
 
@@ -87,11 +87,9 @@ def reduce_only_sell(quantity: str) -> Send:
     return Send(Side.SELL, Decimal(quantity), reduce_only=True)
 
 
-class ScriptedStrategy:
+class ScriptedStrategy(NeverWakes):
     """Sends the orders its script lists for a tick's time, and keeps every
     order event it hears, per order, in arrival order."""
-
-    wake_interval_seconds: float | None = None
 
     def __init__(
         self,
@@ -117,9 +115,6 @@ class ScriptedStrategy:
                 reduce_only=send.reduce_only,
             )
             self.sent.append(signal_id)
-
-    async def on_wake(self, wake: Wake) -> None:
-        pass
 
     async def on_order_event(self, event: OrderEvent) -> None:
         self.events.setdefault(event.signal_id, []).append(event)

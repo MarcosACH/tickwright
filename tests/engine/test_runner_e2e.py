@@ -18,6 +18,7 @@ from pathlib import Path
 
 from kafka_fakes import FakeKafkaBroker
 from ledgers import GENESIS
+from never_wakes import NeverWakes
 from recovery_stores import RecoveryOrderStore
 from store_backends import SQLiteBackend
 from structlog.typing import EventDict
@@ -64,7 +65,6 @@ from tickwright.domain import (
     VenueAccountState,
     VenueOrderView,
     VenueReadFailure,
-    Wake,
     derive_cloid,
 )
 from tickwright.engine.guard import RealGuard
@@ -439,7 +439,7 @@ def _flat_ticks(path: Path, *, prices: dict[str, str], rounds: int) -> Path:
     return path
 
 
-class _MarginBlindStrategy:
+class _MarginBlindStrategy(NeverWakes):
     """Places its one order only once the account is *already* underwater.
 
     The reader ADR-0040 §7's "reported when negative, with no rejection and no
@@ -451,8 +451,6 @@ class _MarginBlindStrategy:
     account-wide fact and same-symbol ownership is refused (ADR-0034): the
     breach it reads is one another strategy's position opened.
     """
-
-    wake_interval_seconds: float | None = None
 
     def __init__(
         self,
@@ -496,9 +494,6 @@ class _MarginBlindStrategy:
                 post_only=False,
             )
         )
-
-    async def on_wake(self, wake: Wake) -> None:
-        pass
 
     async def on_order_event(self, event: OrderEvent) -> None:
         if isinstance(event, OrderFilled):
@@ -710,11 +705,9 @@ def test_a_live_first_start_materialises_its_account_row_at_the_barrier(
         reopened.close()
 
 
-class _AccountReadingStrategy:
+class _AccountReadingStrategy(NeverWakes):
     """A strategy that does nothing but read its cash line on the first tick —
     the reader ADR-0041 §6's "``cash`` is Tier-1, never ``None``" is a promise to."""
-
-    wake_interval_seconds: float | None = None
 
     def __init__(self, portfolio: Portfolio) -> None:
         self.strategy_id = "live"
@@ -726,9 +719,6 @@ class _AccountReadingStrategy:
         if self.first_read is None:
             self.first_read = self._portfolio.account().cash
             self.read.set()
-
-    async def on_wake(self, wake: Wake) -> None:
-        pass
 
     async def on_order_event(self, event: OrderEvent) -> None:
         return None
@@ -1316,10 +1306,8 @@ def test_the_ledger_is_recovered_before_the_order_cache_is_rebuilt(tmp_path: Pat
     assert timeline[:2] == ["ledger.load_account", "cache.all_orders"]
 
 
-class _SeqRecordingStrategy:
+class _SeqRecordingStrategy(NeverWakes):
     """Records the seq the host hands it and trades nothing."""
-
-    wake_interval_seconds: float | None = None
 
     def __init__(self, strategy_id: str) -> None:
         self.strategy_id = strategy_id
@@ -1327,9 +1315,6 @@ class _SeqRecordingStrategy:
 
     async def on_tick(self, tick: MarketTick) -> None:
         return None
-
-    async def on_wake(self, wake: Wake) -> None:
-        pass
 
     async def on_order_event(self, event: OrderEvent) -> None:
         return None

@@ -16,6 +16,7 @@ import pytest
 from bus_backends import BUS_BACKENDS, make_bus
 from exit_runs import LastingVenue, PriceWaitBlocks, paper_on
 from kafka_fakes import FakeKafkaBroker
+from never_wakes import NeverWakes
 from store_backends import STORE_BACKEND_PARAMS, PostgresBackend, SQLiteBackend, resolve_backend
 from venue_doubles import VenueLink
 
@@ -37,7 +38,6 @@ from tickwright.domain import (
     Side,
     SignalEmitter,
     TimeInForce,
-    Wake,
     derive_cloid,
 )
 from tickwright.engine.exit_run import ExitJob, Flatten, OperatorCancelAll
@@ -53,15 +53,13 @@ _SPECS = {
 }
 
 
-class _Exiter:
+class _Exiter(NeverWakes):
     """Opens a long on its first tick, then exits as far as a strategy can.
 
     Once the open fills, it sells ``reduce`` reduce-only. With ``rest`` it also
     rests a buy far below the market, and cancels all its orders on the symbol
     once the buy is live.
     """
-
-    wake_interval_seconds: float | None = None
 
     def __init__(
         self,
@@ -92,9 +90,6 @@ class _Exiter:
                 order_type=OrderType.MARKET,
                 time_in_force=TimeInForce.IOC,
             )
-
-    async def on_wake(self, wake: Wake) -> None:
-        pass
 
     async def on_order_event(self, event: OrderEvent) -> None:
         seen = self._states.setdefault(event.signal_id, set())

@@ -147,7 +147,9 @@ process.
 - `docs/extending.md`, where it describes the `Strategy` seam.
 - The `Strategy` entry in `CONTEXT.md`.
 - Every test fake that implements `Strategy` gains the two members in the same PR as the
-  protocol change.
+  protocol change. A fake that never wakes gets both from `NeverWakes` in
+  `tests/_support/never_wakes.py`. A fake that wakes overrides both. The strategies in
+  `tests/_support/user_strategies.py` write both out, the way a user does.
 
 ## Dependency graph
 

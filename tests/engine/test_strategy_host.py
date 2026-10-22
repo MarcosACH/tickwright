@@ -14,6 +14,7 @@ import pytest
 import structlog.testing
 from kafka_fakes import FakeKafkaBroker, Record
 from ledgers import ledger, scoped
+from never_wakes import NeverWakes
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.bus.kafka import KafkaBus
@@ -37,7 +38,6 @@ from tickwright.domain import (
     SignalEmitter,
     SignalId,
     Store,
-    Wake,
     derive_cloid,
     wake_interval_refusal,
 )
@@ -71,10 +71,8 @@ def _host(
     )
 
 
-class RecordingStrategy:
+class RecordingStrategy(NeverWakes):
     """A minimal third-party strategy that records what the host delivers."""
-
-    wake_interval_seconds: float | None = None
 
     def __init__(self, strategy_id: str) -> None:
         self.strategy_id = strategy_id
@@ -88,9 +86,6 @@ class RecordingStrategy:
 
     async def on_tick(self, tick: MarketTick) -> None:
         self.ticks.append(tick)
-
-    async def on_wake(self, wake: Wake) -> None:
-        pass
 
     async def on_order_event(self, event: OrderEvent) -> None:
         self.order_events.append(event)

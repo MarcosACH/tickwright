@@ -14,6 +14,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from never_wakes import NeverWakes
 
 from tickwright.adapters.feed import ReplayFeedConfig
 from tickwright.adapters.paper import PaperExchangeConfig
@@ -37,7 +38,6 @@ from tickwright.domain import (
     Side,
     SignalEmitter,
     TimeInForce,
-    Wake,
 )
 from tickwright.engine.runner import Engine
 
@@ -53,10 +53,8 @@ BTC = InstrumentSpec(
 )
 
 
-class SendsABadOrderOnce:
+class SendsABadOrderOnce(NeverWakes):
     """Sends the bad order on its first tick, then a market buy."""
-
-    wake_interval_seconds: float | None = None
 
     def __init__(
         self, emitter: SignalEmitter, *, order_type: OrderType, price: Decimal | None
@@ -92,9 +90,6 @@ class SendsABadOrderOnce:
             time_in_force=TimeInForce.IOC,
         )
         self.sent.append(signal_id)
-
-    async def on_wake(self, wake: Wake) -> None:
-        pass
 
     async def on_order_event(self, event: OrderEvent) -> None:
         self.states.setdefault(event.signal_id, []).append(event.state)

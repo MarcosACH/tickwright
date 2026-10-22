@@ -25,6 +25,7 @@ from pathlib import Path
 
 import pytest
 from bus_backends import BUS_BACKENDS, make_bus
+from never_wakes import NeverWakes
 from store_backends import POSTGRES_DSN_ENV, STORE_BACKEND_PARAMS, resolve_backend
 
 from tickwright.adapters.feed import ReplayFeedConfig
@@ -53,7 +54,6 @@ from tickwright.domain import (
     Side,
     SignalEmitter,
     TimeInForce,
-    Wake,
 )
 from tickwright.engine.guard import PreTradeLimits, RateCap, SymbolLimits
 from tickwright.engine.runner import Engine
@@ -167,15 +167,13 @@ STALE_CLOSE = Step(
 WHOLE_SCENARIO = [*CAPS, FRESH_CLOSE, *FULL_WINDOW, STALE_CLOSE]
 
 
-class ScriptedStrategy:
+class ScriptedStrategy(NeverWakes):
     """Sends, at market, the orders its script lists for a tick's time.
 
     The script is keyed by time, not by tick count, so a restarted strategy
     picks up where the feed is without needing its snapshot.
 
     ``outcomes`` records, in send order, ``"filled"`` or the denial reason."""
-
-    wake_interval_seconds: float | None = None
 
     def __init__(
         self,
@@ -203,9 +201,6 @@ class ScriptedStrategy:
                 time_in_force=TimeInForce.IOC,
             )
             self._sent.append(signal_id)
-
-    async def on_wake(self, wake: Wake) -> None:
-        pass
 
     async def on_order_event(self, event: OrderEvent) -> None:
         if isinstance(event, OrderFilled):
