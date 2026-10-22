@@ -223,9 +223,12 @@ $V cleanup <run-id>
 
 Sends TERM to every life this run started that is still alive, waits 15 s, then KILL. It signals
 the recorded pid, after checking that pid still runs the engine module, so a pid the OS reused is
-skipped. It never searches for engine processes by name. Stops and removes only the compose
-services this run brought up. Scans evidence for the signing key. Deletes `scratch/`.
-Keeps `evidence/`. Run it after every failed attempt too, so nothing strands a process or a port.
+skipped. It never searches for engine processes by name. A `--image` life is stopped by its
+container name with `docker stop`, because its pid is only the `docker run` client. If docker
+cannot stop it, cleanup exits `1` and keeps `scratch/`, so you can run it again. Stops and removes
+only the compose services this run brought up. Scans evidence for the signing key. Deletes
+`scratch/`. Keeps `evidence/`. Run it after every failed attempt too, so nothing strands a process
+or a port.
 
 After cleanup, confirm the proof survived: `ls .agents/verify/<run-id>/evidence/`.
 

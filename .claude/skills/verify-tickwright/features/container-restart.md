@@ -77,6 +77,7 @@ Steps:
 
 - A container `KILL` exits `137`, not `-9`. The helper's pid is the `docker run` client. `signal`
   sends to the container instead, because a `KILL` to the client leaves the engine running.
+  `cleanup` stops the container by name for the same reason.
 - The Kafka broker advertises `localhost:9092`, so the engine joins the broker's network. There
   Postgres is `postgres:5432`. The helper still reads the store from the host at `localhost:5432`,
   so the container gets its own DSN through `--container-env`.
