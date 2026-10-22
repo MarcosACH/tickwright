@@ -21,7 +21,8 @@ FROM python:3.13-slim-bookworm@sha256:a881a81282cca8c57f97014867fa651def1b379903
 COPY --from=build /app/.venv /app/.venv
 RUN useradd --uid 10001 --no-create-home tickwright \
     && mkdir /data && chown tickwright /data
-ENV PATH=/app/.venv/bin:$PATH PYTHONUNBUFFERED=1
+# A user mounts their strategy code at /strategies and names it by import path (ADR-0061).
+ENV PATH=/app/.venv/bin:$PATH PYTHONUNBUFFERED=1 PYTHONPATH=/strategies
 # The SQLite store is written relative to the working directory.
 WORKDIR /data
 USER tickwright

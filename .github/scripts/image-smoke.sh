@@ -1,6 +1,7 @@
 #!/bin/sh
 # Runs a paper replay inside the image the way an operator would, and checks it.
-# A market order must fill, then TERM must stop the engine with exit 0.
+# The strategy is a user strategy from a mounted directory, loaded by import path.
+# Its market order must fill, then TERM must stop the engine with exit 0.
 # A replay does not exit when its file ends, so this script sends the stop.
 # It needs no key and no external service. CI runs it before anything is published.
 #
@@ -26,10 +27,11 @@ fail() {
 # Only the variables set here reach the engine. Docker passes no host environment.
 docker run -d --name "$name" ${platform:+--platform "$platform"} \
   -v "$root/examples/ticks.jsonl:/replay/ticks.jsonl:ro" \
+  -v "$root/examples/strategies:/strategies:ro" \
   -e TICKWRIGHT_REPLAY__PATH=/replay/ticks.jsonl \
   -e TICKWRIGHT_PAPER__GENESIS_COLLATERAL=100000 \
   -e 'TICKWRIGHT_PAPER__INSTRUMENT_SPECS={"BTC": {"symbol": "BTC", "sz_decimals": 3, "max_decimals": 6, "max_sig_figs": 5, "min_notional": "10"}}' \
-  -e 'TICKWRIGHT_STRATEGIES=[{"strategy": "tickwright.strategies.single_shot:SingleShotMarketStrategy", "strategy_id": "smoke", "symbols": ["BTC"], "settings": {"side": "buy", "quantity": "0.5"}}]' \
+  -e 'TICKWRIGHT_STRATEGIES=[{"strategy": "buy_once:BuyOnce", "strategy_id": "smoke", "symbols": ["BTC"], "settings": {"quantity": "0.5"}}]' \
   "$image" >/dev/null
 
 waited=0
