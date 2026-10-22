@@ -17,9 +17,11 @@ on:
     branches: [main]
     tags: ["v*.*.*"]
 
+# A newer pull request push cancels the older run. A push to main or a tag gets a
+# group of its own. GitHub keeps one waiting run per group and cancels the rest,
+# so a shared group would drop the publish of a merge that lands between two others.
 concurrency:
-  group: image-${{ github.ref }}
-  # Never cancel a publish halfway. A newer pull request push may cancel an older one.
+  group: ${{ github.event_name == 'pull_request' && format('image-{0}', github.ref) || format('image-push-{0}', github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
