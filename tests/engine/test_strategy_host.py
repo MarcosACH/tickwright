@@ -39,6 +39,7 @@ from tickwright.domain import (
     Store,
     Wake,
     derive_cloid,
+    wake_interval_refusal,
 )
 from tickwright.engine.cache import Cache
 from tickwright.engine.strategy_host import StrategyHost
@@ -748,6 +749,21 @@ def test_registering_the_reserved_operator_id_fails_fast() -> None:
 
     with pytest.raises(InvariantViolation, match=f"{OPERATOR} is reserved for operator orders"):
         host.register(RecordingStrategy(OPERATOR), symbols={"BTC"})
+
+
+@pytest.mark.parametrize("interval", [0.5, True, float("nan")])
+def test_registering_a_bad_wake_interval_fails_with_the_rule_s_own_sentence(
+    interval: object,
+) -> None:
+    # A strategy built without a config never meets the loader's check (ADR-0062).
+    strategy = RecordingStrategy("alpha")
+    strategy.wake_interval_seconds = interval  # type: ignore[assignment]
+    refusal = wake_interval_refusal(interval)
+    assert refusal is not None
+
+    with pytest.raises(InvariantViolation) as raised:
+        _host().register(strategy, symbols={"BTC"})
+    assert str(raised.value) == refusal
 
 
 def test_a_second_strategy_may_not_claim_an_owned_symbol() -> None:
