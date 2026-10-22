@@ -5,6 +5,7 @@
 #
 # Pick a published tag: `sha-<commit>` or `vX.Y.Z`. There is no `latest`.
 # README.md → "Run in a container" explains each part.
+# CI runs this file with each new image (.github/scripts/image-smoke.sh).
 services:
   tickwright:
     image: ghcr.io/marcosach/tickwright:${IMAGE_TAG:?set IMAGE_TAG to a published tag}
