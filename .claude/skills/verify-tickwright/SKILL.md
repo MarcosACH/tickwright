@@ -72,7 +72,9 @@ the engine. It ends by itself. See `features/safe-exit.md`.
 its own path and is the working directory, so the `.env`, `check --sql` and `dump` work unchanged.
 `../strategies/` is mounted at `/strategies`, so its strategies load by import path. `signal` goes
 to the container, and a `KILL` exits `137`. `--network container:<id>` joins another container's
-network. `--container-env KEY=VALUE` sets a variable in the container only, over the `.env`. See
+network. `--container-env KEY=VALUE` sets a variable in the container only, over the `.env`. It is written to the evidence, so it
+refuses the signing key. An `--image` life also refuses `--forward-key`, because the key would
+never reach the container. `--network` and `--container-env` need `--image`. See
 `features/container-restart.md`.
 
 Kafka and Postgres need Docker. `$V infra <run-id> up kafka` or `up postgres` starts the compose
