@@ -258,6 +258,30 @@ def test_a_second_engine_on_the_same_store_exits_1_until_the_first_is_killed(
         assert _terminate(third) == 0
 
 
+def test_an_engine_on_a_store_bound_to_another_account_exits_2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A restart with the same config refuses again, so a supervisor must not
+    retry it. Exit 2 tells it apart from a fault (ADR-0024)."""
+    _write_workspace(tmp_path)
+    _export_hostile_config(monkeypatch)
+    with _spawn(tmp_path, tmp_path / "first.log") as first:
+        try:
+            _await_event(tmp_path / "first.log", "engine.barrier_cleared")
+        except BaseException:
+            first.kill()
+            raise
+        assert _terminate(first) == 0
+
+    # The same store, now declared as an account with other genesis collateral.
+    env = tmp_path / ".env"
+    env.write_text(env.read_text().replace("GENESIS_COLLATERAL=100000", "GENESIS_COLLATERAL=5000"))
+    log = tmp_path / "second.log"
+
+    assert _run_to_exit(tmp_path, log) == 2
+    assert "StoreAccountMismatch" in log.read_text()
+
+
 def _run_to_exit(cwd: Path, log: Path, *args: str, timeout: float = 15.0) -> int:
     """Run a one-shot CLI command and return its exit code."""
     with _spawn(cwd, log, *args) as process:
@@ -342,6 +366,27 @@ def test_cancel_all_on_a_store_another_engine_holds_exits_two(
     assert [event["event"] for event in _events(log)] == ["exit.refused"]
 
 
+def test_cancel_all_on_a_store_bound_to_another_account_exits_two(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refusal comes before the job reaches the venue, so nothing moved.
+    That is code 2 for an exit run too (ADR-0060)."""
+    _write_workspace(tmp_path)
+    _export_hostile_config(monkeypatch)
+    with SQLiteStore(tmp_path / "saga.db") as store:
+        checkpointer(store, clock=ManualClock()).recover()
+    env = tmp_path / ".env"
+    env.write_text(env.read_text().replace("GENESIS_COLLATERAL=100000", "GENESIS_COLLATERAL=5000"))
+    log = tmp_path / "cancel_all.log"
+
+    assert _run_to_exit(tmp_path, log, "cancel-all") == 2, log.read_text()
+
+    events = _events(log)
+    assert "StoreAccountMismatch" in str(events[-2]["error"])
+    assert events[-1]["event"] == "exit.finished"
+    assert events[-1]["exit_code"] == 2
+
+
 def test_cancel_all_on_a_store_no_engine_has_used_exits_two(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -384,6 +429,25 @@ def test_new_store_with_no_exit_command_exits_two_and_starts_no_run(
 
     assert "--new-store" in log.read_text()
     assert _events(log) == []
+
+
+def test_an_engine_run_on_a_config_that_does_not_validate_exits_2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same config fails the same way on every restart, so a supervisor
+    must not retry it (ADR-0024). Nothing is built, so no store is opened."""
+    _write_workspace(tmp_path)
+    _export_hostile_config(monkeypatch)
+    with (tmp_path / ".env").open("a") as env:
+        env.write("TICKWRIGHT_BUS=no-such-bus\n")
+    log = tmp_path / "engine.log"
+
+    assert _run_to_exit(tmp_path, log) == 2, log.read_text()
+
+    # The message names the field and what it accepts. It never quotes the
+    # input, because the input can hold the signing key.
+    assert "bus\n  Input should be 'in_memory' or 'kafka'" in log.read_text()
+    assert not (tmp_path / "saga.db").exists()
 
 
 def test_cancel_all_on_a_store_it_cannot_open_exits_two(

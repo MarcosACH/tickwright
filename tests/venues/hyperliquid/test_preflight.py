@@ -29,6 +29,7 @@ from tickwright.domain import (
     LeverageBook,
     LeverageOutOfBounds,
     LeverageSpec,
+    VenueAccountModeUnreadable,
     VenueAccountModeUnsupported,
     VenueLeverageMismatch,
     VenueLeveragePushFailed,
@@ -362,7 +363,7 @@ def test_a_mode_that_cannot_be_read_refuses_to_start_once_the_budget_is_spent() 
     clock = ManualClock(start_ns=0)
     post = FakeExchangeApi({"userAbstraction": ConnectionError("venue unreachable")})
 
-    with pytest.raises(VenueAccountModeUnsupported) as refusal:
+    with pytest.raises(VenueAccountModeUnreadable) as refusal:
         asyncio.run(_exchange(post, clock=clock).start())
 
     assert len(post.requests) > 1, "a single attempt is not a bounded retry"
@@ -420,7 +421,7 @@ def test_a_body_that_is_not_a_mode_literal_is_a_failed_read_not_a_refused_mode(
     clock = ManualClock(start_ns=0)
     post = FakeExchangeApi({"userAbstraction": body})
 
-    with pytest.raises(VenueAccountModeUnsupported) as refusal:
+    with pytest.raises(VenueAccountModeUnreadable) as refusal:
         asyncio.run(_exchange(post, clock=clock).start())
 
     assert len(post.requests) > 1, "an unreadable body is retried, not refused outright"

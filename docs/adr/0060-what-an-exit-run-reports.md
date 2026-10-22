@@ -42,6 +42,14 @@ when a venue read fails, and which named events an exit run emits. Decided in
   built prints its message and emits no event, like a config error. A store whose lock read fails
   emits `engine.faulted` naming the error. Neither emits `exit.refused`, because the store check
   never answered.**)**
+
+  **(Extended by [#532](https://github.com/MarcosACH/tickwright/issues/532):** a boot refusal is
+  code 2 too. That is a store bound to another account, or an account mode the venue reported and
+  the engine refuses. Each one stops the boot before the job runs, so nothing at the venue moved.
+  It is not the fault that code 1 lists. It emits `engine.faulted` naming the refusal, then
+  `exit.finished` with code 2. It does not emit `exit.refused`, because the store check passed.
+  An account mode the engine could not read in time is still a fault, so it stays 1. See the
+  ADR-0024 amendment of 2026-10-21.**)**
 - **Cancel all trusts the read, not the statuses.** Hyperliquid answers one status per cancel
   (P4 in the probes). "Already filled", "already cancelled", and "never placed" share one error
   string. Cancelling a parent also cancels its TP and SL, so they answer "already canceled" (P5).

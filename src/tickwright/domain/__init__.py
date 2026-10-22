@@ -20,6 +20,7 @@ from .enums import (
     TimeInForce,
 )
 from .errors import (
+    BootRefusal,
     InvariantViolation,
     LeverageOutOfBounds,
     OpenOrdersReadBeforeStart,
@@ -27,6 +28,7 @@ from .errors import (
     StoreAccountMismatch,
     StoreLockHeld,
     StoreNeverUsed,
+    VenueAccountModeUnreadable,
     VenueAccountModeUnsupported,
     VenueFactUnsupported,
     VenueLeverageMismatch,
@@ -144,6 +146,7 @@ __all__ = [
     "Side",
     "TimeInForce",
     # errors
+    "BootRefusal",
     "InvariantViolation",
     "LeverageOutOfBounds",
     "OpenOrdersReadBeforeStart",
@@ -151,6 +154,7 @@ __all__ = [
     "StoreAccountMismatch",
     "StoreLockHeld",
     "StoreNeverUsed",
+    "VenueAccountModeUnreadable",
     "VenueAccountModeUnsupported",
     "VenueFactUnsupported",
     "VenueLeverageMismatch",

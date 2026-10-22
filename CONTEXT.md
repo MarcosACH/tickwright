@@ -717,7 +717,8 @@ clearinghouse *is* the account boundary; under `unifiedAccount` or `portfolioMar
 snapshot reports only the collateral posted into perps, so equity and free margin read an order of
 magnitude low. Not configuration — it is **read from the venue** and verified at boot, and again
 before any Tier-1 cash heal. The guard **fails closed at both points**: at boot an unsupported *or
-unreadable* mode refuses to start (`VenueAccountModeUnsupported`); in flight a mode that changed or
+unreadable* mode refuses to start (`VenueAccountModeUnsupported` exits 2,
+`VenueAccountModeUnreadable` exits 1 so a supervisor retries); in flight a mode that changed or
 could not be verified refuses the heal, freezes the account-grain reconcile and alerts
 (`ACCOUNT_MODE_UNVERIFIED`) — an unverified mode is never read as an unchanged one. A
 [[Venue adapter]] concern that never reaches `domain`. See ADR-0046, ADR-0038, ADR-0034.

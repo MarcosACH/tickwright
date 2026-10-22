@@ -2,8 +2,9 @@
 
 Reads ``AppSettings`` from the environment and ``.env``, wires logging, builds
 the engine through the composition root, and runs the supervised lifecycle.
-The process exit code is the ADR-0024 contract: 0 = graceful stop (SIGINT/
-SIGTERM), non-zero = ``FAULTED`` — the external supervisor's restart signal.
+The process exit code is the ADR-0024 contract. 0 is a graceful stop (SIGINT or
+SIGTERM). 1 is ``FAULTED``, the external supervisor's restart signal. 2 is a
+boot refusal, which a restart would repeat, so the supervisor should stop.
 
 ``tickwright cancel-all`` and ``tickwright flatten`` use the ADR-0060 codes instead. 0 means done, 1
 means it stopped partway, and 2 means it never booted.
@@ -40,11 +41,15 @@ def main() -> int:
 
 
 def _run_engine() -> int:
-    # Everything comes from the environment/.env at runtime — a missing or
-    # inconsistent field (feed=replay without a tick file, say) is a readable
-    # pydantic validation error, which is exactly the CLI contract. This is the
-    # one place that builds the env-reading skin (issue #71).
-    config = AppSettings()
+    # Everything comes from the environment/.env at runtime. This is the one
+    # place that builds the env-reading skin (issue #71). A config that does not
+    # validate fails the same way on every restart, so it exits 2 and a
+    # supervisor stops retrying it (ADR-0024).
+    try:
+        config = AppSettings()
+    except ValidationError as exc:
+        print(f"tickwright: {exc}", file=sys.stderr)
+        return 2
     configure_logging(secrets=config.secrets())
     engine = build_engine(config)
     return asyncio.run(engine.run())
