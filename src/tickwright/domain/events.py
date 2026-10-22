@@ -177,6 +177,29 @@ class FundingAccrual(Event):
         return self.symbol
 
 
+# --- Strategy wake-ups --------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Wake(Event):
+    """One strategy's slot on its wake interval has come (ADR-0062).
+
+    ``ts_event`` is the scheduled slot, not the time the event was built.
+    """
+
+    strategy_id: str
+
+    @property
+    def event_id(self) -> str:
+        # The slot, not ts_init, so a slot built twice dedups to one id.
+        return f"{self.strategy_id}:wake:{self.ts_event}"
+
+    @property
+    def partition_key(self) -> str:
+        # Per strategy, so one strategy's wake-ups stay in order on Kafka.
+        return self.strategy_id
+
+
 # --- Signals (strategy intent) ----------------------------------------------
 
 

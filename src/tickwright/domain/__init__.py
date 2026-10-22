@@ -62,6 +62,7 @@ from .events import (
     PlaceSignal,
     ReconciliationFill,
     Signal,
+    Wake,
     publishable_event_types,
 )
 from .figures import exact_figure
@@ -224,6 +225,7 @@ __all__ = [
     "VenueOrderView",
     "VenueReadFailure",
     "VenuePositionState",
+    "Wake",
     # the event tree's leaves, for gates that must cover every family
     "publishable_event_types",
     # id derivation
