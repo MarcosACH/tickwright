@@ -619,6 +619,38 @@ def test_a_bad_wake_interval_is_refused_with_the_rule_s_own_sentence(
     assert str(refused.value) == f"strategy 'user': {refusal}"
 
 
+@pytest.mark.parametrize("interval", [None, 1, 60])
+def test_a_good_wake_interval_from_the_settings_loads_and_trades(
+    tmp_path: Path, interval: object
+) -> None:
+    # 1 is the floor itself, so an off-by-one in the rule turns this red.
+    ticks = tmp_path / "ticks.jsonl"
+    ticks.write_text(
+        '{"symbol": "BTC", "price": "42000", "size": "3", '
+        '"aggressor_side": "buy", "trade_id": "a", "ts_event": 1000}\n'
+    )
+    db = tmp_path / "saga.db"
+    config = AppConfig.model_validate(
+        {
+            "replay": ReplayFeedConfig(path=ticks),
+            "sqlite": SQLiteStoreConfig(path=db),
+            "paper": PaperExchangeConfig(
+                instrument_specs={"BTC": _SPEC}, genesis_collateral=GENESIS
+            ),
+            "strategies": [
+                {
+                    "strategy": "user_strategies:WakesOnItsSettings",
+                    "strategy_id": "user",
+                    "symbols": ["BTC"],
+                    "settings": {"quantity": "0.5", "wake_interval_seconds": interval},
+                }
+            ],
+        }
+    )
+    wanted = {derive_cloid("user:BTC:1"): OrderState.FILLED}
+    assert _run_until_states(build_engine(config), db, wanted) == 0
+
+
 def test_a_strategy_whose_id_differs_from_its_entry_is_refused(tmp_path: Path) -> None:
     # The emitter and portfolio carry the entry's id, but the host keys on the
     # strategy's. A mismatch would hide its fills from it and resume its seq
