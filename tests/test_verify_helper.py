@@ -743,6 +743,21 @@ class TestDocker:
         assert "--forward-key does not reach a container" in out
         assert not (helper.evidence("r1") / "first.env.txt").exists()
 
+    @pytest.mark.parametrize(
+        "flag", [["--network", "container:kafka-1"], ["--container-env", "A=1"]]
+    )
+    def test_a_container_flag_without_an_image_is_refused(
+        self, helper: ModuleType, run: Callable[..., tuple[int, str]], flag: list[str]
+    ) -> None:
+        # A venv life would drop it without a word.
+        run("init", "r1")
+
+        code, out = run("start", "r1", "first", "--preset", "paper-replay", *flag)
+
+        assert code == 1
+        assert f"{flag[0]} needs --image" in out
+        assert not (helper.evidence("r1") / "first.env.txt").exists()
+
 
 def _testnet_life(
     helper: ModuleType,

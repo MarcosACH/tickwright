@@ -395,18 +395,28 @@ def life_env(preset: str | None, env: list[str], params: list[str]) -> tuple[str
     return scratch_text, evidence_text
 
 
-def cmd_start(args: argparse.Namespace) -> int:
-    require_run(args.run_id)
-    pid_file = scratch(args.run_id) / f"{args.life}.pid"
-    exit_file = evidence(args.run_id) / f"{args.life}.exit"
-    if pid_file.exists() or exit_file.exists():
-        sys.exit(f"life {args.life} already exists in run {args.run_id}: pick another name")
+def refuse_bad_container_flags(args: argparse.Namespace) -> None:
+    """Exit before anything is written when the container flags do not fit the life."""
     # Every container variable is written to the evidence, so a key there would leak.
     if any("SIGNING_KEY" in pair.partition("=")[0] for pair in args.container_env):
         sys.exit("never pass the signing key through --container-env")
     # The key would reach the `docker run` client, never the engine in the container.
     if args.image and args.forward_key:
         sys.exit("--forward-key does not reach a container: an --image life runs without a key")
+    # A venv life would drop these without a word.
+    if not args.image and args.network:
+        sys.exit("--network needs --image")
+    if not args.image and args.container_env:
+        sys.exit("--container-env needs --image")
+
+
+def cmd_start(args: argparse.Namespace) -> int:
+    require_run(args.run_id)
+    pid_file = scratch(args.run_id) / f"{args.life}.pid"
+    exit_file = evidence(args.run_id) / f"{args.life}.exit"
+    if pid_file.exists() or exit_file.exists():
+        sys.exit(f"life {args.life} already exists in run {args.run_id}: pick another name")
+    refuse_bad_container_flags(args)
 
     scratch_text, evidence_text = life_env(args.preset, args.env, args.param)
     (scratch(args.run_id) / ".env").write_text(scratch_text)
