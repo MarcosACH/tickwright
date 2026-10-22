@@ -578,6 +578,23 @@ def test_a_class_with_no_on_wake_is_refused_before_the_store_exists(tmp_path: Pa
     assert not (tmp_path / "saga.db").exists()
 
 
+def test_a_strategy_that_never_declares_a_wake_interval_is_refused(tmp_path: Path) -> None:
+    # The method check cannot see an attribute. As a bare AttributeError it
+    # would exit 1, and a supervisor would restart it forever.
+    config = _config(
+        tmp_path,
+        strategies=[
+            {
+                "strategy": "user_strategies:LacksWakeInterval",
+                "strategy_id": "user",
+                "symbols": ["BTC"],
+            }
+        ],
+    )
+    with pytest.raises(StrategyLoadRefusal, match="has no wake_interval_seconds"):
+        build_engine(config)
+
+
 def test_a_strategy_whose_id_differs_from_its_entry_is_refused(tmp_path: Path) -> None:
     # The emitter and portfolio carry the entry's id, but the host keys on the
     # strategy's. A mismatch would hide its fills from it and resume its seq

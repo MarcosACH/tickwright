@@ -424,6 +424,13 @@ def _build_engine(config: AppConfig, *, exit_job: ExitJob | None) -> Engine:
                 f"strategy {strategy_id!r}: {strategy_config.strategy} calls itself "
                 f"{own_id!r}. Set strategy_id from emitter.strategy_id."
             )
+        # Read after construction, since it may come from the settings. The
+        # method check cannot see it, and as an AttributeError it would exit 1.
+        if not hasattr(strategy, "wake_interval_seconds"):
+            raise StrategyLoadRefusal(
+                f"strategy {strategy_id!r}: {strategy_config.strategy} has no "
+                "wake_interval_seconds. Set it to None if the strategy never wakes."
+            )
         engine.register(strategy, symbols=set(strategy_config.symbols))
     return engine
 

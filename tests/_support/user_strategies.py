@@ -174,6 +174,34 @@ class LacksOnWake:
         pass
 
 
+class LacksWakeInterval:
+    """Has every Strategy method, but never declares ``wake_interval_seconds``."""
+
+    class Settings(BaseModel):
+        pass
+
+    def __init__(self, *, emitter: SignalEmitter, portfolio: Portfolio, settings: Settings) -> None:
+        self.strategy_id = emitter.strategy_id
+
+    async def on_tick(self, tick: MarketTick) -> None:
+        pass
+
+    async def on_wake(self, wake: Wake) -> None:
+        pass
+
+    async def on_order_event(self, event: OrderEvent) -> None:
+        pass
+
+    def set_next_seq(self, next_seq: int) -> None:
+        pass
+
+    def snapshot(self) -> bytes:
+        return b""
+
+    def restore(self, data: bytes) -> None:
+        pass
+
+
 class HasNoSettings:
     """A class that forgot to declare its settings model."""
 
