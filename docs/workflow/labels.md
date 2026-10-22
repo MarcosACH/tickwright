@@ -63,6 +63,7 @@ Any one of these on an issue means it must not be picked autonomously.
 |---|---|---|
 | `prd` | `#5319e7` (purple) | Parent PRD issue — sub-issues describe vertical slices |
 | `ai` | `#bfd4f2` (sky) | Created or executed by an AI agent |
+| `soak` | `#e99695` (light red) | Bug found by the testnet soak. Links its journal day. |
 | `bug` | `#d73a4a` (red) | (Existing GitHub default; preserved) |
 
 ## Wayfinder — decision-ticket maps
