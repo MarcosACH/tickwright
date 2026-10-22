@@ -78,6 +78,15 @@ def _fake_docker(bin_dir: Path, *, running: bool) -> None:
     script.chmod(0o755)
 
 
+def _recording_docker(bin_dir: Path) -> Path:
+    """A ``docker`` that writes its arguments to a file and exits 0. Returns the file."""
+    argv_file = bin_dir / "docker.argv"
+    script = bin_dir / "docker"
+    script.write_text(f'#!/bin/sh\necho "$@" >> {argv_file}\n')
+    script.chmod(0o755)
+    return argv_file
+
+
 def _finished_life(
     helper: ModuleType,
     run_id: str,
@@ -547,6 +556,26 @@ class TestDocker:
 
         assert code == 0
         assert helper.read_run_json("r1")["infra"] == ["kafka"]
+
+    # The supervisor is detached on purpose and may still be exiting when the test ends.
+    @pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
+    def test_an_image_life_runs_the_engine_in_a_container_on_the_run_scratch(
+        self, helper: ModuleType, run: Callable[..., tuple[int, str]], bin_dir: Path
+    ) -> None:
+        argv_file = _recording_docker(bin_dir)
+        run("init", "r1")
+
+        code, _ = run("start", "r1", "first", "--preset", "paper-replay", "--image", "img:sha-1")
+        run("await", "r1", "first", "--exit", "--timeout", "10")
+
+        scratch = str(helper.scratch("r1"))
+        argv = argv_file.read_text().split()
+        assert code == 0
+        assert argv[0] == "run" and argv[-1] == "img:sha-1"
+        # The same path inside, so the scratch .env and its relative paths work unchanged.
+        assert f"{scratch}:{scratch}" in argv
+        assert argv[argv.index("-w") + 1] == scratch
+        assert f"{helper.SCRIPTS.parent / 'strategies'}:/strategies:ro" in argv
 
 
 def _testnet_life(

@@ -41,6 +41,8 @@ ROOT = SCRIPTS.parents[3]
 VERIFY_HOME = Path(os.environ.get("VERIFY_HOME") or ROOT / ".agents" / "verify")
 ENGINE_CMD = [sys.executable, "-m", "tickwright.app"]
 STRATEGY_RUNNER = SCRIPTS / "run_strategy.py"
+# Strategies outside the package, mounted at ``/strategies`` in a container life.
+STRATEGIES = SCRIPTS.parent / "strategies"
 KEY_VARS = ("TICKWRIGHT_HYPERLIQUID__SIGNING_KEY", "TICKWRIGHT_HYPERLIQUID__ACCOUNT_ADDRESS")
 NO_DOCKER_PATHS = "kafka and postgres paths unavailable"
 SIGNALS = {
@@ -414,6 +416,8 @@ def cmd_start(args: argparse.Namespace) -> int:
 
     if args.strategy:
         command = [sys.executable, str(STRATEGY_RUNNER), args.strategy]
+    elif args.image:
+        command = container_command(args.run_id, args.image)
     else:
         command = list(ENGINE_CMD)
         # An exit run is the same CLI with one argument, so it reads the same .env.
@@ -450,6 +454,28 @@ def cmd_start(args: argparse.Namespace) -> int:
     print(f"stderr    {evidence(args.run_id) / (args.life + '.stderr.jsonl')}")
     print(f"exit code {exit_file} (written when the process ends)")
     return 0
+
+
+def container_command(run_id: str, image: str) -> list[str]:
+    """``docker run`` for one life, with the CLI reading the same scratch as a venv life.
+
+    The scratch is mounted at its own host path and is the working directory, so the
+    engine reads the same ``.env`` and its relative paths. The host uid keeps the
+    store writable on a Linux bind mount."""
+    path = str(scratch(run_id))
+    return [
+        "docker",
+        "run",
+        "--user",
+        f"{os.getuid()}:{os.getgid()}",
+        "-v",
+        f"{path}:{path}",
+        "-w",
+        path,
+        "-v",
+        f"{STRATEGIES}:/strategies:ro",
+        image,
+    ]
 
 
 def cmd_supervise(args: argparse.Namespace) -> int:
@@ -991,6 +1017,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--command", choices=["cancel-all", "flatten"], help="run a one-shot exit run of the CLI"
     )
+    run.add_argument("--image", help="run the CLI in this container image instead of the venv")
     p.add_argument("--param", action="append", default=[], help="KEY=VALUE exported as VERIFY_KEY")
     p.add_argument(
         "--forward-key", action="store_true", help="forward the testnet key from the repo .env"
