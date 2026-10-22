@@ -1,0 +1,54 @@
+# Builds the container image for amd64 and arm64, then runs a paper replay in each
+# one with .github/scripts/image-smoke.sh. The replay needs no key and no external
+# service.
+#
+# This is its own workflow, not a step in ci.yml. ci.yml must stay one job named
+# `ci` (see its header). Actions are pinned by commit SHA, the same as in ci.yml.
+name: image
+
+on:
+  pull_request:
+
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # QEMU runs the arm64 build and the arm64 replay on an amd64 runner.
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # One build per platform, loaded into the local daemon so each can be run.
+      - name: Build amd64
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: tickwright:amd64
+          cache-from: type=gha,scope=amd64
+          cache-to: type=gha,mode=max,scope=amd64
+
+      - name: Build arm64
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/arm64
+          load: true
+          tags: tickwright:arm64
+          cache-from: type=gha,scope=arm64
+          cache-to: type=gha,mode=max,scope=arm64
+
+      - name: Paper replay on amd64
+        run: .github/scripts/image-smoke.sh tickwright:amd64 linux/amd64
+
+      - name: Paper replay on arm64
+        run: .github/scripts/image-smoke.sh tickwright:arm64 linux/arm64
