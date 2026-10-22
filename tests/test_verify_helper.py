@@ -87,6 +87,13 @@ def _recording_docker(bin_dir: Path) -> Path:
     return argv_file
 
 
+def _docker_that_fails_stop(bin_dir: Path, message: str) -> None:
+    """A ``docker`` whose ``stop`` prints ``message`` and exits 1, and accepts the rest."""
+    script = bin_dir / "docker"
+    script.write_text(f'#!/bin/sh\ncase "$1" in\n  stop) echo "{message}" >&2; exit 1;;\nesac\n')
+    script.chmod(0o755)
+
+
 def _finished_life(
     helper: ModuleType,
     run_id: str,
@@ -618,6 +625,28 @@ class TestDocker:
         container = lines[0][lines[0].index("--name") + 1]
         assert code == 0
         assert lines[1:] == [["stop", "--timeout", "15", container]]
+
+    @pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
+    def test_cleanup_keeps_the_scratch_when_docker_cannot_stop_the_container(
+        self,
+        helper: ModuleType,
+        run: Callable[..., tuple[int, str]],
+        bin_dir: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # The engine may still be running. Keeping the scratch lets cleanup run again.
+        _docker_that_fails_stop(bin_dir, "Cannot connect to the Docker daemon")
+        run("init", "r1")
+        run("start", "r1", "first", "--preset", "paper-replay", "--image", "img:sha-1")
+        run("await", "r1", "first", "--exit", "--timeout", "10")
+        monkeypatch.setattr(helper, "ROOT", tmp_path)
+
+        code, out = run("cleanup", "r1")
+
+        assert code == 1
+        assert "could not stop container verify-r1-first" in out
+        assert helper.scratch("r1").exists()
 
     @pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
     def test_an_image_life_joins_the_network_it_is_given(

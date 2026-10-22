@@ -981,7 +981,11 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
         container_file = scratch(args.run_id) / f"{life}.container"
         if container_file.exists():
             name = container_file.read_text().strip()
-            subprocess.run(["docker", "stop", "--timeout", "15", name], capture_output=True)
+            stopped = subprocess.run(
+                ["docker", "stop", "--timeout", "15", name], capture_output=True, text=True
+            )
+            if stopped.returncode != 0:
+                sys.exit(f"docker could not stop container {name}: {stopped.stderr.strip()}")
             continue
         if pid and pid_alive(pid) and pid_is_ours(pid, args.run_id):
             os.kill(pid, signal.SIGTERM)
