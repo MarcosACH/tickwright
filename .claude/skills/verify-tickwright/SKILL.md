@@ -68,6 +68,13 @@ and `features/safe-exit.md`.
 `--command cancel-all` or `--command flatten` runs that one-shot exit run of the CLI instead of
 the engine. It ends by itself. See `features/safe-exit.md`.
 
+`--image <ref>` runs the CLI in that container image instead of the venv. The scratch is mounted at
+its own path and is the working directory, so the `.env`, `check --sql` and `dump` work unchanged.
+`../strategies/` is mounted at `/strategies`, so its strategies load by import path. `signal` goes
+to the container, and a `KILL` exits `137`. `--network container:<id>` joins another container's
+network. `--container-env KEY=VALUE` sets a variable in the container only, over the `.env`. See
+`features/container-restart.md`.
+
 Kafka and Postgres need Docker. `$V infra <run-id> up kafka` or `up postgres` starts the compose
 service and records that this run owns it. A service you already had running is used and never
 owned, so `cleanup` leaves it up. Postgres gets a database per run and the helper prints the DSN
