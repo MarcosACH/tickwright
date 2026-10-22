@@ -95,9 +95,15 @@ a small image on top of a published one:
 FROM ghcr.io/marcosach/tickwright:vX.Y.Z
 COPY --from=ghcr.io/astral-sh/uv:0.11 /uv /bin/uv
 USER root
-RUN uv pip install --python /app/.venv/bin/python numpy
+RUN uv pip freeze --python /app/.venv/bin/python > /tmp/installed.txt \
+    && grep -v '^tickwright' /tmp/installed.txt > /tmp/engine.txt \
+    && uv pip install --python /app/.venv/bin/python -c /tmp/engine.txt numpy
 USER tickwright
 ```
+
+The `-c` constraint keeps every engine dependency at the version the image shipped with. If your
+library needs another version of one, the build fails. Without it, the install could change an
+engine dependency and nothing would warn you.
 
 Then set `image:` in your compose file to the tag of the image you built.
 
