@@ -50,6 +50,11 @@ the testnet soak. The soak was the first time someone brought a real strategy.
 - **Strategies only.** Feeds, exchanges, buses, stores and guards keep their `match` in
   `app/build.py` (ADR-0032).
 
+**(Amended by ADR-0062 and [#554](https://github.com/MarcosACH/tickwright/issues/554): four
+refusals come after construction, not two.** A missing `wake_interval_seconds` and a bad one join
+the list. They also exit 2. The interval is read after construction because it may come from the
+settings. The method check also covers `on_wake`, since it reads the Protocol.**)**
+
 ## Considered options
 
 - **The user writes the start script.** The user builds a node, adds strategies, and calls
