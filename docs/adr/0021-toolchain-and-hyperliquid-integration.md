@@ -3,6 +3,11 @@
 - **Python 3.13** — the latest version `hyperliquid-python-sdk` 0.24 is classifier-tested against
   (it requires `>=3.9,<4.0`). The README's feared 3.10 pin is outdated as of SDK 0.24. (3.14 is
   outside the SDK's tested classifiers — not worth the risk for a reference repo.)
+  **(Amended by #536, 3.13 is the floor and not the ceiling:** after #529 users install
+  Tickwright into their own project. The `<3.14` cap refused every project on 3.14. So
+  `requires-python` is now `>=3.13` with no upper bound. SDK 0.24 is still classifier-tested only
+  up to 3.13. CI runs the whole suite on 3.14 too, and that suite drives the SDK paths we use.
+  Development, the Docker image, ruff and mypy stay on 3.13, the lowest version we support.**)**
 - **`hyperliquid-python-sdk ~=0.24`**, used **narrowly**. The SDK is **synchronous**
   (`websocket-client` + `requests`), and our engine is asyncio-throughout, so:
   - **Market-data feed** needs no auth → connect to `wss://api.hyperliquid.xyz/ws` directly with

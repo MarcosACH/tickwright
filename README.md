@@ -13,8 +13,8 @@ The engine is a small, typed Python core. It is built to be read, tested, and ex
 
 ## Quickstart
 
-You need Python 3.13 and [uv](https://github.com/astral-sh/uv). The default setup runs a paper
-exchange on a recorded tick file. It needs no external service and no API key.
+You need Python 3.13 or later and [uv](https://github.com/astral-sh/uv). The default setup runs a
+paper exchange on a recorded tick file. It needs no external service and no API key.
 
 ```bash
 uv venv && uv sync      # create the venv and install locked dependencies
