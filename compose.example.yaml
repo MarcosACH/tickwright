@@ -1,0 +1,32 @@
+# Runs tickwright from the published image with a strategy from your own directory.
+# From the repo root, this runs a paper replay with examples/strategies/buy_once.py:
+#
+#   IMAGE_TAG=sha-<commit> docker compose -f compose.example.yaml up
+#
+# Pick a published tag: `sha-<commit>` or `vX.Y.Z`. There is no `latest`.
+# README.md → "Run in a container" explains each part.
+services:
+  tickwright:
+    image: ghcr.io/marcosach/tickwright:${IMAGE_TAG:?set IMAGE_TAG to a published tag}
+    volumes:
+      # Your strategy code. The image puts /strategies on the import path, so
+      # config names this one as `buy_once:BuyOnce`.
+      - ./examples/strategies:/strategies:ro
+      - ./examples/ticks.jsonl:/replay/ticks.jsonl:ro
+      # The store. It must outlive the container, or a restart loses the saga.
+      - tickwright-data:/data
+    env_file:
+      # Plain config, safe to commit.
+      - path: ./examples/paper.env
+      # Your keys, in a file that never enters the image or git. Paper needs none.
+      - path: ./.env.secrets
+        required: false
+    # Docker counts these 3 restarts over the container's whole life. A long healthy
+    # run does not reset the count. Only starting it again by hand does. So after
+    # 3 faults the engine stays down. See the README.
+    restart: on-failure:3
+    # Longer than the engine's own 10 second shutdown timeout, so TERM can finish.
+    stop_grace_period: 30s
+
+volumes:
+  tickwright-data:
