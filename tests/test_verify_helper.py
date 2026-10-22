@@ -612,6 +612,28 @@ class TestDocker:
         assert code == 0
         assert argv[argv.index("--network") + 1] == "container:kafka-1"
 
+    @pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
+    def test_a_container_env_reaches_the_container_and_not_the_helper(
+        self, helper: ModuleType, run: Callable[..., tuple[int, str]], bin_dir: Path
+    ) -> None:
+        # Inside the broker's network the store is postgres:5432. The helper still
+        # reads it from the host at localhost:5432, through the scratch .env.
+        argv_file = _recording_docker(bin_dir)
+        run("init", "r1")
+        dsn = "TICKWRIGHT_POSTGRES__DSN=postgresql://u:p@postgres:5432/db"
+
+        code, _ = run(
+            "start", "r1", "first", "--preset", "paper-replay",
+            "--image", "img:sha-1", "--container-env", dsn,
+        )  # fmt: skip
+        run("await", "r1", "first", "--exit", "--timeout", "10")
+
+        argv = argv_file.read_text().split()
+        assert code == 0
+        assert argv[argv.index("-e") + 1] == dsn
+        assert "TICKWRIGHT_POSTGRES__DSN" not in (helper.scratch("r1") / ".env").read_text()
+        assert dsn in (helper.evidence("r1") / "first.env.txt").read_text()
+
 
 def _testnet_life(
     helper: ModuleType,

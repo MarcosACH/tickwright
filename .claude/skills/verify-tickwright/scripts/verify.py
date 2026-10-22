@@ -419,7 +419,9 @@ def cmd_start(args: argparse.Namespace) -> int:
     elif args.image:
         name = f"verify-{args.run_id}-{args.life}"
         (scratch(args.run_id) / f"{args.life}.container").write_text(name)
-        command = container_command(args.run_id, args.image, name, args.network)
+        command = container_command(args.run_id, args.image, name, args.network, args.container_env)
+        with (evidence(args.run_id) / f"{args.life}.env.txt").open("a") as sink:
+            sink.writelines(f"# docker -e {pair}\n" for pair in args.container_env)
     else:
         command = list(ENGINE_CMD)
         # An exit run is the same CLI with one argument, so it reads the same .env.
@@ -458,13 +460,16 @@ def cmd_start(args: argparse.Namespace) -> int:
     return 0
 
 
-def container_command(run_id: str, image: str, name: str, network: str | None) -> list[str]:
+def container_command(
+    run_id: str, image: str, name: str, network: str | None, env: list[str]
+) -> list[str]:
     """``docker run`` for one life, with the CLI reading the same scratch as a venv life.
 
     The scratch is mounted at its own host path and is the working directory, so the
     engine reads the same ``.env`` and its relative paths. The host uid keeps the
     store writable on a Linux bind mount. The store is on the mount, so ``--rm``
-    loses nothing."""
+    loses nothing. A real variable in ``env`` outranks the ``.env`` file, so it can
+    hold an address that only works inside the container's network."""
     path = str(scratch(run_id))
     return [
         "docker",
@@ -481,6 +486,7 @@ def container_command(run_id: str, image: str, name: str, network: str | None) -
         "-v",
         f"{STRATEGIES}:/strategies:ro",
         *(["--network", network] if network else []),
+        *(arg for pair in env for arg in ("-e", pair)),
         image,
     ]
 
@@ -1036,6 +1042,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--image", help="run the CLI in this container image instead of the venv")
     p.add_argument("--network", help="with --image: the docker network, e.g. container:<name>")
+    p.add_argument(
+        "--container-env",
+        action="append",
+        default=[],
+        help="with --image: KEY=VALUE for the container only, over scratch/.env",
+    )
     p.add_argument("--param", action="append", default=[], help="KEY=VALUE exported as VERIFY_KEY")
     p.add_argument(
         "--forward-key", action="store_true", help="forward the testnet key from the repo .env"
