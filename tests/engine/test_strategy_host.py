@@ -641,6 +641,23 @@ def test_invariant_violation_in_restore_pierces_and_faults_start() -> None:
         host.start()
 
 
+def test_stop_after_a_start_that_faulted_in_restore_writes_no_snapshot() -> None:
+    """The runner still tears down after ``start()`` faults. The strategy never
+    got its restored state, so persisting it would erase the previous life's."""
+    store = SQLiteStore(":memory:")
+    store.save_strategy_snapshot("alpha", b"prior-life", ts_ns=1_000)
+    host = _host(store=store)
+    alpha = InvariantViolatingRestoreStrategy("alpha")
+    alpha.state = b"blank"
+    host.register(alpha, symbols={"BTC"})
+    with pytest.raises(InvariantViolation):
+        host.start()
+
+    host.stop()
+
+    assert store.load_strategy_snapshot("alpha") == b"prior-life"
+
+
 def _checkpointed_order(
     store: SQLiteStore, signal_id: str, *, cancel_signal_id: str | None = None
 ) -> None:

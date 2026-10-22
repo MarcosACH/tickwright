@@ -11,8 +11,8 @@ and applies it exactly once; a strategy reading its position from the
 The concrete carries a **wider read surface than the ``Portfolio`` seam** — every
 partition including the reserved unattributed one — because reconciliation,
 telemetry and the CLI read this class directly and a strategy must never make
-those reads (ADR-0041 §8). The scoped facade ``for_strategy`` hands out is what
-implements the seam.
+those reads (ADR-0041 §8). The seam is implemented by ``ScopedPortfolio`` in
+``scoped_portfolio.py``, which also reads open orders from the ``Cache``.
 """
 
 from collections.abc import Iterable, Mapping, Sequence
@@ -35,7 +35,6 @@ from tickwright.domain import (
     MarkTick,
     OrderFillEvent,
     PartitionFill,
-    Portfolio,
     Position,
     PositionChange,
     PositionView,
@@ -1437,30 +1436,3 @@ class PortfolioProjection:
         it out would report an equity the venue does not hold.
         """
         return account_view(self._account, self._rows())
-
-    def for_strategy(self, strategy_id: str) -> Portfolio:
-        """The scoped ``Portfolio`` facade the composition root injects into a
-        strategy. Bound to a real ``strategy_id``, so the unattributed partition
-        is structurally unreachable through it (ADR-0041 §5)."""
-        return _ScopedPortfolio(projection=self, strategy_id=strategy_id)
-
-
-@dataclass(frozen=True, slots=True)
-class _ScopedPortfolio:
-    """One strategy's view of the projection — the ``Portfolio`` seam's only impl.
-
-    Holds no state of its own: it is the binding of a ``strategy_id`` to the
-    projection, which is what lets the seam's methods take no scope argument.
-    """
-
-    projection: PortfolioProjection
-    strategy_id: str
-
-    def position(self, symbol: str) -> PositionView | None:
-        return self.projection.position(symbol, strategy_id=self.strategy_id)
-
-    def open_positions(self) -> tuple[PositionView, ...]:
-        return self.projection.open_positions(strategy_id=self.strategy_id)
-
-    def account(self) -> AccountView:
-        return self.projection.account()

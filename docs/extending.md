@@ -53,11 +53,13 @@ Concretely, the engine does the pulling **for** you before it subscribes you (in
    `signal_id` (ADR-0006/0016). Place, cancel, and cancel all intents each consume a `seq`.
 3. Only then are your `on_tick` / `on_order_event` handlers subscribed, and the feed starts.
 
-A strategy cannot read its open orders. The engine keeps them in its `Cache`, but that lives in
-`engine`, and a strategy may import only `domain`. No `domain` Protocol exposes open orders.
-`Portfolio` gives positions and the account only. So a *stateful* strategy tracks its own open
-orders from `on_order_event` and keeps them in its snapshot. After a restart, that set can be stale.
-Startup may have resolved an order before your handlers were subscribed. The corollary discipline:
+Your snapshot can be stale after a restart. Startup may have settled an order before your handlers
+were subscribed, so you never saw that event. To rebuild your open orders, call
+`portfolio.open_orders()` in `restore()`. It returns this strategy's orders that are not yet
+terminal, as a tuple of frozen `OpenOrderView`s. Each carries its `signal_id`, the id a
+`CancelSignal` targets (ADR-0041 §3). Do not call it from your
+constructor. It raises `OpenOrdersReadBeforeStart` there, because startup has not yet checked the
+orders against the venue. The corollary discipline:
 
 - **Keep state minimal and reconstructible.** Version your snapshot payload (`{"version": 1, …}`)
   and reject unknown shapes in `restore()` — the engine turns that into a clean start.
@@ -118,7 +120,8 @@ A strategy consumes ticks and lifecycle events and emits `PlaceSignal`/`CancelSi
 - [ ] Read your own economics through the [`Portfolio`](../src/tickwright/domain/protocols.py)
   seam, if the strategy needs them. Take it as a constructor argument. The composition root hands
   you a facade already scoped to your `strategy_id`, so no method takes a strategy or account
-  argument. Three synchronous calls, each returning a frozen snapshot:
+  argument. Four synchronous calls, each returning a frozen snapshot. The fourth,
+  `open_orders()`, is covered in the recovery section above:
 
   ```python
   class MyStrategy:

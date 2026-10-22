@@ -62,6 +62,7 @@ from .guard import NoopGuard
 from .ledger_reconcile import LedgerReconciliation, ValuationBand
 from .portfolio import PortfolioProjection
 from .reconcile import ReconcileConfig, Reconciler
+from .scoped_portfolio import ScopedPortfolio
 from .strategy_host import StrategyHost
 
 
@@ -234,11 +235,16 @@ class Engine:
         The composition root still does the injecting (ADR-0041 §7) — a strategy
         receives its facade as an ``__init__`` argument, not from the engine and
         not through the ``Strategy`` Protocol — but it resolves the facade here,
-        off the one projection the engine writes, rather than off a projection of
-        its own. Only the facade leaves: the concrete stays engine-internal, as
-        the ``Cache`` does.
+        off the projection and the ``Cache`` the engine writes, rather than off
+        copies of its own. Only the facade leaves: both concretes stay
+        engine-internal.
         """
-        return self._checkpointer.portfolio.for_strategy(strategy_id)
+        return ScopedPortfolio(
+            projection=self._checkpointer.portfolio,
+            cache=self._checkpointer.cache,
+            open_orders_readable=self._host.open_orders_readable,
+            strategy_id=strategy_id,
+        )
 
     def emitter_for(self, strategy_id: str) -> SignalEmitter:
         """The emitter to hand ``strategy_id``'s constructor.

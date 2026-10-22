@@ -23,6 +23,7 @@ from .errors import (
     BootRefusal,
     InvariantViolation,
     LeverageOutOfBounds,
+    OpenOrdersReadBeforeStart,
     StartupReconciliationTimeout,
     StoreAccountMismatch,
     StoreLockHeld,
@@ -84,7 +85,7 @@ from .leverage import (
     LeverageSpec,
     MarginMode,
 )
-from .order import WORKING_STATES, Order
+from .order import WORKING_STATES, OpenOrderView, Order
 from .ownership import SymbolOwnership
 from .pacing import Backoff, Deadline
 from .position import (
@@ -148,6 +149,7 @@ __all__ = [
     "BootRefusal",
     "InvariantViolation",
     "LeverageOutOfBounds",
+    "OpenOrdersReadBeforeStart",
     "StartupReconciliationTimeout",
     "StoreAccountMismatch",
     "StoreLockHeld",
@@ -187,6 +189,7 @@ __all__ = [
     "MarginMode",
     "MarkTick",
     "MarketTick",
+    "OpenOrderView",
     "Order",
     "OrderCancelled",
     "OrderDenied",

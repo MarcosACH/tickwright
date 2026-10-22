@@ -71,6 +71,29 @@ _TERMINAL_STATES: frozenset[OrderState] = frozenset(
 WORKING_STATES: frozenset[OrderState] = frozenset({OrderState.LIVE, OrderState.PARTIALLY_FILLED})
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class OpenOrderView:
+    """A frozen copy of one open order, as ``Portfolio.open_orders()`` returns it (ADR-0041 §3).
+
+    The strategy knows the order by its ``signal_id``. There is no ``cloid`` and no
+    venue order id, so the ``cloid`` stays out of strategy code (ADR-0006). It is
+    not the ``Order`` itself, because that one carries ``apply()``.
+    """
+
+    signal_id: str
+    symbol: str
+    side: Side
+    order_type: OrderType
+    time_in_force: TimeInForce | None
+    quantity: Decimal
+    filled_quantity: Decimal
+    price: Decimal | None
+    post_only: bool
+    reduce_only: bool
+    state: OrderState
+    cancel_requested: bool
+
+
 @dataclass(slots=True)
 class Order:
     """One order's saga state, keyed by ``cloid`` and advanced by ``apply``."""
