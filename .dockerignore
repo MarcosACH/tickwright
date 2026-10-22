@@ -1,0 +1,6 @@
+# Allow list. Only what the build needs enters the context, so a local .env
+# or a store file can never end up in the image.
+*
+!pyproject.toml
+!uv.lock
+!src/

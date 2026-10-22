@@ -19,3 +19,11 @@ updates:
       interval: weekly
     commit-message:
       prefix: chore
+
+  # The Dockerfile pins its base images by digest. This keeps those pins fresh.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
