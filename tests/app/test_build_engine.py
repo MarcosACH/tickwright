@@ -643,6 +643,33 @@ def test_settings_that_do_not_validate_are_refused_before_the_store_exists(
     assert not (tmp_path / "saga.db").exists()
 
 
+@pytest.mark.parametrize(
+    "settings",
+    [{"quantity": "hunter2-secret"}, {"quantity": "0.5", "api_key": "hunter2-secret"}],
+    ids=["bad-value", "unknown-field"],
+)
+def test_a_settings_refusal_names_the_field_but_never_quotes_its_input(
+    tmp_path: Path, settings: dict[str, str]
+) -> None:
+    # Settings can hold a secret, and the CLI prints the refusal before log
+    # redaction exists. So the refusal must not repeat what it was given.
+    config = _config(
+        tmp_path,
+        strategies=[
+            {
+                "strategy": "user_strategies:BuysEachSymbolOnce",
+                "strategy_id": "user",
+                "symbols": ["BTC"],
+                "settings": settings,
+            }
+        ],
+    )
+    with pytest.raises(StrategyLoadRefusal) as refused:
+        build_engine(config)
+    assert "hunter2-secret" not in str(refused.value)
+    assert list(settings)[-1] in str(refused.value)
+
+
 def _run_until_states(engine: Engine, db: Path, wanted: dict[str, OrderState]) -> int:
     """Run ``engine`` until every order in ``wanted`` reaches its state, then stop it."""
 

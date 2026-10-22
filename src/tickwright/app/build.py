@@ -474,7 +474,14 @@ def _load_strategy(config: StrategyConfig) -> tuple[Callable[..., Strategy], Bas
     try:
         settings = settings_model.model_validate(config.settings, extra="forbid")
     except ValidationError as exc:
+        # Settings can hold a secret, and the CLI prints this before log
+        # redaction exists. So name each field and the problem, never the input.
+        # The chain is cut too, because a traceback would print the input.
+        problems = "".join(
+            f"\n  {'.'.join(map(str, error['loc']))}: {error['msg']}"
+            for error in exc.errors(include_input=False)
+        )
         raise StrategyLoadRefusal(
-            f"strategy {config.strategy_id!r}: its settings do not fit {config.strategy}: {exc}"
-        ) from exc
+            f"strategy {config.strategy_id!r}: its settings do not fit {config.strategy}:{problems}"
+        ) from None
     return cls, settings
