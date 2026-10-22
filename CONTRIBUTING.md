@@ -9,7 +9,8 @@ Before you start, read [`CONTEXT.md`](CONTEXT.md) for the vocabulary and skim
 ## Setup
 
 Python 3.13, managed with [uv](https://github.com/astral-sh/uv). Dependencies live in the project
-`.venv`. Never install them globally.
+`.venv`. Never install them globally. Tickwright also supports 3.14, and CI runs the suite on both.
+Develop on 3.13, the lowest supported version, so you never use a newer language feature by mistake.
 
 ```bash
 uv venv && uv sync

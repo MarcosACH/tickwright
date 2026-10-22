@@ -120,6 +120,20 @@ jobs:
           TICKWRIGHT_HYPERLIQUID__SIGNING_KEY: "0xdeadbeef"
         run: uv run pytest -q
 
+      - name: Test on Python 3.14
+        # requires-python has no upper bound (issue #536), so users can install
+        # Tickwright on 3.14. This step proves the suite passes there too. It is a
+        # step and not a matrix, for the required-check reason in the header. The
+        # venv lives outside the checkout so it never meets ruff or pytest
+        # collection. uv downloads 3.14 itself. Postgres runs here too, because
+        # psycopg is a compiled dependency.
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/venv-py314
+          STORE_POSTGRES_DSN: postgresql://tickwright:tickwright@localhost:5432/tickwright
+        run: |
+          uv sync --frozen --dev --python 3.14
+          uv run --frozen --python 3.14 pytest -q
+
       - name: Audit runtime dependencies
         run: |
           uv export --frozen --no-dev --no-emit-project --format requirements-txt > /tmp/requirements.txt
