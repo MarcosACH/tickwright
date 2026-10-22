@@ -577,6 +577,23 @@ class TestDocker:
         assert argv[argv.index("-w") + 1] == scratch
         assert f"{helper.SCRIPTS.parent / 'strategies'}:/strategies:ro" in argv
 
+    @pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
+    def test_a_signal_to_an_image_life_goes_to_its_container(
+        self, helper: ModuleType, run: Callable[..., tuple[int, str]], bin_dir: Path
+    ) -> None:
+        # A KILL to the `docker run` client would leave the engine running in the container.
+        argv_file = _recording_docker(bin_dir)
+        run("init", "r1")
+        run("start", "r1", "first", "--preset", "paper-replay", "--image", "img:sha-1")
+        run("await", "r1", "first", "--exit", "--timeout", "10")
+
+        code, _ = run("signal", "r1", "first", "KILL")
+
+        run_argv, kill_argv = (line.split() for line in argv_file.read_text().splitlines())
+        container = run_argv[run_argv.index("--name") + 1]
+        assert code == 0
+        assert kill_argv == ["kill", "--signal", "KILL", container]
+
 
 def _testnet_life(
     helper: ModuleType,

@@ -417,7 +417,9 @@ def cmd_start(args: argparse.Namespace) -> int:
     if args.strategy:
         command = [sys.executable, str(STRATEGY_RUNNER), args.strategy]
     elif args.image:
-        command = container_command(args.run_id, args.image)
+        name = f"verify-{args.run_id}-{args.life}"
+        (scratch(args.run_id) / f"{args.life}.container").write_text(name)
+        command = container_command(args.run_id, args.image, name)
     else:
         command = list(ENGINE_CMD)
         # An exit run is the same CLI with one argument, so it reads the same .env.
@@ -456,16 +458,20 @@ def cmd_start(args: argparse.Namespace) -> int:
     return 0
 
 
-def container_command(run_id: str, image: str) -> list[str]:
+def container_command(run_id: str, image: str, name: str) -> list[str]:
     """``docker run`` for one life, with the CLI reading the same scratch as a venv life.
 
     The scratch is mounted at its own host path and is the working directory, so the
     engine reads the same ``.env`` and its relative paths. The host uid keeps the
-    store writable on a Linux bind mount."""
+    store writable on a Linux bind mount. The store is on the mount, so ``--rm``
+    loses nothing."""
     path = str(scratch(run_id))
     return [
         "docker",
         "run",
+        "--rm",
+        "--name",
+        name,
         "--user",
         f"{os.getuid()}:{os.getgid()}",
         "-v",
@@ -531,6 +537,16 @@ def cmd_await(args: argparse.Namespace) -> int:
 
 def cmd_signal(args: argparse.Namespace) -> int:
     require_run(args.run_id)
+    container_file = scratch(args.run_id) / f"{args.life}.container"
+    if container_file.exists():
+        # The pid is the `docker run` client. A KILL to it would leave the engine running.
+        name = container_file.read_text().strip()
+        sent = subprocess.run(["docker", "kill", "--signal", args.name, name], text=True)
+        if sent.returncode != 0:
+            sys.exit(f"docker could not signal container {name}")
+        note(args.run_id, args.life, "signal", f"SIG{args.name} to container {name}")
+        print(f"sent SIG{args.name} to container {name}")
+        return 0
     pid_file = scratch(args.run_id) / f"{args.life}.pid"
     if not pid_file.exists():
         sys.exit(f"no pid for life {args.life}")
