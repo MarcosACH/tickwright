@@ -18,6 +18,7 @@ LABELS=(
   # Process
   "prd|5319e7|Parent PRD issue — sub-issues describe vertical slices"
   "ai|bfd4f2|Created or executed by an AI agent"
+  "soak|e99695|Bug found by the testnet soak. Links its journal day."
 
   # PR state — review state machine
   "ralph:needs-review|1d76db|PR opened, awaiting code-review"
