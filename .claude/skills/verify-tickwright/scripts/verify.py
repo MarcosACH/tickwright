@@ -419,7 +419,7 @@ def cmd_start(args: argparse.Namespace) -> int:
     elif args.image:
         name = f"verify-{args.run_id}-{args.life}"
         (scratch(args.run_id) / f"{args.life}.container").write_text(name)
-        command = container_command(args.run_id, args.image, name)
+        command = container_command(args.run_id, args.image, name, args.network)
     else:
         command = list(ENGINE_CMD)
         # An exit run is the same CLI with one argument, so it reads the same .env.
@@ -458,7 +458,7 @@ def cmd_start(args: argparse.Namespace) -> int:
     return 0
 
 
-def container_command(run_id: str, image: str, name: str) -> list[str]:
+def container_command(run_id: str, image: str, name: str, network: str | None) -> list[str]:
     """``docker run`` for one life, with the CLI reading the same scratch as a venv life.
 
     The scratch is mounted at its own host path and is the working directory, so the
@@ -480,6 +480,7 @@ def container_command(run_id: str, image: str, name: str) -> list[str]:
         path,
         "-v",
         f"{STRATEGIES}:/strategies:ro",
+        *(["--network", network] if network else []),
         image,
     ]
 
@@ -1034,6 +1035,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--command", choices=["cancel-all", "flatten"], help="run a one-shot exit run of the CLI"
     )
     run.add_argument("--image", help="run the CLI in this container image instead of the venv")
+    p.add_argument("--network", help="with --image: the docker network, e.g. container:<name>")
     p.add_argument("--param", action="append", default=[], help="KEY=VALUE exported as VERIFY_KEY")
     p.add_argument(
         "--forward-key", action="store_true", help="forward the testnet key from the repo .env"

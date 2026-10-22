@@ -594,6 +594,24 @@ class TestDocker:
         assert code == 0
         assert kill_argv == ["kill", "--signal", "KILL", container]
 
+    @pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
+    def test_an_image_life_joins_the_network_it_is_given(
+        self, helper: ModuleType, run: Callable[..., tuple[int, str]], bin_dir: Path
+    ) -> None:
+        # The broker advertises localhost:9092, so the engine has to share its network.
+        argv_file = _recording_docker(bin_dir)
+        run("init", "r1")
+
+        code, _ = run(
+            "start", "r1", "first", "--preset", "paper-replay",
+            "--image", "img:sha-1", "--network", "container:kafka-1",
+        )  # fmt: skip
+        run("await", "r1", "first", "--exit", "--timeout", "10")
+
+        argv = argv_file.read_text().split()
+        assert code == 0
+        assert argv[argv.index("--network") + 1] == "container:kafka-1"
+
 
 def _testnet_life(
     helper: ModuleType,
