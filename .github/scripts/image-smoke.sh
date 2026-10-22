@@ -24,14 +24,12 @@ fail() {
   exit 1
 }
 
-# Only the variables set here reach the engine. Docker passes no host environment.
+# The same config and mounts as compose.example.yaml, so CI also checks the example.
+# Only this env file reaches the engine. Docker passes no host environment.
 docker run -d --name "$name" ${platform:+--platform "$platform"} \
   -v "$root/examples/ticks.jsonl:/replay/ticks.jsonl:ro" \
   -v "$root/examples/strategies:/strategies:ro" \
-  -e TICKWRIGHT_REPLAY__PATH=/replay/ticks.jsonl \
-  -e TICKWRIGHT_PAPER__GENESIS_COLLATERAL=100000 \
-  -e 'TICKWRIGHT_PAPER__INSTRUMENT_SPECS={"BTC": {"symbol": "BTC", "sz_decimals": 3, "max_decimals": 6, "max_sig_figs": 5, "min_notional": "10"}}' \
-  -e 'TICKWRIGHT_STRATEGIES=[{"strategy": "buy_once:BuyOnce", "strategy_id": "smoke", "symbols": ["BTC"], "settings": {"quantity": "0.5"}}]' \
+  --env-file "$root/examples/paper.env" \
   "$image" >/dev/null
 
 waited=0
