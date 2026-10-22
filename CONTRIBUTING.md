@@ -52,6 +52,11 @@ Two markers reach real infrastructure. Both skip themselves when it is not confi
   funded key in `TICKWRIGHT_HYPERLIQUID__SIGNING_KEY`. Run it with
   `TICKWRIGHT_LIVE_TESTNET=1 uv run pytest -m live`. CI runs it weekly, never on a PR.
 
+The container image has its own check. `.github/scripts/image-smoke.sh IMAGE` runs
+`compose.example.yaml` with that image and expects a fill and exit `0`. It needs Docker but no key.
+It refuses to run while `.env.secrets` exists, because the compose would load it. The `image`
+workflow runs it on every PR, for `amd64` and `arm64`, before anything is published.
+
 To try the real Kafka bus, run the app rather than the tests: `docker compose up -d kafka`, then
 `TICKWRIGHT_BUS=kafka uv run tickwright`. [`.env.example`](.env.example) lists every variable.
 

@@ -1,0 +1,112 @@
+# Builds the container image for amd64 and arm64, then runs a paper replay in each
+# one with .github/scripts/image-smoke.sh. The replay needs no key and no external
+# service.
+#
+# Only after both replays pass does it publish to GHCR:
+# - a merge to main publishes `sha-<commit>`
+# - a release tag `vX.Y.Z` publishes `vX.Y.Z`
+# It never publishes `latest`. A moving tag would let a restart pull code nobody chose.
+#
+# This is its own workflow, not a step in ci.yml. ci.yml must stay one job named
+# `ci` (see its header). Actions are pinned by commit SHA, the same as in ci.yml.
+name: image
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+
+# A newer pull request push cancels the older run. A push to main or a tag gets a
+# group of its own. GitHub keeps one waiting run per group and cancels the rest,
+# so a shared group would drop the publish of a merge that lands between two others.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('image-{0}', github.ref) || format('image-push-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # QEMU runs the arm64 build and the arm64 replay on an amd64 runner.
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # One build per platform, loaded into the local daemon so each can be run.
+      - name: Build amd64
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: tickwright:amd64
+          cache-from: type=gha,scope=amd64
+          cache-to: type=gha,mode=max,scope=amd64
+
+      - name: Build arm64
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/arm64
+          load: true
+          tags: tickwright:arm64
+          cache-from: type=gha,scope=arm64
+          cache-to: type=gha,mode=max,scope=arm64
+
+      - name: Paper replay on amd64
+        run: .github/scripts/image-smoke.sh tickwright:amd64 linux/amd64
+
+      - name: Paper replay on arm64
+        run: .github/scripts/image-smoke.sh tickwright:arm64 linux/arm64
+
+      - name: Choose the image tag
+        if: github.event_name == 'push'
+        id: tag
+        run: |
+          # GHCR refuses an image name with capitals, and the owner has some.
+          image="ghcr.io/$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            # The tag and pyproject.toml are kept in sync by hand (docs/workflow/versioning.md).
+            # If they drift, the image would carry the wrong version, so stop.
+            version=$(sed -n 's/^version = "\(.*\)"$/\1/p' pyproject.toml)
+            if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+              echo "tag $GITHUB_REF_NAME does not match pyproject.toml version $version" >&2
+              exit 1
+            fi
+            echo "ref=$image:$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=$image:sha-$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Log in to GHCR
+        if: github.event_name == 'push'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # One image for both platforms. The layers come from the cache the replays
+      # above were built from.
+      - name: Publish
+        if: github.event_name == 'push'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.tag.outputs.ref }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: |
+            type=gha,scope=amd64
+            type=gha,scope=arm64

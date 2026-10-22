@@ -49,7 +49,9 @@ Versions only ever move **forward** — you can never return to `0.x`. Instabili
 
 Consequence for the procedure below: **bump the file first, then tag the commit that carries the bump.** (`0.1.0` needed no bump — the scaffold already declared it — so its release was tag-only.)
 
-> **Deferred: VCS-derived versioning.** `hatch-vcs` would make the git tag the single source of truth (version computed at build time, removed from `pyproject.toml`), eliminating drift and the manual bump. It is **not** adopted while the repo publishes no artifacts; revisit when a PyPI or automated-wheel publish step is added — that is when manual bumps and drift become real friction. Its one gotcha: builds need full git history (`actions/checkout` with `fetch-depth: 0`).
+> **Deferred: VCS-derived versioning.** `hatch-vcs` would make the git tag the single source of truth (version computed at build time, removed from `pyproject.toml`), eliminating drift and the manual bump. It is **not** adopted while the repo publishes no Python artifacts; revisit when a PyPI or automated-wheel publish step is added — that is when manual bumps and drift become real friction. Its one gotcha: builds need full git history (`actions/checkout` with `fetch-depth: 0`).
+>
+> The container image is published, but it does not change this. The `image` workflow tags it from the git tag. It stops before publishing if the tag does not match `pyproject.toml`. So a drift fails the publish instead of mislabeling the image.
 
 ## Release procedure
 
@@ -63,6 +65,8 @@ A tag and a GitHub Release are metadata pointing at an existing commit, **not** 
    git push origin vX.Y.Z
    ```
    Use an **annotated** tag (`-a`) — it carries tagger/date/message and is what Releases and `git describe` expect. Tag names are `v`-prefixed (`v0.1.0`).
+
+   The tag push also runs the `image` workflow, which publishes the container image as `vX.Y.Z`. Check that run is green before you cut the Release.
 3. **Cut the GitHub Release** from that tag, notes summarizing the delivered scope and linking the driving PRD/issues:
    ```bash
    gh release create vX.Y.Z --title "vX.Y.Z — <scope>" --notes-file <notes.md> --latest
