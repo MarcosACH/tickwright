@@ -78,3 +78,7 @@ the testnet soak. The soak was the first time someone brought a real strategy.
 - `docs/extending.md` must stop saying a third feed, exchange, bus or store can live out of tree.
   Today it cannot.
 - A strategy still cannot wake itself on a timer. That is a separate issue.
+
+**(Resolved by ADR-0062:** a strategy can now wake on a fixed interval of clock time. It declares
+`wake_interval_seconds` and handles `on_wake`. Decided in
+[#535](https://github.com/MarcosACH/tickwright/issues/535).**)**

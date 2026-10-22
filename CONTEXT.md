@@ -101,6 +101,12 @@ shared durable store. Its [[signal_id]] seq high-water-mark is recovered from th
 reference impls (engine capability, not a library). See ADR-0006, ADR-0015, ADR-0016, ADR-0018.
 _Avoid_: algo, bot, trader.
 
+**Wake**:
+An event the engine sends to one [[Strategy]] every `wake_interval_seconds` of [[Clock]] time.
+It lets a strategy act when no tick or order event arrives. The strategy declares the interval,
+and `None` means it never wakes. See ADR-0062.
+_Avoid_: timer event, tick.
+
 **User strategy**:
 A [[Strategy]] that lives in the user's own code, outside the engine's source. The user installs
 Tickwright as a dependency and writes only the strategy and the config. The engine does the rest.
