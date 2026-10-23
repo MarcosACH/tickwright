@@ -7,6 +7,7 @@ loop a turn before the barrier runs. That turn is the gap this suite covers.
 """
 
 import asyncio
+from collections.abc import Sequence
 from decimal import Decimal
 from pathlib import Path
 
@@ -20,6 +21,8 @@ from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     Account,
+    ComponentState,
+    Event,
     InstrumentSpec,
     OrderState,
     OrderType,
@@ -96,10 +99,21 @@ def _venue() -> FakeExchangeApi:
     )
 
 
-def _run_one_life(db: Path, broker: FakeKafkaBroker, post: FakeExchangeApi) -> None:
+def _produce(broker: FakeKafkaBroker, event: Event) -> None:
+    broker.produce(event.partition_key.encode(), encode_event(event))
+
+
+def _run_one_life(
+    db: Path,
+    broker: FakeKafkaBroker,
+    post: FakeExchangeApi,
+    *,
+    after_barrier: Sequence[Event] = (),
+) -> None:
     """Boot the engine, wait until Kafka has committed every record, then stop.
 
-    The engine closes its store on stop, so each life opens its own on ``db``.
+    ``after_barrier`` lands on the broker once the engine is ``RUNNING``. The
+    engine closes its store on stop, so each life opens its own on ``db``.
     """
     store = SQLiteStore(db)
 
@@ -142,6 +156,10 @@ def _run_one_life(db: Path, broker: FakeKafkaBroker, post: FakeExchangeApi) -> N
             feed=HyperliquidFeed(config=config, bus=bus, clock=clock, connect=idle_ws),
         )
         run = asyncio.create_task(engine.run())
+        while engine.state is not ComponentState.RUNNING:
+            await asyncio.sleep(0)
+        for event in after_barrier:
+            _produce(broker, event)
         await broker.all_committed()
         await engine.stop()
         assert await run == 0
@@ -161,10 +179,28 @@ def test_an_old_intent_in_the_kafka_backlog_is_denied_and_never_placed(tmp_path:
     db = tmp_path / "saga.db"
     broker = FakeKafkaBroker()
     intent = _old_intent()
-    broker.produce(intent.partition_key.encode(), encode_event(intent))
+    _produce(broker, intent)
     post = _venue()
 
     _run_one_life(db, broker, post)
+
+    saga = SQLiteStore(db).get_order(derive_cloid(intent.signal_id))
+    assert saga is not None
+    assert saga.state is OrderState.DENIED
+    assert _sent_orders(post) == []
+
+
+def test_a_later_life_never_places_an_intent_an_earlier_life_denied(tmp_path: Path) -> None:
+    # The first life denies the backlog intent. The second life hears it again
+    # after its barrier, where the gate is open. Only the DENIED row stops it.
+    db = tmp_path / "saga.db"
+    broker = FakeKafkaBroker()
+    intent = _old_intent()
+    _produce(broker, intent)
+    _run_one_life(db, broker, _venue())
+    post = _venue()
+
+    _run_one_life(db, broker, post, after_barrier=[intent])
 
     saga = SQLiteStore(db).get_order(derive_cloid(intent.signal_id))
     assert saga is not None
