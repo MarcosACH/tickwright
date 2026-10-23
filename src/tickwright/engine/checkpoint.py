@@ -492,6 +492,7 @@ class Checkpointer:
         coroutine on this verb would put the seam that guarantees it inside the
         type rather than around it.
         """
+        self._require_open_ledger()
         change = self._portfolio.apply_funding(accrual)
         if change is None:
             return

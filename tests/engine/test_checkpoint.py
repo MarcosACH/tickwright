@@ -164,6 +164,19 @@ def test_a_fill_on_an_unopened_ledger_is_refused_and_writes_nothing() -> None:
     assert checkpointer.portfolio.position("BTC", strategy_id="trivial") is None
 
 
+def test_a_funding_payment_on_an_unopened_ledger_is_refused_and_writes_nothing() -> None:
+    """The fill's rule, for the one ledger input that arrives on the bus."""
+    store = SQLiteStore(":memory:")
+    checkpointer = _unopened_live_ledger(store)
+
+    with pytest.raises(InvariantViolation, match="account row is not open"):
+        checkpointer.checkpoint_funding(_accrual(amount="-1.5", boundary=_HOUR))
+
+    assert store.load_account() is None
+    assert store.funding_mark("BTC") is None
+    assert checkpointer.portfolio.account().cash == Decimal("0")
+
+
 def test_an_accrual_makes_the_funding_line_and_its_mark_durable_together() -> None:
     """The mark lands in the same write as the line it guards (ADR-0043 §5.2).
 
