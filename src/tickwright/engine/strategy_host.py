@@ -77,8 +77,8 @@ class StrategyHost:
         self._tick_staleness_ns = tick_staleness_ns
         self._strategies: dict[str, Strategy] = {}
         self._symbols: dict[str, frozenset[str]] = {}
-        # The wake interval register checked (ADR-0062). The loop and the gate
-        # read this copy, because restore() runs after register and could
+        # The wake interval that register checked (ADR-0062). The loop and the
+        # gate read this copy, because restore() runs after register and could
         # change the strategy's own attribute past the check.
         self._wake_intervals: dict[str, float | None] = {}
         # The last bytes persisted per strategy. A callback that left the
