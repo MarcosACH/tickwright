@@ -38,6 +38,7 @@ from tickwright.domain import (
     SignalEmitter,
     SignalId,
     Store,
+    Wake,
     derive_cloid,
     wake_interval_refusal,
 )
@@ -808,3 +809,42 @@ def test_strategies_on_disjoint_symbols_register_and_route_independently() -> No
     assert sorted(tick.symbol for tick in alpha.ticks) == ["BTC", "ETH"]
     assert [tick.symbol for tick in beta.ticks] == ["SOL"]
     assert [tick.symbol for tick in gamma.ticks] == ["DOGE"]
+
+
+_S = 1_000_000_000
+
+
+class WakeRecordingStrategy(RecordingStrategy):
+    """Wakes every 15 s and records the slot of each wake-up it gets."""
+
+    wake_interval_seconds: float | None = 15.0
+
+    def __init__(self, strategy_id: str) -> None:
+        super().__init__(strategy_id)
+        self.wake_slots: list[int] = []
+
+    async def on_wake(self, wake: Wake) -> None:
+        self.wake_slots.append(wake.ts_event)
+
+
+def _wake(strategy_id: str, *, slot_s: int) -> Wake:
+    return Wake(strategy_id=strategy_id, ts_event=slot_s * _S, ts_init=slot_s * _S)
+
+
+def test_a_redelivered_or_earlier_wake_never_reaches_on_wake() -> None:
+    # The wake gate extends the tick gate (ADR-0025): a slot at or before the last
+    # one delivered is a redelivery or a reorder.
+    bus = InMemoryBus()
+    clock = ManualClock(start_ns=30 * _S)
+    host = _host(bus=bus, clock=clock)
+    strategy = WakeRecordingStrategy("waker")
+    host.register(strategy, symbols={"BTC"})
+    host.start()
+
+    asyncio.run(bus.publish(_wake("waker", slot_s=30)))
+    asyncio.run(bus.publish(_wake("waker", slot_s=30)))  # redelivered
+    asyncio.run(bus.publish(_wake("waker", slot_s=15)))  # earlier, still within the interval
+    clock.advance_to(45 * _S)
+    asyncio.run(bus.publish(_wake("waker", slot_s=45)))
+
+    assert strategy.wake_slots == [30 * _S, 45 * _S]

@@ -296,9 +296,18 @@ class StrategyHost:
             await self._contained(strategy, strategy.on_order_event, event)
             self._persist(strategy)
 
+        # The wake gate, the tick gate's twin (ADR-0062). A slot at or before the
+        # last one delivered is a redelivery or a reorder, so on_wake is
+        # idempotent with no effort from the strategy author.
+        last_slot: int | None = None
+
         async def on_wake(wake: Wake) -> None:
+            nonlocal last_slot
             if wake.strategy_id != strategy.strategy_id:
                 return
+            if last_slot is not None and wake.ts_event <= last_slot:
+                return
+            last_slot = wake.ts_event
             await self._contained(strategy, strategy.on_wake, wake)
             self._persist(strategy)
 
