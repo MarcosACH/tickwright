@@ -206,3 +206,17 @@ def test_a_later_life_never_places_an_intent_an_earlier_life_denied(tmp_path: Pa
     assert saga is not None
     assert saga.state is OrderState.DENIED
     assert _sent_orders(post) == []
+
+
+def test_an_intent_that_arrives_after_the_barrier_still_places(tmp_path: Path) -> None:
+    db = tmp_path / "saga.db"
+    intent = _old_intent()
+    post = _venue()
+
+    _run_one_life(db, FakeKafkaBroker(), post, after_barrier=[intent])
+
+    saga = SQLiteStore(db).get_order(derive_cloid(intent.signal_id))
+    assert saga is not None
+    assert saga.state is OrderState.LIVE
+    (sent,) = _sent_orders(post)
+    assert sent["action"]["orders"][0]["c"] == derive_cloid(intent.signal_id)
