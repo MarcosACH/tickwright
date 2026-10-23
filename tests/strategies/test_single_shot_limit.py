@@ -213,3 +213,28 @@ def test_restored_before_the_deadline_it_cancels_at_the_original_deadline() -> N
     assert isinstance(cancel, CancelSignal)
     assert cancel.target_signal_id == "trivial:BTC:1"
     assert cancel.signal_id == "trivial:BTC:2"
+
+
+def test_restored_after_the_deadline_it_cancels_on_the_first_wake_up_and_never_places_again() -> (
+    None
+):
+    # Placed at 1 s, so the deadline is 11 s. The engine was down until 50 s.
+    bus, _, fired, _ = _harness(cancel_after_seconds=10)
+    asyncio.run(bus.publish(_tick(ts=1 * _S)))
+
+    second_bus, _, restored, signals = _harness(cancel_after_seconds=10)
+    restored.restore(fired.snapshot())
+    restored.set_next_seq(2)
+
+    async def second_life() -> list[type]:
+        await second_bus.publish(_wake(50))
+        after_first_wake = [type(s) for s in signals]
+        await second_bus.publish(_tick(ts=50 * _S))
+        await second_bus.publish(_wake(51))
+        return after_first_wake
+
+    assert asyncio.run(second_life()) == [CancelSignal]
+    assert [type(s) for s in signals] == [CancelSignal]
+    cancel = signals[0]
+    assert isinstance(cancel, CancelSignal)
+    assert cancel.target_signal_id == "trivial:BTC:1"
