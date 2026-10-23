@@ -558,7 +558,8 @@ class Engine:
         # any order it hears before the barrier clears.
         self._bus.subscribe(Signal, self._execution.on_signal)
         # Start the bus (ADR-0024 step 3): in-memory a no-op; Kafka connects
-        # the producer/consumer — before anything can publish or subscribe.
+        # the producer/consumer — before anything can publish. The signal
+        # subscribe above is the one handler that comes first.
         await self._bus.start()
         # Connect the exchange (ADR-0024 step 4), after the bus so an adapter
         # that reports on it has somewhere to publish, and before the barrier
