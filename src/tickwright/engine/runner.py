@@ -201,6 +201,9 @@ class Engine:
         self._fault: Exception | None = None
         self._stop_requested = asyncio.Event()
         self._stopped = asyncio.Event()
+        # Set once the barrier has the account row open. Fill and funding
+        # handlers wait on it, so an old record cannot open the row at zero.
+        self._account_open = asyncio.Event()
         self._feed_handle: FeedHandle | None = None
         self._exchange_task: asyncio.Task[None] | None = None
         self._exit_task: asyncio.Task[None] | None = None
@@ -559,15 +562,16 @@ class Engine:
         self._bus.subscribe(Signal, self._execution.on_signal)
         # Fills subscribe early for the same reason. An old fill polled before
         # its handler is committed, and only reconcile could find it again
-        # (issue #565). Engine-internal handlers subscribe raw (ADR-0024): any
-        # exception in the saga path propagates to the TaskGroup and faults the
-        # engine.
-        self._bus.subscribe(ExecutionReport, self._execution.on_execution_report)
+        # (issue #565). A fill writes the account row, so its handler waits
+        # until the barrier has that row open. Kafka commits a record only
+        # after its handler returns, so a crash while waiting loses nothing.
+        # Engine-internal handlers subscribe raw (ADR-0024): any exception in
+        # the saga path propagates to the TaskGroup and faults the engine.
+        self._bus.subscribe(ExecutionReport, self._on_execution_report)
         # Funding is the one accounting input that arrives on the bus rather
         # than on the fill-apply path, because it has no carrier fill (ADR-0037).
-        # It subscribes before the bus starts for the signal's reason: an old
-        # accrual polled before its handler is committed and never booked
-        # (issue #565). It subscribes raw, and that containment holds only
+        # It subscribes early and waits for the account row, as fills do. It
+        # subscribes raw, and that containment holds only
         # because its live publisher is a supervised task: ``Exchange.run()``,
         # created in the TaskGroup below. A refused ledger write therefore
         # faults the engine and exits non-zero, rather than killing a generator
@@ -603,10 +607,15 @@ class Engine:
         # overwrite a row that exists, and that zero would stand for the life of
         # the ledger with nothing to refuse it — #188's genesis comparison is
         # paper-only. The live row must be materialised, never fallen into.
+        #
+        # An old Kafka record could fall into the row the same way, so fill
+        # and funding handlers wait until the first step has the row open.
+        # Nothing may publish and drain before that step, or the bus would wait
+        # on a handler that waits on the barrier.
         await StartupBarrier(
             clock=self._clock,
             steps=(
-                self._ledger_reconciler.materialise_account,
+                self._materialise_account,
                 self._reconciler.reconcile_startup,
             ),
         ).run(timeout_seconds=self._config.startup_reconciliation_timeout_seconds)
@@ -617,6 +626,18 @@ class Engine:
         if self._exit_job is None:
             self._host.start()
         self._state = ComponentState.RUNNING
+
+    async def _materialise_account(self) -> bool:
+        """The barrier's first step, which also opens the account-row gate."""
+        opened = await self._ledger_reconciler.materialise_account()
+        if opened:
+            self._account_open.set()
+        return opened
+
+    async def _on_execution_report(self, report: ExecutionReport) -> None:
+        """Hand one report to the saga once the account row is open."""
+        await self._account_open.wait()
+        await self._execution.on_execution_report(report)
 
     async def _on_funding_accrual(self, accrual: FundingAccrual) -> None:
         """Apply one settled boundary to the ledger — the bus's only ledger entry.
@@ -630,8 +651,10 @@ class Engine:
 
         Synchronous inside, with no ``await`` between the fold and the write, so
         no other handler can observe a ledger whose memory and durable states
-        disagree — the same no-yield discipline the fill path keeps.
+        disagree — the same no-yield discipline the fill path keeps. The one
+        ``await`` is the wait for the account row, and it comes before the fold.
         """
+        await self._account_open.wait()
         self._checkpointer.checkpoint_funding(accrual)
 
     async def _on_mark_tick(self, mark: MarkTick) -> None:

@@ -129,11 +129,13 @@ def _run_one_life(
     post: FakeExchangeApi,
     *,
     after_barrier: Sequence[Event] = (),
+    first_start: bool = False,
 ) -> Engine:
     """Boot the engine, wait until Kafka has committed every record, then stop.
 
     ``after_barrier`` lands on the broker once the engine is ``RUNNING``. The
     engine closes its store on stop, so each life opens its own on ``db``.
+    ``first_start`` leaves the account row for the barrier to read off the venue.
     Returns the stopped engine, so a test can read what it held in memory.
     """
     store = SQLiteStore(db)
@@ -159,7 +161,7 @@ def _run_one_life(
             startup_timeout_seconds=60.0,
             shrink_wait_seconds=30.0,
         )
-        if store.load_account() is None:
+        if not first_start and store.load_account() is None:
             # The life that published the intent also opened the account row.
             store.checkpoint_ledger(
                 account=Account(
@@ -338,3 +340,33 @@ def test_an_old_mark_in_the_kafka_backlog_reaches_the_ledger(tmp_path: Path) -> 
     engine = _run_one_life(tmp_path / "saga.db", broker, _venue())
 
     assert engine.portfolio.latest_mark("BTC") == mark
+
+
+def test_an_old_funding_payment_waits_for_the_account_row_on_a_first_start(
+    tmp_path: Path,
+) -> None:
+    # Booked before the barrier reads the venue, the payment would open the
+    # row at zero, and nothing would ever correct it (ADR-0043 §6). The
+    # boundary is after the venue's read, so the ledger does not drop it as
+    # already counted in the opening cash.
+    db = tmp_path / "saga.db"
+    broker = FakeKafkaBroker()
+    boundary_ns = START_MS * 1_000_000 + 1
+    _produce(
+        broker,
+        FundingAccrual(
+            ts_event=boundary_ns,
+            ts_init=boundary_ns,
+            account_id=ACCOUNT_ID,
+            symbol="BTC",
+            boundary_ts_ns=boundary_ns,
+            amount=Decimal("-1.5"),
+        ),
+    )
+
+    _run_one_life(db, broker, _venue(), first_start=True)
+
+    account = SQLiteStore(db).load_account()
+    assert account is not None
+    assert account.genesis_collateral == Decimal("100")
+    assert account.cash == Decimal("98.5")
