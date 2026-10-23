@@ -12,6 +12,8 @@ from collections.abc import Iterable
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+from bus_backends import BUS_BACKENDS, make_bus
 from ledgers import GENESIS
 
 from tickwright.adapters.bus import InMemoryBus
@@ -20,6 +22,8 @@ from tickwright.adapters.feed import ReplayFeed
 from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
+    AggressorSide,
+    EventBus,
     MarketFeed,
     MarketTick,
     OrderDenied,
@@ -89,7 +93,7 @@ class _SilentFeed:
 def _engine(
     clock: ManualClock,
     feed: MarketFeed,
-    bus: InMemoryBus | None = None,
+    bus: EventBus | None = None,
     *,
     store: SQLiteStore | None = None,
     guard: RealGuard | None = None,
@@ -296,3 +300,80 @@ def test_a_wake_up_reaches_the_strategy_before_a_tick_at_the_same_time(tmp_path:
     ]
     assert asyncio.run(main()) == expected
     assert asyncio.run(main()) == expected
+
+
+class _OneTickFeed:
+    """A live feed that sends one tick, then goes quiet."""
+
+    def __init__(self, bus: EventBus, tick: MarketTick) -> None:
+        self._bus = bus
+        self._tick = tick
+
+    def add_symbols(self, symbols: Iterable[str]) -> None:
+        return None
+
+    async def start(self) -> None:
+        return None
+
+    async def run(self) -> None:
+        await self._bus.publish(self._tick)
+        await asyncio.Event().wait()
+
+    async def stop(self) -> None:
+        return None
+
+
+class _PausesInOnTick(_WakingStrategy):
+    """Parks inside ``on_tick`` until the test lets it go."""
+
+    def __init__(self) -> None:
+        super().__init__("pauser", wake_interval_seconds=15.0)
+        self.seen: list[str] = []
+        self.paused = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def on_tick(self, tick: MarketTick) -> None:
+        self.seen.append("tick starts")
+        self.paused.set()
+        await self.release.wait()
+        self.seen.append("tick ends")
+
+    async def on_wake(self, wake: Wake) -> None:
+        self.seen.append("wake")
+        await super().on_wake(wake)
+
+
+@pytest.mark.parametrize("backend", BUS_BACKENDS)
+def test_on_wake_never_runs_while_on_tick_is_paused(backend: str) -> None:
+    """A strategy author writes ``on_tick`` and ``on_wake`` without a lock. That
+    is safe only because each bus hands over one event at a time (ADR-0062)."""
+
+    async def main() -> list[str]:
+        clock = ManualClock(start_ns=7 * _S)
+        bus = make_bus(backend)
+        tick = MarketTick(
+            ts_event=7 * _S,
+            ts_init=7 * _S,
+            symbol="BTC",
+            price=Decimal("42000"),
+            size=Decimal("1"),
+            aggressor_side=AggressorSide.BUY,
+            trade_id="t1",
+            seq=0,
+        )
+        engine = _engine(clock, _OneTickFeed(bus, tick), bus)
+        strategy = _PausesInOnTick()
+        engine.register(strategy, symbols={"BTC"})
+        run = asyncio.create_task(engine.run())
+        await asyncio.wait_for(strategy.paused.wait(), timeout=5)
+        # The slot comes due while on_tick is parked. The wake loop publishes now.
+        clock.advance_to(15 * _S)
+        for _ in range(20):
+            await asyncio.sleep(0)
+        strategy.release.set()
+        await asyncio.wait_for(strategy.woke.wait(), timeout=5)
+        await engine.stop()
+        await run
+        return strategy.seen
+
+    assert asyncio.run(main()) == ["tick starts", "tick ends", "wake"]
