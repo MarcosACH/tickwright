@@ -557,6 +557,17 @@ class Engine:
         # subscribe would be lost with no trace (issue #563). The saga denies
         # any order it hears before the barrier clears.
         self._bus.subscribe(Signal, self._execution.on_signal)
+        # Funding is the one accounting input that arrives on the bus rather
+        # than on the fill-apply path, because it has no carrier fill (ADR-0037).
+        # It subscribes before the bus starts for the signal's reason: an old
+        # accrual polled before its handler is committed and never booked
+        # (issue #565). It subscribes raw, and that containment holds only
+        # because its live publisher is a supervised task: ``Exchange.run()``,
+        # created in the TaskGroup below. A refused ledger write therefore
+        # faults the engine and exits non-zero, rather than killing a generator
+        # the adapter spawned for itself and leaving the run accruing nothing
+        # behind a still-``RUNNING`` state (#226).
+        self._bus.subscribe(FundingAccrual, self._on_funding_accrual)
         # Start the bus (ADR-0024 step 3): in-memory a no-op; Kafka connects
         # the producer/consumer — before anything can publish. The signal
         # subscribe above is the one handler that comes first.
@@ -569,21 +580,6 @@ class Engine:
         # Engine-internal handlers subscribe raw (ADR-0024): any exception in
         # the saga path propagates to the TaskGroup and faults the engine.
         self._bus.subscribe(ExecutionReport, self._execution.on_execution_report)
-        # Funding is the one accounting input that arrives on the bus rather
-        # than on the fill-apply path, because it has no carrier fill (ADR-0037)
-        # — so it is subscribed here, beside the saga's own raw handlers, and it
-        # inherits their containment in full. That containment is not a property
-        # of subscribing raw: it holds only because the *publisher* is a
-        # supervised task, which for this event is ``Exchange.run()``, created
-        # in the TaskGroup below. A refused ledger write therefore faults the
-        # engine at the refusal and exits non-zero, rather than killing a
-        # generator the adapter had spawned for itself and leaving the run
-        # accruing nothing behind a still-``RUNNING`` state (#226).
-        #
-        # Subscribed **before** the exchange can produce one, and now trivially
-        # so: the generator does not exist until the TaskGroup opens, which is
-        # behind this line and behind the barrier.
-        self._bus.subscribe(FundingAccrual, self._on_funding_accrual)
         # The mark is the *other* input the ledger subscribes to, and it is the
         # gentler of the two: it moves no money and reaches no store, so unlike
         # the accrual above there is nothing here a refusal could leave half

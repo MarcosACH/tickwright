@@ -1,4 +1,7 @@
-"""An old ``PlaceSignal`` in a Kafka backlog never places before the barrier (issue #563).
+"""An old record in a Kafka backlog is never lost, and never placed early.
+
+An old ``PlaceSignal`` never places before the barrier (issue #563). An old
+fill, funding payment or mark still reaches its handler (issue #565).
 
 The real ``Engine`` on ``KafkaBus`` over the fake broker, with a real
 ``HyperliquidExchange`` faked at HTTP and WebSocket only. The HTTP fake yields
@@ -11,6 +14,7 @@ from collections.abc import Sequence
 from decimal import Decimal
 from pathlib import Path
 
+from eth_account import Account as Wallet
 from hyperliquid_fakes import (
     TEST_SIGNING_KEY,
     FakeExchangeApi,
@@ -31,6 +35,7 @@ from tickwright.domain import (
     CancelSignal,
     ComponentState,
     Event,
+    FundingAccrual,
     InstrumentSpec,
     OrderState,
     OrderType,
@@ -51,6 +56,7 @@ BTC_SPEC = InstrumentSpec(
     symbol="BTC", sz_decimals=5, max_decimals=6, min_notional=Decimal("10"), max_sig_figs=5
 )
 START_MS = 1_700_000_000_000
+ACCOUNT_ID = f"hyperliquid-testnet-{Wallet.from_key(TEST_SIGNING_KEY).address}"
 _SUMMARY = {
     "accountValue": "100.0",
     "totalMarginUsed": "0.0",
@@ -266,3 +272,25 @@ def test_an_old_cancel_in_the_kafka_backlog_still_reaches_the_venue(tmp_path: Pa
     saga = SQLiteStore(db).get_order(cloid)
     assert saga is not None
     assert saga.state is OrderState.CANCELLED
+
+
+def test_an_old_funding_payment_in_the_kafka_backlog_is_booked(tmp_path: Path) -> None:
+    db = tmp_path / "saga.db"
+    broker = FakeKafkaBroker()
+    _produce(
+        broker,
+        FundingAccrual(
+            ts_event=1_000,
+            ts_init=1_000,
+            account_id=ACCOUNT_ID,
+            symbol="BTC",
+            boundary_ts_ns=1_000,
+            amount=Decimal("-1.5"),
+        ),
+    )
+
+    _run_one_life(db, broker, _venue())
+
+    account = SQLiteStore(db).load_account()
+    assert account is not None
+    assert account.cash == Decimal("-1.5")
