@@ -189,18 +189,25 @@ def test_set_next_seq_resumes_the_recovered_counter() -> None:
     assert cancel.target_signal_id == "trivial:BTC:4"
 
 
-def test_snapshot_round_trip_preserves_place_and_cancel_state() -> None:
-    bus, _, fired, _ = _harness(cancel_after_ticks=2)
-    asyncio.run(bus.publish(_tick()))
+def test_restored_before_the_deadline_it_cancels_at_the_original_deadline() -> None:
+    # Placed at 1 s, so the deadline is 11 s.
+    bus, _, fired, _ = _harness(cancel_after_seconds=10)
+    asyncio.run(bus.publish(_tick(ts=1 * _S)))
 
-    second_bus, _, restored, signals = _harness(cancel_after_ticks=2)
+    second_bus, _, restored, signals = _harness(cancel_after_seconds=10)
     restored.restore(fired.snapshot())
     restored.set_next_seq(2)
-    asyncio.run(second_bus.publish(_tick(ts=2_000)))
-    asyncio.run(second_bus.publish(_tick(ts=3_000)))
 
-    # No second placement; the cancel counts restart-spanning ticks and still
-    # targets the signal_id placed in the first life.
+    async def second_life() -> list[type]:
+        # A tick at 5 s must not place again or restart the deadline at 15 s.
+        await second_bus.publish(_tick(ts=5 * _S))
+        for slot_s in range(5, 11):
+            await second_bus.publish(_wake(slot_s))
+        before = [type(s) for s in signals]
+        await second_bus.publish(_wake(11))
+        return before
+
+    assert asyncio.run(second_life()) == []
     assert [type(s) for s in signals] == [CancelSignal]
     cancel = signals[0]
     assert isinstance(cancel, CancelSignal)
