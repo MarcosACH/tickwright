@@ -28,6 +28,8 @@ would otherwise have to know and could silently invert:
   carries the mark's advance beside the line it guards (``checkpoint_funding``)
 - **the non-fill write** — store first, then project (``checkpoint``)
 - **recovery** — the ledger before the order cache (``recover``, ADR-0043 §6/§10)
+- **the open row** — no ledger write before the account row is open. Only the
+  two openers may create it (``_require_open_ledger``, ADR-0043 §6, #565)
 
 Reads stay on the projections themselves: ``cache`` and ``portfolio`` are lent
 out for the ``Reconciler``'s worklist, the manager's saga lookups and the scoped

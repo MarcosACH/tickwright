@@ -202,7 +202,8 @@ class Engine:
         self._stop_requested = asyncio.Event()
         self._stopped = asyncio.Event()
         # Set once the barrier has the account row open. Fill and funding
-        # handlers wait on it, so an old record cannot open the row at zero.
+        # handlers wait on it. Before then the ledger write would refuse an
+        # old record and fault the boot.
         self._account_open = asyncio.Event()
         self._feed_handle: FeedHandle | None = None
         self._exchange_task: asyncio.Task[None] | None = None
@@ -594,24 +595,19 @@ class Engine:
         # The hard gate: nothing places until every proof it holds has cleared.
         # The sequence is the ordering rule, and it lives here rather than inside
         # any step — lifecycle ordering is the runner's, and the barrier owns
-        # only the retry-then-fault policy the steps share. Both steps are bound
-        # methods on the component owning the grain each one proves, so what the
-        # runner contributes is the tuple's order and nothing else.
+        # only the retry-then-fault policy the steps share. Both steps are owned
+        # by the component whose grain each one proves. The runner wraps the
+        # first only to open the account gate below.
         #
-        # The account row is materialised **before** the mass-rebuild rather than
-        # merely inside the same barrier (ADR-0043 §6): the rebuild emits
-        # synthetic fills, every fill's write carries the account row (§9 — every
-        # mutation moves cash), so a rebuild that ran first would *create* the
-        # live row itself at the zero ``Account.open`` resolves a ``None``
-        # genesis to. The materialisation behind it would then decline to
-        # overwrite a row that exists, and that zero would stand for the life of
-        # the ledger with nothing to refuse it — #188's genesis comparison is
-        # paper-only. The live row must be materialised, never fallen into.
+        # The account row is materialised **before** the mass-rebuild (ADR-0043
+        # §6). The rebuild emits synthetic fills, and every fill's write carries
+        # the account row (§9). The ledger write refuses a row that is not open
+        # (#565), so a rebuild that ran first would fault the boot.
         #
-        # An old Kafka record could fall into the row the same way, so fill
-        # and funding handlers wait until the first step has the row open.
-        # Nothing may publish and drain before that step, or the bus would wait
-        # on a handler that waits on the barrier.
+        # An old Kafka record would meet the same refusal, so fill and funding
+        # handlers wait until the first step has the row open. Nothing may
+        # publish and drain before that step, or the bus would wait on a
+        # handler that waits on the barrier.
         await StartupBarrier(
             clock=self._clock,
             steps=(

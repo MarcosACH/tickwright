@@ -85,7 +85,10 @@ those components.
    materialised, never fallen into. The gate is therefore an **ordered** sequence of proofs rather
    than one call, and the runner composes it: a `StartupBarrier` holds the shared retry policy
    below, the step order lives in the runner's own sequence, and an attempt stops at the first step
-   that froze.**)** **(Extended by [#563](https://github.com/MarcosACH/tickwright/issues/563):**
+   that froze.**)** **(Changed by [#565](https://github.com/MarcosACH/tickwright/issues/565):**
+   a ledger write now refuses an account row that is not open (`Checkpointer`). A rebuild that ran
+   first would fault the run, not keep a zero. The step order is still required.**)**
+   **(Extended by [#563](https://github.com/MarcosACH/tickwright/issues/563):**
    the gate now covers a Kafka backlog. On restart, Kafka delivers old records from an earlier
    life. Delivery must run during the barrier, because the reconcile waits for its own reports to
    be delivered. So an old `Signal` can reach the saga before the barrier clears.
@@ -109,8 +112,8 @@ those components.
    - `ExecutionReport`, `FundingAccrual` and `MarkTick` subscribe with `Signal`. Before, an old
      fill, payment or mark polled in the gap was committed and lost.
    - Fill and funding handlers wait until the barrier's first step has the account row open.
-     Applied earlier, an old record would open the live row at zero, and the materialisation
-     behind it would keep that zero. That is the rule this step already states for the rebuild.
+     Applied earlier, the ledger write would refuse the old record and fault the boot. Without
+     that refusal, the record would open the live row at zero, and the barrier would keep it.
    - The wait holds the record unread. Kafka commits a record only after its handler returns,
      so a crash while waiting loses nothing. Records behind it wait too, so per-symbol order
      holds.
