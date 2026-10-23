@@ -57,6 +57,8 @@ Each file has an H1, one paragraph, then exactly four H2 sections in this order:
   readable error. A held lock exits 1. The others exit 2.
 - [Portfolio strategies](./portfolio-strategies.md): four throwaway strategies that read the
   `Portfolio` seam, including margin at 5x and a two-symbol book.
+- [Strategy wake-ups](./strategy-wake.md): the reference limit order is cancelled after N seconds
+  with no tick on its symbol, and stays `LIVE` when time stops before the deadline.
 - [Kafka bus](./kafka-bus.md): the same paper run over `KafkaBus`, messages counted on the topic.
 - [Postgres store](./postgres-store.md): the same paper run on `PostgresStore`, restart included.
 - [Container restart](./container-restart.md): the published image with an import-path strategy,
