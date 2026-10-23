@@ -23,6 +23,10 @@ those components.
    ingested, which is why its twin waits for the barrier.**)**
 3. Start the `EventBus` (InMemory: no-op; Kafka: connect consumers/producers).
 4. Connect the `Exchange` + `ExecutionManager` (WS/HTTP; subscribe to `Signal`/`ExecutionReport`).
+   **(Corrected by [#563](https://github.com/MarcosACH/tickwright/issues/563):** `Signal` now
+   subscribes before step 3. Step 5 says why. So the rule below that nothing touches the venue
+   before the account-mode gate passes has one exception. An old cancel can go out first
+   (ADR-0046 §3).**)**
    **(Extended by ADR-0044 §7:** the *connect* half this step has always named now exists —
    `Exchange.start()`, declared on the Protocol (the `start()` ADR-0014 already assigns the
    component). It is the connect half **only**: this step awaits it inline and it must return so the
@@ -79,7 +83,25 @@ those components.
    materialised, never fallen into. The gate is therefore an **ordered** sequence of proofs rather
    than one call, and the runner composes it: a `StartupBarrier` holds the shared retry policy
    below, the step order lives in the runner's own sequence, and an attempt stops at the first step
-   that froze.**)**
+   that froze.**)** **(Extended by [#563](https://github.com/MarcosACH/tickwright/issues/563):**
+   the gate now covers a Kafka backlog. On restart, Kafka delivers old records from an earlier
+   life. Delivery must run during the barrier, because the reconcile waits for its own reports to
+   be delivered. So an old `Signal` can reach the saga before the barrier clears.
+   - The saga subscribes to `Signal` **before** step 3, not at step 4. Kafka commits a record that
+     meets no handler, so a `Signal` polled before the subscribe was lost with no trace.
+   - `ExecutionManager` denies every `PlaceSignal` until the runner calls `barrier_has_cleared()`
+     right after this step. The denial writes a durable `DENIED` row (ADR-0010), so a later life
+     dedups against it and never places it.
+   - Holding the `Signal` and placing it after the barrier was rejected. Its offset is committed
+     once the handler returns, so a crash before the barrier clears would lose it.
+   - Cancels still pass, from the moment the bus starts. So a cancel can go out before step 4's
+     account-mode gate answers. A cancel only lowers exposure, and its marker is durable before
+     the send (ADR-0026). ADR-0046 §3 carries the matching correction.
+   - The denial's `OrderEvent` is published before strategies subscribe at step 6. The strategy
+     misses it, like any other startup event.
+   - The in-memory bus has no backlog, so nothing changes on that path. `ExecutionReport`,
+     `FundingAccrual` and `MarkTick` can still meet no handler in the same gap. That is
+     [#565](https://github.com/MarcosACH/tickwright/issues/565).**)**
 6. Start the `Strategy` instances (`on_start`: restore snapshot; seq high-water from the saga
    store, ADR-0016; then **pull current open-order state from the `Cache` read-model** by direct
    method call, ADR-0004 — the barrier's reconciliation `OrderEvent`s (step 5) were published
