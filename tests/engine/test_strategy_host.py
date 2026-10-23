@@ -892,3 +892,29 @@ def test_a_raising_on_wake_is_contained_and_the_next_wake_still_arrives() -> Non
     assert strategy.wake_slots == [0, 30 * _S]
     errors = [log for log in logs if log["event"] == "strategy.error"]
     assert [(e["strategy_id"], e["event_id"]) for e in errors] == [("waker", first.event_id)]
+
+
+class WakeCountingStrategy(WakeRecordingStrategy):
+    """A strategy whose state moves on every wake-up, like a deadline it checks."""
+
+    async def on_wake(self, wake: Wake) -> None:
+        await super().on_wake(wake)
+        self.state = f"wakes={len(self.wake_slots)}".encode()
+
+
+def test_state_changed_in_on_wake_is_restored_after_a_crash() -> None:
+    """No ``stop()`` before the second life, so only the save after ``on_wake``
+    can carry the state across (ADR-0016)."""
+    store = SQLiteStore(":memory:")
+    bus = InMemoryBus()
+    first_life = _host(bus=bus, clock=ManualClock(start_ns=15 * _S), store=store)
+    first_life.register(WakeCountingStrategy("waker"), symbols={"BTC"})
+    first_life.start()
+    asyncio.run(bus.publish(_wake("waker", slot_s=15)))
+
+    second_life = _host(store=store)
+    restarted = WakeCountingStrategy("waker")
+    second_life.register(restarted, symbols={"BTC"})
+    second_life.start()
+
+    assert restarted.state == b"wakes=1"
