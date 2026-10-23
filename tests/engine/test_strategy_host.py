@@ -865,6 +865,26 @@ def test_a_wake_older_than_its_interval_never_reaches_on_wake() -> None:
     assert strategy.wake_slots == [45 * _S]
 
 
+class SleeperWithWakeRecorder(WakeRecordingStrategy):
+    """Declares no interval, but records any wake-up that reaches it."""
+
+    wake_interval_seconds: float | None = None
+
+
+def test_a_wake_for_a_strategy_with_no_interval_never_reaches_on_wake() -> None:
+    # On Kafka, a Wake from a previous run can arrive after the author set the
+    # interval to None. A strategy that declared no wake-ups must never get one.
+    bus = InMemoryBus()
+    host = _host(bus=bus, clock=ManualClock(start_ns=50 * _S))
+    strategy = SleeperWithWakeRecorder("sleeper")
+    host.register(strategy, symbols={"BTC"})
+    host.start()
+
+    asyncio.run(bus.publish(_wake("sleeper", slot_s=50)))
+
+    assert strategy.wake_slots == []
+
+
 class RaisingOnFirstWakeStrategy(WakeRecordingStrategy):
     """Raises on its first wake-up and records the ones after it."""
 
