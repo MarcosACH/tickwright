@@ -70,8 +70,8 @@ class _SilentFeed:
         return None
 
 
-def _engine(clock: ManualClock, feed: _SilentFeed) -> Engine:
-    bus = InMemoryBus()
+def _engine(clock: ManualClock, feed: _SilentFeed, bus: InMemoryBus | None = None) -> Engine:
+    bus = bus or InMemoryBus()
     return Engine(
         bus=bus,
         clock=clock,
@@ -90,10 +90,13 @@ def _engine(clock: ManualClock, feed: _SilentFeed) -> Engine:
     )
 
 
-async def _advance_and_wait(clock: ManualClock, strategy: _WakingStrategy, ts_ns: int) -> None:
-    strategy.woke.clear()
+async def _advance_and_wait(clock: ManualClock, ts_ns: int, *waking: _WakingStrategy) -> None:
+    """Move the clock, then wait until each of ``waking`` has had its wake-up."""
+    for strategy in waking:
+        strategy.woke.clear()
     clock.advance_to(ts_ns)
-    await asyncio.wait_for(strategy.woke.wait(), timeout=5)
+    for strategy in waking:
+        await asyncio.wait_for(strategy.woke.wait(), timeout=5)
 
 
 def test_a_strategy_wakes_on_each_slot_of_its_interval_with_no_ticks() -> None:
@@ -106,9 +109,49 @@ def test_a_strategy_wakes_on_each_slot_of_its_interval_with_no_ticks() -> None:
         run = asyncio.create_task(engine.run())
         await asyncio.wait_for(feed.started.wait(), timeout=5)
         for ts in (15, 30, 45):
-            await _advance_and_wait(clock, strategy, ts * _S)
+            await _advance_and_wait(clock, ts * _S, strategy)
         await engine.stop()
         await run
         return [wake.ts_event for wake in strategy.wakes]
 
     assert asyncio.run(main()) == [15 * _S, 30 * _S, 45 * _S]
+
+
+def test_each_strategy_gets_only_its_own_wake_ups_and_a_none_strategy_gets_none() -> None:
+    async def main() -> tuple[list[int], list[int], list[int], set[str]]:
+        clock = ManualClock(start_ns=7 * _S)
+        feed = _SilentFeed()
+        bus = InMemoryBus()
+        published: set[str] = set()
+
+        async def record(wake: Wake) -> None:
+            published.add(wake.strategy_id)
+
+        bus.subscribe(Wake, record)
+        engine = _engine(clock, feed, bus)
+        fast = _WakingStrategy("fast", wake_interval_seconds=10.0)
+        slow = _WakingStrategy("slow", wake_interval_seconds=15.0)
+        never = _WakingStrategy("never", wake_interval_seconds=None)
+        engine.register(fast, symbols={"BTC"})
+        engine.register(slow, symbols={"ETH"})
+        engine.register(never, symbols={"SOL"})
+        run = asyncio.create_task(engine.run())
+        await asyncio.wait_for(feed.started.wait(), timeout=5)
+        await _advance_and_wait(clock, 10 * _S, fast)
+        await _advance_and_wait(clock, 15 * _S, slow)
+        await _advance_and_wait(clock, 20 * _S, fast)
+        await _advance_and_wait(clock, 30 * _S, fast, slow)
+        await engine.stop()
+        await run
+        return (
+            [wake.ts_event for wake in fast.wakes],
+            [wake.ts_event for wake in slow.wakes],
+            [wake.ts_event for wake in never.wakes],
+            published,
+        )
+
+    fast, slow, never, published = asyncio.run(main())
+    assert fast == [10 * _S, 20 * _S, 30 * _S]
+    assert slow == [15 * _S, 30 * _S]
+    assert never == []
+    assert published == {"fast", "slow"}
