@@ -14,6 +14,8 @@ the order's symbol, and proves that wake-ups stay on the grid across a crash and
 - `wake-restart` the second life places nothing and exits 0.
 - `wake-kafka` on `KafkaBus` the same lives pass the same checks, and every `Wake` record on the
   topic is on the grid.
+- `wake-backlog` on `KafkaBus` a third life with a fresh group id reads the whole topic again. No
+  old `Wake` reaches `on_wake`, so the recorder shows no repeated slots.
 
 ## How to get to it (user POV)
 
@@ -69,8 +71,15 @@ Preconditions:
   `grep '"type":"Wake"' .agents/verify/wakek/evidence/second.topic.txt | grep -vc '"ts_event":[0-9]*000000000,' > .agents/verify/wakek/evidence/second.wakes-offgrid.txt`,
   then `$V check wakek second wake-kafka --file second.wakes.txt --expect 20` and
   `$V check wakek second wake-kafka --file second.wakes-offgrid.txt --expect 0`.
+- **Kafka backlog.** Run
+  `$V ticks wakek last --row ETH:2500@20700ms --row ETH:2500@21700ms --row ETH:2500@22700ms --row ETH:2500@23700ms`,
+  `$V start wakek third --preset paper-replay --env TICKWRIGHT_REPLAY__PATH=last.jsonl --env "TICKWRIGHT_STRATEGIES=$S" --env TICKWRIGHT_BUS=kafka --env TICKWRIGHT_KAFKA__EVENTS_TOPIC=verify.wakek --env TICKWRIGHT_KAFKA__GROUP_ID=verify.wakek.fresh`,
+  `$V await wakek third --event engine.feed_started --timeout 60`, wait five seconds,
+  `$V signal wakek third TERM`, `$V await wakek third --exit`, `$V dump wakek third`. Then run
+  `$V check wakek third wake-backlog --sql "$SLOTS" --expect 0,1,2,3,4,5,10,11,12,13,20,21,22,23`
+  and `$V check wakek third wake-backlog --exit --expect 0`.
 - **Report.** Run `$V report wake`, `$V report wakectl` and `$V report wakek`. Expected verdicts:
-  `PASS (0 of 7 checks failed)`, `PASS (0 of 2 checks failed)` and `PASS (0 of 9 checks failed)`.
+  `PASS (0 of 7 checks failed)`, `PASS (0 of 2 checks failed)` and `PASS (0 of 11 checks failed)`.
 - **Cleanup.** Run `$V cleanup wake`, `$V cleanup wakectl` and `$V cleanup wakek`.
 
 ## Gotchas
@@ -92,6 +101,11 @@ Preconditions:
   off-grid slot, so `OFFGRID` checks the grid itself.
 - The topic holds 20 `Wake` records: 10 slots for each of the two strategies. Each strategy gets a
   `Wake`, even the one that has nothing left to do. The record key is the `strategy_id`.
+- `wake-backlog` passes today, but not because of the age gate. The bus starts before the
+  strategies subscribe. The poll loop delivers the whole backlog in that gap, to no `Wake`
+  subscriber. The replay clock is 0 until the first tick, so the age gate would let an old `Wake`
+  through. Issue #561 tracks it. Run `kafka-consumer-groups.sh --describe --group verify.wakek.fresh`
+  to see that the fresh group read every record.
 - In zsh, a variable holding several `--env` flags is not split into words. Write the flags out.
 - The control is its own run id. `check --sql` reads the store named in the run's `scratch/.env`,
   and each `start` rewrites that file.
