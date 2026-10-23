@@ -130,12 +130,14 @@ def _run_one_life(
     *,
     after_barrier: Sequence[Event] = (),
     first_start: bool = False,
+    faults: bool = False,
 ) -> Engine:
     """Boot the engine, wait until Kafka has committed every record, then stop.
 
     ``after_barrier`` lands on the broker once the engine is ``RUNNING``. The
     engine closes its store on stop, so each life opens its own on ``db``.
     ``first_start`` leaves the account row for the barrier to read off the venue.
+    ``faults`` expects the boot to fail and the run to exit 1.
     Returns the stopped engine, so a test can read what it held in memory.
     """
     store = SQLiteStore(db)
@@ -179,6 +181,9 @@ def _run_one_life(
             feed=HyperliquidFeed(config=config, bus=bus, clock=clock, connect=idle_ws),
         )
         run = asyncio.create_task(engine.run())
+        if faults:
+            assert await run == 1
+            return engine
         while engine.state is not ComponentState.RUNNING:
             await asyncio.sleep(0)
         for event in after_barrier:
@@ -351,18 +356,7 @@ def test_an_old_funding_payment_waits_for_the_account_row_on_a_first_start(
     # already counted in the opening cash.
     db = tmp_path / "saga.db"
     broker = FakeKafkaBroker()
-    boundary_ns = START_MS * 1_000_000 + 1
-    _produce(
-        broker,
-        FundingAccrual(
-            ts_event=boundary_ns,
-            ts_init=boundary_ns,
-            account_id=ACCOUNT_ID,
-            symbol="BTC",
-            boundary_ts_ns=boundary_ns,
-            amount=Decimal("-1.5"),
-        ),
-    )
+    _produce(broker, _payment_after_the_venue_read())
 
     _run_one_life(db, broker, _venue(), first_start=True)
 
@@ -370,3 +364,40 @@ def test_an_old_funding_payment_waits_for_the_account_row_on_a_first_start(
     assert account is not None
     assert account.genesis_collateral == Decimal("100")
     assert account.cash == Decimal("98.5")
+
+
+def test_an_old_funding_payment_survives_a_boot_that_faults_while_it_waits(
+    tmp_path: Path,
+) -> None:
+    # The venue never answers the barrier's account read, so the boot faults
+    # while the payment waits for the row. The payment must not be committed.
+    # The next boot books it, and books it once.
+    db = tmp_path / "saga.db"
+    broker = FakeKafkaBroker()
+    _produce(broker, _payment_after_the_venue_read())
+    dark = _venue(clearinghouseState=ConnectionError("venue unreachable"))
+
+    _run_one_life(db, broker, dark, first_start=True, faults=True)
+
+    assert SQLiteStore(db).load_account() is None
+    _run_one_life(db, broker, _venue(), first_start=True)
+    account = SQLiteStore(db).load_account()
+    assert account is not None
+    assert account.cash == Decimal("98.5")
+
+
+def _payment_after_the_venue_read() -> FundingAccrual:
+    """A payment at a boundary just after the barrier's account read.
+
+    An earlier boundary would count as already in the opening cash, and the
+    ledger would drop it.
+    """
+    boundary_ns = START_MS * 1_000_000 + 1
+    return FundingAccrual(
+        ts_event=boundary_ns,
+        ts_init=boundary_ns,
+        account_id=ACCOUNT_ID,
+        symbol="BTC",
+        boundary_ts_ns=boundary_ns,
+        amount=Decimal("-1.5"),
+    )
