@@ -865,6 +865,24 @@ def test_a_wake_older_than_its_interval_never_reaches_on_wake() -> None:
     assert strategy.wake_slots == [45 * _S]
 
 
+def test_a_wake_ahead_of_the_clock_never_reaches_on_wake() -> None:
+    # A Kafka replay restart (#561). The replay clock is 0 until the first tick,
+    # so a backlog Wake from the last life has a negative age. Its slot is ahead
+    # of the clock, which no Wake from this life can be.
+    bus = InMemoryBus()
+    clock = ManualClock(start_ns=0)
+    host = _host(bus=bus, clock=clock)
+    strategy = WakeRecordingStrategy("waker")
+    host.register(strategy, symbols={"BTC"})
+    host.start()
+
+    asyncio.run(bus.publish(_wake("waker", slot_s=45)))  # from the last life
+    clock.advance_to(30 * _S)
+    asyncio.run(bus.publish(_wake("waker", slot_s=30)))  # this life's own
+
+    assert strategy.wake_slots == [30 * _S]
+
+
 class SleeperWithWakeRecorder(WakeRecordingStrategy):
     """Declares no interval, but records any wake-up that reaches it."""
 

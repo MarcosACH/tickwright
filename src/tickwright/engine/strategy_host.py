@@ -312,6 +312,10 @@ class StrategyHost:
         # A Wake older than one interval is a backlog, for example one redelivered
         # after a restart. The next slot is due by then, so dropping it loses
         # nothing. A strategy with no interval never wakes, so it drops them all.
+        # A Wake ahead of the clock is also from an earlier life. This life only
+        # publishes a slot once the clock has reached it. A replay clock reads 0
+        # until the first tick, so without this check an old Wake has a negative
+        # age and passes (#561).
         interval = self._wake_intervals[strategy.strategy_id]
         max_age_ns = None if interval is None else duration_ns(interval, name="wake_interval")
 
@@ -321,7 +325,8 @@ class StrategyHost:
                 return
             if last_slot is not None and wake.ts_event <= last_slot:
                 return
-            if self._clock.timestamp_ns() - wake.ts_event > max_age_ns:
+            age_ns = self._clock.timestamp_ns() - wake.ts_event
+            if age_ns < 0 or age_ns > max_age_ns:
                 return
             last_slot = wake.ts_event
             await self._contained(strategy, strategy.on_wake, wake)

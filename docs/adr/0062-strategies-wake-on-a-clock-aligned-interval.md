@@ -29,6 +29,11 @@ strategy wake on a fixed interval of clock time. Decided in a `/grill-with-docs`
   at or before the last one it delivered to that strategy. It also drops a wake-up older than the
   strategy's own interval, measured against the `Clock`. So a Kafka backlog after a restart causes
   no burst of wake-ups. This rule does not use the tick staleness limit, which is off by default.
+  **(Amended by [#561](https://github.com/MarcosACH/tickwright/issues/561):** the host also drops a
+  wake-up whose scheduled time is ahead of the `Clock`. This life only sends a wake-up once the
+  clock has reached its slot. So a wake-up ahead of the clock comes from an earlier life. A replay
+  clock reads 0 until the first tick. Without this rule, a Kafka backlog on a replay restart had a
+  negative age and reached `on_wake`.**)**
 - **The interval is checked at registration.** An interval under 1 second is refused. Each wake-up
   is a bus event, a Kafka record and maybe a snapshot write. Work that needs to run faster belongs
   on ticks.
