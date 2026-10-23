@@ -76,14 +76,20 @@ class KafkaBus:
         bootstrap_servers: str,
         topic: str,
         group_id: str,
-        producer_factory: Callable[..., _ProducerLike] = AIOKafkaProducer,
-        consumer_factory: Callable[..., _ConsumerLike] = AIOKafkaConsumer,
+        max_poll_interval_seconds: float = 300.0,
+        producer_factory: Callable[..., _ProducerLike] | None = None,
+        consumer_factory: Callable[..., _ConsumerLike] | None = None,
     ) -> None:
         self._bootstrap_servers = bootstrap_servers
         self._topic = topic
         self._group_id = group_id
-        self._producer_factory = producer_factory
-        self._consumer_factory = consumer_factory
+        # How long a handler may hold the poll loop before Kafka drops this
+        # consumer from its group. The default is aiokafka's own.
+        self._max_poll_interval_seconds = max_poll_interval_seconds
+        # Looked up here, not bound as defaults, so a test can stand a fake
+        # at the client boundary of a bus the composition root built.
+        self._producer_factory = producer_factory or AIOKafkaProducer
+        self._consumer_factory = consumer_factory or AIOKafkaConsumer
         self._producer: _ProducerLike | None = None
         self._consumer: _ConsumerLike | None = None
         self._poll_task: asyncio.Task[None] | None = None
@@ -110,6 +116,7 @@ class KafkaBus:
             group_id=self._group_id,
             enable_auto_commit=False,
             auto_offset_reset="earliest",
+            max_poll_interval_ms=round(self._max_poll_interval_seconds * 1000),
         )
         await self._consumer.start()
         self._poll_task = asyncio.create_task(self._poll(self._consumer))

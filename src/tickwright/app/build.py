@@ -81,6 +81,12 @@ def build_bus(config: AppConfig) -> EventBus:
                 bootstrap_servers=config.kafka.bootstrap_servers,
                 topic=config.kafka.events_topic,
                 group_id=config.kafka.group_id,
+                # An old fill waits in the poll loop through the venue's start
+                # and the barrier's first step (#565). Each can use a whole
+                # startup budget. Kafka's own 300s default stays on top, as
+                # room for retries that end late.
+                max_poll_interval_seconds=300.0
+                + 2 * config.engine.startup_reconciliation_timeout_seconds,
             )
         case unreachable:
             assert_never(unreachable)
