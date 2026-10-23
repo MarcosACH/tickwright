@@ -435,6 +435,49 @@ def test_build_engine_wires_a_tradable_paper_engine(tmp_path: Path) -> None:
     assert _run_until_states(engine, db, wanted) == 0
 
 
+_S = 1_000_000_000
+
+
+def _resting_limit_config(tmp_path: Path, *, cancel_after_seconds: int) -> AppConfig:
+    """One ETH tick at 1 s rests a low BUY limit. The only later tick is BTC at
+    100 s. The limit strategy trades ETH alone, so after 1 s it sees no tick.
+    The BTC tick only moves the replay clock."""
+    ticks = tmp_path / "ticks.jsonl"
+    ticks.write_text(
+        f'{{"symbol": "ETH", "price": "42000", "size": "3", '
+        f'"aggressor_side": "buy", "trade_id": "a", "ts_event": {1 * _S}}}\n'
+        f'{{"symbol": "BTC", "price": "42000", "size": "3", '
+        f'"aggressor_side": "buy", "trade_id": "b", "ts_event": {100 * _S}}}\n'
+    )
+    return AppConfig(
+        replay=ReplayFeedConfig(path=ticks),
+        sqlite=SQLiteStoreConfig(path=tmp_path / "saga.db"),
+        paper=PaperExchangeConfig(
+            instrument_specs={"BTC": _SPEC, "ETH": _SPEC}, genesis_collateral=GENESIS
+        ),
+        strategies=[
+            StrategyConfig(
+                strategy="tickwright.strategies.single_shot_limit:SingleShotLimitStrategy",
+                strategy_id="rester",
+                symbols=["ETH"],
+                settings={
+                    "side": Side.BUY,
+                    "quantity": Decimal("0.5"),
+                    "price": Decimal("41000"),
+                    "cancel_after_seconds": cancel_after_seconds,
+                },
+            ),
+        ],
+    )
+
+
+def test_a_resting_limit_is_cancelled_by_the_clock_after_its_ticks_stop(tmp_path: Path) -> None:
+    config = _resting_limit_config(tmp_path, cancel_after_seconds=10)
+
+    wanted = {derive_cloid("rester:ETH:1"): OrderState.CANCELLED}
+    assert _run_until_states(build_engine(config), tmp_path / "saga.db", wanted) == 0
+
+
 def test_a_strategy_named_by_import_path_trades_each_of_its_symbols(tmp_path: Path) -> None:
     # The strategy lives in the test tree, as a user's lives in their own repo
     # (ADR-0061). Its settings arrive as config text, so a 0.5 order at the
