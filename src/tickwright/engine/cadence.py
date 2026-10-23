@@ -24,3 +24,18 @@ async def run_cadence(
     while True:
         await clock.sleep_until(clock.timestamp_ns() + interval_ns)
         await cycle()
+
+
+async def run_aligned(
+    *, clock: Clock, interval_seconds: float, cycle: Callable[[int], Awaitable[object]]
+) -> None:
+    """Run ``cycle`` on each slot of a grid of clock time, forever (ADR-0062).
+
+    Slots are multiples of the interval since the epoch, so they land on the
+    same times in every run. ``cycle`` receives the slot in nanoseconds.
+    """
+    interval_ns = duration_ns(interval_seconds, name="interval_seconds")
+    while True:
+        slot = (clock.timestamp_ns() // interval_ns + 1) * interval_ns
+        await clock.sleep_until(slot)
+        await cycle(slot)

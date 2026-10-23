@@ -24,6 +24,7 @@ from tickwright.domain import (
     Store,
     Strategy,
     SymbolOwnership,
+    Wake,
     reserved_id_refusal,
     wake_interval_refusal,
 )
@@ -136,6 +137,27 @@ class StrategyHost:
         self._strategies[strategy.strategy_id] = strategy
         self._symbols[strategy.strategy_id] = declared
         self._ownership = self._ownership.claim(strategy.strategy_id, symbols=declared)
+
+    def wake_schedules(self) -> list[tuple[float, Callable[[int], Awaitable[None]]]]:
+        """One pair per waking strategy: its interval, and a function that
+        publishes its ``Wake`` for a slot (ADR-0062).
+
+        The runner paces the pairs and knows nothing about ``Wake``. A strategy
+        with no interval is left out, so it gets no loop.
+        """
+        schedules: list[tuple[float, Callable[[int], Awaitable[None]]]] = []
+        for strategy in self._strategies.values():
+            interval = strategy.wake_interval_seconds
+            if interval is None:
+                continue
+
+            async def publish(slot: int, strategy_id: str = strategy.strategy_id) -> None:
+                await self._bus.publish(
+                    Wake(strategy_id=strategy_id, ts_event=slot, ts_init=self._clock.timestamp_ns())
+                )
+
+            schedules.append((interval, publish))
+        return schedules
 
     def start(self) -> None:
         """Recover each strategy — snapshot, then seq, then subscriptions.
@@ -274,8 +296,15 @@ class StrategyHost:
             await self._contained(strategy, strategy.on_order_event, event)
             self._persist(strategy)
 
+        async def on_wake(wake: Wake) -> None:
+            if wake.strategy_id != strategy.strategy_id:
+                return
+            await self._contained(strategy, strategy.on_wake, wake)
+            self._persist(strategy)
+
         self._bus.subscribe(MarketTick, on_tick)
         self._bus.subscribe(OrderEvent, on_order_event)
+        self._bus.subscribe(Wake, on_wake)
 
     @staticmethod
     async def _contained[E: Event](

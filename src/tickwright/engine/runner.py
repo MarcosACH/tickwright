@@ -53,7 +53,7 @@ from tickwright.observability import NamedEvent, named_event
 from tickwright.observability.correlation import bind_run_id
 
 from .barrier import StartupBarrier
-from .cadence import run_cadence
+from .cadence import run_aligned, run_cadence
 from .checkpoint import Checkpointer
 from .execution import ExecutionManager
 from .exit_run import ExitContext, ExitJob, ExitOutcome, ExitStatus
@@ -388,6 +388,12 @@ class Engine:
                     )
                 )
             )
+        # Strategy wake-ups pace on the same clock and stop with the same
+        # cancel (ADR-0062). The host builds the Wake, so the runner only paces.
+        self._cadence_tasks.extend(
+            tg.create_task(run_aligned(clock=self._clock, interval_seconds=interval, cycle=wake))
+            for interval, wake in self._host.wake_schedules()
+        )
 
     def _start_exchange_loop(self, tg: asyncio.TaskGroup) -> None:
         """Supervise the venue's own long-lived half in the run's task group."""
