@@ -167,6 +167,10 @@ class Engine:
             checkpointer=self._checkpointer,
             guard=self._guard,
             exit_run=exit_job is not None,
+            # Closed until the barrier clears. A Kafka backlog reaches the saga
+            # during the barrier, and an order placed then would skip startup
+            # reconciliation (issue #563).
+            barrier_cleared=False,
         )
         # One config for both: the runner also paces the continuous cadences
         # off the same intervals below.
@@ -548,6 +552,11 @@ class Engine:
         # so paper's genesis row is written long before ``host.start()`` lets a
         # strategy read a cash line.
         self._checkpointer.recover()
+        # The saga hears signals before the bus starts. Kafka commits a record
+        # that meets no handler, so an old signal polled in the gap before the
+        # subscribe would be lost with no trace (issue #563). The saga denies
+        # any order it hears before the barrier clears.
+        self._bus.subscribe(Signal, self._execution.on_signal)
         # Start the bus (ADR-0024 step 3): in-memory a no-op; Kafka connects
         # the producer/consumer — before anything can publish or subscribe.
         await self._bus.start()
@@ -558,7 +567,6 @@ class Engine:
         await self._exchange.start()
         # Engine-internal handlers subscribe raw (ADR-0024): any exception in
         # the saga path propagates to the TaskGroup and faults the engine.
-        self._bus.subscribe(Signal, self._execution.on_signal)
         self._bus.subscribe(ExecutionReport, self._execution.on_execution_report)
         # Funding is the one accounting input that arrives on the bus rather
         # than on the fill-apply path, because it has no carrier fill (ADR-0037)
@@ -606,6 +614,7 @@ class Engine:
             ),
         ).run(timeout_seconds=self._config.startup_reconciliation_timeout_seconds)
         named_event(NamedEvent.ENGINE_BARRIER_CLEARED)
+        self._execution.barrier_has_cleared()
         # Strategies after the barrier: restore snapshot, resume seq, subscribe.
         # An exit run starts none, so nothing but its job can place or cancel.
         if self._exit_job is None:
