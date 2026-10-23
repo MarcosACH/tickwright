@@ -344,6 +344,9 @@ class PortfolioProjection:
         self._store = store
         self._clock = clock
         self._account = Account.open(spec, ts_ns=clock.timestamp_ns())
+        # Whether the durable account row exists. Latched once true, because
+        # no row is ever deleted. See ``is_opened``.
+        self._opened = False
         # Keyed ``(strategy_id, symbol)`` — the materialized runtime key of the
         # logical ``(account, strategy, symbol)`` grain, the account being a
         # deployment fact (ADR-0038). ``None`` is the reserved unattributed
@@ -1043,6 +1046,7 @@ class PortfolioProjection:
             self._seed_genesis()
             return
         self._account = stored
+        self._opened = True
         # The reserved unattributed partition comes back with everything else
         # (ADR-0043 §9): ADR-0034's Σ-invariant holds by construction only if it
         # is restored too, so the filtering belongs at the seam, not here.
@@ -1114,6 +1118,7 @@ class PortfolioProjection:
         if not self._spec.declares_genesis:
             return
         self._store.checkpoint_ledger(account=self._account, ts_ns=self._clock.timestamp_ns())
+        self._opened = True
 
     def is_opened(self) -> bool:
         """Whether the **durable** ledger holds this account's row yet.
@@ -1129,22 +1134,18 @@ class PortfolioProjection:
         ``False`` is therefore exactly one state — a live first start, before the
         barrier — and it is the only one in which a venue account read is owed.
 
-        **Asked of the store rather than cached**, and that is not a detail: the
-        row has a writer neither opener goes through — a fill's own
-        ``checkpoint_ledger`` carries it, because ADR-0043 §9 makes ``account``
-        required and every mutation moves cash. A flag maintained by the two
-        openers would therefore answer "not open" against a row a fill had
-        already written, and the barrier's whole ordering rationale rests on the
-        opposite: a rebuild that ran first *creates* the row, and the
-        materialisation behind it declines to overwrite rather than resetting the
-        cash line that fill just moved. One question, one source — a store read
-        cannot drift from the table it reads.
+        **(Changed by [#565](https://github.com/MarcosACH/tickwright/issues/565):**
+        every ledger write now asks this first, so a fill can no longer create
+        the row. The store is still the one source. A ``False`` asks the store
+        again. A ``True`` is latched, because no row is ever deleted. The two
+        openers and ``recover()`` set it as they learn it, so the write path pays
+        no store read.**)**
 
-        A method rather than a property for the same reason: this reaches the
-        store, and a property would invite a caller to treat it as a field. Both
-        callers are startup-only, so the read is paid once per barrier attempt.
+        A method rather than a property, because it can reach the store.
         """
-        return self._store.load_account() is not None
+        if not self._opened:
+            self._opened = self._store.load_account() is not None
+        return self._opened
 
     def materialise(self, state: VenueAccountState) -> None:
         """Open the durable ledger at the genesis ``state`` implies (ADR-0043 §6).
@@ -1168,11 +1169,11 @@ class PortfolioProjection:
         and this one is the answer no future caller can inherit its way around.
 
         The order against the barrier's mass-rebuild is the caller's to keep and
-        is load-bearing: the rebuild emits synthetic fills, every fill's write
-        carries the account row (ADR-0043 §9), so a rebuild that ran first would
-        *create* the row at the zero ``Account.open`` resolved — and this method,
-        declining to overwrite it, would leave that zero standing for the life of
-        the ledger with nothing to refuse it.
+        is load-bearing: the rebuild emits synthetic fills, and every fill's write
+        carries the account row (ADR-0043 §9). A rebuild that ran first used to
+        create the row at the zero ``Account.open`` resolved. Since #565 the
+        ``Checkpointer`` refuses that write, so a wrong order faults the run
+        instead of keeping the zero.
         """
         if self.is_opened():
             raise InvariantViolation(
@@ -1185,6 +1186,7 @@ class PortfolioProjection:
         # local clock stamps only when the row was made durable.
         self._account = Account.ingest(self._spec, state)
         self._store.checkpoint_ledger(account=self._account, ts_ns=self._clock.timestamp_ns())
+        self._opened = True
         # Announced behind the write, as ``project`` is: a record naming an
         # opening balance a crash could still undo would be worse than none.
         named_event(

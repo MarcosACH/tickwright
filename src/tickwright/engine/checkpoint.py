@@ -237,6 +237,7 @@ class Checkpointer:
         ``InvariantViolation`` faults the run (ADR-0014), so nothing goes on to
         trade or report against a read-model the store never recorded.
         """
+        self._require_open_ledger()
         if order.split_basis is None:
             changes = [self._portfolio.apply_fill(event, side=side)]
         else:
@@ -509,6 +510,20 @@ class Checkpointer:
                 f"at boundary {accrual.boundary_ts_ns}"
             ) from exc
         self._portfolio.project_funding(change)
+
+    def _require_open_ledger(self) -> None:
+        """Refuse a ledger write before the account row is open (ADR-0043 §6).
+
+        Checked before the fold, so a refusal leaves memory untouched too. Only
+        the two openers may create the row. A write that created it would open a
+        live ledger at zero, and the barrier would then keep that zero as the
+        genesis for good.
+        """
+        if not self._portfolio.is_opened():
+            raise InvariantViolation(
+                "ledger write refused: the account row is not open yet. A live row "
+                "opens only at the startup barrier (ADR-0043 §6)"
+            )
 
 
 def _leftover_piece(
