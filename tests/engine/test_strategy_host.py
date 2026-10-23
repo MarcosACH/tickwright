@@ -863,3 +863,32 @@ def test_a_wake_older_than_its_interval_never_reaches_on_wake() -> None:
     asyncio.run(bus.publish(_wake("waker", slot_s=45)))  # 5 s old
 
     assert strategy.wake_slots == [45 * _S]
+
+
+class RaisingOnFirstWakeStrategy(WakeRecordingStrategy):
+    """Raises on its first wake-up and records the ones after it."""
+
+    async def on_wake(self, wake: Wake) -> None:
+        if not self.wake_slots:
+            self.wake_slots.append(0)
+            raise KeyError("third-party bug")
+        self.wake_slots.append(wake.ts_event)
+
+
+def test_a_raising_on_wake_is_contained_and_the_next_wake_still_arrives() -> None:
+    bus = InMemoryBus()
+    clock = ManualClock(start_ns=15 * _S)
+    host = _host(bus=bus, clock=clock)
+    strategy = RaisingOnFirstWakeStrategy("waker")
+    host.register(strategy, symbols={"BTC"})
+    host.start()
+
+    first = _wake("waker", slot_s=15)
+    with structlog.testing.capture_logs() as logs:
+        asyncio.run(bus.publish(first))
+        clock.advance_to(30 * _S)
+        asyncio.run(bus.publish(_wake("waker", slot_s=30)))
+
+    assert strategy.wake_slots == [0, 30 * _S]
+    errors = [log for log in logs if log["event"] == "strategy.error"]
+    assert [(e["strategy_id"], e["event_id"]) for e in errors] == [("waker", first.event_id)]
