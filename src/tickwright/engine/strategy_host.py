@@ -315,7 +315,9 @@ class StrategyHost:
         # A Wake ahead of the clock is also from an earlier life. This life only
         # publishes a slot once the clock has reached it. A replay clock reads 0
         # until the first tick, so without this check an old Wake has a negative
-        # age and passes (#561).
+        # age and passes (#561). This assumes the clock never steps back. If the
+        # wall clock does, this life's own Wake can be dropped, and the strategy
+        # wakes one interval late. Nothing runs twice, so that trade is accepted.
         interval = self._wake_intervals[strategy.strategy_id]
         max_age_ns = None if interval is None else duration_ns(interval, name="wake_interval")
 
