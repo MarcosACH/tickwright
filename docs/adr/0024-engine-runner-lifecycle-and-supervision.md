@@ -24,7 +24,9 @@ those components.
 3. Start the `EventBus` (InMemory: no-op; Kafka: connect consumers/producers).
 4. Connect the `Exchange` + `ExecutionManager` (WS/HTTP; subscribe to `Signal`/`ExecutionReport`).
    **(Corrected by [#563](https://github.com/MarcosACH/tickwright/issues/563):** `Signal` now
-   subscribes before step 3. Step 5 says why.**)**
+   subscribes before step 3. Step 5 says why. So the rule below that nothing touches the venue
+   before the account-mode gate passes has one exception. An old cancel can go out first
+   (ADR-0046 §3).**)**
    **(Extended by ADR-0044 §7:** the *connect* half this step has always named now exists —
    `Exchange.start()`, declared on the Protocol (the `start()` ADR-0014 already assigns the
    component). It is the connect half **only**: this step awaits it inline and it must return so the
