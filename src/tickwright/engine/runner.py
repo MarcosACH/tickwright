@@ -574,6 +574,10 @@ class Engine:
         # the adapter spawned for itself and leaving the run accruing nothing
         # behind a still-``RUNNING`` state (#226).
         self._bus.subscribe(FundingAccrual, self._on_funding_accrual)
+        # The mark is the other input the ledger subscribes to. It moves no
+        # money and reaches no store, so a refusal has nothing to leave half
+        # done. It subscribes early too, so an old mark is not lost (issue #565).
+        self._bus.subscribe(MarkTick, self._on_mark_tick)
         # Start the bus (ADR-0024 step 3): in-memory a no-op; Kafka connects
         # the producer/consumer — before anything can publish. The handlers
         # above are the ones a Kafka backlog can reach, so they come first.
@@ -583,13 +587,6 @@ class Engine:
         # below so a refusal precedes any order and the barrier's own venue
         # reads observe an already-aligned venue.
         await self._exchange.start()
-        # The mark is the *other* input the ledger subscribes to, and it is the
-        # gentler of the two: it moves no money and reaches no store, so unlike
-        # the accrual above there is nothing here a refusal could leave half
-        # done. Subscribed beside it because the wiring is the runner's either
-        # way — which event reaches which verb — and subscribed **before** the
-        # feed starts at step 7, so no mark can be published to nobody.
-        self._bus.subscribe(MarkTick, self._on_mark_tick)
         # The hard gate: nothing places until every proof it holds has cleared.
         # The sequence is the ordering rule, and it lives here rather than inside
         # any step — lifecycle ordering is the runner's, and the barrier owns

@@ -38,6 +38,7 @@ from tickwright.domain import (
     FillReport,
     FundingAccrual,
     InstrumentSpec,
+    MarkTick,
     OrderState,
     OrderType,
     PlaceSignal,
@@ -128,11 +129,12 @@ def _run_one_life(
     post: FakeExchangeApi,
     *,
     after_barrier: Sequence[Event] = (),
-) -> None:
+) -> Engine:
     """Boot the engine, wait until Kafka has committed every record, then stop.
 
     ``after_barrier`` lands on the broker once the engine is ``RUNNING``. The
     engine closes its store on stop, so each life opens its own on ``db``.
+    Returns the stopped engine, so a test can read what it held in memory.
     """
     store = SQLiteStore(db)
 
@@ -141,7 +143,7 @@ def _run_one_life(
         await asyncio.sleep(0)
         return await post(url, payload)
 
-    async def life() -> None:
+    async def life() -> Engine:
         bus = _kafka_bus(broker)
         clock = ManualClock(start_ns=START_MS * 1_000_000)
         config = HyperliquidConfig(
@@ -182,8 +184,9 @@ def _run_one_life(
         await broker.all_committed()
         await engine.stop()
         assert await run == 0
+        return engine
 
-    asyncio.run(asyncio.wait_for(life(), timeout=5))
+    return asyncio.run(asyncio.wait_for(life(), timeout=5))
 
 
 def _sent_orders(post: FakeExchangeApi) -> list[dict]:
@@ -325,3 +328,13 @@ def test_an_old_fill_in_the_kafka_backlog_is_booked(tmp_path: Path) -> None:
     assert saga is not None
     assert saga.state is OrderState.PARTIALLY_FILLED
     assert saga.fill_count == 1
+
+
+def test_an_old_mark_in_the_kafka_backlog_reaches_the_ledger(tmp_path: Path) -> None:
+    broker = FakeKafkaBroker()
+    mark = MarkTick(ts_event=1_000, ts_init=1_000, symbol="BTC", price=Decimal("41234"))
+    _produce(broker, mark)
+
+    engine = _run_one_life(tmp_path / "saga.db", broker, _venue())
+
+    assert engine.portfolio.latest_mark("BTC") == mark
