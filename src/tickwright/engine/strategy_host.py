@@ -152,18 +152,21 @@ class StrategyHost:
         The runner paces the pairs and knows nothing about ``Wake``. A strategy
         with no interval is left out, so it gets no loop.
         """
-        schedules: list[tuple[float, Callable[[int], Awaitable[None]]]] = []
-        for strategy_id, interval in self._wake_intervals.items():
-            if interval is None:
-                continue
+        return [
+            (interval, self._wake_publisher(strategy_id))
+            for strategy_id, interval in self._wake_intervals.items()
+            if interval is not None
+        ]
 
-            async def publish(slot: int, strategy_id: str = strategy_id) -> None:
-                await self._bus.publish(
-                    Wake(strategy_id=strategy_id, ts_event=slot, ts_init=self._clock.timestamp_ns())
-                )
+    def _wake_publisher(self, strategy_id: str) -> Callable[[int], Awaitable[None]]:
+        """A function that publishes one strategy's ``Wake`` for a slot."""
 
-            schedules.append((interval, publish))
-        return schedules
+        async def publish(slot: int) -> None:
+            await self._bus.publish(
+                Wake(strategy_id=strategy_id, ts_event=slot, ts_init=self._clock.timestamp_ns())
+            )
+
+        return publish
 
     def start(self) -> None:
         """Recover each strategy — snapshot, then seq, then subscriptions.
