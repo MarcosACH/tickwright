@@ -1,7 +1,7 @@
 """Operator flatten (ADR-0053, ADR-0054, ADR-0056, ADR-0060): the ``Engine`` as a
 one-shot exit run that closes every position.
 
-The real paper path, with no strategy: ``PaperExchange`` over ``InMemoryBus`` and
+The real paper path, where no strategy runs: ``PaperExchange`` over ``InMemoryBus`` and
 ``SQLiteStore``, fed by ``ReplayFeed`` on ``ManualClock``.
 """
 
@@ -38,6 +38,7 @@ from tickwright.domain import (
     MarketOrder,
     MarketTick,
     Order,
+    OrderEvent,
     OrderRef,
     OrderState,
     OrderStatusReport,
@@ -46,10 +47,12 @@ from tickwright.domain import (
     PlaceSignal,
     Side,
     Signal,
+    Strategy,
     TimeInForce,
     VenueOpenOrder,
     VenueOrderView,
     VenueReadFailure,
+    Wake,
     derive_cloid,
 )
 from tickwright.engine.checkpoint import Checkpointer
@@ -68,7 +71,7 @@ _SPECS = {
 _ROWS = {"BTC": ("42000", "43000", "44000"), "ETH": ("3000", "3100", "3200")}
 
 
-def _ticks(path: Path, replayed: Iterable[str]) -> Path:
+def _ticks(path: Path, replayed: Iterable[str], *, step_ns: int = 1_000) -> Path:
     rows = [
         {
             "symbol": symbol,
@@ -76,7 +79,7 @@ def _ticks(path: Path, replayed: Iterable[str]) -> Path:
             "size": "1",
             "aggressor_side": "buy",
             "trade_id": f"{symbol}-{n}",
-            "ts_event": 1_000 * n,
+            "ts_event": step_ns * n,
         }
         for n, (symbol, price) in enumerate(
             ((symbol, price) for symbol in replayed for price in _ROWS[symbol]), start=1
@@ -145,6 +148,8 @@ def _flatten(
     bus: EventBus | None = None,
     used: bool = True,
     new_store: bool = False,
+    registered: Sequence[Strategy] = (),
+    step_ns: int = 1_000,
 ) -> tuple[int, list[EventDict]]:
     """Run flatten over paper and the ``_ROWS`` replay file.
 
@@ -154,7 +159,9 @@ def _flatten(
     ``clock`` lets a test read the virtual time the run ended at. ``bus`` lets
     a venue double publish its own reports. ``used`` boots a fresh store
     first, because an exit run refuses one no engine has used (ADR-0052).
-    ``new_store`` is the operator's ``--new-store``.
+    ``new_store`` is the operator's ``--new-store``. ``registered`` strategies
+    are registered on BTC. An exit run never starts them. ``step_ns`` spaces
+    the replay rows.
     Returns the exit code and every event the run emitted.
     """
     if used:
@@ -168,10 +175,14 @@ def _flatten(
         clock=clock,
         store=store,
         exchange=paper if link is None else link(paper),
-        feed=ReplayFeed(path=_ticks(tmp_path / "ticks.jsonl", replayed), bus=bus, clock=clock),
+        feed=ReplayFeed(
+            path=_ticks(tmp_path / "ticks.jsonl", replayed, step_ns=step_ns), bus=bus, clock=clock
+        ),
         guard=RealGuard(specs=_SPECS, store=store, clock=clock) if guarded else None,
         exit_job=Flatten(feed_ends=True, new_store=new_store),
     )
+    for strategy in registered:
+        engine.register(strategy, symbols={"BTC"})
 
     async def go() -> int:
         if resting:
@@ -1579,3 +1590,50 @@ def test_a_flat_symbol_whose_open_order_is_never_decided_stops_the_run(
         old = store.get_order(left_open)
     assert old is not None
     assert old.state is OrderState.LIVE
+
+
+class _Waker:
+    """A strategy that asks for a wake-up every second."""
+
+    strategy_id = "waker"
+    wake_interval_seconds: float | None = 1.0
+
+    async def on_tick(self, tick: MarketTick) -> None:
+        return None
+
+    async def on_wake(self, wake: Wake) -> None:
+        return None
+
+    async def on_order_event(self, event: OrderEvent) -> None:
+        return None
+
+    def set_next_seq(self, next_seq: int) -> None:
+        return None
+
+    def snapshot(self) -> bytes:
+        return b""
+
+    def restore(self, data: bytes) -> None:
+        return None
+
+
+def test_flatten_publishes_no_wake_up_while_the_replay_crosses_its_slots(tmp_path: Path) -> None:
+    # An exit run only closes positions. A wake-up could lead a strategy to trade (ADR-0062).
+    _hold(tmp_path / "saga.db", {"BTC": "0.02"})
+    bus = InMemoryBus()
+    wakes: list[Wake] = []
+
+    async def record(wake: Wake) -> None:
+        wakes.append(wake)
+
+    bus.subscribe(Wake, record)
+    clock = ManualClock()
+
+    # Rows 1 s apart, so every row lands on one of the waker's slots.
+    exit_code, _ = _flatten(
+        tmp_path, bus=bus, clock=clock, registered=[_Waker()], step_ns=1_000_000_000
+    )
+
+    assert exit_code == 0
+    assert clock.timestamp_ns() >= 3_000_000_000
+    assert wakes == []

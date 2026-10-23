@@ -80,6 +80,8 @@ out.
 
 **Responsibilities:**
 
+- Keep the interval that `register` checked. The loop and the drop rules use that copy, because
+  `restore()` runs later and could change the strategy's own value.
 - Build and publish each `Wake`.
 - Subscribe to `Wake` in `start()`, after restore, like ticks.
 - Deliver a `Wake` only to its own strategy.

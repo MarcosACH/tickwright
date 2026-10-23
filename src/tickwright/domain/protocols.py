@@ -218,7 +218,8 @@ class Strategy(Protocol):
     wake_interval_seconds: float | None
     """How often the strategy wakes, in seconds of clock time (ADR-0062).
 
-    ``None`` means it never wakes. Anything under 1 second is refused at boot."""
+    ``None`` means it never wakes. Anything under 1 second is refused at boot.
+    The engine reads it once, at registration. A later change has no effect."""
 
     async def on_tick(self, tick: MarketTick) -> None:
         """Handle a market tick; may emit signals."""
