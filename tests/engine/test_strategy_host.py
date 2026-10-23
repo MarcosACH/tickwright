@@ -918,3 +918,29 @@ def test_state_changed_in_on_wake_is_restored_after_a_crash() -> None:
     second_life.start()
 
     assert restarted.state == b"wakes=1"
+
+
+class IntervalFromSnapshotStrategy(WakeRecordingStrategy):
+    """Sets its interval to 0.5 s in ``restore()``, after ``register`` checked 15 s."""
+
+    def restore(self, data: bytes) -> None:
+        super().restore(data)
+        self.wake_interval_seconds = 0.5
+
+
+def test_an_interval_changed_after_register_has_no_effect() -> None:
+    # register refuses an interval under 1 s (ADR-0062). restore() runs after it,
+    # so a later read would let 0.5 s past that check.
+    store = SQLiteStore(":memory:")
+    store.save_strategy_snapshot("waker", b"saved", ts_ns=0)
+    bus = InMemoryBus()
+    host = _host(bus=bus, clock=ManualClock(start_ns=50 * _S), store=store)
+    strategy = IntervalFromSnapshotStrategy("waker")
+    host.register(strategy, symbols={"BTC"})
+    host.start()
+
+    asyncio.run(bus.publish(_wake("waker", slot_s=45)))  # 5 s old, within 15 s
+
+    assert strategy.wake_interval_seconds == 0.5
+    assert [interval for interval, _ in host.wake_schedules()] == [15.0]
+    assert strategy.wake_slots == [45 * _S]

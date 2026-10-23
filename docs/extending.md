@@ -93,7 +93,8 @@ A strategy consumes ticks and lifecycle events and emits `PlaceSignal`/`CancelSi
 - [ ] Declare `wake_interval_seconds`, the seconds of clock time between your
   wake-ups. Set it to `None` if the strategy never wakes, and write an empty
   `on_wake`. Otherwise it must be a number of at least 1. You may set it in `__init__` from your
-  `settings`. See ADR-0062.
+  `settings`. The engine reads it once at boot. A change after that, for example in `restore`,
+  has no effect. See ADR-0062.
 - [ ] Declare a `Settings` attribute on the class that names a Pydantic model. The engine checks
   the config entry's `settings` against it at boot. A strategy with no settings declares an empty
   model. An unknown settings field is refused, even if your model allows extra fields.

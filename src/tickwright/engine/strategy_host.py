@@ -77,6 +77,10 @@ class StrategyHost:
         self._tick_staleness_ns = tick_staleness_ns
         self._strategies: dict[str, Strategy] = {}
         self._symbols: dict[str, frozenset[str]] = {}
+        # The wake interval register checked (ADR-0062). The loop and the gate
+        # read this copy, because restore() runs after register and could
+        # change the strategy's own attribute past the check.
+        self._wake_intervals: dict[str, float | None] = {}
         # The last bytes persisted per strategy. A callback that left the
         # state where it was costs a ``snapshot()`` call and no store write.
         self._persisted: dict[str, bytes] = {}
@@ -132,11 +136,13 @@ class StrategyHost:
         refusal = self._ownership.refusal(strategy.strategy_id, symbols=declared)
         if refusal is not None:
             raise InvariantViolation(refusal)
-        wake = wake_interval_refusal(strategy.wake_interval_seconds)
+        interval = strategy.wake_interval_seconds
+        wake = wake_interval_refusal(interval)
         if wake is not None:
             raise InvariantViolation(wake)
         self._strategies[strategy.strategy_id] = strategy
         self._symbols[strategy.strategy_id] = declared
+        self._wake_intervals[strategy.strategy_id] = interval
         self._ownership = self._ownership.claim(strategy.strategy_id, symbols=declared)
 
     def wake_schedules(self) -> list[tuple[float, Callable[[int], Awaitable[None]]]]:
@@ -147,12 +153,11 @@ class StrategyHost:
         with no interval is left out, so it gets no loop.
         """
         schedules: list[tuple[float, Callable[[int], Awaitable[None]]]] = []
-        for strategy in self._strategies.values():
-            interval = strategy.wake_interval_seconds
+        for strategy_id, interval in self._wake_intervals.items():
             if interval is None:
                 continue
 
-            async def publish(slot: int, strategy_id: str = strategy.strategy_id) -> None:
+            async def publish(slot: int, strategy_id: str = strategy_id) -> None:
                 await self._bus.publish(
                     Wake(strategy_id=strategy_id, ts_event=slot, ts_init=self._clock.timestamp_ns())
                 )
@@ -304,7 +309,7 @@ class StrategyHost:
         # A Wake older than one interval is a backlog, for example one redelivered
         # after a restart. The next slot is due by then, so dropping it loses
         # nothing. A strategy with no interval never wakes, so it drops them all.
-        interval = strategy.wake_interval_seconds
+        interval = self._wake_intervals[strategy.strategy_id]
         max_age_ns = None if interval is None else duration_ns(interval, name="wake_interval")
 
         async def on_wake(wake: Wake) -> None:
