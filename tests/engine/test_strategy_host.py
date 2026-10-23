@@ -848,3 +848,18 @@ def test_a_redelivered_or_earlier_wake_never_reaches_on_wake() -> None:
     asyncio.run(bus.publish(_wake("waker", slot_s=45)))
 
     assert strategy.wake_slots == [30 * _S, 45 * _S]
+
+
+def test_a_wake_older_than_its_interval_never_reaches_on_wake() -> None:
+    # A backlog redelivered after a restart. Acting on it would run a check the
+    # strategy meant for a moment long gone (ADR-0062).
+    bus = InMemoryBus()
+    host = _host(bus=bus, clock=ManualClock(start_ns=50 * _S))
+    strategy = WakeRecordingStrategy("waker")
+    host.register(strategy, symbols={"BTC"})
+    host.start()
+
+    asyncio.run(bus.publish(_wake("waker", slot_s=30)))  # 20 s old, interval 15 s
+    asyncio.run(bus.publish(_wake("waker", slot_s=45)))  # 5 s old
+
+    assert strategy.wake_slots == [45 * _S]

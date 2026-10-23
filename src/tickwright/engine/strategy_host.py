@@ -25,6 +25,7 @@ from tickwright.domain import (
     Strategy,
     SymbolOwnership,
     Wake,
+    duration_ns,
     reserved_id_refusal,
     wake_interval_refusal,
 )
@@ -300,12 +301,19 @@ class StrategyHost:
         # last one delivered is a redelivery or a reorder, so on_wake is
         # idempotent with no effort from the strategy author.
         last_slot: int | None = None
+        # A Wake older than one interval is a backlog, for example one redelivered
+        # after a restart. The next slot is due by then, so dropping it loses
+        # nothing. A strategy with no interval never wakes, so it drops them all.
+        interval = strategy.wake_interval_seconds
+        max_age_ns = None if interval is None else duration_ns(interval, name="wake_interval")
 
         async def on_wake(wake: Wake) -> None:
             nonlocal last_slot
-            if wake.strategy_id != strategy.strategy_id:
+            if wake.strategy_id != strategy.strategy_id or max_age_ns is None:
                 return
             if last_slot is not None and wake.ts_event <= last_slot:
+                return
+            if self._clock.timestamp_ns() - wake.ts_event > max_age_ns:
                 return
             last_slot = wake.ts_event
             await self._contained(strategy, strategy.on_wake, wake)
