@@ -87,6 +87,7 @@ out.
 - Deliver a `Wake` only to its own strategy.
 - Drop a `Wake` whose slot is at or before the last one delivered to that strategy.
 - Drop a `Wake` older than that strategy's interval, measured against the `Clock`.
+- Drop a `Wake` whose slot is ahead of the `Clock`. It comes from an earlier life (#561).
 - Run `on_wake` inside the same containment as `on_tick`, then save the snapshot.
 
 **Seams:** None.

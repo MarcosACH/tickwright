@@ -609,10 +609,12 @@ def test_on_kafka_a_place_killed_before_it_is_handled_keeps_its_seq_across_the_r
 
         # Life 2: the tick redelivers, and the old place is handled. This wiring
         # has no wake loop, so the test publishes the wake-up past the deadline
-        # the runner would. The restored strategy sends its cancel.
+        # the runner would. The runner only publishes a slot the clock has
+        # reached, so the clock moves first. The restored strategy sends its cancel.
         bus, store = _kafka_life(broker, store_backend, venue, clock, cancel_after_seconds=1)
         await bus.start()
         await broker.all_committed()
+        clock.advance_to(2 * _S)
         await bus.publish(Wake(strategy_id="trivial", ts_event=2 * _S, ts_init=2 * _S))
         await broker.all_committed()
         await bus.close()

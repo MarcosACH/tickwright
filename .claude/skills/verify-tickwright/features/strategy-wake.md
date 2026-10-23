@@ -101,11 +101,12 @@ Preconditions:
   off-grid slot, so `OFFGRID` checks the grid itself.
 - The topic holds 20 `Wake` records: 10 slots for each of the two strategies. Each strategy gets a
   `Wake`, even the one that has nothing left to do. The record key is the `strategy_id`.
-- `wake-backlog` passes today, but not because of the age gate. The bus starts before the
-  strategies subscribe. The poll loop delivers the whole backlog in that gap, to no `Wake`
-  subscriber. The replay clock is 0 until the first tick, so the age gate would let an old `Wake`
-  through. Issue #561 tracks it. Run `kafka-consumer-groups.sh --describe --group verify.wakek.fresh`
-  to see that the fresh group read every record.
+- `wake-backlog` does not exercise the age gate. The bus starts before the strategies subscribe.
+  The poll loop delivers the whole backlog in that gap, to no `Wake` subscriber. A `Wake` that
+  arrives later, before the first tick, has a slot ahead of the replay clock. The host drops it
+  (#561). A unit test in `tests/engine/test_strategy_host.py` proves that, not this recipe. Run
+  `kafka-consumer-groups.sh --describe --group verify.wakek.fresh` to see that the fresh group read
+  every record.
 - In zsh, a variable holding several `--env` flags is not split into words. Write the flags out.
 - The control is its own run id. `check --sql` reads the store named in the run's `scratch/.env`,
   and each `start` rewrites that file.
