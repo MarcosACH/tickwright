@@ -9,6 +9,7 @@ running it end-to-end.
 """
 
 import asyncio
+import gc
 from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
@@ -433,6 +434,108 @@ def test_build_engine_wires_a_tradable_paper_engine(tmp_path: Path) -> None:
         derive_cloid("rester:ETH:1"): OrderState.LIVE,
     }
     assert _run_until_states(engine, db, wanted) == 0
+
+
+_S = 1_000_000_000
+
+
+def _resting_limit_config(
+    tmp_path: Path,
+    *,
+    cancel_after_seconds: int,
+    ticks: tuple[tuple[str, int], ...] = (("ETH", 1), ("BTC", 100)),
+    life: str = "first",
+) -> AppConfig:
+    """By default one ETH tick at 1 s rests a low BUY limit, and the only later
+    tick is BTC at 100 s. The limit strategy trades ETH alone, so a BTC tick
+    only moves the replay clock. ``ticks`` holds (symbol, seconds) pairs."""
+    path = tmp_path / f"{life}.jsonl"
+    path.write_text(
+        "".join(
+            f'{{"symbol": "{symbol}", "price": "42000", "size": "3", '
+            f'"aggressor_side": "buy", "trade_id": "{life}{i}", "ts_event": {seconds * _S}}}\n'
+            for i, (symbol, seconds) in enumerate(ticks)
+        )
+    )
+    return AppConfig(
+        replay=ReplayFeedConfig(path=path),
+        sqlite=SQLiteStoreConfig(path=tmp_path / "saga.db"),
+        paper=PaperExchangeConfig(
+            instrument_specs={"BTC": _SPEC, "ETH": _SPEC}, genesis_collateral=GENESIS
+        ),
+        strategies=[
+            StrategyConfig(
+                strategy="tickwright.strategies.single_shot_limit:SingleShotLimitStrategy",
+                strategy_id="rester",
+                symbols=["ETH"],
+                settings={
+                    "side": Side.BUY,
+                    "quantity": Decimal("0.5"),
+                    "price": Decimal("41000"),
+                    "cancel_after_seconds": cancel_after_seconds,
+                },
+            ),
+        ],
+    )
+
+
+def test_a_resting_limit_is_cancelled_by_the_clock_after_its_ticks_stop(tmp_path: Path) -> None:
+    config = _resting_limit_config(tmp_path, cancel_after_seconds=10)
+
+    wanted = {derive_cloid("rester:ETH:1"): OrderState.CANCELLED}
+    assert _run_until_states(build_engine(config), tmp_path / "saga.db", wanted) == 0
+
+
+def test_a_limit_killed_while_resting_is_cancelled_at_its_original_deadline(
+    tmp_path: Path,
+) -> None:
+    # Placed at 1 s, so the deadline is 11 s. The first life is killed at 5 s.
+    first = _resting_limit_config(tmp_path, cancel_after_seconds=10, ticks=(("ETH", 1), ("BTC", 5)))
+    _crash_once(build_engine(first), tmp_path / "saga.db", derive_cloid("rester:ETH:1"))
+    # A killed process frees the store lock (ADR-0052). Collecting the first
+    # life's store does the same here, through its finalizer.
+    gc.collect()
+
+    # The second replay ends at 13 s. Only the saved 11 s deadline falls inside
+    # it. A deadline counted from this life would come at 18 s or later. The
+    # ETH tick at 8 s would place a second order if the snapshot were lost.
+    second = _resting_limit_config(
+        tmp_path, cancel_after_seconds=10, ticks=(("ETH", 8), ("BTC", 13)), life="second"
+    )
+    wanted = {derive_cloid("rester:ETH:1"): OrderState.CANCELLED}
+    assert _run_until_states(build_engine(second), tmp_path / "saga.db", wanted) == 0
+
+    store = SQLiteStore(tmp_path / "saga.db")
+    try:
+        assert [order.cloid for order in store.all_orders()] == [derive_cloid("rester:ETH:1")]
+    finally:
+        store.close()
+
+
+def _crash_once(engine: Engine, db: Path, cloid: str) -> None:
+    """Run ``engine`` until ``cloid`` is LIVE, then kill it.
+
+    Cancelling the run task tears nothing down, like a killed process.
+    """
+
+    async def life() -> None:
+        run = asyncio.create_task(engine.run())
+        reader = SQLiteStore(db)
+        try:
+
+            async def until_live() -> None:
+                while (order := reader.get_order(cloid)) is None or order.state is not (
+                    OrderState.LIVE
+                ):
+                    await asyncio.sleep(0)
+
+            await asyncio.wait_for(until_live(), timeout=5)
+        finally:
+            reader.close()
+        run.cancel()
+        await asyncio.gather(run, return_exceptions=True)
+
+    asyncio.run(life())
 
 
 def test_a_strategy_named_by_import_path_trades_each_of_its_symbols(tmp_path: Path) -> None:

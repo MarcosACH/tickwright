@@ -2,9 +2,10 @@
 (ADR-0016, issue #13).
 
 Proves the seam across the second order shape and the cancel path: on its first
-tick it emits exactly one LIMIT ``PlaceSignal``; an optional ``cancel_after_ticks``
-makes it emit exactly one ``CancelSignal`` after that many later ticks, targeting
-its own order **by the ``signal_id`` it emitted** — the strategy never derives or
+tick it emits exactly one LIMIT ``PlaceSignal``; an optional ``cancel_after_seconds``
+makes it emit exactly one ``CancelSignal`` on the first wake-up at or past the
+placing tick's ``ts_event`` plus that many seconds (ADR-0062), targeting its own
+order **by the ``signal_id`` it emitted** — the strategy never derives or
 sees a ``cloid`` (ADR-0006/0026). It records the ``OrderFilled`` and
 ``OrderCancelled`` it receives. It owns its monotonic ``seq`` so both signals are
 deterministic and replayable, and knows nothing of the saga, store, or venue.
@@ -13,7 +14,7 @@ deterministic and replayable, and knows nothing of the saga, store, or venue.
 import json
 from decimal import Decimal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, PositiveInt
 
 from tickwright.domain import (
     InvariantViolation,
@@ -39,9 +40,10 @@ class SingleShotLimitStrategy:
         price: Decimal
         time_in_force: TimeInForce = TimeInForce.GTC
         post_only: bool = False
-        cancel_after_ticks: int | None = None
+        cancel_after_seconds: PositiveInt | None = None
 
-    wake_interval_seconds: float | None = None
+    # Fixed, not a setting. A 1 s grid is fine enough for a whole-second deadline.
+    wake_interval_seconds: float | None = 1.0
 
     def __init__(self, *, emitter: SignalEmitter, portfolio: Portfolio, settings: Settings) -> None:
         # It reads no position state, so it ignores the portfolio. It still
@@ -57,11 +59,12 @@ class SingleShotLimitStrategy:
         self._price = settings.price
         self._time_in_force = settings.time_in_force
         self._post_only = settings.post_only
-        self._cancel_after_ticks = settings.cancel_after_ticks
+        self._cancel_after_seconds = settings.cancel_after_seconds
         # The emitter owns the seq counter (engine-set via set_next_seq, ADR-0016);
         # everything below is the snapshot content this strategy owns.
         self._placed_signal_id: str | None = None
-        self._ticks_since_place = 0
+        self._symbol: str | None = None
+        self._deadline_ns: int | None = None
         self._cancelled = False
         self.fills: list[OrderFilled] = []
         self.cancellations: list[OrderCancelled] = []
@@ -69,10 +72,13 @@ class SingleShotLimitStrategy:
     async def on_tick(self, tick: MarketTick) -> None:
         if self._placed_signal_id is None:
             await self._place(tick)
-            return
-        await self._maybe_cancel(tick)
 
     async def _place(self, tick: MarketTick) -> None:
+        # A strategy has no clock, so the deadline comes from the placing tick's
+        # own time. That keeps a replay the same on every run.
+        self._symbol = tick.symbol
+        if self._cancel_after_seconds is not None:
+            self._deadline_ns = tick.ts_event + self._cancel_after_seconds * 1_000_000_000
         self._placed_signal_id = await self._emitter.place(
             symbol=tick.symbol,
             side=self._side,
@@ -83,20 +89,14 @@ class SingleShotLimitStrategy:
             post_only=self._post_only,
         )
 
-    async def _maybe_cancel(self, tick: MarketTick) -> None:
-        if self._cancel_after_ticks is None or self._cancelled:
-            return
-        if self._placed_signal_id is None:
-            # on_tick only routes here after a place; a missing id is a broken assumption.
-            raise InvariantViolation("cancel path reached before a signal was placed")
-        self._ticks_since_place += 1
-        if self._ticks_since_place < self._cancel_after_ticks:
-            return
-        self._cancelled = True
-        await self._emitter.cancel(symbol=tick.symbol, target_signal_id=self._placed_signal_id)
-
     async def on_wake(self, wake: Wake) -> None:
-        pass
+        if self._deadline_ns is None or self._cancelled or wake.ts_event < self._deadline_ns:
+            return
+        if self._placed_signal_id is None or self._symbol is None:
+            # A deadline is only set by a place, so a missing id is a broken assumption.
+            raise InvariantViolation("cancel path reached before a signal was placed")
+        self._cancelled = True
+        await self._emitter.cancel(symbol=self._symbol, target_signal_id=self._placed_signal_id)
 
     async def on_order_event(self, event: OrderEvent) -> None:
         if isinstance(event, OrderFilled):
@@ -112,9 +112,10 @@ class SingleShotLimitStrategy:
         """State content only — the seq never travels in the snapshot."""
         return json.dumps(
             {
-                "version": 1,
+                "version": 2,
                 "placed_signal_id": self._placed_signal_id,
-                "ticks_since_place": self._ticks_since_place,
+                "symbol": self._symbol,
+                "deadline_ns": self._deadline_ns,
                 "cancelled": self._cancelled,
             }
         ).encode()
@@ -123,8 +124,9 @@ class SingleShotLimitStrategy:
         """Rebuild from ``snapshot()`` bytes; raises on an unknown shape, which
         the engine treats as start-fresh (ADR-0016)."""
         state = json.loads(data)
-        if state.get("version") != 1:
+        if state.get("version") != 2:
             raise ValueError(f"unknown snapshot version: {state.get('version')!r}")
         self._placed_signal_id = state["placed_signal_id"]
-        self._ticks_since_place = int(state["ticks_since_place"])
+        self._symbol = state["symbol"]
+        self._deadline_ns = state["deadline_ns"]
         self._cancelled = bool(state["cancelled"])
