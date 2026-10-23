@@ -52,7 +52,8 @@ $V await <run-id> first --event engine.feed_started
 `start` writes `scratch/.env` from the preset plus your `--env` overrides, spawns
 `python -m tickwright.app` in `scratch/` with every `TICKWRIGHT_*` variable scrubbed from the
 inherited environment, and returns at once. A life is ready when `engine.feed_started` is in its
-log. Presets:
+log. `../strategies/` is on its `PYTHONPATH`, so a strategy there loads by import path, as in an
+`--image` life. Presets:
 
 | Preset | What it wires | Needs |
 | --- | --- | --- |
