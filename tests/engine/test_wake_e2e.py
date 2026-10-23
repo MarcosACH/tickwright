@@ -7,6 +7,7 @@ clock time, even when the feed sends no ticks. The test drives the
 
 import asyncio
 from collections.abc import Iterable
+from decimal import Decimal
 
 from ledgers import GENESIS
 
@@ -14,7 +15,17 @@ from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.adapters.store import SQLiteStore
-from tickwright.domain import MarketTick, OrderEvent, Wake
+from tickwright.domain import (
+    MarketTick,
+    OrderDenied,
+    OrderEvent,
+    OrderType,
+    Side,
+    SignalEmitter,
+    TimeInForce,
+    Wake,
+)
+from tickwright.engine.guard import RealGuard
 from tickwright.engine.runner import Engine
 
 _S = 1_000_000_000
@@ -70,12 +81,20 @@ class _SilentFeed:
         return None
 
 
-def _engine(clock: ManualClock, feed: _SilentFeed, bus: InMemoryBus | None = None) -> Engine:
+def _engine(
+    clock: ManualClock,
+    feed: _SilentFeed,
+    bus: InMemoryBus | None = None,
+    *,
+    store: SQLiteStore | None = None,
+    guard: RealGuard | None = None,
+) -> Engine:
     bus = bus or InMemoryBus()
     return Engine(
         bus=bus,
         clock=clock,
-        store=SQLiteStore(":memory:"),
+        store=store or SQLiteStore(":memory:"),
+        guard=guard,
         exchange=PaperExchange(
             bus=bus,
             clock=clock,
@@ -155,3 +174,60 @@ def test_each_strategy_gets_only_its_own_wake_ups_and_a_none_strategy_gets_none(
     assert slow == [15 * _S, 30 * _S]
     assert never == []
     assert published == {"fast", "slow"}
+
+
+class _PlacingOnWakeStrategy(_WakingStrategy):
+    """Places one resting buy on its first wake-up."""
+
+    def __init__(self, strategy_id: str, emitter: SignalEmitter) -> None:
+        super().__init__(strategy_id, wake_interval_seconds=15.0)
+        self._emitter = emitter
+
+    async def on_wake(self, wake: Wake) -> None:
+        await self._emitter.place(
+            symbol="BTC",
+            side=Side.BUY,
+            quantity=Decimal("0.01"),
+            order_type=OrderType.LIMIT,
+            time_in_force=TimeInForce.GTC,
+            price=Decimal("41000"),
+        )
+        await super().on_wake(wake)
+
+
+def test_an_order_placed_from_on_wake_with_the_kill_switch_on_is_denied() -> None:
+    """A wake-up comes from the clock, not the feed, but its order takes the same
+    path through the guard (ADR-0026)."""
+
+    async def main() -> list[OrderEvent]:
+        clock = ManualClock(start_ns=7 * _S)
+        feed = _SilentFeed()
+        bus = InMemoryBus()
+        store = SQLiteStore(":memory:")
+        guard = RealGuard(specs={}, store=store, clock=clock)
+        events: list[OrderEvent] = []
+        denied = asyncio.Event()
+
+        async def record(event: OrderEvent) -> None:
+            events.append(event)
+            if isinstance(event, OrderDenied):
+                denied.set()
+
+        bus.subscribe(OrderEvent, record)
+        engine = _engine(clock, feed, bus, store=store, guard=guard)
+        strategy = _PlacingOnWakeStrategy("waker", engine.emitter_for("waker"))
+        engine.register(strategy, symbols={"BTC"})
+        run = asyncio.create_task(engine.run())
+        await asyncio.wait_for(feed.started.wait(), timeout=5)
+        guard.trip_kill_switch("operator halt")
+        clock.advance_to(15 * _S)
+        await asyncio.wait_for(denied.wait(), timeout=5)
+        await engine.stop()
+        await run
+        return events
+
+    events = asyncio.run(main())
+    assert [type(event) for event in events] == [OrderDenied]
+    denied = events[0]
+    assert isinstance(denied, OrderDenied)
+    assert denied.reason == "kill switch tripped"
