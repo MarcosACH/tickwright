@@ -12,6 +12,8 @@ the order's symbol, and proves that wake-ups stay on the grid across a crash and
 - `wake-grid` every wake slot is a whole second, before and after a `KILL`. Slots missed while
   the engine was down are skipped, not caught up.
 - `wake-restart` the second life places nothing and exits 0.
+- `wake-kafka` on `KafkaBus` the same lives pass the same checks, and every `Wake` record on the
+  topic is on the grid.
 
 ## How to get to it (user POV)
 
@@ -55,9 +57,21 @@ Preconditions:
   `$V await wakectl first --exit`, `$V dump wakectl first`, then
   `$V check wakectl first wake-deadline --sql "select state from orders where cloid='$REST'" --expect live`,
   `$V check wakectl first wake-deadline --event order.cancelled --expect 0`.
-- **Report.** Run `$V report wake` and `$V report wakectl`. Expected verdicts:
-  `PASS (0 of 7 checks failed)` and `PASS (0 of 2 checks failed)`.
-- **Cleanup.** Run `$V cleanup wake` and `$V cleanup wakectl`.
+- **Kafka.** Needs the Docker daemon up and run id `wakek` unused. Run
+  `$V init wakek --feature strategy-wake`, `$V infra wakek up kafka`, and the same two `ticks`
+  lines as `wake`. Then repeat **Life one** to **Check life two** with `wakek` in place of `wake`.
+  Add `--env TICKWRIGHT_BUS=kafka --env TICKWRIGHT_KAFKA__EVENTS_TOPIC=verify.wakek --env TICKWRIGHT_KAFKA__GROUP_ID=verify.wakek`
+  to both `start` lines, and `--timeout 60` to the first `await` of each life. Wait five seconds
+  in life two, not three.
+- **Kafka topic.** Run
+  `docker compose exec -T kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic verify.wakek --from-beginning --timeout-ms 5000 --property print.key=true > .agents/verify/wakek/evidence/second.topic.txt`,
+  `grep -c '"type":"Wake"' .agents/verify/wakek/evidence/second.topic.txt > .agents/verify/wakek/evidence/second.wakes.txt`,
+  `grep '"type":"Wake"' .agents/verify/wakek/evidence/second.topic.txt | grep -vc '"ts_event":[0-9]*000000000,' > .agents/verify/wakek/evidence/second.wakes-offgrid.txt`,
+  then `$V check wakek second wake-kafka --file second.wakes.txt --expect 20` and
+  `$V check wakek second wake-kafka --file second.wakes-offgrid.txt --expect 0`.
+- **Report.** Run `$V report wake`, `$V report wakectl` and `$V report wakek`. Expected verdicts:
+  `PASS (0 of 7 checks failed)`, `PASS (0 of 2 checks failed)` and `PASS (0 of 9 checks failed)`.
+- **Cleanup.** Run `$V cleanup wake`, `$V cleanup wakectl` and `$V cleanup wakek`.
 
 ## Gotchas
 
@@ -76,5 +90,8 @@ Preconditions:
   would move replay time backwards.
 - `SLOTS` prints seconds past the default `--base` of `2024-01-01`. Integer division hides an
   off-grid slot, so `OFFGRID` checks the grid itself.
+- The topic holds 20 `Wake` records: 10 slots for each of the two strategies. Each strategy gets a
+  `Wake`, even the one that has nothing left to do. The record key is the `strategy_id`.
+- In zsh, a variable holding several `--env` flags is not split into words. Write the flags out.
 - The control is its own run id. `check --sql` reads the store named in the run's `scratch/.env`,
   and each `start` rewrites that file.
