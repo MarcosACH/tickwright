@@ -35,6 +35,7 @@ from tickwright.domain import (
     CancelSignal,
     ComponentState,
     Event,
+    FillReport,
     FundingAccrual,
     InstrumentSpec,
     OrderState,
@@ -294,3 +295,33 @@ def test_an_old_funding_payment_in_the_kafka_backlog_is_booked(tmp_path: Path) -
     account = SQLiteStore(db).load_account()
     assert account is not None
     assert account.cash == Decimal("-1.5")
+
+
+def test_an_old_fill_in_the_kafka_backlog_is_booked(tmp_path: Path) -> None:
+    db = tmp_path / "saga.db"
+    intent = _old_intent()
+    cloid = derive_cloid(intent.signal_id)
+    _run_one_life(db, FakeKafkaBroker(), _venue(), after_barrier=[intent])
+    broker = FakeKafkaBroker()
+    _produce(
+        broker,
+        FillReport(
+            ts_event=2_000,
+            ts_init=2_000,
+            cloid=cloid,
+            symbol="BTC",
+            trade_id="5001",
+            quantity=Decimal("0.0005"),
+            price=Decimal("41000"),
+        ),
+    )
+    # The venue lists no fills, so reconcile cannot book this one for us.
+    # Only the backlog record can.
+    post = _venue(orderStatus=order_status_response(cloid=cloid, oid=901))
+
+    _run_one_life(db, broker, post)
+
+    saga = SQLiteStore(db).get_order(cloid)
+    assert saga is not None
+    assert saga.state is OrderState.PARTIALLY_FILLED
+    assert saga.fill_count == 1

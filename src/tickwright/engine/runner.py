@@ -557,6 +557,12 @@ class Engine:
         # subscribe would be lost with no trace (issue #563). The saga denies
         # any order it hears before the barrier clears.
         self._bus.subscribe(Signal, self._execution.on_signal)
+        # Fills subscribe early for the same reason. An old fill polled before
+        # its handler is committed, and only reconcile could find it again
+        # (issue #565). Engine-internal handlers subscribe raw (ADR-0024): any
+        # exception in the saga path propagates to the TaskGroup and faults the
+        # engine.
+        self._bus.subscribe(ExecutionReport, self._execution.on_execution_report)
         # Funding is the one accounting input that arrives on the bus rather
         # than on the fill-apply path, because it has no carrier fill (ADR-0037).
         # It subscribes before the bus starts for the signal's reason: an old
@@ -569,17 +575,14 @@ class Engine:
         # behind a still-``RUNNING`` state (#226).
         self._bus.subscribe(FundingAccrual, self._on_funding_accrual)
         # Start the bus (ADR-0024 step 3): in-memory a no-op; Kafka connects
-        # the producer/consumer — before anything can publish. The signal
-        # subscribe above is the one handler that comes first.
+        # the producer/consumer — before anything can publish. The handlers
+        # above are the ones a Kafka backlog can reach, so they come first.
         await self._bus.start()
         # Connect the exchange (ADR-0024 step 4), after the bus so an adapter
         # that reports on it has somewhere to publish, and before the barrier
         # below so a refusal precedes any order and the barrier's own venue
         # reads observe an already-aligned venue.
         await self._exchange.start()
-        # Engine-internal handlers subscribe raw (ADR-0024): any exception in
-        # the saga path propagates to the TaskGroup and faults the engine.
-        self._bus.subscribe(ExecutionReport, self._execution.on_execution_report)
         # The mark is the *other* input the ledger subscribes to, and it is the
         # gentler of the two: it moves no money and reaches no store, so unlike
         # the accrual above there is nothing here a refusal could leave half
