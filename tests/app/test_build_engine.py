@@ -22,6 +22,7 @@ from hyperliquid_fakes import (
     fill_entry,
     order_status_response,
 )
+from kafka_fakes import FakeConsumer, FakeKafkaBroker
 from ledgers import GENESIS
 from pydantic import SecretStr, ValidationError
 
@@ -96,6 +97,35 @@ def test_bus_discriminant_selects_the_kafka_bus(tmp_path: Path) -> None:
     # so building the Kafka backend needs no running Kafka.
     config = _config(tmp_path, bus="kafka", kafka={"bootstrap_servers": "kafka:9092"})
     assert isinstance(build_bus(config), KafkaBus)
+
+
+def test_the_kafka_consumer_is_not_dropped_while_an_old_record_waits_at_boot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An old fill waits in the poll loop through the venue's start and the
+    # barrier's first step (#565). Each can use a whole startup budget. Kafka
+    # drops a consumer it does not hear from within its poll limit, and the
+    # commit after that fails. So the limit covers both budgets, with Kafka's
+    # own 300s default on top as room for retries that end late.
+    broker = FakeKafkaBroker()
+    asked: dict[str, object] = {}
+
+    def consumer(*args: object, **kwargs: object) -> FakeConsumer:
+        asked.update(kwargs)
+        return broker.consumer(*args, **kwargs)
+
+    monkeypatch.setattr("tickwright.adapters.bus.kafka.AIOKafkaProducer", broker.producer)
+    monkeypatch.setattr("tickwright.adapters.bus.kafka.AIOKafkaConsumer", consumer)
+    config = _config(tmp_path, bus="kafka", engine={"startup_reconciliation_timeout_seconds": 200})
+    bus = build_bus(config)
+
+    async def boot() -> None:
+        await bus.start()
+        await bus.close()
+
+    asyncio.run(boot())
+
+    assert asked["max_poll_interval_ms"] == (300 + 2 * 200) * 1000
 
 
 def test_store_discriminant_selects_the_sqlite_store(tmp_path: Path) -> None:

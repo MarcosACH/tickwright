@@ -1,4 +1,7 @@
-"""An old ``PlaceSignal`` in a Kafka backlog never places before the barrier (issue #563).
+"""An old record in a Kafka backlog is never lost, and never placed early.
+
+An old ``PlaceSignal`` never places before the barrier (issue #563). An old
+fill, funding payment or mark still reaches its handler (issue #565).
 
 The real ``Engine`` on ``KafkaBus`` over the fake broker, with a real
 ``HyperliquidExchange`` faked at HTTP and WebSocket only. The HTTP fake yields
@@ -11,6 +14,7 @@ from collections.abc import Sequence
 from decimal import Decimal
 from pathlib import Path
 
+from eth_account import Account as Wallet
 from hyperliquid_fakes import (
     TEST_SIGNING_KEY,
     FakeExchangeApi,
@@ -31,7 +35,10 @@ from tickwright.domain import (
     CancelSignal,
     ComponentState,
     Event,
+    FillReport,
+    FundingAccrual,
     InstrumentSpec,
+    MarkTick,
     OrderState,
     OrderType,
     PlaceSignal,
@@ -51,6 +58,7 @@ BTC_SPEC = InstrumentSpec(
     symbol="BTC", sz_decimals=5, max_decimals=6, min_notional=Decimal("10"), max_sig_figs=5
 )
 START_MS = 1_700_000_000_000
+ACCOUNT_ID = f"hyperliquid-testnet-{Wallet.from_key(TEST_SIGNING_KEY).address}"
 _SUMMARY = {
     "accountValue": "100.0",
     "totalMarginUsed": "0.0",
@@ -121,11 +129,16 @@ def _run_one_life(
     post: FakeExchangeApi,
     *,
     after_barrier: Sequence[Event] = (),
-) -> None:
+    first_start: bool = False,
+    faults: bool = False,
+) -> Engine:
     """Boot the engine, wait until Kafka has committed every record, then stop.
 
     ``after_barrier`` lands on the broker once the engine is ``RUNNING``. The
     engine closes its store on stop, so each life opens its own on ``db``.
+    ``first_start`` leaves the account row for the barrier to read off the venue.
+    ``faults`` expects the boot to fail and the run to exit 1.
+    Returns the stopped engine, so a test can read what it held in memory.
     """
     store = SQLiteStore(db)
 
@@ -134,7 +147,7 @@ def _run_one_life(
         await asyncio.sleep(0)
         return await post(url, payload)
 
-    async def life() -> None:
+    async def life() -> Engine:
         bus = _kafka_bus(broker)
         clock = ManualClock(start_ns=START_MS * 1_000_000)
         config = HyperliquidConfig(
@@ -150,7 +163,7 @@ def _run_one_life(
             startup_timeout_seconds=60.0,
             shrink_wait_seconds=30.0,
         )
-        if store.load_account() is None:
+        if not first_start and store.load_account() is None:
             # The life that published the intent also opened the account row.
             store.checkpoint_ledger(
                 account=Account(
@@ -168,6 +181,9 @@ def _run_one_life(
             feed=HyperliquidFeed(config=config, bus=bus, clock=clock, connect=idle_ws),
         )
         run = asyncio.create_task(engine.run())
+        if faults:
+            assert await run == 1
+            return engine
         while engine.state is not ComponentState.RUNNING:
             await asyncio.sleep(0)
         for event in after_barrier:
@@ -175,8 +191,9 @@ def _run_one_life(
         await broker.all_committed()
         await engine.stop()
         assert await run == 0
+        return engine
 
-    asyncio.run(asyncio.wait_for(life(), timeout=5))
+    return asyncio.run(asyncio.wait_for(life(), timeout=5))
 
 
 def _sent_orders(post: FakeExchangeApi) -> list[dict]:
@@ -266,3 +283,121 @@ def test_an_old_cancel_in_the_kafka_backlog_still_reaches_the_venue(tmp_path: Pa
     saga = SQLiteStore(db).get_order(cloid)
     assert saga is not None
     assert saga.state is OrderState.CANCELLED
+
+
+def test_an_old_funding_payment_in_the_kafka_backlog_is_booked(tmp_path: Path) -> None:
+    db = tmp_path / "saga.db"
+    broker = FakeKafkaBroker()
+    _produce(
+        broker,
+        FundingAccrual(
+            ts_event=1_000,
+            ts_init=1_000,
+            account_id=ACCOUNT_ID,
+            symbol="BTC",
+            boundary_ts_ns=1_000,
+            amount=Decimal("-1.5"),
+        ),
+    )
+
+    _run_one_life(db, broker, _venue())
+
+    account = SQLiteStore(db).load_account()
+    assert account is not None
+    assert account.cash == Decimal("-1.5")
+
+
+def test_an_old_fill_in_the_kafka_backlog_is_booked(tmp_path: Path) -> None:
+    db = tmp_path / "saga.db"
+    intent = _old_intent()
+    cloid = derive_cloid(intent.signal_id)
+    _run_one_life(db, FakeKafkaBroker(), _venue(), after_barrier=[intent])
+    broker = FakeKafkaBroker()
+    _produce(
+        broker,
+        FillReport(
+            ts_event=2_000,
+            ts_init=2_000,
+            cloid=cloid,
+            symbol="BTC",
+            trade_id="5001",
+            quantity=Decimal("0.0005"),
+            price=Decimal("41000"),
+        ),
+    )
+    # The venue lists no fills, so reconcile cannot book this one for us.
+    # Only the backlog record can.
+    post = _venue(orderStatus=order_status_response(cloid=cloid, oid=901))
+
+    _run_one_life(db, broker, post)
+
+    saga = SQLiteStore(db).get_order(cloid)
+    assert saga is not None
+    assert saga.state is OrderState.PARTIALLY_FILLED
+    assert saga.fill_count == 1
+
+
+def test_an_old_mark_in_the_kafka_backlog_reaches_the_ledger(tmp_path: Path) -> None:
+    broker = FakeKafkaBroker()
+    mark = MarkTick(ts_event=1_000, ts_init=1_000, symbol="BTC", price=Decimal("41234"))
+    _produce(broker, mark)
+
+    engine = _run_one_life(tmp_path / "saga.db", broker, _venue())
+
+    assert engine.portfolio.latest_mark("BTC") == mark
+
+
+def test_an_old_funding_payment_waits_for_the_account_row_on_a_first_start(
+    tmp_path: Path,
+) -> None:
+    # Booked before the barrier reads the venue, the payment would open the
+    # row at zero, and nothing would ever correct it (ADR-0043 §6). The
+    # boundary is after the venue's read, so the ledger does not drop it as
+    # already counted in the opening cash.
+    db = tmp_path / "saga.db"
+    broker = FakeKafkaBroker()
+    _produce(broker, _payment_after_the_venue_read())
+
+    _run_one_life(db, broker, _venue(), first_start=True)
+
+    account = SQLiteStore(db).load_account()
+    assert account is not None
+    assert account.genesis_collateral == Decimal("100")
+    assert account.cash == Decimal("98.5")
+
+
+def test_an_old_funding_payment_survives_a_boot_that_faults_while_it_waits(
+    tmp_path: Path,
+) -> None:
+    # The venue never answers the barrier's account read, so the boot faults
+    # while the payment waits for the row. The payment must not be committed.
+    # The next boot books it, and books it once.
+    db = tmp_path / "saga.db"
+    broker = FakeKafkaBroker()
+    _produce(broker, _payment_after_the_venue_read())
+    dark = _venue(clearinghouseState=ConnectionError("venue unreachable"))
+
+    _run_one_life(db, broker, dark, first_start=True, faults=True)
+
+    assert SQLiteStore(db).load_account() is None
+    _run_one_life(db, broker, _venue(), first_start=True)
+    account = SQLiteStore(db).load_account()
+    assert account is not None
+    assert account.cash == Decimal("98.5")
+
+
+def _payment_after_the_venue_read() -> FundingAccrual:
+    """A payment at a boundary just after the barrier's account read.
+
+    An earlier boundary would count as already in the opening cash, and the
+    ledger would drop it.
+    """
+    boundary_ns = START_MS * 1_000_000 + 1
+    return FundingAccrual(
+        ts_event=boundary_ns,
+        ts_init=boundary_ns,
+        account_id=ACCOUNT_ID,
+        symbol="BTC",
+        boundary_ts_ns=boundary_ns,
+        amount=Decimal("-1.5"),
+    )

@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 from ledgers import GENESIS
 from recovery_stores import RecoveryOrderStore
-from venue_doubles import venue_holding
+from venue_doubles import account_state, venue_holding
 
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.store import SQLiteStore
@@ -113,6 +113,7 @@ def test_a_fill_moves_the_one_store_and_both_read_models_together() -> None:
     """
     store = SQLiteStore(":memory:")
     checkpointer = _checkpointer(store)
+    checkpointer.recover()  # paper seeds the account row here
     order = _submitted_order()
     event = _fill(order, trade_id="f1", quantity="0.5")
 
@@ -135,34 +136,61 @@ def test_a_fill_moves_the_one_store_and_both_read_models_together() -> None:
     assert position.size == Decimal("0.5")
 
 
-def test_a_fill_opens_the_durable_ledger_and_the_projection_says_so() -> None:
-    """A fill's write is a **third** way the account row comes into being, beside
-    paper's genesis seed and live's materialisation — ``account`` is required on
-    ``checkpoint_ledger`` because every mutation moves cash (ADR-0043 §9).
-
-    So "is the ledger open?" is a question about the *row*, whoever wrote it
-    (ADR-0043 §6: the barrier reads the venue "solely to create the row when
-    absent"), and this is the writer that does not go through either opener. The
-    whole ordering rationale for the barrier's two steps rests on the fallback
-    being real — a rebuild that ran first would create the row, and the
-    materialisation behind it *declines to overwrite* rather than resetting the
-    cash line a fill just moved. A predicate that missed this writer would answer
-    "not open" against a populated row and make that fallback a fiction.
-
-    Live-shaped on purpose: paper's row exists from ``recover()`` onward, so it
-    is the ingested shape that can reach a fill with no row yet at all.
-    """
-    store = SQLiteStore(":memory:")
+def _unopened_live_ledger(store: SQLiteStore) -> Checkpointer:
+    """A live first start before the barrier: recovered, and no account row yet."""
     checkpointer = _checkpointer(store, spec=LIVE_SPEC)
     checkpointer.recover()
     assert checkpointer.portfolio.is_opened() is False  # live seeds nothing
+    return checkpointer
+
+
+def test_a_fill_on_an_unopened_ledger_is_refused_and_writes_nothing() -> None:
+    """Only the barrier may open a live row (ADR-0043 §6).
+
+    Before this refusal, the fill's write opened the row at zero. The barrier
+    then kept that zero as the genesis, and nothing could ever correct it.
+    """
+    store = SQLiteStore(":memory:")
+    checkpointer = _unopened_live_ledger(store)
     order = _submitted_order()
     event = _fill(order, trade_id="f1", quantity="0.5")
 
-    checkpointer.checkpoint_fill(order, event, side=order.side)
+    with pytest.raises(InvariantViolation, match="account row is not open"):
+        checkpointer.checkpoint_fill(order, event, side=order.side)
 
-    assert store.load_account() is not None
-    assert checkpointer.portfolio.is_opened() is True
+    assert store.load_account() is None
+    assert store.all_positions() == []
+    assert store.get_order(order.cloid) is None
+    assert checkpointer.portfolio.position("BTC", strategy_id="trivial") is None
+
+
+def test_a_funding_payment_on_an_unopened_ledger_is_refused_and_writes_nothing() -> None:
+    """The fill's rule, for the one ledger input that arrives on the bus."""
+    store = SQLiteStore(":memory:")
+    checkpointer = _unopened_live_ledger(store)
+
+    with pytest.raises(InvariantViolation, match="account row is not open"):
+        checkpointer.checkpoint_funding(_accrual(amount="-1.5", boundary=_HOUR))
+
+    assert store.load_account() is None
+    assert store.funding_mark("BTC") is None
+    assert checkpointer.portfolio.account().cash == Decimal("0")
+
+
+def test_a_heal_on_an_unopened_ledger_is_refused_and_writes_nothing() -> None:
+    """The fill's rule, for the reconcile cycle's own write."""
+    store = SQLiteStore(":memory:")
+    checkpointer = _unopened_live_ledger(store)
+    foreign = ReconciliationFill(
+        symbol="BTC", side=Side.SELL, quantity=Decimal("0.2"), price=Decimal("42000"), ts_ns=2_000
+    )
+
+    with pytest.raises(InvariantViolation, match="account row is not open"):
+        checkpointer.checkpoint_heal((foreign,))
+
+    assert store.load_account() is None
+    assert store.all_positions() == []
+    assert checkpointer.portfolio.position("BTC", strategy_id=None) is None
 
 
 def test_an_accrual_makes_the_funding_line_and_its_mark_durable_together() -> None:
@@ -421,6 +449,7 @@ def test_a_refused_collateral_only_heal_names_the_symbols_whose_buckets_it_lost(
     store = _HealRefusingStore(":memory:")
     checkpointer = _checkpointer(store, spec=LIVE_SPEC)
     checkpointer.recover()
+    checkpointer.portfolio.materialise(account_state("100"))  # the barrier's step
     order = _submitted_order()
     checkpointer.checkpoint_fill(
         order, _fill(order, trade_id="f1", quantity="0.5"), side=order.side

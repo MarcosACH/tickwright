@@ -28,6 +28,8 @@ would otherwise have to know and could silently invert:
   carries the mark's advance beside the line it guards (``checkpoint_funding``)
 - **the non-fill write** — store first, then project (``checkpoint``)
 - **recovery** — the ledger before the order cache (``recover``, ADR-0043 §6/§10)
+- **the open row** — no ledger write before the account row is open. Only the
+  two openers may create it (``_require_open_ledger``, ADR-0043 §6, #565)
 
 Reads stay on the projections themselves: ``cache`` and ``portfolio`` are lent
 out for the ``Reconciler``'s worklist, the manager's saga lookups and the scoped
@@ -237,6 +239,7 @@ class Checkpointer:
         ``InvariantViolation`` faults the run (ADR-0014), so nothing goes on to
         trade or report against a read-model the store never recorded.
         """
+        self._require_open_ledger()
         if order.split_basis is None:
             changes = [self._portfolio.apply_fill(event, side=side)]
         else:
@@ -419,6 +422,7 @@ class Checkpointer:
         aggregate refused carries no ``changes``. The caller announces off this
         rather than off what it asked for (``LedgerReconciliation._record_heals``).
         """
+        self._require_open_ledger()
         change = self._portfolio.apply_heal(fills, cash=cash, snapshot=snapshot)
         if change is None:
             return None
@@ -491,6 +495,7 @@ class Checkpointer:
         coroutine on this verb would put the seam that guarantees it inside the
         type rather than around it.
         """
+        self._require_open_ledger()
         change = self._portfolio.apply_funding(accrual)
         if change is None:
             return
@@ -509,6 +514,20 @@ class Checkpointer:
                 f"at boundary {accrual.boundary_ts_ns}"
             ) from exc
         self._portfolio.project_funding(change)
+
+    def _require_open_ledger(self) -> None:
+        """Refuse a ledger write before the account row is open (ADR-0043 §6).
+
+        Checked before the fold, so a refusal leaves memory untouched too. Only
+        the two openers may create the row. A write that created it would open a
+        live ledger at zero, and the barrier would then keep that zero as the
+        genesis for good.
+        """
+        if not self._portfolio.is_opened():
+            raise InvariantViolation(
+                "ledger write refused: the account row is not open yet. A live row "
+                "opens only at the startup barrier (ADR-0043 §6)"
+            )
 
 
 def _leftover_piece(
