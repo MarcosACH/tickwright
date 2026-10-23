@@ -3,7 +3,8 @@ through the whole real pipeline.
 
 ``ReplayFeed`` tick → ``SingleShotLimitStrategy`` LIMIT ``PlaceSignal`` →
 ``ExecutionManager`` → ``PaperExchange`` rests it on the book → a later crossing
-tick fills it, or a ``CancelSignal`` cancels it → the strategy sees the terminal
+tick fills it, or a wake-up past the deadline sends a ``CancelSignal`` that
+cancels it → the strategy sees the terminal
 ``OrderFilled`` / ``OrderCancelled``. Everything real, zero external services,
 zero sleeps: ``ManualClock`` + ``InMemoryBus``, driven by a JSONL file. This
 wiring doubles as the pipeline's spec until the composition root lands.
@@ -33,10 +34,13 @@ from tickwright.domain import (
     Side,
     Signal,
     SignalEmitter,
+    Wake,
     derive_cloid,
 )
 from tickwright.engine.execution import ExecutionManager
 from tickwright.strategies import SingleShotLimitStrategy
+
+_S = 1_000_000_000
 
 
 def _write_ticks(path: Path, prices: list[str]) -> Path:
@@ -56,7 +60,7 @@ def _write_ticks(path: Path, prices: list[str]) -> Path:
 
 
 def _run(
-    path: Path, *, cancel_after_ticks: int | None = None
+    path: Path, *, cancel_after_seconds: int | None = None
 ) -> tuple[list[Event], SingleShotLimitStrategy, SQLiteStore]:
     bus = InMemoryBus()
     clock = ManualClock()
@@ -85,7 +89,7 @@ def _run(
             side=Side.BUY,
             quantity=Decimal("0.5"),
             price=Decimal("41000"),
-            cancel_after_ticks=cancel_after_ticks,
+            cancel_after_seconds=cancel_after_seconds,
         ),
     )
     feed = ReplayFeed(path=path, bus=bus, clock=clock)
@@ -96,8 +100,15 @@ def _run(
     bus.subscribe(Signal, manager.on_signal)
     bus.subscribe(ExecutionReport, manager.on_execution_report)
     bus.subscribe(OrderEvent, strategy.on_order_event)
+    bus.subscribe(Wake, strategy.on_wake)
 
-    asyncio.run(feed.run())
+    async def replay_then_wake() -> None:
+        await feed.run()
+        # This wiring has no wake loop, so the test publishes the one wake-up
+        # the engine would, well past any deadline these ticks set.
+        await bus.publish(Wake(strategy_id="trivial", ts_event=60 * _S, ts_init=60 * _S))
+
+    asyncio.run(replay_then_wake())
     return recorded, strategy, store
 
 
@@ -126,10 +137,11 @@ def test_resting_limit_fills_when_a_later_tick_crosses(tmp_path: Path) -> None:
 
 
 def test_resting_limit_is_cancelled_end_to_end(tmp_path: Path) -> None:
-    # Tick 1 at 42000: rests. Tick 2 still at 42000 (no cross): the strategy
-    # cancels its own order, and the venue confirms it.
+    # Tick 1 at 42000: rests. Tick 2 still at 42000 (no cross). The wake-up
+    # past the deadline makes the strategy cancel its own order, and the venue
+    # confirms it.
     path = _write_ticks(tmp_path / "ticks.jsonl", ["42000", "42000"])
-    _, strategy, store = _run(path, cancel_after_ticks=1)
+    _, strategy, store = _run(path, cancel_after_seconds=1)
 
     assert strategy.fills == []
     assert len(strategy.cancellations) == 1
@@ -144,8 +156,8 @@ def test_resting_limit_is_cancelled_end_to_end(tmp_path: Path) -> None:
 
 def test_limit_cancel_pipeline_is_deterministic_across_runs(tmp_path: Path) -> None:
     path = _write_ticks(tmp_path / "ticks.jsonl", ["42000", "42000"])
-    first, _, _ = _run(path, cancel_after_ticks=1)
-    second, _, _ = _run(path, cancel_after_ticks=1)
+    first, _, _ = _run(path, cancel_after_seconds=1)
+    second, _, _ = _run(path, cancel_after_seconds=1)
     assert _fingerprint(first) == _fingerprint(second)
 
 
