@@ -124,7 +124,14 @@ those components.
      The drain would wait on a handler that waits on the barrier, and the boot would hang.
      Nothing does today. Step 4's `Exchange.start()` publishes nothing on either adapter.
    - Waiting for the whole barrier was rejected. The reconcile step publishes its own reports and
-     waits for them, so that wait would never end.**)**
+     waits for them, so that wait would never end.
+   - The wait holds the Kafka poll loop. It can last two startup timeouts: step 4's
+     `Exchange.start()` and the account step. Kafka drops a consumer that does not poll within
+     its poll limit, and the commit after the wait then fails. So `build_bus` sets the poll
+     limit to 300s plus two startup timeouts. The 300s is aiokafka's default, kept as room for
+     a venue request that ends past its deadline.
+   - A ceiling on the startup timeout was rejected. A safe ceiling depends on venue retry and
+     request timeouts, and it would break quietly when those change.**)**
 6. Start the `Strategy` instances (`on_start`: restore snapshot; seq high-water from the saga
    store, ADR-0016; then **pull current open-order state from the `Cache` read-model** by direct
    method call, ADR-0004 — the barrier's reconciliation `OrderEvent`s (step 5) were published
