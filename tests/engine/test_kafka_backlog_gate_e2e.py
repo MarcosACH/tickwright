@@ -11,7 +11,14 @@ from collections.abc import Sequence
 from decimal import Decimal
 from pathlib import Path
 
-from hyperliquid_fakes import TEST_SIGNING_KEY, FakeExchangeApi, idle_ws, resting_response
+from hyperliquid_fakes import (
+    TEST_SIGNING_KEY,
+    FakeExchangeApi,
+    idle_ws,
+    order_status_response,
+    request_type,
+    resting_response,
+)
 from kafka_fakes import FakeKafkaBroker
 from pydantic import SecretStr
 
@@ -21,6 +28,7 @@ from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
     Account,
+    CancelSignal,
     ComponentState,
     Event,
     InstrumentSpec,
@@ -85,8 +93,11 @@ def _kafka_bus(broker: FakeKafkaBroker) -> KafkaBus:
     )
 
 
-def _venue() -> FakeExchangeApi:
-    """A flat account with no resting orders, which takes any order it is sent."""
+def _venue(**routes: object) -> FakeExchangeApi:
+    """A flat account with no resting orders, which takes any order it is sent.
+
+    ``routes`` adds or replaces answers, keyed by request type.
+    """
     return FakeExchangeApi(
         {
             "userAbstraction": "disabled",
@@ -95,6 +106,7 @@ def _venue() -> FakeExchangeApi:
             "userFills": [],
             "userFillsByTime": [],
             "order": resting_response(901),
+            **routes,
         }
     )
 
@@ -220,3 +232,37 @@ def test_an_intent_that_arrives_after_the_barrier_still_places(tmp_path: Path) -
     assert saga.state is OrderState.LIVE
     (sent,) = _sent_orders(post)
     assert sent["action"]["orders"][0]["c"] == derive_cloid(intent.signal_id)
+
+
+def test_an_old_cancel_in_the_kafka_backlog_still_reaches_the_venue(tmp_path: Path) -> None:
+    # A cancel is never denied at boot. It only lowers exposure, so it may go
+    # out before the account-mode gate has answered (ADR-0046 §3).
+    db = tmp_path / "saga.db"
+    intent = _old_intent()
+    _run_one_life(db, FakeKafkaBroker(), _venue(), after_barrier=[intent])
+    broker = FakeKafkaBroker()
+    _produce(
+        broker,
+        CancelSignal(
+            ts_event=2_000,
+            ts_init=2_000,
+            strategy_id="trivial",
+            symbol="BTC",
+            seq=2,
+            target_signal_id=intent.signal_id,
+        ),
+    )
+    cloid = derive_cloid(intent.signal_id)
+    post = _venue(
+        cancel={"status": "ok", "response": {"type": "cancel", "data": {"statuses": ["success"]}}},
+        orderStatus=order_status_response(cloid=cloid, status="canceled", oid=901),
+    )
+
+    _run_one_life(db, broker, post)
+
+    # Sent while the engine is still at boot, right behind the mode read.
+    sent = [request_type(url, payload) for url, payload in post.requests]
+    assert sent[:2] == ["userAbstraction", "cancel"]
+    saga = SQLiteStore(db).get_order(cloid)
+    assert saga is not None
+    assert saga.state is OrderState.CANCELLED

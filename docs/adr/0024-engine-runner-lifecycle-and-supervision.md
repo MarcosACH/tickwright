@@ -92,8 +92,9 @@ those components.
      dedups against it and never places it.
    - Holding the `Signal` and placing it after the barrier was rejected. Its offset is committed
      once the handler returns, so a crash before the barrier clears would lose it.
-   - Cancels still pass during the barrier. A cancel only lowers exposure, and its marker is
-     durable before the send (ADR-0026).
+   - Cancels still pass, from the moment the bus starts. So a cancel can go out before step 4's
+     account-mode gate answers. A cancel only lowers exposure, and its marker is durable before
+     the send (ADR-0026). ADR-0046 §3 carries the matching correction.
    - The denial's `OrderEvent` is published before strategies subscribe at step 6. The strategy
      misses it, like any other startup event.
    - The in-memory bus has no backlog, so nothing changes on that path. `ExecutionReport`,
