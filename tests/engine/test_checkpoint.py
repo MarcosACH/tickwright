@@ -177,6 +177,22 @@ def test_a_funding_payment_on_an_unopened_ledger_is_refused_and_writes_nothing()
     assert checkpointer.portfolio.account().cash == Decimal("0")
 
 
+def test_a_heal_on_an_unopened_ledger_is_refused_and_writes_nothing() -> None:
+    """The fill's rule, for the reconcile cycle's own write."""
+    store = SQLiteStore(":memory:")
+    checkpointer = _unopened_live_ledger(store)
+    foreign = ReconciliationFill(
+        symbol="BTC", side=Side.SELL, quantity=Decimal("0.2"), price=Decimal("42000"), ts_ns=2_000
+    )
+
+    with pytest.raises(InvariantViolation, match="account row is not open"):
+        checkpointer.checkpoint_heal((foreign,))
+
+    assert store.load_account() is None
+    assert store.all_positions() == []
+    assert checkpointer.portfolio.position("BTC", strategy_id=None) is None
+
+
 def test_an_accrual_makes_the_funding_line_and_its_mark_durable_together() -> None:
     """The mark lands in the same write as the line it guards (ADR-0043 §5.2).
 

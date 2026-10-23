@@ -420,6 +420,7 @@ class Checkpointer:
         aggregate refused carries no ``changes``. The caller announces off this
         rather than off what it asked for (``LedgerReconciliation._record_heals``).
         """
+        self._require_open_ledger()
         change = self._portfolio.apply_heal(fills, cash=cash, snapshot=snapshot)
         if change is None:
             return None
