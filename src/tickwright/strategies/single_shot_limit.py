@@ -26,6 +26,7 @@ from tickwright.domain import (
     Side,
     SignalEmitter,
     TimeInForce,
+    Wake,
 )
 
 
@@ -39,6 +40,8 @@ class SingleShotLimitStrategy:
         time_in_force: TimeInForce = TimeInForce.GTC
         post_only: bool = False
         cancel_after_ticks: int | None = None
+
+    wake_interval_seconds: float | None = None
 
     def __init__(self, *, emitter: SignalEmitter, portfolio: Portfolio, settings: Settings) -> None:
         # It reads no position state, so it ignores the portfolio. It still
@@ -91,6 +94,9 @@ class SingleShotLimitStrategy:
             return
         self._cancelled = True
         await self._emitter.cancel(symbol=tick.symbol, target_signal_id=self._placed_signal_id)
+
+    async def on_wake(self, wake: Wake) -> None:
+        pass
 
     async def on_order_event(self, event: OrderEvent) -> None:
         if isinstance(event, OrderFilled):

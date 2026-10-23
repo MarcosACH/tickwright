@@ -25,6 +25,7 @@ from tickwright.domain import (
     Strategy,
     SymbolOwnership,
     reserved_id_refusal,
+    wake_interval_refusal,
 )
 from tickwright.engine.cache import Cache
 from tickwright.observability import NamedEvent, named_event
@@ -115,6 +116,10 @@ class StrategyHost:
         refuses with belong to ``SymbolOwnership``, because ``AppConfig``
         refuses a *configured* overlap at load and the two gates must not come
         to disagree about what an overlap is.
+
+        A bad ``wake_interval_seconds`` is refused in the loader's own words. The
+        loader only checks strategies built from config, and both read
+        ``wake_interval_refusal`` (ADR-0062).
         """
         reserved = reserved_id_refusal(strategy.strategy_id)
         if reserved is not None:
@@ -125,6 +130,9 @@ class StrategyHost:
         refusal = self._ownership.refusal(strategy.strategy_id, symbols=declared)
         if refusal is not None:
             raise InvariantViolation(refusal)
+        wake = wake_interval_refusal(strategy.wake_interval_seconds)
+        if wake is not None:
+            raise InvariantViolation(wake)
         self._strategies[strategy.strategy_id] = strategy
         self._symbols[strategy.strategy_id] = declared
         self._ownership = self._ownership.claim(strategy.strategy_id, symbols=declared)

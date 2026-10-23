@@ -18,12 +18,16 @@ from tickwright.domain import (
     Side,
     SignalEmitter,
     TimeInForce,
+    Wake,
 )
 
 
 class BuyOnce:
     class Settings(BaseModel):
         quantity: Decimal
+
+    # None: this strategy never wakes on the clock, only on ticks.
+    wake_interval_seconds: float | None = None
 
     def __init__(self, *, emitter: SignalEmitter, portfolio: Portfolio, settings: Settings) -> None:
         self.strategy_id = emitter.strategy_id
@@ -42,6 +46,9 @@ class BuyOnce:
             order_type=OrderType.MARKET,
             time_in_force=TimeInForce.IOC,
         )
+
+    async def on_wake(self, wake: Wake) -> None:
+        pass
 
     async def on_order_event(self, event: OrderEvent) -> None:
         pass

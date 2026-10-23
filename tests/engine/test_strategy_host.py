@@ -14,6 +14,7 @@ import pytest
 import structlog.testing
 from kafka_fakes import FakeKafkaBroker, Record
 from ledgers import ledger, scoped
+from never_wakes import NeverWakes
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.bus.kafka import KafkaBus
@@ -38,6 +39,7 @@ from tickwright.domain import (
     SignalId,
     Store,
     derive_cloid,
+    wake_interval_refusal,
 )
 from tickwright.engine.cache import Cache
 from tickwright.engine.strategy_host import StrategyHost
@@ -69,7 +71,7 @@ def _host(
     )
 
 
-class RecordingStrategy:
+class RecordingStrategy(NeverWakes):
     """A minimal third-party strategy that records what the host delivers."""
 
     def __init__(self, strategy_id: str) -> None:
@@ -742,6 +744,21 @@ def test_registering_the_reserved_operator_id_fails_fast() -> None:
 
     with pytest.raises(InvariantViolation, match=f"{OPERATOR} is reserved for operator orders"):
         host.register(RecordingStrategy(OPERATOR), symbols={"BTC"})
+
+
+@pytest.mark.parametrize("interval", [0.5, True, float("nan")])
+def test_registering_a_bad_wake_interval_fails_with_the_rule_s_own_sentence(
+    interval: object,
+) -> None:
+    # A strategy built without a config never meets the loader's check (ADR-0062).
+    strategy = RecordingStrategy("alpha")
+    strategy.wake_interval_seconds = interval  # type: ignore[assignment]
+    refusal = wake_interval_refusal(interval)
+    assert refusal is not None
+
+    with pytest.raises(InvariantViolation) as raised:
+        _host().register(strategy, symbols={"BTC"})
+    assert str(raised.value) == refusal
 
 
 def test_a_second_strategy_may_not_claim_an_owned_symbol() -> None:

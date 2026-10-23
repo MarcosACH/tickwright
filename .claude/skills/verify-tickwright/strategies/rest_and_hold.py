@@ -23,6 +23,7 @@ from tickwright.domain import (
     Side,
     SignalEmitter,
     TimeInForce,
+    Wake,
 )
 
 log = structlog.get_logger()
@@ -33,6 +34,8 @@ class RestAndHold:
         symbol: str
         quantity: Decimal
         rest_price: Decimal
+
+    wake_interval_seconds: float | None = None
 
     def __init__(self, *, emitter: SignalEmitter, portfolio: Portfolio, settings: Settings) -> None:
         self.strategy_id = emitter.strategy_id
@@ -66,6 +69,9 @@ class RestAndHold:
                 time_in_force=TimeInForce.GTC,
                 price=self._rest_price,
             )
+
+    async def on_wake(self, wake: Wake) -> None:
+        pass
 
     async def on_order_event(self, event: OrderEvent) -> None:
         pass

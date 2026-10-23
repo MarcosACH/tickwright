@@ -17,6 +17,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from never_wakes import NeverWakes
 
 from tickwright.adapters.feed import ReplayFeedConfig
 from tickwright.adapters.paper import PaperExchangeConfig
@@ -86,7 +87,7 @@ def reduce_only_sell(quantity: str) -> Send:
     return Send(Side.SELL, Decimal(quantity), reduce_only=True)
 
 
-class ScriptedStrategy:
+class ScriptedStrategy(NeverWakes):
     """Sends the orders its script lists for a tick's time, and keeps every
     order event it hears, per order, in arrival order."""
 

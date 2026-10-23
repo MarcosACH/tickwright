@@ -58,6 +58,7 @@ from tickwright.domain import (
     VenueAccountModeUnreadable,
     VenueOrderView,
     derive_cloid,
+    wake_interval_refusal,
 )
 from tickwright.engine.guard import NoopGuard, RealGuard
 from tickwright.engine.runner import Engine
@@ -563,6 +564,91 @@ def test_a_class_missing_a_strategy_method_is_refused_before_the_store_exists(
     with pytest.raises(StrategyLoadRefusal, match="on_tick, restore"):
         build_engine(config)
     assert not (tmp_path / "saga.db").exists()
+
+
+def test_a_class_with_no_on_wake_is_refused_before_the_store_exists(tmp_path: Path) -> None:
+    # A strategy that never wakes still writes an empty on_wake (ADR-0062).
+    config = _config(
+        tmp_path,
+        strategies=[
+            {"strategy": "user_strategies:LacksOnWake", "strategy_id": "user", "symbols": ["BTC"]}
+        ],
+    )
+    with pytest.raises(StrategyLoadRefusal, match="has no on_wake"):
+        build_engine(config)
+    assert not (tmp_path / "saga.db").exists()
+
+
+def test_a_strategy_that_never_declares_a_wake_interval_is_refused(tmp_path: Path) -> None:
+    # The method check cannot see an attribute. As a bare AttributeError it
+    # would exit 1, and a supervisor would restart it forever.
+    config = _config(
+        tmp_path,
+        strategies=[
+            {
+                "strategy": "user_strategies:LacksWakeInterval",
+                "strategy_id": "user",
+                "symbols": ["BTC"],
+            }
+        ],
+    )
+    with pytest.raises(StrategyLoadRefusal, match="has no wake_interval_seconds"):
+        build_engine(config)
+
+
+@pytest.mark.parametrize("interval", [0.5, 0, -1, "60"])
+def test_a_bad_wake_interval_is_refused_with_the_rule_s_own_sentence(
+    tmp_path: Path, interval: object
+) -> None:
+    # The operator reads the same sentence StrategyHost would raise (ADR-0062).
+    config = _config(
+        tmp_path,
+        strategies=[
+            {
+                "strategy": "user_strategies:WakesOnItsSettings",
+                "strategy_id": "user",
+                "symbols": ["BTC"],
+                "settings": {"quantity": "0.5", "wake_interval_seconds": interval},
+            }
+        ],
+    )
+    refusal = wake_interval_refusal(interval)
+    assert refusal is not None
+    with pytest.raises(StrategyLoadRefusal) as refused:
+        build_engine(config)
+    assert str(refused.value) == f"strategy 'user': {refusal}"
+
+
+@pytest.mark.parametrize("interval", [None, 1, 60])
+def test_a_good_wake_interval_from_the_settings_loads_and_trades(
+    tmp_path: Path, interval: object
+) -> None:
+    # 1 is the floor itself, so an off-by-one in the rule turns this red.
+    ticks = tmp_path / "ticks.jsonl"
+    ticks.write_text(
+        '{"symbol": "BTC", "price": "42000", "size": "3", '
+        '"aggressor_side": "buy", "trade_id": "a", "ts_event": 1000}\n'
+    )
+    db = tmp_path / "saga.db"
+    config = AppConfig.model_validate(
+        {
+            "replay": ReplayFeedConfig(path=ticks),
+            "sqlite": SQLiteStoreConfig(path=db),
+            "paper": PaperExchangeConfig(
+                instrument_specs={"BTC": _SPEC}, genesis_collateral=GENESIS
+            ),
+            "strategies": [
+                {
+                    "strategy": "user_strategies:WakesOnItsSettings",
+                    "strategy_id": "user",
+                    "symbols": ["BTC"],
+                    "settings": {"quantity": "0.5", "wake_interval_seconds": interval},
+                }
+            ],
+        }
+    )
+    wanted = {derive_cloid("user:BTC:1"): OrderState.FILLED}
+    assert _run_until_states(build_engine(config), db, wanted) == 0
 
 
 def test_a_strategy_whose_id_differs_from_its_entry_is_refused(tmp_path: Path) -> None:

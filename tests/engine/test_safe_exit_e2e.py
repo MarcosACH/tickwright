@@ -16,6 +16,7 @@ import pytest
 from bus_backends import BUS_BACKENDS, make_bus
 from exit_runs import LastingVenue, PriceWaitBlocks, paper_on
 from kafka_fakes import FakeKafkaBroker
+from never_wakes import NeverWakes
 from store_backends import STORE_BACKEND_PARAMS, PostgresBackend, SQLiteBackend, resolve_backend
 from venue_doubles import VenueLink
 
@@ -52,7 +53,7 @@ _SPECS = {
 }
 
 
-class _Exiter:
+class _Exiter(NeverWakes):
     """Opens a long on its first tick, then exits as far as a strategy can.
 
     Once the open fills, it sells ``reduce`` reduce-only. With ``rest`` it also
