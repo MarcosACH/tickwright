@@ -26,7 +26,9 @@ those components.
    **(Corrected by [#563](https://github.com/MarcosACH/tickwright/issues/563):** `Signal` now
    subscribes before step 3. Step 5 says why. So the rule below that nothing touches the venue
    before the account-mode gate passes has one exception. An old cancel can go out first
-   (ADR-0046 §3).**)**
+   (ADR-0046 §3).**)** **(Corrected by
+   [#565](https://github.com/MarcosACH/tickwright/issues/565):** `ExecutionReport`,
+   `FundingAccrual` and `MarkTick` now subscribe before step 3 too. Step 5 says why.**)**
    **(Extended by ADR-0044 §7:** the *connect* half this step has always named now exists —
    `Exchange.start()`, declared on the Protocol (the `start()` ADR-0014 already assigns the
    component). It is the connect half **only**: this step awaits it inline and it must return so the
@@ -101,7 +103,25 @@ those components.
      misses it, like any other startup event.
    - The in-memory bus has no backlog, so nothing changes on that path. `ExecutionReport`,
      `FundingAccrual` and `MarkTick` can still meet no handler in the same gap. That is
-     [#565](https://github.com/MarcosACH/tickwright/issues/565).**)**
+     [#565](https://github.com/MarcosACH/tickwright/issues/565).**)** **(Extended by
+   [#565](https://github.com/MarcosACH/tickwright/issues/565):** the other three handlers a
+   Kafka backlog can reach now subscribe before step 3 as well.
+   - `ExecutionReport`, `FundingAccrual` and `MarkTick` subscribe with `Signal`. Before, an old
+     fill, payment or mark polled in the gap was committed and lost.
+   - Fill and funding handlers wait until the barrier's first step has the account row open.
+     Applied earlier, an old record would open the live row at zero, and the materialisation
+     behind it would keep that zero. That is the rule this step already states for the rebuild.
+   - The wait holds the record unread. Kafka commits a record only after its handler returns,
+     so a crash while waiting loses nothing. Records behind it wait too, so per-symbol order
+     holds.
+   - On a restart the row is already open, so step 5's first step opens the gate at once. Only
+     a live first start waits for a venue read.
+   - `MarkTick` does not wait. It moves no money and reaches no store.
+   - New rule: nothing may publish and drain on the bus between step 3 and the account step.
+     The drain would wait on a handler that waits on the barrier, and the boot would hang.
+     Nothing does today. Step 4's `Exchange.start()` publishes nothing on either adapter.
+   - Waiting for the whole barrier was rejected. The reconcile step publishes its own reports and
+     waits for them, so that wait would never end.**)**
 6. Start the `Strategy` instances (`on_start`: restore snapshot; seq high-water from the saga
    store, ADR-0016; then **pull current open-order state from the `Cache` read-model** by direct
    method call, ADR-0004 — the barrier's reconciliation `OrderEvent`s (step 5) were published
