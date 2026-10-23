@@ -459,11 +459,17 @@ def _kafka_life(
     *,
     cancel_after_seconds: int | None = None,
 ) -> tuple[KafkaBus, Store]:
-    """One process life over Kafka, wired the way the runner wires it.
+    """One process life over Kafka, wired by hand and not by the runner.
 
     The store reopens on the same durable backing. The checkpointer restores
     both read models from it. The host restores the strategy from its snapshot.
     The venue is the remote that outlives every one of our crashes.
+
+    Every handler subscribes before ``bus.start()``, and no startup barrier
+    runs. So these tests prove what the bus, the host and the saga do across a
+    crash. They do not prove the runner's boot order. On paper that order
+    hides the gap of issue #563, because paper's boot never lets the bus poll.
+    ``test_kafka_backlog_gate_e2e.py`` proves it with a venue that does.
     """
     bus = KafkaBus(
         bootstrap_servers="kafka:9092",
