@@ -145,6 +145,35 @@ def test_a_strategy_wakes_on_each_slot_of_its_interval_with_no_ticks() -> None:
     assert asyncio.run(main()) == [15 * _S, 30 * _S, 45 * _S]
 
 
+def test_shutdown_leaves_no_wake_loop_running() -> None:
+    """A loop left running would publish into a bus with no engine behind it."""
+
+    async def main() -> list[int]:
+        clock = ManualClock(start_ns=7 * _S)
+        feed = _SilentFeed()
+        bus = InMemoryBus()
+        published: list[int] = []
+
+        async def record(wake: Wake) -> None:
+            published.append(wake.ts_event)
+
+        bus.subscribe(Wake, record)
+        engine = _engine(clock, feed, bus)
+        strategy = _WakingStrategy("waker", wake_interval_seconds=15.0)
+        engine.register(strategy, symbols={"BTC"})
+        run = asyncio.create_task(engine.run())
+        await asyncio.wait_for(feed.started.wait(), timeout=5)
+        await _advance_and_wait(clock, 15 * _S, strategy)
+        await engine.stop()
+        await asyncio.wait_for(run, timeout=5)
+        clock.advance_to(30 * _S)
+        for _ in range(20):
+            await asyncio.sleep(0)
+        return published
+
+    assert asyncio.run(main()) == [15 * _S]
+
+
 def test_each_strategy_gets_only_its_own_wake_ups_and_a_none_strategy_gets_none() -> None:
     async def main() -> tuple[list[int], list[int], list[int], set[str]]:
         clock = ManualClock(start_ns=7 * _S)
