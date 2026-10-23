@@ -1,21 +1,26 @@
 """Strategy wake-ups through the whole engine (issue #555, ADR-0062).
 
 A strategy that declares a wake interval gets ``on_wake`` on every slot of
-clock time, even when the feed sends no ticks. The test drives the
-``ManualClock`` by hand, the way a replay feed would.
+clock time, even when the feed sends no ticks. Most tests drive the
+``ManualClock`` by hand, the way a replay feed would. The ordering test runs a
+real replay.
 """
 
 import asyncio
+import json
 from collections.abc import Iterable
 from decimal import Decimal
+from pathlib import Path
 
 from ledgers import GENESIS
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
+from tickwright.adapters.feed import ReplayFeed
 from tickwright.adapters.paper import ImmediateFillModel, PaperExchange
 from tickwright.adapters.store import SQLiteStore
 from tickwright.domain import (
+    MarketFeed,
     MarketTick,
     OrderDenied,
     OrderEvent,
@@ -83,7 +88,7 @@ class _SilentFeed:
 
 def _engine(
     clock: ManualClock,
-    feed: _SilentFeed,
+    feed: MarketFeed,
     bus: InMemoryBus | None = None,
     *,
     store: SQLiteStore | None = None,
@@ -231,3 +236,63 @@ def test_an_order_placed_from_on_wake_with_the_kill_switch_on_is_denied() -> Non
     denied = events[0]
     assert isinstance(denied, OrderDenied)
     assert denied.reason == "kill switch tripped"
+
+
+class _SeesBoth(_WakingStrategy):
+    """Records ticks and wake-ups in the order they arrive."""
+
+    def __init__(self, *, last_tick_ns: int) -> None:
+        super().__init__("both", wake_interval_seconds=15.0)
+        self.seen: list[tuple[str, int]] = []
+        self.done = asyncio.Event()
+        self._last_tick_ns = last_tick_ns
+
+    async def on_tick(self, tick: MarketTick) -> None:
+        self.seen.append(("tick", tick.ts_event))
+        if tick.ts_event == self._last_tick_ns:
+            self.done.set()
+
+    async def on_wake(self, wake: Wake) -> None:
+        self.seen.append(("wake", wake.ts_event))
+
+
+def test_a_wake_up_reaches_the_strategy_before_a_tick_at_the_same_time(tmp_path: Path) -> None:
+    """A replay is the same story every time it runs (ADR-0027). So when a tick
+    lands on a slot, the order of the two cannot be left to chance. The wake-up
+    goes first, like a cadence that comes due at a tick's own time (ADR-0033)."""
+    ticks = tmp_path / "ticks.jsonl"
+    rows = [
+        {
+            "symbol": "BTC",
+            "price": "42000",
+            "size": "1",
+            "aggressor_side": "buy",
+            "trade_id": f"t{seconds}",
+            "ts_event": seconds * _S,
+        }
+        for seconds in (7, 15, 22, 30)
+    ]
+    ticks.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+
+    async def main() -> list[tuple[str, int]]:
+        clock = ManualClock()
+        bus = InMemoryBus()
+        engine = _engine(clock, ReplayFeed(path=ticks, bus=bus, clock=clock), bus)
+        strategy = _SeesBoth(last_tick_ns=30 * _S)
+        engine.register(strategy, symbols={"BTC"})
+        run = asyncio.create_task(engine.run())
+        await asyncio.wait_for(strategy.done.wait(), timeout=5)
+        await engine.stop()
+        await run
+        return strategy.seen
+
+    expected = [
+        ("tick", 7 * _S),
+        ("wake", 15 * _S),
+        ("tick", 15 * _S),
+        ("tick", 22 * _S),
+        ("wake", 30 * _S),
+        ("tick", 30 * _S),
+    ]
+    assert asyncio.run(main()) == expected
+    assert asyncio.run(main()) == expected
