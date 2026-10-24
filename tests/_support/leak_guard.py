@@ -12,6 +12,9 @@ import warnings
 import pytest
 
 
+# Last, so pytest's own final fixture teardown has already run. An interrupted
+# run tears its session fixtures down there, and a leak freed then counts too.
+@pytest.hookimpl(trylast=True)
 def pytest_sessionfinish(session: pytest.Session) -> None:
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always", ResourceWarning)
