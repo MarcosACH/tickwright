@@ -218,8 +218,8 @@ def test_the_boot_pushes_configured_leverage_to_testnet() -> None:
             leverage=3 if before.leverage != 3 else 2,
         )
 
-        def _boot(book: LeverageSpec) -> HyperliquidExchange:
-            return HyperliquidExchange(
+        async def _boot(book: LeverageSpec) -> None:
+            exchange = HyperliquidExchange(
                 config=config,
                 bus=InMemoryBus(),
                 clock=LiveClock(),
@@ -228,12 +228,18 @@ def test_the_boot_pushes_configured_leverage_to_testnet() -> None:
                 shrink_wait_seconds=30.0,
                 leverage=LeverageBook(entries={SYMBOL: book}),
             )
+            try:
+                await exchange.start()
+            finally:
+                # start() opens the userFundings socket. Left open, it is only
+                # freed after the last test, where no test fails on it (#572).
+                await exchange.stop()
 
         try:
-            await _boot(target).start()
+            await _boot(target)
             assert await _venue_leverage(config, address=address) == target
         finally:
-            await _boot(before).start()
+            await _boot(before)
 
         assert await _venue_leverage(config, address=address) == before
 
