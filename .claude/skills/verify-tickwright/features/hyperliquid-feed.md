@@ -1,8 +1,8 @@
 # Hyperliquid feed
 
-The public mainnet trade stream drives the paper venue. No key, no funds, no order leaves the
-process. This proves the WebSocket adapter, the wall clock, ingress conflation, and a paper fill
-at a real market price.
+The public mainnet trade and mark streams drive the paper venue. Trades come from `trades`,
+marks from `activeAssetCtx`. No key, no funds, no order leaves the process. This proves the
+WebSocket adapter, the wall clock, ingress conflation, and a paper fill at a real market price.
 
 ## Sub-features
 
@@ -40,8 +40,9 @@ Preconditions:
 ## Gotchas
 
 - The first tick can take up to a minute on a quiet market. `--timeout 90` on the fill.
-- `feed.lagged` lines are normal. The stream conflates when trades arrive faster than the
-  engine reads them. They are not a check and not an alarm.
+- `feed.lagged` lines are normal. The feed keeps the latest trade and the latest mark per symbol
+  when they arrive faster than the engine reads them. Each line's `stream` says which one. They
+  are not a check and not an alarm.
 - This is mainnet data. It is read only. The preset never sets `TICKWRIGHT_EXCHANGE`, and you
   must not add it.
 - Reconciliation cadences run on the wall clock here. A resting limit left `LIVE` would be

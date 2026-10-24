@@ -17,6 +17,8 @@ index, then use the matching feature file as the recipe. `../SKILL.md` explains 
 ## Driving conventions
 
 - One `run-id` per feature attempt. A second life in the same run shares the store on purpose.
+- `init` refuses a run id that already has a directory. When a recipe's id is taken, add a
+  suffix, such as `rt-2`, and use it in every command of that recipe.
 - Wait on the store row (`--order`, `--sql`) for anything that must be durable. Wait on the log
   (`--event`) for anything that is only observable there.
 - Every life ends with `$V signal ... TERM`, `$V await ... --exit`, `$V dump ...`. A life you
@@ -53,8 +55,8 @@ Each file has an H1, one paragraph, then exactly four H2 sections in this order:
 - [Paper economics](./paper-economics.md): taker fees, hourly funding, the seeded stochastic fill
   model with partial fills.
 - [Config refusals](./config-refusals.md): the engine refuses to start on a missing genesis, a
-  changed genesis, a dead leverage entry, a reserved strategy id, and a held store lock, with a
-  readable error. A held lock exits 1. The others exit 2.
+  changed genesis, a dead leverage entry, a reserved strategy id, a strategy that does not
+  import, and a held store lock, with a readable error. A held lock exits 1. The others exit 2.
 - [Portfolio strategies](./portfolio-strategies.md): four throwaway strategies that read the
   `Portfolio` seam, including margin at 5x and a two-symbol book.
 - [Strategy wake-ups](./strategy-wake.md): the reference limit order is cancelled after N seconds

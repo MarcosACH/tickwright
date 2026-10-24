@@ -19,8 +19,9 @@ account.
 
 - `$V start <run> <life> --preset paper-replay --strategy <name> --param KEY=VALUE`. Params:
   `SYMBOL` (BTC), `SYMBOL2` (ETH), `QUANTITY` (0.5), `HOLD_TICKS` (2), `TAKE_PROFIT` (100),
-  `LEVERAGE` (JSON, `{}`), `REST_BELOW` (0.8), `WAIT_SECONDS` (0). The last two are for the fifth
-  strategy, `rest_then_hold`, and for live feeds. See `safe-exit.md`.
+  `LEVERAGE` (JSON, `{}`), `REST_BELOW` (0.8), `WAIT_SECONDS` (0). `REST_BELOW` is for the fifth
+  strategy, `rest_then_hold`. See `safe-exit.md`. `WAIT_SECONDS` is for `rest_then_hold` and
+  `round_trip_then_flat` on live feeds.
 
 ## Driving it with verify
 

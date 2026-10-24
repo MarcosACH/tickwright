@@ -66,11 +66,11 @@ Preconditions:
 - **Reset.** Run `$V start safe-exit reset --preset testnet --forward-key --strategy round_trip_then_flat --param QUANTITY=0.001 --param HOLD_TICKS=1 --param WAIT_SECONDS=10`,
   then `$V await safe-exit reset --event verify.flat --timeout 240`.
   Then `$V signal safe-exit reset TERM`, `$V await safe-exit reset --exit`, `$V dump safe-exit reset`,
-  and `$V secrets-check safe-exit`. Check
+  and `$V secrets-check safe-exit > .agents/verify/safe-exit/evidence/secrets.txt`. Check
   `$V check safe-exit reset se-reset --event verify.flat --expect 1`,
   `$V check safe-exit reset se-reset --sql "select count(*) from positions where cast(signed_size as real) != 0" --expect 0`,
-  `$V check safe-exit reset se-redaction --event verify.flat --expect 1` (the run reached the end)
-  and read the `secrets-check` line: `no signing key in evidence`.
+  `$V check safe-exit reset se-redaction --file secrets.txt --expect "no signing key in evidence"`.
+  A hit leaves the file empty, so the check fails.
 - **Report.** Run `$V report safe-exit`. Expected verdict: `PASS`. A FAIL that is not a Gotcha
   below is new, and `$V issue-draft safe-exit` drafts it.
 - **Cleanup.** Run `$V cleanup safe-exit`.
