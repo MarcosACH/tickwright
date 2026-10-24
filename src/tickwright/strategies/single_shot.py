@@ -29,6 +29,7 @@ from tickwright.domain import (
     Side,
     SignalEmitter,
     TimeInForce,
+    Wake,
 )
 
 
@@ -38,6 +39,8 @@ class SingleShotMarketStrategy:
     class Settings(BaseModel):
         side: Side
         quantity: Decimal
+
+    wake_interval_seconds: float | None = None
 
     def __init__(self, *, emitter: SignalEmitter, portfolio: Portfolio, settings: Settings) -> None:
         # The id comes from the emitter, so the two cannot name different
@@ -72,6 +75,9 @@ class SingleShotMarketStrategy:
             # A market order never rests, so IOC is its only honest tif.
             time_in_force=TimeInForce.IOC,
         )
+
+    async def on_wake(self, wake: Wake) -> None:
+        pass
 
     async def on_order_event(self, event: OrderEvent) -> None:
         if isinstance(event, OrderFilled):

@@ -33,6 +33,7 @@ from hyperliquid_fakes import (
 )
 from hyperliquid_flatten import AnswersFirst, priced_frames, run_flatten
 from ledgers import GENESIS, book_fill, checkpointer
+from never_wakes import NeverWakes
 from pydantic import SecretStr
 from venue_doubles import (
     DERIVED_STATE,
@@ -229,7 +230,7 @@ class _DarkVenue(VenueDouble):
         return VenueReadFailure.SEND_FAILED
 
 
-class _Strategy:
+class _Strategy(NeverWakes):
     """A minimal strategy whose handlers raise, to exercise containment."""
 
     def __init__(self, strategy_id: str = "trivial") -> None:

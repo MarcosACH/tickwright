@@ -14,6 +14,7 @@ import pytest
 import structlog.testing
 from kafka_fakes import FakeKafkaBroker, Record
 from ledgers import ledger, scoped
+from never_wakes import NeverWakes
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.bus.kafka import KafkaBus
@@ -37,7 +38,9 @@ from tickwright.domain import (
     SignalEmitter,
     SignalId,
     Store,
+    Wake,
     derive_cloid,
+    wake_interval_refusal,
 )
 from tickwright.engine.cache import Cache
 from tickwright.engine.strategy_host import StrategyHost
@@ -69,7 +72,7 @@ def _host(
     )
 
 
-class RecordingStrategy:
+class RecordingStrategy(NeverWakes):
     """A minimal third-party strategy that records what the host delivers."""
 
     def __init__(self, strategy_id: str) -> None:
@@ -744,6 +747,21 @@ def test_registering_the_reserved_operator_id_fails_fast() -> None:
         host.register(RecordingStrategy(OPERATOR), symbols={"BTC"})
 
 
+@pytest.mark.parametrize("interval", [0.5, True, float("nan")])
+def test_registering_a_bad_wake_interval_fails_with_the_rule_s_own_sentence(
+    interval: object,
+) -> None:
+    # A strategy built without a config never meets the loader's check (ADR-0062).
+    strategy = RecordingStrategy("alpha")
+    strategy.wake_interval_seconds = interval  # type: ignore[assignment]
+    refusal = wake_interval_refusal(interval)
+    assert refusal is not None
+
+    with pytest.raises(InvariantViolation) as raised:
+        _host().register(strategy, symbols={"BTC"})
+    assert str(raised.value) == refusal
+
+
 def test_a_second_strategy_may_not_claim_an_owned_symbol() -> None:
     """ADR-0034's disjointness rule, enforced rather than assumed.
 
@@ -791,3 +809,176 @@ def test_strategies_on_disjoint_symbols_register_and_route_independently() -> No
     assert sorted(tick.symbol for tick in alpha.ticks) == ["BTC", "ETH"]
     assert [tick.symbol for tick in beta.ticks] == ["SOL"]
     assert [tick.symbol for tick in gamma.ticks] == ["DOGE"]
+
+
+_S = 1_000_000_000
+
+
+class WakeRecordingStrategy(RecordingStrategy):
+    """Wakes every 15 s and records the slot of each wake-up it gets."""
+
+    wake_interval_seconds: float | None = 15.0
+
+    def __init__(self, strategy_id: str) -> None:
+        super().__init__(strategy_id)
+        self.wake_slots: list[int] = []
+
+    async def on_wake(self, wake: Wake) -> None:
+        self.wake_slots.append(wake.ts_event)
+
+
+def _wake(strategy_id: str, *, slot_s: int) -> Wake:
+    return Wake(strategy_id=strategy_id, ts_event=slot_s * _S, ts_init=slot_s * _S)
+
+
+def test_a_redelivered_or_earlier_wake_never_reaches_on_wake() -> None:
+    # The wake gate extends the tick gate (ADR-0025): a slot at or before the last
+    # one delivered is a redelivery or a reorder.
+    bus = InMemoryBus()
+    clock = ManualClock(start_ns=30 * _S)
+    host = _host(bus=bus, clock=clock)
+    strategy = WakeRecordingStrategy("waker")
+    host.register(strategy, symbols={"BTC"})
+    host.start()
+
+    asyncio.run(bus.publish(_wake("waker", slot_s=30)))
+    asyncio.run(bus.publish(_wake("waker", slot_s=30)))  # redelivered
+    asyncio.run(bus.publish(_wake("waker", slot_s=15)))  # earlier, still within the interval
+    clock.advance_to(45 * _S)
+    asyncio.run(bus.publish(_wake("waker", slot_s=45)))
+
+    assert strategy.wake_slots == [30 * _S, 45 * _S]
+
+
+def test_a_wake_older_than_its_interval_never_reaches_on_wake() -> None:
+    # A backlog redelivered after a restart. Acting on it would run a check the
+    # strategy meant for a moment long gone (ADR-0062).
+    bus = InMemoryBus()
+    host = _host(bus=bus, clock=ManualClock(start_ns=50 * _S))
+    strategy = WakeRecordingStrategy("waker")
+    host.register(strategy, symbols={"BTC"})
+    host.start()
+
+    asyncio.run(bus.publish(_wake("waker", slot_s=30)))  # 20 s old, interval 15 s
+    asyncio.run(bus.publish(_wake("waker", slot_s=45)))  # 5 s old
+
+    assert strategy.wake_slots == [45 * _S]
+
+
+def test_a_wake_ahead_of_the_clock_never_reaches_on_wake() -> None:
+    # A Kafka replay restart (#561). The replay clock is 0 until the first tick,
+    # so a backlog Wake from the last life has a negative age. Its slot is ahead
+    # of the clock, which no Wake from this life can be.
+    bus = InMemoryBus()
+    clock = ManualClock(start_ns=0)
+    host = _host(bus=bus, clock=clock)
+    strategy = WakeRecordingStrategy("waker")
+    host.register(strategy, symbols={"BTC"})
+    host.start()
+
+    asyncio.run(bus.publish(_wake("waker", slot_s=45)))  # from the last life
+    clock.advance_to(30 * _S)
+    asyncio.run(bus.publish(_wake("waker", slot_s=30)))  # this life's own
+
+    assert strategy.wake_slots == [30 * _S]
+
+
+class SleeperWithWakeRecorder(WakeRecordingStrategy):
+    """Declares no interval, but records any wake-up that reaches it."""
+
+    wake_interval_seconds: float | None = None
+
+
+def test_a_wake_for_a_strategy_with_no_interval_never_reaches_on_wake() -> None:
+    # On Kafka, a Wake from a previous run can arrive after the author set the
+    # interval to None. A strategy that declared no wake-ups must never get one.
+    bus = InMemoryBus()
+    host = _host(bus=bus, clock=ManualClock(start_ns=50 * _S))
+    strategy = SleeperWithWakeRecorder("sleeper")
+    host.register(strategy, symbols={"BTC"})
+    host.start()
+
+    asyncio.run(bus.publish(_wake("sleeper", slot_s=50)))
+
+    assert strategy.wake_slots == []
+
+
+class RaisingOnFirstWakeStrategy(WakeRecordingStrategy):
+    """Raises on its first wake-up and records the ones after it."""
+
+    async def on_wake(self, wake: Wake) -> None:
+        if not self.wake_slots:
+            self.wake_slots.append(0)
+            raise KeyError("third-party bug")
+        self.wake_slots.append(wake.ts_event)
+
+
+def test_a_raising_on_wake_is_contained_and_the_next_wake_still_arrives() -> None:
+    bus = InMemoryBus()
+    clock = ManualClock(start_ns=15 * _S)
+    host = _host(bus=bus, clock=clock)
+    strategy = RaisingOnFirstWakeStrategy("waker")
+    host.register(strategy, symbols={"BTC"})
+    host.start()
+
+    first = _wake("waker", slot_s=15)
+    with structlog.testing.capture_logs() as logs:
+        asyncio.run(bus.publish(first))
+        clock.advance_to(30 * _S)
+        asyncio.run(bus.publish(_wake("waker", slot_s=30)))
+
+    assert strategy.wake_slots == [0, 30 * _S]
+    errors = [log for log in logs if log["event"] == "strategy.error"]
+    assert [(e["strategy_id"], e["event_id"]) for e in errors] == [("waker", first.event_id)]
+
+
+class WakeCountingStrategy(WakeRecordingStrategy):
+    """A strategy whose state moves on every wake-up, like a deadline it checks."""
+
+    async def on_wake(self, wake: Wake) -> None:
+        await super().on_wake(wake)
+        self.state = f"wakes={len(self.wake_slots)}".encode()
+
+
+def test_state_changed_in_on_wake_is_restored_after_a_crash() -> None:
+    """No ``stop()`` before the second life, so only the save after ``on_wake``
+    can carry the state across (ADR-0016)."""
+    store = SQLiteStore(":memory:")
+    bus = InMemoryBus()
+    first_life = _host(bus=bus, clock=ManualClock(start_ns=15 * _S), store=store)
+    first_life.register(WakeCountingStrategy("waker"), symbols={"BTC"})
+    first_life.start()
+    asyncio.run(bus.publish(_wake("waker", slot_s=15)))
+
+    second_life = _host(store=store)
+    restarted = WakeCountingStrategy("waker")
+    second_life.register(restarted, symbols={"BTC"})
+    second_life.start()
+
+    assert restarted.state == b"wakes=1"
+
+
+class IntervalFromSnapshotStrategy(WakeRecordingStrategy):
+    """Sets its interval to 0.5 s in ``restore()``, after ``register`` checked 15 s."""
+
+    def restore(self, data: bytes) -> None:
+        super().restore(data)
+        self.wake_interval_seconds = 0.5
+
+
+def test_an_interval_changed_after_register_has_no_effect() -> None:
+    # register refuses an interval under 1 s (ADR-0062). restore() runs after it,
+    # so a later read would let 0.5 s past that check.
+    store = SQLiteStore(":memory:")
+    store.save_strategy_snapshot("waker", b"saved", ts_ns=0)
+    bus = InMemoryBus()
+    host = _host(bus=bus, clock=ManualClock(start_ns=50 * _S), store=store)
+    strategy = IntervalFromSnapshotStrategy("waker")
+    host.register(strategy, symbols={"BTC"})
+    host.start()
+
+    asyncio.run(bus.publish(_wake("waker", slot_s=45)))  # 5 s old, within 15 s
+
+    assert strategy.wake_interval_seconds == 0.5
+    assert [interval for interval, _ in host.wake_schedules()] == [15.0]
+    assert strategy.wake_slots == [45 * _S]

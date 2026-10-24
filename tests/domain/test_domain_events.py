@@ -30,6 +30,7 @@ from tickwright.domain import (
     PlaceSignal,
     Side,
     TimeInForce,
+    Wake,
     publishable_event_types,
 )
 
@@ -99,6 +100,16 @@ def test_mark_tick_dedups_on_symbol_and_instant_and_orders_per_symbol() -> None:
 
     assert mark.event_id == "BTC:1000"
     assert mark.partition_key == "BTC"
+
+
+def test_a_wake_orders_per_strategy_and_dedups_on_its_slot() -> None:
+    """Two builds of one slot share an id, even when built at different times."""
+    first = Wake(ts_event=60_000, ts_init=60_001, strategy_id="limit-btc")
+    again = Wake(ts_event=60_000, ts_init=60_900, strategy_id="limit-btc")
+
+    assert first.partition_key == "limit-btc"
+    assert first.event_id == "limit-btc:wake:60000"
+    assert again.event_id == first.event_id
 
 
 def test_a_replayed_mark_tick_disambiguates_a_shared_instant_with_its_seq() -> None:

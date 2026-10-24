@@ -42,12 +42,15 @@ from tickwright.domain import (
     MarketFeed,
     Order,
     OrderType,
+    Portfolio,
     PreTradeGuard,
     ReplayClock,
+    SignalEmitter,
     Store,
     Strategy,
     TimeInForce,
     account_net_size,
+    wake_interval_refusal,
 )
 from tickwright.engine.exit_run import ExitJob, Flatten, OperatorCancelAll
 from tickwright.engine.guard import NoopGuard, RealGuard
@@ -78,6 +81,12 @@ def build_bus(config: AppConfig) -> EventBus:
                 bootstrap_servers=config.kafka.bootstrap_servers,
                 topic=config.kafka.events_topic,
                 group_id=config.kafka.group_id,
+                # An old fill waits in the poll loop through the venue's start
+                # and the barrier's first step (#565). Each can use a whole
+                # startup budget. Kafka's own 300s default stays on top, as
+                # room for retries that end late.
+                max_poll_interval_seconds=300.0
+                + 2 * config.engine.startup_reconciliation_timeout_seconds,
             )
         case unreachable:
             assert_never(unreachable)
@@ -342,8 +351,9 @@ class UnsupportedExitRun(ValueError):
 class StrategyLoadRefusal(ValueError):
     """A strategy entry names a class the engine cannot load.
 
-    Most checks run before the store or the venue exists. Two run once the class
-    is built, but still before the engine runs (ADR-0061).
+    Most checks run before the store or the venue exists, in ``_load_strategy``.
+    The rest run in ``_build_strategy`` once the class is built, but still
+    before the engine runs (ADR-0061, ADR-0062).
     """
 
 
@@ -400,30 +410,13 @@ def _build_engine(config: AppConfig, *, exit_job: ExitJob | None) -> Engine:
         return engine
     for strategy_config, (cls, settings) in zip(config.strategies, loaded, strict=True):
         strategy_id = strategy_config.strategy_id
-        # Always all three, even to a strategy that reads no portfolio. A fixed
-        # signature is easier to document than a rule about who gets what
-        # (ADR-0041 §7 as amended by ADR-0061).
-        emitter = engine.emitter_for(strategy_id)
-        portfolio = engine.portfolio_for(strategy_id)
-        # Any error counts, as with the import. A constructor that raises fails
-        # the same way on every restart, so it must exit 2, not 1.
-        try:
-            strategy = cls(emitter=emitter, portfolio=portfolio, settings=settings)
-        except Exception as exc:
-            raise StrategyLoadRefusal(
-                f"strategy {strategy_id!r}: {strategy_config.strategy} raised while it was "
-                f"built: {exc!r}"
-            ) from exc
-        # The emitter and portfolio carry the entry's id, but the host keys on
-        # the strategy's. A mismatch hides its fills from it and resumes its seq
-        # from the wrong high-water after a restart (#442). A missing id refuses
-        # too: as an AttributeError it would exit 1.
-        own_id = getattr(strategy, "strategy_id", None)
-        if own_id != strategy_id:
-            raise StrategyLoadRefusal(
-                f"strategy {strategy_id!r}: {strategy_config.strategy} calls itself "
-                f"{own_id!r}. Set strategy_id from emitter.strategy_id."
-            )
+        strategy = _build_strategy(
+            strategy_config,
+            cls,
+            settings,
+            emitter=engine.emitter_for(strategy_id),
+            portfolio=engine.portfolio_for(strategy_id),
+        )
         engine.register(strategy, symbols=set(strategy_config.symbols))
     return engine
 
@@ -485,3 +478,48 @@ def _load_strategy(config: StrategyConfig) -> tuple[Callable[..., Strategy], Bas
             f"strategy {config.strategy_id!r}: its settings do not fit {config.strategy}:{problems}"
         ) from None
     return cls, settings
+
+
+def _build_strategy(
+    config: StrategyConfig,
+    cls: Callable[..., Strategy],
+    settings: BaseModel,
+    *,
+    emitter: SignalEmitter,
+    portfolio: Portfolio,
+) -> Strategy:
+    """Build the class ``_load_strategy`` returned, and check what only exists once it is
+    built, or refuse the entry."""
+    strategy_id = config.strategy_id
+    # Always all three, even to a strategy that reads no portfolio. A fixed
+    # signature is easier to document than a rule about who gets what
+    # (ADR-0041 §7 as amended by ADR-0061).
+    # Any error counts, as with the import. A constructor that raises fails
+    # the same way on every restart, so it must exit 2, not 1.
+    try:
+        strategy = cls(emitter=emitter, portfolio=portfolio, settings=settings)
+    except Exception as exc:
+        raise StrategyLoadRefusal(
+            f"strategy {strategy_id!r}: {config.strategy} raised while it was built: {exc!r}"
+        ) from exc
+    # The emitter and portfolio carry the entry's id, but the host keys on
+    # the strategy's. A mismatch hides its fills from it and resumes its seq
+    # from the wrong high-water after a restart (#442). A missing id refuses
+    # too: as an AttributeError it would exit 1.
+    own_id = getattr(strategy, "strategy_id", None)
+    if own_id != strategy_id:
+        raise StrategyLoadRefusal(
+            f"strategy {strategy_id!r}: {config.strategy} calls itself "
+            f"{own_id!r}. Set strategy_id from emitter.strategy_id."
+        )
+    # Read after construction, since it may come from the settings. The
+    # method check cannot see it, and as an AttributeError it would exit 1.
+    if not hasattr(strategy, "wake_interval_seconds"):
+        raise StrategyLoadRefusal(
+            f"strategy {strategy_id!r}: {config.strategy} has no "
+            "wake_interval_seconds. Set it to None if the strategy never wakes."
+        )
+    refusal = wake_interval_refusal(strategy.wake_interval_seconds)
+    if refusal is not None:
+        raise StrategyLoadRefusal(f"strategy {strategy_id!r}: {refusal}")
+    return strategy

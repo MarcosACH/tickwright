@@ -52,7 +52,8 @@ $V await <run-id> first --event engine.feed_started
 `start` writes `scratch/.env` from the preset plus your `--env` overrides, spawns
 `python -m tickwright.app` in `scratch/` with every `TICKWRIGHT_*` variable scrubbed from the
 inherited environment, and returns at once. A life is ready when `engine.feed_started` is in its
-log. Presets:
+log. `../strategies/` is on its `PYTHONPATH`, so a strategy there loads by import path, as in an
+`--image` life. Presets:
 
 | Preset | What it wires | Needs |
 | --- | --- | --- |
@@ -67,6 +68,15 @@ and `features/safe-exit.md`.
 
 `--command cancel-all` or `--command flatten` runs that one-shot exit run of the CLI instead of
 the engine. It ends by itself. See `features/safe-exit.md`.
+
+`--image <ref>` runs the CLI in that container image instead of the venv. The scratch is mounted at
+its own path and is the working directory, so the `.env`, `check --sql` and `dump` work unchanged.
+`../strategies/` is mounted at `/strategies`, so its strategies load by import path. `signal` goes
+to the container, and a `KILL` exits `137`. `--network container:<id>` joins another container's
+network. `--container-env KEY=VALUE` sets a variable in the container only, over the `.env`. It is written to the evidence, so it
+refuses the signing key. An `--image` life also refuses `--forward-key`, because the key would
+never reach the container. `--network` and `--container-env` need `--image`. See
+`features/container-restart.md`.
 
 Kafka and Postgres need Docker. `$V infra <run-id> up kafka` or `up postgres` starts the compose
 service and records that this run owns it. A service you already had running is used and never
@@ -216,9 +226,12 @@ $V cleanup <run-id>
 
 Sends TERM to every life this run started that is still alive, waits 15 s, then KILL. It signals
 the recorded pid, after checking that pid still runs the engine module, so a pid the OS reused is
-skipped. It never searches for engine processes by name. Stops and removes only the compose
-services this run brought up. Scans evidence for the signing key. Deletes `scratch/`.
-Keeps `evidence/`. Run it after every failed attempt too, so nothing strands a process or a port.
+skipped. It never searches for engine processes by name. A `--image` life is stopped by its
+container name with `docker stop`, because its pid is only the `docker run` client. If docker
+cannot stop it, cleanup exits `1` and keeps `scratch/`, so you can run it again. Stops and removes
+only the compose services this run brought up. Scans evidence for the signing key. Deletes
+`scratch/`. Keeps `evidence/`. Run it after every failed attempt too, so nothing strands a process
+or a port.
 
 After cleanup, confirm the proof survived: `ls .agents/verify/<run-id>/evidence/`.
 

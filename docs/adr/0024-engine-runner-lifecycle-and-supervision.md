@@ -23,6 +23,12 @@ those components.
    ingested, which is why its twin waits for the barrier.**)**
 3. Start the `EventBus` (InMemory: no-op; Kafka: connect consumers/producers).
 4. Connect the `Exchange` + `ExecutionManager` (WS/HTTP; subscribe to `Signal`/`ExecutionReport`).
+   **(Corrected by [#563](https://github.com/MarcosACH/tickwright/issues/563):** `Signal` now
+   subscribes before step 3. Step 5 says why. So the rule below that nothing touches the venue
+   before the account-mode gate passes has one exception. An old cancel can go out first
+   (ADR-0046 §3).**)** **(Corrected by
+   [#565](https://github.com/MarcosACH/tickwright/issues/565):** `ExecutionReport`,
+   `FundingAccrual` and `MarkTick` now subscribe before step 3 too. Step 5 says why.**)**
    **(Extended by ADR-0044 §7:** the *connect* half this step has always named now exists —
    `Exchange.start()`, declared on the Protocol (the `start()` ADR-0014 already assigns the
    component). It is the connect half **only**: this step awaits it inline and it must return so the
@@ -79,7 +85,53 @@ those components.
    materialised, never fallen into. The gate is therefore an **ordered** sequence of proofs rather
    than one call, and the runner composes it: a `StartupBarrier` holds the shared retry policy
    below, the step order lives in the runner's own sequence, and an attempt stops at the first step
-   that froze.**)**
+   that froze.**)** **(Changed by [#565](https://github.com/MarcosACH/tickwright/issues/565):**
+   a ledger write now refuses an account row that is not open (`Checkpointer`). A rebuild that ran
+   first would fault the run, not keep a zero. The step order is still required.**)**
+   **(Extended by [#563](https://github.com/MarcosACH/tickwright/issues/563):**
+   the gate now covers a Kafka backlog. On restart, Kafka delivers old records from an earlier
+   life. Delivery must run during the barrier, because the reconcile waits for its own reports to
+   be delivered. So an old `Signal` can reach the saga before the barrier clears.
+   - The saga subscribes to `Signal` **before** step 3, not at step 4. Kafka commits a record that
+     meets no handler, so a `Signal` polled before the subscribe was lost with no trace.
+   - `ExecutionManager` denies every `PlaceSignal` until the runner calls `barrier_has_cleared()`
+     right after this step. The denial writes a durable `DENIED` row (ADR-0010), so a later life
+     dedups against it and never places it.
+   - Holding the `Signal` and placing it after the barrier was rejected. Its offset is committed
+     once the handler returns, so a crash before the barrier clears would lose it.
+   - Cancels still pass, from the moment the bus starts. So a cancel can go out before step 4's
+     account-mode gate answers. A cancel only lowers exposure, and its marker is durable before
+     the send (ADR-0026). ADR-0046 §3 carries the matching correction.
+   - The denial's `OrderEvent` is published before strategies subscribe at step 6. The strategy
+     misses it, like any other startup event.
+   - The in-memory bus has no backlog, so nothing changes on that path. `ExecutionReport`,
+     `FundingAccrual` and `MarkTick` can still meet no handler in the same gap. That is
+     [#565](https://github.com/MarcosACH/tickwright/issues/565).**)** **(Extended by
+   [#565](https://github.com/MarcosACH/tickwright/issues/565):** the other three handlers a
+   Kafka backlog can reach now subscribe before step 3 as well.
+   - `ExecutionReport`, `FundingAccrual` and `MarkTick` subscribe with `Signal`. Before, an old
+     fill, payment or mark polled in the gap was committed and lost.
+   - Fill and funding handlers wait until the barrier's first step has the account row open.
+     Applied earlier, the ledger write would refuse the old record and fault the boot. Without
+     that refusal, the record would open the live row at zero, and the barrier would keep it.
+   - The wait holds the record unread. Kafka commits a record only after its handler returns,
+     so a crash while waiting loses nothing. Records behind it wait too, so per-symbol order
+     holds.
+   - On a restart the row is already open, so step 5's first step opens the gate at once. Only
+     a live first start waits for a venue read.
+   - `MarkTick` does not wait. It moves no money and reaches no store.
+   - New rule: nothing may publish and drain on the bus between step 3 and the account step.
+     The drain would wait on a handler that waits on the barrier, and the boot would hang.
+     Nothing does today. Step 4's `Exchange.start()` publishes nothing on either adapter.
+   - Waiting for the whole barrier was rejected. The reconcile step publishes its own reports and
+     waits for them, so that wait would never end.
+   - The wait holds the Kafka poll loop. It can last two startup timeouts: step 4's
+     `Exchange.start()` and the account step. Kafka drops a consumer that does not poll within
+     its poll limit, and the commit after the wait then fails. So `build_bus` sets the poll
+     limit to 300s plus two startup timeouts. The 300s is aiokafka's default, kept as room for
+     a venue request that ends past its deadline.
+   - A ceiling on the startup timeout was rejected. A safe ceiling depends on venue retry and
+     request timeouts, and it would break quietly when those change.**)**
 6. Start the `Strategy` instances (`on_start`: restore snapshot; seq high-water from the saga
    store, ADR-0016; then **pull current open-order state from the `Cache` read-model** by direct
    method call, ADR-0004 — the barrier's reconciliation `OrderEvent`s (step 5) were published

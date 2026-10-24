@@ -99,7 +99,16 @@ shared durable store. Its [[signal_id]] seq high-water-mark is recovered from th
 (not the snapshot), so it is robust to stale snapshots. v1 runs **N strategies concurrently**
 (unique `strategy_id`, per-strategy routing/seq/snapshot); the shipped strategies stay minimal
 reference impls (engine capability, not a library). See ADR-0006, ADR-0015, ADR-0016, ADR-0018.
+It also declares `wake_interval_seconds` and handles each [[Wake]] in `on_wake`. Both are
+required. A strategy that never wakes sets the interval to `None` and leaves `on_wake` empty. See
+ADR-0062.
 _Avoid_: algo, bot, trader.
+
+**Wake**:
+An event the engine sends to one [[Strategy]] every `wake_interval_seconds` of [[Clock]] time.
+It lets a strategy act when no tick or order event arrives. The strategy declares the interval,
+and `None` means it never wakes. See ADR-0062.
+_Avoid_: timer event, tick.
 
 **User strategy**:
 A [[Strategy]] that lives in the user's own code, outside the engine's source. The user installs

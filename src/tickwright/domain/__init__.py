@@ -62,6 +62,7 @@ from .events import (
     PlaceSignal,
     ReconciliationFill,
     Signal,
+    Wake,
     publishable_event_types,
 )
 from .figures import exact_figure
@@ -135,6 +136,7 @@ from .venue import (
     VenueReadFailure,
     place_order_of,
 )
+from .wake import wake_interval_refusal
 
 __all__ = [
     # enums
@@ -224,6 +226,7 @@ __all__ = [
     "VenueOrderView",
     "VenueReadFailure",
     "VenuePositionState",
+    "Wake",
     # the event tree's leaves, for gates that must cover every family
     "publishable_event_types",
     # id derivation
@@ -244,6 +247,8 @@ __all__ = [
     "account_net_size",
     # the one rule for the reserved owner ids, read by config and StrategyHost
     "reserved_id_refusal",
+    # the one rule for a wake interval, read by the strategy loader and StrategyHost
+    "wake_interval_refusal",
     # the one rule for which orders are flatten orders, read by the guard and ExecutionManager
     "is_flatten",
     # the one place a saga becomes a venue order

@@ -29,7 +29,7 @@ index, then use the matching feature file as the recipe. `../SKILL.md` explains 
   says the verdict the map expects today, including known FAILs named in Gotchas.
 - A fill is proven by the `orders` row, the `positions` row, and the `account` row together.
 - An exit code is proof. `0` is graceful, `1` is a fault, `2` is a boot refusal, `-9` is your
-  `KILL`.
+  `KILL`. A `KILL` to an `--image` life exits `137`.
 - Report the number you expected next to the number the dump shows.
 - Report a feature you could not reach with the command you ran and the unmet precondition
   (Docker down, no key, no network). Never report a path as verified through a different path.
@@ -57,8 +57,15 @@ Each file has an H1, one paragraph, then exactly four H2 sections in this order:
   readable error. A held lock exits 1. The others exit 2.
 - [Portfolio strategies](./portfolio-strategies.md): four throwaway strategies that read the
   `Portfolio` seam, including margin at 5x and a two-symbol book.
+- [Strategy wake-ups](./strategy-wake.md): the reference limit order is cancelled after N seconds
+  with no tick on its symbol, and stays `LIVE` when time stops before the deadline. Wake-ups stay
+  on the clock grid across a `KILL` and a restart, on both buses. A Kafka restart with a fresh
+  group replays no old wake-up.
 - [Kafka bus](./kafka-bus.md): the same paper run over `KafkaBus`, messages counted on the topic.
 - [Postgres store](./postgres-store.md): the same paper run on `PostgresStore`, restart included.
+- [Container restart](./container-restart.md): the published image with an import-path strategy,
+  `KILL`, and a restart that resumes from `open_orders()` on both soak setups. A strategy that
+  does not import exits 2 and compose stops after 3 restarts.
 - [Hyperliquid feed](./hyperliquid-feed.md): mainnet public trades into the paper venue. No key.
 - [Hyperliquid testnet](./hyperliquid-testnet.md): a real round trip on the testnet exchange, the
   account reconcile cadence, and key redaction.

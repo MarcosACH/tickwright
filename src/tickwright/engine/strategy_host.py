@@ -24,7 +24,10 @@ from tickwright.domain import (
     Store,
     Strategy,
     SymbolOwnership,
+    Wake,
+    duration_ns,
     reserved_id_refusal,
+    wake_interval_refusal,
 )
 from tickwright.engine.cache import Cache
 from tickwright.observability import NamedEvent, named_event
@@ -74,6 +77,10 @@ class StrategyHost:
         self._tick_staleness_ns = tick_staleness_ns
         self._strategies: dict[str, Strategy] = {}
         self._symbols: dict[str, frozenset[str]] = {}
+        # The wake interval that register checked (ADR-0062). The loop and the
+        # gate read this copy, because restore() runs after register and could
+        # change the strategy's own attribute past the check.
+        self._wake_intervals: dict[str, float | None] = {}
         # The last bytes persisted per strategy. A callback that left the
         # state where it was costs a ``snapshot()`` call and no store write.
         self._persisted: dict[str, bytes] = {}
@@ -115,6 +122,10 @@ class StrategyHost:
         refuses with belong to ``SymbolOwnership``, because ``AppConfig``
         refuses a *configured* overlap at load and the two gates must not come
         to disagree about what an overlap is.
+
+        A bad ``wake_interval_seconds`` is refused in the loader's own words. The
+        loader only checks strategies built from config, and both read
+        ``wake_interval_refusal`` (ADR-0062).
         """
         reserved = reserved_id_refusal(strategy.strategy_id)
         if reserved is not None:
@@ -125,9 +136,37 @@ class StrategyHost:
         refusal = self._ownership.refusal(strategy.strategy_id, symbols=declared)
         if refusal is not None:
             raise InvariantViolation(refusal)
+        interval = strategy.wake_interval_seconds
+        wake = wake_interval_refusal(interval)
+        if wake is not None:
+            raise InvariantViolation(wake)
         self._strategies[strategy.strategy_id] = strategy
         self._symbols[strategy.strategy_id] = declared
+        self._wake_intervals[strategy.strategy_id] = interval
         self._ownership = self._ownership.claim(strategy.strategy_id, symbols=declared)
+
+    def wake_schedules(self) -> list[tuple[float, Callable[[int], Awaitable[None]]]]:
+        """One pair per waking strategy: its interval, and a function that
+        publishes its ``Wake`` for a slot (ADR-0062).
+
+        The runner paces the pairs and knows nothing about ``Wake``. A strategy
+        with no interval is left out, so it gets no loop.
+        """
+        return [
+            (interval, self._wake_publisher(strategy_id))
+            for strategy_id, interval in self._wake_intervals.items()
+            if interval is not None
+        ]
+
+    def _wake_publisher(self, strategy_id: str) -> Callable[[int], Awaitable[None]]:
+        """A function that publishes one strategy's ``Wake`` for a slot."""
+
+        async def publish(slot: int) -> None:
+            await self._bus.publish(
+                Wake(strategy_id=strategy_id, ts_event=slot, ts_init=self._clock.timestamp_ns())
+            )
+
+        return publish
 
     def start(self) -> None:
         """Recover each strategy — snapshot, then seq, then subscriptions.
@@ -266,8 +305,38 @@ class StrategyHost:
             await self._contained(strategy, strategy.on_order_event, event)
             self._persist(strategy)
 
+        # The wake gate, the tick gate's twin (ADR-0062). A slot at or before the
+        # last one delivered is a redelivery or a reorder, so on_wake is
+        # idempotent with no effort from the strategy author.
+        last_slot: int | None = None
+        # A Wake older than one interval is a backlog, for example one redelivered
+        # after a restart. The next slot is due by then, so dropping it loses
+        # nothing. A strategy with no interval never wakes, so it drops them all.
+        # A Wake ahead of the clock is also from an earlier life. This life only
+        # publishes a slot once the clock has reached it. A replay clock reads 0
+        # until the first tick, so without this check an old Wake has a negative
+        # age and passes (#561). This assumes the clock never steps back. If the
+        # wall clock does, this life's own Wake can be dropped, and the strategy
+        # wakes one interval late. Nothing runs twice, so that trade is accepted.
+        interval = self._wake_intervals[strategy.strategy_id]
+        max_age_ns = None if interval is None else duration_ns(interval, name="wake_interval")
+
+        async def on_wake(wake: Wake) -> None:
+            nonlocal last_slot
+            if wake.strategy_id != strategy.strategy_id or max_age_ns is None:
+                return
+            if last_slot is not None and wake.ts_event <= last_slot:
+                return
+            age_ns = self._clock.timestamp_ns() - wake.ts_event
+            if age_ns < 0 or age_ns > max_age_ns:
+                return
+            last_slot = wake.ts_event
+            await self._contained(strategy, strategy.on_wake, wake)
+            self._persist(strategy)
+
         self._bus.subscribe(MarketTick, on_tick)
         self._bus.subscribe(OrderEvent, on_order_event)
+        self._bus.subscribe(Wake, on_wake)
 
     @staticmethod
     async def _contained[E: Event](

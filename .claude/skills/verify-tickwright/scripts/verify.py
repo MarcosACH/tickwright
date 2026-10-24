@@ -41,8 +41,12 @@ ROOT = SCRIPTS.parents[3]
 VERIFY_HOME = Path(os.environ.get("VERIFY_HOME") or ROOT / ".agents" / "verify")
 ENGINE_CMD = [sys.executable, "-m", "tickwright.app"]
 STRATEGY_RUNNER = SCRIPTS / "run_strategy.py"
+# Strategies outside the package, mounted at ``/strategies`` in a container life.
+STRATEGIES = SCRIPTS.parent / "strategies"
 KEY_VARS = ("TICKWRIGHT_HYPERLIQUID__SIGNING_KEY", "TICKWRIGHT_HYPERLIQUID__ACCOUNT_ADDRESS")
 NO_DOCKER_PATHS = "kafka and postgres paths unavailable"
+# Seconds cleanup waits after TERM before it sends KILL.
+STOP_GRACE_S = 15
 SIGNALS = {
     "TERM": signal.SIGTERM,
     "INT": signal.SIGINT,
@@ -391,12 +395,28 @@ def life_env(preset: str | None, env: list[str], params: list[str]) -> tuple[str
     return scratch_text, evidence_text
 
 
+def refuse_bad_container_flags(args: argparse.Namespace) -> None:
+    """Exit before anything is written when the container flags do not fit the life."""
+    # Every container variable is written to the evidence, so a key there would leak.
+    if any("SIGNING_KEY" in pair.partition("=")[0] for pair in args.container_env):
+        sys.exit("never pass the signing key through --container-env")
+    # The key would reach the `docker run` client, never the engine in the container.
+    if args.image and args.forward_key:
+        sys.exit("--forward-key does not reach a container: an --image life runs without a key")
+    # A venv life would drop these without a word.
+    if not args.image and args.network:
+        sys.exit("--network needs --image")
+    if not args.image and args.container_env:
+        sys.exit("--container-env needs --image")
+
+
 def cmd_start(args: argparse.Namespace) -> int:
     require_run(args.run_id)
     pid_file = scratch(args.run_id) / f"{args.life}.pid"
     exit_file = evidence(args.run_id) / f"{args.life}.exit"
     if pid_file.exists() or exit_file.exists():
         sys.exit(f"life {args.life} already exists in run {args.run_id}: pick another name")
+    refuse_bad_container_flags(args)
 
     scratch_text, evidence_text = life_env(args.preset, args.env, args.param)
     (scratch(args.run_id) / ".env").write_text(scratch_text)
@@ -414,8 +434,17 @@ def cmd_start(args: argparse.Namespace) -> int:
 
     if args.strategy:
         command = [sys.executable, str(STRATEGY_RUNNER), args.strategy]
+    elif args.image:
+        name = f"verify-{args.run_id}-{args.life}"
+        (scratch(args.run_id) / f"{args.life}.container").write_text(name)
+        command = container_command(args.run_id, args.image, name, args.network, args.container_env)
+        with (evidence(args.run_id) / f"{args.life}.env.txt").open("a") as sink:
+            sink.writelines(f"# docker -e {pair}\n" for pair in args.container_env)
     else:
         command = list(ENGINE_CMD)
+        # A strategy in ../strategies/ loads by import path here too, as in a container life.
+        paths = [str(STRATEGIES), child_env.get("PYTHONPATH", "")]
+        child_env["PYTHONPATH"] = os.pathsep.join(p for p in paths if p)
         # An exit run is the same CLI with one argument, so it reads the same .env.
         if args.command:
             command.append(args.command)
@@ -450,6 +479,46 @@ def cmd_start(args: argparse.Namespace) -> int:
     print(f"stderr    {evidence(args.run_id) / (args.life + '.stderr.jsonl')}")
     print(f"exit code {exit_file} (written when the process ends)")
     return 0
+
+
+def container_name(run_id: str, life: str) -> str | None:
+    """The container a life runs in, or None when the life is a host process.
+
+    A container life's pid is the ``docker run`` client, not the engine. A KILL to
+    the client leaves the engine running, so signal and stop it by this name."""
+    path = scratch(run_id) / f"{life}.container"
+    return path.read_text().strip() if path.exists() else None
+
+
+def container_command(
+    run_id: str, image: str, name: str, network: str | None, env: list[str]
+) -> list[str]:
+    """``docker run`` for one life, with the CLI reading the same scratch as a venv life.
+
+    The scratch is mounted at its own host path and is the working directory, so the
+    engine reads the same ``.env`` and its relative paths. The host uid keeps the
+    store writable on a Linux bind mount. The store is on the mount, so ``--rm``
+    loses nothing. A real variable in ``env`` outranks the ``.env`` file, so it can
+    hold an address that only works inside the container's network."""
+    path = str(scratch(run_id))
+    return [
+        "docker",
+        "run",
+        "--rm",
+        "--name",
+        name,
+        "--user",
+        f"{os.getuid()}:{os.getgid()}",
+        "-v",
+        f"{path}:{path}",
+        "-w",
+        path,
+        "-v",
+        f"{STRATEGIES}:/strategies:ro",
+        *(["--network", network] if network else []),
+        *(arg for pair in env for arg in ("-e", pair)),
+        image,
+    ]
 
 
 def cmd_supervise(args: argparse.Namespace) -> int:
@@ -505,6 +574,14 @@ def cmd_await(args: argparse.Namespace) -> int:
 
 def cmd_signal(args: argparse.Namespace) -> int:
     require_run(args.run_id)
+    name = container_name(args.run_id, args.life)
+    if name is not None:
+        sent = subprocess.run(["docker", "kill", "--signal", args.name, name], text=True)
+        if sent.returncode != 0:
+            sys.exit(f"docker could not signal container {name}")
+        note(args.run_id, args.life, "signal", f"SIG{args.name} to container {name}")
+        print(f"sent SIG{args.name} to container {name}")
+        return 0
     pid_file = scratch(args.run_id) / f"{args.life}.pid"
     if not pid_file.exists():
         sys.exit(f"no pid for life {args.life}")
@@ -924,20 +1001,39 @@ def cmd_venue_fills(args: argparse.Namespace) -> int:
     return 0
 
 
+def stop_life(run_id: str, life: str) -> None:
+    """TERM the engine, then KILL it if it still runs after the grace period."""
+    name = container_name(run_id, life)
+    if name is not None:
+        # By name, not by pid: the client may be gone while the container runs on.
+        # `docker stop` is TERM, the grace period, then KILL.
+        stopped = subprocess.run(
+            ["docker", "stop", "--timeout", str(STOP_GRACE_S), name],
+            capture_output=True,
+            text=True,
+        )
+        # The life runs with --rm, so a life that exited took its container with it.
+        if stopped.returncode != 0 and "No such container" not in stopped.stderr:
+            sys.exit(f"docker could not stop container {name}: {stopped.stderr.strip()}")
+        if stopped.returncode == 0:
+            note(run_id, life, "cleanup", f"docker stop to container {name}")
+        return
+    pid = int((scratch(run_id) / f"{life}.pid").read_text().strip() or 0)
+    if pid and pid_alive(pid) and pid_is_ours(pid, run_id):
+        os.kill(pid, signal.SIGTERM)
+        note(run_id, life, "cleanup", f"SIGTERM to pid {pid}")
+        deadline = time.monotonic() + STOP_GRACE_S
+        while time.monotonic() < deadline and pid_alive(pid):
+            time.sleep(0.1)
+        if pid_alive(pid):
+            os.kill(pid, signal.SIGKILL)
+            note(run_id, life, "cleanup", f"SIGKILL to pid {pid}")
+
+
 def cmd_cleanup(args: argparse.Namespace) -> int:
     require_run(args.run_id)
     for pid_file in sorted(scratch(args.run_id).glob("*.pid")):
-        pid = int(pid_file.read_text().strip() or 0)
-        life = pid_file.stem
-        if pid and pid_alive(pid) and pid_is_ours(pid, args.run_id):
-            os.kill(pid, signal.SIGTERM)
-            note(args.run_id, life, "cleanup", f"SIGTERM to pid {pid}")
-            deadline = time.monotonic() + 15
-            while time.monotonic() < deadline and pid_alive(pid):
-                time.sleep(0.1)
-            if pid_alive(pid):
-                os.kill(pid, signal.SIGKILL)
-                note(args.run_id, life, "cleanup", f"SIGKILL to pid {pid}")
+        stop_life(args.run_id, pid_file.stem)
     infra_args = argparse.Namespace(run_id=args.run_id, action="down", service=None)
     cmd_infra(infra_args)
     hits = secrets_found(args.run_id)
@@ -990,6 +1086,14 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--strategy", help="run scripts/run_strategy.py <name> instead of the CLI")
     run.add_argument(
         "--command", choices=["cancel-all", "flatten"], help="run a one-shot exit run of the CLI"
+    )
+    run.add_argument("--image", help="run the CLI in this container image instead of the venv")
+    p.add_argument("--network", help="with --image: the docker network, e.g. container:<name>")
+    p.add_argument(
+        "--container-env",
+        action="append",
+        default=[],
+        help="with --image: KEY=VALUE for the container only, over scratch/.env",
     )
     p.add_argument("--param", action="append", default=[], help="KEY=VALUE exported as VERIFY_KEY")
     p.add_argument(

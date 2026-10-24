@@ -17,6 +17,7 @@ from decimal import Decimal
 
 from hypothesis import given
 from hypothesis import strategies as st
+from never_wakes import NeverWakes
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
@@ -38,7 +39,7 @@ from tickwright.engine.cache import Cache
 from tickwright.engine.strategy_host import StrategyHost
 
 
-class EveryTickStrategy:
+class EveryTickStrategy(NeverWakes):
     """A third-party strategy that places on every tick — the densest possible
     consumer of seqs, so any reuse after restart is caught immediately."""
 
@@ -155,7 +156,7 @@ def test_stale_snapshot_never_reuses_a_consumed_signal_id(
     assert not set(emitted) & consumed, f"reused signal ids: {set(emitted) & consumed}"
 
 
-class TickRecorder:
+class TickRecorder(NeverWakes):
     """A third-party strategy that only records what gets through the gate."""
 
     def __init__(self, strategy_id: str) -> None:

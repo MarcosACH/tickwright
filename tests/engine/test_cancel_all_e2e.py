@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 from ledgers import GENESIS, checkpointer
+from never_wakes import NeverWakes
 from structlog.typing import EventDict
 from venue_doubles import VenueLink
 
@@ -50,7 +51,7 @@ from tickwright.engine.runner import Engine
 from tickwright.observability.testing import capture_events
 
 
-class _StrategyThatMustNotStart:
+class _StrategyThatMustNotStart(NeverWakes):
     """Records whether the host ever started or snapshotted it."""
 
     def __init__(self) -> None:

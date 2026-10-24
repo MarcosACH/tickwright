@@ -2,7 +2,9 @@
 name = "tickwright"
 version = "0.5.0"
 description = "A readable, event-driven algorithmic trading engine."
-requires-python = ">=3.13,<3.14"
+# No upper bound. Users install Tickwright into their own project. A cap would
+# lock them out of each new Python release until we lift it (issue #536).
+requires-python = ">=3.13"
 license = "Apache-2.0"
 authors = [{ name = "Marcos Achaval" }]
 # Runtime dependencies are intentionally empty at scaffold time. Each vertical
@@ -78,7 +80,17 @@ warn_redundant_casts = true
 #
 # `examples` holds a user strategy that lives outside `src`. No test imports it. Without
 # this, only the container replay would notice a domain change that breaks it.
-files = ["src", "tests", "examples", ".claude/hooks", ".claude/skills/verify-tickwright/scripts"]
+#
+# The verify-tickwright `strategies` are user strategies too, run from the image by import
+# path. Without this, only a container verify run would notice a seam change.
+files = [
+    "src",
+    "tests",
+    "examples",
+    ".claude/hooks",
+    ".claude/skills/verify-tickwright/scripts",
+    ".claude/skills/verify-tickwright/strategies",
+]
 # Skill-eval fixtures are throwaway sandbox trees, not repo code, and several
 # carry the same module names on purpose (three `domain/leverage.py`). `files`
 # above already leaves them out; this keeps a hand-typed `mypy .` from erroring on the
