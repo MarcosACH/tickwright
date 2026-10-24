@@ -429,6 +429,7 @@ def test_new_store_with_no_exit_command_exits_two_and_starts_no_run(
 
 
 _MARKET = "tickwright.strategies.single_shot:SingleShotMarketStrategy"
+_LIMIT = "tickwright.strategies.single_shot_limit:SingleShotLimitStrategy"
 
 
 @pytest.mark.parametrize(
@@ -439,8 +440,26 @@ _MARKET = "tickwright.strategies.single_shot:SingleShotMarketStrategy"
         {"strategy": _MARKET, "settings": {"side": "buy", "quantity": "lots"}},
         {"strategy": _MARKET, "settings": {"side": "buy", "quantity": "0.5", "quantiy": "5"}},
         {"kind": "single_shot_market", "symbol": "BTC", "side": "buy", "quantity": "0.5"},
+        # Issue #556 renamed it to cancel_after_seconds. The old name must not
+        # load and silently never cancel.
+        {
+            "strategy": _LIMIT,
+            "settings": {
+                "side": "buy",
+                "quantity": "0.5",
+                "price": "41000",
+                "cancel_after_ticks": 3,
+            },
+        },
     ],
-    ids=["does-not-import", "no-settings-model", "bad-value", "unknown-field", "old-kind"],
+    ids=[
+        "does-not-import",
+        "no-settings-model",
+        "bad-value",
+        "unknown-field",
+        "old-kind",
+        "old-cancel-after-ticks",
+    ],
 )
 def test_a_bad_strategy_entry_exits_two_and_leaves_no_store(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, entry: dict[str, object]

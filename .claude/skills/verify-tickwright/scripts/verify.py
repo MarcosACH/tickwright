@@ -442,6 +442,9 @@ def cmd_start(args: argparse.Namespace) -> int:
             sink.writelines(f"# docker -e {pair}\n" for pair in args.container_env)
     else:
         command = list(ENGINE_CMD)
+        # A strategy in ../strategies/ loads by import path here too, as in a container life.
+        paths = [str(STRATEGIES), child_env.get("PYTHONPATH", "")]
+        child_env["PYTHONPATH"] = os.pathsep.join(p for p in paths if p)
         # An exit run is the same CLI with one argument, so it reads the same .env.
         if args.command:
             command.append(args.command)

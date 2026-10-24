@@ -22,7 +22,7 @@ from decimal import Decimal
 
 from tickwright.adapters.clock import ManualClock
 from tickwright.adapters.store import SQLiteStore
-from tickwright.domain import AccountSpec, Clock, OrderFillEvent, Portfolio, Side, Store
+from tickwright.domain import Account, AccountSpec, Clock, OrderFillEvent, Portfolio, Side, Store
 from tickwright.engine.cache import Cache
 from tickwright.engine.checkpoint import Checkpointer
 from tickwright.engine.portfolio import PortfolioProjection
@@ -62,8 +62,17 @@ def checkpointer(store: Store, *, clock: Clock, genesis: Decimal = GENESIS) -> C
 
     Override ``genesis`` only where the opening balance is itself the subject; a
     suite that also wires a venue must move both or neither.
+
+    The account row is opened here when the store has none, because a ledger
+    write refuses an unopened row (#565). It is written directly rather than
+    through ``recover()``, which many suites call themselves on a store they
+    fill with orders first. The row matches what paper's seed would write.
     """
-    return Checkpointer(spec=_spec(genesis), store=store, clock=clock)
+    spec = _spec(genesis)
+    if store.load_account() is None:
+        ts_ns = clock.timestamp_ns()
+        store.checkpoint_ledger(account=Account.open(spec, ts_ns=ts_ns), ts_ns=ts_ns)
+    return Checkpointer(spec=spec, store=store, clock=clock)
 
 
 def ledger(store: Store, *, genesis: Decimal = GENESIS) -> PortfolioProjection:

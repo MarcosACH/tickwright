@@ -9,6 +9,9 @@ The loop runs until cancelled; the runner supervises it in the ``TaskGroup``
 and cancels it in the reverse shutdown (ADR-0024). The cycle's result is
 ignored: a failed pass (e.g. a frozen reconcile cycle) is simply retried at
 the next deadline.
+
+``run_aligned`` paces strategy wake-ups the same way, on a fixed grid of clock
+time instead of from *now* (ADR-0062).
 """
 
 from collections.abc import Awaitable, Callable
@@ -24,3 +27,21 @@ async def run_cadence(
     while True:
         await clock.sleep_until(clock.timestamp_ns() + interval_ns)
         await cycle()
+
+
+async def run_aligned(
+    *, clock: Clock, interval_seconds: float, cycle: Callable[[int], Awaitable[object]]
+) -> None:
+    """Run ``cycle`` on each slot of a grid of clock time, forever (ADR-0062).
+
+    Slots are multiples of the interval since the epoch, so they land on the
+    same times in every run. ``cycle`` receives the slot in nanoseconds.
+
+    A clock jump past several slots fires once, with the latest slot reached.
+    An earlier slot would already be older than the interval, and the host
+    drops a wake-up that old.
+    """
+    interval_ns = duration_ns(interval_seconds, name="interval_seconds")
+    while True:
+        await clock.sleep_until((clock.timestamp_ns() // interval_ns + 1) * interval_ns)
+        await cycle(clock.timestamp_ns() // interval_ns * interval_ns)

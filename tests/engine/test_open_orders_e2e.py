@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 from ledgers import GENESIS
+from never_wakes import NeverWakes
 from venue_doubles import VenueLink
 
 from tickwright.adapters.bus import InMemoryBus
@@ -41,7 +42,7 @@ from tickwright.domain import (
 from tickwright.engine.runner import Engine
 
 
-class _ScriptedStrategy:
+class _ScriptedStrategy(NeverWakes):
     """Runs one scripted step per tick and keeps every open-orders read."""
 
     def __init__(

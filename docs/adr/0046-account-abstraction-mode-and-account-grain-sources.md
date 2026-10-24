@@ -419,6 +419,20 @@ retrying. A mode the engine could not read in time is `VenueAccountModeUnreadabl
 `InvariantViolation`, so the engine exits 1 and a supervisor retries. A retry can fix a dark venue.
 It cannot change a mode the venue stated. See the ADR-0024 amendment of 2026-10-21.**)**
 
+**(Corrected by [#563](https://github.com/MarcosACH/tickwright/issues/563):** "Nothing else touches
+the venue until the gate passes" now has one exception. A cancel can go out before the gate
+answers. On a Kafka restart, the saga hears old signals before `Exchange.start()` runs (ADR-0024
+step 5). An old order is denied there, but an old cancel is sent.
+- A cancel only lowers exposure. The gate protects the meaning of account numbers, and a cancel
+  reads none of them.
+- Dropping the cancel would lose it, because its offset commits once the handler returns. Holding
+  it has the same problem.
+- Its marker is durable before the send (ADR-0026). So reconcile settles the order even if the
+  cancel's own report is lost.
+- If the gate then refuses the mode, the engine still exits. The cancel stays done.
+
+Decided with Marcos while reviewing #566.**)**
+
 ## 4. Re-verification in flight: divergence-triggered, freeze on change
 
 **Decision: read the mode at boot, and re-read it before applying any Tier-1 **account cash** heal.

@@ -22,6 +22,7 @@ from hyperliquid_fakes import (
 )
 from lifecycle_contract import assert_quiet_once_stopped, record_publishes
 from pydantic import SecretStr
+from venue_doubles import account_state
 
 from tickwright.adapters.bus import InMemoryBus
 from tickwright.adapters.clock import ManualClock
@@ -688,14 +689,17 @@ def _ingest_into_ledger(
         bus = InMemoryBus()
         clock = ManualClock(start_ns=7)
         # Live declares no genesis: the opening balance is ingested from the
-        # venue at the startup barrier (ADR-0042 §6), so this ledger opens at
-        # zero and the cash line below is funding and nothing else.
+        # venue at the startup barrier (ADR-0042 §6). The first life opens the
+        # row as the barrier would, at zero and before every boundary below, so
+        # the cash line is funding and nothing else.
         checkpointer = Checkpointer(
             spec=AccountSpec(account_id=LIVE_ACCOUNT, genesis_collateral=None),
             store=store,
             clock=clock,
         )
         checkpointer.portfolio.recover()
+        if not checkpointer.portfolio.is_opened():
+            checkpointer.portfolio.materialise(account_state("0", as_of_ts_ns=0))
         delivered = 0
         enough = asyncio.Event()
 

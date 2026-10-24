@@ -14,7 +14,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from tickwright.adapters.bus.serde import decode_event, encode_event
-from tickwright.domain import Event, MarketTick, publishable_event_types
+from tickwright.domain import Event, MarketTick, Wake, publishable_event_types
 from tickwright.domain.enums import AggressorSide
 
 
@@ -34,6 +34,19 @@ def test_market_tick_round_trips_to_an_equal_object() -> None:
 
     assert restored == tick
     assert type(restored) is MarketTick
+
+
+def test_a_wake_round_trips_to_an_equal_object() -> None:
+    wake = Wake(
+        ts_event=1_700_000_060_000_000_000,
+        ts_init=1_700_000_060_000_000_042,
+        strategy_id="limit-btc",
+    )
+
+    restored = decode_event(encode_event(wake))
+
+    assert restored == wake
+    assert type(restored) is Wake
 
 
 # ---- Property: every publishable event family round-trips -------------------

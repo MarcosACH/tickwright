@@ -520,6 +520,24 @@ class TestStart:
         assert evidence_text.startswith(scratch_text)
         assert "# VERIFY_HOLD_TICKS=3\n" in evidence_text
 
+    @pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
+    def test_a_venv_life_imports_a_strategy_from_the_strategies_directory(
+        self,
+        helper: ModuleType,
+        run: Callable[..., tuple[int, str]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # The engine is the process boundary. A stand-in that only imports the
+        # strategy shows what the CLI's loader would see on its path.
+        monkeypatch.setattr(helper, "ENGINE_CMD", [sys.executable, "-c", "import rest_and_hold"])
+        run("init", "r1")
+
+        code, _ = run("start", "r1", "first", "--preset", "paper-replay")
+        run("await", "r1", "first", "--exit", "--timeout", "10")
+
+        assert code == 0
+        assert (helper.evidence("r1") / "first.exit").read_text().strip() == "0"
+
 
 class TestDocker:
     def test_doctor_reports_a_missing_docker_binary(

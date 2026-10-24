@@ -8,7 +8,7 @@ fires the cycle once, not once per missed interval).
 import asyncio
 
 from tickwright.adapters.clock import ManualClock
-from tickwright.engine.cadence import run_cadence
+from tickwright.engine.cadence import run_aligned, run_cadence
 
 _NS = 1_000_000_000
 
@@ -59,3 +59,25 @@ def test_a_large_time_jump_fires_the_cycle_once_not_once_per_missed_interval() -
         return fired
 
     assert asyncio.run(main()) == [60 * _NS]
+
+
+def test_an_aligned_loop_fires_once_with_the_latest_slot_after_a_jump_past_three() -> None:
+    """A jump from 07 s to 50 s crosses the 15, 30 and 45 s slots. Missed slots
+    are skipped (ADR-0062), and the one cycle gets 45 s, the slot just reached."""
+
+    async def main() -> list[int]:
+        clock = ManualClock(start_ns=7 * _NS)
+        slots: list[int] = []
+
+        async def cycle(slot: int) -> None:
+            slots.append(slot)
+
+        task = asyncio.create_task(run_aligned(clock=clock, interval_seconds=15.0, cycle=cycle))
+        await asyncio.sleep(0)
+        clock.advance_to(50 * _NS)
+        for _ in range(5):
+            await asyncio.sleep(0)
+        task.cancel()
+        return slots
+
+    assert asyncio.run(main()) == [45 * _NS]
