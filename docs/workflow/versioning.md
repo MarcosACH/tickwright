@@ -113,3 +113,13 @@ gh issue close <PRD#> --comment "Delivered in vX.Y.Z: <release-url>. All sub-iss
   isolated margin now reads right after an open, an add, a shared symbol, and a restart (#516,
   #518, #520, #522). Paper keeps its resting orders across a restart (#484). Bump PR backed by
   #527.
+- **v0.6.0** (2026-10-24). Ready for an unattended testnet soak. PRDs #529 and #553 set the MINOR
+  floor. A user strategy lives in its own repo and loads by `module:Class` import path. Each
+  `TICKWRIGHT_STRATEGIES` entry now has `strategy`, `symbols`, and `settings`, so every existing
+  config must change. A strategy constructor takes `emitter`, `portfolio`, and `settings`. The
+  seams grew: `Strategy` gains `wake_interval_seconds` and `on_wake`, and `Portfolio` gains
+  `open_orders`. The engine wakes a strategy on a clock grid, even when ticks stop. A boot
+  refusal now exits `2`. A container image is published on every merge and every release.
+  Python 3.14 can install Tickwright (#536). Fixes: old wake-ups, order intents, fills, funding
+  and marks are handled right after a Kafka restart (#561, #563, #565). Bump PR backed by
+  #570.
