@@ -5,7 +5,8 @@ second life that recovers it from there, with no SQLite file in the workspace.
 
 ## Sub-features
 
-- `pg-schema` the store creates its tables on connect in a fresh database.
+- `pg-schema` the store creates its tables on first use in a fresh database. Opening the store
+  and taking its lock do not create them.
 - `pg-fill` the fill, position and account rows land in Postgres.
 - `pg-restart` life two restores from Postgres, clears the barrier, places nothing.
 

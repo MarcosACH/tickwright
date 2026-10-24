@@ -38,10 +38,14 @@ Preconditions:
 - **Round trip.** Run `$V await testnet rt --event verify.flat --timeout 240`.
 - **Reconcile.** Run `$V await testnet rt --event account.reconciled --timeout 90`.
 - **Stop.** Run `$V signal testnet rt TERM` at once, then `$V await testnet rt --exit`,
-  `$V dump testnet rt`, `$V secrets-check testnet`.
+  `$V dump testnet rt`.
 - **Venue fees.** Run `FEES=$($V venue-fills testnet rt)`. It writes `rt.venue-fills.json` and
   prints the fee sum over every fill whose oid is a `venue_oid` in the `orders` rows. Not the
   cloid: every run places the same cloids, so a cloid cut would adopt the last run's fills.
+- **Key scan.** Run `$V secrets-check testnet > .agents/verify/testnet/evidence/secrets.txt`.
+  It runs after `venue-fills` so the scan covers every evidence file. The file holds
+  `no signing key in evidence` or nothing. A hit goes to stderr as file paths, never the key.
+  With a suffixed run id, change the path too.
 - **Check.** Run `$V check testnet rt tn-materialise --event account.materialised --expect 1`,
   `$V check testnet rt tn-round-trip --sql "select count(*) from orders where state='filled'" --expect 2`,
   `$V check testnet rt tn-round-trip --sql "select signed_size from positions" --expect 0.000`,
@@ -49,11 +53,11 @@ Preconditions:
   `$V check testnet rt tn-fee --sql "select fees from positions" --expect $FEES`,
   `$V check testnet rt tn-reconcile --event account.reconciled --expect 1`,
   `$V check testnet rt tn-cash --event account.healed --expect 0`,
-  `$V check testnet rt tn-redaction --event verify.flat --expect 1` (the run reached the end),
+  `$V check testnet rt tn-round-trip --event verify.flat --expect 1` (the run reached the end),
+  `$V check testnet rt tn-redaction --file secrets.txt --expect "no signing key in evidence"`,
   `$V check testnet rt tn-divergence --event valuation.divergence --expect 0`,
   `$V check testnet rt tn-round-trip --sql "select isolated_collateral from positions" --expect 0`
-  (a closed position holds a known 0, not NULL, #524)
-  and read the `secrets-check` line: `no signing key in evidence`.
+  (a closed position holds a known 0, not NULL, #524).
 - **Report.** Run `$V report testnet`. Expected verdict: `PASS`. A FAIL that matches a Gotcha
   below is known. Any other FAIL is new, and `$V issue-draft testnet` drafts it.
 - **Cleanup.** Run `$V cleanup testnet`.
@@ -68,9 +72,10 @@ Preconditions:
   "unknown, not zero" rule, not a failure. Mid-hold, `positions.isolated_collateral` can be NULL
   for the same reason.
 
-- Every run places the same cloids on the venue, because the cloid is derived from
-  `round_trip:BTC:2`. The engine reads and cancels by oid once it has one, and before the ack it
-  refuses a record placed before the saga was created (#354). A run should not adopt an older
+- Every run places the same cloids on the venue, because each cloid is derived from
+  its signal id, `round_trip:BTC:1` for the buy and `round_trip:BTC:2` for the sell. The engine
+  reads and cancels by oid once it has one, and before the ack it refuses a record placed before
+  the saga was created (#354). A run should not adopt an older
   run's fill. If one does, it is a new bug.
 - The key is forwarded from the repo `.env` into the child environment only. Never write it with
   `--env`. The helper refuses.

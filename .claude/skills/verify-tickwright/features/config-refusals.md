@@ -4,6 +4,7 @@ The engine refuses to start on a config it cannot run safely, with a readable me
 code 2. Three refusals matter most: a paper run with no genesis collateral, a genesis that
 disagrees with the store's ledger, and a leverage entry for a symbol no strategy trades. Two more
 came with safe exit: the reserved strategy id `__operator__`, and a store another engine holds.
+A strategy whose import path does not import also exits 2.
 A held store exits 1, so a supervisor retries it until the holder is gone (ADR-0024). An exit
 run (`cancel-all`, `flatten`) refuses a held store with exit 2. See `safe-exit.md`.
 
@@ -14,6 +15,7 @@ run (`cancel-all`, `flatten`) refuses a held store with exit 2. See `safe-exit.m
   (`StoreAccountMismatch`, ADR-0043 §10).
 - `refuse-dead-leverage` `TICKWRIGHT_LEVERAGE` names a symbol no strategy trades (ADR-0044 §3).
 - `refuse-reserved` a strategy uses the id `__operator__` (ADR-0054).
+- `refuse-import` a strategy names an import path that does not import (ADR-0061).
 - `refuse-lock` a second engine starts on a store a running engine holds (`StoreLockHeld`,
   ADR-0052).
 
@@ -59,9 +61,15 @@ Preconditions:
   `$V await refuse reserved --exit`, then
   `$V check refuse reserved refuse-reserved --exit --expect 2`. The stderr file contains
   `__operator__ is reserved for operator orders, not a strategy id`.
+- **Strategy that does not import.** Run
+  `$V start refuse noimport --preset paper-replay --env 'TICKWRIGHT_STRATEGIES=[{"strategy":"no_such_module:Nope","strategy_id":"bad","symbols":["BTC"],"settings":{}}]'`,
+  `$V await refuse noimport --exit`, then
+  `$V check refuse noimport refuse-import --exit --expect 2`. The stderr file contains
+  `strategy 'bad' names 'no_such_module:Nope', which does not import`. The same refusal in a
+  container is in `container-restart.md`.
 - **Untouched ledger.** Run
   `$V check refuse first refuse-mismatch --sql "select genesis_collateral from account" --expect 100000`.
-- **Report.** Run `$V report refuse`. Expected verdict: `PASS (0 of 8 checks failed)`. The two
+- **Report.** Run `$V report refuse`. Expected verdict: `PASS (0 of 9 checks failed)`. The two
   alarm events listed are both `engine.faulted`, one for the lock and one for the mismatch. Both
   are expected.
 - **Cleanup.** Run `$V cleanup refuse`.
@@ -69,7 +77,8 @@ Preconditions:
 ## Gotchas
 
 - A validation refusal is a `tickwright:` line with the pydantic message on stderr, not a JSON
-  line. `--event` cannot match it. Grep the message text.
+  line. A strategy that does not import is the same shape. `--event` cannot match it. Grep the
+  message text.
 - A `StoreAccountMismatch` is a refusal after the store opened, so it is a JSON `engine.faulted`
   line. Both shapes exit 2.
 - The remedy for a mismatch is a fresh `TICKWRIGHT_SQLITE__PATH`, never editing the store.
