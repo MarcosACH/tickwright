@@ -120,7 +120,8 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra"
+# leak_guard fails the run on a leak found after the last test (issue #572).
+addopts = "-ra -p leak_guard"
 # Process-boundary fakes shared across suites (e.g. the Kafka broker) live in
 # tests/_support and import as plain top-level modules: `import kafka_fakes`.
 pythonpath = ["tests/_support"]
